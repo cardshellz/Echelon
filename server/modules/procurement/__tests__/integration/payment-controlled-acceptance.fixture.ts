@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -31,7 +32,7 @@ const TABLES = [
   schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.products, schema.productVariants, schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.vendorInvoiceAttachments,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.vendorInvoiceAttachments,
   // Invoice detail reads the freight footprint for replacement eligibility even
   // when this payment fixture's product invoice has no shipment or freight rows.
   schema.inboundFreightCosts,
@@ -50,7 +51,9 @@ const CREDIT_HISTORY_TABLES = ["procurement.supplier_credits", "procurement.supp
   "procurement.supplier_credit_applications", "procurement.supplier_credit_application_reversals",
   "procurement.receiving_quarantine_observations", "procurement.receiving_quarantine_acceptances",
   "procurement.receiving_quarantine_dispositions", "inventory.cost_reconciliation_approvals",
-  "inventory.cost_reconciliation_postings", "inventory.cost_origin_repairs"] as const;
+  "inventory.cost_reconciliation_postings", "inventory.cost_origin_repairs",
+  "inventory.lot_cost_origin_amendments", "procurement.receipt_shipment_quantity_amendments",
+  "procurement.receipt_shipment_quantity_results"] as const;
 const FIXTURE_LEASE = "echelon.procurement.payment-controlled-acceptance";
 const DELEGATE_PASSWORD = "local-payment-acceptance-only";
 
@@ -153,7 +156,8 @@ export class PaymentAcceptanceFixture {
     await this.pool.query(readFileSync(resolve(process.cwd(), "migrations/900000016000018570001_ap_payment_balance_completion.sql"), "utf8"));
 
     if (this.creditMigration) {
-      for (const migration of ["222_procurement_cost_evidence.sql", "0751_exact_inventory_cost_totals.sql",
+      for (const migration of ["222_procurement_cost_evidence.sql", "900000017000018590001_receipt_shipment_quantity_amendments.sql",
+        "0751_exact_inventory_cost_totals.sql",
         "900000007000018030001_shipment_cost_exception_decisions.sql",
         "900000008000018110001_shipment_cost_reconciliation.sql",
         "900000009000018290001_historical_cost_origin_repairs.sql",

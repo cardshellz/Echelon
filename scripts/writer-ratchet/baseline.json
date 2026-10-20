@@ -34,6 +34,12 @@
     "server/routes/ebay-listing-rules.routes.ts",
     "server/routes/ebay/ebay-config.routes.ts"
   ],
+  "catalog.publication_media_references": [
+    "modules/catalog"
+  ],
+  "catalog.publication_media_version_pins": [
+    "modules/catalog"
+  ],
   "catalog.shipping_groups": [
     "modules/catalog"
   ],
@@ -67,8 +73,7 @@
     "modules/channels"
   ],
   "channels.channel_pricing_rules": [
-    "modules/channels",
-    "server/routes/ebay/ebay-pricing.routes.ts"
+    "modules/channels"
   ],
   "channels.channel_product_allocation": [
     "modules/channels"
@@ -708,6 +713,9 @@
   "inventory.lot_cost_follow_ups": [
     "modules/inventory"
   ],
+  "inventory.lot_cost_origin_amendments": [
+    "modules/inventory"
+  ],
   "inventory.lot_cost_origins": [
     "modules/inventory"
   ],
@@ -879,6 +887,15 @@
   "inventory.safety_definition_applications": [
     "modules/inventory-planning"
   ],
+  "inventory.supplier_return_allocations": [
+    "modules/inventory"
+  ],
+  "inventory.supplier_return_cost_entries": [
+    "modules/inventory"
+  ],
+  "inventory.supplier_return_followups": [
+    "modules/inventory"
+  ],
   "inventory.tracking_stop_history": [
     "modules/inventory"
   ],
@@ -945,6 +962,18 @@
     "modules/marketplace-listings"
   ],
   "marketplace.dropship_listing_scopes": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_changes": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_deliveries": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_delivery_events": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_delivery_sources": [
     "modules/marketplace-listings"
   ],
   "marketplace.listing_member_retirement_events": [
@@ -1271,6 +1300,12 @@
   "procurement.receipt_reversals": [
     "modules/procurement"
   ],
+  "procurement.receipt_shipment_quantity_amendments": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_shipment_quantity_results": [
+    "modules/procurement"
+  ],
   "procurement.receiving_custody_fence": [
     "modules/procurement"
   ],
@@ -1314,6 +1349,24 @@
     "modules/procurement"
   ],
   "procurement.supplier_credits": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_credit_entitlements": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_credit_links": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_credit_reviews": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_lines": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_reporting_events": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_returns": [
     "modules/procurement"
   ],
   "procurement.supplier_sourcing_revisions": [

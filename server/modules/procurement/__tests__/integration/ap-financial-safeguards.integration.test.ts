@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import pg from "pg";
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -13,13 +14,14 @@ const databaseTests = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "t
 const tables = [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.vendors, schema.inboundShipments, schema.purchaseOrders, schema.purchaseOrderLines,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.inboundFreightCosts,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.inboundFreightCosts,
   schema.apPayments, schema.apPaymentAllocations, schema.poStatusHistory, schema.vendorInvoiceAttachments];
 databaseTests.sequential("AP financial safeguards with actual0620 and status constraint (real PostgreSQL)", () => {
   let pool: pg.Pool; let modulePool: pg.Pool; let db: any;
   let service: typeof import("../../ap-ledger.service");
   let ownsSchema = false; let ownsIdentitySchema = false; let ownsAuditTable = false;
   const actor = "review-ap-unhappy-path";
+  let ownsSupplierReturnInventory = false;
   beforeAll(async () => {
     if (!url || !["localhost", "127.0.0.1"].includes(new URL(url).hostname)
       || [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].filter(Boolean).includes(url)) {
@@ -27,6 +29,7 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
     }
     pool = new pg.Pool({ connectionString: url, ssl: false, max: 6, statement_timeout: 10000 });
     await pool.query("CREATE SCHEMA identity"); ownsIdentitySchema = true;
+    await pool.query("CREATE SCHEMA inventory"); ownsSupplierReturnInventory = true;
     await pool.query("CREATE SCHEMA procurement"); ownsSchema = true;
     for (const table of tables) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
@@ -67,6 +70,7 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
         VALUES(71,'AP-PROBE-INV',5,'approved',10000,10000,'2026-09-01')`);
   });
   afterAll(async () => {
+    if (ownsSupplierReturnInventory) await pool!.query("DROP SCHEMA inventory CASCADE");
     // Attempt every owned cleanup even when setup stopped partway through.
     const failures: unknown[] = [];
     for (const cleanup of [

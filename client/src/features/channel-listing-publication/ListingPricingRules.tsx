@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   listingPriceRuleSchema,
   type ListingCatalogItem,
@@ -22,7 +22,7 @@ interface Props {
   items: ListingCatalogItem[];
   draftItems: ListingDraftItem[];
   canEdit: boolean;
-  onSave(rule: ListingPriceRule): Promise<void>;
+  onSave(rule: ListingPriceRule, expected: ListingPriceRule | null): Promise<ListingPriceRule>;
 }
 
 export function ListingPricingRules({
@@ -36,9 +36,36 @@ export function ListingPricingRules({
     rule?.type ?? "percentage",
   );
   const [value, setValue] = useState(rule?.value ?? "0");
+  const [baseline, setBaseline] = useState<ListingPriceRule | null>(rule);
+  const [dirty, setDirty] = useState(false);
   const [preview, setPreview] = useState<ListingPriceRule | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  useEffect(() => {
+    if (dirty || busy) return;
+    setBaseline(rule);
+    setType(rule?.type ?? "percentage");
+    setValue(rule?.value ?? "0");
+    setPreview(null);
+    setError("");
+  }, [rule, dirty, busy]);
+
+  const savedRuleChanged = dirty && (
+    baseline?.type !== rule?.type || baseline?.value !== rule?.value
+  );
+  function beginEdit() {
+    if (!dirty) setBaseline(rule);
+    setDirty(true);
+    setPreview(null);
+  }
+  function reloadSavedRule() {
+    setBaseline(rule);
+    setType(rule?.type ?? "percentage");
+    setValue(rule?.value ?? "0");
+    setDirty(false);
+    setPreview(null);
+    setError("");
+  }
   function review() {
     const result = listingPriceRuleSchema.safeParse({
       type,
@@ -53,6 +80,7 @@ export function ListingPricingRules({
       );
       return;
     }
+    beginEdit();
     setPreview(result.data);
     setError("");
   }
@@ -83,8 +111,8 @@ export function ListingPricingRules({
               className="min-h-10 w-full rounded-md border bg-background px-3 text-sm"
               value={type}
               onChange={(event) => {
+                beginEdit();
                 setType(event.target.value as ListingPriceRule["type"]);
-                setPreview(null);
               }}
             >
               <option value="percentage">Percentage markup</option>
@@ -101,8 +129,8 @@ export function ListingPricingRules({
               inputMode="decimal"
               value={value}
               onChange={(event) => {
+                beginEdit();
                 setValue(event.target.value);
-                setPreview(null);
               }}
             />
           </div>
@@ -115,6 +143,14 @@ export function ListingPricingRules({
           specific rules take precedence over the channel default. Item
           overrides are preserved.
         </p>
+        {savedRuleChanged && (
+          <div role="status" className="space-y-2 text-sm">
+            <p>The saved pricing rule changed. Your edits are retained; reload the saved rule before changing it.</p>
+            <Button variant="outline" disabled={busy} onClick={reloadSavedRule}>
+              Reload saved pricing rule
+            </Button>
+          </div>
+        )}
         {error && (
           <p role="alert" className="text-sm text-destructive">
             {error}
@@ -180,7 +216,11 @@ export function ListingPricingRules({
                   setBusy(true);
                   setError("");
                   try {
-                    await onSave(preview);
+                    const saved = await onSave(preview, baseline);
+                    setBaseline(saved);
+                    setType(saved.type);
+                    setValue(saved.value);
+                    setDirty(false);
                     setPreview(null);
                   } catch (failure) {
                     setError(errorMessage(failure));

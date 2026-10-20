@@ -6,9 +6,10 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll,afterEach,beforeAll,beforeEach,describe,expect,it } from "vitest";
 import * as schema from "@shared/schema";
+import type { CostInventoryEffect } from "@shared/procurement/cost-source-contracts";
 import { costReportAcknowledgementSchema, costReportDeliveryListSchema } from "@shared/procurement/cost-report-delivery";
 import { CostReportingRepository,type ClaimedCostReport } from "../../cost-reporting.repository";
-import { CostReportingError,type ReportDestination } from "../../cost-reporting.domain";
+import { CostReportingError,reportHash,type ReportDestination } from "../../cost-reporting.domain";
 import { recordCostRevision } from "../../cost-source-revision.repository";
 import { recordReceiptCostOrigin } from "../../../inventory/infrastructure/cost-evidence.repository";
 import { applyCostRevision } from "../../../inventory/application/apply-cost-revision";
@@ -29,7 +30,7 @@ const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShip
     for (const name of ["procurement","inventory","oms"]) {await pool.query(`CREATE SCHEMA ${name}`);owned.push(name);}
     for (const table of tables) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
-    for (const name of ["222_procurement_cost_evidence.sql","0725_inventory_cost_admission_evidence.sql","230_procurement_cost_reporting_delivery.sql",
+    for (const name of ["222_procurement_cost_evidence.sql","900000017000018590001_receipt_shipment_quantity_amendments.sql","0725_inventory_cost_admission_evidence.sql","230_procurement_cost_reporting_delivery.sql",
       "900000007000018030001_shipment_cost_exception_decisions.sql","0751_exact_inventory_cost_totals.sql",
       "900000008000018110001_shipment_cost_reconciliation.sql",
       "900000009000018290001_historical_cost_origin_repairs.sql"]) await pool.query(readFileSync(resolve(process.cwd(),"migrations",name),"utf8"));
@@ -105,6 +106,128 @@ const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShip
     if(tampered) expect(row.last_error_code).toBe("COST_REPORT_SOURCE_CONFLICT");
     else expect(row.envelope.payload.historicalCostAdjustments[0].deltaMills).toBe(100001);
   });
+  async function retainedNoInventoryEffectReport(options: {
+    omitSourceEffect?: boolean;
+    payloadPatch?: Record<string, unknown>;
+    outcomePatch?: Record<string, unknown>;
+    evidencePatch?: Record<string, unknown>;
+    includeLotSnapshot?: boolean;
+    includeHistoricalPosting?: boolean;
+  } = {}) {
+    // Reporting verifies retained immutable owner evidence. The full receiving
+    // acceptance suite separately proves how the inventory owner establishes it.
+    const inventoryEffect: CostInventoryEffect = {
+      kind: "none", reason: "full_quarantine_return", returnedBasePieces: 3,
+      returns: [{ supplierCreditLineId: 81, returnDispositionId: 71, observationId: 61,
+        receivingLineId: 51, quantity: 3, unitsPerVariant: 1 }],
+    };
+    return drizzle(pool).transaction(async tx => {
+      const revision = await recordCostRevision(tx, {
+        contractVersion: 1, component: "product",
+        scope: { kind: "purchase_order_line", purchaseOrderId: 10, purchaseOrderLineId: 21 },
+        sources: [{ kind: "vendor_invoice_line", documentId: 31, lineId: 41, version: "c".repeat(64) },
+          { kind: "supplier_credit_line", documentId: 91, lineId: 81, version: "d".repeat(64) }],
+        currency: "USD", totalMills: options.omitSourceEffect ? 300 : 0,
+        basePieces: options.omitSourceEffect ? 3 : 0,
+        ...(options.omitSourceEffect ? {} : { inventoryEffect }),
+        evidence: "confirmed", packagingTreatment: "separate", issue: null, manualOverride: null,
+      }, "synthetic-user", NOW);
+      const recordedEvidence = {
+        purchaseOrderLineId: 21, recognizedQuantity: false, inventoryHistory: false, costHistory: false,
+        outstandingCustody: false,
+        invoices: [{ documentId: 31, lineId: 41, version: "c".repeat(64) }],
+        returns: [{ ...inventoryEffect.returns[0], supplierCreditId: 91, creditVersion: "d".repeat(64),
+          purchaseOrderLineId: 21, dispositionQuantity: 3, returnedQuantity: 3, observedQuantity: 3,
+          receivedQuantity: 0, pendingQuantity: 0, sourceMatches: true, receiptClosed: true }],
+      };
+      const proof = { contractVersion: 1, purchaseOrderLineId: 21, inventoryEffect,
+        evidenceFingerprint: reportHash(recordedEvidence) };
+      const outcome = { status: "applied", lotsUpdated: 0, cogsRowsUpdated: 0,
+        totalCogsDeltaCents: 0, issues: [], inventoryEffectProof: proof, ...options.outcomePatch };
+      const evidence = { result: outcome, inventoryEffectProof: proof,
+        noInventoryEffectEvidence: recordedEvidence, ...options.evidencePatch };
+      const app = (await tx.execute(sql`INSERT INTO inventory.cost_applications
+        (application_key,source_revision_id,status,evidence,recorded_by,recorded_at)
+        VALUES(${'e'.repeat(64)},${revision.id},'applied',${JSON.stringify(evidence)}::jsonb,
+          'synthetic-user',${NOW}) RETURNING id`)).rows[0];
+      const payload = { contractVersion: 1, currency: "USD", sourceRevisionId: revision.id,
+        sourceFingerprint: revision.contract.fingerprint, component: "product", changes: [],
+        cogsDeltaCents: 0, actorId: "synthetic-user", recordedAt: NOW.toISOString(),
+        inventoryEffectProof: proof, ...options.payloadPatch };
+      if (options.includeLotSnapshot) {
+        await tx.execute(sql`INSERT INTO inventory.cost_application_lots
+          (application_id,inventory_lot_id,before_state,after_state)
+          SELECT ${app.id},inventory_lot_id,before_state,after_state FROM inventory.cost_application_lots
+          ORDER BY application_id,inventory_lot_id LIMIT 1`);
+      }
+      if (options.includeHistoricalPosting) {
+        const approval = (await tx.execute(sql`INSERT INTO inventory.cost_reconciliation_approvals
+          (purchase_order_line_id,component,source_revision_id,application_id,evidence_fingerprint,
+            destination,actor_id,actor_name,reason,recorded_at,evidence)
+          VALUES(21,'product',${revision.id},${app.id},${'a'.repeat(64)},'inventory_variance',
+            'synthetic-user','Synthetic user','Conflicting retained historical posting',${NOW},'{}'::jsonb)
+          RETURNING id`)).rows[0];
+        await tx.execute(sql`INSERT INTO inventory.cost_reconciliation_postings
+          (purchase_order_line_id,component,approval_id,source_revision_id,application_id,destination,currency,
+            before_mills,after_mills,delta_mills,unassigned_delta_mills,actor_id,recorded_at)
+          VALUES(21,'product',${approval.id},${revision.id},${app.id},'inventory_variance','USD',
+            0,100,100,-100,'synthetic-user',${NOW})`);
+      }
+      await tx.execute(sql`INSERT INTO inventory.cost_reporting_events
+        (application_id,contract_version,payload,recorded_at)
+        VALUES(${app.id},1,${JSON.stringify(payload)}::jsonb,${NOW})`);
+      return { applicationId: String(app.id), payload };
+    });
+  }
+
+  it("queues and acknowledges verified no-effect proof without dropping or rewriting it", async () => {
+    const retained = await retainedNoInventoryEffectReport();
+    expect(await repository.enqueue(destination, NOW, randomUUID)).toBe(2);
+    const queued = (await pool.query("SELECT state,envelope,last_error_code FROM procurement.cost_report_deliveries WHERE application_id=$1",
+      [retained.applicationId])).rows[0];
+    expect(queued).toMatchObject({ state: "queued", last_error_code: null });
+    expect(queued.envelope.payload).toEqual(retained.payload);
+    const claimed = await repository.claim(destination, NOW, randomUUID);
+    const work = claimed.find(row => row.envelope.applicationId === retained.applicationId)!;
+    expect(work).toBeDefined();
+    expect(work.envelope.payload.inventoryEffectProof).toEqual(retained.payload.inventoryEffectProof);
+    expect(await repository.finish(work, { acknowledgement: ack(work) }, NOW)).toBe(true);
+    expect(await repository.enqueue(destination, NOW, randomUUID)).toBe(0);
+    expect((await pool.query("SELECT payload FROM inventory.cost_reporting_events WHERE application_id=$1",
+      [retained.applicationId])).rows[0].payload).toEqual(retained.payload);
+  });
+
+  it.each([
+    { name: "source omits its disposition", options: { omitSourceEffect: true } },
+    { name: "event omits its proof", options: { payloadPatch: { inventoryEffectProof: undefined } } },
+    { name: "application omits its proof", options: { outcomePatch: { inventoryEffectProof: undefined } } },
+    { name: "retained custody snapshot is absent", options: { evidencePatch: { noInventoryEffectEvidence: undefined } } },
+    { name: "retained owner proof is absent", options: { evidencePatch: { inventoryEffectProof: undefined } } },
+    { name: "retained custody snapshot is malformed", options: { evidencePatch: { noInventoryEffectEvidence: {} } } },
+    { name: "application reports a COGS write", options: { outcomePatch: { cogsRowsUpdated: 1 } } },
+    { name: "application carries unresolved issues", options: { outcomePatch: { issues: [
+      { code: "COST_ROOT_REVIEW_REQUIRED", message: "Conflicting original recognition." },
+    ] } } },
+    { name: "unreported lot snapshot exists", options: { includeLotSnapshot: true } },
+    { name: "unreported historical posting exists", options: { includeHistoricalPosting: true } },
+    { name: "application proof fingerprint differs", options: { outcomePatch: { inventoryEffectProof: {
+      contractVersion: 1, purchaseOrderLineId: 21, evidenceFingerprint: "f".repeat(64),
+      inventoryEffect: { kind: "none", reason: "full_quarantine_return", returnedBasePieces: 3,
+        returns: [{ supplierCreditLineId: 81, returnDispositionId: 71, observationId: 61,
+          receivingLineId: 51, quantity: 3, unitsPerVariant: 1 }] },
+    } } } },
+  ])("dead letters conflicting no-effect evidence: $name", async ({ options }) => {
+    const retained = await retainedNoInventoryEffectReport(options);
+    await repository.enqueue(destination, NOW, randomUUID);
+    expect((await pool.query("SELECT state,envelope,last_error_code FROM procurement.cost_report_deliveries WHERE application_id=$1",
+      [retained.applicationId])).rows[0]).toEqual({
+      state: "dead_letter", envelope: null, last_error_code: "COST_REPORT_SOURCE_CONFLICT",
+    });
+    expect(await repository.claim(destination, NOW, randomUUID)).toHaveLength(1);
+    expect((await pool.query("SELECT payload FROM inventory.cost_reporting_events WHERE application_id=$1",
+      [retained.applicationId])).rows[0].payload).toEqual(JSON.parse(JSON.stringify(retained.payload)));
+  });
+
   it("serializes simultaneous enqueues and claims without duplicate delivery",async () => {
     expect((await Promise.all([repository.enqueue(destination,NOW,randomUUID),repository.enqueue(destination,NOW,randomUUID)])).reduce((sum,n) => sum+n,0)).toBe(1);
     const work=(await Promise.all(Array.from({length:4},() => repository.claim(destination,NOW,randomUUID)))).flat();expect(work).toHaveLength(1);

@@ -1,3 +1,4 @@
+import { supplierCreditDispositionSchema } from "@shared/procurement/supplier-credit";
 import type { CostIssue, CostSourceReference } from "@shared/procurement/cost-source-contracts";
 import { costFingerprint, costInteger } from "../../inventory/infrastructure/cost-evidence-values";
 import { allocateCentsFromNumericBasis } from "./shipment-allocation-basis";
@@ -20,6 +21,7 @@ export function resolveShipmentSupplierCredits(input: {
   const totals = new Map<number, bigint>();
   const identities = new Set<number>();
   for (const credit of input.credits) {
+    if (supplierCreditDispositionSchema.safeParse(credit.disposition).data?.kind === "accepted_stock_return") continue;
     const creditLineId = costInteger(credit.id, "creditLineId", 1);
     if (identities.has(creditLineId)) {
       issues.push(supplierCreditIssue("CREDIT_SOURCE_DUPLICATE", "A supplier credit source line appears more than once."));

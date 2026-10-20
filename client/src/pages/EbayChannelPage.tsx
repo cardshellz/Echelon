@@ -7,6 +7,9 @@
  * 3. Listing Feed (products ready to list)
  */
 
+import { ListingIntentChanges } from "@/features/channel-listing-publication/ListingIntentChanges";
+import { publicationRequest } from "@/features/channel-listing-publication/api";
+import { useAuth } from "@/lib/auth";
 import { ebayProductSyncResultSchema, ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import { EbayListingJobStatusDialog } from "@/components/ebay/EbayListingJobStatusDialog";
 import { EbayListingJobProgress } from "@/components/ebay/EbayListingJobProgress";
@@ -204,6 +207,7 @@ interface FeedItem {
   isExcluded: boolean;
   syncError: string | null;
   inventoryIssue?: EbayListingIssue | null;
+  priceIssue?: EbayListingIssue | null;
   externalListingId: string | null;
   externalListingIdentityConflict: boolean;
   variantCount: number;
@@ -217,26 +221,30 @@ interface FeedItem {
 }
 
 function listingNeedsAttention(item: FeedItem, job: z.infer<typeof ebayListingSyncJobSchema> | undefined, hasLocalIssue: boolean): boolean {
-  if (item.inventoryIssue || hasLocalIssue || job?.inventoryReconciliation?.state === "needs_attention"
+  if (item.priceIssue || item.inventoryIssue || hasLocalIssue || job?.inventoryReconciliation?.state === "needs_attention"
     || (job && ["needs_attention", "awaiting_evidence"].includes(job.state))) return true;
   if (job && ["queued", "running", "recovering"].includes(job.state)) return false;
   return item.status === "error" || item.status === "publication_incomplete";
 }
 
-interface PricingRule {
-  id: number;
-  channel_id: number;
-  scope: "channel" | "category" | "product" | "variant";
-  scope_id: string | null;
-  rule_type: "percentage" | "fixed" | "override";
-  value: string;
-  scope_label: string | null;
-  created_at: string;
-  updated_at: string;
-}
+// Reads retain legacy values so an invalid saved rule can still be corrected or
+// removed. New selections are validated by the pricing command owner.
+const pricingRuleSchema = z.object({
+  id: z.number().int().positive(),
+  channel_id: z.number().int().positive(),
+  scope: z.string().max(20),
+  scope_id: z.string().nullable(),
+  rule_type: z.string().max(20),
+  value: z.string().max(100),
+  scope_label: z.string().nullable().optional(),
+  created_at: z.string().optional(),
+  updated_at: z.string().optional(),
+});
+const pricingRulesResponseSchema = z.object({ rules: z.array(pricingRuleSchema) });
+type PricingRule = z.infer<typeof pricingRuleSchema>;
 
 interface EffectivePrices {
-  [variantId: number]: { basePriceCents: number; effectivePriceCents: number };
+  [variantId: number]: { basePriceCents: number | null; effectivePriceCents: number | null; missingPrice?: boolean; resolutionIssue?: { code: string; message: string } };
 }
 
 // ============================================================================
@@ -312,6 +320,7 @@ function PolicyOverrideRow({ label, fulfillmentPolicyId, returnPolicyId, payment
 // ============================================================================
 
 export default function EbayChannelPage() {
+  const { hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -421,13 +430,19 @@ export default function EbayChannelPage() {
   );
 
   // ---- Pricing rules ----
-  const { data: pricingRulesData, isLoading: pricingRulesLoading } = useQuery<{ rules: PricingRule[] }>({
+  const {
+    data: pricingRulesData,
+    isLoading: pricingRulesLoading,
+    error: pricingReadError,
+    refetch: refetchPricingRules,
+  } = useQuery({
     queryKey: ["/api/ebay/pricing-rules"],
+    queryFn: () => publicationRequest("GET", "/api/ebay/pricing-rules", pricingRulesResponseSchema),
     enabled: !!config?.connected,
   });
 
   // ---- Effective prices (bulk) ----
-  const { data: effectivePricesData } = useQuery<{ prices: EffectivePrices }>({
+  const { data: effectivePricesData, isError: effectivePricesUnavailable } = useQuery<{ prices: EffectivePrices }>({
     queryKey: ["/api/ebay/effective-prices"],
     enabled: !!config?.connected,
   });
@@ -1025,36 +1040,90 @@ export default function EbayChannelPage() {
     value: string;
   }>({ scope: "channel", scopeId: "", ruleType: "percentage", value: "" });
   const [showPricingForm, setShowPricingForm] = useState(false);
+  const [pricingRuleBaseline, setPricingRuleBaseline] = useState<PricingRule[]>([]);
   const [pricingScopeSearch, setPricingScopeSearch] = useState("");
+  const [pricingError, setPricingError] = useState("");
+  const [pricingReloading, setPricingReloading] = useState(false);
+  const [pricingReloaded, setPricingReloaded] = useState(false);
+
+  async function reloadSavedPricingRules() {
+    setPricingReloading(true);
+    setPricingReloaded(false);
+    try {
+      const result = await refetchPricingRules({ throwOnError: true });
+      if (!result.data) throw new Error("The server did not return the saved pricing rules.");
+      setPricingRuleBaseline(result.data.rules.map((rule) => ({ ...rule })));
+      setPricingError("");
+      setPricingReloaded(true);
+    } catch (error) {
+      setPricingError(error instanceof Error ? error.message : "Saved pricing rules could not be reloaded. Try again.");
+    } finally {
+      setPricingReloading(false);
+    }
+  }
 
   const upsertPricingRuleMutation = useMutation({
-    mutationFn: async (rule: { scope: string; scopeId: string | null; ruleType: string; value: number }) => {
-      const resp = await apiRequest("PUT", "/api/ebay/pricing-rules", rule);
-      return resp.json();
+    mutationFn: async (rule: {
+      scope: string;
+      scopeId: string | null;
+      ruleType: string;
+      value: string;
+      expected: { id: number; ruleType: PricingRule["rule_type"]; value: string } | null;
+    }) => {
+      return publicationRequest(
+        "PUT", "/api/ebay/pricing-rules", z.object({ rule: pricingRuleSchema }), rule,
+      );
     },
-    onSuccess: () => {
+    onSuccess: async ({ rule }) => {
+      await queryClient.cancelQueries({ queryKey: ["/api/ebay/pricing-rules"] });
+      queryClient.setQueryData<{ rules: PricingRule[] }>(["/api/ebay/pricing-rules"], (current) => {
+        const previous = current?.rules.find((saved) => saved.id === rule.id);
+        const acknowledged = { ...previous, ...rule };
+        return {
+          rules: [
+            ...(current?.rules ?? []).filter((saved) =>
+              saved.id !== rule.id && !(saved.scope === rule.scope && saved.scope_id === rule.scope_id),
+            ),
+            acknowledged,
+          ],
+        };
+      });
       toast({ title: "Pricing Rule Saved" });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/pricing-rules"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
       setShowPricingForm(false);
+      setPricingError("");
+      setPricingReloaded(false);
       setPricingRuleForm({ scope: "channel", scopeId: "", ruleType: "percentage", value: "" });
     },
     onError: (err: Error) => {
+      setPricingError(err.message);
+      setPricingReloaded(false);
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
 
   const deletePricingRuleMutation = useMutation({
-    mutationFn: async (id: number) => {
-      const resp = await apiRequest("DELETE", `/api/ebay/pricing-rules/${id}`);
-      return resp.json();
+    mutationFn: async (rule: PricingRule) => {
+      return publicationRequest(
+        "DELETE", `/api/ebay/pricing-rules/${rule.id}`, z.object({ success: z.literal(true) }),
+        { expected: { id: rule.id, ruleType: rule.rule_type, value: String(rule.value) } },
+      );
     },
-    onSuccess: () => {
+    onSuccess: async (_result, deleted) => {
+      await queryClient.cancelQueries({ queryKey: ["/api/ebay/pricing-rules"] });
+      queryClient.setQueryData<{ rules: PricingRule[] }>(["/api/ebay/pricing-rules"], (current) => ({
+        rules: (current?.rules ?? []).filter((rule) => rule.id !== deleted.id),
+      }));
+      setPricingError("");
+      setPricingReloaded(false);
       toast({ title: "Pricing Rule Deleted" });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/pricing-rules"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
     },
     onError: (err: Error) => {
+      setPricingError(err.message);
+      setPricingReloaded(false);
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
@@ -1194,6 +1263,19 @@ export default function EbayChannelPage() {
     <div className="p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 max-w-6xl mx-auto" onClickCapture={handlePolicyAnchorClick}>
       {/* Page Header */}
       <ChannelWorkspaceHeader name="eBay" description="Store setup, category mapping, and listing feed" />
+      {config?.channel?.id && <ListingIntentChanges scope={{ kind: "channel", channelId: config.channel.id }}
+        canEdit={hasPermission("channels", "edit")}
+        onReview={row => {
+          const product = feedData?.feed.find(item => item.id === row.product_id);
+          if (product) setListingChangesTarget(product);
+          else window.location.assign(`/products/${row.product_id}`);
+        }}
+        onOpenOperation={row => {
+          if (row.receipt?.owner === "ebay_listing_sync") setPublicationStatusTarget({
+            jobId: row.receipt.operationId, productId: row.product_id,
+            name: feedData?.feed.find(item => item.id === row.product_id)?.name ?? `Product ${row.product_id}`,
+          });
+        }} />}
 
       {/* ================================================================== */}
       {/* SECTION 1: Store Setup                                             */}
@@ -1917,7 +1999,7 @@ export default function EbayChannelPage() {
                       const withdrawalJob = syncJob?.operation === "withdraw" ? syncJob : null;
                       const withdrawalUnfinished = withdrawalJob != null && withdrawalJob.state !== "completed";
                       const savedSyncIssue = syncJob ? resolveEbayListingJobIssue(syncJob) : null;
-                      const syncIssue = localSyncIssues.get(item.id)?.issue ?? (syncJob && ["awaiting_evidence", "needs_attention"].includes(syncJob.state)
+                      const syncIssue = item.priceIssue ?? localSyncIssues.get(item.id)?.issue ?? (syncJob && ["awaiting_evidence", "needs_attention"].includes(syncJob.state)
                         ? savedSyncIssue
                         : item.status === "error" && item.syncError && !syncPending
                           ? resolveEbayListingIssue({ message: item.syncError, productId: item.id }) : null);
@@ -2392,17 +2474,20 @@ export default function EbayChannelPage() {
                             <TableCell className="hidden sm:table-cell py-1.5">
                               {(() => {
                                 const ep = effectivePricesData?.prices?.[variant.id];
+                                  if (ep?.resolutionIssue) return <a className="text-xs text-destructive underline" href={ep.resolutionIssue.code.startsWith("RETAIL_") ? "/catalog/variants" : "/channels/ebay"} title={ep.resolutionIssue.message}>Price needs review</a>;
+                                  if (effectivePricesUnavailable || !ep || ep.missingPrice || ep.basePriceCents === null || ep.effectivePriceCents === null)
+                                    return <span className="text-xs text-muted-foreground">Price unavailable</span>;
                                 if (ep && ep.effectivePriceCents !== ep.basePriceCents) {
-                                  const pctDiff = ((ep.effectivePriceCents - ep.basePriceCents) / ep.basePriceCents * 100).toFixed(0);
+                                  const pctDiff = ep.basePriceCents > 0 ? ((ep.effectivePriceCents - ep.basePriceCents) / ep.basePriceCents * 100).toFixed(0) : null;
                                   return (
                                     <span className="text-xs">
                                       <span className="text-muted-foreground line-through mr-1">{formatPrice(ep.basePriceCents)}</span>
                                       <span className="font-medium text-blue-600">{formatPrice(ep.effectivePriceCents)}</span>
-                                      <span className="text-muted-foreground ml-1">(+{pctDiff}%)</span>
+                                      {pctDiff !== null && <span className="text-muted-foreground ml-1">(+{pctDiff}%)</span>}
                                     </span>
                                   );
                                 }
-                                return <span className="text-xs">{formatPrice(variant.priceCents)}</span>;
+                                return <span className="text-xs">{formatPrice(ep.effectivePriceCents)}</span>;
                               })()}
                             </TableCell>
                             {/* Qty — desktop */}
@@ -2427,6 +2512,9 @@ export default function EbayChannelPage() {
                               <div className="flex items-center gap-3 text-xs text-muted-foreground pl-1">
                                 {(() => {
                                   const ep = effectivePricesData?.prices?.[variant.id];
+                                  if (ep?.resolutionIssue) return <a className="text-xs text-destructive underline" href={ep.resolutionIssue.code.startsWith("RETAIL_") ? "/catalog/variants" : "/channels/ebay"} title={ep.resolutionIssue.message}>Price needs review</a>;
+                                  if (effectivePricesUnavailable || !ep || ep.missingPrice || ep.basePriceCents === null || ep.effectivePriceCents === null)
+                                    return <span className="text-xs text-muted-foreground">Price unavailable</span>;
                                   if (ep && ep.effectivePriceCents !== ep.basePriceCents) {
                                     return (
                                       <>
@@ -2435,7 +2523,7 @@ export default function EbayChannelPage() {
                                       </>
                                     );
                                   }
-                                  return <span>{formatPrice(variant.priceCents)}</span>;
+                                  return <span>{formatPrice(ep.effectivePriceCents)}</span>;
                                 })()}
                                 <span>·</span>
                                 <span>{variant.inventoryQuantity === null ? "Unavailable" : `${variant.inventoryQuantity} qty`}</span>
@@ -2546,13 +2634,45 @@ export default function EbayChannelPage() {
                 variant="outline"
                 size="sm"
                 className="w-full sm:w-auto min-h-[44px] sm:min-h-0"
-                onClick={() => setShowPricingForm(!showPricingForm)}
+                disabled={pricingReloading || (!showPricingForm && !pricingRulesData)}
+                onClick={() => {
+                  if (!showPricingForm) {
+                    // Keep the snapshot the operator started editing, even if a
+                    // background refresh returns a newer value before Save.
+                    setPricingRuleBaseline((pricingRulesData?.rules ?? []).map((rule) => ({ ...rule })));
+                    setPricingReloaded(false);
+                  }
+                  setShowPricingForm(!showPricingForm);
+                }}
               >
                 {showPricingForm ? "Cancel" : "Add Rule"}
               </Button>
             </div>
           </CardHeader>
           <CardContent className="px-3 sm:px-6">
+            {(pricingError || pricingReadError) && (
+              <div className="mb-3 space-y-2 text-sm">
+                <p role="alert" className="text-destructive">{pricingError || pricingReadError?.message}</p>
+                <p>{showPricingForm
+                  ? "Your entered value and selection are retained. Reload the saved rules, review your change, then retry."
+                  : "Reload the saved rules and review the current values before retrying."}</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={pricingReloading || upsertPricingRuleMutation.isPending || deletePricingRuleMutation.isPending}
+                  onClick={() => void reloadSavedPricingRules()}
+                >
+                  {pricingReloading ? "Reloading saved pricing rules…" : "Reload saved pricing rules"}
+                </Button>
+              </div>
+            )}
+            {pricingReloaded && (
+              <p role="status" className="mb-3 text-sm">
+                {showPricingForm
+                  ? "Saved pricing rules reloaded. Your entered value and selection are unchanged; review them before saving."
+                  : "Saved pricing rules reloaded. Review the current values before making changes."}
+              </p>
+            )}
             {/* Add/edit form */}
             {showPricingForm && (
               <div className="border rounded-lg p-3 sm:p-4 mb-4 bg-muted/30 space-y-3">
@@ -2683,18 +2803,27 @@ export default function EbayChannelPage() {
                       />
                       <Button
                         size="sm"
+                        aria-label="Save pricing rule"
                         className="min-h-[44px] sm:h-8 px-4"
                         disabled={
                           !pricingRuleForm.value ||
                           (pricingRuleForm.scope !== "channel" && !pricingRuleForm.scopeId) ||
+                          pricingReloading ||
                           upsertPricingRuleMutation.isPending
                         }
                         onClick={() => {
+                          const scopeId = pricingRuleForm.scope === "channel" ? null : pricingRuleForm.scopeId;
+                          const previous = pricingRuleBaseline.find((rule) =>
+                            rule.scope === pricingRuleForm.scope && rule.scope_id === scopeId,
+                          );
                           upsertPricingRuleMutation.mutate({
                             scope: pricingRuleForm.scope,
-                            scopeId: pricingRuleForm.scope === "channel" ? null : pricingRuleForm.scopeId,
+                            scopeId,
                             ruleType: pricingRuleForm.ruleType,
-                            value: parseFloat(pricingRuleForm.value),
+                            value: pricingRuleForm.value,
+                            expected: previous
+                              ? { id: previous.id, ruleType: previous.rule_type, value: String(previous.value) }
+                              : null,
                           });
                         }}
                       >
@@ -2748,8 +2877,9 @@ export default function EbayChannelPage() {
                       variant="ghost"
                       size="sm"
                       className="min-h-[44px] min-w-[44px] p-0 text-destructive hover:text-destructive shrink-0"
-                      onClick={() => deletePricingRuleMutation.mutate(rule.id)}
-                      disabled={deletePricingRuleMutation.isPending}
+                      aria-label={`Delete ${rule.scope_label || rule.scope} pricing rule`}
+                      onClick={() => deletePricingRuleMutation.mutate(rule)}
+                      disabled={deletePricingRuleMutation.isPending || pricingReloading}
                     >
                       <XCircle className="h-4 w-4" />
                     </Button>
@@ -2795,8 +2925,9 @@ export default function EbayChannelPage() {
                             variant="ghost"
                             size="sm"
                             className="h-6 w-6 p-0 text-destructive hover:text-destructive"
-                            onClick={() => deletePricingRuleMutation.mutate(rule.id)}
-                            disabled={deletePricingRuleMutation.isPending}
+                            aria-label={`Delete ${rule.scope_label || rule.scope} pricing rule`}
+                            onClick={() => deletePricingRuleMutation.mutate(rule)}
+                            disabled={deletePricingRuleMutation.isPending || pricingReloading}
                           >
                             <XCircle className="h-3.5 w-3.5" />
                           </Button>

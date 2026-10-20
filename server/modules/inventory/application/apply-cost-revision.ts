@@ -6,9 +6,11 @@ import { postCostReconciliation } from "../infrastructure/cost-reconciliation.re
 import { planCostReconciliation } from "./plan-cost-reconciliation";
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { type CostComponent, type CostIssue } from "@shared/procurement/cost-source-contracts";
+import { type CostComponent, type CostIssue, type CostInventoryEffectProof } from "@shared/procurement/cost-source-contracts";
+import { applyNoInventoryEffect } from "./apply-no-inventory-effect";
 import { projectCostForFrozenLot, replaceCostComponent } from "../domain/cost-application.domain";
 import { CostEvidenceError, costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../infrastructure/cost-evidence.repository";
+import type { SupplierReturnCostAdjustment } from "@shared/procurement/supplier-return";
 
 const MAX_APPLICATION_LOTS = 10_000;
 const MAX_APPLICATION_EDGES = 100_000;
@@ -23,11 +25,13 @@ export interface CostRevisionApplicationResult {
   totalCogsDeltaCents: number;
   issues: CostIssue[];
   replayed: boolean;
+  inventoryEffectProof?: CostInventoryEffectProof;
+  supplierReturnAdjustments?: SupplierReturnCostAdjustment[];
 }
 export interface CostComponentWriter {
-  revalueComponent(lotId: number, component: CostComponent, unitMills: number, reason: string, tx: CostEvidenceTransaction): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number } | null>;
+  revalueComponent(lotId: number, component: CostComponent, unitMills: number, reason: string, tx: CostEvidenceTransaction): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number; supplierReturnAdjustments?: SupplierReturnCostAdjustment[] } | null>;
   revalueExactComponent?(lotId: number, component: CostComponent, totalMills: number, basisQuantity: number,
-    reason: string, actorId: string, tx: CostEvidenceTransaction, recordedAt?: Date): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number } | null>;
+    reason: string, actorId: string, tx: CostEvidenceTransaction, recordedAt?: Date, sourceRevisionId?: number): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number; supplierReturnAdjustments?: SupplierReturnCostAdjustment[] } | null>;
 }
 
 /** One inventory owner applies a source revision through the recorded graph.
@@ -39,11 +43,12 @@ export async function applyCostRevision(
   if (!actorId?.trim() || !(now instanceof Date) || !Number.isFinite(now.getTime())) throw new CostEvidenceError("COST_AUDIT_IDENTITY_REQUIRED", "Cost application requires an actor and valid clock.");
   await lockInventoryCostGraph(tx);
   const source = revision.contract;
+  if (source.inventoryEffect) return applyNoInventoryEffect(tx, revision, actorId, now);
   const shipmentLineId = source.scope.kind === "shipment_line" ? source.scope.inboundShipmentLineId : null;
   const rootsResult = await tx.execute(sql`
     SELECT origin.*, line.cost_source_kind, line.cost_source_evidence,
       EXISTS(SELECT 1 FROM procurement.receipt_reversals reversal WHERE reversal.receiving_line_id = origin.receiving_line_id) AS has_reversal
-    FROM inventory.lot_cost_origins origin
+    FROM inventory.effective_lot_cost_origins origin
     JOIN procurement.receiving_lines line ON line.id = origin.receiving_line_id
     WHERE origin.purchase_order_line_id = ${source.scope.purchaseOrderLineId}
       AND (${shipmentLineId}::integer IS NULL OR origin.inbound_shipment_line_id = ${shipmentLineId})
@@ -61,7 +66,7 @@ export async function applyCostRevision(
     SELECT lot.id FROM inventory.inventory_lots lot
     WHERE lot.po_line_id = ${source.scope.purchaseOrderLineId}
       AND (${shipmentLineId}::integer IS NULL OR lot.inbound_shipment_id = ${source.scope.kind === "shipment_line" ? source.scope.inboundShipmentId : null})
-      AND NOT EXISTS(SELECT 1 FROM inventory.lot_cost_origins origin WHERE origin.inventory_lot_id = lot.id)
+      AND NOT EXISTS(SELECT 1 FROM inventory.effective_lot_cost_origins origin WHERE origin.inventory_lot_id = lot.id)
       AND NOT EXISTS(SELECT 1 FROM inventory.lot_cost_contributions edge WHERE edge.output_lot_id = lot.id)
     ORDER BY lot.id LIMIT 1
   `);
@@ -255,12 +260,15 @@ export async function applyCostRevision(
       }, component: source.component, unitMills: target.unitMills });
       if (after.totalMills < 0) throw new CostEvidenceError("COST_NEGATIVE_LOT", "The current lot owner cannot represent a negative total.", { lotId: lot.id });
       const revalue = writer.revalueExactComponent
-        ? await writer.revalueExactComponent(lot.id,source.component,target.allocatedMills,target.quantity,`source_revision:${revision.id}`,actorId,tx,now)
+        ? await writer.revalueExactComponent(lot.id,source.component,target.allocatedMills,target.quantity,`source_revision:${revision.id}`,actorId,tx,now,revision.id)
         : await writer.revalueComponent(lot.id, source.component, target.unitMills, `source_revision:${revision.id}`, tx);
       if (!revalue) throw new CostEvidenceError("COST_LOT_DISAPPEARED", "A locked cost application lot was not updated.", { lotId: lot.id });
       result.lotsUpdated++;
       result.cogsRowsUpdated = costInteger((BigInt(result.cogsRowsUpdated) + BigInt(costInteger(revalue.cogsRowsUpdated, "cogsRowsUpdated"))).toString(), "cogsRowsUpdated");
       result.totalCogsDeltaCents = costInteger((BigInt(result.totalCogsDeltaCents) + BigInt(costInteger(revalue.totalCogsDeltaCents, "totalCogsDeltaCents", -Number.MAX_SAFE_INTEGER))).toString(), "totalCogsDeltaCents", -Number.MAX_SAFE_INTEGER);
+      if (revalue.supplierReturnAdjustments?.length) {
+        (result.supplierReturnAdjustments ??= []).push(...revalue.supplierReturnAdjustments);
+      }
       changes.push({ lotId: lot.id, before, after: { ...after, component: source.component, allocatedMills: target.allocatedMills, quantity: target.quantity, remainderMills: target.remainderMills } });
     }
   }
@@ -280,6 +288,7 @@ export async function applyCostRevision(
     VALUES (${result.applicationId},1,${canonicalJson({ contractVersion: 1, currency: source.currency, sourceRevisionId: revision.id, sourceFingerprint: source.fingerprint, component: source.component, changes, cogsDeltaCents: result.totalCogsDeltaCents, actorId, recordedAt: now.toISOString(),
       ...(quantityReviews.length === 0 ? {} : { unresolvedQuantities: quantityReviews.map(issue => issue.unresolvedQuantity!) }),
       ...(historicalCostAdjustments.length === 0 ? {} : { historicalCostAdjustments }),
+      ...(result.supplierReturnAdjustments?.length ? { supplierReturnAdjustments: result.supplierReturnAdjustments } : {}),
     })}::jsonb,${now})
   `);
   if (allLotIds.length > 0) {

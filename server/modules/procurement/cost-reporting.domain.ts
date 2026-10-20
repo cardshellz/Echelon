@@ -1,8 +1,10 @@
+import { costInventoryEffectProofSchema, type CostSourceRevision } from "@shared/procurement/cost-source-contracts";
+import { proveNoInventoryEffect } from "../inventory/domain/no-inventory-effect";
 import { schedulerIsDisabled } from "../../infrastructure/scheduler-config";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { COST_REPORT_MAX_BYTES, costReportAcknowledgementSchema, costReportEnvelopeCoreSchema, costReportEnvelopeSchema, inventoryCostReportEventSchema, type CostReportAcknowledgement, type CostReportEnvelope } from "@shared/procurement/cost-report-delivery";
+import { COST_REPORT_MAX_BYTES, costReportAcknowledgementSchema, costReportEnvelopeCoreSchema, costReportEnvelopeSchema, inventoryCostReportEventSchema, type CostReportAcknowledgement, type CostReportEnvelope, type InventoryCostReportEvent } from "@shared/procurement/cost-report-delivery";
 
 export const COST_REPORT_MAX_ATTEMPTS = 8;
 export const COST_REPORT_LEASE_MS = 60_000;
@@ -40,6 +42,9 @@ export function buildCostReportEnvelope(input: {
   purchaseOrderId: number; purchaseOrderLineId: number; payload: unknown;
 }): CostReportEnvelope {
   const payload = inventoryCostReportEventSchema.parse(input.payload);
+  if (payload.inventoryEffectProof && payload.inventoryEffectProof.purchaseOrderLineId !== input.purchaseOrderLineId) {
+    throw new CostReportingError("COST_REPORT_SOURCE_CONFLICT", "The no-inventory-effect proof belongs to another purchase order line.");
+  }
   const core = costReportEnvelopeCoreSchema.parse({ contractVersion: 1, eventType: "inventory.cost_application_recorded",
     sourceSystemId: input.destination.sourceSystemId, destinationId: input.destination.id, deliveryId: input.deliveryId,
     sourceEventId: input.sourceEventId, applicationId: input.applicationId, purchaseOrderId: input.purchaseOrderId,
@@ -47,6 +52,60 @@ export function buildCostReportEnvelope(input: {
   const envelope = costReportEnvelopeSchema.parse({ ...core, reportHash: reportHash(core) });
   if (Buffer.byteLength(canonicalJson(envelope), "utf8") > COST_REPORT_MAX_BYTES) throw new CostReportingError("COST_REPORT_TOO_LARGE", "The source event exceeds the supported report size; it has not been truncated.");
   return envelope;
+}
+
+const noInventoryEffectApplicationSchema = z.object({
+  inventoryEffectProof: costInventoryEffectProofSchema,
+  noInventoryEffectEvidence: z.unknown(),
+});
+const noInventoryEffectOutcomeSchema = z.object({
+  status: z.literal("applied"),
+  lotsUpdated: z.literal(0),
+  cogsRowsUpdated: z.literal(0),
+  totalCogsDeltaCents: z.literal(0),
+  issues: z.array(z.unknown()).length(0),
+  inventoryEffectProof: costInventoryEffectProofSchema,
+});
+
+/** Delivery preserves the inventory owner's immutable proof. A missing field
+ * cannot turn a no-effect application into an ordinary empty adjustment. */
+export function costReportInventoryEffectMatches(input: {
+  source: CostSourceRevision;
+  payload: InventoryCostReportEvent;
+  applicationStatus: unknown;
+  applicationOutcome: unknown;
+  applicationEvidence: unknown;
+  actualLotCount: number;
+  historicalPostingCount: number;
+  hasReconciliation: boolean;
+}): boolean {
+  const applicationHasProof = input.applicationOutcome !== null
+    && typeof input.applicationOutcome === "object"
+    && "inventoryEffectProof" in input.applicationOutcome;
+  const applicationHasEvidence = input.applicationEvidence !== null
+    && typeof input.applicationEvidence === "object"
+    && ("inventoryEffectProof" in input.applicationEvidence || "noInventoryEffectEvidence" in input.applicationEvidence);
+  const effect = input.source.inventoryEffect;
+  const proof = input.payload.inventoryEffectProof;
+  if (effect === undefined && proof === undefined && !applicationHasProof && !applicationHasEvidence) return true;
+
+  const outcome = noInventoryEffectOutcomeSchema.safeParse(input.applicationOutcome);
+  const application = noInventoryEffectApplicationSchema.safeParse(input.applicationEvidence);
+  if (effect === undefined || proof === undefined || !outcome.success || !application.success
+    || input.applicationStatus !== "applied" || input.actualLotCount !== 0
+    || input.historicalPostingCount !== 0 || input.hasReconciliation
+    || input.payload.changes.length !== 0 || input.payload.cogsDeltaCents !== 0
+    || input.payload.historicalCostAdjustments !== undefined || input.payload.unresolvedQuantities !== undefined) return false;
+
+  // Re-prove the retained snapshot, not today's mutable custody. Reporting an
+  // immutable past outcome must not silently replace it with current evidence.
+  const retained = proveNoInventoryEffect(input.source, application.data.noInventoryEffectEvidence);
+  return retained.proof !== null
+    && proof.purchaseOrderLineId === input.source.scope.purchaseOrderLineId
+    && reportHash(proof.inventoryEffect) === reportHash(effect)
+    && reportHash(proof) === reportHash(outcome.data.inventoryEffectProof)
+    && reportHash(proof) === reportHash(application.data.inventoryEffectProof)
+    && reportHash(proof) === reportHash(retained.proof);
 }
 
 export function verifyReportAcknowledgement(raw: unknown, envelope: CostReportEnvelope): CostReportAcknowledgement {

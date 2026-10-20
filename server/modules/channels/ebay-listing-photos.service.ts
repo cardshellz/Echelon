@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import type { CatalogPublicationMediaPlan } from "@shared/types/catalog-publication-media";
 import type { ChannelImagePayload } from "./channel-adapter.interface";
 import {
   PgCatalogVariantPublicationPhotoReader,
@@ -44,6 +45,7 @@ export class ChannelEbayListingPhotoResolver implements EbayListingPhotoResolver
     const images: ChannelImagePayload[] = [];
     let hasCatalogAssets = false;
     let retainedGroupPhotos: readonly string[] | undefined;
+    let mediaPlan: CatalogPublicationMediaPlan | undefined;
     let discarded = false;
     try {
       // Scope, channel overlays, order and file hashes must come from the same committed version.
@@ -58,22 +60,23 @@ export class ChannelEbayListingPhotoResolver implements EbayListingPhotoResolver
       hasCatalogAssets = scope.assetIds.length > 0;
       if (input.mode !== "preserve" && hasCatalogAssets) {
         const overrides = await readChannelPhotoOverrides(client, input.channelId, scope.assetIds);
-        const photos = await new PgCatalogVariantPublicationPhotoReader(client, this.publicUrl).listPublicationPhotos({
+        mediaPlan = await new PgCatalogVariantPublicationPhotoReader(client, this.publicUrl).listPublicationPlan({
           productId: input.productId, productVariantIds: input.variants.map(variant => variant.variantId),
-          maxPhotosPerVariant: EBAY_LISTING_MAX_PHOTOS, overrides,
+          maxPhotosPerVariant: EBAY_LISTING_MAX_PHOTOS, maxGroupPhotos: EBAY_LISTING_MAX_PHOTOS, overrides,
         });
         for (const variant of input.variants) {
-          const resolved = photos.get(variant.variantId);
+          const resolved = mediaPlan.variants.find(candidate => candidate.variantId === variant.variantId)?.gallery;
           if (!resolved) throw new EbayListingPhotoError("EBAY_PHOTO_SCOPE_INVALID", "Catalog omitted a requested eBay size.");
-          if (resolved.issues.length) {
-            throw new EbayListingPhotoError("EBAY_CATALOG_PHOTO_UNAVAILABLE", resolved.issues[0].message,
-              { productId: input.productId, variantId: variant.variantId, issues: resolved.issues });
+          const issues = resolved.omissions.filter(omission => omission.blocking);
+          if (issues.length) {
+            throw new EbayListingPhotoError("EBAY_CATALOG_PHOTO_UNAVAILABLE", issues[0].message!,
+              { productId: input.productId, variantId: variant.variantId, issues });
           }
-          if (resolved.photos.length === 0) {
+          if (resolved.selected.length === 0) {
             throw new EbayListingPhotoError("EBAY_CATALOG_PHOTO_REQUIRED", `No included catalog photo is available for eBay SKU ${variant.sku}.`,
               { productId: input.productId, variantId: variant.variantId });
           }
-          for (const photo of resolved.photos) {
+          for (const photo of resolved.selected) {
             assertEbayPhotoUrl(photo.url);
             images.push({ url: photo.url, position: photo.position, variantSku: variant.sku, altText: null });
           }
@@ -90,6 +93,11 @@ export class ChannelEbayListingPhotoResolver implements EbayListingPhotoResolver
       throw error;
     } finally {
       if (!discarded) client.release();
+    }
+    if (mediaPlan) {
+      return { mediaPlan,
+        byVariantId: new Map(mediaPlan.variants.map(variant => [variant.variantId, variant.gallery.selected.map(photo => photo.url)])),
+        groupImageUrls: mediaPlan.group.selected.map(photo => photo.url) };
     }
     if (input.mode === "preserve" || !hasCatalogAssets) {
       if (!input.readExistingPhotos) throw photoRequired(input.productId);

@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -21,7 +22,7 @@ const TABLES = [
   schema.purchasingRecommendationPoHandoffs, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
   schema.apPayments, schema.apPaymentAllocations,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
@@ -123,7 +124,7 @@ export async function createFlowCostHarness(url: string) {
 
     const rfqHelper = await import("./rfq-controlled-acceptance-helper");
     for (const migration of [...rfqHelper.RFQ_CONTROLLED_MIGRATIONS,
-      "221_receiving_unit_snapshots.sql", "222_procurement_cost_evidence.sql", "0751_exact_inventory_cost_totals.sql", "0725_inventory_cost_admission_evidence.sql", "231_receipt_cost_recovery.sql",
+      "221_receiving_unit_snapshots.sql", "222_procurement_cost_evidence.sql", "900000017000018590001_receipt_shipment_quantity_amendments.sql", "0751_exact_inventory_cost_totals.sql", "0725_inventory_cost_admission_evidence.sql", "231_receipt_cost_recovery.sql",
       "900000007000018030001_shipment_cost_exception_decisions.sql",
       "900000008000018110001_shipment_cost_reconciliation.sql",
       "900000009000018290001_historical_cost_origin_repairs.sql",

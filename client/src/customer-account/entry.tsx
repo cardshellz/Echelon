@@ -6,6 +6,7 @@ import { DialogPortalContainerContext } from "@/components/ui/dialog";
 import { CustomerWorkspace } from "@/pages/CustomerReturnCustomerPortal";
 import { CustomerOrderEditor } from "./CustomerOrderEditor";
 import { createCustomerAccountTransport, customerAccountPageConfigSchema, type CustomerAccountTransport } from "./customer-account.transport";
+import { customerAccountAccessNotice, customerAccountSignInUrl, type CustomerAccountAccessNotice } from "./customer-account-access";
 import type { CustomerReturnCustomerOrder } from "@shared/returns/customer-return-access.contract";
 import type { CustomerReturnCustomerLabelStatus } from "@shared/returns/customer-return-customer.contract";
 import "../index.css";
@@ -13,7 +14,7 @@ import "./storefront.css";
 
 type Bootstrap = Awaited<ReturnType<CustomerAccountTransport["bootstrap"]>>;
 type Choice = { kind: "edit" | "return" | "labels"; omsOrderId: number; returnOrder?: CustomerReturnCustomerOrder; returnStatus?: CustomerReturnCustomerLabelStatus };
-const message = (cause: unknown) => cause instanceof Error ? cause.message : "Account tools are temporarily unavailable. Please try again.";
+const message = (cause: unknown) => cause instanceof Error ? cause.message : "Your order could not be loaded. Please try again.";
 function AccountModal({ api, session, choice, onClose }: {
   api: CustomerAccountTransport; session: Bootstrap; choice: Choice; onClose: () => void;
 }) {
@@ -48,10 +49,10 @@ function AccountModal({ api, session, choice, onClose }: {
     </div>
   </dialog>;
 }
-function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: CustomerAccountTransport; statusTarget: HTMLElement | null }) {
+function CustomerAccount({ root, api, statusTarget, signInUrl }: { root: HTMLElement; api: CustomerAccountTransport; statusTarget: HTMLElement | null; signInUrl: string }) {
   const [session, setSession] = useState<Bootstrap | null>(null);
   const [choice, setChoice] = useState<Choice | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<CustomerAccountAccessNotice | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [history, setHistory] = useState<Awaited<ReturnType<ReturnType<CustomerAccountTransport["returns"]>["history"]>> | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -67,6 +68,9 @@ function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: 
     const seen = new Set<HTMLElement>();
     let activeSession: Bootstrap | null = null;
     setError(null);
+    setSession(null);
+    setHistory(null);
+    setHistoryError(null);
     rows.forEach(row => row.querySelectorAll<HTMLElement>("[data-csz-account-action]").forEach(button => { button.hidden = true; }));
     function schedule() {
       // Bound provider inspection work; paginate/scroll adds rows without
@@ -151,7 +155,7 @@ function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: 
         schedule();
       }, { rootMargin: "200px" });
       rows.forEach(row => observer!.observe(row));
-    }).catch(cause => { if (!controller.signal.aborted) setError(message(cause)); });
+    }).catch(cause => { if (!controller.signal.aborted) setError(customerAccountAccessNotice(cause)); });
     return () => { controller.abort(); observer?.disconnect(); rowListeners.forEach(cleanup => cleanup.forEach(remove => remove())); client.clear(); };
   }, [api, root, attempt, client]);
   async function showReturn(authorizationId: number, omsOrderId: number) {
@@ -161,7 +165,10 @@ function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: 
       setChoice({ kind: "labels", omsOrderId, returnStatus });
     } catch (cause) { setHistoryError(message(cause)); }
   }
-  const accessError = error && <div className="csz-account-notice" role="alert"><span>{error}</span><button type="button" className="csz-action" onClick={() => setAttempt(value => value + 1)}>Retry account tools</button></div>;
+  const accessError = error && <div className="csz-account-notice" role="alert"><span>{error.message}</span>
+    {error.action === "sign_in" ? <a className="csz-action" href={signInUrl}>Sign in again</a>
+      : <button type="button" className="csz-action" onClick={() => setAttempt(value => value + 1)}>Try again</button>}
+  </div>;
   return <QueryClientProvider client={client}>
     {accessError && (statusTarget ? createPortal(accessError, statusTarget) : accessError)}
     {choice && session && <AccountModal key={`${choice.kind}:${choice.omsOrderId}:${choice.returnStatus?.authorizationId ?? "intake"}`} api={api} session={session} choice={choice} onClose={close} />}
@@ -186,10 +193,11 @@ if (root && mount && configElement) {
   try {
     const config = customerAccountPageConfigSchema.parse(JSON.parse(configElement.textContent ?? "null"));
     const api = createCustomerAccountTransport(config);
-    createRoot(mount).render(<CustomerAccount root={root} api={api} statusTarget={statusTarget} />);
+    const signInUrl = customerAccountSignInUrl(config.loginPath, `${window.location.pathname}${window.location.search}`);
+    createRoot(mount).render(<CustomerAccount root={root} api={api} statusTarget={statusTarget} signInUrl={signInUrl} />);
   } catch {
     const notice = document.createElement("p"); notice.setAttribute("role", "alert");
-    notice.textContent = "Account tools could not be loaded. Please refresh this page.";
+    notice.textContent = "Order options could not be loaded. Please refresh this page.";
     (statusTarget ?? mount).append(notice);
   }
 }

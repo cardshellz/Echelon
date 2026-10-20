@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 import { expectFinancialRetryBoundaries, installFinancialRetryClock } from "./procurement-retry-clock";
-import { poLineAmountCents, type PoQuantityAmendmentContext, type PoQuantityAmendmentPreview, type PoQuantityApprovalRequest, type PoQuantityPreviewRequest } from "@shared/procurement/po-quantity-amendment";
+import { poLineAmountCents, type PoQuantityAmendmentContext, type PoQuantityAmendmentPreview, type PoQuantityAmendmentResult, type PoQuantityApprovalRequest, type PoQuantityPreviewRequest } from "@shared/procurement/po-quantity-amendment";
 import { normalizePoLinePricing } from "@shared/utils/po-line-pricing";
 
 const version = "a".repeat(64);
@@ -33,31 +33,74 @@ function previewFor(body: PoQuantityPreviewRequest, lines: PoQuantityAmendmentCo
   const sum = (values: number[]) => Number(values.reduce((total, value) => total + BigInt(value), BigInt(0)));
   return { purchaseOrderId: 17, currency: "USD", sourceVersion: body.sourceVersion, reason: body.reason, lines: changes,
     beforeTotalCents: sum(lines.map(value => value.lineTotalCents)), afterTotalCents: sum(lines.map(value => changes.find(change => change.before.id === value.id)?.after.lineTotalCents ?? value.lineTotalCents)),
+    previewVersion: "c".repeat(64),
+    impact: { quantities: changes.filter(line => line.before.lineType === "product").map(({before,after}) => ({ lineId: before.id, name: before.name,
+      ordered: { before: before.orderQty, after: after.orderQty }, received: before.receivedQty, shipped: before.receivedQty, invoiced: before.invoicedQty,
+      shipmentCapacityReview: null,
+      remainingToReceive: {before: Math.max(0,before.orderQty-before.receivedQty),after: Math.max(0,after.orderQty-before.receivedQty)},
+      remainingToShip: {before: Math.max(0,before.orderQty-before.receivedQty),after: Math.max(0,after.orderQty-before.receivedQty)},
+      remainingToInvoice: {before: Math.max(0,before.orderQty-before.invoicedQty),after: Math.max(0,after.orderQty-before.invoicedQty)} })),
+      shipments: [], lots: [], orderCosts: [], historicalCosts: [], applications: [] },
     beforeStatus: "received", afterStatus: "received", warnings: ["Invoice amounts, invoice quantities and payments stay unchanged."], invoiceMatches: [] };
 }
-async function setup(page: Page, options: { admin?: boolean; stale?: boolean; loseAllResponses?: boolean; closeAfterLost?: boolean; lines?: PoQuantityAmendmentContext["lines"]; request?: string; openModal?: boolean; wrongContext?: boolean } = {}) {
+async function setup(page: Page, options: { admin?: boolean; stale?: boolean; loseAllResponses?: boolean; closeAfterLost?: boolean; lines?: PoQuantityAmendmentContext["lines"]; request?: string; openModal?: boolean; wrongContext?: boolean; measuredCosts?: boolean; returnedValue?: "increase" | "decrease" } = {}) {
   const failures = await installFixtures(page);
   const approvals: Captured[] = []; const previews: PoQuantityPreviewRequest[] = [];
   const context: PoQuantityAmendmentContext = { purchaseOrderId: options.wrongContext ? 99 : 17, currency: "USD", sourceVersion: version, canApprove: options.admin !== false, blockedReason: null, lines: options.lines ?? [line] };
   let lose = options.loseAllResponses ?? false; let committed = false; let denied = false;
-  const results = new Map<string, unknown>();
+  const results = new Map<string, PoQuantityAmendmentResult>();
+  const reads: string[] = [];
+  const makePreview = (body: PoQuantityPreviewRequest) => {
+    const preview = previewFor(body, context.lines);
+    if (options.measuredCosts) {
+      preview.impact!.shipments = [{ shipmentId: 88, shipmentNumber: "SHIP-88", status: "closed", chargeCents: 5000,
+        lines: [{ lineId: 91, purchaseOrderId: 17, name: "Product", shippedPieces: 25000,
+          allocatedCents: { before: 5000, after: 5000 }, landedTotalCents: { before: 630000, after: 1255000 } }] }];
+      preview.impact!.lots = [{ lotId: 101, lotNumber: "LOT-101", onHandUnits: 10, unitCostMills: { before: 5000, after: 10000 } }];
+      preview.impact!.orderCosts = [{ costId: 201, orderId: 301, quantity: 2, totalMills: { before: 10000, after: 20000 } }];
+      preview.impact!.applications = [{ purchaseOrderLineId: 11, shipmentId: null, component: "product", status: "review_required",
+        lotsUpdated: 1, orderCostsUpdated: 1, orderCostDeltaCents: 100,
+        issues: [{ code: "TEST_MISSING_EVIDENCE", message: "Supplier packaging amount requires confirmation." }] }];
+    }
+    if (options.returnedValue) {
+      const beforeMills = options.returnedValue === "increase" ? 10001 : 20002;
+      const afterMills = options.returnedValue === "increase" ? 20002 : 10001;
+      preview.impact!.applications.push({ purchaseOrderLineId: 11, shipmentId: null, component: "product", status: "applied",
+        lotsUpdated: 0, orderCostsUpdated: 0, orderCostDeltaCents: 0, issues: [],
+        returnedCosts: [{ returnId: 9, returnLineId: 91, returnAllocationId: 191, costQuantityAllocationId: 391,
+          inventoryLotId: 501, quantity: 2, component: "product", beforeMills, afterMills, deltaMills: afterMills - beforeMills }],
+        returnedCostDeltaMills: afterMills - beforeMills });
+    }
+    return preview;
+  };
   await page.route("**/api/**", async route => {
     const request = route.request(); const path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
+      reads.push(path);
       if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" }, roles: ["Administrator"], permissions: ["purchasing:view", "purchasing:approve"] } });
       if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), status: options.closeAfterLost && committed ? "closed" : "received", physicalStatus: "received", financialStatus: "paid" } });
       if (path === "/api/purchase-orders/17/quantity-amendment") return route.fulfill({ json: { ...context, sourceVersion: committed ? "b".repeat(64) : version } });
+      if (path === "/api/purchase-orders/17/quantity-amendment/history") return route.fulfill({ json: {
+        entries: [...results.values()].map(result => ({ id: result.auditEventId, actorId: "test-user", actorName: "Approving Admin",
+          approvedAt: "2026-10-19T12:00:00.000Z", revisionNumber: result.revisionNumber, preview: result.preview })), nextCursor: null,
+      } });
       return route.fallback();
     }
     if (path === "/api/purchase-orders/17/quantity-amendment/preview") {
       const body = request.postDataJSON() as PoQuantityPreviewRequest; previews.push(body);
       if (options.stale) return route.fulfill({ status: 409, json: { error: "The receipt changed. Reload and review the correction again.", code: "PO_AMENDMENT_STALE" } });
-      return route.fulfill({ json: previewFor(body, context.lines) });
+      return route.fulfill({ json: makePreview(body) });
     }
     if (path !== "/api/purchase-orders/17/quantity-amendment" || request.method() !== "POST") return route.fallback();
     const command = { key: request.headers()["idempotency-key"], body: request.postDataJSON() as PoQuantityApprovalRequest }; approvals.push(command);
     if (denied) return route.fulfill({ status: 403, json: { error: "Permission denied: purchasing:approve" } });
-    if (!results.has(command.key)) { committed = true; results.set(command.key, { purchaseOrderId: 17, revisionNumber: 1, auditEventId: 100, preview: previewFor(command.body, context.lines) }); }
+    if (!results.has(command.key)) {
+      committed = true;
+      const preview = makePreview(command.body);
+      // An already committed legacy command replays its original result shape.
+      if (!command.body.previewVersion) { delete preview.previewVersion; delete preview.impact; }
+      results.set(command.key, { purchaseOrderId: 17, revisionNumber: 1, auditEventId: 100, preview });
+    }
     if (lose) return route.abort("failed");
     return route.fulfill({ json: results.get(command.key), headers: { "Idempotency-Replayed": "true" } });
   });
@@ -66,7 +109,7 @@ async function setup(page: Page, options: { admin?: boolean; stale?: boolean; lo
     await page.getByRole("button", { name: "Edit PO", exact: true }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
   }
-  return { failures, approvals, previews, recover: () => { lose = false; }, deny: (value: boolean) => { denied = value; } };
+  return { failures, approvals, previews, reads, recover: () => { lose = false; }, deny: (value: boolean) => { denied = value; } };
 }
 async function review(page: Page, keepProductTotal = false) {
   const modal = page.getByRole("dialog"); await modal.getByLabel("Quantity (pieces)").fill("25000");
@@ -80,7 +123,7 @@ async function save(page: Page) {
 }
 test("admin reviews explicit pricing impact, confirms and saves with visible actions inside the modal", async ({ page }) => {
   const state = await setup(page); const modal = await review(page);
-  await expect(modal.getByText(line.name, { exact: false })).toBeVisible();
+  await expect(modal.getByText(line.name, { exact: false }).first()).toBeVisible();
   const approve = modal.getByRole("button", { name: "Approve & save PO", exact: true });
   await expect(approve).toBeDisabled(); expect(state.approvals).toHaveLength(0);
   await modal.getByLabel("I reviewed these changes and the new PO total.").check();
@@ -99,6 +142,34 @@ test("a user without current admin approval authority receives a clear explanati
   await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(/current Administrator/);
   await expect(page.getByRole("button", { name: "Review changes", exact: true })).toHaveCount(0);
   expect(state.previews).toEqual([]); expect(state.approvals).toEqual([]); expect(state.failures).toEqual([]);
+});
+
+test("approved dependency impact remains visible in history and connected reads refresh", async ({ page }) => {
+  const state = await setup(page, { measuredCosts: true }), modal = await review(page);
+  const impact = modal.getByRole("region", { name: "Dependent quantity and cost changes" });
+  await expect(impact.getByText("Actual quantities: 25,000 received · 25,000 shipped · 12,500 invoiced")).toBeVisible();
+  await impact.locator("summary").filter({ hasText: "Inventory and sold-cost changes" }).click();
+  await expect(impact.getByRole("row").filter({ hasText: "LOT-101" })).toHaveText(/0.5000 USD.*1.0000 USD/);
+  await expect(impact.getByRole("row").filter({ hasText: "Order #301" })).toHaveText(/1.0000 USD.*2.0000 USD/);
+  await expect(impact.getByText("Supplier packaging amount requires confirmation.")).toBeVisible();
+  await expect(impact.getByRole("link", { name: "Open cost review" })).toHaveAttribute("href", /purchase-orders\/17\?.*costReview=1/);
+  const readsBeforeSave = state.reads.filter(path => path === "/api/purchase-orders/17").length;
+  await save(page);
+  await expect.poll(() => state.reads.filter(path => path === "/api/purchase-orders/17").length).toBeGreaterThan(readsBeforeSave);
+  expect(state.approvals[0].body.previewVersion).toBe("c".repeat(64));
+  await page.keyboard.press("Escape");
+  await page.getByRole("tab", { name: "History", exact: true }).click();
+  const history = page.getByRole("region", { name: "Approved PO edits" });
+  await history.locator("summary").filter({ hasText: "Revision 1 · approved by Approving Admin" }).click();
+  await expect(history.getByRole("region", { name: "Dependent quantity and cost changes" })).toBeVisible();
+  await expect(history.getByText("Supplier confirmed the revised PO line values")).toBeVisible();
+  await expect(history.getByText("Cost work recorded at approval", { exact: true })).toBeVisible();
+  await expect(history.getByText("These issues were recorded with this approval. Open the current cost review to see what remains outstanding.")).toBeVisible();
+  await expect(history.getByRole("table", { name: "PO change summary" }).getByRole("columnheader", { name: "Before", exact: true })).toBeVisible();
+  const historyBounds = await history.boundingBox();
+  expect(historyBounds && historyBounds.x >= 0 && historyBounds.x + historyBounds.width <= page.viewportSize()!.width).toBeTruthy();
+  await history.screenshot({ path: test.info().outputPath("po-edit-approval-history.png") });
+  expect(state.failures).toEqual([]);
 });
 test("stale evidence requires discard and reload before approval", async ({ page }) => {
   const state = await setup(page, { stale: true }); const modal = page.getByRole("dialog");
@@ -247,4 +318,47 @@ test("uses compact rows for eleven lines and summarizes only the edited fields",
   await expect(summary.getByRole("row")).toHaveCount(4);
   await expect(summary).toContainText("8 · Product 8"); await expect(summary).not.toContainText("Quantity");
   expect(state.previews[0].changes.map(row => row.lineId)).toEqual([18]); expect(state.failures).toEqual([]);
+});
+
+
+test("returned stock value is reviewed before approval and retained with its source in history", async ({ page }, info) => {
+  const state = await setup(page, { measuredCosts: true, returnedValue: "increase" });
+  const modal = await review(page);
+  const returned = modal.getByRole("region", { name: "Supplier-return value changes" });
+  await expect(returned).toContainText("2 returned units");
+  await expect(returned).toContainText("Change: 1.0001 USD");
+  const before = returned.getByText("1.0001 USD", { exact: true });
+  const after = returned.getByText("2.0002 USD", { exact: true });
+  await before.scrollIntoViewIfNeeded();
+  await expect(before).toBeInViewport();
+  await expect(after).toBeInViewport();
+  await expect(returned.getByRole("link", { name: "Return #9", exact: true })).toHaveAttribute("href", /supplier-returns\/9/);
+  await expect(returned).toContainText("do not record a new physical return or supplier credit");
+  await expect(modal.getByRole("button", { name: saveAction, exact: true })).toBeDisabled();
+  expect(state.approvals).toEqual([]);
+  await returned.scrollIntoViewIfNeeded();
+  await returned.screenshot({ path: info.outputPath("po-amendment-return-value.png") });
+  await save(page);
+  await page.keyboard.press("Escape");
+  await page.getByRole("tab", { name: "History", exact: true }).click();
+  const history = page.getByRole("region", { name: "Approved PO edits" });
+  await history.locator("summary").filter({ hasText: "Revision 1 · approved by Approving Admin" }).click();
+  const approved = history.getByRole("region", { name: "Supplier-return value changes" });
+  await expect(approved).toContainText("Returned value recorded at approval");
+  await expect(approved).toContainText("Change: 1.0001 USD");
+  expect(state.approvals).toHaveLength(1);
+  expect(state.failures).toEqual([]);
+});
+
+test("a returned-value reduction can be declined without approving a PO edit", async ({ page }) => {
+  const state = await setup(page, { returnedValue: "decrease" });
+  const modal = await review(page);
+  const returned = modal.getByRole("region", { name: "Supplier-return value changes" });
+  await expect(returned).toContainText("Change: -1.0001 USD");
+  await expect(returned.getByText("2.0002 USD", { exact: true })).toBeVisible();
+  await expect(returned.getByText("1.0001 USD", { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(modal).toHaveCount(0);
+  expect(state.approvals).toEqual([]);
+  expect(state.failures).toEqual([]);
 });

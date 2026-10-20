@@ -2,7 +2,6 @@
 // use this single application owner.
 export {
   syncActiveListings,
-  triggerPricingRuleSync,
   ebayListingSyncService,
   readExistingEbayListingIdentityForProduct,
   refreshRecoveredEbayListing,

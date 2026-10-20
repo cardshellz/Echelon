@@ -1275,6 +1275,9 @@ export class ReceivingService {
     if (changesUnits && !actorId) throw new ReceivingError("An authenticated actor is required to change receipt units.", 401);
 
     return await this.db.transaction(async (tx) => {
+      // Count/unit changes participate in the same inventory proof snapshot as
+      // supplier credits. Acquire the graph before receipt and PO row locks.
+      if (changesUnits) await lockInventoryCostGraph(tx);
       const { line, order } = await this.lockReceivingLineAndOrder(tx, lineId);
       await assertReceivingQuarantineLineEditable(tx, lineId, Object.keys(fields));
       if (changesUnits && receivingUnitVersion(line) !== expectedUnitVersion) {
@@ -1786,6 +1789,7 @@ export class ReceivingService {
 
   async completeAllLines(orderId: number, input: unknown, actorId?: string | null) {
     const result = await this.db.transaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
       const order = await this.lockReceivingOrder(tx, orderId);
       this.assertReceivingOrderMutable(order);
       await assertNoReceivingCustodyHistory(tx, { receivingOrderId: orderId });
@@ -2136,6 +2140,7 @@ export class ReceivingService {
     }
 
     const created = await this.db.transaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
       const lockedOrder = await this.lockReceivingOrder(tx, orderId);
       this.assertReceivingOrderMutable(lockedOrder);
       if (canonicalJson(lockedOrder) !== receiptSnapshot) {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { costInventoryEffectSchema } from "./cost-source-contracts";
 import { paymentCalendarDateSchema } from "./ap-payment-contract";
 export const supplierCreditIdSchema = z.number().int().positive().max(2_147_483_647);
 const id = supplierCreditIdSchema;
@@ -19,6 +20,10 @@ export const supplierCreditDispositionSchema = z.discriminatedUnion("kind", [z.o
   returnDispositionId: id,
   quantity: id,
   evidenceReference: z.string().trim().min(1).max(200)
+}).strict(), z.object({
+  kind: z.literal("accepted_stock_return"), supplierReturnLineId: id, quantity: id,
+  evidenceReference: z.string().trim().min(1).max(1000),
+  component: z.enum(["product", "packaging", "landed", "unassigned"]), entitlementId: id.optional(),
 }).strict()]);
 export const supplierCreditSourceLineInputSchema = z.object({
   invoiceLineId: id,
@@ -27,7 +32,10 @@ export const supplierCreditSourceLineInputSchema = z.object({
 }).strict();
 export type SourceLineInput = z.infer<typeof supplierCreditSourceLineInputSchema>;
 export function supplierCreditLineSourceKey(line: SourceLineInput): string {
-  return line.disposition.kind === "price_reduction" ? `price_reduction:${line.disposition.component}` : `quarantine_return:${line.disposition.returnDispositionId}`;
+  const disposition = line.disposition;
+  if (disposition.kind === "price_reduction") return `price_reduction:${disposition.component}`;
+  if (disposition.kind === "quarantine_return") return `quarantine_return:${disposition.returnDispositionId}`;
+  return `accepted_stock_return:${disposition.supplierReturnLineId}:${disposition.entitlementId ?? "new"}:${disposition.component}`;
 }
 export const supplierCreditCreateInputSchema = z.object({
   sourceInvoiceId: id,
@@ -99,8 +107,17 @@ export const supplierCreditLineSchema = supplierCreditSourceLineInputSchema.exte
   label: z.string(),
   sourceEvidence: z.record(z.string(), z.unknown()),
   costState: supplierCreditCostStateSchema,
-  costIssues: z.array(supplierCreditIssueSchema)
-}).strict();
+  costIssues: z.array(supplierCreditIssueSchema),
+  inventoryEffect: costInventoryEffectSchema.optional(),
+}).strict().superRefine((line, context) => {
+  if (!line.inventoryEffect) return;
+  const disposition = line.disposition;
+  const source = line.inventoryEffect.returns.find(row => row.supplierCreditLineId === line.id);
+  if (line.costState !== "posted" || line.costIssues.length > 0 || disposition.kind !== "quarantine_return"
+    || !source || source.returnDispositionId !== disposition.returnDispositionId || source.quantity !== disposition.quantity) {
+    context.addIssue({ code: "custom", message: "A no-inventory credit outcome requires a verified posted return matching this credit line." });
+  }
+});
 export const supplierCreditDetailSchema = z.object({
   id,
   sourceInvoiceId: id,
@@ -135,9 +152,13 @@ export const supplierCreditDetailSchema = z.object({
     approve: supplierCreditCapabilitySchema,
     apply: supplierCreditCapabilitySchema,
     void: supplierCreditCapabilitySchema,
-    replace: supplierCreditCapabilitySchema
+    replace: supplierCreditCapabilitySchema,
+    reconcileCosts: supplierCreditCapabilitySchema.optional()
   }).strict()
 }).strict().superRefine((value, context) => {
+  if (value.lines.some(line => line.inventoryEffect) && value.status !== "approved") {
+    context.addIssue({ code: "custom", message: "Only an approved credit can retain a verified return completion outcome." });
+  }
   if (value.appliedAmountCents !== null && value.unappliedAmountCents !== null && value.status === "approved" && [value.appliedAmountCents, value.unappliedAmountCents, value.totalAmountCents].every(Number.isSafeInteger) && BigInt(value.appliedAmountCents) + BigInt(value.unappliedAmountCents) !== BigInt(value.totalAmountCents)) context.addIssue({
     code: "custom",
     message: "Credit balance does not conserve the document amount."
@@ -176,6 +197,12 @@ export const supplierCreditOptionsSchema = z.object({
     creditedAmountCents: cents,
     availableAmountCents: cents,
     components: z.array(z.enum(["product", "packaging", "landed"])),
+    acceptedReturns: z.array(z.object({
+      supplierReturnId: id, supplierReturnLineId: id, quantityAvailable: cents,
+      unitsPerVariant: id, evidenceReference: z.string(), label: z.string(),
+      components: z.array(z.enum(["product", "packaging", "landed", "unassigned"])),
+      entitlements: z.array(z.object({ id, quantity: id }).strict()),
+    }).strict()).optional(),
     returnDispositions: z.array(z.object({
       returnDispositionId: id,
       quantityAvailable: id,
@@ -187,7 +214,7 @@ export const supplierCreditOptionsSchema = z.object({
   }).strict())
 }).strict();
 export type SupplierCreditOptions = z.infer<typeof supplierCreditOptionsSchema>;
-export const supplierCreditCommandSchema = z.enum(["create", "approve", "apply", "reverse", "void"]);
+export const supplierCreditCommandSchema = z.enum(["create", "approve", "apply", "reverse", "void", "reconcile_costs"]);
 export type SupplierCreditCommand = z.infer<typeof supplierCreditCommandSchema>;
 export const supplierCreditCommandResultSchema = z.object({
   command: supplierCreditCommandSchema,

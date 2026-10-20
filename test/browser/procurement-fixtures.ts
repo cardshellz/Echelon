@@ -6,7 +6,7 @@ import type { Page } from "@playwright/test";
 export const po = (id: number) => ({ id, poNumber: `TEST-PO-${id}`, status: "acknowledged", physicalStatus: "acknowledged", financialStatus: "unpaid", vendorId: 2, vendor: { name: "Test vendor" }, lines: [], subtotalCents: 10000, totalCents: 10000 });
 const shipment = { id: 42, shipmentNumber: "TEST-SHIP-42", status: "booked", mode: "sea_fcl", purchaseOrderId: 17, lines: [{ id: 1, purchaseOrderId: 99, purchaseOrderLineId: 1, sku: "TEST-SKU", productName: "Test product", qtyShipped: 10, cartonCount: 1 }], costs: [{ billingOwnership: { ...unbilledOwnershipFixture(), state: "billed", activeInvoiceId: 71, activeInvoiceLineId: 51, activeInvoiceLineIds: [51], referencedInvoiceIds: [71], canCreateInvoice: false, canLinkExistingLine: false }, derivedStatus: "paid", id: 1, costType: "freight", description: "Test freight", estimatedCents: 10000, actualCents: 10000, linkedInvoice: { id: 71, invoiceNumber: "TEST-INV-71", status: "paid" } }], statusHistory: [] };
 const invoice = { sourceCapabilities: invoiceSourceFixture("shipment"), currency: "USD", invoiceDate: "2026-10-19T00:00:00.000Z", id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test vendor", inboundShipmentId: 42, shipmentNumber: "TEST-SHIP-42", status: "paid", invoicedAmountCents: 10000, balanceCents: 0, hasSupplierCreditHistory: false, paidAmountCents: 10000, creditedAmountCents: 0, settledAmountCents: 10000, lines: [], poLinks: [{ id: 1, purchaseOrderId: 99, poNumber: "TEST-PO-99" }], attachments: [], payments: [] };
-export const receipt = (id: number) => ({ id, receiptNumber: `TEST-RECEIPT-${id}`, createdAt: "2026-09-01T12:00:00Z", status: "closed", purchaseOrderId: 99, inboundShipmentId: 42, lines: [], vendorId: 2, vendorName: "Test vendor" });
+export const receipt = (id: number) => ({ reversalCapability: { allowed: true, code: null, reason: null }, id, receiptNumber: `TEST-RECEIPT-${id}`, createdAt: "2026-09-01T12:00:00Z", status: "closed", purchaseOrderId: 99, inboundShipmentId: 42, lines: [], vendorId: 2, vendorName: "Test vendor" });
 
 export async function installFixtures(page: Page) {
   const failures: string[] = [];
@@ -54,6 +54,7 @@ export async function installFixtures(page: Page) {
     else if (/\/purchase-orders\/\d+\/receipts$/.test(path)) json = { receipts: [{ id: 1, receivingOrderId: 31, purchaseOrderLineId: 1, qtyReceived: 10 }] };
     else if (/\/purchase-orders\/\d+\/invoices$/.test(path)) json = { invoices: [invoice] };
     else if (/\/purchase-orders\/\d+\/exceptions$/.test(path)) json = { exceptions: [] };
+    else if (/\/purchase-orders\/\d+\/quantity-amendment\/history$/.test(path)) json = { entries: [], nextCursor: null };
     else if (/\/purchase-orders\/\d+\/history$/.test(path)) json = { history: [] };
     else if (path === "/api/purchase-orders") json = { purchaseOrders: [], total: 0 };
     else if (["/api/purchase-orders/work-list", "/api/ap-payments/work-list", "/api/vendor-invoices/work-list"].includes(path)) json = { items: [], total: 0, limit: Number(new URL(request.url()).searchParams.get("limit") ?? 50), offset: Number(new URL(request.url()).searchParams.get("offset") ?? 0), nextOffset: null };

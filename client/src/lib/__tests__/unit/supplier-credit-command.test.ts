@@ -8,7 +8,8 @@ const approve: SupplierCreditIntent = {command:"approve",creditId:9,payload:revi
 const apply: SupplierCreditIntent = {command:"apply",creditId:9,payload:{...review,allocations:[{vendorInvoiceId:71,appliedAmountCents:2500}]}};
 const reverse: SupplierCreditIntent = {command:"reverse",creditId:9,applicationId:31,payload:review};
 const voided: SupplierCreditIntent = {command:"void",creditId:9,payload:review};
-const commands = [create,approve,apply,reverse,voided];
+const reconcile: SupplierCreditIntent = {command:"reconcile_costs",creditId:9,payload:review};
+const commands = [create,approve,apply,reverse,voided,reconcile];
 function storage(){const values=new Map<string,string>();return {getItem:(key:string)=>values.get(key)??null,setItem:(key:string,value:string)=>{values.set(key,value);},removeItem:(key:string)=>{values.delete(key);}};}
 function setup(){const memory=storage();const store=createSupplierCreditRecoveryStore(()=>memory,"ap-reader");return {memory,store,client:createSupplierCreditClient(()=>"credit-key-1",store)};}
 function reply(intent:SupplierCreditIntent){
@@ -41,4 +42,43 @@ describe("supplier credit persisted command evidence",()=>{
  it("supports product and packaging on the same source line and checks duplicate treatments",async()=>{const{client}=setup();const intent:SupplierCreditIntent={...create,payload:{...create.payload,lines:[{invoiceLineId:701,amountCents:5000,disposition:{kind:"price_reduction",component:"product"}},{invoiceLineId:701,amountCents:5000,disposition:{kind:"price_reduction",component:"packaging"}}]}};vi.stubGlobal("fetch",vi.fn(async()=>json(reply(intent))));await client.execute(intent);await expect(client.execute({...intent,payload:{...intent.payload,lines:[intent.payload.lines[0],intent.payload.lines[0]]}})).rejects.toThrow("only once");});
  it("blocks requests if durable storage cannot be saved",async()=>{const fetch=vi.fn();vi.stubGlobal("fetch",fetch);const store=createSupplierCreditRecoveryStore(()=>({getItem:()=>null,setItem:()=>{throw Error("full");},removeItem:()=>undefined}),"ap-reader");await expect(createSupplierCreditClient(()=>"credit-key-1",store).execute(create)).rejects.toThrow("not sent");expect(fetch).not.toHaveBeenCalled();});
  it.each([0.1,Number.MAX_SAFE_INTEGER+1,NaN,Infinity])("rejects invalid cents %s before sending",async value=>{const{client}=setup();const fetch=vi.fn();vi.stubGlobal("fetch",fetch);await expect(client.execute({...apply,payload:{...apply.payload,allocations:[{vendorInvoiceId:71,appliedAmountCents:value}]}})).rejects.toThrow();expect(fetch).not.toHaveBeenCalled();});
+});
+
+describe("supplier credit cost recheck command", () => {
+ it("uses the approved credit cost endpoint without creating an invoice application", async () => {
+  const {client,store}=setup(); const fetch=vi.fn(async(_url:string,_init?:RequestInit)=>json(reply(reconcile))); vi.stubGlobal("fetch",fetch);
+  const result=await client.execute(reconcile);
+  expect(fetch.mock.calls[0]?.[0]).toBe("/api/supplier-credits/9/reconcile_costs");
+  expect(result.applicationIds).toEqual([]); expect(result.reversedApplicationId).toBeNull(); expect(store.read()).toBeNull();
+ });
+ it.each(["draft","voided"])("retains a cost recheck result claiming %s instead of approved", async status => {
+  const {client,store}=setup(); const result=reply(reconcile);
+  Object.assign(result.credit,{status,balanceState:status,unappliedAmountCents:0});
+  vi.stubGlobal("fetch",vi.fn(async()=>json(result)));
+  await expect(client.execute(reconcile)).rejects.toThrow("could not be verified"); expect(store.read()).not.toBeNull();
+ });
+ it.each([{applicationIds:[31]},{reversedApplicationId:31},{command:"approve"},{creditId:10}])("retains a mismatched cost recheck result %j", async mismatch => {
+  const {client,store}=setup(); vi.stubGlobal("fetch",vi.fn(async()=>json({...reply(reconcile),...mismatch})));
+  await expect(client.execute(reconcile)).rejects.toThrow("could not be verified"); expect(store.read()).not.toBeNull();
+ });
+});
+
+describe("cost recheck response balance integrity", () => {
+ it.each([
+  {balanceState:"draft"}, {balanceState:"voided"}, {balanceState:"review_required"},
+  {appliedAmountCents:null}, {unappliedAmountCents:null},
+  {balanceIssues:[{code:"CREDIT_BALANCE_REVIEW",message:"Credit ledger requires review."}]},
+  {appliedAmountCents:10000,unappliedAmountCents:0,balanceState:"available"},
+  {balanceState:"fully_applied"},
+ ])("retains recovery for inconsistent balance evidence %j",async mismatch=>{
+  const {client,store}=setup(); const result=reply(reconcile); Object.assign(result.credit,mismatch);
+  vi.stubGlobal("fetch",vi.fn(async()=>json(result)));
+  await expect(client.execute(reconcile)).rejects.toThrow("could not be verified"); expect(store.read()).not.toBeNull();
+ });
+ it("accepts a verified fully-applied credit without inventing new availability",async()=>{
+  const {client,store}=setup(); const result=reply(reconcile);
+  Object.assign(result.credit,{appliedAmountCents:10000,unappliedAmountCents:0,balanceState:"fully_applied"});
+  vi.stubGlobal("fetch",vi.fn(async()=>json(result)));
+  expect((await client.execute(reconcile)).credit.unappliedAmountCents).toBe(0); expect(store.read()).toBeNull();
+ });
 });

@@ -1,3 +1,5 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
+import { resetQuantityAmendmentFixture } from "./quantity-amendment-fixture";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -22,7 +24,7 @@ const TABLES = [
   schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory, schema.inventoryLots,
 ] as const;
 
@@ -91,7 +93,7 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
       await pool.query(fixtureTable(schema.auditEvents));
       ownsAudit = true;
     }
-    for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql", "222_procurement_cost_evidence.sql"]) {
+    for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql", "222_procurement_cost_evidence.sql", "900000017000018590001_receipt_shipment_quantity_amendments.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
     commandsReady = true;
@@ -118,7 +120,7 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
 
   beforeEach(async () => {
     if (ownedSchemas.length !== 5) throw new Error("Disposable shipment fixture ownership was not established");
-    await pool.query(`TRUNCATE ${TABLES.map(qualifiedTable).join(", ")} RESTART IDENTITY CASCADE`);
+    await resetQuantityAmendmentFixture(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(", ")} RESTART IDENTITY CASCADE`);
     await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]]);
     await pool.query("DELETE FROM public.financial_command_results WHERE actor_id=$1 AND idempotency_key LIKE $2", [commands.SHIPMENT_CREATE_COMMAND_PRINCIPAL, `${runId}-%`]);
     await pool.query("INSERT INTO identity.users(id,username,password) VALUES($1::text,$1::text,'fixture-disabled'),($2::text,$2::text,'fixture-disabled')", [actorId, delegateId]);

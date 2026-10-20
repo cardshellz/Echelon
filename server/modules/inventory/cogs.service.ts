@@ -30,6 +30,8 @@ import {
 import type { InventoryLot } from "@shared/schema";
 import { assertLegacyQuantityImportAllowed } from "./application/legacy-quantity-import";
 import { parseCostLotsReport, parseInventoryValuationReport } from "@shared/inventory/cost-report-read";
+import { revalueSupplierReturnAllocations } from "./infrastructure/supplier-return-cost.repository";
+import type { SupplierReturnCostAdjustment } from "@shared/procurement/supplier-return";
 import { buildOrderCOGSReport, type OrderCOGSResult } from "./domain/order-cogs-read";
 export type { OrderCOGSResult, OrderLineCOGS } from "./domain/order-cogs-read";
 
@@ -104,6 +106,7 @@ export interface CostAdjustmentLog {
 export interface LotCostRevalueResult extends CostAdjustmentLog {
   cogsRowsUpdated: number;
   totalCogsDeltaCents: number;
+  supplierReturnAdjustments?: SupplierReturnCostAdjustment[];
 }
 
 // ─── Service ────────────────────────────────────────────────────────
@@ -121,7 +124,7 @@ export class COGSService {
   }
 
   async revalueExactComponent(lotId: number, component: CostComponent, totalMills: number, basisQuantity: number,
-    reason: string, actorId: string, tx: any, recordedAt?: Date) {
+    reason: string, actorId: string, tx: any, recordedAt?: Date, sourceRevisionId?: number) {
     const amount = BigInt(costInteger(totalMills,"component.totalMills"));
     const quantity = BigInt(costInteger(basisQuantity,"component.basisQuantity",1));
     const unitMills = moneyToSafeNumber((amount * BigInt(2) + quantity) / (quantity * BigInt(2)),"component.unitMirror");
@@ -129,7 +132,7 @@ export class COGSService {
       productCostMills:component==="product"?unitMills:undefined,
       packagingCostMills:component==="packaging"?unitMills:undefined,
       landedCostMills:component==="landed"?unitMills:undefined,
-      exactComponent:{component,totalMills,basisQuantity},
+      exactComponent:{component,totalMills,basisQuantity}, sourceRevisionId,
     },tx);
   }
 
@@ -242,6 +245,7 @@ export class COGSService {
     requiredCostSource?: string;
     exactComponent?: {component:CostComponent;totalMills:number;basisQuantity:number};
     recordedAt?: Date;
+    sourceRevisionId?: number;
   }, client?: any): Promise<LotCostRevalueResult | null> {
     const revalue = async (tx: any): Promise<LotCostRevalueResult | null> => {
       await lockInventoryCostGraph(tx);
@@ -351,6 +355,10 @@ export class COGSService {
         total_unit_cost_mills:totalUnitCostMills,unit_cost_mills:totalUnitCostMills,cost_precision_version:1} : null;
       const cascade = exactLot ? await this.cascadeRecostExactQuantities(params.lotId,exactLot,tx)
         : await this.cascadeRecostForLotMills(params.lotId, totalUnitCostMills, tx);
+      const supplierReturnAdjustments = exactLot ? await revalueSupplierReturnAllocations(tx, {
+        previousLot: { ...lot, id: params.lotId }, nextLot: { ...exactLot, id: params.lotId },
+        actorId: params.actorId ?? "system:inventory-cost", at: now, reason: params.reason, sourceRevisionId: params.sourceRevisionId,
+      }) : [];
 
       await tx.execute(sql`
         INSERT INTO inventory.cost_adjustment_log
@@ -380,6 +388,7 @@ export class COGSService {
         reason: params.reason,
         cogsRowsUpdated: cascade.rowsUpdated,
         totalCogsDeltaCents: cascade.totalDeltaCents,
+        ...(supplierReturnAdjustments.length ? { supplierReturnAdjustments } : {}),
       };
     };
     return client ? revalue(client) : this.runInTransaction(revalue);
@@ -871,7 +880,7 @@ export class COGSService {
       const result = await tx.execute(sql`
         SELECT COALESCE(origin.units_per_variant_snapshot,pv.units_per_variant) AS upv
         FROM inventory.inventory_lots lot JOIN catalog.product_variants pv ON pv.id=lot.product_variant_id
-        LEFT JOIN inventory.lot_cost_origins origin ON origin.inventory_lot_id=lot.id
+        LEFT JOIN inventory.effective_lot_cost_origins origin ON origin.inventory_lot_id=lot.id
         WHERE lot.id=${lotId} FOR SHARE OF pv
       `);
       if (!result.rows[0]) return null;

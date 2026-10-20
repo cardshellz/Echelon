@@ -1,3 +1,5 @@
+import { createChannelPricingService } from "./channel-pricing.service";
+import { sendChannelPricingError } from "./interfaces/http/channel-pricing.error";
 import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
 import type { Express } from "express";
 import { z } from "zod";
@@ -50,6 +52,73 @@ import { sendInventoryLegacyAdminControlError } from "../inventory-planning/inte
 import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
 
 type ChannelRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
+
+type ChannelPricingWriteService = Pick<
+  ReturnType<typeof createChannelPricingService>,
+  "savePrice" | "deletePrice"
+>;
+
+/** Route identities stay separate from the strict body parsed by the pricing owner. */
+export function registerChannelPricingRoutes(
+  app: Express,
+  service: ChannelPricingWriteService = createChannelPricingService(db),
+): void {
+  const routeId = z.coerce.number().int().positive().max(2_147_483_647);
+  const actorId = z.string().trim().min(1).max(200);
+
+  app.get(
+    "/api/channels/:channelId/variants/:variantId/pricing",
+    requirePermission("channels", "view"),
+    async (req, res) => {
+      try {
+        const channelId = routeId.parse(req.params.channelId);
+        const variantId = routeId.parse(req.params.variantId);
+        const pricing = await storage.getChannelPricing(channelId, variantId);
+        res.json(pricing ?? null);
+      } catch (error) {
+        sendChannelPricingError(res, error, "channel_price_read");
+      }
+    },
+  );
+
+  app.put(
+    "/api/channels/:channelId/variants/:variantId/pricing",
+    requirePermission("channels", "edit"),
+    async (req, res) => {
+      try {
+        const result = await service.savePrice(
+          routeId.parse(req.params.channelId),
+          routeId.parse(req.params.variantId),
+          req.body,
+          actorId.parse(req.session?.user?.id),
+          new Date(),
+        );
+        res.json(result.price);
+      } catch (error) {
+        sendChannelPricingError(res, error, "channel_price_save");
+      }
+    },
+  );
+
+  app.delete(
+    "/api/channels/:channelId/variants/:variantId/pricing",
+    requirePermission("channels", "edit"),
+    async (req, res) => {
+      try {
+        z.object({}).strict().parse(req.body ?? {});
+        const deleted = await service.deletePrice(
+          routeId.parse(req.params.channelId),
+          routeId.parse(req.params.variantId),
+          actorId.parse(req.session?.user?.id),
+          new Date(),
+        );
+        res.json({ deleted });
+      } catch (error) {
+        sendChannelPricingError(res, error, "channel_price_delete");
+      }
+    },
+  );
+}
 
 export function registerChannelRoutes(app: Express) {
   const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService(pool);
@@ -1382,43 +1451,7 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Channel pricing
-  app.get("/api/channels/:channelId/variants/:variantId/pricing", requirePermission("channels", "view"), async (req, res) => {
-    try {
-      const channelId = parseInt(req.params.channelId);
-      const variantId = parseInt(req.params.variantId);
-      const pricing = await storage.getChannelPricing(channelId, variantId);
-      res.json(pricing || null);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to fetch pricing" });
-    }
-  });
-
-  app.put("/api/channels/:channelId/variants/:variantId/pricing", requirePermission("channels", "edit"), async (req, res) => {
-    try {
-      const channelId = parseInt(req.params.channelId);
-      const variantId = parseInt(req.params.variantId);
-      const pricing = await storage.upsertChannelPricing({
-        channelId,
-        productVariantId: variantId,
-        ...req.body,
-      });
-      res.json(pricing);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to save pricing" });
-    }
-  });
-
-  app.delete("/api/channels/:channelId/variants/:variantId/pricing", requirePermission("channels", "edit"), async (req, res) => {
-    try {
-      const channelId = parseInt(req.params.channelId);
-      const variantId = parseInt(req.params.variantId);
-      const deleted = await storage.deleteChannelPricing(channelId, variantId);
-      res.json({ deleted });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to delete pricing" });
-    }
-  });
+  registerChannelPricingRoutes(app);
 
   // Channel asset overrides
   app.get("/api/channels/:channelId/products/:productId/asset-overrides", requirePermission("channels", "view"), async (req, res) => {

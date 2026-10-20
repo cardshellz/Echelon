@@ -58,6 +58,11 @@ databaseTests.sequential("supplier credit financial ownership and recovery", () 
       allocations: [{ vendorInvoiceId: invoiceId, appliedAmountCents: cents }],
     } });
   }
+  function reconcileCosts(credit: SupplierCreditDetail, key = randomUUID()) {
+    return fixture.request(`/api/supplier-credits/${credit.id}/reconcile_costs`, {
+      key, body: { expectedVersion: credit.version, reason: "Recheck current receipt and cost evidence" },
+    });
+  }
   async function creditGraph() {
     const records = await Promise.all(["supplier_credits", "supplier_credit_lines", "supplier_credit_applications",
       "supplier_credit_application_reversals"].map(table => fixture.pool.query(`SELECT * FROM procurement.${table} ORDER BY id`)));
@@ -219,13 +224,14 @@ databaseTests.sequential("supplier credit financial ownership and recovery", () 
     expect(await creditGraph()).toEqual(before);
   });
 
-  it("requires current permission after a command waits for the financial lock", async () => {
-    const credit = await create(), blocker = await fixture.pool.connect();
+  it.each(["approve", "reconcile_costs"] as const)("requires current permission after %s waits for the financial lock", async command => {
+    const credit = command === "approve" ? await create() : await approved();
+    const blocker = await fixture.pool.connect();
     const before = await creditGraph();
     let pending: ReturnType<typeof fixture.request> | undefined;
     try {
       await blocker.query("BEGIN; SELECT pg_advisory_xact_lock(hashtext('inventory.cost_graph'),hashtext('version_1'))");
-      pending = fixture.request(`/api/supplier-credits/${credit.id}/approve`, { key: randomUUID(), actor: PAYMENT_ACTORS.delegate,
+      pending = fixture.request(`/api/supplier-credits/${credit.id}/${command}`, { key: randomUUID(), actor: PAYMENT_ACTORS.delegate,
         body: { expectedVersion: credit.version, reason: "Permission is revoked while command waits" } });
       const deadline = Date.now() + 5_000;
       let waiting = false;
@@ -353,6 +359,119 @@ databaseTests.sequential("supplier credit financial ownership and recovery", () 
     expect((await fixture.request(`/api/supplier-credits/${credit.id}/approve`, { key: randomUUID(), actor: PAYMENT_ACTORS.viewer,
       body: { expectedVersion: credit.version, reason: "Read-only actor cannot approve" } })).status).toBe(403);
     expect(await creditGraph()).toEqual(created);
+  });
+
+  it("rechecks approved cost evidence without changing credit, settlement or physical history", async () => {
+    const credit = result(await apply(await approved(), 4_000)).credit;
+    expect(credit).toMatchObject({ costStatus: "review_required", capabilities: { reconcileCosts: { allowed: true } } });
+    const before = await creditGraph();
+    const response = result(await reconcileCosts(credit));
+    expect(response).toMatchObject({ command: "reconcile_costs", creditId: credit.id,
+      applicationIds: [], reversedApplicationId: null, credit: {
+        status: "approved", version: credit.version, costStatus: "review_required",
+        totalAmountCents: 10_000, appliedAmountCents: 4_000, unappliedAmountCents: 6_000,
+      } });
+    const after = await creditGraph();
+    const { audits: beforeAudits, ...beforeFinancial } = before.financial;
+    const { audits: afterAudits, ...afterFinancial } = after.financial;
+    expect(afterFinancial).toEqual(beforeFinancial);
+    expect(after.credits).toEqual(before.credits);
+    expect(afterAudits).toHaveLength(beforeAudits.length + 1);
+    expect(afterAudits.at(-1)).toMatchObject({ actor: PAYMENT_ACTORS.owner,
+      action: "ap_ledger.supplier_credit.reconcile_costs", target: `supplier_credit:${credit.id}` });
+    await expectSettlement(0, 4_000, 206_000);
+  });
+
+  it("replays a cost recheck exactly and rejects changed payload, actor, action or document under its key", async () => {
+    const credit = await approved();
+    const other = await approved();
+    const key = randomUUID();
+    const first = await reconcileCosts(credit, key);
+    result(first);
+    const retained = await creditGraph();
+    expect(await reconcileCosts(credit, key)).toEqual({ ...first, replayed: "true" });
+    const body = { expectedVersion: credit.version, reason: "Recheck current receipt and cost evidence" };
+    expect((await fixture.request(`/api/supplier-credits/${credit.id}/reconcile_costs`, {
+      key, body: { ...body, reason: "Changed reason" },
+    })).status).toBe(422);
+    expect((await fixture.request(`/api/supplier-credits/${credit.id}/reconcile_costs`, {
+      key, body, actor: PAYMENT_ACTORS.delegate,
+    })).status).toBe(422);
+    expect((await fixture.request(`/api/supplier-credits/${credit.id}/void`, { key, body })).status).toBe(422);
+    expect((await fixture.request(`/api/supplier-credits/${other.id}/reconcile_costs`, { key, body })).status).toBe(422);
+    expect(await creditGraph()).toEqual(retained);
+  });
+
+  it.each(["draft", "voided"] as const)("retains a durable rejection when a %s credit is rechecked", async status => {
+    let credit = await create();
+    if (status === "voided") credit = result(await fixture.request(`/api/supplier-credits/${credit.id}/void`, {
+      key: randomUUID(), body: { expectedVersion: credit.version, reason: "Supplier withdrew the draft credit" },
+    })).credit;
+    expect(credit.capabilities.reconcileCosts?.allowed).toBe(false);
+    const before = await creditGraph();
+    const key = randomUUID();
+    const rejected = await reconcileCosts(credit, key);
+    expect(rejected).toMatchObject({ status: 409, body: { details: {
+      command: "reconcile_costs", creditCommandOutcome: "rejected", actorId: PAYMENT_ACTORS.owner,
+      idempotencyKey: key, code: "SUPPLIER_CREDIT_COST_RECONCILIATION_UNAVAILABLE",
+    } } });
+    expect(await reconcileCosts(credit, key)).toEqual({ ...rejected, replayed: "true" });
+    expect(await creditGraph()).toEqual(before);
+  });
+
+  it("refuses a stale recheck version and current view-only authority without changing the graph", async () => {
+    const credit = await approved();
+    const before = await creditGraph();
+    const stale = await reconcileCosts({ ...credit, version: "0".repeat(64) });
+    expect(stale).toMatchObject({ status: 409, body: { details: {
+      code: "SUPPLIER_CREDIT_STALE", command: "reconcile_costs", creditCommandOutcome: "rejected",
+    } } });
+    const viewer = await fixture.request(`/api/supplier-credits/${credit.id}`, { actor: PAYMENT_ACTORS.viewer });
+    expect(viewer.body).toMatchObject({ capabilities: { reconcileCosts: { allowed: false } } });
+    expect((await fixture.request(`/api/supplier-credits/${credit.id}/reconcile_costs`, {
+      key: randomUUID(), actor: PAYMENT_ACTORS.viewer,
+      body: { expectedVersion: credit.version, reason: "Read-only operator cannot recheck costs" },
+    })).status).toBe(403);
+    expect(await creditGraph()).toEqual(before);
+  });
+
+  it("rolls back a late recheck audit failure and retries the same key without financial mutation", async () => {
+    const credit = result(await apply(await approved(), 4_000)).credit;
+    const before = await creditGraph();
+    const key = randomUUID();
+    await fixture.pool.query(`CREATE FUNCTION public.reject_credit_recheck_audit() RETURNS trigger LANGUAGE plpgsql AS $guard$
+      BEGIN
+        IF NEW.action = 'ap_ledger.supplier_credit.reconcile_costs' THEN RAISE EXCEPTION 'Synthetic late recheck audit failure'; END IF;
+        RETURN NEW;
+      END $guard$;
+      CREATE TRIGGER reject_credit_recheck_audit BEFORE INSERT ON public.audit_events
+      FOR EACH ROW EXECUTE FUNCTION public.reject_credit_recheck_audit()`);
+    try {
+      expect((await reconcileCosts(credit, key)).status).toBe(500);
+      expect(await creditGraph()).toEqual(before);
+    } finally {
+      await fixture.pool.query("DROP TRIGGER reject_credit_recheck_audit ON public.audit_events; DROP FUNCTION public.reject_credit_recheck_audit()");
+    }
+    const deadline = Date.now() + 6_000;
+    let retry = await reconcileCosts(credit, key);
+    while (retry.status === 409 && retry.body.details?.code === "FINANCIAL_COMMAND_IN_PROGRESS" && Date.now() < deadline) {
+      const seconds = Number((retry.body.details as { retryAfterSeconds?: number }).retryAfterSeconds);
+      expect(Number.isInteger(seconds) && seconds > 0 && seconds <= 3).toBe(true);
+      await new Promise(resolve => setTimeout(resolve, seconds * 1_000));
+      retry = await reconcileCosts(credit, key);
+    }
+    const recovered = result(retry);
+    expect(recovered.credit).toMatchObject({ version: credit.version, totalAmountCents: 10_000,
+      appliedAmountCents: 4_000, unappliedAmountCents: 6_000, costStatus: "review_required" });
+    const after = await creditGraph();
+    const { audits: beforeAudits, ...beforeFinancial } = before.financial;
+    const { audits: afterAudits, ...afterFinancial } = after.financial;
+    expect(afterFinancial).toEqual(beforeFinancial);
+    expect(after.credits).toEqual(before.credits);
+    expect(afterAudits).toHaveLength(beforeAudits.length + 1);
+    expect(afterAudits.filter(row => row.action === "ap_ledger.supplier_credit.reconcile_costs")).toHaveLength(1);
+    expect(await reconcileCosts(credit, key)).toEqual({ ...retry, replayed: "true" });
+    expect(await creditGraph()).toEqual(after);
   });
 
   it("reapplies its migration without rewriting financial or cost history", async () => {

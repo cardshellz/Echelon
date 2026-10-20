@@ -50,6 +50,38 @@ describe("writer-ratchet (P2.1)", () => {
     expect(baseline[table]).toEqual([owner]);
   });
 
+  it.each([
+    [
+        "catalog.publication_media_references",
+        "modules/catalog"
+    ],
+    [
+        "catalog.publication_media_version_pins",
+        "modules/catalog"
+    ],
+    [
+        "marketplace.listing_intent_changes",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.listing_intent_deliveries",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.listing_intent_delivery_sources",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.listing_intent_delivery_events",
+        "modules/marketplace-listings"
+    ]
+])
+    ("phase 2 %s has only its declared publication owner, including scripts", (table, owner) => {
+      expect(current[table]).toEqual([owner]);
+      expect(currentIncludingScripts[table]).toEqual([owner]);
+      expect(baseline[table]).toEqual([owner]);
+    });
+
   it("wms.order_items has exactly one owning writer across runtime and operational scripts", () => {
     expect(current["wms.order_items"]).toEqual(["modules/wms"]);
     expect(currentIncludingScripts["wms.order_items"]).toEqual(["modules/wms"]);
@@ -219,12 +251,10 @@ describe("writer-ratchet (P2.1)", () => {
       for (const [owner, tables] of Object.entries(publicationOwners)) {
         for (const table of tables) expect(topology[table]).toEqual([owner]);
       }
-      // The existing eBay pricing route is retained for compatibility. New
-      // publication routes delegate pricing writes to the Channels owner.
-      expect(topology["channels.channel_pricing_rules"]).toEqual([
-        "modules/channels",
-        "server/routes/ebay/ebay-pricing.routes.ts",
-      ]);
+      // HTTP and import adapters delegate both pricing tables to Channels.
+      // The legacy eBay route remains an API facade, never a second writer.
+      expect(topology["channels.channel_pricing_rules"]).toEqual(["modules/channels"]);
+      expect(topology["channels.channel_pricing"]).toEqual(["modules/channels"]);
     }
   });
 

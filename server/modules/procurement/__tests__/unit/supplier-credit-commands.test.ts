@@ -259,3 +259,81 @@ describe("supplier credit durable response identity", () => {
     expect(reserve).not.toHaveBeenCalled();
   });
 });
+
+
+describe("supplier credit cost reconciliation receipts", () => {
+  const review = { expectedVersion: "b".repeat(64), reason: "Recheck after the receipt was closed" };
+  function reconcileReceipt(): SupplierCreditCommandResult {
+    const body = receipt();
+    body.command = "reconcile_costs";
+    body.request = review;
+    body.credit.status = "approved";
+    body.credit.approvedBy = "owner";
+    body.credit.approvedAt = "2026-10-19T00:00:00.000Z";
+    body.credit.balanceState = "available";
+    body.credit.unappliedAmountCents = body.credit.totalAmountCents;
+    body.credit.costStatus = "review_required";
+    body.credit.costIssues = [{ code: "RECEIPT_EVIDENCE_REQUIRED", message: "Receipt evidence still needs review." }];
+    return body;
+  }
+  function validate(body: SupplierCreditCommandResult) {
+    return validateSupplierCreditReceipt({ body, httpStatus: 200, terminalState: "succeeded" },
+      "reconcile_costs", review, descriptor, 3);
+  }
+  it("accepts an exact successful evaluation that retains the version and unresolved cost review", () => {
+    const body = reconcileReceipt();
+    expect(body.credit.version).toBe(review.expectedVersion);
+    expect(() => validate(body)).not.toThrow();
+  });
+  it("accepts current posted evidence without requiring a new financial version", () => {
+    const body = reconcileReceipt();
+    body.credit.costStatus = "posted";
+    body.credit.costIssues = [];
+    expect(() => validate(body)).not.toThrow();
+  });
+  it.each(["draft", "voided"] as const)("rejects a %s document receipt", status => {
+    const body = reconcileReceipt();
+    body.credit.status = status;
+    expect(() => validate(body)).toThrow();
+  });
+  it("rejects unverified financial evidence even when costing was rechecked", () => {
+    const body = reconcileReceipt();
+    body.credit.balanceState = "review_required";
+    body.credit.appliedAmountCents = null;
+    body.credit.unappliedAmountCents = null;
+    expect(() => validate(body)).toThrow();
+  });
+  it.each(["draft", "voided", "fully_applied"] as const)("rejects an inconsistent approved %s balance state", balanceState => {
+    const body = reconcileReceipt();
+    body.credit.balanceState = balanceState;
+    expect(() => validate(body)).toThrow();
+  });
+  it("rejects missing balance amounts or reported balance issues", () => {
+    const missing = reconcileReceipt();
+    missing.credit.appliedAmountCents = null;
+    expect(() => validate(missing)).toThrow();
+    const inconsistent = reconcileReceipt();
+    inconsistent.credit.balanceIssues = [{ code: "CREDIT_REVIEW", message: "Financial evidence requires review." }];
+    expect(() => validate(inconsistent)).toThrow();
+  });
+  it.each(["actorId", "idempotencyKey"] as const)("rejects another %s", field => {
+    const body = reconcileReceipt();
+    body[field] = "unrelated";
+    expect(() => validate(body)).toThrow();
+  });
+  it("rejects changed request, resource, application or reversal evidence", () => {
+    const changed = reconcileReceipt();
+    changed.request = { ...review, reason: "Unrelated request" };
+    expect(() => validate(changed)).toThrow();
+    const unrelated = reconcileReceipt();
+    unrelated.creditId = 4;
+    unrelated.credit.id = 4;
+    expect(() => validate(unrelated)).toThrow();
+    const allocation = reconcileReceipt();
+    allocation.applicationIds = [7];
+    expect(() => validate(allocation)).toThrow();
+    const reversal = reconcileReceipt();
+    reversal.reversedApplicationId = 7;
+    expect(() => validate(reversal)).toThrow();
+  });
+});

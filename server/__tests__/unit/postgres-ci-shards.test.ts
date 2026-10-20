@@ -59,6 +59,11 @@ describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves prior coverage with the explicitly retired duplicate invoice owner, the retired bulk policy writer suite and reviewed additions", () => {
     const addedSuites = [
       "server/modules/procurement/__tests__/integration/supplier-credit.integration.test.ts",
+      "server/modules/channels/__tests__/integration/channel-pricing-owner.integration.test.ts",
+      "server/modules/channels/__tests__/integration/channel-pricing-routes.integration.test.ts",
+      "server/modules/channels/__tests__/integration/channel-price-provenance.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/prepared-channel-intent.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/listing-intent-propagation.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-create-recovery.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-work-list.integration.test.ts",
       "server/modules/procurement/__tests__/integration/ap-work-lists.integration.test.ts",
@@ -178,6 +183,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
     ];
     addedSuites.push(
+      "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-financial-evidence.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-financial-followup.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-financial-exceptions.integration.test.ts",

@@ -53,6 +53,7 @@ import { createReturnsService } from "../modules/orders/returns.service";
 import { createFulfillmentRouterService } from "../modules/orders/fulfillment-router.service";
 import { createSLAMonitorService } from "../modules/orders/sla-monitor.service";
 import { ManualInventoryTransferService } from "../modules/inventory/application/manual-inventory-transfer.service";
+import { SupplierReturnFollowupService } from "../modules/inventory/application/supplier-return-followup.service";
 import { createPickingService } from "../modules/orders/picking.use-cases";
 import { createPickCorrectionService } from "../modules/orders/pick-correction.service";
 import { AssemblyExecutionService } from "../modules/warehouse/work/application/assembly-execution.service";
@@ -526,6 +527,8 @@ export function createServices(
   };
   channelSync.setInventoryChangePublisher(queueVariantInventorySync);
   inventoryCore.onInventoryChange(queueVariantInventorySync);
+  const supplierReturnFollowups = new SupplierReturnFollowupService(db,
+    (variantId, trigger) => inventoryCore.publishInventoryChange(variantId, trigger), () => new Date());
   const inventoryTransfers = new ManualInventoryTransferService(db, inventoryCore, {
     deliver: async transfer => {
       await replenishment.completeMatchingTransferTask(transfer.transferId, transfer.actor);
@@ -712,6 +715,7 @@ export function createServices(
     dropshipInventoryRuntimeAuthority,
     replenishment,
     inventoryTransfers,
+    supplierReturnFollowups,
     picking,
     pickCorrections,
     channelSync,

@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { resetFixtureCostHistory } from "./cost-history-fixture";
 import { readFile } from "node:fs/promises";
 import { recordCostRevision } from "../../cost-source-revision.repository";
@@ -60,6 +61,7 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
       fixtureTable(schema.vendorInvoices, ["id", "vendorId", "invoiceNumber", "status", "currency", "invoiceDate", "dueDate", "inboundShipmentId", "invoicedAmountCents", "paidAmountCents", "creditedAmountCents", "balanceCents"]),
       fixtureTable(schema.supplierCredits, Object.keys(getTableColumns(schema.supplierCredits))),
       fixtureTable(schema.supplierCreditLines, Object.keys(getTableColumns(schema.supplierCreditLines))),
+      ...supplierReturnReadFixtureTables.map(table => fixtureTable(table, Object.keys(getTableColumns(table)))),
       fixtureTable(schema.supplierCreditApplications, Object.keys(getTableColumns(schema.supplierCreditApplications))),
       fixtureTable(schema.supplierCreditApplicationReversals, Object.keys(getTableColumns(schema.supplierCreditApplicationReversals))),
       fixtureTable(schema.vendorInvoicePoLinks, ["id", "vendorInvoiceId", "purchaseOrderId", "allocatedAmountCents"]),
@@ -71,6 +73,7 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     ];
     for (const ddl of tables) await pool.query(ddl);
     await pool.query(await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/900000017000018590001_receipt_shipment_quantity_amendments.sql"), "utf8"));
     await pool.query(await readFile(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
     await pool.query(await readFile(resolve(process.cwd(), "migrations/900000007000018030001_shipment_cost_exception_decisions.sql"), "utf8"));
     await pool.query(await readFile(resolve(process.cwd(), "migrations/900000008000018110001_shipment_cost_reconciliation.sql"), "utf8"));

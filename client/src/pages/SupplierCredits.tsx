@@ -1,4 +1,4 @@
-import { supplierCreditCostLabel } from "@/features/purchasing/supplier-credit-presentation";
+import { supplierCreditCostSummary } from "@/features/purchasing/supplier-credit-presentation";
 import React, { useEffect, useRef } from "react";
 import { Link, useLocation, useParams, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
@@ -32,7 +32,7 @@ export default function SupplierCredits() {
   const returnDispositionId = queryId(params, "returnDispositionId");
   const creditId = route.id && /^[1-9]\d*$/.test(route.id) && Number(route.id) <= 2_147_483_647 ? Number(route.id) : null;
   const creating = !route.id && params.getAll("new").length === 1 && params.get("new") === "1";
-  const invalidContext = ["invoiceId", "replacesCreditId", "sourceInvoiceId", "vendorId", "returnDispositionId", "inboundShipmentId", "purchaseOrderId"].some(key => params.has(key) && queryId(params, key) === null);
+  const invalidContext = ["invoiceId", "replacesCreditId", "sourceInvoiceId", "vendorId", "returnDispositionId", "supplierReturnLineId", "inboundShipmentId", "purchaseOrderId"].some(key => params.has(key) && queryId(params, key) === null);
   const query = supplierCreditListQuerySchema.safeParse({
     ...(sourceInvoiceId ? { sourceInvoiceId } : {}),
     ...(relatedInvoiceId ? { invoiceId: relatedInvoiceId } : {}),
@@ -70,7 +70,7 @@ export default function SupplierCredits() {
     </Link>
     <SupplierCreditRecovery commands={commands} />
     {route.id ? creditId ? <SupplierCreditDetail creditId={creditId} commands={commands} /> : <p role="alert">Invalid supplier credit identifier.</p> : invalidContext ? <p role="alert">Invalid supplier credit source. Reopen this workflow from its source document.</p> : creating ? <section className="space-y-4">
-      <h1 className="text-2xl font-semibold">Record supplier credit</h1>{commands.canCreate ? <SupplierCreditCreate commands={commands} initialInvoiceId={sourceInvoiceId ?? relatedInvoiceId} returnDispositionId={returnDispositionId} replacesCreditId={queryId(params, "replacesCreditId")} onCancel={() => change({ new: null })} /> : <p>Purchasing edit permission is required to record a supplier credit.</p>}
+      <h1 className="text-2xl font-semibold">Record supplier credit</h1>{commands.canCreate ? <SupplierCreditCreate commands={commands} initialInvoiceId={sourceInvoiceId ?? relatedInvoiceId} returnDispositionId={returnDispositionId} supplierReturnLineId={queryId(params, "supplierReturnLineId")} replacesCreditId={queryId(params, "replacesCreditId")} onCancel={() => change({ new: null })} /> : <p>Purchasing edit permission is required to record a supplier credit.</p>}
     </section> : <>
       <div className="flex flex-wrap gap-3 justify-between items-center">
         <div>
@@ -124,7 +124,7 @@ export default function SupplierCredits() {
               </dd>
             </div>
           </dl>
-          <p className="text-sm">Cost disposition: {supplierCreditCostLabel(credit.costStatus)}
+          <p className="text-sm">Cost disposition: {supplierCreditCostSummary(credit)}
           </p>{credit.balanceIssues.map(issue => <p role="alert" key={issue.code}>{issue.message}
           </p>)}
         </article>)}{list.data?.items.length === 0 && <p>No supplier credits match these filters.</p>}

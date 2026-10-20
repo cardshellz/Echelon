@@ -1,4 +1,6 @@
 import { readShipmentPackingUnitOptions, ShipmentUnitOptionsError } from "./shipment-unit-options.service";
+import { registerReceiptShipmentQuantityCorrectionRoutes } from "./receipt-shipment-quantity-correction.routes";
+import { createReceiptShipmentQuantityCorrectionService } from "./receipt-shipment-quantity-correction.service";
 import { db } from "../../db";
 import { registerShipmentInvoiceRoutes } from "./shipment-invoice.routes";
 import { createShipmentCreateCommands, shipmentCreateCommandScope, SHIPMENT_CREATE_COMMAND_PRINCIPAL } from "./shipment-create.commands";
@@ -27,6 +29,7 @@ export function registerInboundShipmentRoutes(app: Express) {
   registerShipmentCostExceptionRoutes(app);
   registerShipmentInvoiceRoutes(app);
   const { shipmentTracking } = app.locals.services;
+  registerReceiptShipmentQuantityCorrectionRoutes(app, createReceiptShipmentQuantityCorrectionService(db, shipmentTracking, () => new Date()));
   const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
   const shipmentCreateCommands = createShipmentCreateCommands(shipmentTracking);
   const shipmentLineCommands = createShipmentLineCommands(shipmentTracking);

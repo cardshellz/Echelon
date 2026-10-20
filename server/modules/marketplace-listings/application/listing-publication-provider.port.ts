@@ -1,3 +1,4 @@
+import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
 import type {
   ListingAccount,
   ListingCatalogItem,
@@ -29,6 +30,8 @@ export interface ListingPublicationInput {
   recreating?: boolean;
 }
 export interface PreparedListingItem {
+  /** Optional only for immutable reviews created before the shared intent contract. */
+  preparedIntent?: ChannelPreparedIntent;
   variantId: number;
   sku: string;
   feedType: string;

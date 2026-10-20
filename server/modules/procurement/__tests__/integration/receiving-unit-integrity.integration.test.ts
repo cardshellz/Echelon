@@ -22,7 +22,7 @@ const databaseTests = DATABASE_URL && DISPOSABLE ? describe : describe.skip;
 const NOW = new Date("2026-09-06T12:00:00.000Z");
 const TABLES = [schema.products, schema.productVariants, schema.vendors,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
-  schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
+  schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.supplierReturnLines, schema.receiptReversals,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
   schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.poStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.inventoryLevels, schema.inventoryLots, schema.inventoryTransactions] as const;
@@ -210,6 +210,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
     const replay = (await pool.query("SELECT id,receiving_order_id,sku,expected_qty,received_qty,units_per_variant_snapshot,inbound_shipment_line_id FROM procurement.receiving_lines WHERE id=901")).rows[0];
     migrationEvidence = { before, after, replay };
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000017000018590001_receipt_shipment_quantity_amendments.sql"), "utf8"));
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000004000017890001_receiving_quarantine.sql"), "utf8"));
     await pool.query(`

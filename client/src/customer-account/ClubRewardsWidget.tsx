@@ -172,6 +172,7 @@ export function ClubRewardsWidget({
   ) {
     await run(async () => {
       const saved = sessionStorage.getItem(storageKey);
+      const recovering = Boolean(retry || saved);
       const command = commandSchema.parse(
         retry ??
           (saved
@@ -212,6 +213,14 @@ export function ClubRewardsWidget({
       sessionStorage.removeItem(storageKey);
       await refresh();
       setPoints(0);
+      if (recovering) {
+        // Issuance recovery is not an instruction to change this order. The
+        // confirmed code now appears in the existing use/return-points list.
+        setNotice(
+          `Your $${reward.value} reward is ready. You can use it or return it to points below.`,
+        );
+        return;
+      }
       try {
         await current.current.onApply(reward.code);
       } catch (cause) {
@@ -242,7 +251,7 @@ export function ClubRewardsWidget({
         maxPoints,
         pointsPerDollar: data.pointsPerDollar,
         currencyName: data.currencyName,
-        disabled,
+        disabled: disabled || data.pending.length > 0,
         isLoading: busy,
         error,
       }
@@ -304,7 +313,7 @@ export function ClubRewardsWidget({
           disabled={disabled || busy}
           onClick={() => void issue(pending.points, pending)}
         >
-          Retry saved {pending.points.toLocaleString()} point reward
+          Finish creating {pending.points.toLocaleString()} point reward
         </button>
       ))}
       {data?.rewards.map((reward) => {

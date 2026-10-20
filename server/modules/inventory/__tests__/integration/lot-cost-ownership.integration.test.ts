@@ -22,6 +22,7 @@ import { returnCommandResultFor } from "@shared/inventory/return-command";
 import { lotCostFollowUpReportSchema } from "@shared/inventory/lot-cost-follow-up";
 import { resetFixtureCostHistory } from "../../../procurement/__tests__/integration/cost-history-fixture";
 import { executeMigrationWithRetry } from "../../../../../migrations/migration-executor";
+import { supplierReturnReadFixtureTables } from "../../../procurement/__tests__/integration/supplier-return-fixture";
 
 // Exercise registered HTTP handlers against the real application/PG owners.
 // Authentication and unrelated module singletons are isolated; no global DB
@@ -41,7 +42,7 @@ import { registerInventoryRoutes } from "../../inventory.routes";
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const now = new Date("2026-10-05T12:00:00Z");
-const tables = [schema.products,schema.productVariants,schema.warehouses,schema.warehouseLocations,
+const tables = [...supplierReturnReadFixtureTables,schema.products,schema.productVariants,schema.warehouses,schema.warehouseLocations,
   schema.inventoryLevels,schema.inventoryLots,schema.inventoryTransactions,schema.orders,schema.orderItems,
   schema.orderItemCosts,schema.purchaseOrderLines,schema.receivingOrders,schema.receivingLines];
 
@@ -83,7 +84,7 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
         product_variant_id integer,sku text,old_cost_cents bigint,new_cost_cents bigint,delta_cents bigint,
         reason text,created_at timestamp NOT NULL);`);
     await installPreOpeningQuantityAuthorityFixture(pool);
-    for (const name of ["222_procurement_cost_evidence.sql","0751_exact_inventory_cost_totals.sql","0725_inventory_cost_admission_evidence.sql","0726_inventory_return_cost_allocations.sql",
+    for (const name of ["222_procurement_cost_evidence.sql", "900000017000018590001_receipt_shipment_quantity_amendments.sql","0751_exact_inventory_cost_totals.sql","0725_inventory_cost_admission_evidence.sql","0726_inventory_return_cost_allocations.sql",
       "900000007000018030001_shipment_cost_exception_decisions.sql",
       "900000008000018110001_shipment_cost_reconciliation.sql",
       "900000009000018290001_historical_cost_origin_repairs.sql"]) {

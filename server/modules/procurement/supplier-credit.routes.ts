@@ -99,6 +99,7 @@ export function registerSupplierCreditRoutes(app: Express) {
   });
   write("/api/supplier-credits", "create");
   write("/api/supplier-credits/:id/approve", "approve");
+  write("/api/supplier-credits/:id/reconcile_costs", "reconcile_costs");
   write("/api/supplier-credits/:id/applications", "apply");
   write("/api/supplier-credits/:id/applications/:applicationId/reverse", "reverse");
   write("/api/supplier-credits/:id/void", "void");

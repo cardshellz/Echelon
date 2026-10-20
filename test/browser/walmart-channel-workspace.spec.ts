@@ -1,3 +1,4 @@
+import { channelIntentChange, createListingIntentChangesMock, handleListingIntentChangesRequest } from "./fixtures/listing-intent-changes.fixture";
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { expect, test, type Locator, type Page } from "@playwright/test";
@@ -27,7 +28,7 @@ const listing = (sku: string, matched = true): ChannelCatalogRow => ({ sku, titl
   externalVariantId: sku, externalInventoryItemId: sku, lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED",
   mappingStatus: matched ? "matched" : "unmatched", variant: matched ? { id: 11, sku, name: "Card sleeves", eligible: true } : null, message: null });
 async function setup(page: Page, options: { readOnly?: boolean; connected?: boolean; catalogError?: boolean; catalogEmpty?: boolean; remoteRows?: ChannelCatalogRow[]; blocked?: boolean; inventoryAccess?: "view" | "activate" } = {}) {
-  const state = { writes: [] as { path: string; body: any }[], reads: [] as string[], errors: [] as string[], unexpected: [] as string[],
+  const state = { intentChanges: createListingIntentChangesMock(77, !options.readOnly), writes: [] as { path: string; body: any }[], reads: [] as string[], errors: [] as string[], unexpected: [] as string[],
     stock: new Map<string, number | null>(), stockReads: [] as string[][], stockError: false,
     connected: options.connected !== false, linked: false, catalogError: options.catalogError ?? false,
     remoteRows: options.remoteRows ?? (options.catalogEmpty ? [] : null), publication: createPublicationMock(), updates: createListingUpdateMock(), lifecycle: createListingLifecycleMock() };
@@ -36,6 +37,7 @@ async function setup(page: Page, options: { readOnly?: boolean; connected?: bool
   await page.route("**/api/**", async route => {
     const req = route.request(), url = new URL(req.url()), path = url.pathname;
     if (req.method() === "GET") state.reads.push(url.pathname + url.search);
+    if (await handleListingIntentChangesRequest(route, state.intentChanges)) return;
     if (await handleListingUpdateRequest(route, state.updates)) return;
     if (await handlePublicationRequest(route, state.publication)) return;
     if (await handleListingLifecycleRequest(route, state.lifecycle)) return;
@@ -2469,4 +2471,159 @@ test("stock refresh failure hides stale quantities and a retry preserves a real 
   await expect(quantity).toHaveText("0");
   await expect(details.getByRole("alert")).toHaveCount(0);
   expect(state.writes).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+
+test("automatic update history on Walmart requires review and preserves read-only permissions", async ({ page }) => {
+  const state = await setup(page, { readOnly: true });
+  state.intentChanges.items = [channelIntentChange(77, {}), channelIntentChange(77, {
+    id: "2", state: "blocked", can_retry: true, last_error_code: "FIXTURE_RETRY", last_error_message: "Retry is available to an editor.",
+  })];
+  await page.reload();
+  const panel = page.getByTestId("listing-intent-changes");
+  await panel.locator("summary").click();
+  await expect(panel.getByText("Product 1 - Review required", { exact: true })).toBeVisible();
+  await expect(panel.getByText(/Later manual actions do not clear these records/)).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Retry update", exact: true })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Pricing Rules", exact: true }).click();
+  await panel.getByRole("button", { name: "Review listing", exact: true }).first().click();
+  await expect(page.getByRole("tab", { name: "Listing Feed", exact: true })).toHaveAttribute("aria-selected", "true");
+  expect(state.intentChanges.reads).toContain("/api/channels/77/listing-intent-changes?limit=20&offset=0");
+  expect(state.intentChanges.retries).toEqual([]);
+  expect(state.writes).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("shared pricing preserves the original edit snapshot across polling and rejected saves", async ({ page }) => {
+  await page.clock.install();
+  const state = await setup(page);
+  state.publication.pricingRule = { type: "percentage", value: "10.00" };
+  await page.reload();
+  await page.getByRole("tab", { name: "Pricing Rules", exact: true }).click();
+  const input = page.getByLabel("Markup (%)", { exact: true });
+  const save = page.getByRole("button", { name: "Save channel pricing rule", exact: true });
+  await expect(input).toHaveValue("10.00");
+  await input.fill("19.90");
+  await page.getByRole("button", { name: "Preview prices", exact: true }).click();
+
+  state.publication.pricingRule = { type: "percentage", value: "20.00" };
+  await page.clock.runFor(10_100);
+  await expect(page.getByText("Saved channel rule: 20.00% markup.", { exact: false })).toBeVisible();
+  await expect(input).toHaveValue("19.90");
+  await expect(save).toBeVisible();
+  await expect(page.getByText("The saved pricing rule changed.", { exact: false })).toBeVisible();
+
+  const commands: unknown[] = [];
+  await page.route(`**${PUBLICATION_BASE}/pricing`, async route => {
+    expect(route.request().method()).toBe("PUT");
+    const body = route.request().postDataJSON();
+    commands.push(body);
+    if (commands.length <= 2) {
+      return route.fulfill({ status: 409, json: { error: "The pricing rule changed. Reload the saved rule." } });
+    }
+    state.publication.pricingRule = { type: body.type, value: body.value };
+    return route.fulfill({ json: state.publication.pricingRule });
+  });
+  await save.click();
+  await expect(page.getByRole("alert")).toHaveText("The pricing rule changed. Reload the saved rule.");
+  await expect(input).toHaveValue("19.90");
+  await save.click();
+  await expect.poll(() => commands.length).toBe(2);
+  expect(commands).toEqual(Array(2).fill({
+    type: "percentage", value: "19.90", expected: { type: "percentage", value: "10.00" },
+  }));
+
+  await page.getByRole("button", { name: "Reload saved pricing rule", exact: true }).click();
+  await expect(input).toHaveValue("20.00");
+  await expect(save).toHaveCount(0);
+  await input.fill("21.00");
+  await page.getByRole("button", { name: "Preview prices", exact: true }).click();
+  await save.click();
+  await expect(page.getByText("Saved channel rule: 21.00% markup.", { exact: false })).toBeVisible();
+  expect(commands[2]).toEqual({ type: "percentage", value: "21.00", expected: { type: "percentage", value: "20.00" } });
+
+  await input.fill("22.00");
+  await page.getByRole("button", { name: "Preview prices", exact: true }).click();
+  await save.click();
+  await expect(page.getByText("Saved channel rule: 22.00% markup.", { exact: false })).toBeVisible();
+  expect(commands[3]).toEqual({ type: "percentage", value: "22.00", expected: { type: "percentage", value: "21.00" } });
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("shared pricing refreshes a clean editor and retains a lost-response command for retry", async ({ page }) => {
+  await page.clock.install();
+  const state = await setup(page);
+  await page.getByRole("tab", { name: "Pricing Rules", exact: true }).click();
+  const input = page.getByLabel("Markup (%)", { exact: true });
+  await expect(input).toHaveValue("0");
+  state.publication.pricingRule = { type: "percentage", value: "10.00" };
+  await page.clock.runFor(10_100);
+  await expect(input).toHaveValue("10.00");
+  await input.fill("12.50");
+  await page.getByRole("button", { name: "Preview prices", exact: true }).click();
+
+  const commands: unknown[] = [];
+  await page.route(`**${PUBLICATION_BASE}/pricing`, async route => {
+    expect(route.request().method()).toBe("PUT");
+    const body = route.request().postDataJSON();
+    commands.push(body);
+    state.publication.pricingRule = { type: body.type, value: body.value };
+    return commands.length === 1
+      ? route.fulfill({ status: 503, json: { error: "The save response was interrupted. Retry the same change." } })
+      : route.fulfill({ json: state.publication.pricingRule });
+  });
+  const save = page.getByRole("button", { name: "Save channel pricing rule", exact: true });
+  await save.click();
+  await expect(page.getByRole("alert")).toHaveText("The save response was interrupted. Retry the same change.");
+  await page.clock.runFor(10_100);
+  await expect(page.getByText("Saved channel rule: 12.50% markup.", { exact: false })).toBeVisible();
+  await expect(input).toHaveValue("12.50");
+  await expect(page.getByRole("alert")).toHaveText("The save response was interrupted. Retry the same change.");
+  await save.click();
+  await expect.poll(() => commands.length).toBe(2);
+  expect(commands).toEqual(Array(2).fill({
+    type: "percentage", value: "12.50", expected: { type: "percentage", value: "10.00" },
+  }));
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(save).toHaveCount(0);
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+});
+
+test("shared pricing keeps its acknowledged canonical value when the workspace refresh fails", async ({ page }) => {
+  const state = await setup(page);
+  state.publication.pricingRule = { type: "percentage", value: "10.00" };
+  await page.reload();
+  await page.getByRole("tab", { name: "Pricing Rules", exact: true }).click();
+  const input = page.getByLabel("Markup (%)", { exact: true });
+  await expect(input).toHaveValue("10.00");
+  const commands: unknown[] = [];
+  await page.route(`**${PUBLICATION_BASE}/pricing`, async route => {
+    expect(route.request().method()).toBe("PUT");
+    commands.push(route.request().postDataJSON());
+    state.publication.pricingRule = { type: "percentage", value: commands.length === 1 ? "12.50" : "13.00" };
+    return route.fulfill({ json: state.publication.pricingRule });
+  });
+  await page.route(`**${PUBLICATION_BASE}`, route => {
+    expect(route.request().method()).toBe("GET");
+    return route.fulfill({ status: 503, json: { error: "The workspace refresh is temporarily unavailable." } });
+  });
+
+  await input.fill("12.5");
+  await page.getByRole("button", { name: "Preview prices", exact: true }).click();
+  await page.getByRole("button", { name: "Save channel pricing rule", exact: true }).click();
+  await expect(page.getByText("Status refresh failed:", { exact: false })).toBeVisible();
+  await expect(input).toHaveValue("12.50");
+  await expect(page.getByText("Saved channel rule: 12.50% markup.", { exact: false })).toBeVisible();
+  await input.fill("13");
+  await page.getByRole("button", { name: "Preview prices", exact: true }).click();
+  await page.getByRole("button", { name: "Save channel pricing rule", exact: true }).click();
+  await expect(input).toHaveValue("13.00");
+  expect(commands).toEqual([
+    { type: "percentage", value: "12.5", expected: { type: "percentage", value: "10.00" } },
+    { type: "percentage", value: "13", expected: { type: "percentage", value: "12.50" } },
+  ]);
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
 });

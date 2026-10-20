@@ -15,12 +15,30 @@ import { recomputePurchaseOrderInvoiceMatchesInTransaction } from "./ap-ledger.s
 import { replacePurchaseOrderMatchExceptions } from "./purchase-order-match-exceptions.repository";
 import { PoQuantityAmendmentError, type AmendmentPlan } from "./po-quantity-amendment.policy";
 import type { db } from "../../db";
+import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
+import { replacePurchaseOrderQuantityExceptions } from "./purchase-order-quantity-exceptions.repository";
+import { poAmendmentHistorySchema } from "@shared/procurement/po-quantity-amendment";
+import { costInteger } from "../inventory/infrastructure/cost-evidence-values";
 
 // Changes to reviewed behavior invalidate uncommitted previews; committed receipts still replay.
-const PO_LINE_REVIEW_VERSION = 2;
+const PO_LINE_REVIEW_VERSION = 3;
 
 export type AmendmentDatabase = Pick<typeof db, "transaction">;
 export type AmendmentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export async function readPoAmendmentHistory(tx: AmendmentTransaction, purchaseOrderId: number, beforeId: number | null) {
+  const result = await tx.execute(sql`SELECT event.id,event.actor_id,event.created_at,event.payload_json,
+      COALESCE(actor.username,event.actor_id) AS actor_name
+    FROM procurement.po_events event LEFT JOIN identity.users actor ON actor.id=event.actor_id
+    WHERE event.po_id=${purchaseOrderId} AND event.event_type IN ('line_amendment_approved','quantity_amendment_approved')
+      AND (${beforeId}::bigint IS NULL OR event.id < ${beforeId}::bigint)
+    ORDER BY event.id DESC LIMIT 21`);
+  return poAmendmentHistorySchema.parse({ entries: result.rows.slice(0,20).map(row => {
+    const payload = row.payload_json as { revisionNumber?: unknown; preview?: unknown; approvedAt?: unknown };
+    return { id: costInteger(row.id, "approval event id", 1), actorId: row.actor_id, actorName: row.actor_name, approvedAt: payload.approvedAt,
+      revisionNumber: payload.revisionNumber, preview: payload.preview };
+  }), nextCursor: result.rows.length > 20 ? costInteger(result.rows[19].id, "approval event cursor", 1) : null });
+}
 
 /** Cost owners acquire this graph lock first; header/line locks serialize the
  * amendment with receipts, lifecycle transitions and competing amendments. */
@@ -39,7 +57,8 @@ export async function readQuantityAmendmentSource(tx: AmendmentTransaction, purc
   const lineIds = new Set(lines.map((line) => line.id));
   const invoiceLines = allInvoiceLines.filter((line) => line.purchaseOrderLineId === null || lineIds.has(line.purchaseOrderLineId));
   const receipts = await tx.select().from(poReceipts).where(eq(poReceipts.purchaseOrderId, purchaseOrderId)).orderBy(asc(poReceipts.id));
-  const exceptions = await tx.select().from(poExceptions).where(and(eq(poExceptions.poId, purchaseOrderId), eq(poExceptions.kind, "match_mismatch"))).orderBy(asc(poExceptions.id)).for("update");
+  const exceptions = await tx.select().from(poExceptions).where(and(eq(poExceptions.poId, purchaseOrderId), inArray(poExceptions.kind, ["match_mismatch", "qty_short", "qty_over"]))).orderBy(asc(poExceptions.id)).for("update");
+  const dependencies = await readPoAmendmentDependencies(tx, lines.filter(line => line.lineType === "product").map(line => line.id));
   // Row locks do not cover newly inserted tiers or a new DEFAULT settings row.
   // Freeze policy creation as well as edits until this short command finishes.
   await tx.execute(sql`LOCK TABLE ${warehouseSettings}, ${poApprovalTiers} IN SHARE MODE`);
@@ -49,8 +68,8 @@ export async function readQuantityAmendmentSource(tx: AmendmentTransaction, purc
   const facts = { header, lines, invoices, invoiceLines, recommendationOwned: handoffs.length > 0 };
   // Full row versions cover price metadata, counters, invoice void/payment changes,
   // receipt evidence and variance approvals. No client amount is authoritative.
-  const sourceVersion = createHash("sha256").update(canonicalJson({ reviewVersion: PO_LINE_REVIEW_VERSION, facts, actor, links, handoffs, receipts, exceptions, requireApproval, procurementPolicyRevision: policy.revision, approvalTiers })).digest("hex");
-  return { facts, actor, sourceVersion, exceptions, requireApproval, approvalTiers };
+  const sourceVersion = createHash("sha256").update(canonicalJson({ reviewVersion: PO_LINE_REVIEW_VERSION, facts, actor, links, handoffs, receipts, exceptions, dependencies, requireApproval, procurementPolicyRevision: policy.revision, approvalTiers })).digest("hex");
+  return { facts, actor, sourceVersion, exceptions, dependencies, requireApproval, approvalTiers };
 }
 
 export async function persistQuantityAmendment(
@@ -58,7 +77,6 @@ export async function persistQuantityAmendment(
   source: Awaited<ReturnType<typeof readQuantityAmendmentSource>>,
   plan: AmendmentPlan,
   actorId: string,
-  commandKey: string,
   approvedAt: Date,
   approvalEvidence: PurchaseApprovalSnapshot,
 ) {
@@ -105,10 +123,22 @@ export async function persistQuantityAmendment(
     notes: `Admin approved ${actionName} (revision ${revisionNumber})${statusChanged ? "; receiving status recalculated" : ""}: ${plan.preview.reason}`,
   });
   const match = await recomputePurchaseOrderInvoiceMatchesInTransaction(header.id, tx, actorId, approvedAt);
-  const superseded = await replacePurchaseOrderMatchExceptions({ tx, purchaseOrderId: header.id, exceptions: source.exceptions, match,
+  const superseded = await replacePurchaseOrderMatchExceptions({ tx, purchaseOrderId: header.id, exceptions: source.exceptions.filter(row => row.kind === "match_mismatch"), match,
     actorId, at: approvedAt, supersessionNote: `Superseded by admin-approved ${actionName}, revision ${revisionNumber}.`,
     messagePrefix: `PO revision ${revisionNumber}`, revisionNumber });
   const afterLines = await tx.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.purchaseOrderId, header.id)).orderBy(asc(purchaseOrderLines.id));
+  const quantityExceptions = await replacePurchaseOrderQuantityExceptions(tx, source.exceptions, plan, actorId, approvedAt, afterLines);
+  return { revisionNumber, afterHeader, afterLines, superseded, quantityExceptions, resultingMatchSourceFingerprint: match.sourceFingerprint };
+}
+
+/** Record the reviewed downstream outcome only after every owner succeeds. */
+export async function recordQuantityAmendmentResult(tx: AmendmentTransaction,
+  source: Awaited<ReturnType<typeof readQuantityAmendmentSource>>, plan: AmendmentPlan,
+  saved: Awaited<ReturnType<typeof persistQuantityAmendment>>, actorId: string, commandKey: string,
+  approvedAt: Date, approvalEvidence: PurchaseApprovalSnapshot) {
+  const { header, lines } = source.facts;
+  const { revisionNumber, afterHeader, afterLines } = saved;
+  const lineEdit = plan.preview.lines.some(line => ["edit_line", "edit_charge"].includes(line.priceTreatment));
   const [event] = await tx.insert(poEvents).values({
     poId: header.id, eventType: lineEdit ? "line_amendment_approved" : "quantity_amendment_approved", actorType: "user", actorId, createdAt: approvedAt,
     payloadJson: {
@@ -116,7 +146,7 @@ export async function persistQuantityAmendment(
       approvalEvidence: source.actor, approval_authority: approvalEvidence, reviewedSourceVersion: source.sourceVersion,
       closedPurchaseOrderConfirmed: plan.preview.closedPurchaseOrder === true,
       preview: plan.preview, before: { header, lines }, after: { header: afterHeader, lines: afterLines },
-      supersededMatchExceptions: superseded, resultingMatchSourceFingerprint: match.sourceFingerprint,
+      supersededMatchExceptions: saved.superseded, quantityExceptions: saved.quantityExceptions, resultingMatchSourceFingerprint: saved.resultingMatchSourceFingerprint,
     },
   }).returning({ id: poEvents.id });
   return { purchaseOrderId: header.id, revisionNumber, auditEventId: event.id, preview: plan.preview };

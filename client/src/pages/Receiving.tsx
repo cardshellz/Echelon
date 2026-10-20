@@ -1,5 +1,8 @@
+import { receiptReversalSourceCapability } from "@/lib/receipt-reversal-capability";
+import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
 import { parseReceivingImportCsv, parseReceivingImportResult, receivingImportError } from "@/lib/receiving-import";
 import { ReceiptSupplierCosts } from "@/features/purchasing/ReceiptSupplierCosts";
+import { ReceiptShipmentQuantityCorrection } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import type { ReceivingImportRowInput } from "@shared/procurement/receiving-import";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -110,6 +113,7 @@ function createReceivingIdempotencyKey(prefix: string): string {
 }
 
 interface ReceivingLine extends ReceivingUnitLine {
+  reversalCapability?: unknown;
   id: number;
   receivingOrderId: number;
   sku: string | null;
@@ -139,6 +143,7 @@ interface ReceiveValidationWarning {
 }
 
 interface ReceivingOrder {
+  reversalCapability?: unknown;
   id: number;
   receiptNumber: string;
   poNumber: string | null;
@@ -249,13 +254,13 @@ export default function Receiving() {
     if (requestedReceiptId === null) throw new Error("The receipt is no longer open.");
     const context = captureReceiptNavigation();
     const response = await fetch(`/api/receiving/${requestedReceiptId}`);
-    if (!response.ok) throw new Error("The quarantine command needs receipt readback. Retry the saved command to verify its result.");
+    if (!response.ok) throw new Error("The saved change needs receipt readback. Reload the receipt to verify its current values.");
     const current: unknown = await response.json();
     parseReceivingHeaderResult(current, requestedReceiptId);
     if (!current || typeof current !== "object" || !("lines" in current) || !Array.isArray(current.lines) ||
         !("status" in current) || typeof current.status !== "string" || !("receiptNumber" in current) || typeof current.receiptNumber !== "string" ||
         current.lines.some((line: ReceivingLine) => line.receivingOrderId !== requestedReceiptId || !hasReceivingUnitVersion(line))) {
-      throw new Error("The receipt readback was incomplete. Retry the saved quarantine command before further changes.");
+      throw new Error("The receipt readback was incomplete. Reload the receipt before further changes.");
     }
     if (!isCurrentReceiptNavigation(context)) return;
     setSelectedReceipt(current as ReceivingOrder);
@@ -525,7 +530,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       void queryClient.invalidateQueries({ queryKey: ["/api/procurement/receiving-orders"] });
     },
   });
-  const reversalBlocked = !reversal.ready || !reversal.allowed || !!reversal.error || !!reversal.recovery || reverseMutation.isPending || reversalsQuery.isPending || reversalsQuery.isError;
+  const receiptReversalCapability = receiptReversalSourceCapability(selectedReceipt?.reversalCapability);
+  const targetReversalCapability = reverseTarget?.scope === "line" ? receiptReversalSourceCapability(selectedReceipt?.lines?.find(line => line.id === reverseTarget.lineId)?.reversalCapability) : receiptReversalCapability;
+  const reversalBlocked = (reverseTarget !== null && !targetReversalCapability.allowed) || !reversal.ready || !reversal.allowed || !!reversal.error || !!reversal.recovery || reverseMutation.isPending || reversalsQuery.isPending || reversalsQuery.isError;
   function submitReversal(command: ReceiptReversalCommand, pinned?: ReceiptReversalRecovery) {
     if (reverseMutation.isPending) return;
     setReverseError(null);
@@ -960,6 +967,10 @@ DEF-456,25,,,5.00,,Location TBD`;
         pending={quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
         onChange={(variantId, confirm, factor) => applyVariant(line, variantId, confirm, factor)}
       />
+      {selectedReceipt?.status === "closed" && selectedReceipt.inboundShipmentId && <ReceiptShipmentQuantityCorrection receiptLineId={line.id}
+        onSaved={() => { void refreshReceiptAfterQuarantine().catch((error: Error) => {
+          setReceiptSettingsError(error.message);
+        }); }}/>}
       {error && <div role="alert" className="rounded border border-destructive/40 p-2 text-xs text-destructive">
         <p>{error.message}</p>
         {error.needsRefresh && <Button size="sm" variant="outline" className="mt-2 h-auto min-h-10 whitespace-normal" disabled={quarantineCommandPending || reloadingUnits || updateLineMutation.isPending} onClick={() => void reloadReceiptUnits(line.id)}>Load latest line and discard count draft</Button>}
@@ -1927,6 +1938,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                 </DialogDescription>
               </DialogHeader>
               <nav aria-label="Receipt related records" className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
+                {selectedReceipt.status === "closed" && <SupplierReturnLink vendorId={selectedReceipt.vendorId ?? undefined} receivingOrderId={selectedReceipt.id} purchaseOrderId={selectedReceipt.purchaseOrderId ?? undefined} />}
                 {selectedReceipt.purchaseOrderId && (
                   <Link href={procurementNavigation.childHref(`/purchase-orders/${selectedReceipt.purchaseOrderId}`)} className="text-primary underline">
                     Purchase order {selectedReceipt.poNumber || `#${selectedReceipt.purchaseOrderId}`}
@@ -2050,7 +2062,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         setReverseAllowNegative(false);
                       }}
                       data-testid="btn-reverse-order"
-                      disabled={quarantineCommandPending || reversalBlocked}
+                      disabled={quarantineCommandPending || reversalBlocked || !receiptReversalCapability.allowed}
                     >
                       <X className="h-4 w-4 mr-1 md:mr-2" />
                       Reverse Entire Receipt
@@ -2058,6 +2070,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   )}
                 </div>
 
+                {selectedReceipt.status === "closed" && !receiptReversalCapability.allowed && <div className="space-y-2 text-sm"><p>{receiptReversalCapability.reason}</p><Button variant="outline" size="sm" onClick={() => setReceiptLoadAttempt(attempt => attempt + 1)}>Reload receipt return history</Button></div>}
                 {selectedReceipt.status === "closed" && !reversal.allowed && <p className="text-sm text-muted-foreground">Purchasing approval permission is required to reverse a receipt.</p>}
                 {!quarantineAcceptAll.allowed && quarantineAcceptAll.reason && (selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && <p className="text-sm text-muted-foreground">Accept all: {quarantineAcceptAll.reason}</p>}
 
@@ -2318,12 +2331,13 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       setReverseAllowNegative(false);
                                     }}
                                     data-testid={`btn-reverse-line-mobile-${line.id}`}
-                                    disabled={quarantineCommandPending || reversalBlocked}
+                                    disabled={quarantineCommandPending || reversalBlocked || !receiptReversalSourceCapability(line.reversalCapability).allowed}
                                   >
                                     <X className="h-4 w-4 mr-1" />
                                     Reverse
                                   </Button>
                                 )}
+                                {selectedReceipt.status === "closed" && !receiptReversalSourceCapability(line.reversalCapability).allowed && <p className="text-xs text-muted-foreground">{receiptReversalSourceCapability(line.reversalCapability).reason}</p>}
                                 {selectedReceipt.status === "closed" && (line.reversedQty ?? 0) > 0 && (
                                   <span className="text-xs text-destructive font-medium">−{line.reversedQty} reversed</span>
                                 )}
@@ -2429,12 +2443,13 @@ DEF-456,25,,,5.00,,Location TBD`;
                                         setReverseAllowNegative(false);
                                       }}
                                       data-testid={`btn-reverse-line-${line.id}`}
-                                      disabled={quarantineCommandPending || reversalBlocked}
+                                      disabled={quarantineCommandPending || reversalBlocked || !receiptReversalSourceCapability(line.reversalCapability).allowed}
                                     >
                                       <X className="h-4 w-4 mr-1" />
                                       Reverse
                                     </Button>
                                   )}
+                                  {!receiptReversalSourceCapability(line.reversalCapability).allowed && <p className="text-xs text-muted-foreground">{receiptReversalSourceCapability(line.reversalCapability).reason}</p>}
                                 </TableCell>
                               )}
                               {selectedReceipt.status !== "closed" && (

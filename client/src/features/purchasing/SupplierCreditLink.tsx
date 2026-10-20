@@ -7,6 +7,7 @@ export interface SupplierCreditContext {
   inboundShipmentId?: number;
   purchaseOrderId?: number;
   returnDispositionId?: number;
+  supplierReturnLineId?: number;
   create?: boolean;
   replacesCreditId?: number;
 }

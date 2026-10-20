@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "migration": "900000019000018680001_supplier_return_completion.sql",
+  "generation": 19,
+  "pr": 1868,
+  "ordinal": 1,
+  "after": [
+    "0751_exact_inventory_cost_totals.sql",
+    "222_procurement_cost_evidence.sql",
+    "242_inventory_quantity_ledger.sql",
+    "900000017000018590001_receipt_shipment_quantity_amendments.sql",
+    "900000017000018610001_supplier_credit_completion.sql",
+    "900000018000018580002_listing_intent_propagation.sql"
+  ]
+}

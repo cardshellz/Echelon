@@ -16,7 +16,7 @@ export function SupplierCreditRecovery({ commands }: { commands: SupplierCreditC
   return <section aria-label="Saved supplier credit request" className="rounded border border-amber-400 bg-amber-50 p-3 text-sm space-y-2 dark:bg-amber-950">
     <p className="font-medium">Confirm the saved supplier credit outcome before another credit action</p>
     {intent.command === "create" ? <p>Create credit {intent.payload.supplierReference} for {formatPaymentAmount(sumPaymentCents(intent.payload.lines.map(line => line.amountCents)))} against invoice #{intent.payload.sourceInvoiceId}, dated {intent.payload.creditCalendarDate}.</p>
-      : <p>{intent.command === "reverse" ? `Reverse application #${intent.applicationId} of` : intent.command === "apply" ? "Apply" : intent.command === "approve" ? "Approve" : "Void"} <Link className="underline" href={`/supplier-credits/${intent.creditId}`}>supplier credit #{intent.creditId}
+      : <p>{intent.command === "reverse" ? `Reverse application #${intent.applicationId} of` : intent.command === "reconcile_costs" ? "Recheck cost disposition for" : intent.command === "apply" ? "Apply" : intent.command === "approve" ? "Approve" : "Void"} <Link className="underline" href={`/supplier-credits/${intent.creditId}`}>supplier credit #{intent.creditId}
       </Link>.</p>}
     {intent.command === "apply" && <ul>{intent.payload.allocations.map(row => <li key={row.vendorInvoiceId}>Invoice #{row.vendorInvoiceId}: {formatPaymentAmount(row.appliedAmountCents)}
     </li>)}

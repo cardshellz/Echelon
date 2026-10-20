@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -44,12 +45,16 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   let varianceService: ReturnType<typeof createPoVarianceApprovalService>;
   let server: Server;
   let url: string;
+  let ownsAudit = false;
+  const ownedSchemas: string[] = [];
   let requestActor: string | null = "admin-user";
-  const tables = [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
+  const tables: Parameters<typeof fixtureTable>[0][] = [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
     schema.purchaseOrders, schema.purchaseOrderLines, schema.poApprovalTiers, schema.poStatusHistory, schema.poRevisions, schema.poEvents, schema.poExceptions,
     schema.purchasingRecommendationPoHandoffs, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poReceipts,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poReceipts,
     schema.warehouseSettings, schema.apPayments, schema.apPaymentAllocations, schema.receivingOrders, schema.receivingLines, schema.inventoryLots, schema.auditEvents];
+  tables.push(schema.inboundShipments, schema.inboundShipmentLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
+    schema.landedCostSnapshots, schema.receiptReversals, schema.inventoryTransactions, schema.orderItemCosts, schema.orderLineCosts);
   const migrations = ["136_financial_command_results.sql", "140_financial_command_operations.sql", "227_purchase_order_history_retention.sql"];
   const descriptor = (body: unknown, key = randomUUID(), actorId = "admin-user"): FinancialCommandDescriptor => ({
     actorType: "user", actorId, method: "POST", routeTemplate: "/api/purchase-orders/:id/quantity-amendment", resourceKey: "purchase_order:1",
@@ -60,6 +65,19 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     changes: [{ lineId: 11, quantityPieces, priceTreatment: "keep_product_total" }],
     reason: "Supplier confirmed the purchased quantity correction", approvalConfirmed: true,
   });
+  async function reviewBeforeApproval(request: unknown, actorId: string | null) {
+    // These HTTP tests exercise the human preview -> approval protocol. Keep
+    // its token for retries; invalid requests still exercise approval rejection.
+    const body = request as PoQuantityApprovalRequest;
+    if (body.previewVersion || !actorId) return;
+    const { approvalConfirmed: _approval, previewVersion: _preview, ...previewRequest } = body;
+    try { body.previewVersion = (await service.preview(1, previewRequest, actorId)).previewVersion; }
+    catch { /* Approval must independently reject invalid/stale/unauthorized evidence. */ }
+  }
+  async function approve(id: number, request: unknown, actorId: string, command: FinancialCommandDescriptor) {
+    await reviewBeforeApproval(request, actorId);
+    return service.approve(id, request, actorId, { ...command, requestHash: createHash("sha256").update(canonicalJson(request)).digest("hex") });
+  }
   const evidence = async () => {
     const records: Record<string, unknown[]> = {};
     for (const name of ["procurement.purchase_orders", "procurement.purchase_order_lines", "procurement.po_events", "procurement.po_revisions", "procurement.po_status_history", "procurement.po_exceptions"]) records[name] = (await pool.query(`SELECT * FROM ${name} ORDER BY id`)).rows;
@@ -81,6 +99,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     }
   }
   const post = async (request: unknown, key = randomUUID()) => {
+    await reviewBeforeApproval(request, requestActor);
     const response = await fetch(`${url}/api/purchase-orders/1/quantity-amendment`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(request) });
     return { status: response.status, body: await response.json(), replayed: response.headers.get("Idempotency-Replayed") };
   };
@@ -88,8 +107,14 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     validatePostgresTestEnvironment(process.env);
     if ([process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].includes(TEST_URL)) throw new Error("Requires a separate disposable database.");
     pool = new pg.Pool({ connectionString: TEST_URL, max: 8, ssl: false });
-    for (const name of ["identity", "procurement", "inventory"]) await pool.query(`CREATE SCHEMA ${name}`);
-    for (const table of tables) await pool.query(fixtureTable(table));
+    for (const name of ["identity", "procurement", "inventory", "oms"]) {
+      await pool.query(`CREATE SCHEMA ${name}`);
+      ownedSchemas.push(name);
+    }
+    for (const table of tables) {
+      await pool.query(fixtureTable(table));
+      if (table === schema.auditEvents) ownsAudit = true;
+    }
     await pool.query("CREATE UNIQUE INDEX purchase_order_lines_po_id_line_id_uidx ON procurement.purchase_order_lines(purchase_order_id,id)");
     for (const ddl of fixtureForeignKeys(tables)) await pool.query(ddl);
     // Actual production Drizzle checks, including explicit quote residuals,
@@ -105,8 +130,12 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       }
     }
     for (const file of migrations.slice(0, 2)) await pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
+    for (const file of ["222_procurement_cost_evidence.sql", "900000017000018590001_receipt_shipment_quantity_amendments.sql",
+      "900000007000018030001_shipment_cost_exception_decisions.sql", "0751_exact_inventory_cost_totals.sql",
+      "900000008000018110001_shipment_cost_reconciliation.sql", "900000009000018290001_historical_cost_origin_repairs.sql"])
+      await pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
     database = drizzle(pool, { schema }); connection.database = database;
-    service = createPoQuantityAmendmentService(database, () => NOW);
+    service = createPoQuantityAmendmentService(database, () => NOW, { refreshQuantityAllocationInTransaction: async () => { throw new Error("This fixture contains no shipments"); } });
     invoiceService = createInvoiceQuantityCorrectionService(database, () => NOW);
     varianceService = createPoVarianceApprovalService(database, () => NOW);
     const app = express(); app.use(express.json());
@@ -119,6 +148,12 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   });
   beforeEach(async () => {
     requestActor = "admin-user";
+    await pool.query(`ALTER TABLE inventory.cost_reconciliation_approvals DISABLE TRIGGER cost_reconciliation_approval_no_truncate;
+      ALTER TABLE inventory.cost_reconciliation_postings DISABLE TRIGGER cost_reconciliation_posting_no_truncate;
+      ALTER TABLE inventory.cost_origin_repairs DISABLE TRIGGER cost_origin_repair_no_truncate;
+      ALTER TABLE inventory.lot_cost_origin_amendments DISABLE TRIGGER quantity_amendment_no_truncate;
+      ALTER TABLE procurement.receipt_shipment_quantity_amendments DISABLE TRIGGER quantity_amendment_no_truncate;
+      ALTER TABLE procurement.receipt_shipment_quantity_results DISABLE TRIGGER quantity_amendment_no_truncate;`);
     await pool.query(`DROP TRIGGER IF EXISTS po_event_history_immutable_rows ON procurement.po_events;
       DROP TRIGGER IF EXISTS po_event_history_immutable_truncate ON procurement.po_events;
       DROP TRIGGER IF EXISTS purchase_order_history_retention_rows ON procurement.purchase_orders;
@@ -148,10 +183,38 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       INSERT INTO procurement.po_exceptions(po_id,kind,severity,status,payload,payload_hash,title) VALUES(1,'match_mismatch','warn','resolved','{"invoiceId":71,"sourceVersion":1,"sourceFingerprint":"old"}','old-evidence','Old approved variance');
     `);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations", migrations[2]), "utf8"));
+    await pool.query(`ALTER TABLE inventory.cost_reconciliation_approvals ENABLE TRIGGER cost_reconciliation_approval_no_truncate;
+      ALTER TABLE inventory.cost_reconciliation_postings ENABLE TRIGGER cost_reconciliation_posting_no_truncate;
+      ALTER TABLE inventory.cost_origin_repairs ENABLE TRIGGER cost_origin_repair_no_truncate;
+      ALTER TABLE inventory.lot_cost_origin_amendments ENABLE TRIGGER quantity_amendment_no_truncate;
+      ALTER TABLE procurement.receipt_shipment_quantity_amendments ENABLE TRIGGER quantity_amendment_no_truncate;
+      ALTER TABLE procurement.receipt_shipment_quantity_results ENABLE TRIGGER quantity_amendment_no_truncate;`);
   });
   afterAll(async () => {
     if (server) await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done()));
-    if (pool) { for (const name of ["procurement", "inventory", "identity"]) await pool.query(`DROP SCHEMA ${name} CASCADE`); await pool.end(); }
+    if (pool) {
+      if (ownsAudit) await pool.query("DROP TABLE public.audit_events");
+      for (const name of [...ownedSchemas].reverse()) await pool.query(`DROP SCHEMA ${name} CASCADE`);
+      await pool.end();
+    }
+  });
+  it("returns the immutable approved dependency review through permission-gated paginated history", async () => {
+    const saved = await post(await body());
+    expect(saved.status).toBe(200);
+    const response = await fetch(`${url}/api/purchase-orders/1/quantity-amendment/history`);
+    expect(response.status).toBe(200);
+    const history = await response.json();
+    expect(history).toMatchObject({ entries: [{ actorId: "admin-user", actorName: "admin", revisionNumber: 1, preview: saved.body.preview }], nextCursor: null });
+    const older = await fetch(`${url}/api/purchase-orders/1/quantity-amendment/history?before=${history.entries[0].id}`);
+    expect(await older.json()).toEqual({ entries: [], nextCursor: null });
+    requestActor = null;
+    expect((await fetch(`${url}/api/purchase-orders/1/quantity-amendment/history`)).status).toBe(401);
+  });
+  it.each(["0", "-1", "1e2", "01", "2147483648"])("rejects malformed PO history identifier %s", async id => {
+    expect((await fetch(`${url}/api/purchase-orders/${id}/quantity-amendment/history`)).status).toBe(400);
+  });
+  it.each(["0", "1e2", "01", "9007199254740992"])("rejects invalid approval history cursor %s", async cursor => {
+    expect((await fetch(`${url}/api/purchase-orders/1/quantity-amendment/history?before=${cursor}`)).status).toBe(400);
   });
   it("freezes newly created approval tiers until the reviewed source transaction finishes", async () => {
     await pool.query("UPDATE inventory.warehouse_settings SET require_approval=true");
@@ -202,7 +265,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   });
   it("serializes competing corrections from one source version", async () => {
     const request = await body(); const other = { ...request, changes: [{ ...request.changes[0], quantityPieces: 30 }] };
-    const results = await Promise.all([service.approve(1, request, "admin-user", descriptor(request)), service.approve(1, other, "admin-user", descriptor(other))]);
+    const results = await Promise.all([approve(1, request, "admin-user", descriptor(request)), approve(1, other, "admin-user", descriptor(other))]);
     expect(results.map((result) => result.httpStatus).sort()).toEqual([200, 409]);
     expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events")).rows[0].count).toBe(1);
     expect((await pool.query("SELECT revision_number FROM procurement.purchase_orders")).rows[0].revision_number).toBe(1);
@@ -213,7 +276,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   });
   it("checks live membership revocation after preview, including direct command execution", async () => {
     const request = await body(); await pool.query("DELETE FROM identity.auth_user_roles WHERE user_id='admin-user'"); const before = await evidence();
-    const result = await service.approve(1, request, "admin-user", descriptor(request)); expect(result.httpStatus).toBe(403); expect(await evidence()).toEqual(before);
+    const result = await approve(1, request, "admin-user", descriptor(request)); expect(result.httpStatus).toBe(403); expect(await evidence()).toEqual(before);
   });
   it("rejects disabled accounts, missing approval permission and missing authentication at HTTP", async () => {
     const request = await body(); const before = await evidence();
@@ -236,8 +299,9 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   });
   it("rolls back the complete correction if immutable audit append fails, then retries the same command safely", async () => {
     const request = await body(); const command = descriptor(request); const before = await evidence(); const protectedBefore = await protectedRecords();
+    await reviewBeforeApproval(request, "admin-user");
     await pool.query("CREATE FUNCTION procurement.amendment_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Injected audit failure'; END; $$; CREATE TRIGGER amendment_test_failure BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.amendment_test_fail()");
-    await expect(service.approve(1, request, "admin-user", command)).rejects.toThrow();
+    await expect(approve(1, request, "admin-user", command)).rejects.toThrow();
     expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
     await pool.query("DROP TRIGGER amendment_test_failure ON procurement.po_events");
     const deadline = Date.now() + 10000;
@@ -247,7 +311,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       if (Date.now() > deadline) throw new Error("Command retry did not become eligible.");
       await new Promise((done) => setTimeout(done, 20));
     }
-    expect((await service.approve(1, request, "admin-user", command)).httpStatus).toBe(200);
+    expect((await approve(1, request, "admin-user", command)).httpStatus).toBe(200);
   });
   it("requires an idempotency key and validated explicit approval fields", async () => {
     const request = await body(); const before = await evidence();
@@ -274,7 +338,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     try {
       await holder.query("BEGIN"); const pid = Number((await holder.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
       await holder.query("DELETE FROM identity.auth_user_roles WHERE user_id='admin-user'");
-      pending = service.approve(1, request, "admin-user", descriptor(request));
+      pending = approve(1, request, "admin-user", descriptor(request));
       const deadline = Date.now() + 5000; let blocked = false;
       while (Date.now() < deadline) {
         const state = await pool.query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))) AS blocked", [pid]);
@@ -351,6 +415,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     it("rolls back a closed-PO edit completely if its immutable audit cannot be written", async () => {
       await pool.query("UPDATE procurement.purchase_orders SET status='closed',closed_at='2026-10-01' WHERE id=1");
       const request = { ...await editRequest(), closedPurchaseOrderConfirmed: true as const }, before = await evidence(), protectedBefore = await protectedRecords();
+      await reviewBeforeApproval(request, "admin-user");
       await pool.query("CREATE OR REPLACE FUNCTION public.amendment_test_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Simulated immutable audit failure'; END $$; CREATE TRIGGER amendment_test_failure BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION public.amendment_test_failure()");
       const failed = await post(request); expect(failed.status).toBeGreaterThanOrEqual(500);
       expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
@@ -416,6 +481,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     it("rolls back a complete multi-line edit if audit insertion fails", async () => {
       await pool.query("INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,product_name,line_type,order_qty,status,unit_cost_cents,unit_cost_mills,line_total_cents,pricing_basis) VALUES(12,1,2,'Fee','fee',1,'open',50,5000,50,'not_applicable'); UPDATE procurement.purchase_orders SET subtotal_cents=1150,total_cents=1150 WHERE id=1");
       const request = await editRequest(); request.changes.push({ lineId: 12, quantityPieces: 1, priceTreatment: "edit_charge", chargeTotalCents: 75 });
+      await reviewBeforeApproval(request, "admin-user");
       await pool.query("CREATE OR REPLACE FUNCTION public.amendment_test_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Simulated immutable audit failure'; END $$; CREATE TRIGGER amendment_test_failure BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION public.amendment_test_failure()");
       const before = await evidence(), protectedBefore = await protectedRecords();
       expect((await post(request)).status).toBe(500);
@@ -424,11 +490,11 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     it("rejects competing price edits and safely replays the winning approval", async () => {
       const request = await editRequest(), other = { ...request, changes: [{ ...request.changes[0], pricing: { basis: "per_piece" as const, quantityPieces: 10, unitCostMills: 20000 } }] };
       const command = descriptor(request), second = descriptor(other);
-      const results = await Promise.all([service.approve(1, request, "admin-user", command), service.approve(1, other, "admin-user", second)]);
+      const results = await Promise.all([approve(1, request, "admin-user", command), approve(1, other, "admin-user", second)]);
       expect(results.map(result => result.httpStatus).sort()).toEqual([200, 409]);
       const after = await evidence();
       const winnerIndex = results.findIndex(result => result.httpStatus === 200);
-      const replay = await service.approve(1, winnerIndex === 0 ? request : other, "admin-user", winnerIndex === 0 ? command : second);
+      const replay = await approve(1, winnerIndex === 0 ? request : other, "admin-user", winnerIndex === 0 ? command : second);
       expect(replay).toMatchObject({ httpStatus: 200, replayed: true }); expect(await evidence()).toEqual(after);
       expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events")).rows[0].count).toBe(1);
     });
@@ -443,7 +509,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     });
     it.each([{ resourceKey: "purchase_order:2" }, { commandName: "ap.invoice.quantity_correction" }, { routeTemplate: "/api/other/:id" }])("rejects a mismatched direct command scope: %s", async (scope) => {
       const request = await editRequest(), before = await evidence();
-      await expect(service.approve(1, request, "admin-user", { ...descriptor(request), ...scope })).rejects.toMatchObject({ statusCode: 403, code: "PO_AMENDMENT_ACTOR_INVALID" });
+      await expect(approve(1, request, "admin-user", { ...descriptor(request), ...scope })).rejects.toMatchObject({ statusCode: 403, code: "PO_AMENDMENT_ACTOR_INVALID" });
       expect(await evidence()).toEqual(before);
     });
   });

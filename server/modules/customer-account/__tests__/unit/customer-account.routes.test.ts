@@ -47,6 +47,8 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(response.headers.get("cache-control")).toContain("no-store");
     const anonymous = await request({}, proof({ logged_in_customer_id: "" }), { Cookie: "staff-session=fake" });
     expect(anonymous.status).toBe(401);
+    expect(await anonymous.json()).toEqual({ error: { code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", message: "Sign in again to manage your orders." } });
+    expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", path: "/account/bootstrap" });
     expect(services).toHaveBeenCalledTimes(1);
   });
   it("records a database failure code without exposing SQL or connection details", async () => {
@@ -63,7 +65,17 @@ describe("customer account signed storefront HTTP boundary", () => {
     { signed: () => proof({ extra: "unrecognized" }) },
     { signed: () => proof().replace(/signature=[a-f0-9]+/, "signature=" + "0".repeat(64)) },
   ])("rejects malformed, stale or wrong-proxy proof", async ({ signed }) => {
-    expect((await request({}, signed())).status).toBe(401); expect(services).not.toHaveBeenCalled();
+    const response = await request({}, signed());
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).not.toBe("CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED");
+    expect(services).not.toHaveBeenCalled();
+  });
+  it("never treats an invalid anonymous signature as proof that sign-in is needed", async () => {
+    const signed = proof({ logged_in_customer_id: "" }).replace(/signature=[a-f0-9]+/, "signature=" + "0".repeat(64));
+    const response = await request({}, signed);
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).not.toBe("CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED");
+    expect(services).not.toHaveBeenCalled();
   });
   it("keeps the staging surface off by default and checks origin and account switch", async () => {
     enabled = false; expect((await request()).status).toBe(403); enabled = true;

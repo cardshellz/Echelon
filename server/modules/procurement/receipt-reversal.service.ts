@@ -27,6 +27,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { readReceiptReturnCapabilities } from "./receipt-reversal-return.repository";
 import { readReversalKeyEvidence } from "./receipt-reversal.repository";
 import { RECEIPT_REVERSAL_MAX_QUANTITY, RECEIPT_REVERSAL_MAX_REASON_LENGTH, receiptReversalLineResultSchema } from "@shared/procurement/receipt-reversal-command";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
@@ -304,6 +305,9 @@ export class ReceiptReversalService {
       });
     }
 
+    const capability = (await readReceiptReturnCapabilities(tx, receivingOrderId)).order;
+    if (!capability.allowed) throw new ReceiptReversalError(capability.reason, 409, { code: capability.code, receivingOrderId });
+
     const reversals: ReversalLineResult[] = [];
     let orderReversalGroupId: number | null = null;
     const touchedPoIds = new Set<number>();
@@ -373,6 +377,10 @@ export class ReceiptReversalService {
       createdBy: row.created_by,
       createdAt: row.created_at,
     }));
+  }
+
+  async getReturnReversalCapabilities(receivingOrderId: number) {
+    return readReceiptReturnCapabilities(this.db, receivingOrderId);
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -457,6 +465,10 @@ export class ReceiptReversalService {
         status: line.order_status,
       });
     }
+
+    const capability = (await readReceiptReturnCapabilities(tx, receivingOrderId)).lines.get(receivingLineId);
+    if (!capability) throw new Error("Receipt line disappeared while checking supplier return history");
+    if (!capability.allowed) throw new ReceiptReversalError(capability.reason, 409, { code: capability.code, receivingOrderId, receivingLineId });
 
     const receivedQty = Number(line.received_qty) || 0;
     const reversedQty = Number(line.reversed_qty) || 0;

@@ -30,7 +30,7 @@ const NOW = new Date("2026-10-13T12:00:00Z");
 const tables = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments,
   schema.inboundShipmentLines, schema.receivingOrders, schema.receivingLines, schema.poReceipts,
   schema.poStatusHistory, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.receiptReversals] as const;
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.supplierReturnLines, schema.receiptReversals] as const;
 
 run.sequential("Receipt integrity with the activated quantity ledger", () => {
   let context: QuantityLedgerTestContext;
@@ -77,6 +77,7 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     expect((await pool.query("SELECT count(*)::int AS count FROM inventory.lot_cost_origins")).rows[0].count).toBe(0);
     await pool.query("DROP TABLE inventory.lot_cost_origins");
     await pool.query(evidence.slice(originStart, originEnd));
+    await installQuantityAmendmentFixture(pool);
     await pool.query(`CREATE TRIGGER aa_cutover_writer_admission BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON inventory.lot_cost_origins
       FOR EACH STATEMENT EXECUTE FUNCTION inventory.pin_cutover_writer_admission();
       CREATE TRIGGER cost_evidence_immutable BEFORE UPDATE OR DELETE ON inventory.lot_cost_origins
@@ -526,3 +527,4 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     expect(await state()).toEqual(before);
   });
 });
+import { installQuantityAmendmentFixture } from "./quantity-amendment-fixture";

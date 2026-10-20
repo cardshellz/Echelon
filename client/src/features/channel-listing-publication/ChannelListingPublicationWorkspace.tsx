@@ -1,3 +1,4 @@
+import { ListingIntentChanges } from "./ListingIntentChanges";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { catalogImageQueryOptions } from "@/lib/catalog-image-queries";
@@ -477,19 +478,24 @@ export function ChannelListingPublicationWorkspace({
       setBusy(null);
     }
   }
-  async function savePricing(rule: ListingPriceRule) {
-    await publicationRequest(
+  async function savePricing(rule: ListingPriceRule, expected: ListingPriceRule | null): Promise<ListingPriceRule> {
+    const saved = await publicationRequest(
       "PUT",
       `${base}/pricing`,
       listingPriceRuleSchema,
-      listingPriceRuleSchema.parse(rule),
+      { ...listingPriceRuleSchema.parse(rule), expected },
     );
+    // The acknowledged value remains authoritative if the following refresh fails.
+    client.setQueryData<Workspace>([base], (previous) => previous
+      ? { ...previous, pricingRule: saved }
+      : previous);
     setReview(null);
     command.current = null;
     await client.invalidateQueries({ queryKey: [base] });
     setNotice(
       "Pricing rule saved. Review the draft to validate final prices before publishing.",
     );
+    return saved;
   }
   async function reconcile(id: string) {
     await publicationRequest(
@@ -639,6 +645,8 @@ export function ChannelListingPublicationWorkspace({
         </div>
       )}
       <div hidden={workbench} className="space-y-4">
+        <ListingIntentChanges scope={{ kind: "channel", channelId }} canEdit={canEdit} active={active && !workbench}
+          onReview={() => setTab("listings")} />
         {bulkItems && bulkDirty && (
           <div className="space-y-2 rounded-md border p-3">
             <p role="status" className="text-sm">
@@ -736,7 +744,7 @@ export function ChannelListingPublicationWorkspace({
           </TabsContent>
           <TabsContent value="pricing">
             <ListingPricingRules
-              key={JSON.stringify(workspace.data.pricingRule)}
+              key={channelId}
               rule={workspace.data.pricingRule}
               items={currentItems}
               draftItems={draft.items}

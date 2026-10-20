@@ -86,15 +86,17 @@ describe("supplier credits use explicit immutable invoice component evidence", (
     expect(resolvePurchaseCostSource({ purchaseOrderLine: { ...po, received_qty: 80 }, approvedInvoices: [invoice], supplierCredits: [value] }))
       .toMatchObject([{ totalMills: 80000, basePieces: 80, evidence: "confirmed" }, { totalMills: 16000, basePieces: 80, evidence: "confirmed" }]);
   });
-  it.each(["open", "received", "closed"])("keeps a complete exact quarantine return explicitly unposted for a %s source", status => {
+  it.each(["open", "received", "closed"])("describes an exact full quarantine return without inventing a denominator for a %s source", status => {
     const fullReturn = { ...returned, amountCents: 1200, disposition: { ...returned.disposition, quantity: 10 } } as SourceLineInput;
     const value = credit(fullReturn, 1, invoice, { ...returnSource, observationQuantity: 10 });
     const contracts = resolvePurchaseCostSource({ purchaseOrderLine: { ...po, received_qty: 0, status }, approvedInvoices: [invoice], supplierCredits: [value] });
     expect(contracts).toMatchObject([
-      { component: "product", totalMills: 100000, basePieces: 100, evidence: "review_required", issue: { code: "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW" } },
-      { component: "packaging", totalMills: 20000, basePieces: 100, evidence: "review_required", issue: { code: "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW" } },
+      { component: "product", totalMills: 0, basePieces: 0, evidence: "confirmed", issue: null,
+        inventoryEffect: { kind: "none", reason: "full_quarantine_return", returnedBasePieces: 100 } },
+      { component: "packaging", totalMills: 0, basePieces: 0, evidence: "confirmed", issue: null,
+        inventoryEffect: { kind: "none", reason: "full_quarantine_return", returnedBasePieces: 100 } },
     ]);
-    // Even an old successful empty application cannot override the current issue.
+    // Source arithmetic alone cannot override a missing live inventory proof.
     for (const input of contracts) expect(projectPurchaseComponentStatus({ input, currentFingerprint: "a".repeat(64),
       revision: { id: 1, contract: { ...input, revision: 1, fingerprint: "a".repeat(64) } },
       application: { id: 1, status: "applied", reportingVerified: true, evidence: { lotIds: [], result: { status: "applied", lotsUpdated: 0, issues: [] } } },
