@@ -11,7 +11,6 @@ import {
   buildStripeFundingSetupSessionInput,
   buildStripeWalletFundingSessionInput,
   buildScopedSelectionReplacement,
-  buildVariantSelectionReplacement,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
   buildAdminDogfoodLaunchStatusUrl,
@@ -2089,69 +2088,6 @@ describe("dropship ops surface client helpers", () => {
       "vendor-test.myshopify.com",
     );
     expect(normalizeShopifyShopDomainInput(" ")).toBe("");
-  });
-
-  it("builds variant include replacements without carrying stale variant overrides", () => {
-    const replacement = buildVariantSelectionReplacement({
-      existingRules: [
-        makeSelectionRule({ id: 1, scopeType: "catalog", action: "include" }),
-        makeSelectionRule({
-          id: 2,
-          scopeType: "variant",
-          action: "exclude",
-          productVariantId: 42,
-        }),
-        makeSelectionRule({
-          id: 3,
-          scopeType: "variant",
-          action: "include",
-          productVariantId: 99,
-        }),
-      ],
-      rows: [makeCatalogRow({ productVariantId: 42 })],
-      action: "include",
-    });
-
-    expect(replacement).toEqual([
-      expect.objectContaining({ scopeType: "catalog", action: "include" }),
-      expect.objectContaining({
-        scopeType: "variant",
-        action: "include",
-        productVariantId: 99,
-      }),
-      expect.objectContaining({
-        scopeType: "variant",
-        action: "include",
-        productVariantId: 42,
-      }),
-    ]);
-    expect(
-      replacement.some(
-        (rule) => rule.action === "exclude" && rule.productVariantId === 42,
-      ),
-    ).toBe(false);
-  });
-
-  it("builds variant exclude replacements for visible deselection", () => {
-    const replacement = buildVariantSelectionReplacement({
-      existingRules: [
-        makeSelectionRule({ id: 1, scopeType: "catalog", action: "include" }),
-      ],
-      rows: [
-        makeCatalogRow({ productVariantId: 42 }),
-        makeCatalogRow({ productVariantId: 42 }),
-      ],
-      action: "exclude",
-    });
-
-    expect(replacement).toEqual([
-      expect.objectContaining({ scopeType: "catalog", action: "include" }),
-      expect.objectContaining({
-        scopeType: "variant",
-        action: "exclude",
-        productVariantId: 42,
-      }),
-    ]);
   });
 
   it("builds broad catalog selection replacements without stale opposite scope rules", () => {

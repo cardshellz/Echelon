@@ -1,5 +1,5 @@
 import { ListingIntentChanges } from "@/features/channel-listing-publication/ListingIntentChanges";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import {
@@ -10,8 +10,6 @@ import {
   ExternalLink,
   Fingerprint,
   Mail,
-  MinusCircle,
-  PlusCircle,
   Search,
   Send,
 } from "lucide-react";
@@ -24,14 +22,9 @@ import {
   listingPushPollingGaveUp,
   parseDropshipListingPushJob,
 } from "@/lib/dropship-listing-push-status";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
-import { Input } from "@/components/ui/input";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -43,30 +36,23 @@ import {
 import {
   buildListingPreviewRequest,
   buildListingQueueRequest,
-  buildVariantSelectionReplacement,
   buildQueryUrl,
   createDropshipIdempotencyKey,
   fetchJson,
-  formatStatus,
   isStaleListingPreviewError,
   isStepUpRequiredError,
   describeListingQueueResult,
   listLaunchReadyStoreConnections,
   postJson,
-  putJson,
   queryErrorMessage,
   type DropshipCatalogResponse,
-  type DropshipCatalogListingTier,
   type DropshipCatalogRow,
   type DropshipEbayStoreCategoryResponse,
   type DropshipListingPreviewResponse,
   type DropshipListingPreviewResult,
   type DropshipListingPushResponse,
   type DropshipOnboardingState,
-  type DropshipSelectionRulesReplaceResponse,
-  type DropshipSelectionRulesResponse,
   type DropshipSettingsResponse,
-  type DropshipVendorSelectionAction,
 } from "@/lib/dropship-ops-surface";
 import { dropshipPortalPath, isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
 import {
@@ -80,7 +66,8 @@ import { DropshipPortalShell } from "./DropshipPortalShell";
 import { DropshipListingPreview } from "./DropshipListingPreview";
 import { CatalogStepRail } from "./catalog/CatalogStepRail";
 import { CatalogActionBar, type CatalogNextStepAction } from "./catalog/CatalogActionBar";
-import { UnsavedChangesProvider, useLeaveGuard, useUnsavedDrafts } from "./catalog/UnsavedChangesGuard";
+import { ChooseStep } from "./catalog/ChooseStep";
+import { UnsavedChangesProvider, useLeaveGuard, useUnsavedDraft, useUnsavedDrafts } from "./catalog/UnsavedChangesGuard";
 import { ListingSettingsDraftsProvider } from "./listing-settings/ListingSettingsDraftsProvider";
 import {
   ListingSettingsActionBar,
@@ -108,9 +95,19 @@ import {
   rememberCatalogStore,
   type CatalogStep,
 } from "@/lib/dropship-catalog-steps";
+import { CHOOSE_GUARD_ID, EMPTY_CHOOSE_CHANGES, reduceChooseChanges } from "@/lib/dropship-catalog-choose";
+import {
+  CHOOSE_CATALOG_QUERY_KEY,
+  checkChoosePending,
+  freshSelectionRulesReader,
+  selectionRulesQueryOptions,
+  type ChoosePendingSave,
+} from "@/lib/dropship-catalog-choose-requests";
+import { CHOOSE_WORDS } from "@/lib/dropship-catalog-choose-words";
 export { formatListingPreviewIssue as formatIssue } from "@/lib/dropship-listing-preview";
+// Moved to step 1's words (step 1 stage 1); re-exported for the page's existing callers and tests.
+export { describeCatalogListingTier } from "@/lib/dropship-catalog-choose-words";
 
-type PendingSelectionAction = string | null;
 type PendingListingAction = "preview" | "send-code" | "verify-code" | "passkey-proof" | "push" | null;
 /** A failed preview, verification or push, and the fix when the account caused it. */
 interface ListingActionError {
@@ -118,24 +115,8 @@ interface ListingActionError {
   notice: ListingAccessNotice | null;
 }
 const ONBOARDING_QUERY_KEY = ["/api/dropship/onboarding/state"] as const;
-type CatalogFilters = {
-  search: string;
-  selectedOnly: string;
-  category: string;
-  productLineIds: string;
-  productId: string;
-};
-
-const ALL_FILTER_VALUE = "all";
 const SELECTED_CATALOG_PAGE_LIMIT = 200;
 type SelectedCatalogPageLoader = (page: number, limit: number) => Promise<DropshipCatalogResponse>;
-const defaultCatalogFilters: CatalogFilters = {
-  search: "",
-  selectedOnly: "false",
-  category: ALL_FILTER_VALUE,
-  productLineIds: ALL_FILTER_VALUE,
-  productId: ALL_FILTER_VALUE,
-};
 
 export async function fetchAllSelectedCatalogRows(
   loadPage: SelectedCatalogPageLoader = (page, limit) => fetchJson<DropshipCatalogResponse>(
@@ -184,13 +165,6 @@ function DropshipPortalCatalogPage() {
     verifyEmailStepUp,
     verifyPasskeyStepUp,
   } = useDropshipAuth();
-  const [search, setSearch] = useState("");
-  const [selectedOnly, setSelectedOnly] = useState("false");
-  const [categoryFilter, setCategoryFilter] = useState(ALL_FILTER_VALUE);
-  const [productLineIdsFilter, setProductLineIdsFilter] = useState(ALL_FILTER_VALUE);
-  const [productIdFilter, setProductIdFilter] = useState(ALL_FILTER_VALUE);
-  const [applied, setApplied] = useState<CatalogFilters>(defaultCatalogFilters);
-  const [pendingSelectionAction, setPendingSelectionAction] = useState<PendingSelectionAction>(null);
   const [pendingListingAction, setPendingListingActionState] = useState<PendingListingAction>(null);
   const pendingListingActionRef = useRef<PendingListingAction>(null);
   // The store the vendor chose on this visit. Until they choose, the remembered
@@ -209,7 +183,6 @@ function DropshipPortalCatalogPage() {
   const [emailCodeSent, setEmailCodeSent] = useState(false);
   const [verificationCode, setVerificationCode] = useState("");
   const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
   // Failures of the listing card's own actions (preview, verification, push)
   // show inside that card, next to the buttons that caused them.
   const [listingError, setListingError] = useState<ListingActionError | null>(null);
@@ -217,23 +190,22 @@ function DropshipPortalCatalogPage() {
   // The ways onto Listing settings leave the step's own draft out of their question: the page keeps
   // that draft on the other steps, so going back to finish it drops nothing (browser Back to step 1, then Next).
   const toSetupScope = scopeWithoutPrefix(guardDrafts, LISTING_SETTINGS_GUARD_ID_PREFIX);
-  const catalogUrl = useMemo(() => buildQueryUrl("/api/dropship/catalog", {
-    search: applied.search,
-    category: applied.category === ALL_FILTER_VALUE ? undefined : applied.category,
-    productLineIds: applied.productLineIds === ALL_FILTER_VALUE ? undefined : applied.productLineIds,
-    productId: applied.productId === ALL_FILTER_VALUE ? undefined : applied.productId,
-    selectedOnly: applied.selectedOnly,
-    page: 1,
-    limit: 50,
-  }), [applied]);
-  const catalogQuery = useQuery<DropshipCatalogResponse>({
-    queryKey: [catalogUrl],
-    queryFn: () => fetchJson<DropshipCatalogResponse>(catalogUrl),
-  });
-  const selectionRulesQuery = useQuery<DropshipSelectionRulesResponse>({
-    queryKey: ["/api/dropship/catalog/selection-rules"],
-    queryFn: () => fetchJson<DropshipSelectionRulesResponse>("/api/dropship/catalog/selection-rules"),
-  });
+  // Step 1's unsaved changes live at page level (step 1 stage 1), so a store switch keeps them and a browser Back the
+  // guard does not catch never drops them. They are for every store, so the store picker neither asks about them nor
+  // drops them, and the rail's way back to step 1 drops nothing; Next from step 1 still asks (toSetupScope holds them).
+  const [chooseChanges, dispatchChooseChanges] = useReducer(reduceChooseChanges, EMPTY_CHOOSE_CHANGES);
+  const discardChooseChanges = useCallback(() => dispatchChooseChanges({ type: "undo" }), []);
+  // A step 1 save sent with no sure answer, held beside the changes so leaving step 1 never drops it (review MC1).
+  const choosePendingRef = useRef<ChoosePendingSave | null>(null);
+  // While step 1's save runs, the leave question asks the vendor to wait: leaving can't stop it (review MC6).
+  const [chooseSaving, setChooseSaving] = useState(false);
+  // What the check below found, shown in step 1's bar (or above the step the vendor is on).
+  const [chooseNotice, setChooseNotice] = useState<string | null>(null);
+  useUnsavedDraft(CHOOSE_GUARD_ID, CATALOG_STEP_LABELS.choose, chooseChanges.marks.length > 0,
+    { changes: chooseChanges.marks.length, discard: discardChooseChanges, saving: chooseSaving });
+  const toStoreScope = scopeWithoutPrefix(guardDrafts, CHOOSE_GUARD_ID);
+  const toChooseScope = scopeWithoutPrefix(guardDrafts, CHOOSE_GUARD_ID);
+  const selectionRulesQuery = useQuery(selectionRulesQueryOptions());
   const selectedCatalogQuery = useQuery<DropshipCatalogRow[]>({
     queryKey: ["/api/dropship/catalog", "selected"],
     queryFn: () => fetchAllSelectedCatalogRows(),
@@ -254,25 +226,7 @@ function DropshipPortalCatalogPage() {
     : null;
   const previewAccessNotice = describeListingAccess(listingAccount, "preview");
   const pushAccessNotice = describeListingAccess(listingAccount, "push");
-  const visibleRows = catalogQuery.data?.rows ?? [];
-  const visibleSelectableRows = visibleRows.filter(canSelectRow);
-  const visibleSelectedRows = visibleRows.filter((row) => row.selectionDecision.selected);
   const selectedCatalogRows = selectedCatalogQuery.data ?? [];
-  const catalogFacets = catalogQuery.data?.facets ?? {
-    categories: [],
-    productLines: [],
-    products: [],
-  };
-  const hasActiveFilters = applied.search !== ""
-    || applied.selectedOnly !== "false"
-    || applied.category !== ALL_FILTER_VALUE
-    || applied.productLineIds !== ALL_FILTER_VALUE
-    || applied.productId !== ALL_FILTER_VALUE
-    || search.trim() !== ""
-    || selectedOnly !== "false"
-    || categoryFilter !== ALL_FILTER_VALUE
-    || productLineIdsFilter !== ALL_FILTER_VALUE
-    || productIdFilter !== ALL_FILTER_VALUE;
   const launchReadyStoreConnections = useMemo(
     () => listLaunchReadyStoreConnections(settingsQuery.data?.settings.storeConnections ?? []),
     [settingsQuery.data?.settings.storeConnections],
@@ -341,41 +295,56 @@ function DropshipPortalCatalogPage() {
     setPendingListingActionState(next);
   }
 
-  async function replaceSelection(action: DropshipVendorSelectionAction, rows: readonly DropshipCatalogRow[], actionKey: string) {
-    if (!selectionRulesQuery.data) {
-      setError("Selection rules are still loading.");
-      return;
-    }
-    if (rows.length === 0) {
-      return;
-    }
-    setPendingSelectionAction(actionKey);
-    setError("");
-    setMessage("");
-    try {
-      await putJson<DropshipSelectionRulesReplaceResponse>("/api/dropship/catalog/selection-rules", {
-        idempotencyKey: createDropshipIdempotencyKey(`catalog-${action}`),
-        rules: buildVariantSelectionReplacement({
-          existingRules: selectionRulesQuery.data.rules,
-          rows,
-          action,
-        }),
-      });
-      await Promise.all([
-        catalogQuery.refetch(),
-        selectedCatalogQuery.refetch(),
-        selectionRulesQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: [...ONBOARDING_QUERY_KEY] }),
-      ]);
-      setMessage(action === "include" ? "Catalog selection added." : "Catalog selection removed.");
-      invalidateListingPreview();
-      refreshListingSettings();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Catalog selection update failed.");
-    } finally {
-      setPendingSelectionAction(null);
-    }
+  /**
+   * After step 1's save went through: the saved count, the rules (the rail tick) and onboarding are read again, and
+   * step 3's preview and the rail's Listing settings line are marked stale. Step 1 reloads its own list.
+   */
+  async function afterSelectionSaved() {
+    await Promise.allSettled([
+      selectedCatalogQuery.refetch(),
+      selectionRulesQuery.refetch(),
+      queryClient.invalidateQueries({ queryKey: [...ONBOARDING_QUERY_KEY] }),
+    ]);
+    invalidateListingPreview();
+    refreshListingSettings();
   }
+
+  /**
+   * Step 1's changes are all gone (Undo, "Discard and leave", or a reload that showed them saved) while a save that may
+   * have gone through is held: read the rules before forgetting it (review MC1). If it went through, or the rules moved
+   * some other way since it was built (verify V2), everything is read again and the vendor is told; if the rules can't
+   * be read, they are told to reload. Unchanged rules: it never went through, nothing to say.
+   */
+  useEffect(() => {
+    if (chooseChanges.marks.length > 0) {
+      setChooseNotice(null);
+      return;
+    }
+    const pending = choosePendingRef.current;
+    choosePendingRef.current = null;
+    if (!pending?.mayHaveCommitted) return;
+    // Deliberate fire-and-forget: checkChoosePending never rejects (a failed read is its "unreadable" answer), the
+    // reads after it are allSettled, and its outcome is shown as a notice.
+    void (async () => {
+      const found = await checkChoosePending(freshSelectionRulesReader(queryClient), pending);
+      if (found === "wentThrough" || found === "moved") {
+        // Step 1's lists were read under the old rules: a list not on screen is dropped (read afresh when shown), the
+        // one on screen is read again.
+        queryClient.removeQueries({ queryKey: [...CHOOSE_CATALOG_QUERY_KEY], type: "inactive" });
+        await Promise.allSettled([queryClient.invalidateQueries({ queryKey: [...CHOOSE_CATALOG_QUERY_KEY] }), afterSelectionSaved()]);
+        setChooseNotice(found === "wentThrough" ? CHOOSE_WORDS.undoneButSaved : CHOOSE_WORDS.pendingMoved);
+      } else if (found === "unreadable") {
+        setChooseNotice(CHOOSE_WORDS.undoneUnknown);
+      }
+    })();
+    // Runs when the count of changes moves; the closures it uses are this render's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chooseChanges.marks.length]);
+
+  const chooseSavingChange = useCallback((saving: boolean) => {
+    setChooseSaving(saving);
+    if (saving) setChooseNotice(null);
+  }, []);
 
   /** A saved change moves the summary the rail reads, so read it again. */
   function refreshListingSettings() {
@@ -524,7 +493,8 @@ function DropshipPortalCatalogPage() {
       setEmailCodeSent(false);
       setVerificationCode("");
       await Promise.all([
-        catalogQuery.refetch(),
+        // Marks step 1's list stale; it reads again when step 1 shows.
+        queryClient.invalidateQueries({ queryKey: [...CHOOSE_CATALOG_QUERY_KEY] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
       ]);
     });
@@ -580,27 +550,6 @@ function DropshipPortalCatalogPage() {
     // disconnected). Reload it so the card's notice and buttons match.
     if (notice) void queryClient.invalidateQueries({ queryKey: [...ONBOARDING_QUERY_KEY] });
     setListingError({ message: caught instanceof Error ? caught.message : fallback, notice });
-  }
-
-  function applyCatalogFilters() {
-    setApplied({
-      search: search.trim(),
-      selectedOnly,
-      category: categoryFilter,
-      productLineIds: productLineIdsFilter,
-      productId: productIdFilter,
-    });
-    invalidateListingPreview();
-  }
-
-  function resetCatalogFilters() {
-    setSearch("");
-    setSelectedOnly("false");
-    setCategoryFilter(ALL_FILTER_VALUE);
-    setProductLineIdsFilter(ALL_FILTER_VALUE);
-    setProductIdFilter(ALL_FILTER_VALUE);
-    setApplied(defaultCatalogFilters);
-    invalidateListingPreview();
   }
 
   function chooseStore(storeConnectionId: number) {
@@ -673,10 +622,10 @@ function DropshipPortalCatalogPage() {
               if (liveListingSetupQuery.data || liveListingSetupQuery.isError) void liveListingSetupQuery.refetch();
             } } }
             : {}}
-          leaveScopes={{ setup: toSetupScope }}
+          leaveScopes={{ setup: toSetupScope, choose: toChooseScope }}
           storeOptions={storeOptions}
           selectedStoreConnectionId={storeReady ? selectedStoreConnectionIdNumber : null}
-          onStoreChange={(storeConnectionId) => leaveGuard(() => chooseStore(storeConnectionId))}
+          onStoreChange={(storeConnectionId) => leaveGuard(() => chooseStore(storeConnectionId), toStoreScope)}
           // Another store drops the Listing settings draft, so a save in flight would never show its answer: the store waits for it.
           storeDisabled={pendingPriceSaves > 0}
         />
@@ -701,19 +650,21 @@ function DropshipPortalCatalogPage() {
             queuedMessage="The saved listing workflow is loading. Provider completion is not yet confirmed." />}
         </div>}
 
-        {error && (
-          <Alert variant="destructive" className="mt-5">
-            <AlertCircle className="h-4 w-4" />
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
         {message && (
           <Alert className="mt-5 border-emerald-200 bg-emerald-50 text-emerald-900">
             <CheckCircle2 className="h-4 w-4" />
             <AlertDescription>{message}</AlertDescription>
           </Alert>
         )}
-        {selectionRulesQuery.error && (
+        {chooseNotice && activeStep !== "choose" && (
+          <Alert className="mt-5" data-testid="catalog-choose-notice">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{chooseNotice}</AlertDescription>
+          </Alert>
+        )}
+        {/* Step 1 shows its own card for this read (ChooseStep), and a failed re-read keeps its rules on screen, so the
+            page says it only off step 1 and only with nothing to show: one cause, one message (verify V4). */}
+        {activeStep !== "choose" && selectionRulesQuery.isError && selectionRulesQuery.data === undefined && (
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
@@ -737,87 +688,21 @@ function DropshipPortalCatalogPage() {
             </AlertDescription>
           </Alert>
         )}
-        {catalogQuery.error && (
-          <Alert variant="destructive" className="mt-5">
-            <AlertCircle className="h-4 w-4" />
-            <AlertDescription>
-              {queryErrorMessage(catalogQuery.error, "Unable to load dropship catalog.")}
-            </AlertDescription>
-          </Alert>
-        )}
 
         {activeStep === "choose" && (
           <>
             <CatalogStepIntro step="choose" detail="Selection applies to all your stores." />
-            <CatalogFilterPanel
-              category={categoryFilter}
-              categoryOptions={catalogFacets.categories}
-              disabled={catalogQuery.isFetching}
-              hasActiveFilters={hasActiveFilters}
-              productId={productIdFilter}
-              productLineIds={productLineIdsFilter}
-              productLineOptions={catalogFacets.productLines}
-              productOptions={catalogFacets.products}
-              search={search}
-              selectedOnly={selectedOnly}
-              onApply={applyCatalogFilters}
-              onCategoryChange={setCategoryFilter}
-              onProductChange={setProductIdFilter}
-              onProductLineChange={setProductLineIdsFilter}
-              onReset={resetCatalogFilters}
-              onSearchChange={setSearch}
-              onSelectedOnlyChange={setSelectedOnly}
+            <ChooseStep
+              selectedCount={selectedCount}
+              changes={chooseChanges}
+              onChanges={dispatchChooseChanges}
+              pendingRef={choosePendingRef}
+              notice={chooseNotice}
+              next={nextAction}
+              summary={actionBar.summary}
+              onSaved={afterSelectionSaved}
+              onSavingChange={chooseSavingChange}
             />
-
-            <section className="mt-5 overflow-hidden rounded-md border border-zinc-200 bg-white">
-              <div className="flex flex-col gap-3 border-b border-zinc-200 p-4 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <h2 className="text-lg font-semibold">Available catalog</h2>
-                  <p className="mt-1 text-sm text-zinc-500">
-                    Choose the variants you want to sell. Catalog selection does not require verification.
-                  </p>
-                </div>
-                <Badge variant="outline" className="w-fit border-violet-200 bg-violet-50 text-violet-800">
-                  {selectedCatalogQuery.isLoading ? "Loading selection" : `${selectedCatalogRows.length} selected`}
-                </Badge>
-              </div>
-              {catalogQuery.isLoading ? (
-                <div className="space-y-2 p-4">
-                  <Skeleton className="h-12 w-full" />
-                  <Skeleton className="h-12 w-full" />
-                  <Skeleton className="h-12 w-full" />
-                </div>
-              ) : catalogQuery.error ? (
-                <Empty className="p-8">
-                  <EmptyMedia variant="icon"><AlertCircle /></EmptyMedia>
-                  <EmptyHeader>
-                    <EmptyTitle>Catalog unavailable</EmptyTitle>
-                    <EmptyDescription>The catalog API request failed.</EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              ) : catalogQuery.data?.rows.length ? (
-                <CatalogTable
-                  bulkSelectionDisabled={selectionRulesQuery.isLoading || pendingSelectionAction !== null}
-                  pendingSelectionAction={pendingSelectionAction}
-                  rows={catalogQuery.data.rows}
-                  selectableRowCount={visibleSelectableRows.length}
-                  selectedRowCount={visibleSelectedRows.length}
-                  total={catalogQuery.data.total}
-                  onBulkDeselect={() => replaceSelection("exclude", visibleSelectedRows, "bulk:exclude")}
-                  onBulkSelect={() => replaceSelection("include", visibleSelectableRows, "bulk:include")}
-                  onDeselectRow={(row) => replaceSelection("exclude", [row], `variant:${row.productVariantId}:exclude`)}
-                  onSelectRow={(row) => replaceSelection("include", [row], `variant:${row.productVariantId}:include`)}
-                />
-              ) : (
-                <Empty className="p-8">
-                  <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
-                  <EmptyHeader>
-                    <EmptyTitle>No catalog rows</EmptyTitle>
-                    <EmptyDescription>No exposed catalog rows match the current filters.</EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              )}
-            </section>
           </>
         )}
 
@@ -879,9 +764,10 @@ function DropshipPortalCatalogPage() {
           </>
         )}
 
+        {/* Step 1 draws its own bar, with its unsaved changes and Save (ChooseStep). */}
         {activeStep === "setup" && storeReady
           ? <ListingSettingsActionBar next={nextAction} saving={pendingPriceSaves > 0} />
-          : <CatalogActionBar summary={actionBar.summary} next={nextAction} />}
+          : activeStep === "choose" ? null : <CatalogActionBar summary={actionBar.summary} next={nextAction} />}
       </div>
     </DropshipPortalShell>
   );
@@ -899,174 +785,6 @@ function CatalogStepIntro({ detail, step }: { step: CatalogStep; detail: string 
         Step {CATALOG_STEPS.indexOf(step) + 1} · {CATALOG_STEP_LABELS[step]}
       </h2>
       {detail && <p className="mt-1 text-sm text-zinc-500">{detail}</p>}
-    </div>
-  );
-}
-
-function CatalogFilterPanel({
-  category,
-  categoryOptions,
-  disabled,
-  hasActiveFilters,
-  onApply,
-  onCategoryChange,
-  onProductChange,
-  onProductLineChange,
-  onReset,
-  onSearchChange,
-  onSelectedOnlyChange,
-  productId,
-  productLineIds,
-  productLineOptions,
-  productOptions,
-  search,
-  selectedOnly,
-}: {
-  category: string;
-  categoryOptions: DropshipCatalogResponse["facets"]["categories"];
-  disabled: boolean;
-  hasActiveFilters: boolean;
-  onApply: () => void;
-  onCategoryChange: (value: string) => void;
-  onProductChange: (value: string) => void;
-  onProductLineChange: (value: string) => void;
-  onReset: () => void;
-  onSearchChange: (value: string) => void;
-  onSelectedOnlyChange: (value: string) => void;
-  productId: string;
-  productLineIds: string;
-  productLineOptions: DropshipCatalogResponse["facets"]["productLines"];
-  productOptions: DropshipCatalogResponse["facets"]["products"];
-  search: string;
-  selectedOnly: string;
-}) {
-  return (
-    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">Catalog filters</h2>
-          <p className="mt-1 text-sm text-zinc-500">
-            Narrow the table without changing what is selected.
-          </p>
-        </div>
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Button
-            type="button"
-            variant="outline"
-            className="h-10"
-            disabled={disabled || !hasActiveFilters}
-            onClick={onReset}
-          >
-            Reset
-          </Button>
-          <Button
-            type="button"
-            className="h-10 bg-[#C060E0] hover:bg-[#a94bc9]"
-            disabled={disabled}
-            onClick={onApply}
-          >
-            Apply filters
-          </Button>
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <div className="xl:col-span-2">
-          <Label>Search</Label>
-          <div className="relative mt-2">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
-            <Input
-              value={search}
-              onChange={(event) => onSearchChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  onApply();
-                }
-              }}
-              className="pl-9"
-              placeholder="Product, variant, or SKU"
-            />
-          </div>
-        </div>
-
-        <FilterSelect
-          label="Selection"
-          value={selectedOnly}
-          onValueChange={onSelectedOnlyChange}
-          options={[
-            { value: "false", label: "All exposed" },
-            { value: "true", label: "Selected only" },
-          ]}
-        />
-        <FilterSelect
-          label="Category"
-          value={category}
-          onValueChange={onCategoryChange}
-          options={[
-            { value: ALL_FILTER_VALUE, label: "All categories" },
-            ...categoryOptions.map((option) => ({
-              value: option.category,
-              label: `${formatStatus(option.label)} (${option.rowCount})`,
-            })),
-          ]}
-        />
-        <FilterSelect
-          label="Product line"
-          value={productLineIds}
-          onValueChange={onProductLineChange}
-          options={[
-            { value: ALL_FILTER_VALUE, label: "All product lines" },
-            ...productLineOptions.map((option) => ({
-              value: option.productLineIds.join(","),
-              label: `${option.label} (${option.rowCount})`,
-            })),
-          ]}
-        />
-        <div className="xl:col-span-2">
-          <FilterSelect
-            label="Product"
-            value={productId}
-            onValueChange={onProductChange}
-            options={[
-              { value: ALL_FILTER_VALUE, label: "All products" },
-              ...productOptions.map((option) => ({
-                value: String(option.productId),
-                label: `${option.label}${option.sku ? ` (${option.sku})` : ""}`,
-              })),
-            ]}
-          />
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function FilterSelect({
-  label,
-  onValueChange,
-  options,
-  value,
-}: {
-  label: string;
-  onValueChange: (value: string) => void;
-  options: Array<{ value: string; label: string }>;
-  value: string;
-}) {
-  return (
-    <div>
-      <Label>{label}</Label>
-      <Select value={value} onValueChange={onValueChange}>
-        <SelectTrigger className="mt-2 h-10">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((option) => (
-            <SelectItem key={option.value} value={option.value}>
-              {option.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
     </div>
   );
 }
@@ -1321,144 +1039,6 @@ function ListingPushOutcomeNotice({ jobId, queuedMessage, storeName }: { jobId: 
   );
 }
 
-function CatalogTable({
-  bulkSelectionDisabled,
-  onBulkDeselect,
-  onBulkSelect,
-  onDeselectRow,
-  onSelectRow,
-  pendingSelectionAction,
-  rows,
-  selectableRowCount,
-  selectedRowCount,
-  total,
-}: {
-  bulkSelectionDisabled: boolean;
-  onBulkDeselect: () => void;
-  onBulkSelect: () => void;
-  onDeselectRow: (row: DropshipCatalogRow) => void;
-  onSelectRow: (row: DropshipCatalogRow) => void;
-  pendingSelectionAction: PendingSelectionAction;
-  rows: DropshipCatalogRow[];
-  selectableRowCount: number;
-  selectedRowCount: number;
-  total: number;
-}) {
-  return (
-    <>
-      <div className="flex flex-col gap-3 border-b border-zinc-200 px-4 py-3 text-sm text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
-        <span>{total} row{total === 1 ? "" : "s"}</span>
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-9 gap-2"
-            disabled={bulkSelectionDisabled || selectableRowCount === 0}
-            onClick={onBulkSelect}
-          >
-            <PlusCircle className="h-4 w-4" />
-            Select visible
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-9 gap-2"
-            disabled={bulkSelectionDisabled || selectedRowCount === 0}
-            onClick={onBulkDeselect}
-          >
-            <MinusCircle className="h-4 w-4" />
-            Remove visible
-          </Button>
-        </div>
-      </div>
-      <div className="overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Product</TableHead>
-              <TableHead>Variant</TableHead>
-              <TableHead>Category</TableHead>
-              <TableHead>Quantity</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Action</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.productVariantId}>
-                <TableCell>
-                  <div className="font-medium">{row.productName}</div>
-                  <div className="text-xs text-zinc-500">{row.productSku || "No product SKU"}</div>
-                </TableCell>
-                <TableCell>
-                  <div className="font-medium">{row.variantName}</div>
-                  <div className="text-xs text-zinc-500">{row.variantSku || `Variant ${row.productVariantId}`}</div>
-                </TableCell>
-                <TableCell>
-                  <div>{row.category ? formatStatus(row.category) : "Uncategorized"}</div>
-                  {row.productLineNames.length > 0 && (
-                    <div className="text-xs text-zinc-500">{row.productLineNames.join(", ")}</div>
-                  )}
-                </TableCell>
-                <TableCell className="font-mono">{row.selectionDecision.marketplaceQuantity}</TableCell>
-                <TableCell>
-                  <Badge
-                    variant="outline"
-                    className={row.selectionDecision.selected
-                      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                      : "border-zinc-200 bg-zinc-50 text-zinc-600"}
-                  >
-                    {row.selectionDecision.selected ? "Selected" : formatStatus(row.selectionDecision.reason)}
-                  </Badge>
-                  {row.selectionDecision.selected && row.listingTier && !row.listingTier.eligible && (
-                    <Badge
-                      variant="outline"
-                      className="ml-1 border-amber-200 bg-amber-50 text-amber-900"
-                      data-testid={`catalog-tier-off-sale-${row.productVariantId}`}
-                      title={describeCatalogListingTier(row.listingTier)}
-                    >
-                      {row.listingTier.tier === "case" ? "Case tier not active" : "Pack tier not active"}
-                    </Badge>
-                  )}
-                </TableCell>
-                <TableCell className="text-right">
-                  {row.selectionDecision.selected ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-9 gap-2"
-                      disabled={pendingSelectionAction !== null}
-                      onClick={() => onDeselectRow(row)}
-                    >
-                      <MinusCircle className="h-4 w-4" />
-                      Remove
-                    </Button>
-                  ) : (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-9 gap-2"
-                      disabled={pendingSelectionAction !== null || !canSelectRow(row)}
-                      onClick={() => onSelectRow(row)}
-                    >
-                      <PlusCircle className="h-4 w-4" />
-                      Select
-                    </Button>
-                  )}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </>
-  );
-}
-
 /**
  * What the account needs before listings can be previewed or pushed, with the
  * one link that fixes it. `notice` reads as guidance; `error` follows a request
@@ -1532,31 +1112,4 @@ function pushButtonIcon(pendingListingAction: PendingListingAction, emailCodeSen
   if (pendingListingAction === "send-code" || (emailCodeSent && pendingListingAction !== "push")) return <Mail className="h-4 w-4" />;
   if (pendingListingAction === "push") return <Send className="h-4 w-4" />;
   return <ArrowRight className="h-4 w-4" />;
-}
-
-/**
- * Why a selected SKU's tier is not active, in the vendor's words: what the
- * tier needs and what to change, from the server's reason. The amount is the
- * published one, the same the wallet shows.
- */
-export function describeCatalogListingTier(tier: DropshipCatalogListingTier): string {
-  const name = tier.tier === "case" ? "Case tier" : "Pack tier";
-  const amount = formatCatalogDollars(tier.policyMinimumCents);
-  if (tier.reason === "autopay_off") {
-    return `The ${name} is not active: autopay is off, so your wallet has no reserve. Turn on autopay with a reserve of at least ${amount} in Wallet.`;
-  }
-  if (tier.reason === "reserve_below_tier") {
-    return `The ${name} is not active: it needs a reserve of ${amount}. Raise your reserve in Wallet.`;
-  }
-  return `The ${name} is not active: your balance needs to reach ${amount}. You need ${formatCatalogDollars(tier.balanceShortfallCents)} more.`;
-}
-
-/** Whole dollars when there are no cents ($500), else both cent digits ($10.50, never $10.5). Display only. */
-function formatCatalogDollars(centsValue: number): string {
-  const fractionDigits = centsValue % 100 === 0 ? 0 : 2;
-  return `$${(centsValue / 100).toLocaleString("en-US", { minimumFractionDigits: fractionDigits, maximumFractionDigits: 2 })}`;
-}
-
-function canSelectRow(row: DropshipCatalogRow): boolean {
-  return !row.selectionDecision.selected && row.selectionDecision.reason !== "not_exposed_by_admin";
 }

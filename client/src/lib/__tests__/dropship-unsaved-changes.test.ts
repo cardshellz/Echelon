@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  anyDraftSaving,
   describeLeavePrompt,
   describeUnsavedDrafts,
+  LEAVE_WHILE_SAVING_WORDS,
   scopeUnsavedDrafts,
   scopeWithoutPrefix,
   updateUnsavedDrafts,
@@ -98,5 +100,30 @@ describe("unsaved changes that count themselves (the new Listing settings step)"
     const lookalike: UnsavedDraft = { id: "older:listing-settings:22", label: "Older" };
     expect(scopeWithoutPrefix([lookalike], "listing-settings:")).toEqual([lookalike.id]);
     expect(drafts).toEqual([step, pricing, categories]);
+  });
+});
+
+describe("a draft whose save is running (catalog step 1 stage 1, review MC6)", () => {
+  const discard = () => undefined;
+  const choose: UnsavedDraft = { id: "catalog-choose", label: "Choose what to sell", changes: 2, discard };
+
+  it("replaces the entry when the save starts or ends, and keeps it while nothing changes", () => {
+    const idle = updateUnsavedDrafts([], choose.id, choose);
+    const saving = updateUnsavedDrafts(idle, choose.id, { ...choose, saving: true });
+    expect(saving).not.toBe(idle);
+    expect(saving[0].saving).toBe(true);
+    expect(updateUnsavedDrafts(saving, choose.id, { ...choose, saving: true, discard: () => undefined })).toBe(saving);
+    expect(updateUnsavedDrafts(saving, choose.id, choose)).not.toBe(saving);
+  });
+
+  it("says a save is running when any asked draft is saving, so leaving can't offer to discard it", () => {
+    expect(anyDraftSaving([])).toBe(false);
+    expect(anyDraftSaving([choose, pricing])).toBe(false);
+    expect(anyDraftSaving([pricing, { ...choose, saving: true }])).toBe(true);
+    expect(LEAVE_WHILE_SAVING_WORDS).toEqual({
+      title: "Your changes are still saving",
+      text: "Wait for the save to finish, then leave. Leaving now can't stop it.",
+      stay: "OK",
+    });
   });
 });

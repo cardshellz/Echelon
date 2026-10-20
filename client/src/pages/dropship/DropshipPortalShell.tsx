@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
 import { isOnboardingVendor } from "@/lib/dropship-onboarding";
 import { fetchJson, type DropshipOnboardingState } from "@/lib/dropship-ops-surface";
+import { useLeaveGuard } from "./catalog/UnsavedChangesGuard";
 
 const ONBOARDING_QUERY_KEY = ["/api/dropship/onboarding/state"] as const;
 const ONBOARDING_NAV_HREF = "/onboarding";
@@ -38,6 +39,9 @@ export function DropshipPortalShell({ children }: { children: React.ReactNode })
   const [location, setLocation] = useLocation();
   const { principal, logout } = useDropshipAuth();
   const [loggingOut, setLoggingOut] = useState(false);
+  // Leaving through the menu or signing out asks first while a page holds unsaved changes (the Catalog page's
+  // step 1 and Listing settings; review DUX2). Outside such a page it leaves at once.
+  const leaveGuard = useLeaveGuard();
   // The same query every portal page runs, so it is served from the cache.
   const onboardingQuery = useQuery<DropshipOnboardingState>({
     queryKey: [...ONBOARDING_QUERY_KEY],
@@ -73,7 +77,7 @@ export function DropshipPortalShell({ children }: { children: React.ReactNode })
               <div className="text-xs text-zinc-500">Dropship portal</div>
             </div>
           </div>
-          <Button variant="outline" size="sm" className="gap-2" disabled={loggingOut} onClick={signOut}>
+          <Button variant="outline" size="sm" className="gap-2" disabled={loggingOut} onClick={() => leaveGuard(() => { void signOut(); })}>
             <LogOut className="h-4 w-4" />
             Sign out
           </Button>
@@ -94,7 +98,8 @@ export function DropshipPortalShell({ children }: { children: React.ReactNode })
                 className={active
                   ? "h-9 shrink-0 gap-2 border-[#C060E0]/30 bg-[#C060E0]/10 text-[#8c35aa] hover:bg-[#C060E0]/15"
                   : "h-9 shrink-0 gap-2"}
-                onClick={() => setLocation(href)}
+                // The page's own item keeps the page (and its unsaved changes) mounted, so it needs no question.
+                onClick={() => (active ? setLocation(href) : leaveGuard(() => setLocation(href)))}
               >
                 {item.icon}
                 {item.label}

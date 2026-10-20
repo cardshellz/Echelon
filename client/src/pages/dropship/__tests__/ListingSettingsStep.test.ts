@@ -268,7 +268,11 @@ describe("Catalog page wiring of the Listing settings step", () => {
   it("holds the step's draft at page level, unkeyed, and gives Listing settings its own bar", () => {
     expect(source).toContain("return <ListingSettingsDraftsProvider storeConnectionId={selectedStoreConnectionIdNumber}>{page}</ListingSettingsDraftsProvider>;");
     expect(source).not.toMatch(/<ListingSettingsDraftsProvider\s+key=/);
-    expect(source).toContain('{activeStep === "setup" && storeReady\n          ? <ListingSettingsActionBar next={nextAction} saving={pendingPriceSaves > 0} />\n          : <CatalogActionBar summary={actionBar.summary} next={nextAction} />}');
+    // Step 1 stage 1: step 1 draws its own bar (ChooseStep, with its changes and Save); Listing settings keeps its own,
+    // and Publish keeps the page's.
+    expect(source).toContain('{activeStep === "setup" && storeReady\n          ? <ListingSettingsActionBar next={nextAction} saving={pendingPriceSaves > 0} />\n          : activeStep === "choose" ? null : <CatalogActionBar summary={actionBar.summary} next={nextAction} />}');
+    const choose = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/ChooseStep.tsx"), "utf8");
+    expect(choose).toContain("<CatalogActionBar summary={summary} next={next}>");
     expect(source).toContain("const guardDrafts = useUnsavedDrafts();");
     // No older panel's draft to count any more (D7).
     expect(source).not.toContain("olderUnsaved");
