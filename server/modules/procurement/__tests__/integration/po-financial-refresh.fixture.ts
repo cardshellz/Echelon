@@ -99,7 +99,8 @@ export class PoFinancialRefreshFixture {
   async snapshot(): Promise<Record<string, unknown[]>> {
     const result: Record<string, unknown[]> = {};
     for (const table of [...TABLES, schema.auditEvents]) {
-      result[qualifiedTable(table)] = (await this.pool.query(`SELECT * FROM ${qualifiedTable(table)} ORDER BY id`)).rows;
+      result[qualifiedTable(table)] = (await this.pool.query(`SELECT * FROM ${qualifiedTable(table)} ORDER BY ${
+        table === schema.supplierReturnFollowups ? "supplier_return_id,product_variant_id" : "id"}`)).rows;
     }
     return result;
   }

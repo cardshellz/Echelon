@@ -77,7 +77,8 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
 
   async function state() {
     const results = await Promise.all([
-      ...TABLES.map((table) => pool.query(`SELECT * FROM ${qualifiedTable(table)} ORDER BY id`)),
+      ...TABLES.map((table) => pool.query(`SELECT * FROM ${qualifiedTable(table)} ORDER BY ${
+        table === schema.supplierReturnFollowups ? "supplier_return_id,product_variant_id" : "id"}`)),
       pool.query("SELECT * FROM public.audit_events WHERE actor = ANY($1::text[]) ORDER BY id", [[actorId, delegateId]]),
     ]);
     return results.map((result) => result.rows);

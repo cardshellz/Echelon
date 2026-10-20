@@ -208,23 +208,82 @@ export function registerSupplierReturnStockCases(fixture: SupplierReturnStockFix
     expect((await query("SELECT count(*)::int AS count FROM inventory.supplier_return_followups")).rows[0].count).toBe(0);
   });
 
-  it("supplier return evidence rejects a physical movement whose recorded value or receipt identity conflicts", async () => {
+  for (const concurrent of [false, true]) it(`supplier return rejects a new source line ${concurrent ? "racing the original commit" : "after its immutable report"}`, async () => {
+    await fixture.receive();
+    const originalLot = await rootLot();
+    await query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'SEALED-RETURN')");
+    await fixture.inventory().transfer({ productVariantId: 200, fromLocationId: 99, toLocationId: 100, qty: 1,
+      userId: fixture.actorId, commandKey: randomUUID() });
+    const otherLot = Number((await query("SELECT id FROM inventory.inventory_lots WHERE warehouse_location_id=100")).rows[0].id);
+    const otherSource = (await preview(otherLot)).lines[0];
+    const originalPreview = await preview(originalLot);
+    const input = { raw: { vendorId: 5, lines: [{ inventoryLotId: originalLot, quantity: 1 }],
+      expectedSourceFingerprint: originalPreview.sourceFingerprint, returnCalendarDate: "2026-09-06",
+      evidenceReference: "Sealed collection receipt", reason: "Supplier collected reviewed original source" },
+      actorId: fixture.actorId, at: fixture.at, commandKey: randomUUID(), requestFingerprint: "f".repeat(64) };
+    type Created = { document: Awaited<ReturnType<typeof recordSupplierReturn>>; backendPid: number };
+    let releaseCreation!: () => void;
+    const hold = new Promise<void>(resolve => { releaseCreation = resolve; });
+    let announce!: (created: Created) => void;
+    const announced = new Promise<Created>(resolve => { announce = resolve; });
+    const creation = fixture.database().transaction(async tx => {
+      const document = await recordSupplierReturn(tx, input);
+      const backendPid = Number((await tx.execute(sql`SELECT pg_backend_pid() AS id`)).rows[0].id);
+      const created = { document, backendPid };
+      announce(created);
+      if (concurrent) await hold;
+      return created;
+    });
+    const appender = await fixture.pool().connect();
+    let append: Promise<unknown> | undefined;
+    try {
+      // Race the signal with completion so a failed setup cannot strand this test.
+      const created = concurrent ? await Promise.race([announced, creation]) : await creation;
+      const appendPid = Number((await appender.query("SELECT pg_backend_pid() AS id")).rows[0].id);
+      const source = otherSource, origin = source.sourceProof.origin;
+      append = appender.query(`INSERT INTO procurement.supplier_return_lines
+        (supplier_return_id,inventory_lot_id,inventory_level_id,warehouse_location_id,warehouse_id,product_id,product_variant_id,
+         purchase_order_id,purchase_order_line_id,receiving_order_id,receiving_line_id,origin_lot_id,quantity,units_per_variant,base_pieces,source_snapshot)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)`,
+        [created.document.id, source.inventoryLotId, source.inventoryLevelId, source.warehouseLocationId, source.warehouseId,
+          source.productId, source.productVariantId, origin.purchaseOrderId, origin.purchaseOrderLineId, origin.receivingOrderId,
+          origin.receivingLineId, origin.inventoryLotId, source.quantity, source.unitsPerVariant, source.basePieces, JSON.stringify(source)])
+        .then(() => ({ accepted: true }), error => ({ accepted: false, error }));
+      if (concurrent) {
+        let blocked = false;
+        for (let attempt = 0; attempt < 60 && !blocked; attempt++) {
+          blocked = (await query("SELECT $1::integer=ANY(pg_blocking_pids($2::integer)) AS blocked", [created.backendPid, appendPid])).rows[0].blocked;
+          if (!blocked) await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        expect(blocked, "The append must wait for the creator's graph transaction before checking the immutable report").toBe(true);
+        releaseCreation();
+        await creation;
+      }
+      const before = await evidence();
+      expect(await append).toMatchObject({ accepted: false, error: { code: "23514",
+        message: "A reported supplier collection cannot acquire additional source lines" } });
+      expect((await query("SELECT count(*)::int AS count FROM procurement.supplier_return_lines WHERE supplier_return_id=$1", [created.document.id])).rows[0].count).toBe(1);
+      expect(await createSupplierReturnReader(fixture.database()).detail(created.document.id, fixture.actorId)).toEqual(created.document);
+      expect(await evidence()).toEqual(before);
+    } finally {
+      releaseCreation();
+      await Promise.allSettled([creation, ...(append ? [append] : [])]);
+      appender.release();
+    }
+  });
+
+  it("supplier return physical value and receipt identity are immutable and canonical evidence remains unchanged", async () => {
     await fixture.receive();
     const saved = await record(await rootLot());
     const movementId = saved.document.inventoryReceipt.lines[0].inventoryTransactionId;
-    const original = (await query("SELECT total_cost_mills,receiving_line_id FROM inventory.inventory_transactions WHERE id=$1", [movementId])).rows[0];
     for (const change of [
       "total_cost_mills=total_cost_mills+1",
       "receiving_line_id=NULL",
     ]) {
-      try {
-        await query(`UPDATE inventory.inventory_transactions SET ${change} WHERE id=$1`, [movementId]);
-        await expect(fixture.database().transaction(tx => readSupplierReturnInventoryEvidence(tx, saved.document.id)))
-          .rejects.toThrow("Retained supplier return source, quantity and physical movement evidence conflict.");
-      } finally {
-        await query("UPDATE inventory.inventory_transactions SET total_cost_mills=$1,receiving_line_id=$2 WHERE id=$3",
-          [original.total_cost_mills, original.receiving_line_id, movementId]);
-      }
+      await expect(query(`UPDATE inventory.inventory_transactions SET ${change} WHERE id=$1`, [movementId]))
+        .rejects.toThrow("Recorded supplier return stock transaction is immutable");
+      expect((await fixture.database().transaction(tx => readSupplierReturnInventoryEvidence(tx, saved.document.id))).receipt)
+        .toEqual(saved.document.inventoryReceipt);
     }
     expect((await fixture.database().transaction(tx => readSupplierReturnInventoryEvidence(tx, saved.document.id))).receipt)
       .toEqual(saved.document.inventoryReceipt);

@@ -11,6 +11,23 @@ function setup() { const values = new Map<string, string>(); const memory = { ge
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 afterEach(() => vi.unstubAllGlobals());
 describe("accepted-stock return command evidence", () => {
+  it("accepts a physical return reason at the quantity owner's 1000-character boundary", async () => {
+    const { client, store } = setup();
+    const payload = { ...returnRequest(), reason: "R".repeat(1000) };
+    const fetch = vi.fn(async () => json(returnResult(payload)));
+    vi.stubGlobal("fetch", fetch);
+    await client.execute({ command: "record", payload, reviewed: returnPreview() });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(store.read()).toBeNull();
+  });
+  it("rejects a physical return reason over 1000 characters before persistence or dispatch", async () => {
+    const { client, store } = setup();
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    await expect(client.execute({ command: "record", payload: { ...returnRequest(), reason: "R".repeat(1001) }, reviewed: returnPreview() })).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(store.read()).toBeNull();
+  });
   it("confirms exact frozen quantity, value and stock receipt without a new credit", async () => { const { client, store } = setup(); const fetch = vi.fn(async () => json(returnResult())); vi.stubGlobal("fetch", fetch); await client.execute(intent()); expect(store.read()).toBeNull(); expect(fetch).toHaveBeenCalledOnce(); expect(fetch.mock.calls[0]).toHaveLength(2); });
   it("recovers the same request after lost response, reload and expired session", async () => {
     const { memory, client, store } = setup(); const requests: RequestInit[] = [];

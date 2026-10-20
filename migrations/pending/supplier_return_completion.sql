@@ -129,6 +129,11 @@ CREATE OR REPLACE FUNCTION procurement.guard_supplier_return_line() RETURNS trig
 DECLARE header procurement.supplier_returns%ROWTYPE; snapshot jsonb; origin jsonb;
 BEGIN
  SELECT * INTO STRICT header FROM procurement.supplier_returns WHERE id=NEW.supplier_return_id;
+ -- The immutable report seals the collection. Both inserts take the graph
+ -- statement lock, so a concurrent append rechecks after the creator commits.
+ -- All original lines are inserted before the report in the owner transaction.
+ IF EXISTS(SELECT 1 FROM procurement.supplier_return_reporting_events WHERE supplier_return_id=NEW.supplier_return_id)
+ THEN RAISE EXCEPTION 'A reported supplier collection cannot acquire additional source lines' USING ERRCODE='23514'; END IF;
  snapshot:=NEW.source_snapshot; origin:=snapshot->'sourceProof'->'origin';
  IF snapshot->'inventoryLotId' IS DISTINCT FROM to_jsonb(NEW.inventory_lot_id)
  OR snapshot->'inventoryLevelId' IS DISTINCT FROM to_jsonb(NEW.inventory_level_id)

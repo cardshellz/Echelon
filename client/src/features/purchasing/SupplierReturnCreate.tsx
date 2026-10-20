@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery, type InfiniteData } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { supplierReturnOptionsSchema, supplierReturnPreviewInputSchema, supplierReturnRecordInputSchema, type SupplierReturnStockPreview, type SupplierReturnStockOptions } from "@shared/procurement/supplier-return";
+import { SUPPLIER_RETURN_MAX_REASON_LENGTH, supplierReturnOptionsSchema, supplierReturnPreviewInputSchema, supplierReturnRecordInputSchema, type SupplierReturnStockPreview, type SupplierReturnStockOptions } from "@shared/procurement/supplier-return";
 
 import { apVendorOptionsQuery } from "./ap-work-list-query";
 import { supplierReturnQuantity, supplierReturnUnits, supplierReturnMaximumPieces, type SupplierReturnOption } from "@/lib/supplier-return-quantity";
@@ -109,7 +109,7 @@ export function SupplierReturnCreate({ commands, initialVendorId, purchaseOrderI
       {reviewed.costProvisional && <p className="text-sm rounded border border-amber-400 p-3">This value includes provisional costs. Later verified cost updates remain in the return value history; this does not establish the supplier's credit amount.</p>}
       <fieldset disabled={blocked} className="space-y-3"><div className="grid sm:grid-cols-2 gap-3"><div><Label htmlFor="return-date">Collection date</Label><Input id="return-date" type="date" value={date} onChange={event => { setDate(event.target.value); setConfirmed(false); }} /></div><div><Label htmlFor="return-reference">Collection evidence reference</Label><Input id="return-reference" value={reference} maxLength={1000} onChange={event => { setReference(event.target.value); setConfirmed(false); }} /></div></div>
       <div><Label htmlFor="return-supplier-reference">Supplier return reference (optional)</Label><Input id="return-supplier-reference" value={supplierReference} maxLength={200} onChange={event => { setSupplierReference(event.target.value); setConfirmed(false); }} /></div>
-      <div><Label htmlFor="return-reason">Reason for return</Label><Textarea id="return-reason" value={reason} maxLength={2000} onChange={event => { setReason(event.target.value); setConfirmed(false); }} /></div>
+      <div><Label htmlFor="return-reason">Reason for return</Label><Textarea id="return-reason" value={reason} maxLength={SUPPLIER_RETURN_MAX_REASON_LENGTH} onChange={event => { setReason(event.target.value); setConfirmed(false); }} /></div>
       <label className="flex items-start gap-3 text-sm"><input type="checkbox" className="mt-1 size-5 shrink-0" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I verified the collected goods, source locations, quantities and value above.</label>
       <Button disabled={!confirmed || !reference.trim() || reason.trim().length < 3} onClick={() => void record()}>{commands.pending ? "Recording return…" : "Record collected supplier return"}</Button></fieldset>
     </section>}

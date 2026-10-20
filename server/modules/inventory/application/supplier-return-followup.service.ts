@@ -8,6 +8,13 @@ const RETRY_DELAY_MS = 30_000;
 const MAX_RETRY_DELAY_MS = 300_000;
 const MAX_ATTEMPT_COUNT = 2_147_483_647;
 
+function followupTimestamp(value: unknown): Date {
+  // Drizzle's raw PostgreSQL executor retains timestamptz text, while node-pg
+  // may return Date. Reject absent/malformed evidence instead of treating it as due.
+  if (!(value instanceof Date) && typeof value !== "string") throw new Error("Supplier return retry time is invalid.");
+  return z.date().parse(value instanceof Date ? value : new Date(value));
+}
+
 export function nextSupplierReturnFollowupAttempt(at: Date, previousAttempts: number): Date {
   z.date().parse(at);
   z.number().int().min(0).max(MAX_ATTEMPT_COUNT).parse(previousAttempts);
@@ -57,7 +64,7 @@ export class SupplierReturnFollowupService {
         const row = result.rows[0];
         if (row.completed_at !== null) return true;
         const at = z.date().parse(this.clock());
-        if (z.date().parse(row.next_attempt_at).getTime() > at.getTime()) return false;
+        if (followupTimestamp(row.next_attempt_at).getTime() > at.getTime()) return false;
         const previousAttempts = z.number().int().min(0).max(MAX_ATTEMPT_COUNT).parse(row.attempt_count);
         const attemptCount = Math.min(previousAttempts + 1, MAX_ATTEMPT_COUNT);
         try {
