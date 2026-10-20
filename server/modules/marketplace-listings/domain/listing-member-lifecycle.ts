@@ -27,7 +27,7 @@ export function archivedListingMemberSelection(input: {
   if (!input.archived) return null;
   const retirement = input.retirement;
   return {
-    productVariantId: input.productVariantId, action: "none", blockers: [], catalogArchived: true,
+    productVariantId: input.productVariantId, action: "none", blockers: [], catalogArchived: true, listingSelected: false,
     reason: retirement?.state === "retired"
       ? "This archived variant's exact external listing was verified unpublished."
       : "This variant is archived. The listing lifecycle owns its external removal separately from active stock updates.",

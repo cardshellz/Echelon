@@ -40,8 +40,9 @@ export function resolveChannelStockSelection(facts: ChannelStockSelectionFacts):
     const product = facts.catalog.product;
     const known = facts.variants.find(variant => variant.productVariantId === productVariantId);
     const jobMember = facts.latestJob?.members.find(member => member.variantId === productVariantId);
+    let listingSelected: boolean | undefined;
     const blockers: StockPublicationSelection["variants"][number]["blockers"] = [];
-    const result = (action: StockPublicationSelection["variants"][number]["action"], reason: string) => ({ productVariantId, action, reason, blockers });
+    const result = (action: StockPublicationSelection["variants"][number]["action"], reason: string) => ({ productVariantId, action, reason, blockers, listingSelected });
     if (!catalog || !product) {
       blockers.push({ code: "CHANNEL_SELECTION_CATALOG_IDENTITY_MISSING", message: "This requested variant no longer belongs to the selected catalog product. Review its saved mapping before publishing stock." });
       return result("none", "The exact catalog identity could not be established.");
@@ -56,12 +57,13 @@ export function resolveChannelStockSelection(facts: ChannelStockSelectionFacts):
       || Boolean(listing && (listing.externalProductId || listing.externalVariantId || listing.externalSku))
       || Boolean(jobMember && (jobMember.offerId || jobMember.listingId));
     const isEbay = facts.provider === "ebay";
-    const selected = isInventoryManagedVariant(catalog) && isVariantSellable({
+    listingSelected = isVariantSellable({
       productActive: product.isActive, variantActive: catalog.isActive, salesEligibility: catalog.salesEligibility,
       productOverrideIsListed: facts.productIsListed, variantOverrideIsListed: known?.variantIsListed,
       ...(isEbay ? { productExcluded: product.ebayListingExcluded, variantExcluded: catalog.ebayListingExcluded,
         typeListingEnabled: facts.typeListingEnabled } : {}),
     }) && (isEbay || product.status === "active");
+    const selected = isInventoryManagedVariant(catalog) && listingSelected;
     const withdrawing = isEbay && jobMember && facts.latestJob?.operation === "withdraw"
       && facts.latestJob.state !== "completed";
     const withdrawn = facts.latestJob?.verifiedMembers.find(member => member.variantId === productVariantId);

@@ -1,3 +1,4 @@
+import type { ListingIntentLifecycleService } from "../application/listing-intent-lifecycle.service";
 import {
   DROPSHIP_LISTING_ACCESS_BLOCK_CODES,
   DROPSHIP_LISTING_ACCESS_RESOLUTIONS,
@@ -25,6 +26,7 @@ const blocked = (code: string, message: string): IntentHandoff => ({
  * for receipt-first replay. Access decisions remain with the Dropship owner. */
 const ADMISSION_REFUSAL_CODES = new Set<string>([
   ...DROPSHIP_LISTING_ACCESS_BLOCK_CODES,
+  "LISTING_INTENT_LIFECYCLE_SCOPE_CHANGED",
   "EBAY_SYNC_IDENTITY_CHANGED",
   "EBAY_SYNC_ACCOUNT_UNVERIFIED",
   "EBAY_SYNC_AUTH_REQUIRED",
@@ -82,6 +84,7 @@ export class ExistingListingIntentHandoff implements ListingIntentHandoffPort {
       service: Pick<EbayListingSyncService, "getByCommand" | "getAdmission">;
       sync: typeof syncActiveListings;
     },
+    private readonly lifecycle: Pick<ListingIntentLifecycleService, "assess">,
   ) {}
 
   async handoff(delivery: IntentDelivery): Promise<IntentHandoff> {
@@ -134,6 +137,8 @@ export class ExistingListingIntentHandoff implements ListingIntentHandoffPort {
           },
         };
       }
+      const disposition = await this.lifecycle.assess(delivery);
+      if (disposition) return disposition;
       const rejected = await this.ebay.service.getAdmission(
         delivery.commandKey,
         d.channelId,
@@ -193,6 +198,10 @@ export class ExistingListingIntentHandoff implements ListingIntentHandoffPort {
         accountId: d.accountId,
         environment: d.environment,
       });
+      if (!receipt?.admitted) {
+        const disposition = await this.lifecycle.assess(delivery);
+        if (disposition) return disposition;
+      }
       if (receipt && !receipt.admitted)
         return blocked(
           "DROPSHIP_LISTING_PREVIEW_BLOCKED",
@@ -244,6 +253,8 @@ export class ExistingListingIntentHandoff implements ListingIntentHandoffPort {
         },
       };
     }
+    const disposition = await this.lifecycle.assess(delivery);
+    if (disposition) return disposition;
     return {
       state: "needs_review",
       code: "LISTING_INTENT_REVIEW_REQUIRED",

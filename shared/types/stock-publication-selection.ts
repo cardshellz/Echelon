@@ -9,6 +9,9 @@ export const stockPublicationSelectionSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   variants: z.array(z.object({
     productVariantId: id,
+    // Upstream listing intent is independent of inventory tracking and stock mode.
+    // Older/custom readers may omit it; consumers must not infer exclusion then.
+    listingSelected: z.boolean().optional(),
     action: z.enum(["publish", "zero", "read_only", "none"]),
     reason: z.string().trim().min(1).max(1_000),
     blockers: z.array(z.object({
