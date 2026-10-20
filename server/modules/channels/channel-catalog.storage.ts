@@ -1,3 +1,5 @@
+import { createChannelPricingService } from "./channel-pricing.service";
+import { parsePricingId } from "./channel-pricing.domain";
 import {
   db,
   channelProductOverrides,
@@ -38,8 +40,8 @@ export interface IChannelCatalogStorage {
 
   getChannelPricing(channelId: number, productVariantId: number): Promise<ChannelPricing | undefined>;
   getChannelPricingByProduct(channelId: number, productId: number): Promise<ChannelPricing[]>;
-  upsertChannelPricing(data: InsertChannelPricing): Promise<ChannelPricing>;
-  deleteChannelPricing(channelId: number, productVariantId: number): Promise<boolean>;
+  upsertChannelPricing(data: InsertChannelPricing, actor: string, now: Date): Promise<ChannelPricing>;
+  deleteChannelPricing(channelId: number, productVariantId: number, actor: string, now: Date): Promise<boolean>;
 
   getChannelListing(channelId: number, productVariantId: number): Promise<ChannelListing | undefined>;
   getChannelListingsByProduct(channelId: number, productId: number): Promise<ChannelListing[]>;
@@ -170,31 +172,20 @@ export const channelCatalogMethods: IChannelCatalogStorage = {
       ));
   },
 
-  async upsertChannelPricing(data: InsertChannelPricing): Promise<ChannelPricing> {
-    const result = await db.insert(channelPricing)
-      .values(data)
-      .onConflictDoUpdate({
-        target: [channelPricing.channelId, channelPricing.productVariantId],
-        set: {
-          price: data.price,
-          compareAtPrice: data.compareAtPrice,
-          cost: data.cost,
-          currency: data.currency,
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
-    return result[0];
+  async upsertChannelPricing(data: InsertChannelPricing, actor: string, now: Date): Promise<ChannelPricing> {
+    const { channelId, productVariantId, ...input } = data;
+    const result = await createChannelPricingService(db).savePrice(
+      channelId,
+      parsePricingId(productVariantId),
+      input,
+      actor,
+      now,
+    );
+    return result.price;
   },
 
-  async deleteChannelPricing(channelId: number, productVariantId: number): Promise<boolean> {
-    const result = await db.delete(channelPricing)
-      .where(and(
-        eq(channelPricing.channelId, channelId),
-        eq(channelPricing.productVariantId, productVariantId)
-      ))
-      .returning();
-    return result.length > 0;
+  async deleteChannelPricing(channelId: number, productVariantId: number, actor: string, now: Date): Promise<boolean> {
+    return createChannelPricingService(db).deletePrice(channelId, productVariantId, actor, now);
   },
 
   async getChannelListing(channelId: number, productVariantId: number): Promise<ChannelListing | undefined> {
