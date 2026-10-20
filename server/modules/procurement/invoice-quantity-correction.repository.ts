@@ -1,3 +1,4 @@
+import { hasInvoiceCreditHistory } from "./supplier-credit-settlement.repository";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { and, eq } from "drizzle-orm";
@@ -14,7 +15,7 @@ import { replacePurchaseOrderMatchExceptions } from "./purchase-order-match-exce
 import type { PurchaseApprovalSnapshot } from "./purchase-order-approval.policy";
 
 // Version the reviewed behavior as well as its data; saved committed receipts still replay.
-const INVOICE_LINE_REVIEW_VERSION = 2;
+const INVOICE_LINE_REVIEW_VERSION = 3;
 
 export async function readInvoiceQuantitySource(tx: AmendmentTransaction, lineId: number, actorId: string) {
   // Discover the scope, then re-read the exact line under the established graph,
@@ -35,10 +36,11 @@ export async function readInvoiceBillingSource(tx: AmendmentTransaction, source:
     .innerJoin(apPayments, eq(apPayments.id, apPaymentAllocations.apPaymentId))
     .where(eq(apPaymentAllocations.vendorInvoiceId, target.vendorInvoiceId)).orderBy(apPaymentAllocations.id).for("share");
   const invoicePoLinks = await tx.select().from(vendorInvoicePoLinks).where(eq(vendorInvoicePoLinks.vendorInvoiceId, target.vendorInvoiceId)).orderBy(vendorInvoicePoLinks.id).for("share");
-  const billing = { purchaseAllocations: invoicePoLinks.map(row => ({ purchaseOrderId: row.purchaseOrderId, amountCents: row.allocatedAmountCents })), purchaseOrderIds: invoicePoLinks.map(row => row.purchaseOrderId), invoiceId: target.vendorInvoiceId, allInvoiceLines,
+  const hasCreditHistory = await hasInvoiceCreditHistory(tx, target.vendorInvoiceId);
+  const billing = { hasCreditHistory, purchaseAllocations: invoicePoLinks.map(row => ({ purchaseOrderId: row.purchaseOrderId, amountCents: row.allocatedAmountCents })), purchaseOrderIds: invoicePoLinks.map(row => row.purchaseOrderId), invoiceId: target.vendorInvoiceId, allInvoiceLines,
     allocations: allocations.map(row => ({ invoiceId: row.allocation.vendorInvoiceId, amountCents: row.allocation.appliedAmountCents, paymentStatus: row.payment.status, currency: row.payment.currency })) };
   return { ...source, invoicePoLinks, facts: { ...source.facts, billing },
-    sourceVersion: createHash("sha256").update(canonicalJson({ reviewVersion: INVOICE_LINE_REVIEW_VERSION, sourceVersion: source.sourceVersion, allInvoiceLines, allocations, invoicePoLinks })).digest("hex") };
+    sourceVersion: createHash("sha256").update(canonicalJson({ reviewVersion: INVOICE_LINE_REVIEW_VERSION, sourceVersion: source.sourceVersion, allInvoiceLines, allocations, invoicePoLinks, hasCreditHistory })).digest("hex") };
 }
 export function invoiceQuantityCorrectionTime(source: Awaited<ReturnType<typeof readInvoiceQuantitySource>>, now: Date): Date {
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new Error("Invoice correction clock is invalid.");

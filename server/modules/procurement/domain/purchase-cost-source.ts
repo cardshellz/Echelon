@@ -4,11 +4,13 @@ import {
   costInteger,
 } from "../../inventory/infrastructure/cost-evidence-values";
 import type { CostRevisionInput } from "../../inventory/infrastructure/cost-evidence.repository";
+import { resolveSupplierCreditReductions, type SupplierCreditCostRow } from "./supplier-credit-source";
 
 /** The single product/packaging source decision, shared by posting and reads. */
 export function resolvePurchaseCostSource(source: {
   purchaseOrderLine: Record<string, unknown>;
   approvedInvoices: Record<string, unknown>[];
+  supplierCredits?: SupplierCreditCostRow[];
 }): CostRevisionInput[] {
   const { purchaseOrderLine: line, approvedInvoices } = source;
   const purchaseOrderLineId = costInteger(line.id, "purchaseOrderLineId", 1);
@@ -16,15 +18,27 @@ export function resolvePurchaseCostSource(source: {
   const coverageQty = ["received", "closed"].includes(String(line.status))
     ? costInteger(line.received_qty, "receivedQty")
     : qty;
+  const credits = resolveSupplierCreditReductions(approvedInvoices, source.supplierCredits, purchaseOrderLineId);
   const approvedQty = approvedInvoices.reduce(
     (sum, row) => sum + BigInt(costInteger(row.qty_invoiced, "qtyInvoiced")),
     BigInt(0),
-  );
+  ) - credits.basePieces;
   const parsed = approvedInvoices.map((row) =>
     invoiceCostComponentEvidenceSchema.safeParse(row.cost_component_evidence),
   );
-  let issue: { code: string; message: string } | null = null;
+  const fullQuarantineReturn = approvedInvoices.length > 0 && approvedQty === BigInt(0)
+    && credits.basePieces > BigInt(0) && credits.issues.length === 0 && parsed.every(result => result.success)
+    && parsed.reduce((sum, result) => sum + BigInt(result.success ? result.data.productMills : 0), BigInt(0)) === credits.productMills
+    && parsed.reduce((sum, result) => sum + BigInt(result.success ? result.data.packagingMills : 0), BigInt(0)) === credits.packagingMills;
+  // The current application contract requires a positive quantity denominator.
+  // Preserve an explicit unresolved disposition instead of inventing a basis or
+  // presenting complete, unrecognized returns as missing invoice evidence.
+  let issue: { code: string; message: string } | null = fullQuarantineReturn ? {
+    code: "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW",
+    message: "The approved credits cover every invoiced unit returned from quarantine. Zero-quantity inventory cost completion is not supported yet. This credit does not change inventory or sold-item costs. Retain the return and credit evidence for accounting review; retrying will not complete this case.",
+  } : null;
   if (
+    !issue &&
     approvedInvoices.length > 0 &&
     (coverageQty === 0 ||
       approvedQty !== BigInt(coverageQty) ||
@@ -88,9 +102,16 @@ export function resolvePurchaseCostSource(source: {
       if (components.packagingTreatment === "included_in_product")
         packagingTreatment = "included_in_product";
     }
-    productMills = costInteger(product.toString(), "invoice.productMills");
+    const netProduct = product - credits.productMills;
+    const netPackaging = packaging - credits.packagingMills;
+    if (netProduct < BigInt(0) || netPackaging < BigInt(0)) issue = {
+      code: "CREDIT_SOURCE_EXCEEDED", message: "Supplier credits exceed the original invoice component. Review the source; negative inventory cost is not supported.",
+    };
+    // Keep the gross amount visible when the proposed net amount is invalid;
+    // the review issue prevents posting either amount as confirmed authority.
+    productMills = costInteger((netProduct < BigInt(0) ? product : netProduct).toString(), "invoice.productMills");
     packagingMills = costInteger(
-      packaging.toString(),
+      (netPackaging < BigInt(0) ? packaging : netPackaging).toString(),
       "invoice.packagingMills",
     );
   } else if (
@@ -103,6 +124,7 @@ export function resolvePurchaseCostSource(source: {
         "The purchase has a discount or tax requiring an explicit cost component disposition.",
     };
   }
+  issue ??= credits.issues[0] ?? null;
   const currency = actual
     ? approvedInvoices.every((row) => row.currency === "USD")
       ? "USD"
@@ -110,7 +132,7 @@ export function resolvePurchaseCostSource(source: {
     : line.currency === "USD"
       ? "USD"
       : null;
-  const sources = actual
+  const sources: CostRevisionInput["sources"] = actual
     ? approvedInvoices.map((row) => ({
         kind: "vendor_invoice_line" as const,
         documentId: costInteger(row.vendor_invoice_id, "invoiceId", 1),
@@ -125,6 +147,7 @@ export function resolvePurchaseCostSource(source: {
           version: costFingerprint(line),
         },
       ];
+  sources.push(...credits.sources);
   return (
     [
       ["product", productMills],

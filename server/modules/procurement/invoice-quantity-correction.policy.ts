@@ -12,7 +12,7 @@ export class InvoiceQuantityCorrectionError extends Error {
   constructor(message: string, readonly code: string, readonly statusCode = 409) { super(message); this.name = "InvoiceQuantityCorrectionError"; }
 }
 export type InvoiceCorrectionFacts = AmendmentFacts & { billing?: {
-  invoiceId: number; purchaseOrderIds: number[]; purchaseAllocations: { purchaseOrderId: number; amountCents: number | null }[]; allInvoiceLines: AmendmentFacts["invoiceLines"];
+  hasCreditHistory: boolean; invoiceId: number; purchaseOrderIds: number[]; purchaseAllocations: { purchaseOrderId: number; amountCents: number | null }[]; allInvoiceLines: AmendmentFacts["invoiceLines"];
   allocations: { invoiceId: number; amountCents: number; paymentStatus: string; currency: string | null }[];
 } };
 const nonnegative = z.number().int().nonnegative().safe();
@@ -31,8 +31,9 @@ function sourceLine(facts: AmendmentFacts, lineId: number) {
   if (!line || !invoice || !poLine) throw new InvoiceQuantityCorrectionError("The invoice line is not linked to this purchase order. Reload the invoice.", "INVOICE_QUANTITY_LINK_MISSING");
   return { line, invoice, poLine };
 }
-function blockedReason(facts: AmendmentFacts, lineId: number, allowClosedBilling = false): string | null {
+function blockedReason(facts: InvoiceCorrectionFacts, lineId: number, allowClosedBilling = false): string | null {
   const { invoice, poLine } = sourceLine(facts, lineId);
+  if (facts.billing?.hasCreditHistory) return "This invoice has supplier credit history. Review its credits before changing original quantity or amounts.";
   if (invoice.status === "voided") return "A voided invoice cannot be corrected.";
   if (poLine.lineType !== "product") return "Quantity correction is available for product lines.";
   if (facts.header.cancelledAt || ["cancelled", "short_closed"].includes(facts.header.status)
@@ -50,6 +51,8 @@ function isClosedPurchaseOrder(facts: AmendmentFacts): boolean {
 }
 export function reviewedInvoiceAmount(facts: InvoiceCorrectionFacts, lineId: number, afterLineAmount: number): number {
   const { line, invoice } = sourceLine(facts, lineId), billing = facts.billing;
+  if (billing?.hasCreditHistory) throw new InvoiceQuantityCorrectionError(
+    "This invoice has supplier credit history. Review its credits before changing original quantity or amounts.", "AP_INVOICE_CREDIT_HISTORY");
   if (!billing || billing.invoiceId !== invoice.id) throw new InvoiceQuantityCorrectionError("Complete invoice and payment evidence is required before changing the bill.", "INVOICE_CORRECTION_BILLING_REQUIRED");
   if (afterLineAmount !== line.lineTotalCents && (billing.purchaseOrderIds.length !== 1 || billing.purchaseOrderIds[0] !== facts.header.id)) {
     throw new InvoiceQuantityCorrectionError("This bill covers multiple POs. Review its allocations through the invoice workflow before changing billed amounts.", "INVOICE_CORRECTION_ALLOCATION_REVIEW_REQUIRED");

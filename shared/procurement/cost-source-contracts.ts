@@ -62,7 +62,7 @@ export const costSourceScopeSchema = z.discriminatedUnion("kind", [
 ]);
 
 export const costSourceReferenceSchema = z.object({
-  kind: z.enum(["purchase_order_line", "vendor_invoice_line", "shipment_cost", "manual_override"]),
+  kind: z.enum(["purchase_order_line", "vendor_invoice_line", "supplier_credit_line", "shipment_cost", "manual_override"]),
   documentId: resourceId,
   lineId: resourceId,
   // The source owner fingerprints the captured immutable economic inputs. A

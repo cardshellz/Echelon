@@ -10,7 +10,8 @@ config({ path: resolve(process.cwd(), ".env.test") });
 const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_DB_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const TABLES = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
   schema.apPayments, schema.apPaymentAllocations];
 
 databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => {

@@ -26,10 +26,10 @@ const invoiceSchema = z.object({
   id, inboundShipmentId: id, invoiceNumber: z.string().min(1), vendorName: z.string().nullable(),
   status: z.enum(["draft", "received", "approved", "partially_paid", "paid", "disputed", "voided"]),
   currency: z.string().regex(/^[A-Z]{3}$/), invoiceDate: z.string().datetime({ offset: true }).nullable(),
-  invoicedAmountCents: money, paidAmountCents: money.nonnegative(),
+  invoicedAmountCents: money, paidAmountCents: money.nonnegative(), creditedAmountCents: money.nonnegative().optional(), settledAmountCents: money.nonnegative().optional(),
 }).passthrough();
 export const shipmentInvoicesSchema = z.object({ invoices: z.array(invoiceSchema), summary: z.object({
-  totalInvoicedCents: money, totalPaidCents: money.nonnegative(), outstandingCents: money.nonnegative(),
+  totalInvoicedCents: money, totalPaidCents: money.nonnegative(), totalCreditedCents: money.nonnegative().optional(), outstandingCents: money.nonnegative(),
   invoiceCount: z.number().int().nonnegative(), activeInvoiceCount: z.number().int().nonnegative(),
 }) });
 export function parseShipmentInvoices(raw: unknown, shipmentId: number) {

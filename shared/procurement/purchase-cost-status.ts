@@ -117,7 +117,8 @@ export function purchaseLineNeedsCostReview(
  * an old receipt attempt. Posting estimates is separate from confirming them. */
 export function purchaseCostNextAction(
   line: PurchaseLineCostStatus,
-): "invoice" | "history" | "apply" | "none" {
+): "invoice" | "history" | "review" | "apply" | "none" {
+  if (line.components.some(component => component.issues.some(issue => issue.code === "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW"))) return "review";
   if (
     line.components.some(
       (component) =>

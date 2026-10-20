@@ -1,3 +1,4 @@
+import { hasInvoiceCreditHistory, SupplierCreditEvidenceError, assertInvoiceHasNoCreditHistory, assertInvoiceSettlementEvidence, readInvoiceCreditAmount, readVerifiedInvoiceSettlementProjections } from "./supplier-credit-settlement.repository";
 import { paymentApplicationInputSchema, paymentCalendarDateSchema, type PaymentApplicationInput } from "@shared/procurement/ap-payment-contract";
 import { readPaymentBalances } from "./ap-payment-balance.repository";
 import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
@@ -569,6 +570,7 @@ async function lockEditableInvoice(
       currency: vendorInvoices.currency,
       status: vendorInvoices.status,
       paidAmountCents: vendorInvoices.paidAmountCents,
+      creditedAmountCents: vendorInvoices.creditedAmountCents,
       approvedAt: vendorInvoices.approvedAt,
       approvedBy: vendorInvoices.approvedBy,
       replacesInvoiceId: vendorInvoices.replacesInvoiceId,
@@ -581,6 +583,7 @@ async function lockEditableInvoice(
   if (!invoice) {
     throw new ApLedgerError("Invoice not found", 404, { code: "AP_INVOICE_NOT_FOUND" });
   }
+  await assertInvoiceHasNoCreditHistory(client, invoiceId);
   const headerCapability = invoiceEditCapability({ ...invoice, hasPaymentHistory: false });
   if (!headerCapability.allowed) {
     throw new ApLedgerError(headerCapability.reason, 409, { code: headerCapability.code, invoiceId, status: invoice.status });
@@ -614,6 +617,7 @@ async function lockInvoiceForMatch(
       currency: vendorInvoices.currency,
       status: vendorInvoices.status,
       paidAmountCents: vendorInvoices.paidAmountCents,
+      creditedAmountCents: vendorInvoices.creditedAmountCents,
     })
     .from(vendorInvoices)
     .where(eq(vendorInvoices.id, invoiceId))
@@ -824,6 +828,7 @@ export async function recomputePoFinancialAggregates(
     .select({
       invoicedAmountCents: vendorInvoices.invoicedAmountCents,
       paidAmountCents: vendorInvoices.paidAmountCents,
+      creditedAmountCents: vendorInvoices.creditedAmountCents,
       status: vendorInvoices.status,
     })
     .from(vendorInvoicePoLinks)
@@ -837,8 +842,9 @@ export async function recomputePoFinancialAggregates(
 
   // Integer arithmetic only (Rule #3).
   let invoicedTotal = BigInt(0);
-  let paidTotal = BigInt(0);
+  let paidTotal = BigInt(0); let creditedTotal = BigInt(0);
   for (const [index, row] of invoiceRows.entries()) {
+    creditedTotal += databaseMoneyToBigInt(row.creditedAmountCents,`invoiceRows[${index}].creditedAmountCents`);
     invoicedTotal += databaseMoneyToBigInt(
       row.invoicedAmountCents ?? 0,
       `invoiceRows[${index}].invoicedAmountCents`,
@@ -848,7 +854,8 @@ export async function recomputePoFinancialAggregates(
       `invoiceRows[${index}].paidAmountCents`,
     );
   }
-  const outstanding = invoicedTotal > paidTotal ? invoicedTotal - paidTotal : BigInt(0);
+  const settledTotal = paidTotal + creditedTotal;
+  const outstanding = invoicedTotal > settledTotal ? invoicedTotal - settledTotal : BigInt(0);
   const hasDisputedInvoice = invoiceRows.some((row) => row.status === "disputed");
 
   // Derive new financial_status. Disputed stays disputed until explicitly resolved.
@@ -860,9 +867,9 @@ export async function recomputePoFinancialAggregates(
     newFinancial = "disputed";
   } else if (invoicedTotal === BigInt(0)) {
     newFinancial = "unbilled";
-  } else if (paidTotal >= invoicedTotal) {
+  } else if (settledTotal >= invoicedTotal) {
     newFinancial = "paid";
-  } else if (paidTotal > BigInt(0)) {
+  } else if (settledTotal > BigInt(0)) {
     newFinancial = "partially_paid";
   } else {
     newFinancial = "invoiced";
@@ -943,9 +950,9 @@ async function generatePaymentNumber(client: ApLedgerDbClient = db): Promise<str
 
 // ─── Invoice Balance Recalculation ────────────────────────────────────────────
 
-async function recalculateInvoiceBalance(invoiceId: number, client: ApLedgerDbClient = db, at: Date = new Date()): Promise<void> {
+export async function recalculateInvoiceBalance(invoiceId: number, client: ApLedgerDbClient = db, at: Date = new Date()): Promise<void> {
   const [invoice] = await client
-    .select({ invoicedAmountCents: vendorInvoices.invoicedAmountCents, status: vendorInvoices.status })
+    .select({ id: vendorInvoices.id, vendorId: vendorInvoices.vendorId, currency: vendorInvoices.currency, invoicedAmountCents: vendorInvoices.invoicedAmountCents, status: vendorInvoices.status })
     .from(vendorInvoices)
     .where(eq(vendorInvoices.id, invoiceId))
     .for("update");
@@ -977,7 +984,8 @@ async function recalculateInvoiceBalance(invoiceId: number, client: ApLedgerDbCl
     invoice.invoicedAmountCents,
     `invoice[${invoiceId}].invoicedAmountCents`,
   );
-  const projected = deriveInvoiceFinancialState({ status: invoice.status,
+  const creditedAmountCents = await readInvoiceCreditAmount(client, invoice);
+  const projected = deriveInvoiceFinancialState({ status: invoice.status, creditedAmountCents,
     invoiceAmountCents: bigintMoneyToNumber(invoicedAmount, `invoice[${invoiceId}].invoicedAmountCents`),
     paidAmountCents: bigintMoneyToNumber(paidAmount, `invoice[${invoiceId}].paidAmountCents`),
   });
@@ -985,6 +993,7 @@ async function recalculateInvoiceBalance(invoiceId: number, client: ApLedgerDbCl
   await client
     .update(vendorInvoices)
     .set({
+      creditedAmountCents,
       paidAmountCents: bigintMoneyToNumber(paidAmount, `invoice[${invoiceId}].paidAmountCents`),
       balanceCents: projected.balanceCents,
       status: projected.status,
@@ -1163,6 +1172,7 @@ export async function getInvoiceById(id: number) {
       .where(eq(vendorInvoices.id, id));
 
     if (!invoice) return null;
+    const settlement=(await readVerifiedInvoiceSettlementProjections(tx,[invoice])).get(invoice.id)!;
 
     const poLinks = await tx
       .select({
@@ -1207,7 +1217,8 @@ export async function getInvoiceById(id: number) {
     const { readInvoiceReplacementDetail } = await import("./ap-invoice-replacement.service");
     const replacementDetail = await readInvoiceReplacementDetail(tx, id);
     const sourceCapabilities = await readInvoiceSourceCapabilities(tx, id);
-    return { ...invoice, ...replacementDetail, sourceCapabilities, capabilities: { edit: invoiceEditCapability({ ...invoice, hasPaymentHistory: payments.length > 0 }) },
+    const hasSupplierCreditHistory = await hasInvoiceCreditHistory(tx, id);
+    return { ...invoice, ...settlement, ...replacementDetail, sourceCapabilities, hasSupplierCreditHistory, capabilities: { edit: invoiceEditCapability({ ...invoice, hasPaymentHistory: payments.length > 0 }) },
       paymentReviewRequired: payments.some((payment) => classifyApPaymentState(payment.paymentStatus) === "review_required"),
       poLinks, payments, lines: lines.map((line) => ({ ...line, costReviewVersion: invoiceCostReviewVersion(line) })), attachments };
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
@@ -1226,6 +1237,7 @@ export async function listInvoices(filters: {
   limit?: number;
   offset?: number;
 }) {
+  return db.transaction(async tx => {
   const conditions = [];
 
   if (filters.vendorId) conditions.push(eq(vendorInvoices.vendorId, filters.vendorId));
@@ -1242,7 +1254,7 @@ export async function listInvoices(filters: {
     conditions.push(lte(vendorInvoices.dueDate, filters.dueBefore));
   }
 
-  const rows = await db
+  const rows = await tx
     .select({
       invoice: vendorInvoices,
       vendorName: vendors.name,
@@ -1259,7 +1271,7 @@ export async function listInvoices(filters: {
   const invoiceIds = rows.map((r) => r.invoice.id);
   let poLinkMap: Record<number, string[]> = {};
   if (invoiceIds.length) {
-    const links = await db
+    const links = await tx
       .select({
         vendorInvoiceId: vendorInvoicePoLinks.vendorInvoiceId,
         poNumber: purchaseOrders.poNumber,
@@ -1274,12 +1286,14 @@ export async function listInvoices(filters: {
     }
   }
 
+  const settlements=await readVerifiedInvoiceSettlementProjections(tx,rows.map(row=>row.invoice));
   return rows.map((r) => ({
-    ...r.invoice,
+    ...r.invoice, ...settlements.get(r.invoice.id)!,
     vendorName: r.vendorName,
     vendorCode: r.vendorCode,
     poNumbers: poLinkMap[r.invoice.id] ?? [],
   }));
+  }, {isolationLevel:"repeatable read",accessMode:"read only"});
 }
 
 export async function updateInvoice(
@@ -1493,7 +1507,7 @@ export type ApprovedInvoiceVarianceReconciliationResult = Awaited<ReturnType<typ
   authoritativeUnitCostMills: number | null;
   approvedInvoiceIds: number[];
   approvedQty: string;
-  quantityCoverage: { approvedPieces: string; requiredPieces: number; complete: boolean };
+  quantityCoverage: { basis:"gross_invoice_before_supplier_credits"; approvedPieces: string; requiredPieces: number; complete: boolean };
 };
 
 /** Delegate economic authority to exact component sources. Invoice quantity
@@ -1530,7 +1544,7 @@ export async function reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTran
   const approvedSet = new Set(approvedInvoiceIds);
   const approvedQty = candidateLines.filter((line) => approvedSet.has(Number(line.vendorInvoiceId)))
     .reduce((sum, line) => sum + BigInt(requireNonnegativeInteger(line.qtyInvoiced, `vendorInvoiceLine[${line.id}].qtyInvoiced`)), BigInt(0));
-  const quantityCoverage = { approvedPieces: approvedQty.toString(), requiredPieces: costCoverageQty,
+  const quantityCoverage = { basis:"gross_invoice_before_supplier_credits" as const, approvedPieces: approvedQty.toString(), requiredPieces: costCoverageQty,
     complete: costCoverageQty > 0 && approvedQty === BigInt(costCoverageQty) };
   if (poLine.lineType !== "product") {
     const result: ApprovedInvoiceVarianceReconciliationResult = {
@@ -1622,6 +1636,7 @@ async function voidInvoiceInTransaction(
       code: "AP_INVOICE_ALREADY_VOIDED",
     });
   }
+  await assertInvoiceHasNoCreditHistory(tx, id);
   if (inv.paidAmountCents > 0) {
     throw new ApLedgerError(
       "Cannot void an invoice with payments applied — void the payments first",
@@ -1794,7 +1809,8 @@ export async function unlinkPoFromInvoice(
 }
 
 export async function getInvoicesForPo(purchaseOrderId: number) {
-  const links = await db
+  return db.transaction(async tx=>{
+  const links = await tx
     .select({
       link: vendorInvoicePoLinks,
       invoice: vendorInvoices,
@@ -1804,7 +1820,9 @@ export async function getInvoicesForPo(purchaseOrderId: number) {
     .where(eq(vendorInvoicePoLinks.purchaseOrderId, purchaseOrderId))
     .orderBy(desc(vendorInvoices.invoiceDate));
 
-  return links.map((r) => ({ ...r.invoice, allocatedAmountCents: r.link.allocatedAmountCents }));
+  const settlements=await readVerifiedInvoiceSettlementProjections(tx,links.map(row=>row.invoice));
+  return links.map((r) => ({ ...r.invoice, ...settlements.get(r.invoice.id)!, allocatedAmountCents: r.link.allocatedAmountCents }));
+  },{isolationLevel:"repeatable read",accessMode:"read only"});
 }
 
 /**
@@ -1950,6 +1968,7 @@ async function lockAndValidatePaymentInvoices(
       currency: vendorInvoices.currency,
       status: vendorInvoices.status,
       balanceCents: vendorInvoices.balanceCents,
+      invoicedAmountCents: vendorInvoices.invoicedAmountCents,paidAmountCents:vendorInvoices.paidAmountCents,creditedAmountCents:vendorInvoices.creditedAmountCents,
     })
     .from(vendorInvoices)
     .where(inArray(vendorInvoices.id, invoiceIds))
@@ -1991,6 +2010,7 @@ async function lockAndValidatePaymentInvoices(
       invoice.balanceCents,
       `invoice[${invoice.id}].balanceCents`,
     );
+    await assertInvoiceSettlementEvidence(tx, invoice);
     if (BigInt(allocation.appliedAmountCents) > balanceCents) {
       throw new ApLedgerError("Payment allocation exceeds the invoice's open balance", 409, {
         code: "AP_PAYMENT_ALLOCATION_EXCEEDS_BALANCE",
@@ -2005,7 +2025,16 @@ async function recordPaymentInTransaction(
 ): Promise<PaymentMutationResult<any>> {
   validateRecordPaymentInput(data);
   const paymentCurrency = requireUsdFinancialDocumentCurrency(data.currency, "currency");
-  await lockAndValidatePaymentInvoices(tx, data, paymentCurrency);
+  try {
+    await lockAndValidatePaymentInvoices(tx, data, paymentCurrency);
+  } catch (error) {
+    // Preserve the established new-cash rejection contract; applying existing funds
+    // reports the specific evidence conflict without recording another payment.
+    if (error instanceof SupplierCreditEvidenceError && error.details.code === "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW") {
+      throw new ApLedgerError("The payment references invalid or incompatible AP records", 422, { code: "AP_PAYMENT_REFERENCE_INVALID" });
+    }
+    throw error;
+  }
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('ap_payment_number'))`);
   const paymentNumber = await generatePaymentNumber(tx);
   const affectedPoIds = new Set<number>();
@@ -2286,32 +2315,7 @@ async function applyRecordedPaymentInTransaction(tx: ApLedgerDbClient, paymentId
   // Cached balances are not spending authority. Check them against immutable settlement evidence while invoice locks are held.
   const targetIds = allocations.map(row => row.vendorInvoiceId);
   const targets = await tx.select().from(vendorInvoices).where(inArray(vendorInvoices.id, targetIds)).orderBy(vendorInvoices.id);
-  for (const invoice of targets) {
-    const evidence = await tx.select({ payment: apPayments, appliedAmountCents: apPaymentAllocations.appliedAmountCents })
-      .from(apPaymentAllocations).leftJoin(apPayments, eq(apPayments.id, apPaymentAllocations.apPaymentId))
-      .where(eq(apPaymentAllocations.vendorInvoiceId, invoice.id)).orderBy(apPaymentAllocations.id);
-    let effectivePaid = BigInt(0);
-    for (const row of evidence) {
-      if (!row.payment || !["completed", "voided"].includes(row.payment.status) || row.payment.vendorId !== invoice.vendorId
-        || row.payment.currency !== invoice.currency || !Number.isSafeInteger(row.appliedAmountCents) || row.appliedAmountCents <= 0)
-        throw new ApLedgerError("Invoice settlement evidence requires review before applying funds.", 409, { code: "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW", invoiceId: invoice.id });
-      if (row.payment.status === "completed") effectivePaid += BigInt(row.appliedAmountCents);
-    }
-    const sourcePayments = [...new Map(evidence.filter(row => row.payment).map(row => [row.payment!.id, row.payment!])).values()];
-    const sourceBalances = await readPaymentBalances(tx, sourcePayments);
-    if ([...sourceBalances.values()].some(balance => balance.state === "review_required"))
-      throw new ApLedgerError("Invoice settlement relies on a payment that requires review.", 409, { code: "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW", invoiceId: invoice.id });
-    if (![invoice.invoicedAmountCents, invoice.paidAmountCents, invoice.balanceCents].every(value => Number.isSafeInteger(value) && value >= 0))
-      throw new ApLedgerError("Invoice amounts require review before applying funds.", 409, { code: "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW", invoiceId: invoice.id });
-    const amount = BigInt(invoice.invoicedAmountCents);
-    const cachedPaid = BigInt(invoice.paidAmountCents);
-    const cachedBalance = BigInt(invoice.balanceCents);
-    if (effectivePaid > amount) throw new ApLedgerError("Invoice applications exceed its amount.", 409, { code: "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW", invoiceId: invoice.id });
-    const projectedStatus = deriveInvoiceFinancialState({ status: invoice.status, invoiceAmountCents: invoice.invoicedAmountCents, paidAmountCents: Number(effectivePaid) }).status;
-    if (effectivePaid > amount || cachedPaid !== effectivePaid || cachedBalance !== amount - effectivePaid || projectedStatus !== invoice.status)
-      throw new ApLedgerError("Invoice balance does not agree with recorded applications. Review its evidence before applying funds.", 409,
-        { code: "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW", invoiceId: invoice.id });
-  }
+  for (const invoice of targets) await assertInvoiceSettlementEvidence(tx, invoice);
   const applications = await tx.insert(apPaymentAllocations).values(allocations.map(row => ({ apPaymentId: paymentId,
     vendorInvoiceId: row.vendorInvoiceId, appliedAmountCents: row.appliedAmountCents, notes: application.reason, createdAt: at })))
     .returning({ allocationId: apPaymentAllocations.id, vendorInvoiceId: apPaymentAllocations.vendorInvoiceId, appliedAmountCents: apPaymentAllocations.appliedAmountCents });
@@ -2505,6 +2509,10 @@ export async function getApSummary(options: { now?: Date } = {}) {
     "paidAllTimeCents",
   );
 
+  const creditTotals=await db.execute(sql`SELECT coalesce(sum(a.applied_amount_cents),0) AS total
+    FROM procurement.supplier_credit_applications a JOIN procurement.supplier_credits c ON c.id=a.supplier_credit_id
+    LEFT JOIN procurement.supplier_credit_application_reversals r ON r.application_id=a.id WHERE c.status='approved' AND r.id IS NULL`);
+  const creditedAllTimeCents=bigintMoneyToNumber(databaseMoneyToBigInt(creditTotals.rows[0]?.total??0,"creditedAllTimeCents"),"creditedAllTimeCents");
   // Recent payments (last 10)
   const recentPayments = await db
     .select({
@@ -2534,6 +2542,7 @@ export async function getApSummary(options: { now?: Date } = {}) {
       vendorName: vendors.name,
       invoicedAmountCents: vendorInvoices.invoicedAmountCents,
       paidAmountCents: vendorInvoices.paidAmountCents,
+      creditedAmountCents: vendorInvoices.creditedAmountCents,
       updatedAt: vendorInvoices.updatedAt,
     })
     .from(vendorInvoices)
@@ -2549,7 +2558,7 @@ export async function getApSummary(options: { now?: Date } = {}) {
     overdueCents: bigintMoneyToNumber(overdue, "overdueCents"),
     dueSoonCents: bigintMoneyToNumber(dueSoon, "dueSoonCents"),
     paidThisMonthCents,
-    paidAllTimeCents,
+    paidAllTimeCents,creditedAllTimeCents,
     agingBuckets: Object.fromEntries(
       Object.entries(agingBuckets).map(([bucket, value]) => [
         bucket,
@@ -3097,7 +3106,7 @@ async function recalculateInvoiceFromLines(
     inv.paidAmountCents,
     `invoice[${invoiceId}].paidAmountCents`,
   );
-  const balance = linesTotalCents - paidAmountCents;
+  const balance = linesTotalCents - paidAmountCents - requireNonnegativeInteger(inv.creditedAmountCents,`invoice[${invoiceId}].creditedAmountCents`);
 
   await client
     .update(vendorInvoices)
@@ -3687,7 +3696,7 @@ export async function createInvoiceFromShipmentCostsInTransaction(tx: ApLedgerDb
     const costs = lockedRows.rows as any[];
     const ownership = await readShipmentBillingOwnership(tx, costs.map(cost => ({ id: cost.id,
       inboundShipmentId: cost.inbound_shipment_id, vendorId: cost.vendor_id,
-      vendorInvoiceId: cost.vendor_invoice_id, currency: cost.currency })));
+      vendorInvoiceId: cost.vendor_invoice_id, currency: cost.currency, actualCents:cost.actual_cents,estimatedCents:cost.estimated_cents })));
     const blocked = costs.filter(cost => !ownership.get(cost.id)?.canCreateInvoice);
     if (blocked.length) throw new ApLedgerError("Selected charges have existing or ambiguous invoice ownership. Review their source invoices.", 409,
       { code: "AP_SHIPMENT_BILLING_REVIEW_REQUIRED", costIds: blocked.map(cost => cost.id) });
@@ -3898,6 +3907,7 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
       invoiceNumber: vendorInvoices.invoiceNumber,
       invoicedAmountCents: vendorInvoices.invoicedAmountCents,
       paidAmountCents: vendorInvoices.paidAmountCents,
+      creditedAmountCents: vendorInvoices.creditedAmountCents,
       invoiceLineTotalCents: sql<number | null>`(
         SELECT SUM(vil.line_total_cents)::bigint
         FROM procurement.vendor_invoice_lines vil
@@ -3916,7 +3926,7 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
   }
   let totalCents = 0;
   let linkedCents = 0;
-  let paidCents = 0;
+  let paidCents = 0; let creditedCents = 0;
   let outstandingCents = 0;
 
   // Shipment costs may include signed credits (for example, a seller
@@ -3967,7 +3977,7 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
     totalCents += amount;
 
     let paymentStatus: "unlinked" | "unpaid" | "partial" | "paid" | "disputed" | "voided" = "unlinked";
-    let costPaidCents = 0;
+    let costPaidCents = 0; let costCreditedCents = 0;
     let costOutstandingCents = amount;
 
     if (c.vendorInvoiceId && c.invoiceStatus) {
@@ -3990,6 +4000,14 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
       }
     }
 
+    if(c.vendorInvoiceId && c.invoiceStatus!=="voided" && (c.creditedAmountCents??0)>0){
+      const invoiceCosts=normalizedCosts.filter(row=>row.vendorInvoiceId===c.vendorInvoiceId);
+      if(invoiceCosts.length!==1||amount!==c.invoicedAmountCents)throw new ApLedgerError("Invoice credit settlement has no exact split across its shipment charges. Review the original invoice application.",409,{code:"AP_SHIPMENT_CREDIT_ATTRIBUTION_REQUIRED",shipmentId});
+      costPaidCents=requireNonnegativeInteger(c.paidAmountCents,"shipment.invoice.cash");costCreditedCents=requireNonnegativeInteger(c.creditedAmountCents,"shipment.invoice.credit");
+      costOutstandingCents=amount-costPaidCents-costCreditedCents;
+      if(costOutstandingCents<0)throw new ApLedgerError("Shipment invoice settlement exceeds its amount.",409,{code:"AP_SHIPMENT_CREDIT_EVIDENCE_REVIEW"});
+    }
+    creditedCents+=costCreditedCents;
     paidCents += costPaidCents;
     outstandingCents += costOutstandingCents;
 
@@ -4005,17 +4023,17 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
       invoiceNumber: c.invoiceNumber,
       invoiceStatus: c.invoiceStatus,
       paymentStatus,
-      paidCents: costPaidCents,
+      paidCents: costPaidCents, creditedCents:costCreditedCents,
       outstandingCents: costOutstandingCents,
     };
   });
 
-  if (paidCents + outstandingCents !== totalCents) {
+  if (paidCents + creditedCents + outstandingCents !== totalCents) {
     throw new ApLedgerError("Shipment cost payment summary checksum failed", 500, {
       code: "AP_SHIPMENT_PAYMENT_CHECKSUM_FAILED",
       shipmentId,
       totalCents,
-      paidCents,
+      paidCents,creditedCents,
       outstandingCents,
     });
   }
@@ -4025,7 +4043,7 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
     summary: {
       totalCents,
       linkedCents,
-      paidCents,
+      paidCents,creditedCents,
       outstandingCents,
     },
   };
@@ -4058,12 +4076,14 @@ export async function getShipmentInvoicesSummary(shipmentId: number) {
     .orderBy(desc(vendorInvoices.invoiceDate));
 
   let totalInvoiced = BigInt(0);
-  let totalPaid = BigInt(0);
+  let totalPaid = BigInt(0); let totalCredited = BigInt(0);
   let activeInvoiceCount = 0;
 
+  const settlements=await readVerifiedInvoiceSettlementProjections(tx,rows.map(row=>row.invoice));
   const invoices = rows.map((r, index) => {
     if (r.invoice.status !== "voided") {
       activeInvoiceCount++;
+      totalCredited += databaseMoneyToBigInt(r.invoice.creditedAmountCents,`shipmentInvoices[${index}].creditedAmountCents`);
       totalInvoiced += databaseMoneyToBigInt(
         r.invoice.invoicedAmountCents ?? 0,
         `shipmentInvoices[${index}].invoicedAmountCents`,
@@ -4074,13 +4094,13 @@ export async function getShipmentInvoicesSummary(shipmentId: number) {
       );
     }
     return {
-      ...r.invoice,
+      ...r.invoice, ...settlements.get(r.invoice.id)!,
       vendorName: r.vendorName,
       vendorCode: r.vendorCode,
     };
   });
 
-  const outstanding = totalInvoiced > totalPaid ? totalInvoiced - totalPaid : BigInt(0);
+  const outstanding = totalInvoiced > totalPaid + totalCredited ? totalInvoiced - totalPaid - totalCredited : BigInt(0);
   const totalInvoicedCents = bigintMoneyToNumber(totalInvoiced, "shipment.totalInvoicedCents");
   const totalPaidCents = bigintMoneyToNumber(totalPaid, "shipment.totalPaidCents");
 
@@ -4088,7 +4108,7 @@ export async function getShipmentInvoicesSummary(shipmentId: number) {
     invoices,
     summary: {
       totalInvoicedCents,
-      totalPaidCents,
+      totalPaidCents, totalCreditedCents:bigintMoneyToNumber(totalCredited,"shipment.totalCreditedCents"),
       outstandingCents: bigintMoneyToNumber(outstanding, "shipment.outstandingCents"),
       invoiceCount: invoices.length,
       activeInvoiceCount,
@@ -4115,6 +4135,7 @@ export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
       invoiceVendorName: vendors.name,
       invoicedAmountCents: vendorInvoices.invoicedAmountCents,
       paidAmountCents: vendorInvoices.paidAmountCents,
+      creditedAmountCents: vendorInvoices.creditedAmountCents,
       balanceCents: vendorInvoices.balanceCents,
     })
     .from(inboundFreightCosts)

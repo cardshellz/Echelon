@@ -127,7 +127,7 @@ describe("PO financial evidence", () => {
       currency: "USD",
       state: "complete",
       invoicedAmountCents: 10000,
-      paidAmountCents: 0,
+      paidAmountCents: 0, creditedAmountCents:0,settledAmountCents:0,
       outstandingAmountCents: 10000,
       invoiceCount: 1,
       reviewReasons: [],

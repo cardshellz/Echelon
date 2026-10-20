@@ -35,8 +35,9 @@ const mockSelectChain: any = {
 };
 
 vi.mock("../../../../db", () => {
-  const db = { select: vi.fn().mockReturnValue(mockSelectChain), transaction: vi.fn() };
+  const db = { select: vi.fn().mockReturnValue(mockSelectChain), execute: vi.fn().mockResolvedValue({ rows: [] }), transaction: vi.fn() };
   db.transaction.mockImplementation(async (work: (tx: unknown) => Promise<unknown>) => work({
+    execute: db.execute,
     select: (projection?: unknown) => projection === undefined
       ? { from: () => ({ where: async () => [] }) } : db.select(projection),
   }));
@@ -55,6 +56,7 @@ vi.mock("@shared/schema", () => ({
     dueDate: "dueDate",
     invoicedAmountCents: "invoicedAmountCents",
     paidAmountCents: "paidAmountCents",
+    creditedAmountCents: "creditedAmountCents",
     balanceCents: "balanceCents",
     createdAt: "createdAt",
   },
@@ -88,7 +90,9 @@ vi.mock("drizzle-orm", () => ({
   ne: vi.fn((a, b) => ({ type: "ne", a, b })),
   asc: vi.fn((col) => ({ type: "asc", col })),
   like: vi.fn((a, b) => ({ type: "like", a, b })),
-  sql: vi.fn((strings: TemplateStringsArray, ...values: any[]) => ({ type: "sql", strings, values })),
+  sql: Object.assign(vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ type: "sql", strings, values })), {
+    join: vi.fn((chunks: unknown[], separator: unknown) => ({ type: "join", chunks, separator })),
+  }),
 }));
 
 vi.mock("date-fns", () => ({
@@ -114,7 +118,7 @@ describe("getShipmentInvoicesSummary", () => {
               id: 1,
               invoiceNumber: "INV-001",
               invoicedAmountCents: 50000,
-              paidAmountCents: 50000,
+              paidAmountCents: 50000, creditedAmountCents: 0,
               balanceCents: 0,
               status: "paid",
               invoiceDate: new Date("2026-01-15"),
@@ -127,7 +131,7 @@ describe("getShipmentInvoicesSummary", () => {
               id: 2,
               invoiceNumber: "INV-002",
               invoicedAmountCents: 30000,
-              paidAmountCents: 10000,
+              paidAmountCents: 10000, creditedAmountCents: 0,
               balanceCents: 20000,
               status: "partially_paid",
               invoiceDate: new Date("2026-01-20"),
@@ -181,7 +185,7 @@ describe("getShipmentInvoicesSummary", () => {
               id: 1,
               status: "approved",
               invoicedAmountCents: 50000,
-              paidAmountCents: 10000,
+              paidAmountCents: 10000, creditedAmountCents: 0, balanceCents: 40000,
             },
             vendorName: "Freightos",
             vendorCode: "FRT",
@@ -191,7 +195,7 @@ describe("getShipmentInvoicesSummary", () => {
               id: 2,
               status: "voided",
               invoicedAmountCents: 90000,
-              paidAmountCents: 0,
+              paidAmountCents: 0, creditedAmountCents: 0, balanceCents: 90000,
             },
             vendorName: "Freightos",
             vendorCode: "FRT",
@@ -206,6 +210,7 @@ describe("getShipmentInvoicesSummary", () => {
     expect(result.summary).toEqual({
       totalInvoicedCents: 50000,
       totalPaidCents: 10000,
+      totalCreditedCents: 0,
       outstandingCents: 40000,
       invoiceCount: 2,
       activeInvoiceCount: 1,
@@ -235,7 +240,7 @@ describe("listInvoices with inboundShipmentId filter", () => {
               limit: vi.fn().mockReturnValue({
                 offset: vi.fn().mockResolvedValue([
                   {
-                    invoice: { id: 1, inboundShipmentId: 42, invoiceNumber: "INV-001" },
+                    invoice: { id: 1, inboundShipmentId: 42, invoiceNumber: "INV-001", status: "approved", invoicedAmountCents: 10000, paidAmountCents: 0, creditedAmountCents: 0, balanceCents: 10000 },
                     vendorName: "Freightos",
                     vendorCode: "FRT",
                   },
@@ -280,7 +285,7 @@ describe("enrichCostsWithInvoiceInfo", () => {
           invoiceVendorName: "Freightos Inc",
           vendorName: "Freightos",
           invoicedAmountCents: 50000,
-          paidAmountCents: 50000,
+          paidAmountCents: 50000, creditedAmountCents: 0,
           balanceCents: 0,
         },
       ]),
@@ -315,7 +320,7 @@ describe("enrichCostsWithInvoiceInfo", () => {
           invoiceStatus: "approved",
           invoiceVendorName: "Clearit USA",
           invoicedAmountCents: 30000,
-          paidAmountCents: 0,
+          paidAmountCents: 0, creditedAmountCents: 0,
           balanceCents: 30000,
         },
       ]),
@@ -370,7 +375,7 @@ describe("enrichCostsWithInvoiceInfo", () => {
           invoiceVendorName: "Freightos Inc",
           vendorName: "Freightos",
           invoicedAmountCents: 50000,
-          paidAmountCents: 0,
+          paidAmountCents: 0, creditedAmountCents: 0,
           balanceCents: 50000,
         },
       ]),
@@ -477,6 +482,7 @@ describe("shipment cost payment allocation", () => {
     expect(result.costs.map((cost) => cost.paidCents)).toEqual([2, 1, 2, 0]);
     expect(result.costs[3].amountCents).toBe(0);
     expect(result.summary).toEqual({
+      creditedCents: 0,
       totalCents: 10,
       linkedCents: 10,
       paidCents: 5,
@@ -570,6 +576,7 @@ describe("shipment cost payment allocation", () => {
       paymentStatus: "unlinked",
     });
     expect(result.summary).toEqual({
+      creditedCents: 0,
       totalCents: 604_879,
       linkedCents: 0,
       paidCents: 0,

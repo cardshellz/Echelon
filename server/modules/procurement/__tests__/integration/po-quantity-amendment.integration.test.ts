@@ -47,7 +47,8 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   let requestActor: string | null = "admin-user";
   const tables = [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
     schema.purchaseOrders, schema.purchaseOrderLines, schema.poApprovalTiers, schema.poStatusHistory, schema.poRevisions, schema.poEvents, schema.poExceptions,
-    schema.purchasingRecommendationPoHandoffs, schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poReceipts,
+    schema.purchasingRecommendationPoHandoffs, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poReceipts,
     schema.warehouseSettings, schema.apPayments, schema.apPaymentAllocations, schema.receivingOrders, schema.receivingLines, schema.inventoryLots, schema.auditEvents];
   const migrations = ["136_financial_command_results.sql", "140_financial_command_operations.sql", "227_purchase_order_history_retention.sql"];
   const descriptor = (body: unknown, key = randomUUID(), actorId = "admin-user"): FinancialCommandDescriptor => ({

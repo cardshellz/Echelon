@@ -1,3 +1,5 @@
+import { formatPaymentAmount } from "@/lib/ap-payment-command";
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { InvoicePurchaseOrderSelector } from "@/features/purchasing/InvoicePurchaseOrderSelector";
 import { invoiceWorkListQuery, invalidateApInvoiceQueries, apVendorOptionsQuery } from "@/features/purchasing/ap-work-list-query";
 import { WorkListPagination } from "@/features/purchasing/WorkListPagination";
@@ -147,7 +149,7 @@ export default function APInvoices() {
     <div className="p-6 max-w-7xl mx-auto space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Vendor Invoices</h1>
+          <h1 className="text-2xl font-bold">Vendor Invoices</h1><SupplierCreditLink />
           <p className="text-muted-foreground text-sm">Track and approve vendor invoices</p>
         </div>
         <Button size="sm" onClick={async () => {
@@ -171,7 +173,7 @@ export default function APInvoices() {
             <TabsTrigger value="open">Open</TabsTrigger>
             <TabsTrigger value="needs_approval">Needs Approval</TabsTrigger>
             <TabsTrigger value="overdue">Overdue</TabsTrigger>
-            <TabsTrigger value="paid">Paid</TabsTrigger>
+            <TabsTrigger value="paid">Settled</TabsTrigger>
             <TabsTrigger value="voided">Voided</TabsTrigger>
             <TabsTrigger value="all">All</TabsTrigger>
           </TabsList>
@@ -238,11 +240,11 @@ export default function APInvoices() {
                       </TableCell>
                       <TableCell className="text-right font-mono">{formatCents(inv.invoicedAmountCents)}</TableCell>
                       <TableCell className="text-right font-mono font-medium">
-                        {inv.balanceCents > 0 ? formatCents(inv.balanceCents) : <span className="text-green-600">Paid</span>}
+                        {formatCents(inv.balanceCents)}<div className="text-xs text-muted-foreground">Cash {formatPaymentAmount(inv.paidAmountCents)} · Credits {formatPaymentAmount(inv.creditedAmountCents)}</div>{inv.settlementReviewRequired && <div className="text-xs text-amber-700">{inv.overpaidAmountCents > 0 ? `Review overpayment: ${formatPaymentAmount(inv.overpaidAmountCents)}` : "Historical settlement requires review"}</div>}
                       </TableCell>
                       <TableCell>
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[inv.status] ?? ""}`}>
-                          {inv.status.replace("_", " ")}
+                          {inv.status === "paid" && inv.creditedAmountCents > 0 ? "settled" : inv.status.replace("_", " ")}
                         </span>
                       </TableCell>
                     </TableRow>

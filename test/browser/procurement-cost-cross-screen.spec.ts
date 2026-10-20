@@ -507,3 +507,51 @@ test("purchasing health monitor carries the same landed-cost state into the ship
   await expect(page.getByRole("region", { name: "Landed Cost Health", exact: true })).toContainText(currentCostIssue.message);
   expect(failures).toEqual([]);
 });
+
+
+test("purchase cost source history opens its immutable supplier credit document", async ({page}) => {
+ const {state,failures}=await installCostScreens(page);
+ const revision=state.workspace.costTrace!.applicationHistory!.revisions[0];
+ revision.source!.sources.push({kind:"supplier_credit_line",documentId:9,lineId:1,version:"c".repeat(64)});
+ await page.goto("/purchase-orders/17?tab=lifecycle");
+ const source=page.getByRole("link",{name:"Supplier credit line #1",exact:true});
+ await expect(source).toHaveAttribute("href",/supplier-credits\/9/);
+ await source.click();await expect(page).toHaveURL(/supplier-credits\/9.*via=purchase%3A17%3Alifecycle/);
+ expect(failures).toEqual([]);
+});
+
+
+test("full quarantine return keeps its accounting boundary explicit on PO and shipment without an automatic cost retry", async ({ page }, info) => {
+  const { state, failures } = await installCostScreens(page);
+  const message = "The approved credits cover every invoiced unit returned from quarantine. Zero-quantity inventory cost completion is not supported yet. This credit does not change inventory or sold-item costs. Retain the return and credit evidence for accounting review; retrying will not complete this case.";
+  const current = supplierCosts(false);
+  current.lines[0].lots = [];
+  current.lines[0].components = current.lines[0].components.map(component => ({
+    ...component, sourceEvidence: "confirmed", issues: [{ code: "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW", message }],
+  }));
+  state.costs.supplierCosts = current;
+  state.review.supplierCosts = current;
+  await page.route("**/api/purchase-orders/17", route => route.fulfill({ json: {
+    ...po(17), status: "closed", physicalStatus: "received", subtotalCents: 100000, totalCents: 100000,
+  } }));
+  async function assertSpecificReview() {
+    const line = page.getByTestId("supplier-cost-line-171");
+    await expect(line).toContainText(message);
+    await expect(line).toContainText("The recorded source needs an accounting review.");
+    await expect(line).toContainText("there is no automatic cost retry for this case");
+    await expect(line.getByText(/Confirm the product and packaging amounts|some receipt or stock history is missing|current supplier costs still need to be applied/)).toHaveCount(0);
+    await expect(line.getByRole("link", { name: "Open receipt cost processing", exact: true })).toHaveCount(0);
+    const source = line.getByRole("link", { name: "View invoice TEST-INV-71 · line 1", exact: true });
+    await expect(source).toBeVisible();
+    await expect(source).not.toHaveAttribute("href", /costLine=/);
+  }
+  await page.goto("/purchase-orders/17?tab=lines");
+  await page.getByRole("button", { name: "Review supplier costs", exact: true }).click();
+  await assertSpecificReview();
+  await page.goto("/shipments/42?tab=allocation");
+  await assertSpecificReview();
+  await page.reload();
+  await assertSpecificReview();
+  await page.getByTestId("supplier-cost-line-171").screenshot({ path: info.outputPath("supplier-credit-full-return-review.png") });
+  expect(failures).toEqual([]);
+});

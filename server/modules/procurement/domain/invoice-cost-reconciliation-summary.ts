@@ -22,7 +22,8 @@ export function summarizeInvoiceCostReconciliation(result: ComponentReconciliati
     && sources.filter((source) => source.component === "packaging").length === 1;
   const knownCurrency = sources.every((source) => source.currency === "USD");
   const confirmed = completeSources && knownCurrency && sources.every((source) => source.evidence === "confirmed"
-    && source.issue === null && source.sources.every((reference) => reference.kind === "vendor_invoice_line"));
+    && source.issue === null && source.sources.some((reference) => reference.kind === "vendor_invoice_line")
+    && source.sources.every((reference) => reference.kind === "vendor_invoice_line" || reference.kind === "supplier_credit_line"));
   const estimated = completeSources && knownCurrency && sources.every((source) => source.evidence === "estimated"
     && source.issue === null && source.sources.every((reference) => reference.kind === "purchase_order_line"));
   const applied = completeSources && result.costApplications.length === sources.length

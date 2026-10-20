@@ -85,6 +85,8 @@ export const purchaseWorkspaceSchema = z.object({
     inboundShipmentId: id.nullable(),
     invoicedAmountCents: money,
     paidAmountCents: money,
+    creditedAmountCents: money.optional(),settledAmountCents:money.optional(),
+    overpaidAmountCents: money.optional(), settlementReviewRequired: z.boolean().optional(),
     balanceCents: money,
     amountScope: z.literal("whole_invoice"),
     allocatedToPurchaseCents: money,

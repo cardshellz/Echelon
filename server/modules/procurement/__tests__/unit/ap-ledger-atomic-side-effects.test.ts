@@ -59,6 +59,7 @@ const tables = vi.hoisted(() => ({
     invoiceDate: "vendor_invoices.invoice_date",
     invoicedAmountCents: "vendor_invoices.invoiced_amount_cents",
     paidAmountCents: "vendor_invoices.paid_amount_cents",
+    creditedAmountCents: "vendor_invoices.credited_amount_cents",
     balanceCents: "vendor_invoices.balance_cents",
     status: "vendor_invoices.status",
     updatedAt: "vendor_invoices.updated_at",
@@ -162,8 +163,23 @@ function makeUpdateChain() {
 
 function buildTx(selectResults: unknown[][], returnedPayment = { id: 21, paymentNumber: "PAY-20260518-001" } as Record<string, unknown>) {
   const tx: any = {
-    select: vi.fn(() => makeSelectChain(selectResults.shift() ?? [])),
-    execute: vi.fn(() => Promise.resolve()),
+    select: vi.fn((projection) => {
+      // This suite's ordinary invoice fixtures have no previous cash allocations.
+      // The real PostgreSQL credit/payment suite verifies the settlement reader.
+      if (projection?.payment === tables.apPayments && projection?.amount === tables.apPaymentAllocations.appliedAmountCents) {
+        return makeSelectChain([]);
+      }
+      const rows = (selectResults.shift() ?? []).map((value) => {
+        if (!value || typeof value !== "object") return value;
+        const row = value as Record<string, unknown>;
+        const isInvoiceProjection = "invoicedAmountCents" in row || "paidAmountCents" in row || "balanceCents" in row;
+        return isInvoiceProjection ? { id: 12, vendorId: 4, currency: "USD", status: "approved",
+          invoicedAmountCents: 2500, paidAmountCents: 0, creditedAmountCents: 0, balanceCents: 2500, ...row } : row;
+      });
+      return makeSelectChain(rows);
+    }),
+    // No credit documents or applications exist in these orchestration fixtures.
+    execute: vi.fn(async () => ({ rows: [] })),
     insert: vi.fn((table) => ({
       values: vi.fn(() => {
         if (table === tables.apPayments) {
@@ -219,7 +235,8 @@ describe("AP ledger atomic side effects", () => {
     expect(payment).toEqual({ id: 21, paymentNumber: "PAY-20260518-001" });
     expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
     expect(tx.insert).toHaveBeenCalledWith(tables.apPayments);
-    expect(tx.execute).toHaveBeenCalledOnce();
+    // One existing payment reservation plus two explicit credit-evidence reads.
+    expect(tx.execute).toHaveBeenCalledTimes(3);
     expect(tx.insert).toHaveBeenCalledWith(tables.apPaymentAllocations);
     expect(tx.update).toHaveBeenCalledWith(tables.vendorInvoices);
     expect(tx.update).toHaveBeenCalledWith(tables.purchaseOrders);
@@ -483,7 +500,8 @@ describe("AP ledger atomic side effects", () => {
     }, tx)).rejects.toThrow("audit unavailable");
 
     expect(tx.insert).toHaveBeenCalledWith(tables.apPayments);
-    expect(tx.execute).toHaveBeenCalledOnce();
+    // One existing payment reservation plus two explicit credit-evidence reads.
+    expect(tx.execute).toHaveBeenCalledTimes(3);
     expect(tx.insert).toHaveBeenCalledWith(tables.auditEvents);
   });
 

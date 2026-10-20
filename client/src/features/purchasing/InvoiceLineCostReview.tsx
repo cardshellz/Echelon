@@ -1,3 +1,4 @@
+import { SupplierCreditLink } from "./SupplierCreditLink";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearch } from "wouter";
 import { INVOICE_COST_QUERY_PARAM } from "@/lib/procurement-navigation";
@@ -131,8 +132,8 @@ function ReviewEditor({ line, currency, blockedReason, onSaved, onDiscard, onClo
   </form>;
 }
 
-export function InvoiceLineCostReview({ line, currency, invoiceStatus, onSaved }: {
-  line: ReviewLine; currency: string; invoiceStatus: string; onSaved: () => void;
+export function InvoiceLineCostReview({ line, currency, invoiceStatus, invoiceId, onSaved }: {
+  line: ReviewLine; currency: string; invoiceStatus: string; invoiceId: number; onSaved: () => void;
 }) {
   const { hasPermission } = useAuth();
   const [snapshot, setSnapshot] = useState<ReviewLine | null>(null);
@@ -160,6 +161,7 @@ export function InvoiceLineCostReview({ line, currency, invoiceStatus, onSaved }
     <Dialog open={snapshot !== null} onOpenChange={(open) => { if (!open && !busy) setSnapshot(null); }}>
       <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-xl" onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }} onInteractOutside={(event) => { if (busy) event.preventDefault(); }}>
         <DialogHeader><DialogTitle>Invoice cost breakdown · {snapshot?.sku || `Line ${snapshot?.lineNumber}`}</DialogTitle><DialogDescription>Split this line's invoice amount into product, packaging and any adjustments. These totals are used to review inventory costs.</DialogDescription></DialogHeader>
+        <p className="text-sm">Supplier credit documents are recorded separately from this original invoice breakdown. <SupplierCreditLink sourceInvoiceId={invoiceId} /></p>
         {snapshot && <ReviewEditor line={snapshot} currency={currency} blockedReason={blockedReason} onSaved={onSaved} setBusy={setBusy} onClose={() => setSnapshot(null)} onDiscard={() => { setSnapshot(null); onSaved(); }} />}
       </DialogContent>
     </Dialog>

@@ -1,3 +1,4 @@
+import { readVerifiedInvoiceSettlementProjections } from "./supplier-credit-settlement.repository";
 import { readPaymentBalances } from "./ap-payment-balance.repository";
 import { and, desc, eq, ilike, inArray, lt, or, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db";
@@ -32,14 +33,15 @@ export async function readInvoiceWorkList(query: InvoiceWorkListQuery, now: Date
       id: vendorInvoices.id, vendorId: vendorInvoices.vendorId, invoiceNumber: vendorInvoices.invoiceNumber,
       ourReference: vendorInvoices.ourReference, vendorName: vendors.name, vendorCode: vendors.code, status: vendorInvoices.status,
       invoiceDate: vendorInvoices.invoiceDate, dueDate: vendorInvoices.dueDate, invoicedAmountCents: vendorInvoices.invoicedAmountCents,
-      paidAmountCents: vendorInvoices.paidAmountCents, balanceCents: vendorInvoices.balanceCents, inboundShipmentId: vendorInvoices.inboundShipmentId,
+      paidAmountCents: vendorInvoices.paidAmountCents, creditedAmountCents:vendorInvoices.creditedAmountCents, balanceCents: vendorInvoices.balanceCents, inboundShipmentId: vendorInvoices.inboundShipmentId,
       currency: vendorInvoices.currency,
     }).from(vendorInvoices).leftJoin(vendors, eq(vendors.id, vendorInvoices.vendorId)).where(predicate)
       .orderBy(desc(vendorInvoices.createdAt), desc(vendorInvoices.id)).limit(query.limit).offset(query.offset);
     const links = rows.length ? await tx.select({ invoiceId: vendorInvoicePoLinks.vendorInvoiceId, poNumber: purchaseOrders.poNumber })
       .from(vendorInvoicePoLinks).innerJoin(purchaseOrders, eq(purchaseOrders.id, vendorInvoicePoLinks.purchaseOrderId))
       .where(inArray(vendorInvoicePoLinks.vendorInvoiceId, rows.map(row => row.id))).orderBy(purchaseOrders.poNumber, purchaseOrders.id) : [];
-    const items = rows.map(row => ({ ...row, invoiceDate: row.invoiceDate?.toISOString() ?? null, dueDate: row.dueDate?.toISOString() ?? null,
+    const settlements=await readVerifiedInvoiceSettlementProjections(tx,rows);
+    const items = rows.map(row => ({ ...row, ...settlements.get(row.id)!, invoiceDate: row.invoiceDate?.toISOString() ?? null, dueDate: row.dueDate?.toISOString() ?? null,
       poNumbers: links.filter(link => link.invoiceId === row.id).map(link => link.poNumber) }));
     return invoiceWorkListPageSchema.parse({ items, ...pageMetadata(count.total, query, items.length) });
   }, { isolationLevel: "repeatable read", accessMode: "read only" });

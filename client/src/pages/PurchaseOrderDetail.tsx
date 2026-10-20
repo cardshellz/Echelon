@@ -1,3 +1,5 @@
+import { formatPaymentAmount } from "@/lib/ap-payment-command";
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
 import { ShipmentQuantityControl } from "@/components/purchasing/ShipmentQuantityControl";
 import { parseShipmentUnits, shipmentQuantityDraft, shipmentQuantityPayload, shipmentQuantityPreview, type ShipmentQuantityDraft } from "@/lib/shipment-unit-entry";
@@ -148,7 +150,7 @@ const FINANCIAL_LABELS: Record<string, string> = {
   unbilled: "Unbilled",
   invoiced: "Invoiced",
   partially_paid: "Partial",
-  paid: "Paid",
+  paid: "Settled",
   disputed: "Disputed",
 };
 
@@ -3732,6 +3734,7 @@ export default function PurchaseOrderDetail() {
         {/* ── History Tab ── */}
         {/* ── Invoices Tab ── */}
         <TabsContent value="invoices" className="space-y-4">
+          <SupplierCreditLink purchaseOrderId={po.id} />
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
               Linked vendor invoices. Amounts and balances cover each entire invoice, which may include other purchase orders.
@@ -3787,10 +3790,10 @@ export default function PurchaseOrderDetail() {
                         </TableCell>
                         <TableCell className="text-right font-mono">{formatCents(inv.invoicedAmountCents)}</TableCell>
                         <TableCell className="text-right font-mono font-medium">
-                          {formatCents(inv.balanceCents)}
+                          {formatCents(inv.balanceCents)}<div className="text-xs text-muted-foreground">Cash {formatPaymentAmount(inv.paidAmountCents)} · Credits {formatPaymentAmount(inv.creditedAmountCents)}</div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant="outline" className="text-xs">{inv.status?.replace("_", " ")}</Badge>
+                          <Badge variant="outline" className="text-xs">{inv.status === "paid" && inv.creditedAmountCents > 0 ? "settled" : inv.status?.replace("_", " ")}</Badge>
                         </TableCell>
                         <TableCell>
                           <Link href={procurementNavigation.childHref(`/ap-invoices/${inv.id}`)} className="text-xs text-blue-600 hover:underline">View →</Link>

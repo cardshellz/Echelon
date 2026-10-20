@@ -9,10 +9,16 @@ function source(): InvoiceReplacementSource {
   lines: [{ id: 11, freightCostId: 4, purchaseOrderLineId: null, productVariantId: null, unitCostMills: 99000,
     unitCostCents: 990, qtyInvoiced: 1, lineTotalCents: 990 }],
   costs: [{ id: 4, vendorInvoiceId: 1, vendorId: 3, inboundShipmentId: 2, currency: "USD", actualCents: 990, estimatedCents: null }],
-  links: [], paymentHistory: [], successorInvoiceId: null, shipment: { status: "closed" }, shipmentPoIds: [] };
+  links: [], paymentHistory: [], hasCreditHistory: false, successorInvoiceId: null, shipment: { status: "closed" }, shipmentPoIds: [] };
 }
 
 describe("explicit invoice replacement eligibility", () => {
+  it("preserves retained supplier credit history instead of offering a replacement", () => {
+    const input = { ...source(), hasCreditHistory: true };
+    const before = structuredClone(input);
+    expect(evaluateInvoiceReplacement(input, version)).toMatchObject({ allowed: false, code: "AP_INVOICE_REPLACEMENT_CREDIT_HISTORY" });
+    expect(input).toEqual(before);
+  });
   it("accepts a complete unpaid closed-shipment invoice without mutating its input", () => {
     const input = source(), before = structuredClone(input);
     expect(evaluateInvoiceReplacement(input, version)).toMatchObject({ allowed: true, code: null, expectedVersion: version });

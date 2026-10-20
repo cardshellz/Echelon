@@ -2,7 +2,8 @@ export function invoiceListItem(value: Record<string, unknown>) {
   return { id: value.id, vendorId: value.vendorId ?? 2, invoiceNumber: value.invoiceNumber, ourReference: value.ourReference ?? null,
     vendorName: value.vendorName ?? "Test vendor", vendorCode: value.vendorCode ?? "TEST", status: value.status ?? "approved",
     invoiceDate: value.invoiceDate ?? null, dueDate: value.dueDate ?? null, invoicedAmountCents: value.invoicedAmountCents ?? 10000,
-    paidAmountCents: value.paidAmountCents ?? 0, balanceCents: value.balanceCents ?? 10000, inboundShipmentId: value.inboundShipmentId ?? null,
+    paidAmountCents: value.paidAmountCents ?? 0, creditedAmountCents: value.creditedAmountCents ?? 0, settledAmountCents: value.settledAmountCents ?? value.paidAmountCents ?? 0, balanceCents: value.balanceCents ?? 10000, inboundShipmentId: value.inboundShipmentId ?? null,
+    overpaidAmountCents: value.overpaidAmountCents ?? 0, settlementReviewRequired: value.settlementReviewRequired ?? false,
     currency: value.currency ?? "USD", poNumbers: value.poNumbers ?? [] };
 }
 export function paymentListItem(value: Record<string, unknown>) {

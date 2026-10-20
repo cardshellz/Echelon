@@ -1,3 +1,4 @@
+import { SupplierCreditEvidenceError } from "./supplier-credit-settlement.repository";
 import { financialCommandRepository } from "../../platform/commands/command-results.repository";
 import {
   runTransactionalFinancialCommand,
@@ -17,7 +18,7 @@ import {
 export function classifyApInvoiceCommandFailure(
   error: unknown,
 ): FinancialCommandFailureDisposition {
-  if (error instanceof ApLedgerError && error.statusCode >= 400 && error.statusCode <= 499) {
+  if ((error instanceof ApLedgerError || error instanceof SupplierCreditEvidenceError) && error.statusCode >= 400 && error.statusCode <= 499) {
     return {
       kind: "rejected",
       httpStatus: error.statusCode,

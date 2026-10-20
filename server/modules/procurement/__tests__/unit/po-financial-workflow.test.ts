@@ -361,7 +361,8 @@ function reader(rows: readonly (readonly unknown[])[]) {
     };
     return query;
   });
-  const client = { select } as unknown as PoFinancialEvidenceReadClient;
+  const execute = vi.fn(async () => ({ rows: [] })); // These fixtures contain no retained supplier-credit applications.
+  const client = { select, execute } as unknown as PoFinancialEvidenceReadClient;
   const transaction = vi.fn(
     async (run: (tx: PoFinancialEvidenceReadClient) => Promise<unknown>) =>
       run(client),
@@ -369,6 +370,7 @@ function reader(rows: readonly (readonly unknown[])[]) {
   return {
     client,
     select,
+    execute,
     transaction,
     database: { transaction } as unknown as PoFinancialEvidenceDatabase,
   };

@@ -1,7 +1,7 @@
 import { MAX_WORKSPACE_TRAIL, parsePurchaseWorkspaceSelection, parseWorkspaceRef, workspaceRefKey, type ProcurementWorkspaceRef } from "./purchase-workspace-selection";
 
 /** Navigation metadata only: these references never authorize or reparent records. */
-export type ProcurementRecordKind = "purchase" | "shipment" | "invoice" | "receipt";
+export type ProcurementRecordKind = "purchase" | "shipment" | "invoice" | "receipt" | "credit";
 
 export interface ProcurementRecord {
   kind: ProcurementRecordKind;
@@ -31,11 +31,12 @@ const TABS: Record<ProcurementRecordKind, readonly string[]> = {
   shipment: ["lines", "costs", "allocation", "invoices", "timeline", "tracking"],
   invoice: ["lines", "details", "attachments"],
   receipt: ["detail"],
+  credit: ["details"],
 };
 // Bound copied URLs even when users follow cycles through shared documents.
 const MAX_TRAIL_DEPTH = 12;
 const MAX_SEARCH_LENGTH = 8192;
-const LIST_PATHS = ["/purchase-orders", "/shipments", "/ap-invoices", "/receiving"];
+const LIST_PATHS = ["/purchase-orders", "/shipments", "/ap-invoices", "/receiving", "/supplier-credits"];
 
 function positiveId(value: string | null): number | null {
   if (!value || !/^[1-9]\d*$/.test(value)) return null;
@@ -51,11 +52,12 @@ function single(params: URLSearchParams, name: string): string | null {
 export function parseProcurementRecord(path: string, search: string): ProcurementRecord | null {
   if (search.length > MAX_SEARCH_LENGTH) return null;
   const params = new URLSearchParams(search);
-  const match = /^(\/purchase-orders|\/shipments|\/ap-invoices)\/([1-9]\d*)$/.exec(path);
+  const match = /^(\/purchase-orders|\/shipments|\/ap-invoices|\/supplier-credits)\/([1-9]\d*)$/.exec(path);
   const kind: ProcurementRecordKind | null = path === "/receiving" ? "receipt"
     : match?.[1] === "/purchase-orders" ? "purchase"
     : match?.[1] === "/shipments" ? "shipment"
-    : match?.[1] === "/ap-invoices" ? "invoice" : null;
+    : match?.[1] === "/ap-invoices" ? "invoice"
+    : match?.[1] === "/supplier-credits" ? "credit" : null;
   const id = positiveId(kind === "receipt" ? single(params, "open") : match?.[2] ?? null);
   if (!kind || id === null) return null;
   const tab = single(params, "tab");
@@ -108,7 +110,8 @@ export function procurementRecordHref(record: ProcurementRecord, journey?: Procu
   const params = new URLSearchParams();
   const path = record.kind === "purchase" ? `/purchase-orders/${record.id}`
     : record.kind === "shipment" ? `/shipments/${record.id}`
-    : record.kind === "invoice" ? `/ap-invoices/${record.id}` : "/receiving";
+    : record.kind === "invoice" ? `/ap-invoices/${record.id}`
+    : record.kind === "credit" ? `/supplier-credits/${record.id}` : "/receiving";
   if (record.kind === "receipt") params.set("open", String(record.id));
   else params.set("tab", record.tab);
   if (record.kind === "purchase" && record.tab === "lifecycle" && record.workspace) {
@@ -121,7 +124,7 @@ export function procurementRecordHref(record: ProcurementRecord, journey?: Procu
 }
 
 export function procurementRecordLabel(record: ProcurementRecord): string {
-  const label = { purchase: "purchase", shipment: "shipment", invoice: "invoice", receipt: "receipt" }[record.kind];
+  const label = { purchase: "purchase", shipment: "shipment", invoice: "invoice", receipt: "receipt", credit: "supplier credit" }[record.kind];
   return `${label} #${record.id}`;
 }
 
@@ -156,6 +159,21 @@ export function procurementChildHref(
     return `${href}&${INVOICE_CORRECTION_QUERY_PARAM}=${lineId}`;
   }
   return href;
+}
+
+/** Preserve the same document trail when entering a supported work list. */
+export function procurementListChildHref(path: string, search: string, destination: string): string {
+  const separator = destination.indexOf("?");
+  const listPath = separator < 0 ? destination : destination.slice(0, separator);
+  if (!LIST_PATHS.includes(listPath)) throw new Error("Invalid procurement list destination");
+  const params = new URLSearchParams(separator < 0 ? "" : destination.slice(separator + 1));
+  const journey = parseProcurementJourney(search);
+  const current = parseProcurementRecord(path, search);
+  const purchase = journey.purchase ?? (current?.kind === "purchase" ? current : null);
+  params.delete("purchase"); params.delete("via");
+  if (purchase) params.set("purchase", encodeReference(purchase));
+  for (const record of [...journey.trail, ...(current ? [current] : [])].slice(-MAX_TRAIL_DEPTH)) params.append("via", encodeReference(record));
+  return `${listPath}${params.size ? `?${params}` : ""}`;
 }
 
 export function procurementBackHref(search: string, fallback: string): string {
