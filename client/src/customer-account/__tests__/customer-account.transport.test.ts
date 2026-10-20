@@ -35,6 +35,10 @@ describe("storefront transport reuses canonical clients", () => {
     await expect(api.rewards.issue(4, 9, { requestKey: "22222222-2222-4222-8222-222222222222", points: 100 }))
       .rejects.toMatchObject({ code: "REWARD_ISSUANCE_PENDING" });
   });
+  it("does not reinterpret an invalid successful bootstrap as proof of a signed-out customer", async () => {
+    const api = createCustomerAccountTransport(config, async () => Response.json({ ...bootstrap, session: { ...bootstrap.session, authenticated: false, sessionKey: null } }));
+    await expect(api.bootstrap()).rejects.toMatchObject({ code: "CUSTOMER_ACCOUNT_SESSION_INVALID" });
+  });
   afterEach(() => vi.useRealTimers());
   it("bounds a stalled account read without retrying it", async () => {
     vi.useFakeTimers();

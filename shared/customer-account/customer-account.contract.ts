@@ -4,6 +4,7 @@ import { orderEditConnectionSchema } from "../order-edits/order-edit.contract";
 
 export const CUSTOMER_ACCOUNT_PROXY_API = `${CUSTOMER_RETURNS_SHOPIFY_PROXY}/account`;
 export const CUSTOMER_ACCOUNT_COMMAND_HEADER = "X-Customer-Account";
+export const CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED = "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED";
 const externalId = z.string().max(30).regex(/^[1-9][0-9]*$/);
 export const customerAccountRequestSchema = z.object({
   themeId: externalId,
