@@ -32,7 +32,7 @@ export async function installSupplierReturnCompletionFixture(pool: {
     if (!routine) throw new Error("AP graph fixture migration boundary changed.");
     await pool.query(routine);
   }
-  await pool.query(readFileSync(resolve(process.cwd(), "migrations/pending/supplier_return_completion.sql"), "utf8"));
+  await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000019000018680001_supplier_return_completion.sql"), "utf8"));
 }
 
 /** Only the owning disposable fixture uses this around its existing reset. */
