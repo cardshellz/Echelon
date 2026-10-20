@@ -25,6 +25,7 @@ export default defineConfig({
     "ebay-listing-photos.spec.ts",
     "ebay-listing-sync-recovery.spec.ts",
     "ebay-policy-integrity.spec.ts",
+    "ebay-pricing-integrity.spec.ts",
     "ebay-listing-mapping-repair.spec.ts",
     "ebay-listing-intent.spec.ts",
     "ebay-publication-stock.spec.ts",
