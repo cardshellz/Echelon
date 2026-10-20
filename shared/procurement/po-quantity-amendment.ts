@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PO_LINE_TYPES } from "./po-line-type";
+import { poAmendmentImpactSchema } from "./po-amendment-impact";
 
 export const poAmendmentIdSchema = z.number().int().positive().max(2_147_483_647);
 const money = z.number().int().nonnegative().safe();
@@ -38,7 +39,9 @@ export const poQuantityPreviewRequestSchema = z.object({
   closedPurchaseOrderConfirmed: z.literal(true).optional(),
   reason: z.string().trim().min(10).max(2000),
 }).strict();
-export const poQuantityApprovalRequestSchema = poQuantityPreviewRequestSchema.extend({ approvalConfirmed: z.literal(true) }).strict();
+// Optional in stored retry receipts from earlier releases; new approvals require
+// the reviewed downstream fingerprint in the application service.
+export const poQuantityApprovalRequestSchema = poQuantityPreviewRequestSchema.extend({ approvalConfirmed: z.literal(true), previewVersion: poAmendmentVersionSchema.optional() }).strict();
 export const poQuantityLineViewSchema = z.object({
   id: poAmendmentIdSchema,
   lineNumber: poAmendmentIdSchema,
@@ -74,6 +77,8 @@ export const poQuantityAmendmentContextSchema = z.object({
   }).strict()).optional(),
 });
 export const poQuantityAmendmentPreviewSchema = z.object({
+  previewVersion: poAmendmentVersionSchema.optional(),
+  impact: poAmendmentImpactSchema.optional(),
   purchaseOrderId: poAmendmentIdSchema,
   currency: z.string(),
   sourceVersion: poAmendmentVersionSchema,
@@ -108,6 +113,11 @@ export type PoQuantityApprovalRequest = z.infer<typeof poQuantityApprovalRequest
 export type PoQuantityAmendmentContext = z.infer<typeof poQuantityAmendmentContextSchema>;
 export type PoQuantityAmendmentPreview = z.infer<typeof poQuantityAmendmentPreviewSchema>;
 export type PoQuantityAmendmentResult = z.infer<typeof poQuantityAmendmentResultSchema>;
+export const poAmendmentHistorySchema = z.object({
+  entries: z.array(z.object({ id: z.number().int().positive().safe(), actorId: z.string(), actorName: z.string(),
+    approvedAt: z.string().datetime(), revisionNumber: z.number().int().positive(), preview: poQuantityAmendmentPreviewSchema }).strict()),
+  nextCursor: z.number().int().positive().safe().nullable(),
+}).strict();
 
 /** One exact calculation shared by the server and the editable form. */
 export function poLineAmountCents(productCents: number, packagingCents: number, discountCents: number, taxCents: number): number {

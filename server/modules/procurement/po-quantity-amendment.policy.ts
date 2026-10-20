@@ -151,10 +151,10 @@ export function planQuantityAmendment(facts: AmendmentFacts, request: PoQuantity
   const oldTotal = oldSubtotal - BigInt(stored(facts.header.discountCents, "PO discount")) + BigInt(stored(facts.header.taxCents, "PO tax")) + BigInt(stored(facts.header.shippingCostCents, "PO freight"));
   if (oldSubtotal !== BigInt(stored(facts.header.subtotalCents, "PO subtotal")) || oldTotal !== BigInt(stored(facts.header.totalCents, "PO total"))) throw new PoQuantityAmendmentError("Recorded PO amounts do not reconcile. Review the cost evidence before correcting quantity.", "PO_AMENDMENT_SOURCE_INVALID");
   const warnings = new Set<string>([
-    "Receipt quantities, inventory quantities and recorded inventory costs stay unchanged.",
+    "Actual receipt, shipment and inventory quantities stay unchanged. Remaining quantities are recalculated from the PO.",
     "Invoice amounts, invoice quantities and payments stay unchanged. Remaining match issues require separate review.",
     "Review product, packaging, discount and tax against the supplier document; no missing cost component is guessed.",
-    "Changed product costs require a separate inventory cost review. This approval does not revalue stock or COGS.",
+    "Dependent allocations, inventory costs and recorded COGS are recalculated through their cost owners. Any unresolved evidence is shown in this review.",
     "Previous three-way match variance approvals are superseded; any remaining variance requires a new review.",
   ]);
   const patches = request.changes.map((change) => {

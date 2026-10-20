@@ -1,0 +1,55 @@
+# PO ordered quantity: consumer trace and acceptance
+
+Scope: repository consumers of `purchase_order_lines.order_qty` / `PurchaseOrderLine.orderQty`, aliases selected from that field, and their persisted financial projections. Sales-order `orderQty`, inventory `backorder_qty`, and historical migration/import evidence are not a second purchase-quantity authority. This is a source-code trace and synthetic local acceptance record, not a claim about deployment or live document values.
+
+## Approved edit command
+
+| Responsibility | Owner / function | Result of an approved edit |
+| --- | --- | --- |
+| HTTP and authority | `po-quantity-amendment.routes.ts`; `createPoQuantityAmendmentService`; `assertQuantityAmendmentAuthority` | Validate canonical IDs, current admin grant, revised-total approval tier, source and measured-impact fingerprints. Durable command replay prevents a second edit. |
+| Canonical quantity, pricing and totals | `planQuantityAmendment`; `persistQuantityAmendment` | Update ordered pieces, exact product/line/header totals, normalized quote fields and receiving status/count. Actual receipts are inputs, never replacement quantities. Closed PO state stays closed. |
+| Quantity variance | `planPurchaseOrderQuantityExceptions`; `replacePurchaseOrderQuantityExceptions` | Supersede only changed ordered evidence. Preserve original payload/decision history; expose a still-applicable shortage or overreceipt without inventing receipt corrections. |
+| Invoice comparison | `recomputePurchaseOrderInvoiceMatchesInTransaction`; `replacePurchaseOrderMatchExceptions` | Reevaluate against current PO lines and saved invoice/receipt actuals. Supersede old source-specific match decisions; preserve invoice amounts, counts, payments and original evidence. |
+| Supplier product and packaging costs | `refreshPoAmendmentCosts` → `reconcilePurchaseCostEvidence` → `resolvePurchaseCostSource` → `applyCostRevision` | Reevaluate quote/invoice authority. Propagate supported revised costs through frozen receipt origins, transfers/conversions, remaining stock and recorded sold costs. Missing evidence remains actionable. |
+| Shipment allocation and landed cost | `refreshQuantityAllocationInTransaction`; `buildShipmentAllocationBasis`; `projectShipmentProductValue`; `updateCostsInTransaction` | Recompute from exact product value prorated to actual shipment pieces. Refresh the entire shared shipment. Finalized costs use the existing audited owner; open shipments remain visibly unfinalized. |
+| Historical cost approvals | `applyCostRevision`; existing cost reconciliation owner | Preserve approval destination and append monetary adjustments when needed. No new approval of identical costs, no fabricated sales or stock movements. |
+| Shared completion status | `readPurchaseCostStatus`; `readShipmentCostReviewInTransaction`; `isShipmentCostLinePosted` | Use current source/application/reconciliation evidence, including approved historical postings. Raw historic application warnings do not reopen completed costs. |
+| Review and audit | `buildPoAmendmentImpact`; `recordQuantityAmendmentResult`; `readPoAmendmentHistory` | Measured before/after for quantities, allocations, lot rates, sold-cost records, historical balances and unresolved work. Immutable event and paginated approval history retain the reviewed result. |
+
+## Current reads and calculations
+
+Paths below are under `server/modules/procurement/` unless qualified. These readers select current PO quantity; they do not need a duplicate quantity write.
+
+| Consumers | Current source and dependency |
+| --- | --- |
+| `purchase-workspace.repository.ts`, `purchase-cost-trace.repository.ts`, `purchase-cost-trace.service.ts`, `procurement.storage.ts` | PO workspace, detail/list and cost trace read current ordered quantity and totals. Cost trace distinguishes actual document quantities and pricing provenance. |
+| `purchase-pipeline.repository.ts` / `projectPurchasePipeline` | Current ordered, cancelled and posted receipt quantities feed remaining supply, stage quantities and exact prorated value. Immutable supplier progress is compared with the current order. |
+| `readPurchasePlanningSupply`, `readPurchasePlanningSnapshot`, `purchasing-recommendation.routes.ts` | Reorder/planning reads combine current open PO supply with posted receipt evidence. The active review queue recalculates from current inputs; accepted recommendation snapshots remain historical evidence. Recommendation-owned PO economics retain their ownership guard. |
+| `supplier-progress.repository.ts` | Supplier progress commands lock the current PO line and validate against current ordered/cancelled pieces. Saved supplier reports are evidence of what the supplier reported. |
+| `loadLinkedRfqPurchases`, `loadPendingPurchaseSourcingReservations`, `domain/rfq-sourcing-reservation.ts` | RFQ sourcing and reservations read linked current PO quantities. Existing RFQ/recommendation creation/handoff paths are initial-authority writers; their accepted snapshots are not rewritten. |
+| `readShipmentSourceCapacities`, `shipment-tracking.service.ts` | Available shipping quantity deducts shipment commitments and direct PO receipts, handles reversals, and requires reconciled source evidence. The amendment preview calls this exact owner instead of using ordered minus shipped. |
+| `createReceiptFromPO`, `createReceiptFromShipment`, `receive-validation.service.ts`, `receiving-close-integrity.domain.ts` / `.repository.ts`, `receiving.service.ts`, `receive-configuration-policy.ts` | New PO receipt defaults use the current remaining order. Shipment receipt defaults use the selected shipment. Posting/overreceipt checks use current PO quantity and frozen receiving-unit evidence. Existing receipt expected units describe that receipt's planned quantity, not the current PO order; posted actuals and unit snapshots remain untouched. |
+| `reconcilePurchaseOrderReceipt`, `receipt-reversal.service.ts`, `purchase-order-close.service.ts` | Future posting, reversals and close eligibility compare actuals with the revised order. PO edits recalculate receiving status; they do not create or reverse receipts. |
+| `getInvoiceLinesWithPoQuantities`, `purchase-order-invoice-match.ts`, `invoice-quantity-correction.policy.ts`, `po-variance-approval.policy.ts`, `ap-ledger.service.ts` | Invoice comparisons and later corrections use current PO quantities. Invoice line snapshots and actual billed counts remain historical billing evidence. |
+| `readPurchaseCostSource(s)`, `receipt-cost-evidence.service.ts`, `shipment-cost-application.service.ts`, `domain/purchase-cost-source.ts` | New receipt and current costing bases follow the selected PO/invoice authority. Persisted cost dependents now refresh inside the approved PO edit transaction. |
+| `loadSupplierPoDocumentSource`, `supplier-po-document.ts` | Newly rendered supplier POs use the current order. Sent document revisions remain immutable; the amendment does not email the supplier. |
+| `getExpectedReceiptsReport` → `projectExpectedReceipts` | Corrected an additional value bug: outstanding product value now uses exact product total × remaining / ordered, rounded once per line, instead of multiplying a rounded per-piece cent mirror. Receipt/cancellation counts remain separate. |
+| `legacy-po-receive-config-remediation.service.ts`, `receipt-shipment-quantity-correction.repository.ts` | Compare requested corrections with current PO quantity. PO edits do not change catalog packaging factors or silently perform a receipt/shipment correction. |
+| `purchase-order-line-commands.ts` | Ordinary line edits require a draft header and no downstream links. Approved-document edits cannot use that route to bypass the amendment. |
+
+## Displays and saved history
+
+`PoQuantityAmendment`, `PoAmendmentImpact` and `PoAmendmentHistory` render the server review. `PurchaseOrderDetail`, `PurchaseOrders`, `PurchaseLifecycleWorkspace`, `PurchasePipeline`, invoice `InvoicePoQuantity`, shipment line actions, receiving and product/inventory planning views use the current read owners above. `shared/procurement/po-line-landed-cost.ts` uses current ordered basis and allocated amounts for the PO landed cost display.
+
+`invalidatePurchaseCosts` refreshes purchase-order, inbound-shipment, shipment-line, receiving, invoice, purchasing/planning, procurement-health, inventory, product, COGS and finance query families, including the pipeline's non-URL key and approval history. It also runs after an ambiguous response. The global query client refetches mounted routes on navigation. `server/modules/oms/finance-analytics.service.ts` reads exact recorded order-cost totals, updated through the existing COGS owner. Actual stock/ATP/reservation counts are not derived from ordered quantity and therefore are not rewritten.
+
+Frozen PO revisions, sent supplier documents, invoice billed counts, receipt expectations/conversion snapshots, stock movements, sales quantities and accepted recommendation evidence retain their original facts. Current comparison values are read from their owning documents; they are not copied into historic evidence.
+
+## Validation
+
+- `po-amendment-dependencies.cases.ts` runs inside the real receiving/costing PostgreSQL fixture: receive, transfer, sell, preview rollback, approve, retry, shared shipment across two POs, direct receipts consuming shipping capacity, open-shipment finalization, approved supplier authority, historical COGS approval preservation, first-application preview identity stability, stale evidence and audit-failure rollback. It checks current PO/shipment cost readers, planning pipeline, expected-receipt value and approval history while comparing actual document/stock/sale records.
+- `po-quantity-amendment.integration.test.ts` covers HTTP authentication/authorization, monetary tiers, source and permission races, stale input, exact-money constraints, transaction failures, closed PO protection, command replay and permission-gated history pagination.
+- Unit policies cover exact proration/rounding/overflow, shipping capacity, historical balance selection, accidental quantity/charge mutation guards and exception supersession. Procurement unit suites and cache invalidation tests cover connected reads.
+- `procurement-quantity-amendments.spec.ts` exercises compact desktop/mobile editing, measured review, explicit approval, connected refetch, immutable history, legacy replay, stale input and lost-response recovery with mocked APIs. Database tests supply persistence proof; browser mocks do not claim production acceptance.
+
+Operational boundary: a PO edit can save a valid commercial correction while explicitly retaining missing cost evidence. Unsupported allocation data or an actual write failure aborts the whole edit. Restoring missing history, changing receipt/shipment actuals, finalizing an open shipment, or changing an invoice requires its existing explicit correction workflow. These are visible remaining actions, not silently resolved warnings.

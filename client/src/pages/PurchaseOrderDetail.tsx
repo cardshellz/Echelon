@@ -6,6 +6,7 @@ import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/pur
 import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSummary";
 import { PoFinancialEvidence, usePoFinancialEvidence } from "@/features/purchasing/PoFinancialEvidence";
 import { usePoShipmentCosts } from "@/features/purchasing/use-po-shipment-costs";
+import { PoAmendmentHistory } from "@/features/purchasing/PoAmendmentHistory";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
 import { projectPoLineLandedCosts } from "@shared/procurement/po-line-landed-cost";
 import { PoLineLandedCost } from "@/features/purchasing/PoLineLandedCost";
@@ -3302,7 +3303,7 @@ export default function PurchaseOrderDetail() {
 
       {/* Phase 2: Tabs + Quick Actions side rail */}
       <div className="flex flex-col md:flex-row gap-4 items-start">
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0 w-full">
       {/* Tabs: Lines, Receipts, History */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex h-auto max-w-full flex-wrap justify-start">
@@ -3970,6 +3971,7 @@ export default function PurchaseOrderDetail() {
         </TabsContent>
 
         <TabsContent value="history" className="space-y-4">
+          {poId !== null && <PoAmendmentHistory purchaseOrderId={poId} />}
           {shipmentCosts.isPending && <p role="status">Loading cost approval history…</p>}
           {shipmentCosts.isError && <p role="alert">Cost approval history could not be loaded. <Button variant="outline" onClick={() => void shipmentCosts.refetch()}>Reload cost history</Button></p>}
           {shipmentCosts.data?.supplierCosts && <PurchaseCostOriginHistory status={shipmentCosts.data.supplierCosts} />}
