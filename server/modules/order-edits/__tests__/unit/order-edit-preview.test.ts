@@ -118,23 +118,20 @@ describe("read-only preview pricing", () => {
     });
     expect(
       priceOrderEditPreviewItems(context, previewInput(1)).itemsNetCents,
-    ).toBe(10099);
+    ).toBe(11049);
     context.snapshot.previewProductDiscounts![0].amountCents = 6001;
     expect(() => priceOrderEditPreviewItems(context, previewInput(1))).toThrow(
       /exact cents/,
     );
   });
-  it("rejects unused rewards, changed member prices, stock shortages and unknown identities", () => {
+  it("rejects missing fixed allocation evidence, changed member prices, stock shortages and unknown identities", () => {
     const variants = [
       previewContext(),
       previewContext(),
       previewContext(),
       previewContext(),
     ];
-    variants[0].snapshot.discountRules![1].value = {
-      type: "fixed",
-      amountCents: 50000,
-    };
+    variants[0].snapshot.nativeDiscountAllocations = undefined;
     variants[1].variants[0].memberCents = 12000;
     variants[2].variants[0].availableQuantity = 0;
     variants[3].snapshot.previewProductDiscounts = [];

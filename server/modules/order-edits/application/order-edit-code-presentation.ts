@@ -1,4 +1,4 @@
-import type { OrderEditSnapshot } from "./order-edit-provider";
+import type { OrderEditSnapshot, OrderEditQuote } from "./order-edit-provider";
 import type { OrderEditCodePricing } from "@shared/order-edits/order-edit-codes";
 import { presentOrderEditCodeFinancials } from "../domain/order-edit-code-pricing";
 import { OrderEditError } from "../domain/order-edit-error";
@@ -11,8 +11,32 @@ import {
 export function presentOrderEditCodeBreakdown(
   financials: OrderEditFinancials | undefined,
   pricing: OrderEditCodePricing | undefined,
+  productLines?: Array<{ id: string; productNetCents: number }>,
 ): OrderEditFinancials | undefined {
-  if (!financials || !pricing) return financials;
+  if (!financials) return financials;
+  if (!pricing) {
+    const discounts = financials.itemDiscounts?.filter((entry) =>
+      entry.key.startsWith("code:"),
+    );
+    if (!productLines || !discounts?.length) return financials;
+    const byId = new Map(
+      productLines.map((line) => [line.id, line.productNetCents]),
+    );
+    const presented = orderEditFinancialsSchema.safeParse({
+      ...financials,
+      orderDiscounts: discounts,
+      lines: financials.lines.map((line) => ({
+        ...line,
+        productNetCents: byId.get(line.id),
+      })),
+    });
+    if (byId.size !== productLines.length || !presented.success)
+      throw new OrderEditError(
+        "ORDER_EDIT_CODE_PRESENTATION_INVALID",
+        "The original item prices and order discount could not be verified.",
+      );
+    return presented.data;
+  }
   const byId = new Map(pricing.lines.map((line) => [line.id, line]));
   const presented = orderEditFinancialsSchema.safeParse({
     ...financials,
@@ -50,6 +74,51 @@ export function presentOrderEditCodeBreakdown(
       "The item prices and order discount could not be verified. Refresh the order before continuing.",
     );
   return presented.data;
+}
+
+export function snapshotProductPrices(snapshot: OrderEditSnapshot) {
+  if (!snapshot.previewProductDiscounts || !snapshot.financials)
+    return undefined;
+  return snapshot.financials.lines.map((line) => ({
+    id: line.id,
+    productNetCents:
+      line.grossCents -
+      (snapshot.previewProductDiscounts!.find(
+        (entry) => entry.lineId === line.id,
+      )?.amountCents ?? 0),
+  }));
+}
+
+export function quoteProductPrices(quote: OrderEditQuote | null) {
+  if (!quote?.baseline.previewProductDiscounts) return undefined;
+  return quote.lines.map((line) => {
+    if (line.quantity === 0)
+      return { id: line.calculatedLineId, productNetCents: 0 };
+    const original = quote.baseline.lines.find(
+      (entry) => entry.id === line.originalLineId,
+    );
+    const discount = quote.baseline.previewProductDiscounts!.find(
+      (entry) => entry.lineId === line.originalLineId,
+    );
+    if (!original || !discount)
+      return { id: line.calculatedLineId, productNetCents: line.totalCents };
+    const numerator = BigInt(discount.amountCents) * BigInt(line.quantity);
+    if (
+      original.quantity <= 0 ||
+      numerator % BigInt(original.quantity) !== BigInt(0)
+    )
+      throw new OrderEditError(
+        "ORDER_EDIT_CODE_PRESENTATION_INVALID",
+        "The original item price cannot be displayed exactly.",
+      );
+    return {
+      id: line.calculatedLineId,
+      productNetCents: Number(
+        BigInt(line.originalUnitPriceCents) * BigInt(line.quantity) -
+          numerator / BigInt(original.quantity),
+      ),
+    };
+  });
 }
 
 /** Enrich verified pricing evidence without changing native identity fingerprints. */

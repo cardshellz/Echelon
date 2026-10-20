@@ -99,7 +99,7 @@ publication/category coverage must also be checked on the deployed connection.
 ## Pilot boundaries
 
 - USD, domestic US physical orders only; Shopify and warehouse eligibility are
-  rechecked. Orders with prior refunds or unsupported promotion/tender/lineage
+  rechecked. Orders with prior refund payment activity or unsupported promotion/tender/lineage
   combinations fail closed.
 - Shipping is recalculated for revised items using current checkout rates and
   eligible shipping benefits. Address editing is not included.
@@ -132,10 +132,13 @@ allocation engine. Rewards state remains owned by the Club app.
    A native per-line allocation must equal one of the two adjacent integer cents
    around the exact percentage. This covers the captured Shopify rounding; it is
    not a tolerance for an arbitrary difference in order totals.
-3. Each fixed code has one original credit budget across the order. Quantity
-   growth cannot multiply it. Removal must preserve that budget on the remaining
-   eligible items. Shopify's distribution is accepted only if the budget and all
-   item bounds reconcile exactly.
+3. Existing native fixed codes retain their actual checkout allocations on the
+   original items. Their face value is not a new credit budget. Added items get
+   no allocation from that old code. Extra quantity is staged as another line
+   because Shopify rejects increasing a line carrying a fixed native code.
+   Reductions retain only the exact proportional original allocation; they do
+   not redistribute it to other items. `priceRetainedOrderDiscounts` verifies
+   fixed allocations separately from percentage recalculation.
 4. Shipping is reconciled separately; tax comes from Shopify. The final financial
    quote must reconcile every item allocation, discount, shipping amount and tax
    to the order total. Commit readback verifies the same per-code amounts and
@@ -147,16 +150,32 @@ allocations that include quantities removed by a prior edit retain their verifie
 aggregate display rather than invented per-code amounts. Enriching old evidence
 does not prevent cancelling an unchanged unsubmitted edit.
 
-Shopify cannot edit existing order-level discount codes, and some fixed codes
-retain allocations instead of redistributing when an item is removed. The engine
-rejects lost or duplicated fixed credit before commit. It also rejects edits that
-leave unused credit, or require choosing priority between multiple capped fixed
-credits. Automatic settlement of unused Shellz rewards points is not implemented:
-that requires a command owned by the rewards ledger, proven original redemption
-identity, a capped settlement budget and retry-safe audit. A code name is not proof
-of a rewards redemption. The original-code path does not mint a replacement
-discount or invent compensating credit. The separate new-code path below requires
-explicit combination and redemption evidence before staging a manual adjustment.
+Shopify retains the original fixed allocations rather than redistributing a
+code's unused face value to added merchandise. A reward issued for $7.23 that
+used $2.79 keeps the $2.79 allocation; it must not turn into $7.23 after an edit.
+Club owns checkout settlement and returns unused points through its existing
+ledger, including the reviewed admin correction for historical cases. Echelon
+does not return points or reactivate the consumed code. A code name is not proof
+of a rewards redemption. New-code entry still requires its own combination and
+redemption evidence. Adding a new code to an order that already has a native
+checkout code remains outside that adapter's supported path.
+
+Unpaid recovery preserves all original refund evidence and rejects any changed
+payment, refund amount, refund intent or transaction (including zero/pending).
+Shopify's new unannotated $0 records with no transactions are retained in the
+audit snapshot but do not themselves block recovery or a subsequent edit.
+Historical zero-quantity rows are omitted from the next quote only after their
+gross, discount and net amounts are all proven zero.
+
+`scripts/verify-preserved-reward-staging.ts` exercises the actual provider on a
+synthetic native-code order in `cardshellz-staging.myshopify.com`: preview, submit,
+reconcile, recover, edit again, submit, recover again and open a third session.
+Cleanup removes the synthetic resources and restores the sample inventory.
+The test store's sample
+product prices differ from production; its native tax was zero. Financial unit
+fixtures separately cover nonzero tax and Club product pricing. The successful
+report is `verification/preserved-reward-staging-2026-10-20.json`. No production
+order or points are changed by this acceptance script.
 
 These boundaries follow [Shopify's order-edit rules](https://help.shopify.com/en/manual/fulfillment/managing-orders/editing-orders/considerations)
 and [discount combination rules](https://help.shopify.com/en/manual/discounts/discount-combinations).

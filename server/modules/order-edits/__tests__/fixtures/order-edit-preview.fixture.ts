@@ -85,6 +85,7 @@ export function previewContext(): OrderEditPreviewContext {
         discountApplications: [],
       },
       financials,
+      nativeDiscountAllocations: [{ lineId: PREVIEW_LINE, ruleKey: "code:Reward", amountCents: 1900 }],
       previewProductDiscounts: [
         { lineId: PREVIEW_LINE, amountCents: 3000, automaticCents: 3000 },
       ],

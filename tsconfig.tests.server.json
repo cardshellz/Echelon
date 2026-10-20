@@ -3,6 +3,7 @@
   "extends": "./tsconfig.tests.json",
   "include": [
     "server/**/*",
-    "shared/**/*"
+    "shared/**/*",
+    "scripts/verify-preserved-reward-staging.ts"
   ]
 }
