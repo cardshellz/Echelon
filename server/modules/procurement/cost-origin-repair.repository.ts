@@ -117,7 +117,7 @@ export async function readOriginRepairGraphEvidence(
     (
       await tx.execute(sql`SELECT origin.*,line.cost_source_kind,line.cost_source_evidence,
     EXISTS(SELECT 1 FROM procurement.receipt_reversals reversal WHERE reversal.receiving_line_id=origin.receiving_line_id) AS reversed
-    FROM inventory.lot_cost_origins origin JOIN procurement.receiving_lines line ON line.id=origin.receiving_line_id
+    FROM inventory.effective_lot_cost_origins origin JOIN procurement.receiving_lines line ON line.id=origin.receiving_line_id
     WHERE origin.inventory_lot_id=ANY(${sql.param(ids)}::int[]) ORDER BY origin.inventory_lot_id LIMIT ${MAX_REPAIR_LOTS + 1}`)
     ).rows,
     MAX_REPAIR_LOTS,
@@ -167,7 +167,7 @@ export async function readOriginRepairFacts(
     await tx.execute(sql`SELECT * FROM procurement.inbound_shipment_lines
     WHERE inbound_shipment_id=${lot.inbound_shipment_id} AND purchase_order_line_id=${lot.po_line_id} ORDER BY id LIMIT ${MAX_REPAIR_LOTS + 1} FOR UPDATE`);
   const origins = await tx.execute(
-    sql`SELECT * FROM inventory.lot_cost_origins WHERE purchase_order_line_id=${lot.po_line_id} ORDER BY purchase_start_base_piece,inventory_lot_id LIMIT ${MAX_REPAIR_LOTS + 1}`,
+    sql`SELECT * FROM inventory.effective_lot_cost_origins WHERE purchase_order_line_id=${lot.po_line_id} ORDER BY purchase_start_base_piece,inventory_lot_id LIMIT ${MAX_REPAIR_LOTS + 1}`,
   );
   const siblings =
     await tx.execute(sql`SELECT id,qty_received,product_variant_id FROM inventory.inventory_lots

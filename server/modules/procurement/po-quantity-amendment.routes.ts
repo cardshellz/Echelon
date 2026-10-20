@@ -7,28 +7,47 @@ import { FinancialCommandError } from "../../platform/commands/transactional-com
 import { createPoQuantityAmendmentService } from "./po-quantity-amendment.service";
 import { PoQuantityAmendmentError } from "./po-quantity-amendment.policy";
 import { PurchaseApprovalAuthorityError } from "./purchase-order-approval.policy";
+import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
+import { ShipmentTrackingError } from "./shipment-tracking.service";
+import { poAmendmentIdSchema } from "@shared/procurement/po-quantity-amendment";
 
-export function registerPoQuantityAmendmentRoutes(app: Express, service = createPoQuantityAmendmentService(db, () => new Date())) {
+function purchaseOrderId(value: unknown): number {
+  const parsed = typeof value === "string" && /^[1-9]\d*$/.test(value)
+    ? poAmendmentIdSchema.safeParse(Number(value)) : null;
+  if (!parsed?.success) throw new PoQuantityAmendmentError("The PO identifier must be a positive whole identifier.", "PO_AMENDMENT_INPUT_INVALID", 400);
+  return parsed.data;
+}
+
+export function registerPoQuantityAmendmentRoutes(app: Express, service = createPoQuantityAmendmentService(db, () => new Date(), app.locals.services.shipmentTracking)) {
   function failure(error: unknown, req: Request, res: Response) {
     if (error instanceof FinancialCommandError) return res.status(error.statusCode).set(error.responseHeaders ?? {}).json({ error: error.message, code: error.code, details: error.details });
     if (error instanceof PoQuantityAmendmentError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
     if (error instanceof PurchaseApprovalAuthorityError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
+    if (error instanceof CostEvidenceError || error instanceof ShipmentTrackingError) return res.status(409).json({ error: error.message, code: "PO_AMENDMENT_COST_REVIEW" });
     if (error instanceof z.ZodError) return res.status(409).json({ error: "Recorded PO evidence is invalid. Review the source records.", code: "PO_AMENDMENT_SOURCE_INVALID" });
     console.error(JSON.stringify({ event: "po_quantity_amendment_failed", purchaseOrderId: req.params.id, actorId: req.session.user?.id, message: error instanceof Error ? error.message : "Unknown failure" }));
     return res.status(500).json({ error: "Could not complete the quantity correction. Retry the saved request.", code: "PO_AMENDMENT_FAILED" });
   }
   const root = "/api/purchase-orders/:id/quantity-amendment";
+  app.get(`${root}/history`, requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      if (req.query.before !== undefined && (typeof req.query.before !== "string" || !/^[1-9]\d*$/.test(req.query.before)))
+        throw new PoQuantityAmendmentError("The history cursor must be a positive whole identifier.", "PO_AMENDMENT_INPUT_INVALID", 400);
+      res.json(await service.history(purchaseOrderId(req.params.id), req.query.before === undefined ? null : Number(req.query.before)));
+    }
+    catch (error) { failure(error, req, res); }
+  });
   app.get(root, requirePermission("purchasing", "view"), async (req, res) => {
-    try { res.json(await service.context(Number(req.params.id), req.session.user!.id)); }
+    try { res.json(await service.context(purchaseOrderId(req.params.id), req.session.user!.id)); }
     catch (error) { failure(error, req, res); }
   });
   app.post(`${root}/preview`, requirePermission("purchasing", "approve"), async (req, res) => {
-    try { res.json(await service.preview(Number(req.params.id), req.body, req.session.user!.id)); }
+    try { res.json(await service.preview(purchaseOrderId(req.params.id), req.body, req.session.user!.id)); }
     catch (error) { failure(error, req, res); }
   });
   app.post(root, requirePermission("purchasing", "approve"), async (req, res) => {
     try {
-      const poId = Number(req.params.id);
+      const poId = purchaseOrderId(req.params.id);
       const actorId = req.session.user!.id;
       const descriptor = financialCommandFromRequest(req, { actorId, routeTemplate: root, resourceKey: `purchase_order:${poId}`, commandName: "purchase_order.quantity_amendment.approve" });
       const result = await service.approve(poId, req.body, actorId, descriptor);

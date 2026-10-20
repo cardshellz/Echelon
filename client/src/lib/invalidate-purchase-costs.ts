@@ -10,16 +10,21 @@ export function invalidatePurchaseCosts(
       const key = query.queryKey[0];
       return (
         typeof key === "string" &&
-        (/^\/api\/purchase-orders(?:\/|\?|$)/.test(key) ||
+        (key === "purchase-pipeline" ||
+          /^\/api\/purchasing(?:\/|\?|$)/.test(key) ||
+          /^\/api\/procurement(?:\/|\?|$)/.test(key) ||
+          /^\/api\/cogs(?:\/|\?|$)/.test(key) ||
+          /^\/api\/finance(?:\/|\?|$)/.test(key) ||
+          /^\/api\/inventory(?:\/|\?|$)/.test(key) ||
+          /^\/api\/products(?:\/|\?|$)/.test(key) ||
+          /^\/api\/purchase-orders(?:\/|\?|$)/.test(key) ||
           /^\/api\/inbound-shipments(?:\/|\?|$)/.test(key) ||
           /^\/api\/receiving(?:\/|\?|$)/.test(key) ||
+          /^\/api\/receiving-lines(?:\/|\?|$)/.test(key) ||
+          /^\/api\/shipment-lines(?:\/|\?|$)/.test(key) ||
           /^\/api\/vendor-invoices(?:\/|\?|$)/.test(key) ||
           /^\/api\/vendor-invoice-lines(?:\/|\?|$)/.test(key) ||
-          /^\/api\/procurement\/health(?:\?|$)/.test(key) ||
-          key.startsWith("/api/procurement/landed-cost-health") ||
-          key.startsWith("/api/inventory-lots/") ||
-          key === "/api/cogs/historical-adjustments" ||
-          key.startsWith("/api/purchasing/dashboard"))
+          /^\/api\/inventory-lots(?:\/|\?|$)/.test(key))
       );
     },
   });

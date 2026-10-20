@@ -1,4 +1,5 @@
 import { readShipmentList, countShipmentList, type ShipmentListFilters } from "./shipment-work-list.repository";
+import { projectExpectedReceipts } from "./domain/expected-receipts";
 import { attachSupplierSourcingCandidates } from "./supplier-sourcing.repository";
 import { comparePurchaseBuyingPriority, purchaseBuyingDisposition } from "@shared/procurement/purchase-buying-review";
 import { readShipmentPurchaseOrders } from "./shipment-purchase-orders.repository";
@@ -1909,18 +1910,17 @@ export const procurementMethods: IProcurementStorage = {
         po.expected_delivery_date,
         po.confirmed_delivery_date,
         COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) AS eta,
-        SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS pending_units,
-        COUNT(pol.id) AS pending_lines,
-        SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0) * pol.unit_cost_cents) AS pending_value_cents
+        pol.order_qty, COALESCE(pol.received_qty, 0) AS received_qty,
+        COALESCE(pol.cancelled_qty, 0) AS cancelled_qty, pol.total_product_cost_cents
       FROM procurement.purchase_orders po
       JOIN procurement.vendors v ON v.id = po.vendor_id
       JOIN procurement.purchase_order_lines pol ON pol.purchase_order_id = po.id
         AND pol.status IN ('open', 'partially_received')
+        AND pol.line_type = 'product'
       WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
-      GROUP BY po.id, po.po_number, v.name, po.status, po.expected_delivery_date, po.confirmed_delivery_date
-      ORDER BY COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) ASC NULLS LAST
+      ORDER BY COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) ASC NULLS LAST, po.id, pol.id
     `);
-    return rows.rows as any[];
+    return projectExpectedReceipts(rows.rows);
   },
 
   // ===== PURCHASING DASHBOARD METHODS =====

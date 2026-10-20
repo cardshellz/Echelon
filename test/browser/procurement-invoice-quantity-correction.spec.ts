@@ -5,8 +5,9 @@ import { normalizePoLinePricing } from "@shared/utils/po-line-pricing";
 import { poLineAmountCents, type PoQuantityAmendmentContext, type PoQuantityAmendmentPreview, type PoQuantityPreviewRequest, type PoQuantityApprovalRequest } from "@shared/procurement/po-quantity-amendment";
 
 const initialVersion = "a".repeat(64), nextVersion = "b".repeat(64);
+const poPreviewVersion = "c".repeat(64);
 const receiptKey = "invoice-quantity-correction:quantity-admin:72";
-async function setup(page: Page, options: { canApprove?: boolean; stale?: boolean; loss?: "once" | "untilReleased"; otherQuantity?: number; disagree?: boolean; openModal?: boolean; multiplePos?: boolean; closedPo?: boolean; poRate?: number; poAllocation?: number; alreadyCorrected?: boolean; skipInitialReview?: boolean } = {}) {
+async function setup(page: Page, options: { canApprove?: boolean; stale?: boolean; loss?: "once" | "untilReleased"; otherQuantity?: number; disagree?: boolean; openModal?: boolean; multiplePos?: boolean; closedPo?: boolean; poRate?: number; poAllocation?: number; alreadyCorrected?: boolean; skipInitialReview?: boolean; omitPoPreview?: "impact" | "previewVersion" } = {}) {
   const failures = await installFixtures(page);
   let version = initialVersion, stale = options.stale ?? false, acknowledged = options.loss === undefined;
   const otherQuantity = options.otherQuantity ?? 0;
@@ -18,7 +19,7 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
     qtyInvoiced: options.alreadyCorrected ? 25000 : 12500, qtyOrdered: 12500, qtyReceived: 25000, unitCostCents: 50, unitCostMills: 5023, lineTotalCents: options.alreadyCorrected ? 1338750 : 669375,
     matchStatus: poRate === 5023 ? "qty_discrepancy" : "price_discrepancy", costComponentEvidence: null,
     poQuantities: { status: "current", purchaseOrderId: 17, purchaseOrderLineId: 18, orderedQty: 25000, receivedQty: options.disagree ? 20000 : 25000 } };
-  const invoice = { id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test vendor", status: options.alreadyCorrected ? "partially_paid" : "paid", currency: "USD",
+  const invoice = { id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test vendor", status: (options.alreadyCorrected ? "partially_paid" : "paid") as NonNullable<InvoiceQuantityPreview["beforeInvoiceStatus"]>, currency: "USD",
     invoicedAmountCents: line.lineTotalCents, balanceCents: options.alreadyCorrected ? 669375 : 0, paidAmountCents: 669375, attachments: [], payments: [], lines: [line],
     poLinks: [{ id: 1, purchaseOrderId: 17, poNumber: "TEST-PO-17" }, ...(options.multiplePos ? [{ id: 2, purchaseOrderId: 99, poNumber: "TEST-PO-99" }] : [])] };
   const preview = (quantity: number, unitPrice = line.unitCostMills, amount = line.lineTotalCents): InvoiceQuantityPreview => {
@@ -57,7 +58,9 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
         pricing: { basis: "per_piece", quantityPieces: 25000, unitCostMills: poRate }, lineTotalCents: poTotal, status: "received", blockedReason: null }],
     };
   }
-  function poPreview(purchaseOrderId: number, body: PoQuantityPreviewRequest): PoQuantityAmendmentPreview {
+  // New reviews require the measured impact and its fingerprint. The shared
+  // response type also accepts historical approvals that predate these fields.
+  function poPreview(purchaseOrderId: number, body: PoQuantityPreviewRequest): PoQuantityAmendmentPreview & Required<Pick<PoQuantityAmendmentPreview, "impact" | "previewVersion">> {
     const before = poContext(purchaseOrderId).lines[0], change = body.changes[0];
     const pricing = normalizePoLinePricing(change.pricing!);
     const lineTotalCents = poLineAmountCents(pricing.totalProductCostCents, change.packagingCostCents!, change.discountCents!, change.taxCents!);
@@ -65,6 +68,19 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
       totalProductCostCents: pricing.totalProductCostCents, packagingCostCents: change.packagingCostCents!,
       discountCents: change.discountCents!, taxCents: change.taxCents!, componentTotalCents: lineTotalCents, lineTotalCents };
     return { purchaseOrderId, currency: "USD", sourceVersion: body.sourceVersion, reason: body.reason,
+      previewVersion: poPreviewVersion,
+      impact: {
+        quantities: [{
+          lineId: before.id, name: before.name,
+          ordered: { before: before.orderQty, after: after.orderQty },
+          received: before.receivedQty, shipped: 25000, invoiced: before.invoicedQty,
+          remainingToReceive: { before: Math.max(0, before.orderQty - before.receivedQty), after: Math.max(0, after.orderQty - before.receivedQty) },
+          remainingToShip: { before: Math.max(0, before.orderQty - 25000), after: Math.max(0, after.orderQty - 25000) },
+          remainingToInvoice: { before: Math.max(0, before.orderQty - before.invoicedQty), after: Math.max(0, after.orderQty - before.invoicedQty) },
+          shipmentCapacityReview: null,
+        }],
+        shipments: [], lots: [], orderCosts: [], historicalCosts: [], applications: [],
+      },
       beforeTotalCents: before.lineTotalCents, afterTotalCents: lineTotalCents, beforeStatus: options.closedPo ? "closed" : "received", afterStatus: options.closedPo ? "closed" : "received", closedPurchaseOrder: options.closedPo === true,
       lines: [{ before, after, priceTreatment: change.priceTreatment }], warnings: [], invoiceMatches: [] };
   }
@@ -76,7 +92,9 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
     if (request.method() === "GET" && match[2] === "/quantity-amendment") { poContextReads.push(purchaseOrderId); return route.fulfill({ json: poContext(purchaseOrderId) }); }
     if (request.method() === "POST" && match[2] === "/quantity-amendment/preview") {
       const body = request.postDataJSON() as PoQuantityPreviewRequest; poPreviews.push({ purchaseOrderId, body });
-      return route.fulfill({ json: poPreview(purchaseOrderId, body) });
+      const response: PoQuantityAmendmentPreview = poPreview(purchaseOrderId, body);
+      if (options.omitPoPreview) delete response[options.omitPoPreview];
+      return route.fulfill({ json: response });
     }
     if (request.method() === "POST" && match[2] === "/quantity-amendment") {
       const body = request.postDataJSON() as PoQuantityApprovalRequest;
@@ -263,11 +281,14 @@ test("edits and saves the linked PO directly from a paid invoice without changin
   await editor.getByLabel("Reason for editing / supplier reference").fill("Supplier confirmed the corrected PO price");
   await editor.getByRole("button", { name: "Review changes", exact: true }).click();
   await expect(editor.getByText("PO total: 12500.00 → 13387.50 USD", { exact: true })).toBeVisible();
+  await expect(editor.getByRole("region", { name: "Dependent quantity and cost changes" }))
+    .toContainText("Actual quantities: 25,000 received · 25,000 shipped · 12,500 invoiced");
+  expect(proof.poCommands).toEqual([]);
   await editor.getByLabel("I reviewed these changes and the new PO total.").check();
   await editor.getByRole("button", { name: "Approve & save PO", exact: true }).click();
   await expect(editor.getByRole("status")).toContainText("approved and saved as revision 1");
   expect(proof.poCommands).toHaveLength(1);
-  expect(proof.poCommands[0]).toMatchObject({ purchaseOrderId: 17, body: { changes: [{ lineId: 18, quantityPieces: 25000, priceTreatment: "edit_line", pricing: { basis: "per_piece", unitCostMills: 5355 }, packagingCostCents: 0, discountCents: 0, taxCents: 0 }] } });
+  expect(proof.poCommands[0]).toMatchObject({ purchaseOrderId: 17, body: { sourceVersion: initialVersion, previewVersion: poPreviewVersion, changes: [{ lineId: 18, quantityPieces: 25000, priceTreatment: "edit_line", pricing: { basis: "per_piece", unitCostMills: 5355 }, packagingCostCents: 0, discountCents: 0, taxCents: 0 }] } });
   expect(proof.commands).toEqual([]);
   expect(proof.invoice).toMatchObject({ invoicedAmountCents: 669375, paidAmountCents: 669375, balanceCents: 0, lines: [{ qtyInvoiced: 12500, lineTotalCents: 669375 }] });
   await editor.getByRole("button", { name: "Close", exact: true }).click();
@@ -277,6 +298,24 @@ test("edits and saves the linked PO directly from a paid invoice without changin
   await expect(page.getByRole("link", { name: "Edit PO TEST-PO-17", exact: true })).toBeVisible();
   expect(proof.failures).toEqual([]);
 });
+
+for (const omitted of ["impact", "previewVersion"] as const) {
+  test(`invoice-to-PO editing blocks approval when the preview omits ${omitted}`, async ({ page }) => {
+    const proof = await setup(page, { openModal: false, omitPoPreview: omitted });
+    await page.getByRole("link", { name: "Edit PO TEST-PO-17", exact: true }).click();
+    const editor = page.getByRole("dialog");
+    await editor.getByLabel("Product price per piece (USD)").fill("0.5355");
+    await editor.getByLabel("Reason for editing / supplier reference").fill("Supplier confirmed the corrected purchase price");
+    await editor.getByRole("button", { name: "Review changes", exact: true }).click();
+    await expect(editor.getByRole("alert")).toHaveText("The complete quantity and cost preview could not be loaded. Reload the PO before approving.");
+    await expect(editor.getByLabel("I reviewed these changes and the new PO total.")).toHaveCount(0);
+    await expect(editor.getByRole("button", { name: "Approve & save PO", exact: true })).toHaveCount(0);
+    expect(proof.poPreviews).toHaveLength(1);
+    expect(proof.poCommands).toEqual([]); expect(proof.commands).toEqual([]);
+    expect(proof.invoice).toMatchObject({ invoicedAmountCents: 669375, paidAmountCents: 669375, balanceCents: 0, lines: [{ qtyInvoiced: 12500, lineTotalCents: 669375 }] });
+    expect(proof.failures).toEqual([]);
+  });
+}
 
 test("switches the invoice quantity dialog straight to the PO editor with visible actions", async ({ page }, testInfo) => {
   const proof = await setup(page, { skipInitialReview: true });
@@ -321,10 +360,15 @@ test("direct PO edit navigation allows an audited edit to a closed PO", async ({
   await editor.getByLabel("Product price per piece (USD)").fill("0.5355");
   await editor.getByLabel("Reason for editing / supplier reference").fill("Supplier confirmed the corrected closed purchase price");
   await editor.getByRole("button", { name: "Review changes", exact: true }).click();
+  await expect(editor.getByRole("region", { name: "Dependent quantity and cost changes" }))
+    .toContainText("Actual quantities: 25,000 received · 25,000 shipped · 12,500 invoiced");
+  expect(proof.poCommands).toEqual([]);
   await editor.getByLabel("I approve these changes to the closed PO and its total.").check();
   await editor.getByRole("button", { name: "Approve & save PO", exact: true }).click();
   await expect(editor.getByRole("status")).toContainText("approved and saved");
-  expect(proof.poCommands[0].body.closedPurchaseOrderConfirmed).toBe(true);
+  expect(proof.poCommands[0].body).toMatchObject({
+    closedPurchaseOrderConfirmed: true, sourceVersion: initialVersion, previewVersion: poPreviewVersion,
+  });
   expect(proof.commands).toEqual([]);
   expect(proof.invoice.lines[0].qtyInvoiced).toBe(12500);
   expect(proof.poCommands).toHaveLength(1); expect(proof.poPreviews).toHaveLength(1); expect(proof.commands).toEqual([]);
