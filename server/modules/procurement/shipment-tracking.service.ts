@@ -1562,6 +1562,7 @@ export function createShipmentTrackingService(
   async function refreshQuantityAllocationInTransaction(tx: any, shipmentId: number, actorId: string, now: Date) {
     await lockInventoryCostGraph(tx);
     const shipment = await lockShipment(tx, shipmentId);
+    await recomputeShipmentTotals(shipmentId, tx, now);
     if (["costing", "closed"].includes(shipment.status)) return updateCostsInTransaction(tx, shipmentId, {}, actorId, now);
     if (shipment.status === "cancelled") throw new ShipmentTrackingError("Cancelled shipment quantities cannot be corrected.", 409);
     await runAllocationInTransaction(tx, shipmentId, shipment, now);

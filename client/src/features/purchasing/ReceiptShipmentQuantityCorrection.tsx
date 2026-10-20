@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   quantityCorrectionContextSchema,
   quantityCorrectionInputSchema,
-  quantityCorrectionOptionsSchema,
+  shipmentQuantityEditInputSchema,
+  type QuantityCorrectionPurpose,
   quantityCorrectionPreviewSchema,
   type QuantityCorrectionContext,
   type QuantityCorrectionPreview,
@@ -39,15 +40,36 @@ import { PoShipmentCostReview } from "./PoShipmentCostReview";
 import { poShipmentCostsSchema } from "@shared/procurement/po-shipment-costs";
 
 type Entry =
-  | { shipmentLineId: number; receiptLineId?: never; purchaseOrderId?: never }
-  | { receiptLineId: number; shipmentLineId?: never; purchaseOrderId?: never }
-  | { purchaseOrderId: number; receiptLineId?: never; shipmentLineId?: never };
+  | { receiptLineId: number; shipmentLines?: never }
+  | {
+      shipmentLines: readonly {
+        id: number;
+        sku: string | null;
+        productName?: string | null;
+      }[];
+      receiptLineId?: never;
+    };
 const get = async (path: string) =>
   financialCommandFetchJson(path, { method: "GET", credentials: "include" });
 
-export function ReceiptShipmentQuantityCorrection(
-  props: Entry & { onSaved?: () => void },
-) {
+export function ReceiptShipmentQuantityCorrection(props: {
+  receiptLineId: number;
+  onSaved?: () => void;
+}) {
+  return <QuantityCorrectionDialog {...props} />;
+}
+export function ShipmentQuantityEditor(props: {
+  shipmentLines: readonly {
+    id: number;
+    sku: string | null;
+    productName?: string | null;
+  }[];
+  onSaved?: () => void;
+}) {
+  return <QuantityCorrectionDialog {...props} />;
+}
+function QuantityCorrectionDialog(props: Entry & { onSaved?: () => void }) {
+  const purpose = props.receiptLineId === undefined ? "shipment" : "receipt";
   const [open, setOpen] = useState(false);
   const [locked, setLocked] = useState(false);
   return (
@@ -58,7 +80,9 @@ export function ReceiptShipmentQuantityCorrection(
         className="whitespace-normal"
         onClick={() => setOpen(true)}
       >
-        Correct received quantities
+        {purpose === "shipment"
+          ? "Edit shipment"
+          : "Correct received quantities"}
       </Button>
       <Dialog
         open={open}
@@ -76,10 +100,15 @@ export function ReceiptShipmentQuantityCorrection(
           }}
         >
           <DialogHeader>
-            <DialogTitle>Correct receipt and shipment</DialogTitle>
+            <DialogTitle>
+              {purpose === "shipment"
+                ? "Edit shipment"
+                : "Correct receipt and shipment"}
+            </DialogTitle>
             <DialogDescription>
-              Set the recorded pieces, review the cost impact, then approve one
-              correction for the linked records.
+              {purpose === "shipment"
+                ? "Edit the shipped pieces, review receiving and cost changes, then approve."
+                : "Set the recorded pieces, review the cost impact, then approve one correction for the linked records."}
             </DialogDescription>
           </DialogHeader>
           {open && (
@@ -101,8 +130,10 @@ function CorrectionEntry(
     onSaved?: () => void;
   },
 ) {
+  const purpose: QuantityCorrectionPurpose =
+    props.receiptLineId === undefined ? "shipment" : "receipt";
   const [selected, setSelected] = useState<number | null>(
-    props.shipmentLineId ?? null,
+    props.shipmentLines?.[0]?.id ?? null,
   );
   const [locked, setLocked] = useState(false);
   const onLock = useCallback(
@@ -112,22 +143,9 @@ function CorrectionEntry(
     },
     [props.onLock],
   );
-  const options = useQuery({
-    queryKey: [
-      `/api/purchase-orders/${props.purchaseOrderId}/quantity-corrections`,
-    ],
-    enabled: props.purchaseOrderId !== undefined,
-    refetchOnWindowFocus: false,
-    queryFn: async () =>
-      quantityCorrectionOptionsSchema.parse(
-        await get(
-          `/api/purchase-orders/${props.purchaseOrderId}/quantity-corrections`,
-        ),
-      ),
-  });
   const path =
     selected !== null
-      ? `/api/shipment-lines/${selected}/quantity-correction`
+      ? `/api/shipment-lines/${selected}/shipment-edit`
       : `/api/receiving-lines/${props.receiptLineId}/quantity-correction`;
   const query = useQuery({
     queryKey: [path],
@@ -137,7 +155,7 @@ function CorrectionEntry(
   });
   return (
     <>
-      {props.purchaseOrderId !== undefined && (
+      {props.shipmentLines && props.shipmentLines.length > 1 && (
         <div className="space-y-1">
           <Label>Shipment line</Label>
           <Select
@@ -149,21 +167,13 @@ function CorrectionEntry(
               <SelectValue placeholder="Select the shipment to correct" />
             </SelectTrigger>
             <SelectContent>
-              {options.data?.map((row) => (
-                <SelectItem
-                  key={row.shipmentLineId}
-                  value={String(row.shipmentLineId)}
-                >
-                  {row.shipmentNumber} · {row.sku} ·{" "}
-                  {row.shippedPieces.toLocaleString()} pieces
+              {props.shipmentLines.map((row) => (
+                <SelectItem key={row.id} value={String(row.id)}>
+                  {row.sku || row.productName || `Line ${row.id}`}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
-          {options.isError && <p role="alert">{options.error.message}</p>}
-          {options.data?.length === 0 && (
-            <p>No posted shipment receipts are available to correct.</p>
-          )}
         </div>
       )}
       {query.isFetching && !query.data && (
@@ -183,6 +193,7 @@ function CorrectionEntry(
         <CorrectionForm
           key={query.data.shipmentLineId}
           initial={query.data}
+          purpose={purpose}
           onClose={props.onClose}
           onLock={onLock}
           onSaved={props.onSaved}
@@ -215,6 +226,14 @@ export function QuantityCorrectionSummary({
           `Receipt ${row.receiptNumber} pieces`,
           number(row.receivedPieces),
           number(row.afterPieces),
+        ] as [string, string, string],
+    ),
+    ...(summary.pendingReceipts ?? []).map(
+      (row) =>
+        [
+          `Expected units · ${row.receiptNumber}`,
+          number(row.expectedUnits),
+          number(row.afterExpectedUnits),
         ] as [string, string, string],
     ),
     ...summary.receipts.map(
@@ -269,6 +288,20 @@ export function QuantityCorrectionSummary({
       `$${exactMoneyAsInput(summary.historicalCost.beforeMills, 4)}`,
       `$${exactMoneyAsInput(summary.historicalCost.afterMills, 4)}`,
     ],
+    ...(summary.physicalTotals
+      ? ([
+          [
+            "Net weight (kg)",
+            summary.physicalTotals.netWeightKg.before ?? "—",
+            summary.physicalTotals.netWeightKg.after ?? "—",
+          ],
+          [
+            "Volume (CBM)",
+            summary.physicalTotals.volumeCbm.before ?? "—",
+            summary.physicalTotals.volumeCbm.after ?? "—",
+          ],
+        ] as Array<[string, string, string]>)
+      : []),
   ];
   return (
     <div className="space-y-3">
@@ -294,9 +327,12 @@ export function QuantityCorrectionSummary({
         </tbody>
       </table>
       <p className="text-sm">
-        Stock movement: <strong>0 units</strong>. This corrects the piece
-        conversion of the existing receipt. Ordered quantities, supplier
-        invoices, payments and shipping carton counts stay unchanged.
+        Stock movement: <strong>0 units</strong>.{" "}
+        {summary.purpose === "shipment"
+          ? "Posted receipt counts are preserved. Open receipt expectations and shipment-dependent costs are refreshed."
+          : "This corrects the piece conversion of the existing receipt."}{" "}
+        Ordered quantities, supplier invoices, payments and shipping carton
+        counts stay unchanged.
       </p>
       <details>
         <summary className="cursor-pointer text-sm">
@@ -336,12 +372,14 @@ function CorrectionForm({
   onLock,
   onReload,
   onSaved,
+  purpose,
 }: {
   initial: QuantityCorrectionContext;
   onClose: () => void;
   onLock: (value: boolean) => void;
   onReload: () => Promise<QuantityCorrectionContext | undefined>;
   onSaved?: () => void;
+  purpose: QuantityCorrectionPurpose;
 }) {
   const [data, setData] = useState(initial);
   const [pieces, setPieces] = useState(String(initial.shippedPieces));
@@ -364,10 +402,10 @@ function CorrectionForm({
   const [saved, setSaved] = useState<QuantityCorrectionContext | null>(null);
   const [attempt, setAttempt] = useState<unknown>(null);
   const [client] = useState(() =>
-    createQuantityCorrectionClient(() => crypto.randomUUID()),
+    createQuantityCorrectionClient(() => crypto.randomUUID(), purpose),
   );
   const queryClient = useQueryClient();
-  const path = `/api/shipment-lines/${data.shipmentLineId}/quantity-correction`;
+  const path = `/api/shipment-lines/${data.shipmentLineId}/${purpose === "shipment" ? "shipment-edit" : "quantity-correction"}`;
   const revision = useRef(0);
   function changed(action: () => void) {
     revision.current++;
@@ -377,13 +415,21 @@ function CorrectionForm({
   function request() {
     const parse = (value: string) =>
       /^[1-9]\d*$/.test(value) ? Number(value) : NaN;
-    const parsed = quantityCorrectionInputSchema.safeParse({
+    const parsed = (
+      purpose === "shipment"
+        ? shipmentQuantityEditInputSchema
+        : quantityCorrectionInputSchema
+    ).safeParse({
       sourceVersion: data.sourceVersion,
       shippedPieces: parse(pieces),
-      receipts: data.receipts.map((row) => ({
-        receiptLineId: row.receiptLineId,
-        receivedPieces: parse(receiptPieces[row.receiptLineId]),
-      })),
+      ...(purpose === "receipt"
+        ? {
+            receipts: data.receipts.map((row) => ({
+              receiptLineId: row.receiptLineId,
+              receivedPieces: parse(receiptPieces[row.receiptLineId]),
+            })),
+          }
+        : {}),
       historicalCostDestination: destination,
       reason,
       evidenceConfirmed: confirmed,
@@ -484,7 +530,11 @@ function CorrectionForm({
               className="rounded-md border border-green-600 bg-green-50 dark:bg-green-950 p-3"
               role="status"
             >
-              <strong>Quantity correction approved and saved</strong>
+              <strong>
+                {purpose === "shipment"
+                  ? "Shipment edit approved and saved"
+                  : "Quantity correction approved and saved"}
+              </strong>
               <p className="text-sm">
                 {saved.history[0].approvedBy} ·{" "}
                 {new Date(saved.history[0].approvedAt).toLocaleString()}
@@ -522,9 +572,19 @@ function CorrectionForm({
         ) : (
           <>
             {data.blockedReason && (
-              <p role="alert" className="rounded border p-3">
-                {data.blockedReason}
-              </p>
+              <div role="alert" className="rounded border p-3 space-y-2">
+                <p>{data.blockedReason}</p>
+                {purpose === "shipment" &&
+                  data.receivingLinks?.map((row) => (
+                    <a
+                      key={row.receiptId}
+                      className="block underline text-sm"
+                      href={`/receiving?open=${row.receiptId}`}
+                    >
+                      Review receipt {row.receiptNumber}
+                    </a>
+                  ))}
+              </div>
             )}
             {!preview && (
               <fieldset
@@ -549,26 +609,67 @@ function CorrectionForm({
                       changed(() => setPieces(event.target.value))
                     }
                   />
-                  {data.receipts.map((row) => (
-                    <ReceiptQuantityRow
-                      key={row.receiptLineId}
-                      row={row}
-                      value={receiptPieces[row.receiptLineId]}
-                      onChange={(value) =>
-                        changed(() =>
-                          setReceiptPieces({
-                            ...receiptPieces,
-                            [row.receiptLineId]: value,
-                          }),
-                        )
-                      }
-                    />
-                  ))}
+                  {purpose === "receipt" &&
+                    data.receipts.map((row) => (
+                      <ReceiptQuantityRow
+                        key={row.receiptLineId}
+                        row={row}
+                        value={receiptPieces[row.receiptLineId]}
+                        onChange={(value) =>
+                          changed(() =>
+                            setReceiptPieces({
+                              ...receiptPieces,
+                              [row.receiptLineId]: value,
+                            }),
+                          )
+                        }
+                      />
+                    ))}
                 </div>
+                {purpose === "shipment" && (
+                  <div className="rounded border p-3 text-sm space-y-2">
+                    <strong>Receiving</strong>
+                    {data.receipts.map((row) => (
+                      <p key={row.receiptLineId}>
+                        <a
+                          className="underline"
+                          href={`/receiving?open=${row.receiptId}`}
+                        >
+                          {row.receiptNumber}
+                        </a>
+                        {" · "}
+                        {number(row.receivedPieces)} pieces received (saved).
+                      </p>
+                    ))}
+                    {(data.pendingReceipts ?? []).map((row) => (
+                      <p key={row.receiptLineId}>
+                        <a
+                          className="underline"
+                          href={`/receiving?open=${row.receiptId}`}
+                        >
+                          {row.receiptNumber}
+                        </a>
+                        {" · "}Open receipt: {number(row.receivedUnits)} units
+                        counted. Its expected quantity will be recalculated from
+                        the shipment.
+                      </p>
+                    ))}
+                    {!data.receipts.length && !data.pendingReceipts?.length && (
+                      <p>
+                        No receipts recorded. Future receiving will use the
+                        edited shipment quantity.
+                      </p>
+                    )}
+                    <p className="text-muted-foreground">
+                      Correct an actual received count from its receipt.
+                      Shipment edits preserve received counts.
+                    </p>
+                  </div>
+                )}
                 <p className="text-xs text-muted-foreground">
-                  Enter pieces from the receiving documents. The handled
-                  receiving units and stock movements are preserved; the pieces
-                  per unit will be corrected.
+                  {purpose === "shipment"
+                    ? "Enter the pieces on the packing list. Review changes shows the receiving expectations, shipment costs, and inventory cost impact."
+                    : "Enter pieces from the receiving documents. The handled receiving units and stock movements are preserved; the pieces per unit will be corrected."}
                 </p>
                 <Label htmlFor="quantity-reason">
                   Reason / document reference
@@ -590,8 +691,9 @@ function CorrectionForm({
                       changed(() => setConfirmed(event.target.checked))
                     }
                   />
-                  I checked the receipt and shipment quantities against the
-                  source documents.
+                  {purpose === "shipment"
+                    ? "I checked the shipped quantity against the packing list."
+                    : "I checked the receipt and shipment quantities against the source documents."}
                 </label>
               </fieldset>
             )}
@@ -715,7 +817,9 @@ function CorrectionForm({
                 ? "Saving correction…"
                 : attempt
                   ? "Retry same approval"
-                  : "Approve correction"}
+                  : purpose === "shipment"
+                    ? "Approve shipment edit"
+                    : "Approve correction"}
             </Button>
           )}
       </div>

@@ -37,6 +37,26 @@ export const quantityCorrectionApprovalSchema = quantityCorrectionInputSchema
 export type QuantityCorrectionInput = z.infer<
   typeof quantityCorrectionInputSchema
 >;
+export type QuantityCorrectionPurpose = "receipt" | "shipment";
+// Shipment edits never accept received quantities from the caller. The command
+// loads and preserves those facts under the same locks used for approval.
+export const shipmentQuantityEditInputSchema = quantityCorrectionInputSchema
+  .omit({ receipts: true })
+  .strict();
+export const shipmentQuantityEditApprovalSchema =
+  shipmentQuantityEditInputSchema
+    .extend({ previewVersion: costFingerprintSchema })
+    .strict();
+export const pendingShipmentReceiptSchema = z
+  .object({
+    receiptId: quantityCorrectionId,
+    receiptNumber: z.string(),
+    receiptLineId: quantityCorrectionId,
+    expectedUnits: quantity,
+    receivedUnits: quantity,
+    piecesPerUnit: quantityCorrectionId,
+  })
+  .strict();
 export const quantityCorrectionReceiptSchema = z
   .object({
     receiptId: quantityCorrectionId,
@@ -50,6 +70,7 @@ export const quantityCorrectionReceiptSchema = z
   .strict();
 export const quantityCorrectionSummarySchema = z
   .object({
+    purpose: z.enum(["receipt", "shipment"]).optional(),
     shipmentPieces: z.object({
       before: quantityCorrectionId,
       after: quantityCorrectionId,
@@ -74,6 +95,25 @@ export const quantityCorrectionSummarySchema = z
       after: z.string().nullable(),
     }),
     stockUnitChange: z.literal(0),
+    physicalTotals: z
+      .object({
+        netWeightKg: z.object({
+          before: z.string().nullable(),
+          after: z.string().nullable(),
+        }),
+        volumeCbm: z.object({
+          before: z.string().nullable(),
+          after: z.string().nullable(),
+        }),
+      })
+      .optional(),
+    pendingReceipts: z
+      .array(
+        pendingShipmentReceiptSchema.extend({
+          afterExpectedUnits: quantity,
+        }),
+      )
+      .optional(),
     costResults: z.array(
       z
         .object({
@@ -135,6 +175,17 @@ export const quantityCorrectionContextSchema = z
     orderedPieces: quantityCorrectionId,
     shippedPieces: quantityCorrectionId,
     receipts: z.array(quantityCorrectionReceiptSchema),
+    pendingReceipts: z.array(pendingShipmentReceiptSchema).optional(),
+    receivingLinks: z
+      .array(
+        z
+          .object({
+            receiptId: quantityCorrectionId,
+            receiptNumber: z.string(),
+          })
+          .strict(),
+      )
+      .optional(),
     sourceVersion: costFingerprintSchema,
     canApprove: z.boolean(),
     blockedReason: z.string().nullable(),

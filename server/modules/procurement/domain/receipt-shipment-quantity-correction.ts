@@ -1,4 +1,7 @@
-import type { QuantityCorrectionInput } from "@shared/procurement/receipt-shipment-quantity-correction";
+import type {
+  QuantityCorrectionInput,
+  QuantityCorrectionPurpose,
+} from "@shared/procurement/receipt-shipment-quantity-correction";
 
 const MAX_QUANTITY = 2_147_483_647;
 export class QuantityCorrectionError extends Error {
@@ -61,6 +64,15 @@ export interface QuantityCorrectionFacts {
   otherShippedPieces: number;
   receipts: QuantityReceiptFact[];
   origins: QuantityOriginFact[];
+  pendingReceipts?: PendingShipmentReceipt[];
+}
+export interface PendingShipmentReceipt {
+  receiptId: number;
+  receiptNumber: string;
+  receiptLineId: number;
+  expectedUnits: number;
+  receivedUnits: number;
+  piecesPerUnit: number;
 }
 export interface QuantityCorrectionPlan {
   shippedPieces: number;
@@ -69,6 +81,9 @@ export interface QuantityCorrectionPlan {
     QuantityReceiptFact & { afterPieces: number; afterPiecesPerUnit: number }
   >;
   origins: QuantityOriginFact[];
+  pendingReceipts: Array<
+    PendingShipmentReceipt & { afterExpectedUnits: number }
+  >;
 }
 export function correctedReceiptLifecycle(input: {
   closed: boolean;
@@ -119,6 +134,7 @@ function bounded(value: bigint, field: string): number {
 export function planQuantityCorrection(
   facts: QuantityCorrectionFacts,
   input: QuantityCorrectionInput,
+  purpose: QuantityCorrectionPurpose = "receipt",
 ): QuantityCorrectionPlan {
   if (
     new Set(input.receipts.map((row) => row.receiptLineId)).size !==
@@ -138,6 +154,14 @@ export function planQuantityCorrection(
     const requested = input.receipts.find(
       (row) => row.receiptLineId === receipt.id,
     )!;
+    if (
+      purpose === "shipment" &&
+      requested.receivedPieces !== receipt.receivedPieces
+    )
+      throw new QuantityCorrectionError(
+        "SHIPMENT_EDIT_RECEIPT_IMMUTABLE",
+        "A shipment edit cannot change received quantities. Correct the receipt from receiving.",
+      );
     if (requested.receivedPieces % receipt.receivedUnits !== 0)
       throw new QuantityCorrectionError(
         "QUANTITY_CORRECTION_WHOLE_UNITS",
@@ -187,12 +211,14 @@ export function planQuantityCorrection(
     receipts.every(
       (receipt) =>
         receipt.afterPieces === receipt.receivedPieces &&
-        receipt.unitWasRecorded,
+        (purpose === "shipment" || receipt.unitWasRecorded),
     )
   )
     throw new QuantityCorrectionError(
       "QUANTITY_CORRECTION_NO_CHANGE",
-      "These quantities and receiving units are already recorded.",
+      purpose === "shipment"
+        ? "The shipped quantity is unchanged. Enter the corrected number of pieces."
+        : "These quantities and receiving units are already recorded.",
     );
 
   const origins = facts.origins.map((origin) => ({ ...origin }));
@@ -269,5 +295,42 @@ export function planQuantityCorrection(
     poReceivedPieces,
     receipts,
     origins,
+    pendingReceipts: planShipmentReceiptExpectations(
+      facts.pendingReceipts ?? [],
+      input.shippedPieces,
+      receipts.reduce((sum, row) => sum + BigInt(row.afterPieces), BigInt(0)),
+    ),
   };
+}
+
+/** A single open receipt plans the remaining shipment. Multiple open receipts
+ * have no recorded split authority, so require that work to be resolved first. */
+export function planShipmentReceiptExpectations(
+  receipts: PendingShipmentReceipt[],
+  shippedPieces: number,
+  postedPieces: bigint,
+): Array<PendingShipmentReceipt & { afterExpectedUnits: number }> {
+  if (receipts.length > 1)
+    throw new QuantityCorrectionError(
+      "SHIPMENT_EDIT_OPEN_RECEIPTS",
+      "More than one open receipt covers this line. Finish or cancel the duplicate receiving work before editing the shipment.",
+    );
+  return receipts.map((receipt) => {
+    const remaining = BigInt(shippedPieces) - postedPieces;
+    if (
+      remaining < BigInt(0) ||
+      remaining % BigInt(receipt.piecesPerUnit) !== BigInt(0)
+    )
+      throw new QuantityCorrectionError(
+        "SHIPMENT_EDIT_RECEIVING_UNIT",
+        `The remaining pieces cannot be expressed in the receiving unit on ${receipt.receiptNumber}. Review that receipt's unit before editing the shipment.`,
+      );
+    return {
+      ...receipt,
+      afterExpectedUnits: bounded(
+        remaining / BigInt(receipt.piecesPerUnit),
+        "Expected receipt units",
+      ),
+    };
+  });
 }
