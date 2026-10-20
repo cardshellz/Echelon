@@ -16,6 +16,7 @@ import {
   type InventoryAvailabilityRuntimePublicationContext,
   type InventoryAvailabilityRuntimePublicationExecutor,
   type InventoryAvailabilityRuntimePublicationLogger,
+  type BlockedPublicationTargetPolicy,
 } from "../application/inventory-availability-runtime-publication.service";
 import { planInventoryChannelExposureProduct, type ActiveInventoryPublicationTargetSnapshot } from "../application/inventory-channel-exposure-runtime.service";
 import type { ChannelExposurePolicyCandidate } from "../domain/inventory-channel-exposure";
@@ -271,6 +272,7 @@ export async function previewProductDefinitionPublicationInsideTransaction(
   productId: number,
   supplySnapshot: SupplySnapshotDto,
   reviewedTargets?: readonly ActiveInventoryPublicationTargetSnapshot[],
+  blockedTargets: BlockedPublicationTargetPolicy = "reject",
 ) {
   if (supplySnapshot.productId !== productId) throw new Error("Review snapshot product mismatch");
   const context = await createPublicationContext(client, undefined, true);
@@ -284,7 +286,7 @@ export async function previewProductDefinitionPublicationInsideTransaction(
       enqueueFullPublications: async () => { throw new Error("A definition review cannot enqueue publication"); },
     }),
   });
-  const result = await preview.publishProduct({ productId, dryRun: true, triggeredBy: "product_definition_review" },
+  const result = await preview.publishProduct({ productId, dryRun: true, triggeredBy: "product_definition_review", blockedTargets },
     async () => { throw new Error("A definition review cannot use legacy publication"); });
   if (result.authority !== "canonical") throw new Error("Canonical definition review required");
   return result.publication;
