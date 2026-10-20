@@ -1,3 +1,4 @@
+import { supplierReturnCostAdjustmentSchema } from "@shared/procurement/supplier-return";
 import { costIssueSchema, costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -65,6 +66,33 @@ export class CostReportingRepository {
           const historical = postings.rows.map(posting=>({id:Number(posting.id),approvalId:Number(posting.approval_id),
             destination:posting.destination,beforeMills:Number(posting.before_mills),afterMills:Number(posting.after_mills),deltaMills:Number(posting.delta_mills)}));
           const historicalMatches=reportHash(historical)===reportHash(payload.historicalCostAdjustments ?? []);
+          const returnAdjustments = payload.supplierReturnAdjustments ?? [];
+          const expectedReturnAdjustments = supplierReturnCostAdjustmentSchema.array().max(10_000).parse(row.outcome?.supplierReturnAdjustments ?? []);
+          if (reportHash(returnAdjustments) !== reportHash(expectedReturnAdjustments)) {
+            throw new CostReportingError("COST_REPORT_RETURN_CONFLICT", "Returned-value reporting differs from the immutable cost application result.");
+          }
+          if (returnAdjustments.length) {
+            const entries = await tx.query(`SELECT entry.*,owned.supplier_return_line_id,owned.inventory_lot_id,owned.allocation_id,owned.quantity,
+                line.supplier_return_id FROM inventory.supplier_return_cost_entries entry
+              JOIN inventory.supplier_return_allocations owned ON owned.id=entry.return_allocation_id
+              JOIN procurement.supplier_return_lines line ON line.id=owned.supplier_return_line_id
+              WHERE entry.id=ANY($1::bigint[]) ORDER BY entry.id`, [returnAdjustments.map(item => item.entryId)]);
+            const retained = entries.rows.map(entry => {
+              if (String(entry.source_revision_id) !== row.sourceRevisionId || entry.recorded_by !== payload.actorId
+                || instant(entry.recorded_at) !== instant(payload.recordedAt)) {
+                throw new CostReportingError("COST_REPORT_RETURN_CONFLICT", "Returned-value entries belong to another revision, actor or posting time.");
+              }
+              return supplierReturnCostAdjustmentSchema.parse({ entryId: Number(entry.id), returnId: Number(entry.supplier_return_id),
+                returnLineId: Number(entry.supplier_return_line_id), returnAllocationId: Number(entry.return_allocation_id),
+                inventoryLotId: Number(entry.inventory_lot_id), costQuantityAllocationId: Number(entry.allocation_id),
+                quantity: Number(entry.quantity), component: entry.component, beforeMills: Number(entry.previous_mills),
+                afterMills: Number(entry.next_mills), deltaMills: Number(entry.delta_mills), postingKey: entry.posting_key });
+            });
+            if (reportHash(retained) !== reportHash([...returnAdjustments].sort((a, b) => a.entryId - b.entryId))) {
+              throw new CostReportingError("COST_REPORT_RETURN_CONFLICT", "Returned-value reporting does not match the inventory owner's immutable entries.");
+            }
+          }
+
           // A retained historical gap is explicit evidence, not an applied
           // write-off. Only this classified review may accompany posted costs.
           const appliedWithReview = row.status === "review_required" && row.outcome?.status === "review_required"

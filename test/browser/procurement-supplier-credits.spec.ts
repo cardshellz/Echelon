@@ -241,3 +241,36 @@ test("cost recheck preserves an unsent invoice application draft", async ({ page
   expect(state.requests.map(row => row.command)).toEqual(["reconcile_costs"]);
   expect(state.credit.applications).toEqual([]);
 });
+
+function acceptedCreditOptions() {
+ const options = supplierCreditOptionsFixture();
+ options.lines[0].acceptedReturns = [{ supplierReturnId: 9, supplierReturnLineId: 91, quantityAvailable: 3, unitsPerVariant: 10, evidenceReference: "COLLECT-17", label: "Returned accepted cases", components: ["product", "packaging", "unassigned"], entitlements: [{ id: 111, quantity: 2 }] }];
+ return options;
+}
+async function acceptedCreditForm(page: Page, treatment: string) {
+ await page.goto("/supplier-credits?new=1&sourceInvoiceId=71&supplierReturnLineId=91");
+ await page.getByLabel("Supplier credit reference", { exact: true }).fill("CN-ACCEPTED");
+ await page.getByLabel("Credit document date").fill("2026-10-20");
+ await page.getByLabel("Credit amount for Toploader cases", { exact: true }).fill("2.00");
+ await page.getByLabel("Credit reason and cost treatment", { exact: true }).selectOption(treatment);
+ await page.getByLabel("Credit reason / document evidence").fill("Supplier issued credit for collected stock");
+}
+test("accepted return credit uses one reviewed physical quantity across components", async ({ page }) => {
+ const { state } = await setup(page); state.options = acceptedCreditOptions(); await acceptedCreditForm(page, "accepted:91:new:product");
+ await page.getByLabel("Accepted-stock returned quantity", { exact: false }).fill("2");
+ await page.getByRole("button", { name: "Add another treatment for Toploader cases", exact: true }).click();
+ await page.getByLabel("Credit amount for Toploader cases", { exact: true }).nth(1).fill(".20");
+ await page.getByLabel("Credit reason and cost treatment", { exact: true }).nth(1).selectOption("accepted:91:new:packaging");
+ await page.getByLabel("Accepted-stock returned quantity", { exact: false }).nth(1).fill("3");
+ await page.getByRole("button", { name: "Create credit draft", exact: true }).click(); await expect(page.getByText(/must use the same physical quantity/)).toBeVisible(); expect(state.requests).toEqual([]);
+ await page.getByLabel("Accepted-stock returned quantity", { exact: false }).nth(1).fill("2"); await page.getByRole("button", { name: "Create credit draft", exact: true }).click(); await expect(page).toHaveURL(/supplier-credits\/9/);
+ expect(state.requests[0].body.lines.map((line: any) => line.disposition)).toEqual([{ kind: "accepted_stock_return", supplierReturnLineId: 91, quantity: 2, evidenceReference: "COLLECT-17", component: "product" }, { kind: "accepted_stock_return", supplierReturnLineId: 91, quantity: 2, evidenceReference: "COLLECT-17", component: "packaging" }]);
+});
+test("accepted return top-up pins its existing matched quantity and keeps unassigned value in review", async ({ page }) => {
+ const { state } = await setup(page); state.options = acceptedCreditOptions(); await acceptedCreditForm(page, "accepted:91:111:unassigned");
+ await expect(page.getByLabel("Accepted-stock returned quantity", { exact: false })).toHaveValue("2"); await expect(page.getByLabel("Accepted-stock returned quantity", { exact: false })).toBeDisabled(); await expect(page.getByText(/value disposition remains in review/)).toBeVisible();
+ await page.getByRole("button", { name: "Create credit draft", exact: true }).click(); await expect(page).toHaveURL(/supplier-credits\/9/); expect(state.requests[0].body.lines[0].disposition).toEqual({ kind: "accepted_stock_return", supplierReturnLineId: 91, quantity: 2, evidenceReference: "COLLECT-17", component: "unassigned", entitlementId: 111 });
+});
+test("return context cannot silently become a price reduction of retained goods", async ({ page }) => {
+ const { state } = await setup(page); state.options = acceptedCreditOptions(); await acceptedCreditForm(page, "price:product"); await page.getByRole("button", { name: "Create credit draft", exact: true }).click(); await expect(page.getByText(/Select the verified accepted-stock return/)).toBeVisible(); expect(state.requests).toEqual([]);
+});

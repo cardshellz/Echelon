@@ -22,6 +22,7 @@ import { returnCommandResultFor } from "@shared/inventory/return-command";
 import { lotCostFollowUpReportSchema } from "@shared/inventory/lot-cost-follow-up";
 import { resetFixtureCostHistory } from "../../../procurement/__tests__/integration/cost-history-fixture";
 import { executeMigrationWithRetry } from "../../../../../migrations/migration-executor";
+import { supplierReturnReadFixtureTables } from "../../../procurement/__tests__/integration/supplier-return-fixture";
 
 // Exercise registered HTTP handlers against the real application/PG owners.
 // Authentication and unrelated module singletons are isolated; no global DB
@@ -41,7 +42,7 @@ import { registerInventoryRoutes } from "../../inventory.routes";
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const now = new Date("2026-10-05T12:00:00Z");
-const tables = [schema.products,schema.productVariants,schema.warehouses,schema.warehouseLocations,
+const tables = [...supplierReturnReadFixtureTables,schema.products,schema.productVariants,schema.warehouses,schema.warehouseLocations,
   schema.inventoryLevels,schema.inventoryLots,schema.inventoryTransactions,schema.orders,schema.orderItems,
   schema.orderItemCosts,schema.purchaseOrderLines,schema.receivingOrders,schema.receivingLines];
 

@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,17 +19,19 @@ const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const TABLES = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.inboundFreightCosts,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.inboundFreightCosts,
   schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.vendorInvoiceAttachments, schema.apPayments, schema.apPaymentAllocations];
 
 databaseTests.sequential("invoice current PO comparison PostgreSQL guarantees", () => {
   let pool: pg.Pool | undefined;
   let ownsProcurement = false;
 
+  let ownsSupplierReturnInventory = false;
   beforeAll(async () => {
     if (!TEST_URL) throw new Error("Explicit disposable test database required");
     validatePostgresTestEnvironment(process.env);
     pool = new pg.Pool({ connectionString: TEST_URL, max: 4, ssl: false, statement_timeout: 10000 });
+    await pool.query("CREATE SCHEMA inventory"); ownsSupplierReturnInventory = true;
     await pool.query("CREATE SCHEMA procurement");
     ownsProcurement = true;
     for (const table of TABLES) await pool.query(fixtureTable(table));
@@ -59,6 +62,7 @@ databaseTests.sequential("invoice current PO comparison PostgreSQL guarantees", 
   });
 
   afterAll(async () => {
+    if (ownsSupplierReturnInventory) await pool!.query("DROP SCHEMA inventory CASCADE");
     connection.database = null;
     try { if (pool && ownsProcurement) await pool.query("DROP SCHEMA procurement CASCADE"); }
     finally { await pool?.end(); }

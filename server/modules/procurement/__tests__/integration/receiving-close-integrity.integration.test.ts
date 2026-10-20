@@ -30,7 +30,7 @@ const NOW = new Date("2026-10-13T12:00:00Z");
 const tables = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments,
   schema.inboundShipmentLines, schema.receivingOrders, schema.receivingLines, schema.poReceipts,
   schema.poStatusHistory, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.receiptReversals] as const;
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.supplierReturnLines, schema.receiptReversals] as const;
 
 run.sequential("Receipt integrity with the activated quantity ledger", () => {
   let context: QuantityLedgerTestContext;

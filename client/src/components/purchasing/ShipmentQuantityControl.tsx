@@ -5,13 +5,14 @@ import { ReceiveUnitSelect } from "@/components/purchasing/ReceiveUnitSelect";
 import { selectShipmentQuantityUnit, shipmentQuantityPreview, type ShipmentQuantityDraft } from "@/lib/shipment-unit-entry";
 import type { ShipmentUnits } from "@shared/procurement/shipment-unit-selection";
 
-export function ShipmentQuantityControl({ id, value, units, disabled, maximumPieces, quantityLabel, onChange }: {
+export function ShipmentQuantityControl({ id, value, units, disabled, maximumPieces, quantityLabel, purpose = "shipment", onChange }: {
   id: string;
   value: ShipmentQuantityDraft;
   units: ShipmentUnits | null;
   disabled?: boolean;
   maximumPieces?: number;
   quantityLabel?: string;
+  purpose?: "shipment" | "supplier-return";
   onChange: (value: ShipmentQuantityDraft) => void;
 }) {
   const preview = shipmentQuantityPreview(value, units, maximumPieces);
@@ -36,12 +37,12 @@ export function ShipmentQuantityControl({ id, value, units, disabled, maximumPie
     </div>
     <div aria-live="polite" className="rounded border bg-muted/20 p-3 text-sm">
       {preview.pieces !== null
-        ? <p className="font-medium">{value.variantId === null ? "" : `${value.quantity} × ${value.unitsPerVariant.toLocaleString("en-US")} pieces = `}{preview.pieces.toLocaleString("en-US")} pieces shipped</p>
+        ? <p className="font-medium">{value.variantId === null ? "" : `${value.quantity} × ${value.unitsPerVariant.toLocaleString("en-US")} pieces = `}{preview.pieces.toLocaleString("en-US")} pieces {purpose === "supplier-return" ? "to return" : "shipped"}</p>
         : <p role="alert" className="text-destructive">{preview.error}</p>}
       {maximumPieces !== undefined && <p className="text-xs text-muted-foreground">{maximumPieces.toLocaleString("en-US")} pieces available</p>}
     </div>
     {units?.issue && <p className="text-xs text-amber-800 dark:text-amber-200">{units.issue.message}</p>}
     {!units && <p className="text-xs text-muted-foreground">Configured receive units could not be verified. This quantity is recorded in pieces.</p>}
-    <p className="text-xs text-muted-foreground">Selecting a unit preserves the piece total when conversion is exact. A blank count requires a new explicit quantity. Shipping cartons and dimensions stay unchanged.</p>
+    <p className="text-xs text-muted-foreground">Selecting a unit preserves the piece total when conversion is exact. A blank count requires a new explicit quantity. {purpose === "supplier-return" ? "The original receipt unit is fixed; a return must contain whole recorded stock units." : "Shipping cartons and dimensions stay unchanged."}</p>
   </div>;
 }

@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { readFileSync } from "node:fs";
 import pg from "pg";
 import * as schema from "@shared/schema";
@@ -5,7 +6,7 @@ import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-lin
 
 const TABLES = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
   schema.inboundFreightCosts,
   schema.apPayments, schema.apPaymentAllocations, schema.poStatusHistory, schema.poExceptions];
 const LEASE = "echelon.procurement.po-financial-refresh";
@@ -20,6 +21,7 @@ export class PoFinancialRefreshFixture {
   private modulePool?: pg.Pool;
   private lease?: pg.PoolClient;
   private ownsProcurement = false;
+  private ownsInventory = false;
   private ownsAudit = false;
 
   async start(url: string): Promise<void> {
@@ -32,6 +34,7 @@ export class PoFinancialRefreshFixture {
     this.lease = await this.pool.connect();
     const locked = await this.lease.query("SELECT pg_try_advisory_lock(hashtext($1)) AS acquired", [LEASE]);
     if (!locked.rows[0].acquired) throw new Error("Another PO financial fixture owns the schema lease");
+    await this.pool.query("CREATE SCHEMA inventory"); this.ownsInventory = true;
     await this.pool.query("CREATE SCHEMA procurement");
     this.ownsProcurement = true;
     for (const table of TABLES) await this.pool.query(fixtureTable(table));
@@ -119,6 +122,7 @@ export class PoFinancialRefreshFixture {
     try {
       if (this.ownsAudit) await this.pool.query("DROP TABLE public.audit_events");
       if (this.ownsProcurement) await this.pool.query("DROP SCHEMA procurement CASCADE");
+      if (this.ownsInventory) await this.pool.query("DROP SCHEMA inventory CASCADE");
     } finally {
       if (this.lease) {
         await this.lease.query("SELECT pg_advisory_unlock(hashtext($1))", [LEASE]);

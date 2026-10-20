@@ -276,6 +276,7 @@ export async function readSupplierCreditOptions(tx: CreditTransaction, invoiceId
         availableAmountCents: line.lineTotalCents - credited,
         components: option?.components ?? [],
         returnDispositions: option?.returnDispositions ?? [],
+        acceptedReturns: option?.acceptedReturns ?? [],
         issues: option?.issues ?? []
       };
     })

@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
@@ -7,16 +8,18 @@ import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-lin
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const tables = [schema.vendors, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseOrders, schema.vendorInvoicePoLinks, schema.apPayments, schema.apPaymentAllocations];
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseOrders, schema.vendorInvoicePoLinks, schema.apPayments, schema.apPaymentAllocations];
 databaseTests.sequential("AP work lists with real PostgreSQL", () => {
   let pool: pg.Pool; let modulePool: pg.Pool; let ownsSchema = false;
   let repository: typeof import("../../ap-work-list.repository");
   let poService: typeof import("../../purchase-order-work-list.service");
   const now = new Date("2026-10-18T12:00:00Z");
+  let ownsSupplierReturnInventory = false;
   beforeAll(async () => {
     if (!url || !["localhost", "127.0.0.1"].includes(new URL(url).hostname)
       || [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].filter(Boolean).includes(url)) throw new Error("Requires a separate disposable local database");
     pool = new pg.Pool({ connectionString: url, ssl: false, max: 6, statement_timeout: 10000 });
+    await pool.query("CREATE SCHEMA inventory"); ownsSupplierReturnInventory = true;
     await pool.query("CREATE SCHEMA procurement"); ownsSchema = true;
     for (const table of tables) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
@@ -34,7 +37,8 @@ databaseTests.sequential("AP work lists with real PostgreSQL", () => {
       INSERT INTO procurement.ap_payments(id,payment_number,vendor_id,payment_date,payment_method,total_amount_cents,status)
       SELECT n,'PAY-'||n,CASE WHEN n<=5 THEN 6 ELSE 5 END,'2026-10-01','ach',10000,'completed' FROM generate_series(1,265) n;`);
   });
-  afterAll(async () => { if (ownsSchema) await pool.query("DROP SCHEMA procurement CASCADE"); await pool?.end(); await modulePool?.end(); });
+  afterAll(async () => {
+    if (ownsSupplierReturnInventory) await pool!.query("DROP SCHEMA inventory CASCADE"); if (ownsSchema) await pool.query("DROP SCHEMA procurement CASCADE"); await pool?.end(); await modulePool?.end(); });
   const invoices = (query: Record<string, unknown> = {}) => repository.readInvoiceWorkList(invoiceWorkListQuerySchema.parse(query), now);
   const payments = (query: Record<string, unknown> = {}) => repository.readPaymentWorkList(paymentWorkListQuerySchema.parse(query));
 

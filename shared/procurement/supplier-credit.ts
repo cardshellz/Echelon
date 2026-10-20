@@ -20,6 +20,10 @@ export const supplierCreditDispositionSchema = z.discriminatedUnion("kind", [z.o
   returnDispositionId: id,
   quantity: id,
   evidenceReference: z.string().trim().min(1).max(200)
+}).strict(), z.object({
+  kind: z.literal("accepted_stock_return"), supplierReturnLineId: id, quantity: id,
+  evidenceReference: z.string().trim().min(1).max(1000),
+  component: z.enum(["product", "packaging", "landed", "unassigned"]), entitlementId: id.optional(),
 }).strict()]);
 export const supplierCreditSourceLineInputSchema = z.object({
   invoiceLineId: id,
@@ -28,7 +32,10 @@ export const supplierCreditSourceLineInputSchema = z.object({
 }).strict();
 export type SourceLineInput = z.infer<typeof supplierCreditSourceLineInputSchema>;
 export function supplierCreditLineSourceKey(line: SourceLineInput): string {
-  return line.disposition.kind === "price_reduction" ? `price_reduction:${line.disposition.component}` : `quarantine_return:${line.disposition.returnDispositionId}`;
+  const disposition = line.disposition;
+  if (disposition.kind === "price_reduction") return `price_reduction:${disposition.component}`;
+  if (disposition.kind === "quarantine_return") return `quarantine_return:${disposition.returnDispositionId}`;
+  return `accepted_stock_return:${disposition.supplierReturnLineId}:${disposition.entitlementId ?? "new"}:${disposition.component}`;
 }
 export const supplierCreditCreateInputSchema = z.object({
   sourceInvoiceId: id,
@@ -190,6 +197,12 @@ export const supplierCreditOptionsSchema = z.object({
     creditedAmountCents: cents,
     availableAmountCents: cents,
     components: z.array(z.enum(["product", "packaging", "landed"])),
+    acceptedReturns: z.array(z.object({
+      supplierReturnId: id, supplierReturnLineId: id, quantityAvailable: cents,
+      unitsPerVariant: id, evidenceReference: z.string(), label: z.string(),
+      components: z.array(z.enum(["product", "packaging", "landed", "unassigned"])),
+      entitlements: z.array(z.object({ id, quantity: id }).strict()),
+    }).strict()).optional(),
     returnDispositions: z.array(z.object({
       returnDispositionId: id,
       quantityAvailable: id,

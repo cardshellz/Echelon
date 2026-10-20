@@ -114,7 +114,7 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
       {credit.lines.map(line => <div key={line.id} className="border-t pt-2 text-sm space-y-1">
         <p className="font-medium">{line.label}: {formatPaymentAmount(line.amountCents)}
         </p>
-        <p>{line.disposition.kind === "price_reduction" ? `Price reduction · ${line.disposition.component}` : `Physical return #${line.disposition.returnDispositionId} · ${line.disposition.quantity} source units · ${line.disposition.evidenceReference}`}
+        <p>{line.disposition.kind === "price_reduction" ? `Price reduction · ${line.disposition.component}` : line.disposition.kind === "accepted_stock_return" ? `Accepted-stock return line #${line.disposition.supplierReturnLineId} · ${line.disposition.quantity} recorded units · ${line.disposition.component} · ${line.disposition.evidenceReference}${line.disposition.entitlementId ? ` · Existing matched quantity #${line.disposition.entitlementId}` : ""}` : `Physical return #${line.disposition.returnDispositionId} · ${line.disposition.quantity} source units · ${line.disposition.evidenceReference}`}
         </p>
         <p>Cost result: {line.inventoryEffect ? noInventoryEffectLabel : supplierCreditCostLabel(line.costState)}
         </p>{line.costIssues.map(issue => <p key={`${issue.code}:${issue.message}`} role="alert">{issue.message}

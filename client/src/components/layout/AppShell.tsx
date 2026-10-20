@@ -172,6 +172,7 @@ const navStructure: NavEntry[] = [
       { label: "Invoices", icon: Receipt, href: "/ap-invoices" },
       { label: "Payments", icon: CreditCard, href: "/ap-payments" },
       { label: "Supplier Credits", icon: Receipt, href: "/supplier-credits" },
+      { label: "Supplier Returns", icon: Receipt, href: "/supplier-returns" },
     ],
   },
   {

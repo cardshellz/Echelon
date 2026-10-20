@@ -885,6 +885,15 @@
   "inventory.safety_definition_applications": [
     "modules/inventory-planning"
   ],
+  "inventory.supplier_return_allocations": [
+    "modules/inventory"
+  ],
+  "inventory.supplier_return_cost_entries": [
+    "modules/inventory"
+  ],
+  "inventory.supplier_return_followups": [
+    "modules/inventory"
+  ],
   "inventory.tracking_stop_history": [
     "modules/inventory"
   ],
@@ -1332,6 +1341,24 @@
     "modules/procurement"
   ],
   "procurement.supplier_credits": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_credit_entitlements": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_credit_links": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_credit_reviews": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_lines": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_reporting_events": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_returns": [
     "modules/procurement"
   ],
   "procurement.supplier_sourcing_revisions": [

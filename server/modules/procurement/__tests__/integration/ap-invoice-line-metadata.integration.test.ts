@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { config } from "dotenv";
@@ -11,7 +12,7 @@ const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_DB_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const TABLES = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
   schema.apPayments, schema.apPaymentAllocations];
 
 databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => {
@@ -23,6 +24,7 @@ databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => 
   let ownsAudit = false;
   let updateInvoiceLine: typeof import("../../ap-ledger.service").updateInvoiceLine;
 
+  let ownsSupplierReturnInventory = false;
   beforeAll(async () => {
     if ([process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].filter(Boolean).includes(TEST_DB_URL!)) {
       throw new Error("AP metadata tests require a separate explicitly disposable database");
@@ -32,6 +34,7 @@ databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => 
     lease = await pool.connect();
     const lock = await lease.query("SELECT pg_try_advisory_lock(hashtext('echelon.procurement.cost-audit-fixture')) AS acquired");
     if (!lock.rows[0].acquired) throw new Error("Another procurement cost fixture owns the schema lease");
+    await pool.query("CREATE SCHEMA inventory"); ownsSupplierReturnInventory = true;
     await pool.query("CREATE SCHEMA procurement"); ownsProcurement = true;
     for (const table of TABLES) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
@@ -77,6 +80,7 @@ databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => 
   });
 
   afterAll(async () => {
+    if (ownsSupplierReturnInventory) await pool!.query("DROP SCHEMA inventory CASCADE");
     try {
       if (pool && ownsProcurement) {
         if (ownsAudit) await pool.query("DROP TABLE public.audit_events");

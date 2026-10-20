@@ -41,7 +41,9 @@ export function registerSupplierCreditCostCases(fixture: {
         VALUES(${invoiceId},5,${JSON.stringify(source.sourceSnapshot)}::jsonb,${randomUUID()},'2026-09-06',${lines.reduce((sum, line) => sum + line.amountCents, 0)},'USD','draft','Supplier document received',${context.actorId},${context.at}) RETURNING id`);
       const creditId = Number(inserted.rows[0].id);
       for (const [index, line] of lines.entries()) {
-        const sourceKey = line.disposition.kind === "price_reduction" ? `price_reduction:${line.disposition.component}` : `quarantine_return:${line.disposition.returnDispositionId}`;
+        const sourceKey = line.disposition.kind === "price_reduction" ? `price_reduction:${line.disposition.component}`
+          : line.disposition.kind === "quarantine_return" ? `quarantine_return:${line.disposition.returnDispositionId}`
+          : `accepted_stock_return:${line.disposition.supplierReturnLineId}:${line.disposition.component}`;
         await tx.execute(sql`INSERT INTO procurement.supplier_credit_lines
           (supplier_credit_id,invoice_line_id,source_key,amount_cents,disposition,source_evidence,cost_state,cost_issues,created_at)
           VALUES(${creditId},${line.invoiceLineId},${sourceKey},${line.amountCents},${JSON.stringify(line.disposition)}::jsonb,
@@ -151,8 +153,8 @@ export function registerSupplierCreditCostCases(fixture: {
     await query(`UPDATE procurement.purchase_order_lines SET order_qty=100,total_product_cost_cents=10000,packaging_cost_cents=1000,line_total_cents=11000 WHERE id=21;
       UPDATE procurement.vendor_invoice_lines SET qty_invoiced=100,line_total_cents=13000,cost_component_evidence='{"contractVersion":1,"packagingTreatment":"separate","productMills":1200000,"packagingMills":100000,"adjustmentMills":0,"source":"operator_review"}' WHERE id=72;
       UPDATE procurement.vendor_invoices SET invoiced_amount_cents=13000,balance_cents=13000,status='approved' WHERE id=71;
-      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(2,'inventory','adjust','inventory');
-      INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,2);
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(3,'inventory','adjust','inventory');
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,3);
       INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code,location_type) VALUES(100,1,'CREDIT-QUARANTINE','quarantine')`);
     const receipt = await fixture.prepareQuarantineReceipt();
     const intake = await fixture.database().transaction(tx => executeReceivingCustodyCommand(tx, fixture.receiving(), {

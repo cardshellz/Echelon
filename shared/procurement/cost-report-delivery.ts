@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { supplierReturnCostAdjustmentSchema } from "./supplier-return";
 import { costInventoryEffectProofSchema, unresolvedCostQuantitySchema } from "./cost-source-contracts";
 import { reconciliationPostingSchema } from "./cost-reconciliation";
 
@@ -38,10 +39,11 @@ export const inventoryCostReportEventSchema = z.object({
   unresolvedQuantities: z.array(unresolvedCostQuantitySchema).min(1).max(10_000).optional(),
   historicalCostAdjustments: z.array(reconciliationPostingSchema).min(1).max(2).optional(),
   inventoryEffectProof: costInventoryEffectProofSchema.optional(),
+  supplierReturnAdjustments: z.array(supplierReturnCostAdjustmentSchema).min(1).max(10_000).optional(),
 }).strict().superRefine((event, context) => {
   if (event.inventoryEffectProof && (event.currency !== "USD" || event.component === "landed"
     || event.changes.length !== 0 || event.cogsDeltaCents !== 0
-    || event.historicalCostAdjustments !== undefined || event.unresolvedQuantities !== undefined)) {
+    || event.historicalCostAdjustments !== undefined || event.unresolvedQuantities !== undefined || event.supplierReturnAdjustments !== undefined)) {
     context.addIssue({
       code: "custom", path: ["inventoryEffectProof"],
       message: "No-inventory-effect evidence cannot accompany inventory, COGS or historical cost adjustments",
@@ -62,6 +64,14 @@ export const inventoryCostReportEventSchema = z.object({
       context.addIssue({ code: "custom", path: ["changes", index], message: "Cost event identities or exact allocation totals conflict" });
     }
     ids.add(change.lotId);
+  }
+  const returnEntries = new Set<number>();
+  for (const adjustment of event.supplierReturnAdjustments ?? []) {
+    if (returnEntries.has(adjustment.entryId) || adjustment.component !== event.component
+      || !event.changes.some(change => change.lotId === adjustment.inventoryLotId)) {
+      context.addIssue({ code: "custom", path: ["supplierReturnAdjustments"], message: "Returned-value adjustments must identify distinct entries on the applied component and lot." });
+    }
+    returnEntries.add(adjustment.entryId);
   }
   const unresolvedIds = new Set<number>();
   const unresolvedLots = new Set<number>();

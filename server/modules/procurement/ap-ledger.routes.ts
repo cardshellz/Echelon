@@ -1,3 +1,4 @@
+import { registerSupplierReturnRoutes } from "./supplier-return.routes";
 import { SupplierCreditEvidenceError } from "./supplier-credit-settlement.repository";
 import { registerSupplierCreditRoutes } from "./supplier-credit.routes";
 import { paymentCalendarDateSchema, paymentCalendarDateToUtc } from "@shared/procurement/ap-payment-contract";
@@ -48,6 +49,7 @@ function sendFinancialCommandError(res: any, error: FinancialCommandError): any 
 
 export function registerApLedgerRoutes(app: Express) {
   registerSupplierCreditRoutes(app);
+  registerSupplierReturnRoutes(app);
   registerInvoiceQuantityCorrectionRoutes(app);
   registerPoFinancialEvidenceRoutes(app);
   // ============================================================

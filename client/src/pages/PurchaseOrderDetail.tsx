@@ -1,3 +1,4 @@
+import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
@@ -3734,7 +3735,7 @@ export default function PurchaseOrderDetail() {
         {/* ── History Tab ── */}
         {/* ── Invoices Tab ── */}
         <TabsContent value="invoices" className="space-y-4">
-          <SupplierCreditLink purchaseOrderId={po.id} />
+          <div className="flex flex-wrap gap-4"><SupplierCreditLink purchaseOrderId={po.id} /><SupplierReturnLink vendorId={po.vendorId} purchaseOrderId={po.id} /></div>
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
               Linked vendor invoices. Amounts and balances cover each entire invoice, which may include other purchase orders.

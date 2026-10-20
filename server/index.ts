@@ -840,6 +840,7 @@ function startEchelonSyncScheduler(
           recoverPendingPickingCommands: () => services.picking.recoverPendingPickingCommands(),
           recoverReplenishmentFollowups: () => services.replenishment.recoverReplenishmentFollowups(),
           recoverInventoryTransfers: () => services.inventoryTransfers.recoverPending(),
+          recoverSupplierReturns: () => services.supplierReturnFollowups.recoverPending(),
         });
         httpServer.once("close", () => worker.stop());
       } else {

@@ -13,9 +13,16 @@ import type { SupplierCreditCommands } from "./use-supplier-credit-commands";
 
 type LineDraft = { amount: string; disposition: string; quantity: string; reference: string };
 const emptyLine = (): LineDraft => ({ amount: "", disposition: "", quantity: "", reference: "" });
+type CreditSourceLine = SupplierCreditOptions["lines"][number];
+function acceptedReturnChoices(line: CreditSourceLine) {
+  return (line.acceptedReturns ?? []).flatMap(source => source.components.flatMap(component => [
+    ...(source.quantityAvailable > 0 ? [{ key: `accepted:${source.supplierReturnLineId}:new:${component}`, source, component, entitlement: null }] : []),
+    ...source.entitlements.map(entitlement => ({ key: `accepted:${source.supplierReturnLineId}:${entitlement.id}:${component}`, source, component, entitlement })),
+  ]));
+}
 const selectClass = "w-full rounded border bg-background p-2 text-sm";
-export function SupplierCreditCreate({ commands, initialInvoiceId, returnDispositionId, replacesCreditId, onCancel }: {
-  commands: SupplierCreditCommands; initialInvoiceId: number | null; returnDispositionId: number | null; replacesCreditId: number | null; onCancel: () => void;
+export function SupplierCreditCreate({ commands, initialInvoiceId, returnDispositionId, supplierReturnLineId = null, replacesCreditId, onCancel }: {
+  commands: SupplierCreditCommands; initialInvoiceId: number | null; returnDispositionId: number | null; supplierReturnLineId?: number | null; replacesCreditId: number | null; onCancel: () => void;
 }) {
   const [invoiceId, setInvoiceId] = useState(initialInvoiceId);
   const [search, setSearch] = useState("");
@@ -66,6 +73,15 @@ export function SupplierCreditCreate({ commands, initialInvoiceId, returnDisposi
         if (!line) throw new Error("A selected source line is no longer available. Reload the credit source.");
         const amountCents = parsePaymentAmount(draft.amount);
         if (amountCents <= 0 || amountCents > line.availableAmountCents) throw new Error(`${line.label}: enter a positive amount within its available credit value.`);
+        const accepted = acceptedReturnChoices(line).find(item => item.key === draft.disposition);
+        if (accepted) {
+          const quantity = accepted.entitlement?.quantity ?? Number(draft.quantity);
+          if (!/^[1-9]\d*$/.test(draft.quantity) || !Number.isSafeInteger(quantity) || quantity !== Number(draft.quantity)
+            || (!accepted.entitlement && quantity > accepted.source.quantityAvailable)) throw new Error(`${line.label}: enter a whole quantity within the verified accepted-stock return.`);
+          return { invoiceLineId: line.invoiceLineId, amountCents, disposition: { kind: "accepted_stock_return" as const,
+            supplierReturnLineId: accepted.source.supplierReturnLineId, quantity, evidenceReference: draft.reference.trim(), component: accepted.component,
+            ...(accepted.entitlement ? { entitlementId: accepted.entitlement.id } : {}) } };
+        }
         const returned = line.returnDispositions.find(item => `return:${item.returnDispositionId}` === draft.disposition);
         if (returned) {
           if (!/^[1-9]\d*$/.test(draft.quantity) || !Number.isSafeInteger(Number(draft.quantity)) || Number(draft.quantity) > returned.quantityAvailable) throw new Error(`${line.label}: enter a valid returned quantity within the available physical return.`);
@@ -75,6 +91,13 @@ export function SupplierCreditCreate({ commands, initialInvoiceId, returnDisposi
         if (!component) throw new Error(`${line.label}: choose a supported credit reason and cost component.`);
         return { invoiceLineId: line.invoiceLineId, amountCents, disposition: { kind: "price_reduction" as const, component } };
       });
+      if (supplierReturnLineId !== null && !lines.some(line => line.disposition.kind === "accepted_stock_return" && line.disposition.supplierReturnLineId === supplierReturnLineId)) throw new Error("Select the verified accepted-stock return that opened this credit workflow.");
+      const newReturnQuantities = new Map<number, number>();
+      for (const line of lines) if (line.disposition.kind === "accepted_stock_return" && line.disposition.entitlementId === undefined) {
+        const prior = newReturnQuantities.get(line.disposition.supplierReturnLineId);
+        if (prior !== undefined && prior !== line.disposition.quantity) throw new Error("Cost components for the same new accepted-stock return must use the same physical quantity on this document.");
+        newReturnQuantities.set(line.disposition.supplierReturnLineId, line.disposition.quantity);
+      }
       for (const line of reviewed.lines) {
         if (sumPaymentCents(lines.filter(item => item.invoiceLineId === line.invoiceLineId).map(item => item.amountCents)) > line.availableAmountCents) throw new Error(`${line.label}: combined credit treatments exceed the available source amount.`);
       }
@@ -97,6 +120,7 @@ export function SupplierCreditCreate({ commands, initialInvoiceId, returnDisposi
       </p>}<Button variant="outline" onClick={() => void replacement.refetch()}>Reload replacement source</Button>
     </div>}
     {returnDispositionId !== null && <p className="rounded border p-2 text-sm">Physical return #{returnDispositionId}: choose the supplier invoice that owns those goods. Only verified return choices can be used below.</p>}
+    {supplierReturnLineId !== null && <p className="rounded border p-2 text-sm">Accepted-stock return line #{supplierReturnLineId}: select a verified original invoice and the explicit returned-stock treatment. This credit will not remove inventory again or reprice retained goods.</p>}
     {!commands.canCreate && <p role="alert">Purchasing edit permission is required to record a credit draft.</p>}
     {invoiceId === null ? <div className="space-y-3">
       <Input aria-label="Search original supplier invoice" placeholder="Search invoice number or supplier" value={search} onChange={event => { setSearch(event.target.value); setOffset(0); }} disabled={commands.blocked} />
@@ -132,6 +156,8 @@ export function SupplierCreditCreate({ commands, initialInvoiceId, returnDisposi
           {reviewed.lines.flatMap(line => [String(line.invoiceLineId), ...Object.keys(drafts).filter(key => key.startsWith(`${line.invoiceLineId}:`))].map(key => {
             const draft = drafts[key] ?? emptyLine();
             const returned = line.returnDispositions.find(item => `return:${item.returnDispositionId}` === draft.disposition);
+            const acceptedChoices = acceptedReturnChoices(line);
+            const accepted = acceptedChoices.find(item => item.key === draft.disposition);
             return <div key={key} className="rounded border p-3 space-y-2">
               <p className="font-medium">{line.label}
               </p>
@@ -147,13 +173,19 @@ export function SupplierCreditCreate({ commands, initialInvoiceId, returnDisposi
                 </div>
                 <div>
                   <Label htmlFor={`credit-disposition-${key}`}>Credit reason and cost treatment</Label>
-                  <select id={`credit-disposition-${key}`} className={selectClass} value={draft.disposition} onChange={event => { const option = line.returnDispositions.find(item => `return:${item.returnDispositionId}` === event.target.value); update(key, { disposition: event.target.value, quantity: "", reference: option?.evidenceReference ?? "" }); }}>
+                  <select id={`credit-disposition-${key}`} className={selectClass} value={draft.disposition} onChange={event => { const option = line.returnDispositions.find(item => `return:${item.returnDispositionId}` === event.target.value); const accepted = acceptedChoices.find(item => item.key === event.target.value); update(key, { disposition: event.target.value, quantity: accepted?.entitlement ? String(accepted.entitlement.quantity) : "", reference: accepted?.source.evidenceReference ?? option?.evidenceReference ?? "" }); }}>
                     <option value="">Choose verified source treatment</option>{line.components.map(component => <option key={component} value={`price:${component}`}>Price reduction · {component}
                     </option>)}{line.returnDispositions.map(item => <option key={item.returnDispositionId} value={`return:${item.returnDispositionId}`}>Physical return #{item.returnDispositionId} · {item.label}
-                    </option>)}
+                    </option>)}{acceptedChoices.map(item => <option key={item.key} value={item.key}>Accepted-stock return #{item.source.supplierReturnId} / line #{item.source.supplierReturnLineId} · {item.component === "unassigned" ? "Component requires review" : item.component} · {item.entitlement ? `Existing matched quantity #${item.entitlement.id}` : "New returned quantity"}</option>)}
                   </select>
                 </div>
               </div>
+              {accepted && <div className="space-y-2 text-sm">
+                <p>{accepted.entitlement ? "This additional credit uses an existing matched physical quantity; the stock return is not repeated." : "Match part or all of the recorded physical return. Components on this document share the same selected returned quantity. This does not change retained inventory or record cash."}</p>
+                <div className="grid gap-2 sm:grid-cols-2"><div><Label htmlFor={`credit-accepted-qty-${key}`}>Accepted-stock returned quantity ({accepted.source.unitsPerVariant} pieces per recorded unit; available {accepted.entitlement?.quantity ?? accepted.source.quantityAvailable})</Label><Input id={`credit-accepted-qty-${key}`} inputMode="numeric" value={draft.quantity} disabled={accepted.entitlement !== null} onChange={event => update(key, { quantity: event.target.value })} /></div>
+                <div><Label htmlFor={`credit-accepted-ref-${key}`}>Accepted-stock collection evidence</Label><Input id={`credit-accepted-ref-${key}`} value={draft.reference} maxLength={1000} onChange={event => update(key, { reference: event.target.value })} /></div></div>
+                {accepted.component === "unassigned" && <p className="text-amber-800 dark:text-amber-200">The supplier document does not identify a cost component. Its value disposition remains in review.</p>}
+              </div>}
               {returned && <div className="grid gap-2 sm:grid-cols-2">
                 <div>
                   <Label htmlFor={`credit-return-qty-${key}`}>Returned quantity ({returned.unitLabel}; available {returned.quantityAvailable})</Label>

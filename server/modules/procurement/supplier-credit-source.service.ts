@@ -1,4 +1,6 @@
 import { sql } from "drizzle-orm";
+import { readAcceptedReturnCreditOptions, reviewAcceptedReturnCreditSource, recordAcceptedReturnCreditLinks,
+  readAcceptedReturnCreditCostStatus } from "./supplier-return-credit.repository";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { supplierCreditSourceLineInputSchema, type SourceLineInput } from "@shared/procurement/supplier-credit";
@@ -7,7 +9,7 @@ import type { CostIssue, CostInventoryEffect } from "@shared/procurement/cost-so
 import { COGSService } from "../inventory/cogs.service";
 import { costInteger, CostEvidenceError, lockInventoryCostGraph, type CostEvidenceTransaction } from "../inventory/infrastructure/cost-evidence.repository";
 import { evaluateSupplierCreditSource, resolveSupplierCreditReductions, supplierCreditIssue,
-  supplierCreditSourceEvidenceSchema, type SupplierCreditSourceEvidence } from "./domain/supplier-credit-source";
+  supplierCreditSourceEvidenceSchema, supplierCreditInvoiceSourceFingerprint, type SupplierCreditSourceEvidence } from "./domain/supplier-credit-source";
 import { readCreditedReturnQuantities, readSupplierCreditCostRows, readSupplierCreditInvoiceLines,
   readSupplierCreditReturns, writeSupplierCreditSourceResult } from "./supplier-credit-source.repository";
 import { reconcilePurchaseCostEvidence } from "./purchase-cost-application.service";
@@ -41,10 +43,30 @@ export async function validateSupplierCreditSourceLines(tx: CostEvidenceTransact
   if (!invoices.length) throw new CostEvidenceError("CREDIT_SOURCE_INVOICE_UNAVAILABLE", "The source invoice has no available lines.");
   const result = [];
   const requestedReturns = new Map<number, bigint>();
+  const acceptedGroups = new Map<string, number>();
   for (const line of lines) {
     const invoice = invoices.find(row => Number(row.id) === line.invoiceLineId);
     if (!invoice) throw new CostEvidenceError("CREDIT_SOURCE_LINE_MISMATCH", "A credit line does not belong to its source invoice.");
     requireApprovedInvoice(invoice);
+    if (line.disposition.kind === "accepted_stock_return") {
+      const disposition = line.disposition;
+      const group = `${disposition.supplierReturnLineId}:${disposition.entitlementId ?? "new"}`;
+      const priorQuantity = acceptedGroups.get(group);
+      if (priorQuantity !== undefined && priorQuantity !== disposition.quantity) {
+        throw new CostEvidenceError("RETURN_CREDIT_GROUP_QUANTITY", "Components sharing a returned-quantity entitlement must review the same exact quantity.");
+      }
+      acceptedGroups.set(group, disposition.quantity);
+      const acceptedReturnSource = await reviewAcceptedReturnCreditSource(tx, { invoice, line, creditId: input.creditId });
+      const sourceEvidence = supplierCreditSourceEvidenceSchema.parse({ contractVersion: 1,
+        invoiceLineId: line.invoiceLineId, invoiceId: Number(invoice.vendor_invoice_id),
+        invoiceSourceFingerprint: supplierCreditInvoiceSourceFingerprint(invoice),
+        purchaseOrderLineId: invoice.purchase_order_line_id == null ? null : Number(invoice.purchase_order_line_id),
+        freightCostId: invoice.freight_cost_id == null ? null : Number(invoice.freight_cost_id),
+        reduction: { productMills: 0, packagingMills: 0, landedMills: 0, basePieces: 0 },
+        returnSource: null, acceptedReturnSource, issues: [] });
+      result.push({ invoiceLineId: line.invoiceLineId, sourceEvidence, costState: "pending" as const, costIssues: [] });
+      continue;
+    }
     let returnSource: SupplierCreditSourceEvidence["returnSource"] = null;
     if (line.disposition.kind === "quarantine_return") {
       const disposition = line.disposition;
@@ -101,7 +123,8 @@ export async function readSupplierCreditSourceOptions(tx: CostEvidenceTransactio
       return available <= BigInt(0) ? [] : [{ returnDispositionId: Number(row.id), quantityAvailable: costInteger(available.toString(), "quantityAvailable", 1),
         unitLabel: String(row.unit_label), evidenceReference: String(row.evidence_reference), label: String(row.description) }];
     });
-    result.push({ invoiceLineId: costInteger(invoice.id, "invoiceLineId", 1), components, returnDispositions, issues });
+    const acceptedReturns = await readAcceptedReturnCreditOptions(tx, invoice);
+    result.push({ invoiceLineId: costInteger(invoice.id, "invoiceLineId", 1), components, returnDispositions, acceptedReturns, issues });
   }
   return result;
 }
@@ -124,9 +147,10 @@ async function reconcileCreditSources(tx: AmendmentTransaction, input: SourceCon
       await writeSupplierCreditSourceResult(tx, Number(lines[index].id), validated[index]);
     }
   }
+  if (action === "approve") await recordAcceptedReturnCreditLinks(tx, input);
   if (action === "void" && credit.approved_at === null) return readSupplierCreditCostStatus(tx, { creditId: input.creditId });
   const invoices = await readSupplierCreditInvoiceLines(tx, Number(credit.source_invoice_id), false);
-  const affected = invoices.filter(row => lines.some(line => Number(line.invoice_line_id) === Number(row.id)));
+  const affected = invoices.filter(row => lines.some(line => supplierCreditSourceLineInputSchema.shape.disposition.parse(line.disposition).kind !== "accepted_stock_return" && Number(line.invoice_line_id) === Number(row.id)));
   const poIds = [...new Set(affected.filter(row => row.purchase_order_line_id != null).map(row => Number(row.purchase_order_line_id)))];
   const writer = new COGSService(tx);
   for (const poLineId of poIds) await reconcilePurchaseCostEvidence(tx, poLineId, writer, input.actorId, input.at);
@@ -154,7 +178,7 @@ export async function readSupplierCreditCostStatus(tx: CostEvidenceTransaction, 
     JOIN procurement.vendor_invoice_lines invoice_line ON invoice_line.id=line.invoice_line_id
     WHERE credit.id=${costInteger(input.creditId, "creditId", 1)} ORDER BY line.id`)).rows;
   const postedDocument = rows.some(row => row.approved_at !== null);
-  const poIds = [...new Set(rows.filter(row => row.purchase_order_line_id != null).map(row => Number(row.purchase_order_line_id)))];
+  const poIds = [...new Set(rows.filter(row => row.disposition.kind !== "accepted_stock_return" && row.purchase_order_line_id != null).map(row => Number(row.purchase_order_line_id)))];
   const purchaseLines = postedDocument && poIds.length ? await cache.readPurchaseLines(poIds) : [];
   const lines: Array<{ id: number; costState: CostState; costIssues: CostIssue[]; inventoryEffect?: CostInventoryEffect }> = [];
   for (const row of rows) {
@@ -164,6 +188,10 @@ export async function readSupplierCreditCostStatus(tx: CostEvidenceTransaction, 
     if (row.status === "voided" && row.approved_at === null) {
       costState = "not_applicable";
       costIssues = [];
+    } else if (postedDocument && row.disposition.kind === "accepted_stock_return") {
+      const current = await readAcceptedReturnCreditCostStatus(tx, Number(row.id));
+      costState = current.costState;
+      costIssues = current.costIssues;
     } else if (postedDocument) {
       const original = supplierCreditSourceEvidenceSchema.safeParse(row.source_evidence);
       const issues = row.status === "approved" && original.success ? original.data.issues : [];

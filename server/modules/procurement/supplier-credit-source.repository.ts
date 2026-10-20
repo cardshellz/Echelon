@@ -21,6 +21,7 @@ export async function readSupplierCreditCostRows(tx: CostEvidenceTransaction, sc
     JOIN procurement.supplier_credits credit ON credit.id=line.supplier_credit_id
     JOIN procurement.vendor_invoice_lines invoice_line ON invoice_line.id=line.invoice_line_id
     WHERE (credit.status='approved' OR (credit.status='voided' AND credit.approved_at IS NOT NULL))
+      AND (line.disposition->>'kind' IS DISTINCT FROM 'accepted_stock_return' OR credit.id=${scope.creditId ?? null})
       AND (invoice_line.purchase_order_line_id=ANY(${sql.param(poIds)}::int[])
         OR invoice_line.freight_cost_id=ANY(${sql.param(freightIds)}::int[])
         OR credit.id=${scope.creditId ?? null})

@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -16,7 +17,7 @@ const url = process.env.ECHELON_TEST_DATABASE_URL;
 const integration = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const NOW = new Date("2026-09-07T12:00:00Z");
 const TABLES = [schema.vendors, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines];
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines];
 
 // The command, advisory lock, version check, audit and durable command repository
 // execute against real PostgreSQL. Linked component/COGS application is covered
@@ -30,6 +31,7 @@ integration.sequential("invoice component review transaction and replay", () => 
   let commands: ReturnType<typeof import("../../invoice-cost-review.service").createInvoiceCostReviewCommands>;
   let versionOf: typeof import("../../ap-ledger.service").invoiceCostReviewVersion;
 
+  let ownsSupplierReturnInventory = false;
   beforeAll(async () => {
     if (!["127.0.0.1", "localhost"].includes(new URL(url!).hostname)
       || [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].filter(Boolean).includes(url!)) {
@@ -39,6 +41,7 @@ integration.sequential("invoice component review transaction and replay", () => 
     lease = await pool.connect();
     const lock = await lease.query("SELECT pg_try_advisory_lock(hashtext('echelon.procurement.cost-audit-fixture')) AS acquired");
     if (!lock.rows[0].acquired) throw new Error("Another procurement fixture owns the schema lease");
+    await pool.query("CREATE SCHEMA inventory"); ownsSupplierReturnInventory = true;
     await pool.query("CREATE SCHEMA procurement"); ownsProcurement = true;
     for (const table of TABLES) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
@@ -79,6 +82,7 @@ integration.sequential("invoice component review transaction and replay", () => 
         VALUES(72,71,1,150,67,6667,11800)`);
   });
   afterAll(async () => {
+    if (ownsSupplierReturnInventory) await pool!.query("DROP SCHEMA inventory CASCADE");
     try {
       if (pool && ownsProcurement) {
         if (ownsAudit) await pool.query("DROP TABLE public.audit_events"); else await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);

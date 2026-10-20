@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { resetFixtureCostHistory } from "./cost-history-fixture";
 import { readFile } from "node:fs/promises";
 import { recordCostRevision } from "../../cost-source-revision.repository";
@@ -60,6 +61,7 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
       fixtureTable(schema.vendorInvoices, ["id", "vendorId", "invoiceNumber", "status", "currency", "invoiceDate", "dueDate", "inboundShipmentId", "invoicedAmountCents", "paidAmountCents", "creditedAmountCents", "balanceCents"]),
       fixtureTable(schema.supplierCredits, Object.keys(getTableColumns(schema.supplierCredits))),
       fixtureTable(schema.supplierCreditLines, Object.keys(getTableColumns(schema.supplierCreditLines))),
+      ...supplierReturnReadFixtureTables.map(table => fixtureTable(table, Object.keys(getTableColumns(table)))),
       fixtureTable(schema.supplierCreditApplications, Object.keys(getTableColumns(schema.supplierCreditApplications))),
       fixtureTable(schema.supplierCreditApplicationReversals, Object.keys(getTableColumns(schema.supplierCreditApplicationReversals))),
       fixtureTable(schema.vendorInvoicePoLinks, ["id", "vendorInvoiceId", "purchaseOrderId", "allocatedAmountCents"]),

@@ -227,3 +227,22 @@ describe("bounded authenticated report transport",() => {
     expect(await service.tick()).toMatchObject({claimed:2,acknowledged:2,failed:0});expect(started).toHaveLength(2);
   });
 });
+
+
+describe("accepted supplier return cost report evidence", () => {
+  const adjustment = { entryId: 11, returnId: 12, returnLineId: 13, returnAllocationId: 14,
+    inventoryLotId: 5, costQuantityAllocationId: 15, quantity: 1, component: "product",
+    beforeMills: 200, afterMills: 100, deltaMills: -100, postingKey: "source_revision:1:prior:9" };
+  it("preserves exact returned-value change separately from sales COGS", () => {
+    const input = { ...payload, supplierReturnAdjustments: [adjustment] };
+    expect(inventoryCostReportEventSchema.parse(input)).toEqual(input);
+    expect(buildCostReportEnvelope({ destination: configuration, deliveryId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", sourceEventId: "1",
+      applicationId: "1", purchaseOrderId: 10, purchaseOrderLineId: 21, payload: input }).payload.supplierReturnAdjustments).toEqual([adjustment]);
+  });
+  it.each([{ deltaMills: -99 }, { beforeMills: 0.5 }, { inventoryLotId: 99 }, { component: "landed" }])("rejects mismatched returned-value evidence %j", patch => {
+    expect(inventoryCostReportEventSchema.safeParse({ ...payload, supplierReturnAdjustments: [{ ...adjustment, ...patch }] }).success).toBe(false);
+  });
+  it("rejects duplicate returned-value entries", () => {
+    expect(inventoryCostReportEventSchema.safeParse({ ...payload, supplierReturnAdjustments: [adjustment, adjustment] }).success).toBe(false);
+  });
+});

@@ -107,3 +107,35 @@ The real PostgreSQL full-return case in `server/modules/procurement/__tests__/in
 Accepted-stock supplier returns and credit differences are the next authorized stages. Their physical movement and loss/claim classifications are not implemented by this zero-effect correction.
 
 Local correction validation: 4,721 unit/guard cases passed (seven existing database-dependent cases skipped); 103 focused client/contract cases also passed, with overlaps not added to the broad count. All 169 PostgreSQL cases across receiving cost application, supplier-credit commands and reporting passed. The two affected browser suites plus new recovery regressions cover 132 distinct desktop/mobile cases, with no skips or failures. Application, server-test, client-test and scoped browser TypeScript checks passed, as did the production build. PostgreSQL source tracking recorded a later test-comment-only change during the final two suites; their production code was unchanged. No hosted CI or production acceptance is claimed.
+
+## Accepted-stock collections and credit differences
+
+This later stage adds a separate physical return record. It does not reinterpret the original accepted receipt as a receiving error. The first full-quarantine correction remains independently committed at `ce84c0254783f738b9ed96a3f891df35527d7fe4`.
+
+### Physical collection authority
+
+`inventory/application/supplier-return-stock.ts::executeSupplierReturnStock` admits the active quantity authority, takes the inventory graph fence and current location/level/lot locks, checks current purchasing approval, and verifies the reviewed source fingerprint. Only available, unreserved stock with an original receipt or proven one-to-one transfer lineage is eligible. The frozen lot unit conversion is used by preview and execution. Mixed/transformed provenance, missing cost allocation evidence, changed units, a corrected receipt, frozen locations and stale previews require review.
+
+Procurement creates the immutable supplier collection header and source lines only after those locks. Inventory owns the physical decrease, exact cost-quantity allocation and three initial returned-value entries. The receipt, original PO received quantity, invoice and retained lot cost basis remain historical facts. A returned unit cannot also be allocated to sale or another return. The collection, stock posting, cost entries, physical reporting evidence, audit event, durable command response and availability follow-up commit together. An unavailable publication owner leaves retryable work for the existing inventory-change publication path.
+
+The collection requires its supplier, calendar date, evidence reference, reason and explicit lot quantities. A supplier RMA/reference is optional; it is not used as a substitute for the durable command key. Exact replay retains the original response. Unknown database, transport or evidence failures retain recovery; only classified input/authority/source refusals issue a terminal rejection.
+
+`receipt-reversal.service.ts` reads retained supplier-return lineage under the same graph lock before a new reversal. A source line with returned stock cannot be reversed. The whole receipt is blocked if any of its sources has a return; other individual lines retain their existing reversal path. The receiving screen consumes the same per-line and whole-receipt capability. A saved reversal response remains recoverable.
+
+### Returned value and credit ownership
+
+Returned value stays in an immutable inventory-owned component ledger. Later product, packaging or landed-cost revisions append the exact difference for the original returned intervals. The original cost basis is preserved, and returned value is accounted for separately from retained stock and sold COGS. Cost application reporting includes those returned-value adjustments with their retained entry identities.
+
+An `accepted_stock_return` supplier credit links money to an already recorded physical return. It does not reduce the gross purchase cost source or remove stock again. Immutable quantity entitlements identify a specific returned slice once; product and packaging lines on one reviewed note may share that slice. A later short-credit top-up or replacement explicitly selects the existing entitlement. An independent competing draft cannot silently join another approved entitlement. Voiding a credit preserves the return and its quantity entitlement.
+
+Goods and freight credits require their corresponding approved source invoice and supplier/receipt lineage. A combined goods note may retain an unassigned component amount until the operator records an exact product/packaging attribution. The attribution must sum to the original note amount; this review cannot turn goods credit into unsupported freight reimbursement.
+
+### Difference review and limits
+
+`GET /api/supplier-return-entitlements/:id/review` projects current returned component values, actual credit links, differences and retained reviews. The corresponding durable POST appends an operator's evidence and exact attribution under current authority and the inventory graph fence. Its version binds the returned value entries, active credit notes and prior review. Late cost, void or top-up makes an earlier review stale; original review history remains visible.
+
+The available dispositions are attribution only, awaiting supplier note and supplier declined. None writes off an amount or creates a receivable. A financially unresolved difference stays unresolved even after the supplier declines it. The codebase provides no verified supplier-return loss/claim posting destination to invoke in this stage. An actual expense/write-off, reimbursement claim, cash refund or external GL journal requires its own approved accounting owner and policy; no such event is inferred from review evidence.
+
+### Local validation state
+
+Validation for this later stage is in progress. New command/API and domain tests are passing, and initial desktop/mobile accepted-stock return/reversal cases have passed. Real PostgreSQL acceptance, affected-suite regression, final typechecks and the build must complete before this stage is declared ready. The SQL remains in `migrations/pending/supplier_return_completion.sql` until a real PR migration ID can be allocated. It has not been applied to production. Local checks, hosted CI, merge and production acceptance remain separate.
