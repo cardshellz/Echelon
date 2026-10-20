@@ -130,6 +130,9 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(migrationGuard).toBeGreaterThan(checkout);
     expect(gate.slice(checkout, migrationGuard)).toContain("fetch-depth: 0");
     expect(gate.slice(checkout, migrationGuard)).toContain("persist-credentials: false");
+    expect(gate).toContain("    permissions:\n      contents: read\n      pull-requests: read");
+    expect(gate).toContain("run: node scripts/migrations/check-migrations.mjs --ci\n        env:\n          GITHUB_TOKEN: ${{ github.token }}");
+    expect(gate).not.toMatch(/(?:contents|pull-requests): write/);
     for (const setup of ["uses: actions/setup-node@", "run: npm ci", "playwright install", "services:"]) {
       const setupPosition = gate.indexOf(setup);
       if (setupPosition !== -1) expect(setupPosition, setup).toBeGreaterThan(migrationGuard);
@@ -204,6 +207,7 @@ describe("fast CI preserves coverage and required checks", () => {
     const preflightLines = preflight.split(/\r?\n/).map(line => line.trim());
     for (const file of [
       "postgres-ci-shards.test.ts", "migration-prefix-collision.test.ts",
+      "migration-allocation.test.ts", "migration-inherited-provenance.test.ts",
       "browser-ci-selection.test.ts", "dropship-browser-features.test.ts", "test-typecheck-ratchet.test.ts", "ci-fast-feedback.test.ts",
       "writer-ratchet.test.ts",
     ]) expect(preflightLines).toContain(`server/__tests__/unit/${file}`);

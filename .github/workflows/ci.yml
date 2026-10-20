@@ -19,6 +19,9 @@ concurrency:
 
 jobs:
   preflight:
+    permissions:
+      contents: read
+      pull-requests: read
     name: Fast CI guards
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -29,6 +32,8 @@ jobs:
           persist-credentials: false
       - name: Validate migration identities before dependency setup
         run: node scripts/migrations/check-migrations.mjs --ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -41,6 +46,8 @@ jobs:
           npx vitest run
           server/__tests__/unit/postgres-ci-shards.test.ts
           server/__tests__/unit/migration-prefix-collision.test.ts
+          server/__tests__/unit/migration-allocation.test.ts
+          server/__tests__/unit/migration-inherited-provenance.test.ts
           server/__tests__/unit/browser-ci-selection.test.ts
           server/__tests__/unit/dropship-browser-features.test.ts
           server/__tests__/unit/writer-ratchet.test.ts

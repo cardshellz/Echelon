@@ -442,7 +442,7 @@ describe("migration CI provenance and immutability", () => {
     const env = { ...process.env, GITHUB_EVENT_PATH: eventFile, GITHUB_EVENT_NAME: "workflow_dispatch" };
     expect(runMigrationCheck(["--ci"], root, env).migrations).toBe(3);
     const isolatedTools = path.join(root, "scripts", "migrations"); mkdirSync(isolatedTools, { recursive: true });
-    for (const file of ["check-migrations.mjs", "migration-policy.mjs"]) writeFileSync(path.join(isolatedTools, file), readFileSync(path.join(toolRoot, file)));
+    for (const file of ["check-migrations.mjs", "migration-policy.mjs", "inherited-migration-provenance.mjs"]) writeFileSync(path.join(isolatedTools, file), readFileSync(path.join(toolRoot, file)));
     expect(existsSync(path.join(root, "node_modules"))).toBe(false);
     const result = spawnSync(process.execPath, [path.join(isolatedTools, "check-migrations.mjs"), "--ci"], { cwd: root, env: { ...env, NODE_PATH: undefined }, encoding: "utf8" });
     expect(result.status).toBe(0); expect(result.stdout).toContain("migration_policy_validated");
@@ -453,7 +453,7 @@ describe("migration CI provenance and immutability", () => {
     const context = prMergeFixture({ migrationOwner: 1800 });
     const { root, eventFile } = context;
     const isolatedTools = path.join(root, "scripts", "migrations"); mkdirSync(isolatedTools, { recursive: true });
-    for (const file of ["check-migrations.mjs", "migration-policy.mjs"]) writeFileSync(path.join(isolatedTools, file), readFileSync(path.join(toolRoot, file)));
+    for (const file of ["check-migrations.mjs", "migration-policy.mjs", "inherited-migration-provenance.mjs"]) writeFileSync(path.join(isolatedTools, file), readFileSync(path.join(toolRoot, file)));
     function check(eventName: string, event: unknown, pr = 1800) {
       writeFileSync(eventFile, JSON.stringify(event));
       return spawnSync(process.execPath, [path.join(isolatedTools, "check-migrations.mjs"), "--ci"], {
@@ -463,7 +463,7 @@ describe("migration CI provenance and immutability", () => {
     }
     expect(check("pull_request", context.event).status).toBe(0);
     const wrongOwner = check("pull_request", { ...context.event, number: 1802 }, 1802);
-    expect(wrongOwner.status).toBe(1); expect(wrongOwner.stderr).toContain("MIGRATION_PR_OWNERSHIP");
+    expect(wrongOwner.status).toBe(1); expect(wrongOwner.stderr).toContain("MIGRATION_PROVENANCE_UNAVAILABLE");
     expect(check("push", { before: context.eventBase }).status).toBe(0);
   });
 });
