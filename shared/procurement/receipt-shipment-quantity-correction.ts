@@ -24,9 +24,9 @@ export const quantityCorrectionInputSchema = z
       )
       .min(1)
       .max(200),
-    historicalCostDestination: reconciliationDestinationSchema
-      .nullable()
-      .default(null),
+    // Kept for older clients that send null. A quantity correction is not
+    // authority to book a historical sale or an inventory write-off.
+    historicalCostDestination: z.null().default(null),
     reason: z.string().trim().min(10).max(2000),
     evidenceConfirmed: z.literal(true),
   })
@@ -137,6 +137,28 @@ export const quantityCorrectionSummarySchema = z
         destination: reconciliationDestinationSchema.nullable(),
       })
       .strict(),
+    shipmentCostReview: z
+      .object({
+        beforeUnassignedMills: amount.nonnegative().nullable(),
+        afterUnassignedMills: amount.nonnegative().nullable(),
+        needsHistoryReview: z.boolean(),
+        affectedLots: z
+          .array(
+            z
+              .object({
+                lotId: quantityCorrectionId,
+                lotNumber: z.string(),
+                receiptId: quantityCorrectionId.nullable(),
+                receivedUnits: quantity,
+                onHandUnits: quantity,
+              })
+              .strict(),
+          )
+          // Same bound as the inventory owner's complete cost graph.
+          .max(10000),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type QuantityCorrectionSummary = z.infer<

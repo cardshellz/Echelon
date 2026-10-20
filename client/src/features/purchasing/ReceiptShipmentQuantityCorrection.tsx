@@ -214,8 +214,10 @@ const money = (value: number | null) =>
   value === null ? "Needs cost evidence" : formatIntegerCents(value, "USD");
 export function QuantityCorrectionSummary({
   summary,
+  approved = false,
 }: {
   summary: QuantityCorrectionSummary;
+  approved?: boolean;
 }) {
   const rows: Array<[string, string, string]> = [
     [
@@ -294,11 +296,29 @@ export function QuantityCorrectionSummary({
         ? "Needs cost evidence"
         : `$${summary.landedCostPerPiece.after}`,
     ],
-    [
-      "Historical expense already posted",
-      `$${exactMoneyAsInput(summary.historicalCost.beforeMills, 4)}`,
-      `$${exactMoneyAsInput(summary.historicalCost.afterMills, 4)}`,
-    ],
+    ...(summary.historicalCost.beforeMills !== 0 ||
+    summary.historicalCost.afterMills !== 0
+      ? [
+          [
+            "Previously approved cost adjustment",
+            `$${exactMoneyAsInput(summary.historicalCost.beforeMills, 4)}`,
+            `$${exactMoneyAsInput(summary.historicalCost.afterMills, 4)}`,
+          ] as [string, string, string],
+        ]
+      : []),
+    ...(summary.shipmentCostReview
+      ? [
+          [
+            "Shipment costs not yet assigned",
+            summary.shipmentCostReview.beforeUnassignedMills === null
+              ? "Not yet calculated"
+              : `$${exactMoneyAsInput(summary.shipmentCostReview.beforeUnassignedMills, 4)}`,
+            summary.shipmentCostReview.afterUnassignedMills === null
+              ? "Not yet calculated"
+              : `$${exactMoneyAsInput(summary.shipmentCostReview.afterUnassignedMills, 4)}`,
+          ] as [string, string, string],
+        ]
+      : []),
     ...(summary.physicalTotals
       ? ([
           [
@@ -338,16 +358,37 @@ export function QuantityCorrectionSummary({
         </tbody>
       </table>
       <p className="text-sm">
-        Stock movement: <strong>0 units</strong>.{" "}
         {summary.purpose === "shipment"
-          ? "Posted receipt counts are preserved. Open receipt expectations and shipment-dependent costs are refreshed."
-          : "This corrects the piece conversion of the existing receipt."}{" "}
-        Ordered quantities, supplier invoices, payments and shipping carton
-        counts stay unchanged.
+          ? "This updates the shipped pieces and receiving expectations. It does not change previously received counts."
+          : "This corrects how many pieces were in the existing receipt. It does not record another delivery or remove stock."}
       </p>
+      {summary.shipmentCostReview?.needsHistoryReview && (
+        <div className="rounded-md border p-3 space-y-2 text-sm" role="status">
+          <p className="font-semibold">
+            {approved
+              ? "The quantities are saved. Some costs still need their stock history linked."
+              : "Quantity correction is ready for approval. Some costs still need their stock history linked."}
+          </p>
+          <p>
+            The shipment charge stays recorded. This correction does not treat
+            missing history as a sale or post an inventory expense.
+          </p>
+          {summary.shipmentCostReview.affectedLots.map((lot) => (
+            <p key={lot.lotId}>
+              {lot.lotNumber}: {number(lot.receivedUnits)} received units;{" "}
+              {number(lot.onHandUnits)} remain in this lot. An empty lot may
+              have been transferred or repacked. It does not establish a sale.
+            </p>
+          ))}
+          <p>
+            Review the recorded transfers, pack changes and stock counts to
+            identify where these costs belong.
+          </p>
+        </div>
+      )}
       <details>
         <summary className="cursor-pointer text-sm">
-          Inventory and sold-item cost impact
+          Inventory costs and linked customer-order costs
         </summary>
         <ul className="text-sm space-y-2 pt-2">
           {summary.costResults.map((result, index) => (
@@ -357,9 +398,9 @@ export function QuantityCorrectionSummary({
                   ? "Shipment costs"
                   : result.component}
               </strong>
-              : {result.lotsUpdated} lots updated; {result.orderCostsUpdated}{" "}
-              sold-item cost records updated; order cost change{" "}
-              {money(result.orderCostDeltaCents)}.
+              : {result.lotsUpdated} stock cost records updated;{" "}
+              {result.orderCostsUpdated} linked customer-order cost records
+              updated; cost change {money(result.orderCostDeltaCents)}.
               {result.issues.map((issue, i) => (
                 <p key={i} className="text-amber-800 dark:text-amber-300">
                   {issue.message}
@@ -416,9 +457,6 @@ function CorrectionForm({
       : receiptPieces;
   const [reason, setReason] = useState("");
   const [confirmed, setConfirmed] = useState(false);
-  const [destination, setDestination] = useState<
-    "historical_cogs" | "inventory_variance" | null
-  >(null);
   const [preview, setPreview] = useState<QuantityCorrectionPreview | null>(
     null,
   );
@@ -462,7 +500,7 @@ function CorrectionForm({
             })),
           }
         : {}),
-      historicalCostDestination: destination,
+      historicalCostDestination: null,
       reason,
       evidenceConfirmed: confirmed,
     });
@@ -580,13 +618,16 @@ function CorrectionForm({
               </p>
               <p className="text-sm">{saved.history[0].reason}</p>
             </div>
-            <QuantityCorrectionSummary summary={saved.history[0].summary} />
+            <QuantityCorrectionSummary
+              summary={saved.history[0].summary}
+              approved
+            />
             {pendingIssues && (
               <div className="space-y-2">
                 <h3 className="font-semibold">Remaining cost work</h3>
                 <p className="text-sm">
-                  The quantities are saved. These cost records still need the
-                  evidence or accounting decision shown below.
+                  The quantities are saved. The affected cost records and their
+                  remaining evidence requirements are shown below.
                 </p>
                 {costs.isPending && (
                   <p role="status">Loading current cost actions…</p>
@@ -778,45 +819,6 @@ function CorrectionForm({
               </fieldset>
             )}
             {preview && <QuantityCorrectionSummary summary={preview.summary} />}
-            {(preview?.summary.historicalCost.requiresDecision ||
-              destination !== null) && (
-              <fieldset
-                disabled={locked}
-                className="space-y-2 rounded-md border p-3 text-sm"
-              >
-                <legend className="font-semibold px-1">
-                  Where does the unlinked historical cost belong?
-                </legend>
-                <p>
-                  The recorded stock is depleted but its destination is missing.
-                  Choose only the destination supported by your records, then
-                  update the preview.
-                </p>
-                <label className="flex gap-2">
-                  <input
-                    type="radio"
-                    name="quantity-destination"
-                    checked={destination === "historical_cogs"}
-                    onChange={() =>
-                      changed(() => setDestination("historical_cogs"))
-                    }
-                  />
-                  Cost of goods already sold — I have evidence of the sale.
-                </label>
-                <label className="flex gap-2">
-                  <input
-                    type="radio"
-                    name="quantity-destination"
-                    checked={destination === "inventory_variance"}
-                    onChange={() =>
-                      changed(() => setDestination("inventory_variance"))
-                    }
-                  />
-                  Historical inventory expense — the movements cannot be
-                  attributed to sales.
-                </label>
-              </fieldset>
-            )}
             {(review.error || approval.error) && (
               <div role="alert" className="text-sm text-destructive">
                 {review.error?.message || approval.error?.message}
@@ -845,7 +847,10 @@ function CorrectionForm({
                     <strong>Approved by {item.approvedBy}</strong> ·{" "}
                     {new Date(item.approvedAt).toLocaleString()}
                     <p>{item.reason}</p>
-                    <QuantityCorrectionSummary summary={item.summary} />
+                    <QuantityCorrectionSummary
+                      summary={item.summary}
+                      approved
+                    />
                   </div>
                 ))}
               </details>
@@ -866,44 +871,38 @@ function CorrectionForm({
             Edit quantities
           </Button>
         )}
-        {!saved &&
-          (!preview ||
-            !confirmed ||
-            preview.summary.historicalCost.requiresDecision) &&
-          !attempt && (
-            <Button
-              onClick={() => review.mutate()}
-              disabled={
-                review.isPending ||
-                !!data.blockedReason ||
-                !confirmed ||
-                reason.trim().length < 10
-              }
-            >
-              {review.isPending ? "Calculating impact…" : "Review changes"}
-            </Button>
-          )}
-        {!saved &&
-          !!(preview || attempt) &&
-          !preview?.summary.historicalCost.requiresDecision && (
-            <Button
-              className="bg-green-700 hover:bg-green-800 text-white"
-              onClick={() => approval.mutate()}
-              disabled={
-                approval.isPending || review.isPending || !!data.blockedReason
-              }
-            >
-              {approval.isPending
-                ? "Saving correction…"
-                : attempt
-                  ? "Retry same approval"
-                  : purpose === "shipment"
-                    ? "Approve shipment edit"
-                    : entryPurpose === "shipment"
-                      ? "Approve shipment and receipt"
-                      : "Approve correction"}
-            </Button>
-          )}
+        {!saved && (!preview || !confirmed) && !attempt && (
+          <Button
+            onClick={() => review.mutate()}
+            disabled={
+              review.isPending ||
+              !!data.blockedReason ||
+              !confirmed ||
+              reason.trim().length < 10
+            }
+          >
+            {review.isPending ? "Calculating impact…" : "Review changes"}
+          </Button>
+        )}
+        {!saved && !!(preview || attempt) && (
+          <Button
+            className="bg-green-700 hover:bg-green-800 text-white"
+            onClick={() => approval.mutate()}
+            disabled={
+              approval.isPending || review.isPending || !!data.blockedReason
+            }
+          >
+            {approval.isPending
+              ? "Saving correction…"
+              : attempt
+                ? "Retry same approval"
+                : purpose === "shipment"
+                  ? "Approve shipment edit"
+                  : entryPurpose === "shipment"
+                    ? "Approve shipment and receipt"
+                    : "Approve correction"}
+          </Button>
+        )}
       </div>
     </>
   );

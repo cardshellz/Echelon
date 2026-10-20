@@ -23,23 +23,12 @@ import {
 } from "../../platform/commands/transactional-command.service";
 import { readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
 import { COGSService } from "../inventory/cogs.service";
-import { applyCostRevision } from "../inventory/application/apply-cost-revision";
 import {
   costFingerprint,
   costInteger,
   CostEvidenceError,
 } from "../inventory/infrastructure/cost-evidence.repository";
-import {
-  hasReconciliationRoots,
-  readReconciliationLedger,
-  readReconciliationRecords,
-  recordReconciliationApproval,
-} from "../inventory/infrastructure/cost-reconciliation.repository";
-import {
-  reconciliationBlocker,
-  reconciliationEligibility,
-  reconciliationState,
-} from "../inventory/domain/cost-reconciliation";
+import { readQuantityCorrectionCostReview } from "./quantity-correction-cost-review.repository";
 import { hasQuantityAmendmentAuthority } from "./po-quantity-amendment.policy";
 import {
   QuantityCorrectionError,
@@ -57,7 +46,6 @@ import {
 import { reconcilePurchaseCostEvidence } from "./purchase-cost-application.service";
 import { recomputePurchaseOrderInvoiceMatchesInTransaction } from "./ap-ledger.service";
 import { replacePurchaseOrderMatchExceptions } from "./purchase-order-match-exceptions.repository";
-import { recordShipmentCostRevisions } from "./shipment-cost-application.service";
 import {
   ShipmentTrackingError,
   type ShipmentTrackingService,
@@ -176,126 +164,7 @@ function sumMoney(
 function unitCharge(cents: number, pieces: number): string {
   return new Decimal(String(cents)).div(100).div(pieces).toFixed(6);
 }
-async function reviewHistoricalCost(
-  tx: AmendmentTransaction,
-  source: QuantityCorrectionSource,
-  input: QuantityCorrectionInput,
-  actorId: string,
-  actorName: string,
-  now: Date,
-  writer: COGSService,
-  before: Awaited<ReturnType<typeof readReconciliationLedger>>,
-) {
-  const shipmentId = integer(source.evidence.shipment.id, "shipment", 1);
-  const lineId = source.facts.shipmentLineId;
-  const beforeMills = costInteger(
-    (
-      BigInt(before.balances.historical_cogs) +
-      BigInt(before.balances.inventory_variance)
-    ).toString(),
-    "historical cost",
-  );
-  const unchanged = {
-    eligible: false,
-    requiresDecision: false,
-    blockedReason: null as string | null,
-    beforeMills,
-    afterMills: beforeMills,
-    destination: before.approval?.destination ?? null,
-  };
-  // Open shipments have a new allocation, not a finalized cost revision. Never
-  // post an old snapshot while presenting it as the corrected cost.
-  if (!["costing", "closed"].includes(String(source.evidence.shipment.status)))
-    return {
-      historical: unchanged,
-      application: null,
-      initialApplicationId: null,
-    };
-  const recorded = await recordShipmentCostRevisions(
-    tx,
-    shipmentId,
-    actorId,
-    now,
-    { inboundShipmentLineId: lineId },
-  );
-  const revision = recorded.revisions[0];
-  if (!revision)
-    return {
-      historical: unchanged,
-      application: null,
-      initialApplicationId: null,
-    };
-  let application = await applyCostRevision(tx, revision, writer, actorId, now);
-  const initialApplicationId = application.applicationId;
-  const records = await readReconciliationRecords(
-    tx,
-    revision.contract,
-    application.issues,
-  );
-  const eligible = reconciliationEligibility(
-    revision.contract,
-    application.issues,
-    records,
-  );
-  const blocker = application.issues.length
-    ? reconciliationBlocker(
-        revision.contract,
-        application.issues,
-        records,
-        await hasReconciliationRoots(tx, revision.contract),
-      )
-    : null;
-  const destination =
-    input.historicalCostDestination ??
-    (beforeMills > 0 ? before.approval?.destination : null);
-  if (eligible && !blocker && destination) {
-    // This explicit approval belongs only to the selected shipment line. Other
-    // lines and supplier cost evidence cannot be swept into its disposition.
-    await recordReconciliationApproval(tx, {
-      lineId,
-      revisionId: revision.id,
-      applicationId: application.applicationId,
-      fingerprint: eligible.identity,
-      destination,
-      actorId,
-      actorName,
-      reason: input.reason,
-      now,
-      evidence: {
-        kind: "receipt_shipment_quantity_correction",
-        sourceVersion: source.sourceVersion,
-        authority: source.actor,
-        input,
-        records,
-        source: revision.contract,
-      },
-    });
-    application = await applyCostRevision(tx, revision, writer, actorId, now);
-  }
-  const after = await readReconciliationLedger(tx, lineId);
-  const state = reconciliationState(eligible, after);
-  const posted = eligible !== null && state.status === "posted";
-  return {
-    historical: {
-      eligible: eligible !== null && blocker === null,
-      requiresDecision: eligible !== null && blocker === null && !posted,
-      blockedReason: blocker,
-      beforeMills,
-      afterMills: costInteger(
-        (
-          BigInt(after.balances.historical_cogs) +
-          BigInt(after.balances.inventory_variance)
-        ).toString(),
-        "historical cost",
-      ),
-      destination: after.approval?.destination ?? null,
-    },
-    application: posted
-      ? { ...application, status: "applied" as const, issues: [] }
-      : application,
-    initialApplicationId,
-  };
-}
+const quantityCostOptions = { historicalReconciliation: "preserve" } as const;
 
 /** The preview executes the same owners in a savepoint and rolls them back.
  * The approval repeats this under source locks and compares the complete impact. */
@@ -366,7 +235,7 @@ async function executeCorrection(
         heightCm: target.height_cm == null ? null : String(target.height_cm),
       })
     : undefined;
-  const originalLedger = await readReconciliationLedger(
+  const costReviewBefore = await readQuantityCorrectionCostReview(
     tx,
     source.facts.shipmentLineId,
   );
@@ -385,16 +254,13 @@ async function executeCorrection(
   const poLineId = integer(target.purchase_order_line_id, "PO line", 1);
   const shipmentId = integer(source.evidence.shipment.id, "shipment", 1);
   const costResults: QuantityCorrectionSummary["costResults"] = [];
-  const appliedResults = new Map<
-    number,
-    QuantityCorrectionSummary["costResults"][number]
-  >();
   const purchase = await reconcilePurchaseCostEvidence(
     tx,
     poLineId,
     writer,
     actorId,
     now,
+    quantityCostOptions,
   );
   purchase.costApplications.forEach((application, index) =>
     costResults.push({
@@ -436,6 +302,7 @@ async function executeCorrection(
       id,
       actorId,
       now,
+      quantityCostOptions,
     );
     for (const application of updated.costApplications) {
       const result: QuantityCorrectionSummary["costResults"][number] = {
@@ -452,7 +319,6 @@ async function executeCorrection(
         issues: application.issues,
       };
       costResults.push(result);
-      appliedResults.set(application.applicationId, result);
     }
     if (updated.costApplications.length === 0)
       costResults.push({
@@ -471,23 +337,10 @@ async function executeCorrection(
         ],
       });
   }
-  const historical = await reviewHistoricalCost(
+  const costReviewAfter = await readQuantityCorrectionCostReview(
     tx,
-    source,
-    input,
-    actorId,
-    actorName,
-    now,
-    writer,
-    originalLedger,
+    source.facts.shipmentLineId,
   );
-  if (historical.application?.status === "applied") {
-    const result = appliedResults.get(historical.initialApplicationId!);
-    if (result) {
-      result.status = "applied";
-      result.issues = [];
-    }
-  }
   const poId = integer(source.evidence.po.id, "PO", 1);
   const match = await recomputePurchaseOrderInvoiceMatchesInTransaction(
     poId,
@@ -640,7 +493,26 @@ async function executeCorrection(
     },
     stockUnitChange: 0,
     costResults,
-    historicalCost: historical.historical,
+    historicalCost: {
+      eligible: false,
+      requiresDecision: false,
+      blockedReason: null,
+      beforeMills: costReviewBefore.postedMills,
+      afterMills: costReviewAfter.postedMills,
+      destination: costReviewAfter.destination,
+    },
+    shipmentCostReview: {
+      beforeUnassignedMills: costReviewBefore.unassignedMills,
+      // An open shipment only refreshes allocation. Its older saved cost
+      // application cannot prove what remains after the new quantity change.
+      afterUnassignedMills: ["costing", "closed"].includes(
+        String(source.evidence.shipment.status),
+      )
+        ? costReviewAfter.unassignedMills
+        : null,
+      needsHistoryReview: costReviewAfter.needsHistoryReview,
+      affectedLots: costReviewAfter.affectedLots,
+    },
   });
   await recordQuantityCorrectionResult(
     tx,
@@ -817,11 +689,6 @@ export function createReceiptShipmentQuantityCorrectionService(
             shipments,
             purpose,
           );
-          if (summary.historicalCost.requiresDecision)
-            throw new QuantityCorrectionError(
-              "QUANTITY_CORRECTION_DESTINATION_REQUIRED",
-              "Choose where the historical cost belongs and review its impact before approving.",
-            );
           if (costFingerprint({ input: review, summary }) !== previewVersion)
             throw new QuantityCorrectionError(
               "QUANTITY_CORRECTION_PREVIEW_CHANGED",
