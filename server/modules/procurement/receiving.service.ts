@@ -30,6 +30,7 @@ type DrizzleDb = {
 
 // Import sql tagged template for raw queries
 import { sql } from "drizzle-orm";
+import { receivingLineStatus } from "./domain/receiving-line-status";
 import { receivingImportRowSchema } from "@shared/procurement/receiving-import";
 import { planReceivingImportIdentities } from "./domain/receiving-import-identity";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -1389,10 +1390,7 @@ export class ReceivingService {
   }
 
   private receivingLineStatus(receivedQty: number, expectedQty: number): string {
-    if (receivedQty === 0) return "pending";
-    if (receivedQty < expectedQty) return "partial";
-    if (receivedQty === expectedQty) return "complete";
-    return "overage";
+    return receivingLineStatus(receivedQty, expectedQty);
   }
 
   async open(orderId: number, userId: string | null) {
