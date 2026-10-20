@@ -50,6 +50,9 @@ export function SupplierReturnCreditReview({ entitlementId, returnId, commands, 
   useEffect(() => { setReviewed(null); setAssignments({}); setEvidence(""); setReason(""); setAcknowledged(false); setError(null); }, [commands.userId, entitlementId]);
   useEffect(() => { const result = commands.confirmed; if (result?.command === "review_credit_difference" && result.entitlementId === entitlementId && result.actorId === actor.current) acceptSource(result.review); }, [commands.confirmed, entitlementId]);
   const changed = reviewed !== null && query.data?.version !== reviewed.version;
+  // Keep the submitted form pinned until the operator reloads, but display the
+  // latest read as current evidence when costs or credits have changed.
+  const displayed = changed && !query.isFetching && query.data ? query.data : reviewed;
   const blocked = commands.blocked || !commands.canApprove || query.isFetching || query.isError || changed || !reviewed;
   async function reload() { const currentActor = commands.userId; const result = await query.refetch(); if (result.data && !result.error && actor.current === currentActor) acceptSource(result.data); }
   async function submit() {
@@ -76,7 +79,7 @@ export function SupplierReturnCreditReview({ entitlementId, returnId, commands, 
     <DialogHeader><DialogTitle>Review supplier credit difference</DialogTitle><DialogDescription>Credit matching for return #{returnId}. The recorded return and supplier document amounts stay unchanged.</DialogDescription></DialogHeader>
     {(commands.recovery || commands.storageError) && <SupplierReturnRecovery commands={commands} />}
     {query.isPending ? <p role="status">Loading return credit evidence…</p> : query.isError || !reviewed ? <div role="alert"><p>Return credit evidence is unavailable.</p><Button onClick={() => void reload()}>Retry credit difference evidence</Button></div> : <div className="space-y-4">
-      <SupplierReturnDifferenceSummary review={reviewed} />
+      <SupplierReturnDifferenceSummary review={displayed ?? reviewed} />
       {changed && <p role="alert">Returned costs or credits changed after this review opened. Reload the evidence before recording a review.</p>}
       <Button variant="outline" disabled={query.isFetching || commands.pending} onClick={() => void reload()}>Reload credit difference evidence</Button>
       <fieldset disabled={blocked} className="space-y-4">
@@ -95,7 +98,7 @@ export function SupplierReturnCreditReview({ entitlementId, returnId, commands, 
       </fieldset>
       {!commands.canApprove && <p>Purchasing approval permission is required to record this review.</p>}
       {error && <p role="alert" className="text-destructive">{error}</p>}
-      {reviewed.reviewHistory.length > 0 && <details><summary className="cursor-pointer py-2">Previous difference reviews</summary><div className="space-y-2">{reviewed.reviewHistory.map(entry => <article key={entry.id} className="rounded border p-3 text-sm"><p className="font-medium">{dispositionLabels[entry.disposition]}</p><p>{entry.evidenceReference} · {entry.reason}</p><p>{entry.recordedBy} · {formatWorkspaceDate(entry.recordedAt)} · Review #{entry.id}</p>{entry.assignments.map(row => <p key={row.creditLinkId}>Credit link #{row.creditLinkId}: product {formatPaymentAmount(row.productCents)}, packaging {formatPaymentAmount(row.packagingCents)}, landed {formatPaymentAmount(row.landedCents)}</p>)}</article>)}</div></details>}
+      {(displayed ?? reviewed).reviewHistory.length > 0 && <details><summary className="cursor-pointer py-2">Previous difference reviews</summary><div className="space-y-2">{(displayed ?? reviewed).reviewHistory.map(entry => <article key={entry.id} className="rounded border p-3 text-sm"><p className="font-medium">{dispositionLabels[entry.disposition]}</p><p>{entry.evidenceReference} · {entry.reason}</p><p>{entry.recordedBy} · {formatWorkspaceDate(entry.recordedAt)} · Review #{entry.id}</p>{entry.assignments.map(row => <p key={row.creditLinkId}>Credit link #{row.creditLinkId}: product {formatPaymentAmount(row.productCents)}, packaging {formatPaymentAmount(row.packagingCents)}, landed {formatPaymentAmount(row.landedCents)}</p>)}</article>)}</div></details>}
     </div>}
     <Button variant="outline" onClick={onClose}>Close difference review</Button>
   </DialogContent></Dialog>;

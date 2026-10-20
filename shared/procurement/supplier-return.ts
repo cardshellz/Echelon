@@ -1,11 +1,15 @@
 import { z } from "zod";
 import { paymentCalendarDateSchema } from "./ap-payment-contract";
 const id = z.number().int().positive().safe();
+// Incoming identities stored as PostgreSQL integer must fail before a SQL cast.
+// Retained allocation and value-entry identities use bigint and keep safe-integer bounds.
+const inputId = id.max(2_147_483_647);
+const queryId = z.coerce.number().int().positive().max(2_147_483_647);
 const quantity = z.number().int().positive().max(2147483647);
 const nonnegative = z.number().int().nonnegative().safe();
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const timestamp = z.string().datetime({ offset: true });
-const reason = z.string().trim().min(3).max(2000);
+const reason = z.string().trim().min(3).max(1000);
 export const supplierReturnIssueSchema = z.object({ code: z.string().min(1), message: z.string().min(1) }).strict();
 export const supplierReturnComponentSchema = z.enum(["product", "packaging", "landed"]);
 export const supplierReturnCostTotalsSchema = z.object({
@@ -64,13 +68,13 @@ export const supplierReturnSourceProofSchema = z.object({
     }
 });
 export type SupplierReturnSourceProof = z.infer<typeof supplierReturnSourceProofSchema>;
-export const supplierReturnSelectionSchema = z.object({ inventoryLotId: id, quantity }).strict();
+export const supplierReturnSelectionSchema = z.object({ inventoryLotId: inputId, quantity }).strict();
 const selections = z.array(supplierReturnSelectionSchema).min(1).max(100).superRefine((rows, context) => {
     if (new Set(rows.map(row => row.inventoryLotId)).size !== rows.length) {
         context.addIssue({ code: "custom", message: "Select each physical lot only once per return." });
     }
 });
-export const supplierReturnPreviewInputSchema = z.object({ vendorId: id, lines: selections }).strict();
+export const supplierReturnPreviewInputSchema = z.object({ vendorId: inputId, lines: selections }).strict();
 export type SupplierReturnPreviewInput = z.infer<typeof supplierReturnPreviewInputSchema>;
 export const supplierReturnRecordInputSchema = supplierReturnPreviewInputSchema.extend({
     expectedSourceFingerprint: hash, returnCalendarDate: paymentCalendarDateSchema,
@@ -140,9 +144,9 @@ export const supplierReturnStockPreviewSchema = z.object({
 export type SupplierReturnStockPreview = z.infer<typeof supplierReturnStockPreviewSchema>;
 export const supplierReturnPreviewSchema = supplierReturnStockPreviewSchema;
 export const supplierReturnOptionsQuerySchema = z.object({
-    vendorId: z.coerce.number().int().positive().safe(), purchaseOrderId: z.coerce.number().int().positive().safe().optional(),
-    receivingOrderId: z.coerce.number().int().positive().safe().optional(),
-    afterLotId: z.coerce.number().int().positive().safe().optional(), limit: z.coerce.number().int().min(1).max(100).default(25),
+    vendorId: queryId, purchaseOrderId: queryId.optional(),
+    receivingOrderId: queryId.optional(),
+    afterLotId: queryId.optional(), limit: z.coerce.number().int().min(1).max(100).default(25),
 }).strict();
 export type SupplierReturnOptionsQuery = z.infer<typeof supplierReturnOptionsQuerySchema>;
 export const supplierReturnStockOptionsSchema = z.object({
@@ -261,9 +265,9 @@ export const supplierReturnDetailSchema = z.object({
 });
 export type SupplierReturnDetail = z.infer<typeof supplierReturnDetailSchema>;
 export const supplierReturnListQuerySchema = z.object({
-    vendorId: z.coerce.number().int().positive().safe().optional(), purchaseOrderId: z.coerce.number().int().positive().safe().optional(),
-    receivingOrderId: z.coerce.number().int().positive().safe().optional(),
-    afterId: z.coerce.number().int().positive().safe().optional(), limit: z.coerce.number().int().min(1).max(100).default(25),
+    vendorId: queryId.optional(), purchaseOrderId: queryId.optional(),
+    receivingOrderId: queryId.optional(),
+    afterId: queryId.optional(), limit: z.coerce.number().int().min(1).max(100).default(25),
 }).strict();
 export const supplierReturnListSchema = z.object({
     items: z.array(z.object({

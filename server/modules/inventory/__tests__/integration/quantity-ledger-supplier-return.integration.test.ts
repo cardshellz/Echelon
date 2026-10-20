@@ -41,7 +41,8 @@ suite.sequential("supplier return under activated quantity authority", () => {
     await pool.query(`DROP TABLE inventory.lot_cost_follow_up_attempts,inventory.lot_cost_follow_ups;
       DROP TABLE inventory.lot_cost_origins,inventory.lot_cost_contributions,inventory.cost_component_protections,
         inventory.cost_applications,inventory.cost_application_lots,inventory.cost_reporting_events CASCADE`);
-    for (const name of ["222_procurement_cost_evidence.sql", "0751_exact_inventory_cost_totals.sql", "0725_inventory_cost_admission_evidence.sql"]) {
+    for (const name of ["222_procurement_cost_evidence.sql", "0751_exact_inventory_cost_totals.sql", "0725_inventory_cost_admission_evidence.sql",
+      "900000017000018590001_receipt_shipment_quantity_amendments.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", name), "utf8"));
     }
     for (const name of ["lot_cost_origins", "lot_cost_contributions", "cost_component_protections", "cost_applications", "cost_application_lots", "cost_reporting_events"]) {

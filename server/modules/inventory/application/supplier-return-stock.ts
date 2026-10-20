@@ -41,7 +41,7 @@ export async function executeSupplierReturnStock(tx: CostEvidenceTransaction, in
   const selected = supplierReturnPreviewInputSchema.parse({ vendorId: input.vendorId, lines: input.lines });
   const audit = z.object({
     expectedSourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/), requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-    actorId: z.string().trim().min(1).max(100), at: z.date(), reason: z.string().trim().min(3).max(2000),
+    actorId: z.string().trim().min(1).max(100), at: z.date(), reason: z.string().trim().min(3).max(1000),
     commandKey: z.string().min(1).max(200).refine(value => value === value.trim()),
   }).parse(input);
   if (typeof input.assertAuthority !== "function" || typeof input.createDocument !== "function") throw new Error("Supplier return requires its authority and document owners.");
@@ -138,8 +138,8 @@ export async function executeSupplierReturnStock(tx: CostEvidenceTransaction, in
   if (posting) await posting.post({ idempotencyKey: audit.commandKey, kind: "supplier_return", actor: audit.actorId,
     reason: audit.reason, reference: { type: "supplier_return", id: String(created.returnId) }, occurredAt: audit.at.toISOString() });
   for (const variantId of [...new Set(snapshot.preview.lines.map(line => line.productVariantId))].sort((a, b) => a - b)) {
-    await tx.execute(sql`INSERT INTO inventory.supplier_return_followups(supplier_return_id,product_variant_id,created_at)
-      VALUES(${created.returnId},${variantId},${audit.at})`);
+    await tx.execute(sql`INSERT INTO inventory.supplier_return_followups(supplier_return_id,product_variant_id,created_at,next_attempt_at)
+      VALUES(${created.returnId},${variantId},${audit.at},${audit.at})`);
   }
   const receipt = supplierReturnStockReceiptSchema.parse({ returnId: created.returnId, commandKey: audit.commandKey,
     sourceFingerprint: audit.expectedSourceFingerprint, actorId: audit.actorId, occurredAt: audit.at.toISOString(), lines: receiptLines, replayed: false });

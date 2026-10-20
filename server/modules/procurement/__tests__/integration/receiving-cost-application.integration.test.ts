@@ -286,16 +286,16 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await storage.getReceivingLines(receipt.id)).map((line: { putawayLocationId: number | null }) => line.putawayLocationId)).toEqual([null]);
   });
 
-  async function prepareReceipt() {
+  async function prepareReceipt(quantity = 2) {
     const receipt = await purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10 });
     const [line] = await storage.getReceivingLines(receipt.id);
-    expect(line).toMatchObject({ unitsPerVariantSnapshot: 50, expectedQty: 2, inboundShipmentLineId: 11, purchaseOrderLineId: 21 });
+    expect(line).toMatchObject({ unitsPerVariantSnapshot: 50, expectedQty: quantity, inboundShipmentLineId: 11, purchaseOrderLineId: 21 });
     await receiving.open(receipt.id, actorId);
-    await receiving.updateLine(line.id, { receivedQty: 2, putawayLocationId: 99, expectedUnitVersion: receivingUnitVersion(line) }, actorId);
+    await receiving.updateLine(line.id, { receivedQty: quantity, putawayLocationId: 99, expectedUnitVersion: receivingUnitVersion(line) }, actorId);
     return { receiptId: receipt.id as number, lineId: line.id as number };
   }
-  async function receive() {
-    const ids = await prepareReceipt();
+  async function receive(quantity = 2) {
+    const ids = await prepareReceipt(quantity);
     await receiving.close(ids.receiptId, actorId);
     const lineage = (await pool.query(`SELECT t.receiving_line_id,rl.units_per_variant_snapshot,rl.inbound_shipment_line_id,
       pr.qty_received AS received_qty,l.qty_received FROM inventory.inventory_transactions t
@@ -303,7 +303,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       JOIN procurement.receiving_lines rl ON rl.id=t.receiving_line_id
       JOIN procurement.po_receipts pr ON pr.receiving_line_id=rl.id
       WHERE t.transaction_type='receipt' AND t.voided_at IS NULL`)).rows;
-    expect(lineage).toEqual([{ receiving_line_id: ids.lineId, units_per_variant_snapshot: 50, inbound_shipment_line_id: 11, received_qty: 100, qty_received: 2 }]);
+    expect(lineage).toEqual([{ receiving_line_id: ids.lineId, units_per_variant_snapshot: 50, inbound_shipment_line_id: 11, received_qty: quantity * 50, qty_received: quantity }]);
     return ids;
   }
   async function lot() {
@@ -1460,13 +1460,13 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect(await state()).toEqual(before);
   });
   registerSupplierReturnStockCases({ pool: () => pool, database: () => database, at: NOW, actorId,
-    receive, approveInvoice: approveEvidence, inventory: () => inventory, receiving: () => receiving,
+    receive, approveInvoice: approveEvidence, inventory: () => inventory, receiving: () => receiving, shipments: () => shipment,
     updateFreight: async () => { await shipment.finalizeAllocations(1, actorId); return shipment.pushLandedCostsToLots(1, actorId); } });
   registerSupplierReturnCommandCases({ pool: () => pool, database: () => database, at: NOW, actorId,
-    receive, approveInvoice: approveEvidence, inventory: () => inventory, receiving: () => receiving,
+    receive, approveInvoice: approveEvidence, inventory: () => inventory, receiving: () => receiving, shipments: () => shipment,
     updateFreight: async () => { await shipment.finalizeAllocations(1, actorId); return shipment.pushLandedCostsToLots(1, actorId); } });
   registerSupplierReturnCreditCases({ pool: () => pool, database: () => database, at: NOW, actorId,
-    receive, approveInvoice: approveEvidence, inventory: () => inventory, receiving: () => receiving,
+    receive, approveInvoice: approveEvidence, inventory: () => inventory, receiving: () => receiving, shipments: () => shipment,
     updateFreight: async () => { await shipment.finalizeAllocations(1, actorId); return shipment.pushLandedCostsToLots(1, actorId); } });
   // Custody history is intentionally retained; register its case last so the
   // legacy empty-custody fixture reset never erases immutable return evidence.

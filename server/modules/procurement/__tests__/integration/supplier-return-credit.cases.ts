@@ -1,8 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { createPoQuantityAmendmentService } from "../../po-quantity-amendment.service";
+import { poQuantityAmendmentResultSchema } from "@shared/procurement/po-quantity-amendment";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { CostReportingRepository } from "../../cost-reporting.repository";
 import { expect, it } from "vitest";
+import { supplierReturnCreditReviewCommandResultSchema } from "@shared/procurement/supplier-return-credit";
+import { createSupplierReturnReviewCommands, SUPPLIER_RETURN_REVIEW_COMMAND_SCOPE } from "../../supplier-return-difference.commands";
+import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
+import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
+import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import type { SupplierReturnStockFixture } from "./supplier-return-stock.cases";
 import type { SourceLineInput } from "@shared/procurement/supplier-credit";
 import { previewSupplierReturnStock } from "../../../inventory/application/supplier-return-stock";
@@ -15,10 +22,10 @@ export function registerSupplierReturnCreditCases(fixture: SupplierReturnStockFi
     const query = (text: string, values: unknown[] = []) => fixture.pool().query(text, values);
     const context = { actorId: fixture.actorId, at: fixture.at };
     const cents = (mills: number) => { expect(BigInt(mills) % BigInt(100)).toBe(BigInt(0)); return Number(BigInt(mills) / BigInt(100)); };
-    async function prepare() {
+    async function prepare(approveInvoice = true) {
         await query("INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(501,'purchasing','edit','purchasing'); INSERT INTO identity.auth_role_permissions(role_id,permission_id,constraints) VALUES(1,501,NULL)");
         await fixture.receive();
-        await fixture.approveInvoice();
+        if (approveInvoice) await fixture.approveInvoice();
         const inventoryLotId = Number((await query("SELECT id FROM inventory.inventory_lots ORDER BY id LIMIT 1")).rows[0].id);
         const preview = await fixture.database().transaction(tx => previewSupplierReturnStock(tx, { vendorId: 5, lines: [{ inventoryLotId, quantity: 1 }] }));
         const document = await fixture.database().transaction(tx => recordSupplierReturn(tx, { ...context, commandKey: randomUUID(), requestFingerprint: "d".repeat(64),
@@ -26,7 +33,7 @@ export function registerSupplierReturnCreditCases(fixture: SupplierReturnStockFi
                 returnCalendarDate: "2026-09-06", evidenceReference: "RETURN-COLLECTION-1", reason: "Supplier physically collected accepted stock" } }));
         return { document, line: document.lines[0] };
     }
-    async function draft(lines: SourceLineInput[], supplierReference = randomUUID(), replacesCreditId?: number, sourceInvoiceId = 71) {
+    async function draft(lines: SourceLineInput[], supplierReference: string = randomUUID(), replacesCreditId?: number, sourceInvoiceId = 71) {
         return fixture.database().transaction(async (tx) => {
             const source = await loadSupplierCreditSource(tx, sourceInvoiceId);
             return executeSupplierCreditCommand(tx, { ...context, command: "create", raw: { sourceInvoiceId, expectedSourceVersion: source.version,
@@ -67,6 +74,83 @@ export function registerSupplierReturnCreditCases(fixture: SupplierReturnStockFi
                 } });
         });
     }
+    const reviewCommands = () => createSupplierReturnReviewCommands(createDrizzleFinancialCommandRepository(fixture.database()), () => fixture.at);
+    function reviewDescriptor(id: number, raw: unknown, key: string = randomUUID(), actorId = fixture.actorId): FinancialCommandDescriptor {
+        return { ...SUPPLIER_RETURN_REVIEW_COMMAND_SCOPE, actorType: "user", actorId, idempotencyKey: key, contractVersion: 1,
+            requestHash: hashHttpFinancialCommand({ ...SUPPLIER_RETURN_REVIEW_COMMAND_SCOPE, body: raw, params: { id: String(id) }, query: {} }) };
+    }
+    async function reviewedRequest() {
+        const { line } = await prepare();
+        const created = await draft([creditLine(line.id, 100, "product")]);
+        await change(created.creditId, "approve");
+        const id = await entitlement(line.id);
+        const current = await fixture.database().transaction(tx => readSupplierReturnEntitlementReview(tx, id));
+        return { id, raw: { expectedVersion: current.version, reason: "Supplier confirmed another note is pending",
+            evidenceReference: "SUPPLIER-CORRESPONDENCE-1", disposition: "awaiting_supplier_note" as const, assignments: [] } };
+    }
+    it("accepted-return durable review replays a lost response and refuses changed payload, actor and entitlement reuse", async () => {
+        const { id, raw } = await reviewedRequest(), identity = reviewDescriptor(id, raw), before = await physical();
+        const first = await reviewCommands().review(id, raw, identity);
+        expect(first).toMatchObject({ terminalState: "succeeded", httpStatus: 201, replayed: false });
+        const body = supplierReturnCreditReviewCommandResultSchema.parse(first.body);
+        expect(body.review.reviewHistory).toHaveLength(1);
+        expect(body.review.differences.totalMills).toBeGreaterThan(0);
+        const saved = (await query("SELECT response_body FROM public.financial_command_results WHERE idempotency_key=$1", [identity.idempotencyKey])).rows[0];
+        expect(saved.response_body).toEqual(first.body);
+        expect(await reviewCommands().review(id, raw, identity)).toMatchObject({ replayed: true, body: first.body });
+        const changed = { ...raw, reason: "Changed supplier correspondence" };
+        for (const attempt of [
+            () => reviewCommands().review(id, changed, reviewDescriptor(id, changed, identity.idempotencyKey)),
+            () => reviewCommands().review(id, raw, reviewDescriptor(id, raw, identity.idempotencyKey, "admin-user")),
+            () => reviewCommands().review(id + 1, raw, reviewDescriptor(id + 1, raw, identity.idempotencyKey)),
+        ]) await expect(attempt()).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED", statusCode: 422 });
+        expect((await query("SELECT count(*)::int AS count FROM procurement.supplier_return_credit_reviews")).rows[0].count).toBe(1);
+        expect(await physical()).toEqual(before);
+    });
+    it("accepted-return durable review serializes competing versions and retains the losing rejection", async () => {
+        const { id, raw } = await reviewedRequest(), before = await physical();
+        const identities = [reviewDescriptor(id, raw), reviewDescriptor(id, raw)];
+        const results = await Promise.all(identities.map(identity => reviewCommands().review(id, raw, identity)));
+        expect(results.filter(result => result.terminalState === "succeeded")).toHaveLength(1);
+        const rejected = results.findIndex(result => result.terminalState === "rejected");
+        expect(rejected).toBeGreaterThanOrEqual(0);
+        expect(results[rejected]).toMatchObject({ httpStatus: 409, body: { details: { code: "RETURN_CREDIT_REVIEW_STALE",
+            supplierReturnCommandOutcome: "rejected", command: "review_credit_difference", actorId: fixture.actorId, entitlementId: id } } });
+        expect(await reviewCommands().review(id, raw, identities[rejected])).toMatchObject({ replayed: true, body: results[rejected].body });
+        expect((await query("SELECT count(*)::int AS count FROM procurement.supplier_return_credit_reviews")).rows[0].count).toBe(1);
+        expect(await physical()).toEqual(before);
+    });
+    it("accepted-return durable review rechecks current authority after waiting for the shared graph", async () => {
+        const { id, raw } = await reviewedRequest(), identity = reviewDescriptor(id, raw), before = await physical();
+        const blocker = await fixture.pool().connect();
+        let pending: ReturnType<ReturnType<typeof reviewCommands>["review"]> | undefined;
+        try {
+            await blocker.query("BEGIN; SELECT pg_advisory_xact_lock(hashtext('inventory.cost_graph'),hashtext('version_1'))");
+            const blockerId = Number((await blocker.query("SELECT pg_backend_pid() AS id")).rows[0].id);
+            pending = reviewCommands().review(id, raw, identity);
+            const deadline = Date.now() + 5000;
+            let waiting = false;
+            while (Date.now() < deadline) {
+                waiting = Boolean((await query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))) AS waiting", [blockerId])).rows[0].waiting);
+                if (waiting) break;
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
+            expect(waiting).toBe(true);
+            await query("UPDATE identity.users SET active=0 WHERE id=$1", [fixture.actorId]);
+            await blocker.query("COMMIT");
+            const result = await pending;
+            expect(result).toMatchObject({ terminalState: "rejected", httpStatus: 403, body: { details: {
+                code: "SUPPLIER_RETURN_AUTHORITY_REQUIRED", supplierReturnCommandOutcome: "rejected", command: "review_credit_difference" } } });
+            await query("UPDATE identity.users SET active=1 WHERE id=$1", [fixture.actorId]);
+            expect(await reviewCommands().review(id, raw, identity)).toMatchObject({ replayed: true, body: result.body });
+            expect((await query("SELECT count(*)::int AS count FROM procurement.supplier_return_credit_reviews")).rows[0].count).toBe(0);
+            expect(await physical()).toEqual(before);
+        } finally {
+            await blocker.query("ROLLBACK");
+            blocker.release();
+            await pending;
+        }
+    });
     it("accepted-return short credit and top-up share one physical entitlement and never reprice retained stock", async () => {
         const { document, line } = await prepare();
         const before = await physical();
@@ -150,6 +234,38 @@ export function registerSupplierReturnCreditCases(fixture: SupplierReturnStockFi
         await expect(draft([wrong])).rejects.toMatchObject({ code: "RETURN_CREDIT_SOURCE_MISMATCH" });
         expect((await query("SELECT count(*)::int AS count FROM procurement.supplier_credits")).rows[0].count).toBe(0);
     });
+    it("PO quantity amendment previews exact returned-value changes and approval preserves physical collection history", async () => {
+        const { document, line } = await prepare(false);
+        await query("INSERT INTO inventory.warehouse_settings(warehouse_code,require_approval) VALUES('DEFAULT',false)");
+        await query("UPDATE procurement.purchase_orders SET subtotal_cents=22000,total_cents=22000 WHERE id=10");
+        const service = createPoQuantityAmendmentService(fixture.database(), () => fixture.at, fixture.shipments());
+        const current = await service.context(10, fixture.actorId);
+        const raw = { sourceVersion: current.sourceVersion, changes: [{ lineId: 21, quantityPieces: 400, priceTreatment: "keep_product_total" as const }],
+            reason: "Supplier corrected the original order quantity while retaining the documented goods total" };
+        const before = await physical();
+        const preview = await service.preview(10, raw, fixture.actorId);
+        expect(await physical()).toEqual(before);
+        const reviewedReturns = preview.impact!.applications.flatMap(row => row.returnedCosts ?? []);
+        expect(reviewedReturns).toContainEqual(expect.objectContaining({ returnId: document.id, returnLineId: line.id,
+            component: "product", beforeMills: 500000, afterMills: 250000, deltaMills: -250000 }));
+        const request = { ...raw, previewVersion: preview.previewVersion, approvalConfirmed: true };
+        const scope = { method: "POST", routeTemplate: "/api/purchase-orders/:id/quantity-amendment", resourceKey: "purchase_order:10", commandName: "purchase_order.quantity_amendment.approve" };
+        const identity: FinancialCommandDescriptor = { ...scope, actorType: "user", actorId: fixture.actorId, idempotencyKey: randomUUID(), contractVersion: 1,
+            requestHash: hashHttpFinancialCommand({ ...scope, body: request, params: { id: "10" }, query: {} }) };
+        const saved = await service.approve(10, request, fixture.actorId, identity);
+        expect(saved).toMatchObject({ terminalState: "succeeded", httpStatus: 200 });
+        const result = poQuantityAmendmentResultSchema.parse(saved.body);
+        expect(result.preview.impact).toEqual(preview.impact);
+        const after = await physical();
+        for (const key of ["receipt", "returned", "movements"]) expect(after[key]).toEqual(before[key]);
+        const detail = await createSupplierReturnReader(fixture.database()).detail(document.id, fixture.actorId);
+        expect(detail?.inventoryReceipt).toEqual(document.inventoryReceipt);
+        expect(detail?.lines[0].source).toEqual(line.source);
+        const delta = preview.impact!.applications.reduce((sum, row) => sum + BigInt(row.returnedCostDeltaMills ?? 0), BigInt(0));
+        expect(BigInt(detail!.lines[0].currentCosts.totalMills) - BigInt(line.currentCosts.totalMills)).toBe(delta);
+        expect((await service.approve(10, request, fixture.actorId, identity)).body).toEqual(saved.body);
+        expect(await physical()).toEqual(after);
+    });
     it("accepted-return late value adjustments reach delivery with the exact immutable entries and separate sold COGS", async () => {
         const { line } = await prepare();
         await fixture.updateFreight();
@@ -226,7 +342,7 @@ export function registerSupplierReturnCreditCases(fixture: SupplierReturnStockFi
             VALUES(74,73,1,21,50,120,12000,6500,'{"contractVersion":1,"packagingTreatment":"separate","productMills":600000,"packagingMills":50000,"adjustmentMills":0,"source":"operator_review"}'::jsonb)`);
         const before = await physical();
         await expect(draft([creditLine(line.id, 100, "product", undefined, 74)], randomUUID(), undefined, 73))
-            .rejects.toMatchObject({ code: "RETURN_CREDIT_SOURCE_MISMATCH" });
+            .rejects.toMatchObject({ code: "CREDIT_SOURCE_VENDOR_MISMATCH" });
         expect((await query("SELECT count(*)::int AS count FROM procurement.supplier_credits")).rows[0].count).toBe(0);
         expect(await physical()).toEqual(before);
     });

@@ -10,6 +10,8 @@ import { CostEvidenceError, costFingerprint, costInteger, lockInventoryCostGraph
 import { readLotCostAllocation } from "./cost-quantity.repository";
 import { lotCostsForIntervals, moneyToSafeNumber, type LotCostRecord } from "../domain/lot-cost";
 import { assertSupplierReturnCostsEqual, supplierReturnCostComponents, supplierReturnCostField, verifySupplierReturnCostHistory } from "../domain/supplier-return-cost";
+import { normalizeQuantityCommand } from "../domain/quantity-ledger";
+import { quantityCommandHash } from "./quantity-ledger.repository";
 
 export const supplierReturnAllocationEvidenceSchema = z.object({
   contractVersion: z.literal(1), sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
@@ -63,7 +65,8 @@ async function readInventoryEvidenceBatch(tx: CostEvidenceTransaction, rawIds: r
       movement.product_variant_id AS movement_variant_id,movement.inventory_lot_id AS movement_lot_id,
       movement.from_location_id,movement.to_location_id,movement.units_per_variant_snapshot,
       movement.source_state,movement.target_state,movement.user_id,movement.created_at,movement.voided_at,
-      movement.variant_qty_before,movement.variant_qty_after,
+      movement.variant_qty_before,movement.variant_qty_after,movement.total_cost_mills,movement.reserved_qty_delta,
+      movement.receiving_order_id AS movement_receipt_id,movement.receiving_line_id AS movement_receipt_line_id,movement.notes,
       EXISTS(SELECT 1 FROM inventory.lot_cost_quantity_allocations reversal WHERE reversal.reverses_allocation_id=custody.id) AS reversed
     FROM procurement.supplier_return_lines line
     LEFT JOIN inventory.supplier_return_allocations owned ON owned.supplier_return_line_id=line.id
@@ -87,6 +90,7 @@ async function readInventoryEvidenceBatch(tx: CostEvidenceTransaction, rawIds: r
   const commandKeys = headers.map(header => String(header.command_key));
   const needsLedger = rows.some(row => supplierReturnAllocationEvidenceSchema.parse(row.source_evidence).quantityAuthority === "ledger");
   const commands = needsLedger ? (await tx.execute(sql`SELECT command.idempotency_key,command.kind,command.actor,command.reference_type,command.reference_id,command.request_payload,
+    command.request_hash,command.reason,command.occurred_at,command.line_count,
     (SELECT jsonb_agg(jsonb_build_object('inventoryLotId',entry.inventory_lot_id,'inventoryLevelId',entry.inventory_level_id,
       'productVariantId',entry.product_variant_id,'warehouseLocationId',entry.warehouse_location_id,'warehouseId',entry.warehouse_id,
       'onHand',entry.on_hand_delta,'reserved',entry.reserved_delta,'picked',entry.picked_delta,'packed',entry.packed_delta) ORDER BY entry.inventory_lot_id)
@@ -123,6 +127,9 @@ async function readInventoryEvidenceBatch(tx: CostEvidenceTransaction, rawIds: r
         || Number(row.variant_qty_delta) !== -line.quantity || Number(row.movement_variant_id) !== line.productVariantId
         || Number(row.movement_lot_id) !== line.inventoryLotId || Number(row.from_location_id) !== line.warehouseLocationId || row.to_location_id !== null
         || Number(row.units_per_variant_snapshot) !== line.unitsPerVariant || row.source_state !== "on_hand" || row.target_state !== "returned_to_supplier"
+        || costInteger(row.total_cost_mills, "movement.totalCostMills") !== line.costs.totalMills || Number(row.reserved_qty_delta) !== 0
+        || Number(row.movement_receipt_id) !== origin.receivingOrderId || Number(row.movement_receipt_line_id) !== origin.receivingLineId
+        || row.notes !== header.reason
         || row.user_id !== header.recorded_by || occurredAt(row.created_at) !== occurredAt(header.recorded_at) || row.voided_at !== null
         || authority !== undefined && authority !== evidence.quantityAuthority) {
         throw new Error("Retained supplier return source, quantity and physical movement evidence conflict.");
@@ -151,13 +158,20 @@ async function readInventoryEvidenceBatch(tx: CostEvidenceTransaction, rawIds: r
     }
     if (authority === "ledger") {
       const command = commandByKey.get(String(header.command_key));
-      const movements = z.array(z.object({ inventoryLotId: z.number(), delta: z.object({ onHand: z.number(), reserved: z.number(), picked: z.number(), packed: z.number() }) }).passthrough())
-        .parse(command?.request_payload?.movements);
+      const accepted = normalizeQuantityCommand(command?.request_payload);
+      const movements = accepted.movements;
       if (!command || command.kind !== "supplier_return" || command.actor !== header.recorded_by
         || command.reference_type !== "supplier_return" || command.reference_id !== String(returnId) || movements.length !== receiptLines.length
+        || command.request_hash !== quantityCommandHash(accepted) || accepted.idempotencyKey !== header.command_key
+        || accepted.kind !== "supplier_return" || accepted.actor !== header.recorded_by || accepted.reason !== header.reason
+        || accepted.reference.type !== "supplier_return" || accepted.reference.id !== String(returnId) || accepted.reversesCommandId !== null
+        || command.reason !== header.reason || Number(command.line_count) !== movements.length
+        || occurredAt(command.occurred_at) !== occurredAt(header.recorded_at) || occurredAt(accepted.occurredAt) !== occurredAt(header.recorded_at)
         || new Set(movements.map(row => row.inventoryLotId)).size !== movements.length
-        || receiptLines.some(line => !movements.some(movement => movement.inventoryLotId === line.inventoryLotId
-          && movement.delta.onHand === -line.quantity && movement.delta.reserved === 0 && movement.delta.picked === 0 && movement.delta.packed === 0))) {
+        || selected.some(row => !movements.some(movement => movement.inventoryLotId === Number(row.inventory_lot_id)
+          && movement.inventoryLevelId === Number(row.inventory_level_id) && movement.productVariantId === Number(row.product_variant_id)
+          && movement.warehouseLocationId === Number(row.warehouse_location_id) && movement.warehouseId === Number(row.warehouse_id)
+          && movement.delta.onHand === -Number(row.quantity) && movement.delta.reserved === 0 && movement.delta.picked === 0 && movement.delta.packed === 0))) {
         throw new Error("Supplier return lacks its original quantity ledger command.");
       }
       const posted = z.array(z.object({ inventoryLotId: z.number(), inventoryLevelId: z.number(), productVariantId: z.number(),

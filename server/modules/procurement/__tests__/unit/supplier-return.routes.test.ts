@@ -68,6 +68,38 @@ describe("supplier return HTTP boundary", () => {
     expect((await request("GET", path)).status).toBe(422);
     expect(reader.detail).not.toHaveBeenCalled(); expect(differenceReader.read).not.toHaveBeenCalled();
   });
+  it.each([
+    "/api/supplier-returns/options?vendorId=2147483648",
+    "/api/supplier-returns/options?vendorId=5&purchaseOrderId=2147483648",
+    "/api/supplier-returns/options?vendorId=5&receivingOrderId=2147483648",
+    "/api/supplier-returns/options?vendorId=5&afterLotId=2147483648",
+    "/api/supplier-returns?vendorId=2147483648",
+    "/api/supplier-returns?purchaseOrderId=2147483648",
+    "/api/supplier-returns?receivingOrderId=2147483648",
+    "/api/supplier-returns?afterId=2147483648",
+  ])("rejects overflowing query identities before database access: %s", async path => {
+    expect(await request("GET", path)).toMatchObject({ status: 422,
+      body: { details: { code: "SUPPLIER_RETURN_INPUT_INVALID" } } });
+    expect(reader.options).not.toHaveBeenCalled(); expect(reader.list).not.toHaveBeenCalled();
+  });
+  it.each([
+    { vendorId: 2147483648, lines: [{ inventoryLotId: 501, quantity: 1 }] },
+    { vendorId: 5, lines: [{ inventoryLotId: 2147483648, quantity: 1 }] },
+  ])("rejects overflowing preview identities before database access", async input => {
+    expect(await request("POST", "/api/supplier-returns/preview", input)).toMatchObject({ status: 422,
+      body: { details: { code: "SUPPLIER_RETURN_INPUT_INVALID" } } });
+    expect(reader.preview).not.toHaveBeenCalled();
+  });
+  it("accepts maximum PostgreSQL integer identities at the HTTP boundary", async () => {
+    const maximumId = 2147483647;
+    expect((await request("GET", `/api/supplier-returns/options?vendorId=${maximumId}&afterLotId=${maximumId}`)).status).toBe(200);
+    expect(reader.options).toHaveBeenCalledWith({ vendorId: maximumId, afterLotId: maximumId, limit: 25 }, "operator");
+    expect((await request("GET", `/api/supplier-returns?purchaseOrderId=${maximumId}&afterId=${maximumId}`)).status).toBe(200);
+    expect(reader.list).toHaveBeenCalledWith({ purchaseOrderId: maximumId, afterId: maximumId, limit: 25 }, "operator");
+    const input = { vendorId: maximumId, lines: [{ inventoryLotId: maximumId, quantity: 1 }] };
+    expect((await request("POST", "/api/supplier-returns/preview", input)).status).toBe(200);
+    expect(reader.preview).toHaveBeenCalledWith(input, "operator");
+  });
   it("returns an explicit not-found response for a missing return", async () => {
     reader.detail.mockResolvedValue(undefined);
     expect(await request("GET", "/api/supplier-returns/999")).toMatchObject({ status: 404,

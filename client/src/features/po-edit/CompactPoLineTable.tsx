@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import React, { type ComponentProps } from "react";
 import { Table } from "@/components/ui/table";
 
 /** Shared compact table frame for draft lines and approved-document amendments. */

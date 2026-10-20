@@ -2,7 +2,7 @@
 
 ## Baseline and scope
 
-Implementation starts at `00e18a2a07d4745adc131ed920be8af7a50e4791`, the tested PR1857 dependency. The operator reports deployment; GitHub reported PR1857 open at this review. Fetched `origin/main` was `356b9eaa1d54f340e8f037936ec26a8277a08011`. Neither the branch nor local tests establish production acceptance.
+The original supplier-credit batch started at `00e18a2a07d4745adc131ed920be8af7a50e4791`, the tested PR1857 dependency. The operator reports deployment; GitHub reported PR1857 open at this review. Fetched `origin/main` was `356b9eaa1d54f340e8f037936ec26a8277a08011`. Neither the branch nor local tests establish production acceptance.
 
 ## Confirmed owners
 
@@ -19,7 +19,7 @@ Implementation starts at `00e18a2a07d4745adc131ed920be8af7a50e4791`, the tested 
 4. A voided credit can be replaced explicitly using the same supplier reference. Both documents and their predecessor/successor relationship remain visible; duplicate active references are rejected.
 5. Credit source effects remain separate from liability settlement. Supported price reductions produce source revisions through the existing inventory/COGS owner; unsupported or insufficient evidence remains explicit review work.
 6. Linking or voiding a credit never repeats or reverses physical return movement. Quarantine credit references must prove source ownership and cumulative quantity. Unknown custody cannot be assigned a supplier by inference.
-7. Accepted-stock supplier return is a separate remaining inventory capability. Receipt correction cannot substitute for it. Supplier cash refunds, writeoffs and external journal posting are not implied by a recorded credit.
+7. Accepted-stock supplier return has a separate inventory owner, described in the later-stage section below. Receipt correction cannot substitute for it. Supplier cash refunds, writeoffs and external journal posting are not implied by a recorded credit.
 
 ## Operator workflow
 
@@ -38,14 +38,14 @@ Credit source snapshots and original credited invoice economics are protected. A
 ## Explicit remaining boundaries
 
 - Full quarantine returns are supported only under the exact no-inventory-effect proof described below. Accepted quantities, any relevant inventory history, prior product/packaging postings, open receiving work, incomplete custody, nonmatching credit values or changed source evidence remain review-required. Landed costs retain their separate owner; a fully credited goods line does not settle a freight charge.
-- Returning already accepted stock needs its own physical return owner for lot/variant/location movements and the corresponding financial disposition. This batch supports immutable pending-recognition quarantine returns only.
+- Accepted-stock returns use the separate physical collection and returned-value owners described below. Mixed or transformed lot lineage remains unsupported until its exact supplier provenance and conversion can be proved.
 - A supplier cash refund, short-credit/writeoff difference, and external GL journal are separate operations. Recording or applying a credit does not assert that any of them occurred.
 - Legacy negative freight charges remain retained source evidence. They are not automatically copied into new supplier credit entitlement; that would risk counting the same credit twice. Unsupported historical signed-charge posting still requires explicit source review.
 - A mixed cash/credit shared invoice does not prove each PO's separate cash/credit share. Whole-invoice settlement remains available; ambiguous PO attribution remains visibly under review.
 
-## Validation ledger
+## Original supplier-credit batch validation
 
-The bounded supplier-credit implementation is locally validated. The remaining return-accounting capabilities above are not claimed complete.
+These results belong to the original supplier-credit batch. Later full-quarantine and accepted-stock return validation is recorded separately below.
 
 | Validation | Result |
 | --- | --- |
@@ -110,21 +110,21 @@ Local correction validation: 4,721 unit/guard cases passed (seven existing datab
 
 ## Accepted-stock collections and credit differences
 
-This later stage adds a separate physical return record. It does not reinterpret the original accepted receipt as a receiving error. The first full-quarantine correction remains independently committed at `ce84c0254783f738b9ed96a3f891df35527d7fe4`.
+This later stage incorporates fetched main `0429b4ec02ddbf7eaf1c7953caae1982ff2d3d35` through local merge `3adf67d27` and adds a separate physical return record. It does not reinterpret the original accepted receipt as a receiving error. The first full-quarantine correction remains independently committed at `ce84c0254783f738b9ed96a3f891df35527d7fe4`.
 
 ### Physical collection authority
 
-`inventory/application/supplier-return-stock.ts::executeSupplierReturnStock` admits the active quantity authority, takes the inventory graph fence and current location/level/lot locks, checks current purchasing approval, and verifies the reviewed source fingerprint. Only available, unreserved stock with an original receipt or proven one-to-one transfer lineage is eligible. The frozen lot unit conversion is used by preview and execution. Mixed/transformed provenance, missing cost allocation evidence, changed units, a corrected receipt, frozen locations and stale previews require review.
+`inventory/application/supplier-return-stock.ts::executeSupplierReturnStock` admits the active quantity authority, takes the inventory graph fence and current location/level/lot locks, checks current purchasing approval, and verifies the reviewed source fingerprint. Only available, unreserved stock with an original receipt or proven one-to-one transfer lineage is eligible. The frozen lot unit conversion is used by preview and execution. Mixed/transformed provenance, missing cost allocation evidence, unapproved conversion drift, frozen locations and stale previews require review. New returns use approved effective origin conversions; their physical snapshot remains frozen after collection.
 
 Procurement creates the immutable supplier collection header and source lines only after those locks. Inventory owns the physical decrease, exact cost-quantity allocation and three initial returned-value entries. The receipt, original PO received quantity, invoice and retained lot cost basis remain historical facts. A returned unit cannot also be allocated to sale or another return. The collection, stock posting, cost entries, physical reporting evidence, audit event, durable command response and availability follow-up commit together. An unavailable publication owner leaves retryable work for the existing inventory-change publication path.
 
 The collection requires its supplier, calendar date, evidence reference, reason and explicit lot quantities. A supplier RMA/reference is optional; it is not used as a substitute for the durable command key. Exact replay retains the original response. Unknown database, transport or evidence failures retain recovery; only classified input/authority/source refusals issue a terminal rejection.
 
-`receipt-reversal.service.ts` reads retained supplier-return lineage under the same graph lock before a new reversal. A source line with returned stock cannot be reversed. The whole receipt is blocked if any of its sources has a return; other individual lines retain their existing reversal path. The receiving screen consumes the same per-line and whole-receipt capability. A saved reversal response remains recoverable.
+`receipt-reversal.service.ts` reads retained supplier-return lineage under the same graph lock before a new reversal. A source line with returned stock cannot be reversed. The whole receipt is blocked if any of its sources has a return; other individual lines retain their existing reversal path. The receiving screen consumes the same per-line and whole-receipt capability. A saved reversal response remains recoverable. Receipt/shipment conversion corrections include existing return history in their reviewed source and refuse to reinterpret a PO line after a recorded collection; returned goods cannot acquire a different physical piece count through that separate command.
 
 ### Returned value and credit ownership
 
-Returned value stays in an immutable inventory-owned component ledger. Later product, packaging or landed-cost revisions append the exact difference for the original returned intervals. The original cost basis is preserved, and returned value is accounted for separately from retained stock and sold COGS. Cost application reporting includes those returned-value adjustments with their retained entry identities.
+Returned value stays in an immutable inventory-owned component ledger. Later product, packaging or landed-cost revisions append the exact difference for the original returned intervals. The original cost basis is preserved, and returned value is accounted for separately from retained stock and sold COGS. Cost application reporting includes those returned-value adjustments with their retained entry identities. PO quantity-amendment previews and approved history show the actual returned-value changes alongside inventory and sold COGS. Preview identity uses stable collection/allocation identities and exact before/after values; generated posting IDs remain in the committed application evidence because preview savepoints roll back.
 
 An `accepted_stock_return` supplier credit links money to an already recorded physical return. It does not reduce the gross purchase cost source or remove stock again. Immutable quantity entitlements identify a specific returned slice once; product and packaging lines on one reviewed note may share that slice. A later short-credit top-up or replacement explicitly selects the existing entitlement. An independent competing draft cannot silently join another approved entitlement. Voiding a credit preserves the return and its quantity entitlement.
 

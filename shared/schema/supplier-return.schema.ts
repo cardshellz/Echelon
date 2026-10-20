@@ -111,7 +111,13 @@ export const supplierReturnFollowups = inventory.table("supplier_return_followup
     productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id, { onDelete: "restrict" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
-}, table => [primaryKey({ columns: [table.supplierReturnId, table.productVariantId] })]);
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull(),
+    lastError: text("last_error"),
+}, table => [primaryKey({ columns: [table.supplierReturnId, table.productVariantId] }),
+    check("supplier_return_followups_attempt_count_check", sql`${table.attemptCount} >= 0`),
+    index("supplier_return_followups_due_idx").on(table.nextAttemptAt, table.supplierReturnId, table.productVariantId)
+      .where(sql`${table.completedAt} IS NULL`)]);
 export const supplierReturnCreditReviews = procurement.table("supplier_return_credit_reviews", {
     id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
     entitlementId: integer("entitlement_id").notNull().references(() => supplierReturnCreditEntitlements.id, { onDelete: "restrict" }),

@@ -78,10 +78,10 @@ async function readSourceGraph(tx: CostEvidenceTransaction, selectedIds: readonl
       line.product_id AS receipt_product_id,line.product_variant_id AS receipt_variant_id,line.units_per_variant_snapshot AS receipt_units,
       line.received_qty,line.cost_source_kind,receipt.status AS receipt_status,po_line.purchase_order_id,po.vendor_id,
       po_line.product_id AS po_product_id,
-      (SELECT COALESCE(sum(other.received_variant_qty),0) FROM inventory.lot_cost_origins other
+      (SELECT COALESCE(sum(other.received_variant_qty),0) FROM inventory.effective_lot_cost_origins other
         WHERE other.receiving_line_id=origin.receiving_line_id) AS origin_received_quantity,
       EXISTS(SELECT 1 FROM procurement.receipt_reversals reversal WHERE reversal.receiving_line_id=origin.receiving_line_id) AS has_reversal
-    FROM inventory.lot_cost_origins origin JOIN procurement.receiving_lines line ON line.id=origin.receiving_line_id
+    FROM inventory.effective_lot_cost_origins origin JOIN procurement.receiving_lines line ON line.id=origin.receiving_line_id
     JOIN procurement.receiving_orders receipt ON receipt.id=line.receiving_order_id
     JOIN procurement.purchase_order_lines po_line ON po_line.id=origin.purchase_order_line_id
     JOIN procurement.purchase_orders po ON po.id=po_line.purchase_order_id
@@ -224,7 +224,7 @@ export async function readSupplierReturnStockOptions(tx: CostEvidenceTransaction
   const candidates = (await tx.execute(sql`
     WITH RECURSIVE supplier_lots(id,purchase_order_id,receiving_order_id,purchase_order_line_id) AS (
       SELECT origin.inventory_lot_id,po.id,line.receiving_order_id,origin.purchase_order_line_id
-      FROM inventory.lot_cost_origins origin JOIN procurement.purchase_order_lines po_line ON po_line.id=origin.purchase_order_line_id
+      FROM inventory.effective_lot_cost_origins origin JOIN procurement.purchase_order_lines po_line ON po_line.id=origin.purchase_order_line_id
       JOIN procurement.purchase_orders po ON po.id=po_line.purchase_order_id
       JOIN procurement.receiving_lines line ON line.id=origin.receiving_line_id
       WHERE po.vendor_id=${input.vendorId} AND (${input.purchaseOrderId ?? null}::integer IS NULL OR po.id=${input.purchaseOrderId ?? null})

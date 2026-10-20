@@ -84,8 +84,13 @@ CREATE TABLE IF NOT EXISTS procurement.supplier_return_reporting_events (
 CREATE TABLE IF NOT EXISTS inventory.supplier_return_followups (
  supplier_return_id integer NOT NULL REFERENCES procurement.supplier_returns(id) ON DELETE RESTRICT,
  product_variant_id integer NOT NULL REFERENCES catalog.product_variants(id) ON DELETE RESTRICT,
- created_at timestamptz NOT NULL, completed_at timestamptz, PRIMARY KEY(supplier_return_id,product_variant_id)
+ created_at timestamptz NOT NULL, completed_at timestamptz,
+ attempt_count integer NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+ next_attempt_at timestamptz NOT NULL, last_error text,
+ PRIMARY KEY(supplier_return_id,product_variant_id)
 );
+CREATE INDEX IF NOT EXISTS supplier_return_followups_due_idx
+ ON inventory.supplier_return_followups(next_attempt_at,supplier_return_id,product_variant_id) WHERE completed_at IS NULL;
 CREATE TABLE IF NOT EXISTS procurement.supplier_return_credit_reviews (
  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
  entitlement_id integer NOT NULL REFERENCES procurement.supplier_return_credit_entitlements(id) ON DELETE RESTRICT,

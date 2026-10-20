@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { projectReturnCreditReview, validateReturnCreditAssignments } from "../../domain/supplier-return-credit-review";
 import { supplierReturnCreditReviewInputSchema, supplierReturnCreditReviewCommandResultSchema } from "@shared/procurement/supplier-return-credit";
-import { supplierCreditCreateInputSchema } from "@shared/procurement/supplier-credit";
+import { supplierCreditCreateInputSchema, supplierCreditDispositionSchema } from "@shared/procurement/supplier-credit";
 import { resolveSupplierCreditReductions } from "../../domain/supplier-credit-source";
 import { resolveShipmentSupplierCredits } from "../../domain/shipment-supplier-credits";
 const link = { id: 5, creditId: 6, creditLineId: 7, sourceInvoiceId: 8, supplierReference: "CREDIT-1", status: "approved" as const,
@@ -93,5 +93,22 @@ describe("immutable supplier return credit difference review", () => {
             disposition: { kind: "accepted_stock_return", supplierReturnLineId: 4, quantity: 2, evidenceReference: "collection", component: "product" }, source_evidence: {} };
         expect(resolveSupplierCreditReductions([], [credit])).toEqual({ productMills: BigInt(0), packagingMills: BigInt(0), basePieces: BigInt(0), issues: [], sources: [], returns: [] });
         expect(resolveShipmentSupplierCredits({ charges: [], allocations: [], invoices: [], credits: [credit] })).toMatchObject({ issues: [], sources: [] });
+    });
+});
+
+describe("incoming return credit SQL integer identities", () => {
+    const maximumId = 2_147_483_647;
+    it.each(["supplierReturnLineId", "entitlementId"] as const)("accepts the maximum %s and rejects overflow before source lookup", field => {
+        const disposition = { kind: "accepted_stock_return", supplierReturnLineId: 3, entitlementId: 4,
+            quantity: 1, evidenceReference: "COLLECTION-1", component: "product" };
+        expect(supplierCreditDispositionSchema.safeParse({ ...disposition, [field]: maximumId }).success).toBe(true);
+        expect(supplierCreditDispositionSchema.safeParse({ ...disposition, [field]: maximumId + 1 }).success).toBe(false);
+    });
+    it("bounds attribution link identities without restricting retained value entry identities", () => {
+        const request = { expectedVersion: "a".repeat(64), reason: "Reviewed evidence", evidenceReference: "proof",
+            disposition: "attribution_only", assignments: [{ ...assignment, creditLinkId: maximumId }] };
+        expect(supplierReturnCreditReviewInputSchema.safeParse(request).success).toBe(true);
+        expect(supplierReturnCreditReviewInputSchema.safeParse({ ...request,
+            assignments: [{ ...assignment, creditLinkId: maximumId + 1 }] }).success).toBe(false);
     });
 });

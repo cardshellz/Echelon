@@ -21,7 +21,7 @@ export const acceptedReturnCreditSourceSchema = z.object({
 export type AcceptedReturnCreditSource = z.infer<typeof acceptedReturnCreditSourceSchema>;
 const cents = z.number().int().nonnegative().safe();
 export const supplierReturnCreditAssignmentSchema = z.object({
-    creditLinkId: id, productCents: cents, packagingCents: cents, landedCents: cents,
+    creditLinkId: id.max(2_147_483_647), productCents: cents, packagingCents: cents, landedCents: cents,
 }).strict().superRefine((value, context) => {
     if (![value.productCents, value.packagingCents, value.landedCents].every(Number.isSafeInteger))
         return;
