@@ -104,13 +104,13 @@ No migration or historical backfill is required. No existing credit is automatic
 
 The real PostgreSQL full-return case in `server/modules/procurement/__tests__/integration/supplier-credit-cost.cases.ts` exercises approval while receiving remains open, later completion of that same approved credit, late reporting failure/rollback, concurrent retries, an actual waiting receipt writer, legacy stock ambiguity, current evidence drift and void. It asserts unchanged physical inventory, sold cost, gross invoice and credit settlement. HTTP recovery tests exercise current permission revocation, stale and terminal documents, payload/key mismatch, exact replay and audit rollback. UI/render tests exercise the shared completion label and desktop/mobile recovery against mocked HTTP.
 
-Accepted-stock supplier returns and credit differences are the next authorized stages. Their physical movement and loss/claim classifications are not implemented by this zero-effect correction.
+This zero-effect correction does not move accepted stock or classify a loss or claim. The subsequent accepted-stock collection and credit-difference implementation is documented below.
 
 Local correction validation: 4,721 unit/guard cases passed (seven existing database-dependent cases skipped); 103 focused client/contract cases also passed, with overlaps not added to the broad count. All 169 PostgreSQL cases across receiving cost application, supplier-credit commands and reporting passed. The two affected browser suites plus new recovery regressions cover 132 distinct desktop/mobile cases, with no skips or failures. Application, server-test, client-test and scoped browser TypeScript checks passed, as did the production build. PostgreSQL source tracking recorded a later test-comment-only change during the final two suites; their production code was unchanged. No hosted CI or production acceptance is claimed.
 
 ## Accepted-stock collections and credit differences
 
-This later stage incorporates fetched main `0429b4ec02ddbf7eaf1c7953caae1982ff2d3d35` through local merge `3adf67d27` and adds a separate physical return record. It does not reinterpret the original accepted receipt as a receiving error. The first full-quarantine correction remains independently committed at `ce84c0254783f738b9ed96a3f891df35527d7fe4`.
+This later stage incorporates fetched main `a23f0b223` through local merge `42ff3e513c240668dfecfd292b8d6838b2991f4e`. The final product correction checkpoint is `f50ea2c29d7146a0dc1ae8b3f44c89716bcec598`. It adds a separate physical return record. It does not reinterpret the original accepted receipt as a receiving error. The first full-quarantine correction remains independently committed at `ce84c0254783f738b9ed96a3f891df35527d7fe4`.
 
 ### Physical collection authority
 
@@ -138,4 +138,21 @@ The available dispositions are attribution only, awaiting supplier note and supp
 
 ### Local validation state
 
-Validation for this later stage is in progress. New command/API and domain tests are passing, and initial desktop/mobile accepted-stock return/reversal cases have passed. Real PostgreSQL acceptance, affected-suite regression, final typechecks and the build must complete before this stage is declared ready. The SQL remains in `migrations/pending/supplier_return_completion.sql` until a real PR migration ID can be allocated. It has not been applied to production. Local checks, hosted CI, merge and production acceptance remain separate.
+Local implementation and validation are complete for the supported workflows above.
+
+| Validation | Latest distinct result |
+| --- | --- |
+| Procurement/inventory units and CI guards | 4,669 passed; seven existing database-dependent PO-exception cases skipped |
+| Client commands, navigation and actual component rendering | 186 passed; no skips |
+| Real disposable PostgreSQL | 966 passed across 31 suites; no skips |
+| Desktop/mobile browser | 282 passed; no skips or flaky outcomes |
+| TypeScript | Application, server tests and client tests passed on `f50ea2c29` |
+| Production build | Passed on `f50ea2c29` |
+
+The first complete frozen regression run used `42ff3e513`. Final corrections normalize PostgreSQL timestamp transport for availability retry, seal a reported collection against late source-line insertion, align the physical reason field to the existing 1,000-character owner limit, and repair fixture prerequisites/snapshot ordering. All nine affected PostgreSQL suites (381 cases) passed on `f50ea2c29`; the other 22 suites (585 cases) retain their unchanged-owner passing results from `42ff3e513`. Both runs verified source identity before and after every suite. The case ledger replaces reruns instead of adding them. Unit and browser ledgers use the same latest-result rule. The seven skipped unit cases remain explicitly skipped, not claimed as passing.
+
+Failure coverage includes concurrent double-return attempts, permission revocation, stale preview/version, lost responses, actor/key mismatch, audit and durable-response rollback, incomplete collection evidence, immutable stock/value history, direct and transferred source lineage, active quantity-ledger posting, late invoice/freight and PO amendment value conservation, credit top-up/replacement/void, exact component attribution and stale difference review. The final database cases also prove that committed and concurrent late source-line appends are rejected, and that a full failed availability batch does not starve newer returns. Availability publication uses bounded retry through the existing inventory owner; its operational retry fields do not rewrite physical history.
+
+Evidence is retained under the task output directories: `procurement-return-accounting-2026-10-20/release-unit-case-ledger.json`, `client-unique-case-ledger.json`, `browser-unique-case-ledger.json`, `release-compile-build.json`, and `procurement-supplier-credits-2026-10-19/return-final-consolidated-pg-evidence.json`. Browser tests use actual client code with mocked HTTP. PostgreSQL tests use real transactions and migration constraints in verified disposable databases. These results do not establish live provider or production acceptance.
+
+The SQL remains in `migrations/pending/supplier_return_completion.sql` until a real PR migration ID can be allocated. It has not been applied to production. GitHub still reports PR1857 open against main and PR1861 merged into that dependency branch; publication must retain or explicitly resolve this dependency. No publication, production data repair, financial transfer or deployment is part of this local implementation. Mixed/transformed provenance and actual writeoff/refund/claim/GL posting remain the explicit boundaries above.
