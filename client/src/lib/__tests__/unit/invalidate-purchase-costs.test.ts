@@ -12,6 +12,10 @@ describe("cost posting cache refresh", () => {
       ["/api/vendor-invoices/139"], ["/api/vendor-invoice-lines/193/cost-components"],
       ["/api/procurement/landed-cost-health"], ["/api/procurement/health"],
       ["/api/procurement/health?includeResolved=false"], ["/api/purchasing/dashboard"],
+      ["purchase-pipeline", "active"], ["/api/purchasing/reorder-analysis"], ["/api/cogs/valuation"],
+      ["/api/cogs/order", 123], ["/api/inventory/levels"], ["/api/inventory/by-bin"], ["/api/products/10"],
+      ["/api/purchase-orders/117/quantity-amendment/history"],
+      ["/api/finance/orders", 123], ["/api/finance/summary"], ["/api/inventory-lots"],
     ];
     const unrelated = ["/api/settings/procurement"];
     for (const key of [...affected, unrelated]) client.setQueryData(key, { saved: true });

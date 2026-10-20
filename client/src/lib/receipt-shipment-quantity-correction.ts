@@ -1,0 +1,85 @@
+import { canonicalJson } from "@shared/utils/canonical-json";
+import {
+  quantityCorrectionApprovalSchema,
+  quantityCorrectionContextSchema,
+  quantityCorrectionId,
+} from "@shared/procurement/receipt-shipment-quantity-correction";
+import {
+  createFinancialCommandIntentStore,
+  financialCommandFetchJson,
+  FinancialCommandRequestError,
+} from "./financial-command";
+
+export function createQuantityCorrectionClient(generateKey: () => string) {
+  const intent = createFinancialCommandIntentStore(generateKey);
+  let pending: string | null = null;
+  return {
+    async approve(lineId: number, input: unknown) {
+      quantityCorrectionId.parse(lineId);
+      const body = quantityCorrectionApprovalSchema.parse(input),
+        fingerprint = canonicalJson({ lineId, body });
+      if (pending !== null && pending !== fingerprint)
+        throw new FinancialCommandRequestError(
+          "Retry the pending correction before changing its values.",
+          {
+            status: null,
+            code: "QUANTITY_CORRECTION_PENDING",
+            ambiguous: true,
+            retryable: true,
+          },
+        );
+      const key = intent.acquire({ lineId, body });
+      pending = fingerprint;
+      try {
+        const raw = await financialCommandFetchJson(
+          `/api/shipment-lines/${lineId}/quantity-correction`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: {
+              "Content-Type": "application/json",
+              "Idempotency-Key": key,
+            },
+            body: JSON.stringify(body),
+          },
+        );
+        const parsed = quantityCorrectionContextSchema.safeParse(raw);
+        const saved = parsed.success ? parsed.data.history[0] : null;
+        if (
+          !parsed.success ||
+          parsed.data.shipmentLineId !== lineId ||
+          !saved ||
+          saved.sourceVersion !== body.sourceVersion ||
+          saved.reason !== body.reason ||
+          saved.summary.shipmentPieces.after !== body.shippedPieces ||
+          body.receipts.some(
+            (receipt) =>
+              saved.summary.receipts.find(
+                (row) => row.receiptLineId === receipt.receiptLineId,
+              )?.afterPieces !== receipt.receivedPieces,
+          )
+        )
+          throw new FinancialCommandRequestError(
+            "The saved correction could not be verified. Retry the same approval.",
+            {
+              status: 200,
+              code: "QUANTITY_CORRECTION_RESPONSE",
+              ambiguous: true,
+              retryable: true,
+            },
+          );
+        intent.complete(key);
+        pending = null;
+        return parsed.data;
+      } catch (error) {
+        intent.fail(key, error);
+        if (
+          !(error instanceof FinancialCommandRequestError) ||
+          !error.ambiguous
+        )
+          pending = null;
+        throw error;
+      }
+    },
+  };
+}

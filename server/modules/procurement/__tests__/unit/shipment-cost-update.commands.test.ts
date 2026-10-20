@@ -24,7 +24,7 @@ function harness() {
       httpStatus: rejection.httpStatus, body: rejection.body, terminalState: "rejected" as const })),
     markRetryable: vi.fn(async () => undefined),
   };
-  const updateCostsInTransaction = vi.fn(async () => outcome);
+  const updateCostsInTransaction = vi.fn(async () => ({ ...outcome, costApplications: [] }));
   const now = new Date("2026-10-15T12:00:00Z");
   const commands = createShipmentCostUpdateCommands({ updateCostsInTransaction }, repository, () => now);
   return { tx, repository, updateCostsInTransaction, now, commands };

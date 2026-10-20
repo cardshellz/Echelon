@@ -713,6 +713,9 @@
   "inventory.lot_cost_follow_ups": [
     "modules/inventory"
   ],
+  "inventory.lot_cost_origin_amendments": [
+    "modules/inventory"
+  ],
   "inventory.lot_cost_origins": [
     "modules/inventory"
   ],
@@ -1286,6 +1289,12 @@
     "modules/procurement"
   ],
   "procurement.receipt_reversals": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_shipment_quantity_amendments": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_shipment_quantity_results": [
     "modules/procurement"
   ],
   "procurement.receiving_custody_fence": [

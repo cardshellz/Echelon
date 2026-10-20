@@ -187,9 +187,24 @@ dbDescribe.sequential("archived catch-up settlement through canonical mapping an
     // Catalog's real 0743 trigger retains new selection work independently of
     // the completed archived catch-up; no fabricated catch-up event is needed.
     await database.pool.query("UPDATE catalog.product_variants SET is_active=true WHERE id=101");
+    const pendingWork = (await database.pool.query<{ pending: boolean; due_at_ms: string }>(`
+      SELECT revision>acknowledged_revision AS pending,
+        ceil(extract(epoch FROM next_attempt_at)*1000)::bigint::text AS due_at_ms
+      FROM inventory.publication_selection_work WHERE product_id=20`)).rows;
+    expect(pendingWork).toHaveLength(1);
+    expect(pendingWork[0].pending).toBe(true);
+    // The real trigger uses PostgreSQL's transaction clock, not the archived
+    // receipt's fixed NOW. Round its microsecond deadline up to a JS millisecond
+    // and drive the injected worker clock across that recorded boundary.
+    const dueAtMs = Number(pendingWork[0].due_at_ms);
+    expect(Number.isSafeInteger(dueAtMs)).toBe(true);
+    let workerNowMs = dueAtMs - 1;
+    const worker = new PostgresPublicationSelectionWork(database.pool, () => new Date(workerNowMs));
+    expect(await worker.processDue(1)).toEqual({ planned: 0, blocked: 0, skipped: 0 });
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox")).rows).toEqual([]);
     expect((await database.pool.query(`SELECT revision>acknowledged_revision AS pending
       FROM inventory.publication_selection_work WHERE product_id=20`)).rows).toEqual([{ pending: true }]);
-    const worker = new PostgresPublicationSelectionWork(database.pool, () => new Date(NOW));
+    workerNowMs = dueAtMs;
     expect(await worker.processDue(1)).toEqual({ planned: 1, blocked: 0, skipped: 0 });
     expect((await database.pool.query(`SELECT desired_quantity::text,state,provider_key_snapshot,
       channel_connection_id_snapshot,external_inventory_item_id_snapshot
