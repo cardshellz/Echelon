@@ -31,7 +31,11 @@ export function registerQuantityCorrectionCases(fixture: {
       purpose,
     );
   const query = (text: string) => fixture.pool().query(text);
-  async function prepare(knownOrigin = true, receivedPieces = 100) {
+  async function prepare(
+    knownOrigin = true,
+    receivedPieces = 100,
+    receivedUnits = 2,
+  ) {
     await query(`UPDATE procurement.purchase_order_lines SET order_qty=${Math.max(2000, receivedPieces)},received_qty=${receivedPieces},status='partially_received' WHERE id=21;
       UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1;
       UPDATE procurement.inbound_shipment_lines SET units_per_variant_snapshot=50 WHERE id=11;
@@ -39,15 +43,15 @@ export function registerQuantityCorrectionCases(fixture: {
         VALUES(60,'CORRECTION-RECEIPT','shipment','closed',10,1);
       INSERT INTO procurement.receiving_lines(id,receiving_order_id,purchase_order_line_id,inbound_shipment_line_id,product_variant_id,
         sku,expected_qty,received_qty,units_per_variant_snapshot,cost_source_kind)
-        VALUES(62,60,21,11,200,'AUDIT-CASE',2,2,${receivedPieces / 2},'purchase_order_line');
+        VALUES(62,60,21,11,200,'AUDIT-CASE',${receivedUnits},${receivedUnits},${receivedPieces / receivedUnits},'purchase_order_line');
       INSERT INTO procurement.po_receipts(purchase_order_id,purchase_order_line_id,receiving_order_id,receiving_line_id,qty_received)
         VALUES(10,21,60,62,${receivedPieces});
       INSERT INTO inventory.inventory_lots(id,lot_number,product_variant_id,warehouse_location_id,qty_received,qty_on_hand,
         purchase_order_id,po_line_id,inbound_shipment_id,receiving_order_id,cost_source,received_at)
-        VALUES(501,'CORRECTION-LOT',200,99,2,${knownOrigin ? 2 : 0},10,21,1,60,'po','2026-09-01');
+        VALUES(501,'CORRECTION-LOT',200,99,${receivedUnits},${knownOrigin ? receivedUnits : 0},10,21,1,60,'po','2026-09-01');
       INSERT INTO inventory.inventory_transactions(transaction_type,product_variant_id,to_location_id,variant_qty_delta,
         inventory_lot_id,receiving_order_id,receiving_line_id,reference_type,reference_id)
-        VALUES('receipt',200,99,2,501,60,62,'receiving','60');`);
+        VALUES('receipt',200,99,${receivedUnits},501,60,62,'receiving','60');`);
     if (knownOrigin)
       await fixture.database().transaction((tx) =>
         recordReceiptCostOrigin(
@@ -57,8 +61,8 @@ export function registerQuantityCorrectionCases(fixture: {
             receivingLineId: 62,
             purchaseOrderLineId: 21,
             inboundShipmentLineId: 11,
-            unitsPerVariantSnapshot: receivedPieces / 2,
-            receivedVariantQty: 2,
+            unitsPerVariantSnapshot: receivedPieces / receivedUnits,
+            receivedVariantQty: receivedUnits,
           },
           "admin-user",
           fixture.at,
@@ -142,6 +146,193 @@ export function registerQuantityCorrectionCases(fixture: {
       evidenceConfirmed: true as const,
     };
   }
+  it("combined shipment entry corrects both 20,000-piece records to 200,000 with one exact cost and audit transaction", async () => {
+    await prepare(true, 20000, 20);
+    await query(`UPDATE procurement.purchase_order_lines SET order_qty=200000 WHERE id=21;
+      UPDATE procurement.inbound_shipment_lines SET qty_shipped=20000,carton_count=20,dimension_basis='carton' WHERE id=11;
+      UPDATE procurement.receiving_lines SET units_per_variant_snapshot=NULL WHERE id=62;
+      UPDATE procurement.inbound_freight_costs SET actual_cents=129838 WHERE id=31`);
+    await fixture
+      .database()
+      .transaction((tx) =>
+        fixture
+          .shipments()
+          .updateCostsInTransaction(tx, 1, {}, "admin-user", fixture.at),
+      );
+    const shipmentContext = await service("shipment").context(11, "admin-user");
+    // Both entry points fingerprint the same locked source graph. Opting into
+    // receipt correction must not silently rebase or use a different authority.
+    expect(shipmentContext.sourceVersion).toBe(
+      (await service().context(11, "admin-user")).sourceVersion,
+    );
+    const body = {
+      ...(await request()),
+      sourceVersion: shipmentContext.sourceVersion,
+      shippedPieces: 200000,
+      receipts: [{ receiptLineId: 62, receivedPieces: 200000 }],
+    };
+    const invoicesBefore = (
+      await query(
+        "SELECT id,qty_invoiced,line_total_cents FROM procurement.vendor_invoice_lines ORDER BY id",
+      )
+    ).rows;
+    const before = await snapshot();
+    const preview = await service().preview(11, body, "admin-user");
+    expect(await snapshot()).toEqual(before);
+    expect(preview.summary).toMatchObject({
+      purpose: "receipt",
+      shipmentPieces: { before: 20000, after: 200000 },
+      poReceivedPieces: { before: 20000, after: 200000 },
+      poRemainingPieces: { before: 180000, after: 0 },
+      shipmentChargeCents: { before: 129838, after: 129838 },
+      chargePerPiece: { before: "0.064919", after: "0.006492" },
+      stockUnitChange: 0,
+    });
+    expect(preview.summary.receipts).toEqual([
+      expect.objectContaining({
+        receivedUnits: 20,
+        receivedPieces: 20000,
+        afterPieces: 200000,
+        piecesPerUnit: 1000,
+        afterPiecesPerUnit: 10000,
+        unitWasRecorded: false,
+      }),
+    ]);
+    const input = { ...body, previewVersion: preview.previewVersion },
+      command = descriptor(input);
+    const approved = await service().approve(11, input, "admin-user", command);
+    expect(approved.httpStatus, JSON.stringify(approved.body)).toBe(200);
+    const after = await snapshot();
+    expect(after.receipt[0]).toMatchObject({
+      received_qty: 20,
+      expected_qty: 20,
+      units_per_variant_snapshot: 10000,
+    });
+    expect(after.shipment[0]).toMatchObject({
+      qty_shipped: 200000,
+      carton_count: 20,
+      units_per_variant_snapshot: 10000,
+    });
+    expect(after.po[0]).toMatchObject({
+      order_qty: 200000,
+      received_qty: 200000,
+      status: "received",
+    });
+    expect(after.transactions).toEqual(before.transactions);
+    expect(after.origin).toEqual(before.origin);
+    expect(
+      after.lots.map((row) => [row.id, row.qty_received, row.qty_on_hand]),
+    ).toEqual(
+      before.lots.map((row) => [row.id, row.qty_received, row.qty_on_hand]),
+    );
+    expect(after.audit).toHaveLength(1);
+    expect(
+      (
+        await query(
+          "SELECT qty_received FROM procurement.po_receipts WHERE receiving_line_id=62",
+        )
+      ).rows,
+    ).toEqual([{ qty_received: 200000 }]);
+    expect(
+      (
+        await query(
+          "SELECT total_pieces FROM procurement.inbound_shipments WHERE id=1",
+        )
+      ).rows,
+    ).toEqual([{ total_pieces: 200000 }]);
+    expect(
+      (
+        await query(
+          "SELECT units_per_variant_snapshot FROM inventory.effective_lot_cost_origins WHERE inventory_lot_id=501",
+        )
+      ).rows,
+    ).toEqual([{ units_per_variant_snapshot: 10000 }]);
+    expect(
+      (
+        await query(
+          "SELECT landed_total_cost_mills::text AS amount FROM inventory.inventory_lots WHERE id=501",
+        )
+      ).rows,
+    ).toEqual([{ amount: "12983800" }]);
+    expect(
+      (
+        await query(
+          "SELECT id,qty_invoiced,line_total_cents FROM procurement.vendor_invoice_lines ORDER BY id",
+        )
+      ).rows,
+    ).toEqual(invoicesBefore);
+    for (const readback of [
+      await service("shipment").context(11, "admin-user"),
+      await service().receiptContext(62, "admin-user"),
+    ]) {
+      expect(readback.shippedPieces).toBe(200000);
+      expect(readback.receipts[0].receivedPieces).toBe(200000);
+      expect(readback.history).toHaveLength(1);
+      expect(readback.history[0].summary).toEqual(preview.summary);
+    }
+    for (const table of [
+      "po_status_history",
+      "inbound_shipment_status_history",
+    ]) {
+      expect(
+        (
+          await query(
+            `SELECT notes FROM procurement.${table} WHERE notes LIKE 'Administrator approved receipt and shipment correction%'`,
+          )
+        ).rows,
+      ).toEqual([
+        expect.objectContaining({
+          notes: expect.stringContaining("20000 → 200000"),
+        }),
+      ]);
+    }
+    expect(
+      (await service().approve(11, input, "admin-user", command)).replayed,
+    ).toBe(true);
+    expect(await snapshot()).toEqual(after);
+  });
+  it("combined corrections cannot change receipt conversions protected by quarantine custody", async () => {
+    await prepare();
+    await query(`UPDATE procurement.receiving_orders SET warehouse_id=1 WHERE id=60;
+      UPDATE procurement.receiving_lines SET product_id=100 WHERE id=62`);
+    const body = await request(),
+      preview = await service().preview(11, body, "admin-user");
+    const before = await snapshot(),
+      rollback = new Error("Roll back posted custody fixture");
+    await expect(
+      fixture.database().transaction(async (tx) => {
+        await tx.execute(sql`INSERT INTO procurement.receiving_quarantine_observations
+        (receiving_order_id,receiving_line_id,warehouse_id,holding_location_id,product_id,product_variant_id,
+         units_per_variant_snapshot,purchase_order_line_id,inbound_shipment_line_id,description,unit_label,
+         condition,observed_qty,reason,evidence_reference,actor_id,recorded_at,command_key,source_evidence)
+        VALUES(60,62,1,99,100,200,50,21,11,'Held carton','case','damaged',1,'Damage found','PACKING-SLIP',
+         'admin-user','2026-09-01','combined-correction-custody','{}'::jsonb)`);
+        await tx.execute(sql`SET CONSTRAINTS ALL IMMEDIATE`);
+        const guarded = createReceiptShipmentQuantityCorrectionService(
+          tx,
+          fixture.shipments(),
+          () => fixture.at,
+        );
+        const current = await guarded.context(11, "admin-user");
+        await expect(
+          guarded.preview(
+            11,
+            { ...body, sourceVersion: current.sourceVersion },
+            "admin-user",
+          ),
+        ).rejects.toMatchObject({
+          code: "RECEIVING_CUSTODY_HISTORY_PROTECTED",
+        });
+        const input = { ...body, previewVersion: preview.previewVersion };
+        expect(
+          (await guarded.approve(11, input, "admin-user", descriptor(input)))
+            .httpStatus,
+        ).toBe(409);
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+    expect(await snapshot()).toEqual(before);
+  });
   it("shipment edit fixes the 20,000 to 200,000 manifest while preserving the already-correct receipt and posting exact costs", async () => {
     await prepare(true, 200000);
     await query(`UPDATE procurement.inbound_shipment_lines SET qty_shipped=20000,carton_count=20,dimension_basis='carton' WHERE id=11;

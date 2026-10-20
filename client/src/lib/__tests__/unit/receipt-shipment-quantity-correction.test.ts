@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createQuantityCorrectionClient } from "../../receipt-shipment-quantity-correction";
+import {
+  createQuantityCorrectionClient,
+  receiptCorrectionDraft,
+} from "../../receipt-shipment-quantity-correction";
 import {
   correctionContext,
   correctionInput,
@@ -108,5 +111,47 @@ describe("quantity correction command recovery", () => {
       client.approve(1, { ...correctionInput, shippedPieces: 1000 }),
     ).rejects.toMatchObject({ code: "QUANTITY_CORRECTION_PENDING" });
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("explicit receipt correction defaults", () => {
+  it("suggests 200,000 for the sole receipt that covered the original 20,000-piece shipment", () => {
+    const context = correctionContext();
+    context.shippedPieces = 20000;
+    context.receipts[0].receivedPieces = 20000;
+    expect(receiptCorrectionDraft(context, "200000", {})).toEqual({
+      32: "200000",
+    });
+    expect(context.receipts[0].receivedPieces).toBe(20000);
+  });
+  it("preserves a typed override including an invalid draft for boundary validation", () => {
+    const context = correctionContext();
+    for (const value of ["1500", "", "0", "-1", "1.5", "2147483648"]) {
+      expect(receiptCorrectionDraft(context, "2000", { 32: value })).toEqual({
+        32: value,
+      });
+    }
+  });
+  it("does not turn a partial receipt into a full delivery", () => {
+    const context = correctionContext();
+    context.receipts[0].receivedPieces = 100;
+    expect(receiptCorrectionDraft(context, "2000", {})).toEqual({ 32: "100" });
+  });
+  it("does not guess the split across multiple receipts", () => {
+    const context = correctionContext();
+    context.receipts.push({
+      ...context.receipts[0],
+      receiptLineId: 34,
+      receivedPieces: 100,
+    });
+    expect(receiptCorrectionDraft(context, "2000", { 32: "1500" })).toEqual({
+      32: "1500",
+      34: "100",
+    });
+  });
+  it("does not invent a receipt before receiving", () => {
+    expect(
+      receiptCorrectionDraft({ shippedPieces: 200, receipts: [] }, "2000", {}),
+    ).toEqual({});
   });
 });

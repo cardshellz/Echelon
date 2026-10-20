@@ -151,19 +151,22 @@ async function openFromReceipt(page: Page) {
     .getByRole("button", { name: "Correct received quantities", exact: true })
     .click();
 }
-async function review(page: Page) {
+async function review(page: Page, combined = false) {
   const dialog = page.getByRole("dialog").last();
   await dialog.getByLabel("Shipment TEST-SHIP-42").fill("2000");
   await dialog.getByLabel(/TEST-RECEIPT-31/).fill("2000");
   await dialog
     .getByLabel("Reason / document reference")
     .fill(correctionInput.reason);
-  await dialog.getByRole("checkbox").check();
+  await dialog.getByRole("checkbox", { name: /^I checked/ }).check();
   await dialog
     .getByRole("button", { name: "Review changes", exact: true })
     .click();
   await expect(
-    dialog.getByRole("button", { name: "Approve correction", exact: true }),
+    dialog.getByRole("button", {
+      name: combined ? "Approve shipment and receipt" : "Approve correction",
+      exact: true,
+    }),
   ).toBeEnabled();
   return dialog;
 }
@@ -217,37 +220,49 @@ test("a receipt correction and its saved approval are visible from shipment and 
   }
   expect(failures).toEqual([]);
 });
-test("a lost response retries the same approval and prevents document switching", async ({
-  page,
-}) => {
-  const { commands, failures } = await install(page, { loseResponse: true });
-  await openFromReceipt(page);
-  const dialog = await review(page);
-  await dialog
-    .getByRole("button", { name: "Approve correction", exact: true })
-    .click();
-  const retry = dialog.getByRole("button", {
-    name: "Retry same approval",
-    exact: true,
+for (const entry of ["receipt", "combined"] as const)
+  test(`a lost response from ${entry} retries the same approval and prevents document switching`, async ({
+    page,
+  }) => {
+    const { commands, failures } = await install(page, { loseResponse: true });
+    if (entry === "receipt") await openFromReceipt(page);
+    else await openCombinedFromShipment(page);
+    const dialog = await review(page, entry === "combined");
+    await dialog
+      .getByRole("button", {
+        name:
+          entry === "combined"
+            ? "Approve shipment and receipt"
+            : "Approve correction",
+        exact: true,
+      })
+      .click();
+    const retry = dialog.getByRole("button", {
+      name: "Retry same approval",
+      exact: true,
+    });
+    await expect(retry).toBeEnabled();
+    await expect(
+      dialog.getByRole("button", { name: "Close", exact: true }).first(),
+    ).toBeDisabled();
+    await dialog
+      .getByRole("button", { name: "Close", exact: true })
+      .last()
+      .click();
+    await expect(dialog).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Edit quantities", exact: true }),
+    ).toHaveCount(0);
+    await retry.click();
+    await expect(dialog).toContainText(
+      entry === "combined"
+        ? "Shipment and receipt correction approved and saved"
+        : "Quantity correction approved and saved",
+    );
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toEqual(commands[1]);
+    expect(failures).toEqual([]);
   });
-  await expect(retry).toBeEnabled();
-  await expect(
-    dialog.getByRole("button", { name: "Close", exact: true }).first(),
-  ).toBeDisabled();
-  await dialog
-    .getByRole("button", { name: "Close", exact: true })
-    .last()
-    .click();
-  await expect(dialog).toBeVisible();
-  await expect(
-    dialog.getByRole("button", { name: "Edit quantities", exact: true }),
-  ).toHaveCount(0);
-  await retry.click();
-  await expect(dialog).toContainText("Quantity correction approved and saved");
-  expect(commands).toHaveLength(2);
-  expect(commands[0]).toEqual(commands[1]);
-  expect(failures).toEqual([]);
-});
 test("view access does not expose approval to a non-admin", async ({
   page,
 }) => {
@@ -285,7 +300,7 @@ test("shipment edit reviews and saves shipped pieces while the correct receipt s
   await dialog
     .getByLabel("Reason / document reference")
     .fill(correctionInput.reason);
-  await dialog.getByRole("checkbox").check();
+  await dialog.getByRole("checkbox", { name: /^I checked/ }).check();
   await dialog
     .getByRole("button", { name: "Review changes", exact: true })
     .click();
@@ -320,5 +335,127 @@ test("shipment edit reviews and saves shipped pieces while the correct receipt s
       exact: true,
     }),
   ).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
+
+async function openCombinedFromShipment(page: Page) {
+  await page.goto("/shipments/42?tab=lines");
+  await page
+    .getByRole("button", { name: "Edit shipment", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog").last();
+  await dialog
+    .getByRole("checkbox", {
+      name: "Also correct received quantities",
+      exact: true,
+    })
+    .check();
+  return dialog;
+}
+
+test("shipment and receipt stay in one draft, review and administrator approval", async ({
+  page,
+}, info) => {
+  const { commands, failures } = await install(page);
+  await page.goto("/shipments/42?tab=lines");
+  await page
+    .getByRole("button", { name: "Edit shipment", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog").last();
+  await dialog.getByLabel("Shipment TEST-SHIP-42").fill("2000");
+  await dialog
+    .getByLabel("Reason / document reference")
+    .fill(correctionInput.reason);
+  const link = dialog.getByRole("link", {
+    name: "TEST-RECEIPT-31",
+    exact: true,
+  });
+  await expect(link).toHaveAttribute("target", "_blank");
+  const popupPromise = page.waitForEvent("popup");
+  await link.click();
+  const receiptTab = await popupPromise;
+  // Page-local API fixtures must also be installed in the inspection tab.
+  const receiptFixture = await install(receiptTab);
+  await receiptTab.reload();
+  await expect(
+    receiptTab.getByRole("heading", { name: /Receipt TEST-RECEIPT-31/ }),
+  ).toBeVisible();
+  expect(receiptFixture.failures).toEqual([]);
+  await receiptTab.close();
+  await expect(dialog.getByLabel("Shipment TEST-SHIP-42")).toHaveValue("2000");
+  const include = dialog.getByRole("checkbox", {
+    name: "Also correct received quantities",
+    exact: true,
+  });
+  await include.check();
+  const received = dialog.getByLabel(/TEST-RECEIPT-31/);
+  await expect(received).toHaveValue("2000");
+  await received.fill("1800");
+  await dialog.getByLabel("Shipment TEST-SHIP-42").fill("2200");
+  await expect(received).toHaveValue("1800");
+  await include.uncheck();
+  await expect(received).toHaveCount(0);
+  await include.check();
+  await expect(received).toHaveValue("1800");
+  await dialog.getByLabel("Shipment TEST-SHIP-42").fill("2000");
+  await received.fill("2000");
+  await expect(dialog.getByLabel("Reason / document reference")).toHaveValue(
+    correctionInput.reason,
+  );
+  await dialog
+    .getByRole("checkbox", { name: /^I checked the receipt/ })
+    .check();
+  await dialog
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  for (const label of [
+    "Shipment pieces",
+    "Receipt TEST-RECEIPT-31 pieces",
+    "PO received pieces",
+  ]) {
+    await expect(dialog.getByRole("row").filter({ hasText: label })).toHaveText(
+      /200.*2,000/,
+    );
+  }
+  await expect(
+    dialog
+      .getByRole("row")
+      .filter({ hasText: "Received units · TEST-RECEIPT-31" }),
+  ).toHaveText(/2.*2/);
+  await dialog
+    .getByRole("button", { name: "Edit quantities", exact: true })
+    .click();
+  await expect(received).toHaveValue("2000");
+  await expect(dialog.getByLabel("Reason / document reference")).toHaveValue(
+    correctionInput.reason,
+  );
+  await dialog
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  const approve = dialog.getByRole("button", {
+    name: "Approve shipment and receipt",
+    exact: true,
+  });
+  await expect(approve).toBeInViewport();
+  const bounds = await dialog.boundingBox();
+  expect(bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+  await page.screenshot({
+    path: info.outputPath("combined-shipment-receipt-preview.png"),
+  });
+  await approve.click();
+  await expect(dialog).toContainText(
+    "Shipment and receipt correction approved and saved",
+  );
+  await expect(dialog).toContainText("Test Administrator");
+  expect(commands).toHaveLength(1);
+  expect(commands[0].body).toEqual(correctionInput);
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await openFromReceipt(page);
+  await expect(
+    page
+      .getByRole("dialog")
+      .last()
+      .getByLabel(/TEST-RECEIPT-31/),
+  ).toHaveValue("2000");
   expect(failures).toEqual([]);
 });
