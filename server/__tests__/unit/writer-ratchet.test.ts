@@ -68,6 +68,17 @@ describe("writer-ratchet (P2.1)", () => {
     expect(currentIncludingScripts[table]).toEqual(["modules/procurement"]);
     expect(baseline[table]).toEqual(["modules/procurement"]);
   });
+  it.each([
+    "procurement.supplier_credits",
+    "procurement.supplier_credit_lines",
+    "procurement.supplier_credit_applications",
+    "procurement.supplier_credit_application_reversals",
+  ])("%s has only the Procurement credit owner, including operational scripts", (table) => {
+    expect(current[table]).toEqual(["modules/procurement"]);
+    expect(currentIncludingScripts[table]).toEqual(["modules/procurement"]);
+    expect(baseline[table]).toEqual(["modules/procurement"]);
+  });
+
   it("historical receipt repair audit has only the Procurement command owner, including scripts", () => {
     const table = "inventory.cost_origin_repairs";
     expect(current[table]).toEqual(["modules/procurement"]);

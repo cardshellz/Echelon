@@ -1304,6 +1304,18 @@
   "procurement.shipment_cost_exception_decisions": [
     "modules/procurement"
   ],
+  "procurement.supplier_credit_application_reversals": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_credit_applications": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_credit_lines": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_credits": [
+    "modules/procurement"
+  ],
   "procurement.supplier_sourcing_revisions": [
     "modules/procurement"
   ],
