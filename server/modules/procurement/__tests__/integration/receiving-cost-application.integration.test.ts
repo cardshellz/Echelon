@@ -24,6 +24,7 @@ import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence
 import type { ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
 import { registerShipmentReconciliationCases } from "./shipment-cost-reconciliation.cases";
 import { registerOriginRepairCases } from "./cost-origin-repair.cases";
+import { registerQuantityCorrectionCases } from "./receipt-shipment-quantity-correction.cases";
 import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
 import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
 import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
@@ -39,7 +40,7 @@ const TABLES = [
   schema.products, schema.productVariants, schema.vendors, schema.purchaseOrders,
   schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.poStatusHistory,
+  schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poStatusHistory, schema.poEvents, schema.poExceptions,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.productLocations, schema.inventoryLevels,
@@ -95,6 +96,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
         reason VARCHAR(100), created_at TIMESTAMP NOT NULL DEFAULT NOW()
       )`);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000017000018590001_receipt_shipment_quantity_amendments.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000007000018030001_shipment_cost_exception_decisions.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0751_exact_inventory_cost_totals.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000008000018110001_shipment_cost_reconciliation.sql"), "utf8"));
@@ -181,6 +183,9 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   beforeEach(async () => {
     if (ownedSchemas.length !== 7) throw new Error("Fixture schema ownership missing");
+    await pool.query(`ALTER TABLE inventory.lot_cost_origin_amendments DISABLE TRIGGER quantity_amendment_no_truncate;
+      ALTER TABLE procurement.receipt_shipment_quantity_amendments DISABLE TRIGGER quantity_amendment_no_truncate;
+      ALTER TABLE procurement.receipt_shipment_quantity_results DISABLE TRIGGER quantity_amendment_no_truncate`);
     // These schemas are exclusively owned by this disposable local fixture.
     // Restore production immutability guards before any owner code executes.
     await pool.query(`ALTER TABLE inventory.cost_reconciliation_approvals DISABLE TRIGGER cost_reconciliation_approval_no_truncate;
@@ -191,6 +196,9 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       ALTER TABLE inventory.cost_reconciliation_postings ENABLE TRIGGER cost_reconciliation_posting_no_truncate;
       ALTER TABLE inventory.cost_origin_repairs ENABLE TRIGGER cost_origin_repair_no_truncate`); }
     await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
+    await pool.query(`ALTER TABLE inventory.lot_cost_origin_amendments ENABLE TRIGGER quantity_amendment_no_truncate;
+      ALTER TABLE procurement.receipt_shipment_quantity_amendments ENABLE TRIGGER quantity_amendment_no_truncate;
+      ALTER TABLE procurement.receipt_shipment_quantity_results ENABLE TRIGGER quantity_amendment_no_truncate`);
     await pool.query("TRUNCATE public.financial_command_results RESTART IDENTITY CASCADE");
     await pool.query("INSERT INTO identity.users(id,username,password,role,active) VALUES($1,'cost-audit-owner','unused','admin',1)", [actorId]);
     await pool.query(`
@@ -872,6 +880,14 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   });
 
   function exceptionService() { return createShipmentCostExceptionService(database, () => NOW); }
+  registerQuantityCorrectionCases({pool:()=>pool,database:()=>database,shipments:()=>shipment,at:NOW,receive,approveSupplier:approveEvidence,
+    transferAndSell:async()=>{
+      await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'CORRECTION-PICK')");
+      await inventory.transfer({productVariantId:200,fromLocationId:99,toLocationId:100,qty:1,userId:actorId});
+      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,
+        warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
+    }});
   registerOriginRepairCases({ pool: () => pool, database: () => database, at: NOW, updateCosts: updateShipmentCosts,
     physicalSnapshot: costQuantityPhysicalSnapshot, costHealth: () => shipment.getLandedCostHealth(),
     shipmentReview: () => shipment.getCostReview(1) });

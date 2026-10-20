@@ -871,7 +871,7 @@ export class COGSService {
       const result = await tx.execute(sql`
         SELECT COALESCE(origin.units_per_variant_snapshot,pv.units_per_variant) AS upv
         FROM inventory.inventory_lots lot JOIN catalog.product_variants pv ON pv.id=lot.product_variant_id
-        LEFT JOIN inventory.lot_cost_origins origin ON origin.inventory_lot_id=lot.id
+        LEFT JOIN inventory.effective_lot_cost_origins origin ON origin.inventory_lot_id=lot.id
         WHERE lot.id=${lotId} FOR SHARE OF pv
       `);
       if (!result.rows[0]) return null;

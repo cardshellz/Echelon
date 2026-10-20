@@ -1,4 +1,5 @@
 import { shipmentRecordedUnitSummary, shipmentDimensionBasisLabel } from "@/lib/shipment-unit-entry";
+import { ReceiptShipmentQuantityCorrection } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
 import { formatMills } from "@shared/utils/money";
@@ -1471,6 +1472,7 @@ export default function InboundShipmentDetail() {
                             <span>{formatNumber(line.totalVolumeCbm, 4)} CBM</span>
                           </div>
                           <p className="mt-1 text-xs text-muted-foreground">{shipmentRecordedUnitSummary(line)}</p>
+                          <ReceiptShipmentQuantityCorrection shipmentLineId={line.id}/>
                           <p className="text-xs text-muted-foreground">Measurements per {shipmentDimensionBasisLabel(line) === "carton" ? "shipping carton" : "piece"}</p>
                           {line.allocatedCostCents != null && (
                             <div className="text-xs mt-1">
@@ -1528,7 +1530,7 @@ export default function InboundShipmentDetail() {
                         <TableCell className="font-mono">{line.sku || "—"}</TableCell>
                         <TableCell className="max-w-[180px] truncate">{line.productName || line.sku || "—"}</TableCell>
                         <TableCell className="text-right">{line.cartonCount ? line.cartonCount : "—"}</TableCell>
-                        <TableCell className="text-right">{line.qtyShipped}<div className="max-w-56 text-xs text-muted-foreground">{shipmentRecordedUnitSummary(line)}</div></TableCell>
+                        <TableCell className="text-right">{line.qtyShipped}<div className="max-w-56 text-xs text-muted-foreground">{shipmentRecordedUnitSummary(line)}</div><ReceiptShipmentQuantityCorrection shipmentLineId={line.id}/></TableCell>
                         <TableCell className="text-right">{formatNumber(line.weightKg, 2)}<div className="text-xs text-muted-foreground">per {shipmentDimensionBasisLabel(line) === "carton" ? "shipping carton" : "piece"}</div></TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalWeightKg, 1)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalVolumeCbm, 4)}</TableCell>

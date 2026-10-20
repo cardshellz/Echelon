@@ -13,6 +13,9 @@ export function invalidatePurchaseCosts(
         (/^\/api\/purchase-orders(?:\/|\?|$)/.test(key) ||
           /^\/api\/inbound-shipments(?:\/|\?|$)/.test(key) ||
           /^\/api\/receiving(?:\/|\?|$)/.test(key) ||
+          /^\/api\/receiving-lines(?:\/|\?|$)/.test(key) ||
+          /^\/api\/shipment-lines(?:\/|\?|$)/.test(key) ||
+          key.startsWith("/api/procurement/receiving-orders") ||
           /^\/api\/vendor-invoices(?:\/|\?|$)/.test(key) ||
           /^\/api\/vendor-invoice-lines(?:\/|\?|$)/.test(key) ||
           /^\/api\/procurement\/health(?:\?|$)/.test(key) ||
