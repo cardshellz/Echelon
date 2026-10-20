@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { resetQuantityAmendmentFixture } from "./quantity-amendment-fixture";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -22,7 +23,8 @@ const TABLES = [
   schema.users, schema.warehouses, schema.products, schema.productVariants, schema.vendors, schema.vendorProducts,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory, schema.inventoryLots,
 ] as const;
 

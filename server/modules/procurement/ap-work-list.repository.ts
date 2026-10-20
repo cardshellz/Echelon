@@ -1,3 +1,5 @@
+import { readVerifiedInvoiceSettlementProjections } from "./supplier-credit-settlement.repository";
+import { readPaymentBalances } from "./ap-payment-balance.repository";
 import { and, desc, eq, ilike, inArray, lt, or, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db";
 import { apPayments, purchaseOrders, vendorInvoicePoLinks, vendorInvoices, vendors } from "@shared/schema";
@@ -31,14 +33,15 @@ export async function readInvoiceWorkList(query: InvoiceWorkListQuery, now: Date
       id: vendorInvoices.id, vendorId: vendorInvoices.vendorId, invoiceNumber: vendorInvoices.invoiceNumber,
       ourReference: vendorInvoices.ourReference, vendorName: vendors.name, vendorCode: vendors.code, status: vendorInvoices.status,
       invoiceDate: vendorInvoices.invoiceDate, dueDate: vendorInvoices.dueDate, invoicedAmountCents: vendorInvoices.invoicedAmountCents,
-      paidAmountCents: vendorInvoices.paidAmountCents, balanceCents: vendorInvoices.balanceCents, inboundShipmentId: vendorInvoices.inboundShipmentId,
+      paidAmountCents: vendorInvoices.paidAmountCents, creditedAmountCents:vendorInvoices.creditedAmountCents, balanceCents: vendorInvoices.balanceCents, inboundShipmentId: vendorInvoices.inboundShipmentId,
       currency: vendorInvoices.currency,
     }).from(vendorInvoices).leftJoin(vendors, eq(vendors.id, vendorInvoices.vendorId)).where(predicate)
       .orderBy(desc(vendorInvoices.createdAt), desc(vendorInvoices.id)).limit(query.limit).offset(query.offset);
     const links = rows.length ? await tx.select({ invoiceId: vendorInvoicePoLinks.vendorInvoiceId, poNumber: purchaseOrders.poNumber })
       .from(vendorInvoicePoLinks).innerJoin(purchaseOrders, eq(purchaseOrders.id, vendorInvoicePoLinks.purchaseOrderId))
       .where(inArray(vendorInvoicePoLinks.vendorInvoiceId, rows.map(row => row.id))).orderBy(purchaseOrders.poNumber, purchaseOrders.id) : [];
-    const items = rows.map(row => ({ ...row, invoiceDate: row.invoiceDate?.toISOString() ?? null, dueDate: row.dueDate?.toISOString() ?? null,
+    const settlements=await readVerifiedInvoiceSettlementProjections(tx,rows);
+    const items = rows.map(row => ({ ...row, ...settlements.get(row.id)!, invoiceDate: row.invoiceDate?.toISOString() ?? null, dueDate: row.dueDate?.toISOString() ?? null,
       poNumbers: links.filter(link => link.invoiceId === row.id).map(link => link.poNumber) }));
     return invoiceWorkListPageSchema.parse({ items, ...pageMetadata(count.total, query, items.length) });
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
@@ -57,12 +60,14 @@ export async function readPaymentWorkList(query: PaymentWorkListQuery): Promise<
   return db.transaction(async tx => {
     const [count] = await tx.select({ total: sql<number>`count(*)::int` }).from(apPayments).leftJoin(vendors, eq(vendors.id, apPayments.vendorId)).where(predicate);
     const rows = await tx.select({ id: apPayments.id, vendorId: apPayments.vendorId, paymentNumber: apPayments.paymentNumber,
-      vendorName: vendors.name, vendorCode: vendors.code, paymentDate: apPayments.paymentDate, paymentMethod: apPayments.paymentMethod,
+      vendorName: vendors.name, vendorCode: vendors.code, paymentDate: apPayments.paymentDate, paymentCalendarDate: apPayments.paymentCalendarDate, paymentMethod: apPayments.paymentMethod,
       referenceNumber: apPayments.referenceNumber, checkNumber: apPayments.checkNumber, totalAmountCents: apPayments.totalAmountCents,
       currency: apPayments.currency, status: apPayments.status,
     }).from(apPayments).leftJoin(vendors, eq(vendors.id, apPayments.vendorId)).where(predicate)
       .orderBy(desc(apPayments.paymentDate), desc(apPayments.id)).limit(query.limit).offset(query.offset);
-    const items = rows.map(row => ({ ...row, paymentDate: row.paymentDate.toISOString() }));
+    const balances = await readPaymentBalances(tx, rows);
+    const items = rows.map(row => ({ ...row, paymentDate: row.paymentDate.toISOString(),
+      paymentDateSource: row.paymentCalendarDate === null ? "legacy_timestamp" : "recorded_calendar_date", paymentBalance: balances.get(row.id)! }));
     return paymentWorkListPageSchema.parse({ items, ...pageMetadata(count.total, query, items.length) });
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }

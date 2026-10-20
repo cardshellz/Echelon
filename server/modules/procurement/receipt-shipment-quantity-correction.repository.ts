@@ -172,6 +172,16 @@ export async function readQuantityCorrectionSource(
     ).rows,
     "receipt cost origins",
   );
+  // A correction can change the unit meaning and interval offsets of every
+  // receipt on this PO line. Recorded supplier returns retain their original
+  // base-piece evidence and credit entitlements; this owner cannot rewrite it.
+  // The shared graph fence serializes this check with return recording.
+  const supplierReturnHistory = (
+    await tx.execute(sql`SELECT EXISTS(
+      SELECT 1 FROM procurement.supplier_return_lines
+      WHERE purchase_order_line_id=${poLineId}
+    ) AS present`)
+  ).rows[0]?.present === true;
   const costs = bounded(
     (
       await tx.execute(
@@ -248,6 +258,7 @@ export async function readQuantityCorrectionSource(
     postings,
     reversals,
     origins,
+    supplierReturnHistory,
     costs,
     snapshots,
     costEvidence,
@@ -406,6 +417,10 @@ export async function readQuantityCorrectionSource(
           : integer(origin.shipment_start_base_piece, "shipment interval"),
     })),
   };
+  if (supplierReturnHistory) {
+    blockedReason =
+      "This purchase line has recorded supplier returns. Their frozen piece quantities and credit evidence cannot be reinterpreted by a receipt quantity correction.";
+  }
   return { evidence, facts, sourceVersion, actor, blockedReason, history };
 }
 export type QuantityCorrectionSource = Awaited<

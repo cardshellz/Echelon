@@ -1,3 +1,8 @@
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
+import { ApPaymentRecovery } from "@/features/purchasing/ApPaymentRecovery";
+import { useApPaymentCommands } from "@/features/purchasing/use-ap-payment-commands";
+import { formatPaymentAmount, parsePaymentAmount, recordPaymentInputSchema } from "@/lib/ap-payment-command";
+import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
 import { InvoicePurchaseOrderSelector } from "@/features/purchasing/InvoicePurchaseOrderSelector";
 import { invalidateApInvoiceQueries, invalidateApPaymentQueries } from "@/features/purchasing/ap-work-list-query";
 import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
@@ -8,8 +13,8 @@ import { apInvoiceEditCapabilitySchema } from "@shared/procurement/ap-invoice-ca
 import { useAuth } from "@/lib/auth";
 import { InvoiceQuantityCorrection } from "@/features/purchasing/InvoiceQuantityCorrection";
 import { InvoicePoQuantity } from "@/features/purchasing/InvoicePoQuantity";
-import { centsToMills, dollarsToCents, dollarsToMills, formatMills } from "@shared/utils/money";
-import React, { useState, useRef } from "react";
+import { centsToDollarString, centsToMills, dollarsToCents, dollarsToMills, formatMills } from "@shared/utils/money";
+import React, { useEffect, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { ProcurementContext } from "@/components/procurement-context";
@@ -160,9 +165,7 @@ export default function APInvoiceDetail() {
   const { hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [paymentIntent] = useState(() =>
-    createFinancialCommandIntentStore(() => createApCommandIdempotencyKey("ap-payment")),
-  );
+  const paymentCommands = useApPaymentCommands();
   const [invoiceLifecycleIntent] = useState(() =>
     createFinancialCommandIntentStore(() => createApCommandIdempotencyKey("ap-invoice")),
   );
@@ -364,50 +367,27 @@ export default function APInvoiceDetail() {
 
   const paymentMutation = useMutation({
     mutationFn: async () => {
-      if (!canPay) throw new Error("Payment recording is unavailable. Reload the invoice and verify approval permission before continuing.");
+      if (!canPay || !invoiceId) throw new Error("Payment recording is unavailable. Reload the invoice and verify approval permission before continuing.");
       if (!sourceCapabilities.success || !sourceCapabilities.data.payment.allowed) throw new Error(sourceCapabilities.success ? sourceCapabilities.data.payment.reason : sourceUnavailableReason);
-      const body = {
-        vendorId: invoice?.vendorId,
-        paymentDate: payment.paymentDate,
-        paymentMethod: payment.paymentMethod,
-        referenceNumber: payment.referenceNumber || undefined,
-        checkNumber: payment.checkNumber || undefined,
-        bankAccountLabel: payment.bankAccountLabel || undefined,
-        totalAmountCents: dollarsToCents(payment.amountDollars || "0"),
-        notes: payment.notes || undefined,
-        allocations: [{
-          vendorInvoiceId: invoiceId,
-          appliedAmountCents: dollarsToCents(payment.amountDollars || "0"),
-        }],
-      };
-      const idempotencyKey = paymentIntent.acquire({ method: "POST", url: "/api/ap-payments", body });
-      try {
-        const result = await financialCommandFetchJson<any>("/api/ap-payments", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Idempotency-Key": idempotencyKey,
-          },
-          body: JSON.stringify(body),
-        });
-        return { result, idempotencyKey };
-      } catch (error) {
-        paymentIntent.fail(idempotencyKey, error);
-        throw error;
-      }
+      const amount = parsePaymentAmount(payment.amountDollars);
+      const payload = recordPaymentInputSchema.parse({ vendorId: invoice.vendorId, paymentDate: payment.paymentDate, paymentMethod: payment.paymentMethod,
+        referenceNumber: payment.referenceNumber || undefined, checkNumber: payment.checkNumber || undefined, bankAccountLabel: payment.bankAccountLabel || undefined,
+        totalAmountCents: amount, notes: payment.notes || undefined, allocations: [{ vendorInvoiceId: invoiceId, appliedAmountCents: amount }] });
+      return paymentCommands.execute({ operation: "record_payment", originInvoiceId: invoiceId, payload });
     },
-    retry: shouldRetryFinancialCommand,
-    retryDelay: financialCommandRetryDelay,
-    onSuccess: ({ result, idempotencyKey }) => {
-      paymentIntent.complete(idempotencyKey);
-      invalidate();
-      void invalidateApPaymentQueries(queryClient);
+    onError: (error: Error) => { invalidate(); toast({ title: "Payment request requires attention", description: error.message, variant: "destructive" }); },
+  });
+  useEffect(() => {
+    if (paymentCommands.confirmed?.operation === "record_payment") {
       setShowPaymentDialog(false);
       setPayment({ paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", amountDollars: "", notes: "" });
-      toast({ title: "Payment recorded", description: apLedgerOutcomeDescription(result) });
-    },
-    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
-  });
+    }
+  }, [paymentCommands.confirmed]);
+
+  useEffect(() => {
+    setShowPaymentDialog(false);
+    setPayment({ paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", amountDollars: "", notes: "" });
+  }, [paymentCommands.userId]);
 
   // ── Line Mutations ──
 
@@ -505,6 +485,7 @@ export default function APInvoiceDetail() {
     return (
       <div className="p-2 md:p-6 max-w-5xl mx-auto space-y-4">
         <ProcurementContext navigation={procurementNavigation} />
+      <ApPaymentRecovery commands={paymentCommands} />
         {backLink}
         <div role="status" aria-label="Loading invoice" className="flex items-center justify-center h-64">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
@@ -517,6 +498,7 @@ export default function APInvoiceDetail() {
     return (
       <div className="p-2 md:p-6 max-w-5xl mx-auto space-y-4">
         <ProcurementContext navigation={procurementNavigation} />
+      <ApPaymentRecovery commands={paymentCommands} />
         {backLink}
         <div role="alert" className="rounded-lg border p-4 space-y-3">
           <p className="font-medium">Unable to load invoice.</p>
@@ -536,6 +518,7 @@ export default function APInvoiceDetail() {
     return (
       <div className="p-2 md:p-6 max-w-5xl mx-auto space-y-4">
         <ProcurementContext navigation={procurementNavigation} />
+      <ApPaymentRecovery commands={paymentCommands} />
         {backLink}
         <p className="text-muted-foreground">Invoice not found.</p>
       </div>
@@ -545,8 +528,8 @@ export default function APInvoiceDetail() {
   const status = invoice.status;
   const canApprove = hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.approval.allowed && ["received", "disputed"].includes(status);
   const canDispute = hasPermission("purchasing", "edit") && ["received", "approved", "partially_paid"].includes(status);
-  const canVoid = hasPermission("purchasing", "approve") && status !== "voided" && invoice.paidAmountCents === 0;
-  const canPay = hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.payment.allowed && !invoice.paymentReviewRequired && ["approved", "partially_paid"].includes(status);
+  const canVoid = hasPermission("purchasing", "approve") && status !== "voided" && invoice.paidAmountCents === 0 && invoice.creditedAmountCents === 0 && invoice.hasSupplierCreditHistory === false;
+  const canPay = !invoiceError && !invoiceRefreshing && hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.payment.allowed && !invoice.paymentReviewRequired && !invoice.settlementReviewRequired && ["approved", "partially_paid"].includes(status);
   // Evidence attachments and reviewed quantity corrections retain their own owners.
   const canManageAttachments = hasPermission("purchasing", "edit") && status !== "voided";
   const canRunMatch = hasPermission("purchasing", "edit") && status !== "voided";
@@ -558,6 +541,7 @@ export default function APInvoiceDetail() {
   return (
     <div className="p-2 md:p-6 max-w-5xl mx-auto space-y-4 md:space-y-6">
       <ProcurementContext navigation={procurementNavigation} />
+      <ApPaymentRecovery commands={paymentCommands} />
       {/* ── Voided Banner ── */}
       {!isVoided && !canEdit && (
         <p role="status" className="rounded-lg border px-4 py-3 text-sm text-muted-foreground">
@@ -567,6 +551,13 @@ export default function APInvoiceDetail() {
       {invoice.paymentReviewRequired && (
         <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm">
           A payment has an unsupported historical status. Review its recorded evidence before changing the invoice balance; existing balances have been preserved.
+        </p>
+      )}
+      {invoice.settlementReviewRequired && (
+        <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm">
+          {invoice.overpaidAmountCents > 0
+            ? <>Recorded cash exceeds this invoice by {formatPaymentAmount(invoice.overpaidAmountCents)}. Review the retained payment applications before applying further settlement; the original invoice and cash history are preserved.</>
+            : "Historical settlement requires review. The original invoice and recorded settlements are preserved."}
         </p>
       )}
       {isVoided && (
@@ -598,7 +589,7 @@ export default function APInvoiceDetail() {
             <div className="flex items-center gap-3">
               <h1 className={`text-lg md:text-xl font-bold ${isVoided ? "line-through" : ""}`}>Invoice #{invoice.invoiceNumber}</h1>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[status] ?? ""}`}>
-                {status.replace("_", " ")}
+                {status === "paid" && invoice.creditedAmountCents > 0 ? "settled" : status.replace("_", " ")}
               </span>
             </div>
             <p className="text-sm text-muted-foreground">{invoice.vendorName}</p>
@@ -620,8 +611,8 @@ export default function APInvoiceDetail() {
               </Button>
             )}
             {canPay && (
-              <Button size="sm" onClick={() => {
-                setPayment(p => ({ ...p, amountDollars: (invoice.balanceCents / 100).toFixed(2) }));
+              <Button size="sm" disabled={paymentCommands.blocked} onClick={() => {
+                setPayment(p => ({ ...p, amountDollars: centsToDollarString(invoice.balanceCents) }));
                 setShowPaymentDialog(true);
               }}>
                 <CreditCard className="h-4 w-4 mr-1" />
@@ -644,8 +635,10 @@ export default function APInvoiceDetail() {
         )}
       </div>
 
+      <div className="flex flex-wrap gap-4"><SupplierCreditLink sourceInvoiceId={invoice.id} />{hasPermission("purchasing", "edit") && ["approved", "partially_paid", "paid"].includes(status) && <SupplierCreditLink sourceInvoiceId={invoice.id} create>Record supplier credit</SupplierCreditLink>}</div>
+      {invoice.hasSupplierCreditHistory === true && <p className="text-sm text-muted-foreground">This invoice retains supplier credit history. Review its original credit documents and applications; voiding or replacing the original invoice is unavailable.</p>}
       {/* ── Amount Cards ── */}
-      <div className="grid grid-cols-3 gap-3 md:gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         <Card>
           <CardContent className="pt-4 pb-3 text-center">
             <p className="text-xs text-muted-foreground mb-1">Invoiced</p>
@@ -654,10 +647,11 @@ export default function APInvoiceDetail() {
         </Card>
         <Card>
           <CardContent className="pt-4 pb-3 text-center">
-            <p className="text-xs text-muted-foreground mb-1">Paid</p>
+            <p className="text-xs text-muted-foreground mb-1">Cash paid</p>
             <p className="text-xl md:text-2xl font-bold text-green-600">{formatCents(invoice.paidAmountCents)}</p>
           </CardContent>
         </Card>
+        <Card><CardContent className="pt-4 pb-3 text-center"><p className="text-xs text-muted-foreground mb-1">Credits applied</p><p className="text-xl md:text-2xl font-bold">{formatPaymentAmount(invoice.creditedAmountCents)}</p></CardContent></Card>
         <Card className={invoice.balanceCents > 0 ? "border-amber-200" : ""}>
           <CardContent className="pt-4 pb-3 text-center">
             <p className="text-xs text-muted-foreground mb-1">Balance</p>
@@ -792,7 +786,7 @@ export default function APInvoiceDetail() {
                             <span className={`text-xs px-1.5 py-0.5 rounded ${match.className}`}>{match.label}</span>
                             <InvoiceQuantityCorrection lineId={line.id} lineNumber={line.lineNumber} needsCorrection={["qty_discrepancy", "over_billed", "price_discrepancy"].includes(line.matchStatus)} allowMatched={line.purchaseOrderLineId != null && invoice.status !== "voided"} onSaved={invalidate} />
                           </TableCell>
-                          <TableCell><InvoiceLineCostReview line={line} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} /></TableCell>
+                          <TableCell><InvoiceLineCostReview line={line} invoiceId={invoice.id} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} /></TableCell>
                           {canEdit && (
                             <TableCell>
                               <Button size="sm" variant="ghost" className="min-h-[44px] min-w-[44px] text-muted-foreground"
@@ -975,8 +969,8 @@ export default function APInvoiceDetail() {
         <CardHeader className="flex flex-row items-center justify-between py-3">
           <CardTitle className="text-sm">Payment History</CardTitle>
           {canPay && (
-            <Button size="sm" variant="outline" onClick={() => {
-              setPayment(p => ({ ...p, amountDollars: (invoice.balanceCents / 100).toFixed(2) }));
+            <Button size="sm" variant="outline" disabled={paymentCommands.blocked} onClick={() => {
+              setPayment(p => ({ ...p, amountDollars: centsToDollarString(invoice.balanceCents) }));
               setShowPaymentDialog(true);
             }}>
               <Plus className="h-4 w-4 mr-1" />
@@ -1003,11 +997,11 @@ export default function APInvoiceDetail() {
                 {invoice.payments.map((p: any) => (
                   <TableRow key={p.id} className={p.paymentStatus === "voided" ? "opacity-50" : ""}>
                     <TableCell>
-                      <Link href={`/ap-payments/${p.apPaymentId}`} className="font-mono text-blue-600 hover:underline">
+                      <Link href={`/ap-payments?paymentId=${p.apPaymentId}`} className="font-mono text-blue-600 hover:underline">
                         {p.paymentNumber}
                       </Link>
                     </TableCell>
-                    <TableCell className="text-sm">{formatDate(p.paymentDate)}</TableCell>
+                    <TableCell className="text-sm">{formatPaymentCalendarDate(p)}</TableCell>
                     <TableCell className="text-sm">{PAYMENT_METHOD_LABELS[p.paymentMethod] ?? p.paymentMethod}</TableCell>
                     <TableCell className="text-sm font-mono text-muted-foreground">{p.referenceNumber || "—"}</TableCell>
                     <TableCell className="text-right font-mono font-medium">{formatCents(p.appliedAmountCents)}</TableCell>
@@ -1122,16 +1116,17 @@ export default function APInvoiceDetail() {
 
       {/* ── Record Payment Dialog ── */}
       <Dialog open={showPaymentDialog} onOpenChange={setShowPaymentDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Record Payment</DialogTitle>
-            <DialogDescription>Balance due: {formatCents(invoice.balanceCents)}</DialogDescription>
+            <DialogDescription>Record cash already paid. Balance due: {formatCents(invoice.balanceCents)}. To use an existing payment, open AP Payments.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
+          <ApPaymentRecovery commands={paymentCommands} />
+          <fieldset disabled={paymentCommands.blocked} className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Payment Date *</Label>
-                <Input type="date" value={payment.paymentDate} onChange={(e) => setPayment(p => ({ ...p, paymentDate: e.target.value }))} />
+                <Input aria-label="Payment date" type="date" value={payment.paymentDate} onChange={(e) => setPayment(p => ({ ...p, paymentDate: e.target.value }))} />
               </div>
               <div className="space-y-2">
                 <Label>Method *</Label>
@@ -1168,13 +1163,13 @@ export default function APInvoiceDetail() {
             </div>
 
             {!canPay && <p role="alert" className="text-sm text-destructive">Payment recording is unavailable. Reload the invoice and verify approval permission before continuing.</p>}
+          </fieldset>
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancel</Button>
-              <Button onClick={() => paymentMutation.mutate()} disabled={!canPay || !payment.amountDollars || paymentMutation.isPending}>
+              <Button onClick={() => paymentMutation.mutate()} disabled={paymentCommands.blocked || !canPay || !payment.amountDollars || paymentMutation.isPending}>
                 {paymentMutation.isPending ? "Recording..." : "Record Payment"}
               </Button>
             </div>
-          </div>
         </DialogContent>
       </Dialog>
     </div>

@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -100,7 +101,8 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       ownedSchemas.push(name);
     }
     for (const table of [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
-      schema.purchaseOrders, schema.purchaseOrderLines, schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poApprovalTiers, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings]) {
+      schema.purchaseOrders, schema.purchaseOrderLines, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poApprovalTiers, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings]) {
       await pool.query(fixtureTable(table));
     }
     await pool.query(`

@@ -28,3 +28,5 @@ export * from "./publication-selection-work.schema";
 export * from "./build-demand.schema";
 export * from "./warehouse-work.schema";
 export * from "./warehouse-work-items.schema";
+
+export * from "./supplier-return.schema";

@@ -3,7 +3,19 @@ import { invoiceSourceCapabilitiesSchema, type InvoiceSourceCapabilities, type S
 import { resolveShipmentBillingOwnership, type BillingCostEvidence, type BillingInvoiceEvidence, type BillingLineEvidence } from "./domain/shipment-billing-ownership";
 import type { ApLedgerDbClient } from "./ap-ledger.service";
 
-export type BillingCostRow = { id: number; inboundShipmentId: number; vendorId: number | null; vendorInvoiceId: number | null; currency: string | null };
+export type BillingCostRow = { id: number; inboundShipmentId: number; vendorId: number | null; vendorInvoiceId: number | null; currency: string | null; actualCents?: number | string | null; estimatedCents?: number | string | null };
+// Raw PostgreSQL bigint reads are strings, while Drizzle reads are numbers.
+// Invalid amounts remain invalid evidence rather than being rounded or defaulted.
+function billingAmount(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && /^-?\d+$/.test(value)) {
+    const amount = BigInt(value);
+    if (amount >= BigInt(Number.MIN_SAFE_INTEGER) && amount <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(amount);
+  }
+  return Number.NaN;
+}
+
 type BillingOwnershipRow = { lineId: number | null; invoiceId: number; freightCostId: number; purchaseOrderLineId: number | null;
   productVariantId: number | null; headerId: number; vendorId: number; shipmentId: number | null; currency: string;
   status: string; invoiceNumber: string; replacesInvoiceId: number | null; hasProductSources: boolean };
@@ -40,7 +52,7 @@ export async function readShipmentBillingOwnership(client: ApLedgerDbClient, cos
   }
   return new Map(costs.map(cost => {
     const evidence: BillingCostEvidence = { id: cost.id, shipmentId: cost.inboundShipmentId,
-      vendorId: cost.vendorId, invoiceId: cost.vendorInvoiceId, currency: cost.currency };
+      vendorId: cost.vendorId, invoiceId: cost.vendorInvoiceId, currency: cost.currency,amountCents: billingAmount(cost.actualCents ?? cost.estimatedCents) };
     return [cost.id, resolveShipmentBillingOwnership({ cost: evidence, invoices: [...invoices.values()], lines })];
   }));
 }

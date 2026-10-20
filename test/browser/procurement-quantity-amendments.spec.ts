@@ -43,7 +43,7 @@ function previewFor(body: PoQuantityPreviewRequest, lines: PoQuantityAmendmentCo
       shipments: [], lots: [], orderCosts: [], historicalCosts: [], applications: [] },
     beforeStatus: "received", afterStatus: "received", warnings: ["Invoice amounts, invoice quantities and payments stay unchanged."], invoiceMatches: [] };
 }
-async function setup(page: Page, options: { admin?: boolean; stale?: boolean; loseAllResponses?: boolean; closeAfterLost?: boolean; lines?: PoQuantityAmendmentContext["lines"]; request?: string; openModal?: boolean; wrongContext?: boolean; measuredCosts?: boolean } = {}) {
+async function setup(page: Page, options: { admin?: boolean; stale?: boolean; loseAllResponses?: boolean; closeAfterLost?: boolean; lines?: PoQuantityAmendmentContext["lines"]; request?: string; openModal?: boolean; wrongContext?: boolean; measuredCosts?: boolean; returnedValue?: "increase" | "decrease" } = {}) {
   const failures = await installFixtures(page);
   const approvals: Captured[] = []; const previews: PoQuantityPreviewRequest[] = [];
   const context: PoQuantityAmendmentContext = { purchaseOrderId: options.wrongContext ? 99 : 17, currency: "USD", sourceVersion: version, canApprove: options.admin !== false, blockedReason: null, lines: options.lines ?? [line] };
@@ -61,6 +61,15 @@ async function setup(page: Page, options: { admin?: boolean; stale?: boolean; lo
       preview.impact!.applications = [{ purchaseOrderLineId: 11, shipmentId: null, component: "product", status: "review_required",
         lotsUpdated: 1, orderCostsUpdated: 1, orderCostDeltaCents: 100,
         issues: [{ code: "TEST_MISSING_EVIDENCE", message: "Supplier packaging amount requires confirmation." }] }];
+    }
+    if (options.returnedValue) {
+      const beforeMills = options.returnedValue === "increase" ? 10001 : 20002;
+      const afterMills = options.returnedValue === "increase" ? 20002 : 10001;
+      preview.impact!.applications.push({ purchaseOrderLineId: 11, shipmentId: null, component: "product", status: "applied",
+        lotsUpdated: 0, orderCostsUpdated: 0, orderCostDeltaCents: 0, issues: [],
+        returnedCosts: [{ returnId: 9, returnLineId: 91, returnAllocationId: 191, costQuantityAllocationId: 391,
+          inventoryLotId: 501, quantity: 2, component: "product", beforeMills, afterMills, deltaMills: afterMills - beforeMills }],
+        returnedCostDeltaMills: afterMills - beforeMills });
     }
     return preview;
   };
@@ -309,4 +318,47 @@ test("uses compact rows for eleven lines and summarizes only the edited fields",
   await expect(summary.getByRole("row")).toHaveCount(4);
   await expect(summary).toContainText("8 · Product 8"); await expect(summary).not.toContainText("Quantity");
   expect(state.previews[0].changes.map(row => row.lineId)).toEqual([18]); expect(state.failures).toEqual([]);
+});
+
+
+test("returned stock value is reviewed before approval and retained with its source in history", async ({ page }, info) => {
+  const state = await setup(page, { measuredCosts: true, returnedValue: "increase" });
+  const modal = await review(page);
+  const returned = modal.getByRole("region", { name: "Supplier-return value changes" });
+  await expect(returned).toContainText("2 returned units");
+  await expect(returned).toContainText("Change: 1.0001 USD");
+  const before = returned.getByText("1.0001 USD", { exact: true });
+  const after = returned.getByText("2.0002 USD", { exact: true });
+  await before.scrollIntoViewIfNeeded();
+  await expect(before).toBeInViewport();
+  await expect(after).toBeInViewport();
+  await expect(returned.getByRole("link", { name: "Return #9", exact: true })).toHaveAttribute("href", /supplier-returns\/9/);
+  await expect(returned).toContainText("do not record a new physical return or supplier credit");
+  await expect(modal.getByRole("button", { name: saveAction, exact: true })).toBeDisabled();
+  expect(state.approvals).toEqual([]);
+  await returned.scrollIntoViewIfNeeded();
+  await returned.screenshot({ path: info.outputPath("po-amendment-return-value.png") });
+  await save(page);
+  await page.keyboard.press("Escape");
+  await page.getByRole("tab", { name: "History", exact: true }).click();
+  const history = page.getByRole("region", { name: "Approved PO edits" });
+  await history.locator("summary").filter({ hasText: "Revision 1 · approved by Approving Admin" }).click();
+  const approved = history.getByRole("region", { name: "Supplier-return value changes" });
+  await expect(approved).toContainText("Returned value recorded at approval");
+  await expect(approved).toContainText("Change: 1.0001 USD");
+  expect(state.approvals).toHaveLength(1);
+  expect(state.failures).toEqual([]);
+});
+
+test("a returned-value reduction can be declined without approving a PO edit", async ({ page }) => {
+  const state = await setup(page, { returnedValue: "decrease" });
+  const modal = await review(page);
+  const returned = modal.getByRole("region", { name: "Supplier-return value changes" });
+  await expect(returned).toContainText("Change: -1.0001 USD");
+  await expect(returned.getByText("2.0002 USD", { exact: true })).toBeVisible();
+  await expect(returned.getByText("1.0001 USD", { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(modal).toHaveCount(0);
+  expect(state.approvals).toEqual([]);
+  expect(state.failures).toEqual([]);
 });

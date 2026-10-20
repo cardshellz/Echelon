@@ -1013,6 +1013,47 @@ export async function unallocatedLotCostIntervals(
     : takeCostQuantityIntervals(basis, occupied, basis - occupiedCount);
 }
 
+/** Read-only preview evidence for an exact physical command. Unlike
+ * ensureLotCostQuantityBasis this never imports historical custody. */
+export async function readLotCostQuantityState(
+  tx: CostEvidenceTransaction,
+  lot: LotCostRecord & { id: unknown; qty_picked?: unknown; qty_packed?: unknown },
+) {
+  const lotId = costInteger(lot.id, "lotId", 1);
+  const basisRows = (await tx.execute(sql`SELECT quantity,source_evidence FROM inventory.lot_cost_quantity_bases
+    WHERE inventory_lot_id=${lotId}`)).rows;
+  if (basisRows.length > 1) throw new CostEvidenceError("COST_QUANTITY_BASIS_CONFLICT", "A lot has ambiguous original cost quantity.");
+  let basisQuantity = basisRows[0] ? costInteger(basisRows[0].quantity, "basisQuantity", 1) : null;
+  const allocations = await readAllocations(tx, lotId);
+  const basis = lotCostTotals(lot).basisQuantity;
+  const occupied = occupiedCostQuantityIntervals(allocations, basis);
+  const occupiedQuantity = occupied.reduce((sum, interval) => sum + interval.quantity, 0);
+  // A newly created exact transfer lot has not needed a consumption basis yet.
+  // Its entire original quantity can be previewed without importing history
+  // only when no physical or financial outflow has ever been recorded.
+  let freshUnconsumed = false;
+  if (basisQuantity === null && allocations.length === 0 && hasExactLotCostTotals(lot)
+    && costInteger(lot.qty_on_hand, "lot.onHand") === basis
+    && costInteger(lot.qty_picked ?? 0, "lot.picked") === 0
+    && costInteger(lot.qty_packed ?? 0, "lot.packed") === 0) {
+    const history = (await tx.execute(sql`SELECT
+      EXISTS(SELECT 1 FROM oms.order_item_costs WHERE inventory_lot_id=${lotId}) AS has_cogs,
+      EXISTS(SELECT 1 FROM inventory.lot_cost_contributions WHERE source_lot_id=${lotId}) AS has_outflow,
+      EXISTS(SELECT 1 FROM inventory.inventory_transactions WHERE inventory_lot_id=${lotId}
+        AND variant_qty_delta<0 AND voided_at IS NULL) AS has_physical_outflow`)).rows[0];
+    freshUnconsumed = history?.has_cogs === false && history?.has_outflow === false && history?.has_physical_outflow === false;
+    if (freshUnconsumed) basisQuantity = basis;
+  }
+  return {
+    basisQuantity,
+    freshUnconsumed,
+    basisEvidence: basisRows[0]?.source_evidence ?? null,
+    allocations,
+    freeIntervals: occupiedQuantity === basis ? [] : takeCostQuantityIntervals(basis, occupied, basis - occupiedQuantity),
+    hasUnresolvedQuantity: allocations.some(row => row.source_evidence.sourceKind === "unresolved_historical_quantity"),
+  };
+}
+
 /** Batch counterpart for valuation. The caller supplies one coherent snapshot;
  * no financial custody is created by a read. Bound the complete allocation set
  * rather than silently reporting a truncated inventory value.

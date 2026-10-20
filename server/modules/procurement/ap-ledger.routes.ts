@@ -1,3 +1,8 @@
+import { registerSupplierReturnRoutes } from "./supplier-return.routes";
+import { SupplierCreditEvidenceError } from "./supplier-credit-settlement.repository";
+import { registerSupplierCreditRoutes } from "./supplier-credit.routes";
+import { paymentCalendarDateSchema, paymentCalendarDateToUtc } from "@shared/procurement/ap-payment-contract";
+import { z } from "zod";
 import { invoiceWorkListQuerySchema, paymentWorkListQuerySchema } from "@shared/procurement/ap-work-list";
 import { registerPoFinancialEvidenceRoutes } from "./po-financial-evidence.routes";
 import { invoiceCostReviewCommands } from "./invoice-cost-review.service";
@@ -17,7 +22,7 @@ import { apInvoiceReplacementCommands } from "./ap-invoice-replacement.commands"
 import { invoiceReplacementInputSchema } from "@shared/procurement/invoice-replacement";
 
 function handleApLedgerError(res: any, err: any, fallbackStatus = 400) {
-  if (err?.name === "ApLedgerError") {
+  if (err?.name === "ApLedgerError" || err instanceof SupplierCreditEvidenceError) {
     return res.status(err.statusCode).json({ error: err.message, details: err.details });
   }
   return res.status(err?.statusCode ?? fallbackStatus).json({ error: err.message });
@@ -43,6 +48,8 @@ function sendFinancialCommandError(res: any, error: FinancialCommandError): any 
 }
 
 export function registerApLedgerRoutes(app: Express) {
+  registerSupplierCreditRoutes(app);
+  registerSupplierReturnRoutes(app);
   registerInvoiceQuantityCorrectionRoutes(app);
   registerPoFinancialEvidenceRoutes(app);
   // ============================================================
@@ -456,6 +463,10 @@ export function registerApLedgerRoutes(app: Express) {
       if (!body.vendorId || !body.paymentDate || !body.paymentMethod || body.totalAmountCents == null) {
         return res.status(400).json({ error: "vendorId, paymentDate, paymentMethod, and totalAmountCents are required" });
       }
+      const calendar = paymentCalendarDateSchema.safeParse(body.paymentDate);
+      const legacy = z.string().datetime({ offset: true }).safeParse(body.paymentDate);
+      // Invalid date evidence reaches the durable owner as Invalid Date, so a reviewed
+      // request receives a saved rejection and can be safely corrected with a new key.
       const descriptor = financialCommandFromRequest(req, {
         actorId: getUserId(req),
         routeTemplate: "/api/ap-payments",
@@ -465,7 +476,8 @@ export function registerApLedgerRoutes(app: Express) {
       const result = await apPaymentCommands.recordPayment({
         payment: {
           ...body,
-          paymentDate: new Date(body.paymentDate),
+          paymentDate: calendar.success ? paymentCalendarDateToUtc(calendar.data) : new Date(legacy.success ? legacy.data : ""),
+          paymentCalendarDate: calendar.success ? calendar.data : null,
           allocations: body.allocations ?? [],
           createdBy: getUserId(req),
         },
@@ -484,6 +496,21 @@ export function registerApLedgerRoutes(app: Express) {
       res.json(payment);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/ap-payments/:id/applications", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const paymentId = Number(req.params.id);
+      if (!Number.isInteger(paymentId) || paymentId <= 0 || paymentId > 2_147_483_647)
+        return res.status(400).json({ error: "Invalid payment id.", details: { code: "AP_PAYMENT_ID_INVALID" } });
+      const descriptor = financialCommandFromRequest(req, { actorId: getUserId(req), routeTemplate: "/api/ap-payments/:id/applications",
+        resourceKey: `ap_payment:${paymentId}`, commandName: "ap.payment.apply" });
+      const result = await apPaymentCommands.applyPayment(paymentId, { application: req.body, userId: getUserId(req) }, descriptor);
+      return sendFinancialCommandResult(res, result);
+    } catch (err: any) {
+      if (err instanceof FinancialCommandError) return sendFinancialCommandError(res, err);
+      handleApLedgerError(res, err);
     }
   });
 

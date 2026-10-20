@@ -1,3 +1,5 @@
+import { formatPaymentAmount } from "@/lib/ap-payment-command";
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { shipmentRecordedUnitSummary, shipmentDimensionBasisLabel } from "@/lib/shipment-unit-entry";
 import { ShipmentQuantityEditor } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
@@ -531,7 +533,7 @@ export default function InboundShipmentDetail() {
     if (parsed.data.state === "review_required") return "Invoice ownership needs review";
     if (parsed.data.state === "voided") return "Voided invoice — replacement required";
     if (parsed.data.state === "unbilled") return "Unbilled";
-    return cost.derivedStatus === "paid" ? "Paid" : "Invoiced";
+    return cost.derivedStatus === "paid" ? "Settled" : "Invoiced";
   }
   function invoiceRecoveryLink(cost: { billingOwnership?: unknown; linkedInvoice?: { id: number; status?: string } | null }) {
     if (!shipmentBillingReadVerified) return null;
@@ -1592,6 +1594,7 @@ export default function InboundShipmentDetail() {
 
         {/* ══ Tab 2: Costs ══ */}
         <TabsContent value="costs" className="space-y-4">
+          <SupplierCreditLink inboundShipmentId={shipment.id} />
           <div className="flex flex-wrap items-center gap-2">
             {isEditable && (
               <Button variant="outline" onClick={() => setShowAddCostDialog(true)} disabled={!!costCreateRecoveryError} className="min-h-[44px]">
@@ -1601,7 +1604,8 @@ export default function InboundShipmentDetail() {
             )}
             {shipmentBillingReadVerified && hasPermission("purchasing", "edit") && shipment.status !== "cancelled" && costs.some((cost: any) => {
               const ownership = shipmentCostBillingOwnershipSchema.safeParse(cost.billingOwnership);
-              return ownership.success && ownership.data.canCreateInvoice && Number.isInteger(cost.vendorId) && cost.vendorId > 0 && cost.vendorId <= 2_147_483_647;
+              const amount = effectiveShipmentCostCents(cost);
+              return ownership.success && ownership.data.canCreateInvoice && amount !== null && amount >= 0 && Number.isInteger(cost.vendorId) && cost.vendorId > 0 && cost.vendorId <= 2_147_483_647;
             }) && (
               <Button variant="outline" onClick={() => setShowAddInvoiceModal(true)} className="min-h-[44px]">
                 <FileText className="h-4 w-4 mr-2" />
@@ -1635,7 +1639,8 @@ export default function InboundShipmentDetail() {
             <div className="flex flex-wrap gap-4 text-sm px-1">
               <span>Total: <strong className="font-mono">{formatCents(paymentStatus.summary.totalCents)}</strong></span>
               <span>Linked: <strong className="font-mono">{formatCents(paymentStatus.summary.linkedCents)}</strong></span>
-              <span className="text-green-600">Paid: <strong className="font-mono">{formatCents(paymentStatus.summary.paidCents)}</strong></span>
+              <span className="text-green-600">Cash paid: <strong className="font-mono">{formatCents(paymentStatus.summary.paidCents)}</strong></span>
+              <span>Credits applied: <strong className="font-mono">{formatPaymentAmount(paymentStatus.summary.creditedCents)}</strong></span>
               <span className="text-amber-600">Outstanding: <strong className="font-mono">{formatCents(paymentStatus.summary.outstandingCents)}</strong></span>
             </div>
           )}
@@ -1980,11 +1985,13 @@ export default function InboundShipmentDetail() {
 
         {/* ══ Tab 4: Invoices ══ */}
         <TabsContent value="invoices" className="space-y-4">
+          <SupplierCreditLink inboundShipmentId={shipment.id} />
           {/* Summary bar */}
           {!invoicesLoading && !invoicesRefreshing && !invoicesError && invoicesData?.summary && (
             <div className="flex flex-wrap gap-6 text-sm px-1">
               <span>Total Invoiced: <strong className="font-mono">{formatCents(invoicesData.summary.totalInvoicedCents)}</strong></span>
-              <span>Total Paid: <strong className="font-mono">{formatCents(invoicesData.summary.totalPaidCents)}</strong></span>
+              <span>Cash paid: <strong className="font-mono">{formatCents(invoicesData.summary.totalPaidCents)}</strong></span>
+              <span>Credits applied: <strong className="font-mono">{formatPaymentAmount(invoicesData.summary.totalCreditedCents)}</strong></span>
               <span className={invoicesData.summary.outstandingCents > 0 ? "text-amber-600" : "text-green-600"}>Outstanding: <strong className="font-mono">{formatCents(invoicesData.summary.outstandingCents)}</strong></span>
             </div>
           )}
@@ -2014,7 +2021,7 @@ export default function InboundShipmentDetail() {
                       <TableHead>Invoice #</TableHead>
                       <TableHead>Vendor</TableHead>
                       <TableHead className="text-right">Total</TableHead>
-                      <TableHead className="text-right">Paid</TableHead>
+                      <TableHead className="text-right">Cash paid / credits</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead></TableHead>
                     </TableRow>
@@ -2029,10 +2036,10 @@ export default function InboundShipmentDetail() {
                         <TableCell className="text-sm">{inv.vendorName || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(inv.invoicedAmountCents)}</TableCell>
                         <TableCell className="text-right font-mono">
-                          {inv.paidAmountCents > 0 ? formatCents(inv.paidAmountCents) : "—"}
+                          {formatPaymentAmount(inv.paidAmountCents)}<div className="text-xs">Credits {formatPaymentAmount(inv.creditedAmountCents)}</div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant="outline" className="text-xs">{inv.status?.replace(/_/g, " ")}</Badge>
+                          <Badge variant="outline" className="text-xs">{inv.status === "paid" && inv.creditedAmountCents > 0 ? "settled" : inv.status?.replace(/_/g, " ")}</Badge>
                         </TableCell>
                         <TableCell>
                           <Button

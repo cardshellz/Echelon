@@ -1,3 +1,5 @@
+import { receiptReversalSourceCapability } from "@/lib/receipt-reversal-capability";
+import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
 import { parseReceivingImportCsv, parseReceivingImportResult, receivingImportError } from "@/lib/receiving-import";
 import { ReceiptSupplierCosts } from "@/features/purchasing/ReceiptSupplierCosts";
 import { ReceiptShipmentQuantityCorrection } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
@@ -17,6 +19,7 @@ import { RECEIPT_REVERSAL_MAX_REASON_LENGTH } from "@shared/procurement/receipt-
 import { parseReceivingHeaderResult, parseReceivingCloseResult, receivingIssueMessages, receivingCostOutcomeMessage } from "@/lib/receiving-outcomes";
 import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitControl";
 import { ReceivingCountControl } from "@/components/purchasing/ReceivingCountControl";
+import { ReceivingQuarantineRecoveryNotice } from "@/components/purchasing/ReceivingQuarantineRecoveryNotice";
 import { ReceivingQuarantinePanel } from "@/components/purchasing/ReceivingQuarantinePanel";
 import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
 import { ProcurementContext } from "@/components/procurement-context";
@@ -110,6 +113,7 @@ function createReceivingIdempotencyKey(prefix: string): string {
 }
 
 interface ReceivingLine extends ReceivingUnitLine {
+  reversalCapability?: unknown;
   id: number;
   receivingOrderId: number;
   sku: string | null;
@@ -139,6 +143,7 @@ interface ReceiveValidationWarning {
 }
 
 interface ReceivingOrder {
+  reversalCapability?: unknown;
   id: number;
   receiptNumber: string;
   poNumber: string | null;
@@ -525,7 +530,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       void queryClient.invalidateQueries({ queryKey: ["/api/procurement/receiving-orders"] });
     },
   });
-  const reversalBlocked = !reversal.ready || !reversal.allowed || !!reversal.error || !!reversal.recovery || reverseMutation.isPending || reversalsQuery.isPending || reversalsQuery.isError;
+  const receiptReversalCapability = receiptReversalSourceCapability(selectedReceipt?.reversalCapability);
+  const targetReversalCapability = reverseTarget?.scope === "line" ? receiptReversalSourceCapability(selectedReceipt?.lines?.find(line => line.id === reverseTarget.lineId)?.reversalCapability) : receiptReversalCapability;
+  const reversalBlocked = (reverseTarget !== null && !targetReversalCapability.allowed) || !reversal.ready || !reversal.allowed || !!reversal.error || !!reversal.recovery || reverseMutation.isPending || reversalsQuery.isPending || reversalsQuery.isError;
   function submitReversal(command: ReceiptReversalCommand, pinned?: ReceiptReversalRecovery) {
     if (reverseMutation.isPending) return;
     setReverseError(null);
@@ -1896,6 +1903,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   {requestedReceiptId !== null ? `Receipt #${requestedReceiptId}` : "Receipt details"}
                 </DialogDescription>
               </DialogHeader>
+              {requestedReceiptId !== null && <ReceivingQuarantineRecoveryNotice key={requestedReceiptId} receiptId={requestedReceiptId} />}
               {receiptLoading && <p role="status" className="text-sm text-muted-foreground">Loading receipt details…</p>}
               {receiptLoadError && (
                 <div className="space-y-3">
@@ -1930,6 +1938,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                 </DialogDescription>
               </DialogHeader>
               <nav aria-label="Receipt related records" className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
+                {selectedReceipt.status === "closed" && <SupplierReturnLink vendorId={selectedReceipt.vendorId ?? undefined} receivingOrderId={selectedReceipt.id} purchaseOrderId={selectedReceipt.purchaseOrderId ?? undefined} />}
                 {selectedReceipt.purchaseOrderId && (
                   <Link href={procurementNavigation.childHref(`/purchase-orders/${selectedReceipt.purchaseOrderId}`)} className="text-primary underline">
                     Purchase order {selectedReceipt.poNumber || `#${selectedReceipt.purchaseOrderId}`}
@@ -2053,7 +2062,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         setReverseAllowNegative(false);
                       }}
                       data-testid="btn-reverse-order"
-                      disabled={quarantineCommandPending || reversalBlocked}
+                      disabled={quarantineCommandPending || reversalBlocked || !receiptReversalCapability.allowed}
                     >
                       <X className="h-4 w-4 mr-1 md:mr-2" />
                       Reverse Entire Receipt
@@ -2061,6 +2070,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   )}
                 </div>
 
+                {selectedReceipt.status === "closed" && !receiptReversalCapability.allowed && <div className="space-y-2 text-sm"><p>{receiptReversalCapability.reason}</p><Button variant="outline" size="sm" onClick={() => setReceiptLoadAttempt(attempt => attempt + 1)}>Reload receipt return history</Button></div>}
                 {selectedReceipt.status === "closed" && !reversal.allowed && <p className="text-sm text-muted-foreground">Purchasing approval permission is required to reverse a receipt.</p>}
                 {!quarantineAcceptAll.allowed && quarantineAcceptAll.reason && (selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && <p className="text-sm text-muted-foreground">Accept all: {quarantineAcceptAll.reason}</p>}
 
@@ -2321,12 +2331,13 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       setReverseAllowNegative(false);
                                     }}
                                     data-testid={`btn-reverse-line-mobile-${line.id}`}
-                                    disabled={quarantineCommandPending || reversalBlocked}
+                                    disabled={quarantineCommandPending || reversalBlocked || !receiptReversalSourceCapability(line.reversalCapability).allowed}
                                   >
                                     <X className="h-4 w-4 mr-1" />
                                     Reverse
                                   </Button>
                                 )}
+                                {selectedReceipt.status === "closed" && !receiptReversalSourceCapability(line.reversalCapability).allowed && <p className="text-xs text-muted-foreground">{receiptReversalSourceCapability(line.reversalCapability).reason}</p>}
                                 {selectedReceipt.status === "closed" && (line.reversedQty ?? 0) > 0 && (
                                   <span className="text-xs text-destructive font-medium">−{line.reversedQty} reversed</span>
                                 )}
@@ -2432,12 +2443,13 @@ DEF-456,25,,,5.00,,Location TBD`;
                                         setReverseAllowNegative(false);
                                       }}
                                       data-testid={`btn-reverse-line-${line.id}`}
-                                      disabled={quarantineCommandPending || reversalBlocked}
+                                      disabled={quarantineCommandPending || reversalBlocked || !receiptReversalSourceCapability(line.reversalCapability).allowed}
                                     >
                                       <X className="h-4 w-4 mr-1" />
                                       Reverse
                                     </Button>
                                   )}
+                                  {!receiptReversalSourceCapability(line.reversalCapability).allowed && <p className="text-xs text-muted-foreground">{receiptReversalSourceCapability(line.reversalCapability).reason}</p>}
                                 </TableCell>
                               )}
                               {selectedReceipt.status !== "closed" && (

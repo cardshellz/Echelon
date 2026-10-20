@@ -3,11 +3,11 @@ import { installFixtures, receipt } from "./procurement-fixtures";
 
 const STORAGE_KEY = "echelon:receipt-reversal:v1:test-user";
 type Request = { path: string; key: string; body: { qty?: number; reason: string; allowNegative: boolean } };
-type Options = { lost?: boolean; malformed?: boolean; rejected?: boolean; unconfirmed?: boolean; delayed?: boolean; permitted?: boolean };
+type Options = { lost?: boolean; malformed?: boolean; rejected?: boolean; unconfirmed?: boolean; delayed?: boolean; permitted?: boolean; returnHistory?: boolean; missingReturnHistory?: boolean };
 async function setup(page: Page, options: Options = {}) {
   const failures = await installFixtures(page);
   const state = { requests: [] as Request[], postings: 0, offline: false, detailUnavailable: false, actorId: "test-user", reads: 0, lineParentId: 31, historyFailure: false, historyPayload: [] as unknown };
-  const lines = [7, 8].map(id => ({ id, receivingOrderId: 31, sku: `REVIEW-${id}`, productName: `Review product ${id}`,
+  const lines = [7, 8].map(id => ({ reversalCapability: options.missingReturnHistory ? undefined : options.returnHistory && id === 7 ? { allowed: false, code: "RECEIPT_REVERSAL_SUPPLIER_RETURN_HISTORY", reason: "This line has recorded supplier returns. Review its retained physical history." } : { allowed: true, code: null, reason: null }, id, receivingOrderId: 31, sku: `REVIEW-${id}`, productName: `Review product ${id}`,
     productId: 10, productVariantId: 2, unitsPerVariantSnapshot: 10, unitVersion: "a".repeat(64), expectedQty: 5, receivedQty: 5,
     damagedQty: 0, reversedQty: 0, status: "complete", putawayLocationId: 5, putawayComplete: 1, unitCost: 25, purchaseOrderLineId: id }));
   const results = new Map<string, Record<string, unknown>>();
@@ -21,7 +21,7 @@ async function setup(page: Page, options: Options = {}) {
       if (path === "/api/receiving/31") {
         state.reads++;
         if (state.detailUnavailable) return route.fulfill({ status: 503, json: { error: "Detail unavailable" } });
-        return route.fulfill({ json: { ...receipt(31), sourceType: "po", warehouseId: 1, lines: lines.map(line => ({ ...line, receivingOrderId: state.lineParentId })) } });
+        return route.fulfill({ json: { ...receipt(31), reversalCapability: options.missingReturnHistory ? undefined : options.returnHistory ? { allowed: false, code: "RECEIPT_REVERSAL_SUPPLIER_RETURN_HISTORY", reason: "This receipt has recorded supplier returns. Its physical history must remain intact." } : { allowed: true, code: null, reason: null }, sourceType: "po", warehouseId: 1, lines: lines.map(line => ({ ...line, receivingOrderId: state.lineParentId })) } });
       }
       if (path.endsWith("/reversals")) return route.fulfill(state.historyFailure ? { status: 503, json: { error: "History unavailable" } } : { json: state.historyPayload });
       if (path === "/api/warehouse/locations") return route.fulfill({ json: [{ id: 5, code: "RCV-01", name: "Receiving", warehouseId: 1, isActive: 1, locationType: "receiving" }] });
@@ -220,3 +220,13 @@ for (const failure of ["unavailable", "malformed", "wrong_receipt"] as const) {
     await expect(page.getByTestId("btn-reverse-order")).toBeEnabled(); expect(state.requests).toEqual([]); expect(failures).toEqual([]);
   });
 }
+
+for (const missing of [false, true]) test(`supplier return history ${missing ? "unavailable" : "retained"} blocks the affected reversal without blocking saved recovery`, async ({ page }) => {
+  const { state } = await setup(page, { returnHistory: !missing, missingReturnHistory: missing });
+  await page.goto("/receiving?open=31");
+  await expect(page.getByTestId("btn-reverse-order")).toBeDisabled();
+  await expect(page.locator('[data-testid="btn-reverse-line-7"]:visible,[data-testid="btn-reverse-line-mobile-7"]:visible')).toBeDisabled();
+  await expect(page.getByText(missing ? /Supplier return history could not be verified/ : /This receipt has recorded supplier returns/).first()).toBeVisible();
+  if (!missing) await expect(page.locator('[data-testid="btn-reverse-line-8"]:visible,[data-testid="btn-reverse-line-mobile-8"]:visible')).toBeEnabled();
+  expect(state.requests).toEqual([]);
+});

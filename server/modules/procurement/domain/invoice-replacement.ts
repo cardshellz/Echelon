@@ -6,6 +6,7 @@ export interface InvoiceReplacementSource {
   readonly lines: readonly Pick<VendorInvoiceLine, "id" | "freightCostId" | "purchaseOrderLineId" | "productVariantId" | "unitCostMills" | "unitCostCents" | "qtyInvoiced" | "lineTotalCents">[];
   readonly costs: readonly Pick<InboundFreightCost, "id" | "vendorInvoiceId" | "vendorId" | "inboundShipmentId" | "currency" | "actualCents" | "estimatedCents">[];
   readonly links: readonly Pick<VendorInvoicePoLink, "purchaseOrderId" | "allocatedAmountCents">[];
+  readonly hasCreditHistory: boolean;
   readonly paymentHistory: readonly { readonly id: number }[];
   readonly successorInvoiceId: number | null;
   readonly shipment: Pick<InboundShipment, "status"> | null;
@@ -21,6 +22,8 @@ export function evaluateInvoiceReplacement(source: InvoiceReplacementSource, exp
   });
   if (source.successorInvoiceId !== null) return result("AP_INVOICE_REPLACEMENT_EXISTS", "This document already has a replacement. Open its successor to continue.");
   if (invoice.status !== "voided") return result("AP_INVOICE_REPLACEMENT_NOT_VOIDED", "Only a voided shipment invoice can be replaced.");
+  if (source.hasCreditHistory) return result("AP_INVOICE_REPLACEMENT_CREDIT_HISTORY",
+    "This invoice has supplier credit history. Review its source and applications before replacing the original document.");
   if (!safeMoney(invoice.paidAmountCents) || invoice.paidAmountCents !== 0 || source.paymentHistory.length > 0) {
     return result("AP_INVOICE_REPLACEMENT_PAYMENT_HISTORY", "This invoice has payment history or invalid paid amounts. Accounting review is required; this replacement action cannot recover it.");
   }

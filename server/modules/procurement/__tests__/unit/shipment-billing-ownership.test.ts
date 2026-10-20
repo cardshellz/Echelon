@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { readShipmentBillingOwnership } from "../../shipment-billing-ownership.repository";
+import type { ApLedgerDbClient } from "../../ap-ledger.service";
 import { resolveShipmentBillingOwnership } from "../../domain/shipment-billing-ownership";
 import { shipmentCostBillingOwnershipSchema, invoiceSourceCapabilitySchema } from "@shared/procurement/shipment-billing-ownership";
 const cost = { id: 31, shipmentId: 1, vendorId: 6, invoiceId: 71, currency: "USD" };
@@ -57,5 +59,24 @@ describe("canonical shipment billing ownership", () => {
     expect(shipmentCostBillingOwnershipSchema.safeParse({ ...billed, canCreateInvoice: true }).success).toBe(false);
     expect(shipmentCostBillingOwnershipSchema.safeParse({ ...billed, activeInvoiceLineIds: [] }).success).toBe(false);
     expect(invoiceSourceCapabilitySchema.safeParse({ allowed: true, code: "AP_INVOICE_BILLING_REVIEW_REQUIRED", reason: "review" }).success).toBe(false);
+  });
+});
+
+
+describe("shipment billing stored amount boundary", () => {
+  it.each([990, "990", 0, "0"])("retains valid PostgreSQL amount %s as unbilled", async actualCents => {
+    const tx = { execute: vi.fn().mockResolvedValue({ rows: [] }) } as unknown as ApLedgerDbClient;
+    const result = await readShipmentBillingOwnership(tx, [{ id: 31, inboundShipmentId: 1, vendorId: 6, vendorInvoiceId: null, currency: "USD", actualCents }]);
+    expect(result.get(31)).toMatchObject({ state: "unbilled", canCreateInvoice: true });
+  });
+  it.each([-10, "-10"])("routes unbilled negative amount %s to explicit supplier-credit review", async actualCents => {
+    const tx = { execute: vi.fn().mockResolvedValue({ rows: [] }) } as unknown as ApLedgerDbClient;
+    const result = await readShipmentBillingOwnership(tx, [{ id: 31, inboundShipmentId: 1, vendorId: 6, vendorInvoiceId: null, currency: "USD", actualCents }]);
+    expect(result.get(31)).toMatchObject({ state: "review_required", canCreateInvoice: false, issueCode: "AP_SUPPLIER_CREDIT_DOCUMENT_REQUIRED" });
+  });
+  it.each(["9007199254740992", "1.5", "1e3", "", "not-money"])("keeps invalid raw amount %s in review", async actualCents => {
+    const tx = { execute: vi.fn().mockResolvedValue({ rows: [] }) } as unknown as ApLedgerDbClient;
+    const result = await readShipmentBillingOwnership(tx, [{ id: 31, inboundShipmentId: 1, vendorId: 6, vendorInvoiceId: null, currency: "USD", actualCents }]);
+    expect(result.get(31)).toMatchObject({ state: "review_required", canCreateInvoice: false, issueCode: "AP_SHIPMENT_BILLING_EVIDENCE_INVALID" });
   });
 });

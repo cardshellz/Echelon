@@ -129,6 +129,12 @@ describe("current supplier and receipt cost authority", () => {
     });
     expect(purchaseCostNextAction(current)).toBe("history");
   });
+  it("routes an exact full quarantine return to explicit accounting review instead of invoice edits or automatic retry", () => {
+    const current = line();
+    current.components = current.components.map(component => ({ ...component, status: "review_required", sourceEvidence: "review_required",
+      issues: [{ code: "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW", message: "Zero-quantity inventory completion requires accounting review." }] }));
+    expect(purchaseCostNextAction(current)).toBe("review");
+  });
   it("uses a later supplier application for current receipt status without rewriting its old attempt", () => {
     const queue: ReceiptCostQueueRead = {
       requests: [

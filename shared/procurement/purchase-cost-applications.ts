@@ -1,7 +1,8 @@
 import { z } from "zod";
+import { canonicalJson } from "../utils/canonical-json";
 import { isHistoricalCostIssue } from "./cost-posting-status";
 import { reconciliationDestinationSchema, reconciliationPostingSchema } from "./cost-reconciliation";
-import { costComponentSchema, costIssueSchema, costSourceRevisionSchema } from "./cost-source-contracts";
+import { costComponentSchema, costInventoryEffectSchema, costIssueSchema, costSourceRevisionSchema } from "./cost-source-contracts";
 
 const id = z.number().int().positive().safe();
 const integer = z.number().int().safe();
@@ -42,6 +43,7 @@ export const purchaseCostApplicationSchema = z.object({
   status: z.enum(["applied", "retry_required", "review_required"]),
   latestRecordedApplication: z.boolean(),
   resolvedByCurrentPosting: z.boolean().optional(),
+  inventoryEffect: costInventoryEffectSchema.optional(),
   recordedBy: z.string(),
   recordedAt: date,
   evidenceState: z.enum(["verified_record", "review_required"]),
@@ -147,6 +149,15 @@ export const purchaseCostApplicationHistorySchema = purchaseCostApplicationHisto
   history.revisions.forEach((revision, index) => {
     const verifiedResolution = isPurchaseCostResolutionVerified(history, revision);
     revision.applications.forEach((application, applicationIndex) => {
+      if (application.inventoryEffect && (application.status !== "applied" || application.evidenceState !== "verified_record"
+        || application.issues.length !== 0 || application.outcome?.lotsUpdated !== 0 || application.outcome.cogsRowsUpdated !== 0
+        || application.outcome.totalCogsDeltaCents !== 0 || application.lotChanges.length !== 0
+        || application.reportingEvent?.evidenceState !== "verified_record" || !revision.source?.inventoryEffect
+        || canonicalJson(application.inventoryEffect) !== canonicalJson(revision.source.inventoryEffect))) {
+        context.addIssue({ code: z.ZodIssueCode.custom,
+          path: ["revisions", index, "applications", applicationIndex, "inventoryEffect"],
+          message: "A completed return requires matching source and verified zero-effect application evidence" });
+      }
       if (application.resolvedByCurrentPosting && (!verifiedResolution || application.status !== "review_required"
         || application.issues.length === 0 || !application.issues.every(isHistoricalCostIssue))) {
         context.addIssue({ code: z.ZodIssueCode.custom,

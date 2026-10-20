@@ -1,3 +1,4 @@
+import { SupplierCreditEvidenceError } from "../../supplier-credit-settlement.repository";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -110,6 +111,11 @@ describe("AP invoice transactional commands", () => {
     expect(mocks.postCommit).toHaveBeenCalledWith(apLedgerOutcome);
   });
 
+  it("records credit evidence conflicts as terminal review rejections", () => {
+    const failure = classifyApInvoiceCommandFailure(new SupplierCreditEvidenceError(12, "AP_INVOICE_SETTLEMENT_REVIEW"));
+    expect(failure).toMatchObject({ kind: "rejected", httpStatus: 409,
+      errorCode: "AP_INVOICE_SETTLEMENT_REVIEW", body: { details: { code: "AP_INVOICE_SETTLEMENT_REVIEW", invoiceId: 12 } } });
+  });
   it("replays a completed transition without running the mutation or hooks", async () => {
     const replayedBody = {
       id: 12,

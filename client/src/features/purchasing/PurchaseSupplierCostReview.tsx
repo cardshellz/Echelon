@@ -1,3 +1,5 @@
+import React from "react";
+import { noInventoryEffectLabel } from "./cost-inventory-effect-presentation";
 import { Link } from "wouter";
 import type {
   PurchaseCostStatus,
@@ -5,6 +7,7 @@ import type {
 } from "@shared/procurement/purchase-cost-status";
 import {
   purchaseCostNextAction,
+  purchaseLineInventoryEffect,
   purchaseLineNeedsCostReview,
 } from "@shared/procurement/purchase-cost-status";
 import type { ProcurementNavigation } from "@/hooks/use-procurement-navigation";
@@ -19,6 +22,7 @@ export function PurchaseSupplierCostLine({
   navigation: ProcurementNavigation;
 }) {
   const action = purchaseCostNextAction(line);
+  const inventoryEffect = purchaseLineInventoryEffect(line);
   const missingOrigin = line.lots.some(lot => lot.origin === "unproven");
   const issues = [
     ...new Map(
@@ -41,7 +45,7 @@ export function PurchaseSupplierCostLine({
             {component.component === "product" ? "Product" : "Packaging"}:{" "}
             {component.status === "applied"
               ? component.sourceEvidence === "confirmed"
-                ? "Posted"
+                ? component.inventoryEffect ? "No inventory change" : "Posted"
                 : "Estimate posted"
               : component.status === "pending"
                 ? "Not posted"
@@ -78,17 +82,22 @@ export function PurchaseSupplierCostLine({
           cost processing section to retry and review its saved result.
         </p>
       )}
+      {action === "review" && (
+        <p>
+          The recorded source needs an accounting review. See the current reasons
+          below; there is no automatic cost retry for this case.
+        </p>
+      )}
       {action === "none" && (
         <p className="text-green-700 dark:text-green-400">
-          Product and packaging costs are posted for the current source and lot
-          history.
+          {inventoryEffect ? noInventoryEffectLabel : "Product and packaging costs are posted for the current source and lot history."}
         </p>
       )}
       <div className="flex flex-wrap gap-3">
         {line.invoices.map((invoice) => {
           const href = navigation.childHref(
             `/ap-invoices/${invoice.invoiceId}?tab=lines`,
-            { invoiceCostLineId: invoice.lineId },
+            action === "review" || action === "none" ? undefined : { invoiceCostLineId: invoice.lineId },
           );
           return (
             <Link
@@ -96,7 +105,7 @@ export function PurchaseSupplierCostLine({
               href={href}
               className="text-primary underline underline-offset-4"
             >
-              {action === "none" ? "View" : "Review"} invoice{" "}
+              {action === "none" || action === "review" ? "View" : "Review"} invoice{" "}
               {invoice.invoiceNumber} · line {invoice.lineNumber}
             </Link>
           );
@@ -136,8 +145,9 @@ export function PurchaseSupplierCostLine({
       )}
       <details open={action === "history"}>
         <summary className="cursor-pointer">
-          Affected lot history ({line.lots.length})
+          {inventoryEffect ? "Return and receipt evidence" : `Affected lot history (${line.lots.length})`}
         </summary>
+        {inventoryEffect && <p className="mt-2">All {inventoryEffect.returnedBasePieces.toLocaleString()} base pieces were returned before acceptance. Zero remaining source quantity; no inventory lots were created.</p>}
         <ul className="mt-2 space-y-2">
           {line.lots.map((lot) => (
             <li key={lot.id}>

@@ -1,0 +1,39 @@
+import { SupplierReturnDifferenceSummary } from "../../SupplierReturnCreditReview";
+import { returnCreditReview, returnCreditReviewRequest, returnCreditReviewResult } from "../../../../../../test/fixtures/supplier-return";
+import { createElement, type ReactElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Router } from "wouter";
+import { describe, expect, it } from "vitest";
+import { AuthProvider } from "@/lib/auth";
+import SupplierReturns from "@/pages/SupplierReturns";
+import { SupplierReturnCreate } from "../../SupplierReturnCreate";
+import { SupplierReturnDetail } from "../../SupplierReturnDetail";
+import { SupplierReturnRecovery } from "../../SupplierReturnRecovery";
+import { SupplierReturnLink } from "../../SupplierReturnLink";
+import type { SupplierReturnCommands } from "../../use-supplier-return-commands";
+import { returnOption, returnPreview, returnRequest, returnResult } from "../../../../../../test/fixtures/supplier-return";
+function commands(overrides: Partial<SupplierReturnCommands> = {}): SupplierReturnCommands { return { userId: "ap-reader", canApprove: true, recovery: null, storageError: null, confirmed: null, pending: false, error: null, blocked: false, recoverAllowed: false,
+  refresh: () => { throw Error("No mutation in static render"); }, recover: () => { throw Error("No mutation in static render"); }, execute: async () => { throw Error("No mutation in static render"); }, ...overrides }; }
+function render(element: ReactElement, seed: (client: QueryClient) => void = () => undefined, href = "/supplier-returns"): string {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false, staleTime: Infinity, gcTime: Infinity } } }); seed(client); const url = new URL(href, "https://echelon.test");
+  try { return renderToStaticMarkup(createElement(Router, { ssrPath: url.pathname, ssrSearch: url.search, children: createElement(QueryClientProvider, { client, children: createElement(AuthProvider, { children: element }) }) })); } finally { client.clear(); }
+}
+describe("supplier return actual component rendering", () => {
+  it("renders list loading under the same JSX runtime as CI", () => { expect(render(createElement(SupplierReturns))).toContain("Loading supplier returns"); });
+  it("renders immutable detail, exact fractional cents and separate credit state", () => { const html = render(createElement(SupplierReturnDetail, { returnId: 9, commands: commands() }), client => { client.setQueryData(["/api/supplier-returns/9", "ap-reader"], returnResult().return); }, "/supplier-returns/9"); expect(html).toContain("Supplier return #9"); expect(html).toContain("$2.0002"); expect(html).toContain("Awaiting supplier credit"); expect(html).toContain("Original receipt quantities remain in history"); expect(html).toContain("Inventory transaction #291"); });
+  it("does not invent a return after detail read failure", () => { const html = render(createElement(SupplierReturnDetail, { returnId: 9, commands: commands() }), client => { client.getQueryCache().build(client, { queryKey: ["/api/supplier-returns/9", "ap-reader"] }).setState({ status: "error", fetchStatus: "idle", error: Error("unavailable") }); }); expect(html).toContain("inventory outcome must be verified"); expect(html).toContain("Retry supplier return"); });
+  it("renders current source options with blocked lineage preserved", () => { const html = render(createElement(SupplierReturnCreate, { commands: commands(), initialVendorId: 2, purchaseOrderId: 17, receivingOrderId: null, onCancel: () => undefined }), client => { client.setQueryData(["/api/vendors"], [{ id: 2, name: "Test supplier" }]); client.setQueryData(["/api/supplier-returns/options", 2, 17, null, "ap-reader"], { pages: [{ items: [returnOption(), { ...returnOption(502), eligible: false, unitsPerVariant: null, issues: [{ code: "SOURCE_UNKNOWN", message: "Mixed source history requires review" }] }], nextAfterLotId: 502 }], pageParams: [null] }); }); expect(html).toContain("LOT-501"); expect(html).toContain("Mixed source history requires review"); expect(html).toContain("Load more return stock"); expect(html).not.toContain("Record collected supplier return"); });
+  it("renders saved quantities and exact reviewed value without executing recovery", () => { const html = render(createElement(SupplierReturnRecovery, { commands: commands({ recovery: { version: 1, userId: "ap-reader", key: "return-key-1", body: { command: "record", payload: returnRequest(), reviewed: returnPreview() } }, recoverAllowed: true }) })); expect(html).toContain("Saved supplier return request"); expect(html).toContain("COLLECT-17"); expect(html).toContain("2 recorded units / 20 pieces"); expect(html).toContain("$2.0302"); expect(html).toContain("Recover saved return request"); });
+  it("renders storage failure with retry and no replacement action", () => { const html = render(createElement(SupplierReturnRecovery, { commands: commands({ storageError: "Saved return belongs to another operator" }) })); expect(html).toContain("another operator"); expect(html).toContain("Retry return recovery storage"); });
+  it("renders PO return link preserving context", () => { const html = render(createElement(SupplierReturnLink, { vendorId: 2, purchaseOrderId: 17 }), () => undefined, "/purchase-orders/17?tab=receipts"); expect(html).toContain("/supplier-returns?vendorId=2&amp;purchaseOrderId=17"); expect(html).toContain("via=purchase%3A17%3Areceipts"); });
+});
+
+describe("return difference evidence presentation", () => {
+  it("shows unassigned credit and a precise unresolved shortfall", () => { const html = render(createElement(SupplierReturnDifferenceSummary, { review: returnCreditReview() })); expect(html).toContain("$0.2000"); expect(html).toContain("$2.00 of existing supplier credit"); expect(html).toContain("remaining difference stays unresolved"); });
+  it("retains supplier declined without claiming settlement", () => { const request = { ...returnCreditReviewRequest(), disposition: "supplier_declined" as const }; const html = render(createElement(SupplierReturnDifferenceSummary, { review: returnCreditReviewResult(request).review })); expect(html).toContain("Supplier declined the difference"); expect(html).toContain("$0.2000"); expect(html).not.toContain("financially settled"); });
+  it("labels superseded review as stale when current cost or credit changed", () => { const review = returnCreditReviewResult().review; review.reviewCurrent = false; const html = render(createElement(SupplierReturnDifferenceSummary, { review })); expect(html).toContain("previous review is stale"); expect(html).not.toContain("Current follow-up:"); });
+  it("keeps excess credit negative and explains its direction", () => { const html = render(createElement(SupplierReturnDifferenceSummary, { review: returnCreditReview(230) })); expect(html).toContain("-$0.1000"); expect(html).toContain("supplier credit above returned value"); });
+  it("does not round a sub-cent remaining value to zero", () => { const review = returnCreditReview(220); review.differences.totalMills = 1; const html = render(createElement(SupplierReturnDifferenceSummary, { review })); expect(html).toContain("$0.0001"); });
+  it("renders pending attribution recovery distinctly from physical return", () => { const html = render(createElement(SupplierReturnRecovery, { commands: commands({ recovery: { version: 1, userId: "ap-reader", key: "review-key-1", body: { command: "review_credit_difference", entitlementId: 111, payload: returnCreditReviewRequest(), reviewed: returnCreditReview() } } }) })); expect(html).toContain("saved credit difference review"); expect(html).toContain("does not remove inventory"); });
+});

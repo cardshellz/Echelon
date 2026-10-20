@@ -1,3 +1,4 @@
+import { custodyTestResult } from "@shared/procurement/__tests__/receiving-quarantine.fixture";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import express, { type Request } from "express";
@@ -6,12 +7,13 @@ import { z } from "zod";
 import type { ServiceRegistry } from "../../../../services";
 
 const mocks = vi.hoisted(() => ({
-  transaction: vi.fn(), view: vi.fn(), options: vi.fn(), run: vi.fn(), log: vi.fn(),
+  transaction: vi.fn(), view: vi.fn(), options: vi.fn(), run: vi.fn(), log: vi.fn(), execute: vi.fn(),
 }));
 vi.mock("../../../../db", () => ({ db: { transaction: mocks.transaction } }));
 // Keep the real requireAuth middleware, but do not initialize identity storage.
 vi.mock("../../../identity", () => ({ hasPermission: vi.fn() }));
 vi.mock("../../../../platform/observability", () => ({ logger: { error: mocks.log } }));
+vi.mock("../../receiving-quarantine-command-evidence.repository", () => ({ assertNoLegacyCustodyCommand: vi.fn() }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
 vi.mock("../../../../platform/commands/transactional-command.service", async (original) => ({
   ...await original<typeof import("../../../../platform/commands/transactional-command.service")>(),
@@ -20,6 +22,7 @@ vi.mock("../../../../platform/commands/transactional-command.service", async (or
 vi.mock("../../receiving-quarantine.service", async (original) => ({
   ...await original<typeof import("../../receiving-quarantine.service")>(),
   readReceivingQuarantineView: mocks.view,
+  executeReceivingCustodyCommand: mocks.execute,
 }));
 vi.mock("../../receiving-quarantine-options.repository", async (original) => ({
   ...await original<typeof import("../../receiving-quarantine-options.repository")>(),
@@ -73,7 +76,8 @@ describe("receiving quarantine HTTP boundary", () => {
     mocks.transaction.mockImplementation(async (work: (transaction: typeof tx) => Promise<unknown>) => work(tx));
     mocks.view.mockResolvedValue({ receivingOrderId: 31, observations: [] });
     mocks.options.mockResolvedValue({ items: [], nextCursor: null });
-    mocks.run.mockResolvedValue({ commandId: 90, replayed: false, httpStatus: 200, terminalState: "succeeded", body: { saved: true } });
+    mocks.execute.mockImplementation((_tx, _service, input) => custodyTestResult(input.command, input.resourceId, input.body, input.actorId));
+    mocks.run.mockImplementation(async options => ({ commandId: 90, replayed: false, terminalState: "succeeded", ...await options.work(tx) }));
   });
 
   function request(path: string, options: { method?: string; body?: unknown; authenticated?: boolean; headers?: Record<string, string> } = {}) {
@@ -96,12 +100,12 @@ describe("receiving quarantine HTTP boundary", () => {
   it.each(commands)("constructs the authenticated, resource-scoped $command descriptor", async command => {
     const response = await post(command.path, command.body);
     expect(response.status).toBe(200); expect(response.headers.get("Idempotency-Replayed")).toBe("false");
-    expect(await response.json()).toEqual({ saved: true });
+    expect(await response.json()).toMatchObject({ command: command.command, actorId: "custody-operator", idempotencyKey: key });
     expect(mocks.run).toHaveBeenCalledOnce();
     expect(mocks.run.mock.calls[0][0].descriptor).toEqual({
-      actorType: "user", actorId: "custody-operator", method: "POST", routeTemplate: command.route,
-      resourceKey: command.resource, idempotencyKey: key, contractVersion: 1,
-      commandName: `procurement.receiving.custody.${command.command.replaceAll("-", "_")}`,
+      actorType: "service", actorId: "procurement.receiving-custody", method: "POST", routeTemplate: "/api/receiving/custody-command",
+      resourceKey: "receiving:custody", idempotencyKey: key, contractVersion: 1,
+      commandName: "procurement.receiving.custody.command",
       requestHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
   });
@@ -164,7 +168,9 @@ describe("receiving quarantine HTTP boundary", () => {
   });
 
   it.each([200, 409])("preserves durable replay HTTP %s and response body", async status => {
-    const body = status === 200 ? { recovered: true } : { error: "Custody changed. Refresh its quantities.", code: "RECEIVING_CUSTODY_STALE" };
+    const identity = { command: "return", resourceId: 41, actorId: "custody-operator", idempotencyKey: key };
+    const body = status === 200 ? { ...custodyTestResult("return", 41, physicalReturn, "custody-operator"), ...identity, request: physicalReturn }
+      : { error: "Custody changed. Refresh its quantities.", code: "RECEIVING_CUSTODY_STALE", details: { custodyCommandOutcome: "rejected", ...identity } };
     mocks.run.mockResolvedValueOnce({ commandId: 90, replayed: true, httpStatus: status, terminalState: status === 200 ? "succeeded" : "rejected", body });
     const response = await post(commands[2].path, physicalReturn);
     expect(response.status).toBe(status); expect(response.headers.get("Idempotency-Replayed")).toBe("true");
@@ -204,4 +210,15 @@ describe("receiving quarantine HTTP boundary", () => {
     expect(mocks.log).toHaveBeenCalledWith("receiving.custody.request_failed", { error_code: "RECEIVING_CUSTODY_UNAVAILABLE", error_type: "Error" });
     expect(JSON.stringify(mocks.log.mock.calls)).not.toContain("SECRET");
   });
+  it("rejects a saved rejection without its matching durable identity", async () => {
+    mocks.run.mockResolvedValueOnce({ commandId: 90, replayed: true, httpStatus: 409, terminalState: "rejected", body: { error: "Source changed", code: "STALE" } });
+    const response = await post(commands[0].path, intake);
+    expect(response.status).toBe(503); expect(await response.json()).toMatchObject({ code: "RECEIVING_CUSTODY_RESULT_INVALID" });
+  });
+  it("does not mark pre-ledger key collision as a durable rejection", async () => {
+    mocks.run.mockRejectedValueOnce(new FinancialCommandError("Changed intent", 409, "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED"));
+    const response = await post(commands[0].path, intake);
+    expect(response.status).toBe(409); expect(await response.json()).not.toHaveProperty("details.custodyCommandOutcome");
+  });
+
 });

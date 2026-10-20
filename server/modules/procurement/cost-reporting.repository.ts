@@ -1,8 +1,9 @@
+import { supplierReturnCostAdjustmentSchema } from "@shared/procurement/supplier-return";
 import { costIssueSchema, costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { costReportEnvelopeSchema, retryCostReportSchema, type CostReportAcknowledgement, type CostReportEnvelope } from "@shared/procurement/cost-report-delivery";
-import { buildCostReportEnvelope, COST_REPORT_BATCH_SIZE, COST_REPORT_LEASE_MS, COST_REPORT_MAX_ATTEMPTS, CostReportingError, nextReportFailure, reportHash, verifyReportAcknowledgement, type ReportDestination } from "./cost-reporting.domain";
+import { buildCostReportEnvelope, costReportInventoryEffectMatches, COST_REPORT_BATCH_SIZE, COST_REPORT_LEASE_MS, COST_REPORT_MAX_ATTEMPTS, CostReportingError, nextReportFailure, reportHash, verifyReportAcknowledgement, type ReportDestination } from "./cost-reporting.domain";
 
 export type ReportingDatabase = Pick<Pool, "connect">;
 export type ClaimedCostReport = { id: string; leaseToken: string; attemptCount: number; cycleAttemptCount: number; envelope: CostReportEnvelope };
@@ -35,7 +36,7 @@ export class CostReportingRepository {
     return this.transaction(async (tx) => {
       await this.bind(tx,destination,now);
       const candidates = await tx.query(`SELECT event.id::text AS "eventId",event.application_id::text AS "applicationId",event.payload,event.contract_version,event.recorded_at,
-        a.recorded_by AS "applicationActor",a.recorded_at AS "applicationRecordedAt",a.status,a.evidence->'result' AS outcome,a.evidence->'reconciliation' AS reconciliation,r.id::text AS "sourceRevisionId",r.contract AS "sourceContract",r.inbound_shipment_line_id AS "shipmentLineId",r.fingerprint,r.component,r.contract->>'currency' AS currency,
+        a.recorded_by AS "applicationActor",a.recorded_at AS "applicationRecordedAt",a.status,a.evidence AS "applicationEvidence",a.evidence->'result' AS outcome,a.evidence->'reconciliation' AS reconciliation,r.id::text AS "sourceRevisionId",r.contract AS "sourceContract",r.inbound_shipment_line_id AS "shipmentLineId",r.fingerprint,r.component,r.contract->>'currency' AS currency,
         r.purchase_order_line_id AS "purchaseOrderLineId",pol.purchase_order_id AS "purchaseOrderId",
         COALESCE((SELECT jsonb_agg(jsonb_build_object('lotId',c.inventory_lot_id,'before',c.before_state,'after',c.after_state) ORDER BY c.inventory_lot_id)
           FROM inventory.cost_application_lots c WHERE c.application_id=a.id),'[]'::jsonb) AS changes
@@ -54,12 +55,44 @@ export class CostReportingRepository {
           const reviewIssues = costIssueSchema.array().safeParse(row.outcome?.issues);
           // Financial postings are separate from retained quantity evidence.
           // Verify every exported amount against the immutable owner ledger.
-          const postings = row.reconciliation || payload.historicalCostAdjustments
+          const hasInventoryEffectEvidence = payload.inventoryEffectProof !== undefined
+            || source.success && source.data.inventoryEffect !== undefined
+            || row.outcome != null && Object.prototype.hasOwnProperty.call(row.outcome, "inventoryEffectProof")
+            || row.applicationEvidence != null && (Object.prototype.hasOwnProperty.call(row.applicationEvidence, "inventoryEffectProof")
+              || Object.prototype.hasOwnProperty.call(row.applicationEvidence, "noInventoryEffectEvidence"));
+          const postings = hasInventoryEffectEvidence || row.reconciliation || payload.historicalCostAdjustments
             ? await tx.query(`SELECT id,approval_id,destination,before_mills,after_mills,delta_mills
               FROM inventory.cost_reconciliation_postings WHERE application_id=$1 ORDER BY id`,[row.applicationId]) : {rows:[]};
           const historical = postings.rows.map(posting=>({id:Number(posting.id),approvalId:Number(posting.approval_id),
             destination:posting.destination,beforeMills:Number(posting.before_mills),afterMills:Number(posting.after_mills),deltaMills:Number(posting.delta_mills)}));
           const historicalMatches=reportHash(historical)===reportHash(payload.historicalCostAdjustments ?? []);
+          const returnAdjustments = payload.supplierReturnAdjustments ?? [];
+          const expectedReturnAdjustments = supplierReturnCostAdjustmentSchema.array().max(10_000).parse(row.outcome?.supplierReturnAdjustments ?? []);
+          if (reportHash(returnAdjustments) !== reportHash(expectedReturnAdjustments)) {
+            throw new CostReportingError("COST_REPORT_RETURN_CONFLICT", "Returned-value reporting differs from the immutable cost application result.");
+          }
+          if (returnAdjustments.length) {
+            const entries = await tx.query(`SELECT entry.*,owned.supplier_return_line_id,owned.inventory_lot_id,owned.allocation_id,owned.quantity,
+                line.supplier_return_id FROM inventory.supplier_return_cost_entries entry
+              JOIN inventory.supplier_return_allocations owned ON owned.id=entry.return_allocation_id
+              JOIN procurement.supplier_return_lines line ON line.id=owned.supplier_return_line_id
+              WHERE entry.id=ANY($1::bigint[]) ORDER BY entry.id`, [returnAdjustments.map(item => item.entryId)]);
+            const retained = entries.rows.map(entry => {
+              if (String(entry.source_revision_id) !== row.sourceRevisionId || entry.recorded_by !== payload.actorId
+                || instant(entry.recorded_at) !== instant(payload.recordedAt)) {
+                throw new CostReportingError("COST_REPORT_RETURN_CONFLICT", "Returned-value entries belong to another revision, actor or posting time.");
+              }
+              return supplierReturnCostAdjustmentSchema.parse({ entryId: Number(entry.id), returnId: Number(entry.supplier_return_id),
+                returnLineId: Number(entry.supplier_return_line_id), returnAllocationId: Number(entry.return_allocation_id),
+                inventoryLotId: Number(entry.inventory_lot_id), costQuantityAllocationId: Number(entry.allocation_id),
+                quantity: Number(entry.quantity), component: entry.component, beforeMills: Number(entry.previous_mills),
+                afterMills: Number(entry.next_mills), deltaMills: Number(entry.delta_mills), postingKey: entry.posting_key });
+            });
+            if (reportHash(retained) !== reportHash([...returnAdjustments].sort((a, b) => a.entryId - b.entryId))) {
+              throw new CostReportingError("COST_REPORT_RETURN_CONFLICT", "Returned-value reporting does not match the inventory owner's immutable entries.");
+            }
+          }
+
           // A retained historical gap is explicit evidence, not an applied
           // write-off. Only this classified review may accompany posted costs.
           const appliedWithReview = row.status === "review_required" && row.outcome?.status === "review_required"
@@ -71,7 +104,17 @@ export class CostReportingRepository {
             && historical.length>0 && historicalMatches && payload.changes.length===0 && payload.cogsDeltaCents===0
             && payload.unresolvedQuantities===undefined && reviewIssues.success && reviewIssues.data.length>0
             && reviewIssues.data.every(issue=>issue.code==="COST_HISTORICAL_LINEAGE_MISSING");
-          if (!source.success || source.data.fingerprint !== row.fingerprint || source.data.component !== row.component
+          const inventoryEffectMatches = source.success && costReportInventoryEffectMatches({
+            source: source.data,
+            payload,
+            applicationStatus: row.status,
+            applicationOutcome: row.outcome,
+            applicationEvidence: row.applicationEvidence,
+            actualLotCount: row.changes.length,
+            historicalPostingCount: historical.length,
+            hasReconciliation: row.reconciliation != null,
+          });
+          if (!source.success || !inventoryEffectMatches || source.data.fingerprint !== row.fingerprint || source.data.component !== row.component
             || source.data.scope.purchaseOrderId !== row.purchaseOrderId || source.data.scope.purchaseOrderLineId !== row.purchaseOrderLineId
             || (source.data.scope.kind === "shipment_line" ? source.data.scope.inboundShipmentLineId : null) !== row.shipmentLineId
             || row.applicationActor !== payload.actorId || instant(row.applicationRecordedAt) !== instant(payload.recordedAt)

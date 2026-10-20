@@ -17,6 +17,8 @@ export const poFinancialEvidenceSchema = z
     state: z.enum(["complete", "review_required"]),
     invoicedAmountCents: cents.nullable(),
     paidAmountCents: cents.nonnegative().nullable(),
+    creditedAmountCents: cents.nonnegative().nullable().optional(),
+    settledAmountCents: cents.nonnegative().nullable().optional(),
     outstandingAmountCents: cents.nonnegative().nullable(),
     invoiceCount: z.number().int().nonnegative().safe(),
     reviewReasons: z.array(
@@ -35,6 +37,7 @@ export const poFinancialEvidenceSchema = z
       value.invoicedAmountCents,
       value.paidAmountCents,
       value.outstandingAmountCents,
+      ...(value.creditedAmountCents !== undefined || value.settledAmountCents !== undefined ? [value.creditedAmountCents ?? null,value.settledAmountCents ?? null] : []),
     ];
     if (amounts.some((amount) => amount !== null) && value.currency !== "USD") {
       context.addIssue({
@@ -62,13 +65,19 @@ export const poFinancialEvidenceSchema = z
         message: "Incomplete evidence requires an explicit review reason.",
       });
     }
+    if(value.paidAmountCents!==null && value.creditedAmountCents!==undefined && value.creditedAmountCents!==null
+      && value.settledAmountCents!==undefined && value.settledAmountCents!==null
+      && [value.paidAmountCents,value.creditedAmountCents,value.settledAmountCents].every(Number.isSafeInteger)
+      && BigInt(value.paidAmountCents)+BigInt(value.creditedAmountCents)!==BigInt(value.settledAmountCents))
+      context.addIssue({code:z.ZodIssueCode.custom,path:["settledAmountCents"],message:"Cash plus supplier credit must equal settled amount."});
     if (
       value.invoicedAmountCents !== null &&
       value.paidAmountCents !== null &&
       value.outstandingAmountCents !== null &&
       amounts.every((amount) => Number.isSafeInteger(amount)) &&
+      (value.creditedAmountCents === undefined || Number.isSafeInteger(value.creditedAmountCents)) &&
       BigInt(value.invoicedAmountCents) !==
-        BigInt(value.paidAmountCents) + BigInt(value.outstandingAmountCents)
+        BigInt(value.paidAmountCents) + BigInt(value.creditedAmountCents ?? 0) + BigInt(value.outstandingAmountCents)
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,

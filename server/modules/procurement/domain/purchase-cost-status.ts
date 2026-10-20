@@ -3,7 +3,9 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   costIssueSchema,
   costSourceRevisionSchema,
+  costInventoryEffectProofSchema,
 } from "@shared/procurement/cost-source-contracts";
+import { proveNoInventoryEffect } from "../../inventory/domain/no-inventory-effect";
 import {
   purchaseComponentPostingStatus,
   purchaseCostComponentStatusSchema,
@@ -14,6 +16,9 @@ const resultSchema = z.object({
   status: z.enum(["applied", "review_required"]),
   lotsUpdated: z.number().int().nonnegative().safe(),
   issues: z.array(costIssueSchema),
+  cogsRowsUpdated: z.number().int().nonnegative().safe().optional(),
+  totalCogsDeltaCents: z.number().int().safe().optional(),
+  inventoryEffectProof: costInventoryEffectProofSchema.optional(),
 });
 export interface CurrentPurchaseComponentEvidence {
   input: CostRevisionInput;
@@ -33,6 +38,7 @@ export interface CurrentPurchaseComponentEvidence {
     amountMatches: boolean;
   }[];
   historicalPosting?: { destination: "historical_cogs" | "inventory_variance"; amountMills: number };
+  noInventoryEffectEvidence?: unknown;
 }
 
 /** A successful old attempt is not current authority: compare the live source,
@@ -68,6 +74,17 @@ export function projectPurchaseComponentStatus(
   }
   if (sourceCurrent && saved.success) issues.push(...saved.data.result.issues.filter(issue =>
     !(evidence.historicalPosting && issue.code === "COST_UNRESOLVED_QUANTITY_RETAINED")));
+  if (input.inventoryEffect) {
+    const current = proveNoInventoryEffect(input, evidence.noInventoryEffectEvidence);
+    issues.push(...current.issues);
+    if (sourceCurrent && application && (application.status === "applied") && (!saved.success || !current.proof
+      || canonicalJson(saved.data.result.inventoryEffectProof ?? null) !== canonicalJson(current.proof)
+      || saved.data.result.lotsUpdated !== 0 || saved.data.result.cogsRowsUpdated !== 0 || saved.data.result.totalCogsDeltaCents !== 0
+      || evidence.lotIds.length !== 0 || evidence.unprovenLotIds.length !== 0 || evidence.changedLots.length !== 0 || evidence.historicalPosting)) {
+      issues.push({ code: "COST_NO_EFFECT_PROOF_UNVERIFIED",
+        message: "The saved completion does not match the current full-return, inventory and cost-history proof. Review this source before treating its costs as complete." });
+    }
+  }
   if (
     !issues.some((issue) => issue.code === "COST_HISTORICAL_LINEAGE_MISSING")
   ) {
@@ -122,18 +139,19 @@ export function projectPurchaseComponentStatus(
   const unique = [
     ...new Map(issues.map((issue) => [canonicalJson(issue), issue])).values(),
   ];
+  const status = purchaseComponentPostingStatus({
+    sourceCurrent, issues: unique,
+    applicationStatus: sourceCurrent ? (evidence.historicalPosting ? "applied" : application?.status ?? null) : null,
+  });
   return purchaseCostComponentStatusSchema.parse({
     component: input.component,
-    status: purchaseComponentPostingStatus({
-      sourceCurrent,
-      issues: unique,
-      applicationStatus: sourceCurrent ? (evidence.historicalPosting ? "applied" : application?.status ?? null) : null,
-    }),
+    status,
     sourceEvidence: input.evidence,
     sourceCurrent,
     sourceRevisionId: revision?.id ?? null,
     applicationId: application?.id ?? null,
     issues: unique,
     ...(evidence.historicalPosting ? { historicalPosting: evidence.historicalPosting } : {}),
+    ...(status === "applied" && input.inventoryEffect ? { inventoryEffect: input.inventoryEffect } : {}),
   });
 }

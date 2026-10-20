@@ -100,6 +100,7 @@ function selectChain(rows: unknown[]) {
 function buildTx(selectResults: unknown[][], writeReached: Error) {
   return {
     select: vi.fn(() => selectChain(selectResults.shift() ?? [])),
+    execute: vi.fn(async () => ({ rows: [{ present: false }] })),
     insert: vi.fn(() => {
       throw writeReached;
     }),

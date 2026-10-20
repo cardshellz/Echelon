@@ -1,3 +1,4 @@
+import { hasInvoiceCreditHistory } from "./supplier-credit-settlement.repository";
 import { readShipmentBillingOwnership } from "./shipment-billing-ownership.repository";
 import { and, asc, eq, inArray, or } from "drizzle-orm";
 import { z } from "zod";
@@ -34,7 +35,8 @@ async function readReplacementSource(client: ApLedgerDbClient, invoiceId: number
   const [shipment] = shipmentQuery === null ? [] : await (lock ? shipmentQuery.for("update") : shipmentQuery);
   const shipmentPoIds = invoice.inboundShipmentId === null || links.length === 0 ? [] :
     ((await readShipmentPurchaseOrders(client, [invoice.inboundShipmentId])).get(invoice.inboundShipmentId) ?? []).map(po => po.id);
-  return { invoice, lines, costs, links, paymentHistory, successorInvoiceId: successor?.id ?? null, shipment: shipment ?? null, shipmentPoIds };
+  const hasCreditHistory = await hasInvoiceCreditHistory(client, invoiceId);
+  return { invoice, lines, costs, links, paymentHistory, hasCreditHistory, successorInvoiceId: successor?.id ?? null, shipment: shipment ?? null, shipmentPoIds };
 }
 
 

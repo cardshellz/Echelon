@@ -1,3 +1,5 @@
+import { readVerifiedInvoiceSettlementProjections } from "./supplier-credit-settlement.repository";
+import { costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import { readPurchaseRfqOrigins } from "./purchase-rfq-origin.repository";
 import { readRows, dateValues, moneyValues, uniqueIds, PURCHASE_WORKSPACE_RECORD_LIMIT, PURCHASE_WORKSPACE_LINE_LIMIT, type Row } from "./purchase-workspace-read";
 import { readPurchaseCostEvidence } from "./purchase-cost-trace.repository";
@@ -135,9 +137,9 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
         }
         const [invoiceRows, invoicePoLinks] = invoiceIds.length === 0 ? [[], []] : [
           await readRows(tx, sql`
-            SELECT id, invoice_number AS "invoiceNumber", status, currency,
+            SELECT id, vendor_id AS "vendorId", invoice_number AS "invoiceNumber", status, currency,
               invoice_date AS "invoiceDate", due_date AS "dueDate", inbound_shipment_id AS "inboundShipmentId",
-              invoiced_amount_cents AS "invoicedAmountCents", paid_amount_cents AS "paidAmountCents", balance_cents AS "balanceCents"
+              invoiced_amount_cents AS "invoicedAmountCents", paid_amount_cents AS "paidAmountCents", credited_amount_cents AS "creditedAmountCents", balance_cents AS "balanceCents"
             FROM procurement.vendor_invoices
             WHERE id = ANY(${sql.param(invoiceIds)}::int[])
             ORDER BY invoice_date, id LIMIT ${PURCHASE_WORKSPACE_RECORD_LIMIT + 1}
@@ -186,14 +188,27 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
         }
         const receipts = [...receiptMap.values()].map((row) =>
           purchaseWorkspaceSchema.shape.receipts.element.parse(dateValues(row, ["expectedDate", "receivedDate", "closedDate"])));
+        const invoiceSettlements = await readVerifiedInvoiceSettlementProjections(tx, invoiceRows.map(row => {
+          if (typeof row.currency !== "string") throw new PurchaseWorkspaceError("PURCHASE_WORKSPACE_CURRENCY_INVALID", "Invoice currency evidence is invalid.", 500);
+          if (typeof row.status !== "string") throw new PurchaseWorkspaceError("PURCHASE_WORKSPACE_STATUS_INVALID", "Invoice status evidence is invalid.", 500);
+          return {
+            status: row.status,
+            id: costInteger(row.id, "invoice.id", 1), vendorId: costInteger(row.vendorId, "invoice.vendorId", 1), currency: row.currency,
+            invoicedAmountCents: costInteger(row.invoicedAmountCents, "invoice.gross", -Number.MAX_SAFE_INTEGER),
+            paidAmountCents: costInteger(row.paidAmountCents, "invoice.cash"),
+            creditedAmountCents: costInteger(row.creditedAmountCents, "invoice.credits"),
+            balanceCents: costInteger(row.balanceCents, "invoice.balance")
+          };
+        }));
         const invoices = invoiceRows.map((row) => {
           const links = linksByInvoice.get(row.id as number) ?? [];
           const purchaseLink = links.find((link) => link.purchaseOrderId === purchaseOrderId);
           return purchaseWorkspaceSchema.shape.invoices.element.parse({
             ...dateValues(moneyValues({
               ...row,
+              ...invoiceSettlements.get(row.id as number)!,
               allocatedToPurchaseCents: purchaseLink ? purchaseLink.allocatedAmountCents : null,
-            }, ["invoicedAmountCents", "paidAmountCents", "balanceCents", "allocatedToPurchaseCents"]), ["invoiceDate", "dueDate"]),
+            }, ["invoicedAmountCents", "paidAmountCents", "creditedAmountCents", "settledAmountCents", "balanceCents", "allocatedToPurchaseCents"]), ["invoiceDate", "dueDate"]),
             amountScope: "whole_invoice",
             purchaseOrderIds: uniqueIds(links.map((link) => link.purchaseOrderId)),
           });

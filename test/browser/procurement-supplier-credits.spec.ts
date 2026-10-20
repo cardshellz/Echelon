@@ -1,0 +1,276 @@
+import { fullQuarantineSupplierCredit } from "../fixtures/full-quarantine-cost";
+import {expect,test,type Page,type Route} from "@playwright/test";
+import {installFixtures,po} from "./procurement-fixtures";
+import {invoiceSourceFixture,unbilledOwnershipFixture} from "../fixtures/invoice-source";
+import {installQuarantineFixtures} from "./procurement-quarantine-fixtures";
+import {invoiceListItem,workListPage} from "./procurement-ap-work-list-fixtures";
+import {supplierCreditFixture,supplierCreditOptionsFixture,creditAllowed,creditDenied} from "../fixtures/supplier-credit";
+import type {SupplierCreditDetail} from "../../shared/procurement/supplier-credit";
+
+test.use({timezoneId:"America/Los_Angeles"});
+type Mode="ok"|"lost"|"auth"|"mismatch"|"reject";
+async function setup(page:Page){
+ const failures=await installFixtures(page);
+ const state={actor:"ap-reader",recheckLeavesReview:false,edit:true,approve:true,mode:"ok" as Mode,detailFailed:false,sourceFailed:false,listFailed:false,invoiceFailed:false,credit:supplierCreditFixture(),options:supplierCreditOptionsFixture(),requests:[] as Array<{command:string;key:string;body:any}>,records:new Map<string,any>(),queries:[] as URLSearchParams[]};
+ await page.route("**/api/auth/me",route=>route.fulfill({json:{user:{id:state.actor,username:state.actor,role:"admin"},permissions:["purchasing:view",...(state.edit?["purchasing:edit"]:[]),...(state.approve?["purchasing:approve"]:[])],roles:["admin"]}}));
+ await page.route("**/api/vendor-invoices/71/supplier-credit-options",route=>state.sourceFailed?route.fulfill({status:503,json:{error:"Unavailable"}}):route.fulfill({json:state.options}));
+ await page.route("**/api/vendor-invoices/work-list?*",route=>{const params=new URL(route.request().url()).searchParams;state.queries.push(params);if(state.invoiceFailed)return route.fulfill({status:503,json:{error:"Invoice read unavailable"}});const rows=Array.from({length:25},(_,index)=>invoiceListItem({id:index+201,invoiceNumber:`INV-${index+201}`,vendorId:2,status:"approved",balanceCents:10000,creditedAmountCents:0,settledAmountCents:0}));return route.fulfill({json:workListPage(rows,route.request().url())});});
+ async function command(route:Route,operation:string){
+  const request=route.request();const body=request.postDataJSON();const key=request.headers()["idempotency-key"];state.requests.push({command:operation,key,body});
+  if(state.mode==="auth")return route.fulfill({status:401,json:{error:"Session expired"}});
+  if(state.mode==="reject")return route.fulfill({status:409,json:{error:"Review current supplier credit",details:{creditCommandOutcome:"rejected",command:operation,actorId:state.actor,idempotencyKey:key}}});
+  let result=state.records.get(key);
+  if(!result){
+   let ids:number[]=[];let reversed:number|null=null;
+   if(operation==="create")state.credit=supplierCreditFixture({id:body.replacesCreditId?10:9,sourceInvoiceId:body.sourceInvoiceId,supplierReference:body.supplierReference,creditCalendarDate:body.creditCalendarDate,reason:body.reason,status:"draft",balanceState:"draft",totalAmountCents:body.lines.reduce((sum:number,line:any)=>sum+line.amountCents,0),appliedAmountCents:0,unappliedAmountCents:0,replacesCreditId:body.replacesCreditId??null,approvedAt:null,approvedBy:null,lines:body.lines.map((line:any,index:number)=>({...line,id:index+1,label:"Toploader cases",sourceEvidence:{},costState:"pending",costIssues:[]})),costStatus:"pending",capabilities:{approve:creditAllowed,apply:creditDenied,void:creditAllowed,replace:creditDenied}});
+   if(operation==="approve"){state.credit.status="approved";state.credit.balanceState="available";state.credit.unappliedAmountCents=state.credit.totalAmountCents;state.credit.approvedBy=state.actor;state.credit.approvedAt="2026-10-19T17:00:00.000Z";state.credit.capabilities={approve:creditDenied,apply:creditAllowed,void:creditAllowed,replace:creditDenied};state.credit.costStatus="review_required";state.credit.costIssues=[{code:"SUPPLIER_CREDIT_COST_REVIEW",message:"Historical cost destination requires reviewed evidence."}];}
+   if(operation==="apply"){
+    for(const row of body.allocations){const id=31+state.credit.applications.length;ids.push(id);state.credit.applications.push({id,...row,invoiceNumber:`INV-${row.vendorInvoiceId}`,actorId:state.actor,recordedAt:"2026-10-19T17:00:00.000Z",reason:body.reason,reversal:null,canReverse:creditAllowed});}
+    const total=body.allocations.reduce((sum:number,row:any)=>sum+row.appliedAmountCents,0);state.credit.appliedAmountCents!+=total;state.credit.unappliedAmountCents!-=total;state.credit.capabilities.void={allowed:false,code:"ACTIVE_APPLICATIONS",reason:"Reverse active applications before voiding."};
+   }
+   if(operation==="reverse"){reversed=Number(new URL(request.url()).pathname.split("/").at(-2));const row=state.credit.applications.find(item=>item.id===reversed)!;row.reversal={id:51+row.id,actorId:state.actor,recordedAt:"2026-10-19T18:00:00.000Z",reason:body.reason};row.canReverse=creditDenied;state.credit.appliedAmountCents!-=row.appliedAmountCents;state.credit.unappliedAmountCents!+=row.appliedAmountCents;if(state.credit.appliedAmountCents===0)state.credit.capabilities.void=creditAllowed;}
+   if(operation==="void"){state.credit.status="voided";state.credit.balanceState="voided";state.credit.unappliedAmountCents=0;state.credit.voidedAt="2026-10-19T19:00:00.000Z";state.credit.voidedBy=state.actor;state.credit.voidReason=body.reason;state.credit.capabilities={approve:creditDenied,apply:creditDenied,void:creditDenied,replace:creditAllowed};}
+   if(operation==="reconcile_costs"&&!state.recheckLeavesReview){
+    const verified=fullQuarantineSupplierCredit();
+    state.credit.lines=verified.lines;state.credit.costStatus=verified.costStatus;state.credit.costIssues=[];
+    state.credit.capabilities.reconcileCosts={allowed:false,code:"COST_COMPLETE",reason:"Current cost disposition is complete."};
+   }
+   if(operation!=="reconcile_costs")state.credit.version=(state.records.size+2).toString(16).padStart(64,"0");
+   result=structuredClone({command:operation,actorId:state.actor,idempotencyKey:key,creditId:state.credit.id,request:body,applicationIds:ids,reversedApplicationId:reversed,credit:state.credit});state.records.set(key,result);
+  }
+  if(state.mode==="lost")return route.abort("failed");return route.fulfill({json:state.mode==="mismatch"?{...result,creditId:999}:result});
+ }
+ await page.route("**/api/supplier-credits?*",route=>state.listFailed?route.fulfill({status:503,json:{error:"Unavailable"}}):route.fulfill({json:{items:[state.credit],total:1,limit:20,offset:0,nextOffset:null}}));
+ await page.route("**/api/supplier-credits",route=>command(route,"create"));
+ await page.route(/\/api\/supplier-credits\/\d+$/,route=>state.detailFailed?route.fulfill({status:503,json:{error:"Unavailable"}}):route.fulfill({json:state.credit}));
+ for(const operation of ["approve","void","reconcile_costs"]){await page.route(`**/api/supplier-credits/*/${operation}`,route=>command(route,operation));}
+ await page.route("**/api/supplier-credits/*/applications",route=>command(route,"apply"));
+ await page.route("**/api/supplier-credits/*/applications/*/reverse",route=>command(route,"reverse"));
+ return {state,failures};
+}
+async function openCredit(page:Page){await page.goto("/supplier-credits/9");await expect(page.getByRole("heading",{name:"Supplier credit CN-100",exact:true})).toBeVisible();}
+async function createDraft(page:Page,split=false){
+ await page.goto("/supplier-credits?new=1&sourceInvoiceId=71");await page.getByLabel("Supplier credit reference",{exact:true}).fill("CN-100");await page.getByLabel("Credit document date").fill("2026-10-19");await page.getByLabel("Credit amount for Toploader cases",{exact:true}).fill(split?".10":"25.00");await page.getByLabel("Credit reason and cost treatment",{exact:true}).selectOption("price:product");
+ if(split){await page.getByRole("button",{name:"Add another treatment for Toploader cases",exact:true}).click();await page.getByLabel("Credit amount for Toploader cases",{exact:true}).nth(1).fill(".20");await page.getByLabel("Credit reason and cost treatment",{exact:true}).nth(1).selectOption("price:packaging");}
+ await page.getByLabel("Credit reason / document evidence").fill("Supplier confirmed price adjustment");await page.getByRole("button",{name:"Create credit draft",exact:true}).click();
+}
+async function reviewAction(page:Page,label:string){await page.getByRole("button",{name:label,exact:true}).first().click();const dialog=page.getByRole("dialog");await dialog.getByLabel("Reason for this credit action").fill("Reviewed original supplier evidence");await dialog.getByRole("button",{name:label,exact:true}).click();}
+async function applyCredit(page:Page,amount="25.00"){await page.getByLabel("Apply credit to INV-201",{exact:true}).fill(amount);await page.getByLabel("Credit application reason").fill("Apply approved supplier credit");await page.getByRole("button",{name:"Apply supplier credit",exact:true}).click();}
+
+test("creates one supplier document with product and packaging reductions and preserves gross evidence",async({page},info)=>{
+ const{state,failures}=await setup(page);await createDraft(page,true);await expect(page).toHaveURL(/supplier-credits\/9/);await expect(page.getByRole("heading",{name:"Supplier credit CN-100",exact:true})).toBeVisible();expect(state.requests[0].body.lines).toEqual([{invoiceLineId:701,amountCents:10,disposition:{kind:"price_reduction",component:"product"}},{invoiceLineId:701,amountCents:20,disposition:{kind:"price_reduction",component:"packaging"}}]);await expect(page.getByText("$0.30",{exact:true})).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:info.outputPath("supplier-credit-draft.png"),fullPage:true,animations:"disabled"});expect(failures).toEqual([]);
+});
+test("approval keeps cost review separate from credit availability and invoice settlement",async({page})=>{const{state}=await setup(page);state.credit=supplierCreditFixture({status:"draft",balanceState:"draft",unappliedAmountCents:0,capabilities:{approve:creditAllowed,apply:creditDenied,void:creditAllowed,replace:creditDenied}});await openCredit(page);await reviewAction(page,"Approve credit");await expect(page.getByRole("region",{name:"Supplier credit cost disposition"})).toContainText("Historical cost destination requires reviewed evidence");await expect(page.getByRole("button",{name:"Apply supplier credit",exact:true})).toBeVisible();expect(state.requests.map(row=>row.command)).toEqual(["approve"]);});
+test("applies across pages, repeats a partial application, reverses explicitly and retains history before void",async({page},info)=>{
+ const{state,failures}=await setup(page);await openCredit(page);await page.getByLabel("Apply credit to INV-201",{exact:true}).fill(".10");await page.getByRole("navigation",{name:"credit invoices pages"}).getByRole("button",{name:"Next",exact:true}).click();await page.getByLabel("Apply credit to INV-225",{exact:true}).fill(".20");await page.getByLabel("Credit application reason").fill("Apply first partial credit");await page.getByRole("button",{name:"Apply supplier credit",exact:true}).click();await expect(page.getByRole("button",{name:"Reverse application #31",exact:true})).toBeVisible();await expect(page.getByRole("button",{name:"Void credit",exact:true})).toBeDisabled();await page.getByRole("navigation",{name:"credit invoices pages"}).getByRole("button",{name:"Previous",exact:true}).click();await applyCredit(page,".30");await expect(page.getByRole("region",{name:"Supplier credit application history"}).getByRole("link",{name:"INV-201",exact:true})).toHaveCount(2);
+ for(const id of [31,32,33]){await page.getByRole("button",{name:`Reverse application #${id}`,exact:true}).click();const dialog=page.getByRole("dialog");await dialog.getByLabel("Reason for this credit action").fill("Reverse reviewed application");await dialog.getByRole("button",{name:"Reverse credit application",exact:true}).click();await expect(dialog).toHaveCount(0);}
+ await reviewAction(page,"Void credit");await expect(page.getByRole("link",{name:"Replace voided credit",exact:true})).toBeVisible();await expect(page.getByRole("region",{name:"Supplier credit application history"})).toContainText("Reversed");expect(state.credit.applications).toHaveLength(3);expect(state.requests.map(row=>row.command)).toEqual(["apply","apply","reverse","reverse","reverse","void"]);expect(state.queries.every(query=>query.get("vendorId")==="2"&&query.get("status")==="approved,partially_paid")).toBe(true);await expect(page.getByRole("dialog")).toHaveCount(0);await expect(page.locator('div[data-state="closed"].fixed.inset-0')).toHaveCount(0);await page.getByRole("region",{name:"Supplier credit application history"}).screenshot({path:info.outputPath("supplier-credit-reversal-history.png"),animations:"disabled"});expect(failures).toEqual([]);
+});
+for(const operation of ["create","apply","approve","reverse","void"] as const){test(`${operation} lost response survives reload and session expiry with one durable intent`,async({page})=>{
+ const{state}=await setup(page);state.mode="lost";
+ if(operation==="create")await createDraft(page);else{
+  if(operation==="approve")state.credit=supplierCreditFixture({status:"draft",balanceState:"draft",unappliedAmountCents:0,capabilities:{approve:creditAllowed,apply:creditDenied,void:creditAllowed,replace:creditDenied}});
+  if(operation==="reverse")state.credit=supplierCreditFixture({appliedAmountCents:2500,unappliedAmountCents:7500,applications:[{id:31,vendorInvoiceId:201,invoiceNumber:"INV-201",appliedAmountCents:2500,actorId:"ap-reader",recordedAt:"2026-10-19T16:00:00.000Z",reason:"Earlier application",reversal:null,canReverse:creditAllowed}]});
+  await openCredit(page);if(operation==="apply")await applyCredit(page);else if(operation==="reverse"){await page.getByRole("button",{name:"Reverse application #31",exact:true}).click();const dialog=page.getByRole("dialog");await dialog.getByLabel("Reason for this credit action").fill("Reverse original application");await dialog.getByRole("button",{name:"Reverse credit application",exact:true}).click();}else await reviewAction(page,operation==="approve"?"Approve credit":"Void credit");
+ }
+ await expect(page.getByRole("region",{name:"Saved supplier credit request"}).first()).toBeVisible();state.mode="auth";await page.reload();await page.getByRole("button",{name:"Recover saved credit request",exact:true}).click();await expect(page.getByText("Session expired",{exact:true}).first()).toBeVisible();state.mode="ok";await page.getByRole("button",{name:"Recover saved credit request",exact:true}).click();await expect(page.getByRole("region",{name:"Saved supplier credit request"})).toHaveCount(0);expect(state.records.size).toBe(1);expect(state.requests).toHaveLength(3);expect(state.requests.every(row=>row.key===state.requests[0].key&&JSON.stringify(row.body)===JSON.stringify(state.requests[0].body))).toBe(true);
+});}
+test("another operator cannot replace an unresolved supplier credit",async({page})=>{const{state}=await setup(page);state.mode="lost";await createDraft(page);await expect(page.getByRole("region",{name:"Saved supplier credit request"})).toBeVisible();state.actor="different-buyer";await page.goto("/supplier-credits");await expect(page.getByRole("alert").filter({hasText:"another operator"})).toBeVisible();await expect(page.getByRole("button",{name:"Record supplier credit",exact:true})).toBeDisabled();expect(state.requests).toHaveLength(1);state.actor="ap-reader";state.mode="ok";await page.reload();await page.getByRole("button",{name:"Recover saved credit request",exact:true}).click();await expect(page.getByRole("region",{name:"Saved supplier credit request"})).toHaveCount(0);});
+test("malformed success retains recovery while durable rejection permits a newly reviewed request",async({page})=>{const{state}=await setup(page);state.mode="mismatch";await openCredit(page);await applyCredit(page);await expect(page.getByRole("region",{name:"Saved supplier credit request"})).toBeVisible();state.mode="ok";await page.getByRole("button",{name:"Recover saved credit request",exact:true}).click();await expect(page.getByRole("region",{name:"Saved supplier credit request"})).toHaveCount(0);state.mode="reject";await applyCredit(page,"1.00");await expect(page.getByText("Review current supplier credit",{exact:true}).first()).toBeVisible();await expect(page.getByRole("region",{name:"Saved supplier credit request"})).toHaveCount(0);state.mode="ok";await page.getByRole("button",{name:"Apply supplier credit",exact:true}).click();await expect.poll(()=>state.records.size).toBe(2);expect(state.requests.at(-1)!.key).not.toBe(state.requests.at(-2)!.key);});
+test("source and detail failures remain recoverable without presenting zero balances",async({page})=>{const{state}=await setup(page);state.detailFailed=true;await page.goto("/supplier-credits/9");await expect(page.getByRole("button",{name:"Retry supplier credit",exact:true})).toBeVisible();state.detailFailed=false;await page.getByRole("button",{name:"Retry supplier credit",exact:true}).click();await expect(page.getByRole("heading",{name:"Supplier credit CN-100",exact:true})).toBeVisible();state.sourceFailed=true;await page.goto("/supplier-credits?new=1&sourceInvoiceId=71");await expect(page.getByRole("button",{name:"Retry credit source",exact:true})).toBeVisible();await expect(page.getByRole("button",{name:"Create credit draft",exact:true})).toBeDisabled();state.sourceFailed=false;await page.getByRole("button",{name:"Retry credit source",exact:true}).click();await expect(page.getByLabel("Supplier credit reference",{exact:true})).toBeVisible();});
+test("read-only users inspect credit history but cannot create or settle",async({page})=>{const{state}=await setup(page);state.edit=false;state.approve=false;await page.goto("/supplier-credits");await expect(page.getByRole("link",{name:"CN-100",exact:true})).toBeVisible();await expect(page.getByRole("button",{name:"Record supplier credit",exact:true})).toHaveCount(0);await page.getByRole("link",{name:"CN-100",exact:true}).click();await expect(page.getByRole("region",{name:"Supplier credit application history"})).toBeVisible();await expect(page.getByRole("button",{name:"Apply supplier credit",exact:true})).toHaveCount(0);expect(state.requests).toEqual([]);});
+test("physical return credit requires verified source quantity and evidence",async({page})=>{const{state}=await setup(page);await page.goto("/supplier-credits?new=1&sourceInvoiceId=71&returnDispositionId=41");await page.getByLabel("Supplier credit reference",{exact:true}).fill("CN-RETURN");await page.getByLabel("Credit amount for Toploader cases",{exact:true}).fill("20.00");await page.getByLabel("Credit reason and cost treatment",{exact:true}).selectOption("return:41");await page.getByLabel("Returned quantity",{exact:false}).fill("4");await page.getByLabel("Credit reason / document evidence").fill("Two damaged cases returned to supplier");await page.getByRole("button",{name:"Create credit draft",exact:true}).click();await expect(page.getByRole("alert")).toContainText("valid returned quantity");expect(state.requests).toEqual([]);await page.getByLabel("Returned quantity",{exact:false}).fill("2");await page.getByRole("button",{name:"Create credit draft",exact:true}).click();await expect(page).toHaveURL(/supplier-credits\/9/);expect(state.requests[0].body.lines[0].disposition).toEqual({kind:"quarantine_return",returnDispositionId:41,quantity:2,evidenceReference:"RMA-41"});});
+test("voided credit replacement retains the real reference and explicit predecessor",async({page})=>{const{state}=await setup(page);state.credit=supplierCreditFixture({status:"voided",balanceState:"voided",unappliedAmountCents:0,capabilities:{approve:creditDenied,apply:creditDenied,void:creditDenied,replace:creditAllowed}});await openCredit(page);await page.getByRole("link",{name:"Replace voided credit",exact:true}).click();await expect(page.getByLabel("Supplier credit reference",{exact:true})).toHaveValue("CN-100");await expect(page.getByLabel("Supplier credit reference",{exact:true})).toBeDisabled();await page.getByLabel("Credit amount for Toploader cases",{exact:true}).fill("10.00");await page.getByLabel("Credit reason and cost treatment",{exact:true}).selectOption("price:product");await page.getByLabel("Credit reason / document evidence").fill("Correct mistaken source amount");await page.getByRole("button",{name:"Create credit draft",exact:true}).click();await expect(page).toHaveURL(/supplier-credits\/10/);await expect(page.getByRole("link",{name:"Replaces credit #9",exact:true})).toBeVisible();expect(state.requests[0].body.replacesCreditId).toBe(9);expect(state.requests[0].body.supplierReference).toBe("CN-100");});
+test("failed persistent storage prevents the credit document request",async({page})=>{const{state}=await setup(page);await page.addInitScript(()=>{const save=Storage.prototype.setItem;Storage.prototype.setItem=function(key,value){if(key==="echelon:supplier-credit:v1")throw Error("Unavailable");return save.call(this,key,value);};});await createDraft(page);await expect(page.getByText(/request was not sent because its recovery could not be saved/).first()).toBeVisible();expect(state.requests).toEqual([]);});
+
+for(const screen of ["invoice","invoice-list","shipment","po","dashboard"] as const){test(`${screen} preserves original amount and distinguishes cash from applied supplier credits`,async({page})=>{
+ const failures=await installFixtures(page);const invoice={id:71,inboundShipmentId:42,invoiceNumber:"INV-CREDIT",vendorId:2,vendorName:"Test supplier",status:"paid",currency:"USD",invoiceDate:null,invoicedAmountCents:10000,paidAmountCents:7500,creditedAmountCents:2500,settledAmountCents:10000,balanceCents:0,sourceCapabilities:invoiceSourceFixture(),lines:[],poLinks:[],attachments:[],payments:[]};
+ await page.route("**/api/vendor-invoices/71",route=>route.fulfill({json:invoice}));
+ await page.route("**/api/vendor-invoices/work-list?*",route=>route.fulfill({json:workListPage([invoiceListItem(invoice)],route.request().url())}));
+ await page.route("**/api/purchase-orders/17/invoices",route=>route.fulfill({json:{invoices:[invoice]}}));
+ await page.route("**/api/purchase-orders/17/financial-evidence",route=>route.fulfill({json:{purchaseOrderId:17,currency:"USD",state:"complete",invoiceCount:1,invoicedAmountCents:10000,paidAmountCents:7500,creditedAmountCents:2500,settledAmountCents:10000,outstandingAmountCents:0,reviewReasons:[]}}));
+ await page.route("**/api/inbound-shipments/42/invoices",route=>route.fulfill({json:{invoices:[invoice],summary:{invoiceCount:1,activeInvoiceCount:1,totalInvoicedCents:10000,totalPaidCents:7500,totalCreditedCents:2500,outstandingCents:0}}}));
+ await page.route("**/api/ap/summary",route=>route.fulfill({json:{totalOutstandingCents:0,openInvoiceCount:0,paidAllTimeCents:7500,creditedAllTimeCents:2500,agingBuckets:{},vendorAging:[],recentPayments:[],recentlyPaid:[invoice]}}));
+ await page.goto(screen==="invoice"?"/ap-invoices/71":screen==="invoice-list"?"/ap-invoices":screen==="shipment"?"/shipments/42?tab=invoices":screen==="po"?"/purchase-orders/17?tab=invoices":"/ap");
+ if(screen==="po"){const card=page.getByRole("region",{name:"Purchase order financial evidence"});await expect(card).toContainText("Cash paid for this PO$75.00");await expect(card).toContainText("Credits applied to this PO$25.00");await expect(card).toContainText("Invoiced to this PO$100.00");}
+ else if(screen==="invoice"){await expect(page.getByText("Credits applied",{exact:true})).toBeVisible();await expect(page.getByText("$25.00",{exact:true})).toBeVisible();await expect(page.getByText("$75.00",{exact:true})).toBeVisible();await expect(page.getByText("$100.00",{exact:true}).first()).toBeVisible();}
+ else if(screen==="dashboard"){await expect(page.getByText("Supplier credits applied",{exact:true})).toBeVisible();await expect(page.getByText("$25.00",{exact:true})).toBeVisible();await expect(page.getByText("Cash paid",{exact:true})).toBeVisible();}
+ else{const row=page.getByRole("row").filter({hasText:"INV-CREDIT"});await expect(row).toContainText("$100.00");await expect(row).toContainText("$75.00");await expect(row).toContainText("$25.00");await expect(row).toContainText("settled");}
+ await expect(page.getByRole("link",{name:"Review supplier credits",exact:true}).first()).toBeVisible();expect(failures).toEqual([]);
+});}
+test("negative shipment charge offers credit review without an ordinary invoice command",async({page})=>{
+ const failures=await installFixtures(page);await page.route("**/api/auth/me",route=>route.fulfill({json:{user:{id:"ap-reader",username:"ap-reader",role:"admin"},permissions:["purchasing:view","purchasing:edit"],roles:["admin"]}}));
+ await page.route("**/api/inbound-shipments/42",route=>route.fulfill({json:{id:42,shipmentNumber:"SHIP-CREDIT",status:"booked",mode:"sea_fcl",lines:[],statusHistory:[],costs:[{id:9,costType:"freight",vendorId:2,description:"Supplier reduction",estimatedCents:-2500,actualCents:null,billingOwnership:{...unbilledOwnershipFixture(),canCreateInvoice:false,message:"Negative charges require supplier credit review."}}]}}));
+ await page.goto("/shipments/42?tab=costs");await expect(page.getByRole("button",{name:"Add Invoice",exact:true})).toHaveCount(0);await expect(page.getByRole("link",{name:"Review supplier credits",exact:true})).toHaveAttribute("href",/inboundShipmentId=42/);await page.getByRole("link",{name:"Review supplier credits",exact:true}).click();await expect(page).toHaveURL(/supplier-credits.*inboundShipmentId=42/);expect(failures).toEqual([]);
+});
+test("physical return opens credit source selection without inventing invoice ownership",async({page})=>{
+ const{state,failures}=await installQuarantineFixtures(page,{existing:true});await page.route("**/api/auth/me",route=>route.fulfill({json:{user:{id:"test-user",username:"test-user",role:"admin"},permissions:["purchasing:view","purchasing:edit"],roles:["admin"]}}));const observation=state.view.observations[0];observation.returnedQty=1;observation.unallocatedQty=2;observation.physicalHeldQty=2;observation.dispositions=[{id:41,kind:"return",observationQty:1,actorId:"receiver",recordedAt:"2026-10-19T16:00:00.000Z",reason:"Returned damaged carton",evidenceReference:"RMA-41",acceptanceId:null}];await page.reload();const link=page.getByRole("link",{name:"Review supplier credit for return #41",exact:true});await expect(link).toBeVisible();const href=await link.getAttribute("href");expect(href).toContain("returnDispositionId=41");expect(href).not.toContain("sourceInvoiceId");await link.click();await expect(page.getByText(/Physical return #41: choose the supplier invoice/)).toBeVisible();expect(state.commands).toEqual([]);expect(failures).toEqual([]);
+});
+test("saved credit recovery remains available when detail navigation fails",async({page})=>{const{state}=await setup(page);state.mode="lost";await openCredit(page);await applyCredit(page);await expect(page.getByRole("region",{name:"Saved supplier credit request"})).toBeVisible();state.detailFailed=true;await page.reload();await expect(page.getByRole("button",{name:"Retry supplier credit",exact:true})).toBeVisible();state.mode="ok";await page.getByRole("button",{name:"Recover saved credit request",exact:true}).click();await expect(page.getByRole("region",{name:"Saved supplier credit request"})).toHaveCount(0);expect(state.records.size).toBe(1);});
+
+
+test("never-approved voided draft shows no cost effect rather than unresolved posting",async({page})=>{
+ const {state}=await setup(page);state.credit=supplierCreditFixture({status:"voided",balanceState:"voided",unappliedAmountCents:0,costStatus:"not_applicable",approvedAt:null,approvedBy:null,lines:[],capabilities:{approve:creditDenied,apply:creditDenied,void:creditDenied,replace:creditAllowed}});
+ await openCredit(page);await expect(page.getByRole("region",{name:"Supplier credit cost disposition"})).toContainText("No cost effect");await expect(page.getByText(/Resolve the recorded cost issues/)).toHaveCount(0);
+});
+test("stale source refresh preserves entered values but requires fresh evidence",async({page})=>{
+ const {state}=await setup(page);await page.goto("/supplier-credits?new=1&sourceInvoiceId=71");await page.getByLabel("Supplier credit reference",{exact:true}).fill("CN-REVIEW");await page.getByLabel("Credit amount for Toploader cases",{exact:true}).fill("50.00");await page.getByLabel("Credit reason and cost treatment",{exact:true}).selectOption("price:product");await page.getByLabel("Credit reason / document evidence").fill("Supplier confirmed price reduction");state.options.sourceVersion="b".repeat(64);state.options.lines[0].availableAmountCents=2500;await page.getByRole("button",{name:"Reload credit source",exact:true}).click();await expect(page.getByLabel("Credit amount for Toploader cases",{exact:true})).toHaveValue("50.00");await page.getByRole("button",{name:"Create credit draft",exact:true}).click();await expect(page.getByRole("alert")).toContainText("within its available credit value");expect(state.requests).toEqual([]);await page.getByLabel("Credit amount for Toploader cases",{exact:true}).fill("20.00");await page.getByRole("button",{name:"Create credit draft",exact:true}).click();await expect(page).toHaveURL(/supplier-credits\/9/);expect(state.requests[0].body.expectedSourceVersion).toBe("b".repeat(64));
+});
+
+
+test("recovering a created credit from the list does not redirect a subsequent new draft",async({page})=>{
+ const {state}=await setup(page);state.mode="lost";await createDraft(page);await expect(page.getByRole("region",{name:"Saved supplier credit request"})).toBeVisible();await page.goto("/supplier-credits");state.mode="ok";await page.getByRole("button",{name:"Recover saved credit request",exact:true}).click();await expect(page.getByRole("region",{name:"Saved supplier credit request"})).toHaveCount(0);await page.getByRole("button",{name:"Record supplier credit",exact:true}).click();await expect(page.getByRole("heading",{name:"Record supplier credit",exact:true})).toBeVisible();await expect(page).toHaveURL(/supplier-credits\?new=1/);expect(state.records.size).toBe(1);
+});
+test("invoice credit history blocks void even after all credit applications were reversed",async({page})=>{
+ const failures=await installFixtures(page);await page.route("**/api/auth/me",route=>route.fulfill({json:{user:{id:"ap-reader",username:"ap-reader",role:"admin"},permissions:["purchasing:view","purchasing:approve","purchasing:edit"],roles:["admin"]}}));await page.route("**/api/vendor-invoices/71",route=>route.fulfill({json:{id:71,invoiceNumber:"INV-HISTORY",vendorId:2,vendorName:"Supplier",currency:"USD",status:"approved",invoicedAmountCents:10000,paidAmountCents:0,creditedAmountCents:0,settledAmountCents:0,balanceCents:10000,hasSupplierCreditHistory:true,sourceCapabilities:invoiceSourceFixture(),lines:[],attachments:[],poLinks:[],payments:[]}}));await page.goto("/ap-invoices/71");await expect(page.getByText(/This invoice retains supplier credit history/)).toBeVisible();await expect(page.getByRole("button",{name:"Void",exact:true})).toHaveCount(0);await expect(page.getByRole("link",{name:"Review supplier credits",exact:true})).toHaveAttribute("href",/invoiceId=71/);expect(failures).toEqual([]);
+});
+test("target invoice review includes credits from another source invoice and preserves source-specific creation",async({page})=>{
+ const {state}=await setup(page);const queries:URLSearchParams[]=[];await page.route("**/api/supplier-credits?*",route=>{queries.push(new URL(route.request().url()).searchParams);return route.fulfill({json:{items:[state.credit],total:1,limit:20,offset:0,nextOffset:null}});});await page.goto("/supplier-credits?invoiceId=201");await expect(page.getByRole("link",{name:"CN-100",exact:true})).toBeVisible();expect(queries[0].get("invoiceId")).toBe("201");expect(queries[0].has("sourceInvoiceId")).toBe(false);await page.getByRole("link",{name:"CN-100",exact:true}).click();await expect(page.getByRole("link",{name:"Original invoice INV-71",exact:true})).toBeVisible();
+});
+
+
+test("verified historical overpayment preserves cash and exposes settlement review on invoice and work list",async({page})=>{
+ const failures=await installFixtures(page);const invoice={id:71,invoiceNumber:"INV-OVERPAID",vendorId:2,vendorName:"Supplier",currency:"USD",status:"paid",invoicedAmountCents:10000,paidAmountCents:12000,creditedAmountCents:0,settledAmountCents:12000,balanceCents:-2000,overpaidAmountCents:2000,settlementReviewRequired:true,hasSupplierCreditHistory:false,sourceCapabilities:invoiceSourceFixture(),lines:[],attachments:[],poLinks:[],payments:[]};
+ await page.route("**/api/vendor-invoices/71",route=>route.fulfill({json:invoice}));await page.route("**/api/vendor-invoices/work-list?*",route=>route.fulfill({json:workListPage([invoiceListItem(invoice)],route.request().url())}));await page.goto("/ap-invoices/71");await expect(page.getByRole("alert").filter({hasText:"Recorded cash exceeds this invoice by $20.00"})).toBeVisible();await expect(page.getByText("$120.00",{exact:true})).toBeVisible();await expect(page.getByRole("button",{name:"Record Payment",exact:true})).toHaveCount(0);await page.goto("/ap-invoices");await page.getByRole("tab",{name:"Settled",exact:true}).click();await expect(page.getByText("Review overpayment: $20.00",{exact:true})).toBeVisible();expect(failures).toEqual([]);
+});
+
+
+test("historical negative voided invoice shows settlement review without claiming a cash overpayment",async({page})=>{
+ const failures=await installFixtures(page);const invoice={id:71,invoiceNumber:"INV-VOIDED-HISTORY",vendorId:2,vendorName:"Supplier",currency:"USD",status:"voided",invoicedAmountCents:-1000,paidAmountCents:0,creditedAmountCents:0,settledAmountCents:0,balanceCents:0,overpaidAmountCents:0,settlementReviewRequired:true,hasSupplierCreditHistory:false,sourceCapabilities:invoiceSourceFixture(),lines:[],attachments:[],poLinks:[],payments:[]};
+ await page.route("**/api/vendor-invoices/71",route=>route.fulfill({json:invoice}));await page.route("**/api/vendor-invoices/work-list?*",route=>route.fulfill({json:workListPage([invoiceListItem(invoice)],route.request().url())}));await page.goto("/ap-invoices/71");await expect(page.getByRole("alert").filter({hasText:"Historical settlement requires review"})).toBeVisible();await expect(page.getByText(/Recorded cash exceeds/)).toHaveCount(0);await page.goto("/ap-invoices");await page.getByRole("tab",{name:"Voided",exact:true}).click();await expect(page.getByText("Historical settlement requires review",{exact:true})).toBeVisible();await expect(page.getByText(/Review overpayment:/)).toHaveCount(0);expect(failures).toEqual([]);
+});
+
+test("verified full quarantine return credit retains financial value and consistent cost outcome across list and detail", async ({ page }, info) => {
+  const { state, failures } = await setup(page); state.credit = fullQuarantineSupplierCredit();
+  const label = "Fully returned before acceptance; no inventory or sold-cost change";
+  await page.goto("/supplier-credits"); await expect(page.getByText(`Cost disposition: ${label}`, { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "CN-100", exact: true }).click();
+  const disposition = page.getByRole("region", { name: "Supplier credit cost disposition" });
+  await expect(disposition).toContainText(label);
+  await expect(page.getByText("Available credit", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apply supplier credit", exact: true })).toBeVisible();
+  await expect(page.getByText(`Cost result: ${label}`, { exact: true })).toBeVisible();
+  await page.reload(); await expect(disposition).toContainText(label);
+  await disposition.screenshot({ path: info.outputPath("full-return-credit.png") });
+  expect(state.requests).toEqual([]); expect(failures).toEqual([]);
+});
+test("unverified full return credit remains review required without a no-inventory completion", async ({ page }) => {
+  const { state } = await setup(page); state.credit = fullQuarantineSupplierCredit();
+  delete state.credit.lines[0].inventoryEffect;
+  state.credit.lines[0].costState = "review_required"; state.credit.costStatus = "review_required";
+  state.credit.costIssues = [{ code: "COST_REPORTING_PROOF_MISSING", message: "The return reporting evidence requires review." }];
+  await openCredit(page);
+  await expect(page.getByRole("region", { name: "Supplier credit cost disposition" })).toContainText("The return reporting evidence requires review.");
+  await expect(page.getByText(/Fully returned before acceptance; no inventory or sold-cost change/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Apply supplier credit", exact: true })).toBeVisible();
+  expect(state.requests).toEqual([]);
+});
+
+function creditAwaitingRecheck(): SupplierCreditDetail {
+  const credit = fullQuarantineSupplierCredit();
+  delete credit.lines[0].inventoryEffect; credit.lines[0].costState = "review_required";
+  credit.costStatus = "review_required";
+  credit.costIssues = [{ code: "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW", message: "Recorded return costs need a verified completion result." }];
+  credit.capabilities.reconcileCosts = creditAllowed;
+  return credit;
+}
+test("cost recheck lost response survives reload, actor switch and session expiry without another financial command", async ({ page }, info) => {
+  const { state, failures } = await setup(page); state.credit = creditAwaitingRecheck(); state.mode = "lost";
+  const original = { total: state.credit.totalAmountCents, applied: state.credit.appliedAmountCents,
+    available: state.credit.unappliedAmountCents, applications: structuredClone(state.credit.applications), version: state.credit.version };
+  await openCredit(page); await reviewAction(page, "Recheck cost disposition");
+  await expect(page.getByRole("region", { name: "Saved supplier credit request" }).first()).toContainText("Recheck cost disposition for");
+  state.actor = "another-operator"; await page.reload();
+  await expect(page.getByRole("alert").filter({ hasText: "another operator" })).toBeVisible();
+  expect(state.requests).toHaveLength(1);
+  state.actor = "ap-reader"; state.mode = "auth"; await page.reload();
+  await page.getByRole("button", { name: "Recover saved credit request", exact: true }).click();
+  await expect(page.getByText("Session expired", { exact: true }).first()).toBeVisible();
+  state.mode = "ok"; await page.getByRole("button", { name: "Recover saved credit request", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Saved supplier credit request" })).toHaveCount(0);
+  const cost = page.getByRole("region", { name: "Supplier credit cost disposition" });
+  await expect(cost).toContainText("Fully returned before acceptance; no inventory or sold-cost change");
+  expect(state.records.size).toBe(1); expect(state.requests).toHaveLength(3);
+  expect(state.requests.every(row => row.command === "reconcile_costs" && row.key === state.requests[0].key
+    && JSON.stringify(row.body) === JSON.stringify(state.requests[0].body))).toBe(true);
+  expect({ total: state.credit.totalAmountCents, applied: state.credit.appliedAmountCents, available: state.credit.unappliedAmountCents,
+    applications: state.credit.applications, version: state.credit.version }).toEqual(original);
+  await cost.screenshot({ path: info.outputPath("full-return-cost-recheck.png") }); expect(failures).toEqual([]);
+});
+test("cost recheck can confirm unchanged review without claiming completion or retaining a finished intent", async ({ page }) => {
+  const { state } = await setup(page); state.credit = creditAwaitingRecheck(); state.recheckLeavesReview = true;
+  const originalVersion = state.credit.version;
+  await openCredit(page); await reviewAction(page, "Recheck cost disposition");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Supplier credit cost disposition" })).toContainText("Recorded return costs need a verified completion result.");
+  await expect(page.getByText(/Fully returned before acceptance; no inventory or sold-cost change/)).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Saved supplier credit request" })).toHaveCount(0);
+  expect(state.credit.version).toBe(originalVersion); expect(state.records.size).toBe(1);
+});
+test("cost recheck durable rejection allows a newly reviewed request with a new key", async ({ page }) => {
+  const { state } = await setup(page); state.credit = creditAwaitingRecheck(); state.mode = "reject";
+  await openCredit(page); await reviewAction(page, "Recheck cost disposition");
+  await expect(page.getByText("Review current supplier credit", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("region", { name: "Saved supplier credit request" })).toHaveCount(0);
+  state.mode = "ok";
+  await page.getByRole("dialog").getByRole("button", { name: "Recheck cost disposition", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.records.size).toBe(1); expect(state.requests).toHaveLength(2);
+  expect(state.requests[0].key).not.toBe(state.requests[1].key);
+});
+test("cost recheck respects current permission and absent or denied capability", async ({ page }) => {
+  const { state } = await setup(page); state.credit = creditAwaitingRecheck(); state.approve = false;
+  await openCredit(page); await expect(page.getByRole("button", { name: "Recheck cost disposition", exact: true })).toHaveCount(0);
+  state.approve = true; delete state.credit.capabilities.reconcileCosts; await page.reload();
+  await expect(page.getByRole("button", { name: "Recheck cost disposition", exact: true })).toHaveCount(0);
+  state.credit.capabilities.reconcileCosts = { allowed: false, code: "CREDIT_BALANCE_REVIEW", reason: "Credit balance requires review." };
+  await page.reload(); await expect(page.getByRole("button", { name: "Recheck cost disposition", exact: true })).toBeDisabled();
+  await expect(page.getByText("Credit balance requires review.", { exact: true })).toBeVisible(); expect(state.requests).toEqual([]);
+});
+
+test("cost recheck preserves an unsent invoice application draft", async ({ page }) => {
+  const { state } = await setup(page); state.credit = creditAwaitingRecheck();
+  await openCredit(page);
+  await page.getByLabel("Apply credit to INV-201", { exact: true }).fill("25.00");
+  await page.getByLabel("Credit application reason", { exact: true }).fill("Supplier approved this invoice application.");
+  await reviewAction(page, "Recheck cost disposition");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByLabel("Apply credit to INV-201", { exact: true })).toHaveValue("25.00");
+  await expect(page.getByLabel("Credit application reason", { exact: true })).toHaveValue("Supplier approved this invoice application.");
+  await expect(page.getByRole("button", { name: "Apply supplier credit", exact: true })).toBeEnabled();
+  expect(state.requests.map(row => row.command)).toEqual(["reconcile_costs"]);
+  expect(state.credit.applications).toEqual([]);
+});
+
+function acceptedCreditOptions() {
+ const options = supplierCreditOptionsFixture();
+ options.lines[0].acceptedReturns = [{ supplierReturnId: 9, supplierReturnLineId: 91, quantityAvailable: 3, unitsPerVariant: 10, evidenceReference: "COLLECT-17", label: "Returned accepted cases", components: ["product", "packaging", "unassigned"], entitlements: [{ id: 111, quantity: 2 }] }];
+ return options;
+}
+async function acceptedCreditForm(page: Page, treatment: string) {
+ await page.goto("/supplier-credits?new=1&sourceInvoiceId=71&supplierReturnLineId=91");
+ await page.getByLabel("Supplier credit reference", { exact: true }).fill("CN-ACCEPTED");
+ await page.getByLabel("Credit document date").fill("2026-10-20");
+ await page.getByLabel("Credit amount for Toploader cases", { exact: true }).fill("2.00");
+ await page.getByLabel("Credit reason and cost treatment", { exact: true }).selectOption(treatment);
+ await page.getByLabel("Credit reason / document evidence").fill("Supplier issued credit for collected stock");
+}
+test("accepted return credit uses one reviewed physical quantity across components", async ({ page }) => {
+ const { state } = await setup(page); state.options = acceptedCreditOptions(); await acceptedCreditForm(page, "accepted:91:new:product");
+ await page.getByLabel("Accepted-stock returned quantity", { exact: false }).fill("2");
+ await page.getByRole("button", { name: "Add another treatment for Toploader cases", exact: true }).click();
+ await page.getByLabel("Credit amount for Toploader cases", { exact: true }).nth(1).fill(".20");
+ await page.getByLabel("Credit reason and cost treatment", { exact: true }).nth(1).selectOption("accepted:91:new:packaging");
+ await page.getByLabel("Accepted-stock returned quantity", { exact: false }).nth(1).fill("3");
+ await page.getByRole("button", { name: "Create credit draft", exact: true }).click(); await expect(page.getByText(/must use the same physical quantity/)).toBeVisible(); expect(state.requests).toEqual([]);
+ await page.getByLabel("Accepted-stock returned quantity", { exact: false }).nth(1).fill("2"); await page.getByRole("button", { name: "Create credit draft", exact: true }).click(); await expect(page).toHaveURL(/supplier-credits\/9/);
+ expect(state.requests[0].body.lines.map((line: any) => line.disposition)).toEqual([{ kind: "accepted_stock_return", supplierReturnLineId: 91, quantity: 2, evidenceReference: "COLLECT-17", component: "product" }, { kind: "accepted_stock_return", supplierReturnLineId: 91, quantity: 2, evidenceReference: "COLLECT-17", component: "packaging" }]);
+});
+test("accepted return top-up pins its existing matched quantity and keeps unassigned value in review", async ({ page }) => {
+ const { state } = await setup(page); state.options = acceptedCreditOptions(); await acceptedCreditForm(page, "accepted:91:111:unassigned");
+ await expect(page.getByLabel("Accepted-stock returned quantity", { exact: false })).toHaveValue("2"); await expect(page.getByLabel("Accepted-stock returned quantity", { exact: false })).toBeDisabled(); await expect(page.getByText(/value disposition remains in review/)).toBeVisible();
+ await page.getByRole("button", { name: "Create credit draft", exact: true }).click(); await expect(page).toHaveURL(/supplier-credits\/9/); expect(state.requests[0].body.lines[0].disposition).toEqual({ kind: "accepted_stock_return", supplierReturnLineId: 91, quantity: 2, evidenceReference: "COLLECT-17", component: "unassigned", entitlementId: 111 });
+});
+test("return context cannot silently become a price reduction of retained goods", async ({ page }) => {
+ const { state } = await setup(page); state.options = acceptedCreditOptions(); await acceptedCreditForm(page, "price:product"); await page.getByRole("button", { name: "Create credit draft", exact: true }).click(); await expect(page.getByText(/Select the verified accepted-stock return/)).toBeVisible(); expect(state.requests).toEqual([]);
+});
