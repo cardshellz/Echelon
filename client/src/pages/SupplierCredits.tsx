@@ -1,4 +1,4 @@
-import { supplierCreditCostLabel } from "@/features/purchasing/supplier-credit-presentation";
+import { supplierCreditCostSummary } from "@/features/purchasing/supplier-credit-presentation";
 import React, { useEffect, useRef } from "react";
 import { Link, useLocation, useParams, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
@@ -124,7 +124,7 @@ export default function SupplierCredits() {
               </dd>
             </div>
           </dl>
-          <p className="text-sm">Cost disposition: {supplierCreditCostLabel(credit.costStatus)}
+          <p className="text-sm">Cost disposition: {supplierCreditCostSummary(credit)}
           </p>{credit.balanceIssues.map(issue => <p role="alert" key={issue.code}>{issue.message}
           </p>)}
         </article>)}{list.data?.items.length === 0 && <p>No supplier credits match these filters.</p>}

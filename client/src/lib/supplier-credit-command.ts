@@ -10,6 +10,7 @@ export const supplierCreditIntentSchema = z.discriminatedUnion("command", [
   z.object({ command: z.literal("apply"), creditId: supplierCreditIdSchema, payload: supplierCreditApplyInputSchema }).strict(),
   z.object({ command: z.literal("reverse"), creditId: supplierCreditIdSchema, applicationId: supplierCreditIdSchema, payload: supplierCreditReviewInputSchema }).strict(),
   z.object({ command: z.literal("void"), creditId: supplierCreditIdSchema, payload: supplierCreditReviewInputSchema }).strict(),
+  z.object({ command: z.literal("reconcile_costs"), creditId: supplierCreditIdSchema, payload: supplierCreditReviewInputSchema }).strict(),
 ]);
 export type SupplierCreditIntent = z.infer<typeof supplierCreditIntentSchema>;
 const recoverySchema = z.object({ version: z.literal(1), userId: z.string().min(1), key: z.string().regex(/^[A-Za-z0-9:_-]{8,100}$/), body: supplierCreditIntentSchema }).strict();
@@ -59,7 +60,10 @@ export function createSupplierCreditClient(generateKey: () => string, store: Ret
             || BigInt(result.credit.totalAmountCents) !== submittedLines.reduce((sum, line) => sum + BigInt(line.amountCents), BigInt(0))
             || canonicalJson(returnedLines.map(line => canonicalJson(line)).sort()) !== canonicalJson(submittedLines.map(line => canonicalJson(line)).sort())) return invalid();
         }
-        if (["approve", "apply", "reverse"].includes(intent.command) && result.credit.status !== "approved") return invalid();
+        if (["approve", "apply", "reverse", "reconcile_costs"].includes(intent.command) && result.credit.status !== "approved") return invalid();
+        if (intent.command === "reconcile_costs" && (result.credit.appliedAmountCents === null
+          || result.credit.unappliedAmountCents === null || result.credit.balanceIssues.length > 0
+          || result.credit.balanceState !== (result.credit.unappliedAmountCents === 0 ? "fully_applied" : "available"))) return invalid();
         if (intent.command === "approve" && result.credit.approvedBy !== store.userId) return invalid();
         if (intent.command === "void" && (result.credit.status !== "voided" || result.credit.voidedBy !== store.userId || result.credit.voidReason !== intent.payload.reason)) return invalid();
         if (intent.command === "apply") {

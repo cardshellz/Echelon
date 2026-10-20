@@ -1,3 +1,5 @@
+import { fullQuarantineCostStatus, fullQuarantineWorkspace } from "../fixtures/full-quarantine-cost";
+import { installQuarantineFixtures } from "./procurement-quarantine-fixtures";
 import { shipmentListItem } from "../fixtures/shipment-work-list";
 import { landedCostHealthSchema } from "../../shared/procurement/landed-cost-health";
 import { expect, test, type Page } from "@playwright/test";
@@ -553,5 +555,69 @@ test("full quarantine return keeps its accounting boundary explicit on PO and sh
   await page.reload();
   await assertSpecificReview();
   await page.getByTestId("supplier-cost-line-171").screenshot({ path: info.outputPath("supplier-credit-full-return-review.png") });
+  expect(failures).toEqual([]);
+});
+
+const fullReturnLabel = "Fully returned before acceptance; no inventory or sold-cost change";
+for (const screen of ["purchase", "shipment"] as const) {
+  test(`verified full quarantine return completion remains readable on ${screen} after reload`, async ({ page }, info) => {
+    const { state, failures } = await installCostScreens(page);
+    state.costs.supplierCosts = fullQuarantineCostStatus(); state.review.supplierCosts = fullQuarantineCostStatus();
+    await page.goto(screen === "purchase" ? "/purchase-orders/17?tab=lines" : "/shipments/42?tab=allocation");
+    async function inspect() {
+      if (screen === "purchase") await page.getByRole("button", { name: "View supplier cost result", exact: true }).click();
+      const line = page.getByTestId("supplier-cost-line-171");
+      await expect(line).toContainText(fullReturnLabel);
+      await expect(line).not.toContainText("current source and lot history");
+      await expect(line).not.toContainText("Needs review");
+      await line.getByText("Return and receipt evidence", { exact: true }).click();
+      await expect(line).toContainText("All 150 base pieces were returned before acceptance.");
+      await expect(line.getByRole("link", { name: /View invoice/ })).not.toHaveAttribute("href", /costLine=/);
+      await expect(line.getByRole("link", { name: "Open receipt cost processing", exact: true })).toHaveCount(0);
+    }
+    await inspect(); await page.reload(); await inspect();
+    await page.getByTestId("supplier-cost-line-171").screenshot({ path: info.outputPath(`full-return-${screen}.png`) });
+    expect(failures).toEqual([]);
+  });
+}
+test("verified full quarantine return completion preserves history and closes receipt retry guidance", async ({ page }, info) => {
+  const { state, failures } = await installCostScreens(page); state.workspace = fullQuarantineWorkspace();
+  await page.goto("/purchase-orders/17?tab=lifecycle");
+  const receipt = page.getByTestId("receipt-cost-request-61");
+  await expect(receipt).toContainText("Return cost review completed");
+  await expect(receipt).toContainText(fullReturnLabel);
+  await expect(receipt.getByRole("button", { name: "Apply current supplier costs", exact: true })).toHaveCount(0);
+  await receipt.getByText("1 recorded cost attempt", { exact: true }).click();
+  await expect(receipt).toContainText("Original return evidence required review.");
+  const history = page.getByRole("region", { name: "Recorded cost applications" });
+  await expect(history).toContainText("All 150 base pieces returned before acceptance; zero remaining source quantity");
+  await expect(history).not.toContainText("Quantity basis unknown");
+  await page.getByTestId("cost-application-21").getByText(/Fully returned before acceptance.*Application #21/).click();
+  await expect(history).toContainText("The verified return disposition required no inventory or sold-cost changes.");
+  await expect(history).toContainText("Internal reporting event #41");
+  await history.screenshot({ path: info.outputPath("full-return-history.png") }); expect(failures).toEqual([]);
+});
+test("verified full quarantine return completion is visible on the closed receiving document", async ({ page }, info) => {
+  const { state, failures } = await installQuarantineFixtures(page, { closed: true });
+  state.order.purchaseOrderId = 17;
+  state.order.lines[0].receivedQty = 0; state.order.lines[0].damagedQty = 0;
+  const costs = ordinaryPostedCosts(); costs.supplierCosts = fullQuarantineCostStatus();
+  await page.route("**/api/purchase-orders/17/shipment-costs", route => route.fulfill({ json: costs }));
+  await page.reload();
+  const region = page.getByRole("region", { name: "Receipt supplier cost status" });
+  await expect(region).toContainText(fullReturnLabel);
+  await region.getByText("Return and receipt evidence", { exact: true }).click();
+  await expect(region).toContainText("Zero remaining source quantity; no inventory lots were created.");
+  await region.screenshot({ path: info.outputPath("full-return-receiving.png") });
+  expect(state.commands).toEqual([]); expect(failures).toEqual([]);
+});
+
+test("verified full quarantine return result remains accessible on a PO without shipments", async ({ page }) => {
+  const { state, failures } = await installCostScreens(page);
+  state.costs.supplierCosts = fullQuarantineCostStatus(); state.costs.lines = [];
+  Object.assign(state.costs.summary, { shipmentCount: 0, appliedLines: 0, pendingLines: 0, reviewLines: 0 });
+  await page.goto("/purchase-orders/17?tab=lines");
+  await page.getByRole("button", { name: "View supplier cost result", exact: true }).click();
+  await expect(page.getByTestId("supplier-cost-line-171")).toContainText(fullReturnLabel);
   expect(failures).toEqual([]);
 });

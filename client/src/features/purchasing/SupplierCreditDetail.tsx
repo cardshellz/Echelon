@@ -1,6 +1,7 @@
-import { supplierCreditCostLabel } from "@/features/purchasing/supplier-credit-presentation";
+import { noInventoryEffectLabel } from "./cost-inventory-effect-presentation";
+import { supplierCreditCostLabel, supplierCreditCostSummary } from "@/features/purchasing/supplier-credit-presentation";
 import { SupplierCreditLink } from "./SupplierCreditLink";
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { supplierCreditDetailSchema, supplierCreditApplyInputSchema, type SupplierCreditDetail as Credit } from "@shared/procurement/supplier-credit";
@@ -17,8 +18,8 @@ import { WorkListPagination } from "./WorkListPagination";
 import { SupplierCreditRecovery } from "./SupplierCreditRecovery";
 import type { SupplierCreditCommands } from "./use-supplier-credit-commands";
 
-type ReviewAction = { command: "approve" | "void"; expectedVersion: string } | { command: "reverse"; expectedVersion: string; applicationId: number };
-const actionLabel = { approve: "Approve credit", void: "Void credit", reverse: "Reverse credit application" };
+type ReviewAction = { command: "approve" | "void" | "reconcile_costs"; expectedVersion: string } | { command: "reverse"; expectedVersion: string; applicationId: number };
+const actionLabel = { approve: "Approve credit", void: "Void credit", reverse: "Reverse credit application", reconcile_costs: "Recheck cost disposition" };
 export function SupplierCreditDetail({ creditId, commands }: { creditId: number; commands: SupplierCreditCommands }) {
   const navigation = useProcurementNavigation();
   const [action, setAction] = useState<ReviewAction | null>(null);
@@ -40,7 +41,7 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
   }, [commands.confirmed, creditId]);
   const credit = creditQuery.data;
   const blocked = commands.blocked || creditQuery.isFetching || creditQuery.isError;
-  const actionCapability = !credit || !action ? null : action.command === "reverse" ? credit.applications.find(row => row.id === action.applicationId)?.canReverse : credit.capabilities[action.command];
+  const actionCapability = !credit || !action ? null : action.command === "reverse" ? credit.applications.find(row => row.id === action.applicationId)?.canReverse : credit.capabilities[action.command === "reconcile_costs" ? "reconcileCosts" : action.command];
   const staleAction = action !== null && action.expectedVersion !== credit?.version;
   async function submitReview() {
     if (!credit || !action || blocked || !commands.canApprove || !actionCapability?.allowed || staleAction) return;
@@ -100,17 +101,22 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
     {credit.balanceIssues.map(issue => <p key={issue.code} role="alert">{issue.message}
     </p>)}
     <section aria-label="Supplier credit cost disposition" className="rounded border p-4 space-y-3">
-      <h2 className="font-semibold">Inventory and sold-goods cost disposition: {supplierCreditCostLabel(credit.costStatus)}
+      <h2 className="font-semibold">Inventory and sold-goods cost disposition: {supplierCreditCostSummary(credit)}
       </h2>
       {(credit.costStatus === "pending" || credit.costStatus === "review_required") && <p className="text-sm">Financial credit approval does not prove inventory or COGS posting. Resolve the recorded cost issues before treating costs as complete.</p>}
       {credit.costIssues.map(issue => <p key={`${issue.code}:${issue.message}`} role="alert" className="text-amber-700">{issue.message}
       </p>)}
+      {credit.status === "approved" && commands.canApprove && credit.capabilities.reconcileCosts && <div className="space-y-1">
+        <Button variant="outline" disabled={blocked || !credit.capabilities.reconcileCosts.allowed}
+          onClick={() => review({ command: "reconcile_costs", expectedVersion: credit.version })}>Recheck cost disposition</Button>
+        {!credit.capabilities.reconcileCosts.allowed && <p className="text-sm">{credit.capabilities.reconcileCosts.reason}</p>}
+      </div>}
       {credit.lines.map(line => <div key={line.id} className="border-t pt-2 text-sm space-y-1">
         <p className="font-medium">{line.label}: {formatPaymentAmount(line.amountCents)}
         </p>
         <p>{line.disposition.kind === "price_reduction" ? `Price reduction · ${line.disposition.component}` : `Physical return #${line.disposition.returnDispositionId} · ${line.disposition.quantity} source units · ${line.disposition.evidenceReference}`}
         </p>
-        <p>Cost result: {supplierCreditCostLabel(line.costState)}
+        <p>Cost result: {line.inventoryEffect ? noInventoryEffectLabel : supplierCreditCostLabel(line.costState)}
         </p>{line.costIssues.map(issue => <p key={`${issue.code}:${issue.message}`} role="alert">{issue.message}
         </p>)}
       </div>)}
@@ -153,7 +159,7 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
         <DialogHeader>
           <DialogTitle>{action ? actionLabel[action.command] : "Review credit"}
           </DialogTitle>
-          <DialogDescription>{action?.command === "reverse" ? "This restores the applied credit balance and the invoice amount due; the original application remains in history." : action?.command === "void" ? "Reverse all active invoice applications first. Voiding retains this credit document and its cost reversal evidence." : "Approve this recorded supplier document and its explicit cost disposition. Applying it to an invoice is a separate action."}
+          <DialogDescription>{action?.command === "reconcile_costs" ? "Recheck the current invoice and return evidence using this approved credit. This does not change the credit amount, invoice applications, cash or physical stock. The saved result may still require review." : action?.command === "reverse" ? "This restores the applied credit balance and the invoice amount due; the original application remains in history." : action?.command === "void" ? "Reverse all active invoice applications first. Voiding retains this credit document and its cost reversal evidence." : "Approve this recorded supplier document and its explicit cost disposition. Applying it to an invoice is a separate action."}
           </DialogDescription>
         </DialogHeader>
         <SupplierCreditRecovery commands={commands} />{staleAction && <p role="alert">The credit changed after this review opened. Close and reopen the action after refreshing.</p>}<Label htmlFor="credit-action-reason">Reason for this credit action</Label>
@@ -174,7 +180,12 @@ function CreditApplication({ credit, commands, sourceBusy }: { credit: Credit; c
   const [reason, setReason] = useState(""); const [reviewedVersion, setReviewedVersion] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const invoices = useQuery({ ...invoiceWorkListQuery({ status: "approved,partially_paid", vendorId: String(credit.vendorId), search, offset, limit: 20 }), enabled: credit.capabilities.apply.allowed && commands.canApprove });
-  useEffect(() => { setAmounts({}); setLabels({}); setReason(""); setReviewedVersion(null); setError(null); }, [commands.userId, credit.id, commands.confirmed]);
+  const resetDraft = useCallback(() => { setAmounts({}); setLabels({}); setReason(""); setReviewedVersion(null); setError(null); }, []);
+  useEffect(resetDraft, [commands.userId, credit.id, resetDraft]);
+  useEffect(() => {
+    // Cost-only recovery does not consume an unrelated invoice-application draft.
+    if (commands.confirmed?.creditId === credit.id && commands.confirmed.command !== "reconcile_costs") resetDraft();
+  }, [commands.confirmed, credit.id, resetDraft]);
   const stale = reviewedVersion !== null && reviewedVersion !== credit.version;
   const disabled = commands.blocked || !commands.canApprove || !credit.capabilities.apply.allowed || sourceBusy || invoices.isFetching || invoices.isError || stale;
   let total: number | null = null; try { total = sumPaymentCents(paymentAllocationInputs(amounts).map(row => row.appliedAmountCents)); } catch { /* Keep invalid draft values for correction. */ }

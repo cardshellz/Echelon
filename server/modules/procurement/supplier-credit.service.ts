@@ -110,6 +110,27 @@ async function approveCredit(tx: CreditTransaction, input: SupplierCreditCommand
     at: input.at
   });
 }
+async function reconcileCreditCosts(
+  tx: CreditTransaction,
+  input: SupplierCreditCommandInput,
+  credit: ExistingCredit,
+  current: SupplierCreditDetail,
+): Promise<void> {
+  if (!current.capabilities.reconcileCosts?.allowed) {
+    throw new SupplierCreditError(
+      "SUPPLIER_CREDIT_COST_RECONCILIATION_UNAVAILABLE",
+      current.capabilities.reconcileCosts?.reason ?? "This credit is unavailable for cost reconciliation.",
+    );
+  }
+  // Re-evaluate the existing approved source; do not approve the document again,
+  // increment its financial version, or repeat a physical/settlement action.
+  // An unchanged review outcome may legitimately retain the same detail version.
+  await approveSupplierCreditSources(tx, {
+    creditId: credit.id,
+    actorId: input.actorId,
+    at: input.at,
+  });
+}
 async function applyCredit(tx: CreditTransaction, input: SupplierCreditCommandInput, credit: ExistingCredit, current: SupplierCreditDetail, data: SupplierCreditApplyInput): Promise<number[]> {
   const creditId = credit.id;
   if (!current.capabilities.apply.allowed || current.unappliedAmountCents === null) throw new SupplierCreditError("SUPPLIER_CREDIT_UNAVAILABLE", current.capabilities.apply.reason);
@@ -203,6 +224,8 @@ export async function executeSupplierCreditCommand(tx: CreditTransaction, input:
     if (current.balanceState === "review_required") throw new SupplierCreditError("SUPPLIER_CREDIT_EVIDENCE_REVIEW", "Resolve the credit evidence before changing this document.");
     if (input.command === "approve") {
       await approveCredit(tx, input, credit, current);
+    } else if (input.command === "reconcile_costs") {
+      await reconcileCreditCosts(tx, input, credit, current);
     } else if (input.command === "apply") {
       applicationIds.push(...(await applyCredit(tx, input, credit, current, supplierCreditApplyInputSchema.parse(request))));
     } else if (input.command === "reverse") {

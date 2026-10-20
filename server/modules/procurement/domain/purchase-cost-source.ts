@@ -30,15 +30,11 @@ export function resolvePurchaseCostSource(source: {
     && credits.basePieces > BigInt(0) && credits.issues.length === 0 && parsed.every(result => result.success)
     && parsed.reduce((sum, result) => sum + BigInt(result.success ? result.data.productMills : 0), BigInt(0)) === credits.productMills
     && parsed.reduce((sum, result) => sum + BigInt(result.success ? result.data.packagingMills : 0), BigInt(0)) === credits.packagingMills;
-  // The current application contract requires a positive quantity denominator.
-  // Preserve an explicit unresolved disposition instead of inventing a basis or
-  // presenting complete, unrecognized returns as missing invoice evidence.
-  let issue: { code: string; message: string } | null = fullQuarantineReturn ? {
-    code: "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW",
-    message: "The approved credits cover every invoiced unit returned from quarantine. Zero-quantity inventory cost completion is not supported yet. This credit does not change inventory or sold-item costs. Retain the return and credit evidence for accounting review; retrying will not complete this case.",
-  } : null;
+  // This is a source disposition, not proof of inventory completion. The
+  // application owner must independently verify live custody and cost history.
+  let issue: { code: string; message: string } | null = null;
   if (
-    !issue &&
+    !fullQuarantineReturn &&
     approvedInvoices.length > 0 &&
     (coverageQty === 0 ||
       approvedQty !== BigInt(coverageQty) ||
@@ -168,7 +164,11 @@ export function resolvePurchaseCostSource(source: {
     sources,
     currency,
     totalMills: costInteger(amount, "amount"),
-    basePieces: actual ? coverageQty : qty,
+    basePieces: fullQuarantineReturn ? (!issue && currency === "USD" ? 0 : qty) : actual ? coverageQty : qty,
+    ...(fullQuarantineReturn && !issue && currency === "USD" ? { inventoryEffect: {
+      kind: "none" as const, reason: "full_quarantine_return" as const,
+      returnedBasePieces: costInteger(credits.basePieces.toString(), "returnedBasePieces", 1), returns: credits.returns,
+    } } : {}),
     evidence: issue ? "review_required" : actual ? "confirmed" : "estimated",
     packagingTreatment,
     issue,

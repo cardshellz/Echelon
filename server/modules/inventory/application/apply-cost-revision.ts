@@ -6,7 +6,8 @@ import { postCostReconciliation } from "../infrastructure/cost-reconciliation.re
 import { planCostReconciliation } from "./plan-cost-reconciliation";
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { type CostComponent, type CostIssue } from "@shared/procurement/cost-source-contracts";
+import { type CostComponent, type CostIssue, type CostInventoryEffectProof } from "@shared/procurement/cost-source-contracts";
+import { applyNoInventoryEffect } from "./apply-no-inventory-effect";
 import { projectCostForFrozenLot, replaceCostComponent } from "../domain/cost-application.domain";
 import { CostEvidenceError, costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../infrastructure/cost-evidence.repository";
 
@@ -23,6 +24,7 @@ export interface CostRevisionApplicationResult {
   totalCogsDeltaCents: number;
   issues: CostIssue[];
   replayed: boolean;
+  inventoryEffectProof?: CostInventoryEffectProof;
 }
 export interface CostComponentWriter {
   revalueComponent(lotId: number, component: CostComponent, unitMills: number, reason: string, tx: CostEvidenceTransaction): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number } | null>;
@@ -39,6 +41,7 @@ export async function applyCostRevision(
   if (!actorId?.trim() || !(now instanceof Date) || !Number.isFinite(now.getTime())) throw new CostEvidenceError("COST_AUDIT_IDENTITY_REQUIRED", "Cost application requires an actor and valid clock.");
   await lockInventoryCostGraph(tx);
   const source = revision.contract;
+  if (source.inventoryEffect) return applyNoInventoryEffect(tx, revision, actorId, now);
   const shipmentLineId = source.scope.kind === "shipment_line" ? source.scope.inboundShipmentLineId : null;
   const rootsResult = await tx.execute(sql`
     SELECT origin.*, line.cost_source_kind, line.cost_source_evidence,

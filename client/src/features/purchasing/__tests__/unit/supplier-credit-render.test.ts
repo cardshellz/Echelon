@@ -1,3 +1,5 @@
+import { fullQuarantineSupplierCredit } from "../../../../../../test/fixtures/full-quarantine-cost";
+import { noInventoryEffectLabel } from "../../cost-inventory-effect-presentation";
 import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider, type QueryKey } from "@tanstack/react-query";
@@ -222,5 +224,49 @@ describe("supplier credit real component rendering", () => {
     expect(markup).toContain("Supplier credits are unavailable.");
     expect(markup).toContain("Retry supplier credits");
     expect(markup).not.toContain("No supplier credits match these filters.");
+  });
+});
+
+describe("verified full-return supplier credit rendering", () => {
+  it("shows no inventory or sold-cost change separately from the available financial credit", () => {
+    const markup = render(createElement(SupplierCreditDetail, { creditId: 9, commands: commands() }), client => {
+      client.setQueryData(detailKey, fullQuarantineSupplierCredit());
+    });
+    expect(markup).toContain(noInventoryEffectLabel);
+    expect(markup).toContain("Available credit");
+    expect(markup).toContain("$100.00");
+    expect(markup).not.toContain("Resolve the recorded cost issues");
+  });
+  it("shows the same verified outcome on the credit work list", () => {
+    const markup = render(createElement(SupplierCredits), client => {
+      client.setQueryData(listKey, supplierCreditListSchema.parse({ items: [fullQuarantineSupplierCredit()],
+        total: 1, limit: 20, offset: 0, nextOffset: null }));
+    });
+    expect(markup).toContain(noInventoryEffectLabel);
+    expect(markup).toContain('href="/supplier-credits/9?tab=details"');
+  });
+});
+
+describe("supplier credit cost recovery rendering", () => {
+  it("offers an explicitly permitted cost recheck for an approved credit", () => {
+    const markup = render(createElement(SupplierCreditDetail, { creditId: 9, commands: commands() }), client => {
+      client.setQueryData(detailKey, credit({ capabilities: { approve: unavailable, apply: allowed, void: allowed,
+        replace: unavailable, reconcileCosts: allowed } }));
+    });
+    expect(markup).toContain("Recheck cost disposition");
+  });
+  it("hides cost recheck when the current capability is absent", () => {
+    const markup = render(createElement(SupplierCreditDetail, { creditId: 9, commands: commands() }), client => {
+      client.setQueryData(detailKey, credit());
+    });
+    expect(markup).not.toContain("Recheck cost disposition");
+  });
+  it("describes the saved cost recheck without claiming a new credit or void", () => {
+    const markup = render(createElement(SupplierCreditRecovery, { commands: commands({ blocked: true, recoverAllowed: true,
+      recovery: { version: 1, userId: actorId, key: "credit-render-key", body: { command: "reconcile_costs", creditId: 9,
+        payload: { expectedVersion: version, reason: "Review immutable return evidence." } } } }) }));
+    expect(markup).toContain("Recheck cost disposition for");
+    expect(markup).toContain("Recover saved credit request");
+    expect(markup).not.toContain("Void");
   });
 });

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { supplierCreditSourceLineInputSchema, type SourceLineInput } from "@shared/procurement/supplier-credit";
 import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
-import type { CostIssue } from "@shared/procurement/cost-source-contracts";
+import type { CostIssue, CostInventoryEffect } from "@shared/procurement/cost-source-contracts";
 import { COGSService } from "../inventory/cogs.service";
 import { costInteger, CostEvidenceError, lockInventoryCostGraph, type CostEvidenceTransaction } from "../inventory/infrastructure/cost-evidence.repository";
 import { evaluateSupplierCreditSource, resolveSupplierCreditReductions, supplierCreditIssue,
@@ -156,10 +156,11 @@ export async function readSupplierCreditCostStatus(tx: CostEvidenceTransaction, 
   const postedDocument = rows.some(row => row.approved_at !== null);
   const poIds = [...new Set(rows.filter(row => row.purchase_order_line_id != null).map(row => Number(row.purchase_order_line_id)))];
   const purchaseLines = postedDocument && poIds.length ? await cache.readPurchaseLines(poIds) : [];
-  const lines: Array<{ id: number; costState: CostState; costIssues: CostIssue[] }> = [];
+  const lines: Array<{ id: number; costState: CostState; costIssues: CostIssue[]; inventoryEffect?: CostInventoryEffect }> = [];
   for (const row of rows) {
     let costState: CostState = row.cost_state;
     let costIssues: CostIssue[] = row.cost_issues;
+    let inventoryEffect: CostInventoryEffect | undefined;
     if (row.status === "voided" && row.approved_at === null) {
       costState = "not_applicable";
       costIssues = [];
@@ -171,6 +172,12 @@ export async function readSupplierCreditCostStatus(tx: CostEvidenceTransaction, 
         const components = current?.components.filter(component => row.disposition.kind === "quarantine_return" || component.component === row.disposition.component) ?? [];
         costIssues = [...issues, ...components.flatMap(component => component.issues)];
         costState = costIssues.length || !components.length ? "review_required" : components.every(component => component.status === "applied") ? "posted" : "pending";
+        if (row.status === "approved" && row.disposition.kind === "quarantine_return" && costState === "posted" && components.length === 2
+          && components.every(component => component.sourceEvidence === "confirmed" && component.sourceCurrent && component.inventoryEffect)
+          && canonicalJson(components[0].inventoryEffect) === canonicalJson(components[1].inventoryEffect)
+          && components[0].inventoryEffect?.returns.some(item => item.supplierCreditLineId === Number(row.id))) {
+          inventoryEffect = components[0].inventoryEffect;
+        }
       } else if (row.freight_cost_id != null) {
         const scope = await cache.readShipmentScope(Number(row.freight_cost_id));
         const current = [];
@@ -187,7 +194,7 @@ export async function readSupplierCreditCostStatus(tx: CostEvidenceTransaction, 
         costIssues = [supplierCreditIssue("CREDIT_COST_SCOPE_REQUIRED", "The approved credit has no supported original inventory cost source.")];
       }
     }
-    lines.push({ id: Number(row.id), costState, costIssues });
+    lines.push({ id: Number(row.id), costState, costIssues, ...(inventoryEffect ? { inventoryEffect } : {}) });
   }
   const costStatus: CostState = lines.length && lines.every(line => line.costState === "not_applicable") ? "not_applicable"
     : lines.some(line => line.costState === "review_required") ? "review_required" : lines.length && lines.every(line => line.costState === "posted") ? "posted" : "pending";

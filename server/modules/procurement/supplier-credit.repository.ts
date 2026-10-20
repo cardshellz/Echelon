@@ -143,7 +143,9 @@ export async function readSupplierCreditDetail(tx: CreditTransaction, id: number
     disposition: supplierCreditDispositionSchema.parse(line.disposition),
     sourceEvidence: line.sourceEvidence,
     costState: cost.lines.find(row => row.id === line.id)?.costState ?? line.costState,
-    costIssues: cost.lines.find(row => row.id === line.id)?.costIssues ?? line.costIssues
+    costIssues: cost.lines.find(row => row.id === line.id)?.costIssues ?? line.costIssues,
+    ...(cost.lines.find(row => row.id === line.id)?.inventoryEffect
+      ? { inventoryEffect: cost.lines.find(row => row.id === line.id)!.inventoryEffect } : {}),
   }));
   const result = {
     ...credit,
@@ -174,6 +176,15 @@ export async function readSupplierCreditDetail(tx: CreditTransaction, id: number
       canReverse: creditCapability(eligible && credit.status === "approved" && !reversal, "SUPPLIER_CREDIT_REVERSE", !canApprove ? "Purchasing approval permission required." : reversal ? "Application already reversed." : "Reverse this recorded noncash application.")
     })),
     capabilities: {
+      reconcileCosts: creditCapability(
+        eligible && credit.status === "approved" && ["pending", "review_required"].includes(cost.costStatus),
+        "SUPPLIER_CREDIT_RECONCILE_COSTS",
+        !canApprove ? "Purchasing approval permission required."
+          : issues.length > 0 ? "Resolve supplier credit balance evidence before rechecking costs."
+          : credit.status !== "approved" ? "Only an approved supplier credit can recheck its cost evidence."
+          : cost.costStatus === "posted" ? "The current supplier credit cost evidence is already complete."
+          : "Recheck current receipt and cost evidence. Unresolved issues remain visible; credit amounts and applications are unchanged.",
+      ),
       replace: creditCapability(canCreate && credit.status === "voided" && !replacement, "SUPPLIER_CREDIT_REPLACE", replacement ? "An explicit replacement already exists." : "Create a reviewed replacement preserving this voided document."),
       approve: creditCapability(eligible && credit.status === "draft", "SUPPLIER_CREDIT_APPROVE", eligible ? "Approve the reviewed supplier document." : "Resolve evidence and permission requirements."),
       apply: creditCapability(eligible && credit.status === "approved" && applied < BigInt(total), "SUPPLIER_CREDIT_APPLY", eligible ? "Apply available credit to an approved invoice." : "Resolve evidence and permission requirements."),

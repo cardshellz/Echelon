@@ -24,7 +24,7 @@ export async function readPurchaseCostApplications(tx: Transaction, purchaseOrde
     `, "cost source revision history", COST_REVISION_HISTORY_LIMIT),
     await readRows(tx, sql`
       SELECT application.id, application.source_revision_id AS "sourceRevisionId", application.status,
-        application.evidence->'result' AS result, application.recorded_by AS "recordedBy", application.recorded_at AS "recordedAt"
+        application.evidence->'result' AS result, application.evidence->'noInventoryEffectEvidence' AS "noInventoryEffectEvidence", application.recorded_by AS "recordedBy", application.recorded_at AS "recordedAt"
       FROM inventory.cost_applications application
       JOIN procurement.cost_source_revisions revision ON revision.id=application.source_revision_id
       JOIN procurement.purchase_order_lines line ON line.id=revision.purchase_order_line_id
@@ -61,6 +61,7 @@ export async function readPurchaseCostApplications(tx: Transaction, purchaseOrde
         event.payload->'contractVersion' AS "payloadContractVersion",
         event.payload->'historicalCostAdjustments' AS "historicalCostAdjustments",
         event.payload->'unresolvedQuantities' AS "unresolvedQuantities",
+        event.payload->'inventoryEffectProof' AS "inventoryEffectProof",
         CASE WHEN jsonb_typeof(event.payload->'changes')='array' THEN jsonb_array_length(event.payload->'changes') ELSE NULL END AS "changeCount"
       FROM inventory.cost_reporting_events event
       JOIN inventory.cost_applications application ON application.id=event.application_id

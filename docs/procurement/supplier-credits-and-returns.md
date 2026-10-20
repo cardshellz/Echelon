@@ -37,7 +37,7 @@ Credit source snapshots and original credited invoice economics are protected. A
 
 ## Explicit remaining boundaries
 
-- An exact quarantine return credit covering every invoiced unit has zero remaining source quantity. The inventory cost contract requires a positive denominator, so this case remains `CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW`; it does not post stock or sold-cost adjustments, claim completion, or offer an automatic retry. Retain the physical return and credit evidence for an explicit zero-quantity accounting disposition. A financial credit can still be approved and applied independently; that does not establish inventory cost completion.
+- Full quarantine returns are supported only under the exact no-inventory-effect proof described below. Accepted quantities, any relevant inventory history, prior product/packaging postings, open receiving work, incomplete custody, nonmatching credit values or changed source evidence remain review-required. Landed costs retain their separate owner; a fully credited goods line does not settle a freight charge.
 - Returning already accepted stock needs its own physical return owner for lot/variant/location movements and the corresponding financial disposition. This batch supports immutable pending-recognition quarantine returns only.
 - A supplier cash refund, short-credit/writeoff difference, and external GL journal are separate operations. Recording or applying a credit does not assert that any of them occurred.
 - Legacy negative freight charges remain retained source evidence. They are not automatically copied into new supplier credit entitlement; that would risk counting the same credit twice. Unsupported historical signed-charge posting still requires explicit source review.
@@ -76,3 +76,34 @@ Covered failure modes and invariants:
 - Real PostgreSQL migration constraints and immutable audit history; affected existing fixture suites; typechecks and build.
 
 No production data repair, financial transfer, merge or deployment is part of local validation.
+
+## Full quarantine return correction
+
+This correction starts from local merge `44782172fefe65731cfc4856437993b9513325f1`, incorporating supplier-credit dependency head `7a770574ce4e50dde93ae788c541e0780a786a3e` and fetched main `dd29f502fb89c6706847e8407cf53a2299fd263d`. The operator reports PR1861 deployed. These Git identities and local tests do not identify the running production release.
+
+### Exact supported outcome
+
+When every invoiced piece was held and returned before acceptance, and the approved supplier credits exactly cover its product and packaging source values, the source may explicitly have zero remaining pieces and zero remaining cost. It does not use a made-up unit denominator. Inventory independently proves that the line has no recognized receipt quantity, lot origin or associated legacy stock, physical movement or prior product/packaging cost posting, and that all related receiving work is closed or cancelled. The live invoice, credit and immutable return identities must match the saved source.
+
+The source contract carries an explicit full-quarantine-return disposition. `inventory/application/apply-no-inventory-effect.ts::applyNoInventoryEffect` records a zero-effect application and reporting event only after `inventory/domain/no-inventory-effect.ts::proveNoInventoryEffect` succeeds. It does not allocate stock, update a lot, adjust sold COGS or change the supplier credit's settlement. Existing positive-quantity sources retain their original representation and fingerprints.
+
+Current PO, shipment, receipt and supplier-credit projections revalidate that same proof. Their completion label is **Fully returned before acceptance; no inventory or sold-cost change**. Purchase history retains each original attempt and verifies its retained source/proof/reporting snapshot. A later approval never rewrites an earlier review attempt. Void or later contradictory evidence removes current completion while preserving the historical record.
+
+### Recovery for existing approved credits
+
+1. Resolve the actual held custody and close the receipt with zero accepted units.
+2. Open the existing approved supplier credit. An authorized purchasing approver can use **Recheck cost disposition** when its current cost status still needs work.
+3. Review the current evidence and submit a reason. The command checks current authority, source and version under the inventory graph and document locks. It appends audit/cost evidence; it does not change the credit amount/version, apply credit to an invoice, create a payment or repeat the return.
+4. If evidence is still insufficient, the result remains review-required with its blocker. A successful command response does not imply successful cost completion. A response lost after commit retains the same actor-bound request/key for recovery.
+
+The HTTP owner is `POST /api/supplier-credits/:id/reconcile_costs` with the existing expected-version/reason contract. Exact replay returns the retained receipt; changed actor, resource or payload cannot reuse its key. Stale evidence and revoked authority reject before side effects. Cost/report/audit failures roll the command back together. Counts and import mutations join the existing inventory graph fence so a no-stock proof cannot race a receipt count change.
+
+No migration or historical backfill is required. No existing credit is automatically reapproved. Reporting payloads carry the explicit zero-effect proof; external delivery remains subject to the separately configured receiver's contract and acceptance, which local Echelon tests do not establish.
+
+### Evidence and remaining work
+
+The real PostgreSQL full-return case in `server/modules/procurement/__tests__/integration/supplier-credit-cost.cases.ts` exercises approval while receiving remains open, later completion of that same approved credit, late reporting failure/rollback, concurrent retries, an actual waiting receipt writer, legacy stock ambiguity, current evidence drift and void. It asserts unchanged physical inventory, sold cost, gross invoice and credit settlement. HTTP recovery tests exercise current permission revocation, stale and terminal documents, payload/key mismatch, exact replay and audit rollback. UI/render tests exercise the shared completion label and desktop/mobile recovery against mocked HTTP.
+
+Accepted-stock supplier returns and credit differences are the next authorized stages. Their physical movement and loss/claim classifications are not implemented by this zero-effect correction.
+
+Local correction validation: 4,721 unit/guard cases passed (seven existing database-dependent cases skipped); 103 focused client/contract cases also passed, with overlaps not added to the broad count. All 169 PostgreSQL cases across receiving cost application, supplier-credit commands and reporting passed. The two affected browser suites plus new recovery regressions cover 132 distinct desktop/mobile cases, with no skips or failures. Application, server-test, client-test and scoped browser TypeScript checks passed, as did the production build. PostgreSQL source tracking recorded a later test-comment-only change during the final two suites; their production code was unchanged. No hosted CI or production acceptance is claimed.

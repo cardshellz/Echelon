@@ -101,6 +101,13 @@ export function validateSupplierCreditReceipt(result: Pick<FinancialCommandResul
     } else if (command === "reverse") {
       const reversal = body.credit.applications.find(row => row.id === applicationId)?.reversal;
       if (!reversal || reversal.actorId !== descriptor.actorId || reversal.reason !== expected.reason) fail();
+    } else if (command === "reconcile_costs") {
+      // This is successful evaluation, not a promise that blockers disappeared.
+      // An exact replay may retain both the reviewed version and review status.
+      const credit = body.credit;
+      if (credit.status !== "approved" || credit.appliedAmountCents === null || credit.unappliedAmountCents === null
+        || credit.balanceIssues.length > 0
+        || credit.balanceState !== (credit.unappliedAmountCents === 0 ? "fully_applied" : "available")) fail();
     } else if (command === "approve" && body.credit.status !== "approved") fail();else if (command === "void" && (body.credit.status !== "voided" || body.credit.voidReason !== expected.reason)) fail();
     if (command !== "apply" && body.applicationIds.length > 0) fail();
     if (command !== "reverse" && body.reversedApplicationId !== null) fail();

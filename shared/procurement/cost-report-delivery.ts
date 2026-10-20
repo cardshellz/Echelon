@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { unresolvedCostQuantitySchema } from "./cost-source-contracts";
+import { costInventoryEffectProofSchema, unresolvedCostQuantitySchema } from "./cost-source-contracts";
 import { reconciliationPostingSchema } from "./cost-reconciliation";
 
 export const COST_REPORT_MAX_BYTES = 4 * 1024 * 1024;
@@ -25,7 +25,8 @@ const priorBalance = balance.extend({
 });
 
 /** This is the inventory owner's existing version-1 event, unchanged in transit.
- * It reports an applied cost adjustment; it is not a sale or a journal command. */
+ * It reports an applied cost adjustment or a verified no-inventory-effect
+ * disposition; neither is a sale or a journal command. */
 export const inventoryCostReportEventSchema = z.object({
   contractVersion: z.literal(1), currency: z.string().regex(/^[A-Z]{3}$/),
   sourceRevisionId: id, sourceFingerprint: hash, component,
@@ -36,7 +37,16 @@ export const inventoryCostReportEventSchema = z.object({
   cogsDeltaCents: integer, actorId: z.string().min(1).max(500), recordedAt: z.string().datetime({ offset: true }),
   unresolvedQuantities: z.array(unresolvedCostQuantitySchema).min(1).max(10_000).optional(),
   historicalCostAdjustments: z.array(reconciliationPostingSchema).min(1).max(2).optional(),
+  inventoryEffectProof: costInventoryEffectProofSchema.optional(),
 }).strict().superRefine((event, context) => {
+  if (event.inventoryEffectProof && (event.currency !== "USD" || event.component === "landed"
+    || event.changes.length !== 0 || event.cogsDeltaCents !== 0
+    || event.historicalCostAdjustments !== undefined || event.unresolvedQuantities !== undefined)) {
+    context.addIssue({
+      code: "custom", path: ["inventoryEffectProof"],
+      message: "No-inventory-effect evidence cannot accompany inventory, COGS or historical cost adjustments",
+    });
+  }
   if (event.historicalCostAdjustments && (event.currency !== "USD"
     || new Set(event.historicalCostAdjustments.map(posting=>posting.destination)).size !== event.historicalCostAdjustments.length)) {
     context.addIssue({code:"custom",path:["historicalCostAdjustments"],message:"Historical cost postings must have unique USD component destinations"});

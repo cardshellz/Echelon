@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { costIssueSchema, type CostIssue, type CostSourceReference } from "@shared/procurement/cost-source-contracts";
+import { costIssueSchema, type CostIssue, type CostSourceReference, type CostInventoryEffect } from "@shared/procurement/cost-source-contracts";
 import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
 import { supplierCreditDispositionSchema, type SourceLineInput } from "@shared/procurement/supplier-credit";
 import { costFingerprint, costInteger, CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
@@ -121,6 +121,7 @@ export function resolveSupplierCreditReductions(invoices: Record<string, unknown
   let productMills = BigInt(0), packagingMills = BigInt(0), basePieces = BigInt(0);
   const issues: CostIssue[] = [];
   const sources: CostSourceReference[] = [];
+  const returns: CostInventoryEffect["returns"] = [];
   const byInvoice = new Map<number, { product: bigint; packaging: bigint; pieces: bigint }>();
   const identities = new Set<number>();
   for (const credit of credits) {
@@ -168,6 +169,11 @@ export function resolveSupplierCreditReductions(invoices: Record<string, unknown
     totals.product += BigInt(reduction.productMills); totals.packaging += BigInt(reduction.packagingMills); totals.pieces += BigInt(reduction.basePieces);
     byInvoice.set(invoiceLineId, totals);
     productMills += BigInt(reduction.productMills); packagingMills += BigInt(reduction.packagingMills); basePieces += BigInt(reduction.basePieces);
+    if (evidence.returnSource) returns.push({
+      supplierCreditLineId: lineId, returnDispositionId: evidence.returnSource.dispositionId,
+      observationId: evidence.returnSource.observationId, receivingLineId: evidence.returnSource.receivingLineId,
+      quantity: evidence.returnSource.observationQuantity, unitsPerVariant: evidence.returnSource.unitsPerVariant,
+    });
   }
   for (const [invoiceLineId, totals] of byInvoice) {
     const invoice = invoices.find(row => Number(row.id) === invoiceLineId)!;
@@ -177,5 +183,5 @@ export function resolveSupplierCreditReductions(invoices: Record<string, unknown
       issues.push(supplierCreditIssue("CREDIT_SOURCE_EXCEEDED", "Cumulative supplier credits exceed the original invoice component or quantity. Review the credit source before changing inventory costs."));
     }
   }
-  return { productMills, packagingMills, basePieces, issues, sources };
+  return { productMills, packagingMills, basePieces, issues, sources, returns };
 }

@@ -11,8 +11,11 @@ import { executeReceivingCustodyCommand } from "../../receiving-quarantine.servi
 import type { ReceivingService } from "../../receiving.service";
 import { receivingUnitVersion, type ReceiptUnitLine } from "../../receiving-unit-contract";
 import { prepareShipmentCostRevisions } from "../../shipment-cost-application.service";
-import { loadSupplierCreditSource } from "../../supplier-credit.repository";
+import { loadSupplierCreditSource, readSupplierCreditDetail } from "../../supplier-credit.repository";
+import { executeSupplierCreditCommand } from "../../supplier-credit.service";
 import { purchaseCostNextAction } from "@shared/procurement/purchase-cost-status";
+import { readPurchaseCostApplications } from "../../purchase-cost-application-read.repository";
+import { projectPurchaseCostApplications } from "../../purchase-cost-application-read.service";
 
 export function registerSupplierCreditCostCases(fixture: {
   pool: () => pg.Pool;
@@ -144,7 +147,7 @@ export function registerSupplierCreditCostCases(fixture: {
     expect(result.proposals[0].input).toMatchObject({ totalMills: 400000, evidence: "review_required", issue: { code: "LANDED_ALLOCATION_STALE" } });
   });
 
-  it("quarantine return credits prove partial posting, full-return review and custody caps without another physical movement", async () => {
+  it("quarantine return credits prove partial posting, full-return completion and custody caps without another physical movement", async () => {
     await query(`UPDATE procurement.purchase_order_lines SET order_qty=100,total_product_cost_cents=10000,packaging_cost_cents=1000,line_total_cents=11000 WHERE id=21;
       UPDATE procurement.vendor_invoice_lines SET qty_invoiced=100,line_total_cents=13000,cost_component_evidence='{"contractVersion":1,"packagingTreatment":"separate","productMills":1200000,"packagingMills":100000,"adjustmentMills":0,"source":"operator_review"}' WHERE id=72;
       UPDATE procurement.vendor_invoices SET invoiced_amount_cents=13000,balance_cents=13000,status='approved' WHERE id=71;
@@ -204,42 +207,132 @@ export function registerSupplierCreditCostCases(fixture: {
       INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,line_number,purchase_order_line_id,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents,cost_component_evidence)
         VALUES(76,75,1,22,100,120,12000,13000,'{"contractVersion":1,"packagingTreatment":"separate","productMills":1200000,"packagingMills":100000,"adjustmentMills":0,"source":"operator_review"}'::jsonb)`);
     const fullReceipt = await fixture.prepareQuarantineReceipt({ shipmentId: 2, purchaseOrderId: 20 });
+    // The count writer must wait behind the same graph fence used by the cost proof.
+    // Observe PostgreSQL's actual blocker relationship rather than relying on elapsed time.
+    const graphLease = await fixture.pool().connect();
+    let countEdit: Promise<unknown> | undefined;
+    try {
+      await graphLease.query("BEGIN");
+      const blocker = (await graphLease.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      await graphLease.query("SELECT pg_advisory_xact_lock(hashtext('inventory.cost_graph'),hashtext('version_1'))");
+      countEdit = fixture.receiving().updateLine(Number(fullReceipt.line.id), {
+        receivedQty: 0, expectedUnitVersion: receivingUnitVersion(fullReceipt.line),
+      }, fixture.actorId);
+      // Attach rejection handling immediately while observing the waiting connection.
+      const observedEdit = countEdit.then(() => ({ ok: true as const }), error => ({ ok: false as const, error }));
+      await expect.poll(async () => (await query(
+        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1::int=ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock') AS waiting", [blocker],
+      )).rows[0].waiting, { timeout: 5000 }).toBe(true);
+      await graphLease.query("COMMIT");
+      const outcome = await observedEdit;
+      if (!outcome.ok) throw outcome.error;
+    } finally {
+      await graphLease.query("ROLLBACK");
+      graphLease.release();
+      await countEdit?.catch(() => undefined);
+    }
+    // Use the saved post-edit timestamp when rebuilding the reviewed unit fingerprint.
+    const refreshedUnit = (await query("SELECT updated_at FROM procurement.receiving_lines WHERE id=$1", [Number(fullReceipt.line.id)])).rows[0];
+    const refreshedLine = { ...fullReceipt.line, receivedQty: 0, updatedAt: refreshedUnit.updated_at };
     const fullIntake = await fixture.database().transaction(tx => executeReceivingCustodyCommand(tx, fixture.receiving(), {
       command: "intake", resourceId: fullReceipt.receiptId, actorId: "admin-user", at: fixture.at, commandKey: randomUUID(),
-      body: { kind: "receipt_line", receivingLineId: Number(fullReceipt.line.id), expectedUnitVersion: receivingUnitVersion(fullReceipt.line),
+      body: { kind: "receipt_line", receivingLineId: Number(fullReceipt.line.id), expectedUnitVersion: receivingUnitVersion(refreshedLine),
         acceptedQty: 0, heldQty: 2, countsReviewed: true, holdingLocationId: 100, condition: "damaged", reason: "All cases damaged", evidenceReference: "INSPECT-FULL" },
     }));
     await fixture.database().transaction(tx => executeReceivingCustodyCommand(tx, fixture.receiving(), {
       command: "return", resourceId: fullIntake.observation.id, actorId: "admin-user", at: fixture.at, commandKey: randomUUID(),
       body: { expectedVersion: 0, observationQty: 2, reason: "Supplier collected every case", evidenceReference: "COLLECT-FULL" },
     }));
-    await fixture.receiving().close(fullReceipt.receiptId, fixture.actorId);
     const fullDisposition = (await query("SELECT id FROM procurement.receiving_quarantine_dispositions WHERE observation_id=$1 AND kind='return'", [fullIntake.observation.id])).rows[0];
-    const fullPhysical = await fixture.physicalSnapshot();
     const soldCosts = (await query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows;
-    const fullCredit = await approve([{ invoiceLineId: 76, amountCents: 13000,
-      disposition: { kind: "quarantine_return", returnDispositionId: Number(fullDisposition.id), quantity: 2, evidenceReference: "COLLECT-FULL" } }], 75);
+    const fullLine: SourceLineInput = { invoiceLineId: 76, amountCents: 13000,
+      disposition: { kind: "quarantine_return", returnDispositionId: Number(fullDisposition.id), quantity: 2, evidenceReference: "COLLECT-FULL" } };
+    const fullCredit = await approve([fullLine], 75);
     expect(fullCredit.result.costStatus).toBe("review_required");
-    expect(fullCredit.result.costIssues.every(issue => issue.code === "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW")).toBe(true);
+    await fixture.receiving().close(fullReceipt.receiptId, fixture.actorId);
+    const fullPhysical = await fixture.physicalSnapshot();
+    const currentCredit = await fixture.database().transaction(tx => readSupplierCreditDetail(tx, fullCredit.creditId, true));
+    expect(currentCredit.capabilities.reconcileCosts?.allowed).toBe(true);
+    const recheck = () => fixture.database().transaction(tx => executeSupplierCreditCommand(tx, {
+      command: "reconcile_costs", creditId: fullCredit.creditId, actorId: "admin-user", at: fixture.at,
+      raw: { expectedVersion: currentCredit.version, reason: "All returned custody is closed; recheck existing approved credit" },
+    }));
+    const beforeFailure = (await query("SELECT * FROM procurement.supplier_credits ORDER BY id")).rows;
+    const revisionsBeforeFailure = (await query("SELECT * FROM procurement.cost_source_revisions ORDER BY id")).rows;
+    await query(`CREATE FUNCTION inventory.full_return_reporting_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'full return reporting failure'; END $$;
+      CREATE TRIGGER full_return_reporting_failure BEFORE INSERT ON inventory.cost_reporting_events FOR EACH ROW EXECUTE FUNCTION inventory.full_return_reporting_failure()`);
+    try { await expect(recheck()).rejects.toThrow("full return reporting failure"); }
+    finally { await query("DROP TRIGGER full_return_reporting_failure ON inventory.cost_reporting_events; DROP FUNCTION inventory.full_return_reporting_failure()"); }
+    expect((await query("SELECT * FROM procurement.supplier_credits ORDER BY id")).rows).toEqual(beforeFailure);
+    expect((await query("SELECT * FROM procurement.cost_source_revisions ORDER BY id")).rows).toEqual(revisionsBeforeFailure);
+    expect(await fixture.physicalSnapshot()).toEqual(fullPhysical);
+    const rechecked = await recheck();
+    expect(rechecked.credit.costStatus).toBe("posted");
+    expect(rechecked.credit.costIssues).toEqual([]);
+    expect(rechecked.applicationIds).toEqual([]);
+    expect(rechecked.reversedApplicationId).toBeNull();
+    expect((await query("SELECT * FROM procurement.supplier_credits ORDER BY id")).rows).toEqual(beforeFailure);
+    expect((await query("SELECT count(*)::int AS count FROM procurement.supplier_credit_applications WHERE supplier_credit_id=$1", [fullCredit.creditId])).rows[0].count).toBe(0);
     expect((await query("SELECT status FROM procurement.supplier_credits WHERE id=$1", [fullCredit.creditId])).rows).toEqual([{ status: "approved" }]);
     expect((await query("SELECT count(*)::int AS count FROM inventory.inventory_lots WHERE po_line_id=22")).rows[0].count).toBe(0);
     expect((await query("SELECT count(*)::int AS count FROM inventory.lot_cost_origins WHERE purchase_order_line_id=22")).rows[0].count).toBe(0);
     const fullCosts = await fixture.database().transaction(tx => readPurchaseCostStatus(tx, [22]));
-    expect(fullCosts.lines[0].components.every(component => component.status === "review_required")).toBe(true);
-    expect(purchaseCostNextAction(fullCosts.lines[0])).toBe("review");
+    expect(fullCosts.lines[0].components.every(component => component.status === "applied" && component.sourceEvidence === "confirmed")).toBe(true);
+    expect(purchaseCostNextAction(fullCosts.lines[0])).toBe("none");
+    expect(fullCosts.lines[0].components.map(component => component.inventoryEffect)).toEqual([
+      expect.objectContaining({ kind: "none", reason: "full_quarantine_return", returnedBasePieces: 100 }),
+      expect.objectContaining({ kind: "none", reason: "full_quarantine_return", returnedBasePieces: 100 }),
+    ]);
+    const history = await fixture.database().transaction(async tx => projectPurchaseCostApplications(await readPurchaseCostApplications(tx, 20), 20));
+    expect(history.revisions).toHaveLength(2);
+    for (const revision of history.revisions) {
+      expect(revision.source).toMatchObject({ totalMills: 0, basePieces: 0, evidence: "confirmed" });
+      expect(revision.applications).toHaveLength(2);
+      expect(revision.applications.find(application => application.status === "review_required")?.inventoryEffect).toBeUndefined();
+      expect(revision.applications.find(application => application.status === "applied")).toMatchObject({ status: "applied", evidenceState: "verified_record",
+        inventoryEffect: { kind: "none", reason: "full_quarantine_return", returnedBasePieces: 100 },
+        outcome: { lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0 } });
+    }
     const fullApplications = (await query(`SELECT application.* FROM inventory.cost_applications application
       JOIN procurement.cost_source_revisions revision ON revision.id=application.source_revision_id WHERE revision.purchase_order_line_id=22 ORDER BY application.id`)).rows;
-    expect(fullApplications).toHaveLength(2);
-    expect(fullApplications.every(application => application.status === "review_required" && application.evidence.result.lotsUpdated === 0 && application.evidence.result.cogsRowsUpdated === 0)).toBe(true);
+    expect(fullApplications).toHaveLength(4);
+    expect(fullApplications.filter(application => application.status === "applied")).toHaveLength(2);
+    expect(fullApplications.every(application => application.evidence.result.lotsUpdated === 0 && application.evidence.result.cogsRowsUpdated === 0 && application.evidence.result.totalCogsDeltaCents === 0)).toBe(true);
     expect((await query(`SELECT count(*)::int AS count FROM inventory.cost_reporting_events event
       JOIN inventory.cost_applications application ON application.id=event.application_id
-      JOIN procurement.cost_source_revisions revision ON revision.id=application.source_revision_id WHERE revision.purchase_order_line_id=22`)).rows[0].count).toBe(0);
-    await fixture.database().transaction(tx => approveSupplierCreditSources(tx, { ...context, creditId: fullCredit.creditId }));
+      JOIN procurement.cost_source_revisions revision ON revision.id=application.source_revision_id WHERE revision.purchase_order_line_id=22`)).rows[0].count).toBe(2);
+    await Promise.all([1, 2, 3].map(() => fixture.database().transaction(tx => approveSupplierCreditSources(tx, { ...context, creditId: fullCredit.creditId }))));
     expect((await query(`SELECT application.* FROM inventory.cost_applications application
       JOIN procurement.cost_source_revisions revision ON revision.id=application.source_revision_id WHERE revision.purchase_order_line_id=22 ORDER BY application.id`)).rows).toEqual(fullApplications);
     expect(await fixture.physicalSnapshot()).toEqual(fullPhysical);
     expect((await query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows).toEqual(soldCosts);
     expect((await query("SELECT invoiced_amount_cents,balance_cents FROM procurement.vendor_invoices WHERE id=75")).rows)
       .toEqual([{ invoiced_amount_cents: "13000", balance_cents: "13000" }]);
+    const rollback = new Error("rollback contradictory accepted quantity fixture");
+    await expect(fixture.database().transaction(async tx => {
+      await tx.execute(sql`UPDATE procurement.purchase_order_lines SET received_qty=1 WHERE id=22`);
+      const stale = await readPurchaseCostStatus(tx, [22]);
+      expect(stale.lines[0].components.every(component => component.status !== "applied" && component.inventoryEffect === undefined)).toBe(true);
+      expect((await readSupplierCreditCostStatus(tx, { creditId: fullCredit.creditId })).costStatus).not.toBe("posted");
+      throw rollback;
+    })).rejects.toBe(rollback);
+    const legacyRollback = new Error("rollback ambiguous legacy lot fixture");
+    await expect(fixture.database().transaction(async tx => {
+      await tx.execute(sql`INSERT INTO inventory.inventory_lots
+        (lot_number,product_variant_id,warehouse_location_id,purchase_order_id,received_at,qty_received,qty_on_hand)
+        VALUES('AMBIGUOUS-FULL-RETURN',200,99,20,${fixture.at},1,0)`);
+      const ambiguous = await readPurchaseCostStatus(tx, [22]);
+      expect(ambiguous.lines[0].components.every(component => component.status !== "applied" && component.inventoryEffect === undefined)).toBe(true);
+      expect((await readSupplierCreditCostStatus(tx, { creditId: fullCredit.creditId })).costStatus).not.toBe("posted");
+      throw legacyRollback;
+    })).rejects.toBe(legacyRollback);
+    await voidCredit(fullCredit.creditId);
+    const afterVoid = await fixture.database().transaction(tx => readPurchaseCostStatus(tx, [22]));
+    expect(afterVoid.lines[0].components.every(component => component.inventoryEffect === undefined)).toBe(true);
+    const retainedHistory = await fixture.database().transaction(async tx => projectPurchaseCostApplications(await readPurchaseCostApplications(tx, 20), 20));
+    expect(retainedHistory.revisions.filter(revision => revision.source?.inventoryEffect).flatMap(revision => revision.applications)
+      .filter(application => application.status === "applied").every(application => application.inventoryEffect?.reason === "full_quarantine_return")).toBe(true);
+    expect(await fixture.physicalSnapshot()).toEqual(fullPhysical);
+    expect((await query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows).toEqual(soldCosts);
   });
 }
