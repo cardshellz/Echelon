@@ -128,10 +128,15 @@ function ListingIntentChangesPanel({ base, canEdit, active = true, onReview, onO
             <p className="font-medium">Product {row.product_id} - {status.label}</p>
 
             <p className="text-xs text-muted-foreground">{status.message}</p>
+            {row.lifecycle && <details className="text-xs">
+              <summary className="cursor-pointer">Channel work checked {new Date(row.lifecycle.assessedAt).toLocaleString()}</summary>
+              <ul className="space-y-1 py-1">{row.lifecycle.members.map(member =>
+                <li key={member.productVariantId}>Variant {member.productVariantId}: {member.message}</li>)}</ul>
+            </details>}
 
             <div className="flex flex-wrap gap-2 pt-1">
 
-              {row.state !== "delivered" && <Button size="sm" variant="outline" onClick={() => onReview(row)}>{row.last_error_resolution ? "Resolve issue" : "Review listing"}</Button>}
+              {row.state !== "delivered" && row.state !== "not_applicable" && <Button size="sm" variant="outline" onClick={() => onReview(row)}>{row.last_error_resolution ? "Resolve issue" : "Review listing"}</Button>}
 
               {row.receipt && onOpenOperation && <Button size="sm" variant="outline" onClick={() => onOpenOperation(row)}>View update status</Button>}
 

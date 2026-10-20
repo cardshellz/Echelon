@@ -1,3 +1,4 @@
+import { listingIntentLifecycleEvidenceSchema } from "./listing-intent-lifecycle";
 import { DROPSHIP_LISTING_ACCESS_RESOLUTIONS } from "./dropship/listing-access";
 import { z } from "zod";
 const id = z.number().int().positive().max(2_147_483_647);
@@ -28,7 +29,15 @@ export const listingIntentChangeStatusSchema = z
     destination: listingIntentDestinationSchema,
     product_id: id,
     variant_ids: z.array(id).min(1),
-    state: z.enum(["pending", "delivered", "needs_review", "blocked"]),
+    state: z.enum([
+      "pending",
+      "delivered",
+      "needs_review",
+      "blocked",
+      "waiting_lifecycle",
+      "not_applicable",
+    ]),
+    lifecycle: listingIntentLifecycleEvidenceSchema.nullable().optional(),
     receipt: listingIntentReceiptSchema.nullable(),
     can_retry: z.boolean(),
     last_error_code: z.string().nullable(),

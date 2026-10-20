@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000019000018700001_listing_intent_lifecycle_disposition.sql",
+  "generation": 19,
+  "pr": 1870,
+  "ordinal": 1,
+  "after": [
+    "900000018000018580002_listing_intent_propagation.sql"
+  ]
+}

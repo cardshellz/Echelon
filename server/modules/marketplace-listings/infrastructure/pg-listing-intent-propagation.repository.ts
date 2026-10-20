@@ -1,3 +1,4 @@
+import { listingIntentLifecycleEvidenceSchema } from "@shared/listing-intent-lifecycle";
 import {
   listingIntentChangePageSchema,
   type ListingIntentChangePage,
@@ -19,7 +20,7 @@ const RETRY_ALLOWED = `state='blocked'
   AND destination->>'accountId' IS NOT NULL
   AND (destination->>'ambiguousConnection')::boolean=false
   AND last_error_code NOT IN ('LISTING_INTENT_ACCOUNT_UNRESOLVED','LISTING_INTENT_RECEIPT_SCOPE_CONFLICT',
-    'EBAY_SYNC_IDENTITY_CHANGED','DROPSHIP_LISTING_ACCOUNT_CHANGED','DROPSHIP_LISTING_MANAGED_SCOPE_CHANGED','DROPSHIP_IDEMPOTENCY_CONFLICT')`;
+    'EBAY_SYNC_IDENTITY_CHANGED','LISTING_INTENT_LIFECYCLE_SCOPE_CHANGED','DROPSHIP_LISTING_ACCOUNT_CHANGED','DROPSHIP_LISTING_MANAGED_SCOPE_CHANGED','DROPSHIP_IDEMPOTENCY_CONFLICT')`;
 const FANOUT_PAGE_SIZE = 100;
 const LEASE_MS = 300_000;
 interface ChangeRow {
@@ -96,6 +97,26 @@ export class PostgresListingIntentPropagationRepository implements ListingIntent
     } finally {
       client.release(discard);
     }
+  }
+
+  async withDelivery(
+    delivery: IntentDelivery,
+    work: () => Promise<void>,
+  ): Promise<boolean> {
+    return this.transaction(async (client) => {
+      const lock = await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock(hashtext('listing_intent_delivery'),hashtext($1)) acquired",
+        [delivery.id],
+      );
+      if (!lock.rows[0]?.acquired) return false;
+      const current = await client.query(
+        "SELECT 1 FROM marketplace.listing_intent_deliveries WHERE id=$1 AND lease_token=$2 AND state IN ('pending','waiting_lifecycle','blocked')",
+        [delivery.id, delivery.leaseToken],
+      );
+      if (!current.rows.length) return false;
+      await work();
+      return true;
+    });
   }
 
   async expand(limit: number, now: Date): Promise<number> {
@@ -185,7 +206,7 @@ export class PostgresListingIntentPropagationRepository implements ListingIntent
            SELECT id FROM marketplace.listing_intent_deliveries d
            WHERE NOT EXISTS(SELECT 1 FROM marketplace.listing_intent_changes source
              WHERE source.source_transaction=d.source_transaction AND source.expanded_at IS NULL)
-             AND state='pending' AND next_attempt_at <= $2 AND (lease_until IS NULL OR lease_until <= $2)
+             AND (state IN ('pending','waiting_lifecycle') OR (state='blocked' AND lifecycle_checked_at IS NULL)) AND next_attempt_at <= $2 AND (lease_until IS NULL OR lease_until <= $2)
            ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1
          ), claimed AS (
            UPDATE marketplace.listing_intent_deliveries d SET lease_token=$1,lease_until=$3,
@@ -208,6 +229,21 @@ export class PostgresListingIntentPropagationRepository implements ListingIntent
     outcome: IntentHandoff,
     now: Date,
   ): Promise<void> {
+    if ("lifecycle" in outcome) {
+      const proof = listingIntentLifecycleEvidenceSchema.parse(
+        outcome.lifecycle,
+      );
+      const ids = proof.members
+        .map((row) => row.productVariantId)
+        .sort((a, b) => a - b);
+      if (
+        JSON.stringify(ids) !==
+        JSON.stringify([...delivery.variantIds].sort((a, b) => a - b))
+      )
+        throw new Error(
+          "Lifecycle evidence must cover every exact delivery member once.",
+        );
+    }
     await this.transition(
       delivery,
       now,
@@ -216,6 +252,7 @@ export class PostgresListingIntentPropagationRepository implements ListingIntent
       outcome.state === "delivered" ? null : outcome.code,
       outcome.state === "delivered" ? null : outcome.message,
       outcome.state === "delivered" ? null : (outcome.resolution ?? null),
+      "lifecycle" in outcome ? outcome.lifecycle : null,
     );
   }
 
@@ -231,6 +268,9 @@ export class PostgresListingIntentPropagationRepository implements ListingIntent
       null,
       code,
       "The change is saved. Its listing handoff will retry automatically; no provider completion has been confirmed.",
+      null,
+      null,
+      true,
     );
   }
 
@@ -242,16 +282,18 @@ export class PostgresListingIntentPropagationRepository implements ListingIntent
     code: string | null,
     message: string | null,
     resolution: string | null = null,
+    lifecycle: unknown = null,
+    preserveAssessment = false,
   ): Promise<void> {
     await this.transaction(async (client) => {
       const before = await client.query<{ snapshot: unknown }>(
-        "SELECT to_jsonb(d) snapshot FROM marketplace.listing_intent_deliveries d WHERE id=$1 AND lease_token=$2 AND state='pending' FOR UPDATE",
+        "SELECT to_jsonb(d) snapshot FROM marketplace.listing_intent_deliveries d WHERE id=$1 AND lease_token=$2 AND state IN ('pending','waiting_lifecycle','blocked') FOR UPDATE",
         [delivery.id, delivery.leaseToken],
       );
       if (!before.rows[0]) return; // Another lease may have safely replayed the same immutable command.
       const result = await client.query<{ snapshot: unknown }>(
-        `UPDATE marketplace.listing_intent_deliveries d SET state=$3,receipt=$4::jsonb,
-          last_error_code=$5,last_error_message=$6,last_error_resolution=$8,lease_token=NULL,lease_until=NULL,
+        `UPDATE marketplace.listing_intent_deliveries d SET state=CASE WHEN $10 AND d.state='waiting_lifecycle' THEN d.state ELSE $3 END,receipt=$4::jsonb,
+          last_error_code=$5,last_error_message=CASE WHEN $10 AND d.state='waiting_lifecycle' THEN 'The last check still shows outstanding channel work. Automatic checks will retry; completion has not been confirmed.' ELSE $6 END,last_error_resolution=$8,lifecycle=CASE WHEN $10 THEN d.lifecycle ELSE $9::jsonb END,lifecycle_checked_at=CASE WHEN $10 THEN d.lifecycle_checked_at ELSE $7 END,lease_token=NULL,lease_until=NULL,
           next_attempt_at=$7::timestamptz + least(3600,30*greatest(1,attempt_count)) * interval '1 second',updated_at=$7
          WHERE id=$1 AND lease_token=$2 RETURNING to_jsonb(d) snapshot`,
         [
@@ -263,6 +305,8 @@ export class PostgresListingIntentPropagationRepository implements ListingIntent
           message,
           now,
           resolution,
+          lifecycle ? JSON.stringify(lifecycle) : null,
+          preserveAssessment,
         ],
       );
       await client.query(
@@ -270,7 +314,7 @@ export class PostgresListingIntentPropagationRepository implements ListingIntent
           VALUES ($1,$2,'system:listing-intent-propagation',$3::jsonb,$4::jsonb,$5)`,
         [
           delivery.id,
-          state,
+          preserveAssessment ? "check_deferred" : state,
           JSON.stringify(before.rows[0].snapshot),
           JSON.stringify(result.rows[0].snapshot),
           now,
@@ -310,13 +354,13 @@ export class PostgresListingIntentPropagationRepository implements ListingIntent
     try {
       const result = await client.query<{ page: unknown }>(
         `WITH visible AS (
-         SELECT d.id::text,d.change_id::text,d.destination,d.product_id,d.variant_ids,d.state,d.receipt,
+         SELECT d.id::text,d.change_id::text,d.destination,d.product_id,d.variant_ids,d.state,d.receipt,d.lifecycle,
           (${RETRY_ALLOWED}) can_retry,d.last_error_code,d.last_error_message,d.last_error_resolution,d.attempt_count,d.created_at,d.updated_at,
           c.source_relation,c.changed_fields,c.operation,c.before_scope,c.after_scope,c.actor_provenance,
           (SELECT jsonb_agg(jsonb_build_object('id',source.id::text,'source_relation',source.source_relation,
             'changed_fields',source.changed_fields,'operation',source.operation,'before_scope',source.before_scope,'after_scope',source.after_scope) ORDER BY source.id)
            FROM marketplace.listing_intent_delivery_sources link JOIN marketplace.listing_intent_changes source ON source.id=link.change_id WHERE link.delivery_id=d.id) source_changes,
-          CASE WHEN d.state IN ('blocked','needs_review') THEN 0 WHEN d.state='pending' THEN 1 ELSE 2 END attention_order,d.id sequence_id
+          CASE WHEN d.state IN ('blocked','needs_review','waiting_lifecycle') THEN 0 WHEN d.state='pending' THEN 1 ELSE 2 END attention_order,d.id sequence_id
          FROM marketplace.listing_intent_deliveries d JOIN marketplace.listing_intent_changes c ON c.id=d.change_id
          WHERE ($1::int IS NULL OR d.destination->>'channelId'=$1::text)
            AND ($2::int IS NULL OR d.destination->>'vendorId'=$2::text)
@@ -404,7 +448,7 @@ interface ManagedTarget {
   product_id: number;
   variant_ids: number[];
 }
-async function managedTargets(
+export async function managedTargets(
   client: PoolClient,
   selectors: IntentSelector[],
   cursor: string,
