@@ -5,6 +5,7 @@ import {
   listingCatalogPageSchema,
   listingDraftSchema,
   listingPriceRuleSchema,
+  saveListingPriceRuleSchema,
   listingReviewSchema,
   listingTaxonomySchema,
   reviewListingDraftSchema,
@@ -156,7 +157,7 @@ export class ListingPublicationService {
     await this.provider(channelId);
     return this.dependencies.catalog.savePricingRule(
       channelId,
-      listingPriceRuleSchema.parse(input),
+      saveListingPriceRuleSchema.parse(input),
       actorSchema.parse(actor),
       this.now(),
     );

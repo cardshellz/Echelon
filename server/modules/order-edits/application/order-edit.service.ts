@@ -48,7 +48,7 @@ import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
 import { orderEditHasSubmissionEvidence } from "./order-edit-submission";
 import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
 import { requiresOrderEditCodeReceipt } from "../domain/order-edit-coupon-boundary";
-import { presentOrderEditCodeBreakdown } from "./order-edit-code-presentation";
+import { presentOrderEditCodeBreakdown, snapshotProductPrices, quoteProductPrices } from "./order-edit-code-presentation";
 import {
   orderEditActorFingerprint,
   orderEditDiagnosticError,
@@ -307,6 +307,7 @@ export class OrderEditService {
       financials: presentOrderEditCodeBreakdown(
         snapshot.financials,
         snapshot.codePricing,
+        snapshotProductPrices(snapshot),
       ),
       settlement: presentOrderEditSettlement(snapshot),
       financialStatus: snapshot.fullyPaid ? "Paid" : "Payment outstanding",
@@ -1310,16 +1311,19 @@ export class OrderEditService {
           presentOrderEditCodeBreakdown(
             record.baseline.financials,
             record.baseline.codePricing,
+            snapshotProductPrices(record.baseline),
           ) ?? null,
         quoted:
           presentOrderEditCodeBreakdown(
             quote?.financials,
             quote?.codePricing,
+            quoteProductPrices(quote),
           ) ?? null,
         current:
           presentOrderEditCodeBreakdown(
             snapshot.financials,
             snapshot.codePricing,
+            snapshotProductPrices(snapshot),
           ) ?? null,
       },
       settlement: presentOrderEditSettlement(snapshot),

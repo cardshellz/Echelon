@@ -1,5 +1,6 @@
 import {
   listingDraftItemSchema,
+  listingPriceRuleSchema,
   type ListingCatalogItem,
   type ListingDraftItem,
   type ListingPriceRule,
@@ -37,7 +38,7 @@ export function previewRulePrice(
     item.basePriceCents === null ||
     !Number.isSafeInteger(item.basePriceCents) ||
     item.basePriceCents < 0 ||
-    !/^\d{1,7}(\.\d{1,2})?$/.test(rule.value)
+    !listingPriceRuleSchema.safeParse(rule).success
   )
     return null;
   const [whole, fraction = ""] = rule.value.split(".");
