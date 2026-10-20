@@ -7,7 +7,10 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { ShopifyOrderEditProvider } from "../server/modules/order-edits/infrastructure/shopify-order-edit.provider";
+import { PostgresOrderEditCodeHistory } from "../server/modules/order-edits/infrastructure/postgres-order-edit-code-history";
+import type { OrderEditQuote } from "../server/modules/order-edits/application/order-edit-provider";
 import {
   presentOrderEditCodeBreakdown,
   quoteProductPrices,
@@ -18,6 +21,29 @@ assert.equal(shop, "cardshellz-staging.myshopify.com");
 const token = process.env.REWARDS_STAGING_TOKEN;
 assert.ok(token);
 const fixture = `reward-edit-${randomUUID().slice(0, 20)}`;
+const stackSavedReward = process.env.REWARDS_STAGING_STACK === "true";
+const receiptUrl = process.env.REWARDS_STAGING_RECEIPTS_URL;
+if (stackSavedReward) {
+  assert.ok(receiptUrl);
+  assert.equal(new URL(receiptUrl).hostname, "127.0.0.1");
+  assert.equal(process.env.ECHELON_TEST_DATABASE_DISPOSABLE, "true");
+  assert.ok(process.env.REWARDS_STAGING_TEST_KEY);
+}
+async function receipt<T = unknown>(path: string, body: unknown): Promise<T> {
+  assert.ok(stackSavedReward && receiptUrl);
+  const response = await fetch(`${receiptUrl}/${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Test-Key": process.env.REWARDS_STAGING_TEST_KEY!,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const result = await response.json();
+  assert.equal(response.ok, true, JSON.stringify(result));
+  return result as T;
+}
 const inventoryRecoveryKey = randomUUID();
 const originalVariant = "gid://shopify/ProductVariant/45456261873862";
 let testInventory: { inventoryItemId: string; locationId: string } | undefined;
@@ -31,6 +57,9 @@ const report: Record<string, unknown> = {
   startedAt: new Date().toISOString(),
   realOrdersChanged: 0,
   realPointsChanged: 0,
+  sourceRevision: execFileSync("git", ["rev-parse", "HEAD"], {
+    encoding: "utf8",
+  }).trim(),
   inventoryRecoveryKey,
 };
 async function request<T>(
@@ -222,7 +251,30 @@ async function main(): Promise<void> {
       ".codex-artifacts/preserved-reward-staging.json",
       JSON.stringify({ ...report, cleanup }, null, 2),
     );
+    const savedReward = stackSavedReward
+      ? await receipt<{ code: string; discountId: string }>("setup", {
+          customerId: customer.id,
+          orderId: order.id,
+          originalCode: fixture.toUpperCase(),
+          originalDiscountId: code.codeDiscountNode.id,
+        })
+      : undefined;
+    if (savedReward) cleanup.push({ kind: "code", id: savedReward.discountId });
+    const quotes: OrderEditQuote[] = [];
     const provider = new ShopifyOrderEditProvider({
+      ...(stackSavedReward
+        ? {
+            fetch: async (url: string | URL | Request, init?: RequestInit) => {
+              const response = await fetch(url, init);
+              const input = JSON.parse(String(init?.body));
+              if (input.query.includes("query EchelonEditOrder(")) {
+                const result = await response.clone().json();
+                report.lastNativeOrder = result.data?.order;
+              }
+              return response;
+            },
+          }
+        : {}),
       credentials: {
         get: async () => ({
           connectionId: 1,
@@ -234,10 +286,135 @@ async function main(): Promise<void> {
       clock: () => new Date(),
       report: (event) =>
         console.log(JSON.stringify({ phase: event.phase, code: event.code })),
+      ...(savedReward
+        ? {
+            rewards: {
+              available: () => true,
+              identify: async (input: {
+                customerId: string;
+                codes: string[];
+              }) =>
+                (await receipt<{ codes: string[] }>("identify", input)).codes,
+              verify: async (input: unknown) => {
+                await receipt("validate", input);
+              },
+            },
+            codeHistory: new PostgresOrderEditCodeHistory({
+              query: async () => ({
+                rows: [...quotes].reverse().map((quote) => ({ quote })),
+              }),
+            } as unknown as import("pg").Pool),
+          }
+        : {}),
     });
     const before = await provider.readOrder(1, order.id);
     assert.equal(before.subtotalCents, 0);
     assert.equal(before.nativeDiscountAllocations?.[0]?.amountCents, 279);
+    if (savedReward) {
+      const plan = {
+        changes: [{ lineItemId: before.lines[0].id, quantity: 2 }],
+        additions: [],
+        discountCodes: [savedReward.code],
+      };
+      const preview = await provider.preview(
+        await provider.preparePreview(before),
+        plan,
+      );
+      const prepare = async (snapshot: typeof before) => {
+        const quote = await provider.quote(1, snapshot, plan, randomUUID());
+        quotes.push(quote);
+        assert.equal(quote.financials!.itemsNetCents, 88362);
+        assert.equal(
+          quote.codePricing!.retainedNativeDiscounts![0].amountCents,
+          279,
+        );
+        assert.deepEqual(quote.codePricing!.applications, [
+          { code: savedReward.code, amountCents: 233 },
+        ]);
+        await receipt("intent", { quote });
+        return quote;
+      };
+      const failed = await prepare(before);
+      assert.equal(preview.financials.totalCents, failed.totalCents);
+      await assert.rejects(
+        provider.commit(1, failed, failed.operationId, async () => {
+          await receipt("reserve-lost-response", {
+            operationId: failed.operationId,
+          });
+        }),
+      );
+      assert.equal(
+        (await provider.readOrder(1, order.id)).fingerprint,
+        before.fingerprint,
+      );
+      await receipt("not-submitted", { operationId: failed.operationId });
+      const quote = await prepare(before);
+      const unpaid = await provider.commit(
+        1,
+        quote,
+        quote.operationId,
+        async () => {
+          await receipt("reserve", { operationId: quote.operationId });
+        },
+      );
+      assert.ok(unpaid.outstandingCents > 0);
+      await receipt("unpaid", {
+        operationId: quote.operationId,
+        snapshot: unpaid,
+      });
+      const recoveryId = randomUUID();
+      const restored = await provider.recoverUnpaid(
+        1,
+        before,
+        quote,
+        recoveryId,
+      );
+      assert.equal(
+        (await provider.reconcileRecovery(1, before, recoveryId, quote)).status,
+        "restored",
+      );
+      await receipt("recovered", {
+        operationId: quote.operationId,
+        snapshot: restored,
+      });
+      const retry = await prepare(restored);
+      await provider.commit(1, retry, retry.operationId, async () => {
+        await receipt("reserve", { operationId: retry.operationId });
+      });
+      result(
+        (
+          await request<{ orderMarkAsPaid: Result<unknown> }>(
+            `mutation($input:OrderMarkAsPaidInput!){orderMarkAsPaid(input:$input){userErrors{message}}}`,
+            { input: { id: order.id } },
+          )
+        ).orderMarkAsPaid,
+      );
+      const paid = await provider.readOrder(1, order.id);
+      assert.equal(paid.fullyPaid, true);
+      assert.equal(
+        (await provider.reconcileCommit(1, restored, retry, retry.operationId))
+          .status,
+        "applied",
+      );
+      const ledger = await receipt("settled", {
+        operationId: retry.operationId,
+        snapshot: paid,
+      });
+      report.results = {
+        originalAppliedCents: 279,
+        originalFaceCents: 723,
+        newRewardCents: 233,
+        newRewardCode: savedReward.code,
+        remainingMerchandiseCents: 88362,
+        previewAgrees: true,
+        lostReservationResponseRecovered: true,
+        unpaidRecoveryReconciles: true,
+        retryUsesSameReward: true,
+        paidCommitReconciles: true,
+        ledger,
+      };
+      return;
+    }
     const plan = {
       changes: [],
       additions: [{ variantId: addedVariant, quantity: 1 }],

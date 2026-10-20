@@ -29,7 +29,7 @@ const bag = z.object({ shopMoney: money, presentmentMoney: money });
 const integer = z.number().int().nonnegative().safe();
 const page = z.object({ hasNextPage: z.boolean() });
 const combines = `combinesWith { productDiscounts orderDiscounts shippingDiscounts }`;
-export const ORDER_EDIT_CODE_LOOKUP = `query EchelonEditCode($code: String!, $search: String!) {
+export const ORDER_EDIT_CODE_LOOKUP = `query EchelonEditCode($code: String!, $search: String) {
   codeDiscountNodeByCode(code: $code) { id codeDiscount { __typename ... on DiscountCodeBasic {
     title status startsAt endsAt usageLimit appliesOncePerCustomer discountClasses
     codes(first: 2, query: $search) { nodes { code } pageInfo { hasNextPage } }
@@ -124,6 +124,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 export function readOrderEditCodeRule(
   raw: unknown,
   code: string,
+  canonicalReward = false,
 ): OrderEditCodeRule {
   const node = parse(lookupSchema, raw).codeDiscountNodeByCode;
   if (!node)
@@ -134,6 +135,9 @@ export function readOrderEditCodeRule(
   const discount = node.codeDiscount;
   const normalized = code.trim().toUpperCase();
   if (
+    (canonicalReward &&
+      (discount.codes.pageInfo.hasNextPage ||
+        discount.codes.nodes.length !== 1)) ||
     !discount.codes.nodes.some(
       (entry) => entry.code.toUpperCase() === normalized,
     )
@@ -193,7 +197,10 @@ export function readOrderEditCodeRule(
 }
 
 export class ShopifyOrderEditCodes {
-  constructor(private readonly request: Request, private readonly rewards?: OrderEditRewards) {}
+  constructor(
+    private readonly request: Request,
+    private readonly rewards?: OrderEditRewards,
+  ) {}
 
   async rules(
     snapshot: OrderEditSnapshot,
@@ -204,45 +211,140 @@ export class ShopifyOrderEditCodes {
         "ORDER_EDIT_CODE_CUSTOMER_MISSING",
         "We could not verify the customer for this order.",
       );
+    const requestedRewards = new Set(
+      this.rewards?.available()
+        ? await this.rewards.identify({
+            customerId: snapshot.customerId,
+            codes,
+          })
+        : [],
+    );
+    const results = await this.readRules(codes, requestedRewards);
+    const verifiedRules = results.map((rule) =>
+      this.identifyReward(rule, requestedRewards),
+    );
+    await this.retainedNativeRewards(snapshot, verifiedRules);
+    const rewardRules = verifiedRules.filter(
+      (rule) => rule.redemption === "club_reward",
+    );
+    if (rewardRules.length) {
+      if (!this.rewards)
+        fail(
+          "ORDER_EDIT_REWARDS_UNAVAILABLE",
+          "We couldn't check your Club reward. Please try again shortly.",
+        );
+      // Canonical issuance identifies rewards; restrictions and code prefixes do not.
+      await this.rewards.verify({
+        customerId: snapshot.customerId,
+        orderId: snapshot.orderId,
+        rules: rewardRules,
+      });
+    }
+    return verifiedRules;
+  }
+
+  private readRules(
+    codes: string[],
+    issued = new Set<string>(),
+  ): Promise<OrderEditCodeRule[]> {
+    return Promise.all(
+      codes.map(async (code) =>
+        readOrderEditCodeRule(
+          await this.request(ORDER_EDIT_CODE_LOOKUP, {
+            code,
+            // A newly issued Club reward is a single-code node. Read its sole
+            // code directly: Shopify's nested code-search index can still be
+            // empty after codeDiscountNodeByCode already finds that exact node.
+            // Ordinary coupons retain the existing search and eligibility path.
+            search: issued.has(code.trim().toUpperCase())
+              ? null
+              : `"${code.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
+          }),
+          code,
+          issued.has(code.trim().toUpperCase()),
+        ),
+      ),
+    );
+  }
+
+  private identifyReward(
+    rule: OrderEditCodeRule,
+    issued: Set<string>,
+  ): OrderEditCodeRule {
+    if (!issued.has(rule.code)) return rule;
     if (
-      (snapshot.discountRules ?? []).some(
+      rule.value.type !== "fixed" ||
+      rule.usageLimit !== 1 ||
+      rule.appliesOncePerCustomer !== true
+    )
+      fail(
+        "ORDER_EDIT_REWARD_TERMS_CHANGED",
+        "This reward's details have changed. It has not been added to your order.",
+      );
+    return orderEditCodeRuleSchema.parse({
+      ...rule,
+      redemption: "club_reward",
+    });
+  }
+
+  /** Recognize the already-used checkout reward without reserving or redeeming it again. */
+  async retainedNativeRewards(
+    snapshot: OrderEditSnapshot,
+    proposed: OrderEditCodeRule[],
+  ): Promise<OrderEditCodeRule[]> {
+    const native = (snapshot.discountRules ?? []).filter(
+      (rule) =>
+        rule.type === "DiscountCodeApplication" &&
+        rule.targetType === "LINE_ITEM",
+    );
+    if (!native.length) return [];
+    if (
+      !snapshot.customerId ||
+      !this.rewards?.available() ||
+      proposed.some((rule) => rule.redemption !== "club_reward") ||
+      native.some(
         (rule) =>
-          rule.type === "DiscountCodeApplication" &&
-          rule.targetType === "LINE_ITEM",
+          rule.targetSelection !== "ALL" ||
+          rule.allocationMethod !== "ACROSS" ||
+          rule.value.type !== "fixed",
       )
     )
       fail(
         "ORDER_EDIT_CODE_EXISTING_NATIVE_UNSUPPORTED",
         "Adding another code to this order requires our help. Your existing code has not changed.",
       );
-    const results = await Promise.all(
-      codes.map(async (code) =>
-        readOrderEditCodeRule(
-          await this.request(ORDER_EDIT_CODE_LOOKUP, {
-            code,
-            search: `"${code.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
-          }),
-          code,
-        ),
-      ),
+    const codes = native.map((rule) => rule.label);
+    const issued = new Set(
+      await this.rewards.identify({ customerId: snapshot.customerId, codes }),
     );
-    const requestedRewards = new Set(this.rewards?.available()
-      ? await this.rewards.identify({ customerId: snapshot.customerId, codes })
-      : []);
-    const verifiedRules = results.map((rule) => {
-      if (!requestedRewards.has(rule.code)) return rule;
-      if (rule.value.type !== "fixed" || rule.usageLimit !== 1 || rule.appliesOncePerCustomer !== true)
-        fail("ORDER_EDIT_REWARD_TERMS_CHANGED", "This reward's details have changed. It has not been added to your order.");
-      return orderEditCodeRuleSchema.parse({ ...rule, redemption: "club_reward" });
-    });
-    const rewardRules = verifiedRules.filter((rule) => rule.redemption === "club_reward");
-    if (rewardRules.length) {
-      if (!this.rewards)
-        fail("ORDER_EDIT_REWARDS_UNAVAILABLE", "We couldn't check your Club reward. Please try again shortly.");
-      // Canonical issuance identifies rewards; restrictions and code prefixes do not.
-      await this.rewards.verify({ customerId: snapshot.customerId, orderId: snapshot.orderId, rules: rewardRules });
-    }
-    return verifiedRules;
+    const rules = (await this.readRules(codes, issued)).map((rule) =>
+      this.identifyReward(rule, issued),
+    );
+    if (
+      rules.some(
+        (rule, index) =>
+          rule.redemption !== "club_reward" ||
+          canonicalJson(rule.value) !== canonicalJson(native[index].value),
+      )
+    )
+      fail(
+        "ORDER_EDIT_CODE_EXISTING_NATIVE_UNSUPPORTED",
+        "The original Club reward could not be verified. Your existing discount has not changed.",
+      );
+    if (
+      rules.some((rule) =>
+        proposed.some(
+          (candidate) =>
+            candidate.discountId === rule.discountId ||
+            candidate.code.toUpperCase() === rule.code.toUpperCase(),
+        ),
+      )
+    )
+      fail(
+        "ORDER_EDIT_CODE_ALREADY_APPLIED",
+        "This reward is already on your order. It cannot be used again.",
+      );
+    return rules;
   }
 
   async assertCombinations(
@@ -255,16 +357,20 @@ export class ShopifyOrderEditCodes {
       snapshot,
       productDiscount,
       shippingLabels,
+      rules,
     );
     // Recheck every pair against the complete revised cart, including a newly earned shipping benefit.
     assertOrderEditCodeCombinations({
-      existing,
-      proposed: rules.map((rule) => ({
-        id: rule.discountId,
-        label: rule.code,
-        classes: rule.classes,
-        combinesWith: rule.combinesWith,
-      })),
+      existing: existing.discounts,
+      proposed: [
+        ...existing.retainedRewards,
+        ...rules.map((rule) => ({
+          id: rule.discountId,
+          label: rule.code,
+          classes: rule.classes,
+          combinesWith: rule.combinesWith,
+        })),
+      ],
     });
   }
 
@@ -272,7 +378,11 @@ export class ShopifyOrderEditCodes {
     snapshot: OrderEditSnapshot,
     productDiscount: boolean,
     shippingLabels: string[],
-  ): Promise<OrderEditCombinationDiscount[]> {
+    proposed: OrderEditCodeRule[],
+  ): Promise<{
+    discounts: OrderEditCombinationDiscount[];
+    retainedRewards: OrderEditCombinationDiscount[];
+  }> {
     const schema = z.object({
       shopifyFunctions: z.object({
         nodes: z.array(z.object({ id: z.string(), handle: z.string() })),
@@ -304,7 +414,21 @@ export class ShopifyOrderEditCodes {
         "ORDER_EDIT_CODE_RULES_INCOMPLETE",
         "The order's discount combination rules could not be fully loaded.",
       );
-    const used = new Map<string, OrderEditCombinationDiscount>();
+    const retainedRewards = await this.retainedNativeRewards(
+      snapshot,
+      proposed,
+    );
+    const used = new Map<string, OrderEditCombinationDiscount>(
+      retainedRewards.map((rule) => [
+        rule.discountId,
+        {
+          id: rule.discountId,
+          label: rule.code,
+          classes: rule.classes,
+          combinesWith: rule.combinesWith,
+        },
+      ]),
+    );
     const rules = [
       ...(snapshot.discountRules ?? []).filter(
         (rule) => rule.targetType !== "SHIPPING_LINE",
@@ -336,6 +460,15 @@ export class ShopifyOrderEditCodes {
         value: { type: "fixed", amountCents: 0 },
       });
     for (const rule of rules) {
+      // These remain native ORDER discounts, including when there is no product discount.
+      if (
+        rule.type === "DiscountCodeApplication" &&
+        rule.targetType === "LINE_ITEM" &&
+        retainedRewards.some(
+          (reward) => reward.code === rule.label.toUpperCase(),
+        )
+      )
+        continue;
       if (rule.targetType === "LINE_ITEM" && !productDiscount) continue;
       if (
         rule.type === "ManualDiscountApplication" &&
@@ -394,7 +527,13 @@ export class ShopifyOrderEditCodes {
         combinesWith: matches[0].discount.combinesWith!,
       });
     }
-    return [...used.values()];
+    const retainedIds = new Set(retainedRewards.map((rule) => rule.discountId));
+    return {
+      discounts: [...used.values()].filter((rule) => !retainedIds.has(rule.id)),
+      retainedRewards: [...used.values()].filter((rule) =>
+        retainedIds.has(rule.id),
+      ),
+    };
   }
 
   /** Calculation only: never creates a draft order or consumes a code. Shopify remains eligibility authority. */
@@ -405,8 +544,22 @@ export class ShopifyOrderEditCodes {
     expected?: { code: string; amountCents: number }[],
   ): Promise<Array<{ code: string; amountCents: number }>> {
     if (!rules.length) return [];
+    // Verify the new reward on the editable real merchandise. The original
+    // checkout reward is already consumed and must never be submitted again.
+    // Combination permissions for both are checked separately with current terms.
+    if (lines.some((line) => line.nativeDiscountCents)) {
+      await this.retainedNativeRewards(snapshot, rules);
+      lines = lines.filter((line) => !line.nativeDiscountCents);
+    }
+    if (!lines.length)
+      fail(
+        "ORDER_EDIT_CODE_UNUSED_CREDIT",
+        "There is no eligible merchandise left for this reward. Your reward is still available.",
+      );
     const nativeCoupons = rules.every(
-      (rule) => rule.redemption === "shopify_coupon" || rule.redemption === "club_reward",
+      (rule) =>
+        rule.redemption === "shopify_coupon" ||
+        rule.redemption === "club_reward",
     );
     const result = parse(
       z.object({

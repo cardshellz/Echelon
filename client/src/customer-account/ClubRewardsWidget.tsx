@@ -71,7 +71,7 @@ export function ClubRewardsWidget({
   omsOrderId: number;
   actorKey: string;
   disabled: boolean;
-  maxDiscountCents: number;
+  maxDiscountCents: number | null;
   appliedCodes: string[];
   onApply(code: string): Promise<void>;
   onRemove(code: string): void;
@@ -237,7 +237,7 @@ export function ClubRewardsWidget({
     ? BigInt(rate[1]) * BigInt(100) + BigInt((rate[2] ?? "").padEnd(2, "0"))
     : BigInt(0);
   const merchandiseCap =
-    (BigInt(Math.max(0, maxDiscountCents)) * rateUnits) / BigInt(10_000);
+    (BigInt(Math.max(0, maxDiscountCents ?? 0)) * rateUnits) / BigInt(10_000);
   const maxPoints = Number(
     merchandiseCap < BigInt(MAX_POINTS_PER_REDEMPTION)
       ? merchandiseCap
@@ -284,6 +284,12 @@ export function ClubRewardsWidget({
   return (
     <section className="oe-rewards" aria-label="Club rewards">
       <div ref={container} />
+      {data && maxDiscountCents === 0 && !busy && data.pending.length === 0 && (
+        <p className="oe-reward-value-note">
+          Your items are fully discounted. Rewards can’t be used for shipping or
+          tax.
+        </p>
+      )}
       {notice && (
         <p className="oe-reward-notice" role="status">
           {notice}
@@ -323,7 +329,8 @@ export function ClubRewardsWidget({
         const [whole, fraction = ""] = reward.value.split(".");
         const valueCents =
           BigInt(whole) * BigInt(100) + BigInt(fraction.padEnd(2, "0"));
-        const fits = valueCents <= BigInt(maxDiscountCents);
+        const fits =
+          maxDiscountCents !== null && valueCents <= BigInt(maxDiscountCents);
         const cancelling = reward.status === "cancelling";
         return (
           <div
@@ -377,11 +384,15 @@ export function ClubRewardsWidget({
                 </>
               )}
             </div>
-            {!selected && !cancelling && !fits && (
-              <p className="oe-reward-value-note">
-                This reward is larger than the remaining items total.
-              </p>
-            )}
+            {!selected &&
+              !cancelling &&
+              !fits &&
+              maxDiscountCents !== null &&
+              maxDiscountCents > 0 && (
+                <p className="oe-reward-value-note">
+                  This reward is larger than the remaining items total.
+                </p>
+              )}
           </div>
         );
       })}

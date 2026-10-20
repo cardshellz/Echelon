@@ -300,6 +300,17 @@ export function priceOrderEditPreviewItems(
   return {
     lines: lines.map((line) => ({
       ...line,
+      ...(priced.allocations.some(
+        (a) => a.lineId === line.id && a.amountCents > 0,
+      )
+        ? {
+            nativeDiscountCents: sumOrderEditCents(
+              priced.allocations
+                .filter((a) => a.lineId === line.id)
+                .map((a) => a.amountCents),
+            ),
+          }
+        : {}),
       netCents:
         line.productNetCents -
         sumOrderEditCents(

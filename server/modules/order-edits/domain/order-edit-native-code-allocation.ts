@@ -40,7 +40,12 @@ export function allocateOrderEditNativeCodePricing(
       "ORDER_EDIT_CODE_ALLOCATION_IDENTITY_INVALID",
       "An existing automatic discount could not be verified. Your order has not changed.",
     );
-  if (!pricing.lines.some((line) => protectedIds.has(line.id))) return pricing;
+  const native = pricing.lines.filter((line) => line.nativeDiscountCents);
+  if (
+    !native.length &&
+    !pricing.lines.some((line) => protectedIds.has(line.id))
+  )
+    return pricing;
   if (
     pricing.rules.some(
       (rule) => rule.classes.length !== 1 || rule.classes[0] !== "ORDER",
@@ -50,11 +55,15 @@ export function allocateOrderEditNativeCodePricing(
       "ORDER_EDIT_CODE_ALLOCATION_SCOPE_INVALID",
       "The discount's item eligibility could not be verified. No code was used.",
     );
-  const editable = pricing.lines.filter((line) => !protectedIds.has(line.id));
+  const editable = pricing.lines.filter(
+    (line) => !protectedIds.has(line.id) && !line.nativeDiscountCents,
+  );
   const saving = sumOrderEditCents(
     pricing.applications.map((entry) => entry.amountCents),
   );
-  if (saving > sumOrderEditCents(editable.map((line) => line.productNetCents)))
+  const replaceAutomatic =
+    saving > sumOrderEditCents(editable.map((line) => line.productNetCents));
+  if (replaceAutomatic && !native.length)
     return orderEditCodePricingSchema.parse({
       ...pricing,
       lines: pricing.lines.map((line) => ({
@@ -66,6 +75,16 @@ export function allocateOrderEditNativeCodePricing(
           : {}),
       })),
     });
+  const eligible = replaceAutomatic
+    ? pricing.lines.filter((line) => !line.nativeDiscountCents)
+    : editable;
+  // Native checkout allocations cannot be moved to another item or folded into
+  // the new reward. Shopify also refuses a second manual discount on those rows.
+  if (saving > sumOrderEditCents(eligible.map((line) => line.productNetCents)))
+    throw new OrderEditError(
+      "ORDER_EDIT_CODE_NATIVE_ALLOCATION_UNSUPPORTED",
+      "This reward needs more eligible merchandise in your changes. Your original discount and saved reward have not changed.",
+    );
 
   // Reuse the exact-cent allocator. A single budget represents all accepted
   // order discounts; each code's verified terms and amount remain in pricing.
@@ -77,7 +96,7 @@ export function allocateOrderEditNativeCodePricing(
         value: { type: "fixed", amountCents: saving },
       },
     ],
-    lines: editable.map((line) => ({
+    lines: eligible.map((line) => ({
       id: line.id,
       subtotalCents: line.productNetCents,
     })),
@@ -89,8 +108,15 @@ export function allocateOrderEditNativeCodePricing(
     ...pricing,
     lines: pricing.lines.map((line) => ({
       ...line,
-      netCents: line.productNetCents - (amounts.get(line.id) ?? 0),
-      ...(protectedIds.has(line.id) ? { preserveAutomaticDiscount: true } : {}),
+      netCents:
+        line.productNetCents -
+        (line.nativeDiscountCents ?? 0) -
+        (amounts.get(line.id) ?? 0),
+      ...(protectedIds.has(line.id)
+        ? (amounts.get(line.id) ?? 0) > 0
+          ? { replacesAutomaticDiscount: true }
+          : { preserveAutomaticDiscount: true }
+        : {}),
     })),
   });
 }
@@ -108,6 +134,7 @@ export function referenceOrderEditCodePricing(
       quantity: number;
       grossCents: number;
       productNetCents: number;
+      nativeDiscountCents?: number;
     }
   >();
   for (const line of pricing.lines) {
@@ -134,6 +161,14 @@ export function referenceOrderEditCodePricing(
         previous?.productNetCents ?? 0,
         line.productNetCents,
       ]),
+      ...(line.nativeDiscountCents || previous?.nativeDiscountCents
+        ? {
+            nativeDiscountCents: sumOrderEditCents([
+              previous?.nativeDiscountCents ?? 0,
+              line.nativeDiscountCents ?? 0,
+            ]),
+          }
+        : {}),
     });
   }
   return priceOrderEditCodes(
@@ -141,5 +176,6 @@ export function referenceOrderEditCodePricing(
     pricing.rules,
     pricing.newCodes,
     pricing.applications,
+    pricing.retainedNativeDiscounts,
   );
 }

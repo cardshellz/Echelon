@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   priceOrderEditCodes,
   splitOrderEditCodeLine,
+  presentOrderEditCodeFinancials,
 } from "../../domain/order-edit-code-pricing";
+import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
+import { presentOrderEditCodeBreakdown } from "../../application/order-edit-code-presentation";
 import {
   allocateOrderEditNativeCodePricing,
   referenceOrderEditCodePricing,
@@ -47,6 +50,141 @@ const price = (lines = [original, added], rules = [reward]) =>
     rules,
     rules.map((rule) => rule.code),
   );
+
+describe("saved rewards alongside an already-used native reward", () => {
+  const native = {
+    ...original,
+    productNetCents: 279,
+    nativeDiscountCents: 279,
+  };
+  const extra = { ...added, grossCents: 279, productNetCents: 233 };
+  const saved = {
+    ...reward,
+    value: { type: "fixed" as const, amountCents: 233 },
+  };
+  const retained = [
+    {
+      key: "code:ORIGINAL",
+      label: "ORIGINAL",
+      amountCents: 279,
+      value: { type: "fixed" as const, amountCents: 723 },
+    },
+  ];
+  const pricing = () =>
+    allocateOrderEditNativeCodePricing(
+      priceOrderEditCodes(
+        [native, extra],
+        [saved],
+        [saved.code],
+        undefined,
+        retained,
+      ),
+      [],
+    );
+
+  it("keeps the original $2.79 allocation and applies only the saved $2.33 to added Club-priced merchandise", () => {
+    const result = pricing();
+    expect(result.lines).toMatchObject([
+      {
+        id: original.id,
+        productNetCents: 279,
+        nativeDiscountCents: 279,
+        netCents: 0,
+      },
+      { id: added.id, productNetCents: 233, netCents: 0 },
+    ]);
+    expect(result.applications).toEqual([
+      { code: saved.code, amountCents: 233 },
+    ]);
+    expect(result.rules).toEqual([saved]);
+    expect(result.retainedNativeDiscounts).toEqual(retained);
+    expect(splitOrderEditCodeLine(result.lines[0])).toEqual([
+      { quantity: 1, unitCents: 279, productNetCents: 279, netCents: 0 },
+    ]);
+    expect(referenceOrderEditCodePricing(result)).toEqual(result);
+  });
+
+  it("shows both order discounts separately while keeping the Club product price", () => {
+    const result = pricing();
+    const financials = buildOrderEditFinancials({
+      lines: [
+        { id: original.id, grossCents: 279, netCents: 0 },
+        { id: added.id, grossCents: 279, netCents: 0 },
+      ],
+      itemsNetCents: 0,
+      itemDiscountLabels: [],
+      shippingGrossCents: 549,
+      shippingCents: 549,
+      shippingDiscountLabels: [],
+      taxCents: 33,
+      taxesIncluded: false,
+      totalCents: 582,
+    });
+    const shown = presentOrderEditCodeBreakdown(
+      presentOrderEditCodeFinancials(financials, result),
+      result,
+    )!;
+    expect(shown.orderDiscounts).toEqual([
+      ...retained,
+      {
+        key: `code:${saved.code}`,
+        label: saved.code,
+        amountCents: 233,
+        value: saved.value,
+      },
+    ]);
+    expect(shown.lines.map((line) => line.productNetCents)).toEqual([279, 233]);
+    expect(shown.itemDiscounts).toContainEqual({
+      key: "product",
+      label: "Product discounts",
+      amountCents: 46,
+      value: { type: "allocated" },
+    });
+  });
+
+  it("never moves the old face value onto extra merchandise or spends it again", () => {
+    expect(() =>
+      priceOrderEditCodes([native], [saved], [saved.code], undefined, retained),
+    ).toThrow(
+      expect.objectContaining({ code: "ORDER_EDIT_CODE_UNUSED_CREDIT" }),
+    );
+    for (const mutate of [
+      (value: ReturnType<typeof pricing>) => {
+        value.retainedNativeDiscounts![0].amountCents = 723;
+      },
+      (value: ReturnType<typeof pricing>) => {
+        delete value.lines[0].nativeDiscountCents;
+      },
+      (value: ReturnType<typeof pricing>) => {
+        value.lines[0].replacesAutomaticDiscount = true;
+      },
+      (value: ReturnType<typeof pricing>) => {
+        value.retainedNativeDiscounts![0].label = saved.code;
+      },
+    ]) {
+      const forged = pricing();
+      mutate(forged);
+      expect(orderEditCodePricingSchema.safeParse(forged).success).toBe(false);
+    }
+  });
+
+  it("does not discount an original native-discounted row when added merchandise cannot carry the new reward", () => {
+    const partial = { ...native, nativeDiscountCents: 100 };
+    const existing = [{ ...retained[0], amountCents: 100 }];
+    const input = priceOrderEditCodes(
+      [partial, { ...extra, productNetCents: 100 }],
+      [saved],
+      [saved.code],
+      undefined,
+      existing,
+    );
+    expect(() => allocateOrderEditNativeCodePricing(input, [])).toThrow(
+      expect.objectContaining({
+        code: "ORDER_EDIT_CODE_NATIVE_ALLOCATION_UNSUPPORTED",
+      }),
+    );
+  });
+});
 
 describe("native order-discount allocation around automatic prices", () => {
   it("keeps the existing allocation when no original line is protected", () => {

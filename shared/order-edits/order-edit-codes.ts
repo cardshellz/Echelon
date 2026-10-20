@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { orderEditDiscountValueSchema } from "./order-edit-discounts";
+import {
+  orderEditDiscountSchema,
+  orderEditDiscountValueSchema,
+} from "./order-edit-discounts";
 
 export const MAX_ORDER_EDIT_CODES = 5;
 export const orderEditCodeSchema = z
@@ -102,6 +105,8 @@ export const orderEditCodePricingLineSchema = z
     retailCents: z.number().int().nonnegative().safe(),
     productNetCents: z.number().int().nonnegative().safe(),
     netCents: z.number().int().nonnegative().safe(),
+    /** Already used at checkout. Preserve natively; never include it in a new reward receipt. */
+    nativeDiscountCents: z.number().int().positive().safe().optional(),
     /** The original automatic discount remains native; no manual adjustment may target this line. */
     preserveAutomaticDiscount: z.literal(true).optional(),
     /** The same real variant replaces an original automatic-price line. */
@@ -115,11 +120,15 @@ export const orderEditCodePricingLineSchema = z
         line.productNetCents,
         line.retailCents,
         line.quantity,
+        line.nativeDiscountCents ?? 0,
       ].every(Number.isSafeInteger) &&
-      line.netCents <= line.productNetCents &&
+      BigInt(line.netCents) + BigInt(line.nativeDiscountCents ?? 0) <=
+        BigInt(line.productNetCents) &&
       !(line.preserveAutomaticDiscount && line.replacesAutomaticDiscount) &&
+      !(line.nativeDiscountCents && line.replacesAutomaticDiscount) &&
       (!line.preserveAutomaticDiscount ||
-        line.netCents === line.productNetCents) &&
+        line.netCents ===
+          line.productNetCents - (line.nativeDiscountCents ?? 0)) &&
       BigInt(line.productNetCents) <=
         BigInt(line.retailCents) * BigInt(line.quantity),
   );
@@ -135,6 +144,12 @@ export const orderEditCodePricingSchema = z
       .max(MAX_ORDER_EDIT_CODES),
     description: z.string().regex(/^Order discounts \([a-f0-9]{24}\)$/),
     lines: z.array(orderEditCodePricingLineSchema).min(1).max(250),
+    /** The original checkout allocations are distinct from the newly claimed rewards. */
+    retainedNativeDiscounts: z
+      .array(orderEditDiscountSchema)
+      .min(1)
+      .max(MAX_ORDER_EDIT_CODES)
+      .optional(),
   })
   .strict()
   .superRefine((pricing, context) => {
@@ -146,10 +161,14 @@ export const orderEditCodePricingSchema = z
             line.productNetCents,
             line.quantity,
             line.retailCents,
+            line.nativeDiscountCents ?? 0,
           ].every(Number.isSafeInteger),
       ) ||
       pricing.applications.some(
         (application) => !Number.isSafeInteger(application.amountCents),
+      ) ||
+      pricing.retainedNativeDiscounts?.some(
+        (discount) => !Number.isSafeInteger(discount.amountCents),
       )
     )
       return;
@@ -158,10 +177,16 @@ export const orderEditCodePricingSchema = z
       application.code.toUpperCase(),
     );
     const expected = pricing.lines.reduce(
-      (sum, line) => sum + BigInt(line.productNetCents) - BigInt(line.netCents),
+      (sum, line) =>
+        sum +
+        BigInt(line.productNetCents) -
+        BigInt(line.nativeDiscountCents ?? 0) -
+        BigInt(line.netCents),
       BigInt(0),
     );
     if (
+      pricing.rules.length + (pricing.retainedNativeDiscounts?.length ?? 0) >
+        MAX_ORDER_EDIT_CODES ||
       new Set(keys).size !== keys.length ||
       new Set(pricing.rules.map((rule) => rule.discountId)).size !==
         pricing.rules.length ||
@@ -174,6 +199,23 @@ export const orderEditCodePricingSchema = z
       pricing.applications.some(
         (application) => application.amountCents === 0,
       ) ||
+      (pricing.retainedNativeDiscounts ?? []).some(
+        (discount) =>
+          discount.key !== `code:${discount.label}` ||
+          discount.value.type === "percentage" ||
+          !Number.isSafeInteger(discount.amountCents) ||
+          keys.includes(discount.label.toUpperCase()),
+      ) ||
+      new Set(pricing.retainedNativeDiscounts?.map((discount) => discount.key))
+        .size !== (pricing.retainedNativeDiscounts?.length ?? 0) ||
+      (pricing.retainedNativeDiscounts ?? []).reduce(
+        (sum, discount) => sum + BigInt(discount.amountCents),
+        BigInt(0),
+      ) !==
+        pricing.lines.reduce(
+          (sum, line) => sum + BigInt(line.nativeDiscountCents ?? 0),
+          BigInt(0),
+        ) ||
       pricing.applications.reduce(
         (sum, application) => sum + BigInt(application.amountCents),
         BigInt(0),
