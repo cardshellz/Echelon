@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supplierCreditCreateInputSchema, supplierCreditOptionsSchema, supplierCreditDetailSchema, type SupplierCreditOptions } from "@shared/procurement/supplier-credit";
 import { format } from "date-fns";

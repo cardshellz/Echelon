@@ -1,5 +1,5 @@
 import { supplierCreditCostLabel } from "@/features/purchasing/supplier-credit-presentation";
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef } from "react";
 import { Link, useLocation, useParams, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { supplierCreditListSchema, supplierCreditListQuerySchema } from "@shared/procurement/supplier-credit";
