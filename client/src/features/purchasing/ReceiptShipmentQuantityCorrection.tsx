@@ -10,7 +10,10 @@ import {
   type QuantityCorrectionPreview,
   type QuantityCorrectionSummary,
 } from "@shared/procurement/receipt-shipment-quantity-correction";
-import { createQuantityCorrectionClient } from "@/lib/receipt-shipment-quantity-correction";
+import {
+  createQuantityCorrectionClient,
+  receiptCorrectionDraft,
+} from "@/lib/receipt-shipment-quantity-correction";
 import {
   financialCommandFetchJson,
   FinancialCommandRequestError,
@@ -107,7 +110,7 @@ function QuantityCorrectionDialog(props: Entry & { onSaved?: () => void }) {
             </DialogTitle>
             <DialogDescription>
               {purpose === "shipment"
-                ? "Edit the shipped pieces, review receiving and cost changes, then approve."
+                ? "Edit shipped pieces and, when needed, linked receipt pieces. Review all changes and save with one administrator approval."
                 : "Set the recorded pieces, review the cost impact, then approve one correction for the linked records."}
             </DialogDescription>
           </DialogHeader>
@@ -226,6 +229,14 @@ export function QuantityCorrectionSummary({
           `Receipt ${row.receiptNumber} pieces`,
           number(row.receivedPieces),
           number(row.afterPieces),
+        ] as [string, string, string],
+    ),
+    ...summary.receipts.map(
+      (row) =>
+        [
+          `Received units · ${row.receiptNumber}`,
+          number(row.receivedUnits),
+          number(row.receivedUnits),
         ] as [string, string, string],
     ),
     ...(summary.pendingReceipts ?? []).map(
@@ -372,7 +383,7 @@ function CorrectionForm({
   onLock,
   onReload,
   onSaved,
-  purpose,
+  purpose: entryPurpose,
 }: {
   initial: QuantityCorrectionContext;
   onClose: () => void;
@@ -382,15 +393,27 @@ function CorrectionForm({
   purpose: QuantityCorrectionPurpose;
 }) {
   const [data, setData] = useState(initial);
+  const [includeReceipts, setIncludeReceipts] = useState(
+    entryPurpose === "receipt",
+  );
+  const purpose: QuantityCorrectionPurpose = includeReceipts
+    ? "receipt"
+    : "shipment";
   const [pieces, setPieces] = useState(String(initial.shippedPieces));
   const [receiptPieces, setReceiptPieces] = useState<Record<number, string>>(
-    Object.fromEntries(
-      initial.receipts.map((row) => [
-        row.receiptLineId,
-        String(row.receivedPieces),
-      ]),
-    ),
+    entryPurpose === "shipment"
+      ? {}
+      : Object.fromEntries(
+          initial.receipts.map((row) => [
+            row.receiptLineId,
+            String(row.receivedPieces),
+          ]),
+        ),
   );
+  const receiptValues =
+    entryPurpose === "shipment"
+      ? receiptCorrectionDraft(data, pieces, receiptPieces)
+      : receiptPieces;
   const [reason, setReason] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [destination, setDestination] = useState<
@@ -401,9 +424,18 @@ function CorrectionForm({
   );
   const [saved, setSaved] = useState<QuantityCorrectionContext | null>(null);
   const [attempt, setAttempt] = useState<unknown>(null);
-  const [client] = useState(() =>
-    createQuantityCorrectionClient(() => crypto.randomUUID(), purpose),
-  );
+  // Each command retains its own immutable retry intent. The form locks scope
+  // switching as soon as approval starts, including an uncertain response.
+  const [clients] = useState(() => ({
+    shipment: createQuantityCorrectionClient(
+      () => crypto.randomUUID(),
+      "shipment",
+    ),
+    receipt: createQuantityCorrectionClient(
+      () => crypto.randomUUID(),
+      "receipt",
+    ),
+  }));
   const queryClient = useQueryClient();
   const path = `/api/shipment-lines/${data.shipmentLineId}/${purpose === "shipment" ? "shipment-edit" : "quantity-correction"}`;
   const revision = useRef(0);
@@ -426,7 +458,7 @@ function CorrectionForm({
         ? {
             receipts: data.receipts.map((row) => ({
               receiptLineId: row.receiptLineId,
-              receivedPieces: parse(receiptPieces[row.receiptLineId]),
+              receivedPieces: parse(receiptValues[row.receiptLineId]),
             })),
           }
         : {}),
@@ -464,7 +496,10 @@ function CorrectionForm({
       };
       setAttempt(body);
       try {
-        const result = await client.approve(data.shipmentLineId, body);
+        const result = await clients[purpose].approve(
+          data.shipmentLineId,
+          body,
+        );
         setSaved(result);
         setAttempt(null);
         onSaved?.();
@@ -504,12 +539,14 @@ function CorrectionForm({
     setData(updated);
     setPieces(String(updated.shippedPieces));
     setReceiptPieces(
-      Object.fromEntries(
-        updated.receipts.map((row) => [
-          row.receiptLineId,
-          String(row.receivedPieces),
-        ]),
-      ),
+      entryPurpose === "shipment"
+        ? {}
+        : Object.fromEntries(
+            updated.receipts.map((row) => [
+              row.receiptLineId,
+              String(row.receivedPieces),
+            ]),
+          ),
     );
     setPreview(null);
     review.reset();
@@ -533,7 +570,9 @@ function CorrectionForm({
               <strong>
                 {purpose === "shipment"
                   ? "Shipment edit approved and saved"
-                  : "Quantity correction approved and saved"}
+                  : entryPurpose === "shipment"
+                    ? "Shipment and receipt correction approved and saved"
+                    : "Quantity correction approved and saved"}
               </strong>
               <p className="text-sm">
                 {saved.history[0].approvedBy} ·{" "}
@@ -580,6 +619,8 @@ function CorrectionForm({
                       key={row.receiptId}
                       className="block underline text-sm"
                       href={`/receiving?open=${row.receiptId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
                     >
                       Review receipt {row.receiptNumber}
                     </a>
@@ -591,6 +632,41 @@ function CorrectionForm({
                 disabled={locked || review.isPending || !!data.blockedReason}
                 className="space-y-3"
               >
+                {entryPurpose === "shipment" && data.receipts.length > 0 && (
+                  <div className="rounded border p-3 text-sm space-y-2">
+                    <label className="flex items-start gap-2 font-medium">
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={includeReceipts}
+                        onChange={(event) =>
+                          changed(() => {
+                            setIncludeReceipts(event.target.checked);
+                            setConfirmed(false);
+                            review.reset();
+                            approval.reset();
+                          })
+                        }
+                      />
+                      Also correct received quantities
+                    </label>
+                    <p className="text-muted-foreground">
+                      {includeReceipts
+                        ? "Check each receipt below. One approval saves these receipt quantities, the shipment and their cost updates together."
+                        : "Select this when the saved receipt pieces are also wrong. Otherwise, received quantities stay unchanged."}
+                    </p>
+                    {includeReceipts &&
+                      data.receipts.length === 1 &&
+                      data.receipts[0].receivedPieces ===
+                        data.shippedPieces && (
+                        <p className="text-muted-foreground">
+                          This receipt covered the original shipment. Its
+                          suggested quantity follows the shipment quantity until
+                          you enter an override.
+                        </p>
+                      )}
+                  </div>
+                )}
                 <div className="grid grid-cols-[minmax(0,1fr)_4.5rem_6rem] sm:grid-cols-[minmax(0,1fr)_7rem_8rem] items-center gap-2 text-sm">
                   <span className="font-medium">Document</span>
                   <span className="text-right">Saved pieces</span>
@@ -614,7 +690,7 @@ function CorrectionForm({
                       <ReceiptQuantityRow
                         key={row.receiptLineId}
                         row={row}
-                        value={receiptPieces[row.receiptLineId]}
+                        value={receiptValues[row.receiptLineId]}
                         onChange={(value) =>
                           changed(() =>
                             setReceiptPieces({
@@ -634,6 +710,8 @@ function CorrectionForm({
                         <a
                           className="underline"
                           href={`/receiving?open=${row.receiptId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
                         >
                           {row.receiptNumber}
                         </a>
@@ -646,6 +724,8 @@ function CorrectionForm({
                         <a
                           className="underline"
                           href={`/receiving?open=${row.receiptId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
                         >
                           {row.receiptNumber}
                         </a>
@@ -661,8 +741,8 @@ function CorrectionForm({
                       </p>
                     )}
                     <p className="text-muted-foreground">
-                      Correct an actual received count from its receipt.
-                      Shipment edits preserve received counts.
+                      Receipt details open in a separate tab so this draft stays
+                      here.
                     </p>
                   </div>
                 )}
@@ -819,7 +899,9 @@ function CorrectionForm({
                   ? "Retry same approval"
                   : purpose === "shipment"
                     ? "Approve shipment edit"
-                    : "Approve correction"}
+                    : entryPurpose === "shipment"
+                      ? "Approve shipment and receipt"
+                      : "Approve correction"}
             </Button>
           )}
       </div>

@@ -313,12 +313,27 @@ async function executeCorrection(
   purpose: QuantityCorrectionPurpose,
 ) {
   const plan = planQuantityCorrection(source.facts, input, purpose);
-  for (const receipt of plan.pendingReceipts) {
-    if (receipt.expectedUnits === receipt.afterExpectedUnits) continue;
+  // Both pending expectations and posted unit conversions must honor custody
+  // evidence. The combined command cannot rewrite an accepted quarantine count.
+  const receiptWrites = [
+    ...(purpose === "receipt"
+      ? plan.receipts.map((receipt) => ({
+          receiptLineId: receipt.id,
+          receiptNumber: receipt.receiptNumber,
+          fields: ["unitsPerVariantSnapshot", "inboundShipmentLineId"],
+        }))
+      : []),
+    ...plan.pendingReceipts
+      .filter((receipt) => receipt.expectedUnits !== receipt.afterExpectedUnits)
+      .map((receipt) => ({ ...receipt, fields: ["expectedQty"] })),
+  ];
+  for (const receipt of receiptWrites) {
     try {
-      await assertReceivingQuarantineLineEditable(tx, receipt.receiptLineId, [
-        "expectedQty",
-      ]);
+      await assertReceivingQuarantineLineEditable(
+        tx,
+        receipt.receiptLineId,
+        receipt.fields,
+      );
     } catch (error) {
       if (error instanceof ReceivingQuarantineError)
         throw new QuantityCorrectionError(

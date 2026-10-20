@@ -5,12 +5,32 @@ import {
   quantityCorrectionId,
   shipmentQuantityEditApprovalSchema,
   type QuantityCorrectionPurpose,
+  type QuantityCorrectionContext,
 } from "@shared/procurement/receipt-shipment-quantity-correction";
 import {
   createFinancialCommandIntentStore,
   financialCommandFetchJson,
   FinancialCommandRequestError,
 } from "./financial-command";
+
+/** Suggest a full-delivery correction only after the user explicitly includes receipts.
+ * Partial/multiple deliveries keep their saved quantities; typed overrides always win. */
+export function receiptCorrectionDraft(
+  source: Pick<QuantityCorrectionContext, "shippedPieces" | "receipts">,
+  shippedPieces: string,
+  overrides: Readonly<Record<number, string>>,
+): Record<number, string> {
+  const fullDelivery =
+    source.receipts.length === 1 &&
+    source.receipts[0].receivedPieces === source.shippedPieces;
+  return Object.fromEntries(
+    source.receipts.map((receipt) => [
+      receipt.receiptLineId,
+      overrides[receipt.receiptLineId] ??
+        (fullDelivery ? shippedPieces : String(receipt.receivedPieces)),
+    ]),
+  );
+}
 
 export function createQuantityCorrectionClient(
   generateKey: () => string,
