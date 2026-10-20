@@ -6,7 +6,10 @@ import { z } from "zod";
 import { db, pool } from "../../db";
 import { requireAuth, requireAuthOrInternalApiKey, requirePermission } from "../middleware";
 import { getAuthService, getChannelConnection, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
+import { ChannelPricingResolutionError } from "../../modules/channels/channel-pricing-resolver";
 import { resolveChannelPrice } from "../../modules/channels/infrastructure/ebay-listing-helpers";
+import { createCatalogPublicImageUrl } from "../../modules/catalog/catalog-public-image";
+import { readEbayListingPhotoReadiness } from "../../modules/channels/ebay-listing-photo-readiness";
 import {
   isProductEffectivelyListed,
   isVariantEffectivelyListed,
@@ -41,6 +44,7 @@ import {
 
 export const router = express.Router();
 const EBAY_LISTING_DEFAULT_MARKETPLACE_ID = "EBAY_US";
+const publicationImageUrl = createCatalogPublicImageUrl(process.env);
 const ebayListingConnector = new EbayMarketplaceListingConnector();
 const feedInventory = new EbayListingFeedInventoryService(atpService, {
   createReference: randomUUID,
@@ -87,7 +91,6 @@ interface ListingFeedVariant {
             ecm.ebay_store_category_id,
             ecm.ebay_store_category_name,
             (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.sku IS NOT NULL AND pv.is_active = true AND pv.sales_eligibility = 'sellable') AS variant_count,
-            (SELECT COUNT(*) FROM product_assets pa WHERE pa.product_id = p.id) AS image_count,
             listing_identity.external_product_id,
             listing_identity.external_product_id_count,
             p.ebay_listing_excluded,
@@ -241,7 +244,6 @@ interface ListingFeedVariant {
 
           const hasCategoryMapping = !!effectiveCategoryId;
           const hasVariants = (row.variant_count || 0) > 0;
-          const hasImages = (row.image_count || 0) > 0;
 
           const productExcludedByIntent = !isProductEffectivelyListed({
             productExcluded: row.ebay_listing_excluded === true,
@@ -277,6 +279,10 @@ interface ListingFeedVariant {
           const variants = listingVariants.map((variant) => ({ ...variant,
             inventoryQuantity: inventory.quantities.get(variant.id) ?? null }));
           const includedVariants = variants.filter((v: any) => v.effectivelyListed);
+          const mediaReadiness = await readEbayListingPhotoReadiness(client, {
+            productId: row.id, channelId: EBAY_CHANNEL_ID, variantIds: includedVariants.map(variant => variant.id),
+          }, publicationImageUrl);
+          const hasImages = mediaReadiness.ready;
           const includedVariantIds = new Set(includedVariants.map(variant => variant.id));
           const canSyncExistingListing = (listingStatesByProduct.get(row.id) ?? []).some(state =>
             isExistingEbayListingSyncCandidate({
@@ -299,17 +305,19 @@ interface ListingFeedVariant {
           const listingSyncError = listingState?.syncError || null;
           const includedVariantCount = includedVariants.length;
           const missingPriceSkus: string[] = [];
+          let priceIssue: ReturnType<typeof resolveEbayListingIssue> | null = null;
           for (const variant of includedVariants) {
             const basePriceCents = normalizeCents(variant.priceCents);
-            const effectivePriceCents = await resolveChannelPrice(
-              db,
-              EBAY_CHANNEL_ID,
-              row.id,
-              variant.id,
-              basePriceCents ?? 0,
-            );
-            if (!isValidEbayFixedPriceCents(effectivePriceCents)) {
+            try {
+              const effectivePriceCents = await resolveChannelPrice(
+                db, EBAY_CHANNEL_ID, row.id, variant.id, basePriceCents ?? 0,
+              );
+              if (!isValidEbayFixedPriceCents(effectivePriceCents)) missingPriceSkus.push(variant.sku);
+            } catch (error) {
+              if (!(error instanceof ChannelPricingResolutionError)) throw error;
+              // A known source conflict blocks this product, not the entire listing feed.
               missingPriceSkus.push(variant.sku);
+              priceIssue ??= resolveEbayListingIssue({ code: error.code, message: error.message, productId: row.id });
             }
           }
           const hasValidEbayPrices = includedVariantCount > 0 && missingPriceSkus.length === 0;
@@ -366,6 +374,7 @@ interface ListingFeedVariant {
             status,
             missingItems,
             missingPriceSkus,
+            priceIssue,
             missingAspects,
             isListed,
             canSyncExistingListing,
@@ -380,7 +389,8 @@ interface ListingFeedVariant {
             includedVariantCount,
             unlinkedVariants: includedVariants.filter((variant: { id: number }) => listingState.unlinkedVariantIds.includes(variant.id))
               .map((variant: { id: number; sku: string }) => ({ id: variant.id, sku: variant.sku })),
-            imageCount: parseInt(row.image_count) || 0,
+            imageCount: mediaReadiness.mediaPlan.group.selected.length,
+            mediaReadiness,
             variants,
             fulfillmentPolicyOverride: row.product_fulfillment_override ?? null,
             returnPolicyOverride: row.product_return_override ?? null,

@@ -22,6 +22,7 @@ import {
   type EbayPolicyScope,
   type EbayPolicyValues,
   type EbayPolicySource,
+  type EbayResolvedPolicies,
 } from "@shared/ebay-business-policies";
 
 export const ebayPolicyTargetSchema = z.discriminatedUnion("kind", [
@@ -285,6 +286,7 @@ export function createEbayBusinessPolicyService(
       scope: EbayPolicyScope;
       product: EbayPolicyValues;
       byVariantId: Map<number, EbayAvailablePolicyValues>;
+      provenanceByVariantId: Map<number, EbayResolvedPolicies>;
     }> {
       const productId = z
           .number()
@@ -333,7 +335,8 @@ export function createEbayBusinessPolicyService(
           policies: selection.product,
         });
         const product = resolvedEbayPolicyValues(resolveEbayPolicies(layers)),
-          byVariantId = new Map<number, EbayAvailablePolicyValues>();
+          byVariantId = new Map<number, EbayAvailablePolicyValues>(),
+          provenanceByVariantId = new Map<number, EbayResolvedPolicies>();
         for (const variant of selection.variants) {
           const resolved = resolveEbayPolicies([
             ...layers,
@@ -347,6 +350,7 @@ export function createEbayBusinessPolicyService(
             },
           ]);
           assertResolvedEbayPolicies(resolved, catalog);
+          provenanceByVariantId.set(variant.variantId, resolved);
           byVariantId.set(
             variant.variantId,
             ebayAvailablePolicyValuesSchema.parse(
@@ -354,7 +358,7 @@ export function createEbayBusinessPolicyService(
             ),
           );
         }
-        return { scope, product, byVariantId };
+        return { scope, product, byVariantId, provenanceByVariantId };
       });
     },
   };

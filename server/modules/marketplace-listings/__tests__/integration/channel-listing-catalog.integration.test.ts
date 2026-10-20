@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import {
   afterAll,
   beforeAll,
@@ -28,7 +29,7 @@ CREATE TABLE catalog.products(id integer PRIMARY KEY,name text,title text,descri
 CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer,sku text,name text,uom_type varchar(20),units_per_variant integer,gtin text,barcode text,
  is_active boolean,requires_shipping boolean,track_inventory boolean,sales_eligibility text,position integer,price_cents bigint,shopify_variant_id varchar(100));
 CREATE TABLE catalog.product_assets(id integer PRIMARY KEY,product_id integer,product_variant_id integer,asset_type varchar(20),url text,position integer,
- storage_type varchar(20) NOT NULL DEFAULT 'url',mime_type text,file_data bytea);
+ storage_type varchar(20) NOT NULL DEFAULT 'url',mime_type text,file_data bytea,is_primary integer NOT NULL DEFAULT 0);
 CREATE TABLE channels.channel_product_overrides(channel_id integer,product_id integer,title_override text,description_override text,is_listed integer,PRIMARY KEY(channel_id,product_id));
 CREATE TABLE channels.channel_variant_overrides(channel_id integer,product_variant_id integer,sku_override text,name_override text,barcode_override text,is_listed integer,PRIMARY KEY(channel_id,product_variant_id));
 CREATE TABLE channels.channel_asset_overrides(channel_id integer,product_asset_id integer,url_override text,position_override integer,is_included integer,PRIMARY KEY(channel_id,product_asset_id));
@@ -43,7 +44,7 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
     let database: InventoryCutoverTestDatabase;
     let repository: ChannelListingCatalogRepository;
     beforeAll(async () => {
-      database = await createInventoryCutoverTestDatabase(url, disposable, ddl);
+      database = await createInventoryCutoverTestDatabase(url, disposable, ddl); await database.pool.query(await readFile("migrations/900000017000018580001_catalog_publication_media_versions.sql", "utf8"));
       repository = new ChannelListingCatalogRepository(database.pool, createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https://catalog.example.com" }));
     });
     afterAll(async () => {
@@ -183,11 +184,11 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
       const replaced = (await repository.catalog(104, {})).items[0];
       expect(replaced.images[0]).toContain(fingerprint(replacement));
       expect(replaced.sourceHash).not.toBe(reordered.sourceHash);
-      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(png))).toBeNull();
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(png))).toEqual({ data: png, mimeType: "image/png" });
       expect(await readPublicCatalogImage(database.pool, 8, fingerprint(replacement))).toEqual({ data: replacement, mimeType: "image/gif" });
 
       await database.pool.query("DELETE FROM catalog.product_assets WHERE id=8");
-      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(replacement))).toBeNull();
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(replacement))).toEqual({ data: replacement, mimeType: "image/gif" });
       expect((await repository.catalog(104, {})).items[0].images).toEqual(before.images);
     });
     it("retains exact variant scope, channel exclusions, URL overrides and override order for uploaded photos", async () => {
@@ -246,12 +247,12 @@ CREATE TABLE public.shopify_variants(id varchar(100) PRIMARY KEY,sku text,price 
       expect(item).toMatchObject({ sku: "SKU-10", title: "Catalog title", priceCents: 999, images: ["https://example.com/base.jpg"] });
       expect(item.imageIssues).toEqual([expect.objectContaining({ field: "images", code: expect.stringMatching(/CATALOG_IMAGE_UNAVAILABLE|IMAGE_FORMAT_UNSUPPORTED/) })]);
     });
-    it("never serves a non-image asset or a URL-only record's retained blob", async () => {
+    it("retains previously published bytes after source reclassification without publishing that asset again", async () => {
       await upload();
       await database.pool.query("UPDATE catalog.product_assets SET asset_type='document' WHERE id=8");
-      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(png))).toBeNull();
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(png))).toEqual({ data: png, mimeType: "image/png" });
       await database.pool.query("UPDATE catalog.product_assets SET asset_type='image',storage_type='url' WHERE id=8");
-      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(png))).toBeNull();
+      expect(await readPublicCatalogImage(database.pool, 8, fingerprint(png))).toEqual({ data: png, mimeType: "image/png" });
     });
   },
 );

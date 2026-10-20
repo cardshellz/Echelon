@@ -1,4 +1,7 @@
 import type { Pool, PoolClient } from "pg";
+import type { CatalogPublicationMediaPlan } from "@shared/types/catalog-publication-media";
+import { resolveCatalogPublicationMediaPlan } from "./catalog-publication-media";
+import { resolveCatalogPublicationImage, type CatalogPublicationImage, type CatalogPublicationPhotoSelection } from "./catalog-publication-image";
 import { ProductAssetError } from "./product-asset-errors";
 import { CATALOG_IMAGE_HASH_PATTERN, type CatalogPublicImageUrl } from "./catalog-public-image";
 import {
@@ -7,19 +10,14 @@ import {
   type DownloadableProductImage,
 } from "./product-image-download.service";
 
-export interface CatalogPublicationImage {
-  id: number;
-  productId: number;
-  productVariantId: number | null;
-  position: number;
-  /** Catalog order assigned once across product/size images by the size publication query. */
-  publicationPosition?: number;
-  url: string | null;
-  storageType: string;
-  mimeType: string | null;
-  fileBytes: number | null;
-  fileHash: string | null;
-  fileHeader: Buffer | null;
+export { resolveCatalogPublicationImage, type CatalogPublicationImage, type CatalogPublicationImageOverride, type CatalogPublicationPhotoSelection } from "./catalog-publication-image";
+
+/** Asset identities for audience-owned overlays; no blobs or alternative selection policy. */
+export async function readCatalogPublicationImageIds(database: Pick<PoolClient, "query">, productIds: readonly number[]): Promise<number[]> {
+  if (!productIds.length) return [];
+  const result = await database.query<{ id: number }>(
+    "SELECT id FROM catalog.product_assets WHERE product_id=ANY($1::int[]) AND asset_type='image' ORDER BY id", [productIds]);
+  return result.rows.map(row => row.id);
 }
 
 /** Metadata only: listing pages do not transfer image blobs from PostgreSQL. */
@@ -46,19 +44,7 @@ export async function readCatalogPublicationImages(
   return result.rows;
 }
 
-export function resolveCatalogPublicationImage(
-  image: CatalogPublicationImage,
-  publicUrl: CatalogPublicImageUrl,
-): string | null {
-  if (image.url !== null) return image.url;
-  if (image.storageType !== "file" && image.storageType !== "both") return null;
-  if (!image.fileBytes || image.fileBytes > MAX_PRODUCT_IMAGE_BYTES || !image.fileHash || !image.fileHeader) {
-    throw new ProductAssetError("CATALOG_IMAGE_UNAVAILABLE", `Replace uploaded catalog image ${image.id}: its file is missing, empty or larger than 10 MB.`, 422);
-  }
-  // Check the same signature as the public read boundary without loading the full blob.
-  const validated = validateProductImage({ data: image.fileHeader, mimeType: image.mimeType ?? "" });
-  return publicUrl(image.id, image.fileHash, validated.mimeType);
-}
+
 
 export interface CatalogPublicationImageIssue {
   assetId: number;
@@ -104,20 +90,7 @@ export function resolveCatalogPublicationImages(
   return { images: photos.map((photo) => photo.url), issues };
 }
 
-/** An explicit audience selection; Catalog does not know which channel supplied it. */
-export interface CatalogPublicationImageOverride {
-  assetId: number;
-  included: boolean;
-  urlOverride: string | null;
-  positionOverride: number | null;
-}
 
-export interface CatalogPublicationPhotoSelection {
-  productVariantIds: readonly number[];
-  maxPhotosPerVariant: number;
-  productId?: number;
-  overrides?: readonly CatalogPublicationImageOverride[];
-}
 
 /** Identity-only read: other owners can load their own overlays without joining Catalog tables. */
 export async function readCatalogPublicationPhotoScope(
@@ -146,18 +119,17 @@ const MAX_CATALOG_ID = 2_147_483_647;
  * The photos each size publishes, in listing order: the primary photo first,
  * then by position and id. A size has its product's photos and its own.
  *
- * Only the first `maxPhotosPerVariant` count. A photo is a non-blank URL or a
- * stored file; a blank URL is not a photo. Stored files are fingerprinted only
- * within that limit, once per photo, so a read never hashes a file the caller
- * will not publish. Each requested size has an entry, empty when it has no
- * photos.
+ * Read the complete candidate set. Capacity is applied by the canonical media
+ * plan after URL deduplication, and every excluded/unusable candidate remains
+ * visible in that plan. Shared files are fingerprinted once per asset.
  */
 export async function readCatalogVariantPublicationImages(
   database: Pick<PoolClient, "query">,
   input: CatalogPublicationPhotoSelection,
 ): Promise<Map<number, CatalogPublicationImage[]>> {
   if (input.productVariantIds.some((id) => !Number.isInteger(id) || id <= 0 || id > MAX_CATALOG_ID)
-    || !Number.isSafeInteger(input.maxPhotosPerVariant) || input.maxPhotosPerVariant <= 0) {
+    || !Number.isSafeInteger(input.maxPhotosPerVariant) || input.maxPhotosPerVariant <= 0
+    || (input.maxGroupPhotos !== undefined && (!Number.isSafeInteger(input.maxGroupPhotos) || input.maxGroupPhotos <= 0))) {
     throw new ProductAssetError("CATALOG_IMAGE_READ_INVALID", "Catalog photos were requested with invalid sizes or an invalid photo limit.", 500);
   }
   if (input.productId !== undefined && (!Number.isInteger(input.productId) || input.productId <= 0 || input.productId > MAX_CATALOG_ID)) {
@@ -168,7 +140,7 @@ export async function readCatalogVariantPublicationImages(
     !Number.isInteger(override.assetId) || override.assetId <= 0 || override.assetId > MAX_CATALOG_ID
     || typeof override.included !== "boolean"
     || (override.urlOverride !== null && (typeof override.urlOverride !== "string" || !override.urlOverride.trim()))
-    || (override.positionOverride !== null && (!Number.isInteger(override.positionOverride) || override.positionOverride < 0)))) {
+    || (override.positionOverride !== null && !Number.isInteger(override.positionOverride)))) {
     throw new ProductAssetError("CATALOG_IMAGE_READ_INVALID", "Catalog photo overrides are invalid.", 500);
   }
   const productVariantIds = [...new Set(input.productVariantIds)];
@@ -181,12 +153,11 @@ export async function readCatalogVariantPublicationImages(
     ), candidates AS (
       -- Assign Catalog order once. Per-size galleries and the listing group use this same order.
       SELECT pa.id AS asset_id, pa.product_id, pa.product_variant_id,
-        ROW_NUMBER() OVER (ORDER BY pa.product_id, pa.is_primary DESC, COALESCE(o.position_override, pa.position) ASC, pa.id ASC) - 1 AS publication_position
+        ROW_NUMBER() OVER (PARTITION BY pa.product_id ORDER BY pa.is_primary DESC, COALESCE(o.position_override, pa.position) ASC, pa.id ASC) - 1 AS publication_position
       FROM catalog.product_assets pa
       LEFT JOIN overrides o ON o.asset_id = pa.id
       WHERE pa.product_id IN (SELECT product_id FROM catalog.product_variants WHERE id = ANY($1::int[]))
-        AND pa.asset_type = 'image' AND ($5::int IS NULL OR pa.product_id = $5) AND COALESCE(o.included, true)
-        AND (COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) IS NOT NULL OR pa.storage_type IN ('file', 'both'))
+        AND pa.asset_type = 'image' AND ($5::int IS NULL OR pa.product_id = $5)
     ), ranked AS (
       SELECT pv.id AS variant_id, candidates.asset_id, candidates.publication_position,
         ROW_NUMBER() OVER (PARTITION BY pv.id ORDER BY candidates.publication_position) AS photo_rank
@@ -195,10 +166,11 @@ export async function readCatalogVariantPublicationImages(
       WHERE pv.id = ANY($1::int[])
         AND (candidates.product_variant_id IS NULL OR candidates.product_variant_id = pv.id)
     ), kept AS (
-      SELECT variant_id, asset_id, publication_position, photo_rank FROM ranked WHERE photo_rank <= $2
+      SELECT variant_id, asset_id, publication_position, photo_rank FROM ranked WHERE $2::int > 0
     ), photos AS MATERIALIZED (
       -- One row per photo: a product photo that several sizes share is hashed once.
       SELECT pa.id, pa.product_id, pa.product_variant_id, COALESCE(o.position_override, pa.position) AS position, pa.storage_type, pa.mime_type,
+        pa.is_primary = 1 AS is_primary, COALESCE(o.included, true) AS included,
         COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) AS url,
         CASE WHEN COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) IS NULL AND pa.storage_type IN ('file', 'both')
           THEN octet_length(pa.file_data) END AS file_bytes,
@@ -215,6 +187,7 @@ export async function readCatalogVariantPublicationImages(
     SELECT kept.variant_id AS "forProductVariantId", photos.id, photos.product_id AS "productId",
       photos.product_variant_id AS "productVariantId", photos.position,
       kept.publication_position::int AS "publicationPosition", photos.url,
+      photos.is_primary AS "isPrimary", photos.included,
       photos.storage_type AS "storageType", photos.mime_type AS "mimeType",
       photos.file_bytes AS "fileBytes", photos.file_hash AS "fileHash", photos.file_header AS "fileHeader"
     FROM kept
@@ -248,9 +221,25 @@ export class PgCatalogVariantPublicationPhotoReader implements CatalogVariantPub
   ) {}
 
   async listPublicationPhotos(input: CatalogPublicationPhotoSelection): Promise<Map<number, CatalogVariantPublicationPhotos>> {
+    const plan = await this.listPublicationPlan(input);
+    return new Map(plan.variants.map(({ variantId, gallery }) => [variantId, {
+      photos: gallery.selected.map(({ assetId, url, position, uploaded }) => ({ assetId: assetId!, url, position, uploaded })),
+      issues: gallery.omissions.filter(omission => omission.blocking).map(omission => ({
+        assetId: omission.assetId!, code: omission.code!, message: omission.message!,
+      })),
+    }]));
+  }
+
+  async listPublicationPlan(input: CatalogPublicationPhotoSelection): Promise<CatalogPublicationMediaPlan> {
     const images = await readCatalogVariantPublicationImages(this.database, input);
-    return new Map([...images].map(([productVariantId, variantImages]) =>
-      [productVariantId, resolveCatalogPublicationPhotos(variantImages, this.publicUrl)]));
+    return resolveCatalogPublicationMediaPlan(images, input, this.publicUrl);
+  }
+
+  /** Independent SKU publications share one batch read, not one cross-product source revision. */
+  async listPublicationPlansByVariant(input: CatalogPublicationPhotoSelection): Promise<Map<number, CatalogPublicationMediaPlan>> {
+    const images = await readCatalogVariantPublicationImages(this.database, input);
+    return new Map([...images].map(([variantId, candidates]) => [variantId,
+      resolveCatalogPublicationMediaPlan(new Map([[variantId, candidates]]), { ...input, productVariantIds: [variantId] }, this.publicUrl)]));
   }
 }
 
@@ -264,11 +253,10 @@ export async function readPublicCatalogImage(
     || !CATALOG_IMAGE_HASH_PATTERN.test(contentHash)) return null;
   const result = await database.query<{ data: Buffer; mimeType: string }>(`
     SELECT file_data AS data, mime_type AS "mimeType"
-    FROM catalog.product_assets
-    WHERE id = $1 AND asset_type = 'image' AND storage_type IN ('file', 'both')
+    FROM catalog.product_asset_versions
+    WHERE asset_id = $1 AND content_hash = $2
       AND mime_type IN ('image/jpeg', 'image/png', 'image/webp', 'image/gif')
-      AND CASE WHEN octet_length(file_data) BETWEEN 1 AND $3
-        THEN encode(sha256(file_data), 'hex') = $2 ELSE false END
+      AND octet_length(file_data) BETWEEN 1 AND $3
     LIMIT 1
   `, [assetId, contentHash, MAX_PRODUCT_IMAGE_BYTES]);
   const image = result.rows[0];

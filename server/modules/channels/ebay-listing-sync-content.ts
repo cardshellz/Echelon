@@ -1,3 +1,4 @@
+import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
 import Decimal from "decimal.js";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { syncStageHash } from "./ebay-listing-sync.domain";
@@ -35,7 +36,7 @@ export function itemGroupSyncContent(
 }
 
 /** Bind durable verification to the exact desired content, independently of changing ATP. */
-export function syncContentIntentHash(
+export function ebayPreparedContentHash(
   draft: Pick<BuiltEbayListingDraft, "inventoryItems" | "offers"> & {
     itemGroup?: BuiltItemGroup | null;
   },
@@ -61,6 +62,14 @@ export function syncContentIntentHash(
         }
       : null,
   });
+}
+
+/** Legacy checkpoints remain comparable; new checkpoints also bind account and source provenance. */
+export function syncContentIntentHash(
+  draft: Parameters<typeof ebayPreparedContentHash>[0] & { preparedIntent?: ChannelPreparedIntent },
+): string {
+  const contentHash = ebayPreparedContentHash(draft);
+  return draft.preparedIntent ? syncStageHash({ contentHash, intentHash: draft.preparedIntent.intentHash }) : contentHash;
 }
 
 /** Return only a field path, never provider values such as private image URLs. */

@@ -3,6 +3,7 @@ import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
 import {
   CUSTOMER_ACCOUNT_COMMAND_HEADER,
+  CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED,
   CUSTOMER_ACCOUNT_PROXY_API,
   customerAccountBootstrapSchema,
   customerAccountRequestSchema,
@@ -97,6 +98,13 @@ export function registerCustomerAccountRoutes(
     },
   });
   const failed = (res: Response, error: unknown, path: string) => {
+    if (error instanceof CustomerReturnCustomerAccessError && error.code === "RETURN_STOREFRONT_CUSTOMER_MISSING") {
+      dependencies.report({ code: CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED, path });
+      // The theme owns the notice and recovery link. Keep a neutral fallback
+      // for older bundles while preserving the precise machine-readable cause.
+      res.status(401).json({ error: { code: CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED, message: "Sign in again to manage your orders." } });
+      return;
+    }
     // Record a bounded driver/provider code, never SQL, credentials or customer data.
     const cause = z.object({ code: z.string().regex(/^[A-Z0-9_]{1,80}$/) }).safeParse(error);
     const known =

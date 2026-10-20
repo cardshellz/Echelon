@@ -239,7 +239,14 @@ export interface DropshipListingPushJobItemRecord {
   errorMessage: string | null;
 }
 
+export interface ManagedListingIntentScope {
+  accountId: string;
+  environment: string;
+  managedOnly: true;
+}
+
 export interface CreateDropshipListingPushJobRepositoryInput {
+  managedIntentScope?: ManagedListingIntentScope;
   vendorId: number;
   storeConnectionId: number;
   platform: DropshipSourcePlatform;
@@ -937,13 +944,15 @@ export class DropshipListingPreviewService {
     });
   }
 
-  async createListingPushJob(input: unknown): Promise<{
+  async createListingPushJob(input: unknown, managedIntentScope?: ManagedListingIntentScope): Promise<{
     job: DropshipListingPushJobRecord;
     items: DropshipListingPushJobItemRecord[];
     preview: DropshipListingPreviewResult;
     idempotentReplay: boolean;
   }> {
     const parsed = createListingPushJobInputSchema.parse(input);
+    if (managedIntentScope) managedIntentScope = z.object({ accountId: z.string().min(1).max(255),
+      environment: z.enum(["production", "sandbox"]), managedOnly: z.literal(true) }).strict().parse(managedIntentScope);
     const reviewMode: ListingPushReviewMode = parsed.reviewMode ?? "reviewed_preview";
     if (reviewMode === "current_preview" && carriesReviewedPreviewEvidence(parsed)) {
       // A one-step push queues what the server's own preview shows. Evidence from
@@ -995,6 +1004,7 @@ export class DropshipListingPreviewService {
       ),
     });
     const result = await this.deps.repository.createListingPushJob({
+      ...(managedIntentScope ? { managedIntentScope } : {}),
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       platform: preview.platform,

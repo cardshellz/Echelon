@@ -1,3 +1,4 @@
+import { ChannelPricingResolutionError } from "./channel-pricing-resolver";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { createHash } from "node:crypto";
@@ -185,8 +186,8 @@ export function syncFailure(
     : code === "CANONICAL_PUBLICATION_MAPPING_MISSING"
       ? "Inventory setup stopped this listing update before its pictures could be confirmed. Retry Sync to prepare this listing's inventory connection."
     : error instanceof Error &&
-    (error instanceof EbayListingSyncError ||
-      /^(EBAY_|PUBLICATION_|QUANTITY_)/.test(code))
+    (error instanceof EbayListingSyncError || error instanceof ChannelPricingResolutionError ||
+      (code !== "EBAY_LISTING_SYNC_FAILED" && /^(EBAY_|PUBLICATION_|QUANTITY_)/.test(code)))
       ? error.message.slice(0, 1000)
       : "The listing update could not finish. Inspect the saved sync job before retrying.";
   return {

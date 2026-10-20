@@ -1,3 +1,5 @@
+import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
+import { assertEbayPreparedIntent } from "../ebay-prepared-intent";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
@@ -81,6 +83,7 @@ export interface EbayListingLifecycleClient extends EbayListingConnectorClient {
 }
 
 export interface EbayListingConnectorDraft {
+  preparedIntent?: ChannelPreparedIntent;
   productId: number;
   marketplaceId: string;
   inventoryItems: BuiltInventoryItem[];
@@ -524,6 +527,10 @@ export class EbayMarketplaceListingConnector {
       },
       liveGroup,
     });
+    // New preparations already aligned against the observed provider schema.
+    // A later axis change must require preparation again, never silently alter
+    // the hashed content. Legacy drafts retain the existing alignment behavior.
+    assertEbayPreparedIntent(alignedDraft);
     const result = await this.updateExistingVariationGroup({
       client: input.client,
       draft: alignedDraft,
@@ -570,10 +577,9 @@ export class EbayMarketplaceListingConnector {
     let temporaryTransitionApplied = false;
     let targetGroupApplied = false;
     let retainedRemovedSkus: string[] = [];
-    const addedSkus = new Set(normalizedSkus(input.addedSkus));
-    const inventoryItemsToPrepare = input.draft.inventoryItems.filter((item) =>
-      addedSkus.has(item.sku),
-    );
+    // The reviewed plan covers existing members as well as newly added SKUs.
+    // Group image replacement alone does not replace item-level galleries.
+    const inventoryItemsToPrepare = input.draft.inventoryItems;
 
     try {
       for (const item of inventoryItemsToPrepare) {
@@ -687,6 +693,7 @@ export class EbayMarketplaceListingConnector {
       groupKey: input.draft.itemGroup.groupKey,
       marketplaceId: input.draft.marketplaceId,
     });
+    await this.verifyListingMedia({ client: input.client, draft: input.draft });
     return {
       productId: input.draft.productId,
       status: "updated",
@@ -771,10 +778,11 @@ export class EbayMarketplaceListingConnector {
   private validateExistingListingSyncDraft(input: {
     draft: Pick<
       EbayListingConnectorDraft,
-      "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup"
+      "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup" | "preparedIntent"
     >;
     identity?: EbayListingSyncIdentity;
   }): void {
+    assertEbayPreparedIntent(input.draft, input.identity);
     if (input.identity) {
       const identity = input.identity,
         skus = new Set([...identity.variants.map((member) => member.sku), ...identity.retainedGroupSkus ?? []]);
@@ -823,7 +831,7 @@ export class EbayMarketplaceListingConnector {
   async prepareExistingListingSyncDraft(input: {
     client: EbayListingLifecycleClient;
     identity: EbayListingSyncIdentity;
-    draft: Pick<EbayListingConnectorDraft, "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup">;
+    draft: Pick<EbayListingConnectorDraft, "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup" | "preparedIntent">;
   }): Promise<typeof input.draft> {
     // Preserve only archived SKUs observed in this actual group. They carry no
     // item/offer update or stock preparation; cleanup has a separate owner.
@@ -878,7 +886,7 @@ export class EbayMarketplaceListingConnector {
     client: EbayListingConnectorClient;
     draft: Pick<
       EbayListingConnectorDraft,
-      "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup"
+      "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup" | "preparedIntent"
     >;
     identity?: EbayListingSyncIdentity;
     stage?: (
@@ -983,7 +991,7 @@ export class EbayMarketplaceListingConnector {
       Pick<EbayListingLifecycleClient, "getInventoryItemGroup">;
     draft: Pick<
       EbayListingConnectorDraft,
-      "productId" | "inventoryItems" | "offers" | "itemGroup" | "marketplaceId"
+      "productId" | "inventoryItems" | "offers" | "itemGroup" | "marketplaceId" | "preparedIntent"
     >;
     identity: EbayListingSyncIdentity;
     offerIds: Record<number, string>;
@@ -1032,6 +1040,27 @@ export class EbayMarketplaceListingConnector {
         throw readbackPending(`group ${group.groupKey}`, "inventoryItemGroupKey");
       }
       const mismatch = findEbaySyncContentMismatch(current, itemGroupSyncContent(group.payload));
+      if (mismatch) throw readbackPending(`group ${group.groupKey}`, mismatch);
+    }
+  }
+
+  /** Every update path must observe the exact ordered item and group galleries before success. */
+  private async verifyListingMedia(input: {
+    client: Pick<EbayListingLifecycleClient, "getInventoryItem" | "getInventoryItemGroup">;
+    draft: Pick<EbayListingConnectorDraft, "inventoryItems" | "itemGroup">;
+  }): Promise<void> {
+    for (const item of input.draft.inventoryItems) {
+      const current = await input.client.getInventoryItem(item.sku);
+      if (!current || current.sku !== item.sku) throw readbackPending(`inventory item ${item.sku}`, "sku");
+      const mismatch = findEbaySyncContentMismatch(current.product?.imageUrls, item.payload.product?.imageUrls, "content.product.imageUrls");
+      if (mismatch) throw readbackPending(`inventory item ${item.sku}`, mismatch);
+    }
+    if (input.draft.itemGroup) {
+      const group = input.draft.itemGroup;
+      const current = await input.client.getInventoryItemGroup(group.groupKey);
+      if (!current || (current.inventoryItemGroupKey !== undefined && current.inventoryItemGroupKey !== group.groupKey))
+        throw readbackPending(`group ${group.groupKey}`, "inventoryItemGroupKey");
+      const mismatch = findEbaySyncContentMismatch(current.imageUrls, group.payload.imageUrls, "content.imageUrls");
       if (mismatch) throw readbackPending(`group ${group.groupKey}`, mismatch);
     }
   }
@@ -1152,6 +1181,7 @@ export class EbayMarketplaceListingConnector {
 }
 
 function validateDraft(draft: EbayListingConnectorDraft): void {
+  assertEbayPreparedIntent(draft);
   if (!draft.marketplaceId.trim()) {
     throw new EbayListingSyncError("EBAY_LISTING_VALIDATION_FAILED", "eBay marketplace id is required.");
   }
@@ -1235,7 +1265,7 @@ function buildGroupWithoutVariation(input: {
   };
 }
 
-function alignDraftVariationSchemaToLiveGroup(input: {
+export function alignDraftVariationSchemaToLiveGroup(input: {
   draft: EbayListingConnectorDraft & { itemGroup: BuiltItemGroup };
   liveGroup: EbayInventoryItemGroup & { variantSKUs?: string[] };
 }): EbayListingConnectorDraft & { itemGroup: BuiltItemGroup } {

@@ -1,3 +1,4 @@
+import { ListingIntentChanges } from "./ListingIntentChanges";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { catalogImageQueryOptions } from "@/lib/catalog-image-queries";
@@ -639,6 +640,8 @@ export function ChannelListingPublicationWorkspace({
         </div>
       )}
       <div hidden={workbench} className="space-y-4">
+        <ListingIntentChanges scope={{ kind: "channel", channelId }} canEdit={canEdit} active={active && !workbench}
+          onReview={() => setTab("listings")} />
         {bulkItems && bulkDirty && (
           <div className="space-y-2 rounded-md border p-3">
             <p role="status" className="text-sm">

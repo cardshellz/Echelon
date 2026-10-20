@@ -11,9 +11,10 @@ import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetMan
 export const customerAccountPageConfigSchema = z.object({
   themeId: z.string().max(30).regex(/^[1-9][0-9]*$/),
   customerId: z.string().max(30).regex(/^[1-9][0-9]*$/),
+  loginPath: z.string().max(100).regex(/^\/(?:[a-z]{2}(?:-[a-z0-9]{2,8})?\/)?account\/login$/i).default("/account/login"),
   proxyPath: z.string().regex(/^\/(apps|a|community|tools)\/[a-z0-9][a-z0-9-]*$/).refine(path => !path.endsWith("/member-portal")),
 }).strict();
-export type CustomerAccountPageConfig = z.infer<typeof customerAccountPageConfigSchema>;
+export type CustomerAccountPageConfig = z.input<typeof customerAccountPageConfigSchema>;
 // Bound storefront waits; a timed-out mutation must still be reconciled.
 export const CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS = 25_000;
 export class CustomerAccountRequestError extends Error {
@@ -83,7 +84,7 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
   return {
     async bootstrap(signal?: AbortSignal) {
       const result = await json(await call({ method: "GET", path: "/account/bootstrap" }, signal), customerAccountBootstrapSchema);
-      if (!result.session.authenticated || !result.session.sessionKey) throw new Error("Sign in to your store account before continuing.");
+      if (!result.session.authenticated || !result.session.sessionKey) throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_SESSION_INVALID", "The account response could not be verified.");
       sessionKey = result.session.sessionKey;
       return result;
     },

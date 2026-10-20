@@ -10,6 +10,7 @@ const fixture = vi.hoisted(() => ({
   connector: { pushListing: vi.fn(), previewListingRebuild: vi.fn(), updateExistingListing: vi.fn(), executeListingRebuild: vi.fn() },
   photos: vi.fn(), prices: vi.fn(), quantities: vi.fn(), policies: vi.fn(), build: vi.fn(), identity: vi.fn(),
   inspect: vi.fn(), jobs: { getByCommand: vi.fn(), getAdmission: vi.fn(), enqueue: vi.fn(), recordAdmissionFailure: vi.fn() },
+  liveGroup: vi.fn(),
 }));
 vi.mock("../../../../db", () => ({ db: {}, pool: { query: fixture.query }, getDatabasePoolSnapshot: () => ({ maximumConnections: 20 }) }));
 vi.mock("../../infrastructure/ebay-api-runtime", () => ({
@@ -17,9 +18,9 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({
   ebayListingPhotoResolver: { resolve: fixture.photos }, getAuthService: () => fixture.auth,
 }));
 vi.mock("../../infrastructure/ebay-listing-client", () => ({
-  createEbayRouteListingClient: () => ({}), createEbayRouteListingLifecycleClient: () => ({}), getExistingEbayListingPhotos: vi.fn(),
+  createEbayRouteListingClient: () => ({}), createEbayRouteListingLifecycleClient: () => ({getInventoryItemGroup:fixture.liveGroup}), getExistingEbayListingPhotos: vi.fn(),
 }));
-vi.mock("../../infrastructure/ebay-listing-helpers", () => ({ determineVariationAspectName: () => "Pack Size", resolveChannelPrice: fixture.prices }));
+vi.mock("../../infrastructure/ebay-listing-helpers", () => ({ determineVariationAspectName: () => "Pack Size", resolveChannelPriceResolution: fixture.prices }));
 // The full writer, catalog adapter and saved-publication gate are exercised in
 // ebay-business-policies.integration and ebay-policy-publication.integration.
 vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: { resolveProductPolicies: fixture.policies } }));
@@ -30,12 +31,14 @@ vi.mock("../../infrastructure/ebay-active-listing-sync", () => ({ ebayListingSyn
 vi.mock("../../infrastructure/ebay-listing-push.repository", () => ({
   PostgresEbayListingPushRepository: class { constructor() { return fixture.repository; } },
 }));
-vi.mock("../../listing-connectors/ebay-listing.connector", () => ({
+vi.mock("../../listing-connectors/ebay-listing.connector", async importOriginal => ({
+  ...await importOriginal<typeof import("../../listing-connectors/ebay-listing.connector")>(),
   EbayMarketplaceListingConnector: class { constructor() { return fixture.connector; } },
 }));
 
 import { ebayListingPushService, prepareEbayPublicationCompletion, readEbayPublicationSource } from "../../infrastructure/ebay-listing-push";
 import { EbayListingSyncError, storedEbayListingSyncJobSchema } from "../../ebay-listing-sync.domain";
+import { assertEbayPreparedIntent } from "../../ebay-prepared-intent";
 
 describe("eBay publication application composition", () => {
   beforeEach(() => {
@@ -55,9 +58,9 @@ describe("eBay publication application composition", () => {
     fixture.repository.currentListingIds.mockResolvedValue([]);
     fixture.repository.readAspects.mockResolvedValue({});
     fixture.photos.mockResolvedValue({});
-    fixture.prices.mockResolvedValue(999);
+    fixture.prices.mockResolvedValue({ priceCents: 999, basePriceCents: 999, source: "catalog_variant", provenance: { kind: "catalog_variant", variantId: 101 }, appliedRule: null });
     fixture.quantities.mockResolvedValue([{ productVariantId: 101, atpUnits: 8 }]);
-    fixture.build.mockReturnValue({ inventoryItems: [], offers: [], itemGroup: undefined });
+    fixture.build.mockReturnValue({ inventoryItems: [], offers: [{ variantId: 101, sku: "PROVIDER-PACK", payload: { pricingSummary: { price: { currency: "USD", value: "9.99" } } } }], itemGroup: undefined });
     fixture.connector.pushListing.mockResolvedValue({ externalProductId: "listing-20", externalOfferIds: { 101: "offer-101" } });
     fixture.identity.mockResolvedValue({ groupKey: "PROVIDER-GROUP" });
     fixture.repository.projectSuccess.mockResolvedValue(undefined);
@@ -135,6 +138,26 @@ describe("eBay publication application composition", () => {
     expect(fixture.repository.projectSuccess).not.toHaveBeenCalled();
     expect(fixture.connector.pushListing).not.toHaveBeenCalled();
     expect(fixture.connector.executeListingRebuild).not.toHaveBeenCalled();
+  });
+
+  it("aligns reviewed in-place update content before creating its prepared envelope", async () => {
+    fixture.repository.currentListingIds.mockResolvedValue(["listing-20"]);
+    const routeDraft = {inventoryItems:[{sku:"PROVIDER-PACK",payload:{condition:"NEW",product:{title:"Pack",imageUrls:[],aspects:{"Pack Size":["100"]}}}}],
+      offers:[{variantId:101,sku:"PROVIDER-PACK",payload:{pricingSummary:{price:{currency:"USD",value:"9.99"}}}}],
+      itemGroup:{groupKey:"PROVIDER-GROUP",payload:{title:"Pack",description:"Pack",aspects:{},imageUrls:[],variantSKUs:["PROVIDER-PACK"],variesBy:{specifications:[{name:"Pack Size",values:["100"]}]}}}};
+    fixture.build.mockReturnValue(routeDraft);
+    fixture.liveGroup.mockResolvedValue({...routeDraft.itemGroup.payload,inventoryItemGroupKey:"PROVIDER-GROUP",variesBy:{specifications:[{name:"Number of Sleeves",values:["100"]}]}});
+    fixture.connector.updateExistingListing.mockResolvedValue({externalProductId:"listing-20",externalOfferIds:{101:"offer-101"}});
+    const result = await ebayListingPushService.push({productIds:[20],updateExisting:{mode:"execute",preview:{productId:20,groupKey:"PROVIDER-GROUP",
+      currentExternalListingId:"listing-20",sourceState:"active",currentSkus:["PROVIDER-PACK"],activeSkus:["PROVIDER-PACK"],inactiveSkus:[],desiredSkus:["PROVIDER-PACK"],
+      addedSkus:[],removedSkus:[],rebuildRequired:false,confirmationToken:"a".repeat(64)}}});
+    expect(result.summary.succeeded).toBe(1);
+    const prepared = fixture.connector.updateExistingListing.mock.calls[0][0].draft;
+    expect(prepared.inventoryItems[0].payload.product.aspects).toEqual({"Number of Sleeves":["100"]});
+    expect(prepared.itemGroup.payload.variesBy.specifications[0].name).toBe("Number of Sleeves");
+    expect(prepared.preparedIntent).toBeDefined();
+    expect(()=>assertEbayPreparedIntent(prepared)).not.toThrow();
+    expect(routeDraft.inventoryItems[0].payload.product.aspects).toEqual({"Pack Size":["100"]});
   });
 
   it("reports uncertain job admission without provider calls or claiming publication completed", async () => {

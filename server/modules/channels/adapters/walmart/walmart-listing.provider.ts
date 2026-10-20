@@ -1,3 +1,5 @@
+import { limitPublicationMediaPlan, resolveExplicitPublicationMediaPlan } from "../../../catalog/catalog-publication-media";
+import { prepareWalmartChannelIntent, assertWalmartPreparedIntent } from "./walmart-prepared-intent";
 import { z } from "zod";
 import {
   listingAccountSchema,
@@ -273,7 +275,14 @@ export class WalmartListingProvider implements ListingPublicationProvider {
     // A new-condition catalog offer reuses Walmart's existing product content.
     // Other conditions can require offer-specific images under the match schema.
     const reusesCatalogContent = feedType === "MP_ITEM_MATCH" && orderable.condition === "New";
-    const images = reusesCatalogContent ? [] : draft.images ?? input.catalog.images;
+    const mediaLimit = feedType === "MP_ITEM_MATCH" ? 1 : 20;
+    const mediaPlan = reusesCatalogContent ? null : draft.images === null && input.catalog.mediaPlan
+      ? limitPublicationMediaPlan(input.catalog.mediaPlan, { maxPhotosPerVariant: mediaLimit, maxGroupPhotos: mediaLimit })
+      : resolveExplicitPublicationMediaPlan({ variantIds: [draft.variantId], urls: draft.images ?? input.catalog.images,
+          maxPhotosPerVariant: mediaLimit, maxGroupPhotos: mediaLimit });
+    const images = mediaPlan?.group.selected.map(photo => photo.url) ?? [];
+    for (const omission of mediaPlan?.group.omissions ?? []) if (omission.blocking)
+      issues.push(issue(omission.code ?? "WALMART_IMAGES_INVALID", omission.message ?? "A selected image needs correction before publication.", "images"));
     if (feedType === "MP_ITEM_MATCH" && !reusesCatalogContent && draft.images === null)
       issues.push(...(input.catalog.imageIssues ?? []));
     const imageUrls = z
@@ -336,6 +345,7 @@ export class WalmartListingProvider implements ListingPublicationProvider {
       })
     )
       issues.push(...schemaIssues(schema.validate.errors));
+    if (issues.length === 0) result.preparedIntent = prepareWalmartChannelIntent(account, input, result, { mediaPlan, mediaAction: reusesCatalogContent ? "preserve" : "replace" });
     return result;
   }
 
@@ -388,6 +398,8 @@ export class WalmartListingProvider implements ListingPublicationProvider {
       );
       const seen = new Set<string>();
       for (const item of items) {
+        try { assertWalmartPreparedIntent(account, item); }
+        catch { throw new WalmartApiError("WALMART_LISTING_REVIEW_STALE", "The prepared listing account or content changed; review this item again.", false); }
         await input.beforeSubmit();
         if (
           item.feedType !== feedType ||

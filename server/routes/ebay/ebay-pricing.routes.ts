@@ -1,4 +1,4 @@
-import { syncActiveListings, triggerPricingRuleSync } from "../../modules/channels/ebay-listing-sync";
+import { syncActiveListings } from "../../modules/channels/ebay-listing-sync";
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
 import { db, pool } from "../../db";
@@ -15,7 +15,7 @@ import {
   channelPricingRules,
 } from "@shared/schema";
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
-import { resolveChannelListingPrice } from "../../modules/channels/channel-pricing-resolver";
+import { resolveChannelListingPrice, ChannelPricingResolutionError } from "../../modules/channels/channel-pricing-resolver";
 
 export const router = express.Router();
 
@@ -113,10 +113,8 @@ export const router = express.Router();
         }
       });
 
-      // Fire-and-forget: sync affected listings after pricing rule change
-      triggerPricingRuleSync(scope, effectiveScopeId).catch((e) =>
-        console.error("[eBay Pricing Rule Sync] Background sync error:", e.message),
-      );
+      // The source transaction captures durable listing-intent obligations.
+      // The shared propagation worker hands them to the existing listing owner.
       
       res.json({ rule: {
         id: ruleResult.id,
@@ -181,6 +179,7 @@ export const router = express.Router();
         basePriceCents: basePrice,
         effectivePriceCents: effectivePrice,
         priceSource: resolution.source,
+        priceProvenance: resolution.provenance,
         appliedPricingRule: resolution.appliedRule,
         missingPrice: resolution.priceCents === null,
         basePrice: (basePrice / 100).toFixed(2),
@@ -188,7 +187,7 @@ export const router = express.Router();
       });
     } catch (err: any) {
       console.error("[eBay Effective Price] Error:", err.message);
-      res.status(500).json({ error: err.message });
+      res.status(err instanceof ChannelPricingResolutionError ? err.status : 500).json({ error: err.message, ...(err instanceof ChannelPricingResolutionError ? { code: err.code } : {}) });
     }
   });
 
@@ -205,24 +204,33 @@ export const router = express.Router();
       .where(and(eq(products.isActive, true), isNotNull(productVariants.sku)));
 
       const prices: Record<number, {
-        basePriceCents: number;
-        effectivePriceCents: number;
+        basePriceCents: number | null;
+        effectivePriceCents: number | null;
         priceSource: string | null;
+        priceProvenance: Awaited<ReturnType<typeof resolveChannelListingPrice>>["provenance"];
         missingPrice: boolean;
+        resolutionIssue?: { code: string; message: string };
       }> = {};
       for (const v of varResult) {
-        const resolution = await resolveChannelListingPrice(db, {
-          channelId: EBAY_CHANNEL_ID,
-          productId: v.productId,
-          variantId: v.id,
-          fallbackCatalogPriceCents: v.priceCents,
-        });
-        prices[v.id] = {
-          basePriceCents: resolution.basePriceCents ?? 0,
-          effectivePriceCents: resolution.priceCents ?? 0,
-          priceSource: resolution.source,
-          missingPrice: resolution.priceCents === null,
-        };
+        try {
+          const resolution = await resolveChannelListingPrice(db, {
+            channelId: EBAY_CHANNEL_ID, productId: v.productId, variantId: v.id,
+            fallbackCatalogPriceCents: v.priceCents,
+          });
+          prices[v.id] = {
+            basePriceCents: resolution.basePriceCents,
+            effectivePriceCents: resolution.priceCents,
+            priceSource: resolution.source, priceProvenance: resolution.provenance,
+            missingPrice: resolution.priceCents === null,
+          };
+        } catch (error) {
+          if (!(error instanceof ChannelPricingResolutionError)) throw error;
+          // A source conflict blocks this variant, not the healthy price previews.
+          // Null means unavailable; it must never be displayed as a zero price.
+          prices[v.id] = { basePriceCents: null, effectivePriceCents: null, priceSource: null,
+            priceProvenance: null, missingPrice: true,
+            resolutionIssue: { code: error.code, message: error.message } };
+        }
       }
 
       res.json({ prices });
