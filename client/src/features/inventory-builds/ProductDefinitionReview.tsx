@@ -86,6 +86,8 @@ export function ProductDefinitionReview({ view, onApplyBlockedChange, onApplied 
       <p className="text-sm">{review.affectedProductIds.length} affected product(s), including dependent builds. Applying changes rules only—it does not move or assemble stock.</p>
       {stale && <p role="alert">The draft changed. Review it again.</p>}
       {review.blockers.length > 0 && <ul className="list-disc pl-5 text-sm text-destructive">{review.blockers.map(message => <li key={message}>{message}</li>)}</ul>}
+      {(review.skippedDestinations?.length ?? 0) > 0 && <ul aria-label="Channels not updating" className="list-disc pl-5 text-sm text-amber-700 dark:text-amber-400">
+        {review.skippedDestinations!.map(message => <li key={message}>{message}</li>)}</ul>}
       <div className="max-h-80 overflow-auto"><table className="w-full text-left text-sm">
         <caption className="text-left font-medium">Warehouse ATP</caption>
         <thead><tr><th>SKU</th><th>Warehouse</th><th>Current</th><th>Your changes</th></tr></thead>
