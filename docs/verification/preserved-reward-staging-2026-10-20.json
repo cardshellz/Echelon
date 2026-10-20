@@ -1,0 +1,54 @@
+{
+  "fixture": "reward-edit-1141b544-91e1-4228-9",
+  "shop": "cardshellz-staging.myshopify.com",
+  "startedAt": "2026-10-20T13:48:52.275Z",
+  "realOrdersChanged": 0,
+  "realPointsChanged": 0,
+  "inventoryRecoveryKey": "aed8e193-f5ab-4333-8039-78f82f18a5a1",
+  "inventoryBefore": 50,
+  "deliveryService": "Standard",
+  "order": {
+    "id": "gid://shopify/Order/8148241285318",
+    "name": "#1018"
+  },
+  "results": {
+    "originalAppliedCents": 279,
+    "originalFaceCents": 723,
+    "addedMerchandiseCents": 88595,
+    "itemsSubtotalCents": 88874,
+    "displayedOrderDiscountCents": 279,
+    "quoteTotalCents": 88595,
+    "quoteTaxCents": 0,
+    "previewAgrees": true,
+    "commitReconciles": true,
+    "recoveryReconciles": true,
+    "quantityIncreaseUsesSeparateLine": true,
+    "quantityRecoveryReconciles": true,
+    "thirdSessionReopens": true
+  },
+  "inventoryRestoredUnits": 2,
+  "cleanup": [
+    {
+      "kind": "order",
+      "id": "gid://shopify/Order/8148241285318",
+      "deleted": true
+    },
+    {
+      "kind": "draft",
+      "id": "gid://shopify/DraftOrder/1081950011590",
+      "deleted": true
+    },
+    {
+      "kind": "code",
+      "id": "gid://shopify/DiscountCodeNode/1917059137734",
+      "deleted": true
+    },
+    {
+      "kind": "customer",
+      "id": "gid://shopify/Customer/10149030822086",
+      "deleted": true
+    }
+  ],
+  "inventoryAfter": 50,
+  "finishedAt": "2026-10-20T13:49:34.788Z"
+}

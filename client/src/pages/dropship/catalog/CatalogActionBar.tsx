@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { GuardedLink } from "./UnsavedChangesGuard";
@@ -17,14 +18,22 @@ const LIVE_SUMMARY = { role: "status", "aria-live": "polite" } as const;
  * Bottom of every step: what the vendor is working on, and the step's one way
  * forward (asks first when changes aren't saved). `live` announces the
  * summary to screen readers; it is off by default, so the other steps'
- * markup stays as it was.
+ * markup stays as it was. `children` (step 1's unsaved changes and Save,
+ * step 1 stage 1) sit above the summary row; left out, the markup is
+ * unchanged.
  */
-export function CatalogActionBar({ next, summary, live = false }: { summary: string; next: CatalogNextStepAction | null; live?: boolean }) {
+export function CatalogActionBar({ next, summary, live = false, children }: {
+  summary: string;
+  next: CatalogNextStepAction | null;
+  live?: boolean;
+  children?: ReactNode;
+}) {
   return (
     <div
       className="sticky bottom-0 z-20 -mx-4 mt-6 border-t border-zinc-200 bg-white/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6"
       data-testid="catalog-action-bar"
     >
+      {children}
       <div className="flex items-center justify-between gap-3">
         <p className="min-w-0 text-sm text-zinc-700" data-testid="catalog-action-summary" {...(live ? LIVE_SUMMARY : {})}>{summary}</p>
         {next && (next.disabled ? (

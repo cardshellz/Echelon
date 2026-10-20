@@ -69,15 +69,21 @@ describe("DropshipPortalCatalog workflow", () => {
       join(process.cwd(), "client", "src", "pages", "dropship", "DropshipPortalCatalog.tsx"),
       "utf8",
     );
-    const filterPosition = source.indexOf("<CatalogFilterPanel");
-    const availableCatalogPosition = source.indexOf("Available catalog");
-    const catalogTablePosition = source.indexOf("<CatalogTable");
+    // Step 1 stage 1: the choice moved into ChooseStep, which holds the filters, the heading and the table, in that order.
+    const choose = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/ChooseStep.tsx"), "utf8");
+    const chooseStepPosition = source.indexOf("<ChooseStep");
     const listingPreviewPosition = source.indexOf("<ListingPreviewPanel");
+    const filterPosition = choose.indexOf("<CatalogFilterPanel");
+    const availableCatalogPosition = choose.indexOf("{CHOOSE_WORDS.heading}");
+    const catalogTablePosition = choose.indexOf("<ChooseTable");
 
+    expect(chooseStepPosition).toBeGreaterThan(-1);
+    expect(listingPreviewPosition).toBeGreaterThan(chooseStepPosition);
     expect(filterPosition).toBeGreaterThan(-1);
     expect(availableCatalogPosition).toBeGreaterThan(filterPosition);
     expect(catalogTablePosition).toBeGreaterThan(availableCatalogPosition);
-    expect(listingPreviewPosition).toBeGreaterThan(catalogTablePosition);
+    expect(choose).not.toContain("CatalogSelectionProofPanel");
+    expect(choose).not.toContain("manage_catalog_selection");
     expect(source).not.toContain("CatalogSelectionProofPanel");
     expect(source).not.toContain("manage_catalog_selection");
     expect(source).toContain("MFA is requested only when you queue ready listings.");
@@ -143,9 +149,12 @@ describe("catalog listing tier", () => {
   });
 
   it("labels the badge by tier and never says on sale or off sale", () => {
-    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
+    // Step 1 stage 1: the table (and its badge) moved to ChooseTable; the page keeps no off-sale words either.
+    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/ChooseTable.tsx"), "utf8");
+    const page = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
     expect(source).toContain('{row.listingTier.tier === "case" ? "Case tier not active" : "Pack tier not active"}');
     expect(source).not.toMatch(/"(Cases off sale|Off sale|On sale)"/);
+    expect(page).not.toMatch(/"(Cases off sale|Off sale|On sale)"/);
   });
 });
 
@@ -198,7 +207,8 @@ describe("listing access notice", () => {
     expect(source).not.toContain("A launch-ready store connection is required before listing preview or push.");
     // An expired verification reloads the proof so the next click asks again.
     const start = source.indexOf("function showListingError(");
-    const end = source.indexOf("function applyCatalogFilters(");
+    // Step 1 stage 1 removed applyCatalogFilters, the next function before; chooseStore follows showListingError now.
+    const end = source.indexOf("function chooseStore(");
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const errorHandler = source.slice(start, end);

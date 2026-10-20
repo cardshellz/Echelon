@@ -101,6 +101,9 @@ const line = z
 export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
   .object({
     codePricing: orderEditCodePricingSchema.optional(),
+    nativeDiscountAllocations: z.array(z.object({
+      lineId: gid("LineItem"), ruleKey: text, amountCents: money,
+    }).strict()).max(62500).optional(),
     previewProductDiscounts: z
       .array(
         z

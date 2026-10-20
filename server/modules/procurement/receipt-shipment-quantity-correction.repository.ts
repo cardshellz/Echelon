@@ -9,6 +9,7 @@ import {
   quantityCorrectionHistorySchema,
   type QuantityCorrectionInput,
   type QuantityCorrectionSummary,
+  type QuantityCorrectionPurpose,
 } from "@shared/procurement/receipt-shipment-quantity-correction";
 import { readPurchaseApprovalActor } from "../identity/infrastructure/purchase-approval-access.repository";
 import {
@@ -26,6 +27,7 @@ import {
   type QuantityCorrectionFacts,
   type QuantityCorrectionPlan,
 } from "./domain/receipt-shipment-quantity-correction";
+import { receivingLineStatus } from "./domain/receiving-line-status";
 import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
 
 type Row = Record<string, unknown>;
@@ -76,6 +78,7 @@ export async function readQuantityCorrectionSource(
   tx: AmendmentTransaction,
   lineId: number,
   actorId: string,
+  purpose: QuantityCorrectionPurpose = "receipt",
 ) {
   await lockInventoryCostGraph(tx);
   const rows = (
@@ -281,7 +284,7 @@ export async function readQuantityCorrectionSource(
   )
     blockedReason =
       "Cancelled shipments, cancelled/short-closed POs, or returned purchase lines need their owning reversal workflow.";
-  if (!receiptRows.length)
+  if (!receiptRows.length && purpose === "receipt")
     blockedReason =
       "No linked posted receipt was found. Use the normal shipment editor before receiving.";
   if (
@@ -292,7 +295,35 @@ export async function readQuantityCorrectionSource(
     blockedReason =
       "A historical receipt could belong to more than one shipment line. Its source link must be resolved first.";
   const receipts: QuantityCorrectionFacts["receipts"] = [];
+  const pendingReceipts: NonNullable<
+    QuantityCorrectionFacts["pendingReceipts"]
+  > = [];
   for (const line of receiptRows) {
+    if (line.receipt_status === "cancelled") continue;
+    if (purpose === "shipment" && line.receipt_status !== "closed") {
+      if (
+        line.units_per_variant_snapshot == null ||
+        Number(line.receipt_po_id) !== poId ||
+        Number(line.inbound_shipment_line_id) !== lineId ||
+        Number(line.reversed_qty ?? 0) !== 0
+      ) {
+        blockedReason = `Review the source link and receiving unit on ${line.receipt_number} before editing the shipment.`;
+        continue;
+      }
+      pendingReceipts.push({
+        receiptId: integer(line.receiving_order_id, "receipt", 1),
+        receiptLineId: integer(line.id, "receipt line", 1),
+        receiptNumber: String(line.receipt_number),
+        expectedUnits: integer(line.expected_qty, "expected receipt units"),
+        receivedUnits: integer(line.received_qty, "received units"),
+        piecesPerUnit: integer(
+          line.units_per_variant_snapshot,
+          "receipt unit",
+          1,
+        ),
+      });
+      continue;
+    }
     if (
       line.receipt_status !== "closed" ||
       Number(line.reversed_qty ?? 0) !== 0 ||
@@ -358,6 +389,7 @@ export async function readQuantityCorrectionSource(
       "other shipped pieces",
     ),
     receipts,
+    pendingReceipts,
     origins: origins.map((origin) => ({
       inventoryLotId: integer(origin.inventory_lot_id, "lot", 1),
       receiptLineId: integer(
@@ -403,6 +435,12 @@ export async function persistQuantityCorrection(
   actorId: string,
   actorName: string,
   now: Date,
+  purpose: QuantityCorrectionPurpose = "receipt",
+  physicalTotals?: {
+    totalWeightKg: string;
+    totalVolumeCbm: string;
+    chargeableWeightKg: string;
+  },
 ): Promise<number> {
   const { shipment, shipmentLines, po, poLines } = source.evidence;
   const line = shipmentLines.find(
@@ -413,15 +451,37 @@ export async function persistQuantityCorrection(
     await tx.execute(sql`INSERT INTO procurement.receipt_shipment_quantity_amendments
     (inbound_shipment_line_id,purchase_order_line_id,source_version,actor_id,actor_name,reason,approved_at,evidence)
     VALUES(${line.id},${poLine.id},${source.sourceVersion},${actorId},${actorName},${input.reason},${now},
-      ${canonicalJson({ contractVersion: 1, before: source.evidence, input, plan, authority: source.actor })}::jsonb) RETURNING id`);
+      ${canonicalJson({ contractVersion: 1, purpose, before: source.evidence, input, plan, authority: source.actor })}::jsonb) RETURNING id`);
   const amendmentId = costInteger(audit.rows[0]?.id, "amendmentId", 1);
-  for (const receipt of plan.receipts) {
+  for (const receipt of purpose === "receipt" ? plan.receipts : []) {
     await tx.execute(sql`UPDATE procurement.receiving_lines SET units_per_variant_snapshot=${receipt.afterPiecesPerUnit},
       inbound_shipment_line_id=${line.id},updated_at=${now} WHERE id=${receipt.id}`);
     await tx.execute(sql`UPDATE procurement.receiving_orders SET updated_at=GREATEST(${now}::timestamp,updated_at+interval '1 millisecond')
       WHERE id=${receipt.receiptId}`);
     await tx.execute(sql`UPDATE procurement.po_receipts SET qty_received=${receipt.afterPieces}
       WHERE receiving_line_id=${receipt.id} AND purchase_order_line_id=${poLine.id}`);
+  }
+  for (const receipt of plan.pendingReceipts) {
+    if (receipt.expectedUnits === receipt.afterExpectedUnits) continue;
+    await tx.execute(sql`UPDATE procurement.receiving_lines SET expected_qty=${receipt.afterExpectedUnits},
+      status=${receivingLineStatus(receipt.receivedUnits, receipt.afterExpectedUnits)},
+      updated_at=GREATEST(${now}::timestamp,updated_at+interval '1 millisecond') WHERE id=${receipt.receiptLineId}`);
+    const receiptLines = (
+      await tx.execute(sql`SELECT expected_qty FROM procurement.receiving_lines
+      WHERE receiving_order_id=${receipt.receiptId} ORDER BY id`)
+    ).rows;
+    const expectedTotal = integer(
+      receiptLines
+        .reduce(
+          (sum, row) =>
+            sum + BigInt(integer(row.expected_qty, "expected receipt units")),
+          BigInt(0),
+        )
+        .toString(),
+      "expected receipt total",
+    );
+    await tx.execute(sql`UPDATE procurement.receiving_orders SET expected_total_units=${expectedTotal},
+      updated_at=GREATEST(${now}::timestamp,updated_at+interval '1 millisecond') WHERE id=${receipt.receiptId}`);
   }
   for (const origin of plan.origins) {
     const before = source.facts.origins.find(
@@ -437,14 +497,19 @@ export async function persistQuantityCorrection(
     });
   }
   const uniform =
+    plan.receipts.length > 0 &&
     plan.receipts.every(
       (receipt) =>
         receipt.variantId === plan.receipts[0].variantId &&
         receipt.afterPiecesPerUnit === plan.receipts[0].afterPiecesPerUnit,
-    ) && plan.shippedPieces % plan.receipts[0].afterPiecesPerUnit === 0;
+    ) &&
+    plan.shippedPieces % plan.receipts[0].afterPiecesPerUnit === 0;
   await tx.execute(sql`UPDATE procurement.inbound_shipment_lines SET qty_shipped=${plan.shippedPieces},
-    product_variant_id=${uniform ? plan.receipts[0].variantId : null},
-    units_per_variant_snapshot=${uniform ? plan.receipts[0].afterPiecesPerUnit : null},
+    product_variant_id=${purpose === "shipment" ? line.product_variant_id : uniform ? plan.receipts[0].variantId : null},
+    units_per_variant_snapshot=${purpose === "shipment" ? line.units_per_variant_snapshot : uniform ? plan.receipts[0].afterPiecesPerUnit : null},
+    total_weight_kg=${physicalTotals?.totalWeightKg ?? line.total_weight_kg},
+    total_volume_cbm=${physicalTotals?.totalVolumeCbm ?? line.total_volume_cbm},
+    chargeable_weight_kg=${physicalTotals?.chargeableWeightKg ?? line.chargeable_weight_kg},
     updated_at=GREATEST(${now}::timestamp,updated_at+interval '1 millisecond') WHERE id=${line.id}`);
   const totalPieces = shipmentLines.reduce(
     (sum, row) =>
@@ -458,6 +523,7 @@ export async function persistQuantityCorrection(
   );
   await tx.execute(sql`UPDATE procurement.inbound_shipments SET total_pieces=${integer(totalPieces.toString(), "shipment total pieces")},
     updated_at=GREATEST(${now}::timestamp,updated_at+interval '1 millisecond') WHERE id=${shipment.id}`);
+  if (purpose === "shipment") return amendmentId;
   const lifecycle = correctedReceiptLifecycle({
     closed:
       po.closed_at != null ||
@@ -496,9 +562,13 @@ export async function recordQuantityCorrectionResult(
   await tx.execute(sql`INSERT INTO procurement.receipt_shipment_quantity_results(amendment_id,summary)
     VALUES(${amendmentId},${canonicalJson(summary)}::jsonb)`);
   await tx.execute(sql`INSERT INTO procurement.po_events(po_id,event_type,actor_type,actor_id,payload_json,created_at)
-    VALUES(${source.evidence.po.id},'receipt_quantity_corrected','user',${actorId},
+    VALUES(${source.evidence.po.id},${summary.purpose === "shipment" ? "shipment_quantity_corrected" : "receipt_quantity_corrected"},'user',${actorId},
     ${canonicalJson({ contractVersion: 1, amendmentId, summary })}::jsonb,${now})`);
-  const notes = `Administrator approved receipt and shipment correction #${amendmentId}: shipment ${summary.shipmentPieces.before} → ${summary.shipmentPieces.after} pieces; PO received ${summary.poReceivedPieces.before} → ${summary.poReceivedPieces.after} pieces. Original stock movements and supplier charges preserved.`;
+  const action =
+    summary.purpose === "shipment"
+      ? "shipment edit"
+      : "receipt and shipment correction";
+  const notes = `Administrator approved ${action} #${amendmentId}: shipment ${summary.shipmentPieces.before} → ${summary.shipmentPieces.after} pieces; PO received ${summary.poReceivedPieces.before} → ${summary.poReceivedPieces.after} pieces. Original stock movements and supplier charges preserved.`;
   const current = (
     await tx.execute(
       sql`SELECT status FROM procurement.purchase_orders WHERE id=${source.evidence.po.id}`,

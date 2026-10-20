@@ -131,6 +131,7 @@ describe("catalog action bar", () => {
 
 describe("catalog page steps", () => {
   const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
+  const choose = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/ChooseStep.tsx"), "utf8");
   const app = readFileSync(join(process.cwd(), "client/src/App.tsx"), "utf8");
 
   function stepBlock(step: string, nextMarker: string): string {
@@ -148,21 +149,23 @@ describe("catalog page steps", () => {
   });
 
   it("mounts the existing sections under their steps", () => {
-    const choose = stepBlock("choose", '{activeStep === "setup" && (');
+    const chooseBlock = stepBlock("choose", '{activeStep === "setup" && (');
     const setup = stepBlock("setup", '{activeStep === "publish" && (');
     const publish = stepBlock("publish", "<CatalogActionBar");
+    // Step 1 stage 1: the choose block mounts ChooseStep, which holds the filters and the table.
+    expect(chooseBlock).toContain("<ChooseStep");
     expect(choose).toContain("<CatalogFilterPanel");
-    expect(choose).toContain("<CatalogTable");
+    expect(choose).toContain("<ChooseTable");
     // Step 2 is the Listing settings step alone; the six older panels went in Listing settings PR 12.
     expect(setup).toContain("<ListingSettingsStep");
-    expect(choose).not.toContain("<ListingSettingsStep");
+    expect(chooseBlock).not.toContain("<ListingSettingsStep");
     expect(publish).not.toContain("<ListingSettingsStep");
     for (const panel of ["EbayListingSetupPanel", "EbayListingPolicyOverridePanel", "DropshipEbayCategoryRulesPanel",
       "EbayStoreCategoryAssignmentPanel", "DropshipPricingRulesPanel", "DropshipContentTemplatesPanel", "OlderListingSettings"]) {
       expect(source).not.toContain(panel);
     }
     expect(publish).toContain("<ListingPreviewPanel");
-    expect(choose).not.toContain("<ListingPreviewPanel");
+    expect(chooseBlock).not.toContain("<ListingPreviewPanel");
     expect(setup).not.toContain("<ListingPreviewPanel");
   });
 
@@ -170,13 +173,38 @@ describe("catalog page steps", () => {
     expect(source).toContain("const toSetupScope = scopeWithoutPrefix(guardDrafts, LISTING_SETTINGS_GUARD_ID_PREFIX);");
     // Next from Choose and the rail's Listing settings link; the other ways off still ask about every draft.
     expect(source).toContain('...(actionBar.next.step === "setup" ? { scope: toSetupScope } : {}),');
-    expect(source).toContain("leaveScopes={{ setup: toSetupScope }}");
-    expect(source).toContain("onStoreChange={(storeConnectionId) => leaveGuard(() => chooseStore(storeConnectionId))}");
+    // Step 1 stage 1: step 1's changes are for every store and live at page level, so the store picker leaves them out of
+    // its question (and keeps them), and the rail's way back to step 1 drops nothing of step 1's.
+    expect(source).toContain("leaveScopes={{ setup: toSetupScope, choose: toChooseScope }}");
+    expect(source).toContain("onStoreChange={(storeConnectionId) => leaveGuard(() => chooseStore(storeConnectionId), toStoreScope)}");
+    expect(source).toContain("const toStoreScope = scopeWithoutPrefix(guardDrafts, CHOOSE_GUARD_ID);");
+    expect(source).toContain("const toChooseScope = scopeWithoutPrefix(guardDrafts, CHOOSE_GUARD_ID);");
     expect(source).toContain("storeDisabled={pendingPriceSaves > 0}");
+  });
+
+  it("asks before the portal menu or Sign out drops unsaved changes, and asks the vendor to wait while step 1 saves (review DUX2, MC6)", () => {
+    const shell = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalShell.tsx"), "utf8");
+    const guard = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/UnsavedChangesGuard.tsx"), "utf8");
+    expect(shell).toContain('import { useLeaveGuard } from "./catalog/UnsavedChangesGuard";');
+    expect(shell).toContain("const leaveGuard = useLeaveGuard();");
+    // The page's own item keeps the page mounted, so it goes at once; every other item asks first.
+    expect(shell).toContain("onClick={() => (active ? setLocation(href) : leaveGuard(() => setLocation(href)))}");
+    expect(shell).toContain("onClick={() => leaveGuard(() => { void signOut(); })}");
+    expect(shell).not.toContain("onClick={() => setLocation(href)}");
+    // Step 1 reports its save while it runs; the question then offers no discard.
+    expect(source).toContain("{ changes: chooseChanges.marks.length, discard: discardChooseChanges, saving: chooseSaving }");
+    expect(guard).toContain("const saving = anyDraftSaving(asking);");
+    expect(guard).toContain("<AlertDialogCancel>{LEAVE_WHILE_SAVING_WORDS.stay}</AlertDialogCancel>");
+    const savingStart = guard.indexOf("{saving ? (");
+    const savingBranch = guard.slice(savingStart, guard.indexOf(") : (", savingStart));
+    expect(savingStart).toBeGreaterThan(-1);
+    expect(savingBranch).not.toContain("leaveNow");
   });
 
   it("chooses the store in the rail only, and asks eBay for store categories only on the step that shows them", () => {
     expect(source.match(/<SelectTrigger/g)?.length ?? 0).toBe(source.match(/function FilterSelect/g)?.length ?? 0);
+    // Step 1's menus moved to ChooseStep: the same rule holds there.
+    expect(choose.match(/<SelectTrigger/g)?.length ?? 0).toBe(choose.match(/function FilterSelect/g)?.length ?? 0);
     expect(source).toContain('enabled: selectedStoreConnection?.platform === "ebay" && activeStep === "setup",');
     expect(source).toContain("rememberCatalogStore(catalogBrowserStorage(), memberId, storeConnectionId);");
   });

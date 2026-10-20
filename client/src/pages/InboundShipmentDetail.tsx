@@ -1,7 +1,7 @@
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { shipmentRecordedUnitSummary, shipmentDimensionBasisLabel } from "@/lib/shipment-unit-entry";
-import { ReceiptShipmentQuantityCorrection } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
+import { ShipmentQuantityEditor } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
 import { formatMills } from "@shared/utils/money";
@@ -1192,6 +1192,9 @@ export default function InboundShipmentDetail() {
 
         {/* Action buttons */}
         <div className="flex gap-2 flex-wrap w-full sm:w-auto">
+          {shipment.status !== "cancelled" && lines.length > 0 && (
+            <ShipmentQuantityEditor key={shipment.id} shipmentLines={lines} />
+          )}
           {isEditable && (
             <Button
               variant="outline"
@@ -1227,7 +1230,7 @@ export default function InboundShipmentDetail() {
               className="flex-1 sm:flex-none min-h-[44px]"
             >
               <Pencil className="h-4 w-4 mr-2" />
-              Edit
+              Shipment details
             </Button>
           )}
 
@@ -1469,12 +1472,11 @@ export default function InboundShipmentDetail() {
                           {line.productName && <div className="text-xs text-muted-foreground truncate">{line.productName}</div>}
                           <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
                             <span>{line.cartonCount ?? "—"} shipping cartons</span>
-                            <span>{line.qtyShipped} pieces</span>
+                            <span>{Number(line.qtyShipped).toLocaleString()} pieces</span>
                             <span>{formatNumber(line.totalWeightKg, 1)} kg</span>
                             <span>{formatNumber(line.totalVolumeCbm, 4)} CBM</span>
                           </div>
                           <p className="mt-1 text-xs text-muted-foreground">{shipmentRecordedUnitSummary(line)}</p>
-                          <ReceiptShipmentQuantityCorrection shipmentLineId={line.id}/>
                           <p className="text-xs text-muted-foreground">Measurements per {shipmentDimensionBasisLabel(line) === "carton" ? "shipping carton" : "piece"}</p>
                           {line.allocatedCostCents != null && (
                             <div className="text-xs mt-1">
@@ -1532,7 +1534,7 @@ export default function InboundShipmentDetail() {
                         <TableCell className="font-mono">{line.sku || "—"}</TableCell>
                         <TableCell className="max-w-[180px] truncate">{line.productName || line.sku || "—"}</TableCell>
                         <TableCell className="text-right">{line.cartonCount ? line.cartonCount : "—"}</TableCell>
-                        <TableCell className="text-right">{line.qtyShipped}<div className="max-w-56 text-xs text-muted-foreground">{shipmentRecordedUnitSummary(line)}</div><ReceiptShipmentQuantityCorrection shipmentLineId={line.id}/></TableCell>
+                        <TableCell className="text-right">{Number(line.qtyShipped).toLocaleString()}<div className="max-w-56 text-xs text-muted-foreground">{shipmentRecordedUnitSummary(line)}</div></TableCell>
                         <TableCell className="text-right">{formatNumber(line.weightKg, 2)}<div className="text-xs text-muted-foreground">per {shipmentDimensionBasisLabel(line) === "carton" ? "shipping carton" : "piece"}</div></TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalWeightKg, 1)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalVolumeCbm, 4)}</TableCell>

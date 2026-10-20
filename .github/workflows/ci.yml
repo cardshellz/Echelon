@@ -167,6 +167,10 @@ jobs:
           client/src/lib/__tests__/dropship-pricing-rules.test.ts
           client/src/pages/dropship/__tests__/DropshipListingPreview.test.ts
           client/src/lib/__tests__/dropship-catalog-steps.test.ts
+          client/src/lib/__tests__/dropship-catalog-choose.test.ts
+          client/src/lib/__tests__/dropship-catalog-choose-requests.test.ts
+          client/src/lib/__tests__/dropship-catalog-choose-words.test.ts
+          client/src/pages/dropship/__tests__/DropshipCatalogChoose.test.ts
           client/src/lib/__tests__/dropship-listing-settings.test.ts
           client/src/pages/dropship/__tests__/DropshipCatalogFrame.test.ts
           client/src/lib/__tests__/dropship-ebay-category-rules.test.ts

@@ -9,6 +9,9 @@ import {
   quantityCorrectionOptionsSchema,
   quantityCorrectionPreviewSchema,
   quantityCorrectionSummarySchema,
+  shipmentQuantityEditInputSchema,
+  shipmentQuantityEditApprovalSchema,
+  type QuantityCorrectionPurpose,
   type QuantityCorrectionInput,
   type QuantityCorrectionSummary,
 } from "@shared/procurement/receipt-shipment-quantity-correction";
@@ -63,14 +66,26 @@ import type {
   AmendmentDatabase,
   AmendmentTransaction,
 } from "./po-quantity-amendment.repository";
+import { computeShipmentLinePhysicalTotals } from "./shipment-line-physical-values";
+import { assertReceivingQuarantineLineEditable } from "./receiving-quarantine.repository";
+import { ReceivingQuarantineError } from "./domain/receiving-quarantine";
 
-export function quantityCorrectionScope(lineId: number) {
+export function quantityCorrectionScope(
+  lineId: number,
+  purpose: QuantityCorrectionPurpose = "receipt",
+) {
   quantityCorrectionId.parse(lineId);
   return {
     method: "POST",
-    routeTemplate: "/api/shipment-lines/:id/quantity-correction",
+    routeTemplate:
+      purpose === "shipment"
+        ? "/api/shipment-lines/:id/shipment-edit"
+        : "/api/shipment-lines/:id/quantity-correction",
     resourceKey: `shipment_line:${lineId}`,
-    commandName: "procurement.receipt_shipment.quantity_correct",
+    commandName:
+      purpose === "shipment"
+        ? "procurement.shipment.quantity_edit"
+        : "procurement.receipt_shipment.quantity_correct",
   };
 }
 function context(source: QuantityCorrectionSource) {
@@ -100,6 +115,18 @@ function context(source: QuantityCorrectionSource) {
       piecesPerUnit: receipt.piecesPerUnit,
       unitWasRecorded: receipt.unitWasRecorded,
     })),
+    pendingReceipts: source.facts.pendingReceipts ?? [],
+    receivingLinks: [
+      ...new Map(
+        source.evidence.receiptRows.map((row) => [
+          row.receiving_order_id,
+          {
+            receiptId: integer(row.receiving_order_id, "receipt", 1),
+            receiptNumber: String(row.receipt_number),
+          },
+        ]),
+      ).values(),
+    ],
     sourceVersion: source.sourceVersion,
     canApprove,
     blockedReason: canApprove
@@ -283,8 +310,62 @@ async function executeCorrection(
     ShipmentTrackingService,
     "updateCostsInTransaction" | "refreshQuantityAllocationInTransaction"
   >,
+  purpose: QuantityCorrectionPurpose,
 ) {
-  const plan = planQuantityCorrection(source.facts, input);
+  const plan = planQuantityCorrection(source.facts, input, purpose);
+  // Both pending expectations and posted unit conversions must honor custody
+  // evidence. The combined command cannot rewrite an accepted quarantine count.
+  const receiptWrites = [
+    ...(purpose === "receipt"
+      ? plan.receipts.map((receipt) => ({
+          receiptLineId: receipt.id,
+          receiptNumber: receipt.receiptNumber,
+          fields: ["unitsPerVariantSnapshot", "inboundShipmentLineId"],
+        }))
+      : []),
+    ...plan.pendingReceipts
+      .filter((receipt) => receipt.expectedUnits !== receipt.afterExpectedUnits)
+      .map((receipt) => ({ ...receipt, fields: ["expectedQty"] })),
+  ];
+  for (const receipt of receiptWrites) {
+    try {
+      await assertReceivingQuarantineLineEditable(
+        tx,
+        receipt.receiptLineId,
+        receipt.fields,
+      );
+    } catch (error) {
+      if (error instanceof ReceivingQuarantineError)
+        throw new QuantityCorrectionError(
+          error.code,
+          `${receipt.receiptNumber}: ${error.message}`,
+          error.statusCode,
+        );
+      throw error;
+    }
+  }
+  const target = source.evidence.shipmentLines.find(
+    (line) => line.id === source.facts.shipmentLineId,
+  )!;
+  // Pieces change physical totals only when measurements were recorded per piece.
+  // Carton measurements describe the same cartons after a piece-count correction.
+  const pieceDimensions =
+    target.dimension_basis === "piece" ||
+    (target.dimension_basis == null && target.carton_count == null);
+  const physicalTotals = pieceDimensions
+    ? computeShipmentLinePhysicalTotals({
+        qtyShipped: plan.shippedPieces,
+        cartonCount:
+          target.carton_count == null
+            ? null
+            : integer(target.carton_count, "cartons"),
+        dimensionBasis: "piece",
+        weightKg: target.weight_kg == null ? null : String(target.weight_kg),
+        lengthCm: target.length_cm == null ? null : String(target.length_cm),
+        widthCm: target.width_cm == null ? null : String(target.width_cm),
+        heightCm: target.height_cm == null ? null : String(target.height_cm),
+      })
+    : undefined;
   const originalLedger = await readReconciliationLedger(
     tx,
     source.facts.shipmentLineId,
@@ -297,11 +378,10 @@ async function executeCorrection(
     actorId,
     actorName,
     now,
+    purpose,
+    physicalTotals,
   );
   const writer = new COGSService(tx);
-  const target = source.evidence.shipmentLines.find(
-    (line) => line.id === source.facts.shipmentLineId,
-  )!;
   const poLineId = integer(target.purchase_order_line_id, "PO line", 1);
   const shipmentId = integer(source.evidence.shipment.id, "shipment", 1);
   const costResults: QuantityCorrectionSummary["costResults"] = [];
@@ -423,8 +503,13 @@ async function executeCorrection(
     actorId,
     at: now,
     supersessionNote:
-      "Superseded by an approved receipt and shipment quantity correction.",
-    messagePrefix: "Corrected receipt and shipment quantities",
+      purpose === "shipment"
+        ? "Superseded by an approved shipment edit."
+        : "Superseded by an approved receipt and shipment quantity correction.",
+    messagePrefix:
+      purpose === "shipment"
+        ? "Corrected shipment quantities"
+        : "Corrected receipt and shipment quantities",
   });
   const afterLine = (
     await tx.execute(
@@ -477,6 +562,32 @@ async function executeCorrection(
       ? null
       : costInteger(newSnapshot.total_landed_cost_cents, "landed total");
   const summary = quantityCorrectionSummarySchema.parse({
+    purpose,
+    pendingReceipts: plan.pendingReceipts,
+    physicalTotals: {
+      netWeightKg: {
+        before:
+          target.total_weight_kg == null
+            ? null
+            : String(target.total_weight_kg),
+        after:
+          physicalTotals?.totalWeightKg ??
+          (target.total_weight_kg == null
+            ? null
+            : String(target.total_weight_kg)),
+      },
+      volumeCbm: {
+        before:
+          target.total_volume_cbm == null
+            ? null
+            : String(target.total_volume_cbm),
+        after:
+          physicalTotals?.totalVolumeCbm ??
+          (target.total_volume_cbm == null
+            ? null
+            : String(target.total_volume_cbm)),
+      },
+    },
     shipmentPieces: {
       before: source.facts.shippedPieces,
       after: plan.shippedPieces,
@@ -548,23 +659,35 @@ export function createReceiptShipmentQuantityCorrectionService(
     "updateCostsInTransaction" | "refreshQuantityAllocationInTransaction"
   >,
   clock: () => Date,
+  purpose: QuantityCorrectionPurpose = "receipt",
 ) {
   const repository = createDrizzleFinancialCommandRepository(database);
+  const readSource = (tx: AmendmentTransaction, id: number, actorId: string) =>
+    readQuantityCorrectionSource(tx, id, actorId, purpose);
+  const preserveReceipts = (
+    input: Omit<QuantityCorrectionInput, "receipts"> & {
+      receipts?: QuantityCorrectionInput["receipts"];
+    },
+    source: QuantityCorrectionSource,
+  ): QuantityCorrectionInput => ({
+    ...input,
+    receipts:
+      purpose === "shipment"
+        ? source.facts.receipts.map((row) => ({
+            receiptLineId: row.id,
+            receivedPieces: row.receivedPieces,
+          }))
+        : input.receipts!,
+  });
   return {
     context: (id: number, actorId: string) =>
       database.transaction(async (tx) =>
-        context(
-          await readQuantityCorrectionSource(
-            tx,
-            quantityCorrectionId.parse(id),
-            actorId,
-          ),
-        ),
+        context(await readSource(tx, quantityCorrectionId.parse(id), actorId)),
       ),
     receiptContext: (id: number, actorId: string) =>
       database.transaction(async (tx) =>
         context(
-          await readQuantityCorrectionSource(
+          await readSource(
             tx,
             await resolveReceiptShipmentLine(
               tx,
@@ -584,13 +707,18 @@ export function createReceiptShipmentQuantityCorrectionService(
         ),
       ),
     async preview(id: number, raw: unknown, actorId: string) {
-      const input = quantityCorrectionInputSchema.parse(raw);
+      const request = (
+        purpose === "shipment"
+          ? shipmentQuantityEditInputSchema
+          : quantityCorrectionInputSchema
+      ).parse(raw);
       return database.transaction(async (tx) => {
-        const source = await readQuantityCorrectionSource(
+        const source = await readSource(
           tx,
           quantityCorrectionId.parse(id),
           actorId,
         );
+        const input = preserveReceipts(request, source);
         assertReview(source, input.sourceVersion);
         await tx.execute(sql`SAVEPOINT receipt_quantity_preview`);
         try {
@@ -602,6 +730,7 @@ export function createReceiptShipmentQuantityCorrectionService(
             await readPurchaseApproverName(tx, actorId),
             z.date().parse(clock()),
             shipments,
+            purpose,
           );
           return quantityCorrectionPreviewSchema.parse({
             sourceVersion: input.sourceVersion,
@@ -621,8 +750,12 @@ export function createReceiptShipmentQuantityCorrectionService(
       descriptor: FinancialCommandDescriptor,
     ) {
       const lineId = quantityCorrectionId.parse(id),
-        input = quantityCorrectionApprovalSchema.parse(raw),
-        scope = quantityCorrectionScope(lineId);
+        input = (
+          purpose === "shipment"
+            ? shipmentQuantityEditApprovalSchema
+            : quantityCorrectionApprovalSchema
+        ).parse(raw),
+        scope = quantityCorrectionScope(lineId, purpose);
       if (
         descriptor.actorId !== actorId ||
         descriptor.actorType !== "user" ||
@@ -670,13 +803,10 @@ export function createReceiptShipmentQuantityCorrectionService(
           };
         },
         work: async (tx) => {
-          const source = await readQuantityCorrectionSource(
-            tx,
-            lineId,
-            actorId,
-          );
+          const source = await readSource(tx, lineId, actorId);
           assertReview(source, input.sourceVersion);
-          const { previewVersion, ...review } = input;
+          const { previewVersion, ...request } = input;
+          const review = preserveReceipts(request, source);
           const summary = await executeCorrection(
             tx,
             source,
@@ -685,6 +815,7 @@ export function createReceiptShipmentQuantityCorrectionService(
             await readPurchaseApproverName(tx, actorId),
             z.date().parse(clock()),
             shipments,
+            purpose,
           );
           if (summary.historicalCost.requiresDecision)
             throw new QuantityCorrectionError(
@@ -700,9 +831,7 @@ export function createReceiptShipmentQuantityCorrectionService(
             httpStatus: 200,
             resultType: "shipment_line",
             resultId: lineId,
-            body: context(
-              await readQuantityCorrectionSource(tx, lineId, actorId),
-            ),
+            body: context(await readSource(tx, lineId, actorId)),
           };
         },
       });

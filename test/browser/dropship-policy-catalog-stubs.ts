@@ -131,6 +131,13 @@ import {
   olderGroupRulesEdit,
   type OlderGroupRulesKind,
 } from "../../server/modules/dropship/domain/older-group-rules-edit";
+import {
+  previewDropshipVendorCatalogInputSchema,
+  replaceDropshipVendorSelectionRulesInputSchema,
+} from "../../server/modules/dropship/application/dropship-selection-dtos";
+import { hashVendorSelectionRules, normalizeVendorSelectionRule } from "../../server/modules/dropship/application/dropship-selection-atp-service";
+import { evaluateDropshipVendorCatalogSelection } from "../../server/modules/dropship/domain/vendor-selection";
+import { publicationSelectionBusyIssue } from "../../server/modules/inventory-planning/publication-selection-work";
 
 /**
  * The stub Card Shellz server and fixtures the Catalog page's browser journeys run against
@@ -171,6 +178,83 @@ export const ROW = {
   selectionDecision: { selected: true, reason: "selected", marketplaceQuantity: 25, quantityCapApplied: false, autoConnectNewSkus: true, autoListNewSkus: false },
   listingTier: { tier: "pack", eligible: true, reason: null, policyMinimumCents: 10_000, reserveShortfallCents: 0, balanceShortfallCents: 0 },
 };
+
+/**
+ * One size of step 1's catalog as the stub holds it (catalog step 1, stage 1): the candidate's facts, its stock and
+ * whether it is turned off for the vendor. Its selection decision is never stored: every read evaluates it with the
+ * server's own `evaluateDropshipVendorCatalogSelection` against `StubState.selectionRules`, as the route does.
+ */
+export interface ChooseRowFact {
+  productId: number;
+  productVariantId: number;
+  productSku: string | null;
+  productName: string;
+  variantSku: string | null;
+  variantName: string;
+  category: string | null;
+  productLineIds: number[];
+  productLineNames: string[];
+  unitsPerVariant: number;
+  /** The quantity a selected size shows. */
+  stock: number;
+  /** `disabled_by_vendor_override` when false. */
+  enabledOverride?: boolean;
+  listingTier: typeof ROW.listingTier;
+}
+
+/** ROW's facts: the default catalog's one size. */
+export const ROW_FACT: ChooseRowFact = {
+  productId: ROW.productId, productVariantId: ROW.productVariantId, productSku: ROW.productSku, productName: ROW.productName,
+  variantSku: ROW.variantSku, variantName: ROW.variantName, category: ROW.category, productLineIds: [], productLineNames: [],
+  unitsPerVariant: ROW.unitsPerVariant, stock: ROW.selectionDecision.marketplaceQuantity, listingTier: ROW.listingTier,
+};
+
+/** `count` sizes of one product line ("Trading Card Supplies"), two categories, ascending ids from 2001. */
+export function chooseRowsFixture(count: number): ChooseRowFact[] {
+  return Array.from({ length: count }, (_, index) => ({
+    ...ROW_FACT, productId: 200 + Math.floor(index / 4), productVariantId: 2_001 + index,
+    productName: `Penny Sleeves ${String(Math.floor(index / 4) + 1).padStart(3, "0")}`, productSku: `PS-${Math.floor(index / 4) + 1}`,
+    variantName: `Pack of ${25 * ((index % 4) + 1)}`, variantSku: `PS-${index + 1}`, category: index % 2 === 0 ? "Sleeves" : "Toploaders",
+    productLineIds: [4], productLineNames: ["Trading Card Supplies"], stock: 10 + (index % 7),
+  }));
+}
+
+/** A saved selection rule as `GET /api/dropship/catalog/selection-rules` returns it. */
+export interface SelectionRuleRecord {
+  id: number; revisionId: number | null; vendorId: number;
+  scopeType: "catalog" | "product_line" | "category" | "product" | "variant"; action: "include" | "exclude";
+  productLineId: number | null; productId: number | null; productVariantId: number | null; category: string | null;
+  autoConnectNewSkus: boolean; autoListNewSkus: boolean; priority: number; isActive: boolean;
+  metadata: Record<string, unknown> | null; createdAt: string; updatedAt: string;
+}
+
+/** A rule record; the targets left out are null. */
+export function selectionRule(id: number, scopeType: SelectionRuleRecord["scopeType"], action: SelectionRuleRecord["action"],
+  target: Partial<Pick<SelectionRuleRecord, "productLineId" | "productId" | "productVariantId" | "category">> = {},
+  extra: Partial<SelectionRuleRecord> = {}): SelectionRuleRecord {
+  return { id, revisionId: 1, vendorId: 1, scopeType, action, productLineId: target.productLineId ?? null, productId: target.productId ?? null,
+    productVariantId: target.productVariantId ?? null, category: target.category ?? null, autoConnectNewSkus: action === "include",
+    autoListNewSkus: false, priority: action === "include" ? 100 : 200, isActive: true, metadata: { source: "portal_catalog" },
+    createdAt: STAMP, updatedAt: STAMP, ...extra };
+}
+
+/**
+ * How the next selection save (PUT …/selection-rules) answers: busy (nothing saved), a 500 (nothing saved), a 403 refusal
+ * (nothing saved), saved with the answer cut off, or saved after a pause (a save still running while the vendor clicks).
+ */
+export type SelectionPutAnswer = "busy" | "server-error" | "forbidden" | "drop-after-commit" | "slow";
+
+/** How long a "slow" selection save takes before it saves and answers. */
+export const SLOW_SELECTION_PUT_MS = 2_500;
+
+/** How the next rules read (GET …/selection-rules) answers: as saved, or a 500. */
+export type RulesReadAnswer = "ok" | "server-error";
+
+/** A step 1 catalog read (GET /api/dropship/catalog) that answers 500 once: the first read with this Show filter and page. */
+export interface CatalogReadFailure { selectedOnly: boolean; page: number }
+
+/** One PUT …/selection-rules as the stub received it, with the status it answered (0: the answer was cut off). */
+export interface SelectionPut { key: string; body: { idempotencyKey?: unknown; rules?: unknown }; bytes: number; status: number }
 
 export function previewRow(storeConnectionId: number) {
   return {
@@ -588,6 +672,26 @@ export interface StubState {
   keyedAnswers: Record<string, { body: string; json: Record<string, unknown> }>;
   /** The next revision a keyed writer saves (W1, W3, W4, W5, W6, W9 share one counter, as ids; W6's request ids too). */
   nextRevision: number;
+  /** Step 1's catalog (catalog step 1 stage 1): each size's facts; its decision is evaluated on every read. */
+  chooseRows: ChooseRowFact[];
+  /** The vendor's active selection rules. Left out of `initial`, they follow `selected`: ROW's pick, or none. */
+  selectionRules: SelectionRuleRecord[];
+  /** The id the next saved rule gets (a save re-inserts every rule with new ids, as the repository does). */
+  nextRuleId: number;
+  /** The rule set's revision; every committed save adds one. */
+  selectionRevision: number;
+  /** Every selection save, in order. */
+  selectionPuts: SelectionPut[];
+  /** How many times the rules were read. */
+  rulesReads: number;
+  /** How the next selection saves answer, in order; once used up, a save is made. */
+  selectionPutAnswers: SelectionPutAnswer[];
+  /** How the next rules reads answer, in order; once used up, every read answers the saved rules. */
+  rulesReadAnswers: RulesReadAnswer[];
+  /** Catalog reads that answer 500, each once, matched in order by Show filter and page (verify V5, V8). */
+  catalogReadFailures: CatalogReadFailure[];
+  /** The request keys the selection save saw: the request hash and the revision it made, so the same key replays. */
+  selectionKeys: Record<string, { hash: string; revisionId: number }>;
   unexpected: string[];
   errors: string[];
 }
@@ -2521,7 +2625,10 @@ export const defaultStubState = (): StubState => ({
   priceChangeChecks: {}, priceChangeApplied: {}, categoryMovesAcknowledges: [], categoryMovesAcknowledgeAnswers: [],
   conversionPages: {}, conversionApplies: [], conversionApplyAnswers: [], conversionLayers: { categorySettings: {}, productSettings: {} },
   conversionNotices: {}, conversionNoticeAcknowledges: [], conversionNoticeAcknowledgeAnswers: [],
-  reviews: {}, keyedAnswers: {}, nextRevision: 40, unexpected: [], errors: [],
+  reviews: {}, keyedAnswers: {}, nextRevision: 40,
+  chooseRows: [ROW_FACT], selectionRules: [], nextRuleId: 100, selectionRevision: 1, selectionPuts: [], rulesReads: 0,
+  selectionPutAnswers: [], rulesReadAnswers: [], catalogReadFailures: [], selectionKeys: {},
+  unexpected: [], errors: [],
 });
 
 /**
@@ -2531,6 +2638,8 @@ export const defaultStubState = (): StubState => ({
  */
 export async function openCatalog(page: Page, path: string, initial: Partial<StubState> = {}) {
   const state: StubState = { ...defaultStubState(), ...initial };
+  // Step 1's rules follow `selected` unless a journey gives its own: ROW chosen by the vendor's own pick, or nothing.
+  if (initial.selectionRules === undefined) state.selectionRules = state.selected ? [selectionRule(1, "variant", "include", { productVariantId: ROW.productVariantId })] : [];
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async (route) => {
@@ -2570,17 +2679,15 @@ async function answerApi(state: StubState, route: Route) {
   }
   if (path === "/api/dropship/onboarding/state" && method === "GET") return route.fulfill({ json: onboardingJson(state.vendor) });
   if (path === "/api/dropship/settings" && method === "GET") return route.fulfill({ json: settingsJson(state) });
-  if (path === "/api/dropship/catalog" && method === "GET") {
-    const selectedOnly = url.searchParams.get("selectedOnly") === "true";
-    const row = { ...ROW, selectionDecision: { ...ROW.selectionDecision, selected: state.selected, reason: state.selected ? "selected" : "not_selected" } };
-    const rows = selectedOnly && !state.selected ? [] : [row];
-    return route.fulfill({ json: { rows, total: rows.length, page: 1, limit: Number(url.searchParams.get("limit") ?? 50),
-      facets: { categories: [], productLines: [], products: [] } } });
-  }
+  if (path === "/api/dropship/catalog" && method === "GET") return answerCatalogRead(state, route, url);
   if (path === "/api/dropship/catalog/selection-rules" && method === "GET") {
-    return route.fulfill({ json: { rules: state.selected
-      ? [{ id: 1, scopeType: "variant", action: "include", productVariantId: 101, isActive: true }] : [] } });
+    state.rulesReads += 1;
+    if (state.rulesReadAnswers.shift() === "server-error") {
+      return fulfillError(route, { status: 500, code: "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR", message: "Dropship vendor catalog request failed." });
+    }
+    return route.fulfill({ json: { rules: state.selectionRules.filter((rule) => rule.isActive) } });
   }
+  if (path === "/api/dropship/catalog/selection-rules" && method === "PUT") return answerSelectionSave(state, route);
   if (storeId !== null && method === "GET" && path === `${listings}/listing-intent-changes`
     && state.stores.some((store) => store.storeConnectionId === storeId)) {
     return route.fulfill({ json: listingIntentChangePage(url, []) });
@@ -2603,6 +2710,181 @@ async function answerApi(state: StubState, route: Route) {
   }
   state.unexpected.push(`${method} ${path}`);
   return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });
+}
+
+// ---------------------------------------------------------------------------
+// Catalog step 1 (stage 1): the catalog read and the selection save, as dropship-vendor-catalog.routes.ts serves them
+// ---------------------------------------------------------------------------
+
+/** The global JSON parser's limit the selection save goes through (rate-table-admin-body.middleware.ts). */
+const GLOBAL_JSON_LIMIT_BYTES = 100 * 1024;
+/** The catalog read's filters the step may send; anything else (a product line, a product) is off contract for step 1. */
+const CATALOG_READ_PARAMS = new Set(["search", "category", "selectedOnly", "page", "limit"]);
+
+/** One size's decision under the stub's rules, by the server's own evaluator. */
+function chooseDecision(state: StubState, fact: ChooseRowFact) {
+  return evaluateDropshipVendorCatalogSelection({
+    candidate: { productId: fact.productId, productVariantId: fact.productVariantId, productLineIds: fact.productLineIds, category: fact.category,
+      productIsActive: true, variantIsActive: true, variantUomType: "pack" },
+    adminExposureDecision: { exposed: true, reason: "exposed", includeRuleIds: [], excludeRuleIds: [] },
+    rules: state.selectionRules.filter((rule) => rule.isActive),
+    rawAtpUnits: fact.stock,
+    override: fact.enabledOverride === false ? { productVariantId: fact.productVariantId, enabledOverride: false } : null,
+  });
+}
+
+/** The route's own query reading (dropship-vendor-catalog.routes.ts): trimmed strings, positive integers, "true"/"false". */
+function routeString(value: string | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+function routeNumber(value: string | null, fallback: number): number {
+  const parsed = Number(routeString(value));
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * `GET /api/dropship/catalog`: the query is read as the route reads it and checked with the server's own schema (a
+ * failure is the route's 400, recorded as unexpected; review CT4); search, category and selectedOnly filter; facets
+ * apply search only; page/limit slice.
+ */
+function answerCatalogRead(state: StubState, route: Route, url: URL) {
+  const offContract = [...url.searchParams.keys()].filter((key) => !CATALOG_READ_PARAMS.has(key));
+  if (offContract.length > 0) state.unexpected.push(`GET /api/dropship/catalog${url.search} (query off contract: ${offContract.join(",")})`);
+  const selectedOnlyText = routeString(url.searchParams.get("selectedOnly"));
+  const parsed = previewDropshipVendorCatalogInputSchema.safeParse({
+    vendorId: 1,
+    search: routeString(url.searchParams.get("search")),
+    category: routeString(url.searchParams.get("category")),
+    // The route reads "true" and "false"; anything else falls back to false.
+    selectedOnly: selectedOnlyText === "true",
+    page: routeNumber(url.searchParams.get("page"), 1),
+    limit: routeNumber(url.searchParams.get("limit"), 50),
+  });
+  if (!parsed.success) {
+    state.unexpected.push(`GET /api/dropship/catalog${url.search} (query refused: ${parsed.error.issues.map((issue) => issue.path.join(".")).join(",")})`);
+    return route.fulfill({ status: 400, json: { error: { code: "DROPSHIP_VENDOR_CATALOG_INVALID_INPUT", message: "Dropship vendor catalog input failed validation." } } });
+  }
+  const search = parsed.data.search?.toLowerCase() ?? "";
+  const category = parsed.data.category?.toLowerCase() ?? "";
+  const selectedOnly = parsed.data.selectedOnly;
+  const page = parsed.data.page;
+  const limit = parsed.data.limit;
+  const failing = state.catalogReadFailures.findIndex((failure) => failure.selectedOnly === selectedOnly && failure.page === page);
+  if (failing >= 0) {
+    state.catalogReadFailures.splice(failing, 1);
+    return fulfillError(route, { status: 500, code: "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR", message: "Dropship vendor catalog request failed." });
+  }
+  const searched = state.chooseRows.filter((fact) => !search
+    || [fact.productSku, fact.variantSku, fact.productName, fact.variantName].some((text) => text?.toLowerCase().includes(search)));
+  const decided = searched
+    .filter((fact) => !category || fact.category?.toLowerCase() === category)
+    .map((fact) => ({ fact, decision: chooseDecision(state, fact) }))
+    .filter(({ decision }) => !selectedOnly || decision.selected);
+  const rows = decided.slice((page - 1) * limit, page * limit).map(({ fact, decision }) => ({
+    productId: fact.productId, productVariantId: fact.productVariantId, productSku: fact.productSku, productName: fact.productName,
+    variantSku: fact.variantSku, variantName: fact.variantName, category: fact.category, productLineIds: fact.productLineIds,
+    productLineNames: fact.productLineNames, unitsPerVariant: fact.unitsPerVariant, productIsActive: true, variantIsActive: true,
+    variantUomType: "pack", selectionDecision: decision, listingTier: fact.listingTier,
+  }));
+  const categories = new Map<string, { category: string; label: string; rowCount: number }>();
+  const productLines = new Map<string, { productLineIds: number[]; label: string; rowCount: number }>();
+  for (const fact of searched) {
+    if (fact.category) {
+      const facet = categories.get(fact.category.toLowerCase()) ?? { category: fact.category, label: fact.category, rowCount: 0 };
+      facet.rowCount += 1;
+      categories.set(fact.category.toLowerCase(), facet);
+    }
+    fact.productLineNames.forEach((label, index) => {
+      const facet = productLines.get(label) ?? { productLineIds: [fact.productLineIds[index]], label, rowCount: 0 };
+      facet.rowCount += 1;
+      productLines.set(label, facet);
+    });
+  }
+  const byLabel = <T extends { label: string }>(facets: Iterable<T>) => [...facets].sort((left, right) => left.label.localeCompare(right.label));
+  return route.fulfill({ json: { rows, total: decided.length, page, limit,
+    facets: { categories: byLabel(categories.values()), productLines: byLabel(productLines.values()), products: [] } } });
+}
+
+/**
+ * `PUT /api/dropship/catalog/selection-rules`, as the route and repository answer it: 413 over the global JSON limit,
+ * 400 off the server's schema (recorded as unexpected), the same key and request hash replayed (200), the same key with
+ * another hash refused (409), the scripted answers, else every rule saved again under new ids and a new revision (201).
+ */
+async function answerSelectionSave(state: StubState, route: Route) {
+  const text = route.request().postData() ?? "";
+  const bytes = Buffer.byteLength(text);
+  let body: { idempotencyKey?: unknown; rules?: unknown } = {};
+  try {
+    body = JSON.parse(text) as typeof body;
+  } catch (error) {
+    state.unexpected.push(`PUT selection-rules (not JSON: ${error instanceof Error ? error.message : String(error)})`);
+  }
+  const key = typeof body.idempotencyKey === "string" ? body.idempotencyKey : "";
+  const record = (status: number) => { state.selectionPuts.push({ key, body, bytes, status }); };
+  if (bytes > GLOBAL_JSON_LIMIT_BYTES) {
+    record(413);
+    return route.fulfill({ status: 413, json: { error: { code: "PAYLOAD_TOO_LARGE", message: "request entity too large" } } });
+  }
+  const parsed = replaceDropshipVendorSelectionRulesInputSchema.safeParse({ vendorId: 1, idempotencyKey: key,
+    actor: { actorType: "vendor", actorId: MEMBER_ID }, rules: body.rules });
+  if (!parsed.success) {
+    record(400);
+    state.unexpected.push(`PUT selection-rules (body off contract: ${parsed.error.issues.map((issue) => issue.message).join("; ")})`);
+    return route.fulfill({ status: 400, json: { error: { code: "DROPSHIP_VENDOR_CATALOG_INVALID_INPUT", message: "Dropship vendor catalog input failed validation." } } });
+  }
+  const normalized = parsed.data.rules.map(normalizeVendorSelectionRule);
+  const hash = hashVendorSelectionRules(normalized);
+  const seen = state.selectionKeys[key];
+  if (seen) {
+    if (seen.hash !== hash) {
+      record(409);
+      return fulfillError(route, { status: 409, code: "DROPSHIP_IDEMPOTENCY_CONFLICT", message: "Dropship vendor selection idempotency key was reused with a different request." });
+    }
+    record(200);
+    return route.fulfill({ status: 200, json: { revisionId: seen.revisionId, idempotentReplay: true, rules: state.selectionRules } });
+  }
+  const scripted = state.selectionPutAnswers.shift();
+  if (scripted === "busy") {
+    record(409);
+    const busy = publicationSelectionBusyIssue({ code: "55P03", message: "PUBLICATION_SELECTION_BUSY" });
+    return route.fulfill({ status: 409, json: { error: busy } });
+  }
+  if (scripted === "server-error") {
+    record(500);
+    return fulfillError(route, { status: 500, code: "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR", message: "Dropship vendor catalog request failed." });
+  }
+  if (scripted === "forbidden") {
+    record(403);
+    return fulfillError(route, { status: 403, code: "DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED", message: "Dropship vendor status does not allow catalog access." });
+  }
+  if (scripted === "slow") await new Promise<void>((resolve) => { setTimeout(resolve, SLOW_SELECTION_PUT_MS); });
+  state.selectionRevision += 1;
+  const revisionId = state.selectionRevision;
+  state.selectionRules = normalized.map((rule) => selectionRule(state.nextRuleId++, rule.scopeType, rule.action,
+    { productLineId: rule.productLineId, productId: rule.productId, productVariantId: rule.productVariantId, category: rule.category },
+    { revisionId, autoConnectNewSkus: rule.autoConnectNewSkus, autoListNewSkus: rule.autoListNewSkus, priority: rule.priority, metadata: rule.metadata }));
+  state.selectionKeys[key] = { hash, revisionId };
+  if (scripted === "drop-after-commit") {
+    record(0);
+    return route.abort("connectionreset");
+  }
+  record(201);
+  return route.fulfill({ status: 201, json: { revisionId, idempotentReplay: false, rules: state.selectionRules } });
+}
+
+/**
+ * Serve the next `openCatalog` with the app's own query client (client/src/lib/queryClient.ts: staleTime Infinity,
+ * refetchOnMount "always"), as production serves the portal, instead of the harness's (staleTime 0). Call it first.
+ */
+export async function serveAppQueryClient(page: Page): Promise<void> {
+  await page.addInitScript(() => { (window as Window & { __CATALOG_APP_QUERY_CLIENT__?: boolean }).__CATALOG_APP_QUERY_CLIENT__ = true; });
+}
+
+/** Another tab's save: `rules` become the vendor's rules under new ids and a new revision (as any committed save does). */
+export function saveFromAnotherTab(state: StubState, rules: ReadonlyArray<Omit<SelectionRuleRecord, "id">>): void {
+  state.selectionRevision += 1;
+  state.selectionRules = rules.map((rule) => ({ ...rule, id: state.nextRuleId++, revisionId: state.selectionRevision }));
 }
 
 /**

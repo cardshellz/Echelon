@@ -21,7 +21,6 @@ import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib
 import React from "react";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
 import { PoQuantityAmendment } from '@/features/purchasing/PoQuantityAmendment';
-import { ReceiptShipmentQuantityCorrection } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import { useAuth } from "@/lib/auth";
 import { useShipmentCreation } from "@/hooks/use-shipment-creation";
 import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateRecovery";
@@ -2859,7 +2858,6 @@ export default function PurchaseOrderDetail() {
             </Button>
           )}
           {poId !== null && <PoQuantityAmendment key={poId} purchaseOrderId={poId} status={po.status} />}
-          {poId !== null && ["partially_received", "received", "closed"].includes(po.status) && <ReceiptShipmentQuantityCorrection purchaseOrderId={poId}/>}
           {canClosePo && (
             <Button onClick={() => closeMutation.mutate()} disabled={closeMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Archive className="h-4 w-4 mr-2" />
