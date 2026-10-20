@@ -228,7 +228,7 @@ async function main(): Promise<void> {
           connectionId: 1,
           channelId: 1,
           shopDomain: shop!,
-          accessToken: token,
+          accessToken: token!,
         }),
       },
       clock: () => new Date(),
