@@ -8,7 +8,12 @@ import {
 
 async function install(
   page: Page,
-  { admin = true, loseResponse = false, shipmentEdit = false } = {},
+  {
+    admin = true,
+    loseResponse = false,
+    shipmentEdit = false,
+    missingHistory = false,
+  } = {},
 ) {
   const failures = await installFixtures(page);
   let posted = false,
@@ -26,9 +31,88 @@ async function install(
     poRemainingPieces: { before: 0, after: 0 },
   };
   const { receipts: _, ...shipmentInput } = correctionInput;
+  const reviewSummary = missingHistory
+    ? {
+        ...correctionSummary,
+        shipmentCostReview: {
+          beforeUnassignedMills: 500000,
+          afterUnassignedMills: 500000,
+          needsHistoryReview: true,
+          affectedLots: [
+            {
+              lotId: 501,
+              lotNumber: "RECEIPT-TRANSFER-LOT",
+              receiptId: 31,
+              receivedUnits: 2,
+              onHandUnits: 0,
+            },
+          ],
+        },
+        costResults: [
+          {
+            component: "landed" as const,
+            shipmentId: 42,
+            status: "review_required" as const,
+            lotsUpdated: 0,
+            orderCostsUpdated: 0,
+            orderCostDeltaCents: 0,
+            issues: [
+              {
+                code: "COST_HISTORICAL_LINEAGE_MISSING",
+                message: "The recorded transfer is missing its cost link.",
+              },
+            ],
+          },
+        ],
+      }
+    : correctionSummary;
   await page.route("**/api/**", async (route) => {
     const request = route.request(),
       path = new URL(request.url()).pathname;
+    if (missingHistory && path === "/api/purchase-orders/17/shipment-costs")
+      return route.fulfill({
+        json: {
+          summary: {
+            currency: "USD",
+            shipmentCount: 1,
+            chargeCount: 1,
+            freightCents: 5000,
+            dutyCents: 0,
+            otherCents: 0,
+            totalCents: 5000,
+            poAmountCents: 20000,
+            combinedCostCents: 25000,
+            estimatedCents: 0,
+            unallocatedChargeCount: 0,
+            unsupportedCurrencyCount: 0,
+            appliedLines: 0,
+            reviewLines: 1,
+            pendingLines: 0,
+            inventoryCosting: "review_required",
+          },
+          supplier: { freightCents: 0, dutyCents: 0 },
+          totals: {
+            freightCents: 5000,
+            dutyCents: 0,
+            combinedCostCents: 25000,
+          },
+          lines: [
+            {
+              lineId: 1,
+              purchaseOrderLineId: 171,
+              shipmentId: 42,
+              shipmentNumber: "TEST-SHIP-42",
+              shipmentStatus: "closed",
+              sku: "TEST-SKU",
+              allocatedCents: 5000,
+              status: "review_required",
+              applicationId: 1,
+              recordedAt: "2026-09-01T12:00:00.000Z",
+              issues: reviewSummary.costResults[0].issues,
+            },
+          ],
+        },
+      });
     if (path === "/api/purchase-orders/17")
       return route.fulfill({ json: { ...po(17), status: "received" } });
     if (path === "/api/purchase-orders/17/quantity-corrections")
@@ -54,7 +138,7 @@ async function install(
         json: {
           sourceVersion: "a".repeat(64),
           previewVersion: "b".repeat(64),
-          summary: shipmentEdit ? shipmentSummary : correctionSummary,
+          summary: shipmentEdit ? shipmentSummary : reviewSummary,
         },
       });
     }
@@ -77,6 +161,7 @@ async function install(
         }
       }
       const current = correctionContext(posted);
+      if (posted && missingHistory) current.history[0].summary = reviewSummary;
       if (shipmentEdit) {
         current.receipts = correctionContext(true).receipts;
         if (posted) current.history[0].summary = shipmentSummary;
@@ -457,5 +542,57 @@ test("shipment and receipt stay in one draft, review and administrator approval"
       .last()
       .getByLabel(/TEST-RECEIPT-31/),
   ).toHaveValue("2000");
+  expect(failures).toEqual([]);
+});
+
+test("missing stock history allows one combined approval without an expense choice and remains visible after saving", async ({
+  page,
+}, info) => {
+  const { failures, commands } = await install(page, { missingHistory: true });
+  await page.goto("/shipments/42");
+  await page
+    .getByRole("button", { name: "Edit shipment", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog").last();
+  await dialog.getByLabel("Also correct received quantities").check();
+  await review(page, true);
+  await expect(dialog.getByRole("radio")).toHaveCount(0);
+  await expect(dialog).not.toContainText(
+    "Where does the unlinked historical cost belong?",
+  );
+  await expect(dialog).toContainText(
+    "Quantity correction is ready for approval.",
+  );
+  await expect(dialog).toContainText("RECEIPT-TRANSFER-LOT");
+  await expect(
+    dialog
+      .getByRole("row")
+      .filter({ hasText: "Shipment costs not yet assigned" }),
+  ).toContainText("$50.0000");
+  await page.screenshot({
+    path: info.outputPath("correction-without-expense-preview.png"),
+  });
+  await dialog
+    .getByRole("button", { name: "Approve shipment and receipt", exact: true })
+    .click();
+  await expect(dialog).toContainText(
+    "Shipment and receipt correction approved and saved",
+  );
+  await expect(dialog).toContainText("Test Administrator");
+  await expect(dialog).toContainText(
+    "The quantities are saved. Some costs still need their stock history linked.",
+  );
+  expect(commands).toHaveLength(1);
+  expect(commands[0].body).toEqual(correctionInput);
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await openFromReceipt(page);
+  await page
+    .getByRole("dialog")
+    .last()
+    .getByText("Previous corrections and approvals (1)")
+    .click();
+  await expect(page.getByRole("dialog").last()).toContainText(
+    "Shipment costs not yet assigned",
+  );
   expect(failures).toEqual([]);
 });

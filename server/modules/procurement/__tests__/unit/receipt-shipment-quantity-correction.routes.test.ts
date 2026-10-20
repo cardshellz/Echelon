@@ -76,6 +76,11 @@ describe.each(["receipt", "shipment"] as const)(
           "idempotency-key": options.key ?? "quantity-test-key",
         },
       });
+    it.each(["historical_cogs", "inventory_variance"])("rejects expense classification on the quantity endpoint: %s", async destination => {
+      const response = await post({body:{...expectedInput,historicalCostDestination:destination}});
+      expect(response.status).toBe(400);
+      expect(service.approve).not.toHaveBeenCalled();
+    });
     it("requires authentication, approval permission and idempotency identity", async () => {
       for (const permission of [
         "purchasing:view",

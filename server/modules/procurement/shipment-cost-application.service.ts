@@ -4,7 +4,7 @@ import { recordCostRevision } from "./cost-source-revision.repository";
 import { sql } from "drizzle-orm";
 import type { CostIssue, CostSourceReference } from "@shared/procurement/cost-source-contracts";
 import { costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../inventory/infrastructure/cost-evidence.repository";
-import { applyCostRevision, type CostComponentWriter } from "../inventory/application/apply-cost-revision";
+import { applyCostRevision, type CostApplicationOptions, type CostComponentWriter } from "../inventory/application/apply-cost-revision";
 import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence";
 import { retainEquivalentShipmentCostSource, type ShipmentCostProposal } from "./shipment-cost-source-identity";
 import { readSupplierCreditCostRows } from "./supplier-credit-source.repository";
@@ -214,10 +214,10 @@ export async function recordShipmentCostRevisions(tx: CostEvidenceTransaction, s
   return { revisions, issues };
 }
 
-export async function applyShipmentCostRevisions(tx: CostEvidenceTransaction, shipmentId: number, writer: CostComponentWriter, actorId: string, now: Date) {
+export async function applyShipmentCostRevisions(tx: CostEvidenceTransaction, shipmentId: number, writer: CostComponentWriter, actorId: string, now: Date, options: CostApplicationOptions = {}) {
   const { revisions, issues } = await recordShipmentCostRevisions(tx, shipmentId, actorId, now);
   const applications = [];
-  for (const revision of revisions) applications.push(await applyCostRevision(tx, revision, writer, actorId, now));
+  for (const revision of revisions) applications.push(await applyCostRevision(tx, revision, writer, actorId, now, options));
   return {
     updated: applications.filter((application) => !application.replayed).reduce((sum, application) => sum + application.lotsUpdated, 0),
     total: applications.reduce((sum, application) => sum + application.lotsUpdated, 0),
