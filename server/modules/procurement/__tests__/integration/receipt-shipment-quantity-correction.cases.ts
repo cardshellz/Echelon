@@ -271,8 +271,31 @@ export function registerQuantityCorrectionCases(fixture: {
       ).rows[0].count,
     ).toBe(1);
   });
+  it("quantity correction blocks cancelled and returned purchase lines", async () => {
+    await prepare();
+    for (const statement of [
+      "UPDATE procurement.purchase_order_lines SET status='cancelled' WHERE id=21",
+      "UPDATE procurement.purchase_order_lines SET status='received',returned_qty=1 WHERE id=21",
+      "UPDATE procurement.purchase_order_lines SET returned_qty=0 WHERE id=21; UPDATE procurement.purchase_orders SET physical_status='cancelled' WHERE id=10",
+    ]) {
+      await query(statement);
+      const current = await service().context(11, "admin-user");
+      expect(current.blockedReason).toContain("reversal workflow");
+      const body = await request(),
+        before = await snapshot();
+      await expect(
+        service().preview(11, body, "admin-user"),
+      ).rejects.toMatchObject({ code: "QUANTITY_CORRECTION_BLOCKED" });
+      expect(await snapshot()).toEqual(before);
+    }
+  });
   it("quantity correction can post explicitly approved historical freight without inventing stock or sales", async () => {
     await prepare(false);
+    // Historical receipt and manifest links can be incomplete. The saved PO
+    // receipt posting proves the prior pieces; today's catalog is not authority.
+    await query(`UPDATE procurement.receiving_lines SET units_per_variant_snapshot=NULL,inbound_shipment_line_id=NULL WHERE id=62;
+      UPDATE procurement.inbound_shipment_lines SET product_variant_id=NULL,units_per_variant_snapshot=NULL WHERE id=11;
+      UPDATE catalog.product_variants SET units_per_variant=5000 WHERE id=200;`);
     const body = {
       ...(await request()),
       historicalCostDestination: "historical_cogs" as const,
@@ -294,6 +317,14 @@ export function registerQuantityCorrectionCases(fixture: {
       descriptor(input),
     );
     expect(result.httpStatus, JSON.stringify(result.body)).toBe(200);
+    expect(
+      quantityCorrectionContextSchema.parse(result.body).receipts[0],
+    ).toMatchObject({
+      receivedPieces: 1000,
+      piecesPerUnit: 500,
+      receivedUnits: 2,
+      unitWasRecorded: true,
+    });
     expect((await snapshot()).transactions).toEqual(before.transactions);
     expect(
       (

@@ -262,10 +262,14 @@ export async function readQuantityCorrectionSource(
       "Confirm the converted USD shipment charges before correcting their quantity and cost basis.";
   if (
     shipment.status === "cancelled" ||
-    ["cancelled", "short_closed"].includes(String(po.status))
+    po.cancelled_at != null ||
+    ["cancelled", "short_closed"].includes(String(po.status)) ||
+    ["cancelled", "short_closed"].includes(String(po.physical_status)) ||
+    poLine.status === "cancelled" ||
+    Number(poLine.returned_qty ?? 0) !== 0
   )
     blockedReason =
-      "Cancelled shipments or cancelled/short-closed POs need their owning reversal workflow.";
+      "Cancelled shipments, cancelled/short-closed POs, or returned purchase lines need their owning reversal workflow.";
   if (!receiptRows.length)
     blockedReason =
       "No linked posted receipt was found. Use the normal shipment editor before receiving.";
