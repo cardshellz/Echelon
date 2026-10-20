@@ -240,12 +240,10 @@ describe("writer-ratchet (P2.1)", () => {
       for (const [owner, tables] of Object.entries(publicationOwners)) {
         for (const table of tables) expect(topology[table]).toEqual([owner]);
       }
-      // The existing eBay pricing route is retained for compatibility. New
-      // publication routes delegate pricing writes to the Channels owner.
-      expect(topology["channels.channel_pricing_rules"]).toEqual([
-        "modules/channels",
-        "server/routes/ebay/ebay-pricing.routes.ts",
-      ]);
+      // HTTP and import adapters delegate both pricing tables to Channels.
+      // The legacy eBay route remains an API facade, never a second writer.
+      expect(topology["channels.channel_pricing_rules"]).toEqual(["modules/channels"]);
+      expect(topology["channels.channel_pricing"]).toEqual(["modules/channels"]);
     }
   });
 

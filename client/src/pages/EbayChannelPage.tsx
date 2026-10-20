@@ -8,6 +8,7 @@
  */
 
 import { ListingIntentChanges } from "@/features/channel-listing-publication/ListingIntentChanges";
+import { publicationRequest } from "@/features/channel-listing-publication/api";
 import { useAuth } from "@/lib/auth";
 import { ebayProductSyncResultSchema, ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import { EbayListingJobStatusDialog } from "@/components/ebay/EbayListingJobStatusDialog";
@@ -226,17 +227,21 @@ function listingNeedsAttention(item: FeedItem, job: z.infer<typeof ebayListingSy
   return item.status === "error" || item.status === "publication_incomplete";
 }
 
-interface PricingRule {
-  id: number;
-  channel_id: number;
-  scope: "channel" | "category" | "product" | "variant";
-  scope_id: string | null;
-  rule_type: "percentage" | "fixed" | "override";
-  value: string;
-  scope_label: string | null;
-  created_at: string;
-  updated_at: string;
-}
+// Reads retain legacy values so an invalid saved rule can still be corrected or
+// removed. New selections are validated by the pricing command owner.
+const pricingRuleSchema = z.object({
+  id: z.number().int().positive(),
+  channel_id: z.number().int().positive(),
+  scope: z.string().max(20),
+  scope_id: z.string().nullable(),
+  rule_type: z.string().max(20),
+  value: z.string().max(100),
+  scope_label: z.string().nullable().optional(),
+  created_at: z.string().optional(),
+  updated_at: z.string().optional(),
+});
+const pricingRulesResponseSchema = z.object({ rules: z.array(pricingRuleSchema) });
+type PricingRule = z.infer<typeof pricingRuleSchema>;
 
 interface EffectivePrices {
   [variantId: number]: { basePriceCents: number | null; effectivePriceCents: number | null; missingPrice?: boolean; resolutionIssue?: { code: string; message: string } };
@@ -425,8 +430,14 @@ export default function EbayChannelPage() {
   );
 
   // ---- Pricing rules ----
-  const { data: pricingRulesData, isLoading: pricingRulesLoading } = useQuery<{ rules: PricingRule[] }>({
+  const {
+    data: pricingRulesData,
+    isLoading: pricingRulesLoading,
+    error: pricingReadError,
+    refetch: refetchPricingRules,
+  } = useQuery({
     queryKey: ["/api/ebay/pricing-rules"],
+    queryFn: () => publicationRequest("GET", "/api/ebay/pricing-rules", pricingRulesResponseSchema),
     enabled: !!config?.connected,
   });
 
@@ -1029,36 +1040,90 @@ export default function EbayChannelPage() {
     value: string;
   }>({ scope: "channel", scopeId: "", ruleType: "percentage", value: "" });
   const [showPricingForm, setShowPricingForm] = useState(false);
+  const [pricingRuleBaseline, setPricingRuleBaseline] = useState<PricingRule[]>([]);
   const [pricingScopeSearch, setPricingScopeSearch] = useState("");
+  const [pricingError, setPricingError] = useState("");
+  const [pricingReloading, setPricingReloading] = useState(false);
+  const [pricingReloaded, setPricingReloaded] = useState(false);
+
+  async function reloadSavedPricingRules() {
+    setPricingReloading(true);
+    setPricingReloaded(false);
+    try {
+      const result = await refetchPricingRules({ throwOnError: true });
+      if (!result.data) throw new Error("The server did not return the saved pricing rules.");
+      setPricingRuleBaseline(result.data.rules.map((rule) => ({ ...rule })));
+      setPricingError("");
+      setPricingReloaded(true);
+    } catch (error) {
+      setPricingError(error instanceof Error ? error.message : "Saved pricing rules could not be reloaded. Try again.");
+    } finally {
+      setPricingReloading(false);
+    }
+  }
 
   const upsertPricingRuleMutation = useMutation({
-    mutationFn: async (rule: { scope: string; scopeId: string | null; ruleType: string; value: number }) => {
-      const resp = await apiRequest("PUT", "/api/ebay/pricing-rules", rule);
-      return resp.json();
+    mutationFn: async (rule: {
+      scope: string;
+      scopeId: string | null;
+      ruleType: string;
+      value: string;
+      expected: { id: number; ruleType: PricingRule["rule_type"]; value: string } | null;
+    }) => {
+      return publicationRequest(
+        "PUT", "/api/ebay/pricing-rules", z.object({ rule: pricingRuleSchema }), rule,
+      );
     },
-    onSuccess: () => {
+    onSuccess: async ({ rule }) => {
+      await queryClient.cancelQueries({ queryKey: ["/api/ebay/pricing-rules"] });
+      queryClient.setQueryData<{ rules: PricingRule[] }>(["/api/ebay/pricing-rules"], (current) => {
+        const previous = current?.rules.find((saved) => saved.id === rule.id);
+        const acknowledged = { ...previous, ...rule };
+        return {
+          rules: [
+            ...(current?.rules ?? []).filter((saved) =>
+              saved.id !== rule.id && !(saved.scope === rule.scope && saved.scope_id === rule.scope_id),
+            ),
+            acknowledged,
+          ],
+        };
+      });
       toast({ title: "Pricing Rule Saved" });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/pricing-rules"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
       setShowPricingForm(false);
+      setPricingError("");
+      setPricingReloaded(false);
       setPricingRuleForm({ scope: "channel", scopeId: "", ruleType: "percentage", value: "" });
     },
     onError: (err: Error) => {
+      setPricingError(err.message);
+      setPricingReloaded(false);
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
 
   const deletePricingRuleMutation = useMutation({
-    mutationFn: async (id: number) => {
-      const resp = await apiRequest("DELETE", `/api/ebay/pricing-rules/${id}`);
-      return resp.json();
+    mutationFn: async (rule: PricingRule) => {
+      return publicationRequest(
+        "DELETE", `/api/ebay/pricing-rules/${rule.id}`, z.object({ success: z.literal(true) }),
+        { expected: { id: rule.id, ruleType: rule.rule_type, value: String(rule.value) } },
+      );
     },
-    onSuccess: () => {
+    onSuccess: async (_result, deleted) => {
+      await queryClient.cancelQueries({ queryKey: ["/api/ebay/pricing-rules"] });
+      queryClient.setQueryData<{ rules: PricingRule[] }>(["/api/ebay/pricing-rules"], (current) => ({
+        rules: (current?.rules ?? []).filter((rule) => rule.id !== deleted.id),
+      }));
+      setPricingError("");
+      setPricingReloaded(false);
       toast({ title: "Pricing Rule Deleted" });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/pricing-rules"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
     },
     onError: (err: Error) => {
+      setPricingError(err.message);
+      setPricingReloaded(false);
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
@@ -2569,13 +2634,45 @@ export default function EbayChannelPage() {
                 variant="outline"
                 size="sm"
                 className="w-full sm:w-auto min-h-[44px] sm:min-h-0"
-                onClick={() => setShowPricingForm(!showPricingForm)}
+                disabled={pricingReloading || (!showPricingForm && !pricingRulesData)}
+                onClick={() => {
+                  if (!showPricingForm) {
+                    // Keep the snapshot the operator started editing, even if a
+                    // background refresh returns a newer value before Save.
+                    setPricingRuleBaseline((pricingRulesData?.rules ?? []).map((rule) => ({ ...rule })));
+                    setPricingReloaded(false);
+                  }
+                  setShowPricingForm(!showPricingForm);
+                }}
               >
                 {showPricingForm ? "Cancel" : "Add Rule"}
               </Button>
             </div>
           </CardHeader>
           <CardContent className="px-3 sm:px-6">
+            {(pricingError || pricingReadError) && (
+              <div className="mb-3 space-y-2 text-sm">
+                <p role="alert" className="text-destructive">{pricingError || pricingReadError?.message}</p>
+                <p>{showPricingForm
+                  ? "Your entered value and selection are retained. Reload the saved rules, review your change, then retry."
+                  : "Reload the saved rules and review the current values before retrying."}</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={pricingReloading || upsertPricingRuleMutation.isPending || deletePricingRuleMutation.isPending}
+                  onClick={() => void reloadSavedPricingRules()}
+                >
+                  {pricingReloading ? "Reloading saved pricing rules…" : "Reload saved pricing rules"}
+                </Button>
+              </div>
+            )}
+            {pricingReloaded && (
+              <p role="status" className="mb-3 text-sm">
+                {showPricingForm
+                  ? "Saved pricing rules reloaded. Your entered value and selection are unchanged; review them before saving."
+                  : "Saved pricing rules reloaded. Review the current values before making changes."}
+              </p>
+            )}
             {/* Add/edit form */}
             {showPricingForm && (
               <div className="border rounded-lg p-3 sm:p-4 mb-4 bg-muted/30 space-y-3">
@@ -2706,18 +2803,27 @@ export default function EbayChannelPage() {
                       />
                       <Button
                         size="sm"
+                        aria-label="Save pricing rule"
                         className="min-h-[44px] sm:h-8 px-4"
                         disabled={
                           !pricingRuleForm.value ||
                           (pricingRuleForm.scope !== "channel" && !pricingRuleForm.scopeId) ||
+                          pricingReloading ||
                           upsertPricingRuleMutation.isPending
                         }
                         onClick={() => {
+                          const scopeId = pricingRuleForm.scope === "channel" ? null : pricingRuleForm.scopeId;
+                          const previous = pricingRuleBaseline.find((rule) =>
+                            rule.scope === pricingRuleForm.scope && rule.scope_id === scopeId,
+                          );
                           upsertPricingRuleMutation.mutate({
                             scope: pricingRuleForm.scope,
-                            scopeId: pricingRuleForm.scope === "channel" ? null : pricingRuleForm.scopeId,
+                            scopeId,
                             ruleType: pricingRuleForm.ruleType,
-                            value: parseFloat(pricingRuleForm.value),
+                            value: pricingRuleForm.value,
+                            expected: previous
+                              ? { id: previous.id, ruleType: previous.rule_type, value: String(previous.value) }
+                              : null,
                           });
                         }}
                       >
@@ -2771,8 +2877,9 @@ export default function EbayChannelPage() {
                       variant="ghost"
                       size="sm"
                       className="min-h-[44px] min-w-[44px] p-0 text-destructive hover:text-destructive shrink-0"
-                      onClick={() => deletePricingRuleMutation.mutate(rule.id)}
-                      disabled={deletePricingRuleMutation.isPending}
+                      aria-label={`Delete ${rule.scope_label || rule.scope} pricing rule`}
+                      onClick={() => deletePricingRuleMutation.mutate(rule)}
+                      disabled={deletePricingRuleMutation.isPending || pricingReloading}
                     >
                       <XCircle className="h-4 w-4" />
                     </Button>
@@ -2818,8 +2925,9 @@ export default function EbayChannelPage() {
                             variant="ghost"
                             size="sm"
                             className="h-6 w-6 p-0 text-destructive hover:text-destructive"
-                            onClick={() => deletePricingRuleMutation.mutate(rule.id)}
-                            disabled={deletePricingRuleMutation.isPending}
+                            aria-label={`Delete ${rule.scope_label || rule.scope} pricing rule`}
+                            onClick={() => deletePricingRuleMutation.mutate(rule)}
+                            disabled={deletePricingRuleMutation.isPending || pricingReloading}
                           >
                             <XCircle className="h-3.5 w-3.5" />
                           </Button>

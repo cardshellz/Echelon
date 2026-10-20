@@ -15,10 +15,13 @@ export const publicationMoneySchema = z
 export const listingPriceRuleSchema = z
   .object({
     type: z.enum(["percentage", "fixed", "override"]),
-    value: z.string().regex(/^\d{1,7}(\.\d{1,2})?$/),
+    value: z.string().regex(/^\d{1,8}(\.\d{1,2})?$/),
   })
   .strict();
 export type ListingPriceRule = z.infer<typeof listingPriceRuleSchema>;
+export const saveListingPriceRuleSchema = listingPriceRuleSchema.extend({
+  expected: listingPriceRuleSchema.nullable().optional(),
+});
 
 // Provider fields are bounded JSON data. They never select HTTP paths or carry credentials.
 export const listingProviderFieldsSchema = z

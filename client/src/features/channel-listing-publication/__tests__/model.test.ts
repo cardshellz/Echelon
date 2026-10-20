@@ -126,6 +126,12 @@ describe("exact monetary preview", () => {
       ),
     ).toBeNull();
   });
+  it("uses the shared rule limit for an exact eight-digit price preview", () => {
+    expect(previewRulePrice(catalog(), { type: "override", value: "99999999.99" }))
+      .toBe(9_999_999_999);
+    expect(previewRulePrice(catalog(), { type: "fixed", value: "100000000.00" }))
+      .toBeNull();
+  });
   it("preserves explicit and more-specific prices even when rules have identical values", () => {
     expect(
       previewRulePrice(

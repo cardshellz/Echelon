@@ -73,8 +73,7 @@
     "modules/channels"
   ],
   "channels.channel_pricing_rules": [
-    "modules/channels",
-    "server/routes/ebay/ebay-pricing.routes.ts"
+    "modules/channels"
   ],
   "channels.channel_product_allocation": [
     "modules/channels"
