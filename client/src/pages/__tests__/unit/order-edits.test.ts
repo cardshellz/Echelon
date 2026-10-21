@@ -747,6 +747,9 @@ describe("verified order edit review", () => {
     expect(html).toContain('href="https://shop.example/pay"');
     expect(html).toContain(`dateTime="${paymentDeadline}"`);
     expect(html).toContain('rel="noopener noreferrer"');
+    const completed = {...operation,status:"completed" as const,paymentDeadline,balanceDueCents:0};
+    expect(renderOperation(completed,{audience:"customer"})).not.toContain('Payment deadline:');
+    expect(renderOperation(completed)).toContain(`dateTime="${paymentDeadline}"`);
     expect(
       renderOperation({
         ...operation,

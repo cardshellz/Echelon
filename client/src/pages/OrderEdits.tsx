@@ -1468,7 +1468,7 @@ export function OrderEditOperationView({
             pendingChanges={operation.status === "ready"}
           />
         )}
-        {operation.paymentDeadline && (
+        {operation.paymentDeadline && (audience === "staff" || operation.status === "awaiting_payment") && (
           <p className="rounded-md bg-muted p-3 text-sm">
             Payment deadline:{" "}
             <time dateTime={operation.paymentDeadline}>

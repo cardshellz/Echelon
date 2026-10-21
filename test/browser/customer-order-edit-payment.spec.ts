@@ -293,6 +293,7 @@ test("payment stays in the same tab and the verified completed edit reopens afte
   await expect(
     page.getByText("Your order has been updated.", { exact: true }),
   ).toBeVisible();
+  await expect(page.getByText('Payment deadline:',{exact:false})).toHaveCount(0);
   await page.screenshot({
     path: resolve(
       process.cwd(),

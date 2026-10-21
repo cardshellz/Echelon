@@ -25,6 +25,7 @@ holds and an edit's receipt are separate responsibilities.
   `_self` for customer payment links. Staff payment links retain their behavior.
   Ordinary progress has no status button; failures and uncertain commands offer
   **Try again**. An acknowledged pending payment is progress, not a red failure.
+  Completed customer views have no payment action or payment deadline.
 - `client/src/customer-account/use-order-edit-status.ts::useOrderEditStatus`
   observes submitted operations with serial, abortable, visible-page reads every
   five seconds. Focus, pageshow and visibility return refresh promptly. A failed
