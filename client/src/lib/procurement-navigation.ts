@@ -14,11 +14,13 @@ export interface ProcurementRecord {
 export const PO_EDITOR_QUERY_PARAM = "editPo";
 export const INVOICE_CORRECTION_QUERY_PARAM = "correctLine";
 export const INVOICE_COST_QUERY_PARAM = "costLine";
+export const SHIPMENT_COST_REPAIR_QUERY_PARAM = "repairCostLinks";
 export interface ProcurementChildNavigationOptions {
   replaceCurrent?: boolean;
   editPo?: boolean;
   invoiceLineCorrectionId?: number;
   invoiceCostLineId?: number;
+  shipmentCostRepairLineId?: number;
 }
 
 export interface ProcurementJourney {
@@ -146,6 +148,12 @@ export function procurementChildHref(
   const purchase = journey.purchase ?? (current?.kind === "purchase" ? current : null);
   const trail = current && !options.replaceCurrent ? [...journey.trail, current] : journey.trail;
   const href = procurementRecordHref(target, { purchase, trail: trail.slice(-MAX_TRAIL_DEPTH) });
+  if (options.shipmentCostRepairLineId !== undefined) {
+    const lineId = options.shipmentCostRepairLineId;
+    if (target.kind !== "shipment" || options.editPo || options.invoiceCostLineId !== undefined || options.invoiceLineCorrectionId !== undefined
+      || !Number.isSafeInteger(lineId) || lineId <= 0 || lineId > 2_147_483_647) throw new Error("Cost-link repair requires a valid shipment line destination");
+    return `${href}&${SHIPMENT_COST_REPAIR_QUERY_PARAM}=${lineId}`;
+  }
   if (options.invoiceCostLineId !== undefined) {
     const lineId = options.invoiceCostLineId;
     if (target.kind !== "invoice" || options.editPo || options.invoiceLineCorrectionId !== undefined

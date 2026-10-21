@@ -10,6 +10,8 @@ import { ShipmentCostUpdateAction } from "./ShipmentCostUpdateAction";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { ShipmentCostExceptionReview } from "./ShipmentCostExceptionReview";
 import { PurchaseSupplierCostReview } from "./PurchaseSupplierCostReview";
+import { CostIssueMessage } from "./CostIssueMessage";
+import { CostLinkRepairAction } from "./CostLinkRepairAction";
 
 export function PoShipmentCostReview({
   costs,
@@ -112,13 +114,14 @@ export function PoShipmentCostReview({
                     )}
                   </div>
                   <div className="space-y-2 text-sm">
+                    {line.status !== "applied" && <CostLinkRepairAction shipmentId={shipment.id} lineId={line.lineId} issues={line.issues} />}
                     {line.exceptionReview ? <ShipmentCostExceptionReview lineId={line.lineId} review={line.exceptionReview} /> : <>
                     {guidance.explanation ? (
                       <p>{guidance.explanation}</p>
                     ) : (
                       line.issues.map((issue) => (
                         <p key={`${issue.code}:${issue.message}`}>
-                          {issue.message}
+                          <CostIssueMessage issue={issue} />
                         </p>
                       ))
                     )}
@@ -134,7 +137,7 @@ export function PoShipmentCostReview({
                         {line.issues.map((issue) => (
                           <li key={`${issue.code}:${issue.message}`}>
                             <span className="font-mono">{issue.code}</span>:{" "}
-                            {issue.message}
+                            <CostIssueMessage issue={issue} />
                           </li>
                         ))}
                       </ul>

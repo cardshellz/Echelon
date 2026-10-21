@@ -8,6 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { ShipmentCostExceptionReview } from "./ShipmentCostExceptionReview";
 import { PurchaseSupplierCostReview } from "./PurchaseSupplierCostReview";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
+import { CostLinkRepairAction } from "./CostLinkRepairAction";
+import { CostIssueMessage } from "./CostIssueMessage";
 
 export function ShipmentCostApplicationReview({ shipmentId }: { shipmentId: number }) {
   const navigation = useProcurementNavigation();
@@ -40,8 +42,9 @@ export function ShipmentCostApplicationReview({ shipmentId }: { shipmentId: numb
           return <div key={line.lineId} className="border-t pt-3 space-y-2">
             <div className="flex flex-wrap items-center gap-2"><strong className="font-mono break-all">{line.sku ?? `Line ${line.lineId}`}</strong>
               {!line.exceptionReview && <Badge variant="outline">{unique.length ? "Needs attention" : "Not updated yet"}</Badge>}</div>
+            {!isShipmentCostLinePosted(line) && <CostLinkRepairAction shipmentId={shipmentId} lineId={line.lineId} issues={unique} />}
             {line.exceptionReview ? <ShipmentCostExceptionReview lineId={line.lineId} review={line.exceptionReview} /> : <>
-            {guidance.explanation ? <p>{guidance.explanation}</p> : unique.map(issue => <p key={`${issue.code}:${issue.message}`}>{issue.message}</p>)}
+            {guidance.explanation ? <p>{guidance.explanation}</p> : unique.map(issue => <p key={`${issue.code}:${issue.message}`}><CostIssueMessage issue={issue} /></p>)}
             {!line.application && unique.length === 0 && <p>No inventory cost update has been recorded for this line.</p>}
             <p><strong>Next step:</strong> {guidance.nextStep}</p>{unique.some(issue => issue.code === "SIGNED_LANDED_CREDIT_REVIEW" || issue.code.startsWith("SUPPLIER_CREDIT")) && <SupplierCreditLink inboundShipmentId={shipmentId} />}
             </>}
