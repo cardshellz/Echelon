@@ -49,6 +49,8 @@ describe("browser CI impact selection", () => {
     "playwright.order-edits.config.ts",
     "test/browser/order-edits.spec.ts",
     "test/browser/customer-order-edit-resume.spec.ts",
+    "test/browser/customer-order-edit-payment.spec.ts",
+    "test/browser/customer-order-edit-rewards.spec.ts",
     "test/browser/fixtures/customer-order-edit-harness.tsx",
     "client/src/customer-account/entry.tsx",
     "client/src/pages/OrderEdits.tsx",

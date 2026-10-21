@@ -548,7 +548,7 @@ export async function finalizeOrderEditWarehouseRelease(
   omsOrderId: number,
   operationId: string,
   proof: OrderEditReleaseProof,
-  releasedAt?: string,
+  releasedAt: string,
 ): Promise<void> {
   positiveId.parse(omsOrderId);
   operationIdSchema.parse(operationId);
@@ -590,13 +590,14 @@ export async function finalizeOrderEditWarehouseRelease(
       "ORDER_EDIT_RELEASE_CHANGED",
       "Warehouse state changed after provider verification; verify the edit again.",
     );
-  if (proof.unsubmitted) {
-    const retirementTime = z.string().datetime().parse(releasedAt);
-    await retireOrderEditProviderHolds(client, {
-      operationId,
-      now: new Date(retirementTime),
-    });
-  }
+  // Provider cleanup was verified before this proof was issued. Retire its
+  // receipt with completion and audit, including when an independent manual
+  // hold must remain physically in place. A failed transaction retains both.
+  const retirementTime = z.string().datetime().parse(releasedAt);
+  await retireOrderEditProviderHolds(client, {
+    operationId,
+    now: new Date(retirementTime),
+  });
   if (proof.ownership === "none") return;
   const released = await releaseOrderEditWarehouseHold(client, {
     operationId,
