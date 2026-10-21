@@ -58,20 +58,28 @@ function BatchProgress({
         {stale ? "Last known progress" : headline(batch)} — {c.finished} of{" "}
         {c.total} products processed
       </p>
-      <progress
+      <div
+        role="progressbar"
         aria-label="Sync batch progress"
-        className="h-2 w-full"
-        style={{
-          accentColor:
-            stale || c.needsAttention || c.unavailable
-              ? "#d97706"
-              : batch.state === "completed"
-                ? "#16a34a"
-                : "#4f46e5",
-        }}
-        max={Math.max(c.total, 1)}
-        value={c.finished}
-      />
+        aria-valuemin={0}
+        aria-valuemax={Math.max(c.total, 1)}
+        aria-valuenow={c.finished}
+        aria-valuetext={`${c.finished} of ${c.total} processed; ${c.completed} synced; ${c.needsAttention} need attention`}
+        className="h-2 w-full overflow-hidden rounded bg-muted"
+      >
+        <div
+          className="h-full transition-[width]"
+          style={{
+            width: `${c.total ? (100 * c.finished) / c.total : 0}%`,
+            backgroundColor:
+              stale || c.needsAttention || c.unavailable
+                ? "#d97706"
+                : batch.state === "completed"
+                  ? "#16a34a"
+                  : "#4f46e5",
+          }}
+        />
+      </div>
       <p className="text-xs text-muted-foreground" aria-live="polite">
         {summary(batch)}
       </p>

@@ -609,7 +609,7 @@ test("bulk sync keeps real progress after closing and reloading without submitti
   batches.batch = refreshBatch({...batches.batch,items:batches.batch.items.map(item=>({...item,state:"completed"}))});
   await progress.getByRole("button", { name: "Refresh sync progress", exact: true }).click();
   await expect(progress).toContainText("Sync complete — 1 of 1 products processed");
-  await expect(progress.getByRole("progressbar")).toHaveAttribute("value","1");
+  await expect(progress.getByRole("progressbar")).toHaveAttribute("aria-valuenow","1");
   expect(batches.posts).toHaveLength(1);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
