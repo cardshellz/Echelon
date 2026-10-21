@@ -47,6 +47,7 @@ const now = new Date("2026-10-21T18:00:00Z");
 const operationId = "11111111-1111-4111-8111-111111111111";
 
 interface ReconciliationPort {
+  reserveBeforeShipmentProcessing(orderId: number, omsOrderId: number, context: string): Promise<void>;
   reconcileExistingWmsOrderLines(
     omsOrderId: number,
     wmsOrderId: number,
@@ -161,6 +162,9 @@ suite.sequential("existing shipment inventory demand reconciliation", () => {
         VALUES(21,2,21,'P5',101,20,true,1,0,0,'pending',false,1);
     `);
     try {
+      await reservations.reserveOrder(2);
+      // Ordinary synchronization already replayed the original active claim
+      // before the edit. Its cached receipt must not certify later demand.
       await reservations.reserveOrder(2);
     } catch (error) {
       throw new Error(
@@ -277,6 +281,39 @@ suite.sequential("existing shipment inventory demand reconciliation", () => {
     expect(after.shipment).toEqual(before.shipment);
     await synchronize.synchronize(2, snapshot, operationId);
     expect(await inventoryEvidence()).toEqual(after);
+  }, 30_000);
+
+  it("reconciles another demand change after the replacement claim's receipt was cached", async () => {
+    await reconciler.reconcileExistingWmsOrderLines(2, 2);
+    await reconciler.reconcileExistingWmsOrderLines(2, 2);
+    const before = await inventoryEvidence();
+    await context.pool.query(`
+      UPDATE oms.oms_orders SET total_cents=3000 WHERE id=2;
+      UPDATE oms.oms_order_lines SET quantity=2,authority_fulfillable_quantity=2,
+        wms_materialized_quantity=2,total_price_cents=2000 WHERE id=22;
+      UPDATE wms.order_items SET quantity=2 WHERE id=22;
+      UPDATE wms.outbound_shipment_items SET qty=2 WHERE order_item_id=22;
+    `);
+    await reconciler.reconcileExistingWmsOrderLines(2, 2);
+    const after = await inventoryEvidence();
+    expect(after.claims.map(claim => claim.status)).toEqual(["superseded", "superseded", "active"]);
+    expect(after.lines).toEqual([
+      { order_item_id: 21, requested_qty: "1", planned_qty: "1" },
+      { order_item_id: 22, requested_qty: "2", planned_qty: "2" },
+    ]);
+    expect(after.reserved).toBe(before.reserved + 1);
+    expect(after.holds).toEqual(before.holds);
+    await reconciler.reconcileExistingWmsOrderLines(2, 2);
+    expect(await inventoryEvidence()).toEqual(after);
+  }, 30_000);
+
+  it("keeps unchanged inventory stable across initial and existing sync contexts", async () => {
+    await reconciler.reconcileExistingWmsOrderLines(2, 2);
+    const before = await inventoryEvidence();
+    await reconciler.reserveBeforeShipmentProcessing(2, 2, "post_create");
+    await reconciler.reconcileExistingWmsOrderLines(2, 2);
+    await reconciler.reserveBeforeShipmentProcessing(2, 2, "post_create");
+    expect(await inventoryEvidence()).toEqual(before);
   }, 30_000);
 
   it("retains the original claim on a failed replacement, then repairs once on retry", async () => {
