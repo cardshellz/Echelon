@@ -5,6 +5,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { DialogPortalContainerContext } from "@/components/ui/dialog";
 import { CustomerWorkspace } from "@/pages/CustomerReturnCustomerPortal";
 import { CustomerOrderEditor } from "./CustomerOrderEditor";
+import {
+  loadOrderEditPaymentReturn,
+  orderEditPaymentReturnStorage,
+} from "./order-edit-payment-return";
 import { createCustomerAccountTransport, customerAccountPageConfigSchema, type CustomerAccountTransport } from "./customer-account.transport";
 import { customerAccountAccessNotice, customerAccountSignInUrl, type CustomerAccountAccessNotice } from "./customer-account-access";
 import type { CustomerReturnCustomerOrder } from "@shared/returns/customer-return-access.contract";
@@ -13,10 +17,16 @@ import "../index.css";
 import "./storefront.css";
 
 type Bootstrap = Awaited<ReturnType<CustomerAccountTransport["bootstrap"]>>;
-type Choice = { kind: "edit" | "return" | "labels"; omsOrderId: number; returnOrder?: CustomerReturnCustomerOrder; returnStatus?: CustomerReturnCustomerLabelStatus };
+type Choice = {
+  kind: "edit" | "return" | "labels";
+  omsOrderId: number;
+  returnOperationId?: string;
+  returnOrder?: CustomerReturnCustomerOrder;
+  returnStatus?: CustomerReturnCustomerLabelStatus;
+};
 const message = (cause: unknown) => cause instanceof Error ? cause.message : "Your order could not be loaded. Please try again.";
-function AccountModal({ api, session, choice, onClose }: {
-  api: CustomerAccountTransport; session: Bootstrap; choice: Choice; onClose: () => void;
+function AccountModal({ api, session, choice, onClose, customerId }: {
+  api: CustomerAccountTransport; session: Bootstrap; choice: Choice; onClose: () => void; customerId: string;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [portalRoot, setPortalRoot] = useState<HTMLDivElement | null>(null);
@@ -41,7 +51,9 @@ function AccountModal({ api, session, choice, onClose }: {
       {error && <p role="alert" className="rounded-md border p-3 text-sm text-destructive">{error}</p>}
       <DialogPortalContainerContext.Provider value={portalRoot ?? undefined}>
         {choice.kind === "edit" ? <CustomerOrderEditor api={api} connectionId={session.connection.connectionId} omsOrderId={choice.omsOrderId}
-          actorKey={`customer:${session.session.sessionKey}`} enabled={session.connection.enabled} onBusy={setBusy} />
+          actorKey={`customer:${session.session.sessionKey}`} enabled={session.connection.enabled} onBusy={setBusy}
+          paymentOwner={customerId} returnOperationId={choice.returnOperationId}
+          onDone={() => { onClose(); window.location.reload(); }} />
           : (choice.returnOrder || choice.returnStatus) && <CustomerWorkspace embedded initialOrder={choice.returnOrder} initialStatus={choice.returnStatus} sessionKey={session.session.sessionKey!}
             transport={returnApi.current} downloadRequest={api.request} onDenied={setError} onSignedOut={onClose} />}
       </DialogPortalContainerContext.Provider>
@@ -49,7 +61,7 @@ function AccountModal({ api, session, choice, onClose }: {
     </div>
   </dialog>;
 }
-function CustomerAccount({ root, api, statusTarget, signInUrl }: { root: HTMLElement; api: CustomerAccountTransport; statusTarget: HTMLElement | null; signInUrl: string }) {
+function CustomerAccount({ root, api, statusTarget, signInUrl, customerId }: { root: HTMLElement; api: CustomerAccountTransport; statusTarget: HTMLElement | null; signInUrl: string; customerId: string }) {
   const [session, setSession] = useState<Bootstrap | null>(null);
   const [choice, setChoice] = useState<Choice | null>(null);
   const [error, setError] = useState<CustomerAccountAccessNotice | null>(null);
@@ -144,6 +156,17 @@ function CustomerAccount({ root, api, statusTarget, signInUrl }: { root: HTMLEle
       if (controller.signal.aborted) return;
       setSession(result);
       activeSession = result;
+      const paymentStorage = orderEditPaymentReturnStorage();
+      const paymentReturn = paymentStorage && loadOrderEditPaymentReturn(
+        customerId, result.connection.connectionId, paymentStorage, Date.now,
+      );
+      if (paymentReturn && rows.some(row => row.dataset.orderReference === paymentReturn.orderNumber)) {
+        setChoice(current => current ?? {
+          kind: "edit",
+          omsOrderId: paymentReturn.omsOrderId,
+          returnOperationId: paymentReturn.operationId,
+        });
+      }
       void api.returns(result.session.sessionKey!).history(null, controller.signal).then(value => {
         if (!controller.signal.aborted) { setHistory(value); setHistoryError(null); }
       }).catch(cause => { if (!controller.signal.aborted) setHistoryError(message(cause)); });
@@ -157,7 +180,7 @@ function CustomerAccount({ root, api, statusTarget, signInUrl }: { root: HTMLEle
       rows.forEach(row => observer!.observe(row));
     }).catch(cause => { if (!controller.signal.aborted) setError(customerAccountAccessNotice(cause)); });
     return () => { controller.abort(); observer?.disconnect(); rowListeners.forEach(cleanup => cleanup.forEach(remove => remove())); client.clear(); };
-  }, [api, root, attempt, client]);
+  }, [api, root, attempt, client, customerId]);
   async function showReturn(authorizationId: number, omsOrderId: number) {
     if (!session?.session.sessionKey) return;
     try {
@@ -171,7 +194,7 @@ function CustomerAccount({ root, api, statusTarget, signInUrl }: { root: HTMLEle
   </div>;
   return <QueryClientProvider client={client}>
     {accessError && (statusTarget ? createPortal(accessError, statusTarget) : accessError)}
-    {choice && session && <AccountModal key={`${choice.kind}:${choice.omsOrderId}:${choice.returnStatus?.authorizationId ?? "intake"}`} api={api} session={session} choice={choice} onClose={close} />}
+    {choice && session && <AccountModal key={`${choice.kind}:${choice.omsOrderId}:${choice.returnStatus?.authorizationId ?? "intake"}`} api={api} session={session} choice={choice} onClose={close} customerId={customerId} />}
     {session && <section className="csz-account-returns" aria-label="Your returns"><h2>Your returns</h2>
       {historyError && <p role="status">{historyError}</p>}
       {history?.returns.length === 0 && <p>You don’t have any returns yet.</p>}
@@ -194,7 +217,7 @@ if (root && mount && configElement) {
     const config = customerAccountPageConfigSchema.parse(JSON.parse(configElement.textContent ?? "null"));
     const api = createCustomerAccountTransport(config);
     const signInUrl = customerAccountSignInUrl(config.loginPath, `${window.location.pathname}${window.location.search}`);
-    createRoot(mount).render(<CustomerAccount root={root} api={api} statusTarget={statusTarget} signInUrl={signInUrl} />);
+    createRoot(mount).render(<CustomerAccount root={root} api={api} statusTarget={statusTarget} signInUrl={signInUrl} customerId={config.customerId} />);
   } catch {
     const notice = document.createElement("p"); notice.setAttribute("role", "alert");
     notice.textContent = "Order options could not be loaded. Please refresh this page.";

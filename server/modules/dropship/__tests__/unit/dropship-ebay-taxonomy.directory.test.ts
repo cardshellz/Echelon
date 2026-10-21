@@ -275,7 +275,7 @@ function credential(storeConnectionId: number, generation: string | null, enviro
     shopDomain: null,
     externalAccountId: `seller-${storeConnectionId}`,
     providerEnvironment: environment,
-    externalAccountIdentityScheme: "ebay_user_id",
+    externalAccountIdentityScheme: "provider_user_id",
     externalAccountVerifiedAt: START,
     externalDisplayName: `seller ${storeConnectionId}`,
     config: {},

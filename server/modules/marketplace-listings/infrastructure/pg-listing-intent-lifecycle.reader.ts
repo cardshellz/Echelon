@@ -102,9 +102,10 @@ async function hasPendingContent(
 export class PostgresListingIntentLifecycleReader implements ListingIntentLifecycleReader {
   constructor(private readonly pool: Pick<Pool, "connect">) {}
   async inspect(delivery: IntentDelivery, now: Date) {
+    const provider = delivery.destination.provider;
     if (
       delivery.variantIds.length > 250 ||
-      !["ebay", "shopify", "walmart"].includes(delivery.destination.provider)
+      (provider !== "ebay" && provider !== "shopify" && provider !== "walmart")
     )
       return null; // Existing scoped handoff still owns its size limit.
     const client = await this.pool.connect();
@@ -187,6 +188,7 @@ export class PostgresListingIntentLifecycleReader implements ListingIntentLifecy
             destinationKind,
             connectionId: d.connectionId,
             accountId: d.accountId!,
+            providerKey: provider,
             productId: delivery.productId,
             productVariantIds: members,
           })

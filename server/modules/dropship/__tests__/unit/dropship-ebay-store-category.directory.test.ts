@@ -125,7 +125,7 @@ function credential(): DropshipMarketplaceStoreCredentials {
     shopDomain: null,
     externalAccountId: "seller-1",
     providerEnvironment: "production",
-    externalAccountIdentityScheme: "ebay_user_id",
+    externalAccountIdentityScheme: "provider_user_id",
     externalAccountVerifiedAt: new Date("2026-08-29T12:00:00.000Z"),
     externalDisplayName: "marz_cards",
     config: {},

@@ -758,7 +758,7 @@ class FakeCredentialRepository implements DropshipMarketplaceCredentialRepositor
     shopDomain: null,
     externalAccountId: "seller-1",
     providerEnvironment: "production",
-    externalAccountIdentityScheme: "ebay_user_id",
+    externalAccountIdentityScheme: "provider_user_id",
     externalAccountVerifiedAt: new Date("2026-05-01T00:00:00.000Z"),
     externalDisplayName: "seller-1",
     config: { environment: "production", marketplaceId: "EBAY_US" },
