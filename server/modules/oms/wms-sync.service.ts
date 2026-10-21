@@ -1852,40 +1852,56 @@ export class WmsSyncService {
   /**
    * Lines materialized after the order's first reservation (late payment
    * authority, restored lines) make the order's demand differ from its active
-   * claim. reserveOrder deliberately refuses to change an existing claim, so
-   * that difference is replaced through reconcileOrderDemand, the same
-   * primitive order-edit propagation uses. Before 2026-10-08 the refusal
-   * aborted every retry of the sync before the ShipStation amend, so late
-   * lines never reached ShipStation (#63964).
+   * claim. A successful reserveOrder can replay a receipt from before demand
+   * changed, so canonical results must also cross the current-demand owner.
+   * reconcileOrderDemand validates and replaces through the existing atomic
+   * claim lifecycle; unchanged demand does not move inventory. Legacy results
+   * retain their existing reservation path.
    */
   private async reserveOrReplaceChangedClaim(
     wmsOrderId: number,
     omsOrderId: number | null,
     context: string,
   ): Promise<ReservationResult> {
+    let currentClaimId: string;
     try {
-      return await this.services.reservation.reserveOrder(wmsOrderId);
-    } catch (err: any) {
-      if (err?.code !== ACTIVE_CLAIM_REPLACEMENT_REQUIRED_CODE) throw err;
-      const replacedClaimId = String(err?.context?.claimId ?? "unknown");
-      const replacement = await this.services.reservation.reconcileOrderDemand({
-        orderId: wmsOrderId,
-        // One replacement per superseded claim: a retry replays it.
-        sourceEventId: `wms_sync_claim_replacement:${wmsOrderId}:${replacedClaimId}`,
-        demandChanged: true,
-        reason: `Order demand changed after its claim (${context}) — replacing inventory claim`,
-      });
+      const reservation = await this.services.reservation.reserveOrder(wmsOrderId);
+      if (reservation.canonicalClaimId == null) return reservation;
+      currentClaimId = reservation.canonicalClaimId;
+    } catch (error: unknown) {
+      if (reservationErrorCode(error) !== ACTIVE_CLAIM_REPLACEMENT_REQUIRED_CODE) throw error;
+      const details = typeof error === "object" && error !== null && "context" in error
+        ? error.context : null;
+      if (typeof details !== "object" || details === null || !("claimId" in details)
+        || typeof details.claimId !== "string") throw error;
+      currentClaimId = details.claimId;
+    }
+    if (!/^[1-9]\d*$/.test(currentClaimId)) {
+      throw new WmsShipmentPrerequisiteError(
+        "Canonical reservation returned an invalid claim identity.",
+        { wmsOrderId, omsOrderId, context },
+      );
+    }
+    const replacement = await this.services.reservation.reconcileOrderDemand({
+      orderId: wmsOrderId,
+      // The owner also fences by its latest claim. Context belongs in this
+      // identity because initial materialization and later sync use distinct reasons.
+      sourceEventId: `wms_sync_claim_reconciliation:${wmsOrderId}:${currentClaimId}:${context}`,
+      demandChanged: true,
+      reason: `Reconcile current order demand with its inventory claim (${context})`,
+    });
+    if (replacement.reconciled) {
       logger.info("wms_sync_claim_replaced", {
         outcome: "claim_replaced",
         oms_order_id: omsOrderId,
         wms_order_id: wmsOrderId,
-        replaced_claim_id: replacedClaimId,
+        replaced_claim_id: currentClaimId,
         context,
         reserved: replacement?.reservation?.reserved ?? 0,
         failed: replacement?.reservation?.failed?.length ?? 0,
       });
-      return replacement.reservation;
     }
+    return replacement.reservation;
   }
 
   private async reserveBeforeShipmentProcessing(
