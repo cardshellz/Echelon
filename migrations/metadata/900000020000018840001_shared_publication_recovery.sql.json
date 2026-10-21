@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000020000018840001_shared_publication_recovery.sql",
+  "generation": 20,
+  "pr": 1884,
+  "ordinal": 1,
+  "after": [
+    "0734_ebay_operator_republication_recovery.sql",
+    "900000019000018700001_listing_intent_lifecycle_disposition.sql"
+  ]
+}
