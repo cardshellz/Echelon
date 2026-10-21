@@ -5,11 +5,12 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import { fixtureForeignKeys, fixtureTable } from "./shipment-line-fixture";
 import { RFQ_CONTROLLED_MIGRATIONS } from "./rfq-controlled-acceptance-helper";
+import { RFQ_AUTHORITY_TABLES, seedRfqEditActor } from "./rfq-authority.fixture";
 
-const TABLES = [schema.products, schema.productVariants, schema.warehouses, schema.echelonSettings, schema.vendors,
+const TABLES = [...RFQ_AUTHORITY_TABLES, schema.products, schema.productVariants, schema.warehouses, schema.echelonSettings, schema.vendors,
   schema.vendorProducts, schema.purchaseOrders, schema.purchaseOrderLines, schema.poStatusHistory,
   schema.poEvents, schema.purchasingRecommendationDecisions, schema.purchasingRecommendationPoHandoffs];
-const SCHEMAS = ["catalog", "warehouse", "procurement"] as const;
+const SCHEMAS = ["identity", "catalog", "warehouse", "procurement"] as const;
 const PUBLIC_TABLES = ["financial_command_recoveries", "financial_command_results", "audit_events"] as const;
 
 /** Dedicated local database only; no application migrations or database URLs are loaded. */
@@ -67,6 +68,7 @@ export async function createControlledRfqDatabase(url: string, at: Date) {
     // the unrelated demand-event tables are outside this fixture's owner path.
     await pool.query("CREATE UNIQUE INDEX product_variants_id_product_uidx ON catalog.product_variants(id,product_id)");
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
+    await seedRfqEditActor(pool, "controlled-rfq-operator");
     ownsPublicTables = true;
     await pool.query(fixtureTable(schema.auditEvents));
     for (const migration of RFQ_CONTROLLED_MIGRATIONS) {

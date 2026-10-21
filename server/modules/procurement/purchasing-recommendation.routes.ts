@@ -9,7 +9,8 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { centsToMills, computeLineTotalCentsFromMills } from "@shared/utils/money";
 import { db } from "../../db";
-import { requirePermission } from "../../routes/middleware";
+import { requireAnyPermission, requirePermission } from "../../routes/middleware";
+import { rfqWorkListQuerySchema } from "@shared/procurement/rfq-work-list";
 import { procurementStorage } from "../procurement";
 import { inventoryStorage } from "../inventory";
 import {
@@ -1199,7 +1200,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
     }
   });
 
-  app.get("/api/purchasing/rfq-queue", requirePermission("inventory", "view"), async (_req, res) => {
+  app.get("/api/purchasing/rfq-queue", requireAnyPermission(["purchasing", "view"], ["inventory", "view"]), async (_req, res) => {
     try {
       const latestRuns = await db.select().from(purchaseRecommendationRunsTable)
         .where(eq(purchaseRecommendationRunsTable.status, "completed"))
@@ -1391,9 +1392,11 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
 
   // Bounded RFQ list. Quote revisions and draft conversions are registered
   // separately by registerRfqWorkflowRoutes through their owning service.
-  app.get("/api/purchasing/rfqs", requirePermission("inventory", "view"), async (req, res) => {
+  app.get("/api/purchasing/rfqs", requireAnyPermission(["purchasing", "view"], ["inventory", "view"]), async (req, res) => {
+    const query = rfqWorkListQuerySchema.safeParse(req.query);
+    if (!query.success) return res.status(400).json({ code: "RFQ_LIST_QUERY_INVALID", error: "Review the RFQ search, status and page parameters." });
     try {
-      const result = await listRequestForQuotes(db, { limit: req.query.limit });
+      const result = await listRequestForQuotes(db, query.data);
       res.json(result);
     } catch (error) {
       console.error("Error fetching purchasing RFQ list:", error);

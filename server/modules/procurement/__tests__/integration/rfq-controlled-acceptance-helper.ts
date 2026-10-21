@@ -10,6 +10,7 @@ import { attachSupplierSourcingCandidates } from "../../supplier-sourcing.reposi
 import { createRfqWorkflowCommands, rfqWorkflowCommandScope, RFQ_WORKFLOW_COMMAND_PRINCIPAL } from "../../rfq-workflow.commands";
 import { createRfqWorkflowService, type RfqWorkflowCommand } from "../../rfq-workflow.service";
 import type { createPurchasingService } from "../../purchasing.service";
+import { legacyRfqTestCommands } from "./rfq-authority.fixture";
 
 /** Actual migrations required by the planning snapshot and RFQ owners. */
 export const RFQ_CONTROLLED_MIGRATIONS = [
@@ -76,8 +77,8 @@ export async function createControlledRfqProposal(input: ControlledRfqProposalIn
   if (batch.rfqs.length !== 1) throw new Error("Controlled RFQ scenario requires one supplier RFQ");
   const rfqId = Number(batch.rfqs[0].id);
   const workflow = createRfqWorkflowService(input.database, input.purchasingOwner);
-  const commands = createRfqWorkflowCommands(workflow,
-    createDrizzleFinancialCommandRepository(input.database), () => input.at);
+  const commands = legacyRfqTestCommands(createRfqWorkflowCommands(workflow,
+    createDrizzleFinancialCommandRepository(input.database), () => input.at));
   function descriptor(command: RfqWorkflowCommand, key: string): FinancialCommandDescriptor {
     const scope = rfqWorkflowCommandScope(command);
     return { actorType: "service", actorId: RFQ_WORKFLOW_COMMAND_PRINCIPAL, ...scope,

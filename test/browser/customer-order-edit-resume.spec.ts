@@ -269,7 +269,7 @@ test("an uncertain resume is reconciled without repeating or applying the edit",
   page,
 }) => {
   const f = await setup(page, { loseResume: true });
-  await page.getByRole("button", { name: "Check status", exact: true }).click();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(
     page.getByRole("button", {
       name: "Apply changes · $2.47 due",

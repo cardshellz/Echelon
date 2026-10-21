@@ -1,13 +1,33 @@
 import { reviewRfqQuantity } from "../../shared/procurement/rfq-quantity-review";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Locator } from "@playwright/test";
+import { resolve } from "node:path";
 import type { RfqQuoteEvidence, RfqWorkflowDetail } from "../../shared/procurement/rfq-workflow";
 import { normalizePoLinePricing } from "../../shared/utils/po-line-pricing";
+import { rfqCommandReceiptSchema } from "../../shared/procurement/rfq-command";
+import { rfqWorkListResponseSchema, type RfqWorkListItem } from "../../shared/procurement/rfq-work-list";
 import { installFixtures } from "./procurement-fixtures";
 
 const initialVersion = "a".repeat(64);
 const nextVersion = "b".repeat(64);
 
-async function setup(page: Page, options: { canEdit?: boolean; currency?: string; lostResponse?: boolean } = {}) {
+function workListItem(workflow: RfqWorkflowDetail): RfqWorkListItem {
+  return {
+    id: workflow.id, rfqNumber: workflow.rfqNumber, status: workflow.status as RfqWorkListItem["status"], vendorId: workflow.vendorId,
+    vendorName: "Fictional supplier", requestNote: null, currency: workflow.currency, responseDueDate: null, createdBy: "rfq-reviewer",
+    createdAt: "2026-09-07T12:00:00Z", updatedAt: "2026-09-07T12:00:00Z", sentAt: null, respondedAt: null, cancelledAt: null,
+    lineCount: workflow.lines.length, requestedPiecesTotal: workflow.lines.reduce((sum, line) => sum + line.requestedPieces, 0),
+    lines: workflow.lines.map(line => ({ id: line.id, rfqId: workflow.id, recommendationLineId: line.id, recommendationRunId: 1,
+      vendorProductId: line.vendorProductId, vendorSku: null, sku: line.sku, productName: line.productName, status: line.status,
+      requestedPieces: line.requestedPieces, recommendedPieces: line.requestedPieces, purchaseUom: null, piecesPerPurchaseUom: null,
+      quantityOverrideReason: null, allocationOverrideReason: null, allocationOverrideApprovedBy: null, allocationOverrideApprovedAt: null,
+      allocationOverrideBaselinePieces: null, allocationOverrideExcessPieces: null, quotedPieces: line.latestQuote?.quotedPieces ?? null,
+      quotedUnitCostMills: line.latestQuote?.quotedUnitCostMills ?? null, quoteReference: line.latestQuote?.quote.quoteReference ?? null,
+      quoteValidUntil: line.latestQuote?.quote.quoteValidUntil ?? null, quotedAt: line.latestQuote?.quote.quotedAt ?? null })),
+    handoff: { state: "not_started", linkedLineCount: 0, remainingLineCount: workflow.lines.length, issues: [], purchaseOrders: [] },
+  };
+}
+
+async function setup(page: Page, options: { canEdit?: boolean; currency?: string; lostResponse?: boolean; list?: boolean } = {}) {
   const failures = await installFixtures(page);
   const rules = { vendorProductId: 300, minimumOrderPieces: 1, piecesPerPurchaseUom: null, packSize: 1 };
   const workflow: RfqWorkflowDetail = {
@@ -15,17 +35,28 @@ async function setup(page: Page, options: { canEdit?: boolean; currency?: string
     lines: [{ id: 20, status: "draft", productId: 100, productVariantId: 200, warehouseId: 1, vendorProductId: 300, sku: "RFQ-CASE", productName: "Fictional RFQ product", requestedPieces: 150, quantityReview: reviewRfqQuantity({ recommendationRules: rules, currentRules: rules, quotedPieces: 150 }), latestQuote: null, purchaseOrder: null }],
   };
   const commands: Array<{ path: string; key: string; body: Record<string, unknown> }> = [];
+  const secondWorkflow = structuredClone(workflow);
+  secondWorkflow.id = 11; secondWorkflow.rfqNumber = "TEST-RFQ-11"; secondWorkflow.lines[0].id = 21;
+  secondWorkflow.lines[0].sku = "RFQ-OTHER";
   const replays = new Map<string, unknown>();
   let lost = false;
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: { user: { id: "rfq-reviewer", username: "test", role: "admin" }, permissions: options.canEdit === false ? ["inventory:view"] : ["inventory:view", "purchasing:edit"], roles: ["admin"] } }));
+  const controls = { actorId: "rfq-reviewer", canEdit: options.canEdit !== false, postStatus: 0, loseNext: false, malformedNext: false, listStatus: 0, hideSecond: false };
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: { user: { id: controls.actorId, username: "test", role: "admin" }, permissions: controls.canEdit ? ["purchasing:view", "purchasing:edit"] : ["purchasing:view"], roles: ["admin"] } }));
   await page.route("**/api/purchasing/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
       // An empty recent list proves exact links are independent of pagination.
-      if (path === "/api/purchasing/rfqs") return route.fulfill({ json: { rfqs: [], count: 0, statusCounts: {}, limit: 25 } });
+      if (path === "/api/purchasing/rfqs") {
+        if (controls.listStatus) return route.fulfill({ status: controls.listStatus, json: { error: "Fixture list unavailable" } });
+        const rfqs = options.list ? [workListItem(workflow), ...(controls.hideSecond ? [] : [workListItem(secondWorkflow)])] : [];
+        const statusCounts: Record<string, number> = {};
+        for (const rfq of rfqs) statusCounts[rfq.status] = (statusCounts[rfq.status] ?? 0) + 1;
+        return route.fulfill({ json: rfqWorkListResponseSchema.parse({ rfqs, count: rfqs.length, statusCounts, limit: 25, page: { total: rfqs.length, limit: 25, offset: 0, nextOffset: null } }) });
+      }
       if (path === "/api/purchasing/rfq-queue") return route.fulfill({ json: { run: null, items: [], summary: { open: 0, partiallyAllocated: 0, fullyAllocated: 0, supplierAssignmentRequired: 0, activeRfqs: 0 } } });
       if (path === "/api/purchasing/rfqs/10") return route.fulfill({ json: workflow });
+      if (path === "/api/purchasing/rfqs/11") return route.fulfill({ json: secondWorkflow });
       if (path === "/api/purchasing/rfqs/10/lines/20/quotes") return route.fulfill({ json: { revisions: workflow.lines[0].latestQuote ? [workflow.lines[0].latestQuote] : [], nextBeforeRevision: null } });
       return route.fallback();
     }
@@ -34,8 +65,12 @@ async function setup(page: Page, options: { canEdit?: boolean; currency?: string
     const body = request.postDataJSON() as Record<string, unknown>;
     commands.push({ path, key, body });
     if (!key) return route.fulfill({ status: 400, json: { code: "MISSING_KEY", error: "Missing command identity" } });
+    expect(request.headers()["x-rfq-receipt-version"]).toBe("1");
+    if (controls.postStatus) return route.fulfill({ status: controls.postStatus, json: { code: "RFQ_AUTH_REQUIRED", error: "Current purchasing permission is required." } });
     if (replays.has(key)) return route.fulfill({ json: replays.get(key) });
-    if (body.expectedVersion !== workflow.version) return route.fulfill({ status: 409, json: { code: "RFQ_VERSION_CONFLICT", error: "This request changed; refresh before release" } });
+    const operation = path.endsWith("/quotes") ? "capture_quote" : path.endsWith("/release") ? "release" : "convert";
+    const intent = { operation, rfqId: 10, ...(operation === "capture_quote" ? { lineId: 20 } : {}), payload: body };
+    if (body.expectedVersion !== workflow.version) return route.fulfill({ status: 409, json: { code: "RFQ_VERSION_CONFLICT", error: "This request changed; refresh before release", details: { rfqCommandOutcome: "rejected", actorId: controls.actorId, idempotencyKey: key, intent } } });
     let response: unknown;
     if (path.endsWith("/release")) {
       workflow.status = "cancelled"; workflow.version = "e".repeat(64);
@@ -55,35 +90,42 @@ async function setup(page: Page, options: { canEdit?: boolean; currency?: string
       workflow.lines[0].purchaseOrder = { purchaseOrderId: 99, purchaseOrderLineId: 900, quoteRevisionId: 7, poNumber: "TEST-PO-99", status: "draft" };
       response = { rfqId: 10, purchaseOrderId: 99, poNumber: "TEST-PO-99", status: "draft", lines: [{ rfqLineId: 20, quoteRevisionId: 7, purchaseOrderLineId: 900 }] };
     }
-    replays.set(key, response);
-    if (options.lostResponse && !lost) { lost = true; return route.abort("connectionreset"); }
-    return route.fulfill({ json: response });
+    const receipt = rfqCommandReceiptSchema.parse({ version: 1, actorId: controls.actorId, idempotencyKey: key, intent, result: response });
+    replays.set(key, receipt);
+    if (controls.loseNext || (options.lostResponse && !lost)) { lost = true; controls.loseNext = false; return route.abort("connectionreset"); }
+    if (controls.malformedNext) { controls.malformedNext = false; return route.fulfill({ json: { ...receipt, actorId: "wrong-actor" } }); }
+    return route.fulfill({ json: receipt });
   });
-  await page.goto("/procurement/rfqs?rfqId=10");
-  await expect(page.getByRole("heading", { name: /TEST-RFQ-10/ })).toBeVisible();
-  return { commands, workflow, failures };
+  await page.goto(options.list ? "/procurement/rfqs" : "/procurement/rfqs?rfqId=10");
+  if (options.list) await expect(page.getByText("TEST-RFQ-10", { exact: true })).toBeVisible();
+  else await expect(page.getByRole("heading", { name: /TEST-RFQ-10/ })).toBeVisible();
+  return { commands, workflow, failures, controls };
 }
 
-async function capture(page: Page, options: { packaging?: boolean } = {}) {
+async function capture(page: Page | Locator, options: { packaging?: boolean; recover?: boolean; waitForResult?: boolean } = {}) {
+  // Radix choices are portalled outside a scoped RFQ panel.
+  const portal = "page" in page ? page.page() : page;
   await page.getByRole("button", { name: "Capture quote", exact: true }).click();
   await page.getByLabel("Quoted price basis").click();
-  await page.getByRole("option", { name: "Extended product total" }).click();
+  await portal.getByRole("option", { name: "Extended product total" }).click();
   await page.getByLabel(/^Product total/).fill("100.00");
   await page.getByLabel("Supplier quote reference").fill("VENDOR-QUOTE-1");
   await page.getByLabel("Quote date", { exact: true }).fill("2026-09-07");
   await page.getByLabel("Quote note / reason for revision").fill("Final supplier quote received");
   if (options.packaging !== false) {
     await page.getByLabel("Packaging treatment").click();
-    await page.getByRole("option", { name: "Separate amount confirmed" }).click();
+    await portal.getByRole("option", { name: "Separate amount confirmed" }).click();
     await page.getByLabel(/^Total packaging/).fill("18.00");
   }
   await page.getByRole("button", { name: "Save quote revision" }).click();
+  if (options.recover) await page.getByRole("button", { name: "Recover saved RFQ request", exact: true }).click();
+  if (options.waitForResult === false) return;
   await expect(page.getByRole("button", { name: "Revise quote" })).toBeVisible();
 }
 
 test("captures exact economics, retries a lost response and opens the linked purchase", async ({ page }, testInfo) => {
   const { commands, failures } = await setup(page, { lostResponse: true });
-  await capture(page);
+  await capture(page, { recover: true });
   expect(commands).toHaveLength(2);
   expect(commands[0].key).toBe(commands[1].key);
   expect(commands[0].body).toEqual(commands[1].body);
@@ -178,6 +220,7 @@ test("releases an abandoned request with a reason and same-key retry after respo
   await expect(release).toBeDisabled();
   await page.getByLabel("Reason for releasing the request").fill("Supplier cannot fulfill this request");
   await release.click();
+  await page.getByRole("button", { name: "Recover saved RFQ request", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: "Unconverted request reservations released" })).toBeVisible();
   expect(commands).toHaveLength(2);
   expect(commands[0]).toEqual(commands[1]);
@@ -256,5 +299,231 @@ test("holds request release when legacy ordered history lacks a verified purchas
   await page.getByRole("button", { name: "Refresh quotes", exact: true }).click();
   await expect(page.getByRole("alert").filter({ hasText: "no verified purchase-order link" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Release unconverted request", exact: true })).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
+
+for (const authStatus of [401, 403]) {
+  test(`preserves a lost quote through reload and ${authStatus} until the original receipt is recovered`, async ({ page }) => {
+    const { commands, controls, failures } = await setup(page, { lostResponse: true });
+    await capture(page, { waitForResult: false });
+    const recovery = page.getByRole("region", { name: "RFQ request recovery", exact: true });
+    await expect(recovery).toBeVisible();
+    const original = structuredClone(commands[0]);
+    await page.reload();
+    await expect(recovery).toBeVisible();
+    controls.postStatus = authStatus;
+    await recovery.getByRole("button", { name: "Recover saved RFQ request", exact: true }).click();
+    await expect.poll(() => commands.length).toBe(2);
+    await expect(recovery).toBeVisible();
+    await page.reload();
+    await expect(recovery).toBeVisible();
+    controls.postStatus = 0;
+    await recovery.getByRole("button", { name: "Recover saved RFQ request", exact: true }).click();
+    await expect(recovery.getByRole("button", { name: "Recover saved RFQ request", exact: true })).toHaveCount(0);
+    expect(commands).toEqual([original, original, original]);
+    await expect(page.getByRole("button", { name: "Revise quote" })).toBeVisible();
+    expect(failures).toEqual([]);
+  });
+}
+
+for (const operation of ["convert", "release"] as const) {
+  test(`recovers a committed ${operation} after reload without creating a new request`, async ({ page }) => {
+    const { commands, controls, failures } = await setup(page);
+    if (operation === "convert") {
+      await capture(page);
+      await page.getByRole("checkbox", { name: "Select RFQ-CASE for draft purchase order" }).check();
+    } else await page.getByLabel("Reason for releasing the request").fill("Supplier cannot fulfill the remaining request");
+    controls.loseNext = true;
+    await page.getByRole("button", { name: operation === "convert" ? "Create draft PO (1 selected)" : "Release unconverted request", exact: true }).click();
+    const recovery = page.getByRole("region", { name: "RFQ request recovery", exact: true });
+    await expect(recovery).toBeVisible();
+    const original = structuredClone(commands.at(-1));
+    await page.reload();
+    await expect(recovery).toBeVisible();
+    await recovery.getByRole("button", { name: "Recover saved RFQ request", exact: true }).click();
+    await expect(recovery.getByRole("button", { name: "Recover saved RFQ request", exact: true })).toHaveCount(0);
+    expect(commands.at(-1)).toEqual(original);
+    expect(commands.filter(command => command.path.endsWith(`/${operation}`))).toHaveLength(2);
+    if (operation === "convert") await expect(page.getByRole("link", { name: "TEST-PO-99", exact: true }).first()).toBeVisible();
+    else await expect(page.getByRole("button", { name: "Release unconverted request", exact: true })).toHaveCount(0);
+    expect(failures).toEqual([]);
+  });
+}
+
+test("retains the original actor's request while permissions or the signed-in operator change", async ({ page }) => {
+  const { commands, controls, failures } = await setup(page, { lostResponse: true });
+  await capture(page, { waitForResult: false });
+  await expect(page.getByRole("region", { name: "RFQ request recovery", exact: true })).toBeVisible();
+  const original = structuredClone(commands[0]);
+  controls.canEdit = false;
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Recover saved RFQ request", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Revise quote" })).toHaveCount(0);
+  controls.actorId = "second-operator";
+  controls.canEdit = true;
+  await page.reload();
+  await expect(page.getByRole("alert").filter({ hasText: /another operator|original operator/ }).first()).toBeVisible();
+  expect(commands).toEqual([original]);
+  controls.actorId = "rfq-reviewer";
+  await page.reload();
+  await page.getByRole("button", { name: "Recover saved RFQ request", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Recover saved RFQ request", exact: true })).toHaveCount(0);
+  expect(commands).toEqual([original, original]);
+  expect(failures).toEqual([]);
+});
+
+test("recovers the original request when another RFQ is open", async ({ page }) => {
+  const { commands, workflow, failures } = await setup(page, { lostResponse: true });
+  await capture(page, { waitForResult: false });
+  await expect(page.getByRole("region", { name: "RFQ request recovery", exact: true })).toBeVisible();
+  const second = { ...structuredClone(workflow), id: 11, rfqNumber: "TEST-RFQ-11" };
+  await page.route("**/api/purchasing/rfqs/11", route => route.fulfill({ json: second }));
+  await page.goto("/procurement/rfqs?rfqId=11");
+  await expect(page.getByRole("heading", { name: /TEST-RFQ-11/ })).toBeVisible();
+  const recovery = page.getByRole("region", { name: "RFQ request recovery", exact: true });
+  await expect(recovery.getByRole("link")).toHaveAttribute("href", "/procurement/rfqs?rfqId=10");
+  await recovery.getByRole("button", { name: "Recover saved RFQ request", exact: true }).click();
+  await expect(recovery.getByRole("button", { name: "Recover saved RFQ request", exact: true })).toHaveCount(0);
+  expect(commands).toHaveLength(2);
+  expect(commands[0]).toEqual(commands[1]);
+  await expect(page.getByRole("heading", { name: /TEST-RFQ-11/ })).toBeVisible();
+  expect(failures).toEqual([]);
+});
+
+test("retains a malformed success until a matching receipt is recovered", async ({ page }) => {
+  const { commands, controls, failures } = await setup(page);
+  controls.malformedNext = true;
+  await capture(page, { waitForResult: false });
+  await expect(page.getByRole("region", { name: "RFQ request recovery", exact: true })).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: "Recover saved RFQ request", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Recover saved RFQ request", exact: true })).toHaveCount(0);
+  expect(commands).toHaveLength(2);
+  expect(commands[0]).toEqual(commands[1]);
+  expect(failures).toEqual([]);
+});
+
+test("does not dispatch a quote when its recovery cannot be saved", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (key === "echelon:rfq-workflow:v1") throw new DOMException("Fixture storage unavailable", "QuotaExceededError");
+      return original.call(this, key, value);
+    };
+  });
+  const { commands, failures } = await setup(page);
+  await capture(page, { waitForResult: false });
+  await expect(page.getByRole("alert").filter({ hasText: /not sent|could not be saved/ }).first()).toBeVisible();
+  expect(commands).toEqual([]);
+  expect(failures).toEqual([]);
+});
+
+test("keeps recovery available when the RFQ detail read is unavailable", async ({ page }) => {
+  const { commands, failures } = await setup(page, { lostResponse: true });
+  await capture(page, { waitForResult: false });
+  await expect(page.getByRole("button", { name: "Recover saved RFQ request", exact: true })).toBeVisible();
+  await page.route("**/api/purchasing/rfqs/10", route => route.fulfill({ status: 503, json: { error: "Fixture read unavailable" } }));
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Recover saved RFQ request", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Recover saved RFQ request", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Recover saved RFQ request", exact: true })).toHaveCount(0);
+  expect(commands).toHaveLength(2);
+  expect(commands[0]).toEqual(commands[1]);
+  expect(failures).toEqual([]);
+});
+
+async function openRecoveryHarness(page: Page) {
+  await page.route("**/__rfq-recovery", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1" /><script type="module">import RefreshRuntime from '/@react-refresh'; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;</script></head><body><div id="root"></div><script type="module" src="/@fs/${resolve("test/browser/fixtures/rfq-recovery-harness.tsx").replaceAll("\\", "/")}"></script></body></html>` }));
+  await page.goto("/__rfq-recovery");
+  await expect(page.getByRole("region", { name: "First RFQ panel", exact: true }).getByRole("button", { name: "Capture quote", exact: true })).toBeVisible();
+}
+
+test("revoking permission closes the mutation gate of an already open quote editor", async ({ page }) => {
+  const { commands, controls, failures } = await setup(page);
+  await openRecoveryHarness(page);
+  const panel = page.getByRole("region", { name: "First RFQ panel", exact: true });
+  await panel.getByRole("button", { name: "Capture quote", exact: true }).click();
+  await expect(panel.getByRole("button", { name: "Save quote revision", exact: true })).toBeEnabled();
+  controls.canEdit = false;
+  await page.getByRole("button", { name: "Refresh fixture permissions", exact: true }).click();
+  await expect(panel.getByRole("button", { name: "Save quote revision", exact: true })).toBeDisabled();
+  await expect(panel.getByLabel("Supplier quote reference")).toBeDisabled();
+  expect(commands).toEqual([]);
+  expect(failures).toEqual([]);
+});
+
+test("two mounted RFQ panels share recovery and both observe its verified completion", async ({ page }) => {
+  const { commands, failures } = await setup(page, { lostResponse: true });
+  await openRecoveryHarness(page);
+  const first = page.getByRole("region", { name: "First RFQ panel", exact: true });
+  const second = page.getByRole("region", { name: "Second RFQ panel", exact: true });
+  await capture(first, { waitForResult: false });
+  await expect(page.getByRole("button", { name: "Recover saved RFQ request", exact: true })).toBeVisible();
+  await expect(second.getByRole("button", { name: "Revise quote", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Recover saved RFQ request", exact: true }).click();
+  await expect(first.getByRole("button", { name: "Save quote revision", exact: true })).toHaveCount(0);
+  await expect(second.getByRole("button", { name: "Revise quote", exact: true })).toBeEnabled();
+  await first.getByRole("checkbox", { name: "Select RFQ-CASE for draft purchase order" }).check();
+  await expect(first.getByRole("button", { name: "Create draft PO (1 selected)", exact: true })).toBeEnabled();
+  expect(commands).toHaveLength(2);
+  expect(commands[0]).toEqual(commands[1]);
+  expect(failures).toEqual([]);
+});
+
+test("completion in another panel preserves an unsubmitted quote draft for renewed review", async ({ page }) => {
+  const { commands, failures } = await setup(page);
+  await openRecoveryHarness(page);
+  const first = page.getByRole("region", { name: "First RFQ panel", exact: true });
+  const second = page.getByRole("region", { name: "Second RFQ panel", exact: true });
+  await second.getByRole("button", { name: "Capture quote", exact: true }).click();
+  await second.getByLabel("Supplier quote reference").fill("UNSUBMITTED-SECOND-DRAFT");
+  await capture(first);
+  await expect(first.getByRole("button", { name: "Save quote revision", exact: true })).toHaveCount(0);
+  await expect(second.getByLabel("Supplier quote reference")).toHaveValue("UNSUBMITTED-SECOND-DRAFT");
+  await expect(second.getByRole("button", { name: "Save quote revision", exact: true })).toBeDisabled();
+  await expect(second.getByText(/Your unsaved values are retained/)).toBeVisible();
+  expect(commands).toHaveLength(1);
+  expect(failures).toEqual([]);
+});
+
+test("tracking list refresh failures and disappearing rows preserve other opened RFQ drafts", async ({ page }) => {
+  const { controls, commands, failures } = await setup(page, { list: true });
+  await page.getByRole("button", { name: "Expand TEST-RFQ-10", exact: true }).click();
+  await page.getByRole("button", { name: "Expand TEST-RFQ-11", exact: true }).click();
+  const first = page.getByRole("region", { name: "Opened RFQ TEST-RFQ-10", exact: true });
+  const second = page.getByRole("region", { name: "Opened RFQ TEST-RFQ-11", exact: true });
+  await second.getByRole("button", { name: "Capture quote", exact: true }).click();
+  await second.getByLabel("Supplier quote reference").fill("UNSENT-OTHER-RFQ");
+  controls.listStatus = 503;
+  await capture(first);
+  await expect(page.getByRole("button", { name: "Reload quote requests", exact: true })).toBeVisible();
+  await expect(second.getByLabel("Supplier quote reference")).toHaveValue("UNSENT-OTHER-RFQ");
+  await expect(second.getByRole("button", { name: "Save quote revision", exact: true })).toBeDisabled();
+  controls.listStatus = 0;
+  controls.hideSecond = true;
+  await page.getByRole("button", { name: "Reload quote requests", exact: true }).click();
+  await expect(page.getByRole("navigation", { name: "RFQs pages" })).toContainText("1–1 of 1 RFQs");
+  await expect(second.getByLabel("Supplier quote reference")).toHaveValue("UNSENT-OTHER-RFQ");
+  await expect(second.getByRole("button", { name: "Save quote revision", exact: true })).toBeEnabled();
+  expect(commands).toHaveLength(1);
+  expect(failures).toEqual([]);
+});
+
+test("a failed detail refresh preserves unsent quote values and disables submission until recovery", async ({ page }) => {
+  const { workflow, commands, failures } = await setup(page);
+  await page.getByRole("button", { name: "Capture quote", exact: true }).click();
+  await page.getByLabel("Supplier quote reference").fill("UNSENT-REFRESH-DRAFT");
+  let broken = true;
+  await page.route("**/api/purchasing/rfqs/10", route => route.fulfill(broken
+    ? { status: 503, json: { error: "Fixture detail read unavailable" } } : { json: workflow }));
+  await page.getByRole("button", { name: "Refresh quotes", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: /refresh|load/i }).first()).toBeVisible();
+  await expect(page.getByLabel("Supplier quote reference")).toHaveValue("UNSENT-REFRESH-DRAFT");
+  await expect(page.getByRole("button", { name: "Save quote revision", exact: true })).toBeDisabled();
+  broken = false;
+  await page.getByRole("button", { name: "Refresh quotes", exact: true }).click();
+  await expect(page.getByLabel("Supplier quote reference")).toHaveValue("UNSENT-REFRESH-DRAFT");
+  await expect(page.getByRole("button", { name: "Save quote revision", exact: true })).toBeEnabled();
+  expect(commands).toEqual([]);
   expect(failures).toEqual([]);
 });

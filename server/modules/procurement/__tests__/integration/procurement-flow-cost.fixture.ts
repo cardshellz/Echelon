@@ -6,6 +6,7 @@ import pg from "pg";
 import * as schema from "@shared/schema";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
+import { RFQ_AUTHORITY_TABLES, seedRfqEditActor } from "./rfq-authority.fixture";
 
 export const FLOW_ACTOR = "controlled-procurement-flow";
 export const FLOW_AT = new Date("2026-09-10T12:00:00.000Z");
@@ -16,6 +17,7 @@ export const FLOW_IDS = {
 } as const;
 
 const TABLES = [
+  ...RFQ_AUTHORITY_TABLES,
   schema.products, schema.productVariants, schema.vendors, schema.vendorProducts,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.poStatusHistory, schema.poEvents,
   schema.poApprovalTiers, schema.poExceptions, schema.purchasingRecommendationDecisions,
@@ -76,7 +78,7 @@ export async function createFlowCostHarness(url: string) {
     lease = await pool.connect();
     const lock = await lease.query("SELECT pg_try_advisory_lock(hashtext('echelon.procurement.controlled-flow')) AS acquired");
     if (!lock.rows[0]?.acquired) throw new Error("Another FLOW test owns this database");
-    for (const name of ["catalog", "procurement", "warehouse", "inventory", "wms", "oms"]) {
+    for (const name of ["identity", "catalog", "procurement", "warehouse", "inventory", "wms", "oms"]) {
       // An existing schema is a hard failure. Cleanup drops only owned objects.
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
@@ -93,6 +95,7 @@ export async function createFlowCostHarness(url: string) {
       CREATE UNIQUE INDEX purchase_order_lines_po_id_line_id_uidx
         ON procurement.purchase_order_lines(purchase_order_id,id)`);
     for (const foreignKey of fixtureForeignKeys(TABLES)) await pool.query(foreignKey);
+    await seedRfqEditActor(pool, FLOW_ACTOR);
     await installPreOpeningQuantityAuthorityFixture(pool);
     await pool.query(`
       CREATE TABLE inventory.availability_runtime_authority (

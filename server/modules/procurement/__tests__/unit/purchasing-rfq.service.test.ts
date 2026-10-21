@@ -1,3 +1,5 @@
+import type { RfqWorkListDatabase, RfqWorkListExecutor } from "../../rfq-work-list.repository";
+import { rfqListHeader, rfqListLine } from "../fixtures/rfq-work-list.fixture";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildPurchasingRfqQueue,
@@ -117,248 +119,62 @@ describe("purchasing RFQ queue", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Read-only RFQ tracking list (GET /api/purchasing/rfqs)
-// ---------------------------------------------------------------------------
-
-function fakeChain(rows: any[]) {
-  const chain: any = {
-    from: vi.fn(() => chain),
-    where: vi.fn(() => chain),
-    orderBy: vi.fn(() => chain),
-    innerJoin: vi.fn(() => chain),
-    leftJoin: vi.fn(() => chain),
-    limit: vi.fn().mockResolvedValue(rows),
-    then: (resolve: (value: any[]) => unknown, reject?: (reason: unknown) => unknown) =>
-      Promise.resolve(rows).then(resolve, reject),
-  };
-  return chain;
+function listDatabase(headers: unknown[], lines: unknown[] = [], links: unknown[] = [], total = headers.length) {
+  const execute = vi.fn<RfqWorkListExecutor["execute"]>()
+    .mockResolvedValueOnce({ rows: [{ total: String(total) }] }).mockResolvedValueOnce({ rows: headers })
+    .mockResolvedValueOnce({ rows: lines }).mockResolvedValueOnce({ rows: links });
+  const database: RfqWorkListDatabase = { transaction: vi.fn(async work => work({ execute })) };
+  return { database, execute };
 }
 
 describe("RFQ tracking list", () => {
-  it("clamps untrusted limit values to a bounded window", () => {
+  it("validates a bounded page and rejects malformed filters before database access", async () => {
     expect(parseRfqListLimit(undefined)).toBe(RFQ_LIST_DEFAULT_LIMIT);
-    expect(parseRfqListLimit("")).toBe(RFQ_LIST_DEFAULT_LIMIT);
-    expect(parseRfqListLimit("abc")).toBe(RFQ_LIST_DEFAULT_LIMIT);
-    expect(parseRfqListLimit(0)).toBe(RFQ_LIST_DEFAULT_LIMIT);
-    expect(parseRfqListLimit(-5)).toBe(RFQ_LIST_DEFAULT_LIMIT);
     expect(parseRfqListLimit("10")).toBe(10);
-    expect(parseRfqListLimit(5000)).toBe(RFQ_LIST_MAX_LIMIT);
+    expect(parseRfqListLimit(RFQ_LIST_MAX_LIMIT)).toBe(100);
+    const { database } = listDatabase([]);
+    for (const limit of ["", "abc", 0, -5, 5000, "10suffix", "1.5", ["10"]]) {
+      await expect(listRequestForQuotes(database, { limit })).rejects.toThrow();
+    }
+    await expect(listRequestForQuotes(database, { status: "unknown" })).rejects.toThrow();
+    expect(database.transaction).not.toHaveBeenCalled();
   });
-
-  it("returns an empty page without issuing line or vendor queries", async () => {
-    const headerChain = fakeChain([]);
-    const dbClient = { select: vi.fn().mockReturnValueOnce(headerChain) };
-
-    const result = await listRequestForQuotes(dbClient, { limit: "abc" });
-
-    expect(result).toEqual({ limit: RFQ_LIST_DEFAULT_LIMIT, count: 0, statusCounts: {}, rfqs: [] });
-    expect(dbClient.select).toHaveBeenCalledTimes(1);
-    expect(headerChain.limit).toHaveBeenCalledWith(RFQ_LIST_DEFAULT_LIMIT);
+  it("returns an empty page and matching total without issuing line or link queries", async () => {
+    const { database, execute } = listDatabase([]);
+    expect(await listRequestForQuotes(database)).toEqual({ limit: 25, count: 0, statusCounts: {}, rfqs: [], page: { total: 0, limit: 25, offset: 0, nextOffset: null } });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(database.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "repeatable read", accessMode: "read only" });
   });
-
-  it("lists RFQs newest-first with joined lines, vendor names, and piece totals", async () => {
-    const createdA = new Date("2026-07-21T10:00:00.000Z");
-    const createdB = new Date("2026-07-18T09:00:00.000Z");
-    const headerChain = fakeChain([
-      {
-        id: 42,
-        rfqNumber: "RFQ-2026-0042",
-        vendorId: 7,
-        status: "draft",
-        requestNote: "Quote delivered pricing",
-        currency: "USD",
-        responseDueDate: "2026-07-30",
-        createdBy: "buyer-17",
-        createdAt: createdA,
-        updatedAt: createdA,
-        sentAt: null,
-        respondedAt: null,
-        cancelledAt: null,
-      },
-      {
-        id: 41,
-        rfqNumber: "RFQ-2026-0041",
-        vendorId: 9,
-        status: "draft",
-        requestNote: null,
-        currency: "USD",
-        responseDueDate: null,
-        createdBy: null,
-        createdAt: createdB,
-        updatedAt: createdB,
-        sentAt: null,
-        respondedAt: null,
-        cancelledAt: null,
-      },
-    ]);
-    const lineChain = fakeChain([
-      {
-        id: 501,
-        rfqId: 42,
-        recommendationLineId: 11,
-        recommendationRunId: 3,
-        vendorProductId: 44,
-        vendorSku: "SUP-302",
-        sku: "SKU-RED",
-        productName: "Red Card Shell",
-        status: "draft",
-        requestedPieces: 96,
-        recommendedPieces: 96,
-        purchaseUom: "case",
-        piecesPerPurchaseUom: 12,
-        quantityOverrideReason: null,
-        allocationOverrideReason: null,
-        allocationOverrideApprovedBy: null,
-        allocationOverrideApprovedAt: null,
-        allocationOverrideBaselinePieces: null,
-        allocationOverrideExcessPieces: null,
-        quotedPieces: null,
-        quotedUnitCostMills: null,
-        quoteReference: null,
-        quoteValidUntil: null,
-        quotedAt: null,
-      },
-      {
-        id: 502,
-        rfqId: 42,
-        recommendationLineId: 12,
-        recommendationRunId: 3,
-        vendorProductId: 45,
-        vendorSku: null,
-        sku: "SKU-BLUE",
-        productName: "Blue Card Shell",
-        status: "draft",
-        requestedPieces: 125,
-        recommendedPieces: 100,
-        purchaseUom: null,
-        piecesPerPurchaseUom: null,
-        quantityOverrideReason: "Build safety stock for launch",
-        allocationOverrideReason: "Build safety stock for launch",
-        allocationOverrideApprovedBy: "buyer-17",
-        allocationOverrideApprovedAt: createdA,
-        allocationOverrideBaselinePieces: 100,
-        allocationOverrideExcessPieces: 25,
-        quotedPieces: null,
-        quotedUnitCostMills: null,
-        quoteReference: null,
-        quoteValidUntil: null,
-        quotedAt: null,
-      },
-      {
-        id: 503,
-        rfqId: 41,
-        recommendationLineId: 13,
-        recommendationRunId: 2,
-        vendorProductId: 46,
-        vendorSku: "ALT-9",
-        sku: "SKU-GREEN",
-        productName: "Green Card Shell",
-        status: "draft",
-        requestedPieces: 50,
-        recommendedPieces: 50,
-        purchaseUom: null,
-        piecesPerPurchaseUom: null,
-        quantityOverrideReason: null,
-        allocationOverrideReason: null,
-        allocationOverrideApprovedBy: null,
-        allocationOverrideApprovedAt: null,
-        allocationOverrideBaselinePieces: null,
-        allocationOverrideExcessPieces: null,
-        quotedPieces: null,
-        quotedUnitCostMills: null,
-        quoteReference: null,
-        quoteValidUntil: null,
-        quotedAt: null,
-      },
-    ]);
-    const vendorChain = fakeChain([
-      { id: 7, name: "Supply Co" },
-      { id: 9, name: "Shell Works" },
-    ]);
-    const dbClient = {
-      select: vi.fn()
-        .mockReturnValueOnce(headerChain)
-        .mockReturnValueOnce(lineChain)
-        .mockReturnValueOnce(vendorChain),
-    };
-
-    const result = await listRequestForQuotes(dbClient, { limit: 10 });
-
-    expect(headerChain.limit).toHaveBeenCalledWith(10);
-    expect(result.limit).toBe(10);
-    expect(result.count).toBe(2);
-    expect(result.statusCounts).toEqual({ draft: 2 });
-    expect(result.rfqs.map((rfq) => rfq.rfqNumber)).toEqual(["RFQ-2026-0042", "RFQ-2026-0041"]);
-
-    const [first, second] = result.rfqs;
-    expect(first).toMatchObject({
-      id: 42,
-      status: "draft",
-      vendorId: 7,
-      vendorName: "Supply Co",
-      responseDueDate: "2026-07-30",
-      lineCount: 2,
-      requestedPiecesTotal: 221,
-    });
-    expect(first.lines[0]).toMatchObject({
-      sku: "SKU-RED",
-      productName: "Red Card Shell",
-      vendorSku: "SUP-302",
-      requestedPieces: 96,
-      recommendedPieces: 96,
-      status: "draft",
-      quantityOverrideReason: null,
-    });
-    // Override evidence passes through untouched for the workbench indicators.
-    expect(first.lines[1]).toMatchObject({
-      quantityOverrideReason: "Build safety stock for launch",
-      allocationOverrideApprovedBy: "buyer-17",
-      allocationOverrideBaselinePieces: 100,
-      allocationOverrideExcessPieces: 25,
-    });
-    expect(second).toMatchObject({
-      id: 41,
-      vendorName: "Shell Works",
-      lineCount: 1,
-      requestedPiecesTotal: 50,
-    });
+  it("preserves joined lines, supplier names, piece totals and original override evidence", async () => {
+    const header = rfqListHeader();
+    const second = rfqListHeader({ id: 41, rfqNumber: "RFQ-2026-0041", vendorName: "Shell Works" });
+    const firstLine = rfqListLine();
+    const overridden = rfqListLine({ id: 502, requestedPieces: 125, quantityOverrideReason: "Build safety stock for launch", allocationOverrideApprovedBy: "buyer-17", allocationOverrideBaselinePieces: 100, allocationOverrideExcessPieces: 25 });
+    const { database } = listDatabase([header, second], [firstLine, overridden, rfqListLine({ id: 503, rfqId: 41, requestedPieces: 50 })]);
+    const result = await listRequestForQuotes(database, { limit: 10 });
+    expect(result.limit).toBe(10); expect(result.count).toBe(2); expect(result.statusCounts).toEqual({ draft: 2 });
+    expect(result.rfqs.map(rfq => rfq.rfqNumber)).toEqual(["RFQ-2026-0042", "RFQ-2026-0041"]);
+    expect(result.rfqs[0]).toMatchObject({ id: 42, vendorId: 7, vendorName: "Supply Co", responseDueDate: "2026-07-30", lineCount: 2, requestedPiecesTotal: 221 });
+    expect(result.rfqs[0].lines).toEqual([firstLine, overridden]);
+    expect(result.rfqs[1]).toMatchObject({ id: 41, vendorName: "Shell Works", lineCount: 1, requestedPiecesTotal: 50 });
   });
-
-  it("keeps an RFQ visible with a null vendor name when the vendor row is missing", async () => {
-    const createdAt = new Date("2026-07-21T10:00:00.000Z");
-    const dbClient = {
-      select: vi.fn()
-        .mockReturnValueOnce(fakeChain([{
-          id: 42,
-          rfqNumber: "RFQ-2026-0042",
-          vendorId: 7,
-          status: "sent",
-          requestNote: null,
-          currency: "USD",
-          responseDueDate: null,
-          createdBy: null,
-          createdAt,
-          updatedAt: createdAt,
-          sentAt: createdAt,
-          respondedAt: null,
-          cancelledAt: null,
-        }]))
-        .mockReturnValueOnce(fakeChain([]))
-        .mockReturnValueOnce(fakeChain([])),
-    };
-
-    const result = await listRequestForQuotes(dbClient, {});
-
-    // A non-draft status is passed through, not masked — the page renders
-    // whatever the row actually says.
+  it("keeps null supplier names and stored non-draft statuses visible", async () => {
+    const { database } = listDatabase([rfqListHeader({ vendorName: null, status: "sent" })]);
+    const result = await listRequestForQuotes(database);
     expect(result.statusCounts).toEqual({ sent: 1 });
-    expect(result.rfqs[0]).toMatchObject({
-      vendorName: null,
-      status: "sent",
-      lineCount: 0,
-      requestedPiecesTotal: 0,
-      lines: [],
-    });
+    expect(result.rfqs[0]).toMatchObject({ vendorName: null, status: "sent", lineCount: 0, requestedPiecesTotal: 0 });
+  });
+  it("retains page-only status counts separately from all matching rows", async () => {
+    const { database } = listDatabase([rfqListHeader({ status: "quoted" })], [], [], 4);
+    const result = await listRequestForQuotes(database, { limit: 1, offset: 2 });
+    expect(result).toMatchObject({ count: 1, statusCounts: { quoted: 1 }, page: { total: 4, limit: 1, offset: 2, nextOffset: 3 } });
+  });
+  it("normalizes stored timestamps and exact bigint money without rounding unsafe values", async () => {
+    const first = listDatabase([{ ...rfqListHeader(), createdAt: new Date("2026-07-21T10:00:00.000Z"), updatedAt: "2026-07-21 06:00:00-04" }], [{ ...rfqListLine(), quotedUnitCostMills: "9007199254740991" }]);
+    const result = await listRequestForQuotes(first.database);
+    expect(result.rfqs[0].lines[0].quotedUnitCostMills).toBe(Number.MAX_SAFE_INTEGER);
+    expect(result.rfqs[0].updatedAt).toBe("2026-07-21T10:00:00.000Z");
+    const bad = listDatabase([rfqListHeader()], [{ ...rfqListLine(), quotedUnitCostMills: "9007199254740993" }]);
+    await expect(listRequestForQuotes(bad.database)).rejects.toThrow();
   });
 });

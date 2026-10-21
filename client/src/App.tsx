@@ -555,7 +555,7 @@ function Router() {
             requests created from the Order Builder + the sourcing
             requirement queue. */}
         <Route path="/procurement/rfqs">
-          <ProtectedRoute component={ProcurementRfqs} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ProcurementRfqs} anyOfPermissions={[{ resource: "purchasing", action: "view" }, { resource: "inventory", action: "view" }]} />
         </Route>
         <Route path="/replenishment">
           <ProtectedRoute component={Replenishment} allowedRoles={["admin", "lead"]} />

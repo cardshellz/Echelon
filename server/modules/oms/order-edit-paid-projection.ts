@@ -16,6 +16,7 @@ import { OrderEditError } from "../order-edits/domain/order-edit-error";
 import { wmsOmsOrderIdSql } from "./oms-wms-order-link.sql";
 import { buildOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 import { appendOrderEditAudit } from "../order-edits/infrastructure/order-edit-audit.writer";
+import { buildOrderEditPaidPricing } from "./order-edit-paid-pricing";
 
 const integer = z.coerce.number().int().nonnegative().safe();
 const positive = integer.refine((value) => value > 0);
@@ -339,28 +340,13 @@ export class OrderEditPaidProjection {
           "A Shopify line's exact channel variant mapping is not verified.",
         );
     }
-    const gross = cents(
-      snapshot.lines.reduce(
-        (total, line) =>
-          total + BigInt(line.originalUnitPriceCents) * BigInt(line.quantity),
-        BigInt(0),
-      ),
-    );
-    const discount = cents(BigInt(gross) - BigInt(snapshot.subtotalCents));
-    if (
-      snapshot.lines.reduce(
-        (total, line) => total + BigInt(line.totalCents),
-        BigInt(0),
-      ) !== BigInt(snapshot.subtotalCents) ||
-      BigInt(snapshot.subtotalCents) +
-        BigInt(snapshot.shippingCents) +
-        BigInt(snapshot.taxCents) !==
-        BigInt(snapshot.totalCents)
-    )
-      reject(
-        "ORDER_EDIT_PROJECTION_TOTALS_INVALID",
-        "The verified current line prices do not add up to the order total.",
-      );
+    const pricing = buildOrderEditPaidPricing({
+      ...snapshot,
+      productPrices: snapshot.codePricing?.lines,
+      originalLineIds: document.baseline.lines.map(line => line.id),
+    });
+    const gross = pricing.grossCents;
+    const discount = pricing.discountCents;
     const sourceEventId = `order-edit:${operationId}:${snapshot.fingerprint.slice(0, 16)}`;
     // The scoped database fence accepts only this validated operation's certified
     // writes; ordinary stale webhook replays cannot replace its paid authority.
@@ -371,27 +357,18 @@ export class OrderEditPaidProjection {
     let changed = false;
     for (const line of lines) {
       const target = expected.get(numericId(line.external_line_item_id))!;
-      const lineDiscount = cents(
-        BigInt(target.originalUnitPriceCents) * BigInt(target.quantity) -
-          BigInt(target.totalCents),
-      );
-      // Preserve the existing normalizer's categories: accepted originals have
-      // verified automatic discounts (coupon), while the provider applies new
-      // member prices as manual line discounts (plan). Other promotions cannot
-      // reach a verified quote in this pilot.
-      const original = document.baseline.lines.some(
-        (entry) => entry.id === target.id,
-      );
-      const planDiscount = original ? 0 : lineDiscount;
-      const couponDiscount = original ? lineDiscount : 0;
+      const price = pricing.lines.get(target.id)!;
+      const lineDiscount = price.discountCents;
+      const planDiscount = price.planDiscountCents;
+      const couponDiscount = price.couponDiscountCents;
       if (
         line.authorized_by_event_id === sourceEventId &&
         line.paid_quantity === target.quantity &&
         line.authority_fulfillable_quantity === target.quantity &&
         line.fulfillable_quantity === target.quantity &&
-        line.paid_price_cents === target.discountedUnitPriceCents &&
+        line.paid_price_cents === price.unitNetCents &&
         line.retail_price_cents === target.originalUnitPriceCents &&
-        line.total_price_cents === target.totalCents &&
+        line.total_price_cents === price.netCents &&
         line.total_discount_cents === lineDiscount &&
         line.plan_discount_cents === planDiscount &&
         line.coupon_discount_cents === couponDiscount
@@ -409,9 +386,9 @@ export class OrderEditPaidProjection {
           now,
           sourceEventId,
           TOPIC,
-          target.discountedUnitPriceCents,
+          price.unitNetCents,
           target.originalUnitPriceCents,
-          target.totalCents,
+          price.netCents,
           lineDiscount,
           planDiscount,
           couponDiscount,
@@ -590,14 +567,6 @@ export class OrderEditPaidProjection {
       ],
     );
   }
-}
-function cents(value: bigint): number {
-  if (value < BigInt(0) || value > BigInt(Number.MAX_SAFE_INTEGER))
-    reject(
-      "ORDER_EDIT_PROJECTION_TOTALS_INVALID",
-      "A current order amount is outside the supported exact range.",
-    );
-  return Number(value);
 }
 function reject(code: string, message: string): never {
   throw new OrderEditError(code, message);
