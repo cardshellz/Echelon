@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Pool, PoolClient } from "pg";
 import { PgDropshipMarketplaceCredentialRepository } from "../../infrastructure/dropship-marketplace-credentials";
+import { DropshipError } from "../../domain/errors";
 
 vi.hoisted(() => {
   process.env.DATABASE_URL = process.env.DATABASE_URL ?? "postgres://test:test@localhost:5432/test";
@@ -448,12 +449,124 @@ describe("credential generation and refresh coordination guards", () => {
   });
 });
 
+// The database CHECK dropship_store_connections_stable_identity_chk (migration 0609)
+// admits only NULL or 'provider_user_id'. The loader must agree with it exactly.
+describe("stored seller account identity scheme", () => {
+  function schemeHarness(connection: Record<string, unknown>) {
+    const queries: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      queries.push(sql);
+      if (sql.includes("FROM dropship.dropship_store_connections")) return { rows: [makeConnectionRow(connection)] };
+      if (sql.includes("FROM dropship.dropship_store_connection_tokens")) return { rows: [makeSealedTokenRow("access", "access-ref", "sealed")] };
+      if (sql.includes("SELECT COUNT(*) AS count")) return { rows: [{ count: "0" }] };
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const pool = { connect: vi.fn(async () => ({ query, release })) } as unknown as Pool;
+    const tokenCipher = {
+      seal: vi.fn(() => makeSealedTokenRow("access", "access-ref", "sealed")),
+      open: vi.fn(() => "opened-access-token"),
+    };
+    const repository = new PgDropshipMarketplaceCredentialRepository(pool, { tokenCipher });
+    return { repository, queries, release, tokenCipher };
+  }
+  const verifiedAt = new Date("2026-10-01T00:00:00.000Z");
+
+  it("loads a legacy connection with no stored scheme as null", async () => {
+    const { repository, tokenCipher } = schemeHarness({ external_account_identity_scheme: null });
+    await expect(repository.loadForStoreConnection(identityInput)).resolves.toMatchObject({
+      externalAccountIdentityScheme: null,
+      externalAccountVerifiedAt: null,
+      accessToken: "opened-access-token",
+    });
+    expect(tokenCipher.open).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads a verified provider_user_id connection unchanged", async () => {
+    const { repository } = schemeHarness({
+      external_account_identity_scheme: "provider_user_id",
+      external_account_verified_at: verifiedAt,
+    });
+    await expect(repository.loadForStoreConnection(identityInput)).resolves.toMatchObject({
+      externalAccountId: "seller-1",
+      providerEnvironment: "production",
+      externalAccountIdentityScheme: "provider_user_id",
+      externalAccountVerifiedAt: verifiedAt,
+    });
+  });
+
+  it.each([
+    ["the pre-fix reader literal", "ebay_user_id", "ebay_user_id", "string"],
+    ["the Shopify grant scheme", "shop_domain", "shop_domain", "string"],
+    ["the legacy username marker", "legacy_username", "legacy_username", "string"],
+    ["an empty string", "", "", "string"],
+    ["a case variant", "PROVIDER_USER_ID", "PROVIDER_USER_ID", "string"],
+    ["a padded value", " provider_user_id", " provider_user_id", "string"],
+    ["a column missing from the row", undefined, null, "missing"],
+  ])("refuses %s permanently before opening any token", async (_name, scheme, reported, schemeType) => {
+    const { repository, queries, release, tokenCipher } = schemeHarness({
+      external_account_identity_scheme: scheme,
+      external_account_verified_at: verifiedAt,
+    });
+    const error = await repository.loadForStoreConnection(identityInput).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(DropshipError);
+    expect(error).toMatchObject({
+      code: "DROPSHIP_STORE_IDENTITY_SCHEME_UNSUPPORTED",
+      context: {
+        vendorId: 10,
+        storeConnectionId: 22,
+        platform: "ebay",
+        identityScheme: reported,
+        identitySchemeType: schemeType,
+        retryable: false,
+      },
+    });
+    expect(tokenCipher.open).not.toHaveBeenCalled();
+    expect(queries).toContain("ROLLBACK");
+    expect(queries).not.toContain("COMMIT");
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds a long unsupported scheme in the error context", async () => {
+    const { repository } = schemeHarness({ external_account_identity_scheme: "x".repeat(500) });
+    await expect(repository.loadForStoreConnection(identityInput)).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_IDENTITY_SCHEME_UNSUPPORTED",
+      context: { identityScheme: "x".repeat(40) },
+    });
+  });
+
+  it("rolls back a token replacement for a row with an unsupported scheme", async () => {
+    const { repository, queries, release } = schemeHarness({
+      status: "refresh_failed",
+      external_account_identity_scheme: "ebay_user_id",
+      external_account_verified_at: verifiedAt,
+    });
+    await expect(repository.replaceTokens({
+      ...identityInput,
+      accessToken: "new-access-token",
+      refreshToken: null,
+      accessTokenExpiresAt: null,
+      now: new Date("2026-10-20T12:00:00.000Z"),
+    })).rejects.toMatchObject({ code: "DROPSHIP_STORE_IDENTITY_SCHEME_UNSUPPORTED", context: { retryable: false } });
+    expect(queries).toContain("ROLLBACK");
+    expect(queries).not.toContain("COMMIT");
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+const identityInput = { vendorId: 10, storeConnectionId: 22, platform: "ebay" as const };
+
 function makeConnectionRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 22,
     vendor_id: 10,
     platform: "ebay",
     external_account_id: "seller-1",
+    // The selected columns are always present on a real row; NULL scheme is a
+    // legacy (unverified) connection, which the DB CHECK admits.
+    provider_environment: "production",
+    external_account_identity_scheme: null,
+    external_account_verified_at: null,
     external_display_name: "seller-1",
     shop_domain: null,
     access_token_ref: "access-ref",

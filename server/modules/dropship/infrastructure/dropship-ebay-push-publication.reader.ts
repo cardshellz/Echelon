@@ -5,7 +5,10 @@ import type { DropshipMarketplaceStoreCredentials } from "./dropship-marketplace
 import type { EbayDiscoveredPublishedListing } from "../../channels/listing-connectors/ebay-listing.connector";
 import { observeExistingEbayPublication } from "../../channels/ebay-existing-listing-identity";
 import type { MarketplaceListingRegistrationObserver } from "../../marketplace-listings/application/registration-ports";
-import type { MarketplaceObservedListingPublication } from "../../marketplace-listings/domain/listing-registration-plan";
+import {
+  MARKETPLACE_PROVIDER_IDENTITY_SCHEME,
+  type MarketplaceObservedListingPublication,
+} from "../../marketplace-listings/domain/listing-registration-plan";
 import type { EbayListingConnectorDraft } from "../../channels/listing-connectors/ebay-listing.connector";
 import { resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-token-owner";
 import { ebayProviderAccountNamespace } from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
@@ -78,9 +81,14 @@ export class PostgresDropshipEbayPushPublicationReader implements DropshipEbayPu
     return observation;
   }
 
+  /** The store's verified eBay user id is the only account evidence adoption accepts.
+   * The scheme is the one every writer stores and the database CHECK
+   * dropship_store_connections_stable_identity_chk (migration 0609) admits. Comparing
+   * against any other literal refuses every store, so it uses the shared constant. */
   private account(request: { vendorId: number; storeConnectionId: number }, credential: DropshipMarketplaceStoreCredentials): string {
     if (credential.vendorId !== request.vendorId || credential.storeConnectionId !== request.storeConnectionId
-      || credential.platform !== "ebay" || !credential.externalAccountId || credential.externalAccountIdentityScheme !== "ebay_user_id"
+      || credential.platform !== "ebay" || !credential.externalAccountId?.trim()
+      || credential.externalAccountIdentityScheme !== MARKETPLACE_PROVIDER_IDENTITY_SCHEME
       || !credential.externalAccountVerifiedAt)
       throw new DropshipError("DROPSHIP_EBAY_PUBLICATION_ACCOUNT_UNVERIFIED", "The published offer cannot be adopted without this store's verified eBay account. Reconnect the intended store account.", { retryable: false });
     return credential.externalAccountId;

@@ -40,6 +40,11 @@ import {
 } from "./dropship-ebay-auth-failure";
 import { DropshipEbayTokenOwner, resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-token-owner";
 import type { DropshipEbayPushPublicationReader } from "./dropship-ebay-push-publication.reader";
+import {
+  EBAY_CONNECTOR_ACCESS_TOKEN_REJECTED_STATUS,
+  isEbayConnectorAccessTokenRejection,
+  translateEbayConnectorError,
+} from "./dropship-ebay-connector-errors";
 import type {
   DropshipEbayFulfillmentPolicyGuard,
   DropshipEbayFulfillmentPolicyPreflight,
@@ -145,6 +150,8 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       config,
       this.listingBuilder,
     );
+    // The shared connector refuses with EbayListingSyncError, which the worker
+    // cannot classify; see rethrowConnectorFailure.
     const connectorResult = await this.listingConnector.pushListing({
       client: this.createConnectorClient({ credential, config, baseUrl }),
       resolvePublishedIdentity: this.existingPublication
@@ -168,7 +175,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         },
         updateOfferAfterCreate: true,
       },
-    });
+    }).catch((error: unknown) => this.rethrowConnectorFailure(credential, error));
 
     const offerId =
       connectorResult.externalOfferIds[input.productVariantId] ?? null;
@@ -570,6 +577,35 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       message: "eBay listing push returned invalid JSON.",
     });
     } finally { deadline.dispose(); }
+  }
+
+  /**
+   * Translate a shared connector refusal so the worker files permanent ones as
+   * not retryable (dropship-ebay-connector-errors.ts).
+   *
+   * The identity observer borrows the stored access token from the same token
+   * owner, right after this provider's own GET succeeded with it, and reports a
+   * 401 as EBAY_AUTH_REQUIRED. Record that rejection exactly as
+   * throwListingHttpError records a 401 on this provider's own calls, so the
+   * next attempt refreshes the token instead of reusing it; the error stays
+   * retryable. The record is guarded by the credential this push loaded: if the
+   * stored token has changed since, the repository refuses with
+   * DROPSHIP_CREDENTIAL_CHANGED (retryable) and that refusal is what surfaces,
+   * as it does on the HTTP path. Nothing is swallowed either way.
+   */
+  private async rethrowConnectorFailure(credential: DropshipMarketplaceStoreCredentials,error: unknown): Promise<never> {
+    const translated = translateEbayConnectorError(error);
+    if (isEbayConnectorAccessTokenRejection(translated)) {
+      await recordEbayAccessTokenRejection({
+        credentials: this.credentials,
+        credential,
+        status: EBAY_CONNECTOR_ACCESS_TOKEN_REJECTED_STATUS,
+        failureCode: translated.code,
+        message: translated.message,
+        now: this.clock.now(),
+      });
+    }
+    throw translated;
   }
 
   private async throwListingHttpError(credential: DropshipMarketplaceStoreCredentials,status: number,text: string,endpoint: string): Promise<never> {
