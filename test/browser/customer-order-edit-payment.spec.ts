@@ -116,7 +116,10 @@ function operation(
     error: null,
   };
 }
-async function setup(page: Page) {
+async function setup(page: Page, options: {
+  openEditor?: boolean;
+  orderRead?: () => Promise<OrderEditOrder | null>;
+} = {}) {
   await page.clock.install({ time: new Date("2026-10-21T12:00:00Z") });
   const requests: CustomerAccountRequest[] = [];
   const errors: string[] = [];
@@ -167,10 +170,16 @@ async function setup(page: Page) {
       return route.fulfill({
         json: { returns: [], nextBeforeAuthorizationId: null },
       });
-    if (input.path === "/order-edits/orders/1")
-      return route.fulfill({
-        json: { ...order, activeOperationId: activeOperation },
+    if (input.path === "/order-edits/orders/1") {
+      const currentOrder = options.orderRead ? await options.orderRead() : order;
+      if (!currentOrder) return route.fulfill({
+        status: 503,
+        json: { error: { code: "ORDER_READ_UNAVAILABLE", message: "Synthetic order read failure" } },
       });
+      return route.fulfill({
+        json: { ...currentOrder, activeOperationId: activeOperation },
+      });
+    }
     if (
       input.path === `/order-edits/operations/${id}/reconcile` &&
       retryResult
@@ -211,6 +220,7 @@ async function setup(page: Page) {
     <script type="module">import RefreshRuntime from '/@react-refresh'; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;</script></head>
     <body><main data-csz-customer-account><div data-csz-account-tools-status></div>
       <article data-csz-account-order data-order-reference="#fixture" data-external-order-id="99" data-fulfillment="unfulfilled" data-cancelled="false">
+        <span data-csz-order-total role="status"></span>
         <button data-csz-account-action="edit" hidden>Edit order</button><p data-csz-order-tools-status></p>
       </article><div id="csz-customer-account-tools"></div></main>
       <script id="csz-customer-account-config" type="application/json">${JSON.stringify({ themeId: "174740308127", customerId: "100", proxyPath: "/apps/echelon-returns" })}</script>
@@ -219,10 +229,12 @@ async function setup(page: Page) {
     }),
   );
   await page.goto("/account?preview_theme_id=174740308127");
-  await page.getByRole("button", { name: "Edit order", exact: true }).click();
-  await expect(
-    page.getByRole("link", { name: "Pay the difference", exact: true }),
-  ).toBeVisible();
+  if (options.openEditor !== false) {
+    await page.getByRole("button", { name: "Edit order", exact: true }).click();
+    await expect(
+      page.getByRole("link", { name: "Pay the difference", exact: true }),
+    ).toBeVisible();
+  }
   return {
     requests,
     errors,
@@ -270,6 +282,54 @@ async function setup(page: Page) {
       expect(errors).toEqual([]);
     },
   };
+}
+
+test("account totals wait for the owned current financial facts without submitting an edit", async ({ page }) => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const fixture = await setup(page, {
+    openEditor: false,
+    orderRead: async () => {
+      await pending;
+      return { ...order, totalCents: after.totalCents, financials: after };
+    },
+  });
+  const total = page.locator("[data-csz-order-total]");
+  await expect(total).toHaveText("Checking total…");
+  release();
+  await expect(total).toHaveText("$10.76 USD");
+  fixture.assertNoFinancialCommands();
+});
+
+test("account totals recover from a failed current read through an explicit read-only retry", async ({ page }) => {
+  let reads = 0;
+  const fixture = await setup(page, {
+    openEditor: false,
+    orderRead: async () => ++reads === 1 ? null : order,
+  });
+  const total = page.locator("[data-csz-order-total]");
+  await expect(total).toHaveText("Total unavailable");
+  await page.getByRole("button", { name: "Retry order actions", exact: true }).click();
+  await expect(total).toHaveText("$8.29 USD");
+  expect(reads).toBe(2);
+  fixture.assertNoFinancialCommands();
+});
+
+for (const mismatch of [
+  { name: "connection", value: { connectionId: 5 } },
+  { name: "order identity", value: { omsOrderId: 2 } },
+  { name: "order number", value: { orderNumber: "#other" } },
+  { name: "financial total", value: { totalCents: 830 } },
+]) {
+  test(`account totals reject a mismatched ${mismatch.name}`, async ({ page }) => {
+    const fixture = await setup(page, {
+      openEditor: false,
+      orderRead: async () => ({ ...order, ...mismatch.value }),
+    });
+    await expect(page.locator("[data-csz-order-total]")).toHaveText("Total unavailable");
+    await expect(page.getByRole("button", { name: "Edit order", exact: true })).toBeHidden();
+    fixture.assertNoFinancialCommands();
+  });
 }
 
 test("payment stays in the same tab and the verified completed edit reopens after returning", async ({

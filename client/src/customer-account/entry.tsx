@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { DialogPortalContainerContext } from "@/components/ui/dialog";
 import { CustomerWorkspace } from "@/pages/CustomerReturnCustomerPortal";
 import { CustomerOrderEditor } from "./CustomerOrderEditor";
+import { CustomerAccountOrderTotals, type CustomerOrderTotalsState } from "./CustomerAccountOrderTotals";
 import {
   loadOrderEditPaymentReturn,
   orderEditPaymentReturnStorage,
@@ -66,6 +67,7 @@ function CustomerAccount({ root, api, statusTarget, signInUrl, customerId }: { r
   const [choice, setChoice] = useState<Choice | null>(null);
   const [error, setError] = useState<CustomerAccountAccessNotice | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [totals, setTotals] = useState<ReadonlyMap<HTMLElement, CustomerOrderTotalsState>>(new Map());
   const [history, setHistory] = useState<Awaited<ReturnType<ReturnType<CustomerAccountTransport["returns"]>["history"]>> | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } }));
@@ -79,6 +81,10 @@ function CustomerAccount({ root, api, statusTarget, signInUrl, customerId }: { r
     const queued: HTMLElement[] = [];
     const seen = new Set<HTMLElement>();
     let activeSession: Bootstrap | null = null;
+    const setRowTotals = (row: HTMLElement, state: CustomerOrderTotalsState) => {
+      if (!controller.signal.aborted) setTotals(previous => new Map(previous).set(row, state));
+    };
+    setTotals(new Map(rows.map(row => [row, { status: "loading" as const }])));
     setError(null);
     setSession(null);
     setHistory(null);
@@ -94,6 +100,7 @@ function CustomerAccount({ root, api, statusTarget, signInUrl, customerId }: { r
       }
     }
     async function inspect(row: HTMLElement) {
+      setRowTotals(row, { status: "loading" });
       rowListeners.get(row)?.forEach(remove => remove());
       const cleanup: Array<() => void> = [];
       rowListeners.set(row, cleanup);
@@ -123,12 +130,22 @@ function CustomerAccount({ root, api, statusTarget, signInUrl, customerId }: { r
         const editable = row.dataset.fulfillment !== "fulfilled" && row.dataset.cancelled !== "true";
         const canHaveReturn = ["fulfilled", "partial"].includes(row.dataset.fulfillment ?? "") && row.dataset.cancelled !== "true";
         const results = await Promise.allSettled([
-          editable ? api.edits.order(identity.connectionId, identity.omsOrderId, controller.signal) : Promise.resolve(null),
+          // Current financial facts are required even when editing is unavailable.
+          api.edits.order(identity.connectionId, identity.omsOrderId, controller.signal),
           canHaveReturn ? api.returns(currentSession.session.sessionKey!).order(identity.omsOrderId, controller.signal) : Promise.resolve(null),
         ]);
         if (controller.signal.aborted) return;
         const editResult = results[0];
         const returnResult = results[1];
+        if (editResult.status === "fulfilled") {
+          const order = editResult.value;
+          if (order.connectionId !== identity.connectionId || order.omsOrderId !== identity.omsOrderId
+            || order.orderNumber !== row.dataset.orderReference
+            || (order.financials && order.financials.totalCents !== order.totalCents)) {
+            throw new Error("We couldn't verify the current order total. Please try again.");
+          }
+          setRowTotals(row, { status: "verified", order });
+        } else setRowTotals(row, { status: "failed" });
         const bind = (kind: "edit" | "return", returnOrder?: CustomerReturnCustomerOrder) => {
           const button = row.querySelector<HTMLButtonElement>(`[data-csz-account-action="${kind}"]`);
           if (!button) return;
@@ -137,7 +154,7 @@ function CustomerAccount({ root, api, statusTarget, signInUrl, customerId }: { r
           button.addEventListener("click", click);
           cleanup.push(() => button.removeEventListener("click", click));
         };
-        if (editResult.status === "fulfilled" && editResult.value && (editResult.value.activeOperationId || (currentSession.connection.enabled && editResult.value.eligibility.editable))) {
+        if (editable && editResult.status === "fulfilled" && editResult.value && (editResult.value.activeOperationId || (currentSession.connection.enabled && editResult.value.eligibility.editable))) {
           bind("edit");
           const address = row.querySelector<HTMLElement>("[data-csz-account-action='address']");
           if (address && editResult.value.eligibility.editable && !editResult.value.activeOperationId) address.hidden = false;
@@ -145,10 +162,11 @@ function CustomerAccount({ root, api, statusTarget, signInUrl, customerId }: { r
         if (returnResult.status === "fulfilled" && returnResult.value?.order.lines.some(line => line.eligibleQuantity > 0)) bind("return", returnResult.value);
         const failed = results.some(result => result.status === "rejected");
         if (status) status.textContent = failed ? "We couldn't check the available actions for this order. Please try again."
-          : editResult.status === "fulfilled" && editResult.value && !editResult.value.eligibility.editable
+          : editable && editResult.status === "fulfilled" && editResult.value && !editResult.value.eligibility.editable
             ? editResult.value.eligibility.reasons[0] ?? "This order can no longer be edited." : "";
         if (failed) offerRetry();
       } catch (cause) {
+        setRowTotals(row, { status: "failed" });
         if (!controller.signal.aborted && status) { status.textContent = message(cause); offerRetry(); }
       }
     }
@@ -178,7 +196,10 @@ function CustomerAccount({ root, api, statusTarget, signInUrl, customerId }: { r
         schedule();
       }, { rootMargin: "200px" });
       rows.forEach(row => observer!.observe(row));
-    }).catch(cause => { if (!controller.signal.aborted) setError(customerAccountAccessNotice(cause)); });
+    }).catch(cause => { if (!controller.signal.aborted) {
+      setError(customerAccountAccessNotice(cause));
+      setTotals(new Map(rows.map(row => [row, { status: "failed" as const }])));
+    } });
     return () => { controller.abort(); observer?.disconnect(); rowListeners.forEach(cleanup => cleanup.forEach(remove => remove())); client.clear(); };
   }, [api, root, attempt, client, customerId]);
   async function showReturn(authorizationId: number, omsOrderId: number) {
@@ -193,6 +214,7 @@ function CustomerAccount({ root, api, statusTarget, signInUrl, customerId }: { r
       : <button type="button" className="csz-action" onClick={() => setAttempt(value => value + 1)}>Try again</button>}
   </div>;
   return <QueryClientProvider client={client}>
+    <CustomerAccountOrderTotals root={root} states={totals} />
     {accessError && (statusTarget ? createPortal(accessError, statusTarget) : accessError)}
     {choice && session && <AccountModal key={`${choice.kind}:${choice.omsOrderId}:${choice.returnStatus?.authorizationId ?? "intake"}`} api={api} session={session} choice={choice} onClose={close} customerId={customerId} />}
     {session && <section className="csz-account-returns" aria-label="Your returns"><h2>Your returns</h2>
