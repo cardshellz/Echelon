@@ -1,5 +1,6 @@
 import { ebayListingPushRequestSchema, ebayListingPushService } from "../../modules/channels/ebay-listing-push";
-import { syncActiveListings } from "../../modules/channels/ebay-listing-sync";
+import { PostgresEbayListingRecoveryContinuation } from "../../modules/channels/infrastructure/ebay-listing-recovery-continuation";
+import { ebayListingSyncRepository, syncActiveListings } from "../../modules/channels/ebay-listing-sync";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -53,7 +54,7 @@ const feedInventory = new EbayListingFeedInventoryService(atpService, {
 });
 const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncService,
   new EbayPublicationRecoveryService(new PostgresEbayPublicationRecoveryRepository(pool), () => new Date()),
-  (productId, actor, commandKey) => syncActiveListings({ productIds: [productId] }, actor, commandKey), readEbayPushRecoveryIdentity);
+  new PostgresEbayListingRecoveryContinuation(pool, ebayListingSyncRepository), readEbayPushRecoveryIdentity);
 
 interface ListingFeedVariant {
   id: number;

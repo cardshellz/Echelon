@@ -12,7 +12,7 @@ vi.mock("../../ebay-utils", () => ({ EBAY_CHANNEL_ID: 67, getAuthService: vi.fn(
   atpService: { getAtpPerVariant: fixture.getQuantities } }));
 vi.mock("../../../../modules/channels/infrastructure/ebay-listing-helpers", () => ({ resolveChannelPrice: fixture.price }));
 vi.mock("../../../../modules/channels/ebay-listing-push", () => ({ ebayListingPushRequestSchema: {}, ebayListingPushService: {}, readEbayPushRecoveryIdentity: vi.fn() }));
-vi.mock("../../../../modules/channels/ebay-listing-sync", () => ({ syncActiveListings: vi.fn(), ebayListingSyncService: {}, EbayListingRecoveryService: class {} }));
+vi.mock("../../../../modules/channels/ebay-listing-sync", () => ({ syncActiveListings: vi.fn(), ebayListingSyncRepository: {}, ebayListingSyncService: {}, EbayListingRecoveryService: class {} }));
 vi.mock("../../../../modules/inventory-planning/quantity-publication", () => ({ EbayPublicationRecoveryService: class {}, PostgresEbayPublicationRecoveryRepository: class {} }));
 vi.mock("../../../../modules/channels/variant-availability-sync.service", () => ({ queueVariantAvailabilityRepair: vi.fn() }));
 vi.mock("../../ebay-listing-connector-client", () => ({ createEbayRouteListingClient: vi.fn() }));

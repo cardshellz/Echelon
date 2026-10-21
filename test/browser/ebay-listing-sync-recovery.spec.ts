@@ -675,6 +675,50 @@ const preview = {
   }],
 };
 
+
+for (const phase of ["needs_attention", "recovering"] as const) {
+  test(`a ${phase} provider read exposes diagnostics and reaches unreceipted legacy recovery`, async ({ page }, info) => {
+    const state = await setupEbayChannelPage(page);
+    state.jobs = [{ ...job, operation: "sync", state: phase, code: "EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID",
+      message: "old invalid registration observation response", providerRead: {
+        provider: "ebay", resource: "offers", method: "GET", kind: "invalid_response", httpStatus: 200,
+        requestId: "provider-read-123", issues: [{ path: "offers.0.offerId", code: "invalid_type" }],
+      }, issue: resolveEbayListingIssue({ code: "OLD_UNCLASSIFIED_ERROR", message: "old card" }) }];
+    const legacyPreview = { ...preview, attempts: [{ ...preview.attempts[0], requests: [] }] };
+    const confirmations: unknown[] = [];
+    await page.route(`**/api/ebay/listings/sync-jobs/${job.id}/recovery`, route => {
+      if (route.request().method() === "GET") return route.fulfill({ json: legacyPreview });
+      confirmations.push(route.request().postDataJSON());
+      state.jobs = [{ ...job, operation: "sync" }];
+      return route.fulfill({ json: { attemptIds: ["16323"], replayed: false, providerWriteAttempted: false, job: state.jobs[0] } });
+    });
+    await page.reload(); await page.clock.install();
+    await expect(page.getByRole("status", { name: statusName })).toContainText(phase === "recovering" ? "Retrying the listing check" : "The listing check could not finish");
+    await expect(page.getByText("old card", { exact: true })).toHaveCount(0);
+    // The secondary recovery action and diagnostics must remain reachable from
+    // live status, even when its primary action only refreshes that saved status.
+    await page.getByRole("button", { name: "View update status", exact: true }).filter({ visible: true }).first().click();
+    await page.getByRole("dialog").getByText("Technical details", { exact: true }).click();
+    await expect(page.getByRole("dialog").getByText("offers.0.offerId: invalid_type", { exact: true })).toBeVisible();
+    await expect(page.getByRole("dialog").getByText("provider-read-123", { exact: true })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Review earlier requests", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("No request or response receipt was retained by the older workflow");
+    const resume = dialog.getByRole("button", { name: "Resume with current inventory", exact: true });
+    await expect(resume).toBeDisabled(); expect(confirmations).toEqual([]);
+    await dialog.getByRole("checkbox").check();
+    await page.screenshot({ path: info.outputPath(`legacy-read-recovery-${phase}.png`), fullPage: true });
+    await resume.click();
+    await expect(dialog.getByRole("heading", { name: "Listing update status", exact: true })).toBeVisible();
+    await expect(dialog.getByRole("status")).toContainText("Queued for eBay");
+    state.jobs = [{ ...job, operation: "sync", state: "completed" }];
+    await page.clock.fastForward(10_100);
+    await expect(dialog.getByRole("status")).toContainText("Listing and pictures verified.");
+    expect(confirmations).toEqual([{ previewHash: preview.previewHash, acknowledgeUnknownOutcome: true, idempotencyKey: expect.stringMatching(/^[a-f0-9-]{36}$/) }]);
+    expect(state.requests).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  });
+}
+
 test("continuing a saved publication with no unresolved attempts returns to normal Sync progress", async ({ page }) => {
   const state = await setupEbayChannelPage(page);
   state.feedStatus = "publication_incomplete";

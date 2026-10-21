@@ -1,3 +1,4 @@
+import { providerReadDiagnosticFromError, providerReadShouldRetry } from "@shared/channel-provider-read";
 import { ChannelPricingResolutionError } from "./channel-pricing-resolver";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -167,7 +168,8 @@ export function syncFailure(
 } {
   const { code } = ebayListingFailureDiagnostic(error);
   const waiting = WAIT_CODES.has(code);
-  const retrying =
+  const readFailure = providerReadDiagnosticFromError(error);
+  const retrying = readFailure ? providerReadShouldRetry(readFailure, attempts) :
     waiting || AUTOMATIC_RECOVERY_CODES.has(code) ||
     ((RETRY_CODES.has(code) || code === "EBAY_LISTING_SYNC_FAILED") &&
       attempts < SYNC_RETRY_LIMIT);
@@ -181,7 +183,10 @@ export function syncFailure(
       : NaN;
   const minimum =
     now.getTime() + Math.min(15 * 60_000, 30_000 * 2 ** Math.min(attempts, 5));
-  const message = code === "INVENTORY_PUBLICATION_TARGET_BUSY"
+  const message = readFailure
+    ? readFailure.kind === "refused" ? "The channel refused the listing read. Review the saved read diagnostic before retrying."
+      : "Echelon could not read a complete, valid listing response. Existing write evidence remains protected."
+    : code === "INVENTORY_PUBLICATION_TARGET_BUSY"
     ? "An inventory update is using this listing. The saved listing update will retry automatically."
     : code === "CANONICAL_PUBLICATION_MAPPING_MISSING"
       ? "Inventory setup stopped this listing update before its pictures could be confirmed. Retry Sync to prepare this listing's inventory connection."
