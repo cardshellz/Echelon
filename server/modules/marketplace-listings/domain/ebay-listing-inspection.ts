@@ -1,9 +1,11 @@
+import type { ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
 import type { MarketplaceObservedListingPublication, MarketplaceProviderAccountObservation } from "./listing-registration-plan";
 
 export interface EbayListingInspectionIssue {
   readonly code: string; readonly message: string; readonly status?: number;
   readonly sku?: string; readonly listingId?: string; readonly groupKey?: string; readonly listingStatus?: string;
   readonly groupVariantSkus?: readonly string[];
+  readonly providerRead?: ChannelProviderReadDiagnostic;
 }
 export interface EbayListingInspectedOffer {
   readonly sku: string | null;

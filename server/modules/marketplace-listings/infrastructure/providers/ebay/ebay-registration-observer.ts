@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { providerReadDiagnosticFromError } from "@shared/channel-provider-read";
+import { ebayReadDiagnostic, ebayReadFailureKind } from "./ebay-read-diagnostic";
 
 import { listingRegistrationOwnerSnapshotSchema } from "../../../application/registration-dtos";
 import type {
@@ -371,7 +373,7 @@ export class EbayMarketplaceRegistrationObserver
     const parsed = parseProviderResponse(
       identityResponseSchema,
       response.body,
-      "identity",
+      "identity", response,
     );
     return {
       provider: EBAY_PROVIDER,
@@ -588,7 +590,7 @@ export class EbayMarketplaceRegistrationObserver
     const parsed = parseProviderResponse(
       inventoryItemResponseSchema,
       response.body,
-      "inventory_item",
+      "inventory_item", response,
     );
     if (parsed.sku !== undefined && parsed.sku !== sku) {
       throw observationError(
@@ -628,7 +630,7 @@ export class EbayMarketplaceRegistrationObserver
     return parseProviderResponse(
       inventoryItemGroupResponseSchema,
       response.body,
-      "inventory_item_group",
+      "inventory_item_group", response,
     );
   }
 
@@ -659,7 +661,7 @@ export class EbayMarketplaceRegistrationObserver
       const page = parseProviderResponse(
         offersPageSchema,
         response.body,
-        "offers",
+        "offers", response,
       );
       if (page.total !== undefined) {
         if (expectedTotal !== null && expectedTotal !== page.total) {
@@ -934,7 +936,8 @@ function assertSuccessfulRead(
     throw observationError(
       "EBAY_REGISTRATION_PROVIDER_READ_FAILED",
       "An eBay read required for registration failed.",
-      { resource, status: response.status, ...context },
+      { resource, status: response.status, ...context,
+        providerRead: ebayReadDiagnostic(resource, ebayReadFailureKind(response.status), response) },
     );
   }
 }
@@ -943,6 +946,7 @@ function parseProviderResponse<T>(
   schema: z.ZodType<T>,
   value: unknown,
   resource: string,
+  response: EbayRegistrationReadResponse,
 ): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
@@ -951,6 +955,7 @@ function parseProviderResponse<T>(
       "eBay returned an invalid registration observation response.",
       {
         resource,
+        providerRead: ebayReadDiagnostic(resource, "invalid_response", response, parsed.error.issues),
         issues: parsed.error.issues.map((issue) => ({
           path: issue.path.join("."),
           code: issue.code,
@@ -1057,6 +1062,7 @@ function inspectionIssue(error: unknown): EbayListingInspectionIssue {
   const context = error.context;
   const safeText = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 255;
   return { code: error.code, message: error.message,
+    ...(providerReadDiagnosticFromError(error) ? { providerRead: providerReadDiagnosticFromError(error) } : {}),
     ...(typeof context.status === "number" ? { status: context.status } : {}),
     ...(safeText(context.sku) ? { sku: context.sku } : {}),
     ...(safeText(context.listingId) ? { listingId: context.listingId } : {}),

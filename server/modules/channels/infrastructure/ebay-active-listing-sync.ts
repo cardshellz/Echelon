@@ -500,8 +500,9 @@ const existingListingConnector = new EbayMarketplaceListingConnector({
   inventoryDelayMs: 200,
   offerDelayMs: 200,
 });
+export const ebayListingSyncRepository = new PostgresEbayListingSyncRepository(pool, ebayPublicationRejectionReader);
 export const ebayListingSyncService = new EbayListingSyncService(
-  new PostgresEbayListingSyncRepository(pool, ebayPublicationRejectionReader),
+  ebayListingSyncRepository,
   new EbayWithdrawalOperationExecution(new EbayListingOperationExecution(new EbayExistingListingSyncExecution(
     prepareActiveEbayListingSync,
     quantityProviderResponseRecovery,

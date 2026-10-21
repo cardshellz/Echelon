@@ -1,3 +1,4 @@
+import { ebayReadDiagnostic } from "./ebay-read-diagnostic";
 import { sha256Canonical } from "../../../domain/canonical-hash";
 import { MarketplaceListingRegistrationError } from "../../../domain/registration-errors";
 import type { ListingOwnerRef } from "../../../domain/listing-replacement-plan";
@@ -68,6 +69,7 @@ export interface EbayRegistrationReadRequest {
 export interface EbayRegistrationReadResponse {
   readonly status: number;
   readonly body: unknown;
+  readonly requestId?: string;
 }
 
 /** Deliberately GET-only provider boundary for preview and confirmation. */
@@ -153,6 +155,7 @@ export class FetchEbayRegistrationReadTransport
         {
           environment: request.environment,
           path: url.pathname,
+          providerRead: ebayReadDiagnostic(url.pathname.startsWith("/commerce/") ? "identity" : url.pathname.split("/")[4]!, "invalid_response", { status: response.status }),
         },
       );
       let body: unknown = null;
@@ -163,7 +166,8 @@ export class FetchEbayRegistrationReadTransport
           body = responseText;
         }
       }
-      return { status: response.status, body };
+      const requestId = response.headers.get("x-ebay-c-request-id") ?? response.headers.get("rlogid");
+      return { status: response.status, body, ...(requestId ? { requestId } : {}) };
     } catch (error) {
       if (error instanceof MarketplaceListingRegistrationError) throw error;
       throw registrationError(
@@ -178,6 +182,7 @@ export class FetchEbayRegistrationReadTransport
           path: url.pathname,
           ...(timedOut ? { timeoutMs: this.timeoutMs } : {}),
           errorName: error instanceof Error ? error.name : "UnknownError",
+          providerRead: ebayReadDiagnostic(url.pathname.startsWith("/commerce/") ? "identity" : url.pathname.split("/")[4]!, "unavailable"),
         },
       );
     } finally {

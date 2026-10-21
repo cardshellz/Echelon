@@ -1,3 +1,4 @@
+import { providerReadDiagnosticFromError, providerReadShouldRetry } from "@shared/channel-provider-read";
 import { ChannelPricingResolutionError } from "./channel-pricing-resolver";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -167,7 +168,8 @@ export function syncFailure(
 } {
   const { code } = ebayListingFailureDiagnostic(error);
   const waiting = WAIT_CODES.has(code);
-  const retrying =
+  const readFailure = providerReadDiagnosticFromError(error);
+  const retrying = readFailure ? providerReadShouldRetry(readFailure, attempts) :
     waiting || AUTOMATIC_RECOVERY_CODES.has(code) ||
     ((RETRY_CODES.has(code) || code === "EBAY_LISTING_SYNC_FAILED") &&
       attempts < SYNC_RETRY_LIMIT);
