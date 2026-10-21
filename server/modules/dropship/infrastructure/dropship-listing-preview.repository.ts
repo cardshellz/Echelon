@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import { parseCatalogVariantUomType } from "../domain/listing-tiers";
+import { LIVE_LISTING_STATUSES } from "../domain/listing-live-status";
 import type {
   CreateDropshipListingPushJobRepositoryInput,
   CreateDropshipListingPushJobRepositoryResult,
@@ -883,16 +884,40 @@ async function upsertVendorListingForPreview(
     return null;
   }
   const status = row.previewStatus === "blocked" ? "blocked" : "queued";
+  // A listing already live on its marketplace keeps its status: queueing an
+  // update changes nothing buyers see, and orders are accepted only for live
+  // statuses (domain/listing-live-status). Decided on the conflicting row under
+  // the upsert's own row lock, so a concurrent push outcome cannot interleave.
+  // The other columns are still written here on purpose:
+  // - last_preview_hash names the queued item; the worker refuses an item whose
+  //   hash no longer matches it (validateWorkerItemReadiness, PREVIEW_DRIFT);
+  // - vendor_retail_price_cents carries a request-local price to the push-time
+  //   refresh, which rebuilds the preview without request prices and resolves
+  //   the listing's saved price (refreshQueuedListingIntent -> resolveListingPrice
+  //   existingListingPriceCents); keeping the old value would publish the old price.
+  //   A blocked preview queues no push (its item is blocked, and an ops retry
+  //   requeues failed items only), so an existing row keeps its price: no reader
+  //   may take a price nothing will send as the listing's (order acceptance's
+  //   fallback price, the cost change controls' settings price);
+  // - quantity_cap and metadata have no reader that decides anything.
   const result = await client.query<{ id: number }>(
-    `INSERT INTO dropship.dropship_vendor_listings
+    `INSERT INTO dropship.dropship_vendor_listings AS existing
       (vendor_id, store_connection_id, product_variant_id, platform, status,
        vendor_retail_price_cents, pushed_quantity, quantity_cap, last_preview_hash,
        metadata, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9::jsonb, $10, $10)
      ON CONFLICT (store_connection_id, product_variant_id)
      DO UPDATE SET
-       status = EXCLUDED.status,
-       vendor_retail_price_cents = EXCLUDED.vendor_retail_price_cents,
+       status = CASE
+         WHEN NULLIF(BTRIM(existing.external_listing_id), '') IS NOT NULL
+           AND existing.status = ANY($11::text[])
+         THEN existing.status
+         ELSE EXCLUDED.status
+       END,
+       vendor_retail_price_cents = CASE
+         WHEN EXCLUDED.status = 'blocked' THEN existing.vendor_retail_price_cents
+         ELSE EXCLUDED.vendor_retail_price_cents
+       END,
        quantity_cap = EXCLUDED.quantity_cap,
        last_preview_hash = EXCLUDED.last_preview_hash,
        metadata = EXCLUDED.metadata,
@@ -915,6 +940,7 @@ async function upsertVendorListingForPreview(
          businessPolicySelection: row.businessPolicySelection,
        }),
       input.now,
+      [...LIVE_LISTING_STATUSES],
     ],
   );
   return result.rows[0]?.id ?? null;

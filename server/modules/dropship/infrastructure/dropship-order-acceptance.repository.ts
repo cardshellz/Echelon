@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
+import { isLiveListingStatus } from "../domain/listing-live-status";
 import { vendorOrderAdmissionFor } from "../domain/vendor-standing";
 import {
   decideDropshipCatalogOrderAvailability,
@@ -2934,7 +2935,8 @@ function assertListingCandidateCanAccept(
     now: Date;
   },
 ): void {
-  if (!["active", "drift_detected", "paused"].includes(candidate.listingStatus)) {
+  // The live statuses a push never moves a listing out of (domain/listing-live-status).
+  if (!isLiveListingStatus(candidate.listingStatus)) {
     throw new DropshipError(
       "DROPSHIP_ORDER_LISTING_NOT_ACCEPTABLE",
       "Dropship order line listing is not in an acceptable status.",

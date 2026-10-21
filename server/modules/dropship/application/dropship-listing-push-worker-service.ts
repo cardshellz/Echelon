@@ -316,6 +316,28 @@ export class DropshipListingPushWorkerService {
           },
         });
       }
+      if (classified.needsStockSetup) {
+        // ERROR: Card Shellz has to finish stock setup (mapping or plan) for
+        // this listing; the vendor cannot fix it and a re-queue is refused the
+        // same way. The item carries requiresReview in its stored context.
+        this.deps.logger.error({
+          code: "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_STOCK_SETUP",
+          message: "A listing push item is refused until Card Shellz finishes stock setup for the listing.",
+          context: {
+            jobId: claim.job.jobId,
+            itemId: item.itemId,
+            vendorId: claim.job.vendorId,
+            storeConnectionId: claim.job.storeConnectionId,
+            listingId: item.listingId,
+            productVariantId: item.productVariantId,
+            platform: claim.job.platform,
+            errorCode: classified.code,
+            errorMessage: classified.message,
+            outcome: "requires_review",
+            classification: "permanent",
+          },
+        });
+      }
       // The vendor is told by notification; this line is for the operator
       // reading the log for one job, with the marketplace's reason attached.
       this.deps.logger.warn({
@@ -545,6 +567,47 @@ export function describeFailedListingPushJob(result: DropshipListingPushWorkerRe
  */
 const OPERATOR_RESOLVED_ADMISSION_CODES: ReadonlySet<string> = new Set(["PUBLICATION_PRIOR_OUTCOME_UNRESOLVED"]);
 
+/**
+ * Stock-gate refusals (QuantityPublicationAdmissionError) that the same push
+ * meets again on every retry until something outside the push changes, so
+ * they are permanent here: retryable false, never requeued by an ops retry
+ * or a catch-up. The shared error keeps `retryable = true` for its other
+ * owners (channels); this is the dropship worker's own classification.
+ * - PUBLICATION_LISTING_TARGET_UNMAPPED: no single exact active canonical
+ *   stock target/mapping for this listing's eBay SKU
+ *   (inventory-planning canonical-quantity-publication-member.reader.ts);
+ *   Card Shellz has to set up stock mapping for the listing.
+ * - PUBLICATION_LISTING_PLAN_OMITTED: the current canonical stock plan does
+ *   not include this exact listing (quantity-publication-runtime.ts
+ *   planCanonicalListingQuantityInsideTransaction).
+ * - PUBLICATION_PROVIDER_ACCOUNT_UNVERIFIED: the store has no verified eBay
+ *   account id (quantity-publication-runtime.ts
+ *   createDropshipEbayQuantityRequestAdmission); only reconnecting clears it.
+ * Every other stock-gate code stays retryable: the busy, cooldown, suppressed
+ * and changed-plan refusals clear by themselves
+ * (quantity-publication-admission.repository.ts execute).
+ */
+const PERMANENT_ADMISSION_CODES: ReadonlySet<string> = new Set([
+  "PUBLICATION_LISTING_TARGET_UNMAPPED",
+  "PUBLICATION_LISTING_PLAN_OMITTED",
+  "PUBLICATION_PROVIDER_ACCOUNT_UNVERIFIED",
+]);
+
+/** Of the permanent refusals, those Card Shellz (not the vendor) must fix: logged at ERROR and marked for review. */
+const CARD_SHELLZ_SETUP_ADMISSION_CODES: ReadonlySet<string> = new Set([
+  "PUBLICATION_LISTING_TARGET_UNMAPPED",
+  "PUBLICATION_LISTING_PLAN_OMITTED",
+]);
+
+export type DropshipStockGateRefusalClass = "transient" | "permanent" | "operator";
+
+/** How the dropship worker treats a stock-gate refusal's code. Pure. */
+export function classifyStockGateRefusal(code: string): DropshipStockGateRefusalClass {
+  if (OPERATOR_RESOLVED_ADMISSION_CODES.has(code)) return "operator";
+  if (PERMANENT_ADMISSION_CODES.has(code)) return "permanent";
+  return "transient";
+}
+
 function classifyListingPushError(error: unknown): {
   code: string;
   message: string;
@@ -555,18 +618,32 @@ function classifyListingPushError(error: unknown): {
   context?: Record<string, unknown>;
   /** True when a re-queue cannot help and an operator must act first. */
   needsOperator?: boolean;
+  /** True when Card Shellz must finish stock setup for the listing; the item is marked requires_review. */
+  needsStockSetup?: boolean;
 } {
   if (error instanceof QuantityPublicationAdmissionError) {
-    // The gate refused before any marketplace call, so there is no endpoint
-    // and no provider error; its own code is the useful fact.
-    const needsOperator = OPERATOR_RESOLVED_ADMISSION_CODES.has(error.code);
+    // The stock gate's own code is the useful fact; it carries no endpoint or
+    // provider error. Most of its refusals come before the quantity request,
+    // but some come after eBay answered it (PUBLICATION_LISTING_MEMBERSHIP_UNPROVEN
+    // from the bulk quantity response, PUBLICATION_COMPLETION_CONFLICT and
+    // PUBLICATION_CONNECTION_CLEANUP_UNCERTAIN in the admission's completion),
+    // so eBay may already show the new quantity.
+    const refusal = classifyStockGateRefusal(error.code);
+    const needsOperator = refusal === "operator";
+    const needsStockSetup = CARD_SHELLZ_SETUP_ADMISSION_CODES.has(error.code);
     const attemptId = typeof error.context.attemptId === "string" ? error.context.attemptId : null;
     return {
       code: error.code,
       message: error.message,
-      retryable: !needsOperator,
-      context: { attemptId, operatorAction: needsOperator },
+      retryable: refusal === "transient",
+      context: {
+        attemptId,
+        operatorAction: needsOperator,
+        ...(refusal === "permanent" ? { classification: "permanent" } : {}),
+        ...(needsStockSetup ? { requiresReview: true } : {}),
+      },
       needsOperator,
+      needsStockSetup,
     };
   }
   if (error instanceof DropshipError) {

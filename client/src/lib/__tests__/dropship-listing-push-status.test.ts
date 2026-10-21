@@ -146,6 +146,116 @@ describe("stock gate refusals", () => {
   });
 });
 
+describe("refusals whose server text is for operators", () => {
+  function failedOutcome(patch: Partial<DropshipListingPushItem>, storeName: string | null = "marz_cards") {
+    return describeListingPushOutcome(job({ status: "failed", items: [item({ status: "failed", listingUrl: null, ...patch })] }), storeName).items[0]!;
+  }
+
+  it("tells the vendor Card Shellz must finish stock setup for an unmapped listing, never to queue it again in a few minutes", () => {
+    const outcome = failedOutcome({ errorCode: "PUBLICATION_LISTING_TARGET_UNMAPPED", retryable: false,
+      errorMessage: "Listing quantity requires one exact active canonical target/mapping; configure it before publishing." });
+    expect(outcome).toMatchObject({
+      state: "failed",
+      line: "Could not list: Card Shellz has not finished setting up stock updates for this listing yet.",
+      nextStep: "Nothing to fix on your side. Contact support with this message; once stock updates are set up, queue the listing again.",
+    });
+    expect(`${outcome.line} ${outcome.nextStep}`).not.toMatch(/canonical|mapping|configure|few minutes/);
+  });
+
+  it("words the other permanent stock refusals plainly", () => {
+    expect(failedOutcome({ errorCode: "PUBLICATION_LISTING_PLAN_OMITTED", retryable: false,
+      errorMessage: "The current canonical plan did not authorize this exact listing; an older outbox quantity is not authority." })).toMatchObject({
+      line: "Could not list: Card Shellz's stock plan does not include this listing right now.",
+      // Permanent: nothing re-runs it, so the vendor is told to queue it again once support has fixed it.
+      nextStep: "Nothing to fix on your side. Contact support with this message; once they fix it, queue the listing again.",
+    });
+    expect(failedOutcome({ errorCode: "PUBLICATION_PROVIDER_ACCOUNT_UNVERIFIED", retryable: false,
+      errorMessage: "Provider-verified eBay store identity is required before publishing quantity." })).toMatchObject({
+      line: "Could not list: Card Shellz could not confirm marz_cards's eBay account for this listing.",
+      nextStep: "Queue the listing again. If it fails the same way, choose Reconnect marz_cards in Settings first, then queue it again.",
+    });
+  });
+
+  it.each([
+    ["PUBLICATION_SCOPE_BUSY", "Another exact-scope publisher is running; durable catch-up was retained."],
+    ["QUANTITY_PUBLICATION_DRAIN_BUSY", "The publication gate is changing; durable catch-up was retained."],
+    ["PUBLICATION_ADMISSION_CAPACITY_BUSY", "Provider admission capacity is occupied; durable catch-up was retained."],
+    ["PUBLICATION_AUTHORITY_CHANGED", "Canonical listing authority changed."],
+    ["PUBLICATION_CANONICAL_LISTING_PLAN_CHANGED", "Listing quantity is not backed by the current exact canonical desired revision."],
+  ])("says Card Shellz was busy for the transient %s", (errorCode, errorMessage) => {
+    expect(failedOutcome({ errorCode, errorMessage, retryable: true })).toMatchObject({
+      line: "Could not list: Card Shellz was busy updating stock for this listing.",
+      nextStep: "Queue the listing again in a few minutes.",
+    });
+  });
+
+  it("says stock updates are paused while Card Shellz suppresses or stops them", () => {
+    for (const errorCode of ["QUANTITY_PUBLICATION_SUPPRESSED", "PUBLICATION_GLOBAL_STOP_ACTIVE"]) {
+      expect(failedOutcome({ errorCode, errorMessage: "Quantity publication is suppressed; current-state catch-up was retained.", retryable: true }))
+        .toMatchObject({
+          line: "Could not list: Card Shellz has paused stock updates for now.",
+          nextStep: "Queue the listing again later. Contact support with this message if it keeps failing.",
+        });
+    }
+  });
+
+  it("gives any other stock-gate code general words that follow its retryable flag, with no claim about when it stopped", () => {
+    const permanent = failedOutcome({ errorCode: "PUBLICATION_SELECTION_CHANGED", errorMessage: "operator text", retryable: false });
+    expect(permanent).toMatchObject({ line: "Could not list: Card Shellz's stock check stopped this listing update.",
+      nextStep: "Nothing to fix on your side. Contact support with this message." });
+    expect(permanent.line).not.toMatch(/before it was sent/);
+    const transient = failedOutcome({ errorCode: "QUANTITY_PUBLICATION_SOMETHING_NEW", errorMessage: "operator text", retryable: true });
+    expect(transient.nextStep).toBe("Queue the listing again in a few minutes. Contact support with this message if it keeps failing.");
+  });
+
+  it.each([
+    ["PUBLICATION_LISTING_MEMBERSHIP_UNPROVEN", "The provider did not confirm every exact SKU/offer quantity mutation; no successful admission is recorded."],
+    ["PUBLICATION_COMPLETION_CONFLICT", "Provider completion conflicts with recorded terminal evidence."],
+    ["PUBLICATION_CONNECTION_CLEANUP_UNCERTAIN", "Connection cleanup failed."],
+  ])("says the stock update may already be on eBay for %s, raised after eBay was asked to change it", (errorCode, errorMessage) => {
+    const outcome = failedOutcome({ errorCode, errorMessage, retryable: true });
+    expect(outcome).toMatchObject({
+      line: "Could not list: Card Shellz could not confirm the stock update for this listing. eBay may already show the new quantity.",
+      nextStep: "Queue the listing again in a few minutes. Contact support with this message if it keeps failing.",
+    });
+    expect(outcome.line).not.toMatch(/before it was sent/);
+  });
+
+  it("words an account refusal so it is true whether or not the store is verified now", () => {
+    // Before part 1 the account check refused every store, verified or not, with this exact message; such old
+    // items stay visible from listing-intent receipts. After it, the message means the store had no verified identity.
+    const outcome = failedOutcome({ errorCode: "DROPSHIP_EBAY_PUBLICATION_ACCOUNT_UNVERIFIED", retryable: false,
+      errorMessage: "The published offer cannot be adopted without this store's verified eBay account. Reconnect the intended store account." });
+    expect(outcome).toMatchObject({
+      line: "Could not list: Card Shellz could not confirm marz_cards's eBay account for this listing.",
+      // The Settings button reads "Reconnect <store name>" (DropshipPortalSettings reauthorizeButtonLabel).
+      nextStep: "Queue the listing again. If it fails the same way, choose Reconnect marz_cards in Settings first, then queue it again.",
+    });
+    expect(`${outcome.line} ${outcome.nextStep}`).not.toMatch(/adopted|published offer|not verified/);
+    expect(failedOutcome({ errorCode: "DROPSHIP_EBAY_PUBLICATION_ACCOUNT_UNVERIFIED", retryable: false,
+      errorMessage: "The published offer cannot be adopted without this store's verified eBay account. Reconnect the intended store account." }, null))
+      .toMatchObject({
+        line: "Could not list: Card Shellz could not confirm this store's eBay account for this listing.",
+        nextStep: "Queue the listing again. If it fails the same way, choose the store's Reconnect button in Settings first, then queue it again.",
+      });
+  });
+
+  it("does not tell the vendor to reconnect when the eBay listing belongs to the other eBay site", () => {
+    const outcome = failedOutcome({ errorCode: "DROPSHIP_EBAY_PUBLICATION_ACCOUNT_UNVERIFIED", retryable: false,
+      errorMessage: "The observed listing belongs to a different eBay environment than the authorized store connection." });
+    expect(outcome).toMatchObject({
+      line: "Could not list: the listing already on eBay belongs to a different eBay site (the sandbox test site or the real eBay) than this store's connection.",
+      nextStep: "Queueing it again will not help. Contact support with this message.",
+    });
+    expect(outcome.nextStep).not.toMatch(/Reconnect/);
+  });
+
+  it("keeps the server's text for a same-coded refusal it does not know", () => {
+    expect(failedOutcome({ errorCode: "DROPSHIP_EBAY_PUBLICATION_ACCOUNT_UNVERIFIED", retryable: false, errorMessage: "Some new account refusal." }))
+      .toMatchObject({ line: "Could not list: Some new account refusal." });
+  });
+});
+
 describe("a row queued while its preview was blocked", () => {
   // The server stores the blocker codes as one comma-separated list (dropship-listing-preview.repository, insertJobItemForPreview).
   const blocked = item({ status: "blocked", errorCode: "DROPSHIP_LISTING_PREVIEW_BLOCKED", retryable: null, listingUrl: null,

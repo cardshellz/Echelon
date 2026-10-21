@@ -57,6 +57,110 @@ describe("runDropshipListingPushSweep", () => {
   });
 });
 
+describe("runDropshipListingPushSweep recovery", () => {
+  const emptyRecovery = { listingsRestored: 0, listingsNeedingReview: 0, jobsRequeued: 0, itemsRequeued: 0, rowFailures: 0, stepFailures: 0 };
+
+  it("runs the recovery before it lists jobs, so a job requeued by it is processed in the same sweep", async () => {
+    const order: string[] = [];
+    const repository = new FakeListingPushJobQueueRepository([30]);
+    const listClaimableJobIds = repository.listClaimableJobIds.bind(repository);
+    repository.listClaimableJobIds = async (input) => { order.push("list"); return listClaimableJobIds(input); };
+
+    const result = await runDropshipListingPushSweep({
+      repository,
+      processJob: async () => { order.push("process"); },
+      recovery: { run: async (input) => { order.push(`recover:${input.workerId}`); return { ...emptyRecovery, jobsRequeued: 1, itemsRequeued: 1 }; } },
+      now,
+      workerId: "worker-1",
+    });
+
+    expect(order).toEqual(["recover:worker-1", "list", "process"]);
+    expect(result).toEqual({ processed: 1, failed: 0 });
+  });
+
+  function recordingLogger() {
+    const events: Array<{ level: string; code: string; context?: Record<string, unknown> }> = [];
+    return {
+      events,
+      logger: {
+        info: (event: { code: string; message: string; context?: Record<string, unknown> }) => events.push({ level: "info", ...event }),
+        warn: (event: { code: string; message: string; context?: Record<string, unknown> }) => events.push({ level: "warn", ...event }),
+        error: (event: { code: string; message: string; context?: Record<string, unknown> }) => events.push({ level: "error", ...event }),
+      },
+    };
+  }
+
+  it("still processes jobs when the recovery throws, and logs it through the structured logger with an error code", async () => {
+    const processed: number[] = [];
+    const { events, logger } = recordingLogger();
+    const result = await runDropshipListingPushSweep({
+      repository: new FakeListingPushJobQueueRepository([30, 31]),
+      processJob: async (input) => { processed.push(input.jobId); },
+      recovery: { run: async () => { throw new Error("recovery exploded"); } },
+      logger,
+      now,
+      workerId: "worker-1",
+    });
+    expect(result).toEqual({ processed: 2, failed: 0 });
+    expect(processed).toEqual([30, 31]);
+    expect(events).toEqual([expect.objectContaining({
+      level: "error", code: "DROPSHIP_LISTING_PUSH_RECOVERY_FAILED",
+      context: expect.objectContaining({ action: "listing_push_recovery", outcome: "failed", classification: "transient",
+        error: "recovery exploded", error_code: "DROPSHIP_LISTING_PUSH_RECOVERY_FAILED", workerId: "worker-1" }),
+    })]);
+  });
+
+  it("logs the thrown error's own code as error_code", async () => {
+    const { events, logger } = recordingLogger();
+    const thrown = Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+    await runDropshipListingPushSweep({
+      repository: new FakeListingPushJobQueueRepository([]),
+      processJob: async () => undefined,
+      recovery: { run: async () => { throw thrown; } },
+      logger,
+      now,
+      workerId: "worker-1",
+    });
+    expect(events.map((event) => [event.level, event.code, event.context?.error_code])).toEqual([
+      ["error", "DROPSHIP_LISTING_PUSH_RECOVERY_FAILED", "ECONNRESET"],
+    ]);
+  });
+
+  it("logs a recovery pass that changed something at INFO, with its counts, and stays quiet when nothing changed", async () => {
+    const { events, logger } = recordingLogger();
+    await runDropshipListingPushSweep({
+      repository: new FakeListingPushJobQueueRepository([]),
+      processJob: async () => undefined,
+      recovery: { run: async () => ({ ...emptyRecovery, listingsRestored: 2 }) },
+      logger,
+      now,
+      workerId: "worker-1",
+    });
+    await runDropshipListingPushSweep({
+      repository: new FakeListingPushJobQueueRepository([]),
+      processJob: async () => undefined,
+      recovery: { run: async () => emptyRecovery },
+      logger,
+      now,
+      workerId: "worker-1",
+    });
+    expect(events).toEqual([expect.objectContaining({
+      level: "info", code: "DROPSHIP_LISTING_PUSH_RECOVERY_COMPLETED",
+      context: expect.objectContaining({ action: "listing_push_recovery", outcome: "completed", listingsRestored: 2, workerId: "worker-1" }),
+    })]);
+  });
+
+  it("does not run any recovery when none is passed (manual ops sweep)", async () => {
+    const result = await runDropshipListingPushSweep({
+      repository: new FakeListingPushJobQueueRepository([]),
+      processJob: async () => undefined,
+      now,
+      workerId: "worker-1",
+    });
+    expect(result).toEqual({ processed: 0, failed: 0 });
+  });
+});
+
 describe("PgDropshipListingPushJobQueueRepository", () => {
   it("selects queued and stale processing jobs", async () => {
     const query = vi.fn(async () => ({ rows: [{ id: 30 }] }));

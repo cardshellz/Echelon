@@ -86,6 +86,7 @@ import {
   catalogStepFromLocation,
   catalogStepPath,
   catalogStoreOptions,
+  catalogStoreOwnName,
   chooseCatalogStore,
   chooseStepTick,
   describeCatalogActionBar,
@@ -253,6 +254,8 @@ function DropshipPortalCatalogPage() {
   const selectedStoreName = selectedStoreConnection?.externalDisplayName
     || selectedStoreConnection?.shopDomain
     || "connected eBay store";
+  // The push outcome words name a Settings button; without the store's own name they name the button, not a placeholder.
+  const selectedStoreOwnName = catalogStoreOwnName(selectedStoreConnection);
   const ebayStoreCategoryQueryKey = [
     "/api/dropship/ebay/store-categories",
     selectedStoreConnectionIdNumber,
@@ -646,7 +649,7 @@ function DropshipPortalCatalogPage() {
               if (Number.isSafeInteger(jobId)) setIntentJob({ storeConnectionId: selectedStoreConnectionIdNumber, jobId });
             }} />
           {intentJob?.storeConnectionId === selectedStoreConnectionIdNumber && <ListingPushOutcomeNotice
-            key={intentJob.jobId} jobId={intentJob.jobId} storeName={selectedStoreName}
+            key={intentJob.jobId} jobId={intentJob.jobId} storeName={selectedStoreOwnName}
             queuedMessage="The saved listing workflow is loading. Provider completion is not yet confirmed." />}
         </div>}
 
@@ -753,7 +756,7 @@ function DropshipPortalCatalogPage() {
               listingPreviewStale={listingPreviewStale}
               priceSavePending={pendingPriceSaves > 0}
               listingPushResult={listingPushResult}
-              selectedStoreName={selectedStoreName}
+              selectedStoreName={selectedStoreOwnName}
               pendingListingAction={pendingListingAction}
               selectedRows={selectedCatalogRows}
               verificationCode={verificationCode}
@@ -815,8 +818,8 @@ function ListingPreviewPanel({
   listingPreviewStale: boolean;
   priceSavePending: boolean;
   listingPushResult: DropshipListingPushResponse | null;
-  /** The store's name as the vendor knows it, for the push outcome. */
-  selectedStoreName: string;
+  /** The store's own name for the push outcome, or null when it has none yet (catalogStoreOwnName). */
+  selectedStoreName: string | null;
   onPreview: () => void;
   onPush: () => void;
   onVerificationCodeChange: (value: string) => void;
@@ -980,7 +983,7 @@ const PUSH_NOTICE_TONES = {
   failed: "border-rose-200 bg-rose-50 text-rose-900",
 } as const;
 
-function ListingQueueResultNotice({ response, storeName }: { response: DropshipListingPushResponse; storeName: string }) {
+function ListingQueueResultNotice({ response, storeName }: { response: DropshipListingPushResponse; storeName: string | null }) {
   const result = describeListingQueueResult(response);
   if (result.outcome !== "queued") {
     return (
@@ -997,7 +1000,7 @@ function ListingQueueResultNotice({ response, storeName }: { response: DropshipL
  * each listing. Polling stops after LISTING_PUSH_MAX_POLLS so a stuck job
  * cannot keep the page asking forever; the vendor is then told where to look.
  */
-function ListingPushOutcomeNotice({ jobId, queuedMessage, storeName }: { jobId: number; queuedMessage: string; storeName: string }) {
+function ListingPushOutcomeNotice({ jobId, queuedMessage, storeName }: { jobId: number; queuedMessage: string; storeName: string | null }) {
   const url = listingPushJobUrl(jobId);
   const queryKey = [url];
   const queryClient = useQueryClient();
