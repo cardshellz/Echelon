@@ -4,6 +4,7 @@ import { shipmentRecordedUnitSummary, shipmentDimensionBasisLabel } from "@/lib/
 import { ShipmentQuantityEditor } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
+import { ShipmentCustodyReceiptLinks } from "@/components/purchasing/ShipmentCustodyReceiptLinks";
 import { formatMills } from "@shared/utils/money";
 import { useEffect, useMemo, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -2790,7 +2791,7 @@ export default function InboundShipmentDetail() {
               {(shipmentPoReceiveOptions?.purchaseOrders ?? []).map((option: any) => {
                 const { fullyReceived, text: coverageLabel } = shipmentReceiveCoverageLabel(option);
                 return (
-                  <div key={option.purchaseOrderId} className="flex items-center justify-between gap-3 rounded-md border p-3">
+                  <div key={option.purchaseOrderId} data-testid={`shipment-receive-option-${option.purchaseOrderId}`} className="flex flex-col items-start justify-between gap-3 rounded-md border p-3 sm:flex-row sm:items-center">
                     <div className="min-w-0">
                       <div className="font-medium truncate">{option.poNumber ?? `PO #${option.purchaseOrderId}`}</div>
                       <div className="text-sm text-muted-foreground">
@@ -2800,6 +2801,7 @@ export default function InboundShipmentDetail() {
                       {!fullyReceived && option.reason && (
                         <div className="text-xs text-muted-foreground mt-1">{option.reason}</div>
                       )}
+                      <ShipmentCustodyReceiptLinks coverage={option} />
                     </div>
                     {fullyReceived ? (
                       <Badge variant="outline" className="text-green-600 border-green-300 shrink-0">

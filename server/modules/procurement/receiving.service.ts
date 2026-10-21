@@ -7,6 +7,10 @@ import {
   readReceiptCustodyPresence, completeReceivingQuarantineAcceptances,
 } from "./receiving-quarantine.repository";
 import { lockReceivingCustodyFence } from "./receiving-custody-public";
+import { assertShipmentReceiptCustodyAdmission } from "./shipment-receipt-custody.repository";
+import { assertPoDirectReceiptCustodyAdmission } from "./po-direct-receipt-custody.repository";
+import { PoDirectCustodySourceError } from "./domain/po-direct-receipt-custody";
+import { ShipmentReceiptCoverageError } from "./receiving-shipment-coverage";
 import { receivingQuarantineSourceVersion } from "./receiving-quarantine-receiving.port";
 import { ReceivingQuarantineError } from "./domain/receiving-quarantine";
 import type {
@@ -1593,6 +1597,21 @@ export class ReceivingService {
       lines = await this.storage.getReceivingLines(orderId, tx);
       for (const line of lines.filter((line: any) => line.receivedQty > 0)) {
         await this.assertReceiptSourceProduct(tx, line, order, receiveVariants.get(line.productVariantId)!.productId);
+      }
+      try {
+        await assertShipmentReceiptCustodyAdmission(tx, { receivingOrderId: orderId,
+          purchaseOrderId: order.purchaseOrderId ?? null, inboundShipmentId: order.inboundShipmentId ?? null, lines });
+        if (order.purchaseOrderId && !order.inboundShipmentId) {
+          await assertPoDirectReceiptCustodyAdmission(tx, { receivingOrderId: orderId,
+            purchaseOrderId: order.purchaseOrderId, lines });
+        }
+      } catch (error) {
+        if (error instanceof ShipmentReceiptCoverageError || error instanceof PoDirectCustodySourceError) {
+          console.warn(JSON.stringify({ event: "procurement.receiving.custody_admission_rejected", command: "close_receipt",
+            actorId: userId ?? null, receivingOrderId: orderId, purchaseOrderId: order.purchaseOrderId ?? null,
+            inboundShipmentId: order.inboundShipmentId ?? null, code: error.details.code }));
+        }
+        throw error;
       }
 
       for (const line of lines) {
