@@ -2,6 +2,10 @@
 
 ## Current state verified October 21, 2026
 
+PR1883 is now merged and its exact merge has a successful deployment record. Independent readback confirms sampled receipt/PO/shipment quantity agreement, posted shipment-cost agreement, and AP totals. Final verification also identified a concrete receiving CSV retry obstruction in the failed hosted browser shard. The bounded correction, release evidence and remaining acceptance limits are tracked in [final verification](final-verification-2026-10-21.md). No further major corrective feature batch is listed; this follow-up and its release verification remain open. Historical cost exceptions and unavailable production scenarios are stated explicitly rather than certified by the deployment.
+
+### Pre-deployment acceptance checkpoint
+
 This acceptance pass started from fetched main `b0edad6447da59f4aa1a8f4b2147c4fa48f874df` and incorporated `1b7910d9223c7253a44f252be726d60b93ae7b42` before final local validation. RFQ PR1875 merged as `e5c5a7071da92ea4212d045775319ac4ccc0fe4e`; all 59 PR checks and post-merge Core CI `39652973253` passed. The merge is an ancestor of the pinned main. GitHub deployment status records confirm successful Heroku deployment of that merge and its later replacement by `b0edad644`. Deployment metadata does not establish correctness of every saved business record.
 
 Combined acceptance reproduced a new custody bypass: an ordinary second receipt could post held goods while the original quarantine observation still retained them. The correction and connected acceptance evidence are recorded in [lifecycle acceptance](lifecycle-acceptance-2026-10-21.md). This finding prevents marking the entire effort complete merely because the earlier batches deployed.

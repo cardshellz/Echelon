@@ -268,8 +268,16 @@ export default function Receiving() {
     void queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
   }, [requestedReceiptId, captureReceiptNavigation, isCurrentReceiptNavigation, queryClient]);
   const [showCSVImport, setShowCSVImport] = useState(false);
-  const [csvText, setCsvText] = useState("");
+  // A draft belongs to its receipt. Keep it when navigating back without
+  // presenting another receipt's counts as the current import.
+  const [receiptCsvDrafts, setReceiptCsvDrafts] = useState<Record<number, string>>({});
+  const csvText = requestedReceiptId === null ? "" : receiptCsvDrafts[requestedReceiptId] ?? "";
+  const setCsvText = (text: string): void => {
+    if (requestedReceiptId === null) return;
+    setReceiptCsvDrafts((drafts) => ({ ...drafts, [requestedReceiptId]: text }));
+  };
   const [csvImportError, setCsvImportError] = useState<string | null>(null);
+  const [csvFileReadPending, setCsvFileReadPending] = useState(false);
   const [importResults, setImportResults] = useState<{ errors: string[]; warnings: string[]; created: number; updated: number } | null>(null);
   const [showImportResults, setShowImportResults] = useState(false);
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
@@ -748,11 +756,6 @@ DEF-456,25,,,5.00,,Location TBD`;
           updated: result.updated || 0,
         });
         setShowImportResults(true);
-        toast({ 
-          title: result.errors?.length ? (totalProcessed ? "Import partially saved" : "Import needs correction") : "Import complete with warnings",
-          description: `${totalProcessed} rows saved. ${result.errors?.length || 0} rows need correction.`,
-          duration: 5000,
-        });
       } else {
         toast({ 
           title: "Import complete", 
@@ -762,8 +765,9 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
     onError: (error: Error, _variables, context) => {
       if (!isCurrentReceiptNavigation(context)) return;
+      // The persistent dialog owns import recovery. A duplicate toast can
+      // cover its Import button and prevent the corrected retry.
       setCsvImportError(error.message);
-      toast({ title: "Import was not confirmed", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1112,18 +1116,19 @@ DEF-456,25,,,5.00,,Location TBD`;
   };
 
   const handleCSVImport = () => {
+    if (bulkImportMutation.isPending || csvFileReadPending) return;
     if (!selectedReceipt) {
-      toast({ title: "Error", description: "No receipt selected", variant: "destructive" });
+      setCsvImportError("No receipt selected. Open the intended receipt before importing.");
       return;
     }
     setCsvImportError(null);
     const result = parseReceivingImportCsv(csvText);
     if (result.error) {
-      toast({ title: "Error", description: result.error, variant: "destructive" });
+      setCsvImportError(result.error);
       return;
     }
     if (!result.lines || result.lines.length === 0) {
-      toast({ title: "Error", description: "No valid lines found in CSV", variant: "destructive" });
+      setCsvImportError("No valid lines found in CSV. Add at least one data row before importing.");
       return;
     }
     bulkImportMutation.mutate({ orderId: selectedReceipt.id, lines: result.lines });
@@ -1217,6 +1222,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     setLegacyResolveVariant(null);
     setShowCSVImport(false);
     setCsvImportError(null);
+    setCsvFileReadPending(false);
     setShowImportResults(false);
     setImportResults(null);
     setShowAddLineDialog(false);
@@ -2660,7 +2666,11 @@ DEF-456,25,,,5.00,,Location TBD`;
       </Dialog>
 
       {/* CSV Import Dialog */}
-      <Dialog open={showCSVImport} onOpenChange={setShowCSVImport}>
+      <Dialog open={showCSVImport} onOpenChange={(open) => {
+        // Keep pending results visible; browser navigation still ends this
+        // receipt visit and the existing visit guard rejects late callbacks.
+        if (!bulkImportMutation.isPending) setShowCSVImport(open);
+      }}>
         <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Import from CSV</DialogTitle>
@@ -2690,14 +2700,25 @@ DEF-456,25,,,5.00,,Location TBD`;
                     type="file" 
                     accept=".csv,text/csv"
                     className="hidden"
+                    disabled={bulkImportMutation.isPending || csvFileReadPending}
                     onChange={(e) => {
                       const file = e.target.files?.[0];
                       if (file) {
+                        const context = captureReceiptNavigation();
                         const reader = new FileReader();
+                        setCsvFileReadPending(true);
                         reader.onload = (event) => {
+                          if (!isCurrentReceiptNavigation(context)) return;
+                          setCsvFileReadPending(false);
                           setCsvText(event.target?.result as string || "");
                         };
-                        reader.readAsText(file);
+                        const reportFileReadError = () => {
+                          if (!isCurrentReceiptNavigation(context)) return;
+                          setCsvFileReadPending(false);
+                          setCsvImportError("The CSV file could not be read. Choose the file again or paste its contents.");
+                        };
+                        reader.onerror = reportFileReadError;
+                        try { reader.readAsText(file); } catch { reportFileReadError(); }
                       }
                     }}
                     data-testid="input-csv-file"
@@ -2709,9 +2730,12 @@ DEF-456,25,,,5.00,,Location TBD`;
             <div className="text-center text-xs text-muted-foreground">— or paste directly —</div>
             
             {csvImportError && <div role="alert" className="whitespace-pre-wrap rounded border border-destructive p-3 text-sm text-destructive" data-testid="csv-import-error">{csvImportError}</div>}
+            {csvFileReadPending && <p role="status" className="text-sm text-muted-foreground">Reading CSV file.</p>}
+            {bulkImportMutation.isPending && <p role="status" className="text-sm text-muted-foreground">Importing. Keep this dialog open until the result is confirmed.</p>}
             <Textarea 
               value={csvText}
               onChange={(e) => setCsvText(e.target.value)}
+              disabled={bulkImportMutation.isPending || csvFileReadPending}
               placeholder="Paste your CSV data here..."
               className="min-h-[150px] md:min-h-[200px] font-mono text-xs md:text-sm"
               autoComplete="off"
@@ -2721,11 +2745,11 @@ DEF-456,25,,,5.00,,Location TBD`;
               data-testid="textarea-csv"
             />
             <div className="flex justify-end gap-2">
-              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowCSVImport(false)}>Cancel</Button>
+              <Button variant="outline" className="min-h-[44px]" disabled={bulkImportMutation.isPending} onClick={() => setShowCSVImport(false)}>Cancel</Button>
               <Button 
                 className="min-h-[44px]"
                 onClick={handleCSVImport}
-                disabled={quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || bulkImportMutation.isPending || !csvText.trim()}
+                disabled={quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || bulkImportMutation.isPending || csvFileReadPending || !csvText.trim()}
                 data-testid="btn-import"
               >
                 <Upload className="h-4 w-4 mr-2" />
