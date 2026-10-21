@@ -507,14 +507,62 @@ export async function readUnresolvedCostQuantities(
   tx: CostEvidenceTransaction, lotId: number,
 ): Promise<Array<{ allocationId: number; intervals: CostQuantityInterval[]; snapshot: HistoricalCostQuantitySnapshot }>> {
   const rows = await readAllocations(tx, lotId);
-  return rows.filter(row => row.source_evidence.sourceKind === "unresolved_historical_quantity").map(row => {
+  return rows.filter(row => row.source_evidence.sourceKind === "unresolved_historical_quantity").flatMap(row => {
     const snapshot = historicalCostQuantitySnapshotSchema.safeParse(row.source_evidence.snapshot);
     if (!snapshot.success || row.source_evidence.policy !== "retain_unresolved_quantity_v1"
       || row.direction !== 1 || snapshot.data.unresolvedQuantity !== row.quantity) {
       throw new CostEvidenceError("COST_UNRESOLVED_QUANTITY_INVALID", "Unresolved cost quantity has invalid retained evidence.", { lotId });
     }
-    return { allocationId: row.id, intervals: row.intervals, snapshot: snapshot.data };
+    const reversed = rows.filter(other => other.direction === -1 && other.reverses_allocation_id === row.id).flatMap(other => other.intervals);
+    const intervals = subtractCostQuantityIntervals(row.intervals, reversed, snapshot.data.originalQuantity);
+    const remaining = intervals.reduce((sum, interval) => sum + interval.quantity, 0);
+    return remaining === 0 ? [] : [{ allocationId: row.id, intervals, snapshot: {
+      ...snapshot.data,
+      recordedOutflowQuantity: snapshot.data.recordedOutflowQuantity + snapshot.data.unresolvedQuantity - remaining,
+      unresolvedQuantity: remaining,
+    } }];
   });
+}
+
+/** Move only previously unassigned FINANCIAL custody into an approved historical
+ * operation. Append reversals and replacement allocations; never alter a stock
+ * balance, existing order allocation, or the original unresolved evidence. The
+ * procurement approval owns the operation's physical evidence and audit. */
+export async function restoreHistoricalCostAllocation(
+  tx: CostEvidenceTransaction, lotId: number, quantity: number,
+  operationKey: string, evidence: Record<string, unknown>, actor: string, now: Date,
+): Promise<number> {
+  costInteger(quantity, "historical operation quantity", 1);
+  auditIdentity(actor, now);
+  await lockInventoryCostGraph(tx);
+  const selected = await tx.execute(sql`SELECT * FROM inventory.inventory_lots WHERE id=${lotId} FOR UPDATE`);
+  const lot = selected.rows[0];
+  if (!lot) throw new CostEvidenceError("COST_LOT_MISSING", "The historical source lot no longer exists.");
+  const key = `historical_link_allocation:${lotId}:${operationKey}`;
+  const replay = await tx.execute(sql`SELECT * FROM inventory.lot_cost_quantity_allocations WHERE allocation_key=${key}`);
+  if (replay.rows[0]) {
+    const row = parseAllocationRows(replay.rows, lotId)[0];
+    if (row.inventory_lot_id !== lotId || Number(replay.rows[0].inventory_lot_id) !== lotId || row.quantity !== quantity
+      || row.direction !== 1 || canonicalJson(row.source_evidence) !== canonicalJson(evidence)) {
+      throw new CostEvidenceError("COST_ALLOCATION_REPLAY_CONFLICT", "This historical operation already owns different cost evidence.");
+    }
+    return row.id;
+  }
+  await ensureLotCostQuantityBasis(tx, lot, actor, now, { retainUnresolvedQuantity: true, verifyOnHand: true });
+  const unresolved = await readUnresolvedCostQuantities(tx, lotId);
+  const available = unresolved.reduce((sum, row) => sum + BigInt(row.snapshot.unresolvedQuantity), BigInt(0));
+  if (available < BigInt(quantity)) throw new CostEvidenceError("COST_LINK_ALREADY_ASSIGNED", "The proposed operation would reuse costs already assigned to stock or orders.", { lotId });
+  let needed = quantity;
+  const intervals: CostQuantityInterval[] = [];
+  for (const row of unresolved) {
+    const amount = Math.min(needed, row.snapshot.unresolvedQuantity);
+    if (amount === 0) continue;
+    // Retain the same exact financial intervals, including sub-cent remainders.
+    const restored = await reverseLotQuantityCost(tx, row.allocationId, amount, actor, now, `${key}:release:${row.allocationId}`);
+    intervals.push(...restored.intervals);
+    needed -= amount;
+  }
+  return insertAllocation(tx, { lotId, key, direction: 1, quantity, intervals, evidence, actor, now });
 }
 
 /** Historical returns retain their recorded sold-row identity and quantity.
@@ -1050,7 +1098,7 @@ export async function readLotCostQuantityState(
     basisEvidence: basisRows[0]?.source_evidence ?? null,
     allocations,
     freeIntervals: occupiedQuantity === basis ? [] : takeCostQuantityIntervals(basis, occupied, basis - occupiedQuantity),
-    hasUnresolvedQuantity: allocations.some(row => row.source_evidence.sourceKind === "unresolved_historical_quantity"),
+    hasUnresolvedQuantity: (await readUnresolvedCostQuantities(tx, lotId)).length > 0,
   };
 }
 

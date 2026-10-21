@@ -57,6 +57,7 @@ import type {
 import { computeShipmentLinePhysicalTotals } from "./shipment-line-physical-values";
 import { assertReceivingQuarantineLineEditable } from "./receiving-quarantine.repository";
 import { ReceivingQuarantineError } from "./domain/receiving-quarantine";
+import { prepareCostLinkRepair, restoreCostLinks, summarizeCostLinkRepair } from "./cost-link-repair.service";
 
 export function quantityCorrectionScope(
   lineId: number,
@@ -182,6 +183,8 @@ async function executeCorrection(
   purpose: QuantityCorrectionPurpose,
 ) {
   const plan = planQuantityCorrection(source.facts, input, purpose);
+  if (input.repairCostLinks && purpose !== "receipt") throw new CostEvidenceError("COST_LINK_RECEIPT_REQUIRED", "Include the linked receipts when reviewing their historical cost links.");
+  const costLinkRepair = input.repairCostLinks ? await prepareCostLinkRepair(tx, source, plan) : null;
   // Both pending expectations and posted unit conversions must honor custody
   // evidence. The combined command cannot rewrite an accepted quarantine count.
   const receiptWrites = [
@@ -249,7 +252,9 @@ async function executeCorrection(
     now,
     purpose,
     physicalTotals,
+    costLinkRepair?.evidence,
   );
+  if (costLinkRepair) await restoreCostLinks(tx, costLinkRepair, source, plan, actorId, now);
   const writer = new COGSService(tx);
   const poLineId = integer(target.purchase_order_line_id, "PO line", 1);
   const shipmentId = integer(source.evidence.shipment.id, "shipment", 1);
@@ -492,6 +497,8 @@ async function executeCorrection(
           : unitCharge(landedAfter, plan.shippedPieces),
     },
     stockUnitChange: 0,
+    ...(costLinkRepair ? { costLinkRepair: await summarizeCostLinkRepair(tx, costLinkRepair,
+      costResults.flatMap(result=>result.issues.filter(issue=>issue.code==="COST_ORDER_SALE_UNVERIFIED").map(issue=>issue.message))) } : {}),
     costResults,
     historicalCost: {
       eligible: false,
@@ -677,7 +684,9 @@ export function createReceiptShipmentQuantityCorrectionService(
         work: async (tx) => {
           const source = await readSource(tx, lineId, actorId);
           assertReview(source, input.sourceVersion);
-          const { previewVersion, ...request } = input;
+          const { previewVersion, costLinksConfirmed: _costLinksConfirmed, ...request } = input as typeof input & { costLinksConfirmed?: true };
+          // Confirmation belongs to the final approval, not to the simulated
+          // preview input. Validate it above, then compare the same plan inputs.
           const review = preserveReceipts(request, source);
           const summary = await executeCorrection(
             tx,
