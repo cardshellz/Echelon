@@ -12,6 +12,11 @@ import {
 import type { EbayListingConnectorDraft } from "../../channels/listing-connectors/ebay-listing.connector";
 import { resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-token-owner";
 import { ebayProviderAccountNamespace } from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
+import {
+  EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE,
+  EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_MESSAGE,
+  EBAY_PUBLICATION_ENVIRONMENT_MISMATCH_MESSAGE,
+} from "../../../../shared/dropship/ebay-publication-account";
 
 interface RebuildIdentityInput { vendorId: number; storeConnectionId: number; draft: EbayListingConnectorDraft }
 
@@ -77,7 +82,7 @@ export class PostgresDropshipEbayPushPublicationReader implements DropshipEbayPu
 
   private matchEnvironment(observation: MarketplaceObservedListingPublication, credential: DropshipMarketplaceStoreCredentials) {
     if (observation.providerAccount.accountNamespace !== ebayProviderAccountNamespace(resolveDropshipEbayProviderEnvironment(credential)))
-      throw new DropshipError("DROPSHIP_EBAY_PUBLICATION_ACCOUNT_UNVERIFIED", "The observed listing belongs to a different eBay environment than the authorized store connection.", { retryable:false });
+      throw new DropshipError(EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE, EBAY_PUBLICATION_ENVIRONMENT_MISMATCH_MESSAGE, { retryable:false });
     return observation;
   }
 
@@ -90,7 +95,7 @@ export class PostgresDropshipEbayPushPublicationReader implements DropshipEbayPu
       || credential.platform !== "ebay" || !credential.externalAccountId?.trim()
       || credential.externalAccountIdentityScheme !== MARKETPLACE_PROVIDER_IDENTITY_SCHEME
       || !credential.externalAccountVerifiedAt)
-      throw new DropshipError("DROPSHIP_EBAY_PUBLICATION_ACCOUNT_UNVERIFIED", "The published offer cannot be adopted without this store's verified eBay account. Reconnect the intended store account.", { retryable: false });
+      throw new DropshipError(EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE, EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_MESSAGE, { retryable: false });
     return credential.externalAccountId;
   }
 }

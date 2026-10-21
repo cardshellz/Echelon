@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import { RFQ_RECEIPT_VERSION_HEADER } from "@shared/procurement/rfq-command";
 
 const mocks = vi.hoisted(() => ({
   hasPermission: vi.fn(),
@@ -46,10 +47,10 @@ describe("RFQ workflow HTTP authority and durable command identity", () => {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     vi.restoreAllMocks();
   });
-  function request(path: string, options: { actor?: string | null; key?: string; body?: unknown } = {}) {
+  function request(path: string, options: { actor?: string | null; key?: string; body?: unknown; receiptVersion?: string } = {}) {
     return fetch(origin + path, {
       method: options.body === undefined ? "GET" : "POST",
-      headers: { "Content-Type": "application/json", ...(options.actor === null ? {} : { "X-Test-Actor": options.actor ?? "reviewer" }), ...(options.key ? { "Idempotency-Key": options.key } : {}) },
+      headers: { "Content-Type": "application/json", ...(options.actor === null ? {} : { "X-Test-Actor": options.actor ?? "reviewer" }), ...(options.key ? { "Idempotency-Key": options.key } : {}), ...(options.receiptVersion ? { [RFQ_RECEIPT_VERSION_HEADER]: options.receiptVersion } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
   }
@@ -75,6 +76,15 @@ describe("RFQ workflow HTTP authority and durable command identity", () => {
     expect(mocks.history).toHaveBeenCalledWith(10, 20, 9);
     expect(mocks.hasPermission).toHaveBeenCalledWith("reviewer", "inventory", "view");
   });
+  it("permits purchasing-only readers while requiring a proven view grant", async () => {
+    mocks.detail.mockResolvedValue({ id: 10 });
+    mocks.hasPermission.mockImplementation(async (_actor, resource, action) => resource === "purchasing" && action === "view");
+    expect((await request("/api/purchasing/rfqs/10")).status).toBe(200);
+    expect(mocks.hasPermission).toHaveBeenCalledWith("reviewer", "purchasing", "view");
+    mocks.hasPermission.mockResolvedValue(false);
+    expect((await request("/api/purchasing/rfqs/10")).status).toBe(403);
+    expect(mocks.detail).toHaveBeenCalledOnce();
+  });
   it.each(["0", "-1", "1e2", "2147483648"])("rejects invalid RFQ identity %s", async (id) => {
     expect((await request(`/api/purchasing/rfqs/${id}`)).status).toBe(400);
     expect(mocks.detail).not.toHaveBeenCalled();
@@ -86,20 +96,38 @@ describe("RFQ workflow HTTP authority and durable command identity", () => {
     expect(mocks.execute).not.toHaveBeenCalled();
   });
   it("preserves the authenticated actor, exact route scope and replay response", async () => {
-    mocks.execute.mockResolvedValue({ httpStatus: 201, body: { purchaseOrderId: 30 }, replayed: true });
     const body = { expectedVersion: "a".repeat(64), lines: [{ rfqLineId: 20, quoteRevisionId: 7 }], quantityOverrideReason: null };
+    const result = { rfqId: 10, purchaseOrderId: 30, poNumber: "PO-30", status: "draft", lines: [{ rfqLineId: 20, quoteRevisionId: 7, purchaseOrderLineId: 40 }] };
+    const receipt = { version: 1, actorId: "delegate", idempotencyKey: "rfq-command-123", intent: { operation: "convert", rfqId: 10, payload: body }, result };
+    mocks.execute.mockResolvedValue({ terminalState: "succeeded", httpStatus: 201, body: receipt, replayed: true });
     const response = await request("/api/purchasing/rfqs/10/convert", { actor: "delegate", key: "rfq-command-123", body });
     expect(response.status).toBe(201);
+    expect(await response.json()).toEqual(result);
     expect(response.headers.get("Idempotency-Replayed")).toBe("true");
+    const negotiated = await request("/api/purchasing/rfqs/10/convert", { actor: "delegate", key: "rfq-command-123", body, receiptVersion: "1" });
+    expect(negotiated.status).toBe(201);
+    expect(await negotiated.json()).toEqual(receipt);
     expect(mocks.execute).toHaveBeenCalledWith({ operation: "convert", rfqId: 10, body }, "delegate", expect.objectContaining({
       actorType: "service", actorId: "procurement.rfq-workflow", resourceKey: "rfq:10", routeTemplate: "/api/purchasing/rfqs/:rfqId/convert", commandName: "procurement.rfq.convert", idempotencyKey: "rfq-command-123", requestHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     }));
   });
+  it("rejects unsupported receipt negotiation before creating a command", async () => {
+    const response = await request("/api/purchasing/rfqs/10/convert", { key: "rfq-command-123", body: {}, receiptVersion: "2" });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "RFQ_RECEIPT_VERSION_UNSUPPORTED" });
+    expect(mocks.execute).not.toHaveBeenCalled();
+  });
+  it("does not label an invalid saved response as invalid operator input", async () => {
+    mocks.execute.mockResolvedValue({ terminalState: "succeeded", httpStatus: 201, body: { purchaseOrderId: 30 }, replayed: true });
+    const response = await request("/api/purchasing/rfqs/10/convert", { key: "rfq-command-123", body: {} });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ code: "RFQ_COMMAND_RECEIPT_INVALID" });
+  });
   it("uses the dedicated durable release scope and exact review body", async () => {
-    mocks.execute.mockResolvedValue({ httpStatus: 200, body: { status: "cancelled" }, replayed: true });
+    mocks.execute.mockResolvedValue({ terminalState: "rejected", httpStatus: 409, body: { code: "RFQ_VERSION_CONFLICT" }, replayed: true });
     const body = { expectedVersion: "a".repeat(64), reason: "Supplier cannot fulfill" };
     const response = await request("/api/purchasing/rfqs/10/release", { body, key: "rfq-release-123" });
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(409);
     expect(response.headers.get("Idempotency-Replayed")).toBe("true");
     expect(mocks.execute).toHaveBeenCalledWith({ operation: "release", rfqId: 10, body }, "reviewer", expect.objectContaining({ commandName: "procurement.rfq.release", routeTemplate: "/api/purchasing/rfqs/:rfqId/release", resourceKey: "rfq:10" }));
   });

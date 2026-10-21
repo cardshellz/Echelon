@@ -425,6 +425,7 @@ export class PostgresOrderEditStore implements OrderEditStore {
           record.omsOrderId,
           record.id,
           releaseProof,
+          record.updatedAt,
         );
       } else if (releaseProof)
         throw new OrderEditError(

@@ -1,17 +1,20 @@
 import { SupplierSelectionEvidence } from "./SupplierSelectionEvidence";
 import { rfqQuantityReviewMessage } from "@shared/procurement/rfq-quantity-review";
-import { useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import React, { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { z } from "zod";
 import {
-  hasUnverifiedRfqPurchase, releasableRfqLines, rfqConversionResultSchema, rfqQuoteRevisionSchema, rfqWorkflowDetailSchema,
+  hasUnverifiedRfqPurchase, releasableRfqLines, rfqQuoteRevisionSchema, rfqWorkflowDetailSchema,
   type RfqWorkflowDetail,
 } from "@shared/procurement/rfq-workflow";
-import { formatMills } from "@shared/utils/money";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import type { RfqCommandIntent } from "@shared/procurement/rfq-command";
 import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
-import { createFinancialCommandIntentStore, financialCommandFetchJson, financialCommandRetryDelay, FinancialCommandRequestError, shouldRetryFinancialCommand } from "@/lib/financial-command";
+import { FinancialCommandRequestError } from "@/lib/financial-command";
+import { useRfqCommands, invalidateRfqQueries, type RfqCommands } from "./use-rfq-commands";
+import { RfqCommandRecovery } from "./RfqCommandRecovery";
 import { rfqMoneyAsInput, rfqQuoteFormFromEvidence, rfqQuoteFromForm, type RfqQuoteForm } from "@/lib/rfq-quote-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,36 +23,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-
-type CommandIntent = { url: string; body: unknown; key: string; response: "quote" | "conversion" };
-
-function useRfqCommand(onSuccess: (value: unknown) => void) {
-  const store = useRef(createFinancialCommandIntentStore(() => crypto.randomUUID()));
-  const [unresolved, setUnresolved] = useState<CommandIntent | null>(null);
-  const mutation = useMutation<unknown, Error, CommandIntent>({
-    mutationFn: async (intent: CommandIntent) => {
-      const result = await financialCommandFetchJson<unknown>(intent.url, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", "Idempotency-Key": intent.key }, body: JSON.stringify(intent.body) });
-      const parsed = (intent.response === "quote" ? rfqWorkflowDetailSchema : rfqConversionResultSchema).safeParse(result);
-      if (!parsed.success) throw new FinancialCommandRequestError("The operation may have completed, but its response was incomplete. Retry safely with the same request.", { status: 200, retryable: true, ambiguous: true, code: "RFQ_RESPONSE_INVALID" });
-      return parsed.data;
-    },
-    retry: shouldRetryFinancialCommand,
-    retryDelay: financialCommandRetryDelay,
-    onSuccess: (value, intent) => { store.current.complete(intent.key); setUnresolved(null); onSuccess(value); },
-    onError: (error, intent) => {
-      store.current.fail(intent.key, error);
-      setUnresolved(error instanceof FinancialCommandRequestError && error.ambiguous ? intent : null);
-    },
-  });
-  return {
-    ...mutation, unresolved,
-    submit(url: string, body: unknown, response: CommandIntent["response"]) {
-      const key = store.current.acquire({ url, body });
-      mutation.mutate({ url, body, key, response });
-    },
-    retryUnresolved() { if (unresolved) mutation.mutate(unresolved); },
-  };
-}
 
 function QuoteHistory({ rfqId, lineId }: { rfqId: number; lineId: number }) {
   const [beforeRevision, setBeforeRevision] = useState<number | null>(null);
@@ -77,22 +50,23 @@ function QuoteHistory({ rfqId, lineId }: { rfqId: number; lineId: number }) {
   </div>;
 }
 
-function QuoteEditor({ workflow, line, onClose, onSaved }: { workflow: RfqWorkflowDetail; line: RfqWorkflowDetail["lines"][number]; onClose: () => void; onSaved: () => void }) {
+function QuoteEditor({ workflow, line, command, readVerified, onClose, onSaved }: { workflow: RfqWorkflowDetail; line: RfqWorkflowDetail["lines"][number]; command: RfqCommands; readVerified: boolean; onClose: () => void; onSaved: () => void }) {
   // Capture the version actually reviewed. A later query refresh must not
   // silently rebase the operator's in-progress economics onto newer evidence.
   const [expectedVersion] = useState(workflow.version);
   const [form, setForm] = useState<RfqQuoteForm>(() => rfqQuoteFormFromEvidence(line.latestQuote?.quote ?? null, line.requestedPieces, new Date().toISOString().slice(0, 10)));
   const [validationError, setValidationError] = useState<string | null>(null);
-  const command = useRfqCommand(() => onSaved());
-  const locked = command.isPending || command.unresolved !== null;
+  const reviewChanged = expectedVersion !== workflow.version;
+  const locked = command.blocked || !command.canEdit || !readVerified || reviewChanged;
   const field = (name: keyof RfqQuoteForm, value: string) => setForm((current) => ({ ...current, [name]: value }));
   const prefix = `rfq-${workflow.id}-line-${line.id}`;
   function submit(event: React.FormEvent) {
     event.preventDefault();
+    if (locked) return;
     try {
       const quote = rfqQuoteFromForm(form);
       setValidationError(null);
-      command.submit(`/api/purchasing/rfqs/${workflow.id}/lines/${line.id}/quotes`, { expectedVersion, quote }, "quote");
+      command.submit({ operation: "capture_quote", rfqId: workflow.id, lineId: line.id, payload: { expectedVersion, quote } });
     } catch (error) { setValidationError(error instanceof Error ? error.message : "Review the quote fields."); }
   }
   return <form onSubmit={submit} className="space-y-3 rounded border bg-background p-3">
@@ -111,16 +85,25 @@ function QuoteEditor({ workflow, line, onClose, onSaved }: { workflow: RfqWorkfl
       <div className="sm:col-span-2"><Label htmlFor={`${prefix}-reason`}>Quote note / reason for revision</Label><Textarea id={`${prefix}-reason`} value={form.reason} onChange={(event) => field("reason", event.target.value)} /></div>
     </fieldset>
     {form.packagingTreatment !== "separate" && <p className="text-xs text-amber-700 dark:text-amber-300">The quote can be preserved now. Product and packaging treatment must be resolved before creating the purchase order.</p>}
-    {(validationError || command.error) && <p role="alert" className="text-sm text-destructive">{validationError ?? command.error?.message}</p>}
+    {reviewChanged && <div role="alert" className="space-y-1 text-sm text-amber-700"><p>The request changed after this quote draft was opened. Your unsaved values are retained. Review the current quote before submitting another revision.</p><Button type="button" variant="outline" onClick={onSaved} disabled={command.blocked}>Discard draft and review current quote</Button></div>}
+    {validationError && <p role="alert" className="text-sm text-destructive">{validationError}</p>}
     {command.error instanceof FinancialCommandRequestError && command.error.code === "RFQ_VERSION_CONFLICT" && <Button type="button" size="sm" variant="outline" onClick={onSaved}>Discard draft and load latest quote</Button>}
-    <div className="flex flex-wrap gap-2"><Button type="submit" size="sm" disabled={locked}>{command.isPending ? "Saving…" : "Save quote revision"}</Button><Button type="button" size="sm" variant="outline" onClick={onClose} disabled={locked}>Cancel</Button>{command.unresolved && <Button type="button" size="sm" variant="outline" onClick={command.retryUnresolved} disabled={command.isPending}>Retry saved request</Button>}</div>
+    <div className="flex flex-wrap gap-2"><Button type="submit" size="sm" disabled={locked}>{command.pending ? "Saving…" : "Save quote revision"}</Button><Button type="button" size="sm" variant="outline" onClick={onClose} disabled={locked}>Cancel</Button></div>
   </form>;
 }
 
-export function RfqWorkflowPanel({ rfqId }: { rfqId: number }) {
+export function RfqWorkflowPanel({ rfqId, showRecovery = true, sourceVerified = true }: { rfqId: number; showRecovery?: boolean; sourceVerified?: boolean }) {
+  const { user } = useAuth();
+  return <RfqWorkflowScope key={`${user?.id ?? "signed-out"}:${rfqId}`} rfqId={rfqId} showRecovery={showRecovery} sourceVerified={sourceVerified} />;
+}
+
+function RfqWorkflowScope({ rfqId, showRecovery, sourceVerified }: { rfqId: number; showRecovery: boolean; sourceVerified: boolean }) {
   const queryClient = useQueryClient();
-  const { hasPermission } = useAuth();
-  const canEdit = hasPermission("purchasing", "edit");
+  const command = useRfqCommands(rfqId);
+  const canEdit = command.canEdit;
+  const submittedIntent = useRef<RfqCommandIntent | null>(null);
+  const submit = (intent: RfqCommandIntent) => { submittedIntent.current = intent; command.submit(intent); };
+  const editorCommand = { ...command, submit };
   const [editingId, setEditingId] = useState<number | null>(null);
   const [historyId, setHistoryId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -128,27 +111,31 @@ export function RfqWorkflowPanel({ rfqId }: { rfqId: number }) {
   const [overrideReason, setOverrideReason] = useState("");
   const [releaseReason, setReleaseReason] = useState("");
   const [releaseVersion, setReleaseVersion] = useState<string | null>(null);
-  const [released, setReleased] = useState(false);
-  const [createdPo, setCreatedPo] = useState<{ id: number; number: string } | null>(null);
   const queryKey = ["rfq-workflow", rfqId];
-  const workflowQuery = useQuery({ queryKey, queryFn: async () => rfqWorkflowDetailSchema.parse(await (await apiRequest("GET", `/api/purchasing/rfqs/${rfqId}`)).json()) });
-  const refresh = () => {
-    queryClient.invalidateQueries({ queryKey });
-    queryClient.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && (query.queryKey[0].startsWith("/api/purchasing/rfqs") || query.queryKey[0] === "/api/purchasing/rfq-queue" || query.queryKey[0] === "/api/purchase-orders") });
-    queryClient.invalidateQueries({ queryKey: ["rfq-quote-history", rfqId] });
-  };
-  const conversion = useRfqCommand((value) => {
-    const result = rfqConversionResultSchema.parse(value);
-    setCreatedPo({ id: result.purchaseOrderId, number: result.poNumber });
-    setSelected(new Set());
-    setOverrideReason("");
-    refresh();
-  });
-  const release = useRfqCommand(() => { setReleased(true); setReleaseReason(""); setReleaseVersion(null); setSelected(new Set()); refresh(); });
-  if (workflowQuery.isPending) return <p className="mt-3 text-sm text-muted-foreground">Loading quote workflow…</p>;
-  if (workflowQuery.error || !workflowQuery.data) return <div className="mt-3 text-sm" role="alert">Could not load the quote workflow. <Button variant="link" onClick={() => workflowQuery.refetch()}>Retry</Button></div>;
+  const workflowQuery = useQuery({ queryKey, queryFn: async () => {
+    const workflow = rfqWorkflowDetailSchema.parse(await (await apiRequest("GET", `/api/purchasing/rfqs/${rfqId}`)).json());
+    if (workflow.id !== rfqId) throw new Error("The returned workflow belongs to another RFQ.");
+    return workflow;
+  } });
+  const refresh = () => { void invalidateRfqQueries(queryClient); };
+  useEffect(() => {
+    if (!command.confirmed || !submittedIntent.current
+      || canonicalJson(command.confirmed.intent) !== canonicalJson(submittedIntent.current)) return;
+    // A peer panel may have a different unsent draft. Only the originating
+    // panel resets its work when its exact submitted request is confirmed.
+    submittedIntent.current = null;
+    setEditingId(null); setSelected(new Set()); setSelectionVersion(null);
+    setOverrideReason(""); setReleaseReason(""); setReleaseVersion(null);
+  }, [command.confirmed, rfqId]);
+  useEffect(() => {
+    if (command.error && !command.pending && !command.recovery && !command.storageError) submittedIntent.current = null;
+  }, [command.error, command.pending, command.recovery, command.storageError]);
+  const recovery = <RfqCommandRecovery commands={command} showPending={showRecovery} />;
+  if (workflowQuery.isPending) return <>{recovery}<p className="mt-3 text-sm text-muted-foreground">Loading quote workflow…</p></>;
+  if (!workflowQuery.data) return <>{recovery}<div className="mt-3 text-sm" role="alert">Could not load the quote workflow. <Button variant="link" onClick={() => workflowQuery.refetch()}>Retry</Button></div></>;
   const workflow = workflowQuery.data;
-  const locked = conversion.isPending || conversion.unresolved !== null || release.isPending || release.unresolved !== null;
+  const readVerified = sourceVerified && !workflowQuery.isFetching && !workflowQuery.error;
+  const locked = command.blocked || !canEdit || !readVerified;
   const releasable = releasableRfqLines(workflow);
   const releaseChanged = releaseVersion !== null && releaseVersion !== workflow.version;
   const selectionChanged = selected.size > 0 && selectionVersion !== workflow.version;
@@ -157,12 +144,13 @@ export function RfqWorkflowPanel({ rfqId }: { rfqId: number }) {
   const requiresQuantityReason = quantitiesDiffer || selectedLines.some((line) => line.quantityReview.requiresReason);
   const editingLine = workflow.lines.find((line) => line.id === editingId);
   return <section className="mt-4 space-y-3" aria-label="Quote capture and purchase-order handoff">
+    {recovery}
+    {workflowQuery.error ? <p role="alert" className="text-sm text-destructive">Could not refresh the quote workflow. Your unsaved values are retained. Use Refresh quotes to verify the request before submitting changes.</p>
+      : !readVerified && <p role="status" className="text-sm text-muted-foreground">RFQ evidence is not currently verified. Your unsaved values are retained. New actions are unavailable until the request and list reload successfully.</p>}
     <div><h3 className="text-sm font-semibold">{workflow.rfqNumber} · Supplier quotes → draft purchase order</h3><p className="text-xs text-muted-foreground">Capture the final quote, review selected lines, and open the linked draft purchase.</p></div>
-    <Button size="sm" variant="outline" disabled={locked || workflowQuery.isFetching} onClick={() => workflowQuery.refetch()}>Refresh quotes</Button>
+    <Button size="sm" variant="outline" disabled={command.pending || workflowQuery.isFetching} onClick={() => workflowQuery.refetch()}>Refresh quotes</Button>
     {workflow.currency !== "USD" && <p className="text-xs text-amber-700 dark:text-amber-300">Quote currency: {workflow.currency}. Purchase orders currently require USD; currency review is required before conversion.</p>}
     {hasUnverifiedRfqPurchase(workflow) && <p role="alert" className="text-sm text-amber-700 dark:text-amber-300">An ordered request line has no verified purchase-order link. Review its original purchase evidence before releasing this request.</p>}
-    {released && <p role="status" className="text-sm">Unconverted request reservations released. Linked purchase orders remain unchanged.</p>}
-    {createdPo && <p className="rounded border border-emerald-300 bg-emerald-50 p-2 text-sm text-emerald-900 dark:bg-emerald-950 dark:text-emerald-100">Draft created: <Link className="font-semibold underline" href={`/purchase-orders/${createdPo.id}`}>{createdPo.number}</Link></p>}
     <div className="space-y-2">{workflow.lines.map((line) => {
       const quote = line.latestQuote;
       const expired = quote?.quote.quoteValidUntil != null && quote.quote.quoteValidUntil < new Date().toISOString().slice(0, 10);
@@ -189,23 +177,19 @@ export function RfqWorkflowPanel({ rfqId }: { rfqId: number }) {
           {historyId === line.id && <div className="mt-2"><QuoteHistory rfqId={rfqId} lineId={line.id} /></div>}
       </div>;
     })}</div>
-    {editingLine && <QuoteEditor key={editingLine.id} workflow={workflow} line={editingLine} onClose={() => setEditingId(null)} onSaved={() => { setEditingId(null); setSelected(new Set()); refresh(); }} />}
-    {canEdit && (releasable.length > 0 || release.unresolved) && <div className="space-y-2 rounded border p-3" aria-label="Release unconverted request reservations">
+    {editingLine && <QuoteEditor key={editingLine.id} workflow={workflow} line={editingLine} command={editorCommand} readVerified={readVerified} onClose={() => setEditingId(null)} onSaved={() => { setEditingId(null); setSelected(new Set()); refresh(); }} />}
+    {canEdit && releasable.length > 0 && <div className="space-y-2 rounded border p-3" aria-label="Release unconverted request reservations">
       <p className="text-sm">Release this request's {releasable.length} unconverted lines so their demand can be sourced again. Captured quotes and linked purchase orders are preserved.</p>
       <Label htmlFor={`rfq-${rfqId}-release`}>Reason for releasing the request</Label>
       <Textarea id={`rfq-${rfqId}-release`} disabled={locked} maxLength={2000} value={releaseReason} onChange={(event) => { if (releaseVersion === null) setReleaseVersion(workflow.version); setReleaseReason(event.target.value); }} />
       {releaseChanged && <p role="alert">The request changed after your review. <Button variant="link" onClick={() => { setReleaseVersion(null); setReleaseReason(""); }}>Clear release reason and review current request</Button></p>}
-      <Button size="sm" variant="outline" disabled={locked || editingId !== null || releaseChanged || !releaseReason.trim()} onClick={() => release.submit(`/api/purchasing/rfqs/${rfqId}/release`, { expectedVersion: releaseVersion ?? workflow.version, reason: releaseReason.trim() }, "quote")}>{release.isPending ? "Releasing�" : "Release unconverted request"}</Button>
-      {release.error && <p role="alert" className="text-sm text-destructive">{release.error.message}</p>}
-      {release.error instanceof FinancialCommandRequestError && release.error.code === "RFQ_VERSION_CONFLICT" && <Button variant="link" onClick={() => { setReleaseVersion(null); setReleaseReason(""); refresh(); }}>Refresh request before release</Button>}
-      {release.unresolved && <Button size="sm" variant="outline" disabled={release.isPending} onClick={release.retryUnresolved}>Retry saved release</Button>}
+      <Button size="sm" variant="outline" disabled={locked || editingId !== null || releaseChanged || !releaseReason.trim()} onClick={() => submit({ operation: "release", rfqId, payload: { expectedVersion: releaseVersion ?? workflow.version, reason: releaseReason.trim() } })}>{command.pending ? "Releasing…" : "Release unconverted request"}</Button>
+      {command.error instanceof FinancialCommandRequestError && command.error.code === "RFQ_VERSION_CONFLICT" && <Button variant="link" onClick={() => { setReleaseVersion(null); setReleaseReason(""); refresh(); }}>Refresh request before release</Button>}
     </div>}
     {canEdit && <div className="space-y-2 rounded border p-3">
       {selectionChanged && <p role="alert" className="text-sm text-amber-700 dark:text-amber-300">The quote request changed after selection. <Button variant="link" onClick={() => { setSelected(new Set()); setSelectionVersion(null); setOverrideReason(""); }}>Clear selection and review current quotes</Button></p>}
       {requiresQuantityReason && <div><Label htmlFor={`rfq-${rfqId}-override`}>Reason for accepting the quoted quantity</Label><Textarea id={`rfq-${rfqId}-override`} disabled={locked} value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Quoted quantities are preserved. This review reason is saved with the draft purchase.</p></div>}
-      <Button size="sm" disabled={locked || selectionChanged || editingId !== null || selectedLines.length === 0 || (requiresQuantityReason && !overrideReason.trim())} onClick={() => conversion.submit(`/api/purchasing/rfqs/${rfqId}/convert`, { expectedVersion: workflow.version, lines: selectedLines.map((line) => ({ rfqLineId: line.id, quoteRevisionId: line.latestQuote!.id })), quantityOverrideReason: requiresQuantityReason ? overrideReason.trim() : null }, "conversion")}>{conversion.isPending ? "Creating draft…" : `Create draft PO (${selectedLines.length} selected)`}</Button>
-      {conversion.error && <p className="text-sm text-destructive" role="alert">{conversion.error.message}</p>}
-      {conversion.unresolved && <Button size="sm" variant="outline" disabled={conversion.isPending} onClick={conversion.retryUnresolved}>Retry saved request</Button>}
+      <Button size="sm" disabled={locked || selectionChanged || editingId !== null || selectedLines.length === 0 || (requiresQuantityReason && !overrideReason.trim())} onClick={() => submit({ operation: "convert", rfqId, payload: { expectedVersion: workflow.version, lines: selectedLines.map((line) => ({ rfqLineId: line.id, quoteRevisionId: line.latestQuote!.id })), quantityOverrideReason: requiresQuantityReason ? overrideReason.trim() : null } })}>{command.pending ? "Creating draft…" : `Create draft PO (${selectedLines.length} selected)`}</Button>
     </div>}
   </section>;
 }

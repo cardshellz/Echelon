@@ -41,6 +41,8 @@ import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
 import { orderEditQuoteSchema } from "../../application/order-edit-provider.schema";
 import { serviceHarness } from "../fixtures/order-edit-service.fixture";
 import { createShipStationService } from "../../../oms/shipstation.service";
+import { OrderEditPaidProjection } from "../../../oms/order-edit-paid-projection";
+import { paidRewardFixture } from "../fixtures/order-edit-paid-reward.fixture";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -284,6 +286,30 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       );
       await database.pool.query(await readFile(new URL("../../../../../migrations/0745_customer_account_order_edit_actor.sql", import.meta.url), "utf8"));
       await database.pool.query(await readFile(new URL("../../../../../migrations/900000010000018180001_order_edit_submission_holds.sql", import.meta.url), "utf8"));
+      // Columns ordinarily supplied by the OMS owner migrations; exercise its
+      // actual projector here rather than replacing the financial handoff.
+      await database.pool.query(`
+        ALTER TABLE oms.oms_orders ADD COLUMN subtotal_cents bigint DEFAULT 1000,
+          ADD COLUMN gross_subtotal_cents bigint DEFAULT 1000,ADD COLUMN shipping_cents bigint DEFAULT 0,
+          ADD COLUMN tax_cents bigint DEFAULT 0,ADD COLUMN discount_cents bigint DEFAULT 0;
+        ALTER TABLE oms.oms_order_lines ADD COLUMN channel_observed_quantity int DEFAULT 1,
+          ADD COLUMN cancelled_quantity int DEFAULT 0,ADD COLUMN refunded_quantity int DEFAULT 0,
+          ADD COLUMN authorization_status text DEFAULT 'authorized',ADD COLUMN authorized_by_event_id text,
+          ADD COLUMN authorized_at timestamptz,ADD COLUMN paid_price_cents bigint DEFAULT 1000,
+          ADD COLUMN retail_price_cents bigint DEFAULT 1000,ADD COLUMN total_price_cents bigint DEFAULT 1000,
+          ADD COLUMN total_discount_cents bigint DEFAULT 0,ADD COLUMN plan_discount_cents bigint DEFAULT 0,
+          ADD COLUMN coupon_discount_cents bigint DEFAULT 0,ADD COLUMN fulfillable_quantity int DEFAULT 1,
+          ADD COLUMN authority_source_inbox_id int,ADD COLUMN updated_at timestamptz;
+        CREATE TABLE channels.channel_listings(channel_id int,external_variant_id text,product_variant_id int);
+        CREATE TABLE oms.oms_order_events(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          order_id bigint REFERENCES oms.oms_orders(id),event_type text,details jsonb,created_at timestamptz);
+        CREATE TABLE oms.oms_order_line_authority_events(event_key text UNIQUE,event_type text,
+          order_id bigint REFERENCES oms.oms_orders(id),order_line_id bigint,source_topic text,source_event_id text,
+          source_inbox_id int,previous_channel_observed_quantity int,previous_paid_quantity int,
+          previous_authority_fulfillable_quantity int,previous_authorization_status text,channel_observed_quantity int,
+          paid_quantity int,authority_fulfillable_quantity int,cancelled_quantity int,refunded_quantity int,
+          authorization_status text,authorized_at timestamptz,authorized_by_event_id text,created_at timestamptz);
+      `);
     }, 30000);
     afterAll(async () => {
       await database?.close();
@@ -293,6 +319,8 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         "TRUNCATE oms.order_edit_operations,wms.orders,oms.oms_orders,oms.webhook_retry_queue CASCADE",
       );
       await database.pool.query(`TRUNCATE catalog.product_variants;
+        TRUNCATE channels.channel_listings;
+        INSERT INTO channels.channel_listings VALUES(36,'100',100),(36,'101',101);
         INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(100,200,'SKU'),(101,200,'OTHER-PACK'),(999,999,'OTHER')`);
       await database.pool
         .query(`INSERT INTO oms.oms_orders(id,channel_id,external_order_id,status,financial_status,updated_at) VALUES(20,36,'1','open','paid','2026-10-05T00:00:00Z');
@@ -1161,6 +1189,159 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         ).toBe(status);
       },
     );
+    it("finishes an already-paid reward edit through the worker and real paid projector after a failed release", async () => {
+      const now = new Date("2026-10-05T00:01:00Z");
+      const operation = paidRewardFixture(OP, now);
+      const paid = operation.lastSnapshot!;
+      const store = new PostgresOrderEditStore(database.pool);
+      await store.save(
+        { ...operation, version: 1 },
+        0,
+        "staff",
+        "synthetic_paid_fixture",
+      );
+      await database.pool.query(`
+        UPDATE oms.oms_orders SET total_cents=917 WHERE id=20;
+        UPDATE oms.oms_order_lines SET paid_price_cents=279,retail_price_cents=279,
+          total_price_cents=279 WHERE id=30;
+        INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,quantity,paid_quantity,
+          authority_fulfillable_quantity,product_variant_id,authorization_status,paid_price_cents,
+          retail_price_cents,total_price_cents,total_discount_cents)
+        VALUES(31,20,'102',1,0,0,101,'seen',216,499,216,283);
+        INSERT INTO wms.order_items(id,order_id,oms_order_line_id,quantity,product_id,sku) VALUES(41,10,31,1,101,'OTHER-PACK');
+        INSERT INTO inventory.availability_claim_lines VALUES(2,1,41,101,1,1,0,0,0,0);
+        INSERT INTO wms.outbound_shipments(id,order_id,shipstation_order_id) VALUES(51,10,551);
+        INSERT INTO wms.outbound_shipment_items VALUES(1,51,40,1),(2,51,41,1);
+        UPDATE wms.orders SET on_hold=1 WHERE id=10;
+      `);
+      const inventory = inventoryProjection();
+      inventory.claim!.lines.push({
+        ...inventory.claim!.lines[0],
+        claimLineId: "2",
+        lineKey: "item:41",
+        orderItemId: 41,
+        targetVariantId: 101,
+        sku: "OTHER-PACK",
+      });
+      const projector = new OrderEditPaidProjection(database.pool, () => now);
+      const sync = new OrderEditOmsSynchronizer(
+        database.pool,
+        { syncOmsOrderToWms: vi.fn(async () => 10) },
+        { getOrderReservationStatus: vi.fn(async () => inventory) },
+        (id, op, snapshot) => projector.project(id, op, snapshot),
+      );
+      let releaseFailed = false;
+      const remote = vi.fn<
+        OrderEditWarehouseProvider["synchronizeOrderEditShipment"]
+      >(async (input) => {
+        if (input.mode === "hold")
+          await database.pool.query(
+            `INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held)
+          VALUES($1,$2,551,false) ON CONFLICT(operation_id,shipment_id) DO NOTHING`,
+            [input.operationId, input.shipmentId],
+          );
+        if (input.mode === "release" && !releaseFailed) {
+          releaseFailed = true;
+          throw new Error("Synthetic lost release response");
+        }
+      });
+      const actualGateway = new OrderEditWarehouseGateway(
+        database.pool,
+        { isConfigured: () => true, synchronizeOrderEditShipment: remote },
+        (id, snapshot, op) => sync.synchronize(id, snapshot, op),
+      );
+      const h = serviceHarness();
+      h.provider.reconcileCommit.mockResolvedValue({
+        status: "applied",
+        snapshot: paid,
+      });
+      const codes = {
+        available: () => true,
+        reserve: vi.fn(),
+        finalize: vi.fn(async () => {}),
+        release: vi.fn(),
+      };
+      const service = new OrderEditService(
+        store,
+        h.provider,
+        actualGateway,
+        () => now,
+        () => OP,
+        h.report,
+        undefined,
+        undefined,
+        codes,
+      );
+      await service.sweep();
+      expect((await store.get(OP)).status).toBe("synchronizing");
+      expect(releaseFailed).toBe(true);
+      expect((await store.get(OP)).error?.code).toBe("ORDER_EDIT_UNAVAILABLE");
+      expect(
+        (
+          await database.pool.query(
+            "SELECT order_edit_operation_id FROM wms.orders WHERE id=10",
+          )
+        ).rows[0].order_edit_operation_id,
+      ).toBe(OP);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT released_at FROM oms.order_edit_provider_holds WHERE operation_id=$1",
+            [OP],
+          )
+        ).rows,
+      ).toEqual([{ released_at: null }]);
+      await service.sweep();
+      const finished = await store.get(OP);
+      expect(finished.status).toBe("completed");
+      expect(finished.error).toBeNull();
+      expect(await store.pending(25, now)).toEqual([]);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT order_edit_operation_id,on_hold FROM wms.orders WHERE id=10",
+          )
+        ).rows[0],
+      ).toEqual({ order_edit_operation_id: null, on_hold: 1 });
+      expect(
+        (
+          await database.pool.query(
+            "SELECT released_at FROM oms.order_edit_provider_holds WHERE operation_id=$1",
+            [OP],
+          )
+        ).rows,
+      ).toEqual([{ released_at: expect.any(Date) }]);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT total_price_cents FROM oms.oms_order_lines ORDER BY id",
+          )
+        ).rows,
+      ).toEqual([{ total_price_cents: "0" }, { total_price_cents: "216" }]);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT count(*)::int AS count FROM oms.order_edit_events WHERE action='paid_current_projected'",
+          )
+        ).rows[0].count,
+      ).toBe(1);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT count(*)::int AS count FROM oms.order_edit_events WHERE action='completed'",
+          )
+        ).rows[0].count,
+      ).toBe(1);
+      expect(codes.finalize).toHaveBeenCalledTimes(2);
+      expect(codes.reserve).not.toHaveBeenCalled();
+      expect(codes.release).not.toHaveBeenCalled();
+      const remoteCalls = remote.mock.calls.length;
+      await service.sweep();
+      expect(remote).toHaveBeenCalledTimes(remoteCalls);
+      expect(h.provider.commit).not.toHaveBeenCalled();
+      expect(h.provider.refund).not.toHaveBeenCalled();
+      expect(h.provider.recoverUnpaid).not.toHaveBeenCalled();
+    });
     it.each([
       [
         "missing source line",
@@ -1461,7 +1642,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       try {
         await terminal.query("BEGIN");
         await expect(
-          finalizeOrderEditWarehouseRelease(terminal, 20, OP, proof),
+          finalizeOrderEditWarehouseRelease(terminal, 20, OP, proof, record().updatedAt),
         ).rejects.toMatchObject({ code: "ORDER_EDIT_RELEASE_CHANGED" });
         await terminal.query("ROLLBACK");
         expect(
@@ -1483,7 +1664,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       const terminal = await database.pool.connect();
       try {
         await terminal.query("BEGIN");
-        await finalizeOrderEditWarehouseRelease(terminal, 20, OP, proof);
+        await finalizeOrderEditWarehouseRelease(terminal, 20, OP, proof, record().updatedAt);
         await terminal.query(
           "UPDATE oms.order_edit_operations SET status='expired' WHERE id=$1",
           [OP],
@@ -1497,7 +1678,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           ).rows[0],
         ).toEqual({ order_edit_operation_id: OP, on_hold: 1 });
         await terminal.query("BEGIN");
-        await finalizeOrderEditWarehouseRelease(terminal, 20, OP, proof);
+        await finalizeOrderEditWarehouseRelease(terminal, 20, OP, proof, record().updatedAt);
         await terminal.query(
           "UPDATE oms.order_edit_operations SET status='expired' WHERE id=$1",
           [OP],
@@ -1612,6 +1793,8 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
     });
     it("atomically saves the terminal state, hold release and audit, including rollback on audit failure", async () => {
       await gateway.acquire(20, OP);
+      await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,shipstation_order_id) VALUES(51,10,551)");
+      await database.pool.query("INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held) VALUES($1,51,551,false)",[OP]);
       const proof = await gateway.releaseUnchanged(20, OP);
       const store = new PostgresOrderEditStore(database.pool);
       // An invalid audit actor triggers a real FK violation AFTER the owner clear.
@@ -1632,6 +1815,8 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           )
         ).rows[0].order_edit_operation_id,
       ).toBe(OP);
+      expect((await database.pool.query('SELECT released_at FROM oms.order_edit_provider_holds WHERE operation_id=$1',[OP])).rows)
+        .toEqual([{released_at:null}]);
       await store.save(
         { ...record(), status: "expired", version: 1 },
         0,
@@ -1640,6 +1825,8 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         proof,
       );
       expect((await store.get(OP)).status).toBe("expired");
+      expect((await database.pool.query('SELECT released_at FROM oms.order_edit_provider_holds WHERE operation_id=$1',[OP])).rows)
+        .toEqual([{released_at:new Date(record().updatedAt)}]);
       expect(
         (
           await database.pool.query(

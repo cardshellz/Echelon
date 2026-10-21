@@ -1,5 +1,6 @@
 import { reviewRfqQuantity, rfqQuantityReviewMessage } from "@shared/procurement/rfq-quantity-review";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
+import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -107,6 +108,17 @@ export function createRfqWorkflowService(database: RfqWorkflowDatabase, purchasi
       z.string().trim().min(1).max(200).parse(actorId);
       z.date().parse(at);
       await lockInventoryCostGraph(tx);
+      // A session check before waiting for the graph lock is not current command
+      // authority. Identity locks retain the verified grant until this write commits.
+      let authority: Awaited<ReturnType<typeof readCommandAuthorityActor>>;
+      try { authority = await readCommandAuthorityActor(tx, actorId); }
+      catch (error) {
+        if (error instanceof z.ZodError) throw new RfqWorkflowError("RFQ_AUTHORITY_EVIDENCE_INVALID", "Stored authority evidence could not be verified.", 500);
+        throw error;
+      }
+      if (!authority.active || !authority.permissions.includes("purchasing:edit")) {
+        throw new RfqWorkflowError("RFQ_EDIT_AUTHORITY_REQUIRED", "Current unrestricted purchasing edit permission is required for this RFQ command.", 403);
+      }
       if (command.operation === "capture_quote") {
         rfqResourceIdSchema.parse(command.lineId);
         const input = rfqQuoteCaptureSchema.parse(command.body);

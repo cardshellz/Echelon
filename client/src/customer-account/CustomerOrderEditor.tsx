@@ -13,6 +13,15 @@ import type {
 import type { CustomerAccountTransport } from "./customer-account.transport";
 import { orderEditNeedsPreparation } from "@/lib/order-edit-confirmation";
 import { ClubRewardsWidget } from "./ClubRewardsWidget";
+import {
+  useOrderEditStatus,
+  orderEditWatchesStatus,
+} from "./use-order-edit-status";
+import {
+  saveOrderEditPaymentReturn,
+  clearOrderEditPaymentReturn,
+  orderEditPaymentReturnStorage,
+} from "./order-edit-payment-return";
 
 const closed = new Set<OrderEditOperation["status"]>([
   "completed",
@@ -31,6 +40,9 @@ export function CustomerOrderEditor({
   actorKey,
   enabled,
   onBusy,
+  paymentOwner,
+  returnOperationId,
+  onDone,
 }: {
   api: CustomerAccountTransport;
   connectionId: number;
@@ -38,6 +50,9 @@ export function CustomerOrderEditor({
   actorKey: string;
   enabled: boolean;
   onBusy: (busy: boolean) => void;
+  paymentOwner?: string;
+  returnOperationId?: string;
+  onDone?: () => void;
 }) {
   const [order, setOrder] = useState<OrderEditOrder | null>(null);
   const [operation, setOperation] = useState<OrderEditOperation | null>(null);
@@ -64,6 +79,23 @@ export function CustomerOrderEditor({
   const [closedOperationId, setClosedOperationId] = useState<string>();
   const [now, setNow] = useState(Date.now);
   const inFlight = useRef(false);
+  const statusRevision = useRef(0);
+  const status = useOrderEditStatus({
+    operationId: operation?.operationId ?? null,
+    watching: Boolean(
+      operation && !draftVisible && orderEditWatchesStatus(operation.status),
+    ),
+    read: (id, signal) => api.edits.operation(id, signal),
+    busy: () => inFlight.current,
+    revision: () => statusRevision.current,
+    received: (value) => {
+      statusRevision.current += 1;
+      setOperation(value);
+      setError(null);
+      setUncertain(false);
+      if (closed.has(value.status)) setDraftVisible(false);
+    },
+  });
   useEffect(() => {
     onBusy(busy || locked || rewardBusy);
     return () => onBusy(false);
@@ -89,12 +121,24 @@ export function CustomerOrderEditor({
           controller.signal,
         );
         if (controller.signal.aborted) return;
-        if (current.activeOperationId) {
+        const operationToOpen = returnOperationId ?? current.activeOperationId;
+        if (operationToOpen) {
           const active = await api.edits.operation(
-            current.activeOperationId,
+            operationToOpen,
             controller.signal,
           );
           if (controller.signal.aborted) return;
+          if (active.orderNumber !== current.orderNumber)
+            throw new Error("The saved edit does not belong to this order.");
+          if (returnOperationId && paymentOwner) {
+            const storage = orderEditPaymentReturnStorage();
+            if (storage)
+              clearOrderEditPaymentReturn(
+                paymentOwner,
+                returnOperationId,
+                storage,
+              );
+          }
           setInitialOperation(active);
           setOperation(active);
           setDiscountCodes(active.requestedPlan?.discountCodes ?? []);
@@ -110,12 +154,20 @@ export function CustomerOrderEditor({
       }
     })();
     return () => controller.abort();
-  }, [api, connectionId, omsOrderId, actorKey]);
+  }, [
+    api,
+    connectionId,
+    omsOrderId,
+    actorKey,
+    paymentOwner,
+    returnOperationId,
+  ]);
 
   async function received(
     result: OrderEditOperation,
     confirmDisplayedAmount = false,
   ) {
+    statusRevision.current += 1;
     if (result.canAbandon && !result.requestedPlan) {
       setOperation(result);
       // Old quote responses can omit the saved plan. Hydrate it before exposing
@@ -195,6 +247,7 @@ export function CustomerOrderEditor({
     target = operation,
   ): Promise<boolean> {
     if (!target || inFlight.current) return false;
+    statusRevision.current += 1;
     inFlight.current = true;
     setBusy(true);
     setBusyAction(action === "resume" ? "reconcile" : action);
@@ -310,9 +363,23 @@ export function CustomerOrderEditor({
             closedOperationId={closedOperationId}
             discountCodes={discountCodes}
             onDiscountCodesChange={setDiscountCodes}
-            renderRewards={order.codeEntryAvailable ? (props) => <ClubRewardsWidget {...props}
-              api={api} connectionId={connectionId} omsOrderId={omsOrderId} actorKey={actorKey}
-              onBusy={(value) => { props.onBusy(value); setRewardBusy(value); }} /> : undefined}
+            renderRewards={
+              order.codeEntryAvailable
+                ? (props) => (
+                    <ClubRewardsWidget
+                      {...props}
+                      api={api}
+                      connectionId={connectionId}
+                      omsOrderId={omsOrderId}
+                      actorKey={actorKey}
+                      onBusy={(value) => {
+                        props.onBusy(value);
+                        setRewardBusy(value);
+                      }}
+                    />
+                  )
+                : undefined
+            }
             initialOperation={initialOperation}
             onLock={setLocked}
             onQuote={received}
@@ -358,12 +425,37 @@ export function CustomerOrderEditor({
           busy={busy}
           busyAction={busyAction}
           isUncertain={uncertain}
-          error={error}
+          error={error ?? status.error}
           onCommit={() => void progress("commit")}
-          onRefresh={() => void progress("reconcile")}
+          onRefresh={() =>
+            status.error ? status.retry() : void progress("reconcile")
+          }
+          statusReadBusy={status.reading}
+          onPaymentOpen={() => {
+            const storage = orderEditPaymentReturnStorage();
+            if (paymentOwner && order && storage)
+              saveOrderEditPaymentReturn(
+                {
+                  owner: paymentOwner,
+                  connectionId,
+                  omsOrderId,
+                  operationId: operation.operationId,
+                  orderNumber: order.orderNumber,
+                },
+                storage,
+                Date.now,
+              );
+          }}
           onAbandon={() => void progress("abandon")}
         />
       )}
+      {operation &&
+        ["completed", "recovered"].includes(operation.status) &&
+        onDone && (
+          <button type="button" className="csz-action" onClick={onDone}>
+            Done
+          </button>
+        )}
     </div>
   );
 }

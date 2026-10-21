@@ -8,6 +8,7 @@ import type {
 import type { DropshipMarketplaceListingPushProvider } from "../../application/dropship-marketplace-listing-push-provider";
 import {
   DropshipListingPushWorkerService,
+  classifyStockGateRefusal,
   type DropshipListingIntentRefreshInput,
   type DropshipListingPushWorkerClaim,
   type DropshipListingPushWorkerEligibility,
@@ -18,6 +19,20 @@ import {
 import type { DropshipMarketplaceListingIntent, DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
 
 const now = new Date("2026-05-01T19:00:00.000Z");
+
+describe("classifyStockGateRefusal", () => {
+  it("names each stock-gate code's class from its throwing condition", () => {
+    expect(classifyStockGateRefusal("PUBLICATION_PRIOR_OUTCOME_UNRESOLVED")).toBe("operator");
+    for (const code of ["PUBLICATION_LISTING_TARGET_UNMAPPED", "PUBLICATION_LISTING_PLAN_OMITTED", "PUBLICATION_PROVIDER_ACCOUNT_UNVERIFIED"]) {
+      expect(classifyStockGateRefusal(code)).toBe("permanent");
+    }
+    for (const code of ["QUANTITY_PUBLICATION_DRAIN_BUSY", "PUBLICATION_SCOPE_BUSY", "PUBLICATION_ADMISSION_CAPACITY_BUSY",
+      "PUBLICATION_PROVIDER_COOLDOWN", "QUANTITY_PUBLICATION_SUPPRESSED", "PUBLICATION_GLOBAL_STOP_ACTIVE",
+      "PUBLICATION_AUTHORITY_CHANGED", "PUBLICATION_CANONICAL_LISTING_PLAN_CHANGED", "UNKNOWN_CODE"]) {
+      expect(classifyStockGateRefusal(code)).toBe("transient");
+    }
+  });
+});
 
 describe("DropshipListingPushWorkerService", () => {
   let repository: FakeListingPushWorkerRepository;
@@ -316,6 +331,59 @@ describe("DropshipListingPushWorkerService", () => {
       context: { attemptId: null, operatorAction: false },
     });
     expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toBeUndefined();
+  });
+
+  // Stock-gate refusals a retry meets again until Card Shellz or the vendor
+  // changes something are permanent in the dropship worker (F6): an ops retry
+  // and the legacy catch-up requeue only retryable items.
+  it.each([
+    ["PUBLICATION_LISTING_TARGET_UNMAPPED", "Listing quantity requires one exact active canonical target/mapping; configure it before publishing.", true],
+    ["PUBLICATION_LISTING_PLAN_OMITTED", "The current canonical plan did not authorize this exact listing; an older outbox quantity is not authority.", true],
+    ["PUBLICATION_PROVIDER_ACCOUNT_UNVERIFIED", "Provider-verified eBay store identity is required before publishing quantity.", false],
+  ])("records %s as permanent (retryable false)", async (code, message, needsStockSetup) => {
+    marketplacePush.error = new QuantityPublicationAdmissionError(code, message, { scope: { connectionId: 22 } });
+
+    const result = await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-perm" });
+
+    expect(result.items[0]).toMatchObject({ status: "failed", errorCode: code });
+    expect(repository.failInputs[0]).toMatchObject({
+      code,
+      message,
+      retryable: false,
+      context: { attemptId: null, operatorAction: false, classification: "permanent" },
+    });
+    expect(Boolean(repository.failInputs[0]?.context?.requiresReview)).toBe(needsStockSetup);
+    const setupLog = logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_STOCK_SETUP");
+    if (needsStockSetup) {
+      expect(setupLog).toMatchObject({
+        context: { jobId: 30, itemId: 1, vendorId: 10, storeConnectionId: 22, listingId: 100, productVariantId: 101,
+          errorCode: code, outcome: "requires_review", classification: "permanent" },
+      });
+    } else {
+      expect(setupLog).toBeUndefined();
+    }
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toBeUndefined();
+  });
+
+  it.each([
+    "QUANTITY_PUBLICATION_DRAIN_BUSY",
+    "PUBLICATION_SCOPE_BUSY",
+    "PUBLICATION_ADMISSION_CAPACITY_BUSY",
+    "PUBLICATION_PROVIDER_COOLDOWN",
+    "QUANTITY_PUBLICATION_SUPPRESSED",
+    "PUBLICATION_GLOBAL_STOP_ACTIVE",
+    "PUBLICATION_AUTHORITY_CHANGED",
+    "PUBLICATION_CANONICAL_LISTING_PLAN_CHANGED",
+    "PUBLICATION_LISTING_PLAN_MISSING",
+    "SOME_FUTURE_STOCK_CODE",
+  ])("keeps %s retryable: it clears by itself", async (code) => {
+    marketplacePush.error = new QuantityPublicationAdmissionError(code, "Stock gate refused for now.");
+
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-transient" });
+
+    expect(repository.failInputs[0]).toMatchObject({ code, retryable: true });
+    expect(repository.failInputs[0]?.context).toEqual({ attemptId: null, operatorAction: false });
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_STOCK_SETUP")).toBeUndefined();
   });
 
   it("does not fail the push worker when listing failure notification delivery fails", async () => {

@@ -58,6 +58,7 @@ function runnerFixture() {
 describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves prior coverage with the explicitly retired duplicate invoice owner, the retired bulk policy writer suite and reviewed additions", () => {
     const addedSuites = [
+      "server/modules/procurement/__tests__/integration/rfq-work-list.integration.test.ts",
       "server/modules/procurement/__tests__/integration/supplier-credit.integration.test.ts",
       "server/modules/channels/__tests__/integration/channel-pricing-owner.integration.test.ts",
       "server/modules/channels/__tests__/integration/channel-pricing-routes.integration.test.ts",
@@ -103,6 +104,9 @@ describe("PostgreSQL CI coverage and isolation", () => {
       // eBay adoption account identity: the reader's SQL ownership proof and the loader/reader/CHECK agreement.
       "server/modules/dropship/__tests__/integration/dropship-ebay-push-publication-reader.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-ebay-publication-account-identity.integration.test.ts",
+      // Live listings stay orderable through queued/failed updates; demoted rows, below-cost pauses and account-check refusals recover.
+      "server/modules/dropship/__tests__/integration/dropship-listing-live-status.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-cost-change-hold-restore.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-global-control.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-resume.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-enable.integration.test.ts",
