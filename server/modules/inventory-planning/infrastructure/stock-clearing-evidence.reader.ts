@@ -1,6 +1,7 @@
 import {
   readStockClearingScopeBindings,
-  stockClearingAttemptMatchesMemberSql,
+  stockClearingAttemptMembersSql,
+  stockClearingCatchupMembersSql,
 } from "./stock-clearing-scope.reader";
 import { QUANTITY_PUBLICATION_LOCK_NAMESPACE } from "./quantity-publication-admission.repository";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
@@ -57,17 +58,13 @@ export async function readStockClearingEvidence(
       kind: string;
       id: string;
     }>(
-      `WITH bindings AS (SELECT * FROM jsonb_to_recordset($5::jsonb) AS b("productVariantId" int,"scopeKey" text))
-       SELECT v.id product_variant_id,'request' kind,a.id::text
-       FROM inventory.quantity_publication_attempts a CROSS JOIN unnest($3::int[]) v(id)
-       WHERE a.state IN ('running','uncertain') AND ${stockClearingAttemptMatchesMemberSql}
-       UNION ALL SELECT v.id,'catchup',c.id::text
-       FROM inventory.quantity_publication_catchup c CROSS JOIN unnest($3::int[]) v(id)
-       WHERE c.completed_revision<c.revision AND (
-         c.scope_key IN (SELECT b."scopeKey" FROM bindings b WHERE b."productVariantId"=v.id)
-         OR (c.scope->>'destinationKind'=$1 AND c.scope->>'connectionId'=$2
-           AND ((c.scope->>'productVariantId')::integer=v.id
-             OR (c.scope->>'productVariantId' IS NULL AND (c.scope->>'productId')::integer=$4))))
+      `WITH bindings AS (SELECT * FROM jsonb_to_recordset($5::jsonb) AS b("productVariantId" int,"scopeKey" text)),
+       attempt_source AS MATERIALIZED (SELECT id,state,completed_at,scope,scope_key,affected_scope_keys,affected_scopes
+         FROM inventory.quantity_publication_attempts WHERE state IN ('running','uncertain')),
+       attempts AS MATERIALIZED (${stockClearingAttemptMembersSql}),
+       catchup AS (${stockClearingCatchupMembersSql})
+       SELECT product_variant_id,'request' kind,id::text FROM attempts WHERE state IN ('running','uncertain')
+       UNION ALL SELECT product_variant_id,'catchup',id::text FROM catchup
        UNION ALL SELECT product_variant_id,'outbox',id::text FROM inventory.inventory_publication_outbox
        WHERE destination_kind_snapshot=$1 AND COALESCE(channel_connection_id_snapshot,dropship_store_connection_id_snapshot)::text=$2
          AND product_variant_id=ANY($3::integer[]) AND state NOT IN ('verified','cancelled','superseded')`,
@@ -86,7 +83,10 @@ export async function readStockClearingEvidence(
       target_id: number;
       readback_id: string | null;
     }>(
-      `WITH bindings AS (SELECT * FROM jsonb_to_recordset($6::jsonb) AS b("productVariantId" int,"scopeKey" text))
+      `WITH bindings AS (SELECT * FROM jsonb_to_recordset($6::jsonb) AS b("productVariantId" int,"scopeKey" text)),
+       attempt_source AS MATERIALIZED (SELECT id,state,completed_at,scope,scope_key,affected_scope_keys,affected_scopes
+         FROM inventory.quantity_publication_attempts WHERE completed_at IS NOT NULL),
+       attempts AS MATERIALIZED (${stockClearingAttemptMembersSql})
        SELECT v.id product_variant_id,t.id target_id,proof.id::text readback_id
      FROM unnest($3::integer[]) v(id)
      JOIN inventory.inventory_publication_targets t ON t.destination_kind=$1
@@ -112,8 +112,8 @@ export async function readStockClearingEvidence(
          AND NOT EXISTS (SELECT 1 FROM inventory.inventory_publication_outbox later
            WHERE later.publication_target_id=t.id AND later.product_variant_id=v.id AND later.desired_revision>o.desired_revision
              AND later.state NOT IN ('cancelled','superseded'))
-         AND NOT EXISTS (SELECT 1 FROM inventory.quantity_publication_attempts a
-           WHERE a.completed_at>r.observed_at AND ${stockClearingAttemptMatchesMemberSql})
+         AND NOT EXISTS (SELECT 1 FROM attempts a
+           WHERE a.product_variant_id=v.id AND a.completed_at>r.observed_at)
        ORDER BY r.observed_at DESC,r.id DESC LIMIT 1
      ) proof ON true`,
       [

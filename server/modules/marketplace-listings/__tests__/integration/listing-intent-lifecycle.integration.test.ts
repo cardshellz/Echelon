@@ -403,6 +403,72 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
         expect((await rows())[0].lifecycle.members[1].state).toBe("settled");
       },
     );
+    it("assesses the supported 250-member scope within the owner's statement timeout", async () => {
+      await verifyZero(database.pool, now);
+      await database.pool
+        .query(`INSERT INTO catalog.product_variants(id,product_id,sku)
+          SELECT n,20,'MEMBER-'||n FROM generate_series(1000,1249) n;
+        INSERT INTO inventory.publication_variant_mapping_versions
+          (id,publication_target_id,product_variant_id,lifecycle_status,external_inventory_item_id)
+          SELECT n,1,n,'sealed','MEMBER-'||n FROM generate_series(1000,1249) n;
+        INSERT INTO inventory.publication_variant_mapping_heads
+          SELECT 1,n,n FROM generate_series(1000,1249) n;
+        INSERT INTO inventory.inventory_publication_outbox
+          (id,publication_target_id,product_variant_id,destination_kind_snapshot,channel_connection_id_snapshot,
+           state,desired_quantity,desired_revision,external_inventory_item_id_snapshot)
+          SELECT n,1,n,'channel_connection',4,'verified',0,1,'MEMBER-'||n FROM generate_series(1000,1249) n;`);
+      await database.pool.query(
+        `INSERT INTO inventory.inventory_publication_readbacks
+        SELECT n,1,n,n,'channel_connection',4,NULL,1,'account','seller-a','MEMBER-'||n,0,true,true,$1
+        FROM generate_series(1000,1249) n`,
+        [now],
+      );
+      const history = Array.from({ length: 10_000 }, (_, index) => {
+        const identity = scope({ externalInventoryItemId: "HISTORY-" + index });
+        return {
+          token: randomUUID(),
+          scope: identity,
+          key: quantityPublicationScopeLockKey(identity),
+        };
+      });
+      await database.pool.query(
+        `INSERT INTO inventory.quantity_publication_attempts(owner_token,owner_kind,gate_epoch,
+        scope_key,scope,affected_scope_keys,affected_scopes,state,started_at,completed_at)
+        SELECT h.token,'legacy',0,h.key,h.scope,ARRAY[h.key],jsonb_build_array(h.scope),'succeeded',$2,$2
+        FROM jsonb_to_recordset($1::jsonb) h(token uuid,key text,scope jsonb)`,
+        [JSON.stringify(history), new Date(now.getTime() + 1000)],
+      );
+      await database.pool.query(
+        `INSERT INTO inventory.quantity_publication_catchup(scope_key,scope,reason,next_attempt_at,updated_at)
+        SELECT h.key,h.scope,'unrelated retained work',$2,$2 FROM jsonb_to_recordset($1::jsonb) h(key text,scope jsonb)`,
+        [JSON.stringify(history), now],
+      );
+      const client = await database.pool.connect();
+      try {
+        await client.query("BEGIN");
+        // Same limit as PostgresListingIntentLifecycleReader, enforced by PostgreSQL.
+        await client.query("SET LOCAL statement_timeout='5s'");
+        await fenceStockClearingEvidence(client);
+        const evidence = await readStockClearingEvidence(client, {
+          destinationKind: "channel_connection",
+          connectionId: 4,
+          accountId: "seller-a",
+          providerKey: "ebay",
+          productId: 20,
+          productVariantIds: Array.from(
+            { length: 250 },
+            (_, index) => index + 1000,
+          ),
+        });
+        expect(evidence).toHaveLength(250);
+        expect(evidence.every((member) => member.state === "settled")).toBe(
+          true,
+        );
+      } finally {
+        await client.query("ROLLBACK");
+        client.release();
+      }
+    });
     it("retains excluded members and shows their unverified clearing duty without calling content sync", async () => {
       await exclude();
       await worker().processDue();

@@ -85,16 +85,44 @@ export async function readStockClearingScopeBindings(
   return [...bindings.values()];
 }
 
-// Both unfinished work and later completed requests must use the same matching
-// rule. Null Catalog hints never mean every product on an account. Explicit
-// hints remain conservative evidence when an old request predates a mapping.
-// SQL contract: attempt alias a, member alias v(id), bindings CTE; parameters
-// $1 destination kind, $2 connection ID text, $4 product ID.
-export const stockClearingAttemptMatchesMemberSql = `(
-  a.scope_key IN (SELECT b."scopeKey" FROM bindings b WHERE b."productVariantId"=v.id)
-  OR a.affected_scope_keys && ARRAY(SELECT b."scopeKey" FROM bindings b WHERE b."productVariantId"=v.id)
-  OR EXISTS (SELECT 1 FROM jsonb_array_elements(a.affected_scopes || jsonb_build_array(a.scope)) s
+// Resolve the requested members once per query. Correlating this match
+// inside every variant/readback query multiplies the entire request history by
+// the member count and exceeds the lifecycle owner's timeout for larger listings.
+// Both pending work and later completed requests consume this same relation.
+// Null Catalog hints never mean every product on an account. Explicit hints
+// retain conservative evidence when an old request predates a mapping.
+// SQL contract: bindings and attempt_source CTEs; $1 destination kind, $2 connection ID text,
+// $3 member IDs, $4 product ID.
+export const stockClearingAttemptMembersSql = `
+  WITH hinted AS MATERIALIZED (
+    SELECT a.id,a.state,a.completed_at,(s->>'productVariantId')::int product_variant_id
+    FROM attempt_source a
+    CROSS JOIN LATERAL jsonb_array_elements(a.affected_scopes || jsonb_build_array(a.scope)) s
     WHERE s->>'destinationKind'=$1 AND s->>'connectionId'=$2
-      AND ((s->>'productVariantId')::integer=v.id
-        OR (s->>'productVariantId' IS NULL AND (s->>'productId')::integer=$4)))
-)`;
+      AND ((s->>'productVariantId')::int=ANY($3::int[])
+        OR (s->>'productVariantId' IS NULL AND (s->>'productId')::int=$4))
+  )
+  SELECT b."productVariantId" product_variant_id,a.id,a.state,a.completed_at
+  FROM attempt_source a
+  CROSS JOIN LATERAL unnest(a.affected_scope_keys || ARRAY[a.scope_key]) k(scope_key)
+  JOIN bindings b ON b."scopeKey"=k.scope_key
+  UNION
+  SELECT v.id,h.id,h.state,h.completed_at FROM hinted h CROSS JOIN unnest($3::int[]) v(id)
+  WHERE h.product_variant_id IS NULL OR h.product_variant_id=v.id
+`;
+
+export const stockClearingCatchupMembersSql = `
+  WITH hinted AS MATERIALIZED (
+    SELECT c.id,(c.scope->>'productVariantId')::int product_variant_id
+    FROM inventory.quantity_publication_catchup c
+    WHERE c.completed_revision<c.revision AND c.scope->>'destinationKind'=$1 AND c.scope->>'connectionId'=$2
+      AND ((c.scope->>'productVariantId')::int=ANY($3::int[])
+        OR (c.scope->>'productVariantId' IS NULL AND (c.scope->>'productId')::int=$4))
+  )
+  SELECT b."productVariantId" product_variant_id,c.id
+  FROM inventory.quantity_publication_catchup c JOIN bindings b ON b."scopeKey"=c.scope_key
+  WHERE c.completed_revision<c.revision
+  UNION
+  SELECT v.id,h.id FROM hinted h CROSS JOIN unnest($3::int[]) v(id)
+  WHERE h.product_variant_id IS NULL OR h.product_variant_id=v.id
+`;
