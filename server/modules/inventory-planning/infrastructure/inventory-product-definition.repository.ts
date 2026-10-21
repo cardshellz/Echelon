@@ -184,7 +184,9 @@ export async function captureDefinitionImpact(client: PoolClient, affectedProduc
     fingerprints.push(inventoryCutoverEvidenceHash({ before: before.rows, after: after.rows,
       beforeBlocked: before.blockedTargets ?? [], afterBlocked: after.blockedTargets ?? [] }));
     for (const target of after.blockedTargets ?? []) {
-      skippedDestinations.push(`${target.channelName}: stock is not updating (${target.errorCode}: ${target.blockerCodes.join(", ")}). Fix that listing; this change still applies.`);
+      // A row isolation (Dropship eBay) still updates the destination's linked listings.
+      const scope = target.isolation === "rows" ? ` for ${target.productVariantIds.length} unlinked item(s)` : "";
+      skippedDestinations.push(`${target.channelName}: stock is not updating${scope} (${target.errorCode}: ${target.blockerCodes.join(", ")}). Fix that listing; this change still applies.`);
     }
     for (const row of after.rows) {
       blockers.push(...row.blockerCodes.map(code => `${row.channelName} / ${row.sku ?? row.productVariantId}: ${code}`));

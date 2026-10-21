@@ -16,18 +16,27 @@ import type { DropshipClock, DropshipLogger } from "./dropship-ports";
  * requeued item carries a marker counting its automatic requeues, which stop
  * at a small cap (a deploy's overlap can refuse one again). A step that fails
  * is logged and tried again on the next pass; the sweep still runs.
+ * 3. (Fix PR 2a-2, when configured) a push the automatic stock link failed for a
+ *    reason that clears by itself is queued again after a growing wait, a
+ *    bounded number of times; a push that failed with
+ *    PUBLICATION_LISTING_TARGET_UNMAPPED before the link existed is re-sent
+ *    once, only when its store has one live Card Shellz stock destination and the
+ *    listing is still selected (owner decision Q4). Marker-guarded and audited
+ *    in the same transaction as the re-queue (domain/listing-push-automatic-requeue).
  */
 
 export type DropshipRecoveryErrorClass = "transient" | "permanent";
 
 export interface DropshipRecoveryRowFailure {
-  entity: "dropship_vendor_listing" | "dropship_listing_push_job";
+  entity: "dropship_vendor_listing" | "dropship_listing_push_job" | "dropship_store_connection";
   entityId: number;
   code: string;
   message: string;
   classification: DropshipRecoveryErrorClass;
   /** A permanent failure is marked so the row is not tried again; false when even the mark failed. */
   markedForReview: boolean;
+  /** The same passing failure again, right after an earlier one (logged at DEBUG, not as a repeated WARN). */
+  repeated?: boolean;
 }
 
 export interface RestoredLiveListing {
@@ -91,6 +100,45 @@ export interface DropshipAccountVerificationRequeuePort {
   requeueAccountVerificationFailures(input: { now: Date; workerId: string; limit: number }): Promise<AccountVerificationRequeueResult>;
 }
 
+export interface StockLinkRequeuedJob {
+  jobId: number;
+  vendorId: number;
+  storeConnectionId: number;
+  itemIds: number[];
+  listingIds: number[];
+  /** Per item: the failure's code and which automatic re-queue this is (1-based). */
+  items: Array<{ itemId: number; errorCode: string; attempt: number }>;
+}
+
+export interface StockLinkRequeueItemOutcome {
+  jobId: number;
+  itemId: number;
+  listingId: number | null;
+  vendorId: number;
+  storeConnectionId: number;
+  productVariantId: number;
+  errorCode: string;
+  /** Automatic re-queues the item already had. */
+  count: number;
+  /** For a skipped re-send: why it was not sent (the stock selection's decision). */
+  reason?: string;
+}
+
+export interface StockLinkRequeueResult {
+  requeued: StockLinkRequeuedJob[];
+  /** Failed again after its code's last automatic re-queue; marked once, a human looks. */
+  exhausted: StockLinkRequeueItemOutcome[];
+  /** Q4 re-sends not sent because the listing is no longer selected; marked once, never re-sent. */
+  skipped: StockLinkRequeueItemOutcome[];
+  /** Q4 re-sends not sent yet because the listing is only paused or its store mode is off for now; looked at again later, nothing written. */
+  deferred: StockLinkRequeueItemOutcome[];
+  failed: DropshipRecoveryRowFailure[];
+}
+
+export interface DropshipStockLinkRequeuePort {
+  requeueAutomaticStockLinkFailures(input: { now: Date; workerId: string; limit: number }): Promise<StockLinkRequeueResult>;
+}
+
 export interface DropshipListingPushRecoveryResult {
   listingsRestored: number;
   listingsNeedingReview: number;
@@ -98,6 +146,8 @@ export interface DropshipListingPushRecoveryResult {
   itemsRequeued: number;
   rowFailures: number;
   stepFailures: number;
+  /** Present only when the stock link re-queue step is configured (it is included in jobs/items requeued above). */
+  stockLink?: { jobsRequeued: number; itemsRequeued: number; itemsExhausted: number; itemsSkipped: number };
 }
 
 /** Bounded per pass so recovery never delays the sweep's own jobs for long. */
@@ -107,6 +157,10 @@ export class DropshipListingPushRecoveryService {
   constructor(private readonly deps: {
     liveStatusRepair: DropshipLiveListingStatusRepairPort;
     accountVerificationRequeue: DropshipAccountVerificationRequeuePort;
+    /** Fix PR 2a-2's automatic stock link re-queue; absent, the step does not run. */
+    stockLinkRequeue?: DropshipStockLinkRequeuePort;
+    /** Its own bound (domain AUTOMATIC_REQUEUE_BATCH_SIZE in production). */
+    stockLinkBatchSize?: number;
     clock: DropshipClock;
     logger: DropshipLogger;
     batchSize?: number;
@@ -148,7 +202,89 @@ export class DropshipListingPushRecoveryService {
       result.itemsRequeued += requeue.requeued.reduce((sum, job) => sum + job.itemIds.length, 0);
       result.rowFailures += requeue.failed.length;
     });
+    const stockLinkRequeue = this.deps.stockLinkRequeue;
+    if (stockLinkRequeue) {
+      const summary = { jobsRequeued: 0, itemsRequeued: 0, itemsExhausted: 0, itemsSkipped: 0 };
+      result.stockLink = summary;
+      await this.step("requeue_stock_link_failures", input.workerId, result, async () => {
+        const requeue = await stockLinkRequeue.requeueAutomaticStockLinkFailures({
+          now: this.deps.clock.now(), workerId: input.workerId, limit: this.deps.stockLinkBatchSize ?? limit,
+        });
+        for (const job of requeue.requeued) this.logStockLinkRequeued(job, input.workerId);
+        for (const item of requeue.exhausted) this.logStockLinkExhausted(item, input.workerId);
+        for (const item of requeue.skipped) this.logStockLinkSkipped(item, input.workerId);
+        for (const item of requeue.deferred ?? []) this.logStockLinkDeferred(item, input.workerId);
+        for (const failure of requeue.failed) this.logRowFailure("requeue_stock_link_failures", failure, input.workerId);
+        const items = requeue.requeued.reduce((sum, job) => sum + job.itemIds.length, 0);
+        summary.jobsRequeued += requeue.requeued.length;
+        summary.itemsRequeued += items;
+        summary.itemsExhausted += requeue.exhausted.length;
+        summary.itemsSkipped += requeue.skipped.length;
+        result.jobsRequeued += requeue.requeued.length;
+        result.itemsRequeued += items;
+        result.rowFailures += requeue.failed.length;
+      });
+    }
     return result;
+  }
+
+  private logStockLinkRequeued(job: StockLinkRequeuedJob, workerId: string): void {
+    // INFO: a state transition the push sweep makes by itself.
+    this.deps.logger.info({
+      code: "DROPSHIP_LISTING_PUSH_STOCK_LINK_REQUEUED",
+      message: "A push the stock link failed for a passing reason, or that failed before the automatic stock link existed, was queued again automatically.",
+      context: {
+        action: "requeue_stock_link_failure", outcome: "requeued", workerId,
+        jobId: job.jobId, vendorId: job.vendorId, storeConnectionId: job.storeConnectionId,
+        itemIds: job.itemIds, listingIds: job.listingIds, items: job.items,
+        before: { jobStatus: "failed", itemStatus: "failed" }, after: { jobStatus: "queued", itemStatus: "queued" },
+      },
+    });
+  }
+
+  private logStockLinkExhausted(item: StockLinkRequeueItemOutcome, workerId: string): void {
+    // ERROR: the condition did not clear after every automatic re-queue; a human decides.
+    this.deps.logger.error({
+      code: "DROPSHIP_LISTING_PUSH_AUTOMATIC_REQUEUE_EXHAUSTED",
+      message: "A listing push failed again after its last automatic re-queue; it is not queued again automatically.",
+      context: {
+        action: "requeue_stock_link_failure", outcome: "requires_review", classification: "permanent", workerId,
+        jobId: item.jobId, itemId: item.itemId, listingId: item.listingId, vendorId: item.vendorId,
+        storeConnectionId: item.storeConnectionId, productVariantId: item.productVariantId,
+        error_code: item.errorCode, automaticRequeues: item.count,
+        before: { state: null }, after: { state: "exhausted" },
+      },
+    });
+  }
+
+  private logStockLinkSkipped(item: StockLinkRequeueItemOutcome, workerId: string): void {
+    // INFO: an expected terminal decision (the vendor deselected the listing); not an anomaly.
+    this.deps.logger.info({
+      code: "DROPSHIP_LISTING_PUSH_STOCK_LINK_RESEND_SKIPPED",
+      message: "A push that failed before the automatic stock link existed was not sent again: the listing is no longer selected.",
+      context: {
+        action: "requeue_stock_link_failure", outcome: "skipped", workerId,
+        jobId: item.jobId, itemId: item.itemId, listingId: item.listingId, vendorId: item.vendorId,
+        storeConnectionId: item.storeConnectionId, productVariantId: item.productVariantId,
+        error_code: item.errorCode, reason: item.reason ?? null,
+        before: { state: null }, after: { state: "skipped" },
+      },
+    });
+  }
+
+  private logStockLinkDeferred(item: StockLinkRequeueItemOutcome, workerId: string): void {
+    // DEBUG: an expected wait (the listing is paused or its store mode is off for now); nothing changed.
+    this.deps.logger.debug?.({
+      code: "DROPSHIP_LISTING_PUSH_STOCK_LINK_RESEND_DEFERRED",
+      message: "A push that failed before the automatic stock link existed waits: its listing is not eligible right now.",
+      context: {
+        action: "requeue_stock_link_failure", outcome: "deferred", workerId,
+        jobId: item.jobId, itemId: item.itemId, listingId: item.listingId, vendorId: item.vendorId,
+        storeConnectionId: item.storeConnectionId, productVariantId: item.productVariantId,
+        error_code: item.errorCode, reason: item.reason ?? null,
+        before: { state: null }, after: { state: null },
+      },
+    });
   }
 
   /**
@@ -215,6 +351,8 @@ export class DropshipListingPushRecoveryService {
       },
     };
     if (failure.classification === "permanent") this.deps.logger.error(event);
+    // The same passing failure again right after the first: an expected state, not a new anomaly.
+    else if (failure.repeated) this.deps.logger.debug?.(event);
     else this.deps.logger.warn(event);
   }
 }

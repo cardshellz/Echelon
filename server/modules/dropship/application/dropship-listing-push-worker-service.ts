@@ -1,4 +1,12 @@
 import { DropshipError } from "../domain/errors";
+import { STOCK_LINK_ERROR_SOURCE } from "../domain/stock-link-readiness";
+import {
+  STOCK_LINK_AWARE_FAILURE_FIELD,
+  automaticRequeueCountOf,
+  isAutomaticRequeueCode,
+  isAutomaticStockLinkRequeueRun,
+  mayRequeueAutomatically,
+} from "../domain/listing-push-automatic-requeue";
 import { QuantityPublicationAdmissionError } from "../../inventory-planning/domain/quantity-publication-admission";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
@@ -167,8 +175,19 @@ export interface DropshipListingPushWorkerServiceDependencies {
   repository: DropshipListingPushWorkerRepository;
   marketplacePush: DropshipMarketplaceListingPushProvider;
   notificationSender?: DropshipNotificationSender;
+  /**
+   * Which failed items of a finalized job the push sweep will queue again by itself
+   * (review V2-2: the ops repository's readAutomaticRequeuePendingItemIds, every guard
+   * of its selection but the wait). The failure email promises an automatic retry
+   * only for those. Absent: no item is promised one.
+   */
+  automaticRequeueOutlook?: DropshipAutomaticRequeueOutlook;
   clock: DropshipClock;
   logger: DropshipLogger;
+}
+
+export interface DropshipAutomaticRequeueOutlook {
+  pendingItemIds(jobId: number): Promise<readonly number[]>;
 }
 
 export class DropshipListingPushWorkerService {
@@ -284,6 +303,8 @@ export class DropshipListingPushWorkerService {
         existingExternalListingId: item.listing!.externalListingId,
         existingExternalOfferId: item.listing!.externalOfferId,
         idempotencyKey: `${parsed.idempotencyKey}:${item.itemId}`,
+        // The stock link re-queue's own run never adopts an unrecorded published eBay listing (review TW-1).
+        ...(isAutomaticStockLinkRequeueRun(item.result) ? { automaticRetry: true } : {}),
       });
       assertValidPushResult(pushResult);
       await this.deps.repository.completeItem({
@@ -297,11 +318,13 @@ export class DropshipListingPushWorkerService {
     } catch (error) {
       const classified = classifyListingPushError(error);
       if (classified.needsOperator) {
-        // ERROR: a human must attest the prior attempt before this listing can
-        // move again; the vendor cannot fix it and a re-queue is refused the same way.
+        // ERROR: an operator has to act before this listing can move again (attest
+        // a prior stock attempt, or fix the store's stock destination, the SKU's
+        // link or the stock setup); the vendor cannot fix it and a re-queue is
+        // refused the same way.
         this.deps.logger.error({
           code: "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR",
-          message: "A listing push item is blocked until an operator resolves a prior stock attempt.",
+          message: "A listing push item is blocked until an operator resolves it.",
           context: {
             jobId: claim.job.jobId,
             itemId: item.itemId,
@@ -313,6 +336,13 @@ export class DropshipListingPushWorkerService {
             errorCode: classified.code,
             errorMessage: classified.message,
             attemptId: classified.context?.attemptId ?? null,
+            inventoryCode: classified.context?.inventoryCode ?? null,
+            classification: classified.context?.classification ?? null,
+            targetCount: classified.context?.targetCount ?? null,
+            // What the stored item says (review TW-7): a stock link operator refusal is
+            // marked for review; an unresolved prior attempt is attested by an operator,
+            // not re-driven by a retry, so it is not.
+            outcome: classified.context?.requiresReview === true ? "requires_review" : "operator_action",
           },
         });
       }
@@ -377,6 +407,16 @@ export class DropshipListingPushWorkerService {
     if (result.summary.failed === 0 && result.summary.blocked === 0) {
       return;
     }
+    // One email for the job's first failure (it says when the push sweep re-queues an
+    // item by itself), and, after automatic re-queues, one more for the final outcome
+    // (review TW-3). Nothing while another automatic re-queue is still to come; which
+    // items get one is read from the database, with the sweep's own guards (review V2-2).
+    const failedAll = result.items.filter((item) => item.status === "failed" || item.status === "blocked");
+    const afterAutomaticRetry = failedAll.some((item) => automaticRequeueCountOf(item.result) > 0);
+    const pendingAutomaticRequeue = await this.pendingAutomaticRequeueItemIds(result, failedAll);
+    if (afterAutomaticRetry && failedAll.some((item) => pendingAutomaticRequeue.has(item.itemId))) {
+      return;
+    }
 
     const failedItems = result.items
       .filter((item) => item.status === "failed" || item.status === "blocked")
@@ -397,7 +437,7 @@ export class DropshipListingPushWorkerService {
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship listing push failed",
-      message: describeFailedListingPushJob(result),
+      message: describeFailedListingPushJob(result, pendingAutomaticRequeue),
       payload: {
         jobId: result.job.jobId,
         vendorId: result.job.vendorId,
@@ -411,7 +451,9 @@ export class DropshipListingPushWorkerService {
           result.summary.failed + result.summary.blocked - failedItems.length,
         ),
       },
-      idempotencyKey: `listing-push:${result.job.jobId}:failed`,
+      idempotencyKey: afterAutomaticRetry
+        ? `listing-push:${result.job.jobId}:failed:after-automatic-retry`
+        : `listing-push:${result.job.jobId}:failed`,
     }, {
       code: "DROPSHIP_LISTING_PUSH_NOTIFICATION_FAILED",
       message: "Dropship listing push failure notification failed after the job was finalized.",
@@ -424,7 +466,43 @@ export class DropshipListingPushWorkerService {
       },
     });
   }
+
+  /**
+   * The failed items the push sweep will queue again by itself (review V2-2). The
+   * item-level conditions are checked first (mayRequeueAutomatically), so a job with
+   * none of them reads nothing; the rest (store, vendor and listing guards) come
+   * from the repository. A read failure promises nothing: it is logged (WARN, the
+   * email is a side channel) and the email is sent without the automatic sentence,
+   * which is never untrue.
+   */
+  private async pendingAutomaticRequeueItemIds(
+    result: DropshipListingPushWorkerResult,
+    failed: readonly DropshipListingPushWorkerItemRecord[],
+  ): Promise<ReadonlySet<number>> {
+    const candidates = failed.filter(mayRequeueAutomatically);
+    if (candidates.length === 0 || !this.deps.automaticRequeueOutlook) return EMPTY_ITEM_IDS;
+    try {
+      const pending = new Set(await this.deps.automaticRequeueOutlook.pendingItemIds(result.job.jobId));
+      return new Set(candidates.filter((item) => pending.has(item.itemId)).map((item) => item.itemId));
+    } catch (error) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_LISTING_PUSH_AUTOMATIC_REQUEUE_OUTLOOK_FAILED",
+        message: "Could not read which failed listing push items are queued again automatically; the failure email promises no automatic retry.",
+        context: {
+          jobId: result.job.jobId,
+          vendorId: result.job.vendorId,
+          storeConnectionId: result.job.storeConnectionId,
+          itemIds: candidates.map((item) => item.itemId),
+          outcome: "no_automatic_retry_promised",
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return EMPTY_ITEM_IDS;
+    }
+  }
 }
+
+const EMPTY_ITEM_IDS: ReadonlySet<number> = new Set();
 
 export function summarizeWorkerItems(
   items: readonly DropshipListingPushWorkerItemRecord[],
@@ -440,6 +518,7 @@ export function summarizeWorkerItems(
 
 export function makeDropshipListingPushWorkerLogger(): DropshipLogger {
   return {
+    debug: (event) => logDropshipListingPushWorkerEvent("debug", event),
     info: (event) => logDropshipListingPushWorkerEvent("info", event),
     warn: (event) => logDropshipListingPushWorkerEvent("warn", event),
     error: (event) => logDropshipListingPushWorkerEvent("error", event),
@@ -551,14 +630,24 @@ function assertValidPushResult(result: DropshipMarketplaceListingPushResult): vo
 
 /**
  * The notice names the first marketplace reason so the vendor can act on the
- * email alone; the portal shows every item.
+ * email alone; the portal shows every item. It says the item is tried again
+ * automatically only when the push sweep will do so (`pendingAutomaticRequeue`,
+ * read with the sweep's guards, review V2-2).
  */
-export function describeFailedListingPushJob(result: DropshipListingPushWorkerResult): string {
+export function describeFailedListingPushJob(
+  result: DropshipListingPushWorkerResult,
+  pendingAutomaticRequeue: ReadonlySet<number> = EMPTY_ITEM_IDS,
+): string {
   const failed = result.summary.failed + result.summary.blocked;
   const lead = `${failed} of ${result.summary.total} listing${result.summary.total === 1 ? "" : "s"} could not be sent to your store (job ${result.job.jobId}).`;
-  const firstReason = result.items.find((item) => (item.status === "failed" || item.status === "blocked") && item.errorMessage)?.errorMessage;
-  return firstReason ? `${lead} First reason: ${firstReason}` : lead;
+  const first = result.items.find((item) => (item.status === "failed" || item.status === "blocked") && item.errorMessage);
+  if (!first) return lead;
+  const retry = pendingAutomaticRequeue.has(first.itemId) ? ` ${AUTOMATIC_RETRY_EMAIL_SENTENCE}` : "";
+  return `${lead} First reason: ${first.errorMessage}${retry}`;
 }
+
+/** Added to the first reason when the push sweep queues that item again by itself (review TW-3). */
+const AUTOMATIC_RETRY_EMAIL_SENTENCE = "Card Shellz will try it again automatically.";
 
 /**
  * Stock-gate refusals that only a human clears: an earlier eBay quantity
@@ -641,6 +730,11 @@ function classifyListingPushError(error: unknown): {
         operatorAction: needsOperator,
         ...(refusal === "permanent" ? { classification: "permanent" } : {}),
         ...(needsStockSetup ? { requiresReview: true } : {}),
+        // This worker links stock before a managed live push's first write. Every
+        // re-queue code it records says so: an UNMAPPED refusal it records is not one
+        // owner decision Q4 re-sends (review MC-3), and only a PUBLICATION_SCOPE_BUSY
+        // it records is re-queued automatically (review V2-1).
+        ...(isAutomaticRequeueCode(error.code) ? { [STOCK_LINK_AWARE_FAILURE_FIELD]: true } : {}),
       },
       needsOperator,
       needsStockSetup,
@@ -648,12 +742,31 @@ function classifyListingPushError(error: unknown): {
   }
   if (error instanceof DropshipError) {
     const endpoint = error.context?.endpoint;
+    const needsOperator = error.context?.needsOperator === true;
+    const retryable = Boolean(error.context?.retryable);
     return {
       code: error.code,
       message: error.message,
-      retryable: Boolean(error.context?.retryable),
+      retryable,
       providerErrors: providerErrorEntries(error.context?.providerErrors),
       endpoint: typeof endpoint === "string" && endpoint.length > 0 ? endpoint : null,
+      // The stock link's refusals (domain/stock-link-readiness stockLinkError)
+      // keep the inventory code behind them for support. An operator-only
+      // refusal is marked for review, so once it is fixed an admin's retry can
+      // re-drive it (requeueRetryableFailedItems).
+      ...(error.context?.source === STOCK_LINK_ERROR_SOURCE ? {
+        context: {
+          inventoryCode: typeof error.context.inventoryCode === "string" ? error.context.inventoryCode : null,
+          operatorAction: needsOperator,
+          targetCount: typeof error.context.targetCount === "number" ? error.context.targetCount : null,
+          classification: typeof error.context.classification === "string" ? error.context.classification : null,
+          ...(typeof error.context.command_key === "string" ? { commandKey: error.context.command_key } : {}),
+          ...(needsOperator && !retryable ? { requiresReview: true } : {}),
+          // Recorded by the worker that links stock first: the automatic re-queue owns it (review V2-1).
+          ...(isAutomaticRequeueCode(error.code) ? { [STOCK_LINK_AWARE_FAILURE_FIELD]: true } : {}),
+        },
+      } : {}),
+      needsOperator,
     };
   }
   if (error instanceof Error) {
@@ -679,7 +792,7 @@ function providerErrorEntries(value: unknown): ReadonlyArray<Record<string, unkn
 }
 
 function logDropshipListingPushWorkerEvent(
-  level: "info" | "warn" | "error",
+  level: "debug" | "info" | "warn" | "error",
   event: DropshipLogEvent,
 ): void {
   const payload = JSON.stringify({
@@ -693,6 +806,10 @@ function logDropshipListingPushWorkerEvent(
   }
   if (level === "warn") {
     console.warn(payload);
+    return;
+  }
+  if (level === "debug") {
+    console.debug(payload);
     return;
   }
   console.info(payload);

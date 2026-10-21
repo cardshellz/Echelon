@@ -114,6 +114,23 @@ export type EbayPublishedListingIdentityResolver = (
   discovered: EbayDiscoveredPublishedListing,
 ) => Promise<MarketplaceObservedListingPublication>;
 
+/** What the connector accepted for this push: every draft offer with the exact
+ * existing eBay offer it will reuse (null: it creates one), and the published
+ * listing whose identity the resolver proved (null: none was published). */
+export interface EbayResolvedPushOffers {
+  readonly offers: ReadonlyArray<{ readonly variantId: number; readonly sku: string; readonly existingOfferId: string | null }>;
+  readonly verifiedPublishedListingId: string | null;
+}
+
+/**
+ * Optional owner work between offer discovery and the first provider write. It
+ * runs once, after the SKU's existing offers were matched exactly and any
+ * published identity was proven, and before any offer, inventory-item or quantity
+ * mutation. A throw stops the push with nothing written to eBay by the connector.
+ * No admission or provider scope lock is held while it runs.
+ */
+export type EbayBeforeFirstMutation = (resolved: EbayResolvedPushOffers) => Promise<void>;
+
 type EbayPublicationStage = (key: string, hash: string, work: () => Promise<void>, journalContract?: EbayRequestJournalContract) => Promise<void>;
 
 async function runPublicationStage<T>(stage: EbayPublicationStage | undefined,
@@ -239,6 +256,8 @@ export class EbayMarketplaceListingConnector {
     draft: EbayListingConnectorDraft;
     resolvePublishedIdentity?: EbayPublishedListingIdentityResolver;
     stage?: EbayPublicationStage;
+    /** Absent (every channel caller): behavior is unchanged. */
+    beforeFirstMutation?: EbayBeforeFirstMutation;
   }): Promise<EbayListingConnectorResult> {
     validateDraft(input.draft);
 
@@ -271,6 +290,16 @@ export class EbayMarketplaceListingConnector {
       draft = { ...draft, existingExternalProductId: firstListingId,
         itemGroup: draft.itemGroup ? { ...draft.itemGroup, groupKey: groupKey! } : null };
       verifiedPublishedListingId = firstListingId;
+    }
+
+    // Every discovery and identity refusal above has already run; nothing below
+    // has. An owner that must prepare local state for exactly these offers (the
+    // Dropship stock link) does it here, so a refusal leaves eBay untouched.
+    if (input.beforeFirstMutation) {
+      await input.beforeFirstMutation({
+        offers: resolvedOffers.map(({ offer, existingOfferId }) => ({ variantId: offer.variantId, sku: offer.sku, existingOfferId })),
+        verifiedPublishedListingId: verifiedPublishedListingId ?? null,
+      });
     }
 
     // eBay validates an inventory item against any offer already associated with

@@ -13,7 +13,7 @@ function item(patch: Partial<VendorListingPushItemRecord> = {}): VendorListingPu
   return {
     itemId: 1, listingId: 100, productVariantId: 101, sku: "ARM-ENV-SGL-P50", productName: "Armalope Envelope Single Pocket",
     variantName: "Pack of 50", status: "completed", errorCode: null, errorMessage: null, retryable: null, externalListingId: "123456789012",
-    published: true,
+    published: true, automaticRetryPending: false,
     ...patch,
   };
 }
