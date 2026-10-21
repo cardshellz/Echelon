@@ -1,8 +1,15 @@
 // RFQ request tracking, immutable quote capture, and reviewed draft PO handoff.
 import { RfqWorkflowPanel } from "@/features/purchasing/RfqWorkflowPanel";
-import { Fragment, useMemo, useState } from "react";
+import React, { Fragment, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useSearch } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
+import { rfqWorkListQuerySchema, rfqWorkListResponseSchema, rfqStoredStatusSchema, type RfqWorkListItem } from "@shared/procurement/rfq-work-list";
+import { useAuth } from "@/lib/auth";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { WorkListPagination } from "@/features/purchasing/WorkListPagination";
+import { useRfqCommands } from "@/features/purchasing/use-rfq-commands";
+import { RfqCommandRecovery } from "@/features/purchasing/RfqCommandRecovery";
 import { formatMills } from "@shared/utils/money";
 import { ChevronDown, ChevronRight, ClipboardList, ExternalLink, Info } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -20,62 +27,7 @@ import {
 // API types — client-side mirrors of the real server responses.
 // ---------------------------------------------------------------------------
 
-// GET /api/purchasing/rfqs — listRequestForQuotes in purchasing-rfq.service.ts.
-// Statuses mirror the schema enums (request_for_quotes_status_chk /
-// request_for_quote_lines_status_chk), including recorded quotes and purchases.
-interface RfqListLine {
-  id: number;
-  rfqId: number;
-  recommendationLineId: number;
-  recommendationRunId: number | null;
-  vendorProductId: number;
-  vendorSku: string | null;
-  sku: string;
-  productName: string;
-  status: string;
-  requestedPieces: number;
-  recommendedPieces: number | null;
-  purchaseUom: string | null;
-  piecesPerPurchaseUom: number | null;
-  quantityOverrideReason: string | null;
-  allocationOverrideReason: string | null;
-  allocationOverrideApprovedBy: string | null;
-  allocationOverrideApprovedAt: string | null;
-  allocationOverrideBaselinePieces: number | null;
-  allocationOverrideExcessPieces: number | null;
-  quotedPieces: number | null;
-  quotedUnitCostMills: number | null;
-  quoteReference: string | null;
-  quoteValidUntil: string | null;
-  quotedAt: string | null;
-}
-
-interface RfqListItem {
-  id: number;
-  rfqNumber: string;
-  status: string;
-  vendorId: number;
-  vendorName: string | null;
-  requestNote: string | null;
-  currency: string;
-  responseDueDate: string | null;
-  createdBy: string | null;
-  createdAt: string;
-  updatedAt: string;
-  sentAt: string | null;
-  respondedAt: string | null;
-  cancelledAt: string | null;
-  lineCount: number;
-  requestedPiecesTotal: number;
-  lines: RfqListLine[];
-}
-
-interface RfqListResponse {
-  limit: number;
-  count: number;
-  statusCounts: Record<string, number>;
-  rfqs: RfqListItem[];
-}
+type RfqListItem = RfqWorkListItem;
 
 // GET /api/purchasing/rfq-queue — the existing requirement-queue read the
 // Order Builder also consumes (purchasing-recommendation.routes.ts). Only the
@@ -192,7 +144,7 @@ function formatQuotedUnitCost(mills: number, currency: string): string {
 // Per-RFQ line detail (expanded row)
 // ---------------------------------------------------------------------------
 
-function RfqLineDetail({ rfq }: { rfq: RfqListItem }) {
+function RfqLineDetail({ rfq, readVerified }: { rfq: RfqListItem; readVerified: boolean }) {
   return (
     <div className="rounded-md border bg-zinc-50/60 p-2 dark:bg-zinc-900/40">
       {rfq.requestNote && (
@@ -200,7 +152,7 @@ function RfqLineDetail({ rfq }: { rfq: RfqListItem }) {
           <span className="font-medium">Request note:</span> {rfq.requestNote}
         </div>
       )}
-      <table className="w-full text-xs">
+      <div className="overflow-x-auto"><table className="w-full text-xs">
         <thead>
           <tr className="text-left text-[11px] uppercase tracking-wide text-zinc-500">
             <th className="px-1 py-1 font-medium">SKU</th>
@@ -297,8 +249,8 @@ function RfqLineDetail({ rfq }: { rfq: RfqListItem }) {
             </tr>
           )}
         </tbody>
-      </table>
-      <RfqWorkflowPanel rfqId={rfq.id} />
+      </table></div>
+      <RfqWorkflowPanel rfqId={rfq.id} showRecovery={false} sourceVerified={readVerified} />
     </div>
   );
 }
@@ -309,21 +261,48 @@ function RfqLineDetail({ rfq }: { rfq: RfqListItem }) {
 
 export default function ProcurementRfqs() {
   const search = useSearch();
-  const requestedId = new URLSearchParams(search).get("rfqId");
+  const [, navigate] = useLocation();
+  const { user } = useAuth();
+  const commands = useRfqCommands();
+  const params = new URLSearchParams(search);
+  const requestedId = params.get("rfqId");
   const parsedId = requestedId && /^[1-9]\d*$/.test(requestedId) ? Number(requestedId) : null;
-  const focusedRfqId = parsedId !== null && Number.isSafeInteger(parsedId) && parsedId <= 2_147_483_647 ? parsedId : null;
-  const [expandedRfqIds, setExpandedRfqIds] = useState<Set<number>>(new Set());
-
-  const rfqListQuery = useQuery<RfqListResponse>({
-    queryKey: [`/api/purchasing/rfqs?limit=${RFQ_LIST_LIMIT}`],
+  const focusedRfqId = parsedId !== null && Number.isSafeInteger(parsedId) && parsedId <= 2_147_483_647
+    && params.getAll("rfqId").length === 1 ? parsedId : null;
+  const listFilter = rfqWorkListQuerySchema.safeParse({ limit: RFQ_LIST_LIMIT,
+    offset: params.get("offset") ?? 0, status: params.get("status") || undefined, search: params.get("search") ?? "" });
+  const repeatedFilter = ["offset", "status", "search"].some(key => params.getAll(key).length > 1);
+  const validFilter = listFilter.success && !repeatedFilter;
+  const query = listFilter.success ? listFilter.data : null;
+  const listUrl = query ? `/api/purchasing/rfqs?${new URLSearchParams({ limit: String(query.limit), offset: String(query.offset),
+    ...(query.status ? { status: query.status } : {}), ...(query.search ? { search: query.search } : {}) })}` : "";
+  // Open editors belong to the operator, not to a transient result page.
+  // Keeping them outside the row tree preserves drafts across refetch/filter changes.
+  const [opened, setOpened] = useState<{ actorId: string | null; requests: Map<number, RfqListItem> }>(() => ({ actorId: user?.id ?? null, requests: new Map() }));
+  const openedRfqs = opened.actorId === user?.id ? opened.requests : new Map<number, RfqListItem>();
+  const changeFilter = (changes: Record<string, string | null>) => {
+    const next = new URLSearchParams(search);
+    for (const [key, value] of Object.entries(changes)) { if (value) next.set(key, value); else next.delete(key); }
+    navigate(`/procurement/rfqs${next.size ? `?${next}` : ""}`, { replace: true });
+  };
+  const rfqListQuery = useQuery({
+    queryKey: [listUrl, user?.id], enabled: validFilter && !!user, retry: false, staleTime: 0,
+    queryFn: async ({ signal }) => {
+      const response = await fetch(listUrl, { credentials: "include", signal });
+      if (!response.ok) throw new Error(`Quote requests could not be loaded (${response.status}). Retry after restoring access.`);
+      const result = rfqWorkListResponseSchema.safeParse(await response.json());
+      if (!result.success || !query || result.data.page.limit !== query.limit || result.data.page.offset !== query.offset
+        || (query.status && result.data.rfqs.some(rfq => rfq.status !== query.status))) {
+        throw new Error("The quote-request list could not be verified. Reload the list before continuing.");
+      }
+      return result.data;
+    },
   });
-  const rfqQueueQuery = useQuery<RfqQueueResponse>({
-    queryKey: ["/api/purchasing/rfq-queue"],
-  });
-
-  const rfqs = rfqListQuery.data?.rfqs ?? [];
-  const statusCounts = rfqListQuery.data?.statusCounts ?? {};
-  const queue = rfqQueueQuery.data ?? null;
+  const rfqQueueQuery = useQuery<RfqQueueResponse>({ queryKey: ["/api/purchasing/rfq-queue"], retry: false });
+  const listVerified = validFilter && !!rfqListQuery.data && !rfqListQuery.isFetching && !rfqListQuery.isError;
+  const rfqs = listVerified ? rfqListQuery.data?.rfqs ?? [] : [];
+  const statusCounts = listVerified ? rfqListQuery.data?.statusCounts ?? {} : {};
+  const queue = !rfqQueueQuery.isFetching && !rfqQueueQuery.isError ? rfqQueueQuery.data ?? null : null;
 
   // Presentation-only ordering: what still needs sourcing first (open, then
   // partial, then covered), biggest remaining gap on top. No planning math is
@@ -342,12 +321,11 @@ export default function ProcurementRfqs() {
     );
   }, [queue?.items]);
 
-  const toggleExpanded = (rfqId: number) => {
-    setExpandedRfqIds((current) => {
-      const next = new Set(current);
-      if (next.has(rfqId)) next.delete(rfqId);
-      else next.add(rfqId);
-      return next;
+  const toggleExpanded = (rfq: RfqListItem) => {
+    setOpened(current => {
+      const requests = new Map(current.actorId === user?.id ? current.requests : []);
+      if (requests.has(rfq.id)) requests.delete(rfq.id); else requests.set(rfq.id, rfq);
+      return { actorId: user?.id ?? null, requests };
     });
   };
 
@@ -417,7 +395,9 @@ export default function ProcurementRfqs() {
         </div>
       </div>
 
-      {focusedRfqId !== null && <Card className="mb-6 p-4"><RfqWorkflowPanel key={focusedRfqId} rfqId={focusedRfqId} /></Card>}
+      <div className="mb-4"><RfqCommandRecovery commands={commands} /></div>
+      {requestedId !== null && focusedRfqId === null && <p role="alert" className="mb-4 text-destructive">The RFQ link has an invalid request ID. Open a request from the list.</p>}
+      {focusedRfqId !== null && <Card className="mb-6 p-4"><RfqWorkflowPanel key={focusedRfqId} rfqId={focusedRfqId} showRecovery={false} /></Card>}
 
       {/* ---------------- 1 · Quote-request drafts ---------------- */}
       <Card className="mb-6 shadow-sm dark:bg-zinc-900">
@@ -426,11 +406,11 @@ export default function ProcurementRfqs() {
             <div>
               <CardTitle className="text-lg">Quote requests</CardTitle>
               <CardDescription>
-                {rfqs.length > 0 ? `Last ${rfqs.length} requests, newest first — one` : "Newest first — one"}{" "}
-                draft per vendor from the Order Builder&apos;s Request-quote path
+                Newest first. Request status and purchase-order handoff are shown separately.
               </CardDescription>
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
+              {Object.keys(statusCounts).length > 0 && <span className="text-xs text-muted-foreground">On this page:</span>}
               {Object.entries(statusCounts).map(([status, count]) => (
                 <Badge
                   key={status}
@@ -444,14 +424,22 @@ export default function ProcurementRfqs() {
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          {rfqListQuery.isLoading ? (
+          <div className="flex flex-wrap gap-3 border-b p-3">
+            <label className="min-w-0 flex-1 text-sm">Search RFQs<Input aria-label="Search RFQs" maxLength={200} value={params.get("search") ?? ""}
+              placeholder="RFQ number, supplier or SKU" onChange={event => changeFilter({ search: event.target.value, offset: null })} /></label>
+            <label className="text-sm">RFQ status<select aria-label="RFQ status" className="block h-10 rounded-md border bg-background px-3" value={params.get("status") ?? ""}
+              onChange={event => changeFilter({ status: event.target.value, offset: null })}>
+              <option value="">All statuses</option>{rfqStoredStatusSchema.options.map(status => <option key={status} value={status}>{statusLabel(status)}</option>)}
+            </select></label>
+          </div>
+          {!validFilter ? <div role="alert" className="space-y-2 p-4"><p>The RFQ list filters are invalid.</p><Button variant="outline" onClick={() => changeFilter({ offset: null, status: null, search: null })}>Reset RFQ filters</Button></div> : rfqListQuery.isFetching || rfqListQuery.isLoading ? (
             <div className="p-4 text-sm text-zinc-500">Loading quote requests…</div>
           ) : rfqListQuery.isError ? (
-            <div className="p-4 text-sm text-red-600">Failed to load quote requests.</div>
+            <div role="alert" className="space-y-2 p-4 text-sm text-destructive"><p>{rfqListQuery.error.message}</p><Button variant="outline" onClick={() => void rfqListQuery.refetch()}>Reload quote requests</Button></div>
           ) : rfqs.length === 0 ? (
             <div className="flex flex-col items-center gap-2 p-8 text-center text-sm text-zinc-500">
               <ClipboardList className="h-8 w-8 text-zinc-300" />
-              <div className="font-medium text-zinc-600 dark:text-zinc-300">No quote requests yet</div>
+              <div className="font-medium text-zinc-600 dark:text-zinc-300">{query?.search || query?.status || query?.offset ? "No quote requests match this page" : "No quote requests yet"}</div>
               <div className="max-w-md">
                 Build an order on the{" "}
                 <Link href="/reorder-analysis" className="font-medium text-primary underline">
@@ -469,6 +457,7 @@ export default function ProcurementRfqs() {
                     <TableHead className="w-8" />
                     <TableHead>RFQ</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead>Purchase-order handoff</TableHead>
                     <TableHead>Vendor</TableHead>
                     <TableHead>Created</TableHead>
                     <TableHead>Sent</TableHead>
@@ -479,22 +468,29 @@ export default function ProcurementRfqs() {
                 </TableHeader>
                 <TableBody>
                   {rfqs.map((rfq) => {
-                    const expanded = expandedRfqIds.has(rfq.id);
+                    const expanded = openedRfqs.has(rfq.id);
                     return (
                       <Fragment key={rfq.id}>
                         <TableRow
                           aria-expanded={expanded}
-                          onClick={() => toggleExpanded(rfq.id)}
+                          onClick={() => toggleExpanded(rfq)}
                           className="cursor-pointer"
                         >
                           <TableCell className="pr-0 text-zinc-400">
-                            {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                            <button type="button" className="min-h-[44px] min-w-[44px]" aria-label={`${expanded ? "Collapse" : "Expand"} ${rfq.rfqNumber}`} aria-expanded={expanded}
+                              onClick={event => { event.stopPropagation(); toggleExpanded(rfq); }}>{expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}</button>
                           </TableCell>
                           <TableCell className="font-mono text-xs font-semibold text-primary">{rfq.rfqNumber}</TableCell>
                           <TableCell>
                             <Badge variant="outline" className={`text-[10px] capitalize ${rfqStatusClass(rfq.status)}`}>
                               {statusLabel(rfq.status)}
                             </Badge>
+                          </TableCell>
+                          <TableCell className="min-w-[190px] text-xs">
+                            <div>{({ not_started: "Not converted", partially_converted: "Partly converted", converted: "Converted", review_required: "Review required" } as const)[rfq.handoff.state]}</div>
+                            <div className="text-muted-foreground">{rfq.handoff.linkedLineCount} linked · {rfq.handoff.remainingLineCount} remaining</div>
+                            {rfq.handoff.purchaseOrders.map(po => <Link key={po.id} className="block min-h-[32px] py-1 underline" href={`/purchase-orders/${po.id}`} onClick={event => event.stopPropagation()}>{po.poNumber} · {statusLabel(po.status)}</Link>)}
+                            {rfq.handoff.issues.map(issue => <p key={issue.code} className="text-amber-700">{issue.message}</p>)}
                           </TableCell>
                           <TableCell className="text-xs">{rfq.vendorName ?? `Vendor #${rfq.vendorId}`}</TableCell>
                           <TableCell className="text-xs">{formatTimestamp(rfq.createdAt)}</TableCell>
@@ -507,13 +503,6 @@ export default function ProcurementRfqs() {
                             {rfq.requestedPiecesTotal.toLocaleString()} pc
                           </TableCell>
                         </TableRow>
-                        {expanded && (
-                          <TableRow className="hover:bg-transparent">
-                            <TableCell colSpan={9} className="bg-zinc-50/40 p-2 dark:bg-zinc-900/30">
-                              <RfqLineDetail rfq={rfq} />
-                            </TableCell>
-                          </TableRow>
-                        )}
                       </Fragment>
                     );
                   })}
@@ -521,6 +510,17 @@ export default function ProcurementRfqs() {
               </Table>
             </div>
           )}
+          <WorkListPagination label="RFQs" page={listVerified ? rfqListQuery.data?.page : undefined} busy={rfqListQuery.isFetching}
+            onOffset={offset => changeFilter({ offset: String(offset) })} />
+          <div className="space-y-3 p-3">
+            {[...openedRfqs.values()].map(rfq => <section key={`${user?.id}:${rfq.id}`} aria-label={`Opened RFQ ${rfq.rfqNumber}`} className="space-y-2 rounded-md border p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold">Opened request · {rfq.rfqNumber}</h3>
+                <Button variant="outline" size="sm" onClick={() => toggleExpanded(rfq)}>Close {rfq.rfqNumber}</Button></div>
+              <p className="text-xs text-muted-foreground">Request details below were recorded when you opened it. The quote workflow shows the latest verified supplier evidence. This request stays open when the list changes.</p>
+              {!listVerified && <p role="status" className="text-sm text-amber-700">The RFQ list is not verified. Your open draft is retained; reload the list before submitting new changes.</p>}
+              <RfqLineDetail rfq={rfq} readVerified={listVerified} />
+            </section>)}
+          </div>
           <div className="border-t px-4 py-2 text-[11px] text-zinc-500 dark:border-zinc-800">
             Expand a request to capture supplier quotes, review revision history, and create a linked draft purchase order.
           </div>
@@ -563,10 +563,10 @@ export default function ProcurementRfqs() {
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          {rfqQueueQuery.isLoading ? (
+          {rfqQueueQuery.isFetching || rfqQueueQuery.isLoading ? (
             <div className="p-4 text-sm text-zinc-500">Loading sourcing requirements…</div>
           ) : rfqQueueQuery.isError ? (
-            <div className="p-4 text-sm text-red-600">{rfqQueueQuery.error?.message ?? "Failed to load the requirement queue."}</div>
+            <div role="alert" className="space-y-2 p-4 text-sm text-destructive"><p>{rfqQueueQuery.error?.message ?? "Failed to load the requirement queue."}</p><Button variant="outline" onClick={() => void rfqQueueQuery.refetch()}>Reload sourcing requirements</Button></div>
           ) : !queue?.run ? (
             <div className="p-6 text-sm text-zinc-500">
               No completed recommendation run yet — run the analysis from the{" "}
@@ -634,7 +634,7 @@ export default function ProcurementRfqs() {
                                     allocation.vendorName ?? "unknown vendor"
                                   } · line ${statusLabel(allocation.lineStatus)}`}
                                 >
-                                  {allocation.rfqNumber}
+                                  <Link href={`/procurement/rfqs?rfqId=${allocation.rfqId}`} className="inline-flex min-h-[32px] items-center underline">{allocation.rfqNumber}</Link>
                                 </Badge>
                               ))}
                             </div>

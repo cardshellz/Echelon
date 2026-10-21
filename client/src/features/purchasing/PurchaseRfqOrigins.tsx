@@ -27,7 +27,7 @@ export function PurchaseRfqOrigins({ sources }: { sources: PurchaseRfqOrigin[] }
           Quote {source.quoteReference} · revision #{source.quoteRevisionId} · {source.quotedPieces.toLocaleString()} pieces · {source.currency}
         </li>)}</ul>
         <Link href={`/procurement/rfqs?rfqId=${selected[0].rfqId}`} className="inline-block text-sm font-medium text-primary underline underline-offset-4">Open full RFQ</Link>
-        <RfqWorkflowPanel rfqId={selected[0].rfqId} />
+        <RfqWorkflowPanel key={selected[0].rfqId} rfqId={selected[0].rfqId} />
       </div>}
     </section>
   );
