@@ -107,7 +107,11 @@ function harness(options: {
 }) {
   const reconcileOrderDemand = options.reconcileOrderDemand
     ?? vi.fn(async () => ({ reconciled: true, reservation: { reserved: 1, failed: [] } }));
-  const service = new WmsSyncService({ reservation: { reconcileOrderDemand } } as any) as unknown as Harness;
+  const reserveOrder = vi.fn(async () => ({
+    orderId: WMS_ORDER_ID, reserved: 1, promised: 0, failed: [],
+    totalBaseUnits: 1, totalPromisedBaseUnits: 0,
+  }));
+  const service = new WmsSyncService({ reservation: { reserveOrder, reconcileOrderDemand } } as any) as unknown as Harness;
   service.refreshOmsLineMaterializedQuantities = vi.fn(async () => undefined);
   service.lockOmsLinesForMaterialization = vi.fn(async () => [options.lockedLine]);
   service.incrementOmsLineMaterializedQuantities = vi.fn(async () => undefined);

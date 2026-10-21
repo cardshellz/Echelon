@@ -2657,9 +2657,6 @@ export class WmsSyncService {
     if (freshWmsState?.warehouseStatus === "cancelled") {
       return { insertedItems: insertedItems.length, updatedShipments: 0 };
     }
-    if (shippableShipmentItems.length === 0) {
-      return { insertedItems: insertedItems.length, updatedShipments: 0 };
-    }
     // Unpaid pending work and external 3PL custody do not enter the local
     // claim/provider path. A paid sync promotes pending -> ready before this
     // point. All provider mutation below therefore has an explicit warehouse
@@ -2669,14 +2666,19 @@ export class WmsSyncService {
     }
     const reconciledWarehouseId = requireRoutedWarehouseId({
       omsOrderId,
-      hasShippableItems: true,
+      hasShippableItems: shippableShipmentItems.length > 0,
       routedWarehouseId: freshWmsState.warehouseId,
     });
+    // Shipment membership can already be current after a failed sync. Always
+    // reconcile the canonical claim before returning, including on retries.
     await this.reserveBeforeShipmentProcessing(
       wmsOrderId,
       omsOrderId,
       "existing_order_reconciliation",
     );
+    if (shippableShipmentItems.length === 0) {
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
 
     // Shipment reconciliation is driven by provider editability, not by an
     // assumption that every late order edit needs a second package.

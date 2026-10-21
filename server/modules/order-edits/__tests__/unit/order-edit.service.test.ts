@@ -468,6 +468,41 @@ describe("private order edit orchestration", () => {
     await h.service.reconcile(OP, "staff");
     expect(h.warehouse.reconcileAndRelease).toHaveBeenCalledTimes(1);
   });
+  it("shows the settled balance while a paid edit waits for warehouse synchronization", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.setCurrent({ fullyPaid: true, outstandingCents: 0, netPaidCents: 3000 });
+    h.warehouse.reconcileAndRelease.mockRejectedValueOnce(
+      new OrderEditError("ORDER_EDIT_INVENTORY_PENDING", "Allocation pending"),
+    );
+
+    const operation = await h.service.reconcile(OP, "staff");
+
+    expect(operation).toMatchObject({
+      status: "synchronizing",
+      updatedTotalCents: 3000,
+      balanceDueCents: 0,
+      refundDueCents: 0,
+      settlement: { netPaidCents: 3000, outstandingCents: 0 },
+    });
+    expect(await h.service.get(OP)).toMatchObject({ balanceDueCents: 0 });
+    expect(h.provider.commit).toHaveBeenCalledTimes(1);
+    expect(h.provider.refund).not.toHaveBeenCalled();
+  });
+  it("shows only the unpaid remainder after a partial additional payment", async () => {
+    const h = serviceHarness();
+    await h.service.quote(h.input, "staff");
+    await h.service.commit(OP, OP, "staff");
+    h.setCurrent({ fullyPaid: false, outstandingCents: 400, netPaidCents: 2600 });
+
+    expect(await h.service.reconcile(OP, "staff")).toMatchObject({
+      status: "review_required",
+      balanceDueCents: 400,
+      refundDueCents: 0,
+      error: { code: "ORDER_EDIT_PARTIAL_PAYMENT" },
+    });
+  });
   it.each([500, 999])(
     "never automatically recovers a partial additional payment of %s cents",
     async (extra) => {

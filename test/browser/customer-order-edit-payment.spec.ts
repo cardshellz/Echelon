@@ -335,6 +335,15 @@ test("automatically observes payment and synchronization, then stops at completi
       { exact: true },
     ),
   ).toBeVisible();
+  await expect(
+    page.getByText("Payment difference:", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("Amount still due:", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("link", { name: "Pay the difference" }),
+  ).toHaveCount(0);
   fixture.setStatus("completed");
   await page.clock.fastForward(5000);
   await expect(
