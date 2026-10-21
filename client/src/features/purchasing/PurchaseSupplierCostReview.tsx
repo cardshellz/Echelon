@@ -13,6 +13,7 @@ import {
 import type { ProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { Badge } from "@/components/ui/badge";
 import { CostOriginRepair } from "./CostOriginRepair";
+import { CostIssueMessage } from "./CostIssueMessage";
 
 export function PurchaseSupplierCostLine({
   line,
@@ -138,7 +139,7 @@ export function PurchaseSupplierCostLine({
           </summary>
           <ul className="mt-2 list-disc space-y-1 pl-5">
             {issues.map((issue) => (
-              <li key={issue.message}>{issue.message}</li>
+              <li key={issue.message}><CostIssueMessage issue={issue} /></li>
             ))}
           </ul>
         </details>

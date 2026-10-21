@@ -124,7 +124,7 @@ export class COGSService {
   }
 
   async revalueExactComponent(lotId: number, component: CostComponent, totalMills: number, basisQuantity: number,
-    reason: string, actorId: string, tx: any, recordedAt?: Date, sourceRevisionId?: number) {
+    reason: string, actorId: string, tx: any, recordedAt?: Date, sourceRevisionId?: number, options?: { excludedOrderCostIds: readonly number[] }) {
     const amount = BigInt(costInteger(totalMills,"component.totalMills"));
     const quantity = BigInt(costInteger(basisQuantity,"component.basisQuantity",1));
     const unitMills = moneyToSafeNumber((amount * BigInt(2) + quantity) / (quantity * BigInt(2)),"component.unitMirror");
@@ -132,18 +132,20 @@ export class COGSService {
       productCostMills:component==="product"?unitMills:undefined,
       packagingCostMills:component==="packaging"?unitMills:undefined,
       landedCostMills:component==="landed"?unitMills:undefined,
-      exactComponent:{component,totalMills,basisQuantity}, sourceRevisionId,
+      exactComponent:{component,totalMills,basisQuantity}, sourceRevisionId, excludedOrderCostIds:options?.excludedOrderCostIds,
     },tx);
   }
 
-  private async cascadeRecostExactQuantities(lotId: number, lot: LotCostRecord, tx: any): Promise<{rowsUpdated:number;totalDeltaCents:number}> {
+  private async cascadeRecostExactQuantities(lotId: number, lot: LotCostRecord, tx: any, excludedIds: readonly number[] = []): Promise<{rowsUpdated:number;totalDeltaCents:number}> {
     const rows = await tx.execute(sql`SELECT id,qty,unit_cost_mills,unit_cost_cents,total_cost_mills,total_cost_cents,
       cost_precision_version,cost_quantity_allocation_id,product_total_cost_mills,packaging_total_cost_mills,landed_total_cost_mills
       FROM oms.order_item_costs WHERE inventory_lot_id=${lotId} ORDER BY id FOR UPDATE`);
     const unitMirror = moneyToSafeNumber(normalizeLotCosts(lot).totalMills,"cogs.unitMirror");
     let rowsUpdated = 0;
     let deltaCents = BigInt(0);
+    const excluded = new Set(excludedIds.map(id=>costInteger(id,"excluded cost record",1)));
     for (const row of rows.rows) {
+      if (excluded.has(costInteger(row.id,"order cost",1))) continue;
       if (row.cost_quantity_allocation_id == null) throw new CostEvidenceError("COST_COGS_ALLOCATION_MISSING", "Exact COGS revaluation requires a recorded quantity allocation.", {lotId, costId:row.id});
       const allocation = await readLotCostAllocation(tx,costInteger(row.cost_quantity_allocation_id,"allocationId",1));
       const qty = costInteger(row.qty,"cogs.quantity",-2_147_483_647);
@@ -244,6 +246,7 @@ export class COGSService {
     clearProvisional?: boolean;
     requiredCostSource?: string;
     exactComponent?: {component:CostComponent;totalMills:number;basisQuantity:number};
+    excludedOrderCostIds?: readonly number[];
     recordedAt?: Date;
     sourceRevisionId?: number;
   }, client?: any): Promise<LotCostRevalueResult | null> {
@@ -353,7 +356,7 @@ export class COGSService {
         landed_total_cost_mills:extended.totals.landedMills.toString(),po_unit_cost_mills:productCostMills,
         packaging_cost_mills:packagingCostMills,landed_cost_mills:landedCostMills,
         total_unit_cost_mills:totalUnitCostMills,unit_cost_mills:totalUnitCostMills,cost_precision_version:1} : null;
-      const cascade = exactLot ? await this.cascadeRecostExactQuantities(params.lotId,exactLot,tx)
+      const cascade = exactLot ? await this.cascadeRecostExactQuantities(params.lotId,exactLot,tx,params.excludedOrderCostIds)
         : await this.cascadeRecostForLotMills(params.lotId, totalUnitCostMills, tx);
       const supplierReturnAdjustments = exactLot ? await revalueSupplierReturnAllocations(tx, {
         previousLot: { ...lot, id: params.lotId }, nextLot: { ...exactLot, id: params.lotId },

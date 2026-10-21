@@ -153,3 +153,20 @@ describe("supplier credit journeys", () => {
     expect(() => procurementListChildHref("/receiving","open=31","https://evil.invalid")).toThrow();
   });
 });
+
+describe("shipment cost-link repair navigation",()=>{
+  it("retains the explicit repair action and the purchase return, without reopening it on later back navigation",()=>{
+    const href=procurementChildHref("/purchase-orders/17","tab=lines","/shipments/42",{shipmentCostRepairLineId:134});
+    expect(new URLSearchParams(parts(href)[1]).getAll("repairCostLinks")).toEqual(["134"]);
+    expect(procurementBackHref(parts(href)[1],"/shipments")).toContain("/purchase-orders/17?tab=lines");
+    const child=procurementChildHref(...parts(href),"/receiving?open=31");
+    expect(procurementBackHref(parts(child)[1],"/shipments")).not.toContain("repairCostLinks");
+  });
+  it.each([0,-1,1.5,NaN,2_147_483_648])("rejects invalid repair IDs %s",shipmentCostRepairLineId=>{
+    expect(()=>procurementChildHref("/purchase-orders/17","","/shipments/42",{shipmentCostRepairLineId})).toThrow();
+  });
+  it("rejects another document or a conflicting editor action",()=>{
+    expect(()=>procurementChildHref("/purchase-orders/17","","/ap-invoices/71",{shipmentCostRepairLineId:134})).toThrow();
+    expect(()=>procurementChildHref("/purchase-orders/17","","/shipments/42",{shipmentCostRepairLineId:134,invoiceCostLineId:72})).toThrow();
+  });
+});
