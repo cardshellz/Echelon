@@ -119,6 +119,7 @@ function operation(
 async function setup(page: Page, options: {
   openEditor?: boolean;
   orderRead?: () => Promise<OrderEditOrder | null>;
+  customerId?: string;
 } = {}) {
   await page.clock.install({ time: new Date("2026-10-21T12:00:00Z") });
   const requests: CustomerAccountRequest[] = [];
@@ -223,7 +224,7 @@ async function setup(page: Page, options: {
         <span data-csz-order-total role="status"></span>
         <button data-csz-account-action="edit" hidden>Edit order</button><p data-csz-order-tools-status></p>
       </article><div id="csz-customer-account-tools"></div></main>
-      <script id="csz-customer-account-config" type="application/json">${JSON.stringify({ themeId: "174740308127", customerId: "100", proxyPath: "/apps/echelon-returns" })}</script>
+      <script id="csz-customer-account-config" type="application/json">${JSON.stringify({ themeId: "174740308127", customerId: options.customerId ?? "100", proxyPath: "/apps/echelon-returns" })}</script>
       <script type="module" src="/@fs/${resolve(process.cwd(), "client/src/customer-account/entry.tsx").replaceAll("\\", "/")}"></script>
     </body></html>`,
     }),
@@ -312,6 +313,14 @@ test("account totals recover from a failed current read through an explicit read
   await page.getByRole("button", { name: "Retry order actions", exact: true }).click();
   await expect(total).toHaveText("$8.29 USD");
   expect(reads).toBe(2);
+  fixture.assertNoFinancialCommands();
+});
+
+test("account totals leave the loading state when startup configuration is invalid", async ({ page }) => {
+  const fixture = await setup(page, { openEditor: false, customerId: "" });
+  await expect(page.locator("[data-csz-order-total]")).toHaveText("Total unavailable");
+  await expect(page.getByRole("alert")).toHaveText("Order options could not be loaded. Please refresh this page.");
+  expect(fixture.requests).toEqual([]);
   fixture.assertNoFinancialCommands();
 });
 

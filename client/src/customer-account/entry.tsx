@@ -241,6 +241,9 @@ if (root && mount && configElement) {
     const signInUrl = customerAccountSignInUrl(config.loginPath, `${window.location.pathname}${window.location.search}`);
     createRoot(mount).render(<CustomerAccount root={root} api={api} statusTarget={statusTarget} signInUrl={signInUrl} customerId={config.customerId} />);
   } catch {
+    // React has not mounted when page configuration fails validation.
+    root.querySelectorAll<HTMLElement>("[data-csz-order-total], [data-csz-order-financials]")
+      .forEach(target => { target.textContent = "Total unavailable"; });
     const notice = document.createElement("p"); notice.setAttribute("role", "alert");
     notice.textContent = "Order options could not be loaded. Please refresh this page.";
     (statusTarget ?? mount).append(notice);
