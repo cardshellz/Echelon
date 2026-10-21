@@ -474,7 +474,7 @@ export function goldenClassifyAtCost(store: GoldenPreviewStore, facts: CostActio
   const existing = store.existingListings.find((listing) => listing.productVariantId === productVariantId);
   const cost = GOLDEN_PREVIEW_COSTS.get(productVariantId)!;
   return classifyListing(facts, { listingId: existing?.listingId ?? productVariantId, storeConnectionId: store.context.storeConnectionId,
-    productVariantId, status: "active", vendorRetailPriceCents: existing?.vendorRetailPriceCents ?? null, platform: "ebay",
+    productVariantId, status: "active", vendorRetailPriceCents: existing?.vendorRetailPriceCents ?? null, publishedPriceCents: null, platform: "ebay",
     variantSku: candidate.sku, variantName: candidate.variantName, productName: candidate.productName }, cost.unitCostCents!);
 }
 

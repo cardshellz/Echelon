@@ -4,6 +4,15 @@ import type { Pool } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
 import { createDropshipListingPushWorkerServiceFromEnv } from "./dropship-listing-push-worker.factory";
+import { createDropshipListingPushRecoveryFromEnv } from "./dropship-listing-push-recovery.factory";
+import type { DropshipListingPushRecoveryResult } from "../application/dropship-listing-push-recovery-service";
+import { makeDropshipListingPushWorkerLogger } from "../application/dropship-listing-push-worker-service";
+import type { DropshipLogger } from "../application/dropship-ports";
+
+/** Repairs the sweep runs before claiming jobs (dropship-listing-push-recovery-service). */
+export interface DropshipListingPushSweepRecovery {
+  run(input: { workerId: string }): Promise<DropshipListingPushRecoveryResult>;
+}
 
 export interface DropshipListingPushJobQueueRepository {
   listClaimableJobIds(input: {
@@ -73,6 +82,13 @@ export async function runDropshipListingPushSweep(input: {
   staleProcessingMinutes?: number;
   now?: Date;
   workerId?: string;
+  /**
+   * Run before jobs are listed, so a listing restored live or a push queued
+   * again is handled in this same sweep. Only the scheduled sweep passes it.
+   */
+  recovery?: DropshipListingPushSweepRecovery;
+  /** The structured logger the recovery's outcome is logged through (the worker's by default). */
+  logger?: DropshipLogger;
 } = {}): Promise<{ processed: number; failed: number }> {
   const repository = input.repository ?? new PgDropshipListingPushJobQueueRepository();
   const batchSize = input.batchSize ?? envPositiveInteger("DROPSHIP_LISTING_PUSH_WORKER_BATCH_SIZE", DEFAULT_BATCH_SIZE);
@@ -80,6 +96,7 @@ export async function runDropshipListingPushSweep(input: {
     ?? envPositiveInteger("DROPSHIP_LISTING_PUSH_STALE_PROCESSING_MINUTES", DEFAULT_STALE_PROCESSING_MINUTES);
   const now = input.now ?? new Date();
   const workerId = input.workerId ?? defaultWorkerId();
+  if (input.recovery) await runRecoveryBeforeJobs(input.recovery, workerId, input.logger ?? makeDropshipListingPushWorkerLogger());
   const jobIds = await repository.listClaimableJobIds({
     limit: batchSize,
     now,
@@ -124,7 +141,7 @@ export function startDropshipListingPushWorker(): void {
   const runLockedSweep = async () => {
     try {
       await withAdvisoryLock(DROPSHIP_LISTING_PUSH_WORKER_LOCK_ID, async () => {
-        const result = await runDropshipListingPushSweep();
+        const result = await runDropshipListingPushSweep({ recovery: createDropshipListingPushRecoveryFromEnv() });
         if (result.processed > 0 || result.failed > 0) {
           console.info(JSON.stringify({
             code: "DROPSHIP_LISTING_PUSH_SWEEP_COMPLETED",
@@ -152,6 +169,36 @@ export function startDropshipListingPushWorker(): void {
     message: "Dropship listing push worker started.",
     context: { intervalMs, initialDelayMs, schedulingMode: "completion_delayed_non_overlapping" },
   }));
+}
+
+/**
+ * Recovery logs its own outcomes and never throws by design; anything that
+ * still escapes is logged for a human here and the sweep goes on to its jobs,
+ * because a repair problem must not stop vendors' pushes. The next sweep runs
+ * the recovery again.
+ */
+async function runRecoveryBeforeJobs(recovery: DropshipListingPushSweepRecovery, workerId: string, logger: DropshipLogger): Promise<void> {
+  try {
+    const result = await recovery.run({ workerId });
+    if (result.listingsRestored + result.listingsNeedingReview + result.jobsRequeued + result.rowFailures + result.stepFailures > 0) {
+      logger.info({
+        code: "DROPSHIP_LISTING_PUSH_RECOVERY_COMPLETED",
+        message: "Dropship listing push recovery pass completed.",
+        context: { action: "listing_push_recovery", outcome: "completed", workerId, ...result },
+      });
+    }
+  } catch (error) {
+    const thrownCode = typeof (error as { code?: unknown } | null)?.code === "string" ? (error as { code: string }).code : null;
+    logger.error({
+      code: "DROPSHIP_LISTING_PUSH_RECOVERY_FAILED",
+      message: "Dropship listing push recovery failed; the sweep continued with its jobs.",
+      context: {
+        action: "listing_push_recovery", outcome: "failed", classification: "transient", workerId,
+        error: error instanceof Error ? error.message : String(error),
+        error_code: thrownCode ?? "DROPSHIP_LISTING_PUSH_RECOVERY_FAILED",
+      },
+    });
+  }
 }
 
 function defaultWorkerId(): string {

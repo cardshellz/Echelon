@@ -65,6 +65,7 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
       CREATE TABLE dropship.dropship_vendor_listings (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         vendor_id integer, store_connection_id integer, product_variant_id integer, platform text, status text,
         vendor_retail_price_cents integer, pushed_quantity integer, quantity_cap integer, last_preview_hash text,
+        external_listing_id varchar(255),
         metadata jsonb, created_at timestamptz, updated_at timestamptz, UNIQUE(store_connection_id,product_variant_id));
       CREATE TABLE dropship.dropship_listing_push_job_items (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         job_id integer, listing_id integer, product_variant_id integer, action text, status text, preview_hash text,

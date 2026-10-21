@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { isLiveListingStatus } from "../domain/listing-live-status";
 import {
   decideDropshipCatalogOrderAvailability,
   type DropshipCatalogExposureRule,
@@ -46,7 +47,6 @@ interface ListingCandidateRow {
   sales_eligibility: "sellable" | "internal_only";
 }
 
-const QUOTABLE_LISTING_STATUSES = new Set(["active", "drift_detected", "paused"]);
 const PAYMENT_HOLD_EXPIRED_REASON = "Payment hold expired before wallet funds were available.";
 
 export class PgDropshipOrderProcessingRepository implements DropshipOrderProcessingRepository {
@@ -515,7 +515,8 @@ function assertCandidateCanQuote(
   },
 ): void {
   const { intakeId, lineIndex } = input;
-  if (!QUOTABLE_LISTING_STATUSES.has(candidate.listing_status)) {
+  // The live statuses a push never moves a listing out of (domain/listing-live-status).
+  if (!isLiveListingStatus(candidate.listing_status)) {
     throw new DropshipError(
       "DROPSHIP_ORDER_PROCESSING_LISTING_NOT_QUOTABLE",
       "Dropship order line listing is not in a quotable status.",

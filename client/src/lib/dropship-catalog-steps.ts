@@ -259,6 +259,19 @@ export function catalogStoreName(
   return connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} store name pending`;
 }
 
+/**
+ * The store's own name, or null when it has none yet. For words that tell the
+ * vendor which Settings button to choose: without a name the button reads the
+ * placeholder catalogStoreName gives ("Reconnect Ebay store name pending"), so
+ * those words name "the store's Reconnect button" instead
+ * (dropship-listing-push-status unverifiedAccountWords).
+ */
+export function catalogStoreOwnName(
+  connection: Pick<DropshipStoreConnectionSummary, "externalDisplayName" | "shopDomain" | "platform"> | null,
+): string | null {
+  return connection?.externalDisplayName || connection?.shopDomain || null;
+}
+
 /** The launch-ready stores the rail lists, in the order the server returned them. */
 export function catalogStoreOptions(connections: readonly DropshipStoreConnectionSummary[]): CatalogStoreOption[] {
   return connections
