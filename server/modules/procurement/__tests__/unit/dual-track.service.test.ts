@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 const mockDetectQtyVariance = vi.hoisted(() => vi.fn());
 const mockRecomputePoFinancialAggregates = vi.hoisted(() => vi.fn());
@@ -113,7 +114,8 @@ function buildMockDb() {
         };
       }),
     }),
-    execute: vi.fn().mockResolvedValue({ rows: [] }),
+    execute: vi.fn(async query => new PgDialect().sqlToQuery(query).sql.includes("WITH purchase_lines AS MATERIALIZED")
+      ? { rows: [{ observations: [], acceptances: [], unidentifiedAcceptances: [] }] } : { rows: [] }),
   };
   mockDb.transaction = vi.fn(async (fn: any) => fn(mockDb));
 
@@ -369,7 +371,7 @@ describe("createReceiptFromPO — receipt idempotency", () => {
     const result = await svc.createReceiptFromPO(1, "user-1");
 
     expect(mockDb.transaction).toHaveBeenCalledOnce();
-    expect(mockDb.execute).toHaveBeenCalledTimes(5);
+    expect(mockDb.execute).toHaveBeenCalledTimes(6);
     expect((mockDb.execute as any).mock.invocationCallOrder[0]).toBeLessThan(
       (storage.createReceivingOrder as any).mock.invocationCallOrder[0],
     );
