@@ -1,3 +1,4 @@
+import { ebayReadDiagnostic, ebayReadFailureKind } from "./ebay-read-diagnostic";
 import { sha256Canonical } from "../../../domain/canonical-hash";
 import { MarketplaceListingRegistrationError } from "../../../domain/registration-errors";
 import type { ListingOwnerRef } from "../../../domain/listing-replacement-plan";
@@ -68,6 +69,7 @@ export interface EbayRegistrationReadRequest {
 export interface EbayRegistrationReadResponse {
   readonly status: number;
   readonly body: unknown;
+  readonly requestId?: string;
 }
 
 /** Deliberately GET-only provider boundary for preview and confirmation. */
@@ -125,6 +127,8 @@ export class FetchEbayRegistrationReadTransport
 
     const controller = new AbortController();
     let timedOut = false;
+    let received: Pick<EbayRegistrationReadResponse, "status" | "requestId"> | undefined;
+    const resource = url.pathname.startsWith("/commerce/") ? "identity" : url.pathname.split("/")[4] ?? "registration";
     const timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
@@ -147,12 +151,15 @@ export class FetchEbayRegistrationReadTransport
               }),
         },
       });
+      const requestId = response.headers.get("x-ebay-c-request-id") ?? response.headers.get("x-ebay-request-id");
+      received = { status: response.status, ...(requestId ? { requestId } : {}) };
       const responseText = await readBoundedResponseText(
         response,
         this.maxResponseBytes,
         {
           environment: request.environment,
           path: url.pathname,
+          providerRead: ebayReadDiagnostic(resource, response.status >= 200 && response.status < 300 ? "invalid_response" : ebayReadFailureKind(response.status), received),
         },
       );
       let body: unknown = null;
@@ -163,7 +170,7 @@ export class FetchEbayRegistrationReadTransport
           body = responseText;
         }
       }
-      return { status: response.status, body };
+      return { ...received, body };
     } catch (error) {
       if (error instanceof MarketplaceListingRegistrationError) throw error;
       throw registrationError(
@@ -178,6 +185,7 @@ export class FetchEbayRegistrationReadTransport
           path: url.pathname,
           ...(timedOut ? { timeoutMs: this.timeoutMs } : {}),
           errorName: error instanceof Error ? error.name : "UnknownError",
+          providerRead: ebayReadDiagnostic(resource, "unavailable", received),
         },
       );
     } finally {

@@ -17,7 +17,8 @@ import { PoLineLandedCost } from "@/features/purchasing/PoLineLandedCost";
 import { PurchaseCostOriginHistory } from "@/features/purchasing/PurchaseCostOriginHistory";
 import { poFinancialWorkflowSchema } from "@shared/procurement/po-financial-workflow";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
+import { parsePoDirectReceiveOption, parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
+import { ShipmentCustodyReceiptLinks } from "@/components/purchasing/ShipmentCustodyReceiptLinks";
 import React from "react";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
 import { PoQuantityAmendment } from '@/features/purchasing/PoQuantityAmendment';
@@ -5254,7 +5255,7 @@ export default function PurchaseOrderDetail() {
             const shipmentOptions = receiveOptions?.shipmentOptions ?? [];
             const receivableShipments = shipmentOptions.filter((s: any) => s.receivable);
             const blockedShipments = shipmentOptions.filter((s: any) => !s.receivable);
-            const poDirect = receiveOptions?.poDirect ?? { allowed: true, warning: "No receive options loaded." };
+            const poDirect = parsePoDirectReceiveOption(receiveOptions?.poDirect);
             const busy =
               createReceiptMutation.isPending ||
               createReceiptFromShipmentMutation.isPending ||
@@ -5269,7 +5270,7 @@ export default function PurchaseOrderDetail() {
                 voidZeroPostShipmentReceiptMutation.isPending &&
                 voidZeroPostShipmentReceiptMutation.variables?.receiptId === s.existingReceiptId;
               return (
-                <div key={s.shipmentId} className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                <div key={s.shipmentId} data-testid={`po-receive-option-${s.shipmentId}`} className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0">
                       <div className="font-mono text-sm font-medium flex items-center gap-1.5">
@@ -5278,6 +5279,8 @@ export default function PurchaseOrderDetail() {
                       <div className="mt-1 text-xs text-amber-800">
                         {s.reason || "This shipment is blocked from receiving."}
                       </div>
+                      <div className="mt-1 text-xs text-muted-foreground">{shipmentReceiveCoverageLabel(s).text}</div>
+                      <ShipmentCustodyReceiptLinks coverage={s} />
                     </div>
                     {s.action === "repair_empty_receipt" && s.existingReceiptId ? (
                       <Button
@@ -5318,7 +5321,7 @@ export default function PurchaseOrderDetail() {
                       This PO has {receivableShipments.length} shipment{receivableShipments.length > 1 ? "s" : ""} ready to receive:
                     </p>
                     {receivableShipments.map((s: any) => (
-                      <div key={s.shipmentId} className="flex items-center justify-between gap-3 rounded-lg border-2 border-blue-200 bg-blue-50/50 p-3">
+                      <div key={s.shipmentId} data-testid={`po-receive-option-${s.shipmentId}`} className="flex flex-col items-start justify-between gap-3 rounded-lg border-2 border-blue-200 bg-blue-50/50 p-3 sm:flex-row sm:items-center">
                         <div className="min-w-0">
                           <div className="font-mono text-sm font-medium flex items-center gap-1.5">
                             <Ship className="h-4 w-4 text-blue-600" /> {s.shipmentNumber || `Shipment #${s.shipmentId}`}
@@ -5328,6 +5331,8 @@ export default function PurchaseOrderDetail() {
                             {s.actualTotalCostCents ? ` - freight $${(s.actualTotalCostCents / 100).toFixed(2)}` : ""}
                             {s.lineCount ? ` - ${s.lineCount} line${s.lineCount === 1 ? "" : "s"}` : ""}
                           </div>
+                          <div className="mt-1 text-xs text-muted-foreground">{shipmentReceiveCoverageLabel(s).text}</div>
+                          <ShipmentCustodyReceiptLinks coverage={s} />
                         </div>
                         <Button
                           size="sm"
@@ -5351,15 +5356,16 @@ export default function PurchaseOrderDetail() {
                       </div>
                     ))}
                     {blockedShipments.map(renderBlockedShipment)}
-                    <div className="rounded-lg border p-3">
+                    <div data-testid="po-direct-receive-option" className="rounded-lg border p-3">
                       <div className="font-medium text-sm flex items-center gap-1.5">
                         <FileText className="h-4 w-4 text-muted-foreground" /> Receive against the PO directly
                       </div>
                       <div className="mt-1 flex items-start gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
                         <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" /> {poDirect.warning}
                       </div>
+                      <ShipmentCustodyReceiptLinks coverage={poDirect} />
                       <Button size="sm" variant="outline" className="mt-2" disabled={busy || !poDirect.allowed} onClick={() => createReceiptMutation.mutate()}>
-                        Receive against PO anyway
+                        {poDirect.allowed && poDirect.blockedPurchaseOrderLineIds?.length ? "Receive eligible PO lines" : "Receive against PO anyway"}
                       </Button>
                       {!poDirect.allowed && poDirect.reason && (
                         <div className="mt-1 text-xs text-muted-foreground">{poDirect.reason}</div>
@@ -5369,15 +5375,14 @@ export default function PurchaseOrderDetail() {
                 ) : (
                   <>
                     {blockedShipments.map(renderBlockedShipment)}
-                    <div className="rounded-lg border p-3">
+                    <div data-testid="po-direct-receive-option" className="rounded-lg border p-3">
                       <div className="font-medium text-sm">Receive against the PO directly</div>
                       <div className="text-xs text-muted-foreground mt-1">
-                        {blockedShipments.length > 0
-                          ? blockedShipments[0].reason
-                          : poDirect.warning}
+                        {poDirect.warning}
                       </div>
+                      <ShipmentCustodyReceiptLinks coverage={poDirect} />
                       <Button size="sm" className="mt-2" disabled={busy || !poDirect.allowed} onClick={() => createReceiptMutation.mutate()}>
-                        Receive against PO
+                        {poDirect.allowed && poDirect.blockedPurchaseOrderLineIds?.length ? "Receive eligible PO lines" : "Receive against PO"}
                       </Button>
                       {!poDirect.allowed && poDirect.reason && (
                         <div className="mt-1 text-xs text-muted-foreground">{poDirect.reason}</div>

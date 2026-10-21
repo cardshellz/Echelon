@@ -1,3 +1,4 @@
+import { channelProviderReadDiagnosticSchema, providerReadDetails, type ChannelProviderReadDiagnostic } from "./channel-provider-read";
 import { ebayListingIssueSchema, type EbayListingIssue } from "./types/ebay-listing-issue";
 import type { EbayPolicySource } from "./ebay-business-policies";
 import type { EbayListingSyncJob } from "./types/ebay-listing-sync";
@@ -25,8 +26,10 @@ export function resolveEbayListingJobIssue(job: EbayListingSyncJob): EbayListing
   // Replace older cached quantity-only copy without changing the saved outcome.
   if (isUnresolvedListingRequest(code)) return resolveEbayListingIssue({ code,
     message: job.message, productId: job.productId, jobId: job.id, state: job.state, operation: job.operation });
+  if (job.providerRead || code === "PUBLICATION_RECOVERY_REVIEW_REQUIRED" || code?.startsWith("EBAY_REGISTRATION_"))
+    return resolveEbayListingIssue({ code, productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead });
   return job.issue ?? resolveEbayListingIssue({ code: job.code, message: job.message,
-    productId: job.productId, jobId: job.id, state: job.state });
+    productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead });
 }
 
 export interface EbayListingIssueInput {
@@ -38,6 +41,7 @@ export interface EbayListingIssueInput {
   operation?: EbayListingSyncJob["operation"];
   quantityBlockerCodes?: readonly string[];
   policySource?: EbayPolicySource;
+  providerRead?: ChannelProviderReadDiagnostic | null;
 }
 
 /** One presentation contract for API results, saved work, and older server responses.
@@ -45,6 +49,12 @@ export interface EbayListingIssueInput {
 export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListingIssue {
   const code = input.code && /^[A-Z0-9_]{1,100}$/.test(input.code) ? input.code : "EBAY_LISTING_OPERATION_FAILED";
   const automaticResponseRecovery = isAutomaticResponseRecovery(code, input.state);
+  const parsedRead = channelProviderReadDiagnosticSchema.safeParse(input.providerRead);
+  const readFailure = parsedRead.success ? parsedRead.data : null;
+  const isObservationReadFailure = readFailure?.kind !== "refused" && (readFailure !== null
+    || ["EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID", "EBAY_REGISTRATION_PROVIDER_RESPONSE_TOO_LARGE",
+      "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED", "EBAY_REGISTRATION_PROVIDER_READ_TIMEOUT",
+      "EBAY_REGISTRATION_PROVIDER_READ_UNAVAILABLE", "EBAY_REGISTRATION_PROVIDER_READ_FAILED"].includes(code));
   const productPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/products/${input.productId}` : "/channels/ebay";
   const inventoryPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/channels/inventory?product=${input.productId}` : "/channels/inventory";
   const reference = input.jobId && /^[a-f0-9-]{36}$/i.test(input.jobId) ? input.jobId : undefined;
@@ -54,14 +64,38 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     || input.code?.startsWith("CANONICAL_CHANNEL_QUANTITY_");
   // Older jobs saved generic contention prose and described invalid prepared
   // drafts as mapping faults. Present the classified cause and current action.
-  const message = isFeedReadIssue || automaticResponseRecovery || (input.state === "recovering" && isUnresolvedListingRequest(code))
+  const message = isFeedReadIssue || automaticResponseRecovery || isObservationReadFailure || (input.state === "recovering" && isUnresolvedListingRequest(code))
     || ["INVENTORY_PUBLICATION_TARGET_BUSY", "EBAY_SYNC_DRAFT_SCOPE_INVALID", "CANONICAL_PUBLICATION_MAPPING_MISSING", "PUBLICATION_AUTOMATIC_RECOVERY_FAILED"].includes(code)
     ? undefined : safeListingDiagnostic(input.message);
   const issue = (title: string, fallback: string, nextStep: string, retryable: boolean,
     kind: EbayListingIssue["action"]["kind"], label: string, href?: string): EbayListingIssue =>
     ebayListingIssueSchema.parse({ code, title, message: message || fallback, nextStep, retryable,
       action: { kind, label, ...(href ? { href } : {}) }, ...(reference ? { reference } : {}),
-      ...(input.productId ? { details: [{ label: "Product ID", value: String(input.productId) }] } : {}) });
+      details: [...(input.productId ? [{ label: "Product ID", value: String(input.productId) }] : []),
+        ...(readFailure ? providerReadDetails(readFailure) : [])] });
+
+  if (code === "PUBLICATION_RECOVERY_REVIEW_REQUIRED")
+    return issue("An earlier update needs a recovery decision",
+      "An older request has no reliable final receipt. Echelon cannot safely resume this listing without reviewing that unknown outcome.",
+      "Open recovery, review the affected listing and authorize a fresh update using current values. The old outcome remains unknown in the audit history.",
+      false, "check_recovery", "Review recovery");
+  if (readFailure?.kind === "refused") return issue("The channel refused the listing check",
+    "Echelon received a refusal when reading this listing. No successful listing check was recorded.",
+    readFailure.httpStatus === 401 || readFailure.httpStatus === 403
+      ? "Open connection settings and check the seller authorization, then retry Sync."
+      : "Review the saved read details before retrying. The endpoint and HTTP status identify the refused request.",
+    false, readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "reconnect" : "check_status",
+    readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "Open connection settings" : "View update status",
+    readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "/channels/ebay#connection" : undefined);
+  if (isObservationReadFailure) {
+    const retrying = input.state === "recovering";
+    const result = issue(retrying ? "Retrying the listing check" : "The listing check could not finish",
+      "Echelon could not read a complete, valid listing response. This does not establish that the product or its settings are wrong.",
+      retrying ? "The saved update will check again automatically before making another change. Its existing request history stays protected."
+        : "Retry Sync to check the listing again. If it still cannot be read, copy the technical details for investigation. Recovery details also show any earlier unresolved requests.",
+      !retrying, retrying ? "check_status" : "retry_sync", retrying ? "View update status" : "Retry Sync");
+    return ebayListingIssueSchema.parse({ ...result, diagnosticAction: { kind: "check_recovery", label: "Review earlier requests" } });
+  }
 
   if (code === "RETAIL_PRICE_SOURCE_REQUIRED" || code === "RETAIL_PRICE_IDENTITY_MISSING")
     return issue("Choose the retail price source", "More than one retail variant matches this SKU, so Echelon cannot safely choose its price.",

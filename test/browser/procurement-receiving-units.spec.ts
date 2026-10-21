@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Locator } from "@playwright/test";
-import { installFixtures, receipt } from "./procurement-fixtures";
+import { installFixtures, po, receipt } from "./procurement-fixtures";
 
 const version = "a".repeat(64), nextVersion = "b".repeat(64);
 const variants = [
@@ -562,6 +562,192 @@ test("unknown receipt coverage keeps existing receipts openable and other PO cho
   await expect(page).toHaveURL(/open=31/);
   expect(failures).toEqual([]);
 });
+
+for (const partial of [false, true]) {
+  test(`PO-direct custody exclusions preserve the original receipt and ${partial ? "allow unrelated eligible lines" : "block all covered lines"}`, async ({ page }, testInfo) => {
+    const failures = await installFixtures(page);
+    const writes: Array<{ path: string; idempotencyKey: string | undefined }> = [];
+    const warning = "PO-direct receiving excludes CUSTODY-SKU (line 1) because these lines have quarantine history. Use their shipment or original quarantine receipt."
+      + (partial ? " Unrelated eligible lines remain available for PO-direct receiving." : "");
+    const eligibleLine = { ...makeLine(), id: 8, receivingOrderId: 32,
+      purchaseOrderLineId: 18, sku: "ELIGIBLE-SKU", productName: "Unrelated eligible product",
+      expectedQty: 100, receivedQty: 0, damagedQty: 0, status: "pending" };
+    const created = { ...receiptWithLines(32, [eligibleLine], "draft"),
+      sourceType: "po", inboundShipmentId: null, purchaseOrderId: 17,
+      lines: [{ ...eligibleLine, inboundShipmentLineId: null }] };
+    await page.route("**/api/**", async route => {
+      const request = route.request(), path = new URL(request.url()).pathname;
+      if (request.method() === "GET") {
+        if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), poNumber: "PO-DIRECT-CUSTODY" } });
+        if (path === "/api/purchase-orders/17/receive-options") return route.fulfill({ json: {
+          shipmentOptions: [{ shipmentId: 42, shipmentNumber: "CUSTODY-SHIPMENT", purchaseOrderId: 17,
+            qtyShipped: partial ? 1100 : 1000, receivedBaseQty: 800, custodyBaseQty: 200,
+            heldBaseQty: 200, returnedBaseQty: 0, excessBaseQty: 0, remainingBaseQty: partial ? 100 : 0,
+            custodyReceiptIds: [31], lineCount: partial ? 2 : 1, status: "delivered", receivable: partial,
+            action: partial ? "create_receipt" : "blocked", reason: partial ? null : "These shipped pieces are already accounted for in receipt custody." }],
+          poDirect: { allowed: partial, warning, reason: partial ? null : "The remaining purchase lines have quarantine history.",
+            blockedPurchaseOrderLineIds: [17], custodyReceiptIds: [31] },
+        } });
+        if (path === "/api/receiving/32") return route.fulfill({ json: created });
+        return route.fallback();
+      }
+      if (path === "/api/purchase-orders/17/create-receipt" && request.method() === "POST") {
+        writes.push({ path, idempotencyKey: request.headers()["idempotency-key"] });
+        if (!partial) return route.fulfill({ status: 409, json: { error: "The remaining purchase lines have quarantine history." } });
+        return route.fulfill({ json: created });
+      }
+      return route.fallback();
+    });
+
+    const openPicker = async () => {
+      await page.goto("/purchase-orders/17?tab=lines");
+      await page.getByRole("region", { name: "Purchase order actions", exact: true })
+        .getByRole("button", { name: "Receive", exact: true }).click();
+    };
+    await openPicker();
+    const dialog = page.getByRole("dialog", { name: "Receive PO-DIRECT-CUSTODY", exact: true });
+    const direct = dialog.getByTestId("po-direct-receive-option");
+    await expect(direct).toContainText(warning);
+    const custodyLink = direct.getByRole("link", { name: "Review custody on receipt #31", exact: true });
+    await expect(custodyLink).toHaveAttribute("href", /\/receiving\?open=31/);
+    const create = direct.getByRole("button", { name: partial ? "Receive eligible PO lines" : "Receive against PO", exact: true });
+    if (partial) await expect(create).toBeEnabled();
+    else await expect(create).toBeDisabled();
+    await expectModalFits(page, dialog);
+    const box = (await dialog.boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+    await page.screenshot({ path: testInfo.outputPath(`po-direct-${partial ? "partial" : "blocked"}.png`), animations: "disabled" });
+    await custodyLink.click();
+    await expect(page).toHaveURL(/\/receiving\?open=31/);
+    expect(writes).toEqual([]);
+    if (partial) {
+      await openPicker();
+      await page.getByTestId("po-direct-receive-option").getByRole("button", { name: "Receive eligible PO lines", exact: true }).click();
+      await expect(page).toHaveURL(/\/receiving\?open=32/);
+      expect(writes).toEqual([{ path: "/api/purchase-orders/17/create-receipt", idempotencyKey: expect.any(String) }]);
+      expect(writes[0].idempotencyKey).not.toBe("");
+      await expect(page.getByText("Unrelated eligible product", { exact: true }).filter({ visible: true })).toBeVisible();
+      await expect(page.getByText("CUSTODY-SKU", { exact: true })).toHaveCount(0);
+    }
+    expect(failures).toEqual([]);
+  });
+}
+
+for (const scenario of [
+  { name: "all held", received: 0, held: 100, returned: 0, remaining: 0, excess: 0 },
+  { name: "accepted and held", received: 60, held: 40, returned: 0, remaining: 0, excess: 0 },
+  { name: "custody and fresh remainder", received: 20, held: 30, returned: 10, remaining: 40, excess: 0 },
+  { name: "fully returned", received: 0, held: 0, returned: 100, remaining: 0, excess: 0 },
+  { name: "mixed-line excess and fresh remainder", received: 20, held: 60, returned: 10, remaining: 40, excess: 30 },
+] as const) {
+  test(`shipment custody stays separate from inventory on PO and both shipment entry paths: ${scenario.name}`, async ({ page }, testInfo) => {
+    const failures = await installFixtures(page);
+    const state = { singlePo: false, writes: [] as Command[] };
+    const coverage = {
+      qtyShipped: 100, receivedBaseQty: scenario.received, heldBaseQty: scenario.held,
+      returnedBaseQty: scenario.returned, custodyBaseQty: scenario.held + scenario.returned,
+      remainingBaseQty: scenario.remaining, excessBaseQty: scenario.excess, custodyReceiptIds: [31],
+    };
+    const option = { ...coverage, shipmentId: 42, shipmentNumber: "CUSTODY-SHIPMENT", purchaseOrderId: 17,
+      poNumber: "PO-CUSTODY", lineCount: scenario.excess ? 2 : 1, status: "delivered", receivable: scenario.remaining > 0,
+      action: scenario.remaining > 0 ? "create_receipt" : "blocked",
+      reason: scenario.remaining > 0 ? null : "These shipped pieces are already accounted for in receipt custody." };
+    await page.route("**/api/**", async route => {
+      const request = route.request(), path = new URL(request.url()).pathname;
+      if (request.method() === "GET") {
+        if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), poNumber: "PO-CUSTODY" } });
+        if (path === "/api/purchase-orders/17/receive-options") return route.fulfill({ json: {
+          shipmentOptions: [option], poDirect: { allowed: false, warning: "Use the linked shipment or its existing custody receipt." },
+        } });
+        if (path === "/api/inbound-shipments/42") return route.fulfill({ json: {
+          id: 42, shipmentNumber: "CUSTODY-SHIPMENT", status: "delivered", mode: "sea_lcl", costs: [], statusHistory: [],
+          // In the mixed case, line17 has 90 observed against 60 planned; line18 still has 40 unarrived.
+          lines: (state.singlePo ? [17] : [17, 99]).flatMap(purchaseOrderId => purchaseOrderId === 17 && scenario.excess ? [
+            { id: 17, purchaseOrderId, purchaseOrderLineId: 17, sku: "CUSTODY-SKU", qtyShipped: 60 },
+            { id: 18, purchaseOrderId, purchaseOrderLineId: 18, sku: "FRESH-SKU", qtyShipped: 40 },
+          ] : [{
+            id: purchaseOrderId, purchaseOrderId, purchaseOrderLineId: purchaseOrderId, sku: "CUSTODY-SKU", qtyShipped: 100,
+          }]),
+        } });
+        if (path === "/api/inbound-shipments/42/po-receive-options") return route.fulfill({ json: { purchaseOrders: [option,
+          { shipmentId: 42, purchaseOrderId: 99, poNumber: "PO-POSTED", action: "blocked", receivable: false,
+            qtyShipped: 100, lineCount: 1, receivedBaseQty: 100, remainingBaseQty: 0,
+            custodyBaseQty: 0, heldBaseQty: 0, returnedBaseQty: 0, excessBaseQty: 0, custodyReceiptIds: [], reason: null },
+        ] } });
+        if (path === "/api/inbound-shipments/42/receipt-pack-resolution") return route.fulfill({ json: {
+          ...coverage, shipmentId: 42, shipmentNumber: "CUSTODY-SHIPMENT", status: "delivered", purchaseOrderId: 17,
+          poNumber: "PO-CUSTODY", canCreateReceipt: scenario.remaining > 0, unresolvedCount: 0,
+          lineCount: scenario.remaining > 0 ? 1 : 0, issue: option.reason,
+          lines: scenario.remaining > 0 ? [{ shipmentLineId: scenario.excess ? 18 : 17, purchaseOrderLineId: scenario.excess ? 18 : 17, sku: scenario.excess ? "FRESH-SKU" : "CUSTODY-SKU",
+            productId: 10, productName: "Custody product", qtyShipped: scenario.remaining, cartonCount: null,
+            unitsPerCarton: null, status: "resolved", blocking: false, issue: null, activeVariants: [],
+            matchedVariant: { id: 2, sku: "TEST-PC1", name: "Piece", unitsPerVariant: 1 },
+            receivePlan: { productVariantId: 2, unitsPerVariant: 1, expectedQty: scenario.remaining,
+              countsAsPieces: true, preferredVariantId: 3, preferredUnitsPerVariant: 50 },
+          }] : [],
+        } });
+        return route.fallback();
+      }
+      if (path === "/api/inbound-shipments/42/create-receipt" && request.method() === "POST") {
+        state.writes.push({ path, body: request.postDataJSON() });
+        if (scenario.remaining === 0) return route.fulfill({ status: 409, json: { error: "Custody source is already covered." } });
+        return route.fulfill({ json: receipt(32) });
+      }
+      return route.fallback();
+    });
+
+    const assertCoverage = async (scope: Locator) => {
+      await expect(scope).toContainText(`${scenario.received} pieces received into inventory`);
+      if (scenario.held) await expect(scope).toContainText(`${scenario.held} held in quarantine`);
+      if (scenario.returned) await expect(scope).toContainText(`${scenario.returned} returned to supplier`);
+      await expect(scope).toContainText(`${scenario.remaining} pieces remaining to receive`);
+      if (scenario.excess) await expect(scope).toContainText(`${scenario.excess} pieces above shipped quantity`);
+      await expect(scope.getByText("Received", { exact: true })).toHaveCount(0);
+      await expect(scope.getByRole("link", { name: "Review custody on receipt #31", exact: true }))
+        .toHaveAttribute("href", /\/receiving\?open=31/);
+    };
+    await page.goto("/purchase-orders/17?tab=lines");
+    await page.getByRole("region", { name: "Purchase order actions", exact: true })
+      .getByRole("button", { name: "Receive", exact: true }).click();
+    const poOption = page.getByTestId("po-receive-option-42");
+    await assertCoverage(poOption);
+    if (scenario.remaining) await expect(poOption.getByRole("button", { name: "Receive this shipment", exact: true })).toBeEnabled();
+    else await expect(poOption.getByRole("button", { name: "Receive this shipment", exact: true })).toHaveCount(0);
+    await poOption.getByRole("link", { name: "Review custody on receipt #31", exact: true }).click();
+    await expect(page).toHaveURL(/\/receiving\?open=31/);
+
+    await page.goto("/shipments/42");
+    await page.getByRole("button", { name: "Create Receipt", exact: true }).click();
+    const shipmentOption = page.getByTestId("shipment-receive-option-17");
+    await assertCoverage(shipmentOption);
+    if (scenario.remaining) await expect(shipmentOption.getByRole("button", { name: "Receive", exact: true })).toBeEnabled();
+    else await expect(shipmentOption.getByRole("button", { name: "Receive", exact: true })).toBeDisabled();
+
+    state.singlePo = true;
+    await page.goto("/shipments/42");
+    await page.getByRole("button", { name: "Create Receipt", exact: true }).click();
+    const packDialog = page.getByRole("dialog", { name: "Shipment receipt pack check", exact: true });
+    await assertCoverage(packDialog);
+    await expectModalFits(page, packDialog);
+    await page.screenshot({ path: testInfo.outputPath(`custody-${scenario.name.replaceAll(" ", "-")}.png`), animations: "disabled" });
+    const create = packDialog.getByRole("button", { name: "Create receipt", exact: true });
+    if (scenario.remaining) {
+      await expect(packDialog).toContainText("40");
+      await expect(create).toBeEnabled();
+      await create.click();
+      await expect(page).toHaveURL(/\/receiving\?open=32/);
+      expect(state.writes).toEqual([{ path: "/api/inbound-shipments/42/create-receipt", body: { purchaseOrderId: 17 } }]);
+    } else {
+      await expect(create).toBeDisabled();
+      await expect(packDialog.getByRole("button", { name: "Open variants", exact: true })).toHaveCount(0);
+      await packDialog.getByRole("link", { name: "Review custody on receipt #31", exact: true }).click();
+      await expect(page).toHaveURL(/\/receiving\?open=31/);
+      expect(state.writes).toEqual([]);
+    }
+    expect(failures).toEqual([]);
+  });
+}
 
 test("a delayed receipt A reload cannot block receipt B or clear B's newer reload state", async ({ page }) => {
   const failures = await installFixtures(page);

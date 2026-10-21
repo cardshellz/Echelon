@@ -3,6 +3,7 @@
 export {
   syncActiveListings,
   ebayListingSyncService,
+  ebayListingSyncRepository,
   readExistingEbayListingIdentityForProduct,
   refreshRecoveredEbayListing,
 } from "./infrastructure/ebay-active-listing-sync";
