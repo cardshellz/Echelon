@@ -51,6 +51,35 @@ pool.on("error", (error) => {
   console.error("[DatabasePool] Unexpected idle client error:", error);
 });
 
+/**
+ * A small pool of its own, on the same database with the same SSL rule and
+ * search path, for a side channel that must never wait behind the shared
+ * pool's queue: the dropship process heartbeat (step 1 PR A, verify V5), whose
+ * row other releases read to tell whether this process is alive. Every
+ * statement and query is bounded, and TCP keepalive finds a dead connection.
+ * The caller owns the pool and must listen for its "error" event.
+ */
+export function createSideChannelPool(config: {
+  max: number;
+  statementTimeoutMs: number;
+  queryTimeoutMs: number;
+  connectionTimeoutMs: number;
+  idleTimeoutMs: number;
+}): InstanceType<typeof Pool> {
+  return new Pool({
+    ...createDatabasePoolConfig({
+      connectionString: connectionString || "postgresql://stub:stub@localhost:5432/stub",
+      ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+      max: connectionString ? config.max : 0,
+      idleTimeoutMillis: config.idleTimeoutMs,
+      connectionTimeoutMillis: config.connectionTimeoutMs,
+      keepAlive: true,
+    }),
+    statement_timeout: config.statementTimeoutMs,
+    query_timeout: config.queryTimeoutMs,
+  });
+}
+
 export const db = drizzle(pool, { schema });
 
 // Run startup migrations to ensure schema is up to date

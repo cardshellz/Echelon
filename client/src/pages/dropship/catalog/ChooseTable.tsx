@@ -15,6 +15,7 @@ import {
 import { CHOOSE_WORDS, describeCatalogListingTier, formatChooseCount } from "@/lib/dropship-catalog-choose-words";
 import { formatStatus } from "@/lib/dropship-ops-surface";
 import { cn } from "@/lib/utils";
+import { reloadPageWithoutLeavePrompt } from "./UnsavedChangesGuard";
 
 /**
  * Catalog step 1's table, bar line and save question (step 1 stage 1).
@@ -220,6 +221,14 @@ export function ChooseChangesBar({ add, remove, hasChanges, saving, saveOff, sav
       </div>
       {hasChanges && saveOffReason && <p id={reasonId} className="text-xs text-amber-900" data-testid="catalog-choose-save-off">{saveOffReason}</p>}
       {outcome?.kind === "error" && <p role="alert" className="text-sm text-red-800" data-testid="catalog-choose-error">{outcome.message}</p>}
+      {/* Stage 2 (step 1 plan S2-5 §4.9 item 2): this page is older than the server; only a reload can save again. */}
+      {outcome?.kind === "error" && outcome.reload && (
+        <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" data-testid="catalog-choose-reload"
+          // The words already said the changes are lost: the reload asks nothing more (verify VC10).
+          onClick={() => reloadPageWithoutLeavePrompt()}>
+          {CHOOSE_WORDS.reload}
+        </Button>
+      )}
     </div>
   );
 }

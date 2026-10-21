@@ -136,6 +136,8 @@ describeDatabase.sequential("cost change pause restore after a demoted live list
   interface Scenario {
     variantId: number;
     listingStatus?: string;
+    /** The listing's eBay id now; `E-<variant>` when not given. */
+    externalListingId?: string | null;
     completedMode?: "live" | "draft_first";
     /** A push item created after the completed push and before the release (the demotion). */
     demotedBeforeRelease?: boolean;
@@ -147,7 +149,8 @@ describeDatabase.sequential("cost change pause restore after a demoted live list
   async function seed(scenario: Scenario): Promise<{ listingId: number; holdId: number; entryId: number; demotingItemId: number | null; basisItemId: number }> {
     const listing = await pool.query<{ id: number }>(qualify(`INSERT INTO dropship.dropship_vendor_listings
       (vendor_id, store_connection_id, product_variant_id, status, vendor_retail_price_cents, platform, external_listing_id)
-      VALUES (1, 1, $1, $2, 899, 'ebay', $3) RETURNING id`), [scenario.variantId, scenario.listingStatus ?? "active", `E-${scenario.variantId}`]);
+      VALUES (1, 1, $1, $2, 899, 'ebay', $3) RETURNING id`), [scenario.variantId, scenario.listingStatus ?? "active",
+      scenario.externalListingId === undefined ? `E-${scenario.variantId}` : scenario.externalListingId]);
     const listingId = listing.rows[0]!.id;
     const basis = await pool.query<{ id: number }>(qualify(`INSERT INTO dropship.dropship_listing_push_job_items
       (job_id, listing_id, product_variant_id, status, result, created_at, updated_at)
@@ -192,7 +195,8 @@ describeDatabase.sequential("cost change pause restore after a demoted live list
     const draft = await seed({ variantId: 2, completedMode: "draft_first" });
     const releasedWhileActive = await seed({ variantId: 3, demotedBeforeRelease: false });
     const coveredCost = await seed({ variantId: 4, releaseReason: "price_covers_cost" });
-    const stillDemoted = await seed({ variantId: 5, listingStatus: "failed" });
+    // Not on eBay now (no listing id): orders are refused on it, so its pause stays released.
+    const notOnMarketplace = await seed({ variantId: 5, listingStatus: "failed", externalListingId: null });
     const redecided = await seed({ variantId: 6, laterHold: true });
 
     const restored = await actions.restoreHoldsReleasedWhileListingDemoted({ now: NOW, workerId: WORKER, limit: 50 });
@@ -221,7 +225,7 @@ describeDatabase.sequential("cost change pause restore after a demoted live list
         after: { liveHoldId: restored[0]!.holdId }, basisJobItemId: wrongful.basisItemId, demotingJobItemId: wrongful.demotingItemId,
       }),
     }]);
-    void draft; void releasedWhileActive; void coveredCost; void stillDemoted;
+    void draft; void releasedWhileActive; void coveredCost; void notOnMarketplace;
 
     // Re-run: the restored hold is newer than the released one, so nothing is restored again.
     expect(await actions.restoreHoldsReleasedWhileListingDemoted({ now: LATER, workerId: WORKER, limit: 50 })).toEqual([]);
@@ -231,13 +235,43 @@ describeDatabase.sequential("cost change pause restore after a demoted live list
     expect(await actions.restoreHoldsReleasedWhileListingDemoted({ now: LATER, workerId: WORKER, limit: 50 })).toEqual([]);
   });
 
-  it("restores a demoted listing's pause once the listing is live again", async () => {
-    const stillDemoted = await seed({ variantId: 5, listingStatus: "failed" });
-    expect(await actions.restoreHoldsReleasedWhileListingDemoted({ now: NOW, workerId: WORKER, limit: 50 })).toEqual([]);
-    // The listing push sweep's live status repair restores it (dropship-listing-live-status-repair.repository).
-    await pool.query(qualify(`UPDATE dropship.dropship_vendor_listings SET status = 'active' WHERE id = $1`), [stillDemoted.listingId]);
-    const restored = await actions.restoreHoldsReleasedWhileListingDemoted({ now: LATER, workerId: WORKER, limit: 50 });
-    expect(restored.map((hold) => hold.releasedHoldId)).toEqual([stillDemoted.holdId]);
+  // Rebase of PR A onto PR 1b, merge review ADV-3: orders are taken on a listing that reads queued, failed, blocked or
+  // pushing with its eBay id (domain/order-listing-acceptability, §4.7), so its pause is put back too, even while a push
+  // is in flight (the live status repair waits for that push, so the row keeps reading queued).
+  it("puts back a pause while the listing still reads failed or queued with its eBay id, and the review keeps it", async () => {
+    const failed = await seed({ variantId: 5, listingStatus: "failed" });
+    const inFlight = await seed({ variantId: 6, listingStatus: "queued" });
+    await pool.query(qualify(`INSERT INTO dropship.dropship_listing_push_job_items
+      (job_id, listing_id, product_variant_id, status, result, created_at, updated_at)
+      VALUES (1, $1, 6, 'queued', '{"listingIntent":{"listingMode":"live"}}'::jsonb, $2, $2)`), [inFlight.listingId, NOW]);
+    const notOnMarketplace = await seed({ variantId: 7, listingStatus: "failed", externalListingId: null });
+    // The failed listing's settings and its last published price both cover the cost: an active listing would be
+    // released for its price, but one being re-sent keeps its hold whatever its price says (MC2).
+    await pool.query(qualify(`INSERT INTO dropship.dropship_listing_price_settings (vendor_id, store_connection_id, product_variant_id, override_price_cents, pricing_mode)
+      VALUES (1, 1, 5, 1500, 'fixed')`));
+    await pool.query(qualify(`INSERT INTO dropship.dropship_listing_sync_events (listing_id, event_type, source, payload, created_at)
+      VALUES ($1, 'listing_push_completed', 'dropship_worker', '{"jobId":1,"priceCents":1500}'::jsonb, $2)`), [failed.listingId, PUSHED]);
+
+    const restored = await actions.restoreHoldsReleasedWhileListingDemoted({ now: NOW, workerId: WORKER, limit: 50 });
+
+    expect(restored.map((hold) => [hold.releasedHoldId, hold.listingId, hold.demotingJobItemId]))
+      .toEqual([[failed.holdId, failed.listingId, failed.demotingItemId], [inFlight.holdId, inFlight.listingId, inFlight.demotingItemId]]);
+    expect((await pool.query(qualify(`SELECT count(*)::int AS n FROM dropship.dropship_audit_events WHERE event_type = 'cost_change_hold_restored'`))).rows[0].n)
+      .toBe(2);
+
+    // The same pass's review keeps both pauses and holds them again at inventory planning.
+    const { gate, calls } = trackingGate();
+    const { service } = buildService({ gate });
+    const pass = await service.runListingActionPass({ workerId: WORKER });
+    expect(pass.holds).toMatchObject({ restored: 0, reviewed: 2, released: 0, reasserted: 2, deferred: 0, vendorsFailed: 0 });
+    expect(calls).toEqual(["hold:5,6"]);
+    expect((await actions.listActiveHolds({ limit: 10 })).map((hold) => hold.productVariantId)).toEqual([5, 6]);
+
+    // A listing not on eBay is put back only once a push makes it live there (as before).
+    await pool.query(qualify(`UPDATE dropship.dropship_vendor_listings SET status = 'active', external_listing_id = 'E-7' WHERE id = $1`),
+      [notOnMarketplace.listingId]);
+    const later = await actions.restoreHoldsReleasedWhileListingDemoted({ now: LATER, workerId: WORKER, limit: 50 });
+    expect(later.map((hold) => hold.releasedHoldId)).toEqual([notOnMarketplace.holdId]);
   });
 
   it("re-judges a put-back pause in the same pass: still under water, it is held again at inventory planning", async () => {

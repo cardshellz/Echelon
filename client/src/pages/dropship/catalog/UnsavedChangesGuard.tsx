@@ -156,6 +156,7 @@ export function useBrowserLeavePrompt(asking: boolean): void {
   useEffect(() => {
     if (!asking) return undefined;
     const askBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (reloadingOnPurpose) return;
       event.preventDefault();
       // Older browsers show the prompt only when returnValue is set.
       event.returnValue = "";
@@ -163,6 +164,22 @@ export function useBrowserLeavePrompt(asking: boolean): void {
     window.addEventListener("beforeunload", askBeforeUnload);
     return () => window.removeEventListener("beforeunload", askBeforeUnload);
   }, [asking]);
+}
+
+/**
+ * Set by reloadPageWithoutLeavePrompt for the one reload the page itself asks for: the leave prompts stand aside.
+ * Deliberate page-wide state: the reload ends the page, and nothing else sets it.
+ */
+let reloadingOnPurpose = false;
+
+/**
+ * Reloads the page without the browser's leave prompt, for a reload whose words already told the vendor what is lost:
+ * step 1's "This page was updated, so your last changes weren't saved. Reload it…", whose marks can never be saved
+ * (verify VC10: the prompt asked a second time).
+ */
+export function reloadPageWithoutLeavePrompt(reload: () => void = () => window.location.reload()): void {
+  reloadingOnPurpose = true;
+  reload();
 }
 
 /** Every editor's unsaved draft on the page (the leave-guard scopes read them). Empty outside an UnsavedChangesProvider. */

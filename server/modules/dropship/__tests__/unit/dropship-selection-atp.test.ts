@@ -13,12 +13,18 @@ import {
   type DropshipSelectionAtpRepository,
   type DropshipVendorCatalogCandidate,
   type DropshipVendorProfile,
+  type DropshipVendorSelectionCountRecord,
   type DropshipVendorSelectionRuleRecord,
   type DropshipVendorVariantOverrideRecord,
   type ReplaceDropshipVendorSelectionRulesRepositoryInput,
   type ReplaceDropshipVendorSelectionRulesRepositoryResult,
 } from "../../application/dropship-selection-atp-service";
-import type { ListDropshipVendorSelectionRulesInput, PreviewDropshipVendorCatalogInput } from "../../application/dropship-selection-dtos";
+import type { DropshipVendorCatalogCandidateFilter, ListDropshipVendorSelectionRulesInput } from "../../application/dropship-selection-dtos";
+import {
+  dropshipCatalogCategoriesAnswerSchema,
+  dropshipCatalogIdsAnswerSchema,
+  dropshipCatalogSelectionSummarySchema,
+} from "../../../../../shared/dropship/vendor-catalog-reads";
 
 const now = new Date("2026-04-30T12:00:00.000Z");
 
@@ -33,6 +39,8 @@ const candidate: DropshipVendorCatalogCandidate = {
   productLineIds: [30],
   productLineNames: ["Line"],
   category: "Supplies",
+  categoryId: 5,
+  categoryName: "Supplies",
   productIsActive: true,
   variantIsActive: true,
   variantUomType: "pack",
@@ -276,10 +284,10 @@ describe("DropshipSelectionAtpService", () => {
 
     expect(result.total).toBe(1);
     expect(result.rows.map((row) => row.productVariantId)).toEqual([20]);
-    expect(result.facets.categories).toEqual([
+    expect(result.facets?.categories).toEqual([
       { category: "Supplies", label: "Supplies", rowCount: 1 },
     ]);
-    expect(result.facets.productLines).toEqual([
+    expect(result.facets?.productLines).toEqual([
       { productLineIds: [30, 31], label: "Trading Card Supplies", rowCount: 1 },
     ]);
   });
@@ -315,6 +323,21 @@ describe("DropshipSelectionAtpService", () => {
     expect(atp.requestedVariantIds.at(-1)).toEqual([]);
   });
 
+  it("refuses a selection save key in the prefix B's release writes, before the repository (CHK10)", async () => {
+    const repository = new FakeDropshipSelectionAtpRepository();
+    const service = makeService(repository, new FakeAtpProvider());
+
+    await expect(service.replaceSelectionRules({
+      vendorId: 1, idempotencyKey: "legacy-picks-backfill:1", actor: { actorType: "vendor", actorId: "member-1" }, rules: [],
+    })).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_KEY_RESERVED", context: { retryable: false } });
+    expect(repository.lastReplace).toBeNull();
+    // A key that merely contains the words is the vendor's own.
+    await service.replaceSelectionRules({
+      vendorId: 1, idempotencyKey: "my-legacy-picks-key", actor: { actorType: "vendor", actorId: "member-1" }, rules: [],
+    });
+    expect(repository.lastReplace?.idempotencyKey).toBe("my-legacy-picks-key");
+  });
+
   it("requires a vendor profile before catalog access", async () => {
     const repository = new FakeDropshipSelectionAtpRepository();
     repository.vendor = null;
@@ -336,6 +359,15 @@ class FakeDropshipSelectionAtpRepository implements DropshipSelectionAtpReposito
   candidates: DropshipVendorCatalogCandidate[] = [];
   overrides: DropshipVendorVariantOverrideRecord[] = [];
   lastReplace: ReplaceDropshipVendorSelectionRulesRepositoryInput | null = null;
+  /** The filter of every candidate scan, in call order. */
+  candidateFilters: DropshipVendorCatalogCandidateFilter[] = [];
+  counts: DropshipVendorSelectionCountRecord = { selectionRevisionId: 7, selectedTotal: 0, storeLive: null };
+  countInputs: Array<{ vendorId: number; storeConnectionId: number | null; now: Date }> = [];
+
+  async readSelectionCounts(input: { vendorId: number; storeConnectionId: number | null; now: Date }) {
+    this.countInputs.push(input);
+    return this.counts;
+  }
 
   async findVendorByMemberId(): Promise<DropshipVendorProfile | null> {
     return this.vendor;
@@ -367,8 +399,9 @@ class FakeDropshipSelectionAtpRepository implements DropshipSelectionAtpReposito
   }
 
   async listVendorCatalogCandidates(
-    _input: PreviewDropshipVendorCatalogInput,
+    input: DropshipVendorCatalogCandidateFilter,
   ): Promise<DropshipVendorCatalogCandidate[]> {
+    this.candidateFilters.push(input);
     return this.candidates;
   }
 
@@ -441,3 +474,151 @@ function makeSelectionRuleRecord(
     ...input,
   };
 }
+
+/**
+ * Step 1 plan S2-5 §4.8: the catalog GET's selection filter, category id, facet
+ * switch, summary and id lists, the categories read and the selection summary.
+ * Sizes: 20 selected, 21 picked but turned off by the vendor's override, 22 not
+ * picked, 23 picked with no category, 24 not exposed by Card Shellz.
+ */
+describe("DropshipSelectionAtpService catalog reads (S2-5 §4.8)", () => {
+  function catalog() {
+    const repository = new FakeDropshipSelectionAtpRepository();
+    repository.catalogRules = [
+      { id: 1, scopeType: "catalog", action: "include" },
+      { id: 2, scopeType: "variant", action: "exclude", productVariantId: 24 },
+    ];
+    repository.selectionRules = [20, 21, 23, 24].map((productVariantId, index) => makeSelectionRuleRecord({
+      id: 10 + index, scopeType: "variant", action: "include", productVariantId,
+    }));
+    repository.candidates = [
+      { ...candidate, productVariantId: 20, categoryId: 5, categoryName: "Supplies" },
+      { ...candidate, productVariantId: 21, categoryId: 5, categoryName: "Supplies" },
+      { ...candidate, productVariantId: 22, categoryId: 6, categoryName: "Binders", category: "Binders" },
+      { ...candidate, productVariantId: 23, categoryId: null, categoryName: null, category: "Loose" },
+      { ...candidate, productVariantId: 24, categoryId: 6, categoryName: "Binders", category: "Binders" },
+    ];
+    repository.overrides = [{
+      id: 1, vendorId: 1, productVariantId: 21, enabledOverride: false, marketplaceQuantityCap: null,
+      notes: null, createdAt: now, updatedAt: now,
+    }];
+    const atp = new FakeAtpProvider();
+    return { repository, atp, service: makeService(repository, atp) };
+  }
+
+  it("filters by selection three ways; not_selected holds a picked size the override turned off (TESTS2)", async () => {
+    const { service } = catalog();
+    const ids = async (input: Record<string, unknown>) => (await service.previewCatalog({ vendorId: 1, ...input })).rows
+      .map((row) => row.productVariantId);
+
+    expect(await ids({})).toEqual([20, 21, 22, 23]);
+    expect(await ids({ selection: "all" })).toEqual([20, 21, 22, 23]);
+    expect(await ids({ selection: "selected" })).toEqual([20, 23]);
+    expect(await ids({ selection: "not_selected" })).toEqual([21, 22]);
+    // The stage 1 alias still works, and `selection` wins when both are sent.
+    expect(await ids({ selectedOnly: true })).toEqual([20, 23]);
+    expect(await ids({ selectedOnly: true, selection: "not_selected" })).toEqual([21, 22]);
+    await expect(service.previewCatalog({ vendorId: 1, selection: "everything" })).rejects.toThrow();
+  });
+
+  it("answers the filter's summary apart from the selection filter, and the paging total with it", async () => {
+    const { service } = catalog();
+    const page = await service.previewCatalog({ vendorId: 1, selection: "selected", limit: 1 });
+
+    expect(page.summary).toEqual({ matching: 4, matchingSelected: 2 });
+    expect(page.total).toBe(2);
+    expect(page.rows).toHaveLength(1);
+  });
+
+  it("passes the category id to the scan, and skips the facet scan when the page asks for no facets (TESTS9)", async () => {
+    const { repository, service } = catalog();
+
+    const withFacets = await service.previewCatalog({ vendorId: 1, categoryId: 5, search: "env" });
+    expect(repository.candidateFilters).toHaveLength(2);
+    expect(repository.candidateFilters[0]).toMatchObject({ vendorId: 1, categoryId: 5, search: "env" });
+    // The facets apply search only, as before.
+    expect(repository.candidateFilters[1]).toEqual({ vendorId: 1, search: "env" });
+    expect(withFacets.facets?.categories.map((facet) => facet.label)).toEqual(["Binders", "Loose", "Supplies"]);
+
+    repository.candidateFilters = [];
+    const without = await service.previewCatalog({ vendorId: 1, includeFacets: false });
+    expect(repository.candidateFilters).toHaveLength(1);
+    expect(without.facets).toBeNull();
+  });
+
+  it("lists the changeable ids of the filter: exposed and not turned off, ascending, without reading stock", async () => {
+    const { atp, service } = catalog();
+
+    const add = dropshipCatalogIdsAnswerSchema.parse(await service.listCatalogIds({ vendorId: 1, purpose: "add" }));
+    expect(add).toEqual({ selectedIds: [20, 23], notSelectedIds: [22], total: 3 });
+    const remove = await service.listCatalogIds({ vendorId: 1, purpose: "remove", selection: "selected" });
+    expect(remove).toEqual({ selectedIds: [20, 23], notSelectedIds: [], total: 2 });
+    expect(atp.requestedVariantIds).toEqual([]);
+    await expect(service.listCatalogIds({ vendorId: 1 })).rejects.toThrow();
+    await expect(service.listCatalogIds({ vendorId: 1, purpose: "toggle" })).rejects.toThrow();
+  });
+
+  it("refuses only the list the purpose needs above 10,000; the other list is null (TESTS22)", async () => {
+    const repository = new FakeDropshipSelectionAtpRepository();
+    repository.catalogRules = [{ id: 1, scopeType: "catalog", action: "include" }];
+    repository.selectionRules = [makeSelectionRuleRecord({ id: 2, scopeType: "catalog", action: "include" })];
+    repository.candidates = Array.from({ length: 10_001 }, (_, index) => ({ ...candidate, productVariantId: 1 + index }));
+    const service = makeService(repository, new FakeAtpProvider());
+
+    await expect(service.listCatalogIds({ vendorId: 1, purpose: "remove" })).rejects.toMatchObject({
+      code: "DROPSHIP_CATALOG_IDS_TOO_MANY",
+      context: { total: 10_001, needed: 10_001, limit: 10_000, retryable: false },
+    });
+    // Adding needs the not-selected list (empty); the selected list is over the cap, so null.
+    expect(await service.listCatalogIds({ vendorId: 1, purpose: "add" })).toEqual({
+      selectedIds: null, notSelectedIds: [], total: 10_001,
+    });
+
+    repository.selectionRules = [];
+    await expect(service.listCatalogIds({ vendorId: 1, purpose: "add" })).rejects.toMatchObject({
+      code: "DROPSHIP_CATALOG_IDS_TOO_MANY", context: { needed: 10_001 },
+    });
+    expect(await service.listCatalogIds({ vendorId: 1, purpose: "remove" })).toEqual({
+      selectedIds: [], notSelectedIds: null, total: 10_001,
+    });
+    // Exactly at the cap is allowed.
+    repository.candidates = repository.candidates.slice(0, 10_000);
+    expect((await service.listCatalogIds({ vendorId: 1, purpose: "add" })).notSelectedIds).toHaveLength(10_000);
+  });
+
+  it("counts every exposed size by category id, ignoring search and filters, with no-id sizes apart (D26)", async () => {
+    const { repository, service } = catalog();
+
+    const answer = dropshipCatalogCategoriesAnswerSchema.parse(await service.listCatalogCategories({ vendorId: 1 }));
+    expect(answer).toEqual({
+      categories: [
+        { categoryId: 6, name: "Binders", rowCount: 1, selectedCount: 0 },
+        { categoryId: 5, name: "Supplies", rowCount: 2, selectedCount: 1 },
+      ],
+      uncategorizedCount: 1,
+    });
+    expect(repository.candidateFilters).toEqual([{
+      vendorId: 1, search: undefined, category: undefined, categoryId: undefined, productLineId: undefined,
+      productLineIds: undefined, productId: undefined,
+    }]);
+    await expect(service.listCatalogCategories({ vendorId: 1, search: "env" })).rejects.toThrow();
+  });
+
+  it("answers the selection summary from one repository read, at the injected time", async () => {
+    const { repository, service } = catalog();
+    repository.counts = { selectionRevisionId: 41, selectedTotal: 12, storeLive: 5 };
+
+    const store = dropshipCatalogSelectionSummarySchema.parse(await service.readSelectionSummary({ vendorId: 1, storeConnectionId: 22 }));
+    expect(store).toEqual({
+      selectionRevisionId: 41, selectedTotal: 12, cap: 10_000, overCap: false,
+      store: { storeConnectionId: 22, live: 5, notLive: 7 },
+    });
+    expect(repository.countInputs).toEqual([{ vendorId: 1, storeConnectionId: 22, now }]);
+
+    repository.counts = { selectionRevisionId: null, selectedTotal: 10_001, storeLive: null };
+    expect(await service.readSelectionSummary({ vendorId: 1, storeConnectionId: null })).toEqual({
+      selectionRevisionId: null, selectedTotal: 10_001, cap: 10_000, overCap: true, store: null,
+    });
+    await expect(service.readSelectionSummary({ vendorId: 1 })).rejects.toThrow();
+  });
+});

@@ -15,6 +15,7 @@ import {
   type DropshipListingPushWorkerEligibility,
   type DropshipListingPushWorkerItemRecord,
   type DropshipListingPushWorkerJobRecord,
+  type DropshipListingPushPauseOutcome,
   type DropshipListingPushWorkerRepository,
 } from "../../application/dropship-listing-push-worker-service";
 import type { DropshipMarketplaceListingIntent, DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
@@ -542,6 +543,38 @@ describe("DropshipListingPushWorkerService", () => {
       expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed:after-automatic-retry",
         message: `1 of 1 listing could not be sent to your store (job 30). First reason: ${reason}` });
     });
+
+    // Rebase of PR A onto Fix PR 2a: a publish run's chunk job sends no email of its own (its run sends one when it
+    // finishes), and the sweep never re-queues it (stockLinkCandidateSql: run_id null), so neither of 2a's emails
+    // (the first failure's, the one after the automatic retries) is sent for it and the pending items are not read.
+    it.each([["its first failure", null], ["after an automatic re-queue", 1]] as const)(
+      "sends a publish run's chunk job no per-job email for a code the sweep re-queues: %s", async (_name, count) => {
+        if (count !== null) afterRequeues(count);
+        repository.job = { ...repository.job, runId: 4 };
+        marketplacePush.error = busy();
+        await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: `process-run-email-${count}` });
+        expect(repository.failInputs[0]).toMatchObject({ code: "DROPSHIP_STOCK_LINK_BUSY", retryable: true });
+        expect(notificationSender.sent).toEqual([]);
+        expect(outlook.calls).toEqual([]);
+      });
+
+    // Rebase of PR A onto Fix PR 2a: the stock link's bounded in-process retries run inside the one item being sent
+    // (gate and provider, per pushListing call). A stop that lands meanwhile cancels the chunk's queued items; the next
+    // one is cancelled at its start (markItemProcessing reads the run), so only the item already being sent finishes.
+    it("lets a stop that lands during one chunk item's in-process stock link retries cancel the next item at its start", async () => {
+      const second = { ...makeQueuedItem(), itemId: 2, listingId: 200, productVariantId: 102,
+        listing: { ...makeQueuedItem().listing!, listingId: 200, productVariantId: 102 } };
+      repository.items = [makeQueuedItem(), second];
+      repository.job = { ...repository.job, runId: 4 };
+      marketplacePush.beforeAnswer = async () => { repository.runStopRequested = true; };
+      marketplacePush.errors = [busy()];
+      await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-run-stop" });
+      expect(marketplacePush.requests.map((request) => request.jobItemId)).toEqual([1]);
+      expect(repository.items.map((item) => [item.itemId, item.status])).toEqual([[1, "failed"], [2, "cancelled"]]);
+      expect(repository.markInputs.map((input) => input.itemId)).toEqual([1, 2]);
+      expect(repository.finalizeCalls).toBe(1);
+      expect(notificationSender.sent).toEqual([]);
+    });
   });
 
   it.each(["DROPSHIP_STOCK_LINK_BUSY", "DROPSHIP_STOCK_UPDATES_PAUSED"] as const)(
@@ -667,12 +700,186 @@ describe("DropshipListingPushWorkerService", () => {
   });
 });
 
+describe("DropshipListingPushWorkerService pauses, breakers and runs (step 1 plan S2-5, §4.5)", () => {
+  let repository: FakeListingPushWorkerRepository;
+  let marketplacePush: FakeMarketplacePushProvider;
+  let notificationSender: FakeNotificationSender;
+  let logs: DropshipLogEvent[];
+  let service: DropshipListingPushWorkerService;
+  const httpError = (status: number, method: string) => new DropshipError("DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
+    `eBay listing push failed with HTTP ${status}.`, { retryable: status === 429 || status >= 500, status, method, endpoint: `${method} /sell/x` });
+
+  beforeEach(() => {
+    repository = new FakeListingPushWorkerRepository();
+    repository.items = [makeQueuedItem(), { ...makeQueuedItem(), itemId: 2, listingId: 200, productVariantId: 102,
+      listing: { ...makeQueuedItem().listing!, listingId: 200, productVariantId: 102 } }];
+    marketplacePush = new FakeMarketplacePushProvider();
+    notificationSender = new FakeNotificationSender();
+    logs = [];
+    service = new DropshipListingPushWorkerService({
+      repository, marketplacePush, notificationSender, clock: { now: () => now },
+      logger: { info: (event) => logs.push(event), warn: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+  });
+
+  it("pauses on a 429, even on a write: the item and job go back, the job is not finalized, nothing more is sent", async () => {
+    marketplacePush.errors = [httpError(429, "PUT")];
+    const result = await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-101" });
+    expect(repository.pauseInputs).toHaveLength(1);
+    expect(repository.pauseInputs[0]).toMatchObject({ code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", reason: "rate_limited", item: { itemId: 1 } });
+    expect(repository.finalizeCalls).toBe(0);
+    expect(marketplacePush.requests).toHaveLength(1);
+    expect(repository.failInputs).toEqual([]);
+    expect(result.job.status).toBe("queued");
+    expect(notificationSender.sent).toEqual([]);
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_PAUSED")?.context).toMatchObject({
+      jobId: 30, itemId: 1, reason: "rate_limited", jobConsecutivePauses: 1, nextAttemptAt: new Date(now.getTime() + 60_000).toISOString() });
+  });
+
+  it("a pausable answer for an item whose run was stopped cancels it and finalizes the job, never failing it (review MC4)", async () => {
+    repository.runStopped = true;
+    marketplacePush.errors = [httpError(429, "PUT")];
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-mc4" });
+    expect(repository.pauseInputs).toHaveLength(1);
+    expect(repository.items[0].status).toBe("cancelled");
+    expect(repository.failInputs).toEqual([]);
+    // The job carries on to its finalize instead of waiting for a backoff (the second item is the fake's queued one).
+    expect(repository.finalizeCalls).toBe(1);
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_CANCELLED_AFTER_STOP")?.context).toMatchObject({ jobId: 30, itemId: 1 });
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_PAUSED")).toBeUndefined();
+  });
+
+  it("pauses on a 5xx from a read, and fails a 5xx from a write retryable as before", async () => {
+    marketplacePush.errors = [httpError(503, "GET")];
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-102" });
+    expect(repository.pauseInputs).toHaveLength(1);
+    expect(repository.pauseInputs[0].reason).toBe("read_unavailable");
+
+    const write = new FakeListingPushWorkerRepository();
+    marketplacePush.errors = [httpError(503, "POST")];
+    const writer = new DropshipListingPushWorkerService({ repository: write, marketplacePush, notificationSender, clock: { now: () => now },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined } });
+    const result = await writer.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-103" });
+    expect(write.pauseInputs).toEqual([]);
+    expect(write.failInputs[0]).toMatchObject({ code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", retryable: true });
+    expect(result.job.status).toBe("failed");
+  });
+
+  it("starts each item with the job's heartbeat (markItemProcessing) before anything is sent", async () => {
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-104" });
+    expect(repository.markInputs).toEqual([{ jobId: 30, itemId: 1, workerId: "worker-1", now }, { jobId: 30, itemId: 2, workerId: "worker-1", now }]);
+    expect(marketplacePush.requests.map((request) => request.jobItemId)).toEqual([1, 2]);
+  });
+
+  it("fails an item retryable once it has paused five times, and goes on to the next", async () => {
+    repository.items[0] = { ...repository.items[0], result: { ...repository.items[0].result, transientPauses: 5 } };
+    marketplacePush.errors = [httpError(429, "GET")];
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-105" });
+    expect(repository.pauseInputs).toEqual([]);
+    expect(repository.failInputs[0]).toMatchObject({ item: { itemId: 1 }, retryable: true });
+    expect(repository.items.map((item) => item.status)).toEqual(["failed", "completed"]);
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_PAUSE_LIMIT")).toBeDefined();
+  });
+
+  it("trips the job breaker on a pausable error after six pauses in a row, then finalizes", async () => {
+    repository.job = { ...repository.job, consecutivePauseCount: 6, runId: 4 };
+    marketplacePush.errors = [httpError(429, "PUT")];
+    const result = await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-106" });
+    expect(repository.tripInputs).toHaveLength(1);
+    expect(repository.tripInputs[0]).toMatchObject({ code: "DROPSHIP_LISTING_PUSH_PROVIDER_UNAVAILABLE",
+      message: "eBay wasn't answering, so this size wasn't sent. Publish again later.", job: { runId: 4 } });
+    expect(marketplacePush.requests).toHaveLength(1);
+    expect(repository.finalizeCalls).toBe(1);
+    expect(result.items.map((item) => item.status)).toEqual(["failed", "failed"]);
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_JOB_BREAKER_TRIPPED")?.context).toMatchObject({ failedItems: 2, runStopped: true });
+    // A run's chunk sends no email of its own.
+    expect(notificationSender.sent).toEqual([]);
+  });
+
+  it("a completed item ends the job's run of pauses: the next pausable error pauses instead of tripping", async () => {
+    repository.job = { ...repository.job, consecutivePauseCount: 6 };
+    marketplacePush.errors = [null, httpError(429, "PUT")];
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-107" });
+    expect(repository.tripInputs).toEqual([]);
+    expect(repository.pauseInputs).toHaveLength(1);
+    expect(repository.pauseInputs[0].item.itemId).toBe(2);
+  });
+
+  it("an item eBay refused with a definite answer (a 400) ends the job's run of pauses too, in the same write (review round 2 MC4)", async () => {
+    repository.job = { ...repository.job, consecutivePauseCount: 6 };
+    marketplacePush.errors = [httpError(400, "PUT"), httpError(429, "PUT")];
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-107b" });
+    expect(repository.failInputs).toHaveLength(1);
+    expect(repository.failInputs[0]).toMatchObject({ item: { itemId: 1 }, retryable: false, endsPauseRun: true });
+    expect(repository.tripInputs).toEqual([]);
+    expect(repository.pauseInputs).toHaveLength(1);
+    expect(repository.pauseInputs[0].item.itemId).toBe(2);
+  });
+
+  it("a write eBay answered 5xx, or a failure that never reached eBay, does not end the run of pauses", async () => {
+    repository.job = { ...repository.job, consecutivePauseCount: 6 };
+    marketplacePush.errors = [httpError(503, "POST"), httpError(429, "PUT")];
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-107c" });
+    expect(repository.failInputs[0]).toMatchObject({ item: { itemId: 1 }, retryable: true, endsPauseRun: false });
+    expect(repository.tripInputs).toHaveLength(1);
+  });
+
+  it("blocks a size no longer selected at push time, for good, as not selected", async () => {
+    const refreshing = new DropshipListingPushWorkerService({
+      repository, marketplacePush, notificationSender, clock: { now: () => now },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      refreshListingIntent: async (input) => {
+        if (input.productVariantId === 101) {
+          throw new DropshipError("DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED", "Current listing rules do not authorize this queued publication.",
+            { productVariantId: 101, blockers: ["selection:missing_vendor_include_rule"], retryable: true });
+        }
+        return repository.items[1].result!.listingIntent as never;
+      },
+    });
+    await refreshing.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-108" });
+    expect(repository.blockInputs).toHaveLength(1);
+    expect(repository.blockInputs[0]).toMatchObject({ code: "DROPSHIP_LISTING_NOT_SELECTED",
+      message: "This size is no longer chosen to sell, so it wasn't sent.", item: { itemId: 1 } });
+    expect(repository.failInputs).toEqual([]);
+    expect(marketplacePush.requests.map((request) => request.jobItemId)).toEqual([2]);
+  });
+
+  it("keeps other blocked refreshes on today's retryable failure path", async () => {
+    const refreshing = new DropshipListingPushWorkerService({
+      repository, marketplacePush, notificationSender, clock: { now: () => now },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      refreshListingIntent: async () => {
+        throw new DropshipError("DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED", "Current listing rules do not authorize this queued publication.",
+          { blockers: ["content:missing_title"], retryable: true });
+      },
+    });
+    await refreshing.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-109" });
+    expect(repository.blockInputs).toEqual([]);
+    expect(repository.failInputs.map((input) => [input.code, input.retryable])).toEqual([
+      ["DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED", true], ["DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED", true]]);
+  });
+
+  it("a run's chunk job sends no per-job email; any other job still does", async () => {
+    repository.job = { ...repository.job, runId: 4 };
+    marketplacePush.error = new DropshipError("DROPSHIP_LISTING_PUSH_PROVIDER_NOT_CONFIGURED", "Provider missing.", { retryable: false });
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-110" });
+    expect(repository.failInputs).toHaveLength(2);
+    expect(notificationSender.sent).toEqual([]);
+  });
+});
+
 class FakeMarketplacePushProvider implements DropshipMarketplaceListingPushProvider {
   requests: Parameters<DropshipMarketplaceListingPushProvider["pushListing"]>[0][] = [];
   error: Error | null = null;
+  errors: Array<Error | null> = [];
+  /** Runs while the push is in flight, before it answers (where the real provider waits out its bounded retries). */
+  beforeAnswer: (() => Promise<void>) | null = null;
 
   async pushListing(input: Parameters<DropshipMarketplaceListingPushProvider["pushListing"]>[0]) {
     this.requests.push(input);
+    if (this.beforeAnswer) await this.beforeAnswer();
+    const next = this.errors.shift();
+    if (next) throw next;
     if (this.error) {
       throw this.error;
     }
@@ -764,56 +971,108 @@ class FakeListingPushWorkerRepository implements DropshipListingPushWorkerReposi
     };
   }
 
-  async markItemProcessing(): Promise<boolean> {
-    if (this.items[0].status !== "queued") {
+  markInputs: Array<{ jobId: number; itemId: number; workerId: string; now: Date }> = [];
+
+  /** The vendor stopped this job's publish run (cancel_requested_at): as the real repository, a run item starting after it is cancelled. */
+  runStopRequested = false;
+
+  async markItemProcessing(input: { jobId: number; itemId: number; workerId: string; now: Date }): Promise<boolean> {
+    this.markInputs.push(input);
+    const index = this.items.findIndex((item) => item.itemId === input.itemId);
+    if (this.items[index].status !== "queued") {
       return false;
     }
-    this.items[0] = { ...this.items[0], status: "processing" };
+    if (this.job.runId && this.runStopRequested) {
+      this.items[index] = { ...this.items[index], status: "cancelled" };
+      return false;
+    }
+    this.items[index] = { ...this.items[index], status: "processing" };
     return true;
   }
 
   async completeItem(input: Parameters<DropshipListingPushWorkerRepository["completeItem"]>[0]): Promise<DropshipListingPushWorkerItemRecord> {
-    this.items[0] = {
-      ...this.items[0],
+    const index = this.items.findIndex((item) => item.itemId === input.item.itemId);
+    this.job = { ...this.job, consecutivePauseCount: 0 };
+    this.items[index] = {
+      ...this.items[index],
       status: "completed",
       externalListingId: input.pushResult.externalListingId,
-      listing: this.items[0].listing ? {
-        ...this.items[0].listing,
+      listing: this.items[index].listing ? {
+        ...this.items[index].listing!,
         status: input.intent.listingMode === "live" ? "active" : "paused",
         externalListingId: input.pushResult.externalListingId,
         externalOfferId: input.pushResult.externalOfferId,
       } : null,
     };
-    return this.items[0];
+    return this.items[index];
   }
 
   failInputs: Array<Parameters<DropshipListingPushWorkerRepository["failItem"]>[0]> = [];
 
   async failItem(input: Parameters<DropshipListingPushWorkerRepository["failItem"]>[0]): Promise<DropshipListingPushWorkerItemRecord> {
     this.failInputs.push(input);
-    // As the real repository (markItemTerminalFailure): the outcome goes to result.push, context included.
-    this.items[0] = {
-      ...this.items[0],
+    // As the real repository (markItemTerminalFailure): the outcome goes to result.push, context included, and a
+    // definite eBay answer ends the job's run of pauses in the same write (review round 2 MC4).
+    if (input.endsPauseRun) this.job = { ...this.job, consecutivePauseCount: 0 };
+    const index = this.items.findIndex((item) => item.itemId === input.item.itemId);
+    this.items[index] = {
+      ...this.items[index],
       status: "failed",
       errorCode: input.code,
       errorMessage: input.message,
-      result: { ...this.items[0].result, push: { status: "failed", errorCode: input.code, errorMessage: input.message,
+      result: { ...this.items[index].result, push: { status: "failed", errorCode: input.code, errorMessage: input.message,
         retryable: input.retryable, ...(input.context ? { context: input.context } : {}) } },
     };
-    return this.items[0];
+    return this.items[index];
   }
 
   async blockItem(input: Parameters<DropshipListingPushWorkerRepository["blockItem"]>[0]): Promise<DropshipListingPushWorkerItemRecord> {
-    this.items[0] = {
-      ...this.items[0],
+    this.blockInputs.push(input);
+    const index = this.items.findIndex((item) => item.itemId === input.item.itemId);
+    this.items[index] = {
+      ...this.items[index],
       status: "blocked",
       errorCode: input.code,
       errorMessage: input.message,
     };
-    return this.items[0];
+    return this.items[index];
+  }
+
+  pauseInputs: Array<Parameters<DropshipListingPushWorkerRepository["pauseItem"]>[0]> = [];
+  tripInputs: Array<Parameters<DropshipListingPushWorkerRepository["tripJobBreaker"]>[0]> = [];
+  finalizeCalls = 0;
+  blockInputs: Array<Parameters<DropshipListingPushWorkerRepository["blockItem"]>[0]> = [];
+
+  /** The item's run was stopped while it was sent: the repository cancels it instead of queueing it again (review MC4). */
+  runStopped = false;
+
+  async pauseItem(input: Parameters<DropshipListingPushWorkerRepository["pauseItem"]>[0]): Promise<DropshipListingPushPauseOutcome> {
+    this.pauseInputs.push(input);
+    const index = this.items.findIndex((item) => item.itemId === input.item.itemId);
+    if (this.runStopped) {
+      this.items[index] = { ...this.items[index], status: "cancelled" };
+      return { outcome: "stopped" };
+    }
+    const pauses = Number((this.items[index].result as { transientPauses?: number } | null)?.transientPauses ?? 0) + 1;
+    this.items[index] = { ...this.items[index], status: "queued", result: { ...this.items[index].result, transientPauses: pauses } };
+    const consecutivePauseCount = (this.job.consecutivePauseCount ?? 0) + 1;
+    this.job = { ...this.job, status: "queued", consecutivePauseCount };
+    return { outcome: "paused", job: this.job, consecutivePauseCount, nextAttemptAt: new Date(now.getTime() + 60_000) };
+  }
+
+  async tripJobBreaker(input: Parameters<DropshipListingPushWorkerRepository["tripJobBreaker"]>[0]) {
+    this.tripInputs.push(input);
+    const failedItemIds: number[] = [];
+    this.items = this.items.map((item) => {
+      if (item.status !== "queued" && item.status !== "processing") return item;
+      failedItemIds.push(item.itemId);
+      return { ...item, status: "failed", errorCode: input.code, errorMessage: input.message };
+    });
+    return { failedItemIds, runStopped: Boolean(input.job.runId) };
   }
 
   async finalizeJob() {
+    this.finalizeCalls += 1;
     const hasFailure = this.items.some((item) => item.status === "failed" || item.status === "blocked");
     this.job = {
       ...this.job,

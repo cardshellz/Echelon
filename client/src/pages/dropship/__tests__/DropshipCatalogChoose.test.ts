@@ -171,6 +171,13 @@ describe("ChooseChangesBar", () => {
     expect(saving).toMatch(/<button[^>]* disabled=""[^>]*>Undo changes<\/button>/);
   });
 
+  it("(step 1 plan S2-5 §4.9 item 2) offers Reload beside the retired refusal, and only there", () => {
+    const retired = bar({ outcome: { kind: "error", message: CHOOSE_WORDS.retired, reload: true } });
+    expect(retired).toContain('data-testid="catalog-choose-reload"');
+    expect(retired).toMatch(/<button[^>]*data-testid="catalog-choose-reload"[^>]*>Reload<\/button>/);
+    expect(bar({ outcome: { kind: "error", message: CHOOSE_WORDS.rejected } })).not.toContain("catalog-choose-reload");
+  });
+
   it("after a save, says so in the status region; a refusal is an alert; with nothing to say it stays empty", () => {
     const saved = bar({ hasChanges: false, outcome: { kind: "saved", add: 3, remove: 9, notTaken: 0 } });
     expect(saved).toContain('data-testid="catalog-choose-status" class="font-medium text-emerald-800">Saved. 3 added, 9 removed.</p>');

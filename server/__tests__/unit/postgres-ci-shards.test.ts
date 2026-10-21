@@ -196,6 +196,13 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/inventory-planning/__tests__/integration/runtime-publication-row-isolation.integration.test.ts",
       // Dropship eBay push end to end with its automatic stock link (real admission, planner and reader; fake eBay HTTP).
       "server/modules/dropship/__tests__/integration/dropship-ebay-push-stock-link.integration.test.ts",
+      // Publish runs (step 1 plan S2-5, PR A): the new runs suite, and the worker repository suite that ran nowhere (TESTS5).
+      "server/modules/dropship/__tests__/integration/dropship-listing-push-runs.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-listing-push-worker.repository.integration.test.ts",
+      // Catalog reads, release readiness and orders during re-sends (step 1 plan S2-5, PR A2; TESTS2, §4.9, §4.7).
+      "server/modules/dropship/__tests__/integration/dropship-vendor-catalog-read.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-release-readiness.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-order-listing-acceptability.integration.test.ts",
     ];
     addedSuites.push(
       "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",

@@ -6,7 +6,7 @@ import {
   type DropshipWorkerSweepRunner,
 } from "../application/dropship-worker-ops-service";
 import { runDropshipEbayOrderIntakeSweep } from "./dropship-ebay-order-intake-runner";
-import { runDropshipListingPushSweep } from "./dropship-listing-push-job-runner";
+import { runAdminListingPushSweep } from "./dropship-listing-push-job-runner";
 import { runDropshipOrderProcessingSweep } from "./dropship-order-processing-runner";
 import { PgDropshipWorkerOpsRepository } from "./dropship-worker-ops.repository";
 
@@ -19,10 +19,11 @@ export function createDropshipWorkerOpsServiceFromEnv(): DropshipWorkerOpsServic
   });
 }
 
-function createDropshipWorkerSweepRunners(): Record<DropshipWorkerSweepName, DropshipWorkerSweepRunner> {
+export function createDropshipWorkerSweepRunners(): Record<DropshipWorkerSweepName, DropshipWorkerSweepRunner> {
   return {
     listing_push: {
-      run: ({ workerId, batchSize }) => runDropshipListingPushSweep({ workerId, batchSize }),
+      // The publish run steps take the scheduled sweep's lock (review MC5, CT2); jobs are processed as before.
+      run: ({ workerId, batchSize }) => runAdminListingPushSweep({ workerId, batchSize }),
     },
     order_processing: {
       run: ({ workerId, batchSize }) => runDropshipOrderProcessingSweep({ workerId, batchSize }),

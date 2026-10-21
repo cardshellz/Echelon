@@ -13,6 +13,7 @@ import { PgDropshipListingPreviewRepository } from "../../infrastructure/dropshi
 import { PgDropshipListingPushWorkerRepository } from "../../infrastructure/dropship-listing-push-worker.repository";
 import { PgDropshipListingPushOpsRepository } from "../../infrastructure/dropship-listing-push-ops.repository";
 import { PgDropshipListingLiveStatusRepairRepository } from "../../infrastructure/dropship-listing-live-status-repair.repository";
+import { listingPushRunsMigrationSql } from "../fixtures/listing-push-runs.fixture";
 import {
   EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE,
   EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_MESSAGE,
@@ -44,7 +45,9 @@ describeDatabase.sequential("live listing status, repair and account check reque
   let pool: pg.Pool | undefined;
   let created = false;
   let scopedPool: Pool;
-  const qualify = (sql: string) => sql.replaceAll("dropship.", `"${schema}".`);
+  // PR A's publish runs migration runs here too (as in the worker repository suite), so the worker and the ops
+  // repository read the run tables and job columns production has.
+  const qualify = (sql: string) => sql.replaceAll("dropship.", `"${schema}".`).replaceAll("catalog.", `"${schema}".`);
 
   beforeAll(async () => {
     if (!testUrl || !disposable || [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].includes(testUrl)) {
@@ -93,7 +96,13 @@ describeDatabase.sequential("live listing status, repair and account check reque
       CREATE TABLE dropship.dropship_listing_sync_events (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         listing_id integer NOT NULL REFERENCES dropship.dropship_vendor_listings(id), event_type varchar(80) NOT NULL,
         source varchar(40) NOT NULL, payload jsonb, created_at timestamptz NOT NULL DEFAULT now());
+      -- What PR A's publish runs migration references (0657's store owner index, 0091's rule set revisions, the variants).
+      CREATE UNIQUE INDEX live_status_store_owner_idx ON dropship.dropship_store_connections (id, vendor_id);
+      CREATE TABLE dropship.dropship_vendor_selection_rule_set_revisions (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        vendor_id integer NOT NULL);
+      CREATE TABLE catalog.product_variants (id integer PRIMARY KEY);
     `));
+    await pool.query(qualify(listingPushRunsMigrationSql()));
     scopedPool = {
       query: (sql: string, values?: unknown[]) => pool!.query(qualify(sql), values),
       connect: async () => {
@@ -565,6 +574,47 @@ describeDatabase.sequential("live listing status, repair and account check reque
       expect((await item(gate.itemId)).status).toBe("queued");
       expect((await audits("listing_push_job_retry_requested"))[0]!.payload.items)
         .toEqual([{ itemId: gate.itemId, errorCode: "PUBLICATION_PROVIDER_ACCOUNT_UNVERIFIED", basis: "verified_after_failure", attempt: 1 }]);
+    });
+
+    // Rebase of PR A onto PR 1b, merge review ADV-RB-1 and ADV-2: a publish run reports its chunks' outcomes once, when it
+    // finishes, and its card says "reconnect, then publish again"; a stopped run's items are cancelled at their start.
+    it("leaves a publish run's chunk job to its run, whether the run is processing, finished or stopped", async () => {
+      let runs = 0;
+      const seedRun = async (status: "processing" | "partial" | "cancelled") => {
+        runs += 1;
+        const finished = status === "processing" ? null : NOW;
+        return Number((await pool!.query<{ id: string }>(qualify(`INSERT INTO dropship.dropship_listing_push_runs
+          (vendor_id, store_connection_id, scope, status, stop_reason, idempotency_key, request_hash, target_count, chunk_size,
+           chunk_count, next_chunk_index, actor_type, actor_id, cancel_requested_at, created_at, updated_at, completed_at)
+          VALUES (10, $1, 'all', $2, $3, $4, $5, 1, 500, 1, 1, 'vendor', 'member-10', $6, $7, $7, $8) RETURNING id`), [
+          VERIFIED_STORE, status, status === "cancelled" ? "vendor_stop" : null, `run-${runs}`, "a".repeat(64),
+          status === "cancelled" ? QUEUED_AT : null, QUEUED_AT, finished,
+        ])).rows[0]!.id);
+      };
+      const runJobs: Array<{ jobId: number; itemId: number }> = [];
+      for (const [index, status] of (["processing", "partial", "cancelled"] as const).entries()) {
+        const runId = await seedRun(status);
+        // The same facts the requeued job of no run below has: failed after the store was verified, live listing.
+        const failure = await seedAccountFailure({ variantId: 361 + index, listingStatus: "active", failedAt: new Date("2026-10-19T12:00:00Z") });
+        await pool!.query(qualify(`UPDATE dropship.dropship_listing_push_jobs SET run_id = $2, run_chunk_index = 0 WHERE id = $1`),
+          [failure.jobId, runId]);
+        runJobs.push(failure);
+      }
+      const plain = await seedAccountFailure({ variantId: 364, listingStatus: "active", failedAt: new Date("2026-10-19T12:00:00Z") });
+      const ops = new PgDropshipListingPushOpsRepository(scopedPool);
+
+      const result = await ops.requeueAccountVerificationFailures({ now: NOW, workerId: WORKER, limit: 50 });
+
+      expect(result.failed).toEqual([]);
+      expect(result.requeued.map((row) => [row.jobId, row.itemIds])).toEqual([[plain.jobId, [plain.itemId]]]);
+      for (const untouched of runJobs) {
+        expect(await item(untouched.itemId)).toMatchObject({ status: "failed", error_code: EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE });
+        expect((await item(untouched.itemId)).result.schemeRecovery).toBeUndefined();
+        expect((await job(untouched.jobId)).status).toBe("failed");
+      }
+      // The trail records only the re-send that happens.
+      expect((await audits("listing_push_job_retry_requested")).map((audit) => Number(audit.entity_id))).toEqual([plain.jobId]);
+      expect(await audits("listing_push_recovery_review_required")).toEqual([]);
     });
 
     it("leaves refusals the worker would only block again: vendor not active or not entitled, store not connected, not ready or without a refresh token, or a newer item for the same store and size", async () => {

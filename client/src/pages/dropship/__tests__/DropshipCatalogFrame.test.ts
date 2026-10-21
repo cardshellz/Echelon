@@ -164,9 +164,10 @@ describe("catalog page steps", () => {
       "EbayStoreCategoryAssignmentPanel", "DropshipPricingRulesPanel", "DropshipContentTemplatesPanel", "OlderListingSettings"]) {
       expect(source).not.toContain(panel);
     }
-    expect(publish).toContain("<ListingPreviewPanel");
-    expect(chooseBlock).not.toContain("<ListingPreviewPanel");
-    expect(setup).not.toContain("<ListingPreviewPanel");
+    // Step 1 plan S2-5 PR A: step 3's body is PublishStep (publish runs).
+    expect(publish).toContain("<PublishStep");
+    expect(chooseBlock).not.toContain("<PublishStep");
+    expect(setup).not.toContain("<PublishStep");
   });
 
   it("leaves the Listing settings draft out of the question on the ways back onto that step, and holds the store still while a save is in flight", () => {

@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  DROPSHIP_CATALOG_IDS_PURPOSES,
+  DROPSHIP_CATALOG_SELECTION_FILTERS,
+} from "../../../../shared/dropship/vendor-catalog-reads";
 import type {
   DropshipVendorSelectionAction,
   DropshipVendorSelectionScope,
@@ -83,22 +87,66 @@ export const listDropshipVendorSelectionRulesInputSchema = z.object({
   includeInactive: z.boolean().default(false),
 }).strict();
 
-export const previewDropshipVendorCatalogInputSchema = z.object({
+/**
+ * The filters every catalog GET applies before the selection is decided:
+ * search, the category name (kept one release), the category id (step 1 plan
+ * S2-5 §4.8), product lines and product.
+ */
+const catalogFilterFields = {
   vendorId: positiveIdSchema,
   search: z.string().trim().min(1).max(200).optional(),
   category: z.string().trim().min(1).max(200).optional(),
+  categoryId: positiveIdSchema.optional(),
   productLineId: positiveIdSchema.optional(),
   productLineIds: z.array(positiveIdSchema).max(50).optional(),
   productId: positiveIdSchema.optional(),
+  /** Which rows by selection; absent means `selectedOnly`'s answer (§4.8). */
+  selection: z.enum(DROPSHIP_CATALOG_SELECTION_FILTERS).optional(),
+  /** The one-release alias of `selection: "selected"`, for a page of stage 1. `selection` wins when both are sent. */
   selectedOnly: z.boolean().default(false),
+};
+
+export const previewDropshipVendorCatalogInputSchema = z.object({
+  ...catalogFilterFields,
+  /** The facet scan is a second full scan; the new page sends false and reads the categories GET instead (TESTS9). */
+  includeFacets: z.boolean().default(true),
   page: z.number().int().min(1).default(1),
   limit: z.number().int().min(1).max(200).default(50),
+}).strict();
+
+/** `GET /api/dropship/catalog?idsOnly=true`: the same filters, no paging, and what the ids are for. */
+export const listDropshipVendorCatalogIdsInputSchema = z.object({
+  ...catalogFilterFields,
+  purpose: z.enum(DROPSHIP_CATALOG_IDS_PURPOSES),
+}).strict();
+
+/** `GET /api/dropship/catalog/categories`: the whole exposed catalog, no filters (D26). */
+export const listDropshipVendorCatalogCategoriesInputSchema = z.object({
+  vendorId: positiveIdSchema,
+}).strict();
+
+/** `GET /api/dropship/catalog/selection`: the vendor's selection count, split for one store when named. */
+export const readDropshipVendorSelectionSummaryInputSchema = z.object({
+  vendorId: positiveIdSchema,
+  storeConnectionId: positiveIdSchema.nullable(),
 }).strict();
 
 export type ReplaceDropshipVendorSelectionRule = z.infer<typeof replaceDropshipVendorSelectionRuleSchema>;
 export type ReplaceDropshipVendorSelectionRulesInput = z.infer<typeof replaceDropshipVendorSelectionRulesInputSchema>;
 export type ListDropshipVendorSelectionRulesInput = z.infer<typeof listDropshipVendorSelectionRulesInputSchema>;
 export type PreviewDropshipVendorCatalogInput = z.infer<typeof previewDropshipVendorCatalogInputSchema>;
+export type ListDropshipVendorCatalogIdsInput = z.infer<typeof listDropshipVendorCatalogIdsInputSchema>;
+export type ReadDropshipVendorSelectionSummaryInput = z.infer<typeof readDropshipVendorSelectionSummaryInputSchema>;
+/** The filters a candidate scan applies in SQL (every catalog GET's filter fields apart from the selection). */
+export type DropshipVendorCatalogCandidateFilter = Pick<
+  PreviewDropshipVendorCatalogInput,
+  "vendorId" | "search" | "category" | "categoryId" | "productLineId" | "productLineIds" | "productId"
+>;
+
+/** The selection filter a catalog GET applies: `selection` when sent, else `selectedOnly`'s alias. */
+export function resolveCatalogSelectionFilter(input: { selection?: z.infer<typeof catalogFilterFields.selection>; selectedOnly: boolean }) {
+  return input.selection ?? (input.selectedOnly ? "selected" : "all");
+}
 
 function vendorSelectionRuleDedupeKey(rule: {
   scopeType: DropshipVendorSelectionScope;

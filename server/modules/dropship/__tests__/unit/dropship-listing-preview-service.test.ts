@@ -70,11 +70,7 @@ import type {
 } from "../../domain/vendor-selection";
 import { ConfigDrivenDropshipMarketplaceListingProvider } from "../../infrastructure/dropship-config-driven-marketplace-listing.provider";
 import { toDropshipVendorListingPreview } from "../../application/dropship-listing-dtos";
-import {
-  buildListingQueueRequest,
-  type DropshipCatalogRow as ClientCatalogRow,
-  type DropshipListingPreviewResult as ClientListingPreviewResult,
-} from "../../../../../client/src/lib/dropship-ops-surface";
+import type { DropshipListingPreviewResult as ClientListingPreviewResult } from "../../../../../client/src/lib/dropship-ops-surface";
 import { registerDropshipListingRoutes } from "../../interfaces/http/dropship-listing.routes";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
@@ -249,6 +245,17 @@ describe("DropshipListingPreviewService", () => {
       priceSettingRevisionId: 7,
     });
     expect(repository.lastCreatedInput?.preview.rows[0].listingIntent?.description).toBe(content.descriptionHtml);
+    // Only the push sweep names a publish run's chunk (step 1 plan S2-5, §4.3): every other caller's job has none.
+    expect(repository.lastCreatedInput).not.toHaveProperty("run");
+  });
+
+  it("passes a publish run's chunk through to the job it queues (the push sweep's internal input)", async () => {
+    await service.createListingPushJob({
+      vendorId: 10, storeConnectionId: 22, productVariantIds: [101], reviewMode: "current_preview",
+      idempotencyKey: "dropship-run:10:4:0", requestedBy: { actorType: "vendor", actorId: "member-1" },
+      run: { runId: 4, chunkIndex: 0 },
+    });
+    expect(repository.lastCreatedInput).toMatchObject({ idempotencyKey: "dropship-run:10:4:0", run: { runId: 4, chunkIndex: 0 } });
   });
 
   it("replays a one-step push by its key even when stock moved in between", async () => {
@@ -313,10 +320,11 @@ describe("DropshipListingPreviewService", () => {
       return content;
     }
 
-    it("queues the vendor page's one-click request", async () => {
+    // Step 1 plan S2-5 PR A: the page now publishes through runs, so its builder is gone. A tab of the page before A
+    // still sends this exact one-step body (buildListingQueueRequest's answer at stage 1), and the route still serves it.
+    it("queues the one-click request a page of stage 1 sends", async () => {
       const content = withEvidenceOnEveryKind();
-      const selected = { productVariantId: 101, selectionDecision: { selected: true } } as unknown as ClientCatalogRow;
-      const body = buildListingQueueRequest({ storeConnectionId: 22, rows: [selected], idempotencyKey: "http-one-step" });
+      const body = { storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "http-one-step", reviewMode: "current_preview" };
 
       const response = await post("/api/dropship/listing-push-jobs", body);
 
@@ -349,6 +357,15 @@ describe("DropshipListingPreviewService", () => {
 
       expect(response.status).toBe(201);
       expect((await response.json()).job.status).toBe("queued");
+    });
+
+    it("answers a vendor key in the publish runs' reserved prefix with a 400, before any job is written (review CT8)", async () => {
+      const response = await post("/api/dropship/listing-push-jobs", {
+        storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "dropship-run:10:4:0", reviewMode: "current_preview",
+      });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_KEY_RESERVED" });
+      expect(repository.lastCreatedInput).toBeNull();
     });
 
     it("answers a mixed request with a 400 that names the conflict", async () => {

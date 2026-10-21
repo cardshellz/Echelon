@@ -336,7 +336,7 @@ describe("catalog step 1 read contracts against the server", () => {
     const candidate = (productVariantId: number, variantUomType: DropshipVendorCatalogCandidate["variantUomType"]): DropshipVendorCatalogCandidate => ({
       productId: 10, productSku: "P-10", productName: "Product 10", productVariantId, variantSku: null, variantName: `Size ${productVariantId}`,
       unitsPerVariant: 1, productLineIds: [30], productLineNames: ["Trading Card Supplies"], category: "Supplies",
-      productIsActive: true, variantIsActive: true, variantUomType,
+      categoryId: 5, categoryName: "Supplies", productIsActive: true, variantIsActive: true, variantUomType,
     });
     const selectionRules = [
       rule(1, "variant", "include", { productVariantId: 21 }),
@@ -354,6 +354,7 @@ describe("catalog step 1 read contracts against the server", () => {
       replaceSelectionRules: async () => { throw new Error("not used"); },
       listVendorCatalogCandidates: async () => [candidate(21, "pack"), candidate(22, "pack"), candidate(23, "case"), candidate(25, "case")],
       listVariantOverrides: async () => [override],
+      readSelectionCounts: async () => { throw new Error("not used"); },
     };
     const tiers: DropshipListingTierEligibility = {
       pack: { tier: "pack", eligible: true, reason: null, policyMinimumCents: 10_000, minimumCents: 10_000, alreadyOn: true,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  SELECTION_RULES_RETIRED_CODE,
   buildChooseSelectionSave,
   ChooseBuildRefusal,
   CHOOSE_MAX_ROWS_SHOWN,
@@ -35,6 +36,7 @@ import {
   type ChooseSelectionReason,
   type ChooseSelectionRule,
 } from "../dropship-catalog-choose";
+import { DROPSHIP_CATALOG_READ_ERROR_CODES } from "@shared/dropship/vendor-catalog-reads";
 import { CHOOSE_WORDS } from "../dropship-catalog-choose-words";
 import { DropshipApiError } from "../dropship-ops-surface";
 
@@ -466,6 +468,18 @@ describe("error classes", () => {
     expect(classifyChooseSaveError(apiError(400, "DROPSHIP_IDEMPOTENCY_KEY_REQUIRED"))).toEqual({ classification: "permanent", message: CHOOSE_WORDS.rejected });
     expect(classifyChooseSaveError(apiError(409, "DROPSHIP_IDEMPOTENCY_CONFLICT"))).toEqual({ classification: "permanent", message: CHOOSE_WORDS.rejected });
     expect(classifyChooseSaveError(apiError(413))).toEqual({ classification: "permanent", message: CHOOSE_WORDS.tooLarge });
+  });
+
+  it("E8 (step 1 plan S2-5 §4.9 item 2) the 410 after PR B froze the rules is permanent, says retired and offers Reload", () => {
+    expect(classifyChooseSaveError(apiError(410, "DROPSHIP_SELECTION_RULES_RETIRED", CHOOSE_WORDS.retired)))
+      .toEqual({ classification: "permanent", message: CHOOSE_WORDS.retired, reload: true });
+    // Only that code: another 410 keeps the server's words and offers no Reload.
+    expect(classifyChooseSaveError(apiError(410, "SOMETHING_ELSE", "Gone.")))
+      .toEqual({ classification: "permanent", message: "Gone." });
+    expect(CHOOSE_WORDS.retired).toBe("This page was updated, so your last changes weren't saved. Reload it and make them again.");
+    // The page reads the code from the shared contract the server answers with (review CT4).
+    expect(SELECTION_RULES_RETIRED_CODE).toBe(DROPSHIP_CATALOG_READ_ERROR_CODES.rulesRetired);
+    expect(DROPSHIP_CATALOG_READ_ERROR_CODES.rulesRetired).toBe("DROPSHIP_SELECTION_RULES_RETIRED");
   });
 
   it("E6 any other refusal is permanent in the server's words; an unknown error is permanent", () => {
