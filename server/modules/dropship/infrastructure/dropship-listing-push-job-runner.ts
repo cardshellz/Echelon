@@ -138,10 +138,15 @@ export function startDropshipListingPushWorker(): void {
   }
 
   const intervalMs = envPositiveInteger("DROPSHIP_LISTING_PUSH_WORKER_INTERVAL_MS", DEFAULT_INTERVAL_MS);
+  // One recovery for the life of the worker: its stock link re-queue keeps, in
+  // process, when it may read a store's destination or a listing's selection again
+  // (domain/stock-link-resend-schedule), so a waiting store is not read on every
+  // 10-second pass. Its repositories hold no other state.
+  const recovery = createDropshipListingPushRecoveryFromEnv();
   const runLockedSweep = async () => {
     try {
       await withAdvisoryLock(DROPSHIP_LISTING_PUSH_WORKER_LOCK_ID, async () => {
-        const result = await runDropshipListingPushSweep({ recovery: createDropshipListingPushRecoveryFromEnv() });
+        const result = await runDropshipListingPushSweep({ recovery });
         if (result.processed > 0 || result.failed > 0) {
           console.info(JSON.stringify({
             code: "DROPSHIP_LISTING_PUSH_SWEEP_COMPLETED",
@@ -180,7 +185,9 @@ export function startDropshipListingPushWorker(): void {
 async function runRecoveryBeforeJobs(recovery: DropshipListingPushSweepRecovery, workerId: string, logger: DropshipLogger): Promise<void> {
   try {
     const result = await recovery.run({ workerId });
-    if (result.listingsRestored + result.listingsNeedingReview + result.jobsRequeued + result.rowFailures + result.stepFailures > 0) {
+    const stockLinkMarks = result.stockLink ? result.stockLink.itemsExhausted + result.stockLink.itemsSkipped : 0;
+    if (result.listingsRestored + result.listingsNeedingReview + result.jobsRequeued + result.rowFailures + result.stepFailures
+      + stockLinkMarks > 0) {
       logger.info({
         code: "DROPSHIP_LISTING_PUSH_RECOVERY_COMPLETED",
         message: "Dropship listing push recovery pass completed.",

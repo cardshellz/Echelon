@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
+import { stockLinkError, stockLinkRefusal } from "../../domain/stock-link-readiness";
 import { QuantityPublicationAdmissionError } from "../../../inventory-planning/domain/quantity-publication-admission";
 import type {
   DropshipLogEvent,
@@ -38,6 +39,7 @@ describe("DropshipListingPushWorkerService", () => {
   let repository: FakeListingPushWorkerRepository;
   let marketplacePush: FakeMarketplacePushProvider;
   let notificationSender: FakeNotificationSender;
+  let outlook: FakeAutomaticRequeueOutlook;
   let logs: DropshipLogEvent[];
   let service: DropshipListingPushWorkerService;
 
@@ -45,11 +47,13 @@ describe("DropshipListingPushWorkerService", () => {
     repository = new FakeListingPushWorkerRepository();
     marketplacePush = new FakeMarketplacePushProvider();
     notificationSender = new FakeNotificationSender();
+    outlook = new FakeAutomaticRequeueOutlook();
     logs = [];
     service = new DropshipListingPushWorkerService({
       repository,
       marketplacePush,
       notificationSender,
+      automaticRequeueOutlook: outlook,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -311,8 +315,10 @@ describe("DropshipListingPushWorkerService", () => {
       retryable: false,
       context: { attemptId: "482", operatorAction: true },
     });
+    // Review TW-7: the item is not marked for review (an admin retry does not re-drive it; the operator attests the
+    // prior attempt), so the line says operator_action, not requires_review.
     expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toMatchObject({
-      context: { jobId: 30, itemId: 1, errorCode: "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", attemptId: "482" },
+      context: { jobId: 30, itemId: 1, errorCode: "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", attemptId: "482", outcome: "operator_action" },
     });
   });
 
@@ -365,6 +371,55 @@ describe("DropshipListingPushWorkerService", () => {
     expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toBeUndefined();
   });
 
+  // Review MC-3 (owner Q4: re-send only what failed "before this deploys"): an
+  // UNMAPPED refusal this worker records carries the marker that keeps it out of the
+  // one-time automatic re-send. Review V2-1: every other re-queue code it records
+  // carries it too, and only such failures are re-queued; codes the re-queue does
+  // not own never get it.
+  it.each([
+    ["PUBLICATION_LISTING_TARGET_UNMAPPED", true],
+    ["PUBLICATION_LISTING_PLAN_OMITTED", false],
+    ["PUBLICATION_SCOPE_BUSY", true],
+    ["QUANTITY_PUBLICATION_DRAIN_BUSY", false],
+  ] as const)("records %s with the automatic stock link marker: %s", async (code, marked) => {
+    marketplacePush.error = new QuantityPublicationAdmissionError(code, "refused", { scope: { connectionId: 22 } });
+
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-marker" });
+
+    expect(repository.failInputs[0]?.context?.recordedWithAutomaticStockLink).toBe(marked ? true : undefined);
+  });
+
+  it.each([
+    ["DROPSHIP_STOCK_LINK_BUSY", true],
+    ["DROPSHIP_STOCK_UPDATES_PAUSED", true],
+    ["DROPSHIP_STOCK_DESTINATION_NOT_READY", false],
+  ] as const)("records the stock link refusal %s with the automatic stock link marker: %s", async (code, marked) => {
+    marketplacePush.error = stockLinkError(stockLinkRefusal(code, { inventoryCode: "STOCK_MAPPING_PROVIDER_BUSY" }));
+
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-marker-stock" });
+
+    expect(repository.failInputs[0]?.context?.recordedWithAutomaticStockLink).toBe(marked ? true : undefined);
+  });
+
+  // Review TW-1: the run the stock link recovery queued (its marker's key is the item's last retry request) is
+  // flagged, so the gate refuses to adopt an eBay listing the vendor listing never recorded; any other run is not.
+  it.each([
+    ["the automatic re-queue's own run", { automaticRequeue: { count: 1, resend: true, idempotencyKey: "auto-1" },
+      lastRetryRequest: { idempotencyKey: "auto-1", actorType: "system", actorId: "system:dropship-stock-link-requeue" } }, true],
+    ["an admin retry after an automatic re-queue", { automaticRequeue: { count: 1, resend: true, idempotencyKey: "auto-1" },
+      lastRetryRequest: { idempotencyKey: "admin-2", actorType: "admin", actorId: "admin-7" } }, false],
+    ["a marker another actor wrote", { automaticRequeue: { count: 1, idempotencyKey: "auto-1" },
+      lastRetryRequest: { idempotencyKey: "auto-1", actorType: "system", actorId: "system:other" } }, false],
+    ["a vendor's queued push", {}, false],
+  ] as const)("flags %s as an automatic retry: %s", async (_name, extra, automatic) => {
+    const queued = makeQueuedItem();
+    repository.items = [{ ...queued, result: { ...queued.result, ...extra } }];
+
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-auto" });
+
+    expect(marketplacePush.requests[0]?.automaticRetry).toBe(automatic ? true : undefined);
+  });
+
   it.each([
     "QUANTITY_PUBLICATION_DRAIN_BUSY",
     "PUBLICATION_SCOPE_BUSY",
@@ -382,8 +437,143 @@ describe("DropshipListingPushWorkerService", () => {
     await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-transient" });
 
     expect(repository.failInputs[0]).toMatchObject({ code, retryable: true });
-    expect(repository.failInputs[0]?.context).toEqual({ attemptId: null, operatorAction: false });
+    // PUBLICATION_SCOPE_BUSY is the one the automatic re-queue owns, so it carries the marker (review V2-1).
+    expect(repository.failInputs[0]?.context).toEqual({ attemptId: null, operatorAction: false,
+      ...(code === "PUBLICATION_SCOPE_BUSY" ? { recordedWithAutomaticStockLink: true } : {}) });
     expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_STOCK_SETUP")).toBeUndefined();
+  });
+
+  // Fix PR 2a-2 (plan F2 2.11): the automatic stock link's refusals.
+  it.each([
+    ["DROPSHIP_STOCK_DESTINATION_NOT_READY", stockLinkRefusal("DROPSHIP_STOCK_DESTINATION_NOT_READY", { inventoryCode: "STOCK_LISTING_TARGET_MISMATCH", targetCount: 0 })],
+    ["DROPSHIP_STOCK_LINK_FAILED", stockLinkRefusal("DROPSHIP_STOCK_LINK_FAILED", { inventoryCode: "PUBLICATION_AUTHORITY_MISSING" })],
+  ])("files %s as an operator problem: not retryable, marked for review, logged at ERROR", async (code, refusal) => {
+    marketplacePush.error = stockLinkError(refusal, { command_key: "5e0f7f3c-2a4b-5c6d-8e9f-0a1b2c3d4e5f" });
+
+    const result = await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-stock-operator" });
+
+    expect(result.items[0]).toMatchObject({ status: "failed", errorCode: code, errorMessage: refusal.message });
+    expect(repository.failInputs[0]).toMatchObject({ code, retryable: false, context: {
+      inventoryCode: refusal.inventoryCode, operatorAction: true, targetCount: refusal.targetCount, classification: refusal.classification,
+      commandKey: "5e0f7f3c-2a4b-5c6d-8e9f-0a1b2c3d4e5f", requiresReview: true } });
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toMatchObject({
+      message: "A listing push item is blocked until an operator resolves it.",
+      context: { jobId: 30, itemId: 1, errorCode: code, inventoryCode: refusal.inventoryCode, outcome: "requires_review" } });
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_STOCK_SETUP")).toBeUndefined();
+    expect(notificationSender.sent[0]?.message).toBe(`1 of 1 listing could not be sent to your store (job 30). First reason: ${refusal.message}`);
+  });
+
+  // Review TW-3: the vendor's email for a code the push sweep re-queues by itself says so; while an automatic
+  // re-queue is still to come no second email is sent; once they are over, the final reason gets one more email.
+  describe("failure email around the automatic re-queue", () => {
+    const busy = () => stockLinkError(stockLinkRefusal("DROPSHIP_STOCK_LINK_BUSY", { inventoryCode: "STOCK_MAPPING_PROVIDER_BUSY" }));
+    const afterRequeues = (count: number, lastCode = "DROPSHIP_STOCK_LINK_BUSY") => {
+      const queued = makeQueuedItem();
+      repository.items = [{ ...queued, result: { ...queued.result,
+        automaticRequeue: { count, lastCode, idempotencyKey: `auto-${count}`, resend: false },
+        lastRetryRequest: { idempotencyKey: `auto-${count}`, actorType: "system", actorId: "system:dropship-stock-link-requeue" } } }];
+    };
+
+    it("tells the vendor a busy stock link is tried again automatically", async () => {
+      marketplacePush.error = busy();
+      await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-1" });
+      expect(notificationSender.sent).toHaveLength(1);
+      expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed",
+        message: "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment. Card Shellz will try it again automatically." });
+      // Asked with the sweep's own guards, once the job is final (review V2-2).
+      expect(outlook.calls).toEqual([30]);
+    });
+
+    // Review V2-2: the sweep's store, vendor or listing guards exclude the item (for example an unverified store
+    // whose authority read was busy), so no automatic retry is coming: the email does not promise one.
+    it("does not promise an automatic retry the sweep's guards exclude", async () => {
+      outlook.pending = [];
+      marketplacePush.error = busy();
+      await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-guards" });
+      expect(notificationSender.sent).toHaveLength(1);
+      expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed",
+        message: "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment." });
+    });
+
+    it("sends the final email when the guards exclude an item that was already re-queued", async () => {
+      afterRequeues(1);
+      outlook.pending = [];
+      marketplacePush.error = busy();
+      await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-guards-2" });
+      expect(notificationSender.sent).toHaveLength(1);
+      expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed:after-automatic-retry",
+        message: "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment." });
+    });
+
+    it("promises nothing, and logs a WARN, when the pending items cannot be read", async () => {
+      outlook.error = new Error("connection reset");
+      marketplacePush.error = busy();
+      await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-outlook-failed" });
+      expect(notificationSender.sent[0]?.message).toBe(
+        "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment.");
+      expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_AUTOMATIC_REQUEUE_OUTLOOK_FAILED")).toMatchObject({
+        context: { jobId: 30, itemIds: [1], outcome: "no_automatic_retry_promised", error: "connection reset" } });
+    });
+
+    it("reads nothing when no failed item can be re-queued (a code it does not own, or the cap reached)", async () => {
+      marketplacePush.error = stockLinkError(stockLinkRefusal("DROPSHIP_STOCK_DESTINATION_NOT_READY", { inventoryCode: "STOCK_LISTING_TARGET_MISMATCH" }));
+      await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-no-read" });
+      expect(outlook.calls).toEqual([]);
+    });
+
+    it("sends nothing more while another automatic re-queue is still to come", async () => {
+      afterRequeues(1);
+      marketplacePush.error = busy();
+      await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-2" });
+      expect(notificationSender.sent).toEqual([]);
+    });
+
+    it.each([
+      ["a code that is not re-queued", 1, () => stockLinkError(stockLinkRefusal("DROPSHIP_STOCK_DESTINATION_NOT_READY",
+        { inventoryCode: "STOCK_LISTING_TARGET_MISMATCH" })), "Card Shellz hasn't turned on stock updates for your eBay store yet."],
+      ["the last allowed re-queue", 3, busy, "Card Shellz stock for this item was being updated at the same moment."],
+    ] as const)("emails the final reason once after the automatic re-queues: %s", async (_name, count, error, reason) => {
+      afterRequeues(count);
+      marketplacePush.error = error();
+      await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-3" });
+      // Neither can be re-queued again, so the repository is not even asked (review V2-2).
+      expect(outlook.calls).toEqual([]);
+      expect(notificationSender.sent).toHaveLength(1);
+      expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed:after-automatic-retry",
+        message: `1 of 1 listing could not be sent to your store (job 30). First reason: ${reason}` });
+    });
+  });
+
+  it.each(["DROPSHIP_STOCK_LINK_BUSY", "DROPSHIP_STOCK_UPDATES_PAUSED"] as const)(
+    "keeps %s retryable for the automatic re-queue, with no ERROR line", async (code) => {
+      marketplacePush.error = stockLinkError(stockLinkRefusal(code, { inventoryCode: "STOCK_MAPPING_PROVIDER_BUSY" }));
+
+      await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-stock-transient" });
+
+      expect(repository.failInputs[0]).toMatchObject({ code, retryable: true,
+        context: { operatorAction: false, classification: "transient", inventoryCode: "STOCK_MAPPING_PROVIDER_BUSY" } });
+      expect(repository.failInputs[0]?.context).not.toHaveProperty("requiresReview");
+      expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toBeUndefined();
+    });
+
+  it("files a vendor-fixable stock link refusal as permanent with no operator line", async () => {
+    marketplacePush.error = stockLinkError(stockLinkRefusal("DROPSHIP_STOCK_SKU_CHANGED", { inventoryCode: "STOCK_LISTING_SOURCE_CHANGED" }));
+
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-stock-vendor" });
+
+    expect(repository.failInputs[0]).toMatchObject({ code: "DROPSHIP_STOCK_SKU_CHANGED", retryable: false,
+      context: { operatorAction: false, classification: "permanent" } });
+    expect(repository.failInputs[0]?.context).not.toHaveProperty("requiresReview");
+    expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toBeUndefined();
+  });
+
+  it("leaves other DropshipErrors' stored context unchanged", async () => {
+    marketplacePush.error = new DropshipError("DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", "eBay listing push failed with HTTP 500.", { retryable: true });
+
+    await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-other" });
+
+    expect(repository.failInputs[0]).toMatchObject({ code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", retryable: true });
+    expect(repository.failInputs[0]?.context).toBeUndefined();
   });
 
   it("does not fail the push worker when listing failure notification delivery fails", async () => {
@@ -495,6 +685,19 @@ class FakeMarketplacePushProvider implements DropshipMarketplaceListingPushProvi
   }
 }
 
+/** Answers which failed items the sweep will re-queue: by default every item it is asked about (review V2-2). */
+class FakeAutomaticRequeueOutlook {
+  calls: number[] = [];
+  pending: number[] | null = null;
+  error: Error | null = null;
+
+  async pendingItemIds(jobId: number): Promise<readonly number[]> {
+    this.calls.push(jobId);
+    if (this.error) throw this.error;
+    return this.pending ?? [1];
+  }
+}
+
 class FakeNotificationSender {
   sent: DropshipNotificationSenderInput[] = [];
   error: Error | null = null;
@@ -588,11 +791,14 @@ class FakeListingPushWorkerRepository implements DropshipListingPushWorkerReposi
 
   async failItem(input: Parameters<DropshipListingPushWorkerRepository["failItem"]>[0]): Promise<DropshipListingPushWorkerItemRecord> {
     this.failInputs.push(input);
+    // As the real repository (markItemTerminalFailure): the outcome goes to result.push, context included.
     this.items[0] = {
       ...this.items[0],
       status: "failed",
       errorCode: input.code,
       errorMessage: input.message,
+      result: { ...this.items[0].result, push: { status: "failed", errorCode: input.code, errorMessage: input.message,
+        retryable: input.retryable, ...(input.context ? { context: input.context } : {}) } },
     };
     return this.items[0];
   }

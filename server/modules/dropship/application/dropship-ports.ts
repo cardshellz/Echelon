@@ -13,6 +13,8 @@ export interface DropshipClock {
 }
 
 export interface DropshipLogger {
+  /** Detail and expected repeats (root CLAUDE.md section 10); optional, so existing loggers stay valid. */
+  debug?(event: DropshipLogEvent): void;
   info(event: DropshipLogEvent): void;
   warn(event: DropshipLogEvent): void;
   error(event: DropshipLogEvent): void;
