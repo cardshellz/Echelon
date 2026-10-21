@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -242,9 +244,100 @@ describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
   });
 });
 
+// Fix PR 2a-2 (plan F2 2.9.2-2.9.3): a quantity reaches only the offer the
+// listing's own completed push recorded; while a push runs it waits (retryable).
+describe("EbayDropshipInventoryPublicationTransportAdapter offer identity", () => {
+  const noPublishedOffer = () => jsonResponse({ total: 1, offers: [{ ...offerPage(0).offers[0]!, status: "UNPUBLISHED" }] });
+  const posts = (fetchFn: ReturnType<typeof vi.fn>) => fetchFn.mock.calls.filter(([, init]) => (init as RequestInit).method === "POST");
+
+  it("reads the recorded offer for the exact store and variant", async () => {
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(2))).mockResolvedValueOnce(jsonResponse({ responses: [
+      { sku: "SKU-101", offerId: "offer-1", statusCode: 200 }] }));
+    const { adapter, identities } = fixture(fetchFn);
+    await adapter.publishAbsolute({ ...request(), desiredQuantity: 7 });
+    expect(identities.load).toHaveBeenCalledWith(77, 101);
+  });
+
+  it.each([
+    ["no offer is PUBLISHED yet", () => noPublishedOffer()],
+    ["the offer lookup answers 404", () => new Response("not found", { status: 404 })],
+  ])("defers as retryable while a push is in flight when %s", async (_name, response) => {
+    for (const operation of ["publish", "read"] as const) {
+      const fetchFn = vi.fn().mockResolvedValue(response());
+      const { adapter } = fixture(fetchFn, {}, { externalOfferId: null, pushInFlight: true });
+      const call = operation === "publish" ? adapter.publishAbsolute({ ...request(), desiredQuantity: 7 }) : adapter.readAbsolute(request());
+      await expect(call).rejects.toMatchObject({ code: "DROPSHIP_EBAY_LISTING_PUSH_IN_FLIGHT", effect: "not_sent", retryable: true,
+        context: { storeConnectionId: 77, productVariantId: 101, recordedOfferId: null, pushInFlight: true } });
+      expect(posts(fetchFn)).toEqual([]);
+    }
+  });
+
+  it("keeps the original dead-letter classification when no push is in flight", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(noPublishedOffer());
+    const { adapter } = fixture(fetchFn, {}, { externalOfferId: "offer-1", pushInFlight: false });
+    await expect(adapter.publishAbsolute({ ...request(), desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code: "EBAY_INVENTORY_OFFER_AMBIGUOUS", effect: "not_sent", retryable: false });
+    const missing = vi.fn().mockResolvedValue(new Response("not found", { status: 404 }));
+    await expect(fixture(missing, {}, { externalOfferId: "offer-1", pushInFlight: false }).adapter.publishAbsolute({ ...request(), desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_EBAY_INVENTORY_HTTP_ERROR", retryable: false, context: { status: 404, operation: "offer_lookup" } });
+  });
+
+  it("refuses a PUBLISHED offer that is not the recorded one, with no quantity request", async () => {
+    const fetchFn = vi.fn().mockImplementation(async () => jsonResponse(offerPage(2)));
+    const { adapter } = fixture(fetchFn, {}, { externalOfferId: "offer-recorded", pushInFlight: false });
+    await expect(adapter.publishAbsolute({ ...request(), desiredQuantity: 7 })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_OFFER_IDENTITY_CHANGED", effect: "not_sent", retryable: false,
+      context: { recordedOfferId: "offer-recorded", publishedOfferId: "offer-1" } });
+    await expect(adapter.readAbsolute(request())).rejects.toMatchObject({ code: "DROPSHIP_EBAY_OFFER_IDENTITY_CHANGED", retryable: false });
+    expect(posts(fetchFn)).toEqual([]);
+  });
+
+  // Review CF-7: a re-push that replaces the listing's offer records the new one only when it completes; a drain in
+  // between waits (retryable, the outbox's bounded attempts) instead of losing that revision to a dead letter.
+  // Review AV1-1: that wait has its own class, because a PUBLISHED offer is on sale (ops-health counts it once the
+  // outbox gives up and no push runs any more); the no-offer-yet wait above keeps DROPSHIP_EBAY_LISTING_PUSH_IN_FLIGHT.
+  it("waits for a running push when the PUBLISHED offer differs from the recorded one, sending nothing", async () => {
+    const fetchFn = vi.fn().mockImplementation(async () => jsonResponse(offerPage(2)));
+    const { adapter } = fixture(fetchFn, {}, { externalOfferId: "offer-recorded", pushInFlight: true });
+    await expect(adapter.publishAbsolute({ ...request(), desiredQuantity: 7 })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_PUBLISHED_OFFER_PUSH_IN_FLIGHT", effect: "not_sent", retryable: true,
+      context: { recordedOfferId: "offer-recorded", publishedOfferId: "offer-1", pushInFlight: true } });
+    await expect(adapter.readAbsolute(request())).rejects.toMatchObject({ code: "DROPSHIP_EBAY_PUBLISHED_OFFER_PUSH_IN_FLIGHT", retryable: true });
+    expect(posts(fetchFn)).toEqual([]);
+  });
+
+  it("waits for a running push to record its offer, and refuses an unrecorded offer when none runs", async () => {
+    const inFlight = vi.fn().mockResolvedValue(jsonResponse(offerPage(2)));
+    await expect(fixture(inFlight, {}, { externalOfferId: null, pushInFlight: true }).adapter.publishAbsolute({ ...request(), desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_EBAY_PUBLISHED_OFFER_PUSH_IN_FLIGHT", effect: "not_sent", retryable: true, context: { publishedOfferId: "offer-1" } });
+    const unproven = vi.fn().mockResolvedValue(jsonResponse(offerPage(2)));
+    await expect(fixture(unproven, {}, { externalOfferId: null, pushInFlight: false }).adapter.publishAbsolute({ ...request(), desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_EBAY_OFFER_IDENTITY_UNPROVEN", effect: "not_sent", retryable: false });
+    expect([...posts(inFlight), ...posts(unproven)]).toEqual([]);
+  });
+
+  // Review TW-5: without the reader every Dropship eBay outbox send fails closed, so the env factory's wiring is pinned.
+  it("is built with the Dropship listing identity reader by the production factory", () => {
+    const source = readFileSync(resolve(__dirname, "../../infrastructure/dropship-ebay-inventory-publication.adapter.ts"), "utf8");
+    const factory = source.slice(source.indexOf("export function createEbayDropshipInventoryPublicationTransportAdapterFromEnv"));
+    expect(factory.slice(0, factory.indexOf("\n}\n"))).toMatch(/new EbayDropshipInventoryPublicationTransportAdapter\([\s\S]*new PgDropshipInventoryListingIdentityReader\(\),\s*\);/);
+  });
+
+  it("fails closed, before any eBay call, when built without the identity reader", async () => {
+    const fetchFn = vi.fn();
+    const adapter = new EbayDropshipInventoryPublicationTransportAdapter(
+      { load: async () => ({ storeConnectionId: 77, vendorId: 12, providerKey: "ebay", status: "connected" }) },
+      { loadFreshForStoreConnection: async () => credential({}) }, { recordAuthFailure: vi.fn() } as never, fetchFn as typeof fetch);
+    await expect(adapter.publishAbsolute({ ...request(), desiredQuantity: 7 })).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_LISTING_IDENTITY_READER_REQUIRED", effect: "not_sent", retryable: false });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
+
 function fixture(
   fetchFn: ReturnType<typeof vi.fn>,
   credentialOverrides: Partial<DropshipMarketplaceStoreCredentials> = {},
+  identity: { externalOfferId: string | null; pushInFlight: boolean } = { externalOfferId: "offer-1", pushInFlight: false },
 ) {
   const destinations = {
     load: vi.fn(async () => ({
@@ -258,6 +351,8 @@ function fixture(
     loadFreshForStoreConnection: vi.fn(async () => credential(credentialOverrides)),
   };
   const health = { recordAuthFailure: vi.fn(async () => ({}) as never) };
+  // The listing's recorded offer (the last completed push) and whether a push runs now.
+  const identities = { load: vi.fn(async () => identity) };
   return {
     adapter: new EbayDropshipInventoryPublicationTransportAdapter(
       destinations,
@@ -265,9 +360,11 @@ function fixture(
       health,
       fetchFn as typeof fetch,
       { now: () => new Date("2026-09-04T12:00:00.000Z") },
+      identities,
     ),
     credentials,
     health,
+    identities,
   };
 }
 

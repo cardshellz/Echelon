@@ -1,5 +1,4 @@
 import type { Pool, PoolClient } from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import {
   inventoryEbayPublicationReadinessInputSchema, inventoryEbayPublicationReadinessApplySchema,
@@ -9,9 +8,8 @@ import {
 } from "@shared/types/ebay-publication-readiness";
 import { InventoryPublicationMembershipError } from "../application/inventory-publication-membership.service";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
-import { PublicationMappingPreparationStore, applyMappingPreparation, reviewMappingPreparation } from "./publication-mapping-preparation.repository";
-import { PostgresInventoryChannelExposureAdminStore } from "./inventory-channel-exposure-admin.repository";
-import { promoteInventoryCutoverDefinitionsInsideTransaction } from "./inventory-cutover-definitions.repository";
+import { PublicationMappingPreparationStore } from "./publication-mapping-preparation.repository";
+import { applyExactEbaySkuMappingsInsideTransaction } from "./exact-ebay-sku-mapping.apply";
 import { captureEbayPublicationReadiness, readinessDigest } from "./ebay-publication-readiness.read";
 import { lockEbayListingPreparationScope, validateEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../channels/ebay-listing-preparation-scope";
 
@@ -173,36 +171,17 @@ export async function withEbayPublicationReadinessApplied<T>(pool: ConnectionPoo
     if (evidence.review.reviewHash !== input.expectedReviewHash) fail("EBAY_PUBLICATION_STOCK_REVIEW_STALE", "Stock, mappings, or publication settings changed. Review the current plan again.");
     if (!evidence.review.ready || !evidence.target) fail("EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", evidence.review.blockers.map(row => row.message).join(" "));
     const target = evidence.target!;
-    const definitions = new PostgresInventoryChannelExposureAdminStore();
-    const selectors = [];
-    for (const variant of evidence.review.variants) {
-      const row = evidence.rows.find(candidate => candidate.id === variant.productVariantId)!;
-      if (variant.mappingAction === "create") {
-        const saved = await definitions.saveVariantMappingDraftInsideTransaction(drizzle(client), {
-          publicationTargetId: target.id, productVariantId: variant.productVariantId,
-          externalInventoryItemId: variant.sku, externalSku: variant.sku,
-          expectedHeadRevision: row.head_revision ?? "0", expectedDraftMappingId: null, expectedDraftDefinitionHash: null,
-          changeReason: "Reviewed exact eBay SKU stock enrollment before publication.",
-          idempotencyKey: `ebay-stock:${input.commandKey}:${variant.productVariantId}`,
-          requestHash, actorId: actor, occurredAt: now,
-        }, { allowRetainedZero: input.source.purpose === "sync" });
-        selectors.push({ kind: "variant_mapping" as const, key: `${target.id}:${variant.productVariantId}`,
-          definitionId: saved.definitionId, definitionHash: saved.definitionHash });
-      } else if (variant.mappingAction === "promote_draft") selectors.push({ kind: "variant_mapping" as const,
-        key: `${target.id}:${variant.productVariantId}`, definitionId: row.mapping_id!, definitionHash: row.mapping_hash! });
-    }
-    if (selectors.length) await promoteInventoryCutoverDefinitionsInsideTransaction(client, {
-      contractVersion: "inventory_cutover_selection_manifest_v1", productIds: [], publicationTargetIds: [target.id], selections: selectors,
-    }, { actor, reason: "Reviewed exact eBay SKU stock enrollment before publication.", occurredAt: now });
-    const promoted = await captureEbayPublicationReadiness(client, input.source, true, verifiedListing);
-    if (!promoted.review.ready) fail("EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", promoted.review.blockers.map(row => row.message).join(" "));
-    const command = { publicationTargetId: target.id, expectedTargetRevision: target.revision, productId: input.source.productId,
-      productVariantIds: input.source.variants.map(row => row.productVariantId), allowRetainedZero: input.source.purpose === "sync",
-      ...(evidence.listingScope ? { verifiedListingScopeHash: evidence.listingScope.fingerprint } : {}) };
-    const reviewed = (await reviewMappingPreparation(client, command, true)).review;
-    const applied = await applyMappingPreparation(client, scopeKeys, { ...command, expectedReviewHash: reviewed.reviewHash,
-      idempotencyKey: `ebay-stock:${input.commandKey}` }, actor, requestHash, now,
-      evidence.review.variants.filter(row => row.mappingAction !== "none").map(row => row.productVariantId));
+    const applied = await applyExactEbaySkuMappingsInsideTransaction(client, scopeKeys, {
+      target, variants: evidence.review.variants, rows: evidence.rows, productId: input.source.productId,
+      allowRetainedZero: input.source.purpose === "sync", exactVariantScope: false,
+      ...(evidence.listingScope ? { verifiedListingScopeHash: evidence.listingScope.fingerprint } : {}),
+      idempotencyPrefix: "ebay-stock", commandKey: input.commandKey, requestHash, actor, now,
+      changeReason: "Reviewed exact eBay SKU stock enrollment before publication.",
+      afterPromotion: async promotedClient => {
+        const promoted = await captureEbayPublicationReadiness(promotedClient, input.source, true, verifiedListing);
+        if (!promoted.review.ready) fail("EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", promoted.review.blockers.map(row => row.message).join(" "));
+      },
+    });
     const receipt = inventoryEbayPublicationReadinessReceiptSchema.parse({ channelId: input.source.channelId,
       productId: input.source.productId, commandKey: input.commandKey, reviewHash: input.expectedReviewHash,
       contextHash: input.contextHash, appliedAt: now.toISOString(), appliedBy: actor, mappingPreparation: applied, alreadyApplied: false });
