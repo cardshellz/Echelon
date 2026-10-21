@@ -3,6 +3,35 @@ import { expect, test, type Page } from "@playwright/test";
 import { setupEbayChannelPage } from "./fixtures/ebay-channel-page.fixture";
 import { resolveEbayListingIssue } from "../../shared/ebay-listing-issue";
 
+
+test("AUDIT: excluded pending work opens its removal owner instead of the publication editor", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  state.excluded = true;
+  state.feedStatus = "excluded";
+  state.jobs = [{ ...withdrawal, state: "needs_attention", code: "EBAY_LISTING_SYNC_FAILED", message: "Removal needs review." }];
+  state.intentChanges.items = [channelIntentChange(67, {
+    state: "waiting_lifecycle", last_error_code: "LISTING_INTENT_LIFECYCLE_PENDING",
+    last_error_message: "These members are excluded from content updates. Channel clearing or removal is still outstanding.",
+    lifecycle: { assessedAt: "2026-10-20T20:00:00.000Z", selectionFingerprint: "a".repeat(64),
+      members: [{ productVariantId: 11, duty: "stock_clear", state: "pending",
+        code: "LISTING_LIFECYCLE_PRIOR_WORK", message: "Removal needs completion.", references: [withdrawal.id] }] },
+  })];
+  const publishingCalls: unknown[] = [];
+  await page.route("**/api/ebay/listings/push", route => {
+    publishingCalls.push(route.request().postDataJSON());
+    // This is the real publication admission owner's excluded-product refusal.
+    return route.fulfill({ json: { results: [{ productId: 1, success: false,
+      error: "This product is excluded from eBay. Enable it in the listing feed before publishing." }] } });
+  });
+  await page.reload();
+  const panel = page.getByTestId("listing-intent-changes");
+  await panel.locator("summary").first().click();
+  await panel.getByRole("button", { name: "Review listing", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("heading", { name: "Removal status", exact: true })).toBeVisible();
+  expect(publishingCalls).toEqual([]);
+});
+
 const withdrawal = { id: "543b9237-920d-4786-a950-31c6fe941c8f", productId: 1, kind: "sync", operation: "withdraw", state: "queued", code: null, message: null,
   nextAttemptAt: "2026-10-12T12:00:00.000Z", updatedAt: "2026-10-12T12:00:00.000Z" };
 const switchFor = (page: Page, included = true) => page.getByTitle(included ? "Exclude from eBay listings" : "Include in eBay listings", { exact: true });

@@ -59,6 +59,30 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     deleteOffer.mockImplementation(async id => { remote.delete(id); });
     remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "UNPUBLISHED" });
   });
+  // Audit acceptance test: a durable marker alone cannot establish that a
+  // provider request was dispatched. Restart needs a safe, actionable resolution.
+  it("AUDIT: recovers a crash after the retirement marker commits but before dispatch", async () => {
+    remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    await store.discover(now, 25);
+    const [id] = await store.due(now, 25);
+    await expect(store.withMember(id, session => processListingMemberRetirement({
+      ...session,
+      save: async (...args) => {
+        const saved = await session.save(...args);
+        if (args[0] === "retiring") throw new Error("AUDIT simulated process exit before provider dispatch");
+        return saved;
+      },
+    }, { store, adapter: async () => adapter }, () => now))).rejects.toThrow("AUDIT simulated process exit");
+    expect(deleteOffer).not.toHaveBeenCalled();
+    expect(clearOffer).not.toHaveBeenCalled();
+    expect((await receipts())[0]).toMatchObject({ operationId: id, state: "retiring" });
+    store = new PostgresListingMemberLifecycleRepository(database.pool);
+    for (let attempt = 1; attempt <= 6; attempt++) await run(new Date(now.getTime() + attempt * 120_000));
+    // Safe recovery may reconcile a proven no-send or expose a deliberate
+    // recovery decision. Permanent observation-only "retiring" is a dead end.
+    expect(["retired", "failed"]).toContain((await receipts())[0].state);
+  });
+
   it("excludes archived members immediately and verifies an unpublished offer without any inventory mapping or live listing ID", async () => {
     expect((await selection()).variants.map(row => row.action)).toEqual(["publish","none"]);
     await run();

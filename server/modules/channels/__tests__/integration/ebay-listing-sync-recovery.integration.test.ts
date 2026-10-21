@@ -55,6 +55,7 @@ import {
 } from "../fixtures/ebay-listing-sync.fixture";
 import { EbayListingSyncError, type EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
 import { resolveExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
+import { hasOutstandingEbayListingWork } from "../../channel-stock-selection";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
 vi.mock("../../../../db", () => ({ pool: {} }));
 const configured =
@@ -320,6 +321,26 @@ const configured =
       return { currentSource, retired };
     }
 
+    // Audit acceptance test: a completed replacement must settle a proven
+    // pre-write failure without deleting its history or skipping unresolved sends.
+    it("AUDIT: settles an earlier pre-write sync failure after its exact replacement completes", async () => {
+      const f = fixture();
+      const selected = { channelId: identity.channelId, connectionId: identity.connectionId, productId: identity.productId };
+      expect(await hasOutstandingEbayListingWork(database.pool, selected)).toBe(false);
+      f.prepare.mockRejectedValueOnce(new EbayListingSyncError("EBAY_POLICY_UNAVAILABLE", "Selected policy is unavailable."));
+      const failed = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, failed.id);
+      expect(await f.store.get(failed.id)).toMatchObject({ state: "needs_attention", code: "EBAY_POLICY_UNAVAILABLE" });
+      expect(f.mutations).toHaveLength(0);
+      advance();
+      const replacement = await f.service.enqueue(identity, "operator");
+      expect(replacement.id).not.toBe(failed.id);
+      await f.service.processDue(1, replacement.id);
+      expect(await f.store.get(replacement.id)).toMatchObject({ state: "completed" });
+      expect((await f.store.get(failed.id)).id).toBe(failed.id);
+      expect(await hasOutstandingEbayListingWork(database.pool, selected)).toBe(false);
+    });
+
     it("shows only the current claim's phase across a crash, joined command and requeue", async () => {
       await database.pool.query("INSERT INTO catalog.products(id,sku) VALUES(900,'PROGRESS')");
       await database.pool.query("INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(900,900,'PROGRESS-P5')");
@@ -560,6 +581,35 @@ const configured =
       await expect(f.recovery.resume(f.saved.id, 1, "different-operator", f.confirmation)).rejects.toMatchObject({ code: "EBAY_RECOVERY_REPLAY_CONFLICT" });
     });
 
+
+    it.each(["publish", "withdraw"] as const)("AUDIT: bounds invalid provider reads after a %s send marker without dropping that marker", async operation => {
+      identity = { ...identity, channelId: 2000 + sequence, connectionId: 2000 + sequence };
+      await database.pool.query("INSERT INTO channels.channels(id,name,provider) VALUES($1,'Audit read budget','ebay')", [identity.channelId]);
+      await database.pool.query("INSERT INTO channels.channel_connections(id,channel_id) VALUES($1,$1)", [identity.connectionId]);
+      const f = fixture();
+      const source = operation === "publish" ? { ...identity, variants: identity.variants.map(member => ({ ...member, mappingExists: true, listingId: null })) } : identity;
+      const saved = await f.service.enqueue(source, "operator", randomUUID(), operation);
+      const claim = (await f.store.claim(clock(), randomUUID(), saved.id))!;
+      try {
+        if (operation === "publish") await f.store.bindPublicationTarget(claim.job, source, clock());
+        else await f.store.bindProviderIdentity(claim.job, source, clock());
+        await f.store.stage(claim.job, operation, "7".repeat(64), "started", clock());
+        await f.store.finish(claim.job, { state: "awaiting_evidence", code: operation === "publish" ? "EBAY_PUBLICATION_RESPONSE_UNCERTAIN" : "EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN",
+          message: "Outcome unknown.", result: null, nextAttemptAt: clock() }, clock());
+      } finally { await claim.release(); }
+      const executor = { execute: vi.fn(async () => { throw malformedRead(); }) };
+      const restarted = new EbayListingSyncService(f.store, executor, clock, randomUUID);
+      for (let attempt = 0; attempt < 8; attempt++) {
+        advance();
+        await restarted.processDue(1, saved.id);
+      }
+      const retained = await f.store.get(saved.id);
+      expect(operation === "publish" ? retained.publicationWriteStarted : retained.withdrawalWriteStarted).toBe(true);
+      expect(retained.providerRead).toMatchObject({ kind: "invalid_response", requestId: "observed-read-123" });
+      expect(f.mutations).toEqual([]);
+      // Pausing malformed reads must not release the unresolved-write fence.
+      expect(executor.execute.mock.calls.length).toBeLessThanOrEqual(5);
+    });
 
     it.each(["publish", "withdraw"] as const)("commits an empty legacy review and interrupted %s authorization together", async operation => {
       // Each unfinished workflow owns its own channel, just as production permits only one active job per product and channel.
