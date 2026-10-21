@@ -100,6 +100,9 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-payment-controlled-acceptance.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-canonical-acceptance-stage.integration.test.ts",
+      // eBay adoption account identity: the reader's SQL ownership proof and the loader/reader/CHECK agreement.
+      "server/modules/dropship/__tests__/integration/dropship-ebay-push-publication-reader.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-ebay-publication-account-identity.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-global-control.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-resume.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-enable.integration.test.ts",
