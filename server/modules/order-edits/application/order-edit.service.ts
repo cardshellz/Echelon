@@ -1276,9 +1276,12 @@ export class OrderEditService {
     const presentedTotal = useCurrent
       ? snapshot.totalCents
       : (quote?.totalCents ?? snapshot.totalCents);
-    const presentedPaid = useCurrent
-      ? snapshot.netPaidCents
-      : record.baseline.netPaidCents;
+    // Once submission starts, payment/refund observations are authoritative
+    // even while fulfillment synchronization still prevents terminal closure.
+    const presentedPaid =
+      useCurrent || record.commitStartedAt !== null
+        ? snapshot.netPaidCents
+        : record.baseline.netPaidCents;
     const originalVariants = new Set(
       record.baseline.lines
         .filter((line) => line.quantity > 0 && line.variantId !== null)
