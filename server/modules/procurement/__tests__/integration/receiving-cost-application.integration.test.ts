@@ -54,6 +54,8 @@ const TABLES = [
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.productLocations, schema.inventoryLevels,
   schema.inventoryLots, schema.inventoryTransactions, schema.orders, schema.orderItems, schema.orderItemCosts, schema.orderLineCosts,
+  schema.cycleCounts, schema.cycleCountItems,
+  schema.outboundShipments, schema.outboundShipmentItems,
 ];
 
 audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
@@ -1434,6 +1436,9 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       });
     } else {
       const level=(await pool.query("INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty) VALUES(201,99,80000) RETURNING id")).rows[0];
+      await pool.query("INSERT INTO inventory.cycle_counts(id,name,status,warehouse_id) VALUES(1,'Verified loss','completed',1)");
+      await pool.query(`INSERT INTO inventory.cycle_count_items(id,cycle_count_id,warehouse_location_id,product_variant_id,variance_qty,status,approved_by,approved_at)
+        VALUES(1,1,99,201,-30000,'approved',$1,$2)`,[actorId,NOW]);
       const {PostgresCanonicalClaimInventoryRepository}=await import("../../../inventory/infrastructure/canonical-claim-inventory.repository");
       const client=await pool.connect();
       try {

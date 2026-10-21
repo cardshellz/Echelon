@@ -44,6 +44,14 @@ export const costIssueSchema = z.object({
   code: z.string().regex(/^[A-Z][A-Z0-9_]{0,99}$/),
   message: z.string().trim().min(1).max(2_000),
   unresolvedQuantity: unresolvedCostQuantitySchema.optional(),
+  costLinksAlreadyReviewed: z.literal(true).optional(),
+  orderCostReview: z.object({
+    orderId: resourceId,
+    orderCostId: resourceId,
+    inventoryLotId: resourceId,
+    quantity: nonnegativeInteger,
+    status: z.string().nullable(),
+  }).strict().optional(),
 }).strict();
 
 export const costSourceScopeSchema = z.discriminatedUnion("kind", [

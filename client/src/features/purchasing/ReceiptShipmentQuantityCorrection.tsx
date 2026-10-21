@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearch } from "wouter";
+import { SHIPMENT_COST_REPAIR_QUERY_PARAM } from "@/lib/procurement-navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   quantityCorrectionContextSchema,
@@ -40,7 +42,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { PoShipmentCostReview } from "./PoShipmentCostReview";
+import { CostIssueMessage } from "./CostIssueMessage";
 import { poShipmentCostsSchema } from "@shared/procurement/po-shipment-costs";
+import { CostLinkRepairSummary } from "./CostLinkRepairSummary";
 
 type Entry =
   | { receiptLineId: number; shipmentLines?: never }
@@ -69,11 +73,26 @@ export function ShipmentQuantityEditor(props: {
   }[];
   onSaved?: () => void;
 }) {
-  return <QuantityCorrectionDialog {...props} />;
+  const search = useSearch();
+  const requests = new URLSearchParams(search).getAll(SHIPMENT_COST_REPAIR_QUERY_PARAM);
+  const requested = requests.length === 1 ? requests[0] : null;
+  const repairLineId =
+    requested && /^[1-9][0-9]*$/.test(requested)
+      ? props.shipmentLines.find((line) => line.id === Number(requested))?.id
+      : undefined;
+  return (
+    <QuantityCorrectionDialog
+      key={repairLineId ?? "edit"}
+      {...props}
+      repairLineId={repairLineId}
+    />
+  );
 }
-function QuantityCorrectionDialog(props: Entry & { onSaved?: () => void }) {
+function QuantityCorrectionDialog(
+  props: Entry & { onSaved?: () => void; repairLineId?: number },
+) {
   const purpose = props.receiptLineId === undefined ? "shipment" : "receipt";
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(props.repairLineId !== undefined);
   const [locked, setLocked] = useState(false);
   return (
     <>
@@ -131,12 +150,13 @@ function CorrectionEntry(
     onClose: () => void;
     onLock: (value: boolean) => void;
     onSaved?: () => void;
+    repairLineId?: number;
   },
 ) {
   const purpose: QuantityCorrectionPurpose =
     props.receiptLineId === undefined ? "shipment" : "receipt";
   const [selected, setSelected] = useState<number | null>(
-    props.shipmentLines?.[0]?.id ?? null,
+    props.repairLineId ?? props.shipmentLines?.[0]?.id ?? null,
   );
   const [locked, setLocked] = useState(false);
   const onLock = useCallback(
@@ -197,6 +217,7 @@ function CorrectionEntry(
           key={query.data.shipmentLineId}
           initial={query.data}
           purpose={purpose}
+          initialRepair={props.repairLineId === query.data.shipmentLineId}
           onClose={props.onClose}
           onLock={onLock}
           onSaved={props.onSaved}
@@ -362,30 +383,40 @@ export function QuantityCorrectionSummary({
           ? "This updates the shipped pieces and receiving expectations. It does not change previously received counts."
           : "This corrects how many pieces were in the existing receipt. It does not record another delivery or remove stock."}
       </p>
-      {summary.shipmentCostReview?.needsHistoryReview && (
-        <div className="rounded-md border p-3 space-y-2 text-sm" role="status">
-          <p className="font-semibold">
-            {approved
-              ? "The quantities are saved. Some costs still need their stock history linked."
-              : "Quantity correction is ready for approval. Some costs still need their stock history linked."}
-          </p>
-          <p>
-            The shipment charge stays recorded. This correction does not treat
-            missing history as a sale or post an inventory expense.
-          </p>
-          {summary.shipmentCostReview.affectedLots.map((lot) => (
-            <p key={lot.lotId}>
-              {lot.lotNumber}: {number(lot.receivedUnits)} received units;{" "}
-              {number(lot.onHandUnits)} remain in this lot. An empty lot may
-              have been transferred or repacked. It does not establish a sale.
-            </p>
-          ))}
-          <p>
-            Review the recorded transfers, pack changes and stock counts to
-            identify where these costs belong.
-          </p>
-        </div>
+      {summary.costLinkRepair && (
+        <CostLinkRepairSummary
+          summary={summary.costLinkRepair}
+          approved={approved}
+        />
       )}
+      {summary.shipmentCostReview?.needsHistoryReview &&
+        !summary.costLinkRepair && (
+          <div
+            className="rounded-md border p-3 space-y-2 text-sm"
+            role="status"
+          >
+            <p className="font-semibold">
+              {approved
+                ? "The quantities are saved. Some costs still need their stock history linked."
+                : "Quantity correction is ready for approval. Some costs still need their stock history linked."}
+            </p>
+            <p>
+              The shipment charge stays recorded. This correction does not treat
+              missing history as a sale or post an inventory expense.
+            </p>
+            {summary.shipmentCostReview.affectedLots.map((lot) => (
+              <p key={lot.lotId}>
+                {lot.lotNumber}: {number(lot.receivedUnits)} received units;{" "}
+                {number(lot.onHandUnits)} remain in this lot. An empty lot may
+                have been transferred or repacked. It does not establish a sale.
+              </p>
+            ))}
+            <p>
+              Review the recorded transfers, pack changes and stock counts to
+              identify where these costs belong.
+            </p>
+          </div>
+        )}
       <details>
         <summary className="cursor-pointer text-sm">
           Inventory costs and linked customer-order costs
@@ -403,7 +434,7 @@ export function QuantityCorrectionSummary({
               updated; cost change {money(result.orderCostDeltaCents)}.
               {result.issues.map((issue, i) => (
                 <p key={i} className="text-amber-800 dark:text-amber-300">
-                  {issue.message}
+                  <CostIssueMessage issue={issue} />
                 </p>
               ))}
             </li>
@@ -425,6 +456,7 @@ function CorrectionForm({
   onReload,
   onSaved,
   purpose: entryPurpose,
+  initialRepair = false,
 }: {
   initial: QuantityCorrectionContext;
   onClose: () => void;
@@ -432,10 +464,11 @@ function CorrectionForm({
   onReload: () => Promise<QuantityCorrectionContext | undefined>;
   onSaved?: () => void;
   purpose: QuantityCorrectionPurpose;
+  initialRepair?: boolean;
 }) {
   const [data, setData] = useState(initial);
   const [includeReceipts, setIncludeReceipts] = useState(
-    entryPurpose === "receipt",
+    entryPurpose === "receipt" || initialRepair,
   );
   const purpose: QuantityCorrectionPurpose = includeReceipts
     ? "receipt"
@@ -457,6 +490,8 @@ function CorrectionForm({
       : receiptPieces;
   const [reason, setReason] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  const [repairCostLinks, setRepairCostLinks] = useState(initialRepair);
+  const [linksConfirmed, setLinksConfirmed] = useState(false);
   const [preview, setPreview] = useState<QuantityCorrectionPreview | null>(
     null,
   );
@@ -480,6 +515,7 @@ function CorrectionForm({
   function changed(action: () => void) {
     revision.current++;
     setPreview(null);
+    setLinksConfirmed(false);
     action();
   }
   function request() {
@@ -501,6 +537,9 @@ function CorrectionForm({
           }
         : {}),
       historicalCostDestination: null,
+      ...(repairCostLinks && purpose === "receipt"
+        ? { repairCostLinks: true }
+        : {}),
       reason,
       evidenceConfirmed: confirmed,
     });
@@ -531,6 +570,9 @@ function CorrectionForm({
       const body = attempt ?? {
         ...request(),
         previewVersion: preview!.previewVersion,
+        ...(preview?.summary.costLinkRepair
+          ? { costLinksConfirmed: linksConfirmed }
+          : {}),
       };
       setAttempt(body);
       try {
@@ -792,6 +834,29 @@ function CorrectionForm({
                     ? "Enter the pieces on the packing list. Review changes shows the receiving expectations, shipment costs, and inventory cost impact."
                     : "Enter pieces from the receiving documents. The handled receiving units and stock movements are preserved; the pieces per unit will be corrected."}
                 </p>
+                {purpose === "receipt" && (
+                  <div className="rounded border p-3 space-y-2 text-sm">
+                    <label className="flex items-start gap-2 font-medium">
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={repairCostLinks}
+                        onChange={(event) =>
+                          changed(() =>
+                            setRepairCostLinks(event.target.checked),
+                          )
+                        }
+                      />
+                      Restore missing transfer and repacking cost links
+                    </label>
+                    <p>
+                      Review the recorded path from this receipt to transferred
+                      cases, opened packs and linked orders. The next step shows
+                      each proposed link and its cost impact. One approval saves
+                      the quantities and these repairs together.
+                    </p>
+                  </div>
+                )}
                 <Label htmlFor="quantity-reason">
                   Reason / document reference
                 </Label>
@@ -819,6 +884,20 @@ function CorrectionForm({
               </fieldset>
             )}
             {preview && <QuantityCorrectionSummary summary={preview.summary} />}
+            {preview?.summary.costLinkRepair && (
+              <label className="flex items-start gap-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={linksConfirmed}
+                  disabled={locked}
+                  onChange={(event) => setLinksConfirmed(event.target.checked)}
+                />
+                I verified that the transfer and repacking records above
+                describe these same goods and that their pieces per case or pack
+                are correct.
+              </label>
+            )}
             {(review.error || approval.error) && (
               <div role="alert" className="text-sm text-destructive">
                 {review.error?.message || approval.error?.message}
@@ -889,7 +968,10 @@ function CorrectionForm({
             className="bg-green-700 hover:bg-green-800 text-white"
             onClick={() => approval.mutate()}
             disabled={
-              approval.isPending || review.isPending || !!data.blockedReason
+              approval.isPending ||
+              review.isPending ||
+              !!data.blockedReason ||
+              (!!preview?.summary.costLinkRepair && !linksConfirmed && !attempt)
             }
           >
             {approval.isPending
