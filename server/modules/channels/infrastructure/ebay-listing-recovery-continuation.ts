@@ -1,6 +1,5 @@
 import type { Pool } from "pg";
-import { PublicationRecoveryService } from "../../inventory-planning/application/publication-recovery.service";
-import { PostgresPublicationRecoveryRepository } from "../../inventory-planning/infrastructure/publication-recovery.repository";
+import { PublicationRecoveryService, PostgresPublicationRecoveryRepository } from "../../inventory-planning/quantity-publication";
 import type { EbayListingRecoveryContinuation } from "../ebay-listing-recovery.service";
 import type { PostgresEbayListingSyncRepository } from "./ebay-listing-sync.repository";
 

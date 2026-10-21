@@ -1,4 +1,5 @@
-import type { ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
+import { z } from "zod";
+import { channelProviderReadDiagnosticSchema, type ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
 import type { MarketplaceObservedListingPublication, MarketplaceProviderAccountObservation } from "./listing-registration-plan";
 
 export interface EbayListingInspectionIssue {
@@ -7,6 +8,16 @@ export interface EbayListingInspectionIssue {
   readonly groupVariantSkus?: readonly string[];
   readonly providerRead?: ChannelProviderReadDiagnostic;
 }
+/** The observer and all consumers validate the same diagnostic DTO. */
+export const ebayListingInspectionIssueSchema: z.ZodType<EbayListingInspectionIssue> = z.object({
+  code: z.string().min(1).max(150), message: z.string().min(1).max(1000),
+  status: z.number().int().min(100).max(599).optional(),
+  sku: z.string().max(255).optional(), listingId: z.string().max(255).optional(),
+  groupKey: z.string().max(255).optional(), listingStatus: z.string().max(255).optional(),
+  groupVariantSkus: z.array(z.string().max(255)).max(10000).optional(),
+  providerRead: channelProviderReadDiagnosticSchema.optional(),
+}).strict();
+
 export interface EbayListingInspectedOffer {
   readonly sku: string | null;
   readonly offerId: string;

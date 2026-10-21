@@ -17,6 +17,8 @@ export const channelProviderReadDiagnosticSchema = z.object({
 }).strict();
 export type ChannelProviderReadDiagnostic = z.infer<typeof channelProviderReadDiagnosticSchema>;
 
+// Repeated schema failures may require an adapter fix. Stop after a bounded
+// number of reads while retaining the failed job and all diagnostic evidence.
 export const INVALID_PROVIDER_READ_RETRY_LIMIT = 5;
 /** A failed GET never authorizes a write or clears an unresolved write receipt. */
 export function providerReadShouldRetry(read: ChannelProviderReadDiagnostic, attempts: number): boolean {

@@ -25,11 +25,12 @@ export class PublicationRecoveryService {
   }): Promise<PublicationRecoveryResult> {
     const { scopes, actor, ...raw } = input;
     const command = publicationRecoveryConfirmationSchema.parse(raw);
-    if (!scopes.some(scope => scope.productVariantId !== null)) throw new QuantityPublicationAdmissionError(
+    const exactScopes = this.scopes(scopes);
+    if (!exactScopes.some(scope => scope.productVariantId !== null)) throw new QuantityPublicationAdmissionError(
       "EBAY_RECOVERY_CATALOG_MAPPING_REQUIRED", "Review the listing's catalog variant mapping before resuming current inventory.");
     const at = z.date().parse(this.now());
     return publicationRecoveryResultSchema.parse(await this.store.resume({ ...command,
-      scopes: this.scopes(scopes), actor: z.string().trim().min(1).max(100).parse(actor), now: new Date(at) }));
+      scopes: exactScopes, actor: z.string().trim().min(1).max(100).parse(actor), now: new Date(at) }));
   }
   private scopes(input: readonly QuantityPublicationScope[]): QuantityPublicationScope[] {
     const scopes = z.array(quantityPublicationScopeSchema).min(1).max(251).parse(input);

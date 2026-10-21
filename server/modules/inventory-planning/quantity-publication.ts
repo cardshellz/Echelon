@@ -19,6 +19,10 @@ export { PostgresEbayAutomaticPublicationRecoveryRepository } from "./infrastruc
 export { EbayPublicationReconciliationService, EbayPublicationContentRefreshRejectedError } from "./application/ebay-publication-reconciliation.service";
 export type { EbayPublicationReconciliationStatus, RefreshRecoveredEbayContent } from "./application/ebay-publication-reconciliation.service";
 export { PostgresEbayPublicationReconciliationRepository } from "./infrastructure/ebay-publication-reconciliation.repository";
+export { PublicationRecoveryService } from "./application/publication-recovery.service";
+export type { PublicationRecoveryCommand, PublicationRecoveryStore } from "./application/publication-recovery.service";
+export { PostgresPublicationRecoveryRepository } from "./infrastructure/publication-recovery.repository";
+// Compatibility names delegate to the same provider-neutral recovery owner.
 export { EbayPublicationRecoveryService } from "./application/ebay-publication-recovery.service";
 export { InventoryPublicationMembershipError } from "./application/inventory-publication-membership.service";
 export { InventoryPublicationSelectionError } from "./infrastructure/inventory-publication-selection.reader";

@@ -55,8 +55,9 @@ export function EbayListingJobStatusDialog({ jobId, productId, productName, onCl
       <EbayListingJobProgress job={job} />
       {issue && withdrawal && issue.action.kind === "review_mapping" ? <EbayWithdrawalIssueCard issue={issue} busy={status.isFetching}
         onCheck={() => void status.refetch()} onRetry={job.state === "needs_attention" && onRetryWithdrawal ? () => { onClose(); onRetryWithdrawal(productId); } : undefined} /> : issue && <EbayListingIssueCard issue={issue}
-        showTitle={presentEbayListingJob(job).summary !== issue.title} busy={status.isFetching} onAction={issue.action.kind === "check_status" ? undefined : next => {
-        if (withdrawal && next.action.kind === "retry_sync" && next.retryable && onRetryWithdrawal) { onClose(); onRetryWithdrawal(productId); }
+        showTitle={presentEbayListingJob(job).summary !== issue.title} busy={status.isFetching} onAction={issue.action.kind === "check_status" && !issue.diagnosticAction ? undefined : next => {
+        if (next.action.kind === "check_status") { void status.refetch(); }
+        else if (withdrawal && next.action.kind === "retry_sync" && next.retryable && onRetryWithdrawal) { onClose(); onRetryWithdrawal(productId); }
         else { onClose(); onIssueAction(next, productId, jobId); }
       }} />}
     </div>}

@@ -183,7 +183,10 @@ export function syncFailure(
       : NaN;
   const minimum =
     now.getTime() + Math.min(15 * 60_000, 30_000 * 2 ** Math.min(attempts, 5));
-  const message = code === "INVENTORY_PUBLICATION_TARGET_BUSY"
+  const message = readFailure
+    ? readFailure.kind === "refused" ? "The channel refused the listing read. Review the saved read diagnostic before retrying."
+      : "Echelon could not read a complete, valid listing response. Existing write evidence remains protected."
+    : code === "INVENTORY_PUBLICATION_TARGET_BUSY"
     ? "An inventory update is using this listing. The saved listing update will retry automatically."
     : code === "CANONICAL_PUBLICATION_MAPPING_MISSING"
       ? "Inventory setup stopped this listing update before its pictures could be confirmed. Retry Sync to prepare this listing's inventory connection."

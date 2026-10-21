@@ -38,7 +38,7 @@ export const ebayListingSyncJobSchema = z.object({
   code: z.string().max(100).nullable(), message: z.string().max(1000).nullable(),
   nextAttemptAt: z.string().datetime(), updatedAt: z.string().datetime(),
   issue: ebayListingIssueSchema.optional(),
-  providerRead: channelProviderReadDiagnosticSchema.nullish(),
+  providerRead: channelProviderReadDiagnosticSchema.nullish().transform(value => value ?? undefined),
   // Older saved responses remain readable while the server adds event evidence.
   progress: ebayListingSyncProgressSchema.optional(),
   // Inventory's owner supplies current readback evidence independently of

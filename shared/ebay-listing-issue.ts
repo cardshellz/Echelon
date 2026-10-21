@@ -53,7 +53,8 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
   const readFailure = parsedRead.success ? parsedRead.data : null;
   const isObservationReadFailure = readFailure?.kind !== "refused" && (readFailure !== null
     || ["EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID", "EBAY_REGISTRATION_PROVIDER_RESPONSE_TOO_LARGE",
-      "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED"].includes(code));
+      "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED", "EBAY_REGISTRATION_PROVIDER_READ_TIMEOUT",
+      "EBAY_REGISTRATION_PROVIDER_READ_UNAVAILABLE", "EBAY_REGISTRATION_PROVIDER_READ_FAILED"].includes(code));
   const productPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/products/${input.productId}` : "/channels/ebay";
   const inventoryPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/channels/inventory?product=${input.productId}` : "/channels/inventory";
   const reference = input.jobId && /^[a-f0-9-]{36}$/i.test(input.jobId) ? input.jobId : undefined;
@@ -78,6 +79,14 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       "An older request has no reliable final receipt. Echelon cannot safely resume this listing without reviewing that unknown outcome.",
       "Open recovery, review the affected listing and authorize a fresh update using current values. The old outcome remains unknown in the audit history.",
       false, "check_recovery", "Review recovery");
+  if (readFailure?.kind === "refused") return issue("The channel refused the listing check",
+    "Echelon received a refusal when reading this listing. No successful listing check was recorded.",
+    readFailure.httpStatus === 401 || readFailure.httpStatus === 403
+      ? "Open connection settings and check the seller authorization, then retry Sync."
+      : "Review the saved read details before retrying. The endpoint and HTTP status identify the refused request.",
+    false, readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "reconnect" : "check_status",
+    readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "Open connection settings" : "View update status",
+    readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "/channels/ebay#connection" : undefined);
   if (isObservationReadFailure) {
     const retrying = input.state === "recovering";
     const result = issue(retrying ? "Retrying the listing check" : "The listing check could not finish",
