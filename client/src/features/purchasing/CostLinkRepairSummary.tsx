@@ -1,3 +1,4 @@
+import React from "react";
 import type { CostLinkRepairSummary as Summary } from "@shared/procurement/cost-link-repair";
 import { exactMoneyAsInput } from "@/lib/exact-money-input";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";

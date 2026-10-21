@@ -1,3 +1,4 @@
+import React from "react";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
 
 export function CostIssueMessage({ issue }: { issue: CostIssue }) {

@@ -1,3 +1,4 @@
+import React from "react";
 import { Link } from "wouter";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
 import { Button } from "@/components/ui/button";
