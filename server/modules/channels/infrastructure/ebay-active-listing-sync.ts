@@ -500,8 +500,9 @@ const existingListingConnector = new EbayMarketplaceListingConnector({
   inventoryDelayMs: 200,
   offerDelayMs: 200,
 });
+export const ebayListingSyncRepository = new PostgresEbayListingSyncRepository(pool, ebayPublicationRejectionReader);
 export const ebayListingSyncService = new EbayListingSyncService(
-  new PostgresEbayListingSyncRepository(pool, ebayPublicationRejectionReader),
+  ebayListingSyncRepository,
   new EbayWithdrawalOperationExecution(new EbayListingOperationExecution(new EbayExistingListingSyncExecution(
     prepareActiveEbayListingSync,
     quantityProviderResponseRecovery,
@@ -513,15 +514,35 @@ export const ebayListingSyncService = new EbayListingSyncService(
   randomUUID,
   ebayPublicationReconciliationRepository,
 );
+/** Batch selection uses exactly the same eligibility owner as manual Sync. */
+export async function selectActiveEbaySyncProducts() {
+  const ctx = await context();
+  const rows = await readActiveEbaySyncRows(null);
+  const selected = new Map(rows.map(row => [row.product_id, {
+    productId: row.product_id, name: row.product_name ?? row.product_sku ?? `Product ${row.product_id}`, sku: row.product_sku,
+  }]));
+  return {
+    destination: { channelId: EBAY_CHANNEL_ID, provider: "ebay", connectionId: ctx.conn.id,
+      accountId: ctx.account.externalAccountId, environment: ctx.authService.getEnvironment(), marketplaceId: ctx.marketplaceId },
+    products: [...selected.values()],
+  };
+}
 export async function syncActiveListings(
   filter: SyncFilter | null,
   actor = "ebay-listing-sync",
   commandKey?: string,
   expectedDestination?: { connectionId: number; accountId: string; environment?: "production" | "sandbox"; marketplaceId?: string },
+  commandKeys?: ReadonlyMap<number, string>,
 ): Promise<EbayProductSyncResult> {
   filter = filterSchema.parse(filter);
   const validatedActor = z.string().trim().min(1).max(200).parse(actor);
   if (commandKey !== undefined) z.string().uuid().parse(commandKey);
+  if (commandKeys) {
+    const ids = filter?.productIds ?? [];
+    if (commandKey || ids.length !== commandKeys.size || ids.some(id => !commandKeys.has(id)))
+      throw new EbayListingSyncError("EBAY_SYNC_COMMAND_SCOPE_INVALID", "Saved commands must match the requested products.");
+    for (const key of commandKeys.values()) z.string().uuid().parse(key);
+  }
   const ctx = await context();
   if (expectedDestination) {
     const expected = z.object({ connectionId: z.number().int().positive().max(2147483647),
@@ -562,7 +583,7 @@ export async function syncActiveListings(
         return identity;
       },
     };
-  }), { channelId: EBAY_CHANNEL_ID, actor: validatedActor, commandKey: productIds.length ? commandKey : undefined }, {
+  }), { channelId: EBAY_CHANNEL_ID, actor: validatedActor, commandKey: productIds.length ? commandKey : undefined, commandKeys }, {
     findAcceptedCommand: async (key, productId, requestedBy) => {
       const saved = await ebayListingSyncService.getByCommand(key, EBAY_CHANNEL_ID, requestedBy, "sync");
       if (saved && (saved.productId !== productId || saved.identity.connectionId !== ctx.conn.id
