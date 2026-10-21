@@ -1,3 +1,9 @@
+import {
+  readStockClearingEvidence,
+  fenceStockClearingEvidence,
+} from "../../../inventory-planning/stock-clearing-evidence";
+import { quantityPublicationScopeLockKey } from "../../../inventory-planning/infrastructure/quantity-publication-admission.repository";
+import type { QuantityPublicationScope } from "../../../inventory-planning/domain/quantity-publication-admission";
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -63,6 +69,59 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       if (!row) throw new Error("missing delivery");
       return row;
     }
+    // Production requests can carry no Catalog hints. Persist the actual
+    // admission owner's keys, including group member identities, in these tests.
+    function scope(
+      overrides: Partial<QuantityPublicationScope> = {},
+    ): QuantityPublicationScope {
+      return {
+        destinationKind: "channel_connection",
+        connectionId: 4,
+        providerKey: "ebay",
+        providerScopeType: "account",
+        externalScopeId: "seller-a",
+        externalInventoryItemId: "SKU-A",
+        productId: null,
+        productVariantId: null,
+        ...overrides,
+      };
+    }
+    async function attempt(
+      root: QuantityPublicationScope,
+      members: QuantityPublicationScope[] = [root],
+      state: "uncertain" | "succeeded" = "uncertain",
+    ) {
+      return (
+        await database.pool.query<{ id: string }>(
+          `INSERT INTO inventory.quantity_publication_attempts(owner_token,owner_kind,gate_epoch,scope_key,scope,
+          affected_scope_keys,affected_scopes,state,started_at,completed_at)
+         VALUES($1,'legacy',0,$2,$3,$4,$5,$6,$7,$8) RETURNING id::text`,
+          [
+            randomUUID(),
+            quantityPublicationScopeLockKey(root),
+            JSON.stringify(root),
+            members.map(quantityPublicationScopeLockKey),
+            JSON.stringify(members),
+            state,
+            now,
+            state === "succeeded" ? new Date(now.getTime() + 1000) : null,
+          ],
+        )
+      ).rows[0].id;
+    }
+    async function catchup(identity: QuantityPublicationScope) {
+      return (
+        await database.pool.query<{ id: string }>(
+          `INSERT INTO inventory.quantity_publication_catchup(scope_key,scope,reason,next_attempt_at,updated_at)
+         VALUES($1,$2,'retained work',$3,$3) RETURNING id::text`,
+          [
+            quantityPublicationScopeLockKey(identity),
+            JSON.stringify(identity),
+            now,
+          ],
+        )
+      ).rows[0].id;
+    }
     beforeEach(async () => {
       vi.resetAllMocks();
       now = new Date("2026-10-20T20:00:00Z");
@@ -90,6 +149,260 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     afterEach(async () => {
       await database?.close();
     });
+    it.each(["uncertain", "succeeded"] as const)(
+      "does not block other products with an unhinted %s group request",
+      async (state) => {
+        await exclude();
+        await verifyZero(database.pool, now);
+        const root = scope({ externalInventoryItemId: "group:OTHER-PRODUCT" });
+        const id = await attempt(
+          root,
+          [
+            root,
+            scope({ externalInventoryItemId: "OTHER-PACK" }),
+            scope({ externalInventoryItemId: "OTHER-CASE" }),
+          ],
+          state,
+        );
+        await worker().processDue();
+        expect((await rows())[0].state).toBe("not_applicable");
+        expect(
+          (
+            await database.pool.query(
+              "SELECT state FROM inventory.quantity_publication_attempts WHERE id=$1",
+              [id],
+            )
+          ).rows[0].state,
+        ).toBe(state);
+        expect(sync).not.toHaveBeenCalled();
+      },
+    );
+    it("does not manufacture completion when an unrelated request was the only pending blocker", async () => {
+      await exclude();
+      await attempt(scope({ externalInventoryItemId: "OTHER-PRODUCT" }));
+      await worker().processDue();
+      const [row] = await rows();
+      expect(row.state).toBe("waiting_lifecycle");
+      expect(
+        row.lifecycle.members.map((member: { code: string }) => member.code),
+      ).toEqual([
+        "LISTING_STOCK_CLEARING_UNPROVEN",
+        "LISTING_STOCK_CLEARING_UNPROVEN",
+      ]);
+    });
+    it.each(["root", "affected"])(
+      "retains the exact unhinted %s member request without blocking its sibling",
+      async (kind) => {
+        await exclude();
+        await verifyZero(database.pool, now);
+        const member = scope();
+        const root =
+          kind === "root"
+            ? member
+            : scope({ externalInventoryItemId: "group:PRODUCT" });
+        const id = await attempt(root, [
+          root,
+          member,
+          scope({ externalInventoryItemId: "OTHER-PACK" }),
+        ]);
+        await worker().processDue();
+        const [row] = await rows();
+        expect(row.state).toBe("waiting_lifecycle");
+        expect(row.lifecycle.members[0]).toMatchObject({
+          state: "pending",
+          references: ["request:" + id],
+        });
+        expect(row.lifecycle.members[1].state).toBe("settled");
+      },
+    );
+    it.each([true, false])(
+      "scopes unhinted catch-up to its exact retained member (matching=%s)",
+      async (matching) => {
+        await exclude();
+        await verifyZero(database.pool, now);
+        const id = await catchup(
+          scope({ externalInventoryItemId: matching ? "SKU-A" : "OTHER-PACK" }),
+        );
+        await worker().processDue();
+        const [row] = await rows();
+        expect(row.state).toBe(
+          matching ? "waiting_lifecycle" : "not_applicable",
+        );
+        expect(row.lifecycle.members[0].state).toBe(
+          matching ? "pending" : "settled",
+        );
+        expect(row.lifecycle.members[1].state).toBe("settled");
+        expect(
+          (
+            await database.pool.query(
+              "SELECT completed_revision::text n FROM inventory.quantity_publication_catchup WHERE id=$1",
+              [id],
+            )
+          ).rows[0].n,
+        ).toBe("0");
+      },
+    );
+    it("invalidates only the affected member's proof after a later unhinted completed request", async () => {
+      await exclude();
+      await verifyZero(database.pool, now);
+      await attempt(scope(), [scope()], "succeeded");
+      await worker().processDue();
+      const [row] = await rows();
+      expect(row.state).toBe("waiting_lifecycle");
+      expect(row.lifecycle.members[0]).toMatchObject({
+        state: "attention",
+        code: "LISTING_STOCK_CLEARING_UNPROVEN",
+      });
+      expect(row.lifecycle.members[1].state).toBe("settled");
+    });
+    it.each([
+      { label: "provider", override: { providerKey: "shopify" } },
+      { label: "account", override: { externalScopeId: "other-seller" } },
+      { label: "location", override: { providerScopeType: "location" } },
+      { label: "connection", override: { connectionId: 40 } },
+      {
+        label: "destination",
+        override: { destinationKind: "dropship_store_connection" },
+      },
+    ] satisfies Array<{
+      label: string;
+      override: Partial<QuantityPublicationScope>;
+    }>)(
+      "keeps unhinted requests and catch-up isolated by $label",
+      async ({ override }) => {
+        await exclude();
+        await verifyZero(database.pool, now);
+        const identity = scope(override);
+        await attempt(identity);
+        await catchup(identity);
+        await attempt(identity, [identity], "succeeded");
+        await worker().processDue();
+        expect((await rows())[0].state).toBe("not_applicable");
+      },
+    );
+    it.each([
+      {
+        providerKey: "ebay",
+        destinationKind: "channel_connection",
+        providerScopeType: "account",
+      },
+      {
+        providerKey: "walmart",
+        destinationKind: "channel_connection",
+        providerScopeType: "account",
+      },
+      {
+        providerKey: "shopify",
+        destinationKind: "channel_connection",
+        providerScopeType: "location",
+      },
+      {
+        providerKey: "shopify",
+        destinationKind: "dropship_store_connection",
+        providerScopeType: "location",
+      },
+    ] satisfies Array<
+      Pick<
+        QuantityPublicationScope,
+        "providerKey" | "destinationKind" | "providerScopeType"
+      >
+    >)(
+      "uses shared exact member matching for $providerKey / $destinationKind",
+      async (identity) => {
+        await verifyZero(database.pool, now);
+        const dropship =
+          identity.destinationKind === "dropship_store_connection";
+        await database.pool.query(
+          `UPDATE inventory.inventory_publication_targets
+          SET destination_kind=$1,channel_connection_id=$2,dropship_store_connection_id=$3,provider_scope_type=$4`,
+          [
+            identity.destinationKind,
+            dropship ? null : 4,
+            dropship ? 4 : null,
+            identity.providerScopeType,
+          ],
+        );
+        await database.pool.query(
+          `UPDATE inventory.inventory_publication_outbox
+          SET destination_kind_snapshot=$1,channel_connection_id_snapshot=$2,dropship_store_connection_id_snapshot=$3,
+            provider_scope_type_snapshot=$4,provider_key_snapshot=$5`,
+          [
+            identity.destinationKind,
+            dropship ? null : 4,
+            dropship ? 4 : null,
+            identity.providerScopeType,
+            identity.providerKey,
+          ],
+        );
+        await database.pool.query(
+          `UPDATE inventory.inventory_publication_readbacks
+          SET destination_kind_snapshot=$1,channel_connection_id_snapshot=$2,dropship_store_connection_id_snapshot=$3,provider_scope_type_snapshot=$4`,
+          [
+            identity.destinationKind,
+            dropship ? null : 4,
+            dropship ? 4 : null,
+            identity.providerScopeType,
+          ],
+        );
+        const id = await attempt(scope(identity));
+        const client = await database.pool.connect();
+        try {
+          await client.query("BEGIN");
+          await fenceStockClearingEvidence(client);
+          const evidence = await readStockClearingEvidence(client, {
+            destinationKind: identity.destinationKind,
+            connectionId: 4,
+            accountId: "seller-a",
+            providerKey: identity.providerKey,
+            productId: 20,
+            productVariantIds: [101, 102],
+          });
+          expect(evidence[0]).toMatchObject({
+            state: "pending",
+            references: ["request:" + id],
+          });
+          expect(evidence[1].state).toBe("settled");
+        } finally {
+          await client.query("ROLLBACK");
+          client.release();
+        }
+      },
+    );
+    it.each(["mapping", "outbox", "alias"])(
+      "retains an exact historic %s identity after remapping",
+      async (source) => {
+        await exclude();
+        await verifyZero(database.pool, now);
+        if (source === "mapping") {
+          await database.pool
+            .query(`INSERT INTO inventory.publication_variant_mapping_versions
+          (id,publication_target_id,product_variant_id,lifecycle_status,external_inventory_item_id)
+          VALUES(201,1,101,'retired','OLD-ITEM')`);
+        } else if (source === "outbox") {
+          await database.pool
+            .query(`INSERT INTO inventory.inventory_publication_outbox
+          (id,publication_target_id,product_variant_id,destination_kind_snapshot,channel_connection_id_snapshot,
+           state,desired_quantity,desired_revision,external_inventory_item_id_snapshot,external_scope_id_snapshot)
+          VALUES(201,1,101,'channel_connection',4,'cancelled',3,0,'OLD-ITEM','old-seller')`);
+        } else {
+          await database.pool.query(
+            "UPDATE inventory.publication_variant_mapping_versions SET external_sku='OLD-ITEM' WHERE id=101",
+          );
+        }
+        const id = await attempt(
+          scope({
+            externalInventoryItemId: "OLD-ITEM",
+            externalScopeId: source === "outbox" ? "old-seller" : "seller-a",
+          }),
+        );
+        await worker().processDue();
+        expect((await rows())[0].lifecycle.members[0]).toMatchObject({
+          state: "pending",
+          references: ["request:" + id],
+        });
+        expect((await rows())[0].lifecycle.members[1].state).toBe("settled");
+      },
+    );
     it("retains excluded members and shows their unverified clearing duty without calling content sync", async () => {
       await exclude();
       await worker().processDue();
@@ -236,7 +549,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
         );
       if (kind === "later-positive")
         await database.pool.query(
-          "INSERT INTO inventory.inventory_publication_outbox VALUES(103,1,101,'channel_connection',4,NULL,'verified',12,2,'SKU-A')",
+          "INSERT INTO inventory.inventory_publication_outbox(id,publication_target_id,product_variant_id,destination_kind_snapshot,channel_connection_id_snapshot,dropship_store_connection_id_snapshot,state,desired_quantity,desired_revision,external_inventory_item_id_snapshot) VALUES(103,1,101,'channel_connection',4,NULL,'verified',12,2,'SKU-A')",
         );
       await worker().processDue();
       expect((await rows())[0].state).toBe("waiting_lifecycle");

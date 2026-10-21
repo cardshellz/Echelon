@@ -34,10 +34,12 @@ export async function installIntentLifecycleFixture(pool: Pool) {
     CREATE TABLE inventory.publication_variant_mapping_heads(publication_target_id int,product_variant_id int,active_mapping_id int,
       PRIMARY KEY(publication_target_id,product_variant_id));
     CREATE TABLE inventory.publication_variant_mapping_versions(id int PRIMARY KEY,publication_target_id int,product_variant_id int,
-      lifecycle_status text,external_inventory_item_id text);
+      lifecycle_status text,external_inventory_item_id text,external_sku text);
     CREATE TABLE inventory.inventory_publication_outbox(id bigint PRIMARY KEY,publication_target_id int,product_variant_id int,
       destination_kind_snapshot text,channel_connection_id_snapshot int,dropship_store_connection_id_snapshot int,state text,
-      desired_quantity bigint,desired_revision bigint,external_inventory_item_id_snapshot text);
+      desired_quantity bigint,desired_revision bigint,external_inventory_item_id_snapshot text,
+      provider_key_snapshot text DEFAULT 'ebay',provider_scope_type_snapshot text DEFAULT 'account',
+      external_scope_id_snapshot text DEFAULT 'seller-a',external_sku_snapshot text);
     CREATE UNIQUE INDEX inventory_publication_outbox_target_variant_revision_uq
       ON inventory.inventory_publication_outbox(publication_target_id,product_variant_id,desired_revision);
     CREATE TABLE inventory.inventory_publication_readbacks(id bigint PRIMARY KEY,publication_target_id int,product_variant_id int,outbox_id bigint,
@@ -60,8 +62,8 @@ export async function installIntentLifecycleFixture(pool: Pool) {
 export async function verifyZero(pool: Pool, now: Date) {
   await pool.query(`INSERT INTO inventory.inventory_publication_targets VALUES(1,'channel_connection',4,NULL,1,'account','seller-a') ON CONFLICT DO NOTHING;
     INSERT INTO inventory.publication_variant_mapping_heads VALUES(1,101,101),(1,102,102) ON CONFLICT DO NOTHING;
-    INSERT INTO inventory.publication_variant_mapping_versions VALUES(101,1,101,'sealed','SKU-A'),(102,1,102,'sealed','SKU-B') ON CONFLICT DO NOTHING;
-    INSERT INTO inventory.inventory_publication_outbox VALUES(101,1,101,'channel_connection',4,NULL,'verified',0,1,'SKU-A'),
+    INSERT INTO inventory.publication_variant_mapping_versions(id,publication_target_id,product_variant_id,lifecycle_status,external_inventory_item_id) VALUES(101,1,101,'sealed','SKU-A'),(102,1,102,'sealed','SKU-B') ON CONFLICT DO NOTHING;
+    INSERT INTO inventory.inventory_publication_outbox(id,publication_target_id,product_variant_id,destination_kind_snapshot,channel_connection_id_snapshot,dropship_store_connection_id_snapshot,state,desired_quantity,desired_revision,external_inventory_item_id_snapshot) VALUES(101,1,101,'channel_connection',4,NULL,'verified',0,1,'SKU-A'),
       (102,1,102,'channel_connection',4,NULL,'verified',0,1,'SKU-B') ON CONFLICT DO NOTHING;`);
   await pool.query(
     `INSERT INTO inventory.inventory_publication_readbacks

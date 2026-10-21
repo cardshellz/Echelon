@@ -1,3 +1,7 @@
+import {
+  readStockClearingScopeBindings,
+  stockClearingAttemptMatchesMemberSql,
+} from "./stock-clearing-scope.reader";
 import { QUANTITY_PUBLICATION_LOCK_NAMESPACE } from "./quantity-publication-admission.repository";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 import { z } from "zod";
@@ -10,6 +14,7 @@ const inputSchema = z
     ]),
     connectionId: z.number().int().positive(),
     accountId: z.string().min(1),
+    providerKey: z.enum(["ebay", "shopify", "walmart"]),
     productId: z.number().int().positive(),
     productVariantIds: z.array(z.number().int().positive()).max(250),
   })
@@ -44,19 +49,25 @@ export async function readStockClearingEvidence(
       AND h.product_variant_id=ANY($3::int[]) FOR SHARE OF h`,
     [input.destinationKind, input.connectionId, input.productVariantIds],
   );
+  const bindings = await readStockClearingScopeBindings(client, input);
+  const bindingJson = JSON.stringify(bindings);
   const work = (
     await client.query<{
-      product_variant_id: number | null;
+      product_variant_id: number;
       kind: string;
       id: string;
     }>(
-      `SELECT (s->>'productVariantId')::integer product_variant_id,'request' kind,a.id::text
-       FROM inventory.quantity_publication_attempts a CROSS JOIN LATERAL jsonb_array_elements(a.affected_scopes || jsonb_build_array(a.scope)) s
-       WHERE a.state IN ('running','uncertain') AND s->>'destinationKind'=$1 AND s->>'connectionId'=$2
-         AND ((s->>'productVariantId' IS NULL AND (s->>'productId' IS NULL OR (s->>'productId')::integer=$4)) OR (s->>'productVariantId')::integer=ANY($3::integer[]))
-       UNION ALL SELECT (scope->>'productVariantId')::integer,'catchup',id::text
-       FROM inventory.quantity_publication_catchup WHERE completed_revision<revision AND scope->>'destinationKind'=$1
-         AND scope->>'connectionId'=$2 AND ((scope->>'productVariantId' IS NULL AND (scope->>'productId' IS NULL OR (scope->>'productId')::integer=$4)) OR (scope->>'productVariantId')::integer=ANY($3::integer[]))
+      `WITH bindings AS (SELECT * FROM jsonb_to_recordset($5::jsonb) AS b("productVariantId" int,"scopeKey" text))
+       SELECT v.id product_variant_id,'request' kind,a.id::text
+       FROM inventory.quantity_publication_attempts a CROSS JOIN unnest($3::int[]) v(id)
+       WHERE a.state IN ('running','uncertain') AND ${stockClearingAttemptMatchesMemberSql}
+       UNION ALL SELECT v.id,'catchup',c.id::text
+       FROM inventory.quantity_publication_catchup c CROSS JOIN unnest($3::int[]) v(id)
+       WHERE c.completed_revision<c.revision AND (
+         c.scope_key IN (SELECT b."scopeKey" FROM bindings b WHERE b."productVariantId"=v.id)
+         OR (c.scope->>'destinationKind'=$1 AND c.scope->>'connectionId'=$2
+           AND ((c.scope->>'productVariantId')::integer=v.id
+             OR (c.scope->>'productVariantId' IS NULL AND (c.scope->>'productId')::integer=$4))))
        UNION ALL SELECT product_variant_id,'outbox',id::text FROM inventory.inventory_publication_outbox
        WHERE destination_kind_snapshot=$1 AND COALESCE(channel_connection_id_snapshot,dropship_store_connection_id_snapshot)::text=$2
          AND product_variant_id=ANY($3::integer[]) AND state NOT IN ('verified','cancelled','superseded')`,
@@ -65,6 +76,7 @@ export async function readStockClearingEvidence(
         String(input.connectionId),
         input.productVariantIds,
         input.productId,
+        bindingJson,
       ],
     )
   ).rows;
@@ -74,7 +86,8 @@ export async function readStockClearingEvidence(
       target_id: number;
       readback_id: string | null;
     }>(
-      `SELECT v.id product_variant_id,t.id target_id,proof.id::text readback_id
+      `WITH bindings AS (SELECT * FROM jsonb_to_recordset($6::jsonb) AS b("productVariantId" int,"scopeKey" text))
+       SELECT v.id product_variant_id,t.id target_id,proof.id::text readback_id
      FROM unnest($3::integer[]) v(id)
      JOIN inventory.inventory_publication_targets t ON t.destination_kind=$1
        AND COALESCE(t.channel_connection_id,t.dropship_store_connection_id)::text=$2
@@ -92,34 +105,30 @@ export async function readStockClearingEvidence(
          AND r.dropship_store_connection_id_snapshot IS NOT DISTINCT FROM t.dropship_store_connection_id
          AND r.publication_target_revision_snapshot=t.revision AND r.provider_scope_type_snapshot=t.provider_scope_type
          AND r.external_scope_id_snapshot=t.external_scope_id AND r.external_inventory_item_id_snapshot=m.external_inventory_item_id
-         AND (t.provider_scope_type='location' OR (t.provider_scope_type='account' AND t.external_scope_id=$4))
+         AND (t.provider_scope_type='location' OR (t.provider_scope_type='account' AND t.external_scope_id=$5))
          AND o.state='verified' AND o.desired_quantity=0 AND r.observed_quantity=0 AND r.quantity_consistent IS DISTINCT FROM false AND r.matches_desired=true
          AND o.publication_target_id=t.id AND o.product_variant_id=v.id
          AND o.external_inventory_item_id_snapshot=m.external_inventory_item_id
          AND NOT EXISTS (SELECT 1 FROM inventory.inventory_publication_outbox later
            WHERE later.publication_target_id=t.id AND later.product_variant_id=v.id AND later.desired_revision>o.desired_revision
              AND later.state NOT IN ('cancelled','superseded'))
-         AND NOT EXISTS (SELECT 1 FROM inventory.quantity_publication_attempts a,
-           LATERAL jsonb_array_elements(a.affected_scopes || jsonb_build_array(a.scope)) s
-           WHERE s->>'destinationKind'=$1 AND s->>'connectionId'=$2
-             AND ((s->>'productVariantId' IS NULL AND (s->>'productId' IS NULL OR (s->>'productId')::integer=$5)) OR (s->>'productVariantId')::integer=v.id)
-             AND a.completed_at>r.observed_at)
+         AND NOT EXISTS (SELECT 1 FROM inventory.quantity_publication_attempts a
+           WHERE a.completed_at>r.observed_at AND ${stockClearingAttemptMatchesMemberSql})
        ORDER BY r.observed_at DESC,r.id DESC LIMIT 1
      ) proof ON true`,
       [
         input.destinationKind,
         String(input.connectionId),
         input.productVariantIds,
-        input.accountId,
         input.productId,
+        input.accountId,
+        bindingJson,
       ],
     )
   ).rows;
   return input.productVariantIds.map((productVariantId) => {
     const pending = work.filter(
-      (row) =>
-        row.product_variant_id === null ||
-        row.product_variant_id === productVariantId,
+      (row) => row.product_variant_id === productVariantId,
     );
     if (pending.length)
       return {

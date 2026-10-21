@@ -68,6 +68,12 @@ function ListingIntentChangesPanel({ base, canEdit, active = true, onReview, onO
 
   const attention = rows.filter(row => listingIntentChangePresentation(row).attention).length;
 
+  async function refreshStatus() {
+    setMessage(null);
+    const result = await query.refetch();
+    if (!result.isError) setMessage("Latest saved status loaded. Pending channel work is checked automatically.");
+  }
+
   async function retry(row: ListingIntentChangeStatus) {
 
     if (!canEdit || !listingIntentChangePresentation(row).retry || retrying) return;
@@ -113,7 +119,7 @@ function ListingIntentChangesPanel({ base, canEdit, active = true, onReview, onO
 
       {message && <p role="status">{message}</p>}
 
-      <Button size="sm" variant="outline" disabled={query.isFetching} onClick={() => void query.refetch()}>Refresh status</Button>
+      <Button size="sm" variant="outline" disabled={query.isFetching} onClick={() => void refreshStatus()}>{query.isFetching ? "Refreshing..." : "Refresh status"}</Button>
 
       {query.data && rows.length === 0 && <p className="text-muted-foreground">No saved changes on this page.</p>}
 
