@@ -56,9 +56,51 @@ describe("PgDropshipListingPushStatusRepository", () => {
       items: [{
         itemId: 1, listingId: 100, productVariantId: 101, sku: "ARM-ENV-SGL-P50", productName: "Armalope Envelope Single Pocket", variantName: "Pack of 50",
         status: "failed", errorCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", errorMessage: "eBay listing push failed with HTTP 400: 25002 Invalid value",
-        retryable: false, externalListingId: null, published: null,
+        retryable: false, externalListingId: null, published: null, automaticRetryPending: false,
       }],
     });
+  });
+
+  // Review V2-2: the portal says "Card Shellz will try this listing again automatically" only for an item the push
+  // sweep will re-queue; that is read with the sweep's own guarded selection, and only when a failed item has a code
+  // the automatic re-queue owns (the one-time Q4 code's words never promise a retry).
+  it("marks only the failed items the push sweep will re-queue, reading them only when one could be", async () => {
+    const busy = { ...itemRow, error_code: "DROPSHIP_STOCK_LINK_BUSY", retryable: true };
+    const { pool, calls } = fakePool([result([jobRow]), result([busy, { ...busy, id: 2 }, { ...itemRow, id: 3 }])]);
+    const reads: Array<[unknown, number]> = [];
+    const repository = new PgDropshipListingPushStatusRepository(pool, async (database, jobId) => { reads.push([database, jobId]); return [2]; });
+
+    const job = await repository.loadVendorJob({ vendorId: 10, jobId: 31 });
+
+    expect(reads).toEqual([[pool, 31]]);
+    expect(job?.items.map((item) => [item.itemId, item.automaticRetryPending])).toEqual([[1, false], [2, true], [3, false]]);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("uses the ops repository's guarded pending selection by default, on the same pool", async () => {
+    const busy = { ...itemRow, error_code: "DROPSHIP_STOCK_LINK_BUSY", retryable: true };
+    const { pool, calls } = fakePool([result([jobRow]), result([busy]), result([{ id: 1 }])]);
+
+    const job = await new PgDropshipListingPushStatusRepository(pool).loadVendorJob({ vendorId: 10, jobId: 31 });
+
+    expect(job?.items[0]?.automaticRetryPending).toBe(true);
+    expect(calls).toHaveLength(3);
+    expect(calls[2]?.sql).toContain("FROM dropship.dropship_listing_push_job_items i JOIN dropship.dropship_listing_push_jobs j ON j.id = i.job_id");
+    expect(calls[2]?.sql).toContain("COALESCE(i.result -> 'automaticRequeue' ->> 'state', '') = ''");
+    expect(calls[2]?.values).toContain(31);
+  });
+
+  it.each([
+    ["no failed item with a re-queue code", [itemRow]],
+    ["only the one-time re-send code", [{ ...itemRow, error_code: "PUBLICATION_LISTING_TARGET_UNMAPPED" }]],
+    ["a re-queue code on an item that is not failed", [{ ...itemRow, status: "queued", error_code: "DROPSHIP_STOCK_LINK_BUSY" }]],
+  ])("reads nothing more with %s", async (_name, rows) => {
+    const { pool } = fakePool([result([jobRow]), result(rows)]);
+    const reads: number[] = [];
+    const job = await new PgDropshipListingPushStatusRepository(pool, async (_database, jobId) => { reads.push(jobId); return []; })
+      .loadVendorJob({ vendorId: 10, jobId: 31 });
+    expect(reads).toEqual([]);
+    expect(job?.items.every((item) => item.automaticRetryPending === false)).toBe(true);
   });
 
   it("reads an unknown environment as unknown, never as production", async () => {

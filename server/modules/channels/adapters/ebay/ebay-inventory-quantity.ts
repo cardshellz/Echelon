@@ -96,11 +96,33 @@ export interface EbayInventoryQuantityObservation {
   quantityConsistent: boolean;
 }
 
+/** The one PUBLISHED offer discovery resolved, as an owner's identity check sees it. */
+export interface EbayResolvedPublishedOffer {
+  readonly offerId: string;
+  readonly sku: string;
+  readonly marketplaceId: string;
+}
+
+export interface EbayInventoryQuantityOptions {
+  /**
+   * Owner identity check on the resolved PUBLISHED offer, run before any item read
+   * or quantity write. A throw means nothing was sent (publish wraps it as a
+   * preflight refusal). Absent: any single PUBLISHED offer for the SKU is used,
+   * as before (the channel adapter passes none).
+   */
+  readonly expectOffer?: (offer: EbayResolvedPublishedOffer) => void;
+}
+
+function checkExpectedOffer(offer: z.infer<typeof offerSchema>, options: EbayInventoryQuantityOptions): void {
+  options.expectOffer?.({ offerId: offer.offerId, sku: offer.sku, marketplaceId: offer.marketplaceId });
+}
+
 /** Provider availability, not an ATP formula: eBay caps a listing by BOTH quantities. */
 export async function readEbayInventoryQuantity(
-  client: EbayInventoryQuantityClient, sku: string, marketplaceId: string,
+  client: EbayInventoryQuantityClient, sku: string, marketplaceId: string, options: EbayInventoryQuantityOptions = {},
 ): Promise<EbayInventoryQuantityObservation> {
   const offer = await publishedOffer(client, sku, marketplaceId);
+  checkExpectedOffer(offer, options);
   return observeQuantity(client, sku, marketplaceId, offer);
 }
 
@@ -132,6 +154,7 @@ export type EbayInventoryQuantityPublication = {
  * independent readback under the ordinary exact-scope admission boundary. */
 export async function publishEbayInventoryQuantity(
   client: EbayInventoryQuantityClient, sku: string, marketplaceId: string, quantity: number,
+  options: EbayInventoryQuantityOptions = {},
 ): Promise<EbayInventoryQuantityPublication> {
   let offer: z.infer<typeof offerSchema>;
   try {
@@ -139,6 +162,8 @@ export async function publishEbayInventoryQuantity(
       throw new EbayInventoryQuantityError("EBAY_INVENTORY_QUANTITY_INVALID", "The desired eBay quantity must be a nonnegative safe integer.");
     }
     offer = await publishedOffer(client, sku, marketplaceId);
+    // Inside the preflight: an identity refusal is a proven no-send.
+    checkExpectedOffer(offer, options);
     if (offer.availableQuantity === quantity) {
       const observation = await observeQuantity(client, sku, marketplaceId, offer);
       // Matching min(item, offer) is insufficient: the other limit must not be
