@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
+import { LIVE_LISTING_STATUSES, listingStatusAfterCompletedPush } from "../domain/listing-live-status";
 import type { DropshipStoreListingConfig } from "../application/dropship-marketplace-listing-provider";
 import type {
   DropshipListingPushWorkerEligibility,
@@ -229,7 +230,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
               workerId: input.workerId,
             },
           }),
-          input.intent.listingMode === "live" ? "active" : "paused",
+          listingStatusAfterCompletedPush(input.intent.listingMode),
         ],
       );
       await recordListingSyncEvent(client, {
@@ -405,13 +406,30 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
         },
         now: input.now,
       });
+      let listingStatus: { before: string; after: string } | null = null;
       if (input.item.listingId !== null) {
-        await client.query(
-          `UPDATE dropship.dropship_vendor_listings
-           SET status = $2,
-               metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+        // A failed or blocked update of a listing that is live on its
+        // marketplace changed nothing buyers see: it keeps its live status, so
+        // it still takes orders (domain/listing-live-status). The error is
+        // still recorded on the listing, its sync history and the audit trail.
+        // Decided on the locked row in one statement; the CTE only reports the
+        // status before the update for the audit row.
+        const updated = await client.query<{ previous_status: string; status: string }>(
+          `WITH current_listing AS (
+             SELECT id, status FROM dropship.dropship_vendor_listings WHERE id = $1 FOR UPDATE
+           )
+           UPDATE dropship.dropship_vendor_listings AS listing
+           SET status = CASE
+                 WHEN NULLIF(BTRIM(listing.external_listing_id), '') IS NOT NULL
+                   AND listing.status = ANY($5::text[])
+                 THEN listing.status
+                 ELSE $2
+               END,
+               metadata = COALESCE(listing.metadata, '{}'::jsonb) || $3::jsonb,
                updated_at = $4
-           WHERE id = $1`,
+           FROM current_listing
+           WHERE listing.id = current_listing.id
+           RETURNING current_listing.status AS previous_status, listing.status`,
           [
             input.item.listingId,
             input.status,
@@ -426,8 +444,11 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
               },
             }),
             input.now,
+            [...LIVE_LISTING_STATUSES],
           ],
         );
+        const row = updated.rows[0];
+        listingStatus = row ? { before: row.previous_status, after: row.status } : null;
         await recordListingSyncEvent(client, {
           listingId: input.item.listingId,
           eventType: input.status === "blocked" ? "listing_push_blocked" : "listing_push_failed",
@@ -438,6 +459,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
             code: input.code,
             message: input.message,
             retryable: input.retryable,
+            listingStatus,
           },
           occurredAt: input.now,
         });
@@ -455,6 +477,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
           code: input.code,
           message: input.message,
           retryable: input.retryable,
+          listingStatus,
         },
         occurredAt: input.now,
       });
