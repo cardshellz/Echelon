@@ -630,13 +630,34 @@ describe("verified order edit review", () => {
     { isUncertain: true },
     { error: "We could not check your edit." },
   ])("retains customer recovery after an expiry or failed response: %s", (overrides) => {
-    expect(renderOperation(operation, { audience: "customer", ...overrides })).toContain("Check status");
+    expect(renderOperation(operation, { audience: "customer", ...overrides })).toContain("Try again");
   });
   it("retains customer recovery for a server-reported error on a ready review", () => {
-    expect(renderOperation({ ...operation, error: { code: "READBACK_REQUIRED", message: "Check the latest status." } }, { audience: "customer" })).toContain("Check status");
+    expect(renderOperation({ ...operation, error: { code: "READBACK_REQUIRED", message: "Check the latest status." } }, { audience: "customer" })).toContain("Try again");
   });
-  it("retains the customer status action while payment is pending", () => {
-    expect(renderOperation({ ...operation, status: "awaiting_payment" }, { audience: "customer" })).toContain("Check status");
+  it("observes ordinary customer payment progress without a manual status action", () => {
+    for (const status of ["awaiting_payment", "synchronizing", "completed"] as const) {
+      const html = renderOperation({ ...operation, status }, { audience: "customer" });
+      expect(html).not.toContain("Check status");
+      expect(html).not.toContain("Try again");
+      expect(html).toContain('aria-live="polite"');
+    }
+  });
+  it("treats an acknowledged pending payment as progress, while real failures offer retry", () => {
+    const pending = { ...operation, status: "awaiting_payment" as const,
+      error: {code:"ORDER_EDIT_PAYMENT_PENDING",message:"Pending native payment"} };
+    const html = renderOperation(pending, {audience:"customer"});
+    expect(html).toContain("Your payment is processing.");
+    expect(html).not.toContain("Try again");
+    expect(html).not.toContain("Pending native payment");
+    expect(renderOperation({...pending,error:{code:"PROVIDER_UNAVAILABLE",message:"Could not verify payment"}}, {audience:"customer"})).toContain("Try again");
+  });
+  it("opens the customer's verified payment URL in the same tab and preserves the staff workflow", () => {
+    const payment = {...operation,status:"awaiting_payment" as const,paymentUrl:"https://shop.example/pay"};
+    const customer = renderOperation(payment,{audience:"customer"});
+    expect(customer).toContain('href="https://shop.example/pay"');
+    expect(customer).not.toContain('target="_blank"');
+    expect(renderOperation(payment)).toContain('target="_blank"');
   });
   it("shows the additional amount and a commit action only at ready", () => {
     const html = renderOperation(operation);

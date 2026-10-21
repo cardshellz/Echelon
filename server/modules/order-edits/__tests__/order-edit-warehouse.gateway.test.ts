@@ -52,6 +52,8 @@ function fixture() {
   const commands: string[] = [];
   const query = vi.fn(async (text: string, values: unknown[] = []) => {
     commands.push(text);
+    if (text.includes("UPDATE oms.order_edit_provider_holds SET released_at="))
+      return { rows: [], rowCount: 0 };
     if (text.includes("UPDATE wms.orders SET order_edit_operation_id=NULL")) {
       let count = 0;
       for (const order of orders)
@@ -171,7 +173,8 @@ describe("atomic warehouse edit release proof", () => {
         text.includes("SET order_edit_operation_id=NULL"),
       ),
     ).toBe(false);
-    await finalizeOrderEditWarehouseRelease(f.client, 20, OPERATION, proof);
+    await finalizeOrderEditWarehouseRelease(f.client, 20, OPERATION, proof, "2026-10-05T00:01:00.000Z");
+    expect(f.commands.some(command=>command.includes("UPDATE oms.order_edit_provider_holds SET released_at="))).toBe(true);
     expect(f.orders[0].order_edit_operation_id).toBeNull();
     expect(f.orders[0].on_hold).toBe(1);
   });
@@ -180,7 +183,7 @@ describe("atomic warehouse edit release proof", () => {
     const proof = await f.gateway.releaseUnchanged(20, OPERATION);
     f.orders.push({ ...f.orders[0], id: 11 });
     await expect(
-      finalizeOrderEditWarehouseRelease(f.client, 20, OPERATION, proof),
+      finalizeOrderEditWarehouseRelease(f.client, 20, OPERATION, proof, "2026-10-05T00:01:00.000Z"),
     ).rejects.toMatchObject({ code: "ORDER_EDIT_RELEASE_CHANGED" });
     expect(
       f.orders.every((row) => row.order_edit_operation_id === OPERATION),
@@ -191,7 +194,7 @@ describe("atomic warehouse edit release proof", () => {
     const proof = await f.gateway.releaseUnchanged(20, OPERATION);
     f.items[0].quantity = 2;
     await expect(
-      finalizeOrderEditWarehouseRelease(f.client, 20, OPERATION, proof),
+      finalizeOrderEditWarehouseRelease(f.client, 20, OPERATION, proof, "2026-10-05T00:01:00.000Z"),
     ).rejects.toMatchObject({ code: "ORDER_EDIT_RELEASE_CHANGED" });
     expect(f.orders[0].order_edit_operation_id).toBe(OPERATION);
   });
@@ -200,7 +203,7 @@ describe("atomic warehouse edit release proof", () => {
     const proof = await f.gateway.releaseUnchanged(20, OPERATION);
     f.orders[0].order_edit_operation_id = OTHER;
     await expect(
-      finalizeOrderEditWarehouseRelease(f.client, 20, OPERATION, proof),
+      finalizeOrderEditWarehouseRelease(f.client, 20, OPERATION, proof, "2026-10-05T00:01:00.000Z"),
     ).rejects.toMatchObject({ code: "ORDER_EDIT_RELEASE_OWNER_CHANGED" });
     expect(f.orders[0].order_edit_operation_id).toBe(OTHER);
   });
