@@ -34,7 +34,8 @@ jobs:
     name: Returns preview browser journeys (${{ matrix.shard }}/4)
     needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The budget includes hosted browser setup as well as the complete shard.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

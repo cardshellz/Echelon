@@ -52,7 +52,8 @@ jobs:
     # Invalid migrations stop setup; later selector uncertainty still runs coverage.
     if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The budget includes hosted browser setup as well as the complete journey suite.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
