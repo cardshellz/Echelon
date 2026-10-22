@@ -9,5 +9,36 @@
 .csz-modal-close:disabled { opacity: .4; cursor: wait; }
 .csz-account-ui [data-slot="card"] { box-shadow: none; }
 .csz-account-notice { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 14px 16px; margin: 16px 0; border: 1px solid #e9d5bf; border-radius: 8px; background: #fff8f1; font-size: 14px; }
+.csz-account-ui.csz-order-panel { position:fixed; inset:0 0 0 auto; width:min(400px,100vw); max-width:100vw; height:100dvh; max-height:100dvh; margin:0 0 0 auto; padding:0; overflow-y:auto; border:0; border-left:1px solid #dee4eb; color:#162130; background:#fff; box-shadow:-8px 0 30px #0002; }
+.csz-account-ui.csz-order-panel::backdrop { background:#101b2b66; }
+.csz-order-panel-content { padding:24px; }
+.csz-panel-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:22px; }
+.csz-panel-heading p { margin:0 0 6px; color:#596676; font-size:13px; }
+.csz-account-ui.csz-order-panel .csz-panel-heading h2 { margin:0; font-size:24px; line-height:1.3; }
+.csz-panel-close { display:inline-flex; align-items:center; justify-content:center; width:44px; min-width:44px; height:44px; padding:0; border:0; background:transparent; cursor:pointer; }
+.csz-panel-summary { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px 16px; padding-bottom:22px; margin-bottom:20px; border-bottom:1px solid #dee4eb; font-size:14px; }
+.csz-panel-summary strong,.csz-panel-amounts dd { font-variant-numeric:tabular-nums; }
+.csz-panel-summary small { grid-column:1/-1; font-size:13px; color:#596676; }
+.csz-account-ui.csz-order-panel .csz-panel-group { margin:24px 0 6px; color:#596676; font:500 13px/1.4 var(--font-body-family,Arial,sans-serif); }
+.csz-panel-option { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; min-height:48px; padding:13px 0; border:0; border-bottom:1px solid #dee4eb; background:transparent; color:#162130; font:400 15px/1.5 var(--font-body-family,Arial,sans-serif); text-decoration:none; text-align:left; cursor:pointer; }
+.csz-panel-option svg { flex-shrink:0; }
+.csz-panel-option:hover { background:#f5f7f9; }
+.csz-panel-option:disabled { opacity:.65; cursor:wait; }
+.csz-panel-option.csz-panel-cancel { color:#a82837; margin-top:24px; padding-top:18px; border-top:1px solid #dee4eb; border-bottom:0; }
+.csz-panel-error,.csz-panel-payment { padding:14px; margin:16px 0; border:1px solid #e9d5bf; border-radius:6px; background:#fff8f1; font-size:14px; }
+.csz-account-ui.csz-order-panel p { margin:8px 0 14px; }
+.csz-account-ui.csz-order-panel .csz-action { min-height:44px; white-space:normal; }
+.csz-panel-payment .csz-action { background:#c96513; color:#fff; border-color:#c96513; }
+.csz-panel-explanation,.csz-panel-help { margin-top:20px; color:#596676; font-size:13px; }
+.csz-panel-help a { color:inherit; text-decoration:underline; text-underline-offset:3px; }
+.csz-panel-amounts { margin:22px 0; }
+.csz-panel-amounts > div { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:20px; padding:15px 0; border-bottom:1px solid #dee4eb; font-size:14px; }
+.csz-panel-amounts dd { margin:0; text-align:right; white-space:nowrap; }
+.csz-panel-confirmation { display:grid; gap:10px; margin-top:26px; }
+.csz-account-ui.csz-order-panel .csz-cancel-confirm { background:#a82837; color:#fff; border-color:#a82837; }
+.csz-account-ui.csz-order-panel .csz-cancel-confirm:hover { background:#8e202d; }
+.csz-panel-reference { margin-top:28px; overflow-wrap:anywhere; color:#596676; font-size:12px; }
+.csz-account-ui.csz-order-panel button:focus-visible,.csz-account-ui.csz-order-panel a:focus-visible { outline:2px solid #c96513; outline-offset:3px; }
+@media (max-width:600px) { .csz-account-ui.csz-order-panel { width:100vw; } .csz-order-panel-content { padding:20px; } }
 [data-csz-order-total]:empty::before, [data-csz-order-financials]:empty::before { content: "Checking total…"; }
 @media (max-width: 600px) { .csz-account-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); } .csz-dialog-body { padding: 14px; } .csz-dialog-heading { padding: 16px; gap: 12px; } .csz-dialog-heading h2 { font-size: 21px; } }

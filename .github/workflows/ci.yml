@@ -146,6 +146,11 @@ jobs:
           shared/procurement/__tests__/purchase-buying-review.test.ts
           shared/inventory/__tests__/cost-report-read.test.ts
           shared/inventory/__tests__/order-cogs-report.test.ts
+      - name: Customer order lifecycle and saved cancellation contracts
+        run: >-
+          npx vitest run
+          shared/__tests__/customer-order-fulfillment.test.ts
+          client/src/customer-account/__tests__/order-cancellation-request.test.ts
       - name: Inventory shipment quantity UI contracts
         run: >-
           npx vitest run

@@ -13,10 +13,27 @@ function setup() {
   const store = { connections: vi.fn(async () => [connection]), get: vi.fn(async () => ({ actorId: "customer:2:100", connectionId: 4, omsOrderId: 9, baseline: { channelId: 2, customerId: "gid://shopify/Customer/100" } })) };
   const edits = { order: vi.fn(async () => ({ activeOperationId: null, eligibility: { editable: true, reasons: [] } })), catalogCategories: vi.fn(), catalogProducts: vi.fn(), catalogVariants: vi.fn(), warmPreview: vi.fn(), preview: vi.fn(), quote: vi.fn(), get: vi.fn(), commit: vi.fn(), reconcile: vi.fn(), abandon: vi.fn() };
   const rewards = { state: vi.fn(), manage: vi.fn(), cancel: vi.fn(), issue: vi.fn() };
+  const cancellations = { review: vi.fn(), submit: vi.fn(), get: vi.fn() };
+  Object.assign(edits, { cancellations });
   const service = new CustomerOrderEditService({ principal, access, store, edits, rewards } as unknown as ConstructorParameters<typeof CustomerOrderEditService>[0]);
-  return { access, store, edits, rewards, service };
+  return { access, store, edits, rewards, cancellations, service };
 }
 describe("customer order edit ownership", () => {
+  it("binds cancellation approval and status to signed ownership and the original command key", async () => {
+    const h = setup(), body = { expectedRevision: "a".repeat(64), requestKey: uuid };
+    await h.service.cancellationReview(4, 9);
+    await h.service.submitCancellation(4, 9, body, uuid);
+    await h.service.cancellationStatus(4, 9, uuid);
+    expect(h.cancellations.review).toHaveBeenCalledWith(4, 9);
+    expect(h.cancellations.submit).toHaveBeenCalledWith({ ...body, connectionId: 4, omsOrderId: 9 }, "customer:2:100");
+    expect(h.cancellations.get).toHaveBeenCalledWith(4, 9, uuid, "customer:2:100");
+    h.cancellations.submit.mockClear();
+    await expect(h.service.submitCancellation(4, 9, body, "22222222-2222-4222-8222-222222222222")).rejects.toMatchObject({ code: "ORDER_CANCELLATION_KEY_MISMATCH" });
+    await expect(h.service.submitCancellation(4, 9, { ...body, actorId: "staff" }, uuid)).rejects.toThrow();
+    h.access.resolveOwned.mockRejectedValue(new Error("foreign order"));
+    await expect(h.service.submitCancellation(4, 9, body, uuid)).rejects.toThrow("foreign order");
+    expect(h.cancellations.submit).not.toHaveBeenCalled();
+  });
   it("binds saved reward management and cancellation to the signed-in owner", async () => {
     const h = setup();
     await h.service.manageRewards(4, 9);

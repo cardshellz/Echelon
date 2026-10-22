@@ -7,6 +7,7 @@ import { createOrderEditTransport } from "@/lib/order-edits";
 import { createCustomerReturnTransport } from "@/lib/customer-return-customer";
 import { ORDER_EDIT_PRICING_DISPLAY_HEADER, ORDER_EDIT_PRICING_DISPLAY_VERSION } from "@shared/order-edits/order-edit-financials";
 import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
+import { customerOrderCancellationInputSchema, customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
 
 export const customerAccountPageConfigSchema = z.object({
   themeId: z.string().max(30).regex(/^[1-9][0-9]*$/),
@@ -90,6 +91,18 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
     },
     resolve: async (raw: unknown, signal?: AbortSignal) => json(await call({ method: "POST", path: "/account/resolve", body: customerAccountOrderIdentityInputSchema.parse(raw) }, signal), customerAccountOrderIdentitySchema),
     edits: createOrderEditTransport(bridge),
+    cancellation: {
+      review: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({
+        method: "GET", path: `/account/orders/${omsOrderId}/cancellation/review`, query: { connectionId: String(connectionId) },
+      }, signal), customerOrderCancellationReviewSchema),
+      submit: async (raw: unknown, signal?: AbortSignal) => {
+        const { connectionId, omsOrderId, ...body } = customerOrderCancellationInputSchema.parse(raw);
+        return json(await call({ method: "POST", path: `/account/orders/${omsOrderId}/cancellation`, query: { connectionId: String(connectionId) }, body, commandKey: body.requestKey }, signal), customerOrderCancellationSchema);
+      },
+      status: async (connectionId: number, omsOrderId: number, requestKey: string, signal?: AbortSignal) => json(await call({
+        method: "GET", path: `/account/orders/${omsOrderId}/cancellation/status`, query: { connectionId: String(connectionId), requestKey: z.string().uuid().parse(requestKey) },
+      }, signal), customerOrderCancellationSchema),
+    },
     rewards: {
       manage: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({
         method: "GET", path: `/order-edits/orders/${omsOrderId}/rewards/manage`, query: { connectionId: String(connectionId) },

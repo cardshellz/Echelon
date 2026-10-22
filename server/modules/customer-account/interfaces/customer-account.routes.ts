@@ -42,8 +42,9 @@ import {
 } from "../domain/customer-account-staging";
 import type { customerAccountServices } from "../infrastructure/customer-account.composition";
 import { orderEditPricingDisplayVersionSchema } from "@shared/order-edits/order-edit-financials";
-import { orderEditResponsePresentation } from "../../order-edits/application/order-edit-response-presentation";
+import { orderEditResponsePresentation, orderEditOrderManagementPresentation } from "../../order-edits/application/order-edit-response-presentation";
 import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
+import { customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
 
 type Services = ReturnType<ReturnType<typeof customerAccountServices>>;
 export interface CustomerAccountRouteDependencies {
@@ -239,6 +240,18 @@ async function dispatch(
     return services.edits.resolve(body);
   }
   const order = /^\/order-edits\/orders\/([1-9][0-9]*)$/.exec(path);
+  const cancellation = /^\/account\/orders\/([1-9][0-9]*)\/cancellation(?:\/(review|status))?$/.exec(path);
+  if (cancellation) {
+    const omsOrderId = id.parse(cancellation[1]);
+    if (read && cancellation[2] === "status") {
+      const params = connectionQuery.extend({ requestKey: z.string().uuid() }).strict().parse(query);
+      return customerOrderCancellationSchema.parse(await services.edits.cancellationStatus(params.connectionId, omsOrderId, params.requestKey));
+    }
+    const params = connectionQuery.parse(query);
+    if (read && cancellation[2] === "review") return customerOrderCancellationReviewSchema.parse(await services.edits.cancellationReview(params.connectionId, omsOrderId));
+    if (!read && !cancellation[2]) return customerOrderCancellationSchema.parse(await services.edits.submitCancellation(params.connectionId, omsOrderId, body, commandKey(input)));
+    throw notFound();
+  }
   const rewards = /^\/order-edits\/orders\/([1-9][0-9]*)\/rewards(?:\/(issue|manage|cancel))?$/.exec(path);
   if (rewards) {
     const params = connectionQuery.parse(query);
@@ -250,16 +263,16 @@ async function dispatch(
   }
   if (order && read) {
     const params = connectionQuery
-      .extend({ codeEntryVersion: z.literal("v1").optional() })
+      .extend({ codeEntryVersion: z.literal("v1").optional(), managementVersion: z.literal("v1").optional() })
       .parse(query);
     return orderEditResponsePresentation(
-      orderEditOrderSchema.parse(
+      orderEditOrderManagementPresentation(orderEditOrderSchema.parse(
         await services.edits.order(
           params.connectionId,
           id.parse(order[1]),
           params.codeEntryVersion,
         ),
-      ),
+      ), params.managementVersion),
       pricingDisplay,
     );
   }

@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
+import { orderCancellationDocumentSchema } from "@shared/customer-account/order-cancellation";
 import {
   orderEditConnectionSchema,
   orderEditQuoteInputSchema,
@@ -42,6 +43,8 @@ const referenceSchema = z.object({
 });
 const documentSchema = z
   .object({
+    kind: z.literal("cancel_order").optional(),
+    cancellation: orderCancellationDocumentSchema.optional(),
     id: z.string().uuid(),
     omsOrderId: z.number().int().positive().safe(),
     connectionId: z.number().int().positive(),
@@ -68,6 +71,19 @@ const documentSchema = z
   })
   .strict()
   .superRefine((record, context) => {
+    if ((record.kind === "cancel_order") !== (record.cancellation !== undefined))
+      context.addIssue({ code: "custom", message: "Cancellation kind and durable intent must agree." });
+    if (record.kind === "cancel_order" && (record.quote !== null || record.refundIntent !== null || record.recoveryStartedAt !== null))
+      context.addIssue({ code: "custom", message: "A cancellation cannot submit an order edit, a separate refund or unpaid-edit recovery." });
+    if (record.kind === "cancel_order" && record.cancellation) {
+      const cancellation = record.cancellation;
+      if (!["committing", "refunding", "synchronizing", "completed", "review_required", "expired"].includes(record.status)
+        || record.paymentDeadline !== null || cancellation.refundCents !== record.baseline.netPaidCents
+        || (cancellation.stage === "acquiring") !== (record.commitStartedAt === null)
+        || (record.status === "expired" && cancellation.stage !== "acquiring")
+        || (record.status === "completed" && (cancellation.stage !== "settling" || !cancellation.rewards.settled)))
+        context.addIssue({ code: "custom", message: "The cancellation lifecycle and financial approval are inconsistent." });
+    }
     const customerActor = readCustomerOrderEditActor(record.actorId);
     if (
       customerActor &&
@@ -126,11 +142,10 @@ const documentSchema = z
     if (
       (record.commitStartedAt === null) !== (record.commitKey === null) ||
       (record.refundIntent === null) !== (record.refundStartedAt === null) ||
-      (record.commitStartedAt !== null &&
+      (record.kind !== "cancel_order" && record.commitStartedAt !== null &&
         (record.quote === null || record.paymentDeadline === null)) ||
-      ((record.refundIntent !== null || record.recoveryStartedAt !== null) &&
-        record.commitStartedAt === null) ||
-      (record.status === "ready" && record.quote === null)
+      ((record.refundIntent !== null || record.recoveryStartedAt !== null) && record.commitStartedAt === null) ||
+      (record.kind !== "cancel_order" && record.status === "ready" && record.quote === null)
     ) {
       context.addIssue({
         code: "custom",
@@ -413,13 +428,15 @@ export class PostgresOrderEditStore implements OrderEditStore {
           );
         }
         if (
-          ["completed", "recovered"].includes(record.status) &&
+          ["completed", "recovered"].includes(record.status) && record.kind !== "cancel_order" &&
           releaseProof.allocationRequired !== true
         )
           throw new OrderEditError(
             "ORDER_EDIT_ALLOCATION_PROOF_REQUIRED",
             "Revised inventory allocation must be verified before this edit can finish.",
           );
+        if (record.kind === "cancel_order" && record.status === "completed" && !releaseProof.cancelledOrder)
+          throw new OrderEditError("ORDER_CANCELLATION_RELEASE_PROOF_REQUIRED", "Cancellation requires proof of settled payments and released warehouse work.");
         await finalizeOrderEditWarehouseRelease(
           client,
           record.omsOrderId,
