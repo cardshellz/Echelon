@@ -34,6 +34,7 @@ import { registerPoAmendmentDependencyCases } from "./po-amendment-dependencies.
 import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
 import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
 import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
+import { registerHistoricalCostTimestampCases } from "./historical-cost-timestamps.cases";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -743,6 +744,8 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await pool.query("SELECT po_unit_cost_mills::text AS cost FROM inventory.inventory_lots WHERE id>=1001 ORDER BY id")).rows).toEqual([{cost:"2"},{cost:"2"},{cost:"3"}]);
     expect((await pool.query("SELECT total_cost_mills::text AS cost FROM oms.order_item_costs")).rows).toEqual([{cost:"3"}]);
   });
+
+  registerHistoricalCostTimestampCases({ pool: () => pool, database: () => database, cogs: () => cogs, actorId, at: NOW });
 
   async function legacyQuantityGaps() {
     // A compact reproduction of the 220-case / four-case gap and the depleted
