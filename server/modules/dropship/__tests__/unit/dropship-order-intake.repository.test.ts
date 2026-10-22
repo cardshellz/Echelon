@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PoolClient } from "pg";
-import { resolveDropshipOmsChannelIdWithClient } from "../../infrastructure/dropship-order-intake.repository";
+import {
+  intakeStatusAfterPayloadUpdate,
+  resolveDropshipOmsChannelIdWithClient,
+} from "../../infrastructure/dropship-order-intake.repository";
 
 vi.hoisted(() => {
   process.env.DATABASE_URL = process.env.DATABASE_URL ?? "postgres://test:test@localhost:5432/test";
@@ -114,5 +117,27 @@ describe("resolveDropshipOmsChannelIdWithClient", () => {
       context: { env: "DROPSHIP_OMS_CHANNEL_ID", value: "not-an-id" },
     });
     expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe("intakeStatusAfterPayloadUpdate (eBay sync-back plan v4 SB21)", () => {
+  const edit = { status: "received" as const, rejectionReason: null, cancellationStatus: null };
+
+  it("lets an eBay order edit set the status only while the intake is still received", () => {
+    expect(intakeStatusAfterPayloadUpdate({ status: "received", rejectionReason: null, cancellationStatus: null },
+      { status: "rejected", rejectionReason: "store not ready", cancellationStatus: "order_intake_rejected" }))
+      .toEqual({ status: "rejected", rejectionReason: "store not ready", cancellationStatus: "order_intake_rejected" });
+  });
+
+  it("never resets a stuck, failed, held or in-flight intake (FF-5: before, an edit put it back to received)", () => {
+    for (const existing of [
+      { status: "retrying" as const, rejectionReason: "DROPSHIP_ORDER_INVENTORY_SHORTFALL: short", cancellationStatus: null },
+      { status: "failed" as const, rejectionReason: "DROPSHIP_ORDER_PROCESSING_RETRIES_EXHAUSTED: short", cancellationStatus: null },
+      { status: "payment_hold" as const, rejectionReason: null, cancellationStatus: null },
+      { status: "processing" as const, rejectionReason: null, cancellationStatus: null },
+      { status: "exception" as const, rejectionReason: "needs review", cancellationStatus: "marketplace_cancellation_failed" },
+    ]) {
+      expect(intakeStatusAfterPayloadUpdate(existing, edit), existing.status).toEqual(existing);
+    }
   });
 });

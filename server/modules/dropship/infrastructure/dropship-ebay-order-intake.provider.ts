@@ -3,6 +3,7 @@ import type {
   DropshipEbayOrderIntakeFetchResult,
   DropshipEbayOrderIntakeProvider,
   DropshipEbayOrderIntakeStoreConnection,
+  DropshipEbayOrderLookup,
 } from "../application/dropship-ebay-order-intake-poll-service";
 import type {
   DropshipMarketplaceCredentialRepository,
@@ -11,7 +12,10 @@ import type {
 import type { EbayOrder, EbayOrdersResponse } from "../../channels/adapters/ebay/ebay-types";
 import {
   buildEbayDropshipOrderIntakeInput,
+  isEbayOrderCancelled,
+  readEbayOrderPollFacts,
   shouldRecordEbayDropshipOrder,
+  type EbayStoreItemIndex,
 } from "./dropship-ebay-order-intake.mapper";
 import {
   isEbayResourceAuthFailureStatus,
@@ -58,7 +62,7 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
     // own sales on it are none of intake's business, so eBay is not even asked.
     const dropshipListingIds = new Set(input.connection.dropshipListingIds);
     if (dropshipListingIds.size === 0) {
-      return { orders: [], ignored: 0 };
+      return { orders: [], ignored: 0, saleLines: [], cancelledOrders: [], unmatchedLines: [] };
     }
 
     const credential = await this.tokenOwner.loadFreshForStoreConnection({
@@ -77,8 +81,15 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
       until: input.until,
     });
 
-    const result: DropshipEbayOrderIntakeFetchResult = { orders: [], ignored: 0 };
+    const index = storeItemIndex(input.connection);
+    const result: DropshipEbayOrderIntakeFetchResult = { orders: [], ignored: 0, saleLines: [], cancelledOrders: [], unmatchedLines: [] };
     for (const order of orders) {
+      // Every order, recorded or not, feeds the sales ledger and the parked lines (plan v4 §6.4, §7.3); a cancelled
+      // one that sold through the store's listings is applied to its intake (§7.2).
+      const facts = readEbayOrderPollFacts(order, index);
+      result.saleLines.push(...facts.saleLines);
+      result.unmatchedLines.push(...facts.unmatchedLines);
+      if (facts.cancelled && facts.hasDropshipLine) result.cancelledOrders.push({ externalOrderId: order.orderId });
       const decision = shouldRecordEbayDropshipOrder({ order, dropshipListingIds });
       if (!decision.record) {
         result.ignored += 1;
@@ -97,6 +108,54 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
       });
     }
     return result;
+  }
+
+  /**
+   * One order by id (plan v2 §7.2 hourly check; §7.3 parked lines): GET only.
+   * A 404 is `not_found`; any other failure throws for the caller to log and
+   * leave for the next poll.
+   */
+  async fetchOrder(input: {
+    connection: DropshipEbayOrderIntakeStoreConnection;
+    externalOrderId: string;
+  }): Promise<DropshipEbayOrderLookup> {
+    const externalOrderId = input.externalOrderId.trim();
+    if (!externalOrderId) {
+      throw new DropshipError("DROPSHIP_EBAY_ORDER_ID_REQUIRED", "An eBay order id is required to read the order.", { retryable: false });
+    }
+    const credential = await this.tokenOwner.loadFreshForStoreConnection({
+      vendorId: input.connection.vendorId,
+      storeConnectionId: input.connection.storeConnectionId,
+      operation: "order_intake",
+    });
+    let order: EbayOrder;
+    try {
+      order = await this.requestEbay<EbayOrder>({
+        environment: resolveDropshipEbayProviderEnvironment(credential),
+        credential,
+        marketplaceId: resolveMarketplaceId(credential.config),
+        path: `/sell/fulfillment/v1/order/${encodeURIComponent(externalOrderId)}`,
+      });
+    } catch (error) {
+      if (error instanceof DropshipError && error.context?.status === 404) return { kind: "not_found" };
+      throw error;
+    }
+    const decision = shouldRecordEbayDropshipOrder({ order, dropshipListingIds: new Set(input.connection.dropshipListingIds) });
+    return {
+      kind: "order",
+      cancelled: isEbayOrderCancelled(order),
+      fulfilled: order.orderFulfillmentStatus === "FULFILLED",
+      recordable: decision.record
+        ? {
+          externalOrderId: order.orderId,
+          input: buildDropshipOrderInputNamingTheOrder({
+            store: { vendorId: input.connection.vendorId, storeConnectionId: input.connection.storeConnectionId },
+            order,
+            lineItems: decision.lineItems,
+          }),
+        }
+        : null,
+    };
   }
 
   private async fetchAllOrders(input: {
@@ -219,6 +278,23 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
     );
   }
 
+}
+
+function storeItemIndex(connection: DropshipEbayOrderIntakeStoreConnection): EbayStoreItemIndex {
+  const listingIdByItemNumber = new Map<string, number>();
+  for (const item of connection.itemNumbers) {
+    // A current number is listed before an earlier one (the repository's order), so it wins.
+    if (!listingIdByItemNumber.has(item.externalListingId)) listingIdByItemNumber.set(item.externalListingId, item.listingId);
+  }
+  const listingIdsBySku = new Map<string, number[]>();
+  for (const listing of connection.listingSkus) {
+    const key = listing.sku.trim().toUpperCase();
+    if (!key) continue;
+    const ids = listingIdsBySku.get(key) ?? [];
+    if (!ids.includes(listing.listingId)) ids.push(listing.listingId);
+    listingIdsBySku.set(key, ids);
+  }
+  return { listingIdByItemNumber, listingIdsBySku };
 }
 
 function resolveMarketplaceId(config: Record<string, unknown>): string {

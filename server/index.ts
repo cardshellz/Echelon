@@ -39,11 +39,14 @@ import { startDropshipUsdcWatcherWorker } from "./modules/dropship/infrastructur
 import { startDropshipCostDetectionWorker } from "./modules/dropship/infrastructure/dropship-cost-detection-runner";
 import { startDropshipCategoryMarksWorker } from "./modules/dropship/infrastructure/dropship-category-marks-runner";
 import { startDropshipRulesConversionWorker } from "./modules/dropship/infrastructure/dropship-rules-conversion-runner";
+import { startDropshipMarketplaceSyncBackWorker } from "./modules/dropship/infrastructure/dropship-marketplace-sync-runner";
 import { startDropshipProcessHeartbeatFromEnv } from "./modules/dropship/infrastructure/dropship-process-heartbeat";
 import {
   setDropshipFulfillmentSync,
   setDropshipInventoryRuntimeAuthorityGate,
+  setDropshipMarketplaceCancelStop,
 } from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
+import { createDropshipMarketplaceCancelStop } from "./modules/oms/dropship-marketplace-cancel";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startChannelFulfillmentCommandWorker } from "./modules/oms/channel-fulfillment-command.worker";
 import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
@@ -504,6 +507,16 @@ function startEchelonSyncScheduler(
   });
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
+  // OMS's stop for accepted dropship orders eBay cancelled (eBay sync-back plan v4 §7.2): dropship asks, OMS cancels.
+  setDropshipMarketplaceCancelStop(createDropshipMarketplaceCancelStop({
+    db,
+    reservation: services.reservation,
+    // The engine's own answer (cancelled, already cancelled, already shipped or not found) decides the stop (review MS1).
+    engine: services.shipStation
+      ? { cancelOrder: (engineOrderRef: number) => services.shipStation.cancelOrder(engineOrderRef) }
+      : undefined,
+    clock: () => new Date(),
+  }));
   const channelSyncBatches = createChannelSyncBatchService();
   registerChannelSyncBatchRoutes(app, channelSyncBatches);
   startListingPublicationWorker(channelSyncBatches, "channel_sync_batch_admission_worker");
@@ -1012,6 +1025,7 @@ function startEchelonSyncScheduler(
         startDropshipCostDetectionWorker();
         startDropshipCategoryMarksWorker();
         startDropshipRulesConversionWorker();
+        startDropshipMarketplaceSyncBackWorker();
       } else {
         logSchedulerDisabled("scheduler", "Dropship workers");
       }

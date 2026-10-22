@@ -8,6 +8,8 @@ import {
   type EbayResolvedPublishedOffer,
 } from "../../channels/adapters/ebay/ebay-inventory-quantity";
 import { observeEbayQuantityRequest } from "../../inventory-planning/application/quantity-provider-request-evidence";
+import { readDropshipEbayPublishedQuantities } from "../../inventory-planning/quantity-publication";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 
 import { pool as defaultPool } from "../../../db";
 import {
@@ -21,6 +23,21 @@ import {
   type InventoryPublicationTransportAdapter,
 } from "../../inventory-planning/application/inventory-publication-transport";
 import { DropshipError } from "../domain/errors";
+import {
+  chooseQuantityBaseline,
+  decideQuantityPreWrite,
+  quantitySalesWindows,
+  type QuantityBaseline,
+} from "../domain/marketplace-quantity-decision";
+import { MARKETPLACE_SYNC_CODES } from "../domain/marketplace-sync-errors";
+import { hasUnsettledPushAttempt } from "../domain/marketplace-sync-history";
+import { marketplacePublishBaseline } from "../domain/marketplace-sync-sweep";
+import { sumMarketplaceSalesWithClient } from "./dropship-listing-marketplace-sales.repository";
+import {
+  markListingsMarketplaceSyncDueWithClient,
+  readMarketplaceListingSyncStateWithClient,
+  readMarketplaceSyncEventsWithClient,
+} from "./dropship-marketplace-listing-sync-state.repository";
 import {
   isEbayResourceAuthFailureStatus,
 } from "./dropship-ebay-auth-failure";
@@ -119,6 +136,91 @@ export class PgDropshipInventoryListingIdentityReader implements DropshipInvento
   }
 }
 
+/**
+ * What the pre-write quantity guard (eBay sync-back owner rule 1, plan v4
+ * §6.4 SB31, review OR-2) judges a write by: Card Shellz's own last settled
+ * quantity on eBay (B, not counting the row being written), the sales since,
+ * the store's sales ledger start and whether the listing is live.
+ */
+export interface DropshipQuantityPreWriteFacts {
+  listingId: number;
+  baseline: QuantityBaseline | null;
+  salesAll: number;
+  salesLedgerSince: Date | null;
+  listingLive: boolean;
+}
+
+export interface DropshipQuantityPreWriteGuardReader {
+  /** Null when the size has no Dropship eBay listing in the store (nothing to judge). */
+  load(storeConnectionId: number, productVariantId: number, at: Date): Promise<DropshipQuantityPreWriteFacts | null>;
+  /** After a refusal: the sync job reads the listing first on its next run, to decide eBay's number. */
+  markDue(listingId: number): Promise<void>;
+}
+
+/**
+ * The guard's facts from Dropship's own rows and inventory planning's
+ * published reader, in one read-only snapshot. Under this transport the
+ * authority is canonical (it is inventory planning's outbox transport), so B
+ * is the newer of the last completed push and IP's newest settled row, with
+ * the row being written now left out (`excludeLeased`), as the sync job's
+ * rule makes it (marketplacePublishBaseline, chooseQuantityBaseline).
+ */
+export class PgDropshipQuantityPreWriteGuardReader implements DropshipQuantityPreWriteGuardReader {
+  constructor(private readonly database: Pick<Pool, "connect"> = defaultPool) {}
+
+  async load(storeConnectionId: number, productVariantId: number, at: Date): Promise<DropshipQuantityPreWriteFacts | null> {
+    const client = await this.database.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const found = (await client.query<{ id: number; marketplace_sales_ledger_since: Date | null; open: boolean }>(`
+        SELECT l.id, sc.marketplace_sales_ledger_since,
+          EXISTS (SELECT 1 FROM dropship.dropship_listing_push_job_items ji WHERE ji.listing_id = l.id
+            AND ji.status IN ('queued', 'processing')) AS open
+        FROM dropship.dropship_vendor_listings l JOIN dropship.dropship_store_connections sc ON sc.id = l.store_connection_id
+        WHERE l.store_connection_id = $1 AND l.product_variant_id = $2 AND l.platform = 'ebay'`,
+      [storeConnectionId, productVariantId])).rows[0];
+      const state = found ? await readMarketplaceListingSyncStateWithClient(client, found.id) : null;
+      if (!found || !state) {
+        await client.query("COMMIT");
+        return null;
+      }
+      const events = await readMarketplaceSyncEventsWithClient(client, state.listingId);
+      const [published] = await readDropshipEbayPublishedQuantities(client, { storeConnectionId, productVariantIds: [productVariantId],
+        excludeLeased: true });
+      const baseline = chooseQuantityBaseline(marketplacePublishBaseline({ authority: "canonical",
+        push: { pushedQuantity: state.pushedQuantity, lastPushedAt: state.lastPushedAt, hasOpenPushItem: found.open,
+          hasUnsettledAttempt: hasUnsettledPushAttempt(events) },
+        published: published ? { desiredQuantity: published.desiredQuantity, settledAt: published.settledAt } : null,
+      }), state.quantityBaseline);
+      const sales = baseline && baseline.at.getTime() <= at.getTime()
+        ? await sumMarketplaceSalesWithClient(client, { listingId: state.listingId, ...quantitySalesWindows(baseline.at, at) })
+        : { all: 0, live: 0 };
+      await client.query("COMMIT");
+      return { listingId: state.listingId, baseline, salesAll: sales.all, salesLedgerSince: found.marketplace_sales_ledger_since,
+        listingLive: state.status !== "ended" && !state.issueCodes.includes("ended_out_of_stock") };
+    } catch (error) {
+      await client.query("ROLLBACK").catch((rollbackError: unknown) => {
+        // The read's own error is the one that matters; the rollback failure is logged so it is not lost.
+        platformLogger.warn("dropship.ebay_inventory.quantity_guard_rollback_failed", { error_code: "DROPSHIP_QUANTITY_GUARD_ROLLBACK_FAILED",
+          store_connection_id: storeConnectionId, product_variant_id: productVariantId,
+          message: rollbackError instanceof Error ? rollbackError.message : String(rollbackError) });
+      });
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async markDue(listingId: number): Promise<void> {
+    const client = await this.database.connect();
+    try {
+      await markListingsMarketplaceSyncDueWithClient(client, [listingId]);
+    } finally {
+      client.release();
+    }
+  }
+}
+
 /** Raised (not sent, retryable) while a push of the variant is still creating or publishing its offer: nothing is on sale yet. */
 export const DROPSHIP_EBAY_LISTING_PUSH_IN_FLIGHT = "DROPSHIP_EBAY_LISTING_PUSH_IN_FLIGHT";
 /**
@@ -161,6 +263,8 @@ export class EbayDropshipInventoryPublicationTransportAdapter
     private readonly fetchFn: typeof fetch = fetch,
     private readonly clock: { now(): Date } = { now: () => new Date() },
     private readonly listingIdentities?: DropshipInventoryListingIdentityReader,
+    /** Absent: no quantity guard, every write goes as before (owner rule 1 then relies on the sync job alone). */
+    private readonly quantityGuard?: DropshipQuantityPreWriteGuardReader,
   ) {}
 
   async publishAbsolute(
@@ -170,18 +274,44 @@ export class EbayDropshipInventoryPublicationTransportAdapter
     let sku: string;
     let marketplace: string;
     let identity: DropshipInventoryListingIdentity;
+    let guard: DropshipQuantityPreWriteFacts | null;
+    const at = this.clock.now();
     try {
       const context = await this.loadContext(request);
       sku = exactEbayInventoryItemKey(request);
       marketplace = ebayInventoryMarketplace(context.credential.config.marketplaceId);
       client = this.quantityClient(context);
       identity = context.identity;
+      guard = this.quantityGuard
+        ? await this.quantityGuard.load(context.destination.storeConnectionId, request.productVariantId, at) : null;
     } catch (error) { throw translateQuantityError(new EbayInventoryQuantityPreflightError(error)); }
     try {
       const response = await publishEbayInventoryQuantity(client, sku, marketplace, request.desiredQuantity,
-        { expectOffer: offer => assertRecordedOffer(offer, identity, request) });
+        { expectOffer: offer => {
+          assertRecordedOffer(offer, identity, request);
+          assertQuantityWriteAllowed(offer, guard, request, at);
+        } });
       return { publishedQuantity: request.desiredQuantity, providerResponse: response };
-    } catch (error) { throw deferWhilePushInFlight(translateQuantityError(error), identity, request); }
+    } catch (error) {
+      const translated = deferWhilePushInFlight(translateQuantityError(error), identity, request);
+      if (guard && isQuantityGuardRefusal(translated)) await this.markDueAfterRefusal(guard.listingId, request);
+      throw translated;
+    }
+  }
+
+  /**
+   * The refusal already proved nothing was sent and the outbox retries the row
+   * (bounded); marking the listing due only brings the sync job's decision
+   * sooner, so a failure here is logged and the refusal still stands.
+   */
+  private async markDueAfterRefusal(listingId: number, request: AbsoluteInventoryPublicationRequest): Promise<void> {
+    try {
+      await this.quantityGuard!.markDue(listingId);
+    } catch (error) {
+      platformLogger.warn("dropship.ebay_inventory.quantity_guard_mark_due_failed", { error_code: "DROPSHIP_QUANTITY_GUARD_MARK_DUE_FAILED",
+        listing_id: listingId, store_connection_id: request.destination.dropshipStoreConnectionId,
+        product_variant_id: request.productVariantId, message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   async readAbsolute(
@@ -480,6 +610,36 @@ function assertRecordedOffer(offer: EbayResolvedPublishedOffer, identity: Dropsh
     false, identityContext(identity, request, offer.offerId));
 }
 
+/**
+ * The pre-write quantity guard (owner rule 1, SB31): inside discovery, after
+ * the offer identity check and before any write, a write that would raise
+ * eBay above a number Card Shellz's last quantity and the sales since cannot
+ * explain is refused (retryable, nothing sent) until the sync job decides
+ * that number as the vendor's limit. A lower or equal write always goes.
+ */
+function assertQuantityWriteAllowed(offer: EbayResolvedPublishedOffer, guard: DropshipQuantityPreWriteFacts | null,
+  request: AbsoluteInventoryPublicationRequest, at: Date): void {
+  if (guard === null || offer.availableQuantity === null) return;
+  const decision = decideQuantityPreWrite({ desiredQuantity: request.desiredQuantity, observed: { quantity: offer.availableQuantity, at },
+    baseline: guard.baseline, salesAll: guard.salesAll, salesLedgerSince: guard.salesLedgerSince, listingLive: guard.listingLive });
+  if (decision.kind === "allow") return;
+  const context = { storeConnectionId: request.destination.dropshipStoreConnectionId, productVariantId: request.productVariantId,
+    listingId: guard.listingId, desiredQuantity: request.desiredQuantity, observedQuantity: decision.observed,
+    expectedLow: decision.expectedLow };
+  // Expected while the vendor's lower number waits for the sync job's decision; the row retries on its own backoff.
+  platformLogger.debug("dropship.ebay_inventory.quantity_write_deferred", { outcome: "deferred",
+    error_code: MARKETPLACE_SYNC_CODES.quantityVendorChangePending, listing_id: guard.listingId,
+    store_connection_id: context.storeConnectionId, product_variant_id: context.productVariantId,
+    before: { observed_quantity: decision.observed }, after: { desired_quantity: request.desiredQuantity }, expected_low: decision.expectedLow });
+  throw new InventoryPublicationNotSentError(MARKETPLACE_SYNC_CODES.quantityVendorChangePending,
+    "eBay shows a lower quantity than Card Shellz's last one and the sales since explain; it is decided as the vendor's limit before this quantity is sent.",
+    true, context);
+}
+
+function isQuantityGuardRefusal(error: unknown): boolean {
+  return error instanceof InventoryPublicationNotSentError && error.code === MARKETPLACE_SYNC_CODES.quantityVendorChangePending;
+}
+
 /** No published offer yet (none, or only unpublished ones, or a 404 on the lookup) is expected while a push runs. */
 function deferWhilePushInFlight(error: unknown, identity: DropshipInventoryListingIdentity, request: PublicationRequest): unknown {
   if (!identity.pushInFlight || !(error instanceof InventoryPublicationTransportError)) return error;
@@ -501,6 +661,7 @@ EbayDropshipInventoryPublicationTransportAdapter {
     fetch,
     { now: () => new Date() },
     new PgDropshipInventoryListingIdentityReader(),
+    new PgDropshipQuantityPreWriteGuardReader(),
   );
 }
 

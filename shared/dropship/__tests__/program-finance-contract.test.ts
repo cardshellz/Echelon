@@ -258,7 +258,7 @@ function validSummary(): FinanceSummaryInput {
           lineOf("returns.fees.processing", 100, { datedBy: "posted" }),
           lineOf("returns.net", 3_250, { operator: "equals", datedBy: "posted" }),
           lineOf("returns.staff_credits", 2_500, { count: 1, datedBy: "settled" }),
-          lineOf("returns.memo.order_refunds", null, { status: "not_recorded", reasonKey: "no_refund_path", datedBy: "posted" }),
+          lineOf("returns.memo.order_refunds", 0, { count: 0, datedBy: "posted" }),
         ],
       },
       owed: {

@@ -207,6 +207,14 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-order-listing-acceptability.integration.test.ts",
       // Channels PR1: a refused Shopify stock update dead-letters at once and shows on Ops Health (real outbox; fake Shopify HTTP).
       "server/modules/inventory-planning/__tests__/integration/channel-stock-update-dead-letter.integration.test.ts",
+      // eBay sync-back (plan v4 §11 PG): the migration through the release executor, and its repositories.
+      "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-migration.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-repositories.integration.test.ts",
+      // eBay sync-back's sweep (plan v4 §6): the adoption transaction, the quantity decision, selection, dead letters, ops-health SQL.
+      "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-sweep.integration.test.ts",
+      // eBay sync-back's order fixes (plan v4 §7): stuck orders, eBay cancels with OMS's stop and the refund, parked lines; OMS's stop.
+      "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-orders.integration.test.ts",
+      "server/modules/oms/__tests__/integration/dropship-marketplace-cancel.integration.test.ts",
     ];
     addedSuites.push(
       "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",

@@ -25,6 +25,7 @@ import {
   type FinanceReasonKey,
 } from "../../../../shared/dropship/program-finance-definitions";
 import { toSafeNumber } from "../../../../shared/dropship/program-finance-money";
+import { MARKETPLACE_CANCEL_REFUND_REFERENCE_TYPES } from "./marketplace-order-cancel";
 import type { FinanceCashLine, FinanceRawLedger, FinanceRawLedgerGroup, FinanceRawResult } from "./program-finance-raw";
 import type { FinanceShare } from "./program-finance-rules";
 
@@ -46,8 +47,20 @@ const AVAILABLE_TYPES: ReadonlySet<string> = new Set([
 const REWARDS_TYPES: ReadonlySet<string> = new Set([
   "rewards_earned", "rewards_spent", "rewards_expired", "rewards_reversed", "rewards_reinstated",
 ]);
-/** Entry types nothing should write; the walk shows them only when they moved (check N3). */
+/**
+ * Entry types nothing should write; the walk shows them only when they moved
+ * (check N3). The one exception is an order refund (isOrderRefund).
+ */
 export const UNEXPECTED_TYPES: ReadonlySet<string> = new Set(["refund_credit", "manual_adjustment"]);
+
+/**
+ * The refund of an order eBay cancelled after Card Shellz accepted and stopped
+ * it (eBay sync-back): the one writer of refund_credit, an expected entry
+ * with its own walk line and memo (review MS3/ARCH-1).
+ */
+export function isOrderRefund(group: { readonly type: string; readonly referenceType: string | null }): boolean {
+  return group.type === "refund_credit" && group.referenceType === MARKETPLACE_CANCEL_REFUND_REFERENCE_TYPES.cash;
+}
 
 // ── figure conversion ───────────────────────────────────────────────────
 

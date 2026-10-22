@@ -21,6 +21,10 @@ describe("resolveDropshipWorkerSchedule", () => {
       initialDelayMs: 240_000, initialDelayEnvironmentVariable: "DROPSHIP_RULES_CONVERSION_WORKER_INITIAL_DELAY_MS",
     });
     expect(resolveDropshipWorkerSchedule("rulesConversion", { DROPSHIP_RULES_CONVERSION_WORKER_INITIAL_DELAY_MS: "5" }).initialDelayMs).toBe(5);
+    // eBay sync-back (plan v4 §6.1): every 15 minutes, after the rules conversion job's 240 s phase, on a delay no other worker uses.
+    expect(resolveDropshipWorkerSchedule("marketplaceSyncBack", environment)).toEqual({
+      initialDelayMs: 300_000, initialDelayEnvironmentVariable: "DROPSHIP_MARKETPLACE_SYNC_BACK_WORKER_INITIAL_DELAY_MS",
+    });
   });
 
   it("accepts a non-negative per-worker environment override", () => {

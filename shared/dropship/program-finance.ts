@@ -307,6 +307,7 @@ export const FINANCE_SECTION_LINE_KEYS = {
     "owed.walk.return_credits_cs",
     "owed.walk.return_credits_pool",
     "owed.walk.disputes_won",
+    "owed.walk.order_refunds",
     "owed.walk.orders",
     "owed.walk.advance_fees",
     "owed.walk.return_fees",

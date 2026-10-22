@@ -187,16 +187,27 @@ export function requireRoutedWarehouseId(input: {
   );
 }
 
+/** The stable code of a refused whole-order claim, published with `shortfall` for callers outside OMS (review ARCH-6). */
+export const WMS_REQUIRED_INVENTORY_CLAIM_FAILED_CODE = "WMS_REQUIRED_INVENTORY_CLAIM_FAILED";
+
 export class WmsRequiredInventoryClaimError extends Error {
-  readonly code = "WMS_REQUIRED_INVENTORY_CLAIM_FAILED";
+  readonly code = WMS_REQUIRED_INVENTORY_CLAIM_FAILED_CODE;
+  /**
+   * Published classification: true only when the reservation could not
+   * reserve every line (a stock shortfall a later attempt can clear); false
+   * for every other refusal (warehouse mismatch, no WMS order, unproven
+   * claim). Callers branch on this and the code, never on the context shape.
+   */
+  readonly shortfall: boolean;
 
   constructor(
     message: string,
     readonly context: Readonly<Record<string, unknown>>,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { shortfall?: boolean },
   ) {
     super(message, options);
     this.name = "WmsRequiredInventoryClaimError";
+    this.shortfall = options?.shortfall === true;
   }
 }
 
@@ -2022,6 +2033,7 @@ export class WmsSyncService {
         reserved: reserveResult.reserved,
         promised: reserveResult.promised,
       },
+      { shortfall: true },
     );
     await this.compensateFailedRequiredReservation(
       wmsOrderId,

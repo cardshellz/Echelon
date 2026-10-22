@@ -23,7 +23,12 @@ import { costScheduleTimingFromPolicy, planCostScheduleReconciliation } from "..
 import { createDropshipCostChangePolicyServiceFromEnv } from "./dropship-cost-change-policy.factory";
 import { PgDropshipCostScheduleRepository, lockVendorSchedule, mapCostScheduleError } from "./dropship-cost-schedule.repository";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
-import { admittedWhilePushing, decideListingOrderAcceptability } from "../domain/order-listing-acceptability";
+import {
+  admittedWhilePushing,
+  decideListingOrderAcceptability,
+  assertNoMarketplaceVariationLines,
+  parseIntakeOrderedAt,
+} from "../domain/order-listing-acceptability";
 import { logger } from "../../../platform/observability/logger";
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
 import type { DropshipProductCostReader } from "../application/dropship-product-cost";
@@ -37,6 +42,7 @@ import {
 } from "../../oms/oms-line-authority-grant.repository";
 import {
   DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
+  belowCostSaleLinesOf,
   buildDropshipOrderAcceptancePlan,
   assertDropshipQuoteDestinationMatchesShipTo,
   requireDropshipAcceptanceShipTo,
@@ -123,6 +129,9 @@ interface ListingCandidateRow {
   variant_is_active: boolean;
   sales_eligibility: "sellable" | "internal_only";
   catalog_retail_price_cents: string | number | null;
+  marketplace_ended_at: Date | null;
+  /** Item numbers the listing had before a relist (plan v4 §7.3 step 7). */
+  previous_external_listing_ids: string[] | null;
 }
 
 interface PricingPolicyRow {
@@ -510,7 +519,14 @@ async function acceptOrderWithClient(
     paymentHoldReason: null,
     advance: debit.advance,
     idempotentReplay: false,
+    ...belowCostSaleField(plan),
   };
+}
+
+/** A fresh acceptance's below-cost lines (plan v3 §7.4), only when there are any: the service warns after the commit. */
+function belowCostSaleField(plan: Pick<DropshipOrderAcceptancePlan, "lines">): Pick<DropshipOrderAcceptanceResult, "belowCostSaleLines"> {
+  const lines = belowCostSaleLinesOf(plan);
+  return lines.length > 0 ? { belowCostSaleLines: lines } : {};
 }
 
 async function prepareCanonicalOrderWithClient(
@@ -693,6 +709,8 @@ async function prepareCanonicalOrderWithClient(
     warehouseId: plan.warehouseId,
     omsOrderId,
     idempotentReplay: false,
+    // The finalize reads the frozen totals only, so the lines' below-cost facts come from here (plan v3 §7.4).
+    ...belowCostSaleField(plan),
   };
 }
 
@@ -1530,6 +1548,8 @@ async function planAcceptanceWithClient(
   const lines = await resolveAcceptanceLinesWithClient(client, {
     vendor,
     intakeId: intake.intakeId,
+    platform: intake.platform,
+    orderedAt: parseIntakeOrderedAt(intake.normalizedPayload.orderedAt),
     storeConnectionId: input.storeConnectionId,
     rawLines: intake.normalizedPayload.lines,
     costReaders,
@@ -1747,6 +1767,10 @@ async function resolveAcceptanceLinesWithClient(
     vendor: DropshipAcceptanceVendorContext;
     /** Correlation only: the intake being accepted, carried on the acceptability log line. */
     intakeId: number;
+    /** The intake's marketplace: an eBay variation line is refused (plan v4 §7.3 step 7). */
+    platform: string;
+    /** The order's own time: an ended listing takes an order placed before its end (§7.3 step 8). */
+    orderedAt: Date | null;
     storeConnectionId: number;
     rawLines: NormalizedDropshipOrderPayload["lines"];
     costReaders: AcceptanceCostReaders;
@@ -1760,6 +1784,7 @@ async function resolveAcceptanceLinesWithClient(
       "Dropship order acceptance requires at least one line.",
     );
   }
+  assertNoMarketplaceVariationLines(input.rawLines, { intakeId: input.intakeId });
 
   const productVariantIds = uniquePositiveIntegers(
     input.rawLines.map((line) => line.productVariantId).filter((value): value is number => Number.isInteger(value)),
@@ -1778,6 +1803,9 @@ async function resolveAcceptanceLinesWithClient(
        dl.status AS listing_status,
        dl.external_listing_id,
        dl.external_offer_id,
+       dl.marketplace_ended_at,
+       ARRAY(SELECT prev.external_listing_id FROM dropship.dropship_listing_previous_marketplace_ids prev
+             WHERE prev.listing_id = dl.id ORDER BY prev.id)::text[] AS previous_external_listing_ids,
        dl.vendor_retail_price_cents,
        p.sku AS product_sku,
        pv.sku AS variant_sku,
@@ -1811,6 +1839,8 @@ async function resolveAcceptanceLinesWithClient(
        AND (
          dl.product_variant_id = ANY($3::int[])
          OR dl.external_listing_id = ANY($4::text[])
+         OR EXISTS (SELECT 1 FROM dropship.dropship_listing_previous_marketplace_ids prev
+                    WHERE prev.listing_id = dl.id AND prev.external_listing_id = ANY($4::text[]))
          OR dl.external_offer_id = ANY($5::text[])
          OR UPPER(pv.sku) = ANY($6::text[])
          OR UPPER(p.sku) = ANY($6::text[])
@@ -1847,6 +1877,7 @@ async function resolveAcceptanceLinesWithClient(
       catalogRules,
       now: input.observedAt,
       intakeId: input.intakeId,
+      orderedAt: input.orderedAt,
     });
     return { line, index, candidate };
   });
@@ -2878,6 +2909,8 @@ function mapListingCandidateRow(
   productIsActive: boolean;
   variantIsActive: boolean;
   customerSellable: boolean;
+  marketplaceEndedAt: Date | null;
+  previousExternalListingIds: string[];
 } {
   const catalogRetailPriceCents = row.catalog_retail_price_cents === null
     ? null
@@ -2909,6 +2942,8 @@ function mapListingCandidateRow(
     productIsActive: row.product_is_active,
     variantIsActive: row.variant_is_active,
     customerSellable: row.sales_eligibility === "sellable",
+    marketplaceEndedAt: row.marketplace_ended_at ?? null,
+    previousExternalListingIds: row.previous_external_listing_ids ?? [],
   };
 }
 
@@ -2923,7 +2958,10 @@ function findCandidateForOrderLine(
     return candidates.find((candidate) => candidate.externalOfferId === line.externalOfferId) ?? null;
   }
   if (line.externalListingId) {
-    return candidates.find((candidate) => candidate.externalListingId === line.externalListingId) ?? null;
+    // The current item number first; else one the listing had before a relist (plan v4 §7.3 step 7).
+    return candidates.find((candidate) => candidate.externalListingId === line.externalListingId)
+      ?? candidates.find((candidate) => candidate.previousExternalListingIds.includes(line.externalListingId as string))
+      ?? null;
   }
   const normalizedSku = line.sku?.trim().toUpperCase();
   if (normalizedSku) {
@@ -2939,13 +2977,17 @@ function assertListingCandidateCanAccept(
     catalogRules: readonly DropshipCatalogExposureRule[];
     now: Date;
     intakeId: number;
+    orderedAt: Date | null;
   },
 ): void {
   // A listing being re-sent is live on the marketplace while its Echelon status
-  // shows push progress (step 1 plan S2-5 §4.7); see decideListingOrderAcceptability.
+  // shows push progress (step 1 plan S2-5 §4.7); an ended listing takes an order
+  // placed before its end (plan v4 §7.3 step 8); see decideListingOrderAcceptability.
   const acceptability = decideListingOrderAcceptability({
     status: candidate.listingStatus,
     externalListingId: candidate.externalListingId,
+    marketplaceEndedAt: candidate.marketplaceEndedAt,
+    orderedAt: catalog.orderedAt,
   });
   if (!acceptability.acceptable) {
     throw new DropshipError(
@@ -2991,6 +3033,17 @@ function assertListingCandidateCanAccept(
       status: candidate.listingStatus,
       intake_id: catalog.intakeId,
       line_index: lineIndex,
+      path: "acceptance",
+    });
+  }
+  if (acceptability.acceptable && acceptability.reason === "ordered_before_listing_ended") {
+    // INFO: an ended listing took the order only because it was placed before the end (plan v4 §7.3 step 8).
+    logger.info("dropship.order.listing_acceptable_before_end", {
+      outcome: "listing_check_passed",
+      listing_id: candidate.listingId,
+      intake_id: catalog.intakeId,
+      line_index: lineIndex,
+      marketplace_ended_at: candidate.marketplaceEndedAt?.toISOString() ?? null,
       path: "acceptance",
     });
   }
