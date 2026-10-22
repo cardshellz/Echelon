@@ -23,7 +23,17 @@
 .csz-panel-option { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; min-height:48px; padding:13px 0; border:0; border-bottom:1px solid #dee4eb; background:transparent; color:#162130; font:400 15px/1.5 var(--font-body-family,Arial,sans-serif); text-decoration:none; text-align:left; cursor:pointer; }
 .csz-panel-option svg { flex-shrink:0; }
 .csz-panel-option:hover { background:#f5f7f9; }
-.csz-panel-option:disabled { opacity:.65; cursor:wait; }
+.csz-panel-option:disabled { opacity:.65; cursor:not-allowed; }
+.csz-panel-restriction { margin:8px 0 16px; color:#596676; font-size:13px; line-height:1.5; }
+.csz-panel-details section { padding:14px 0; }
+.csz-panel-details h3 { margin:0 0 12px; font-size:15px; }
+.csz-panel-details .csz-expanded { transform:rotate(180deg); }
+.csz-panel-items { margin:0 0 20px; padding:0; list-style:none; }
+.csz-panel-items li { display:grid; gap:5px; padding:14px 0; border-bottom:1px solid #dee4eb; font-size:14px; }
+.csz-panel-items small { color:#596676; }
+.csz-panel-address { padding-top:18px; font-size:14px; }
+.csz-panel-address address { display:grid; gap:4px; margin:10px 0; font-style:normal; line-height:1.5; overflow-wrap:anywhere; }
+.csz-panel-items li > div { display:flex; justify-content:space-between; gap:16px; font-variant-numeric:tabular-nums; }
 .csz-panel-option.csz-panel-cancel { color:#a82837; margin-top:24px; padding-top:18px; border-top:1px solid #dee4eb; border-bottom:0; }
 .csz-panel-error,.csz-panel-payment { padding:14px; margin:16px 0; border:1px solid #e9d5bf; border-radius:6px; background:#fff8f1; font-size:14px; }
 .csz-account-ui.csz-order-panel p { margin:8px 0 14px; }

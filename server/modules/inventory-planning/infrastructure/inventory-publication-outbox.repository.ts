@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
 import { pool } from "../../../db";
+import { logger } from "../../../platform/observability/logger";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { releaseQuantityPublicationSuppressionInsideTransaction } from "./quantity-publication-admission.repository";
 import { readPublicationStockSelection } from "./inventory-publication-selection.reader";
@@ -48,8 +49,13 @@ export class InventoryPublicationOutboxRepositoryError extends Error {
   }
 }
 
+type DeadLetterLogger = Pick<typeof logger, "error">;
+
 export class PostgresInventoryPublicationOutboxRepository {
-  constructor(private readonly connectionPool: ClientPool = pool) {
+  constructor(
+    private readonly connectionPool: ClientPool = pool,
+    private readonly log: DeadLetterLogger = logger,
+  ) {
     const maximumConnections = connectionPool.options?.max;
     if (maximumConnections !== undefined && maximumConnections < 2) {
       throw new InventoryPublicationOutboxRepositoryError(
@@ -359,10 +365,10 @@ export class PostgresInventoryPublicationOutboxRepository {
     claim: ClaimedInventoryPublication,
     input: PublicationAttemptFailure & { completedAt: Date },
   ): Promise<boolean> {
-    return inTransaction(this.connectionPool, async (client) => {
+    const recorded = await inTransaction(this.connectionPool, async (client) => {
       await lockActivationRun(client, claim.activationRunId);
       const current = await lockClaim(client, claim);
-      if (!current) return false;
+      if (!current) return null;
       if (["PUBLICATION_GLOBAL_STOP_ACTIVE", "PUBLICATION_GLOBAL_CONTROL_INVALID"].includes(input.errorClass)) {
         await client.query(
           `UPDATE inventory.inventory_publication_outbox
@@ -374,7 +380,7 @@ export class PostgresInventoryPublicationOutboxRepository {
           [claim.outboxId, claim.leaseToken, input.errorClass.slice(0, 60),
             input.errorMessage.slice(0, 2000), input.completedAt.toISOString()],
         );
-        return true;
+        return "requeued" as const;
       }
       const cancelled = !await publicationCanProceed(client, claim);
       const retryable = !cancelled && input.retryable && claim.attemptNumber < 10;
@@ -406,9 +412,47 @@ export class PostgresInventoryPublicationOutboxRepository {
           [claim.outboxId],
         );
       }
-      return true;
+      return outcome;
     });
+    // Logged only after the dead letter committed. A dead letter needs a person:
+    // that store item keeps its last quantity until the store accepts a newer
+    // stock update (Ops Health CHANNEL_STOCK_UPDATE_DEAD_LETTER for channel stores).
+    if (recorded === "dead_letter") this.log.error("inventory_publication.outbox.dead_lettered", deadLetterLogFields(claim, input));
+    return recorded !== null;
   }
+}
+
+/** Correlation ids for one dead-lettered stock update, so a search on any id
+ * (outbox, destination, size, connection, item) finds this line. */
+function deadLetterLogFields(claim: ClaimedInventoryPublication, input: PublicationAttemptFailure) {
+  return {
+    outcome: "dead_letter",
+    error_code: input.errorClass.slice(0, 60),
+    // A dead letter is never retried, so it is always "permanent" (the platform's closed
+    // vocabulary, server/platform/observability/errors.ts). The reason says how it got there:
+    // refused as non-retryable, or a retryable failure that reached the attempt cap.
+    error_class: "permanent",
+    dead_letter_reason: input.retryable ? "attempts_exhausted" : "non_retryable",
+    error_message: input.errorMessage.slice(0, 500),
+    before: { state: "leased", attempt_number: claim.attemptNumber },
+    after: { state: "dead_letter" },
+    outbox_id: claim.outboxId,
+    activation_run_id: claim.activationRunId,
+    publication_phase: claim.publicationPhase,
+    publication_target_id: claim.publicationTargetId,
+    product_variant_id: claim.productVariantId,
+    desired_revision: claim.desiredRevision,
+    desired_quantity: claim.desiredQuantity,
+    channel_id: claim.channelId,
+    destination_kind: claim.destinationKind,
+    channel_connection_id: claim.channelConnectionId,
+    dropship_store_connection_id: claim.dropshipStoreConnectionId,
+    provider_key: claim.providerKey,
+    provider_scope_type: claim.providerScopeType,
+    external_scope_id: claim.externalScopeId,
+    external_inventory_item_id: claim.externalInventoryItemId,
+    external_sku: claim.externalSku,
+  };
 }
 
 async function supersedeStaleClaim(

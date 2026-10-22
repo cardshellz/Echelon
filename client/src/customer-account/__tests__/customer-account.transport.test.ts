@@ -6,6 +6,33 @@ const connection = { connectionId: 4, channelId: 2, name: "Shopify", shopDomain:
 const key = "a".repeat(43);
 const bootstrap = { session: { authenticated: true, privateTesting: true, sessionKey: key }, connection };
 describe("storefront transport reuses canonical clients", () => {
+  it("binds batch history and inline details to the signed session without creating a financial command key", async () => {
+    const request = vi.fn(async () => Response.json(bootstrap));
+    const api = createCustomerAccountTransport(config, request); await api.bootstrap();
+    const identity = { externalOrderId: "99", orderReference: "#49180" };
+    const summary = { ...identity, omsOrderId: null, currency: "USD", totalCents: 0, cancelled: true, financialStatus: "Refunded" };
+    request.mockImplementation(async () => Response.json({ orders: [summary], unavailableExternalOrderIds: [], statusUnavailable: false }));
+    expect((await api.orderSummaries({ orders: [identity] })).orders).toEqual([summary]);
+    request.mockImplementation(async () => Response.json({ ...identity, currency: "USD", totalCents: 0, lines: [] }));
+    expect((await api.orderDetails(identity)).totalCents).toBe(0);
+    for (const [, options] of request.mock.calls.slice(1) as unknown as Array<[string, RequestInit]>) {
+      const input = JSON.parse(String(options.body));
+      expect(input.sessionKey).toBe(key); expect(input.expectedCustomerId).toBe("100");
+      expect(input.commandKey).toBeUndefined(); expect(options.cache).toBe("no-store");
+    }
+  });
+  it.each([
+    { orders: [], unavailableExternalOrderIds: [], statusUnavailable: false },
+    { orders: [], unavailableExternalOrderIds: ["98"], statusUnavailable: false },
+    { orders: [{ externalOrderId: "99", orderReference: "#other", omsOrderId: null, currency: "USD", totalCents: 917, cancelled: false, financialStatus: "Paid" }], unavailableExternalOrderIds: [], statusUnavailable: false },
+  ])("rejects missing or substituted batch identities before they can replace a displayed total", async response => {
+    const api = createCustomerAccountTransport(config, async () => Response.json(response));
+    await expect(api.orderSummaries({ orders: [{ externalOrderId: "99", orderReference: "#49180" }] })).rejects.toThrow();
+  });
+  it("rejects a late detail reply for a different order instead of displaying its money", async () => {
+    const api = createCustomerAccountTransport(config, async () => Response.json({ externalOrderId: "98", orderReference: "#other", currency: "USD", totalCents: 917, lines: [] }));
+    await expect(api.orderDetails({ externalOrderId: "99", orderReference: "#49180" })).rejects.toMatchObject({ code: "CUSTOMER_ACCOUNT_ORDER_MISMATCH" });
+  });
   it("binds rewards issuance to the same signed session and preserves its request identity", async () => {
     const request = vi.fn(async () => Response.json(bootstrap));
     const api = createCustomerAccountTransport(config, request);

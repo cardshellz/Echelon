@@ -1,3 +1,5 @@
+export type NativeCustomerOrderSummary = Omit<import("@shared/customer-account/customer-account-orders").CustomerAccountOrderSummary, "omsOrderId" | "fulfillment"> & { customerId: string | null; channelId: number; shopDomain: string };
+
 export interface OrderEditCredentials {
   connectionId: number;
   channelId: number;
@@ -189,9 +191,13 @@ export class OrderEditCommitNotSentError extends OrderEditProviderError {
 }
 
 export interface OrderEditProvider {
+  /** Account history is a bounded native read, independent of edit eligibility. */
+  readOrderSummaries?(connectionId: number, externalOrderIds: readonly string[]): Promise<NativeCustomerOrderSummary[]>;
   readOrder(
     connectionId: number,
     externalOrderId: string,
+    expectedCustomerId?: string,
+    expectedShopDomain?: string,
   ): Promise<OrderEditSnapshot>;
   searchVariants(
     connectionId: number,

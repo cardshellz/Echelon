@@ -185,6 +185,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/membership/__tests__/integration/member-directory.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-finance.integration.test.ts",
   "server/modules/order-edits/__tests__/integration/order-edit-warehouse.integration.test.ts",
+  "server/modules/customer-account/__tests__/integration/customer-account-order-context.integration.test.ts",
   "server/modules/oms/__tests__/integration/order-edit-paid-projection.integration.test.ts",
   "server/modules/oms/__tests__/integration/wms-sync-existing-shipment-claim.integration.test.ts",
   "server/modules/catalog/__tests__/integration/catalog-variant-publication-photos.integration.test.ts",
@@ -227,4 +228,5 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/dropship/__tests__/integration/dropship-vendor-catalog-read.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-release-readiness.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-order-listing-acceptability.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/channel-stock-update-dead-letter.integration.test.ts",
 ]);

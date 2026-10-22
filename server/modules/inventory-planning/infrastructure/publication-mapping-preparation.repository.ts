@@ -146,7 +146,10 @@ export async function reviewMappingPreparation(client: PoolClient, input: {
     const review = { publicationTargetId: target.id, targetRevision: target.revision, productId: input.productId, productVariantIds: [...input.productVariantIds].sort((a, b) => a - b),
         ready: blockers.length === 0, blockers, quantities, selectionFingerprint: selection.fingerprint,
         ...(input.verifiedListingScopeHash ? { verifiedListingScopeHash: input.verifiedListingScopeHash } : {}) };
-    return { target, review: { ...review, reviewHash: mappingPreparationDigest({ review, plan: plan.evidenceHash, proposal }) } };
+    // `targetRows`: every planned row of this destination with its blockers, so a caller
+    // that publishes only some sizes can check the others (verified-listing-stock.repository.ts).
+    return { target, review: { ...review, reviewHash: mappingPreparationDigest({ review, plan: plan.evidenceHash, proposal }) },
+        targetRows: targetPlan?.rows ?? [] };
 }
 /** Shares rollback and provider session locks with mapping promotion. No remote
  * I/O occurs while these configuration locks are held. */
@@ -200,7 +203,8 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
     allowRetainedZero?: boolean;
     verifiedListingScopeHash?: string;
     /** Publish only the reviewed members, as a verified listing scope does.
-     * Single-variant listings (Dropship eBay) need it so an unmapped selected
+     * Callers that link one size at a time (Dropship eBay single-variant
+     * listings, verified Walmart listings) need it so an unmapped selected
      * sibling cannot refuse the whole target. Default false: whole product. */
     exactVariantScope?: boolean;
     expectedReviewHash: string;

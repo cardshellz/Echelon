@@ -7,7 +7,8 @@ import { CustomerWorkspace } from "@/pages/CustomerReturnCustomerPortal";
 import { CustomerOrderEditor } from "./CustomerOrderEditor";
 import { CustomerAccountOrderTotals, type CustomerOrderTotalsState } from "./CustomerAccountOrderTotals";
 import { CustomerAccountOrderStatus } from "./CustomerAccountOrderStatus";
-import { CustomerOrderPanel, loadingOrderPanelState, type CustomerOrderPanelState } from "./CustomerOrderPanel";
+import { CustomerOrderPanelLoader } from "./CustomerOrderPanelLoader";
+import type { OrderEditOrder } from "@shared/order-edits/order-edit.contract";
 import {
   loadOrderEditPaymentReturn,
   orderEditPaymentReturnStorage,
@@ -64,210 +65,388 @@ function AccountModal({ api, session, choice, onClose, customerId }: {
     </div>
   </dialog>;
 }
-function CustomerAccount({ root, api, statusTarget, signInUrl, customerId }: { root: HTMLElement; api: CustomerAccountTransport; statusTarget: HTMLElement | null; signInUrl: string; customerId: string }) {
+function CustomerAccount({
+  root,
+  api,
+  statusTarget,
+  signInUrl,
+  customerId,
+}: {
+  root: HTMLElement;
+  api: CustomerAccountTransport;
+  statusTarget: HTMLElement | null;
+  signInUrl: string;
+  customerId: string;
+}) {
   const [session, setSession] = useState<Bootstrap | null>(null);
   const [choice, setChoice] = useState<Choice | null>(null);
-  const [rows] = useState(() => Array.from(root.querySelectorAll<HTMLElement>("[data-csz-account-order]")));
-  const [managed, setManaged] = useState<{ row: HTMLElement; opener: HTMLButtonElement } | null>(null);
-  const [options, setOptions] = useState<ReadonlyMap<HTMLElement, CustomerOrderPanelState>>(new Map());
-  const retryHandlers = useRef(new Map<HTMLElement, () => void>());
+  const [rows] = useState(() =>
+    Array.from(root.querySelectorAll<HTMLElement>("[data-csz-account-order]")),
+  );
+  const [managed, setManaged] = useState<{
+    row: HTMLElement;
+    opener: HTMLButtonElement;
+  } | null>(null);
   const [error, setError] = useState<CustomerAccountAccessNotice | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const [totals, setTotals] = useState<ReadonlyMap<HTMLElement, CustomerOrderTotalsState>>(new Map());
-  const [history, setHistory] = useState<Awaited<ReturnType<ReturnType<CustomerAccountTransport["returns"]>["history"]>> | null>(null);
+  const [totals, setTotals] = useState<
+    ReadonlyMap<HTMLElement, CustomerOrderTotalsState>
+  >(() => new Map(rows.map((row) => [row, { status: "loading" as const }])));
+  const [statusFailures, setStatusFailures] = useState<
+    ReadonlySet<HTMLElement>
+  >(new Set());
+  const [history, setHistory] = useState<Awaited<
+    ReturnType<ReturnType<CustomerAccountTransport["returns"]>["history"]>
+  > | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } }));
-  const close = useCallback(() => { setChoice(null); setManaged(null); setAttempt(value => value + 1); }, []);
+  const [client] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: { retry: false, refetchOnWindowFocus: false },
+        },
+      }),
+  );
+  const requestGeneration = useRef(new Map<HTMLElement, number>());
+  const accountRequests = useRef<AbortController | null>(null);
+
+  const loadSummaries = useCallback(
+    async (
+      selected: HTMLElement[],
+      signal = accountRequests.current?.signal,
+    ) => {
+      const generations = new Map(
+        selected.map((row) => {
+          const generation = (requestGeneration.current.get(row) ?? 0) + 1;
+          requestGeneration.current.set(row, generation);
+          return [row, generation];
+        }),
+      );
+      try {
+        const result = await api.orderSummaries(
+          {
+            orders: selected.map((row) => ({
+              externalOrderId: row.dataset.externalOrderId,
+              orderReference: row.dataset.orderReference,
+            })),
+          },
+          signal,
+        );
+        if (signal?.aborted) return;
+        const currentRows = selected.filter(
+          (row) => requestGeneration.current.get(row) === generations.get(row),
+        );
+        if (!currentRows.length) return;
+        setTotals((previous) => {
+          const next = new Map(previous);
+          for (const row of currentRows) {
+            const order = result.orders.find(
+              (item) => item.externalOrderId === row.dataset.externalOrderId,
+            );
+            next.set(
+              row,
+              order ? { status: "verified", order } : { status: "failed" },
+            );
+          }
+          return next;
+        });
+        setStatusFailures((previous) => {
+          const next = new Set(previous);
+          for (const row of currentRows) {
+            if (result.statusUnavailable) next.add(row);
+            else next.delete(row);
+          }
+          return next;
+        });
+        setError(null);
+      } catch (cause) {
+        if (signal?.aborted) return;
+        const currentRows = selected.filter(row => requestGeneration.current.get(row) === generations.get(row));
+        if (!currentRows.length) return;
+        setTotals((previous) => {
+          const next = new Map(previous);
+          for (const row of currentRows) {
+            if (
+              requestGeneration.current.get(row) === generations.get(row) &&
+              previous.get(row)?.status !== "verified"
+            )
+              next.set(row, { status: "failed" });
+          }
+          return next;
+        });
+        setError(customerAccountAccessNotice(cause));
+      }
+    },
+    [api],
+  );
+
+  const verifiedOrder = useCallback(
+    (row: HTMLElement, order: OrderEditOrder) => {
+      // Prevent an earlier list request from replacing newer detailed native facts.
+      requestGeneration.current.set(row, (requestGeneration.current.get(row) ?? 0) + 1);
+      setTotals((previous) =>
+        new Map(previous).set(row, { status: "verified", order }),
+      );
+    },
+    [],
+  );
+  const closePanel = useCallback(() => setManaged(null), []);
+  const closeModal = () => {
+    const omsOrderId = choice?.omsOrderId;
+    setChoice(null);
+    const row = rows.find((item) => {
+      const state = totals.get(item);
+      return (
+        state?.status === "verified" && state.order.omsOrderId === omsOrderId
+      );
+    });
+    if (row) void loadSummaries([row]);
+  };
+
   useEffect(() => {
     const controller = new AbortController();
-    const rowListeners = new Map<HTMLElement, Array<() => void>>();
-    let observer: IntersectionObserver | null = null;
-    let active = 0;
-    const queued: HTMLElement[] = [];
-    const inspecting = new Set<HTMLElement>();
-    const seen = new Set<HTMLElement>();
-    let activeSession: Bootstrap | null = null;
-    const setRowTotals = (row: HTMLElement, state: CustomerOrderTotalsState) => {
-      if (!controller.signal.aborted) setTotals(previous => new Map(previous).set(row, state));
-    };
-    setTotals(new Map(rows.map(row => [row, { status: "loading" as const }])));
-    setOptions(new Map(rows.map(row => [row, loadingOrderPanelState])));
-    retryHandlers.current.clear();
-    rows.forEach(row => retryHandlers.current.set(row, () => {
-      if (!inspecting.has(row) && !queued.includes(row)) { queued.push(row); schedule(); }
-    }));
+    accountRequests.current = controller;
     setError(null);
     setSession(null);
-    setHistory(null);
     setHistoryError(null);
-    rows.forEach(row => row.querySelectorAll<HTMLElement>("[data-csz-account-action]").forEach(button => { button.hidden = true; }));
-    function schedule() {
-      // Bound provider inspection work; paginate/scroll adds rows without
-      // delaying the native order list or flooding Shopify with parallel reads.
-      while (active < 2 && queued.length && !controller.signal.aborted) {
-        const row = queued.shift()!;
-        active += 1;
-        inspecting.add(row);
-        void inspect(row).finally(() => { active -= 1; inspecting.delete(row); schedule(); });
-      }
-    }
-    async function inspect(row: HTMLElement) {
-      setRowTotals(row, { status: "loading" });
-      if (!controller.signal.aborted) setOptions(previous => new Map(previous).set(row, loadingOrderPanelState));
-      rowListeners.get(row)?.forEach(remove => remove());
-      const cleanup: Array<() => void> = [];
-      rowListeners.set(row, cleanup);
-      row.querySelectorAll<HTMLElement>("[data-csz-account-action]").forEach(button => { button.hidden = true; });
-      const status = row.querySelector<HTMLElement>("[data-csz-order-tools-status]");
-      const enhanced = row.querySelector("[data-csz-order-panel-trigger]") !== null;
-      if (status && !enhanced) status.textContent = "Checking available actions…";
-      const offerRetry = () => {
-        if (!status || enhanced || controller.signal.aborted) return;
-        const retry = document.createElement("button");
-        retry.type = "button";
-        retry.className = "csz-action";
-        retry.textContent = "Try again";
-        const click = () => {
-          retry.disabled = true;
-          queued.push(row);
-          schedule();
-        };
-        retry.addEventListener("click", click);
-        status.after(retry);
-        cleanup.push(() => { retry.removeEventListener("click", click); retry.remove(); });
-      };
-      try {
-        const identity = await api.resolve({ orderReference: row.dataset.orderReference, externalOrderId: row.dataset.externalOrderId }, controller.signal);
-        const currentSession = activeSession;
-        if (!currentSession) return;
-        if (identity.connectionId !== currentSession.connection.connectionId) throw new Error("The order connection could not be verified.");
+    void api
+      .bootstrap(controller.signal)
+      .then((result) => {
         if (controller.signal.aborted) return;
-        const editable = row.dataset.fulfillment !== "fulfilled" && row.dataset.cancelled !== "true";
-        const canHaveReturn = ["fulfilled", "partial"].includes(row.dataset.fulfillment ?? "") && row.dataset.cancelled !== "true";
-        const results = await Promise.allSettled([
-          // Current financial facts are required even when editing is unavailable.
-          api.edits.order(identity.connectionId, identity.omsOrderId, controller.signal),
-          canHaveReturn ? api.returns(currentSession.session.sessionKey!).order(identity.omsOrderId, controller.signal) : Promise.resolve(null),
-        ]);
-        if (controller.signal.aborted) return;
-        const editResult = results[0];
-        const returnResult = results[1];
-        if (editResult.status === "fulfilled") {
-          const order = editResult.value;
-          if (order.connectionId !== identity.connectionId || order.omsOrderId !== identity.omsOrderId
-            || order.orderNumber !== row.dataset.orderReference
-            || (order.financials && order.financials.totalCents !== order.totalCents)) {
-            throw new Error("We couldn't verify the current order total. Please try again.");
-          }
-          setRowTotals(row, { status: "verified", order });
-        } else setRowTotals(row, { status: "failed" });
-        const bind = (kind: "edit" | "return", returnOrder?: CustomerReturnCustomerOrder) => {
-          const button = row.querySelector<HTMLButtonElement>(`[data-csz-account-action="${kind}"]`);
-          if (!button) return;
-          button.hidden = false;
-          const click = () => setChoice({ kind, omsOrderId: identity.omsOrderId, returnOrder });
-          button.addEventListener("click", click);
-          cleanup.push(() => button.removeEventListener("click", click));
-        };
-        if (editable && editResult.status === "fulfilled" && editResult.value && editResult.value.activeOperationKind !== "cancel_order" && (editResult.value.activeOperationId || (currentSession.connection.enabled && editResult.value.eligibility.editable))) {
-          bind("edit");
-          const address = row.querySelector<HTMLElement>("[data-csz-account-action='address']");
-          if (address && editResult.value.eligibility.editable && !editResult.value.activeOperationId) address.hidden = false;
+        setSession(result);
+        // One small native query covers this page, including purchases predating
+        // OMS. Edit eligibility and return policy checks are demand-loaded.
+        void loadSummaries(rows, controller.signal);
+        const paymentStorage = orderEditPaymentReturnStorage();
+        const paymentReturn =
+          paymentStorage &&
+          loadOrderEditPaymentReturn(
+            customerId,
+            result.connection.connectionId,
+            paymentStorage,
+            Date.now,
+          );
+        if (
+          paymentReturn &&
+          rows.some(
+            (row) => row.dataset.orderReference === paymentReturn.orderNumber,
+          )
+        ) {
+          setChoice(
+            (current) =>
+              current ?? {
+                kind: "edit",
+                omsOrderId: paymentReturn.omsOrderId,
+                returnOperationId: paymentReturn.operationId,
+              },
+          );
         }
-        if (returnResult.status === "fulfilled" && returnResult.value?.order.lines.some(line => line.eligibleQuantity > 0)) bind("return", returnResult.value);
-        const failed = results.some(result => result.status === "rejected");
-        setOptions(previous => new Map(previous).set(row, { loading: false, omsOrderId: identity.omsOrderId,
-          order: editResult.status === "fulfilled" ? editResult.value : null,
-          returnOrder: returnResult.status === "fulfilled" ? returnResult.value : null,
-          error: failed ? "Some order options couldn’t be loaded." : null }));
-        if (status && !enhanced) status.textContent = failed ? "We couldn't check the available actions for this order. Please try again."
-          : editable && editResult.status === "fulfilled" && editResult.value && !editResult.value.eligibility.editable
-            ? editResult.value.eligibility.reasons[0] ?? "This order can no longer be edited." : "";
-        if (failed) offerRetry();
-      } catch (cause) {
-        setRowTotals(row, { status: "failed" });
+        void api
+          .returns(result.session.sessionKey!)
+          .history(null, controller.signal)
+          .then((value) => {
+            if (!controller.signal.aborted) {
+              setHistory(value);
+              setHistoryError(null);
+            }
+          })
+          .catch((cause) => {
+            if (!controller.signal.aborted) setHistoryError(message(cause));
+          });
+      })
+      .catch((cause) => {
         if (!controller.signal.aborted) {
-          setOptions(previous => new Map(previous).set(row, { ...loadingOrderPanelState, loading: false, error: message(cause) }));
-          if (status && !enhanced) { status.textContent = message(cause); offerRetry(); }
+          setError(customerAccountAccessNotice(cause));
+          setTotals(
+            (previous) =>
+              new Map(
+                rows.map((row) => [
+                  row,
+                  previous.get(row)?.status === "verified"
+                    ? previous.get(row)!
+                    : { status: "failed" as const },
+                ]),
+              ),
+          );
         }
-      }
-    }
-    void api.bootstrap(controller.signal).then(result => {
-      if (controller.signal.aborted) return;
-      setSession(result);
-      activeSession = result;
-      const paymentStorage = orderEditPaymentReturnStorage();
-      const paymentReturn = paymentStorage && loadOrderEditPaymentReturn(
-        customerId, result.connection.connectionId, paymentStorage, Date.now,
-      );
-      if (paymentReturn && rows.some(row => row.dataset.orderReference === paymentReturn.orderNumber)) {
-        setChoice(current => current ?? {
-          kind: "edit",
-          omsOrderId: paymentReturn.omsOrderId,
-          returnOperationId: paymentReturn.operationId,
-        });
-      }
-      void api.returns(result.session.sessionKey!).history(null, controller.signal).then(value => {
-        if (!controller.signal.aborted) { setHistory(value); setHistoryError(null); }
-      }).catch(cause => { if (!controller.signal.aborted) setHistoryError(message(cause)); });
-      observer = new IntersectionObserver(entries => {
-        entries.filter(entry => entry.isIntersecting).forEach(entry => {
-          const row = entry.target as HTMLElement;
-          if (!seen.has(row)) { seen.add(row); queued.push(row); observer?.unobserve(row); }
-        });
-        schedule();
-      }, { rootMargin: "200px" });
-      rows.forEach(row => observer!.observe(row));
-    }).catch(cause => { if (!controller.signal.aborted) {
-      setError(customerAccountAccessNotice(cause));
-      setTotals(new Map(rows.map(row => [row, { status: "failed" as const }])));
-    } });
-    return () => { controller.abort(); observer?.disconnect(); retryHandlers.current.clear(); rowListeners.forEach(cleanup => cleanup.forEach(remove => remove())); client.clear(); };
-  }, [api, root, rows, attempt, client, customerId]);
-  async function showReturn(authorizationId: number, omsOrderId: number): Promise<boolean> {
+      });
+    return () => {
+      controller.abort();
+      client.clear();
+    };
+  }, [api, rows, attempt, client, customerId, loadSummaries]);
+
+  async function showReturn(
+    authorizationId: number,
+    omsOrderId: number,
+  ): Promise<boolean> {
     if (!session?.session.sessionKey) return false;
     try {
-      const returnStatus = await api.returns(session.session.sessionKey).status(authorizationId, new AbortController().signal);
+      const returnStatus = await api
+        .returns(session.session.sessionKey)
+        .status(authorizationId, new AbortController().signal);
       setChoice({ kind: "labels", omsOrderId, returnStatus });
       setManaged(null);
       return true;
-    } catch (cause) { setHistoryError(message(cause)); return false; }
+    } catch (cause) {
+      setHistoryError(message(cause));
+      return false;
+    }
   }
-  const accessError = error && <div className="csz-account-notice" role="alert"><span>{error.message}</span>
-    {error.action === "sign_in" ? <a className="csz-action" href={signInUrl}>Sign in again</a>
-      : <button type="button" className="csz-action" onClick={() => setAttempt(value => value + 1)}>Try again</button>}
-  </div>;
-  return <QueryClientProvider client={client}>
-    <CustomerAccountOrderTotals root={root} states={totals} />
-    <CustomerAccountOrderStatus states={totals} />
-    {rows.flatMap(row => {
-      const target = row.querySelector<HTMLElement>("[data-csz-order-panel-trigger]");
-      return target ? [createPortal(<button type="button" className="csz-action csz-manage-order" aria-haspopup="dialog"
-        aria-label={`Manage order ${row.dataset.orderReference}`} aria-expanded={managed?.row === row} aria-controls="csz-order-panel"
-        onClick={event => setManaged({ row, opener: event.currentTarget })}>Manage order</button>, target, `${row.dataset.externalOrderId}:manage`)] : [];
-    })}
-    {accessError && !managed && (statusTarget ? createPortal(accessError, statusTarget) : accessError)}
-    {managed && <CustomerOrderPanel key={managed.row.dataset.externalOrderId} row={managed.row} opener={managed.opener}
-      state={{ ...(options.get(managed.row) ?? loadingOrderPanelState), ...(historyError ? { error: historyError } : {}) }}
-      api={api} customerId={customerId} connectionId={session?.connection.connectionId ?? null} enabled={session?.connection.enabled ?? false}
-      accessNotice={error} signInUrl={signInUrl} history={history} onClose={close}
-      onRetry={() => { if (!session || error || historyError) setAttempt(value => value + 1); else retryHandlers.current.get(managed.row)?.(); }}
-      onEdit={omsOrderId => { setManaged(null); setChoice({ kind: "edit", omsOrderId }); }}
-      onReturn={returnOrder => { setManaged(null); setChoice({ kind: "return", omsOrderId: returnOrder.omsOrderId, returnOrder }); }}
-      onLabel={showReturn} />}
-    {choice && session && <AccountModal key={`${choice.kind}:${choice.omsOrderId}:${choice.returnStatus?.authorizationId ?? "intake"}`} api={api} session={session} choice={choice} onClose={close} customerId={customerId} />}
-    {session && <section className="csz-account-returns" aria-label="Your returns"><h2>Your returns</h2>
-      {historyError && <p role="status">{historyError}</p>}
-      {history?.returns.length === 0 && <p>You don’t have any returns yet.</p>}
-      {history?.returns.map(item => <button className="csz-action" type="button" key={item.authorizationId} onClick={() => void showReturn(item.authorizationId, item.omsOrderId)}>
-        {item.orderReference ? `Order ${item.orderReference} · ` : ""}{item.authorizationNumber} · View labels
-      </button>)}
-      {history?.nextBeforeAuthorizationId && <button className="csz-action" type="button" onClick={() => {
-        void api.returns(session.session.sessionKey!).history(history.nextBeforeAuthorizationId, new AbortController().signal).then(page => setHistory(previous => ({ ...page,
-          returns: [...(previous?.returns ?? []).filter(item => !page.returns.some(next => next.authorizationId === item.authorizationId)), ...page.returns] }))).catch(cause => setHistoryError(message(cause)));
-      }}>More returns</button>}
-    </section>}
-  </QueryClientProvider>;
+  const accessError = error && (
+    <div className="csz-account-notice" role="alert">
+      <span>{error.message}</span>
+      {error.action === "sign_in" ? (
+        <a className="csz-action" href={signInUrl}>
+          Sign in again
+        </a>
+      ) : (
+        <button
+          type="button"
+          className="csz-action"
+          onClick={() => setAttempt((value) => value + 1)}
+        >
+          Try again
+        </button>
+      )}
+    </div>
+  );
+  return (
+    <QueryClientProvider client={client}>
+      <CustomerAccountOrderTotals root={root} states={totals} api={api} />
+      <CustomerAccountOrderStatus states={totals} />
+      {rows.flatMap((row) => {
+        const target = row.querySelector<HTMLElement>(
+          "[data-csz-order-panel-trigger]",
+        );
+        return target
+          ? [
+              createPortal(
+                <button
+                  type="button"
+                  className="csz-action csz-manage-order"
+                  aria-haspopup="dialog"
+                  aria-label={`Manage order ${row.dataset.orderReference}`}
+                  aria-expanded={managed?.row === row}
+                  aria-controls="csz-order-panel"
+                  onClick={(event) =>
+                    setManaged({ row, opener: event.currentTarget })
+                  }
+                >
+                  Manage order
+                </button>,
+                target,
+                `${row.dataset.externalOrderId}:manage`,
+              ),
+            ]
+          : [];
+      })}
+      {accessError &&
+        !managed &&
+        (statusTarget ? createPortal(accessError, statusTarget) : accessError)}
+      {managed && (
+        <CustomerOrderPanelLoader
+          key={managed.row.dataset.externalOrderId}
+          row={managed.row}
+          opener={managed.opener}
+          summary={totals.get(managed.row)}
+          statusUnavailable={statusFailures.has(managed.row)}
+          api={api}
+          customerId={customerId}
+          connectionId={session?.connection.connectionId ?? null}
+          enabled={session?.connection.enabled ?? false}
+          sessionKey={session?.session.sessionKey ?? undefined}
+          accessNotice={error}
+          signInUrl={signInUrl}
+          history={history}
+          historyError={historyError}
+          onClose={closePanel}
+          onRefresh={() => {
+            void loadSummaries([managed.row]);
+          }}
+          onAccessRetry={() => setAttempt((value) => value + 1)}
+          onVerified={verifiedOrder}
+          onEdit={(omsOrderId) => {
+            setManaged(null);
+            setChoice({ kind: "edit", omsOrderId });
+          }}
+          onReturn={(returnOrder) => {
+            setManaged(null);
+            setChoice({
+              kind: "return",
+              omsOrderId: returnOrder.omsOrderId,
+              returnOrder,
+            });
+          }}
+          onLabel={showReturn}
+        />
+      )}
+      {choice && session && (
+        <AccountModal
+          key={`${choice.kind}:${choice.omsOrderId}:${choice.returnStatus?.authorizationId ?? "intake"}`}
+          api={api}
+          session={session}
+          choice={choice}
+          onClose={closeModal}
+          customerId={customerId}
+        />
+      )}
+      {session && (
+        <section className="csz-account-returns" aria-label="Your returns">
+          <h2>Your returns</h2>
+          {historyError && <p role="status">{historyError}</p>}
+          {history?.returns.length === 0 && (
+            <p>You don’t have any returns yet.</p>
+          )}
+          {history?.returns.map((item) => (
+            <button
+              className="csz-action"
+              type="button"
+              key={item.authorizationId}
+              onClick={() =>
+                void showReturn(item.authorizationId, item.omsOrderId)
+              }
+            >
+              {item.orderReference ? `Order ${item.orderReference} · ` : ""}
+              {item.authorizationNumber} · View labels
+            </button>
+          ))}
+          {history?.nextBeforeAuthorizationId && (
+            <button
+              className="csz-action"
+              type="button"
+              onClick={() => {
+                void api
+                  .returns(session.session.sessionKey!)
+                  .history(
+                    history.nextBeforeAuthorizationId,
+                    new AbortController().signal,
+                  )
+                  .then((page) =>
+                    setHistory((previous) => ({
+                      ...page,
+                      returns: [
+                        ...(previous?.returns ?? []).filter(
+                          (item) =>
+                            !page.returns.some(
+                              (next) =>
+                                next.authorizationId === item.authorizationId,
+                            ),
+                        ),
+                        ...page.returns,
+                      ],
+                    })),
+                  )
+                  .catch((cause) => setHistoryError(message(cause)));
+              }}
+            >
+              More returns
+            </button>
+          )}
+        </section>
+      )}
+    </QueryClientProvider>
+  );
 }
 const root = document.querySelector<HTMLElement>("[data-csz-customer-account]");
 const mount = document.getElementById("csz-customer-account-tools");
