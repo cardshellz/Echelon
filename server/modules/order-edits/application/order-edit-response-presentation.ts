@@ -6,9 +6,15 @@ import type { OrderEditOrder } from "@shared/order-edits/order-edit.contract";
 
 /** Existing account/staff bundles validate strict DTOs. Management metadata
  * is opt-in so a shared-backend rollout cannot break an older open tab. */
-export function orderEditOrderManagementPresentation(order: OrderEditOrder, version: "v1" | undefined): OrderEditOrder {
-  if (version === "v1") return order;
-  const { fulfillment: _fulfillment, activeOperationKind: _kind, cancellation: _cancellation, ...legacy } = order;
+export function orderEditOrderManagementPresentation(order: OrderEditOrder, version: "v1" | "v2" | undefined): OrderEditOrder {
+  if (version === "v2") return order;
+  const { activeOperationStatus: _status, addressEligibility: _address, ...v1 } = order;
+  if (version === "v1") {
+    if (!v1.cancellation) return v1;
+    const { reasons: _reasons, ...cancellation } = v1.cancellation;
+    return { ...v1, cancellation };
+  }
+  const { fulfillment: _fulfillment, activeOperationKind: _kind, cancellation: _cancellation, ...legacy } = v1;
   return legacy;
 }
 

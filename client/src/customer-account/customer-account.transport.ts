@@ -8,6 +8,7 @@ import { createCustomerReturnTransport } from "@/lib/customer-return-customer";
 import { ORDER_EDIT_PRICING_DISPLAY_HEADER, ORDER_EDIT_PRICING_DISPLAY_VERSION } from "@shared/order-edits/order-edit-financials";
 import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
 import { customerOrderCancellationInputSchema, customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
+import { customerAccountOrderSummariesInputSchema, customerAccountOrderSummariesSchema, customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
 
 export const customerAccountPageConfigSchema = z.object({
   themeId: z.string().max(30).regex(/^[1-9][0-9]*$/),
@@ -90,6 +91,22 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
       return result;
     },
     resolve: async (raw: unknown, signal?: AbortSignal) => json(await call({ method: "POST", path: "/account/resolve", body: customerAccountOrderIdentityInputSchema.parse(raw) }, signal), customerAccountOrderIdentitySchema),
+    orderSummaries: async (raw: unknown, signal?: AbortSignal) => {
+      const input = customerAccountOrderSummariesInputSchema.parse(raw);
+      const result = await json(await call({ method: "POST", path: "/account/order-summaries", body: input }, signal), customerAccountOrderSummariesSchema);
+      const expected = input.orders.map(order => order.externalOrderId);
+      const received = [...result.orders.map(order => order.externalOrderId), ...result.unavailableExternalOrderIds];
+      if (received.length !== expected.length || received.some(id => !expected.includes(id)) || result.orders.some(order => !input.orders.some(item => item.externalOrderId === order.externalOrderId && item.orderReference === order.orderReference)))
+        throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_ORDER_MISMATCH", "Order history could not be verified. Please try again.");
+      return result;
+    },
+    orderDetails: async (raw: unknown, signal?: AbortSignal) => {
+      const input = customerAccountOrderIdentityInputSchema.parse(raw);
+      const result = await json(await call({ method: "POST", path: "/account/order-details", body: input }, signal), customerAccountOrderDetailsSchema);
+      if (result.externalOrderId !== input.externalOrderId || result.orderReference !== input.orderReference)
+        throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_ORDER_MISMATCH", "Order details could not be verified. Please try again.");
+      return result;
+    },
     edits: createOrderEditTransport(bridge),
     cancellation: {
       review: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({

@@ -1594,6 +1594,14 @@ async function reduction() {
 }
 
 describe("native tax rate display evidence", () => {
+  it("rejects a foreign signed-in customer before reading any saved reward/code history", async () => {
+    const history = { enrich: vi.fn() };
+    const h = harness([rawOrder()], {}, undefined, { codeHistory: history });
+    await expect(h.provider.readOrder(4, "100", "gid://shopify/Customer/999")).rejects.toMatchObject({ code: "CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE" });
+    expect(history.enrich).not.toHaveBeenCalled();
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0].query).not.toContain("mutation");
+  });
   it("reads current tax rates without changing the existing order identity or amounts", async () => {
     const original = rawOrder({ currentTotalPriceSet: bag("21.20"), currentTotalTaxSet: bag("1.20"), netPaymentSet: bag("21.20"), transactions: [tx(1, "21.20")] });
     const enriched = { ...original, order: { ...original.order, currentTaxLines: [{ title: "State tax", ratePercentage: 6, priceSet: bag("1.20") }] } };

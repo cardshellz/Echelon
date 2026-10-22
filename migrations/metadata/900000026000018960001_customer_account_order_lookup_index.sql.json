@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000026000018960001_customer_account_order_lookup_index.sql",
+  "generation": 26,
+  "pr": 1896,
+  "ordinal": 1,
+  "after": [
+    "900000025000018890001_dropship_listing_push_runs.sql"
+  ]
+}

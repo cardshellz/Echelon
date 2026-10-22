@@ -45,6 +45,7 @@ import { orderEditPricingDisplayVersionSchema } from "@shared/order-edits/order-
 import { orderEditResponsePresentation, orderEditOrderManagementPresentation } from "../../order-edits/application/order-edit-response-presentation";
 import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
 import { customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
+import { customerAccountOrderDetailsSchema, customerAccountOrderSummariesSchema } from "@shared/customer-account/customer-account-orders";
 
 type Services = ReturnType<ReturnType<typeof customerAccountServices>>;
 export interface CustomerAccountRouteDependencies {
@@ -239,6 +240,14 @@ async function dispatch(
     empty.parse(query);
     return services.edits.resolve(body);
   }
+  if (path === "/account/order-summaries" && !read) {
+    empty.parse(query);
+    return customerAccountOrderSummariesSchema.parse(await services.orders.summaries(body));
+  }
+  if (path === "/account/order-details" && !read) {
+    empty.parse(query);
+    return customerAccountOrderDetailsSchema.parse(await services.orders.details(body));
+  }
   const order = /^\/order-edits\/orders\/([1-9][0-9]*)$/.exec(path);
   const cancellation = /^\/account\/orders\/([1-9][0-9]*)\/cancellation(?:\/(review|status))?$/.exec(path);
   if (cancellation) {
@@ -263,7 +272,7 @@ async function dispatch(
   }
   if (order && read) {
     const params = connectionQuery
-      .extend({ codeEntryVersion: z.literal("v1").optional(), managementVersion: z.literal("v1").optional() })
+      .extend({ codeEntryVersion: z.literal("v1").optional(), managementVersion: z.enum(["v1", "v2"]).optional() })
       .parse(query);
     return orderEditResponsePresentation(
       orderEditOrderManagementPresentation(orderEditOrderSchema.parse(
