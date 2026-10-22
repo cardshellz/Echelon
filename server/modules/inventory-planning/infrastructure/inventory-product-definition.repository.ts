@@ -184,7 +184,9 @@ export async function captureDefinitionImpact(client: PoolClient, affectedProduc
     fingerprints.push(inventoryCutoverEvidenceHash({ before: before.rows, after: after.rows,
       beforeBlocked: before.blockedTargets ?? [], afterBlocked: after.blockedTargets ?? [] }));
     for (const target of after.blockedTargets ?? []) {
-      // A row isolation (Dropship eBay) still updates the destination's linked listings.
+      // A row isolation still updates the destination's linked listings: Dropship eBay and
+      // channel Shopify, Walmart and eBay (isRowIsolableDestination in
+      // inventory-availability-runtime-publication.service.ts).
       const scope = target.isolation === "rows" ? ` for ${target.productVariantIds.length} unlinked item(s)` : "";
       skippedDestinations.push(`${target.channelName}: stock is not updating${scope} (${target.errorCode}: ${target.blockerCodes.join(", ")}). Fix that listing; this change still applies.`);
     }

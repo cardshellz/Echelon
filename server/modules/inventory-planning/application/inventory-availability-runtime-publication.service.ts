@@ -104,8 +104,9 @@ export interface CanonicalInventoryPublicationResult {
  * stop the product's other destinations, or the warehouse operation that changed
  * stock; it stays fail-closed (no quantity is sent to it) until its data is fixed.
  * `isolation:"target"` withholds the whole destination this run. `"rows"` (Dropship
- * eBay destinations only) withholds just `productVariantIds`, the rows whose sole
- * problem is a missing stock link; its other rows are still published. */
+ * eBay and channel Shopify, Walmart and eBay destinations, isRowIsolableDestination)
+ * withholds just `productVariantIds`, the rows whose sole problem is a missing stock
+ * link; its other rows are still published. */
 export interface BlockedInventoryPublicationTarget {
   publicationTargetId: number;
   channelId: number;
@@ -374,9 +375,10 @@ export class AuthorityAwareInventoryPublicationService {
     }
     // A target blocked for any member publishes nothing this run: a partial
     // projection of one destination is not a safe quantity either. The one
-    // exception is a row isolation (Dropship eBay destinations, see
-    // rowIsolatedVariantIds): each row there is its own single-variant listing,
-    // so only the unlinked rows are withheld and the linked listings still update.
+    // exception is a row isolation (Dropship eBay and channel Shopify, Walmart and
+    // eBay destinations, see isRowIsolableDestination): each row there writes one
+    // item absolutely, so only the unlinked rows are withheld and the linked
+    // items still update.
     const rows = planned.filter(row => !isIsolatedPublicationRow(blocked, row));
     for (const target of blocked.values()) {
       (this.logger.error ?? this.logger.warn).call(this.logger, {
@@ -622,12 +624,35 @@ function publicationIntentsFromPlan(
   return rows;
 }
 
-/** Destinations whose rows are independent provider listings: a Dropship eBay
- * store listing is single-variant (buildDropshipEbayListingDraft) and the outbox
- * writes one SKU per row, so one unlinked row cannot make another row's quantity
- * wrong. Every other destination kind keeps whole-destination isolation. */
+/** Destinations whose rows are independent provider writes: each outbox row sets
+ * one exact item's quantity absolutely, so one unlinked row cannot make another
+ * row's quantity wrong, and withholding the linked siblings would only freeze them
+ * at stale quantities (an oversell risk). Owner decision (PLAN-CH-v3 section 7):
+ * one unlinked size must not freeze its linked sizes.
+ * - Dropship eBay: a store listing is single-variant (buildDropshipEbayListingDraft),
+ *   one SKU per row.
+ * - Channel Shopify: one InventoryItem at the destination's one location
+ *   (shopify.adapter.ts pushInventory, inventory_levels/set.json per item).
+ * - Channel Walmart: one seller SKU at the destination's ship node (walmart.adapter.ts pushInventory, setInventory per SKU).
+ * - Channel eBay: one inventory-item SKU per row (ebay.adapter.ts pushCanonicalInventory).
+ * HYPOTHESIS (PLAN-CH-v3 section 12): no provider couples sibling quantities.
+ * Every other destination kind and provider keeps whole-destination isolation. */
+const ROW_ISOLABLE_DESTINATIONS: ReadonlySet<string> = new Set([
+  "dropship_store_connection:ebay",
+  "channel_connection:shopify",
+  "channel_connection:walmart",
+  "channel_connection:ebay",
+]);
+
 function isRowIsolableDestination(destinationKind: string, provider: string): boolean {
-  return destinationKind === "dropship_store_connection" && provider.toLowerCase() === "ebay";
+  return ROW_ISOLABLE_DESTINATIONS.has(`${destinationKind}:${provider.toLowerCase()}`);
+}
+
+/** The one row blocker row isolation may withhold a row for: its stock link is
+ * missing and nothing else is wrong. Exact-size links use the same rule for the
+ * siblings they skip (verified-listing-stock.repository.ts). */
+export function blockedOnlyByMissingStockLink(blockers: readonly { readonly code: string }[]): boolean {
+  return blockers.length === 1 && blockers[0]!.code === "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING";
 }
 
 /** The unlinked rows of a row-isolable destination, or null when the whole
@@ -642,8 +667,7 @@ function rowIsolatedVariantIds(target: InventoryChannelExposureRuntimePlan["targ
   const unlinked: number[] = [];
   for (const row of target.rows) {
     if (row.blockers.length === 0 && row.mapping !== null && row.policy !== null) continue;
-    if (row.mapping === null && row.blockers.length === 1
-      && row.blockers[0]!.code === "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING") {
+    if (row.mapping === null && blockedOnlyByMissingStockLink(row.blockers)) {
       unlinked.push(row.productVariantId);
       continue;
     }

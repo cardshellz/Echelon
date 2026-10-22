@@ -204,6 +204,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-vendor-catalog-read.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-release-readiness.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-order-listing-acceptability.integration.test.ts",
+      // Channels PR1: a refused Shopify stock update dead-letters at once and shows on Ops Health (real outbox; fake Shopify HTTP).
+      "server/modules/inventory-planning/__tests__/integration/channel-stock-update-dead-letter.integration.test.ts",
     ];
     addedSuites.push(
       "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",
