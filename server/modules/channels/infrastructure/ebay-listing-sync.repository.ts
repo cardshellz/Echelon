@@ -1,3 +1,4 @@
+import { CHANNEL_SYNC_BATCH_LIMIT } from "@shared/types/channel-sync-batch";
 import { channelPreparedIntentSchema, type ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
 import { assertPreparedChannelIntent } from "../../marketplace-listings/prepared-channel-intent";
 import { ebayIntentAccount, EBAY_PREPARED_INTENT_CAPABILITY } from "../ebay-prepared-intent";
@@ -627,6 +628,32 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     const job = decode(row);
     if (options.expectedOperation !== undefined) await this.assertCommandOperation(client, job, commandKey, options.expectedOperation);
     return (await withEbayListingJobProgress(client, [job]))[0];
+  }
+  /** Exact immutable command membership, batched for progress polling. A newer
+   * request for the same product must never replace this command's receipt. */
+  async readCommandStatuses(commandKeys: readonly string[]) {
+    const keys = z.array(z.string().uuid()).max(CHANNEL_SYNC_BATCH_LIMIT).parse(commandKeys);
+    if (!keys.length) return [];
+    const rows = (await this.pool.query(`
+      SELECT c.command_key::text AS "commandKey",c.actor,j.channel_id AS "channelId",
+        j.connection_id AS "connectionId",j.identity->>'accountId' AS "accountId",
+        j.identity->>'marketplaceId' AS "marketplaceId",
+        j.id::text,j.product_id AS "productId",j.operation,'sync' AS kind,
+        j.state,j.read_retry_paused AS "readRetryPaused",j.error_code AS code,j.error_message AS message,j.next_attempt_at AS "nextAttemptAt",
+        GREATEST(j.updated_at,(SELECT max(e.created_at) FROM channels.ebay_listing_sync_events e WHERE e.job_id=j.id)) AS "updatedAt"
+      FROM channels.ebay_listing_sync_commands c JOIN channels.ebay_listing_sync_jobs j ON j.id=c.job_id
+      WHERE c.command_key=ANY($1::uuid[])
+      UNION ALL
+      SELECT f.command_key::text,f.actor,f.channel_id,NULL,NULL,NULL,f.command_key::text,f.product_id,f.operation,'admission',
+        'needs_attention',false,f.error_code,f.error_message,f.created_at,f.created_at
+      FROM channels.ebay_listing_sync_admission_failures f WHERE f.command_key=ANY($1::uuid[])
+      AND NOT EXISTS(SELECT 1 FROM channels.ebay_listing_sync_commands c WHERE c.command_key=f.command_key)`, [keys])).rows;
+    const scope = z.object({ commandKey: z.string().uuid(),actor: z.string().min(1),
+      channelId: z.number().int().positive(),connectionId: z.number().int().positive().nullable(),
+      accountId: z.string().min(1).nullable(),marketplaceId: z.string().min(1).nullable() });
+    return rows.map(row => ({ ...scope.parse(row), job: ebayListingSyncJobSchema.parse({
+      ...row,nextAttemptAt: row.nextAttemptAt.toISOString(),updatedAt: row.updatedAt.toISOString(),
+    }) }));
   }
   async getAdmission(id: string, channelId: number): Promise<EbayListingSyncJob | null> {
     const row = (await this.pool.query(`SELECT command_key::text AS id,product_id AS "productId",operation,error_code AS code,error_message AS message,created_at

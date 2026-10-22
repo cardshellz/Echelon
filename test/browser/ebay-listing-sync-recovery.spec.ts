@@ -1,3 +1,4 @@
+import { batchFixture, refreshBatch, mockSyncBatches } from "./fixtures/channel-sync-batch.fixture";
 import { expect, test } from "@playwright/test";
 import { setupEbayChannelPage } from "./fixtures/ebay-channel-page.fixture";
 import { resolveEbayListingIssue } from "../../shared/ebay-listing-issue";
@@ -593,42 +594,24 @@ test("missing terminal evidence stays actionable and cannot claim automatic succ
   expect(state.unexpected).toEqual([]);
 });
 
-test("bulk sync reports retained work rather than displaying pending products as failures", async ({
-  page,
-}) => {
+test("bulk sync keeps real progress after closing and reloading without submitting again", async ({ page }) => {
   const state = await setupEbayChannelPage(page);
-  await page.route("**/api/ebay/listings/sync-stream", (route) =>
-    route.fulfill({
-      contentType: "text/event-stream",
-      body: [
-        {
-          type: "progress",
-          product: "55PT Toploader Combo Pack",
-          productId: 1,
-          status: "pending",
-          current: 1,
-          total: 1,
-        },
-        {
-          type: "complete",
-          summary: { ...pending, total: 1 },
-          cancelled: false,
-        },
-      ]
-        .map((value) => `data: ${JSON.stringify(value)}\n\n`)
-        .join(""),
-    }),
-  );
+  const batches = await mockSyncBatches(page);
   await page.getByRole("button", { name: "Sync All (1)", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("Sync Saved");
-  await expect(dialog).toContainText(
-    "Update saved. Check the listing for progress; you can close this window.",
-  );
-  await expect(dialog.getByText("1 failed", { exact: true })).toHaveCount(0);
+  await expect(dialog).toContainText("0 of 1 products processed");
+  await expect(dialog).toContainText("1 queued");
   await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
-  expect(state.errors).toEqual([]);
-  expect(state.unexpected).toEqual([]);
+  const progress = page.getByRole("region", { name: "Channel sync progress" });
+  await expect(progress).toContainText("1 queued");
+  await page.reload();
+  await expect(progress).toContainText("1 queued");
+  batches.batch = refreshBatch({...batches.batch,items:batches.batch.items.map(item=>({...item,state:"completed"}))});
+  await progress.getByRole("button", { name: "Refresh sync progress", exact: true }).click();
+  await expect(progress).toContainText("Sync complete — 1 of 1 products processed");
+  await expect(progress.getByRole("progressbar")).toHaveAttribute("aria-valuenow","1");
+  expect(batches.posts).toHaveLength(1);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
 test("Sync All includes an unfinished saved offer and excludes new or ended publication candidates", async ({ page }) => {
@@ -641,24 +624,16 @@ test("Sync All includes an unfinished saved offer and excludes new or ended publ
     { ...feed[0], id: 2, name: "New product", status: "ready", externalListingId: null, isListed: false, canSyncExistingListing: false },
     { ...feed[0], id: 3, name: "Ended product", status: "ready", externalListingId: "ended-listing", isListed: false, canSyncExistingListing: false },
   ];
-  const requests: string[] = [];
-  await page.route("**/api/ebay/listings/sync-stream", route => {
-    requests.push(new URL(route.request().url()).pathname);
-    state.jobs = [{ ...job, operation: "publish", state: "running",
-      progress: { ...recordedProgress, phase: "recover_prior_requests", phaseState: "started", queuedAhead: null } }];
-    return route.fulfill({ contentType: "text/event-stream", body: [
-      { type: "progress", product: "55PT Toploader Combo Pack", productId: 1, status: "pending", current: 1, total: 1 },
-      { type: "complete", summary: { ...pending, total: 1, jobs: state.jobs }, cancelled: false },
-    ].map(event => `data: ${JSON.stringify(event)}\n\n`).join("") });
-  });
+  const batches = await mockSyncBatches(page);
+  batches.onPost = () => { state.jobs = [{ ...job, operation: "publish", state: "running",
+    progress: { ...recordedProgress, phase: "recover_prior_requests", phaseState: "started", queuedAhead: null } }]; };
   await page.reload();
   await page.getByRole("button", { name: "Sync All (1)", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("Sync Saved");
+  await expect(dialog).toContainText("1 queued");
   await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
   await expect(page.getByRole("status", { name: statusName })).toContainText("Checking earlier eBay request outcomes");
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-  expect(requests).toEqual(["/api/ebay/listings/sync-stream"]);
+  expect(batches.posts).toHaveLength(1);
   expect(state.requests).toEqual([]); expect(state.commands).toEqual([]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
@@ -905,22 +880,21 @@ test("interrupted publication recovery cannot bypass administrator permission th
   expect(state.commands).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("bulk sync keeps product failures visible beside accepted work and offers the catalog fix", async ({ page }) => {
+test("bulk sync keeps product failures visible beside accepted work and opens the saved fix", async ({ page }) => {
   const state = await setupEbayChannelPage(page);
-  const issue = resolveEbayListingIssue({ code: "EBAY_CATALOG_PHOTO_REQUIRED", message: "Case variant has no included photo.", productId: 2 });
-  await page.route("**/api/ebay/listings/sync-stream", (route) => route.fulfill({ contentType: "text/event-stream", body: [
-    { type: "progress", product: "55PT Toploader Combo Pack", productId: 1, status: "pending", current: 1, total: 2 },
-    { type: "progress", product: "Another product", productId: 2, status: "error", error: issue.message, issue, current: 2, total: 2 },
-    { type: "complete", summary: { ...pending, errors: 1, pending: 1, total: 2 }, cancelled: false },
-  ].map((value) => `data: ${JSON.stringify(value)}\n\n`).join("") }));
+  const batch=batchFixture(["queued","needs_attention"]);
+  batch.items[1].code="EBAY_CATALOG_PHOTO_REQUIRED";
+  batch.items[1].message="Case variant has no included photo.";
+  state.jobs=[{...job,id:batch.items[1].operationId,productId:2,kind:"admission",state:"needs_attention",
+    code:batch.items[1].code,message:batch.items[1].message}];
+  await mockSyncBatches(page,batch);
   await page.getByRole("button", { name: "Sync All (1)", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("Sync needs attention");
-  await expect(dialog).toContainText("1 saved for processing");
+  const dialog=page.getByRole("dialog");
+  await expect(dialog).toContainText("1 queued · 1 need attention");
   await expect(dialog).toContainText("Case variant has no included photo.");
-  await expect(dialog.getByRole("link", { name: "Open product images" })).toHaveAttribute("href", "/products/2?tab=images");
-  await expect(dialog.getByText("Show error", { exact: true })).toHaveCount(0);
-  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  await dialog.getByRole("button",{name:"Review listing",exact:true}).nth(1).click();
+  await expect(page.getByRole("dialog").getByRole("link",{name:"Open product images"})).toHaveAttribute("href","/products/2?tab=images");
+  expect(state.errors).toEqual([]);expect(state.unexpected).toEqual([]);
 });
 
 test("failure to read saved status is visible and blocks duplicate sync until refreshed", async ({ page }) => {
@@ -1064,15 +1038,19 @@ test("a stale recovery preview needs a new acknowledgement and does not claim su
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("malformed progress stops observation with directions instead of silently showing a spinner", async ({ page }) => {
-  const state = await setupEbayChannelPage(page);
-  await page.route("**/api/ebay/listings/sync-stream", (route) => route.fulfill({ contentType: "text/event-stream", body: 'data: {"type":"progress","productId":"wrong"}\n\n' }));
-  await page.getByRole("button", { name: "Sync All (1)", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("alert")).toContainText("Sync progress could not be read.");
-  await expect(dialog.getByRole("button", { name: "Close", exact: true }).first()).toBeVisible();
-  await expect(dialog.getByText("Starting sync...", { exact: true })).toHaveCount(0);
-  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+test("a malformed bulk response shows uncertainty and resumes the same saved request", async ({ page }) => {
+  const state=await setupEbayChannelPage(page);
+  const batches=await mockSyncBatches(page);
+  batches.malformedPost=true;batches.getFailure=true;
+  await page.getByRole("button",{name:"Sync All (1)",exact:true}).click();
+  const dialog=page.getByRole("dialog");
+  await expect(dialog.getByRole("alert")).toContainText("not been confirmed");
+  await dialog.getByRole("button",{name:"Close",exact:true}).first().click();
+  batches.malformedPost=false;batches.getFailure=false;
+  await page.getByRole("button",{name:"Resume saved request",exact:true}).click();
+  await expect(page.getByRole("dialog")).toContainText("1 queued");
+  expect(batches.posts).toHaveLength(2);expect(new Set(batches.posts).size).toBe(1);
+  expect(state.errors).toEqual([]);expect(state.unexpected).toEqual([]);
 });
 
 test("eBay policy read failures have reload and prevent saving unverified selections", async ({ page }) => {
@@ -1378,19 +1356,18 @@ test("recovery success with a new admission error presents that correction inste
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("a bulk admission failure remains visible when there was no saved job or progress event", async ({ page }) => {
-  const state = await setupEbayChannelPage(page);
-  await page.route("**/api/ebay/listings/sync-stream", (route) => route.fulfill({ contentType: "text/event-stream", body: `data: ${JSON.stringify({
-    type: "complete", cancelled: false, summary: { ...pending, pending: 0, jobs: [], errors: 1, total: 0,
-      details: [{ productId: 1, productName: "55PT Toploader Combo Pack", success: false, code: "EBAY_SYNC_ADMISSION_UNSAVED", error: "The sync request could not be saved." }],
-    },
-  })}\n\n` }));
-  await page.getByRole("button", { name: "Sync All (1)", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("Sync needs attention");
-  await expect(dialog).toContainText("The sync request could not be saved.");
-  await expect(dialog.getByRole("button", { name: "Retry this product", exact: true })).toBeVisible();
-  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+test("an unfinished bulk handoff stays visible without claiming sync completion", async ({ page }) => {
+  const state=await setupEbayChannelPage(page);
+  const batch=batchFixture(["pending"]);
+  batch.items[0].operationId=null;batch.items[0].message="Some updates have not reached the listing queue. Saved requests will retry automatically.";
+  await mockSyncBatches(page,batch);
+  await page.getByRole("button",{name:"Sync All (1)",exact:true}).click();
+  const dialog=page.getByRole("dialog");
+  await expect(dialog).toContainText("0 of 1 products processed");
+  await expect(dialog).toContainText("not reached the listing queue");
+  await expect(dialog.getByRole("button",{name:"Review listing",exact:true})).toBeVisible();
+  await expect(dialog.getByText("Sync complete",{exact:true})).toHaveCount(0);
+  expect(state.errors).toEqual([]);expect(state.unexpected).toEqual([]);
 });
 
 test("an unverified connection explains its fix without hiding existing listings", async ({ page }) => {
@@ -1559,6 +1536,142 @@ test("explicit permission denial is not presented as a lost request that can be 
   await expect(page.getByText("Permission denied: channels:edit", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry this request", exact: true })).toHaveCount(0);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("background polling completes the closed modal batch and distinguishes attention from success", async ({ page }, info) => {
+  const state=await setupEbayChannelPage(page);
+  const batches=await mockSyncBatches(page,batchFixture(["completed","retrying","verifying"]));
+  await page.getByRole("button",{name:"Sync All (1)",exact:true}).click();
+  await expect(page.getByRole("dialog")).toContainText("1 of 3 products processed");
+  await page.getByRole("dialog").getByRole("button",{name:"Close",exact:true}).first().click();
+  const progress=page.getByRole("region",{name:"Channel sync progress"});
+  await expect(progress).toContainText("1 retrying · 1 verifying");
+  batches.batch=refreshBatch({...batches.batch,items:batches.batch.items.map((item,index)=>({...item,state:index===1?"needs_attention":"completed"}))});
+  await expect(progress).toContainText("Sync finished with issues — 3 of 3 products processed");
+  await expect(progress).toContainText("2 synced · 1 need attention");
+  await progress.screenshot({path:info.outputPath("persistent-sync-progress.png")});
+  expect(batches.posts).toHaveLength(1);
+  expect(state.errors).toEqual([]);expect(state.unexpected).toEqual([]);
+});
+
+test("read failure marks cached progress stale and recovery resumes observation without another sync", async ({ page }) => {
+  const state=await setupEbayChannelPage(page);
+  const batches=await mockSyncBatches(page,batchFixture(["completed"]));batches.saved=true;
+  await page.reload();
+  const progress=page.getByRole("region",{name:"Channel sync progress"});
+  await expect(progress).toContainText("Sync complete");
+  batches.getFailure=true;
+  await progress.getByRole("button",{name:"Refresh sync progress",exact:true}).click();
+  await expect(progress).toContainText("Last known progress");
+  await expect(progress.getByRole("alert")).toContainText("may be out of date");
+  await expect(page.getByRole("button",{name:"Sync All (1)",exact:true})).toBeDisabled();
+  batches.getFailure=false;
+  await progress.getByRole("button",{name:"Refresh sync progress",exact:true}).click();
+  await expect(progress).toContainText("Sync complete");
+  await expect(progress.getByRole("alert")).toHaveCount(0);
+  expect(batches.posts).toEqual([]);
+  expect(state.errors).toEqual([]);expect(state.unexpected).toEqual([]);
+});
+
+test("a view-only operator can restore progress but cannot start or resume sync", async ({ page }) => {
+  const state=await setupEbayChannelPage(page,{readOnly:true});
+  const batches=await mockSyncBatches(page);batches.saved=true;
+  await page.reload();
+  const progress=page.getByRole("region",{name:"Channel sync progress"});
+  await expect(progress).toContainText("1 queued");
+  await expect(page.getByRole("button",{name:"Sync All (1)",exact:true})).toBeDisabled();
+  await progress.getByRole("button",{name:"View sync progress",exact:true}).click();
+  await expect(page.getByRole("dialog")).toContainText("1 queued");
+  expect(batches.posts).toEqual([]);
+  expect(state.errors).toEqual([]);expect(state.unexpected).toEqual([]);
+});
+
+test("bulk permission refusal is explicit and never offers an uncertain-request retry", async ({ page }) => {
+  const state=await setupEbayChannelPage(page);
+  const posts:string[]=[];
+  await page.route("**/api/channels/67/sync-batches**",async route=>{
+    if(route.request().method()==="GET")return route.fulfill({json:{batches:[]}});
+    posts.push(route.request().postDataJSON().commandKey);
+    return route.fulfill({status:403,json:{message:"Permission denied"}});
+  });
+  await page.getByRole("button",{name:"Sync All (1)",exact:true}).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText("not allowed to start sync");
+  await page.getByRole("dialog").getByRole("button",{name:"Close",exact:true}).first().click();
+  await expect(page.getByRole("button",{name:"Resume saved request",exact:true})).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"Sync All (1)",exact:true})).toBeDisabled();
+  expect(posts).toHaveLength(1);
+  expect(state.errors).toEqual([]);expect(state.unexpected).toEqual([]);
+});
+
+test("a lost bulk acknowledgement is recovered after reload without submitting another request", async ({ page }) => {
+  const state=await setupEbayChannelPage(page);
+  const batches=await mockSyncBatches(page);batches.lostPost=true;
+  await page.getByRole("button",{name:"Sync All (1)",exact:true}).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText("not been confirmed");
+  await page.reload();
+  const progress=page.getByRole("region",{name:"Channel sync progress"});
+  await expect(progress).toContainText("1 queued");
+  await expect(progress.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"Resume saved request",exact:true})).toHaveCount(0);
+  expect(batches.posts).toHaveLength(1);
+  expect(state.errors).toEqual([]);expect(state.unexpected).toEqual([]);
+});
+
+test("the selected bulk run remains exact when a newer run moves it off the history page", async ({ page }) => {
+  const state=await setupEbayChannelPage(page);
+  const batches=await mockSyncBatches(page,batchFixture(["queued","queued"]));
+  const newer=batchFixture(["completed"]);
+  let moved=false,exactReads=0;
+  await page.route("**/api/channels/67/sync-batches**",async route=>{
+    if(route.request().method()!=="GET")return route.fallback();
+    const path=new URL(route.request().url()).pathname;
+    if(path.endsWith("/sync-batches"))return moved?route.fulfill({json:{batches:[newer]}}):route.fallback();
+    exactReads++;return route.fulfill({json:batches.batch});
+  });
+  await page.getByRole("button",{name:"Sync All (1)",exact:true}).click();
+  await expect(page.getByRole("dialog")).toContainText("0 of 2 products processed");
+  await page.getByRole("dialog").getByRole("button",{name:"Close",exact:true}).first().click();
+  const progress=page.getByRole("region",{name:"Channel sync progress"});
+  moved=true;
+  await progress.getByRole("button",{name:"Refresh sync progress",exact:true}).click();
+  await expect(progress).toContainText("0 of 2 products processed");
+  await expect.poll(()=>exactReads).toBeGreaterThan(0);
+  await expect(progress).not.toContainText("1 synced");
+  expect(batches.posts).toHaveLength(1);
+  expect(state.errors).toEqual([]);expect(state.unexpected).toEqual([]);
+});
+
+
+test("a paused batch member opens its saved recovery instead of spinning indefinitely", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  const paused = {
+    ...job, state: "awaiting_evidence", readRetryPaused: true,
+    code: "EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID",
+    message: "The listing response could not be validated.",
+    providerRead: {
+      provider: "ebay", resource: "offers", method: "GET", kind: "invalid_response",
+      httpStatus: 200, requestId: "paused-batch-read",
+    },
+  };
+  state.jobs = [paused];
+  const batch = batchFixture(["needs_attention"]);
+  batch.items[0] = { ...batch.items[0], operationId: job.id, code: paused.code, message: paused.message };
+  const batches = await mockSyncBatches(page, batch);
+  batches.saved = true;
+  await page.reload();
+  const progress = page.getByRole("region", { name: "Channel sync progress" });
+  await expect(progress).toContainText("Sync finished with issues");
+  await expect(progress).toContainText("1 need attention");
+  await progress.getByRole("button", { name: "View sync progress", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Review listing", exact: true }).click();
+  const recovery = page.getByRole("dialog");
+  await expect(recovery.getByRole("status")).toContainText("Listing check paused");
+  await expect(recovery).not.toContainText("Next automatic check eligible");
+  await expect(recovery.getByRole("button", { name: "Retry Sync", exact: true })).toBeEnabled();
+  expect(batches.posts).toEqual([]);
+  expect(state.commands).toEqual([]);
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
 });
 
 for (const operation of ["publish","withdraw"] as const) test(`paused ${operation} read retains diagnostics and exposes deliberate recovery`,async({page})=>{

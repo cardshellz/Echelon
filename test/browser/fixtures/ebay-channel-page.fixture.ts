@@ -47,6 +47,7 @@ export async function setupEbayChannelPage(page: Page, options: { readOnly?: boo
     const req = route.request(),
       path = new URL(req.url()).pathname;
     if (await handleListingIntentChangesRequest(route, state.intentChanges)) return;
+    if (path === "/api/channels/67/sync-batches" && req.method() === "GET") return route.fulfill({ json: { batches: [] } });
     if (path === "/api/auth/me")
       return route.fulfill({
         json: {

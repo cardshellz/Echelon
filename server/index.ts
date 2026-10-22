@@ -1,3 +1,5 @@
+import { createChannelSyncBatchService } from "./channel-sync-batch.composition";
+import { registerChannelSyncBatchRoutes } from "./modules/marketplace-listings/infrastructure/channel-sync-batch.routes";
 import { createListingIntentPropagationService } from "./listing-intent-propagation.composition";
 import { registerListingIntentPropagationRoutes } from "./modules/marketplace-listings/infrastructure/listing-intent-propagation.routes";
 import { ebayListingSyncService } from './modules/channels/ebay-listing-sync';
@@ -501,6 +503,9 @@ function startEchelonSyncScheduler(
   });
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
+  const channelSyncBatches = createChannelSyncBatchService();
+  registerChannelSyncBatchRoutes(app, channelSyncBatches);
+  startListingPublicationWorker(channelSyncBatches, "channel_sync_batch_admission_worker");
   const listingIntentPropagation=createListingIntentPropagationService();
   registerListingIntentPropagationRoutes(app,listingIntentPropagation);
   startListingPublicationWorker(listingIntentPropagation, "listing_intent_propagation_worker");
