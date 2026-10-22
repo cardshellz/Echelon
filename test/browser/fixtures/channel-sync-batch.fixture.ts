@@ -86,7 +86,7 @@ export async function mockSyncBatches(page: Page, initial = batchFixture()) {
       return state.getFailure
         ? route.fulfill({ status: 503, json: { message: "Read failed" } })
         : route.fulfill({
-            json: { batches: state.saved ? [state.batch] : [] },
+            json: new URL(route.request().url()).pathname.endsWith(state.batch.id) ? state.batch : { batches: state.saved ? [state.batch] : [] },
           });
     const { commandKey } = route.request().postDataJSON();
     state.posts.push(commandKey);

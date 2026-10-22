@@ -1,3 +1,4 @@
+import { batchFixture, mockSyncBatches } from "./fixtures/channel-sync-batch.fixture";
 import { channelIntentChange } from "./fixtures/listing-intent-changes.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { setupEbayChannelPage } from "./fixtures/ebay-channel-page.fixture";
@@ -115,10 +116,44 @@ test("including again changes eligibility without claiming publication", async (
     return route.fulfill({ json: receipt(commands[0], null) });
   });
   await page.reload(); await switchFor(page, false).click();
-  await expect(page.getByRole("dialog").getByRole("status")).toHaveText("Included for future eBay publishing. This has not published the product.");
+  await expect(page.getByRole("dialog").getByRole("status")).toHaveText("Included. Sync this product to create or update its channel listing and check any remaining requirements.");
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Sync product" })).toBeVisible();
   expect(commands[0].excluded).toBe(false); expect(state.commands).toEqual([]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
+
+
+for (const lostResponse of [false, true]) {
+  test(`including an unlisted product saves shared progress${lostResponse ? " despite a lost response" : ""}`, async ({ page }) => {
+    const state = await setupEbayChannelPage(page);
+    state.excluded = true; state.feedStatus = "excluded"; state.externalListingId = null;
+    const batches = await mockSyncBatches(page, batchFixture(["queued"]));
+    const commands: Command[] = [];
+    await page.route("**/api/ebay/product-exclusion/1", route => {
+      const command = route.request().postDataJSON() as Command;
+      commands.push(command);
+      state.excluded = false; state.feedStatus = "ready";
+      batches.batch = { ...batches.batch, id: command.commandKey };
+      batches.saved = true;
+      return lostResponse ? route.abort("failed")
+        : route.fulfill({ json: { ...receipt(command, null), syncBatchId: command.commandKey } });
+    });
+    await page.route("**/api/ebay/product-exclusion/1/commands/*", route => {
+      expect(route.request().url()).toContain(commands[0].commandKey);
+      return route.fulfill({ json: { ...receipt(commands[0], null), replayed: true, syncBatchId: commands[0].commandKey } });
+    });
+    await page.reload(); await switchFor(page, false).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("0 of 1 products processed");
+    await expect(dialog).toContainText("1 queued");
+    await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
+    await page.reload();
+    await expect(page.getByRole("region", { name: "Channel sync progress" })).toContainText("1 queued");
+    expect(commands).toHaveLength(1); expect(commands[0].excluded).toBe(false);
+    expect(batches.posts).toHaveLength(0); expect(state.commands).toHaveLength(0);
+    expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  });
+}
 
 test("retrying a failed removal uses the exclusion owner instead of sync or publish", async ({ page }) => {
   const state = await setupEbayChannelPage(page); state.excluded = true; state.feedStatus = "excluded";

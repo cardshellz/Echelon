@@ -10,7 +10,7 @@ const fixture = vi.hoisted(() => ({
   connector: { pushListing: vi.fn(), previewListingRebuild: vi.fn(), updateExistingListing: vi.fn(), executeListingRebuild: vi.fn() },
   photos: vi.fn(), prices: vi.fn(), quantities: vi.fn(), policies: vi.fn(), build: vi.fn(), identity: vi.fn(),
   inspect: vi.fn(), jobs: { getByCommand: vi.fn(), getAdmission: vi.fn(), enqueue: vi.fn(), recordAdmissionFailure: vi.fn() },
-  liveGroup: vi.fn(),
+  liveGroup: vi.fn(), sync: vi.fn(),
 }));
 vi.mock("../../../../db", () => ({ db: {}, pool: { query: fixture.query }, getDatabasePoolSnapshot: () => ({ maximumConnections: 20 }) }));
 vi.mock("../../infrastructure/ebay-api-runtime", () => ({
@@ -27,6 +27,7 @@ vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: { resolve
 vi.mock("../../ebay-listing-draft", () => ({ buildEbayRouteListingDraft: fixture.build }));
 vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: fixture.identity }));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", () => ({ createEbayMarketplaceRegistrationAdapters: () => ({ observer: {}, inspector: { inspectExistingPublication: fixture.inspect } }) }));
+vi.mock("../../infrastructure/ebay-channel-listing-sync", () => ({ syncChannelListings: fixture.sync }));
 vi.mock("../../infrastructure/ebay-active-listing-sync", () => ({ ebayListingSyncService: fixture.jobs }));
 vi.mock("../../infrastructure/ebay-listing-push.repository", () => ({
   PostgresEbayListingPushRepository: class { constructor() { return fixture.repository; } },
@@ -43,6 +44,7 @@ import { assertEbayPreparedIntent } from "../../ebay-prepared-intent";
 describe("eBay publication application composition", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    fixture.sync.mockImplementation(async (filter, _actor, commandKey) => ({ synced: 0, pending: 1, errors: 0, details: [], jobs: [{ id: commandKey, productId: filter.productIds[0], operation: "publish", kind: "sync", state: "queued" }] }));
     fixture.repository.withProductLock.mockImplementation((_id: number, work: () => Promise<unknown>) => work());
     fixture.query.mockResolvedValue({ rows: [{ id: 34, metadata: { marketplaceId: "EBAY_US" } }] });
     fixture.auth.getVerifiedProviderAccount.mockResolvedValue({ externalAccountId: "seller-1" });
@@ -80,7 +82,8 @@ describe("eBay publication application composition", () => {
   it("queues ordinary Publish without provider calls or claiming success", async () => {
     const result = await ebayListingPushService.push({ productIds: [20] });
     expect(result.summary.queued).toBe(1); expect(result.summary.succeeded).toBe(0);
-    expect(fixture.jobs.enqueue).toHaveBeenCalledWith(expect.objectContaining({ productId: 20 }), "ebay-listing-publish", expect.any(String), "publish");
+    expect(fixture.sync).toHaveBeenCalledWith({ productIds: [20] }, "ebay-listing-publish", expect.any(String));
+    expect(fixture.jobs.enqueue).not.toHaveBeenCalled();
     expect(fixture.connector.pushListing).not.toHaveBeenCalled(); expect(fixture.photos).not.toHaveBeenCalled();
     expect(fixture.repository.projectSuccess).not.toHaveBeenCalled();
   });
@@ -110,20 +113,22 @@ describe("eBay publication application composition", () => {
   });
 
   it("isolates admission failures and continues the next product", async () => {
-    fixture.repository.readProduct.mockRejectedValueOnce(new EbayListingSyncError("EBAY_LISTING_PREFLIGHT_FAILED", "Activate this product."));
+    fixture.sync.mockResolvedValueOnce({ synced: 0, pending: 0, errors: 1, details: [{ success: false, productId: 20, code: "CHANNEL_SYNC_PRODUCT_INACTIVE", error: "Activate this product." }], jobs: [] });
     fixture.jobs.recordAdmissionFailure.mockImplementation(async value => ({ id: value.commandKey, kind: "admission", operation: "sync", productId: value.productId,
       state: "needs_attention", code: value.code, message: value.message, nextAttemptAt: "2026-10-11T20:00:00Z", updatedAt: "2026-10-11T20:00:00Z" }));
     const result = await ebayListingPushService.push({ productIds: [20, 21] });
     expect(result.summary).toEqual({ succeeded: 0, queued: 1, failed: 1, skipped: 0, total: 2 });
-    expect(fixture.jobs.recordAdmissionFailure).toHaveBeenCalledOnce();
-    expect(fixture.jobs.enqueue.mock.calls[0][0].productId).toBe(21);
+    expect(result.results[0].code).toBe("CHANNEL_SYNC_PRODUCT_INACTIVE");
+    expect(fixture.sync.mock.calls[1][0]).toEqual({ productIds: [21] });
+    expect(fixture.jobs.recordAdmissionFailure).not.toHaveBeenCalled();
   });
 
-  it("requires Sync for an already mapped listing without overwriting its status", async () => {
+  it("delegates an already mapped listing to the same Sync owner", async () => {
     fixture.repository.currentListingIds.mockResolvedValue(["listing-20"]);
     fixture.jobs.recordAdmissionFailure.mockResolvedValue({ id: "c7c3a7d4-6cdf-4cc9-a5a1-4d2e5e9c4bc1", productId: 20, operation: "sync", kind: "admission", state: "needs_attention" });
     const result = await ebayListingPushService.push({ productIds: [20] });
-    expect(result.results[0].code).toBe("EBAY_LISTING_ALREADY_PUBLISHED");
+    expect(result.results[0]).toMatchObject({ status: "queued", success: false });
+    expect(fixture.sync).toHaveBeenCalledWith({ productIds: [20] }, "ebay-listing-publish", expect.any(String));
     expect(fixture.connector.pushListing).not.toHaveBeenCalled();
     expect(fixture.repository.recordFailure).not.toHaveBeenCalled();
   });
@@ -161,7 +166,7 @@ describe("eBay publication application composition", () => {
   });
 
   it("reports uncertain job admission without provider calls or claiming publication completed", async () => {
-    fixture.jobs.enqueue.mockRejectedValue(new Error("database write failed"));
+    fixture.sync.mockResolvedValue({ synced: 0, pending: 0, errors: 1, jobs: [], details: [{ success: false, productId: 20, code: "EBAY_SYNC_ADMISSION_UNSAVED", error: "Retry the same saved request." }] });
     const result = await ebayListingPushService.push({ productIds: [20] });
     expect(result.summary.succeeded).toBe(0);
     expect(result.results[0]).toMatchObject({ success: false, code: "EBAY_SYNC_ADMISSION_UNSAVED" });
