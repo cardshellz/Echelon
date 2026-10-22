@@ -17,7 +17,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    name: Returns migration preflight
+    name: Returns migration and impact preflight
+    outputs:
+      run: ${{ steps.impact.outputs.run }}
+      matrix: ${{ steps.impact.outputs.matrix }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -29,10 +32,26 @@ jobs:
         run: node scripts/migrations/check-migrations.mjs --ci
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Select affected browser coverage
+        id: impact
+        env:
+          BROWSER_SUITE: returns
+          BROWSER_EVENT_NAME: ${{ github.event_name }}
+          BROWSER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BROWSER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci/browser-feature-impact.mjs
 
   browser-shard:
-    name: Returns preview browser journeys (${{ matrix.shard }}/4)
+    name: Returns preview browser journeys (${{ matrix.feature }} ${{ matrix.shard }}/${{ matrix.shards }})
     needs: preflight
+    if: ${{ needs.preflight.outputs.run == 'true' }}
+    env:
+      BROWSER_FEATURE: ${{ matrix.feature }}
     runs-on: ubuntu-latest
     # Match package-lock.json; browsers and OS libraries are already installed.
     container:
@@ -41,8 +60,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,12 +70,12 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx playwright test --config playwright.returns-preview.config.ts --shard=${{ matrix.shard }}/4
+      - run: npx playwright test --config playwright.returns-preview.config.ts --shard=${{ matrix.shard }}/${{ matrix.shards }} --forbid-only
       - name: Upload browser traces and screenshots
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: returns-preview-browser-results-${{ matrix.shard }}
+          name: returns-preview-browser-results-${{ matrix.feature }}-${{ matrix.shard }}
           path: test-results/
           if-no-files-found: warn
           retention-days: 7
@@ -73,4 +91,4 @@ jobs:
       - name: Require every Returns shard
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
-        run: node scripts/ci/require-success.mjs preflight browser-shard
+        run: node scripts/ci/require-selected-success.mjs browser-shard

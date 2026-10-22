@@ -1,3 +1,4 @@
+import { hasUncertainImpact } from "./test-impact.mjs";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,7 +14,7 @@ export function fullDropshipBrowserPlan(reason) {
   ] } };
 }
 
-export function selectDropshipBrowserFeatures({ changes, files, readSource, force = false }) {
+export function selectDropshipBrowserFeatures({ changes, files, readSource, previous, force = false }) {
   try {
     validateDropshipFeatureCoverage(files);
     const definitions = Object.fromEntries(Object.entries(DROPSHIP_BROWSER_FEATURES).map(([name, group]) => [name, {
@@ -26,9 +27,12 @@ export function selectDropshipBrowserFeatures({ changes, files, readSource, forc
       ownedPrefixes: [],
       isolated: true,
     }]));
+    const dependencyCache = new Map();
     const decisions = Object.keys(definitions).map(feature => ({ feature,
-      ...selectBrowserSuite({ suite: feature, changes, files, readSource, force, definitions }),
+      ...selectBrowserSuite({ suite: feature, changes, files, readSource, previous, force, definitions, dependencyCache }),
     }));
+    if (decisions.some(hasUncertainImpact))
+      return { ...fullDropshipBrowserPlan("Dependency evidence is uncertain"), decisions };
     const include = decisions.filter(result => result.run).flatMap(({ feature }) => {
       const { label, shards } = DROPSHIP_BROWSER_FEATURES[feature];
       return Array.from({ length: shards }, (_, index) => ({ feature, label, shard: index + 1, shards }));

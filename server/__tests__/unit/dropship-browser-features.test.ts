@@ -95,9 +95,9 @@ describe("affected feature browser selection", () => {
   });
 
   it.each(['import "./missing";', 'const feature = import(variable);', 'import "#unknown/alias";', 'const invalid = (;'])(
-    "runs the affected group when its dependency graph cannot be trusted: %s", source => {
+    "runs unfiltered coverage when a dependency graph cannot be trusted: %s", source => {
       const plan = select("docs/example.md", { "test/browser/fixtures/dropship-finance-harness.tsx": source });
-      expect(selectedFeatures(plan)).toEqual(["finance"]);
+      expect(plan.matrix).toEqual(fullDropshipBrowserPlan("uncertain").matrix);
       expect(plan.decisions.find(decision => decision.feature === "finance")?.reason).toContain("Dependency analysis was uncertain");
     },
   );

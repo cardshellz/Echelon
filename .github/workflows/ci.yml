@@ -4,9 +4,9 @@ name: CI
 # GitHub repo settings → Branches → require "Typecheck + unit tests"
 # status check to pass before merge.
 #
-# PostgreSQL coverage is listed in scripts/ci/postgres-test-manifest.ts. Eight
-# independent runners execute it with a fresh database and process per file;
-# the original PostgreSQL check name aggregates every shard's result.
+# PostgreSQL coverage is listed in scripts/ci/postgres-test-manifest.ts. The
+# shared impact owner selects complete affected owners on PRs; main and uncertain
+# impact retain all eight shards. Every file keeps its own database and process.
 
 on:
   pull_request:
@@ -25,6 +25,10 @@ jobs:
     name: Fast CI guards
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      run: ${{ steps.impact.outputs.run }}
+      files: ${{ steps.impact.outputs.files }}
+      matrix: ${{ steps.impact.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,21 +43,16 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      # Catch manifest, test-exclusion, migration and writer-ownership drift early.
-      # These are also retained in the full unit suite.
+      # Guard suites execute here once; the unit lane excludes this exact manifest.
       - name: Validate CI coverage, test exclusions, migrations and writer ownership
-        run: >-
-          npx vitest run
-          server/__tests__/unit/postgres-ci-shards.test.ts
-          server/__tests__/unit/migration-prefix-collision.test.ts
-          server/__tests__/unit/migration-allocation.test.ts
-          server/__tests__/unit/migration-inherited-provenance.test.ts
-          server/__tests__/unit/browser-ci-selection.test.ts
-          server/__tests__/unit/dropship-browser-features.test.ts
-          server/__tests__/unit/writer-ratchet.test.ts
-          server/__tests__/unit/test-typecheck-ratchet.test.ts
-          server/__tests__/unit/ci-fast-feedback.test.ts
-          --allowOnly=false --passWithNoTests=false
+        run: node scripts/ci/run-test-lane.mjs guards
+      - name: Select affected PostgreSQL coverage
+        id: impact
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node --import tsx scripts/ci/postgres-test-impact.ts
 
   typecheck:
     name: Typecheck (${{ matrix.project }})
@@ -109,8 +108,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      # The original unit selection is unchanged; Vitest partitions it by file.
-      - run: npm run test:unit -- --shard=${{ matrix.shard }}/4 --maxWorkers=2 --allowOnly=false --passWithNoTests=false --reporter=default --reporter=junit --outputFile=test-results/unit-${{ matrix.shard }}.xml
+      # All non-guard unit files still run; Vitest partitions them by file.
+      - run: node scripts/ci/run-test-lane.mjs unit --shard=${{ matrix.shard }}/4 --maxWorkers=2 --reporter=default --reporter=junit --outputFile=test-results/unit-${{ matrix.shard }}.xml
       - name: Upload unit test results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
@@ -262,14 +261,14 @@ jobs:
         run: node scripts/ci/require-success.mjs preflight typecheck unit-tests contracts
 
   postgres-hardening-shard:
-    name: PostgreSQL hardening (shard ${{ matrix.shard }}/8)
+    name: PostgreSQL hardening (shard ${{ matrix.shard }}/${{ matrix.count }})
     needs: preflight
+    if: ${{ needs.preflight.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     # Each matrix job owns a separate runner and disposable PostgreSQL service.
     # The runner also creates a fresh database and Vitest process for every file:
     # some legacy suites leave schemas behind even when files execute serially.
@@ -290,6 +289,7 @@ jobs:
     env:
       ECHELON_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/echelon_test
       ECHELON_TEST_DATABASE_DISPOSABLE: "true"
+      POSTGRES_SELECTED_TEST_FILES: ${{ needs.preflight.outputs.files }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -299,7 +299,7 @@ jobs:
       - run: npm ci
       - name: Run PostgreSQL shard
         env:
-          POSTGRES_SHARD: ${{ matrix.shard }}/8
+          POSTGRES_SHARD: ${{ matrix.shard }}/${{ matrix.count }}
         run: node --import tsx scripts/ci/postgres-tests.ts "$POSTGRES_SHARD"
       - name: Upload PostgreSQL test results
         if: ${{ !cancelled() }}
@@ -313,15 +313,12 @@ jobs:
   postgres-hardening:
     # Retain the existing check identity; success requires every shard to pass.
     name: PostgreSQL hardening tests
-    needs: [postgres-hardening-shard]
+    needs: [preflight, postgres-hardening-shard]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require all PostgreSQL shards
+      - uses: actions/checkout@v4
+      - name: Require selected PostgreSQL coverage
         env:
-          SHARD_RESULT: ${{ needs.postgres-hardening-shard.result }}
-        run: |
-          if [ "$SHARD_RESULT" != "success" ]; then
-            echo "::error::PostgreSQL shards did not all pass (result: $SHARD_RESULT)"
-            exit 1
-          fi
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci/require-selected-success.mjs postgres-hardening-shard
