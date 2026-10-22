@@ -16,6 +16,7 @@ import type { DropshipProductCost, DropshipProductCostReader } from "../../appli
 import type { DropshipOrderAcceptanceInput } from "../../application/dropship-order-acceptance-service";
 import { PgDropshipOrderAcceptanceRepository } from "../../infrastructure/dropship-order-acceptance.repository";
 import { createFakeRewardsLots, type FakeRewardsLotsSeed } from "../fixtures/fake-rewards-lots";
+import { logger } from "../../../../platform/observability/logger";
 
 const ACCEPTED_AT = new Date("2026-09-12T15:00:00.000Z");
 const VARIANT_ID = 66;
@@ -155,17 +156,7 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
       match: "FROM channels.channel_warehouse_assignments",
       rows: (params) => (params[0] === 103 && params[1] === 1 ? [{ warehouse_id: 1 }] : []),
     },
-    listings: {
-      match: "FROM dropship.dropship_vendor_listings dl",
-      rows: [{
-        listing_id: 501, vendor_id: 10, store_connection_id: 22, product_id: 7, product_variant_id: VARIANT_ID,
-        product_line_ids: [], listing_status: "active", external_listing_id: "L1", external_offer_id: "O1",
-        vendor_retail_price_cents: 1152, product_sku: "ARM-ENV", variant_sku: "ARM-ENV-SGL-P50",
-        product_name: "Armalope Envelope", variant_name: "Pack of 50", category: "supplies",
-        product_is_active: true, variant_is_active: true, sales_eligibility: "sellable",
-        catalog_retail_price_cents: 899,
-      }],
-    },
+    listings: { match: "FROM dropship.dropship_vendor_listings dl", rows: [listingCandidateRow()] },
     // The admin catalog rules vendors list under; acceptance applies the same rule.
     catalogRules: { match: "FROM dropship.dropship_catalog_rules", rows: [catalogRuleRow()] },
     policies: { match: "FROM dropship.dropship_pricing_policies", rows: [] },
@@ -252,6 +243,18 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
     existingLedger: { match: "FROM dropship.dropship_wallet_ledger", rows: [] },
   };
   return Object.values({ ...defaults, ...overrides });
+}
+
+function listingCandidateRow(overrides: Record<string, unknown> = {}) {
+  return {
+    listing_id: 501, vendor_id: 10, store_connection_id: 22, product_id: 7, product_variant_id: VARIANT_ID,
+    product_line_ids: [], listing_status: "active", external_listing_id: "L1", external_offer_id: "O1",
+    vendor_retail_price_cents: 1152, product_sku: "ARM-ENV", variant_sku: "ARM-ENV-SGL-P50",
+    product_name: "Armalope Envelope", variant_name: "Pack of 50", category: "supplies",
+    product_is_active: true, variant_is_active: true, sales_eligibility: "sellable",
+    catalog_retail_price_cents: 899,
+    ...overrides,
+  };
 }
 
 function catalogRuleRow(overrides: Record<string, unknown> = {}) {
@@ -772,6 +775,61 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
       "INSERT INTO oms.oms_orders",
     ]) {
       expect(db.statements(fragment), fragment).toHaveLength(0);
+    }
+  });
+
+  // Step 1 plan S2-5 §4.7 (SAFETY16, D30): a listing being re-sent is live on eBay.
+  it.each(["queued", "pushing", "failed", "blocked"])(
+    "accepts an order on a %s listing that carries its eBay listing id, and logs the rule that admitted it",
+    async (listingStatus) => {
+      const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+      try {
+        const db = createFakeDb(baseHandlers({
+          listings: { match: "FROM dropship.dropship_vendor_listings dl", rows: [listingCandidateRow({ listing_status: listingStatus })] },
+        }));
+        const { repository } = createRepository(db, availableCost());
+
+        await expect(repository.acceptOrder(acceptanceInput())).resolves.toMatchObject({ outcome: "accepted" });
+
+        expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(1);
+        expect(info).toHaveBeenCalledWith("dropship.order.listing_acceptable_while_pushing", expect.objectContaining({
+          listing_id: 501, status: listingStatus, intake_id: 1, line_index: 0, path: "acceptance",
+        }));
+      } finally {
+        info.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    { listing_status: "queued", external_listing_id: null },
+    { listing_status: "failed", external_listing_id: "" },
+    { listing_status: "ended", external_listing_id: "L1" },
+    { listing_status: "preview_ready", external_listing_id: null },
+  ])("refuses an order on a $listing_status listing with id $external_listing_id before any financial write", async (listing) => {
+    const db = createFakeDb(baseHandlers({
+      listings: { match: "FROM dropship.dropship_vendor_listings dl", rows: [listingCandidateRow(listing)] },
+    }));
+    const { repository, loadProductCosts } = createRepository(db, availableCost());
+
+    await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_LISTING_NOT_ACCEPTABLE",
+      context: expect.objectContaining({ listingId: 501, listingStatus: listing.listing_status }),
+    });
+    expect(loadProductCosts).not.toHaveBeenCalled();
+    expect(db.calls.some((call) => call.sql === "COMMIT")).toBe(false);
+    expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(0);
+  });
+
+  it("logs nothing for an order on an active listing (the long-standing rule)", async () => {
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    try {
+      const db = createFakeDb(baseHandlers());
+      const { repository } = createRepository(db, availableCost());
+      await repository.acceptOrder(acceptanceInput());
+      expect(info).not.toHaveBeenCalledWith("dropship.order.listing_acceptable_while_pushing", expect.anything());
+    } finally {
+      info.mockRestore();
     }
   });
 

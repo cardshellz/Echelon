@@ -18,16 +18,32 @@ import {
   type DropshipVendorSelectionRule,
   type DropshipVendorVariantOverride,
 } from "../domain/vendor-selection";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import {
+  listDropshipVendorCatalogCategoriesInputSchema,
+  listDropshipVendorCatalogIdsInputSchema,
   listDropshipVendorSelectionRulesInputSchema,
   previewDropshipVendorCatalogInputSchema,
+  readDropshipVendorSelectionSummaryInputSchema,
   replaceDropshipVendorSelectionRulesInputSchema,
+  resolveCatalogSelectionFilter,
+  type DropshipVendorCatalogCandidateFilter,
   type ListDropshipVendorSelectionRulesInput,
   type PreviewDropshipVendorCatalogInput,
   type ReplaceDropshipVendorSelectionRule,
   type ReplaceDropshipVendorSelectionRulesInput,
 } from "./dropship-selection-dtos";
+import { CATALOG_READ_WORDS } from "../domain/catalog-read-words";
+import { isReservedSelectionIdempotencyKey } from "../domain/selection-release";
+import {
+  DROPSHIP_CATALOG_READ_ERROR_CODES,
+  DROPSHIP_CATALOG_SELECTION_CAP,
+  type DropshipCatalogCategoriesAnswer,
+  type DropshipCatalogIdsAnswer,
+  type DropshipCatalogReadSummary,
+  type DropshipCatalogSelectionFilter,
+  type DropshipCatalogSelectionSummary,
+} from "../../../../shared/dropship/vendor-catalog-reads";
 
 export interface DropshipVendorProfile {
   vendorId: number;
@@ -56,6 +72,10 @@ export interface DropshipVendorVariantOverrideRecord extends DropshipVendorVaria
 }
 
 export interface DropshipVendorCatalogCandidate extends DropshipCatalogVariantCandidate {
+  /** `catalog.products.category_id` (nullable): what the categories read and the `categoryId` filter key on. */
+  categoryId: number | null;
+  /** The current name of that category (`catalog.product_categories.name`), or null without one. */
+  categoryName: string | null;
   productSku: string | null;
   productName: string;
   productVariantId: number;
@@ -112,6 +132,14 @@ export interface ReplaceDropshipVendorSelectionRulesRepositoryResult {
   rules: DropshipVendorSelectionRuleRecord[];
 }
 
+/** The selection summary's numbers, read in one snapshot (§4.8). */
+export interface DropshipVendorSelectionCountRecord {
+  selectionRevisionId: number | null;
+  selectedTotal: number;
+  /** How many selected sizes are live on the named store; null when no store was named. */
+  storeLive: number | null;
+}
+
 export interface DropshipSelectionAtpRepository {
   findVendorByMemberId(memberId: string): Promise<DropshipVendorProfile | null>;
   listCatalogExposureRules(): Promise<DropshipCatalogExposureRule[]>;
@@ -119,7 +147,13 @@ export interface DropshipSelectionAtpRepository {
   replaceSelectionRules(
     input: ReplaceDropshipVendorSelectionRulesRepositoryInput,
   ): Promise<ReplaceDropshipVendorSelectionRulesRepositoryResult>;
-  listVendorCatalogCandidates(input: PreviewDropshipVendorCatalogInput): Promise<DropshipVendorCatalogCandidate[]>;
+  listVendorCatalogCandidates(input: DropshipVendorCatalogCandidateFilter): Promise<DropshipVendorCatalogCandidate[]>;
+  /** Refuses a store that is not the vendor's (DROPSHIP_STORE_CONNECTION_REQUIRED). */
+  readSelectionCounts(input: {
+    vendorId: number;
+    storeConnectionId: number | null;
+    now: Date;
+  }): Promise<DropshipVendorSelectionCountRecord>;
   listVariantOverrides(input: {
     vendorId: number;
     productVariantIds: readonly number[];
@@ -186,6 +220,13 @@ export class DropshipSelectionAtpService {
 
   async replaceSelectionRules(input: unknown): Promise<ReplaceDropshipVendorSelectionRulesRepositoryResult> {
     const parsed = replaceDropshipVendorSelectionRulesInputSchema.parse(input);
+    // B's release writes its backfill revisions under this prefix (CHK10, Risk 17).
+    if (isReservedSelectionIdempotencyKey(parsed.idempotencyKey)) {
+      throw new DropshipError("DROPSHIP_IDEMPOTENCY_KEY_RESERVED", CATALOG_READ_WORDS.keyReserved, {
+        vendorId: parsed.vendorId,
+        retryable: false,
+      });
+    }
     const normalizedRules = parsed.rules.map(normalizeVendorSelectionRule);
     for (const rule of normalizedRules) {
       assertDropshipVendorSelectionRuleTarget(rule);
@@ -223,77 +264,46 @@ export class DropshipSelectionAtpService {
     total: number;
     page: number;
     limit: number;
-    facets: DropshipVendorCatalogFacets;
+    /** Null when the page asked for no facets (`includeFacets=false`): it reads the categories GET instead. */
+    facets: DropshipVendorCatalogFacets | null;
+    summary: DropshipCatalogReadSummary;
   }> {
     const parsed = previewDropshipVendorCatalogInputSchema.parse(input);
-    const facetInput: PreviewDropshipVendorCatalogInput = {
-      ...parsed,
-      category: undefined,
-      productLineId: undefined,
-      productLineIds: undefined,
-      productId: undefined,
-      selectedOnly: false,
-      page: 1,
-    };
-    const [adminRules, selectionRules, candidates, facetCandidates] = await Promise.all([
-      this.deps.repository.listCatalogExposureRules(),
-      this.deps.repository.listSelectionRules({ vendorId: parsed.vendorId, includeInactive: false }),
-      this.deps.repository.listVendorCatalogCandidates(parsed),
-      this.deps.repository.listVendorCatalogCandidates(facetInput),
+    const facetFilter: DropshipVendorCatalogCandidateFilter = { vendorId: parsed.vendorId, search: parsed.search };
+    const [decided, facetCandidates] = await Promise.all([
+      this.decideCatalogRows(parsed),
+      // The facets apply search only (today's behaviour); one scan fewer when the page reads no facets (TESTS9).
+      parsed.includeFacets ? this.deps.repository.listVendorCatalogCandidates(facetFilter) : Promise.resolve(null),
     ]);
-    const now = this.deps.clock.now();
-    const exposedFacetCandidates = facetCandidates.filter((candidate) => {
-      return evaluateDropshipCatalogExposure(candidate, adminRules, now).exposed;
-    });
-    const facets = buildCatalogFacets(exposedFacetCandidates);
+    const facets = facetCandidates === null
+      ? null
+      : buildCatalogFacets(facetCandidates.filter((candidate) => {
+        return evaluateDropshipCatalogExposure(candidate, decided.adminRules, decided.now).exposed;
+      }));
 
-    const productVariantIds = uniqueNumbers(candidates.map((candidate) => candidate.productVariantId));
-    const [overrideRows, listingTiers] = await Promise.all([
-      this.deps.repository.listVariantOverrides({
-        vendorId: parsed.vendorId,
-        productVariantIds,
-      }),
-      this.deps.listingTiers.resolveForVendor(parsed.vendorId),
-    ]);
-    const overridesByVariantId = new Map(
-      overrideRows.map((override) => [override.productVariantId, override]),
-    );
+    const filteredRows = filterBySelection(decided.exposedRows, resolveCatalogSelectionFilter(parsed));
+    const start = (parsed.page - 1) * parsed.limit;
+    const pageRows = filteredRows.slice(start, start + parsed.limit);
 
     // Exposure and selection never read stock: only marketplaceQuantity depends
     // on rawAtpUnits (domain/vendor-selection.ts). So the filter, total and page
     // are decided first, and stock is read for the returned page alone. Reading
     // it for every candidate ran one Channel Allocation preview per product on
     // each request, past Heroku's 30-second router limit on a full catalog.
-    const decidedRows = candidates.map((candidate) => {
-      const adminExposureDecision = evaluateDropshipCatalogExposure(candidate, adminRules, now);
-      const override = overridesByVariantId.get(candidate.productVariantId) ?? null;
-      const selected = evaluateDropshipVendorCatalogSelection({
-        candidate,
-        adminExposureDecision,
-        rules: selectionRules,
-        rawAtpUnits: 0,
-        override,
-      }).selected;
-      return { candidate, adminExposureDecision, override, selected };
-    });
-    const exposedRows = decidedRows.filter((row) => row.adminExposureDecision.exposed);
-    const filteredRows = parsed.selectedOnly
-      ? exposedRows.filter((row) => row.selected)
-      : exposedRows;
-    const start = (parsed.page - 1) * parsed.limit;
-    const pageRows = filteredRows.slice(start, start + parsed.limit);
-
-    const atp = await this.deps.atp.getVariantAtp(pageRows.map(({ candidate }) => ({
-      productId: candidate.productId,
-      productVariantId: candidate.productVariantId,
-    })));
+    const [atp, listingTiers] = await Promise.all([
+      this.deps.atp.getVariantAtp(pageRows.map(({ candidate }) => ({
+        productId: candidate.productId,
+        productVariantId: candidate.productVariantId,
+      }))),
+      this.deps.listingTiers.resolveForVendor(parsed.vendorId),
+    ]);
     const rows = pageRows.map(({ candidate, adminExposureDecision, override }) => ({
       ...candidate,
       adminExposureDecision,
       selectionDecision: evaluateDropshipVendorCatalogSelection({
         candidate,
         adminExposureDecision,
-        rules: selectionRules,
+        rules: decided.selectionRules,
         rawAtpUnits: atp.quantities.get(candidate.productVariantId) ?? 0,
         override,
         applyMarketplaceQuantityCap: atp.authority === "legacy",
@@ -307,8 +317,173 @@ export class DropshipSelectionAtpService {
       page: parsed.page,
       limit: parsed.limit,
       facets,
+      summary: summarizeCatalogRows(decided.exposedRows),
     };
   }
+
+  /**
+   * The changeable sizes of the filter as ids (§4.8, TESTS22): exposed and not
+   * turned off by the vendor's override, ascending, no stock read. The list
+   * the purpose needs (not selected to add, selected to remove) is refused
+   * above the cap; the other list is null above it, so an over-cap vendor can
+   * always remove up to 10,000 at a time.
+   */
+  async listCatalogIds(input: unknown): Promise<DropshipCatalogIdsAnswer> {
+    const parsed = listDropshipVendorCatalogIdsInputSchema.parse(input);
+    const decided = await this.decideCatalogRows(parsed);
+    const changeable = filterBySelection(decided.exposedRows, resolveCatalogSelectionFilter(parsed))
+      .filter((row) => row.override?.enabledOverride !== false);
+    const selectedIds = changeable.filter((row) => row.selected).map((row) => row.candidate.productVariantId);
+    const notSelectedIds = changeable.filter((row) => !row.selected).map((row) => row.candidate.productVariantId);
+    const needed = parsed.purpose === "add" ? notSelectedIds.length : selectedIds.length;
+    if (needed > DROPSHIP_CATALOG_SELECTION_CAP) {
+      throw new DropshipError(DROPSHIP_CATALOG_READ_ERROR_CODES.idsTooMany, CATALOG_READ_WORDS.idsTooMany, {
+        total: changeable.length,
+        needed,
+        limit: DROPSHIP_CATALOG_SELECTION_CAP,
+        retryable: false,
+      });
+    }
+    const capped = (ids: number[]) => (ids.length > DROPSHIP_CATALOG_SELECTION_CAP ? null : sortAscending(ids));
+    return {
+      selectedIds: capped(selectedIds),
+      notSelectedIds: capped(notSelectedIds),
+      total: changeable.length,
+    };
+  }
+
+  /**
+   * Every exposed size counted by category id, ignoring search and every
+   * filter (D26): a category's numbers are the whole category. Sizes whose
+   * product has no category id are counted apart, even when the product has a
+   * category name (the name filter stays one release; categories key by id).
+   */
+  async listCatalogCategories(input: unknown): Promise<DropshipCatalogCategoriesAnswer> {
+    const parsed = listDropshipVendorCatalogCategoriesInputSchema.parse(input);
+    const decided = await this.decideCatalogRows({ vendorId: parsed.vendorId });
+    const byId = new Map<number, { categoryId: number; name: string; rowCount: number; selectedCount: number }>();
+    let uncategorizedCount = 0;
+    for (const { candidate, selected } of decided.exposedRows) {
+      if (candidate.categoryId === null) {
+        uncategorizedCount += 1;
+        continue;
+      }
+      const entry = byId.get(candidate.categoryId) ?? {
+        categoryId: candidate.categoryId,
+        name: candidate.categoryName ?? candidate.category?.trim() ?? "",
+        rowCount: 0,
+        selectedCount: 0,
+      };
+      entry.rowCount += 1;
+      if (selected) entry.selectedCount += 1;
+      byId.set(candidate.categoryId, entry);
+    }
+    const categories = [...byId.values()].sort((left, right) => (
+      left.name.localeCompare(right.name) || left.categoryId - right.categoryId
+    ));
+    return { categories, uncategorizedCount };
+  }
+
+  /**
+   * The vendor's selection count and head revision, and for a named store how
+   * many of the selected sizes are live there (§4.8): "Publish {notLive} new"
+   * and "Publish all {selectedTotal}" read these, and a publish run's
+   * `expectedSelectionRevisionId` is this revision.
+   */
+  async readSelectionSummary(input: unknown): Promise<DropshipCatalogSelectionSummary> {
+    const parsed = readDropshipVendorSelectionSummaryInputSchema.parse(input);
+    const counts = await this.deps.repository.readSelectionCounts({
+      vendorId: parsed.vendorId,
+      storeConnectionId: parsed.storeConnectionId,
+      now: this.deps.clock.now(),
+    });
+    return {
+      selectionRevisionId: counts.selectionRevisionId,
+      selectedTotal: counts.selectedTotal,
+      cap: DROPSHIP_CATALOG_SELECTION_CAP,
+      overCap: counts.selectedTotal > DROPSHIP_CATALOG_SELECTION_CAP,
+      store: parsed.storeConnectionId === null || counts.storeLive === null
+        ? null
+        : {
+          storeConnectionId: parsed.storeConnectionId,
+          live: counts.storeLive,
+          notLive: counts.selectedTotal - counts.storeLive,
+        },
+    };
+  }
+
+  /**
+   * One scan of the filter's candidates with exposure and selection decided
+   * for each, without stock (the shared start of every catalog read).
+   */
+  private async decideCatalogRows(filter: DropshipVendorCatalogCandidateFilter): Promise<{
+    now: Date;
+    adminRules: DropshipCatalogExposureRule[];
+    selectionRules: DropshipVendorSelectionRuleRecord[];
+    exposedRows: DecidedCatalogRow[];
+  }> {
+    const candidateFilter: DropshipVendorCatalogCandidateFilter = {
+      vendorId: filter.vendorId,
+      search: filter.search,
+      category: filter.category,
+      categoryId: filter.categoryId,
+      productLineId: filter.productLineId,
+      productLineIds: filter.productLineIds,
+      productId: filter.productId,
+    };
+    const [adminRules, selectionRules, candidates] = await Promise.all([
+      this.deps.repository.listCatalogExposureRules(),
+      this.deps.repository.listSelectionRules({ vendorId: filter.vendorId, includeInactive: false }),
+      this.deps.repository.listVendorCatalogCandidates(candidateFilter),
+    ]);
+    const now = this.deps.clock.now();
+    const overrideRows = await this.deps.repository.listVariantOverrides({
+      vendorId: filter.vendorId,
+      productVariantIds: uniqueNumbers(candidates.map((candidate) => candidate.productVariantId)),
+    });
+    const overridesByVariantId = new Map(overrideRows.map((override) => [override.productVariantId, override]));
+    const exposedRows: DecidedCatalogRow[] = [];
+    for (const candidate of candidates) {
+      const adminExposureDecision = evaluateDropshipCatalogExposure(candidate, adminRules, now);
+      if (!adminExposureDecision.exposed) continue;
+      const override = overridesByVariantId.get(candidate.productVariantId) ?? null;
+      const selected = evaluateDropshipVendorCatalogSelection({
+        candidate,
+        adminExposureDecision,
+        rules: selectionRules,
+        rawAtpUnits: 0,
+        override,
+      }).selected;
+      exposedRows.push({ candidate, adminExposureDecision, override, selected });
+    }
+    return { now, adminRules, selectionRules, exposedRows };
+  }
+}
+
+interface DecidedCatalogRow {
+  candidate: DropshipVendorCatalogCandidate;
+  adminExposureDecision: DropshipCatalogExposureDecision;
+  override: DropshipVendorVariantOverrideRecord | null;
+  selected: boolean;
+}
+
+/**
+ * `not_selected` is every exposed row that is not selected for any reason,
+ * a size turned off by the vendor's override included (TESTS2).
+ */
+function filterBySelection(rows: readonly DecidedCatalogRow[], selection: DropshipCatalogSelectionFilter): DecidedCatalogRow[] {
+  if (selection === "selected") return rows.filter((row) => row.selected);
+  if (selection === "not_selected") return rows.filter((row) => !row.selected);
+  return [...rows];
+}
+
+/** The filter's counts apart from the selection filter: what matches, and how much of it is selected. */
+function summarizeCatalogRows(rows: readonly DecidedCatalogRow[]): DropshipCatalogReadSummary {
+  return { matching: rows.length, matchingSelected: rows.filter((row) => row.selected).length };
+}
+
+function sortAscending(values: readonly number[]): number[] {
+  return [...values].sort((left, right) => left - right);
 }
 
 type CatalogFacetCandidate = Pick<
@@ -404,14 +579,6 @@ export function normalizeVendorSelectionRule(
   };
 }
 
-export function makeDropshipSelectionAtpLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipSelectionAtpEvent("info", event),
-    warn: (event) => logDropshipSelectionAtpEvent("warn", event),
-    error: (event) => logDropshipSelectionAtpEvent("error", event),
-  };
-}
-
 export const systemDropshipSelectionAtpClock: DropshipClock = {
   now: () => new Date(),
 };
@@ -435,24 +602,4 @@ function sortJsonValue(value: unknown): unknown {
   }
 
   return value;
-}
-
-function logDropshipSelectionAtpEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  console.info(payload);
 }

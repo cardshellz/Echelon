@@ -3,7 +3,6 @@ import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
-import { isLiveListingStatus } from "../domain/listing-live-status";
 import { vendorOrderAdmissionFor } from "../domain/vendor-standing";
 import {
   decideDropshipCatalogOrderAvailability,
@@ -24,6 +23,8 @@ import { costScheduleTimingFromPolicy, planCostScheduleReconciliation } from "..
 import { createDropshipCostChangePolicyServiceFromEnv } from "./dropship-cost-change-policy.factory";
 import { PgDropshipCostScheduleRepository, lockVendorSchedule, mapCostScheduleError } from "./dropship-cost-schedule.repository";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
+import { admittedWhilePushing, decideListingOrderAcceptability } from "../domain/order-listing-acceptability";
+import { logger } from "../../../platform/observability/logger";
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
 import type { DropshipProductCostReader } from "../application/dropship-product-cost";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
@@ -1528,6 +1529,7 @@ async function planAcceptanceWithClient(
   }
   const lines = await resolveAcceptanceLinesWithClient(client, {
     vendor,
+    intakeId: intake.intakeId,
     storeConnectionId: input.storeConnectionId,
     rawLines: intake.normalizedPayload.lines,
     costReaders,
@@ -1743,6 +1745,8 @@ async function resolveAcceptanceLinesWithClient(
   client: PoolClient,
   input: {
     vendor: DropshipAcceptanceVendorContext;
+    /** Correlation only: the intake being accepted, carried on the acceptability log line. */
+    intakeId: number;
     storeConnectionId: number;
     rawLines: NormalizedDropshipOrderPayload["lines"];
     costReaders: AcceptanceCostReaders;
@@ -1842,6 +1846,7 @@ async function resolveAcceptanceLinesWithClient(
     assertListingCandidateCanAccept(candidate, index, {
       catalogRules,
       now: input.observedAt,
+      intakeId: input.intakeId,
     });
     return { line, index, candidate };
   });
@@ -2933,10 +2938,16 @@ function assertListingCandidateCanAccept(
   catalog: {
     catalogRules: readonly DropshipCatalogExposureRule[];
     now: Date;
+    intakeId: number;
   },
 ): void {
-  // The live statuses a push never moves a listing out of (domain/listing-live-status).
-  if (!isLiveListingStatus(candidate.listingStatus)) {
+  // A listing being re-sent is live on the marketplace while its Echelon status
+  // shows push progress (step 1 plan S2-5 §4.7); see decideListingOrderAcceptability.
+  const acceptability = decideListingOrderAcceptability({
+    status: candidate.listingStatus,
+    externalListingId: candidate.externalListingId,
+  });
+  if (!acceptability.acceptable) {
     throw new DropshipError(
       "DROPSHIP_ORDER_LISTING_NOT_ACCEPTABLE",
       "Dropship order line listing is not in an acceptable status.",
@@ -2969,6 +2980,19 @@ function assertListingCandidateCanAccept(
         catalogReason: availability.reason,
       },
     );
+  }
+  if (admittedWhilePushing(acceptability)) {
+    // INFO: the line passed only because of the push-progress rule (CLAUDE.md
+    // §10 state transition). The acceptance transaction can still refuse the
+    // order later (funding, stock); this line records which rule let it in.
+    logger.info("dropship.order.listing_acceptable_while_pushing", {
+      outcome: "listing_check_passed",
+      listing_id: candidate.listingId,
+      status: candidate.listingStatus,
+      intake_id: catalog.intakeId,
+      line_index: lineIndex,
+      path: "acceptance",
+    });
   }
 }
 

@@ -176,6 +176,11 @@ jobs:
           client/src/lib/__tests__/dropship-catalog-choose-requests.test.ts
           client/src/lib/__tests__/dropship-catalog-choose-words.test.ts
           client/src/pages/dropship/__tests__/DropshipCatalogChoose.test.ts
+          client/src/lib/__tests__/dropship-api-json.test.ts
+          client/src/lib/__tests__/dropship-catalog-publish.test.ts
+          client/src/lib/__tests__/dropship-catalog-publish-requests.test.ts
+          client/src/lib/__tests__/dropship-catalog-publish-words.test.ts
+          client/src/pages/dropship/__tests__/DropshipCatalogPublish.test.ts
           client/src/lib/__tests__/dropship-listing-settings.test.ts
           client/src/pages/dropship/__tests__/DropshipCatalogFrame.test.ts
           client/src/lib/__tests__/dropship-ebay-category-rules.test.ts
@@ -226,6 +231,12 @@ jobs:
           client/src/lib/__tests__/dropship-listing-push-status.test.ts
           client/src/lib/__tests__/dropship-cost-changes.test.ts
           client/src/pages/__tests__/dropship-portal-cost-changes-page.test.ts
+      # test/browser is in no tsconfig, so nothing else type-checks the Catalog page's browser stubs and specs. The publish
+      # run answers are typed against the shared contracts (contractAnswer), so a field a run contract adds or renames
+      # fails here; other answers are parsed with the server's schemas when a journey runs (step 1 plan S2-5, TESTS17;
+      # review round 2 CT11).
+      - name: Dropship catalog browser stub types
+        run: npx tsc --noEmit --incremental false --target ES2022 --module ESNext --moduleResolution Bundler --esModuleInterop --skipLibCheck --strict --types node --allowImportingTsExtensions --jsx preserve --lib esnext,dom test/browser/dropship-policy-catalog-stubs.ts test/browser/dropship-policy-listing-settings-*.ts test/browser/dropship-policy-catalog-steps.spec.ts test/browser/dropship-policy-catalog-choose.spec.ts test/browser/dropship-policy-catalog-publish-runs.spec.ts test/browser/dropship-policy-listing-access.spec.ts test/browser/dropship-policy-cost-changes-portal.spec.ts
       # These paths have no "unit" in them, so test:unit never selects them.
       - name: Dropship program finance contracts
         run: >-

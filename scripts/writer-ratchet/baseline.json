@@ -183,6 +183,9 @@
   "dropship.dropship_carrier_protection_policies": [
     "modules/dropship"
   ],
+  "dropship.dropship_catalog_code_versions": [
+    "modules/dropship"
+  ],
   "dropship.dropship_catalog_rule_set_revisions": [
     "modules/dropship"
   ],
@@ -279,6 +282,12 @@
   "dropship.dropship_listing_push_jobs": [
     "modules/dropship"
   ],
+  "dropship.dropship_listing_push_run_targets": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_listing_push_runs": [
+    "modules/dropship"
+  ],
   "dropship.dropship_listing_rule_conversions": [
     "modules/dropship"
   ],
@@ -322,6 +331,9 @@
     "modules/dropship"
   ],
   "dropship.dropship_pricing_reviews": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_process_heartbeats": [
     "modules/dropship"
   ],
   "dropship.dropship_product_category_seen": [

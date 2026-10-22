@@ -74,7 +74,10 @@ import { registerDropshipOnboardingRoutes } from "./modules/dropship/interfaces/
 import { registerDropshipStoreConnectionRoutes } from "./modules/dropship/interfaces/http/dropship-store-connection.routes";
 import { registerDropshipShippingRoutes } from "./modules/dropship/interfaces/http/dropship-shipping.routes";
 import { registerDropshipListingShippingEstimateRoutes } from "./modules/dropship/interfaces/http/dropship-listing-shipping-estimate.routes";
-import { registerDropshipListingRoutes } from "./modules/dropship/interfaces/http/dropship-listing.routes";
+import {
+  registerDropshipListingPushRunRoutes,
+  registerDropshipListingRoutes,
+} from "./modules/dropship/interfaces/http/dropship-listing.routes";
 import { registerDropshipListingPushStatusRoutes } from "./modules/dropship/interfaces/http/dropship-listing-push-status.routes";
 import { registerDropshipListingPriceRoutes } from "./modules/dropship/interfaces/http/dropship-listing-price.routes";
 import { registerDropshipListingContentRoutes } from "./modules/dropship/interfaces/http/dropship-listing-content.routes";
@@ -216,6 +219,7 @@ export async function registerRoutes(
   registerCustomerReturnCustomerRoutes(app);
   registerDropshipOpsSurfaceRoutes(app);
   registerDropshipListingRoutes(app);
+  registerDropshipListingPushRunRoutes(app);
   registerDropshipListingPushStatusRoutes(app);
   registerDropshipListingPriceRoutes(app);
   registerDropshipListingContentRoutes(app);

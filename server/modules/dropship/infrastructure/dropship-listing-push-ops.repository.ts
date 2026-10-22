@@ -137,6 +137,7 @@ export class PgDropshipListingPushOpsRepository implements DropshipListingPushOp
    *   hash is still the listing's, and the listing has not ended;
    * - the store is a connected, launch-ready, provider-verified eBay store and
    *   the vendor may list;
+   * - the job is not a publish run's chunk (run_id null): see stockLinkCandidateSql;
    * - for the Q4 code only: the failure was recorded before the automatic stock
    *   link existed (no STOCK_LINK_AWARE_FAILURE_FIELD marker: the owner's "before
    *   this deploys", review MC-3), the store's listing configuration is active live
@@ -536,7 +537,9 @@ export class PgDropshipListingPushOpsRepository implements DropshipListingPushOp
    *   MAX_ACCOUNT_REFUSAL_REQUEUES times and is not marked for review. More
    *   than once because, during a deploy, a dyno still running the old reader
    *   can take a requeued job and refuse it with the same message; the fixed
-   *   reader cannot refuse a verified store that way.
+   *   reader cannot refuse a verified store that way;
+   * - the job is not a publish run's chunk (run_id null): see
+   *   accountRefusalCandidateSql.
    * The item gets the schemeRecovery marker (attempts, basis) and the same
    * lastRetryRequest an ops retry writes, the job goes back to queued, and the
    * same audit event as retryJob commits with them. The push-time refresh then
@@ -840,6 +843,21 @@ export class PgDropshipListingPushOpsRepository implements DropshipListingPushOp
         );
       }
 
+      if (existing.run_cancel_requested_at) {
+        // The vendor stopped this job's publish run: anything re-queued would be cancelled at its start, so the retry
+        // would report a re-send that never happens. Refused for good; the vendor publishes again (review round 2 MC5).
+        throw new DropshipError(
+          "DROPSHIP_LISTING_PUSH_OPS_RUN_STOPPED",
+          "This job belongs to a publish run the vendor stopped; its sizes are not sent again. The vendor can publish again from Catalog step 3.",
+          {
+            jobId: input.jobId,
+            runId: Number(existing.run_id),
+            cancelRequestedAt: existing.run_cancel_requested_at.toISOString(),
+            retryable: false,
+          },
+        );
+      }
+
       if (existing.status === "queued") {
         await client.query("COMMIT");
         return mapActionResult(existing, existing.status, 0, true);
@@ -1127,13 +1145,18 @@ function mapStatusCountRow(row: StatusCountRow): DropshipListingPushOpsStatusSum
 async function loadListingPushJobForUpdate(
   client: PoolClient,
   jobId: number,
-): Promise<ListingPushActionJobRow | null> {
-  const result = await client.query<ListingPushActionJobRow>(
-    `SELECT id, vendor_id, store_connection_id, status, updated_at, completed_at
-     FROM dropship.dropship_listing_push_jobs
-     WHERE id = $1
+): Promise<(ListingPushActionJobRow & { run_id?: string | number | null; run_cancel_requested_at?: Date | null }) | null> {
+  // The job's publish run, read with it: a run the vendor stopped is never re-sent by a retry (review round 2 MC5). Only
+  // the job is locked; the run is read, never locked here, so this keeps the job-then-item order and a stop committing
+  // just after still cancels what is queued at each item's start (markItemProcessing).
+  const result = await client.query<ListingPushActionJobRow & { run_id: string | number | null; run_cancel_requested_at: Date | null }>(
+    `SELECT j.id, j.vendor_id, j.store_connection_id, j.status, j.updated_at, j.completed_at,
+            j.run_id, r.cancel_requested_at AS run_cancel_requested_at
+     FROM dropship.dropship_listing_push_jobs j
+     LEFT JOIN dropship.dropship_listing_push_runs r ON r.id = j.run_id
+     WHERE j.id = $1
      LIMIT 1
-     FOR UPDATE`,
+     FOR UPDATE OF j`,
     [jobId],
   );
   return result.rows[0] ?? null;
@@ -1363,6 +1386,25 @@ interface StockLinkSelectionInput {
  * Every mode keeps the same safety guards (newest item, unchanged preview, listing
  * not ended, eligible store and vendor). Every placeholder is referenced, so the
  * server can type each one.
+ *
+ * No mode selects a publish run's chunk job (run_id null; step 1 plan S2-5, PR A),
+ * for the reasons accountRefusalCandidateSql gives for the account-check requeue:
+ * the run reports its outcome once, when it finishes (the run's email and card;
+ * the chunk job sends no email of its own), and its card's step for these codes
+ * is to publish again. A re-queue would re-send behind that report: the recovery
+ * runs before the run steps in one sweep and writes no run target, so the run can
+ * finish on the refusal while the re-queued item waits; a stopped run's items are
+ * cancelled at their start, so the audit row would record a re-send that never
+ * happens (retryJob refuses those, MC5). So a run item is never re-queued, marked
+ * exhausted, skipped or for review here, and the `pending` read never promises it
+ * an automatic retry (the email and the portal's automaticRetryPending stay false).
+ * Every push outside a run keeps this re-queue unchanged, but the vendor portal's
+ * Catalog step 3 now publishes only through runs, so what is left outside them is
+ * the listing intent handoff, the quantity catch-up, the cost-change action and
+ * callers of the job route. For a run, the finish logs one WARN counting the sizes
+ * that failed with these codes (DROPSHIP_LISTING_PUSH_RUN_STOCK_LINK_NOT_REQUEUED,
+ * RUN_UNREQUEUED_STOCK_LINK_CODES; merge review ADV-RB2-1), and the card asks the
+ * vendor to publish again.
  */
 function stockLinkCandidateSql(mode: StockLinkSelection, input: StockLinkSelectionInput, param: (value: unknown, cast: string) => string): string {
   const caps = param(JSON.stringify(Object.fromEntries(AUTOMATIC_REQUEUE_CODES.map((code) => [code, automaticRequeueCap(code)]))), "jsonb");
@@ -1414,6 +1456,7 @@ function stockLinkCandidateSql(mode: StockLinkSelection, input: StockLinkSelecti
      JOIN dropship.dropship_store_connections sc ON sc.id = j.store_connection_id AND sc.vendor_id = j.vendor_id
      JOIN dropship.dropship_vendors v ON v.id = j.vendor_id
      WHERE i.status = 'failed' AND i.action = 'push' AND j.job_type = 'push' AND j.status = 'failed'
+       AND j.run_id IS NULL
        AND ${caps} ? i.error_code
        AND (i.error_code = ${resendCode} OR ${recordedAfterLink})
        AND COALESCE(i.result -> 'automaticRequeue' ->> 'state', '') = ''
@@ -1611,6 +1654,20 @@ function accountRefusalParams(): unknown[] {
  * requeueAccountVerificationFailures. $1 the reader's code, $2 its account
  * check's exact message, $3 the verified identity scheme, $4 the stock gate's
  * code, $5 the requeue cap; `extraFilter` may add a $6 condition.
+ *
+ * A publish run's chunk job is never selected (run_id null; step 1 plan
+ * S2-5, PR A). Its run reports its outcome once, when it finishes (the run's
+ * email and card; the chunk job sends no email of its own), and the card's
+ * step for this refusal is to publish again, reconnecting first if it fails
+ * the same way (PUBLISH_WORDS.accountCheckStep). A requeue would
+ * re-send behind that report: the run can finish on the refusal while the
+ * requeued items wait (the recovery runs before the run steps in one sweep,
+ * the requeue writes no run target, and a run finishes once no target is
+ * pending or queued), so what the re-send then does reaches no email; a
+ * stopped run's items are cancelled at their start, so its audit row would
+ * record a re-send that never happens (retryJob refuses those for the same
+ * reason, MC5). Every push outside a run keeps this recovery, the ones the
+ * earlier reader refused included (publish runs postdate that reader).
  */
 function accountRefusalCandidateSql(attempts: "below_cap" | "at_cap", extraFilter: string): string {
   return `SELECT i.id, i.job_id, i.listing_id, i.error_code, i.error_message,
@@ -1627,6 +1684,7 @@ function accountRefusalCandidateSql(attempts: "below_cap" | "at_cap", extraFilte
      JOIN dropship.dropship_store_connections sc ON sc.id = j.store_connection_id AND sc.vendor_id = j.vendor_id
      JOIN dropship.dropship_vendors v ON v.id = j.vendor_id
      WHERE i.status = 'failed' AND i.action = 'push' AND j.job_type = 'push' AND j.status = 'failed'
+       AND j.run_id IS NULL
        AND ((i.error_code = $1 AND i.error_message = $2) OR i.error_code = $4)
        AND COALESCE(i.result -> 'schemeRecovery' ->> 'state', '') <> 'requires_review'
        AND ${ACCOUNT_REFUSAL_ATTEMPTS_SQL} ${attempts === "below_cap" ? "<" : ">="} $5

@@ -289,6 +289,13 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/lib/__tests__/dropship-catalog-choose-requests.test.ts",
       "client/src/lib/__tests__/dropship-catalog-choose-words.test.ts",
       "client/src/pages/dropship/__tests__/DropshipCatalogChoose.test.ts",
+      // Step 1 plan S2-5 §4.9 item 3: "site updating" for the requests stages 2-5 add.
+      "client/src/lib/__tests__/dropship-api-json.test.ts",
+      // Step 1 plan S2-5 PR A §4.10: Catalog step 3 on publish runs.
+      "client/src/lib/__tests__/dropship-catalog-publish.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-publish-requests.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-publish-words.test.ts",
+      "client/src/pages/dropship/__tests__/DropshipCatalogPublish.test.ts",
       "client/src/lib/__tests__/dropship-listing-settings.test.ts",
       "client/src/pages/dropship/__tests__/DropshipCatalogFrame.test.ts",
       "client/src/lib/__tests__/dropship-ebay-category-rules.test.ts",
@@ -346,6 +353,15 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/__tests__/dropship-finance-panel.test.ts",
     ]) expect(contracts).toContain(file);
     expect(contracts).toContain("--strict --types node scripts/inventory-cutover-records-*.ts");
+    // Step 1 plan S2-5 (TESTS17): the Catalog page's browser stubs and specs are type-checked, every spec they serve named.
+    expect(contracts).toContain("      - name: Dropship catalog browser stub types");
+    for (const file of ["test/browser/dropship-policy-catalog-stubs.ts", "test/browser/dropship-policy-listing-settings-*.ts",
+      "test/browser/dropship-policy-catalog-steps.spec.ts", "test/browser/dropship-policy-catalog-choose.spec.ts",
+      "test/browser/dropship-policy-catalog-publish-runs.spec.ts", "test/browser/dropship-policy-listing-access.spec.ts",
+      // Review round 2 CT12: every file the step names, the cost changes portal spec too.
+      "test/browser/dropship-policy-cost-changes-portal.spec.ts"]) {
+      expect(contracts).toMatch(new RegExp(`--strict --types node --allowImportingTsExtensions --jsx preserve --lib esnext,dom [^\\n]*${file.replace(/[.*]/g, (match) => `\\${match}`)}`));
+    }
   });
 
   // `vitest run` treats each path as a filter and exits 0 when one matches no

@@ -265,7 +265,7 @@ export function ChooseStep({ selectedCount, changes, onChanges, pendingRef, noti
       } else if (result.kind === "blocked") {
         setOutcome({ kind: "error", message: describeChooseSaveBlock(result.block) });
       } else if (result.kind === "rejected") {
-        setOutcome({ kind: "error", message: result.message });
+        setOutcome({ kind: "error", message: result.message, ...(result.reload ? { reload: true as const } : {}) });
       } else if (result.kind === "unconfirmed") {
         setOutcome({ kind: "error", message: CHOOSE_WORDS.unconfirmed });
       } else {

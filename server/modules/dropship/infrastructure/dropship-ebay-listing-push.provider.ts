@@ -653,12 +653,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     }
     const deadline = createProviderRequestDeadline();
     try {
-    const response = await this.fetchImpl(`${input.baseUrl}${input.path}`, {
-      method: input.method,
-      signal: deadline.signal,
-      headers: ebaySellRequestHeaders({ accessToken: input.credential.accessToken, method: input.method, marketplaceId: input.config.marketplaceId }),
-      body: input.body ? JSON.stringify(input.body) : undefined,
-    });
+    const response = await this.fetchEbay(input, deadline.signal);
     const text = await response.text();
     if (response.status === 204 || input.expectNoContent) {
       if (response.ok) return undefined as T;
@@ -703,6 +698,34 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     throw translated;
   }
 
+  /**
+   * One eBay request. A request that never got an answer (network failure,
+   * deadline) is named with its method, so the push worker pauses on a read
+   * that got no answer but fails a write whose outcome is unknown (step 1
+   * plan S2-5, §4.5, SAFETY18). Retryable, as any unexpected error was before.
+   */
+  private async fetchEbay(input: {
+    credential: DropshipMarketplaceStoreCredentials; config: EbayListingConfig;
+    method: "GET" | "POST" | "PUT" | "DELETE"; path: string; body?: unknown; baseUrl: string;
+  }, signal: AbortSignal): Promise<Response> {
+    try {
+      return await this.fetchImpl(`${input.baseUrl}${input.path}`, {
+        method: input.method,
+        signal,
+        headers: ebaySellRequestHeaders({ accessToken: input.credential.accessToken, method: input.method, marketplaceId: input.config.marketplaceId }),
+        body: input.body ? JSON.stringify(input.body) : undefined,
+      });
+    } catch (error) {
+      throw new DropshipError("DROPSHIP_EBAY_LISTING_PUSH_NETWORK_ERROR", "eBay did not answer the listing push request.", {
+        retryable: true,
+        network: true,
+        method: input.method,
+        endpoint: `${input.method} ${input.path}`,
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private async throwListingHttpError(credential: DropshipMarketplaceStoreCredentials,status: number,text: string,endpoint: string): Promise<never> {
       const accessTokenRejected = isEbayResourceAuthFailureStatus(status);
       // eBay's own reason travels with the failure: it is the only thing that
@@ -730,6 +753,8 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           status,
           // Which eBay call refused: the reason alone does not say.
           endpoint,
+          // The call's method ("GET /sell/..." starts with it): a read that failed changed nothing (§4.5).
+          method: endpoint.split(" ", 1)[0],
           body: text.slice(0, 1000),
           providerErrors,
         },
