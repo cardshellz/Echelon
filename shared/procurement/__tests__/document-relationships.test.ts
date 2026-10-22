@@ -11,6 +11,11 @@ describe("shared document relationships", () => {
     ]);
     expect(first.groups[0].lines[0].receipts.map(receivedRelationshipPieces)).toEqual([60000, 40000]);
     expect(second.groups[0].lines[0].owner.purchaseLine?.orderedPieces).toBe(200000);
+    expect(second.groups[0].shippedPieces).toBe(100000);
+    expect(second.groups[0].costs.amounts).toEqual([{ currency: "USD", cents: 500 }]);
+    expect(second.groups[0].lines[0].receipts.map(receivedRelationshipPieces)).toEqual([100000]);
+    expect(first.charges.amounts).toEqual([{ currency: "USD", cents: 10001 }]);
+    expect(second.charges.amounts).toEqual([{ currency: "USD", cents: 500 }]);
     expect(first.allocationIncomplete).toBe(false);
     expect(source).toEqual(before);
   });
