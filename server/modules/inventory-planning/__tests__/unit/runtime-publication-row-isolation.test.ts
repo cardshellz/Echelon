@@ -9,8 +9,12 @@ import {
 // C3b (PLAN-F2-v2 section 2.5, owner decision Q6 = Yes): on a Dropship eBay
 // destination every row is its own single-variant provider listing, so a row
 // whose only problem is a missing stock link is isolated alone and its linked
-// siblings keep receiving canonical quantity. Every other destination and
-// blocker keeps whole-destination isolation; "reject" mode is unchanged.
+// siblings keep receiving canonical quantity.
+// Channels PR1 (PLAN-CH-v3 section 7, owner decision: one unlinked size must not
+// freeze its linked sizes) extends this, on purpose, to channel Shopify, Walmart and
+// eBay destinations: each of their outbox rows writes one item absolutely. Every
+// other destination and every other blocker keeps whole-destination isolation;
+// "reject" mode is unchanged.
 const HASH = "a".repeat(64);
 type PlanTarget = InventoryChannelExposureRuntimePlan["targets"][number];
 type PlanRow = PlanTarget["rows"][number];
@@ -141,8 +145,9 @@ describe("row isolation for Dropship eBay destinations during fan-out", () => {
   });
 
   it.each([
-    { label: "a channel eBay destination", kind: "channel_connection" as const, provider: "ebay" },
     { label: "a Dropship Shopify destination", kind: "dropship_store_connection" as const, provider: "shopify" },
+    { label: "a Dropship Walmart destination", kind: "dropship_store_connection" as const, provider: "walmart" },
+    { label: "a channel destination of another provider", kind: "channel_connection" as const, provider: "manual" },
   ])("keeps whole-destination isolation for $label", async ({ kind, provider }) => {
     const { isolate } = setup([planTarget({ id: 8, kind, provider, rows: [planRow(101, true), planRow(102, false)] })]);
     const publication = await isolate();
@@ -162,7 +167,9 @@ describe("row isolation for Dropship eBay destinations during fan-out", () => {
   it("still publishes a rows-isolated destination's other targets and keeps a broken channel destination whole", async () => {
     const { isolate } = setup([
       planTarget({ id: 8, kind: "dropship_store_connection", provider: "ebay", rows: [planRow(101, true), planRow(102, false)] }),
-      planTarget({ id: 9, kind: "channel_connection", provider: "ebay", rows: [planRow(101, true), planRow(102, false)] }),
+      // Unlinked AND a policy problem: never half-published.
+      planTarget({ id: 9, kind: "channel_connection", provider: "ebay",
+        rows: [planRow(101, true), planRow(102, false, ["CHANNEL_EXPOSURE_POLICY_INCOMPLETE"])] }),
       planTarget({ id: 10, kind: "channel_connection", provider: "shopify", rows: [planRow(101, true), planRow(102, true)] }),
     ]);
     const publication = await isolate();
@@ -179,9 +186,10 @@ describe("row isolation for Dropship eBay destinations during fan-out", () => {
       zeroTargets: [activeTarget(dropship, [101, 103]), activeTarget(channel, [101, 103])] });
     const publication = await isolate();
     expect(context.loadActivePublicationTargets).toHaveBeenCalledTimes(2);
-    expect(pairs(publication.rows)).toEqual([[8, 101, "1"], [8, 103, "0"]]);
+    // Channels PR1: the channel eBay destination now withholds only its unlinked retained 104 too.
+    expect(pairs(publication.rows)).toEqual([[8, 101, "1"], [9, 101, "1"], [8, 103, "0"], [9, 103, "0"]]);
     expect(publication.blockedTargets?.map(entry => [entry.publicationTargetId, entry.isolation, entry.productVariantIds]))
-      .toEqual([[8, "rows", [102, 104]], [9, "target", [104]]]);
+      .toEqual([[8, "rows", [102, 104]], [9, "rows", [104]]]);
   });
 
   it("does not let a rows isolation hide a later whole-destination isolation of the same target", async () => {
@@ -193,5 +201,74 @@ describe("row isolation for Dropship eBay destinations during fan-out", () => {
     expect(publication.rows).toEqual([]);
     expect(publication.blockedTargets).toEqual([expect.objectContaining({ publicationTargetId: 8, isolation: "target",
       productVariantIds: [102, 104] })]);
+  });
+});
+
+describe("row isolation for channel Shopify, Walmart and eBay destinations during fan-out (Channels PR1)", () => {
+  const channels = [
+    { provider: "shopify" }, { provider: "walmart" }, { provider: "ebay" }, { provider: "Shopify" },
+  ];
+
+  it.each(channels)("publishes the two linked sizes and withholds only the unlinked one on a channel $provider destination", async ({ provider }) => {
+    const { context, logger, isolate } = setup([planTarget({ id: 12, kind: "channel_connection", provider,
+      rows: [planRow(101, true), planRow(102, false), planRow(103, true)] })]);
+    const publication = await isolate();
+    expect(pairs(publication.rows)).toEqual([[12, 101, "1"], [12, 103, "3"]]);
+    expect(publication.blockedTargets).toEqual([{ publicationTargetId: 12, channelId: 40, channelName: "Target 12",
+      errorCode: "CANONICAL_PUBLICATION_MAPPING_MISSING", blockerCodes: [MAPPING_MISSING], productVariantIds: [102], isolation: "rows" }]);
+    expect(context.enqueueFullPublications).toHaveBeenCalledExactlyOnceWith("44", [
+      expect.objectContaining({ publicationTargetId: 12, productVariantId: 101, externalInventoryItemId: "SKU-101" }),
+      expect.objectContaining({ publicationTargetId: 12, productVariantId: 103, externalInventoryItemId: "SKU-103" })]);
+    expect(logger.error).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      event: "canonical_inventory_publication_target_isolated", outcome: "rows_skipped", isolation: "rows",
+      error_code: "CANONICAL_PUBLICATION_MAPPING_MISSING", publicationTargetId: 12, productVariantIds: [102] }));
+  });
+
+  it.each([
+    { label: "an unlinked size also has a policy blocker", rows: () => [planRow(101, true), planRow(102, false, ["CHANNEL_EXPOSURE_POLICY_INCOMPLETE"]), planRow(103, true)] },
+    { label: "a linked size has a selection blocker", rows: () => [planRow(101, true), planRow(102, false), planRow(103, true, ["CHANNEL_SELECTION_MAPPING_QUARANTINED"])] },
+    { label: "a linked size has a partition blocker", rows: () => [planRow(101, true, ["PARTITIONED_CHANNEL_SHARE_EXCEEDS_100_PERCENT"]), planRow(102, false), planRow(103, true)] },
+  ])("still withholds the whole channel destination when $label", async ({ rows }) => {
+    for (const provider of ["shopify", "walmart", "ebay"]) {
+      const { context, isolate } = setup([planTarget({ id: 12, kind: "channel_connection", provider, rows: rows() })]);
+      const publication = await isolate();
+      expect(publication.rows).toEqual([]);
+      expect(publication.blockedTargets).toEqual([expect.objectContaining({ publicationTargetId: 12, isolation: "target" })]);
+      expect(context.enqueueFullPublications).toHaveBeenCalledExactlyOnceWith("44", []);
+    }
+  });
+
+  it.each(["shopify", "walmart", "ebay"])("still withholds the whole channel %s destination for a destination-level blocker", async (provider) => {
+    const { isolate } = setup([planTarget({ id: 12, kind: "channel_connection", provider,
+      rows: [planRow(101, true), planRow(102, false), planRow(103, true)], targetBlockers: ["CHANNEL_SOURCE_NODE_NOT_ACTIVE"] })]);
+    const publication = await isolate();
+    expect(publication.rows).toEqual([]);
+    expect(publication.blockedTargets?.[0]).toMatchObject({ isolation: "target", productVariantIds: [102] });
+  });
+
+  it.each(["shopify", "walmart", "ebay"])("still withholds the whole channel %s destination without a sealed source binding", async (provider) => {
+    const target = { ...planTarget({ id: 12, kind: "channel_connection", provider,
+      rows: [planRow(101, true), planRow(102, false), planRow(103, true)] }), sourceBinding: null } as unknown as PlanTarget;
+    const { isolate } = setup([target]);
+    const publication = await isolate();
+    expect(publication.rows).toEqual([]);
+    expect(publication.blockedTargets?.[0]).toMatchObject({ publicationTargetId: 12, isolation: "target" });
+  });
+
+  it.each(["shopify", "walmart", "ebay"])("keeps rejecting in the default mode for a channel %s destination", async (provider) => {
+    const { context, service } = setup([planTarget({ id: 12, kind: "channel_connection", provider,
+      rows: [planRow(101, true), planRow(102, false)] })]);
+    await expect(service.publishProduct({ productId: 10, dryRun: false }, vi.fn()))
+      .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING", context: { publicationTargetId: 12 } });
+    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+  });
+
+  it("withholds only an unlinked retained size's zero on a channel destination", async () => {
+    const shopify = planTarget({ id: 12, kind: "channel_connection", provider: "shopify", rows: [planRow(101, true)] });
+    const { isolate } = setup([shopify], { unmanaged: [103, 104], zeroTargets: [activeTarget(shopify, [101, 103])] });
+    const publication = await isolate();
+    expect(pairs(publication.rows)).toEqual([[12, 101, "1"], [12, 103, "0"]]);
+    expect(publication.blockedTargets?.map(entry => [entry.publicationTargetId, entry.isolation, entry.productVariantIds]))
+      .toEqual([[12, "rows", [104]]]);
   });
 });

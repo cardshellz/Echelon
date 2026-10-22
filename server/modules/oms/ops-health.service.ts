@@ -27,6 +27,10 @@ import {
   dropshipStockDestinationMissingSampleSql,
 } from "./dropship-stock-destination-health";
 import {
+  channelStockUpdateDeadLetterDestinationCountSql,
+  channelStockUpdateDeadLetterDestinationSampleSql,
+} from "../inventory-planning/channel-stock-update-dead-letters";
+import {
   HELD_LINE_AGING_DAYS,
   allLinesHeldCountQuery,
   allLinesHeldSampleQuery,
@@ -39,6 +43,21 @@ import {
 // the stock never arrived ("held forever"), so a human should chase the PO or
 // cancel the line. Deliberately conservative: pre-orders can legitimately run
 // weeks out, and this threshold also drives an ops alert, so keep it low-noise.
+
+/**
+ * A store's stock updates were refused for good and stopped (Channels PR1,
+ * PLAN-CH-v3 section 6): the canonical outbox dead-lettered a stock update of one or
+ * more sizes on a live channel store (for example Shopify answered 404/422 for the
+ * item), so those store items keep their last quantity while stock moves. Critical,
+ * so it reaches the ops alert. Counted per store (destination); the sample lists each
+ * store with its refused-size count, error codes, size ids and outbox ids (the
+ * correlation ids of the outbox's dead-letter log lines). Read through
+ * inventory-planning's published reader. It clears only when the store accepts a
+ * newer stock update of that size; a newer update that is merely queued is not enough.
+ */
+export const CHANNEL_STOCK_UPDATE_DEAD_LETTER_CODE = "CHANNEL_STOCK_UPDATE_DEAD_LETTER";
+export const CHANNEL_STOCK_UPDATE_DEAD_LETTER_MESSAGE =
+  "Some stock updates to a store were refused and stopped. Review them.";
 
 export interface OmsOpsIssue {
   code: string;
@@ -161,6 +180,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     dropshipStockDestinationMissing,
     dropshipStockDestinationHeld,
     dropshipEbayStockOfferUnverified,
+    channelStockUpdateDeadLetter,
   ] = await Promise.all([
     collectOmsFlowReconciliationIssues(db),
     countAndSample(
@@ -901,6 +921,8 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     ),
     // A published Dropship eBay offer whose stock updates the outbox refuses for good (offer identity): frozen quantity.
     countAndSample(db, dropshipEbayStockOfferUnverifiedCountSql(), dropshipEbayStockOfferUnverifiedSampleSql(10)),
+    // Channel stores with a stock update the outbox refused for good and no later update the store accepted.
+    countAndSample(db, channelStockUpdateDeadLetterDestinationCountSql(), channelStockUpdateDeadLetterDestinationSampleSql(10)),
   ]);
   const channelWriteback = await getChannelWritebackHealth(db, {
     windowDays: 14,
@@ -1150,6 +1172,13 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       count: dropshipEbayStockOfferUnverified.count,
       message: DROPSHIP_EBAY_STOCK_OFFER_UNVERIFIED_MESSAGE,
       sample: dropshipEbayStockOfferUnverified.sample,
+    }),
+    issue({
+      code: CHANNEL_STOCK_UPDATE_DEAD_LETTER_CODE,
+      severity: "critical",
+      count: channelStockUpdateDeadLetter.count,
+      message: CHANNEL_STOCK_UPDATE_DEAD_LETTER_MESSAGE,
+      sample: channelStockUpdateDeadLetter.sample,
     }),
     issue({
       code: "CHANNEL_WRITEBACK_MASKED_SPLIT",

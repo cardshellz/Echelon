@@ -74,6 +74,82 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1 });
   });
 
+  // Channels PR1 (PLAN-CH-v3 section 9, PR1): Walmart links one verified size at a
+  // time. Publishing the whole product after one link let the still-unlinked selected
+  // sibling refuse the publication (CANONICAL_PUBLICATION_MAPPING_MISSING) and roll
+  // the new link back, so a multi-size product never linked. Only the linked size is
+  // published now; the sibling waits for its own verified listing.
+  it("links one verified size of a multi-size product while a selected sibling is still unlinked", async () => {
+    await database.pool.query(`INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id,channel_product_id,is_active)
+      VALUES(36,102,'NEW','NEW','WPID-NEW',1)`);
+    const outbox = async () => (await database.pool.query(`SELECT product_variant_id,desired_quantity::text,external_inventory_item_id_snapshot
+      FROM inventory.inventory_publication_outbox WHERE publication_target_id=2 ORDER BY product_variant_id`)).rows;
+    expect(await service.pending(36, 8, [101, 102])).toEqual([101, 102]);
+    const result = await service.connect(input());
+    expect(result).toMatchObject({ state: "connected", dryRun: false, receipt: { publicationTargetId: 2, publicationRows: 1 } });
+    expect(result.quantities).toEqual([{ productVariantId: 101, desiredQuantity: "17" }]);
+    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1 });
+    expect(await outbox()).toEqual([{ product_variant_id: 101, desired_quantity: "17", external_inventory_item_id_snapshot: "P5" }]);
+    expect(await service.pending(36, 8, [101, 102])).toEqual([102]);
+    // The sibling links through its own verified listing and enqueues only itself.
+    const sibling = await service.connect({ ...input(), productVariantId: 102, sku: "NEW", externalProductId: "WPID-NEW" });
+    expect(sibling).toMatchObject({ state: "connected", receipt: { publicationTargetId: 2, publicationRows: 1 },
+      quantities: [{ productVariantId: 102, desiredQuantity: "0" }] });
+    expect(await counts()).toEqual({ mappings: 2, members: 0, updates: 2, receipts: 2 });
+    expect(await outbox()).toEqual([{ product_variant_id: 101, desired_quantity: "17", external_inventory_item_id_snapshot: "P5" },
+      { product_variant_id: 102, desired_quantity: "0", external_inventory_item_id_snapshot: "NEW" }]);
+    expect(await service.pending(36, 8, [101, 102])).toEqual([]);
+  });
+
+  // The exact-size link may skip a sibling only for the reason the owner approved: the
+  // sibling waits for its own link. Any other sibling blocker makes every later stock
+  // fan-out withhold the whole Walmart store (rowIsolatedVariantIds), which would freeze
+  // this size at its link-time quantity, so the link is refused and rolled back as before.
+  it("still refuses and rolls back the link when a selected sibling has a blocker other than its missing link", async () => {
+    await database.pool.query(`INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id,channel_product_id,is_active)
+      VALUES(36,102,'NEW','NEW','WPID-NEW',1)`);
+    // Sibling 102's stock source is a warehouse outside this Walmart destination's binding.
+    await addWarehouseStock(null);
+    await database.pool.query(`INSERT INTO warehouse.fulfillment_nodes(code,name,node_type,warehouse_id,inventory_authority,fulfillment_authority,created_by)
+        VALUES('UNRELATED','Unrelated warehouse','internal_warehouse',2,'echelon','echelon','operator');
+      UPDATE warehouse.fulfillment_nodes SET lifecycle_status='active',activated_by='operator',activated_at=transaction_timestamp() WHERE warehouse_id=2;
+      INSERT INTO inventory.channel_exposure_policy_versions(scope_key,channel_id,scope_type,product_id,product_variant_id,version,
+        source_fulfillment_node_ids,definition_hash,change_reason,idempotency_key,request_hash,created_by)
+        SELECT 'channel:36:variant:102',36,'variant',20,102,1,ARRAY[id],repeat('b',64),'Wrong source fixture','source-override-102',repeat('b',64),'operator'
+        FROM warehouse.fulfillment_nodes WHERE warehouse_id=2;
+      INSERT INTO inventory.channel_exposure_policy_heads(scope_key,channel_id,draft_policy_id,revision,updated_by,update_reason)
+        SELECT scope_key,channel_id,id,1,'operator','Reviewed source fixture' FROM inventory.channel_exposure_policy_versions
+        WHERE scope_key='channel:36:variant:102';
+      UPDATE inventory.channel_exposure_policy_versions SET lifecycle_status='sealed',sealed_by='operator',sealed_at=transaction_timestamp()
+        WHERE scope_key='channel:36:variant:102';
+      UPDATE inventory.channel_exposure_policy_heads SET active_policy_id=draft_policy_id,draft_policy_id=NULL,revision=revision+1
+        WHERE scope_key='channel:36:variant:102'`);
+    await expect(service.connect(input())).rejects.toMatchObject({ code: "STOCK_LISTING_ATP_NOT_READY",
+      message: "Another size of this product (variant 102) is not ready for this Walmart store: This SKU's stock source must match the "
+        + "destination's configured fulfillment warehouse. The SKU has no active exact provider inventory identity for this publication target." });
+    expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0 });
+  });
+
+  // Linking sibling sizes one at a time makes concurrent links possible: each link holds its
+  // own scope locks (applyMappingPreparation), so both commit once, each enqueues only itself.
+  it("links two sibling sizes concurrently, each once, with its own update and receipt", async () => {
+    await database.pool.query(`INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id,channel_product_id,is_active)
+      VALUES(36,102,'NEW','NEW','WPID-NEW',1)`);
+    const sibling = () => ({ ...input(), productVariantId: 102, sku: "NEW", externalProductId: "WPID-NEW" });
+    const outcomes = await Promise.allSettled([service.connect(input()), service.connect(sibling())]);
+    // A link that met the other's in-flight scope lock is refused as busy and retried by the scan.
+    for (const outcome of outcomes) {
+      if (outcome.status === "rejected") expect(outcome.reason).toMatchObject({ code: "STOCK_MAPPING_PROVIDER_BUSY" });
+    }
+    const retried = await Promise.all([service.connect(input()), service.connect(sibling())]);
+    expect(retried.map(result => result.state).every(state => state === "connected" || state === "already_connected")).toBe(true);
+    expect(await counts()).toEqual({ mappings: 2, members: 0, updates: 2, receipts: 2 });
+    expect((await database.pool.query(`SELECT product_variant_id,count(*)::int AS updates FROM inventory.inventory_publication_outbox
+      WHERE publication_target_id=2 GROUP BY product_variant_id ORDER BY product_variant_id`)).rows)
+      .toEqual([{ product_variant_id: 101, updates: 1 }, { product_variant_id: 102, updates: 1 }]);
+    expect(await service.pending(36, 8, [101, 102])).toEqual([]);
+  });
+
   it("dry-runs the complete mapping, enrollment and queue transaction without persisting anything", async () => {
     expect(await service.connect(input(), { dryRun: true })).toMatchObject({ state: "connected", dryRun: true,
       quantities: [{ productVariantId: 101, desiredQuantity: "17" }] });
