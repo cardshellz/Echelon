@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import type { CustomerOrderTotalsState } from "./CustomerAccountOrderTotals";
+import { knownCustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
 
 /** Fulfillment presentation comes from the warehouse owner, never from edit
  * eligibility or a reason string. Native Shopify status remains the fallback. */
@@ -16,7 +17,8 @@ export function CustomerAccountOrderStatus({
       );
       if (fallback)
         fallback.hidden =
-          state.status === "verified" && state.order.fulfillment !== undefined;
+          state.status === "verified" &&
+          knownCustomerOrderFulfillment(state.order.fulfillment) !== undefined;
       const financial = row.querySelector<HTMLElement>(
         "[data-csz-order-financial-native]",
       );
@@ -36,6 +38,10 @@ export function CustomerAccountOrderStatus({
   return (
     <>
       {[...states].flatMap(([row, state]) => {
+        const fulfillment =
+          state.status === "verified"
+            ? knownCustomerOrderFulfillment(state.order.fulfillment)
+            : undefined;
         const target = row.querySelector<HTMLElement>(
           "[data-csz-order-fulfillment]",
         );
@@ -45,10 +51,10 @@ export function CustomerAccountOrderStatus({
         return state.status !== "verified"
           ? []
           : [
-              ...(target && state.order.fulfillment
+              ...(target && fulfillment
                 ? [
                     createPortal(
-                      <span>{state.order.fulfillment.label}</span>,
+                      <span>{fulfillment.label}</span>,
                       target,
                       `${row.dataset.externalOrderId}:fulfillment`,
                     ),
