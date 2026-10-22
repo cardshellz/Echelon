@@ -6,17 +6,102 @@ import type {
 } from "@shared/order-edits/order-edit-financials";
 import type { OrderEditShippingRepricing } from "@shared/order-edits/order-edit-shipping";
 import { formatOrderEditMoney } from "@/lib/order-edits";
-import { orderEditTaxDisplay } from "@/lib/order-edit-display";
+import {
+  orderEditDiscountBreakdown,
+  orderEditTaxDisplay,
+} from "@/lib/order-edit-display";
+import type { OrderEditDiscount } from "@shared/order-edits/order-edit-discounts";
 
 type FinancialColumn = { label: string; financials: OrderEditFinancials };
 const money = (amount: number) => formatOrderEditMoney(amount, "USD");
+
+function DiscountRows({
+  discounts,
+  detailed,
+}: {
+  discounts: OrderEditDiscount[];
+  detailed: boolean;
+}) {
+  return (
+    <>
+      {discounts.map((discount) => (
+        <React.Fragment key={discount.key}>
+          <dt className="oe-saving">
+            {discount.label}
+            {discount.value.type === "percentage" && (
+              <small>
+                {discount.value.percentage}% off
+                {detailed ? " eligible items" : ""}
+              </small>
+            )}
+            {detailed && discount.value.type === "fixed" && (
+              <small>{money(discount.value.amountCents)} fixed discount</small>
+            )}
+          </dt>
+          <dd className="oe-saving">−{money(discount.amountCents)}</dd>
+        </React.Fragment>
+      ))}
+    </>
+  );
+}
+
+/** The compact summary and expanded details share the same ordering. Prices
+ * after Club/product savings remain separate from every order-level code. */
+function MerchandiseBreakdown({
+  financials,
+  detailed = false,
+}: {
+  financials: OrderEditFinancials;
+  detailed?: boolean;
+}) {
+  const breakdown = orderEditDiscountBreakdown(financials);
+  return (
+    <>
+      {financials.itemsDiscountCents > 0 && (
+        <>
+          <dt>Items at regular prices</dt>
+          <dd>{money(financials.itemsGrossCents)}</dd>
+          {breakdown.kind === "separate" ? (
+            <>
+              <DiscountRows
+                discounts={breakdown.productDiscounts}
+                detailed={detailed}
+              />
+              {breakdown.productDiscounts.length > 0 &&
+                breakdown.orderDiscounts.length > 0 && (
+                  <>
+                    <dt className="oe-net">Items subtotal</dt>
+                    <dd className="oe-net">
+                      {money(breakdown.subtotalBeforeOrderDiscountsCents)}
+                    </dd>
+                  </>
+                )}
+              <DiscountRows
+                discounts={breakdown.orderDiscounts}
+                detailed={detailed}
+              />
+            </>
+          ) : (
+            <DiscountRows discounts={breakdown.discounts} detailed={detailed} />
+          )}
+        </>
+      )}
+      <dt className="oe-net">
+        {financials.itemsDiscountCents > 0 ? "Items after discounts" : "Items"}
+      </dt>
+      <dd className="oe-net">{money(financials.itemsNetCents)}</dd>
+    </>
+  );
+}
 
 function TaxLabel({ financials }: { financials: OrderEditFinancials }) {
   const tax = orderEditTaxDisplay(financials);
   return (
     <dt>
       {tax.label}
-      {tax.details.map((detail, index) => <small key={index}>{detail}</small>)}
+      {tax.details.map((detail, index) => (
+        <small key={index}>{detail}</small>
+      ))}
     </dt>
   );
 }
@@ -32,43 +117,12 @@ export function OrderEditSummary({
   financials?: OrderEditFinancials | null;
   paidCents?: number;
 }) {
-  const orderDiscounts = financials?.orderDiscounts ?? [];
-  // The API proves that these exact amounts reconcile; no percentage is calculated in the UI.
-  const itemSubtotal =
-    financials &&
-    Number(
-      BigInt(financials.itemsNetCents) +
-        orderDiscounts.reduce(
-          (sum, discount) => sum + BigInt(discount.amountCents),
-          BigInt(0),
-        ),
-    );
   return (
     <section aria-label="Order summary" className="oe-summary">
       <h3>Your order total</h3>
       {financials && (
         <dl className="oe-money-list oe-summary-items">
-          <dt>
-            {orderDiscounts.length ? "Items subtotal" : "Items after discounts"}
-          </dt>
-          <dd>{money(itemSubtotal!)}</dd>
-          {orderDiscounts.map((discount) => (
-            <React.Fragment key={discount.key}>
-              <dt className="oe-saving">
-                {discount.label}
-                {discount.value.type === "percentage" && (
-                  <small>{discount.value.percentage}% off</small>
-                )}
-              </dt>
-              <dd className="oe-saving">−{money(discount.amountCents)}</dd>
-            </React.Fragment>
-          ))}
-          {orderDiscounts.length > 0 && (
-            <>
-              <dt className="oe-net">Items after discounts</dt>
-              <dd className="oe-net">{money(financials.itemsNetCents)}</dd>
-            </>
-          )}
+          <MerchandiseBreakdown financials={financials} />
           <dt>Shipping</dt>
           <dd>{money(financials.shippingCents)}</dd>
           <TaxLabel financials={financials} />
@@ -198,31 +252,6 @@ export function OrderEditTotals({
       className={`oe-calculations ${embedded ? "" : "oe-panel"}`}
     >
       {columns.map(({ label, financials: values }) => {
-        // Legacy quotes expose an exact aggregate only. Never invent per-code
-        // amounts, or show an absent allocation as a zero-dollar discount.
-        const discounts =
-          values.itemDiscounts?.map((discount) => ({
-            key: discount.key,
-            label: discount.label,
-            amountCents: discount.amountCents,
-            detail:
-              discount.value.type === "percentage"
-                ? `${discount.value.percentage}% off eligible items`
-                : discount.value.type === "fixed"
-                  ? `${money(discount.value.amountCents)} fixed discount`
-                  : undefined,
-          })) ??
-          (values.itemsDiscountCents > 0
-            ? [
-                {
-                  key: "aggregate",
-                  label:
-                    values.itemDiscountLabels.join(", ") || "Product savings",
-                  amountCents: values.itemsDiscountCents,
-                  detail: undefined,
-                },
-              ]
-            : []);
         return (
           <section
             key={label}
@@ -231,29 +260,7 @@ export function OrderEditTotals({
           >
             <h3>{label}</h3>
             <dl className="oe-money-list">
-              {values.itemsDiscountCents > 0 && (
-                <>
-                  <dt>Items at regular prices</dt>
-                  <dd>{money(values.itemsGrossCents)}</dd>
-                  {discounts.map((discount) => (
-                    <React.Fragment key={discount.key}>
-                      <dt className="oe-saving">
-                        <span>{discount.label}</span>
-                        {discount.detail && <small>{discount.detail}</small>}
-                      </dt>
-                      <dd className="oe-saving">
-                        −{money(discount.amountCents)}
-                      </dd>
-                    </React.Fragment>
-                  ))}
-                </>
-              )}
-              <dt className="oe-net">
-                {values.itemsDiscountCents > 0
-                  ? "Items after discounts"
-                  : "Items"}
-              </dt>
-              <dd className="oe-net">{money(values.itemsNetCents)}</dd>
+              <MerchandiseBreakdown financials={values} detailed />
               {values.shippingDiscountCents > 0 && (
                 <>
                   <dt>Shipping rate</dt>

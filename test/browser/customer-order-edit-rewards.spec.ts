@@ -63,9 +63,9 @@ async function setup(
     value: { type: "fixed" as const, amountCents },
   });
   const pricing = (count: number, codes: string[] = []) => {
-    const saving =
-      (codes.includes("SHELLZ-ONE") ? 100 : 0) +
-      (codes.includes("SHELLZ-TWO") ? 366 : 0);
+    const codeSaving = (code: string) =>
+      code === "SHELLZ-ONE" ? 100 : code === "PROMO10" ? 10 : 366;
+    const saving = codes.reduce((sum, code) => sum + codeSaving(code), 0);
     const originalDiscount = options.originalReward ? 233 : 0;
     const original = originalDiscount
       ? [discount("code:ORIGINAL", "ORIGINAL", originalDiscount)]
@@ -81,14 +81,17 @@ async function setup(
       orderDiscounts: [
         ...original,
         ...codes.map((code) =>
-          discount(`code:${code}`, code, code === "SHELLZ-ONE" ? 100 : 366),
+          discount(`code:${code}`, code, codeSaving(code)),
         ),
       ],
       itemDiscounts: [
         ...original,
-        discount("club", "Club", 46 * count),
+        {
+          ...discount("club", "Club", 46 * count),
+          value: { type: "allocated" as const },
+        },
         ...codes.map((code) =>
-          discount(`code:${code}`, code, code === "SHELLZ-ONE" ? 100 : 366),
+          discount(`code:${code}`, code, codeSaving(code)),
         ),
       ],
       itemDiscountLabels: [
@@ -317,7 +320,8 @@ async function setup(
           ],
           appliedCodes: codes.map((code: string) => ({
             code,
-            amountCents: code === "SHELLZ-ONE" ? 100 : 366,
+            amountCents:
+              code === "SHELLZ-ONE" ? 100 : code === "PROMO10" ? 10 : 366,
           })),
           shippingRepricing: {
             title: "Standard",
@@ -358,6 +362,140 @@ async function setup(
     },
   };
 }
+
+test("shows Club prices before the original and both added rewards in summary and details", async ({
+  page,
+}, testInfo) => {
+  const h = await setup(page, { quantity: 3, originalReward: true });
+  const summary = page.locator(".oe-summary-items");
+  const item = page.locator(".oe-edit-item");
+  await expect(item.locator(".oe-item-price")).toContainText("$2.33");
+  for (const name of ["$1.00 saved reward", "$3.66 saved reward"]) {
+    const reward = page.getByRole("group", { name });
+    await reward
+      .getByRole("button", { name: "Use reward", exact: true })
+      .click();
+    await expect(reward.getByText("Applied", { exact: true })).toBeVisible();
+    await expect(item.locator(".oe-item-price")).toContainText("$2.33");
+  }
+  const expected = [
+    "Items at regular prices",
+    "$8.37",
+    "Club",
+    "−$1.38",
+    "Items subtotal",
+    "$6.99",
+    "ORIGINAL",
+    "−$2.33",
+    "SHELLZ-ONE",
+    "−$1.00",
+    "SHELLZ-TWO",
+    "−$3.66",
+    "Items after discounts",
+    "$0.00",
+    "Shipping",
+    "$5.49",
+    "Tax",
+    "$0.33",
+  ];
+  await expect(summary.locator("dt, dd")).toHaveText(expected);
+  await expect(item.locator(".oe-item-total")).toHaveText("$6.99");
+  await page.getByText("How your total is calculated", { exact: true }).click();
+  const details = page.getByRole("region", {
+    name: "With your changes",
+    exact: true,
+  });
+  await expect(details.locator("dt, dd")).toHaveText([
+    ...expected.map((value) =>
+      value === "ORIGINAL"
+        ? "ORIGINAL$2.33 fixed discount"
+        : value === "SHELLZ-ONE"
+          ? "SHELLZ-ONE$1.00 fixed discount"
+          : value === "SHELLZ-TWO"
+            ? "SHELLZ-TWO$3.66 fixed discount"
+            : value,
+    ),
+    "Order total",
+    "$5.82",
+  ]);
+  await page.getByRole("spinbutton").fill("4");
+  await expect(item.locator(".oe-item-total")).toHaveText("$9.32");
+  await expect(item.locator(".oe-item-price")).toContainText("$2.33");
+  await expect(summary.locator("dt, dd")).toHaveText([
+    "Items at regular prices",
+    "$11.16",
+    "Club",
+    "−$1.84",
+    "Items subtotal",
+    "$9.32",
+    "ORIGINAL",
+    "−$2.33",
+    "SHELLZ-ONE",
+    "−$1.00",
+    "SHELLZ-TWO",
+    "−$3.66",
+    "Items after discounts",
+    "$2.33",
+    "Shipping",
+    "$5.49",
+    "Tax",
+    "$0.47",
+  ]);
+  expect(
+    h.requests.some((input) =>
+      /\/(issue|cancel|quotes|commit)$/.test(input.path),
+    ),
+  ).toBe(false);
+  expect(h.errors).toEqual([]);
+  await page.screenshot({
+    path: testInfo.outputPath("club-before-rewards.png"),
+    fullPage: true,
+  });
+});
+
+test("shows Club savings before a separate reward and ordinary coupon without redeeming points", async ({
+  page,
+}, testInfo) => {
+  const h = await setup(page);
+  await page
+    .getByRole("group", { name: "$1.00 saved reward" })
+    .getByRole("button", { name: "Use reward", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: "Discount code", exact: true })
+    .fill("PROMO10");
+  await page.getByRole("button", { name: "Apply code", exact: true }).click();
+  await expect(page.locator(".oe-summary-items").locator("dt, dd")).toHaveText([
+    "Items at regular prices",
+    "$2.79",
+    "Club",
+    "−$0.46",
+    "Items subtotal",
+    "$2.33",
+    "SHELLZ-ONE",
+    "−$1.00",
+    "PROMO10",
+    "−$0.10",
+    "Items after discounts",
+    "$1.23",
+    "Shipping",
+    "$5.49",
+    "Tax",
+    "$0.40",
+  ]);
+  await expect(page.locator(".oe-item-price")).toContainText("$2.33");
+  await expect(page.locator(".oe-item-total")).toHaveText("$2.33");
+  expect(
+    h.requests.some((input) =>
+      /\/(issue|cancel|quotes|commit)$/.test(input.path),
+    ),
+  ).toBe(false);
+  expect(h.errors).toEqual([]);
+  await page.screenshot({
+    path: testInfo.outputPath("club-before-coupon.png"),
+    fullPage: true,
+  });
+});
 
 test("explains zero remaining merchandise and enables saved rewards after more items are priced", async ({
   page,
