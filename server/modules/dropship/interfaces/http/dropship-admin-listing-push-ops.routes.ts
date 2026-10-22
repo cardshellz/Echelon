@@ -83,6 +83,8 @@ function statusForDropshipListingPushOpsError(code: string): number {
       return 404;
     case "DROPSHIP_LISTING_PUSH_OPS_STATUS_NOT_RETRYABLE":
     case "DROPSHIP_LISTING_PUSH_OPS_JOB_NOT_RETRYABLE":
+    // Step 1 plan S2-5 review round 2 MC5: the job's publish run was stopped by the vendor.
+    case "DROPSHIP_LISTING_PUSH_OPS_RUN_STOPPED":
       return 409;
     default:
       return 500;

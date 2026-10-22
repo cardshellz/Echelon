@@ -39,6 +39,7 @@ import { startDropshipUsdcWatcherWorker } from "./modules/dropship/infrastructur
 import { startDropshipCostDetectionWorker } from "./modules/dropship/infrastructure/dropship-cost-detection-runner";
 import { startDropshipCategoryMarksWorker } from "./modules/dropship/infrastructure/dropship-category-marks-runner";
 import { startDropshipRulesConversionWorker } from "./modules/dropship/infrastructure/dropship-rules-conversion-runner";
+import { startDropshipProcessHeartbeatFromEnv } from "./modules/dropship/infrastructure/dropship-process-heartbeat";
 import {
   setDropshipFulfillmentSync,
   setDropshipInventoryRuntimeAuthorityGate,
@@ -786,7 +787,14 @@ function startEchelonSyncScheduler(
 
   httpServer.listen(
     listenOptions,
-    () => {
+    async () => {
+      // First: this process's catalog code version heartbeat (step 1 plan S2-5
+      // §4.9 item 1). Its first write is awaited, bounded and never throws,
+      // before any worker below starts (the dropship stock planner is the
+      // inventory publication selection-work worker, not only the dropship
+      // block), so a later release's gates count every running worker. It is
+      // not a scheduler: DISABLE_SCHEDULERS does not stop it.
+      await startDropshipProcessHeartbeatFromEnv();
       log(`serving on port ${port}`);
       
       // REMOVED: order-sync-listener deleted (duplicate path)

@@ -107,6 +107,8 @@ export interface CostActionListing {
   storeConnectionId: number;
   productVariantId: number;
   status: string;
+  /** The eBay listing id as stored: a listing being re-sent with one is still live (isCostActionableListing). */
+  externalListingId: string | null;
   vendorRetailPriceCents: number | null;
   /** The price the listing's last completed push published (buyers see it); null when none is on record. */
   publishedPriceCents: number | null;
@@ -566,7 +568,8 @@ export class DropshipCostChangeListingActionService {
       for (const listing of facts.listings.filter((candidate) => candidate.productVariantId === entry.productVariantId)) {
         const price = judgedListingPrice(facts, listing, entry.unitCostCents);
         const action = decideCostChangeListingAction({
-          listingStatus: listing.status, price, unitCostCents: entry.unitCostCents, settings: policy.settings,
+          listingStatus: listing.status, externalListingId: listing.externalListingId, price, unitCostCents: entry.unitCostCents,
+          settings: policy.settings,
         });
         decisions.push({ entry, listing, price, action, detail: null, pushJobId: null, hold: null });
       }
@@ -845,8 +848,9 @@ export class DropshipCostChangeListingActionService {
         // Released for its price only once the price buyers see covers the cost: the settings price
         // and the price the last completed push published (a queued or failed raise is not on eBay).
         const reason = decideCostChangeHoldRelease({
-          listingStatus: listing?.status ?? "not_listed", priceCents: price?.priceCents ?? null,
-          publishedPriceCents: listing?.publishedPriceCents ?? null, costInForceCents: costInForce,
+          listingStatus: listing?.status ?? "not_listed", externalListingId: listing?.externalListingId ?? null,
+          priceCents: price?.priceCents ?? null, publishedPriceCents: listing?.publishedPriceCents ?? null,
+          costInForceCents: costInForce,
         });
         if (!reason) {
           keep.push(hold);
@@ -976,11 +980,13 @@ export class DropshipCostChangeListingActionService {
     const decisions: PendingDecision[] = [];
     for (const candidate of candidates) {
       const listing = facts.listings.find((row) => row.listingId === candidate.listingId);
-      // Selected while active; one that changed since is judged once it is live again.
+      // Selected while active; one that changed since is judged once it is active again. Kept to `active` (PR 1b): the
+      // recheck is for listings the live-status repair restored, so a listing still re-sent waits for its push.
       if (!listing || !COST_ACTIONABLE_LISTING_STATUSES.includes(listing.status)) continue;
       const price = judgedListingPrice(facts, listing, candidate.increase.unitCostCents);
       const action = decideCostChangeListingAction({
-        listingStatus: listing.status, price, unitCostCents: candidate.increase.unitCostCents, settings: input.policy.settings,
+        listingStatus: listing.status, externalListingId: listing.externalListingId, price,
+        unitCostCents: candidate.increase.unitCostCents, settings: input.policy.settings,
       });
       decisions.push({ entry: candidate.increase, listing, price, action, detail: null, pushJobId: null, hold: null, recheck: candidate });
     }

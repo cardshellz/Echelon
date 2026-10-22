@@ -172,6 +172,14 @@ describe("runChooseSave", () => {
     expect(run.calls).toEqual(["GET", "PUT"]);
   });
 
+  it("S10b (step 1 plan S2-5 §4.9 item 2) PR B froze the rules: 410 retired is sent once, with Reload offered", async () => {
+    const run = harness([RULES], [new DropshipApiError({ status: 410, code: "DROPSHIP_SELECTION_RULES_RETIRED", message: CHOOSE_WORDS.retired })]);
+    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null }))
+      .toEqual({ kind: "rejected", message: CHOOSE_WORDS.retired, reload: true });
+    expect(run.calls).toEqual(["GET", "PUT"]);
+    expect(run.sleeps).toEqual([]);
+  });
+
   it("S11 past the 500-rule cap on the rules just read: stopped before sending", async () => {
     const many = Array.from({ length: 499 }, (_, index) => rule(10 + index, "variant", "include", { productVariantId: 5_000 + index }));
     const marks: ChooseMark[] = [ADD_105, { ...ADD_105, productVariantId: 106 }];

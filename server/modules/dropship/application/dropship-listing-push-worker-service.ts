@@ -7,6 +7,15 @@ import {
   isAutomaticStockLinkRequeueRun,
   mayRequeueAutomatically,
 } from "../domain/listing-push-automatic-requeue";
+import {
+  LISTING_PUSH_RUN_CODES,
+  decideListingPushPauseAction,
+  decideListingPushTransientPause,
+  isDefiniteMarketplaceAnswer,
+  isSelectionBlocker,
+  itemTransientPauses,
+} from "../domain/listing-push-run";
+import { LISTING_PUSH_RUN_WORDS } from "../domain/listing-push-run-words";
 import { QuantityPublicationAdmissionError } from "../../inventory-planning/domain/quantity-publication-admission";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
@@ -44,6 +53,10 @@ export interface DropshipListingPushWorkerJobRecord {
   createdAt: Date;
   updatedAt: Date;
   completedAt: Date | null;
+  /** The publish run whose chunk this job carries out (step 1 plan S2-5); null or absent for every other job. */
+  runId?: number | null;
+  /** How many times in a row the job paused because the marketplace was busy or not answering. */
+  consecutivePauseCount?: number;
 }
 
 export interface DropshipListingPushWorkerEligibility {
@@ -97,6 +110,11 @@ export interface DropshipListingPushWorkerResult {
   summary: DropshipListingPushWorkerSummary;
 }
 
+/** What a pause did: the item and job wait for a backoff, or the item's run was stopped and the item cancelled (review MC4). */
+export type DropshipListingPushPauseOutcome =
+  | { outcome: "paused"; job: DropshipListingPushWorkerJobRecord; consecutivePauseCount: number; nextAttemptAt: Date }
+  | { outcome: "stopped" };
+
 export interface DropshipListingPushWorkerRepository {
   claimJob(input: {
     jobId: number;
@@ -105,9 +123,17 @@ export interface DropshipListingPushWorkerRepository {
     now: Date;
     staleProcessingMinutes?: number;
   }): Promise<DropshipListingPushWorkerClaim>;
+  /**
+   * Starts a queued item, with the job's heartbeat, in one transaction. False
+   * when the item is not queued any more (a stop cancelled it, another worker
+   * took it), or when its run was stopped: then the item is cancelled here,
+   * whichever path put it back in the queue (a pause, stale recovery; review
+   * MC4), so nothing of a stopped run starts after the stop.
+   */
   markItemProcessing(input: {
     jobId: number;
     itemId: number;
+    workerId: string;
     now: Date;
   }): Promise<boolean>;
   completeItem(input: {
@@ -130,6 +156,11 @@ export interface DropshipListingPushWorkerRepository {
     endpoint?: string | null;
     /** What a refusing gate named (an attempt id, whether an operator must act); kept on the item for support. */
     context?: Record<string, unknown>;
+    /**
+     * eBay gave a definite answer (isDefiniteMarketplaceAnswer): the job's run of pauses ends in the same transaction,
+     * as a completed item ends it (review round 2 MC4). Absent: the count is left alone.
+     */
+    endsPauseRun?: boolean;
     workerId: string;
     now: Date;
   }): Promise<DropshipListingPushWorkerItemRecord>;
@@ -146,6 +177,38 @@ export interface DropshipListingPushWorkerRepository {
     workerId: string;
     now: Date;
   }): Promise<DropshipListingPushWorkerResult>;
+  /**
+   * The marketplace was busy or did not answer and nothing was done (§4.5):
+   * one transaction puts the item and the job back to queued, counts the
+   * pause on both, sets when the job may next be claimed and writes the audit
+   * row. The job is NOT finalized: finalize would set it processing again.
+   * When the item's run was stopped meanwhile, the item is cancelled instead
+   * (`stopped`; review MC4): nothing was done for it, so it is not sent after
+   * the stop, and the job carries on to its finalize.
+   */
+  pauseItem(input: {
+    job: DropshipListingPushWorkerJobRecord;
+    item: DropshipListingPushWorkerItemRecord;
+    code: string;
+    message: string;
+    reason: string;
+    workerId: string;
+    now: Date;
+  }): Promise<DropshipListingPushPauseOutcome>;
+  /**
+   * The job paused too often in a row (§4.5): one transaction fails the item
+   * and every queued item of the job, retryable, as provider unavailable; for
+   * a run's chunk it also stops the run with that reason and fails its pending
+   * sizes, so the run finishes at the next reconcile and frees the store.
+   */
+  tripJobBreaker(input: {
+    job: DropshipListingPushWorkerJobRecord;
+    item: DropshipListingPushWorkerItemRecord;
+    code: string;
+    message: string;
+    workerId: string;
+    now: Date;
+  }): Promise<{ failedItemIds: number[]; runStopped: boolean }>;
 }
 
 /** What the worker hands the push-time refresh for one queued item. */
@@ -212,11 +275,18 @@ export class DropshipListingPushWorkerService {
       };
     }
 
+    // Kept in step with the job's stored count: a completed item resets it, a pause returns at once.
+    const state = { consecutivePauses: claim.job.consecutivePauseCount ?? 0 };
     for (const item of claim.items) {
       if (item.status !== "queued") {
         continue;
       }
-      await this.processItem(parsed, claim, item);
+      const outcome = await this.processItem(parsed, claim, item, state);
+      if (outcome === "paused") {
+        // No finalize: it would set the job processing again while it waits for its next attempt (SAFETY18).
+        return { job: { ...claim.job, status: "queued" }, items: claim.items, summary: summarizeWorkerItems(claim.items) };
+      }
+      if (outcome === "breaker_tripped") break;
     }
 
     const finalized = await this.deps.repository.finalizeJob({
@@ -237,7 +307,8 @@ export class DropshipListingPushWorkerService {
       },
     });
 
-    await this.notifyFailedListingPushJob(finalized);
+    // A run's chunk sends no email of its own: its run sends one when it finishes (§4.5).
+    if (!claim.job.runId) await this.notifyFailedListingPushJob(finalized);
 
     return finalized;
   }
@@ -246,7 +317,8 @@ export class DropshipListingPushWorkerService {
     parsed: ProcessListingPushJobInput,
     claim: DropshipListingPushWorkerClaim,
     item: DropshipListingPushWorkerItemRecord,
-  ): Promise<void> {
+    state: { consecutivePauses: number },
+  ): Promise<"done" | "paused" | "breaker_tripped"> {
     const eligibilityBlocker = validateClaimEligibility(claim);
     if (eligibilityBlocker) {
       await this.deps.repository.blockItem({
@@ -257,7 +329,7 @@ export class DropshipListingPushWorkerService {
         workerId: parsed.workerId,
         now: this.deps.clock.now(),
       });
-      return;
+      return "done";
     }
 
     const intent = parseListingIntent(item.result);
@@ -271,16 +343,19 @@ export class DropshipListingPushWorkerService {
         workerId: parsed.workerId,
         now: this.deps.clock.now(),
       });
-      return;
+      return "done";
     }
 
+    // Also the job's heartbeat: a long job is not taken for stale while its items still start (F5).
     const marked = await this.deps.repository.markItemProcessing({
       jobId: claim.job.jobId,
       itemId: item.itemId,
+      workerId: parsed.workerId,
       now: this.deps.clock.now(),
     });
     if (!marked) {
-      return;
+      // Not queued any more (a stop cancelled it, or another worker took it), or its run was stopped (cancelled now).
+      return "done";
     }
 
     try {
@@ -315,7 +390,25 @@ export class DropshipListingPushWorkerService {
         workerId: parsed.workerId,
         now: this.deps.clock.now(),
       });
+      state.consecutivePauses = 0;
+      return "done";
     } catch (error) {
+      const transient = await this.handleTransientPause(parsed, claim, item, state, error);
+      // A stop came while it was sent and nothing was done: cancelled, and the job goes on to its finalize (review MC4).
+      if (transient === "stopped") return "done";
+      if (transient) return transient;
+      if (isNoLongerSelected(error)) {
+        // Permanent for this push, never retried: the vendor took the size out of their selection (§4.5).
+        await this.deps.repository.blockItem({
+          job: claim.job,
+          item,
+          code: LISTING_PUSH_RUN_CODES.notSelected,
+          message: LISTING_PUSH_RUN_WORDS.itemNotSelected,
+          workerId: parsed.workerId,
+          now: this.deps.clock.now(),
+        });
+        return "done";
+      }
       const classified = classifyListingPushError(error);
       if (classified.needsOperator) {
         // ERROR: an operator has to act before this listing can move again (attest
@@ -388,6 +481,7 @@ export class DropshipListingPushWorkerService {
           providerErrors: classified.providerErrors,
         },
       });
+      const endsPauseRun = isDefiniteMarketplaceAnswer(error);
       await this.deps.repository.failItem({
         job: claim.job,
         item,
@@ -397,10 +491,75 @@ export class DropshipListingPushWorkerService {
         context: classified.context,
         providerErrors: classified.providerErrors,
         endpoint: classified.endpoint,
+        endsPauseRun,
         workerId: parsed.workerId,
         now: this.deps.clock.now(),
       });
+      if (endsPauseRun) state.consecutivePauses = 0;
+      return "done";
     }
+  }
+
+  /**
+   * A marketplace call that did nothing (429, a token rejection, a read with a
+   * 5xx or no answer) pauses the job instead of failing the item; after too
+   * many pauses the item, or the whole job, fails as before. Null: not a
+   * pausable error, or the item breaker let it fail by today's path.
+   */
+  private async handleTransientPause(
+    parsed: ProcessListingPushJobInput,
+    claim: DropshipListingPushWorkerClaim,
+    item: DropshipListingPushWorkerItemRecord,
+    state: { consecutivePauses: number },
+    error: unknown,
+  ): Promise<"paused" | "breaker_tripped" | "stopped" | null> {
+    const pause = decideListingPushTransientPause(error);
+    if (!pause.pause) return null;
+    const itemPauses = itemTransientPauses(item.result);
+    const action = decideListingPushPauseAction({ itemPauses, jobConsecutivePauses: state.consecutivePauses });
+    const code = error instanceof DropshipError ? error.code : "DROPSHIP_LISTING_PUSH_FAILED";
+    const message = error instanceof Error ? error.message : "Dropship listing push failed.";
+    const context = {
+      jobId: claim.job.jobId, runId: claim.job.runId ?? null, itemId: item.itemId, vendorId: claim.job.vendorId,
+      storeConnectionId: claim.job.storeConnectionId, listingId: item.listingId, productVariantId: item.productVariantId,
+      errorCode: code, reason: pause.reason, itemPauses, jobConsecutivePauses: state.consecutivePauses,
+    };
+    if (action.action === "fail_item") {
+      this.deps.logger.warn({ code: "DROPSHIP_LISTING_PUSH_ITEM_PAUSE_LIMIT", message: "A listing push item paused too often; it fails, retryable.", context });
+      return null;
+    }
+    if (action.action === "trip_job_breaker") {
+      const tripped = await this.deps.repository.tripJobBreaker({
+        job: claim.job, item, code: LISTING_PUSH_RUN_CODES.providerUnavailable,
+        message: LISTING_PUSH_RUN_WORDS.itemProviderUnavailable, workerId: parsed.workerId, now: this.deps.clock.now(),
+      });
+      // WARN: anomaly handled by itself (CLAUDE.md §10); the run's finish notice tells the vendor.
+      this.deps.logger.warn({
+        code: "DROPSHIP_LISTING_PUSH_JOB_BREAKER_TRIPPED",
+        message: "The marketplace stayed unavailable; the job's queued items failed, retryable, and its run stopped.",
+        context: { ...context, failedItems: tripped.failedItemIds.length, runStopped: tripped.runStopped },
+      });
+      return "breaker_tripped";
+    }
+    const paused = await this.deps.repository.pauseItem({
+      job: claim.job, item, code, message, reason: pause.reason, workerId: parsed.workerId, now: this.deps.clock.now(),
+    });
+    if (paused.outcome === "stopped") {
+      // INFO: a state transition the vendor asked for (the stop), not an anomaly.
+      this.deps.logger.info({
+        code: "DROPSHIP_LISTING_PUSH_ITEM_CANCELLED_AFTER_STOP",
+        message: "The marketplace answered busy for an item of a stopped publish run; it was cancelled, not queued again.",
+        context,
+      });
+      return "stopped";
+    }
+    state.consecutivePauses = paused.consecutivePauseCount;
+    this.deps.logger.warn({
+      code: "DROPSHIP_LISTING_PUSH_PAUSED",
+      message: "The marketplace was busy or not answering; the job waits and tries again.",
+      context: { ...context, jobConsecutivePauses: paused.consecutivePauseCount, nextAttemptAt: paused.nextAttemptAt.toISOString() },
+    });
+    return "paused";
   }
 
   private async notifyFailedListingPushJob(result: DropshipListingPushWorkerResult): Promise<void> {
@@ -609,6 +768,12 @@ function queuedMarketplaceCategory(intent: DropshipMarketplaceListingIntent): Qu
   if (!categoryId.success) return null;
   const categoryName = queuedEbayCategorySchema.shape.categoryName.safeParse(intent.marketplaceCategoryName ?? null);
   return { categoryId: categoryId.data, categoryName: categoryName.success ? categoryName.data : null };
+}
+
+/** The push-time refresh refused because the size is no longer selected (`selection:` blocker, PS:1284-1286). */
+function isNoLongerSelected(error: unknown): boolean {
+  return error instanceof DropshipError && error.code === "DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED"
+    && isSelectionBlocker(error.context?.blockers);
 }
 
 function parseListingIntent(result: Record<string, unknown> | null): DropshipMarketplaceListingIntent | null {

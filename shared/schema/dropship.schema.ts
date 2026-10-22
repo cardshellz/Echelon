@@ -1770,8 +1770,20 @@ export const dropshipListingPushJobs = dropshipSchema.table(
       .defaultNow()
       .notNull(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
+    /** The publish run whose chunk this job carries out (dropship_listing_push_runs migration); null for every other job. */
+    runId: bigint("run_id", { mode: "number" }).references(() => dropshipListingPushRuns.id),
+    runChunkIndex: integer("run_chunk_index"),
+    /** The sweep does not claim a queued job before this time: a job paused while eBay was busy waits here. */
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    consecutivePauseCount: integer("consecutive_pause_count").notNull().default(0),
   },
   (table) => [
+    uniqueIndex("dropship_listing_job_run_chunk_idx")
+      .on(table.runId, table.runChunkIndex)
+      .where(sql`run_id IS NOT NULL`),
+    check("dropship_listing_job_run_chunk_chk", sql`${table.runChunkIndex} IS NULL OR ${table.runChunkIndex} >= 0`),
+    check("dropship_listing_job_pause_count_chk", sql`${table.consecutivePauseCount} >= 0`),
+    check("dropship_listing_job_run_pair_chk", sql`(${table.runId} IS NULL) = (${table.runChunkIndex} IS NULL)`),
     uniqueIndex("dropship_listing_job_idem_idx")
       .on(table.vendorId, table.idempotencyKey)
       .where(sql`idempotency_key IS NOT NULL`),
@@ -1832,6 +1844,106 @@ export const dropshipListingPushJobItems = dropshipSchema.table(
     ),
   ],
 );
+
+/**
+ * One vendor press of "Publish" in Catalog step 3 (step 1 plan S2-5, PR A):
+ * the server's snapshot of the selection on one store, sent 500 sizes at a
+ * time by the push sweep. The writers are raw SQL
+ * (dropship-listing-push-run.repository.ts); declared so a schema push keeps
+ * the table.
+ */
+export const dropshipListingPushRuns = dropshipSchema.table("dropship_listing_push_runs", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  scope: varchar("scope", { length: 20 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull(),
+  stopReason: varchar("stop_reason", { length: 30 }),
+  selectionRevisionId: integer("selection_revision_id").references(() => dropshipVendorSelectionRuleSetRevisions.id),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  targetCount: integer("target_count").notNull(),
+  chunkSize: integer("chunk_size").notNull(),
+  chunkCount: integer("chunk_count").notNull(),
+  nextChunkIndex: integer("next_chunk_index").notNull().default(0),
+  chunkAttempts: integer("chunk_attempts").notNull().default(0),
+  actorType: varchar("actor_type", { length: 20 }).notNull(),
+  actorId: varchar("actor_id", { length: 255 }),
+  cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  notifiedAt: timestamp("notified_at", { withTimezone: true }),
+}, (table) => [
+  unique("dropship_push_run_vendor_key").on(table.vendorId, table.idempotencyKey),
+  foreignKey({ name: "dropship_push_run_store_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
+  uniqueIndex("dropship_push_run_one_active_idx").on(table.storeConnectionId).where(sql`status = 'processing'`),
+  index("dropship_push_run_vendor_store_idx").on(table.vendorId, table.storeConnectionId, table.id.desc()),
+  index("dropship_push_run_notice_pending_idx").on(table.completedAt)
+    .where(sql`notified_at IS NULL AND status <> 'processing'`),
+  check("dropship_push_run_scope_chk", sql`${table.scope} IN ('not_live', 'all')`),
+  check("dropship_push_run_status_chk", sql`${table.status} IN ('processing', 'completed', 'partial', 'failed', 'cancelled')`),
+  check("dropship_push_run_stop_reason_chk",
+    sql`${table.stopReason} IS NULL OR ${table.stopReason} IN ('vendor_stop', 'provider_unavailable')`),
+  check("dropship_push_run_key_chk", sql`btrim(${table.idempotencyKey}) <> ''`),
+  check("dropship_push_run_hash_chk", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  check("dropship_push_run_target_count_chk", sql`${table.targetCount} BETWEEN 1 AND 10000`),
+  check("dropship_push_run_chunk_size_chk", sql`${table.chunkSize} BETWEEN 1 AND 500`),
+  check("dropship_push_run_chunk_count_chk", sql`${table.chunkCount} >= 1`),
+  check("dropship_push_run_next_chunk_chk", sql`${table.nextChunkIndex} >= 0`),
+  check("dropship_push_run_chunk_attempts_chk", sql`${table.chunkAttempts} >= 0`),
+  check("dropship_push_run_actor_type_chk", sql`${table.actorType} IN ('vendor', 'admin', 'system')`),
+  check("dropship_push_run_chunk_math_chk", sql`${table.chunkCount} = (${table.targetCount} + ${table.chunkSize} - 1) / ${table.chunkSize}
+    AND ${table.nextChunkIndex} <= ${table.chunkCount}`),
+  check("dropship_push_run_finished_chk",
+    sql`(${table.status} IN ('completed', 'partial', 'failed', 'cancelled')) = (${table.completedAt} IS NOT NULL)`),
+  check("dropship_push_run_cancel_chk", sql`(${table.status} <> 'cancelled' OR ${table.cancelRequestedAt} IS NOT NULL)
+    AND (${table.cancelRequestedAt} IS NULL OR ${table.stopReason} IS NOT NULL)`),
+  check("dropship_push_run_notified_chk", sql`${table.notifiedAt} IS NULL OR ${table.completedAt} IS NOT NULL`),
+]);
+
+/** One size of a publish run: its chunk and what became of it (copied from its job item by the sweep). */
+export const dropshipListingPushRunTargets = dropshipSchema.table("dropship_listing_push_run_targets", {
+  runId: bigint("run_id", { mode: "number" }).notNull().references(() => dropshipListingPushRuns.id),
+  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id, { onDelete: "cascade" }),
+  chunkIndex: integer("chunk_index").notNull(),
+  outcome: varchar("outcome", { length: 20 }).notNull(),
+  code: varchar("code", { length: 100 }),
+  retryable: boolean("retryable"),
+  jobId: integer("job_id").references(() => dropshipListingPushJobs.id),
+  jobItemId: integer("job_item_id").references(() => dropshipListingPushJobItems.id),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+}, (table) => [
+  primaryKey({ columns: [table.runId, table.productVariantId] }),
+  index("dropship_push_run_target_chunk_idx").on(table.runId, table.chunkIndex, table.outcome),
+  index("dropship_push_run_target_item_idx").on(table.jobItemId).where(sql`job_item_id IS NOT NULL`),
+  check("dropship_push_run_target_chunk_chk", sql`${table.chunkIndex} >= 0`),
+  check("dropship_push_run_target_outcome_chk", sql`${table.outcome} IN
+    ('pending', 'queued', 'completed', 'failed', 'blocked', 'skipped', 'price_review', 'stale', 'cancelled')`),
+  check("dropship_push_run_target_decided_chk", sql`(${table.outcome} = 'pending') = (${table.decidedAt} IS NULL)`),
+  check("dropship_push_run_target_job_chk", sql`${table.jobItemId} IS NULL OR ${table.jobId} IS NOT NULL`),
+]);
+
+/** Which catalog code version each running process runs, on the database clock (step 1 plan S2-5, §4.9). */
+export const dropshipProcessHeartbeats = dropshipSchema.table("dropship_process_heartbeats", {
+  processKey: varchar("process_key", { length: 200 }).primaryKey(),
+  catalogCodeVersion: integer("catalog_code_version").notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  index("dropship_process_heartbeats_version_idx").on(table.catalogCodeVersion, table.lastSeenAt),
+  check("dropship_process_heartbeat_key_chk", sql`btrim(${table.processKey}) <> ''`),
+  check("dropship_process_heartbeat_version_chk", sql`${table.catalogCodeVersion} >= 1`),
+]);
+
+/** When each catalog code version first ran: one row per version, never deleted. */
+export const dropshipCatalogCodeVersions = dropshipSchema.table("dropship_catalog_code_versions", {
+  catalogCodeVersion: integer("catalog_code_version").primaryKey(),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  check("dropship_catalog_code_version_chk", sql`${table.catalogCodeVersion} >= 1`),
+]);
 
 export const dropshipListingSyncEvents = dropshipSchema.table(
   "dropship_listing_sync_events",

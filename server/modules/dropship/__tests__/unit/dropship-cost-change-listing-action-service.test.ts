@@ -54,7 +54,8 @@ function increase(entryId: number, productVariantId: number, patch: Partial<Effe
 
 function listing(listingId: number, productVariantId: number, patch: Partial<CostActionListing> = {}): CostActionListing {
   return {
-    listingId, storeConnectionId: 9, productVariantId, status: "active", vendorRetailPriceCents: 1099, publishedPriceCents: null, platform: "shopify",
+    listingId, storeConnectionId: 9, productVariantId, status: "active", externalListingId: null, vendorRetailPriceCents: 1099, publishedPriceCents: null,
+    platform: "shopify",
     variantSku: `SKU-${productVariantId}`, variantName: `Variant ${productVariantId}`, productName: "Armor Envelope", ...patch,
   };
 }
@@ -556,6 +557,52 @@ describe("DropshipCostChangeListingActionService", () => {
       expect(gate.calls[1]!.input.idempotencyKey).toBe(`dropship-cost-change-hold:9:reassert:${idSetHash([1])}:${NOW.toISOString()}`);
       expect(repository.released).toEqual([]);
       expect(sender.sent).toEqual([]);
+    });
+
+    it("keeps a below-cost hold while a publish run re-sends the listing that eBay still lists (review MC1)", async () => {
+      // A run queued the listing (status `queued`) and kept its eBay id: orders are accepted on it, so it stays held.
+      repository.activeHolds = [hold(1, 2, 62)];
+      repository.facts.set(5, vendorFacts({
+        listings: [listing(2, 62, { status: "queued", externalListingId: "v1|62|0", vendorRetailPriceCents: 899 })],
+        candidates: new Map([[62, candidate(62)]]),
+      }));
+      repository.costs.set(62, 999);
+      gate.heldBy.set(62, COST_CHANGE_HOLD_ACTOR_ID);
+
+      const result = await service.runListingActionPass({ workerId: "w-1" });
+
+      expect(result.holds).toMatchObject({ reviewed: 1, released: 0, deferred: 0 });
+      expect(gate.calls.map((call) => call.command)).toEqual(["list"]);
+      expect(repository.released).toEqual([]);
+    });
+
+    it("keeps the hold while the re-sent listing's covering price has not reached eBay, and releases it once a push completes (review round 2 MC2)", async () => {
+      // The vendor raised the price to $10 and pressed Publish: the queue wrote 1000 into the listing row, but the push
+      // has not completed, so eBay may still sell at the old price below the $9.99 cost. The row reads `queued` with its
+      // eBay id, as rows written before PR 1b's guards do (since them a queue, a failure, a Stop and the breaker keep a
+      // live listing's status; a listing that stays `active` keeps its hold through the published-price check).
+      repository.activeHolds = [hold(1, 2, 62)];
+      repository.facts.set(5, vendorFacts({
+        // eBay still shows the price its last completed push published, below the cost (PR 1b's published price).
+        listings: [listing(2, 62, { status: "queued", externalListingId: "v1|62|0", vendorRetailPriceCents: 1000, publishedPriceCents: 899 })],
+        candidates: new Map([[62, candidate(62)]]),
+      }));
+      repository.costs.set(62, 999);
+      gate.heldBy.set(62, COST_CHANGE_HOLD_ACTOR_ID);
+
+      const held = await service.runListingActionPass({ workerId: "w-1" });
+      expect(held.holds).toMatchObject({ reviewed: 1, released: 0 });
+      expect(gate.calls.map((call) => call.command)).toEqual(["list"]);
+      expect(repository.released).toEqual([]);
+
+      // The push completed: the listing is active at the price eBay accepted, which covers the cost. Since PR 1b a
+      // release needs that published price too (completeItem writes it on the listing_push_completed sync event).
+      repository.facts.set(5, vendorFacts({
+        listings: [listing(2, 62, { status: "active", externalListingId: "v1|62|0", vendorRetailPriceCents: 1000, publishedPriceCents: 1000 })],
+        candidates: new Map([[62, candidate(62)]]),
+      }));
+      const released = await service.runListingActionPass({ workerId: "w-1" });
+      expect(released.holds).toMatchObject({ reviewed: 1, released: 1 });
     });
 
     it("keeps a hold when the cost in force is unknown, and counts a deferred release for the next pass", async () => {

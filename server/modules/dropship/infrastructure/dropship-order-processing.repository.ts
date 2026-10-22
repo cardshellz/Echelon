@@ -1,12 +1,13 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
-import { isLiveListingStatus } from "../domain/listing-live-status";
 import {
   decideDropshipCatalogOrderAvailability,
   type DropshipCatalogExposureRule,
 } from "../domain/catalog-exposure";
 import { listActiveDropshipCatalogRules } from "./dropship-catalog-exposure.repository";
+import { admittedWhilePushing, decideListingOrderAcceptability } from "../domain/order-listing-acceptability";
+import { logger } from "../../../platform/observability/logger";
 import type {
   DropshipOrderProcessingClaim,
   DropshipOrderProcessingConfig,
@@ -515,8 +516,13 @@ function assertCandidateCanQuote(
   },
 ): void {
   const { intakeId, lineIndex } = input;
-  // The live statuses a push never moves a listing out of (domain/listing-live-status).
-  if (!isLiveListingStatus(candidate.listing_status)) {
+  // A listing being re-sent is live on the marketplace while its Echelon status
+  // shows push progress (step 1 plan S2-5 §4.7); see decideListingOrderAcceptability.
+  const acceptability = decideListingOrderAcceptability({
+    status: candidate.listing_status,
+    externalListingId: candidate.external_listing_id,
+  });
+  if (!acceptability.acceptable) {
     throw new DropshipError(
       "DROPSHIP_ORDER_PROCESSING_LISTING_NOT_QUOTABLE",
       "Dropship order line listing is not in a quotable status.",
@@ -557,6 +563,17 @@ function assertCandidateCanQuote(
         catalogReason: availability.reason,
       },
     );
+  }
+  if (admittedWhilePushing(acceptability)) {
+    // INFO: the line passed only because of the push-progress rule (CLAUDE.md §10).
+    logger.info("dropship.order.listing_acceptable_while_pushing", {
+      outcome: "listing_check_passed",
+      listing_id: candidate.listing_id,
+      status: candidate.listing_status,
+      intake_id: intakeId,
+      line_index: lineIndex,
+      path: "quote",
+    });
   }
 }
 

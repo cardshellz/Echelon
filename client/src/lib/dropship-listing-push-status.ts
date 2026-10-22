@@ -291,6 +291,14 @@ const AUTOMATIC_RETRY_WORDS: Readonly<Record<string, { manual: string; automatic
   },
 });
 
+/**
+ * True for a refusal worded as Card Shellz having paused stock updates (PAUSED_STOCK_WORDS): the vendor tries again
+ * later, not in a few minutes, though the server retries these. The publish run card reads it for its own step.
+ */
+export function isPausedStockRefusal(code: string | null): boolean {
+  return code !== null && STOCK_GATE_REFUSALS[code] === PAUSED_STOCK_WORDS;
+}
+
 /** Stock-gate codes not named above: the server message is operator text, so the vendor gets general words. */
 const STOCK_GATE_CODE_PREFIXES = ["PUBLICATION_", "QUANTITY_PUBLICATION_"] as const;
 

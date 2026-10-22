@@ -32,6 +32,7 @@ import type {
   SkippedListingRecheckCandidate,
 } from "../application/dropship-cost-change-listing-action-service";
 import { DEMOTED_LIVE_LISTING_STATUSES } from "../domain/listing-live-status";
+import { PUSH_PROGRESS_LISTING_STATUSES } from "../domain/order-listing-acceptability";
 import type { DropshipPricingPolicyRecord } from "../application/dropship-listing-preview-service";
 import type { ListingSettingLayers } from "../application/dropship-listing-setting-layers";
 import { mapCostScheduleError } from "./dropship-cost-schedule.repository";
@@ -69,6 +70,7 @@ interface ListingRow {
   store_connection_id: number;
   product_variant_id: number;
   status: string;
+  external_listing_id: string | null;
   vendor_retail_price_cents: string | number | null;
   platform: string;
   variant_sku: string | null;
@@ -287,8 +289,10 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
         // The published price is the one the listing's last completed push
         // sent (completeItem writes it on the listing_push_completed sync event
         // in the same transaction). vendor_retail_price_cents is not: the queue
-        // writes the queued price on it before anything is published.
-        `SELECT l.id, l.store_connection_id, l.product_variant_id, l.status, l.vendor_retail_price_cents, l.platform,
+        // writes the queued price on it before anything is published. The
+        // external listing id says whether a listing being re-sent is still
+        // live (isCostActionableListing).
+        `SELECT l.id, l.store_connection_id, l.product_variant_id, l.status, l.external_listing_id, l.vendor_retail_price_cents, l.platform,
                 pv.sku AS variant_sku, pv.name AS variant_name, p.name AS product_name,
                 published.price_cents AS published_price_cents
          FROM dropship.dropship_vendor_listings l
@@ -409,7 +413,13 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
   /**
    * A pause the review released as listing_inactive is put back when the
    * evidence shows the listing never left its marketplace:
-   * - the listing is active with a marketplace id now;
+   * - the listing has a marketplace id now and reads active, or a
+   *   push-progress status (queued, failed, blocked, pushing): the statuses
+   *   isCostActionableListing treats as live, as orders take the second kind
+   *   (order-listing-acceptability, §4.7; merge review ADV-3). Such a listing
+   *   can stay in push progress while a push is in flight, which the live
+   *   status repair waits for; the review in the same pass keeps its hold
+   *   (decideCostChangeHoldRelease, MC2) until a push completes;
    * - the completed push that wrote last before the release published it
    *   live (result.push.rawResult.listingMode, else the queued intent's mode);
    * - after that push and by the release, another push item was queued, or
@@ -466,7 +476,7 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
            ) demoting ON true
            WHERE h.released_at IS NOT NULL
              AND h.release_reason = 'listing_inactive'
-             AND l.status = 'active'
+             AND (l.status = ANY($3::text[]) OR l.status = ANY($4::text[]))
              AND NULLIF(BTRIM(l.external_listing_id), '') IS NOT NULL
              AND NOT EXISTS (
                SELECT 1 FROM dropship.dropship_cost_change_listing_holds other
@@ -490,7 +500,7 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
          FROM inserted
          JOIN candidates c ON inserted.hold_idempotency_key = 'dropship-cost-change-hold:restore:' || c.released_hold_id::text
          ORDER BY inserted.id ASC`,
-        [input.now, input.limit],
+        [input.now, input.limit, [...COST_ACTIONABLE_LISTING_STATUSES], [...PUSH_PROGRESS_LISTING_STATUSES]],
       );
       const holds = restored.rows.map((row): RestoredCostChangeListingHold => ({
         holdId: toId(row.id, "hold id"),
@@ -884,6 +894,7 @@ function mapListingRow(row: ListingRow): CostActionListing {
     storeConnectionId: row.store_connection_id,
     productVariantId: row.product_variant_id,
     status: row.status,
+    externalListingId: row.external_listing_id ?? null,
     vendorRetailPriceCents: row.vendor_retail_price_cents === null ? null : toCents(row.vendor_retail_price_cents, "vendor_retail_price_cents"),
     publishedPriceCents: row.published_price_cents === null ? null : toId(row.published_price_cents, "published priceCents"),
     platform: row.platform,

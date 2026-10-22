@@ -132,9 +132,38 @@ import {
   type OlderGroupRulesKind,
 } from "../../server/modules/dropship/domain/older-group-rules-edit";
 import {
+  listDropshipVendorCatalogIdsInputSchema,
   previewDropshipVendorCatalogInputSchema,
+  readDropshipVendorSelectionSummaryInputSchema,
   replaceDropshipVendorSelectionRulesInputSchema,
 } from "../../server/modules/dropship/application/dropship-selection-dtos";
+import { generateVendorListingPreviewInputSchema } from "../../server/modules/dropship/application/dropship-use-case-dtos";
+import { DROPSHIP_CATALOG_CODE_VERSION } from "../../server/modules/dropship/domain/catalog-code-version";
+import {
+  LISTING_PUSH_RUN_CHUNK_SIZE,
+  LISTING_PUSH_RUN_ERROR_CODES,
+  MAX_LISTING_PUSH_RUN_TARGETS,
+  createListingPushRunRequestSchema,
+  createListingPushRunResponseSchema,
+  emptyListingPushRunCounts,
+  listListingPushRunsResponseSchema,
+  listingPushRunDetailResponseSchema,
+  stopListingPushRunResponseSchema,
+  type ListingPushRunCounts,
+  type ListingPushRunProblem,
+  type ListingPushRunStatus,
+  type ListingPushRunStopReason,
+  type ListingPushRunView,
+} from "../../shared/dropship/listing-push-runs";
+import {
+  DROPSHIP_CATALOG_READ_ERROR_CODES,
+  DROPSHIP_CATALOG_SELECTION_CAP,
+  DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON,
+  dropshipCatalogIdsAnswerSchema,
+  dropshipCatalogReadSummarySchema,
+  dropshipCatalogSelectionSummarySchema,
+  type DropshipCatalogSelectionSummary,
+} from "../../shared/dropship/vendor-catalog-reads";
 import { hashVendorSelectionRules, normalizeVendorSelectionRule } from "../../server/modules/dropship/application/dropship-selection-atp-service";
 import { evaluateDropshipVendorCatalogSelection } from "../../server/modules/dropship/domain/vendor-selection";
 import { publicationSelectionBusyIssue } from "../../server/modules/inventory-planning/publication-selection-work";
@@ -263,6 +292,10 @@ export function previewRow(storeConnectionId: number) {
     priceCents: 699, marketplaceCategoryId: "183435", marketplaceCategoryName: "Card Sleeves", storeCategoryNames: [],
     businessPolicySelection: null, previewHash: `${storeConnectionId}`.padStart(64, "d"), priceSettingRevisionId: null,
     contentEvidenceHash: "c".repeat(64),
+    // The listing's content, as every preview row carries it (step 3's Check drops it and its sheet reads it again).
+    presentation: { source: "resolved_listing", title: "Envelope Single Pocket, Pack of 50",
+      descriptionText: "Holds one card in a rigid sleeve.", productName: "Envelope Single Pocket", variantName: "Pack of 50", unitsPerVariant: 50,
+      brand: "Card Shellz", condition: "New", itemSpecifics: [{ name: "Material", values: ["PET"] }], images: [], issues: [] },
   };
 }
 
@@ -692,6 +725,33 @@ export interface StubState {
   catalogReadFailures: CatalogReadFailure[];
   /** The request keys the selection save saw: the request hash and the revision it made, so the same key replays. */
   selectionKeys: Record<string, { hash: string; revisionId: number }>;
+  // Step 1 plan S2-5 PR A: step 3 on publish runs.
+  /** The step-up proofs auth/me reports; none by default, so a publish asks for a code first (the server's own rule). */
+  proofs: Record<string, StubProof>;
+  /** The actions a step-up code was sent for, in order. */
+  codesSent: string[];
+  /** Each store's live listings: the selected sizes already on that eBay store (the summary's `live`, `not_live`'s filter). */
+  liveVariantIds: Record<number, number[]>;
+  /** How the next selection summary reads answer, in order; once used up, the summary is worked out from the stub. */
+  selectionSummaryAnswers: Array<"html" | ScriptedError>;
+  /** Every preview POST body, in order (the Check's chunks). */
+  previewBodies: Array<{ storeConnectionId: number; productVariantIds: number[] }>;
+  /** How the next preview POSTs answer, in order; once used up, each previews its sizes. */
+  previewAnswers: ScriptedError[];
+  /** The publish runs the stub holds, oldest first. */
+  runs: StubRun[];
+  /** Every run create body, in order, with the status it answered (0: the answer was cut off). */
+  runCreates: Array<{ body: Record<string, unknown>; status: number }>;
+  /** How the next run creates answer, in order: an older dyno's HTML, a refusal, or made with the answer cut off. */
+  runCreateAnswers: Array<"html" | "drop" | ScriptedError>;
+  /** The states the next run made walks through, one per detail read (the last one stays); null: queued, then completed. */
+  nextRunFrames: StubRunFrame[] | null;
+  /** Sizes the server's snapshot leaves out of the next run (no longer offered when it was taken). */
+  runSnapshotShort: number;
+  /** Every run detail read, by run id, in order. */
+  runDetailReads: number[];
+  /** Every Stop, by run id, in order. */
+  runStops: number[];
   unexpected: string[];
   errors: string[];
 }
@@ -2628,6 +2688,8 @@ export const defaultStubState = (): StubState => ({
   reviews: {}, keyedAnswers: {}, nextRevision: 40,
   chooseRows: [ROW_FACT], selectionRules: [], nextRuleId: 100, selectionRevision: 1, selectionPuts: [], rulesReads: 0,
   selectionPutAnswers: [], rulesReadAnswers: [], catalogReadFailures: [], selectionKeys: {},
+  proofs: {}, codesSent: [], liveVariantIds: {}, selectionSummaryAnswers: [], previewBodies: [], previewAnswers: [],
+  runs: [], runCreates: [], runCreateAnswers: [], nextRunFrames: null, runSnapshotShort: 0, runDetailReads: [], runStops: [],
   unexpected: [], errors: [],
 });
 
@@ -2675,8 +2737,22 @@ async function answerApi(state: StubState, route: Route) {
   const listings = storeId === null ? null : `/api/dropship/listings/stores/${storeId}`;
   if (path === "/api/dropship/auth/me") {
     return route.fulfill({ json: { principal: { authIdentityId: 1, memberId: MEMBER_ID, cardShellzEmail: "vendor@example.com", hasPasskey: false,
-      authMethod: "password", entitlementStatus: "active", authenticatedAt: STAMP }, sensitiveProofs: {} } });
+      authMethod: "password", entitlementStatus: "active", authenticatedAt: STAMP }, sensitiveProofs: state.proofs } });
   }
+  if (path === "/api/dropship/auth/sensitive-actions/challenge/start" && method === "POST") {
+    state.codesSent.push((route.request().postDataJSON() as { action: string }).action);
+    return route.fulfill({ status: 202, json: { method: "email_mfa", challengeId: "c-1", expiresAt: "2999-01-01T00:10:00.000Z" } });
+  }
+  if (path === "/api/dropship/auth/sensitive-actions/challenge/verify" && method === "POST") {
+    const body = route.request().postDataJSON() as { action: string; verificationCode: string };
+    if (body.verificationCode !== STEP_UP_CODE) {
+      return fulfillError(route, { status: 400, code: "DROPSHIP_AUTH_CHALLENGE_INVALID", message: "That code is not right." });
+    }
+    state.proofs[body.action] = LIVE_PROOF;
+    return route.fulfill({ json: { action: body.action, ...LIVE_PROOF } });
+  }
+  if (path === "/api/dropship/catalog/selection" && method === "GET") return answerSelectionSummary(state, route, url);
+  if (path.startsWith(LISTING_PUSH_RUNS_PATH)) return answerListingPushRuns(state, route, url, method, path);
   if (path === "/api/dropship/onboarding/state" && method === "GET") return route.fulfill({ json: onboardingJson(state.vendor) });
   if (path === "/api/dropship/settings" && method === "GET") return route.fulfill({ json: settingsJson(state) });
   if (path === "/api/dropship/catalog" && method === "GET") return answerCatalogRead(state, route, url);
@@ -2702,12 +2778,7 @@ async function answerApi(state: StubState, route: Route) {
   if (storeId !== null && method === "GET" && state.stores.some((store) => store.storeConnectionId === storeId && store.platform === "ebay")) {
     if (await answerStoreRead(state, route, storeId, path, url) !== NOT_MINE) return;
   }
-  if (path === "/api/dropship/listings/preview" && method === "POST") {
-    state.previewCalls += 1;
-    const storeConnectionId = (route.request().postDataJSON() as { storeConnectionId: number }).storeConnectionId;
-    return route.fulfill({ json: { preview: { vendorId: 1, storeConnectionId, platform: "ebay", generatedAt: STAMP,
-      rows: [previewRow(storeConnectionId)], summary: { total: 1, ready: 1, blocked: 0, warning: 0 } } } });
-  }
+  if (path === "/api/dropship/listings/preview" && method === "POST") return answerPreview(state, route);
   state.unexpected.push(`${method} ${path}`);
   return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });
 }
@@ -2719,7 +2790,9 @@ async function answerApi(state: StubState, route: Route) {
 /** The global JSON parser's limit the selection save goes through (rate-table-admin-body.middleware.ts). */
 const GLOBAL_JSON_LIMIT_BYTES = 100 * 1024;
 /** The catalog read's filters the step may send; anything else (a product line, a product) is off contract for step 1. */
-const CATALOG_READ_PARAMS = new Set(["search", "category", "selectedOnly", "page", "limit"]);
+const CATALOG_READ_PARAMS = new Set(["search", "category", "selectedOnly", "page", "limit",
+  // Step 1 plan S2-5 PR A (§4.8): the new filters and this page's version; step 3 sends them.
+  "selection", "includeFacets", "clientVersion", "idsOnly", "purpose", "categoryId"]);
 
 /** One size's decision under the stub's rules, by the server's own evaluator. */
 function chooseDecision(state: StubState, fact: ChooseRowFact) {
@@ -2743,21 +2816,99 @@ function routeNumber(value: string | null, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/** A query value the route reads strictly (step 1 plan S2-5 §4.8): absent, or one of `allowed`; anything else is the route's 400. */
+function strictQuery(url: URL, name: string, allowed: readonly string[]): { ok: true; value: string | undefined } | { ok: false } {
+  const value = routeString(url.searchParams.get(name));
+  if (url.searchParams.get(name) === null) return { ok: true, value: undefined };
+  return value !== undefined && allowed.includes(value) ? { ok: true, value } : { ok: false };
+}
+
+/** `clientVersion`, as the route reads it first (CHK7): absent is this release's page; digits only; newer than the server is 503. */
+function readClientVersion(url: URL): { ok: true; newer: boolean } | { ok: false } {
+  const text = url.searchParams.get("clientVersion");
+  if (text === null) return { ok: true, newer: false };
+  if (!/^\d{1,10}$/.test(text.trim()) || Number(text) < 1) return { ok: false };
+  return { ok: true, newer: Number(text) > DROPSHIP_CATALOG_CODE_VERSION };
+}
+
+function catalogQueryInvalid(state: StubState, route: Route, url: URL, parameter: string) {
+  state.unexpected.push(`GET ${url.pathname}${url.search} (query refused: ${parameter})`);
+  return fulfillError(route, { status: 400, code: DROPSHIP_CATALOG_READ_ERROR_CODES.queryInvalid,
+    message: "This catalog request was not valid. Reload the page and try again.", context: { parameter } });
+}
+
+function pageNewerThanServer(route: Route) {
+  return route.fulfill({ status: 503, headers: { "Retry-After": "5" }, json: { error: { code: DROPSHIP_CATALOG_READ_ERROR_CODES.writesPaused,
+    message: "Card Shellz is updating the site. This page will try again in a moment; nothing you did is lost.",
+    context: { reason: DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON } } } });
+}
+
 /**
  * `GET /api/dropship/catalog`: the query is read as the route reads it and checked with the server's own schema (a
- * failure is the route's 400, recorded as unexpected; review CT4); search, category and selectedOnly filter; facets
- * apply search only; page/limit slice.
+ * failure is the route's 400, recorded as unexpected; review CT4); search, category and the selection filter (`selection`,
+ * or stage 1's `selectedOnly` alias) filter; facets apply search only and are left out when `includeFacets=false`; the
+ * `summary` counts the filter apart from the selection (A2 deviation 5); page/limit slice. `idsOnly=true&purpose=` answers
+ * the changeable ids instead, refusing the list the purpose needs past the cap (TESTS22). Step 1 plan S2-5 PR A.
  */
 function answerCatalogRead(state: StubState, route: Route, url: URL) {
   const offContract = [...url.searchParams.keys()].filter((key) => !CATALOG_READ_PARAMS.has(key));
   if (offContract.length > 0) state.unexpected.push(`GET /api/dropship/catalog${url.search} (query off contract: ${offContract.join(",")})`);
+  const version = readClientVersion(url);
+  if (!version.ok) return catalogQueryInvalid(state, route, url, "clientVersion");
+  if (version.newer) return pageNewerThanServer(route);
+  // No page of PR A filters by category id: the stub holds category names only.
+  if (url.searchParams.has("categoryId")) return catalogQueryInvalid(state, route, url, "categoryId");
+  const selection = strictQuery(url, "selection", ["all", "selected", "not_selected"]);
+  if (!selection.ok) return catalogQueryInvalid(state, route, url, "selection");
+  const idsOnly = strictQuery(url, "idsOnly", ["true", "false"]);
+  if (!idsOnly.ok) return catalogQueryInvalid(state, route, url, "idsOnly");
+  const includeFacets = strictQuery(url, "includeFacets", ["true", "false"]);
+  if (!includeFacets.ok) return catalogQueryInvalid(state, route, url, "includeFacets");
+  const purpose = strictQuery(url, "purpose", ["add", "remove"]);
+  if (!purpose.ok) return catalogQueryInvalid(state, route, url, "purpose");
   const selectedOnlyText = routeString(url.searchParams.get("selectedOnly"));
-  const parsed = previewDropshipVendorCatalogInputSchema.safeParse({
+  const filterFields = {
     vendorId: 1,
     search: routeString(url.searchParams.get("search")),
     category: routeString(url.searchParams.get("category")),
     // The route reads "true" and "false"; anything else falls back to false.
     selectedOnly: selectedOnlyText === "true",
+    ...(selection.value ? { selection: selection.value as "all" | "selected" | "not_selected" } : {}),
+  };
+  const resolved = filterFields.selection ?? (filterFields.selectedOnly ? "selected" : "all");
+  const search = filterFields.search?.toLowerCase() ?? "";
+  const category = filterFields.category?.toLowerCase() ?? "";
+  const searched = state.chooseRows.filter((fact) => !search
+    || [fact.productSku, fact.variantSku, fact.productName, fact.variantName].some((text) => text?.toLowerCase().includes(search)));
+  const matching = searched
+    .filter((fact) => !category || fact.category?.toLowerCase() === category)
+    .map((fact) => ({ fact, decision: chooseDecision(state, fact) }));
+  const bySelection = ({ decision }: { decision: ReturnType<typeof chooseDecision> }) =>
+    resolved === "all" || (resolved === "selected" ? decision.selected : !decision.selected);
+
+  if (idsOnly.value === "true") {
+    const parsedIds = listDropshipVendorCatalogIdsInputSchema.safeParse({ ...filterFields, purpose: purpose.value });
+    if (!parsedIds.success) return catalogQueryInvalid(state, route, url, "purpose");
+    // Changeable: exposed (every stub row is) and not turned off for the vendor.
+    const changeable = matching.filter(bySelection).filter(({ fact }) => fact.enabledOverride !== false);
+    const selectedIds = changeable.filter(({ decision }) => decision.selected).map(({ fact }) => fact.productVariantId).sort((a, b) => a - b);
+    const notSelectedIds = changeable.filter(({ decision }) => !decision.selected).map(({ fact }) => fact.productVariantId).sort((a, b) => a - b);
+    const needed = parsedIds.data.purpose === "add" ? notSelectedIds.length : selectedIds.length;
+    if (needed > DROPSHIP_CATALOG_SELECTION_CAP) {
+      return fulfillError(route, { status: 422, code: DROPSHIP_CATALOG_READ_ERROR_CODES.idsTooMany,
+        message: "More than 10,000 items match. Narrow the list, then try again.", context: { total: changeable.length, needed } });
+    }
+    return route.fulfill({ json: dropshipCatalogIdsAnswerSchema.parse({
+      selectedIds: selectedIds.length > DROPSHIP_CATALOG_SELECTION_CAP ? null : selectedIds,
+      notSelectedIds: notSelectedIds.length > DROPSHIP_CATALOG_SELECTION_CAP ? null : notSelectedIds,
+      total: changeable.length,
+    }) });
+  }
+  if (purpose.value !== undefined) return catalogQueryInvalid(state, route, url, "idsOnly");
+
+  const parsed = previewDropshipVendorCatalogInputSchema.safeParse({
+    ...filterFields,
+    ...(includeFacets.value ? { includeFacets: includeFacets.value === "true" } : {}),
     page: routeNumber(url.searchParams.get("page"), 1),
     limit: routeNumber(url.searchParams.get("limit"), 50),
   });
@@ -2765,28 +2916,24 @@ function answerCatalogRead(state: StubState, route: Route, url: URL) {
     state.unexpected.push(`GET /api/dropship/catalog${url.search} (query refused: ${parsed.error.issues.map((issue) => issue.path.join(".")).join(",")})`);
     return route.fulfill({ status: 400, json: { error: { code: "DROPSHIP_VENDOR_CATALOG_INVALID_INPUT", message: "Dropship vendor catalog input failed validation." } } });
   }
-  const search = parsed.data.search?.toLowerCase() ?? "";
-  const category = parsed.data.category?.toLowerCase() ?? "";
-  const selectedOnly = parsed.data.selectedOnly;
   const page = parsed.data.page;
   const limit = parsed.data.limit;
-  const failing = state.catalogReadFailures.findIndex((failure) => failure.selectedOnly === selectedOnly && failure.page === page);
+  const failing = state.catalogReadFailures.findIndex((failure) => failure.selectedOnly === (resolved === "selected") && failure.page === page);
   if (failing >= 0) {
     state.catalogReadFailures.splice(failing, 1);
     return fulfillError(route, { status: 500, code: "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR", message: "Dropship vendor catalog request failed." });
   }
-  const searched = state.chooseRows.filter((fact) => !search
-    || [fact.productSku, fact.variantSku, fact.productName, fact.variantName].some((text) => text?.toLowerCase().includes(search)));
-  const decided = searched
-    .filter((fact) => !category || fact.category?.toLowerCase() === category)
-    .map((fact) => ({ fact, decision: chooseDecision(state, fact) }))
-    .filter(({ decision }) => !selectedOnly || decision.selected);
+  const decided = matching.filter(bySelection);
   const rows = decided.slice((page - 1) * limit, page * limit).map(({ fact, decision }) => ({
     productId: fact.productId, productVariantId: fact.productVariantId, productSku: fact.productSku, productName: fact.productName,
     variantSku: fact.variantSku, variantName: fact.variantName, category: fact.category, productLineIds: fact.productLineIds,
     productLineNames: fact.productLineNames, unitsPerVariant: fact.unitsPerVariant, productIsActive: true, variantIsActive: true,
     variantUomType: "pack", selectionDecision: decision, listingTier: fact.listingTier,
   }));
+  const summary = dropshipCatalogReadSummarySchema.parse({
+    matching: matching.length, matchingSelected: matching.filter(({ decision }) => decision.selected).length,
+  });
+  if (!parsed.data.includeFacets) return route.fulfill({ json: { rows, total: decided.length, page, limit, facets: null, summary } });
   const categories = new Map<string, { category: string; label: string; rowCount: number }>();
   const productLines = new Map<string, { productLineIds: number[]; label: string; rowCount: number }>();
   for (const fact of searched) {
@@ -2803,7 +2950,7 @@ function answerCatalogRead(state: StubState, route: Route, url: URL) {
   }
   const byLabel = <T extends { label: string }>(facets: Iterable<T>) => [...facets].sort((left, right) => left.label.localeCompare(right.label));
   return route.fulfill({ json: { rows, total: decided.length, page, limit,
-    facets: { categories: byLabel(categories.values()), productLines: byLabel(productLines.values()), products: [] } } });
+    facets: { categories: byLabel(categories.values()), productLines: byLabel(productLines.values()), products: [] }, summary } });
 }
 
 /**
@@ -2871,6 +3018,277 @@ async function answerSelectionSave(state: StubState, route: Route) {
   }
   record(201);
   return route.fulfill({ status: 201, json: { revisionId, idempotentReplay: false, rules: state.selectionRules } });
+}
+
+// ---------------------------------------------------------------------------
+// Step 3 on publish runs (step 1 plan S2-5 PR A, §4.6, §4.8, §4.10): the selection summary, the Check's previews and
+// the run routes, as dropship-vendor-catalog.routes.ts and dropship-listing.routes.ts answer them
+// ---------------------------------------------------------------------------
+
+/** A step-up proof as auth/me reports it. */
+export interface StubProof { method: string; verifiedAt: string; expiresAt: string }
+/** The code the stub's email step-up takes. */
+export const STEP_UP_CODE = "123456";
+/** A live bulk push proof (it expires far in the future). */
+export const LIVE_PROOF: StubProof = { method: "email_mfa", verifiedAt: STAMP, expiresAt: "2999-01-01T00:00:00.000Z" };
+const LISTING_PUSH_RUNS_PATH = "/api/dropship/listing-push-runs";
+
+/** One state a run reaches, applied on a detail read: counts left out stay as they were. */
+export interface StubRunFrame {
+  status?: ListingPushRunStatus;
+  stopReason?: ListingPushRunStopReason | null;
+  counts: Partial<ListingPushRunCounts>;
+  problems?: ListingPushRunProblem[];
+  /** When a paused run tries again (the detail's `waitingUntil`); null once it goes on. */
+  waitingUntil?: string | null;
+  /** Completed sizes the store saved as unpublished drafts (the detail's `drafts`). */
+  drafts?: number;
+}
+
+/**
+ * An answer the stub sends through a shared contract: typed against the schema's input, so a field the contract adds
+ * or renames fails the stub type check (CI "Dropship catalog browser stub types"), not only the browser run, and
+ * parsed, so the page reads exactly what the server's parse sends (review round 2 CT11).
+ */
+export function contractAnswer<S extends z.ZodTypeAny>(schema: S, value: z.input<S>): z.output<S> {
+  return schema.parse(value);
+}
+
+/** A publish run as the stub holds it: the view the routes answer, its counts, problems, and the frames still to come. */
+export interface StubRun {
+  view: ListingPushRunView;
+  counts: ListingPushRunCounts;
+  problems: ListingPushRunProblem[];
+  waitingUntil: string | null;
+  drafts: number;
+  frames: StubRunFrame[];
+  key: string;
+  body: string;
+}
+
+/** The ids the stub's selection selects now, by the server's own evaluator. */
+function selectedVariantIds(state: StubState): number[] {
+  return state.chooseRows.filter((fact) => chooseDecision(state, fact).selected).map((fact) => fact.productVariantId).sort((a, b) => a - b);
+}
+
+/** The selection summary the route answers (dropship-selection-atp-service.ts readSelectionSummary), worked out from the stub. */
+export function stubSelectionSummary(state: StubState, storeConnectionId: number | null): DropshipCatalogSelectionSummary {
+  const selected = selectedVariantIds(state);
+  const live = storeConnectionId === null ? 0 : selected.filter((id) => (state.liveVariantIds[storeConnectionId] ?? []).includes(id)).length;
+  return contractAnswer(dropshipCatalogSelectionSummarySchema, {
+    selectionRevisionId: state.selectionRevision,
+    selectedTotal: selected.length,
+    cap: DROPSHIP_CATALOG_SELECTION_CAP,
+    overCap: selected.length > DROPSHIP_CATALOG_SELECTION_CAP,
+    store: storeConnectionId === null ? null : { storeConnectionId, live, notLive: selected.length - live },
+  });
+}
+
+/** An older dyno's answer to a route it does not know: the app's HTML with 200 (server/static.ts; F25). */
+function fulfillOlderDyno(route: Route) {
+  return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><html><body><div id=\"root\"></div></body></html>" });
+}
+
+/** `GET /api/dropship/catalog/selection?storeConnectionId=&clientVersion=`: the page version first, then a store of the vendor's. */
+function answerSelectionSummary(state: StubState, route: Route, url: URL) {
+  const offContract = [...url.searchParams.keys()].filter((key) => key !== "storeConnectionId" && key !== "clientVersion");
+  if (offContract.length > 0) state.unexpected.push(`GET ${url.pathname}${url.search} (query off contract: ${offContract.join(",")})`);
+  const version = readClientVersion(url);
+  if (!version.ok) return catalogQueryInvalid(state, route, url, "clientVersion");
+  if (version.newer) return pageNewerThanServer(route);
+  const storeText = url.searchParams.get("storeConnectionId");
+  const storeConnectionId = storeText === null ? null : /^\d{1,10}$/.test(storeText) ? Number(storeText) : Number.NaN;
+  const parsed = readDropshipVendorSelectionSummaryInputSchema.safeParse({ vendorId: 1, storeConnectionId });
+  if (!parsed.success) return catalogQueryInvalid(state, route, url, "storeConnectionId");
+  const scripted = state.selectionSummaryAnswers.shift();
+  if (scripted === "html") return fulfillOlderDyno(route);
+  if (scripted) return fulfillError(route, scripted);
+  if (parsed.data.storeConnectionId !== null && !state.stores.some((store) => store.storeConnectionId === parsed.data.storeConnectionId)) {
+    return fulfillError(route, { status: 404, code: DROPSHIP_CATALOG_READ_ERROR_CODES.storeRequired,
+      message: "That store was not found. Reload the page and choose a store." });
+  }
+  return route.fulfill({ json: stubSelectionSummary(state, parsed.data.storeConnectionId) });
+}
+
+/**
+ * `POST /api/dropship/listings/preview`: the body checked with the member schema (at most 500 sizes), then one preview
+ * row per size, in the order sent (the row of ROW's size is `previewRow`'s, as before; another size takes its names
+ * from step 1's catalog). A size the catalog does not hold is previewed as blocked.
+ */
+async function answerPreview(state: StubState, route: Route) {
+  state.previewCalls += 1;
+  const body = route.request().postDataJSON() as Record<string, unknown>;
+  // The member route's schema is this one without vendorId and actor, which the service adds (dropship-listing-dtos.ts).
+  const parsed = generateVendorListingPreviewInputSchema.safeParse({ ...body, vendorId: 1, actor: { actorType: "vendor", actorId: MEMBER_ID } });
+  if (!parsed.success) return refuseBody(state, route, "POST", "/api/dropship/listings/preview", parsed.error.issues.map((issue) => issue.message).join("; "));
+  state.previewBodies.push({ storeConnectionId: parsed.data.storeConnectionId, productVariantIds: [...parsed.data.productVariantIds] });
+  const scripted = state.previewAnswers.shift();
+  if (scripted) return fulfillError(route, scripted);
+  const storeConnectionId = parsed.data.storeConnectionId;
+  const rows = parsed.data.productVariantIds.map((productVariantId) => {
+    const base = previewRow(storeConnectionId);
+    if (productVariantId === base.productVariantId) return base;
+    const fact = state.chooseRows.find((row) => row.productVariantId === productVariantId);
+    if (!fact) return { ...base, productVariantId, productId: 0, sku: null, title: `Size ${productVariantId}`, previewStatus: "blocked",
+      blockers: ["catalog_package_data_required"] };
+    return { ...base, productVariantId, productId: fact.productId, sku: fact.variantSku, title: `${fact.productName}, ${fact.variantName}`,
+      previewHash: `${productVariantId}`.padStart(64, "d") };
+  });
+  const blocked = rows.filter((row) => row.previewStatus === "blocked").length;
+  return route.fulfill({ json: { preview: { vendorId: 1, storeConnectionId, platform: "ebay", generatedAt: STAMP, rows,
+    summary: { total: rows.length, ready: rows.length - blocked, blocked, warning: 0 } } } });
+}
+
+function runCountsOf(run: StubRun): ListingPushRunCounts {
+  return { ...run.counts };
+}
+
+/** The next frame of a run, applied on a detail read; the last frame stays. */
+function advanceRun(run: StubRun): void {
+  const frame = run.frames.length > 1 ? run.frames.shift() : run.frames[0];
+  if (!frame) return;
+  run.counts = { ...run.counts, ...frame.counts };
+  if (frame.status) run.view = { ...run.view, status: frame.status, completedAt: frame.status === "processing" ? null : STAMP };
+  if (frame.stopReason !== undefined) run.view = { ...run.view, stopReason: frame.stopReason };
+  if (frame.problems) run.problems = frame.problems;
+  if (frame.waitingUntil !== undefined) run.waitingUntil = frame.waitingUntil;
+  if (frame.drafts !== undefined) run.drafts = frame.drafts;
+  run.view = { ...run.view, updatedAt: STAMP };
+}
+
+function runRefusal(route: Route, status: number, code: string, message: string, context?: Record<string, unknown>) {
+  return fulfillError(route, { status, code, message, ...(context ? { context } : {}) });
+}
+
+/**
+ * The run routes (§4.2, §4.6), in the server's order: the step-up proof, the body's strict schema, the key replay (200
+ * with the run as it is) or conflict, the selection revision, the snapshot (TOO_LARGE, then EMPTY, as the repository
+ * refuses them), then one run per store. Detail reads walk the run's frames; Stop cancels what has not started.
+ * Every answer is parsed with the shared route contract before it is sent.
+ */
+async function answerListingPushRuns(state: StubState, route: Route, url: URL, method: string, path: string) {
+  if (path === LISTING_PUSH_RUNS_PATH && method === "POST") return answerRunCreate(state, route);
+  if (path === LISTING_PUSH_RUNS_PATH && method === "GET") {
+    const storeConnectionId = Number(url.searchParams.get("storeConnectionId"));
+    const limit = Number(url.searchParams.get("limit") ?? 20);
+    if (!Number.isSafeInteger(storeConnectionId) || storeConnectionId < 1 || !Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
+      state.unexpected.push(`GET ${path}${url.search} (query off contract)`);
+      return runRefusal(route, 400, LISTING_PUSH_RUN_ERROR_CODES.invalidInput, "The publish request was not valid.");
+    }
+    const runs = state.runs.filter((run) => run.view.storeConnectionId === storeConnectionId).reverse().slice(0, limit)
+      .map((run) => ({ run: run.view, counts: runCountsOf(run) }));
+    return route.fulfill({ json: contractAnswer(listListingPushRunsResponseSchema, { runs }) });
+  }
+  const detail = /^\/api\/dropship\/listing-push-runs\/(\d+)(\/stop)?$/.exec(path);
+  const run = detail ? state.runs.find((candidate) => candidate.view.runId === Number(detail[1])) : undefined;
+  if (detail && !run) return runRefusal(route, 404, LISTING_PUSH_RUN_ERROR_CODES.notFound, "That publish was not found.");
+  if (detail && run && !detail[2] && method === "GET") {
+    state.runDetailReads.push(run.view.runId);
+    advanceRun(run);
+    const after = Number(url.searchParams.get("problemsAfter") ?? 0);
+    const items = run.problems.filter((problem) => problem.productVariantId > after).sort((a, b) => a.productVariantId - b.productVariantId);
+    const page = items.slice(0, 50);
+    return route.fulfill({ json: contractAnswer(listingPushRunDetailResponseSchema, { run: run.view, counts: runCountsOf(run),
+      problems: { items: page, nextCursor: items.length > 50 ? page[page.length - 1].productVariantId : null },
+      waitingUntil: run.view.status === "processing" ? run.waitingUntil : null, drafts: run.drafts }) });
+  }
+  if (detail && run && detail[2] && method === "POST") {
+    state.runStops.push(run.view.runId);
+    if (run.view.status === "processing" && run.view.cancelRequestedAt === null) {
+      // Pending targets and queued items are cancelled at once; only the size being sent finishes (§4.6, D28).
+      const cancelled = run.counts.cancelled + run.counts.pending + run.counts.queued;
+      run.view = { ...run.view, cancelRequestedAt: STAMP, stopReason: "vendor_stop", updatedAt: STAMP };
+      run.frames = [{ counts: {} }, { status: "cancelled", stopReason: "vendor_stop", counts: { pending: 0, queued: 0, cancelled } }];
+    }
+    return route.fulfill({ json: contractAnswer(stopListingPushRunResponseSchema, { run: run.view, counts: runCountsOf(run) }) });
+  }
+  state.unexpected.push(`${method} ${path}`);
+  return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });
+}
+
+async function answerRunCreate(state: StubState, route: Route) {
+  const body = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
+  const record = (status: number) => { state.runCreates.push({ body, status }); };
+  const scripted = state.runCreateAnswers.shift();
+  if (scripted === "html") {
+    record(200);
+    return fulfillOlderDyno(route);
+  }
+  if (scripted && scripted !== "drop") {
+    record(scripted.status);
+    return fulfillError(route, scripted);
+  }
+  // requireDropshipSensitiveActionProof("bulk_listing_push") runs before the service.
+  const proof = state.proofs.bulk_listing_push;
+  if (!proof || new Date(proof.expiresAt).getTime() <= Date.now()) {
+    record(403);
+    return runRefusal(route, 403, "DROPSHIP_STEP_UP_REQUIRED", "Recent dropship sensitive-action verification is required.", { action: "bulk_listing_push" });
+  }
+  const parsed = createListingPushRunRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    record(400);
+    return refuseBody(state, route, "POST", LISTING_PUSH_RUNS_PATH, parsed.error.issues.map((issue) => issue.message).join("; "));
+  }
+  const request = parsed.data;
+  const sent = JSON.stringify({ storeConnectionId: request.storeConnectionId, scope: request.scope, expectedSelectionRevisionId: request.expectedSelectionRevisionId });
+  const earlier = state.runs.find((run) => run.key === request.idempotencyKey);
+  if (earlier) {
+    if (earlier.body !== sent) {
+      record(409);
+      return runRefusal(route, 409, LISTING_PUSH_RUN_ERROR_CODES.idempotencyConflict, "This publish request key was already used for a different publish.");
+    }
+    record(200);
+    return route.fulfill({ status: 200, json: contractAnswer(createListingPushRunResponseSchema, { run: earlier.view, idempotentReplay: true }) });
+  }
+  if (request.expectedSelectionRevisionId !== state.selectionRevision) {
+    record(409);
+    return runRefusal(route, 409, LISTING_PUSH_RUN_ERROR_CODES.selectionRevisionConflict,
+      "Your choices changed since this page loaded. Check the count and publish again.",
+      { expectedSelectionRevisionId: request.expectedSelectionRevisionId, currentSelectionRevisionId: state.selectionRevision });
+  }
+  const selected = selectedVariantIds(state);
+  if (selected.length > MAX_LISTING_PUSH_RUN_TARGETS) {
+    record(422);
+    return runRefusal(route, 422, LISTING_PUSH_RUN_ERROR_CODES.tooLarge, "More than 10,000 sizes are selected. Remove some in step 1, then publish.",
+      { limit: MAX_LISTING_PUSH_RUN_TARGETS });
+  }
+  const live = state.liveVariantIds[request.storeConnectionId] ?? [];
+  const liveCount = selected.filter((id) => live.includes(id)).length;
+  const targets = (request.scope === "not_live" ? selected.length - liveCount : selected.length) - state.runSnapshotShort;
+  if (targets <= 0) {
+    record(422);
+    return runRefusal(route, 422, LISTING_PUSH_RUN_ERROR_CODES.empty, request.scope === "not_live" && liveCount > 0
+      ? "Everything selected is already on eBay. Use Publish all to re-send it." : "Choose what to sell in step 1 first.",
+    { scope: request.scope, liveCount, selectedCount: selected.length });
+  }
+  // One run per store, after the snapshot, as the repository checks it (dropship-listing-push-run.repository.ts
+  // createRun: replay, revision, snapshot with TOO_LARGE, EMPTY, then ACTIVE; review round 2 CT8).
+  const active = state.runs.find((run) => run.view.storeConnectionId === request.storeConnectionId && run.view.status === "processing");
+  if (active) {
+    record(409);
+    return runRefusal(route, 409, LISTING_PUSH_RUN_ERROR_CODES.runActive, "A publish is already running for this store. It's shown below.",
+      { runId: active.view.runId });
+  }
+  // Ids grow as the server's identity column does: a new run's id is above every run the store already has.
+  const runId = Math.max(40, ...state.runs.map((run) => run.view.runId)) + 1;
+  const view: ListingPushRunView = {
+    runId, storeConnectionId: request.storeConnectionId, scope: request.scope, status: "processing", stopReason: null,
+    selectionRevisionId: request.expectedSelectionRevisionId, targetCount: targets, chunkSize: LISTING_PUSH_RUN_CHUNK_SIZE,
+    chunkCount: Math.ceil(targets / LISTING_PUSH_RUN_CHUNK_SIZE), nextChunkIndex: 0, cancelRequestedAt: null,
+    createdAt: STAMP, updatedAt: STAMP, completedAt: null,
+  };
+  const frames = state.nextRunFrames ?? [{ counts: { pending: 0, queued: targets } }, { status: "completed", counts: { queued: 0, completed: targets } }];
+  state.nextRunFrames = null;
+  state.runs.push({ view, counts: { ...emptyListingPushRunCounts(), pending: targets }, problems: [], waitingUntil: null, drafts: 0,
+    frames: [...frames], key: request.idempotencyKey, body: sent });
+  const json = contractAnswer(createListingPushRunResponseSchema, { run: view, idempotentReplay: false });
+  if (scripted === "drop") {
+    // The run was made, but its answer never came back (P3).
+    record(0);
+    return route.abort("connectionreset");
+  }
+  record(202);
+  return route.fulfill({ status: 202, json });
 }
 
 /**

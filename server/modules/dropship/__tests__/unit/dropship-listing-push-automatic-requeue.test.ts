@@ -140,6 +140,8 @@ describe("which failed items the automatic re-queue owns (reviews V2-1, V2-2)", 
     expect(statements).toHaveLength(1);
     const [{ text, values }] = statements;
     for (const guard of ["i.status = 'failed' AND i.action = 'push' AND j.job_type = 'push' AND j.status = 'failed'",
+      // Rebase of PR A onto Fix PR 2a: a publish run's chunk job is never promised an automatic retry (its run reports it).
+      "AND j.run_id IS NULL",
       "COALESCE(i.result -> 'automaticRequeue' ->> 'state', '') = ''", "NOT EXISTS (SELECT 1 FROM dropship.dropship_listing_push_job_items newer",
       "l.status <> 'ended'", "i.preview_hash = l.last_preview_hash", "sc.status = 'connected' AND sc.setup_status = 'ready'",
       "sc.external_account_verified_at IS NOT NULL", "v.status = 'active' AND v.entitlement_status = 'active'",
@@ -277,6 +279,8 @@ describe("PgDropshipListingPushOpsRepository stock destination proof for the one
     const stores = statements.find(statement => statement.text.startsWith("SELECT candidates.store_connection_id"))!;
     for (const guard of ["NOT EXISTS (SELECT 1 FROM dropship.dropship_listing_push_job_items newer", "l.status <> 'ended'",
       "i.preview_hash = l.last_preview_hash", "i.action = 'push' AND j.job_type = 'push'", "v.status = 'active' AND v.entitlement_status = 'active'",
+      // Rebase of PR A onto Fix PR 2a: no destination is read for a publish run's item (never re-sent).
+      "AND j.run_id IS NULL",
       "lc.is_active = true AND lc.listing_mode = 'live' AND lc.inventory_mode = 'managed_quantity_sync'",
       "COALESCE(i.result -> 'push' -> 'context' ->> $"]) {
       expect(stores.text).toContain(guard);
@@ -284,6 +288,16 @@ describe("PgDropshipListingPushOpsRepository stock destination proof for the one
     expect(stores.values).toContain("recordedWithAutomaticStockLink");
     expect(stores.text).toContain("ORDER BY MIN(candidates.updated_at) ASC, candidates.store_connection_id ASC");
     expect(stores.values.at(-1)).toBe(AUTOMATIC_RESEND_STORE_LIMIT);
+  });
+
+  // Rebase of PR A onto Fix PR 2a: every selection of a pass (the store list, the due re-queues, the at-cap marks)
+  // leaves a publish run's chunk job to its run, as the account-check requeue does.
+  it("never selects a publish run's chunk job in any statement of a pass", async () => {
+    const { statements, pass } = harness([22], async () => "live");
+    await pass(T0);
+    const selections = statements.filter(statement => statement.text.includes("FROM dropship.dropship_listing_push_job_items i\n"));
+    expect(selections.length).toBeGreaterThanOrEqual(3);
+    for (const selection of selections) expect(selection.text).toContain("AND j.run_id IS NULL");
   });
 
   it("waits after a failed read, logs only the first failure in a row as new, and reads again after the backoff", async () => {

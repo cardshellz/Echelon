@@ -5,8 +5,10 @@
  *
  * A listing is live once a push published it (it has an external listing id)
  * and its status is one orders and quotes accept
- * (dropship-order-acceptance.repository assertListingCandidateCanAccept,
- * dropship-order-processing.repository QUOTABLE check). Queueing an update or
+ * (domain/order-listing-acceptability decideListingOrderAcceptability, which
+ * dropship-order-acceptance.repository assertListingCandidateCanAccept and
+ * dropship-order-processing.repository assertCandidateCanQuote call; it also
+ * admits a push-progress status with a marketplace id). Queueing an update or
  * a failed update does not change what the marketplace shows, so neither may
  * move a live listing out of these statuses: before this rule they did
  * (queued/blocked at queue time, failed/blocked on a failed push), and the

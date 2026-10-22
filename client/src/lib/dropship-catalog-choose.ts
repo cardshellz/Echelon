@@ -22,6 +22,7 @@
  * product line (owner Q2).
  */
 import { z } from "zod";
+import { DROPSHIP_CATALOG_READ_ERROR_CODES } from "@shared/dropship/vendor-catalog-reads";
 import { DropshipApiError } from "./dropship-ops-surface";
 import { CHOOSE_WORDS } from "./dropship-catalog-choose-words";
 
@@ -424,7 +425,8 @@ export type ChooseBarOutcome =
   | { kind: "saved"; add: number; remove: number; notTaken: number }
   /** Good news with nothing left to do, in the status line (verify V1). */
   | { kind: "info"; message: string }
-  | { kind: "error"; message: string };
+  /** `reload`: the bar offers Reload beside the words (a save refused because this page is out of date, §4.9 item 2). */
+  | { kind: "error"; message: string; reload?: true };
 
 /**
  * The bar after a press that found the saved rules moved: an earlier save of
@@ -799,6 +801,12 @@ export function sameRuleContent(
 
 /** The busy answer while a stock update finishes (publication-selection-work.ts): the save wrote nothing; retry. */
 export const PUBLICATION_SELECTION_BUSY_CODE = "PUBLICATION_SELECTION_BUSY";
+/**
+ * Step 1 plan S2-5 §4.9 item 2: once PR B froze the rules table, this page's PUT is refused with 410 and this code
+ * (dropship-selection-atp.repository.ts `SELECTION_RULES_RETIRED_DB_MESSAGE`). Nothing was saved, and saving from this
+ * page can never work again: the vendor reloads to get the new page.
+ */
+export const SELECTION_RULES_RETIRED_CODE = DROPSHIP_CATALOG_READ_ERROR_CODES.rulesRetired;
 const PERMANENT_REJECTED_CODES: ReadonlySet<string> = new Set(["DROPSHIP_IDEMPOTENCY_CONFLICT"]);
 
 /**
@@ -820,7 +828,8 @@ export type ChooseSaveErrorClass =
    * until the rules show it (review MC1). False when the answer itself says nothing was written (busy, 408, 429).
    */
   | { classification: "transient"; busyMessage: string | null; mayHaveCommitted: boolean }
-  | { classification: "permanent"; message: string };
+  /** `reload`: only a reload can help (the page is older than the server, §4.9 item 2); the bar offers Reload. */
+  | { classification: "permanent"; message: string; reload?: true };
 
 /**
  * Transient (sent again with the same key and body): no answer (a network
@@ -842,6 +851,9 @@ export function classifyChooseSaveError(error: unknown): ChooseSaveErrorClass {
     if (error.status >= 500) return { classification: "transient", busyMessage: null, mayHaveCommitted: true };
     if (error.status === 408 || error.status === 429) return { classification: "transient", busyMessage: null, mayHaveCommitted: false };
     if (error.status === 413) return { classification: "permanent", message: CHOOSE_WORDS.tooLarge };
+    if (error.status === 410 && error.code === SELECTION_RULES_RETIRED_CODE) {
+      return { classification: "permanent", message: CHOOSE_WORDS.retired, reload: true };
+    }
     if (error.status === 400 || (error.status === 409 && error.code !== null && PERMANENT_REJECTED_CODES.has(error.code))) {
       return { classification: "permanent", message: CHOOSE_WORDS.rejected };
     }

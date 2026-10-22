@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { LISTING_PUSH_RUN_CODES } from "../domain/listing-push-run";
 import { parseCatalogVariantUomType } from "../domain/listing-tiers";
 import { LIVE_LISTING_STATUSES } from "../domain/listing-live-status";
 import type {
@@ -161,6 +162,9 @@ interface JobRow {
   request_hash: string | null;
   created_at: Date;
   updated_at: Date;
+  /** bigint: node-postgres returns it as text. Read only by the key replay. */
+  run_id?: string | number | null;
+  run_chunk_index?: number | null;
 }
 
 interface JobItemRow {
@@ -743,9 +747,27 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
       const existingJob = await findJobByIdempotencyKeyForUpdate(client, {
         vendorId: input.vendorId,
         idempotencyKey: input.idempotencyKey,
+        withRunColumns: input.run !== undefined,
       });
       if (existingJob) {
+        // A publish run's chunk adopts only its own job (step 1 plan S2-5, SAFETY14):
+        // a job under the same key that carries out another chunk, or none, is
+        // never replayed as this chunk's job.
+        if (input.run && !jobCarriesRunChunk(existingJob, input.run)) {
+          throw new DropshipError(LISTING_PUSH_RUN_CODES.keyConflict,
+            "A listing push job already holds this publish run chunk's key.",
+            { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, runId: input.run.runId,
+              chunkIndex: input.run.chunkIndex, existingJobId: existingJob.id, classification: "permanent" });
+        }
         if (existingJob.request_hash !== input.requestHash) {
+          if (input.run) {
+            // This chunk's own job, queued first by another expansion whose pre-filter left out other sizes: it is
+            // adopted by (run, chunk) at the next sweep, never a conflict that fails the chunk's sizes (review MC5).
+            throw new DropshipError(LISTING_PUSH_RUN_CODES.chunkExists,
+              "This publish run chunk already has its job; the next sweep adopts it.",
+              { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, runId: input.run.runId,
+                chunkIndex: input.run.chunkIndex, existingJobId: existingJob.id, retryable: true });
+          }
           throw new DropshipError(
             "DROPSHIP_IDEMPOTENCY_CONFLICT",
             "Dropship listing push job idempotency key was reused with a different request.",
@@ -802,11 +824,13 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
         }
       }
       const jobStatus = queuedItemCount > 0 ? "queued" : "failed";
-      const jobResult = await client.query<JobRow>(
+      // The run columns are written with the job, in its own transaction, so a
+      // crash can never leave a chunk's job that the sweep cannot adopt.
+      const jobResult = await withRunChunkUniqueness(input, () => client.query<JobRow>(
         `INSERT INTO dropship.dropship_listing_push_jobs
           (vendor_id, store_connection_id, job_type, status, requested_scope,
-           requested_by, idempotency_key, request_hash, error_message, created_at, updated_at)
-         VALUES ($1, $2, 'push', $3, $4::jsonb, $5, $6, $7, $8, $9, $9)
+           requested_by, idempotency_key, request_hash, error_message, created_at, updated_at${input.run ? ", run_id, run_chunk_index" : ""})
+         VALUES ($1, $2, 'push', $3, $4::jsonb, $5, $6, $7, $8, $9, $9${input.run ? ", $10, $11" : ""})
          RETURNING id, vendor_id, store_connection_id, status, idempotency_key,
                    request_hash, created_at, updated_at`,
         [
@@ -824,19 +848,25 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
           input.requestHash,
           queuedItemCount > 0 ? null : "No listing items were ready to push.",
           input.now,
+          ...(input.run ? [input.run.runId, input.run.chunkIndex] : []),
         ],
-      );
+      ));
       const job = requiredRow(jobResult.rows[0], "Dropship listing push job insert did not return a row.");
 
       for (const row of input.preview.rows) {
+        // A run chunk's item records the listing's status before this queue, so a stop that cancels the item before it
+        // reaches eBay puts the listing back instead of leaving it `queued` (verify V7). Only a run's items are
+        // cancelled by a stop; other jobs write what they always wrote.
+        const listingStatusBeforeQueue = input.run ? await readListingStatusForQueue(client, input, row) : undefined;
         const listingId = await upsertVendorListingForPreview(client, input, row);
-        await insertJobItemForPreview(client, {
+        await withRunChunkUniqueness(input, () => insertJobItemForPreview(client, {
           jobId: job.id,
           listingId,
           idempotencyKey: `${input.idempotencyKey}:${row.productVariantId}`,
           row,
           now: input.now,
-        });
+          ...(listingStatusBeforeQueue !== undefined ? { listingStatusBeforeQueue } : {}),
+        }));
       }
 
       await recordListingJobAuditEvent(client, input, job.id);
@@ -856,16 +886,55 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
   }
 }
 
+/** True when a job found by a run chunk's key is that chunk's own job. */
+function jobCarriesRunChunk(job: JobRow, run: { runId: number; chunkIndex: number }): boolean {
+  return job.run_id !== null && job.run_id !== undefined && Number(job.run_id) === run.runId
+    && job.run_chunk_index === run.chunkIndex;
+}
+
+/**
+ * A run chunk's job or item insert that collides with a unique key. The
+ * chunk's own (run_id, run_chunk_index) means its job already exists (another
+ * attempt committed it): the next sweep adopts it, so the collision passes.
+ * Any other key (the job key, an item key) belongs to some other job: never
+ * adopted, permanent (SAFETY14). Jobs without a run keep their errors as is.
+ */
+async function withRunChunkUniqueness<T>(
+  input: Pick<CreateDropshipListingPushJobRepositoryInput, "run" | "vendorId" | "storeConnectionId">,
+  write: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    const pgError = error as { code?: unknown; constraint?: unknown };
+    if (!input.run || pgError?.code !== "23505") throw error;
+    const context = { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId,
+      runId: input.run.runId, chunkIndex: input.run.chunkIndex, constraint: pgError.constraint ?? null };
+    if (pgError.constraint === "dropship_listing_job_run_chunk_idx") {
+      throw new DropshipError(LISTING_PUSH_RUN_CODES.chunkExists,
+        "This publish run chunk already has its job; the next sweep adopts it.", { ...context, retryable: true });
+    }
+    throw new DropshipError(LISTING_PUSH_RUN_CODES.keyConflict,
+      "A publish run chunk's job or item key is already used by another job.", { ...context, classification: "permanent" });
+  }
+}
+
+/**
+ * The job a request key already names, locked. Only a publish run's chunk
+ * reads the run columns (to adopt nothing but its own job); every other
+ * caller's statement is the one it has always sent.
+ */
 async function findJobByIdempotencyKeyForUpdate(
   client: Pick<PoolClient, "query">,
   input: {
     vendorId: number;
     idempotencyKey: string;
+    withRunColumns: boolean;
   },
 ): Promise<JobRow | null> {
   const result = await client.query<JobRow>(
     `SELECT id, vendor_id, store_connection_id, status, idempotency_key,
-            request_hash, created_at, updated_at
+            request_hash, created_at, updated_at${input.withRunColumns ? ", run_id, run_chunk_index" : ""}
      FROM dropship.dropship_listing_push_jobs
      WHERE vendor_id = $1
        AND idempotency_key = $2
@@ -873,6 +942,26 @@ async function findJobByIdempotencyKeyForUpdate(
     [input.vendorId, input.idempotencyKey],
   );
   return result.rows[0] ?? null;
+}
+
+/**
+ * The listing's status before a run chunk queues it, locked so it is the
+ * latest committed one; `not_listed` (the column's default) when the size has
+ * no listing yet. Null for a size the queue writes no listing for.
+ */
+async function readListingStatusForQueue(
+  client: Pick<PoolClient, "query">,
+  input: CreateDropshipListingPushJobRepositoryInput,
+  row: CreateDropshipListingPushJobRepositoryInput["preview"]["rows"][number],
+): Promise<string | null> {
+  if (row.productId <= 0) return null;
+  const result = await client.query<{ status: string }>(
+    `SELECT status FROM dropship.dropship_vendor_listings
+     WHERE store_connection_id = $1 AND product_variant_id = $2
+     FOR UPDATE`,
+    [input.storeConnectionId, row.productVariantId],
+  );
+  return result.rows[0]?.status ?? "not_listed";
 }
 
 async function upsertVendorListingForPreview(
@@ -954,6 +1043,8 @@ async function insertJobItemForPreview(
     idempotencyKey: string;
     row: CreateDropshipListingPushJobRepositoryInput["preview"]["rows"][number];
     now: Date;
+    /** A run chunk's item only: the listing's status before the queue (verify V7). */
+    listingStatusBeforeQueue?: string | null;
   },
 ): Promise<void> {
   const status = input.row.previewStatus === "blocked" ? "blocked" : "queued";
@@ -975,6 +1066,7 @@ async function insertJobItemForPreview(
         blockers: input.row.blockers,
         warnings: input.row.warnings,
         listingIntent: input.row.listingIntent,
+        ...(input.listingStatusBeforeQueue ? { listingStatusBeforeQueue: input.listingStatusBeforeQueue } : {}),
       }),
       input.idempotencyKey,
       input.now,

@@ -79,7 +79,10 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
       CREATE TABLE dropship.dropship_vendor_listings (
         id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id),
         store_connection_id integer NOT NULL, product_variant_id integer NOT NULL REFERENCES catalog.product_variants(id),
-        status varchar(40) NOT NULL DEFAULT 'not_listed', vendor_retail_price_cents bigint, platform varchar(30) NOT NULL DEFAULT 'shopify');
+        status varchar(40) NOT NULL DEFAULT 'not_listed', vendor_retail_price_cents bigint, platform varchar(30) NOT NULL DEFAULT 'shopify',
+        -- Production's column (the cost-change actions read it since step 1 plan S2-5 review MC1: a re-sent listing with
+        -- an eBay id is still live).
+        external_listing_id varchar(255));
       -- The audit trail (0086): the listing action views read a recheck's record from it.
       CREATE TABLE dropship.dropship_audit_events (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         vendor_id integer, store_connection_id integer, entity_type varchar(80) NOT NULL, entity_id varchar(255),

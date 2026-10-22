@@ -138,7 +138,10 @@ describe("affected feature browser selection", () => {
     ["client/src/pages/dropship/DropshipPortalWallet.tsx", ["wallet"]],
     ["shared/dropship/program-finance-money.ts", ["finance"]],
     // Listing settings PR 12 deleted the pricing rules panel and its own feature group; a step row is the listings group's.
-    ["client/src/pages/dropship/listing-settings/PriceDefaultRow.tsx", ["listings"]],
+    // Step 1 plan S2-5 PR A: the catalog-scale journeys render the same Catalog page (one harness), so it runs them too.
+    ["client/src/pages/dropship/listing-settings/PriceDefaultRow.tsx", ["listings", "catalog-scale"]],
+    ["client/src/pages/dropship/catalog/PublishStep.tsx", ["listings", "catalog-scale"]],
+    ["test/browser/dropship-policy-catalog-publish-runs.spec.ts", ["catalog-scale"]],
     ["test/browser/dropship-policy-listing-settings-helpers.ts", ["listings"]],
     ["shared/ebay-listing-issue.ts", []],
     ["docs/migration-allocation.md", []],

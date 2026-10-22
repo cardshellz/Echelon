@@ -42,6 +42,7 @@ import type { DropshipLogEvent } from "../../application/dropship-ports";
 import type { DropshipMarketplaceCredentialRepository, DropshipMarketplaceStoreCredentials } from "../../infrastructure/dropship-marketplace-credentials";
 import * as destinationHealth from "../../../oms/dropship-stock-destination-health";
 import { FakeEbayInventory } from "../fixtures/fake-ebay-inventory";
+import { listingPushRunsMigrationSql } from "../fixtures/listing-push-runs.fixture";
 import { DropshipError } from "../../domain/errors";
 
 // P3 (PLAN-F2-v2 section 9.3): a Dropship eBay push end to end over real
@@ -104,6 +105,19 @@ const WORKER_SCHEMA_SQL = `
     created_at timestamptz NOT NULL DEFAULT now());
   INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(102,20,'P6'),(103,20,'P7'),(104,20,'P8') ON CONFLICT DO NOTHING;`;
 
+/**
+ * What PR A's publish runs migration references, which the reduced schema lacks (rebase of PR A onto Fix PR 2a): the
+ * push jobs' and items' primary keys (0086), 0657's store owner index and 0091's selection revisions. The migration
+ * itself then runs as production applies it, so the merged worker, job runner and ops repository read the run tables
+ * and job columns production has (as dropship-listing-live-status and the worker repository suite do).
+ */
+const PUBLISH_RUNS_PREREQUISITES_SQL = `
+  ALTER TABLE dropship.dropship_listing_push_jobs ADD PRIMARY KEY (id);
+  ALTER TABLE dropship.dropship_listing_push_job_items ADD PRIMARY KEY (id);
+  CREATE UNIQUE INDEX IF NOT EXISTS p3_store_owner_idx ON dropship.dropship_store_connections (id, vendor_id);
+  CREATE TABLE IF NOT EXISTS dropship.dropship_vendor_selection_rule_set_revisions (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    vendor_id integer NOT NULL);`;
+
 function signal() {
   let release!: () => void;
   const promise = new Promise<void>(done => { release = done; });
@@ -143,6 +157,8 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
     runtime.pool = database.pool;
     await installDropshipEbayStockFixture(database.pool);
     await database.pool.query(WORKER_SCHEMA_SQL);
+    await database.pool.query(PUBLISH_RUNS_PREREQUISITES_SQL);
+    await database.pool.query(listingPushRunsMigrationSql());
   }, 90_000);
   afterEach(async () => { await database?.close(); runtime.pool = null; });
 
@@ -982,6 +998,72 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
       expect(await auditEvents("listing_push_item_auto_requeue_exhausted")).toHaveLength(1);
       expect(await item(1)).toMatchObject({ status: "failed" });
     });
+
+  // Rebase of PR A onto Fix PR 2a: a publish run reports its chunks' outcomes once, when it finishes (its email and
+  // card; a chunk job sends no email of its own), and the account-check requeue already leaves its jobs alone
+  // (accountRefusalCandidateSql). The stock link re-queue does the same (stockLinkCandidateSql, run_id null), in every
+  // mode: no re-queue, exhausted mark, one-time re-send, destination read or promised retry for a run's item.
+  it("leaves a publish run's chunk job to its run, whether the run is processing, finished or stopped", async () => {
+    await createDropshipEbayTarget(database.pool);
+    await database.pool.query("INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(105,20,'P9') ON CONFLICT DO NOTHING");
+    const run = async (status: "processing" | "partial" | "cancelled") => (await database.pool.query<{ id: string }>(
+      `INSERT INTO dropship.dropship_listing_push_runs (vendor_id, store_connection_id, scope, status, stop_reason, idempotency_key,
+         request_hash, target_count, chunk_size, chunk_count, next_chunk_index, actor_type, cancel_requested_at, created_at, updated_at,
+         completed_at)
+       VALUES ($1, $2, 'all', $3, $4, $5, repeat('a', 64), 2, 500, 1, 1, 'vendor', $6, $7, $7, $8) RETURNING id`,
+      [F.vendorId, F.storeConnectionId, status, status === "cancelled" ? "vendor_stop" : null, `p3-run-${status}`,
+        status === "cancelled" ? NOW : null, NOW, status === "processing" ? null : NOW])).rows[0]!.id;
+    const chunkOf = async (jobId: number, runId: string) => database.pool.query(
+      "UPDATE dropship.dropship_listing_push_jobs SET run_id = $2, run_chunk_index = 0 WHERE id = $1", [jobId, runId]);
+    // A run still processing, one finished (partial) and one the vendor stopped, each with a failed chunk job.
+    await queuePush({ jobId: 1, itemId: 1, listingId: 1, productVariantId: 101, status: "failed", errorCode: "DROPSHIP_STOCK_LINK_BUSY",
+      result: RECORDED_AFTER_LINK });
+    await queuePush({ jobId: 2, itemId: 2, listingId: 2, productVariantId: 102, status: "failed", errorCode: "DROPSHIP_STOCK_LINK_BUSY",
+      result: { ...RECORDED_AFTER_LINK, automaticRequeue: { count: 3, lastCode: "DROPSHIP_STOCK_LINK_BUSY" } } });
+    // An UNMAPPED failure recorded before the link existed: owner Q4's one-time re-send, if it were not a run's.
+    await queuePush({ jobId: 2, itemId: 5, listingId: 5, productVariantId: 105, sku: "P9", status: "failed",
+      errorCode: "PUBLICATION_LISTING_TARGET_UNMAPPED", result: { push: { status: "failed", retryable: false,
+        context: { attemptId: null, operatorAction: false, classification: "permanent", requiresReview: true } } } });
+    await queuePush({ jobId: 3, itemId: 3, listingId: 3, productVariantId: 103, status: "failed", errorCode: "DROPSHIP_STOCK_UPDATES_PAUSED",
+      result: RECORDED_AFTER_LINK });
+    await chunkOf(1, await run("processing"));
+    await chunkOf(2, await run("partial"));
+    await chunkOf(3, await run("cancelled"));
+    // The same facts outside a run: re-queued as before.
+    await queuePush({ jobId: 4, itemId: 4, listingId: 4, productVariantId: 104, status: "failed", errorCode: "DROPSHIP_STOCK_LINK_BUSY",
+      result: RECORDED_AFTER_LINK });
+    const reads: number[] = [];
+    const ops = new PgDropshipListingPushOpsRepository(database.pool, async input => {
+      reads.push(input.storeConnectionId);
+      return readDropshipEbayStockDestination(database.pool, input);
+    });
+
+    // Nothing is promised for a run's item (the failure email and the portal's automaticRetryPending read this).
+    for (const jobId of [1, 2, 3]) expect(await readAutomaticRequeuePendingItemIds(database.pool, jobId), String(jobId)).toEqual([]);
+    expect(await readAutomaticRequeuePendingItemIds(database.pool, 4)).toEqual([4]);
+    await database.pool.query("ALTER TABLE dropship.dropship_store_connections ADD COLUMN IF NOT EXISTS config jsonb");
+    const status = new PgDropshipListingPushStatusRepository(database.pool);
+    const portal = async (jobId: number) => (await status.loadVendorJob({ vendorId: F.vendorId, jobId }))!.items
+      .map(entry => [entry.itemId, entry.automaticRetryPending]);
+    expect(await portal(1)).toEqual([[1, false]]);
+    expect(await portal(4)).toEqual([[4, true]]);
+
+    const pass = await ops.requeueAutomaticStockLinkFailures({ now: new Date(NOW.getTime() + 86_400_000), workerId: "sweep-p3", limit: 25 });
+
+    expect(pass).toMatchObject({ requeued: [{ jobId: 4, itemIds: [4] }], exhausted: [], skipped: [], deferred: [], failed: [] });
+    expect(reads).toEqual([]);
+    for (const itemId of [1, 2, 3, 5]) {
+      const row = await item(itemId);
+      expect(row.status, String(itemId)).toBe("failed");
+      expect(row.result.automaticRequeue?.state, String(itemId)).toBeUndefined();
+      expect(row.result.lastRetryRequest, String(itemId)).toBeUndefined();
+    }
+    expect((await item(2)).result.automaticRequeue).toEqual({ count: 3, lastCode: "DROPSHIP_STOCK_LINK_BUSY" });
+    expect((await database.pool.query(`SELECT id, status FROM dropship.dropship_listing_push_jobs WHERE id = ANY($1::int[]) ORDER BY id`, [[1, 2, 3, 4]])).rows)
+      .toEqual([{ id: 1, status: "failed" }, { id: 2, status: "failed" }, { id: 3, status: "failed" }, { id: 4, status: "queued" }]);
+    expect((await database.pool.query(`SELECT entity_id, event_type FROM dropship.dropship_audit_events
+      WHERE entity_type = 'dropship_listing_push_job_item' ORDER BY id`)).rows).toEqual([{ entity_id: "4", event_type: "listing_push_item_auto_requeued" }]);
+  });
 
   it("two concurrent links for one SKU make one mapping: the second waits out the fence and finds the link", async () => {
     const targetId = await createDropshipEbayTarget(database.pool);

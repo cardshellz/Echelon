@@ -201,6 +201,13 @@ export const CHOOSE_WORDS = Object.freeze({
   undoneUnknown: "We couldn't check whether your last save went through. Reload the page to see what is saved.",
   // Interim (step 1 PROPOSAL): a refusal this page can't fix. Never "reload": that drops every change and fixes nothing (review DUX10).
   rejected: "Your changes couldn't be saved. They're still here. If this keeps happening, contact Card Shellz support.",
+  // §4.11 retired: the save once PR B froze the old rules. This page is out of date, nothing was saved, and only a
+  // reload fixes it (the one refusal where Reload is offered; CHK9). The server sends the same words
+  // (server/modules/dropship/domain/catalog-read-words.ts).
+  // Stage 2 (step 1 plan S2-5): PROPOSED.
+  retired: "This page was updated, so your last changes weren't saved. Reload it and make them again.",
+  // Stage 2 (step 1 plan S2-5): PROPOSED. The button beside `retired`.
+  reload: "Reload",
 });
 
 /**

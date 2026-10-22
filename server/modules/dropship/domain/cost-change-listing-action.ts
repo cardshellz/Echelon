@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { DropshipCostChangePolicySettings } from "../../../../shared/dropship/cost-change-policy";
 import { resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import type { RulePriceBasis } from "../../../../shared/dropship/pricing-rules";
+import { isPushProgressListingOnMarketplace } from "./order-listing-acceptability";
 
 /**
  * What happens to a vendor's listings when a .ops cost increase takes effect
@@ -51,6 +52,25 @@ export type CostChangeHoldReleaseDetail = (typeof costChangeHoldReleaseDetails)[
 
 /** Only a listing live on the marketplace is repriced, warned about or paused. */
 export const COST_ACTIONABLE_LISTING_STATUSES: readonly string[] = ["active"];
+
+/**
+ * Whether the cost-change actions treat a listing as live: `active`, or a
+ * listing being re-sent that eBay still lists (a push-progress status with a
+ * listing id; step 1 plan S2-5 review MC1). Orders are accepted on the second
+ * kind (order-listing-acceptability.ts, §4.7), so a below-cost hold on one is
+ * kept and a cost increase on one is acted on. Since PR 1b's guards a live
+ * listing keeps its status through a queue, a failure, a Stop and the breaker
+ * (domain/listing-live-status), so the second kind is a row written before
+ * them, or by an older release during a deploy, until the listing-push
+ * recovery repairs it; a listing live today stays `active`, and its hold is
+ * protected by the published-price check (judgeAgainstPublishedPrice,
+ * decideCostChangeHoldRelease). `paused` and `drift_detected` keep their
+ * earlier meaning (publish runs did not change them).
+ */
+export function isCostActionableListing(input: { listingStatus: string; externalListingId: string | null }): boolean {
+  return COST_ACTIONABLE_LISTING_STATUSES.includes(input.listingStatus)
+    || isPushProgressListingOnMarketplace({ status: input.listingStatus, externalListingId: input.externalListingId });
+}
 
 export interface CostChangeListingPriceClassification {
   source: CostChangeListingPriceSource;
@@ -118,12 +138,14 @@ export function judgeAgainstPublishedPrice(
  */
 export function decideCostChangeListingAction(input: {
   listingStatus: string;
+  /** The listing's eBay listing id as stored: a re-sent listing with one is still live (isCostActionableListing). */
+  externalListingId: string | null;
   price: CostChangeListingPriceClassification;
   unitCostCents: number;
   settings: Pick<DropshipCostChangePolicySettings, "rulePricedListings" | "belowCostFixedListings">;
 }): CostChangeListingAction {
   assertPositiveCents(input.unitCostCents, "unitCostCents");
-  if (!COST_ACTIONABLE_LISTING_STATUSES.includes(input.listingStatus)) return "skipped_inactive_listing";
+  if (!isCostActionableListing(input)) return "skipped_inactive_listing";
   if (input.price.followsCost) {
     return input.settings.rulePricedListings === "reprice_automatically" ? "reprice_queued" : "awaiting_review";
   }
@@ -150,15 +172,29 @@ export function decideCostChangeListingAction(input: {
  * and so does a lower price queued to replace a published one that covers
  * it. An unknown price, published price or cost keeps the hold; nothing is
  * released on a guess.
+ *
+ * A listing being re-sent that eBay still lists (a push-progress status with a
+ * listing id) keeps its hold whatever its price says (step 1 plan S2-5 review
+ * round 2 MC2): until a push completes (status `active` again, with the price
+ * eBay accepted) its prices are Echelon's intent, not what buyers pay, and
+ * orders are taken on that listing (§4.7). Since PR 1b's guards no queue,
+ * failure, Stop or breaker writes that status over a live listing, so such a
+ * row was written before them (or by an older release during a deploy) and
+ * keeps its hold until a completed push or the listing-push recovery makes it
+ * `active` again; a listing live today stays `active` and is judged by the
+ * published price above. Only a listing that is neither active nor such a
+ * re-sent listing is released as inactive (isCostActionableListing).
  */
 export function decideCostChangeHoldRelease(input: {
   listingStatus: string;
+  externalListingId: string | null;
   priceCents: number | null;
   /** The price the listing's last completed push published; null when none is on record. */
   publishedPriceCents: number | null;
   costInForceCents: number | null;
 }): CostChangeHoldReleaseReason | null {
-  if (!COST_ACTIONABLE_LISTING_STATUSES.includes(input.listingStatus)) return "listing_inactive";
+  if (!isCostActionableListing(input)) return "listing_inactive";
+  if (isPushProgressListingOnMarketplace({ status: input.listingStatus, externalListingId: input.externalListingId })) return null;
   if (input.priceCents === null || input.publishedPriceCents === null || input.costInForceCents === null) return null;
   assertPositiveCents(input.priceCents, "priceCents");
   assertPositiveCents(input.publishedPriceCents, "publishedPriceCents");

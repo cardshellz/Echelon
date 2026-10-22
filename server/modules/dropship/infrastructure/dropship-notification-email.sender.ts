@@ -37,7 +37,8 @@ function buildHtmlBody(input: {
 }): string {
   return [
     `<h1>${escapeHtml(input.title)}</h1>`,
-    input.message ? `<p>${escapeHtml(input.message)}</p>` : "",
+    // A message's own lines stay lines (a publish run's email lists its sizes one per line, review DUX1).
+    input.message ? `<p>${escapeHtml(input.message).replace(/\n/g, "<br>")}</p>` : "",
     `<p><strong>Event:</strong> ${escapeHtml(input.eventType)}</p>`,
   ].join("");
 }

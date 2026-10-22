@@ -39,7 +39,7 @@ import { CHOOSE_WORDS } from "./dropship-catalog-choose-words";
 
 export const CHOOSE_CATALOG_URL = "/api/dropship/catalog";
 export const SELECTION_RULES_URL = "/api/dropship/catalog/selection-rules";
-/** Step 1's list, apart from the page's "selected" read (`["/api/dropship/catalog", "selected"]`). */
+/** Step 1's list, apart from step 3's "Selected items" (`SELECTED_LIST_QUERY_KEY`, dropship-catalog-publish-requests.ts). */
 export const CHOOSE_CATALOG_QUERY_KEY = [CHOOSE_CATALOG_URL, "choose"] as const;
 /** Shared with the page's rail tick (`chooseStepTick`), so a save's re-read moves both. */
 export const SELECTION_RULES_QUERY_KEY = [SELECTION_RULES_URL] as const;
@@ -196,8 +196,8 @@ export type ChooseSaveOutcome =
   | { kind: "stale" }
   /** Over a limit on the rules just read; nothing sent. */
   | { kind: "blocked"; block: ChooseSaveBlock }
-  /** A permanent refusal, never sent again. */
-  | { kind: "rejected"; message: string }
+  /** A permanent refusal, never sent again. `reload`: only reloading the page can help (§4.9 item 2). */
+  | { kind: "rejected"; message: string; reload?: true }
   /** Nothing of this save was written (the first read failed, or every answer said so): keep `pending` for the next press. */
   | { kind: "notSaved"; pending: ChoosePendingSave | null; busyMessage: string | null; error: unknown }
   /** No sure answer and the rules don't show it saved yet: it may still have gone through. Keep `pending` (review MC1). */
@@ -280,7 +280,9 @@ export async function runChooseSave(deps: ChooseSaveDeps, input: ChooseSaveInput
       return { kind: "saved", replay: answer.idempotentReplay };
     } catch (error) {
       const classified = classifyChooseSaveError(error);
-      if (classified.classification === "permanent") return { kind: "rejected", message: classified.message };
+      if (classified.classification === "permanent") {
+        return { kind: "rejected", message: classified.message, ...(classified.reload ? { reload: true as const } : {}) };
+      }
       lastError = error;
       busyMessage = classified.busyMessage;
       mayHaveCommitted = mayHaveCommitted || classified.mayHaveCommitted;

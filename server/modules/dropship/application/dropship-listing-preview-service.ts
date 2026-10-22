@@ -26,6 +26,8 @@ import {
   type DropshipCatalogVariantCandidate,
 } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
+import { LISTING_PUSH_RUN_CODES, isReservedListingPushJobKey } from "../domain/listing-push-run";
+import { LISTING_PUSH_RUN_WORDS } from "../domain/listing-push-run-words";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
 import { listingPhotoLeftOutReason } from "../domain/listing-photo-reasons";
 import {
@@ -247,6 +249,8 @@ export interface ManagedListingIntentScope {
 
 export interface CreateDropshipListingPushJobRepositoryInput {
   managedIntentScope?: ManagedListingIntentScope;
+  /** The publish run chunk this job carries out (step 1 plan S2-5, §4.3); only the push sweep passes it. */
+  run?: { runId: number; chunkIndex: number };
   vendorId: number;
   storeConnectionId: number;
   platform: DropshipSourcePlatform;
@@ -933,6 +937,12 @@ export class DropshipListingPreviewService {
     idempotentReplay: boolean;
   }> {
     const parsed = createListingPushJobForMemberInputSchema.parse(input);
+    if (isReservedListingPushJobKey(parsed.idempotencyKey)) {
+      // Publish runs' chunk jobs own this prefix (SAFETY14); a vendor key that
+      // looked like one could otherwise collide with a chunk's job.
+      throw new DropshipError(LISTING_PUSH_RUN_CODES.keyReserved, LISTING_PUSH_RUN_WORDS.keyReserved,
+        { classification: "permanent" });
+    }
     const vendor = (await this.deps.vendorProvisioning.provisionForMember(memberId)).vendor;
     return this.createListingPushJob({
       ...parsed,
@@ -1005,6 +1015,7 @@ export class DropshipListingPreviewService {
     });
     const result = await this.deps.repository.createListingPushJob({
       ...(managedIntentScope ? { managedIntentScope } : {}),
+      ...(parsed.run ? { run: parsed.run } : {}),
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       platform: preview.platform,
@@ -1037,6 +1048,15 @@ export class DropshipListingPreviewService {
       ...result,
       preview,
     };
+  }
+
+  /**
+   * The store and account checks a push makes, for a caller that queues
+   * pushes later (a publish run, step 1 plan S2-5, §4.2): the same refusals,
+   * codes and words as a push job, before anything is written.
+   */
+  async assertListingPushAccess(vendorId: number, storeConnectionId: number): Promise<DropshipListingStoreContext> {
+    return this.loadStoreContextForAction(vendorId, storeConnectionId, "push");
   }
 
   private async loadStoreContextForAction(

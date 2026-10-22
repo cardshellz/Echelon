@@ -130,6 +130,7 @@ describe("catalog step 1 words", () => {
     expect(formatCatalogDollars(50_000)).toBe("$500");
   });
 
+  // Stage 2 (step 1 plan S2-5) adds `retired` and its Reload, marked PROPOSED as the plan's words are (§4.11).
   it("marks every new string as interim, and names no product line", () => {
     const source = readFileSync(join(process.cwd(), "client/src/lib/dropship-catalog-choose-words.ts"), "utf8");
     const body = source.slice(source.indexOf("export const CHOOSE_WORDS"), source.indexOf("export function describeCatalogListingTier"));
@@ -138,7 +139,7 @@ describe("catalog step 1 words", () => {
     expect(entries.length).toBeGreaterThan(50);
     for (const words of [body, how]) {
       for (const match of words.matchAll(/\n( {2}\/\/ [^\n]*\n)?( {2}\w+: )/g)) {
-        expect(match[1], `no comment above ${match[2].trim()}`).toMatch(/\/\/ (Interim \(step 1 PROPOSAL\)|Kept)/);
+        expect(match[1], `no comment above ${match[2].trim()}`).toMatch(/\/\/ (Interim \(step 1 PROPOSAL\)|Kept|Stage 2 \(step 1 plan S2-5\): PROPOSED)/);
       }
     }
     // No word the vendor reads names a product line (owner Q2).
