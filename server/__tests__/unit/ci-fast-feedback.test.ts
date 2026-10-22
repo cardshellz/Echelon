@@ -400,6 +400,22 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(workflow).not.toMatch(/continue-on-error:|paths(?:-ignore)?:/);
   });
 
+  it.each([
+    ["order-edits", "browser"], ["inventory-availability", "browser-shard"],
+    ["returns-preview", "browser-shard"], ["procurement-navigation", "browser"],
+    ["dropship-pricing", "browser"],
+  ])("uses a pinned compatible browser runtime in %s", (file, jobName) => {
+    const lock = JSON.parse(source("package-lock.json")) as { packages: Record<string, { version: string }> };
+    const version = lock.packages["node_modules/playwright"].version;
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+    const browser = job(source(".github/workflows/" + file + ".yml"), jobName);
+    const image = browser.match(/^      image: (.+)$/m)?.[1] ?? "";
+    expect(image).toMatch(new RegExp("^mcr\\.microsoft\\.com/playwright:v" + version.replaceAll(".", "\\.") + "-noble@sha256:[a-f0-9]{64}$"));
+    expect(browser).toContain("options: --user 1001 --ipc=host");
+    expect(browser).not.toContain("playwright install");
+    expect(browser).not.toContain("continue-on-error:");
+  });
+
   it("gives procurement eight complete shards and setup headroom without weakening coverage", () => {
     const procurement = source(".github/workflows/procurement-navigation.yml");
     const browser = job(procurement, "browser");
