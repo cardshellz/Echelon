@@ -6,6 +6,7 @@ import type { CustomerAccountTransport } from "./customer-account.transport";
 import type { CustomerAccountAccessNotice } from "./customer-account-access";
 import { CustomerOrderCancellation } from "./CustomerOrderCancellation";
 import { formatOrderEditMoney } from "@/lib/order-edits";
+import { knownCustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
 
 export interface CustomerOrderPanelState {
   loading: boolean;
@@ -84,6 +85,11 @@ export function CustomerOrderPanel({
     error: null as string | null,
   });
   const order = state.order;
+  const fulfillmentLabel =
+    knownCustomerOrderFulfillment(order?.fulfillment)?.label ??
+    (row
+      .querySelector<HTMLElement>("[data-csz-order-fulfillment-native]")
+      ?.textContent?.trim() || "Status unavailable");
   const viewUrl = safeLink(row, "[data-csz-account-view]");
   const addressUrl = safeLink(row, "[data-csz-account-action='address']");
   const trackUrl = safeLink(row, "[data-csz-account-track]");
@@ -222,7 +228,7 @@ export function CustomerOrderPanel({
             <p role="status">Loading order details…</p>
           ) : (
             <div className="csz-panel-summary">
-              <span>{order?.fulfillment?.label ?? "Status unavailable"}</span>
+              <span>{fulfillmentLabel}</span>
               <strong>
                 {order
                   ? formatOrderEditMoney(order.totalCents, order.currency)

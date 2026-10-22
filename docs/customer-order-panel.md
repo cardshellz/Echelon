@@ -14,6 +14,9 @@ restriction beneath action buttons.
   cart implementation.
 - `presentCustomerOrderFulfillment` projects canonical warehouse partitions.
   Unknown evidence is unavailable; it never infers picking from an edit refusal.
+  Stopped warehouse work is labelled **Picking stopped** unless Shopify confirms
+  the order itself is cancelled. When warehouse evidence is unavailable, the
+  table and panel preserve the known native Shopify fulfillment label.
   Financial labels come from the existing settlement presentation owner.
 - `managementVersion=v1` opts strict account/staff clients into new fulfillment
   and cancellation metadata. Older open tabs retain their original DTO shape.

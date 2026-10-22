@@ -84,10 +84,21 @@ export function presentCustomerOrderLifecycle(
   warehouse: CustomerOrderFulfillment,
   cancelled: boolean,
 ): CustomerOrderFulfillment {
+  // Cancelling warehouse work does not cancel the Shopify order. Keep those
+  // facts separate, including legacy orders whose warehouse work was stopped.
+  if (warehouse.code === "cancelled" && !cancelled)
+    return { ...warehouse, label: "Picking stopped" };
   return cancelled &&
     !["cancelled", "shipped", "partially_shipped", "unavailable"].includes(
       warehouse.code,
     )
     ? { code: "cancelling", label: "Cancellation processing" }
     : { ...warehouse };
+}
+
+/** Missing warehouse evidence must not replace a known native storefront fact. */
+export function knownCustomerOrderFulfillment(
+  fulfillment: CustomerOrderFulfillment | undefined,
+): CustomerOrderFulfillment | undefined {
+  return fulfillment?.code === "unavailable" ? undefined : fulfillment;
 }

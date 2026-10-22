@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   presentCustomerOrderFulfillment,
   presentCustomerOrderLifecycle,
+  knownCustomerOrderFulfillment,
 } from "../customer-account/order-fulfillment";
 describe("customer warehouse status presentation", () => {
   it.each([
@@ -64,5 +65,23 @@ describe("customer warehouse status presentation", () => {
         true,
       ).code,
     ).toBe("shipped");
+  });
+  it("distinguishes stopped warehouse work from an actually cancelled order", () => {
+    const warehouse = Object.freeze(presentCustomerOrderFulfillment(["cancelled"]));
+    expect(presentCustomerOrderLifecycle(warehouse, false)).toEqual({
+      code: "cancelled", label: "Picking stopped",
+    });
+    expect(presentCustomerOrderLifecycle(warehouse, true)).toEqual({
+      code: "cancelled", label: "Cancelled",
+    });
+    expect(warehouse.label).toBe("Cancelled");
+  });
+  it("preserves native status fallback when warehouse evidence is absent or unknown", () => {
+    expect(knownCustomerOrderFulfillment(undefined)).toBeUndefined();
+    expect(knownCustomerOrderFulfillment(presentCustomerOrderFulfillment([]))).toBeUndefined();
+    const picking = Object.freeze(presentCustomerOrderFulfillment(["picking"]));
+    expect(knownCustomerOrderFulfillment(picking)).toEqual({
+      code: "picking", label: "Being picked",
+    });
   });
 });
