@@ -4,6 +4,7 @@ import {
   equivalentOrderEditFinancialEvidence,
   matchesOrderEditFinancials,
   presentOrderEditSettlement,
+  presentOrderEditFinancialStatus,
   sumOrderEditCents,
 } from "../../domain/order-edit-financials";
 import { orderEditFinancialsSchema } from "@shared/order-edits/order-edit-financials";
@@ -30,6 +31,14 @@ const payment = (
 ) => ({ id, kind, status, amountCents });
 
 describe("exact order edit financials", () => {
+  it("shows settlement status independently of warehouse edit eligibility", () => {
+    const snapshot = { cancelled: false, fullyPaid: true, netPaidCents: 2000, outstandingCents: 0, transactions: [payment("sale")], refunds: [] };
+    expect(presentOrderEditFinancialStatus(snapshot)).toBe("Paid");
+    expect(presentOrderEditFinancialStatus({ ...snapshot, outstandingCents: 500 })).toBe("Payment due");
+    expect(presentOrderEditFinancialStatus({ ...snapshot, cancelled: true, fullyPaid: false })).toBe("Refund pending");
+    expect(presentOrderEditFinancialStatus({ ...snapshot, cancelled: true, fullyPaid: false, netPaidCents: 0, transactions: [...snapshot.transactions, payment("refund", "REFUND")] })).toBe("Refunded");
+    expect(presentOrderEditFinancialStatus({ ...snapshot, transactions: [...snapshot.transactions, payment("refund", "REFUND", "PENDING")] })).toBe("Refund processing");
+  });
   it("reconciles Shopify tax display amounts without changing saved edit comparisons", () => {
     const legacy = buildOrderEditFinancials({ ...input(), taxCents: 648, totalCents: 11444 });
     const taxLines = [{ title: "PA State Tax", ratePercentage: 6, amountCents: 648 }];

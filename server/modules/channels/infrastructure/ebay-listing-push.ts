@@ -15,7 +15,6 @@ import { createEbayMarketplaceRegistrationAdapters } from "../adapters/ebay/ebay
 import { observeExistingEbayPublication, assertEbayListingSourceIdentityUnchanged } from "../ebay-existing-listing-identity";
 import { resolveEbayPublicationTarget, assertEbayPublicationTargetUnchanged } from "../ebay-publication-completion.domain";
 import type { PreparedEbayPublication } from "../ebay-publication-completion.service";
-import { admitEbayPublication } from "../ebay-publication-admission.service";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -257,9 +256,13 @@ function neverPreview(): never { throw new Error("Reviewed rebuild execution req
 
 export const ebayListingPushService = new EbayListingPushService({ execute: async (productId, command, onRateLimit, actor) => {
   if (command.rebuild || command.updateExisting) return executeProduct(productId, command, onRateLimit);
-  const { ebayListingSyncService } = await import("./ebay-active-listing-sync");
-  return admitEbayPublication({ productId, actor: actor ?? "ebay-listing-publish",
-    commandKey: command.commands?.find(member => member.productId === productId)?.commandKey ?? randomUUID() }, {
-    channelId: EBAY_CHANNEL_ID, jobs: ebayListingSyncService, readSource: readEbayPublicationSource,
-  });
+  // Legacy Push endpoints are compatibility translations of the same Sync owner.
+  const { syncChannelListings } = await import("./ebay-channel-listing-sync");
+  const result = await syncChannelListings({ productIds: [productId] }, actor ?? "ebay-listing-publish",
+    command.commands?.find(member => member.productId === productId)?.commandKey ?? randomUUID());
+  const job = result.jobs[0];
+  const failure = result.details.find(detail => !detail.success);
+  return { productId, productName: `Product ${productId}`, variantCount: result.synced, job,
+    success: result.synced > 0 && result.errors === 0, status: result.errors ? "error" : result.pending ? "queued" : "success",
+    ...(failure ? { error: failure.error, code: failure.code, issue: failure.issue } : {}) };
 } });

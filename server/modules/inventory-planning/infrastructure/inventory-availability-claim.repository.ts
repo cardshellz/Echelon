@@ -6016,7 +6016,8 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           );
         }
         const movementRows = rows(await client.query(
-          `SELECT movement.id, movement.claim_resource_id, movement.claim_lot_allocation_id,
+          `SELECT movement.id, movement.order_item_cost_id,
+                  movement.claim_resource_id, movement.claim_lot_allocation_id,
                   movement.inventory_lot_id, movement.movement_type, movement.quantity,
                   movement.reverses_pick_movement_id,
                   resource.inventory_level_id, resource.warehouse_location_id,

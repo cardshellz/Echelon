@@ -6,10 +6,10 @@ import { PostgresChannelSyncBatchRepository } from "./modules/marketplace-listin
 import { EbaySyncBatchAdapter } from "./modules/channels/adapters/ebay/ebay-sync-batch.adapter";
 import { EBAY_CHANNEL_ID } from "./modules/channels/infrastructure/ebay-api-runtime";
 import {
-  selectActiveEbaySyncProducts,
-  syncActiveListings,
   ebayListingSyncRepository,
 } from "./modules/channels/infrastructure/ebay-active-listing-sync";
+
+import { selectIncludedEbaySyncProducts, syncChannelListings } from "./modules/channels/infrastructure/ebay-channel-listing-sync";
 
 export function createChannelSyncBatchService(): ChannelSyncBatchService {
   const adapters = new Map([
@@ -17,8 +17,8 @@ export function createChannelSyncBatchService(): ChannelSyncBatchService {
       EBAY_CHANNEL_ID,
       new EbaySyncBatchAdapter({
         channelId: EBAY_CHANNEL_ID,
-        select: selectActiveEbaySyncProducts,
-        sync: syncActiveListings,
+        select: selectIncludedEbaySyncProducts,
+        sync: syncChannelListings,
         status: ebayListingSyncRepository,
       }),
     ],

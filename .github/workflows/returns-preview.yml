@@ -34,6 +34,10 @@ jobs:
     name: Returns preview browser journeys (${{ matrix.shard }}/4)
     needs: preflight
     runs-on: ubuntu-latest
+    # Match package-lock.json; browsers and OS libraries are already installed.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      options: --user 1001 --ipc=host
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -48,7 +52,6 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
       - run: npx playwright test --config playwright.returns-preview.config.ts --shard=${{ matrix.shard }}/4
       - name: Upload browser traces and screenshots
         if: ${{ !cancelled() }}

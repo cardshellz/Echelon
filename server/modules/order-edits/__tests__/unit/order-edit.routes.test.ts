@@ -18,6 +18,7 @@ import {
   PREVIEW_NOW,
 } from "../fixtures/order-edit-preview.fixture";
 
+import { serviceHarness } from "../fixtures/order-edit-service.fixture";
 const KEY = "22222222-2222-4222-8222-222222222222";
 const displayOperation: OrderEditOperation = {
   operationId: KEY,
@@ -72,6 +73,8 @@ describe("order edit staff HTTP boundary", () => {
   const catalogCategories = vi.fn();
   const catalogProducts = vi.fn();
   const catalogVariants = vi.fn();
+  const cancellation = { staffGet: vi.fn(), reconcile: vi.fn() };
+  const readOrder = vi.fn();
   beforeEach(async () => {
     vi.clearAllMocks();
     permission.mockResolvedValue(true);
@@ -134,6 +137,8 @@ describe("order edit staff HTTP boundary", () => {
         catalogCategories,
         catalogProducts,
         catalogVariants,
+        cancellations: cancellation,
+        order: readOrder,
       } as unknown as OrderEditService,
       hasPermission: permission,
       report: vi.fn(),
@@ -157,6 +162,29 @@ describe("order edit staff HTTP boundary", () => {
       Origin: url,
     },
     body: JSON.stringify({ paymentWindowMinutes: 30, enabled: true }),
+  });
+  it("protects staff cancellation observation and rechecks with existing permissions, origin and command identity", async () => {
+    const result = { operationId: KEY, requestKey: KEY, omsOrderId: 9, orderNumber: "#1", currency: "USD", status: "pending", refundCents: 829, refundStatus: "pending",
+      rewards: { fingerprint: "a".repeat(64), returnedPoints: "100.00", deductedEarnedPoints: "5.00", settled: false }, error: null };
+    cancellation.staffGet.mockResolvedValue(result);
+    const path = `${url}/api/order-edits/admin/cancellations/${KEY}`;
+    expect((await fetch(path)).status).toBe(200); expect(cancellation.reconcile).not.toHaveBeenCalled();
+    const command = { method: "POST", headers: { "Content-Type": "application/json", Origin: url, "Idempotency-Key": KEY }, body: "{}" };
+    for (const changed of [{ ...command, headers: { ...command.headers, Origin: "https://foreign.test" } }, { ...command, body: '{"refundCents":0}' }])
+      expect((await fetch(`${path}/reconcile`, changed)).status).toBeGreaterThanOrEqual(400);
+    permission.mockResolvedValue(false); expect((await fetch(`${path}/reconcile`, command)).status).toBe(403);
+    permission.mockResolvedValue(true); loggedIn = false; expect((await fetch(path)).status).toBe(401);
+    loggedIn = true; expect(cancellation.reconcile).not.toHaveBeenCalled();
+    expect((await fetch(`${path}/reconcile`, command)).status).toBe(200);
+    expect(cancellation.reconcile).toHaveBeenCalledExactlyOnceWith(KEY, "staff");
+  });
+  it.each([undefined, "v1"])("negotiates order-panel fields without breaking older strict clients, version=%s", async version => {
+    const value = await serviceHarness().service.order(4, 1);
+    readOrder.mockResolvedValue({ ...value, fulfillment: { code: "picking", label: "Being picked" }, cancellation: { canReview: true, requestKey: null } });
+    const response = await fetch(`${url}/api/order-edits/admin/orders/1?connectionId=4${version ? `&managementVersion=${version}` : ""}`);
+    expect(response.status).toBe(200); const body = await response.json();
+    expect(body.fulfillment).toEqual(version ? { code: "picking", label: "Being picked" } : undefined);
+    expect(body.cancellation).toEqual(version ? { canReview: true, requestKey: null } : undefined);
   });
   it.each([undefined, "v1", "v2"])("negotiates coupon display metadata on operation reads and previews, opt-in=%s", async (optIn) => {
     const calculation = previewCalculation();

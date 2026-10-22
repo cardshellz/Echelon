@@ -2,6 +2,11 @@ import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
 import {
+  HISTORICAL_COST_EVIDENCE_ORDER_POLICY,
+  HistoricalCostEvidenceOrderError,
+  orderHistoricalCostEvidence,
+} from "../domain/historical-cost-evidence-order";
+import {
   historicalCostQuantityGap,
   historicalCostQuantitySnapshotSchema,
   type HistoricalCostQuantitySnapshot,
@@ -35,6 +40,7 @@ import {
 } from "../domain/cost-quantity-intervals";
 
 const MAX_COST_ALLOCATION_RECORDS = 50_000;
+const MICROSECONDS_PER_SECOND = 1_000_000;
 const intervalsSchema = z.array(
   z
     .object({
@@ -251,10 +257,18 @@ export async function ensureLotCostQuantityBasis(
   auditIdentity(actor, now);
   const operations =
     await tx.execute(sql`SELECT operation_key,operation_kind,MIN(id)::text AS first_id,
-    MIN(recorded_at) AS recorded_at,MIN(source_qty) AS minimum_qty,MAX(source_qty) AS quantity
+    CASE WHEN bool_and(recorded_at IS NOT NULL AND isfinite(recorded_at))
+      THEN trunc(EXTRACT(EPOCH FROM MIN(recorded_at)) * ${MICROSECONDS_PER_SECOND})::text
+      ELSE NULL END AS recorded_at_micros,
+    MIN(source_qty) AS minimum_qty,MAX(source_qty) AS quantity
     FROM inventory.lot_cost_contributions WHERE source_lot_id=${lotId} AND operation_kind<>'return'
     GROUP BY operation_key,operation_kind ORDER BY MIN(recorded_at),MIN(id)`);
-  const cogs = await tx.execute(sql`SELECT * FROM oms.order_item_costs
+  // EXTRACT on timestamp without time zone uses the stored nominal coordinate;
+  // on timestamptz it uses the absolute instant. Neither depends on Node's TZ or
+  // PostgreSQL's session timezone. Keep microseconds instead of parsing through
+  // JavaScript Date, which both interprets naive dates locally and truncates them.
+  const cogs = await tx.execute(sql`SELECT *,
+    trunc(EXTRACT(EPOCH FROM created_at) * ${MICROSECONDS_PER_SECOND})::text AS created_at_micros FROM oms.order_item_costs
     WHERE inventory_lot_id=${lotId} ORDER BY created_at,id FOR UPDATE`);
   const missingReversals = cogs.rows.filter(
     (row) => Number(row.qty) < 0 && row.cost_quantity_allocation_id == null,
@@ -339,7 +353,7 @@ export async function ensureLotCostQuantityBasis(
         { lotId, operationKey: operation.operation_key },
       );
   }
-  const candidates = [
+  const unorderedCandidates = [
     ...operations.rows
       .filter((row) => !mappedOperations.has(String(row.operation_key)))
       .map((row) => {
@@ -350,10 +364,10 @@ export async function ensureLotCostQuantityBasis(
             { lotId, operationKey: row.operation_key },
           );
         return {
-          kind: "operation",
+          kind: "operation" as const,
           key: `operation:${lotId}:${row.operation_key}`,
           quantity: costInteger(row.quantity, "operation.quantity", 1),
-          timestamp: new Date(row.recorded_at).getTime(),
+          timestampMicros: row.recorded_at_micros,
           id: costInteger(row.first_id, "operation.id", 1),
           operationKey: row.operation_key,
         };
@@ -361,21 +375,27 @@ export async function ensureLotCostQuantityBasis(
     ...cogs.rows
       .filter((row) => row.cost_quantity_allocation_id == null)
       .map((row) => ({
-        kind: Number(row.qty) < 0 ? "reversal" : "cogs",
+        kind: Number(row.qty) < 0 ? "reversal" as const : "cogs" as const,
         key: `historical_cogs:${row.id}`,
         quantity: Math.abs(
           costInteger(row.qty, "cogs.quantity", -2_147_483_647),
         ),
-        timestamp: new Date(row.created_at).getTime(),
+        timestampMicros: row.created_at_micros,
         id: costInteger(row.id, "cogs.id", 1),
         operationKey: null,
       })),
-  ].sort(
-    (left, right) =>
-      left.timestamp - right.timestamp ||
-      (left.kind < right.kind ? -1 : left.kind > right.kind ? 1 : 0) ||
-      left.id - right.id,
-  );
+  ];
+  let candidates: Array<(typeof unorderedCandidates)[number] & { timestampMicros: string }>;
+  try {
+    candidates = orderHistoricalCostEvidence(unorderedCandidates);
+  } catch (error) {
+    if (error instanceof HistoricalCostEvidenceOrderError) {
+      throw new CostEvidenceError(error.code, error.message, {
+        lotId, sourceKind: error.sourceKind, sourceId: error.sourceId,
+      });
+    }
+    throw error;
+  }
   // During an owning stock transaction quantity projections may be buffered.
   // Existing immutable custody remains the authority; only a newly observed
   // legacy operation requires a complete historical reconciliation.
@@ -460,7 +480,7 @@ export async function ensureLotCostQuantityBasis(
       quantity: candidate.quantity,
       intervals,
       evidence: {
-        policy: "stable_recorded_evidence_order_v1",
+        policy: HISTORICAL_COST_EVIDENCE_ORDER_POLICY,
         sourceKind: candidate.kind,
         sourceId: candidate.id,
         operationKey: candidate.operationKey,
@@ -494,7 +514,7 @@ export async function ensureLotCostQuantityBasis(
   if (prior.rows.length === 0)
     await tx.execute(sql`INSERT INTO inventory.lot_cost_quantity_bases(inventory_lot_id,quantity,source_evidence,recorded_by,recorded_at)
     VALUES (${lotId},${basis},${canonicalJson({
-      policy: "stable_recorded_evidence_order_v1",
+      policy: HISTORICAL_COST_EVIDENCE_ORDER_POLICY,
       sources: candidates,
       unallocatedQuantity: onHandQuantity,
       ...(unresolved === null ? {} : { unresolvedQuantity: unresolved.unresolvedQuantity }),

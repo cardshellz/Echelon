@@ -2,6 +2,15 @@ import type {
   OrderEditFinancials,
   OrderEditPricingDisplayVersion,
 } from "@shared/order-edits/order-edit-financials";
+import type { OrderEditOrder } from "@shared/order-edits/order-edit.contract";
+
+/** Existing account/staff bundles validate strict DTOs. Management metadata
+ * is opt-in so a shared-backend rollout cannot break an older open tab. */
+export function orderEditOrderManagementPresentation(order: OrderEditOrder, version: "v1" | undefined): OrderEditOrder {
+  if (version === "v1") return order;
+  const { fulfillment: _fulfillment, activeOperationKind: _kind, cancellation: _cancellation, ...legacy } = order;
+  return legacy;
+}
 
 type FinancialResponse = {
   financials?:

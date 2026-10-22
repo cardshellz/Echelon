@@ -17,10 +17,12 @@ type ExclusionCommand = z.infer<typeof ebayProductExclusionRequestSchema>;
 
 /** Inclusion intent and verified removal are separate results. The exact saved
  * command survives a missing response, closing the dialog, and page reloads. */
-export function EbayProductListingIntentControl({ productId, productName, excluded, currentJob, disabled, retryRequested = 0, onRetryHandled, onIssueAction }: {
+export function EbayProductListingIntentControl({ productId, productName, excluded, currentJob, disabled, retryRequested = 0, onRetryHandled, onIssueAction, onSyncSaved, onSync }: {
   productId: number; productName: string; excluded: boolean; currentJob?: EbayListingSyncJob; disabled?: boolean;
   retryRequested?: number;
   onRetryHandled: (productId: number, request: number) => void;
+  onSyncSaved: (batchId: string) => void;
+  onSync: () => void;
   onIssueAction: (issue: EbayListingIssue, productId: number, jobId?: string) => void;
 }) {
   const queryClient = useQueryClient();
@@ -54,6 +56,7 @@ export function EbayProductListingIntentControl({ productId, productName, exclud
   }
   function accept(value: EbayProductExclusionResult) {
     setResult(value); setCommand(null);
+    if (!value.excluded && value.syncBatchId) { setOpen(false); onSyncSaved(value.syncBatchId); }
     try { sessionStorage.removeItem(storageKey); } catch { /* A retained accepted command replays safely. */ }
     void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"], exact: true });
     void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
@@ -122,12 +125,13 @@ export function EbayProductListingIntentControl({ productId, productName, exclud
         <p className="text-xs text-muted-foreground break-all">Request reference: {command.commandKey}</p>
       </div>}
       {result && <div className="space-y-3 text-sm">
-        <p role="status">{job?.state === "completed" ? "Removed from eBay. The provider's listing state is verified." : result.remoteAction === "included" ? "Included for future eBay publishing. This has not published the product." : result.remoteAction === "local_exclusion" ? "Excluded from future publishing. No provider removal was performed by this request." : jobIssue ? "Exclusion saved. Removal from eBay needs the next step below." : "Exclusion saved. Removing the listing from eBay; completion is not yet confirmed."}</p>
+        <p role="status">{job?.state === "completed" ? "Removed from eBay. The provider's listing state is verified." : result.remoteAction === "included" ? "Included. Sync this product to create or update its channel listing and check any remaining requirements." : result.remoteAction === "local_exclusion" ? "Excluded from future publishing. No provider removal was performed by this request." : jobIssue ? "Exclusion saved. Removal from eBay needs the next step below." : "Exclusion saved. Removing the listing from eBay; completion is not yet confirmed."}</p>
         {jobIssue?.action.kind === "review_mapping" ? <EbayWithdrawalIssueCard issue={jobIssue} busy={status.isFetching}
           onCheck={() => void status.refetch()} onRetry={job?.state === "needs_attention" ? () => changeInclusion(false) : undefined} /> : jobIssue && <EbayListingIssueCard issue={jobIssue} onAction={issue => {
           if (issue.action.kind === "retry_sync" && issue.retryable) changeInclusion(false);
           else { setOpen(false); onIssueAction(issue, productId, job?.id); }
         }} />}
+        {!result.excluded && !result.syncBatchId && <Button onClick={() => { setOpen(false); onSync(); }}>Sync product</Button>}
         {status.isError && <p role="alert">The latest removal status could not be loaded. Refresh the saved status; do not assume the listing has ended.</p>}
         {job && <Button variant="outline" disabled={status.isFetching} onClick={() => status.refetch()}>Refresh removal status</Button>}
       </div>}

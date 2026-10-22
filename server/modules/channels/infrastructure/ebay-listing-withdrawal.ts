@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { createEbayInclusionSync } from "./ebay-inclusion-sync";
+import { readEbaySyncDestination } from "./ebay-active-listing-sync";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import { pool } from "../../../db";
@@ -15,7 +18,11 @@ export const ebayListingExclusionService = new PostgresEbayListingExclusionRepos
   const database = drizzle(client, { schema });
   const authService = new EbayAuthService(database, createEbayAuthConfig());
   return (await readExistingEbayListingMappingIdentity(productId, { database, authService })).identity;
-}, () => new Date());
+}, () => new Date(), createEbayInclusionSync({
+  pool, channelId: EBAY_CHANNEL_ID, uuid: randomUUID,
+  destination: client => readEbaySyncDestination({ database: drizzle(client, { schema }),
+    authService: new EbayAuthService(drizzle(client, { schema }), createEbayAuthConfig()) }),
+}));
 
 export async function prepareEbayWithdrawal(source: EbayListingSyncIdentity): Promise<PreparedEbayWithdrawal> {
   const snapshot = await readExistingEbayListingMappingIdentity(source.productId);

@@ -2,9 +2,11 @@ import type { Pool, PoolClient } from "pg";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import { presentCustomerOrderFulfillment, type CustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
 import { createHash } from "node:crypto";
 import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
 import { OrderEditError } from "../domain/order-edit-error";
+import { matchesOrderCancellationSettlement } from "../domain/order-edit-financials";
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
@@ -67,14 +69,17 @@ export interface OrderEditWarehouseProvider {
       | "synchronize"
       | "release"
       | "verify_shipped"
+      | "verify_cancelled"
       | "release_unsubmitted";
   }): Promise<void>;
 }
 export interface OrderEditWarehouseInspection {
   editable: boolean;
   reasons: string[];
+  cancellationReasons: string[];
   status: string;
   wmsOrderIds: number[];
+  fulfillment: CustomerOrderFulfillment;
 }
 async function readReleaseProof(
   client: PoolClient,
@@ -83,9 +88,10 @@ async function readReleaseProof(
   ownership: "owned" | "none" = "owned",
   allocationRequired = false,
   fulfilledCancellation = false,
+  cancelledOrder = false,
 ): Promise<OrderEditReleaseProof> {
   const source = await client.query(
-    "SELECT id,channel_id,external_order_id,status,financial_status,updated_at FROM oms.oms_orders WHERE id=$1 FOR UPDATE",
+    "SELECT id,channel_id,external_order_id,status,financial_status,updated_at,cancelled_at FROM oms.oms_orders WHERE id=$1 FOR UPDATE",
     [omsOrderId],
   );
   if (source.rows.length !== 1)
@@ -169,14 +175,42 @@ async function readReleaseProof(
     [omsOrderId],
   );
   const shipmentIds = shipments.rows.map((row) => positiveId.parse(row.id));
-  const providerHolds = fulfilledCancellation
+  const providerHolds = fulfilledCancellation || cancelledOrder
     ? (
         await client.query(
-          "SELECT shipment_id,provider_order_id,was_held FROM oms.order_edit_provider_holds WHERE operation_id=$1 ORDER BY shipment_id FOR UPDATE",
+          "SELECT shipment_id,provider_order_id,was_held,released_at FROM oms.order_edit_provider_holds WHERE operation_id=$1 ORDER BY shipment_id FOR UPDATE",
           [operationId],
         )
       ).rows
     : [];
+  const cancellationClaims = cancelledOrder ? (await client.query(
+    "SELECT id,order_id,status FROM inventory.availability_claims WHERE order_id=ANY($1::int[]) AND status='active' ORDER BY id FOR UPDATE", [wmsOrderIds],
+  )).rows : [];
+  if (cancelledOrder) {
+    const operation = (await client.query("SELECT document FROM oms.order_edit_operations WHERE id=$1 AND oms_order_id=$2 FOR UPDATE", [operationId, omsOrderId])).rows[0]?.document;
+    const snapshot = orderEditSnapshotSchema.parse(operation?.lastSnapshot);
+    if (operation?.kind !== "cancel_order" || operation?.cancellation?.rewards?.settled !== true || !snapshot.cancelled || snapshot.netPaidCents !== 0
+      || !matchesOrderCancellationSettlement(orderEditSnapshotSchema.parse(operation.baseline), snapshot, operation.cancellation.refundCents)
+      || snapshot.outstandingCents !== 0 || snapshot.capturableCents !== 0
+      || [...snapshot.transactions, ...snapshot.refunds.flatMap(refund => refund.transactions)].some(transaction => !["SUCCESS", "FAILURE", "ERROR"].includes(transaction.status))
+      || snapshot.channelId !== source.rows[0].channel_id
+      || snapshot.orderId.replace(/^gid:\/\/shopify\/Order\//, "") !== String(source.rows[0].external_order_id).replace(/^gid:\/\/shopify\/Order\//, "")
+      || !["cancelled", "refunded"].includes(source.rows[0].status)
+      || orders.rows.some(row => row.warehouse_status !== "cancelled" || !row.cancelled_at)
+      || shipments.rows.some(row => !["cancelled", "voided"].includes(row.status) || row.shipped_at !== null)
+      || cancellationClaims.length)
+      throw new OrderEditError("ORDER_CANCELLATION_WAREHOUSE_PENDING", "Your cancellation is saved. We’re finishing the warehouse update.");
+    // cancelOrderCascade preserves purchased-line history. Its disposition is
+    // the cancelled order/partitions and released canonical claims, not a zero
+    // purchased quantity. The native snapshot above proves full cancellation.
+    for (const shipment of shipments.rows) {
+      const providerId = shipment.shipstation_order_id ?? (shipment.shipping_engine === "shipstation" && /^[1-9]\d*$/.test(shipment.engine_order_ref ?? "") ? String(shipment.engine_order_ref) : null);
+      const receipt = providerHolds.find(hold => hold.shipment_id === shipment.id);
+      if ((shipment.shipping_engine !== null && shipment.shipping_engine !== "shipstation")
+        || (providerId !== null && (!receipt || receipt.released_at !== null || String(receipt.provider_order_id) !== String(providerId))))
+        throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_UNVERIFIED", "The cancelled warehouse shipment still needs provider verification.");
+    }
+  }
   if (fulfilledCancellation) {
     if (ownership !== "owned" || allocationRequired)
       throw new OrderEditError(
@@ -336,6 +370,7 @@ async function readReleaseProof(
     ...(ownership === "none" ? { ownership } : {}),
     ...(allocationRequired ? { allocationRequired: true } : {}),
     ...(fulfilledCancellation ? { fulfilledCancellation: true } : {}),
+    ...(cancelledOrder ? { cancelledOrder: true } : {}),
     contentFingerprint: createHash("sha256")
       .update(
         JSON.stringify({
@@ -347,7 +382,8 @@ async function readReleaseProof(
           shipmentItems: shipmentItems.rows,
           authority,
           allocation,
-          ...(fulfilledCancellation ? { providerHolds } : {}),
+          ...(fulfilledCancellation || cancelledOrder ? { providerHolds } : {}),
+          ...(cancelledOrder ? { cancellationClaims } : {}),
         }),
       )
       .digest("hex"),
@@ -559,13 +595,14 @@ export async function finalizeOrderEditWarehouseRelease(
     ownership: z.enum(["owned", "none"]).optional(),
     allocationRequired: z.boolean().optional(),
     fulfilledCancellation: z.boolean().optional(),
+    cancelledOrder: z.boolean().optional(),
     unsubmitted: z.boolean().optional(),
   })
     .strict()
     .parse(proof);
   if (
     proof.unsubmitted &&
-    (proof.allocationRequired || proof.fulfilledCancellation)
+    (proof.allocationRequired || proof.fulfilledCancellation || proof.cancelledOrder)
   )
     throw new OrderEditError(
       "ORDER_EDIT_RELEASE_STATE_INVALID",
@@ -580,6 +617,7 @@ export async function finalizeOrderEditWarehouseRelease(
         proof.ownership ?? "owned",
         proof.allocationRequired ?? false,
         proof.fulfilledCancellation ?? false,
+        proof.cancelledOrder ?? false,
       );
   if (
     current.contentFingerprint !== proof.contentFingerprint ||
@@ -732,7 +770,7 @@ export class OrderEditWarehouseGateway {
         )
       ).rows,
     );
-    if (
+    if (lockMode === "update" &&
       shipments.some(
         (shipment) =>
           shipment.requires_review ||
@@ -766,13 +804,20 @@ export class OrderEditWarehouseGateway {
     // Availability is advisory. Use one consistent committed snapshot without
     // competing with cancellation/picking; commands recheck under update locks.
     return this.transaction(async (client) => {
-      const { orders } = await this.evidence(client, omsOrderId, "none");
+      const { orders, shipments } = await this.evidence(client, omsOrderId, "none");
       const reasons = orderEditWarehouseBlockers(orders, operationId);
+      if (shipments.some(shipment => shipment.requires_review || !["planned", "queued", "on_hold"].includes(shipment.status) || (shipment.shipping_engine !== null && shipment.shipping_engine !== "shipstation")))
+        reasons.push("This shipment can no longer be changed online. Contact us for help.");
       return {
         editable: reasons.length === 0,
         reasons,
+        // The canonical cancellation cascade only accepts canonical warehouse
+        // states. Legacy pending rows need staff normalization, not a new writer.
+        cancellationReasons: orders.some(order => order.warehouse_status === "pending")
+          ? [...reasons, "Contact us to cancel this order."] : reasons,
         status: orders.map((order) => order.warehouse_status).join(", "),
         wmsOrderIds: orders.map((order) => order.id),
+        fulfillment: presentCustomerOrderFulfillment(orders.map(order => order.warehouse_status), { held: orders.some(order => order.on_hold !== 0 || order.order_edit_operation_id !== null) }),
       };
     }, "read");
   }
@@ -828,6 +873,7 @@ export class OrderEditWarehouseGateway {
       | "synchronize"
       | "release"
       | "verify_shipped"
+      | "verify_cancelled"
       | "release_unsubmitted",
   ): Promise<void> {
     for (const shipment of shipments) {
@@ -1066,6 +1112,20 @@ export class OrderEditWarehouseGateway {
         "ORDER_EDIT_RELEASE_CHANGED",
         "Completed order state changed during provider verification.",
       );
+    return after;
+  }
+
+  async cancellationReleaseProof(omsOrderId: number, operationId: string): Promise<OrderEditReleaseProof> {
+    const { before, shipments } = await this.transaction(async client => {
+      const before = await readReleaseProof(client, omsOrderId, operationId, "owned", false, false, true);
+      const receipts = await client.query("SELECT shipment_id AS id,provider_order_id FROM oms.order_edit_provider_holds WHERE operation_id=$1 AND released_at IS NULL ORDER BY shipment_id", [operationId]);
+      const shipments = z.array(z.object({ id: positiveId, provider_order_id: z.coerce.number().int().positive().safe() })).parse(receipts.rows);
+      return { before, shipments };
+    });
+    await this.providerPhase(shipments, operationId, "verify_cancelled");
+    const after = await this.transaction(client => readReleaseProof(client, omsOrderId, operationId, "owned", false, false, true));
+    if (before.contentFingerprint !== after.contentFingerprint)
+      throw new OrderEditError("ORDER_CANCELLATION_RELEASE_CHANGED", "The warehouse cancellation changed during verification.");
     return after;
   }
 

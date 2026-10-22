@@ -6,9 +6,11 @@ import { orderEditCodeRuleSchema } from "@shared/order-edits/order-edit-codes";
 import { rewardWidgetScopeSchema, rewardWidgetIssueSchema, rewardWidgetStateSchema, rewardWidgetIssueResultSchema,
   rewardWidgetManagementStateSchema, rewardWidgetCancelSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
 import type { CustomerRewards } from "../../customer-account/application/customer-rewards";
+import type { OrderCancellationRewards } from "../../customer-account/application/order-cancellation.ports";
+import { cancellationRewardsSchema } from "@shared/customer-account/order-cancellation";
 
 /** Club's existing issuance and receipt service; ordinary coupons never use it. */
-export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions, OrderEditRewards, CustomerRewards {
+export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions, OrderEditRewards, CustomerRewards, OrderCancellationRewards {
   constructor(
     private readonly baseUrl: string | undefined,
     private readonly apiKey: string | undefined,
@@ -32,6 +34,14 @@ export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions, O
   }
   async state(input: Parameters<CustomerRewards["state"]>[0]) {
     return rewardWidgetStateSchema.parse(await this.request("rewards/state", rewardWidgetScopeSchema.parse(input), true));
+  }
+  async reviewCancellation(input: Parameters<OrderCancellationRewards["reviewCancellation"]>[0]) {
+    const checked = z.object({ customerId: z.string().regex(/^gid:\/\/shopify\/Customer\/[1-9]\d*$/), orderId: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9]\d*$/) }).strict().parse(input);
+    return cancellationRewardsSchema.parse(await this.request("order-cancellations/review", checked, true));
+  }
+  async settleCancellation(input: Parameters<OrderCancellationRewards["settleCancellation"]>[0]) {
+    const checked = z.object({ operationId: z.string().uuid(), customerId: z.string().regex(/^gid:\/\/shopify\/Customer\/[1-9]\d*$/), orderId: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9]\d*$/) }).strict().parse(input);
+    return cancellationRewardsSchema.parse(await this.request("order-cancellations/settle", checked, true));
   }
   async manage(input: Parameters<CustomerRewards["manage"]>[0]) {
     return rewardWidgetManagementStateSchema.parse(await this.request("rewards/manage", rewardWidgetScopeSchema.parse(input), true));

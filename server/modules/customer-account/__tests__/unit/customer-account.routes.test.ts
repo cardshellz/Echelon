@@ -124,6 +124,25 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request(body)).status).toBe(200);
     expect(progress).toHaveBeenCalledWith(operationId, "resume", operationId);
   });
+  it("keeps cancellation review/status inside signed ownership and requires approval identity for submission", async () => {
+    const bootstrap = await (await request()).json(), requestKey = "22222222-2222-4222-8222-222222222222";
+    const rewards = { fingerprint: "a".repeat(64), returnedPoints: "100.00", deductedEarnedPoints: "5.00", settled: false };
+    const cancellationReview = vi.fn(async () => ({ connectionId: 4, omsOrderId: 9, orderNumber: "#1", currency: "USD", revision: "a".repeat(64), orderRevision: "b".repeat(64), refundCents: 829, rewards, eligibility: { allowed: true, reasons: [] } }));
+    const value = { operationId: requestKey, requestKey, omsOrderId: 9, orderNumber: "#1", currency: "USD", status: "pending", refundCents: 829, refundStatus: "pending", rewards, error: null };
+    const submitCancellation = vi.fn(async () => value), cancellationStatus = vi.fn(async () => value);
+    services.mockImplementation(() => ({ edits: { connection, cancellationReview, submitCancellation, cancellationStatus }, returns: vi.fn() }));
+    const scope = { path: "/account/orders/9/cancellation/review", query: { connectionId: "4" }, sessionKey: bootstrap.session.sessionKey };
+    expect((await request(scope)).status).toBe(200); expect(cancellationReview).toHaveBeenCalledWith(4, 9);
+    expect((await request({ ...scope, path: "/account/orders/9/cancellation/status", query: { connectionId: "4", requestKey } })).status).toBe(200);
+    expect(cancellationStatus).toHaveBeenCalledWith(4, 9, requestKey);
+    const command = { ...scope, path: "/account/orders/9/cancellation", method: "POST", body: { requestKey, expectedRevision: "a".repeat(64) } };
+    expect((await request(command)).status).toBe(400);
+    expect((await request({ ...command, commandKey: requestKey, sessionKey: undefined })).status).toBe(401);
+    expect(submitCancellation).not.toHaveBeenCalled();
+    expect((await request({ ...command, commandKey: requestKey })).status).toBe(200);
+    expect(submitCancellation).toHaveBeenCalledWith(4, 9, command.body, requestKey);
+    expect((await request({ ...scope, path: "/account/orders/9/cancellation/reconcile", method: "POST", commandKey: requestKey, body: {} })).status).toBe(404);
+  });
   it("dispatches rewards only inside the signed account boundary with a command key", async () => {
     const bootstrap = await (await request()).json();
     const rewardsState = vi.fn(async () => ({ version: "v1", balance: "1000.00", minimumPoints: 100,

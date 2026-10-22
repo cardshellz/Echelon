@@ -152,6 +152,7 @@ function setup() {
       | "synchronize"
       | "release"
       | "verify_shipped"
+      | "verify_cancelled"
       | "release_unsubmitted",
   ) =>
     service.synchronizeOrderEditShipment({
@@ -206,6 +207,23 @@ afterEach(() => {
 });
 
 describe("ShipStation order-edit ownership and readback", () => {
+  it("verifies a cancelled provider shipment without restoring a hold or sending any write", async () => {
+    const f = setup(); await f.run("hold");
+    f.header.warehouse_status = "cancelled"; f.header.status = "cancelled"; f.live.orderStatus = "cancelled";
+    const before = f.calls.length;
+    await f.run("verify_cancelled"); await f.run("verify_cancelled");
+    expect(f.calls.slice(before).every(call => call.body === null)).toBe(true);
+    expect(f.live.orderStatus).toBe("cancelled");
+  });
+  it.each(["active_sibling", "active_label", "uncancelled_provider"])("keeps cancellation ownership for %s", async failure => {
+    const f = setup(); await f.run("hold"); f.header.warehouse_status = "cancelled"; f.header.status = "cancelled"; f.live.orderStatus = "cancelled";
+    if (failure === "active_sibling") f.split("awaiting_shipment");
+    if (failure === "active_label") f.setLabels([{ shipmentId: 12, orderId: 55, voided: false }]);
+    if (failure === "uncancelled_provider") f.live.orderStatus = "on_hold";
+    const before = f.calls.length;
+    await expect(f.run("verify_cancelled")).rejects.toThrow();
+    expect(f.calls.slice(before).every(call => call.body === null)).toBe(true);
+  });
   it("releases a timed-out pre-submit hold without changing quantities, linking splits, or placing another hold", async () => {
     const f = setup();
     f.loseHoldResponse();

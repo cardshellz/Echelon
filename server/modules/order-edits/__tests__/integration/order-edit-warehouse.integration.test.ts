@@ -361,6 +361,72 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       }
     });
 
+    async function cancelledOperation(): Promise<OrderEditRecord> {
+      const store = new PostgresOrderEditStore(database.pool);
+      const original = record();
+      const sale = { id: "gid://shopify/OrderTransaction/1", kind: "SALE", status: "SUCCESS", parentId: null, gateway: "manual", amountCents: 1000, manual: true };
+      const paid = { ...original.baseline, transactions: [sale] };
+      const value: OrderEditRecord = { ...original, kind: "cancel_order", status: "synchronizing", version: 1,
+        baseline: paid,
+        cancellation: { stage: "settling", jobId: "gid://shopify/Job/1", refundCents: 1000,
+          rewards: { fingerprint: "a".repeat(64), returnedPoints: "100.00", deductedEarnedPoints: "5.00", settled: true } },
+        commitKey: original.requestKey, commitStartedAt: original.createdAt,
+        lastSnapshot: { ...paid, cancelled: true, fullyPaid: false, netPaidCents: 0, transactions: [sale, { ...sale, id: "gid://shopify/OrderTransaction/2", parentId: sale.id, kind: "REFUND" }] },
+      };
+      await store.save(value, 0, "staff", "fixture_cancellation_approved");
+      await gateway.acquire(20, OP);
+      await database.pool.query(`UPDATE oms.oms_orders SET status='cancelled',financial_status='refunded' WHERE id=20;
+        UPDATE wms.orders SET warehouse_status='cancelled',cancelled_at='2026-10-06T00:00:00Z' WHERE id=10;
+        UPDATE inventory.availability_claims SET status='released' WHERE order_id=10`);
+      return value;
+    }
+    it("finishes native cancellation atomically without erasing paid-line history", async () => {
+      const value = await cancelledOperation(), store = new PostgresOrderEditStore(database.pool);
+      const proof = await gateway.cancellationReleaseProof(20, OP);
+      expect(proof.cancelledOrder).toBe(true);
+      await store.save({ ...value, version: 2, status: "completed" }, 1, null, "cancellation_completed", proof);
+      expect((await store.get(OP)).status).toBe("completed");
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBeNull();
+      expect((await database.pool.query("SELECT paid_quantity,authority_fulfillable_quantity FROM oms.oms_order_lines WHERE id=30")).rows[0]).toEqual({ paid_quantity: 1, authority_fulfillable_quantity: 1 });
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_events WHERE operation_id=$1 AND action='cancellation_completed'", [OP])).rows[0].count).toBe(1);
+    });
+    it.each(["active_claim", "uncancelled_partition", "live_shipment", "unsettled_rewards", "unsettled_payment"])("retains ownership for cancellation with %s", async failure => {
+      const value = await cancelledOperation();
+      if (failure === "active_claim") await database.pool.query("UPDATE inventory.availability_claims SET status='active'");
+      if (failure === "uncancelled_partition") await database.pool.query("UPDATE wms.orders SET warehouse_status='ready',cancelled_at=NULL");
+      if (failure === "live_shipment") await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES(51,10,'queued')");
+      if (failure === "unsettled_rewards" || failure === "unsettled_payment") {
+        if (failure === "unsettled_rewards") value.cancellation!.rewards.settled = false;
+        else value.lastSnapshot!.netPaidCents = 1;
+        await new PostgresOrderEditStore(database.pool).save({ ...value, version: 2 }, 1, null, "fixture_pending");
+      }
+      await expect(gateway.cancellationReleaseProof(20, OP)).rejects.toMatchObject({ code: "ORDER_CANCELLATION_WAREHOUSE_PENDING" });
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBe(OP);
+    });
+    it("revalidates cancellation proof inside completion instead of trusting a stale read", async () => {
+      const value = await cancelledOperation(), proof = await gateway.cancellationReleaseProof(20, OP);
+      await database.pool.query("UPDATE inventory.availability_claims SET status='active' WHERE id=1");
+      await expect(new PostgresOrderEditStore(database.pool).save({ ...value, version: 2, status: "completed" }, 1, null, "cancellation_completed", proof)).rejects.toThrow();
+      expect((await new PostgresOrderEditStore(database.pool).get(OP)).status).toBe("synchronizing");
+    });
+    it("does not accept an ordinary edit release proof for a cancellation", async () => {
+      const value = await cancelledOperation();
+      await expect(new PostgresOrderEditStore(database.pool).save({ ...value, version: 2, status: "completed" }, 1, null, "cancellation_completed",
+        { wmsOrderIds: [10], shipmentIds: [], contentFingerprint: "a".repeat(64), allocationRequired: true })).rejects.toMatchObject({ code: "ORDER_CANCELLATION_RELEASE_PROOF_REQUIRED" });
+    });
+    it.each(["edit_status", "missing_intent", "changed_refund"])("rejects an inconsistent persisted cancellation: %s", async failure => {
+      const value = await cancelledOperation(), invalid = structuredClone(value);
+      if (failure === "edit_status") invalid.status = "ready";
+      if (failure === "missing_intent") invalid.cancellation!.stage = "acquiring";
+      if (failure === "changed_refund") invalid.cancellation!.refundCents = 999;
+      await expect(new PostgresOrderEditStore(database.pool).save({ ...invalid, version: 2 }, 1, null, "invalid_cancellation")).rejects.toThrow();
+      expect((await new PostgresOrderEditStore(database.pool).get(OP)).version).toBe(1);
+    });
+    it("keeps legacy warehouse rows out of online cancellation without altering edit policy", async () => {
+      await database.pool.query("UPDATE wms.orders SET warehouse_status='pending' WHERE id=10");
+      expect(await gateway.inspect(20)).toMatchObject({ editable: true, cancellationReasons: ["Contact us to cancel this order."], fulfillment: { code: "awaiting_picking" } });
+    });
+
     function customerRecord(): OrderEditRecord {
       const original = record();
       return { ...original, id: "88888888-8888-4888-8888-888888888888", omsOrderId: 21,

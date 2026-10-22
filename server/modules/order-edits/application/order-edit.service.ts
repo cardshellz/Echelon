@@ -17,7 +17,7 @@ import type {
   OrderEditPreviewInput,
 } from "@shared/order-edits/order-edit-preview";
 import { createHash } from "node:crypto";
-import { presentOrderEditSettlement } from "../domain/order-edit-financials";
+import { presentOrderEditSettlement, presentOrderEditFinancialStatus } from "../domain/order-edit-financials";
 import {
   orderEditOperationSchema,
   orderEditOrderSchema,
@@ -54,6 +54,9 @@ import {
   orderEditDiagnosticError,
   type OrderEditDiagnosticEvent,
 } from "./order-edit-diagnostics";
+import type { OrderCancellationService } from "../../customer-account/application/order-cancellation.service";
+import { orderCancellationEligibilityReasons } from "../domain/order-cancellation-eligibility";
+import { presentCustomerOrderLifecycle } from "@shared/customer-account/order-fulfillment";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
 // Bound each scheduler pass so one store cannot monopolize the worker.
@@ -76,6 +79,7 @@ export class OrderEditService {
     private readonly previews?: OrderEditPreviewService,
     private readonly catalog?: OrderEditCatalog,
     private readonly codeRedemptions?: OrderEditCodeRedemptions,
+    readonly cancellations?: OrderCancellationService,
   ) {}
 
   async warmPreview(input: OrderEditPreviewScope, actorId: string) {
@@ -250,7 +254,7 @@ export class OrderEditService {
     );
     assertOrderEditIdentity(reference, snapshot);
     const active =
-      reference.activeOperationId && actorId
+      reference.activeOperationId
         ? await this.store.get(reference.activeOperationId)
         : null;
     // Only the authenticated owner can treat this operation's hold as its own.
@@ -272,6 +276,8 @@ export class OrderEditService {
       ...warehouse.reasons,
       ...orderEditEligibilityReasons(snapshot),
     ];
+    const cancellationEnabled = this.cancellations ? (await this.store.settings(connectionId)).enabled : false;
+    const fulfillment = warehouse.fulfillment && presentCustomerOrderLifecycle(warehouse.fulfillment, snapshot.cancelled);
     return orderEditOrderSchema.parse({
       ...(codeEntryVersion === "v1"
         ? {
@@ -285,6 +291,12 @@ export class OrderEditService {
       customerName: reference.customerName,
       customerEmail: reference.customerEmail,
       activeOperationId: reference.activeOperationId,
+      ...(active ? { activeOperationKind: active.kind ?? "edit" } : {}),
+      cancellation: {
+        canReview: orderCancellationEligibilityReasons({ snapshot, warehouseReasons: warehouse.cancellationReasons ?? warehouse.reasons,
+          activeOperationId: reference.activeOperationId, enabled: cancellationEnabled }).length === 0,
+        requestKey: active?.kind === "cancel_order" && active.actorId === actorId ? active.requestKey : null,
+      },
       currency: snapshot.currency,
       revision: snapshot.fingerprint,
       eligibility: {
@@ -310,10 +322,9 @@ export class OrderEditService {
         snapshotProductPrices(snapshot),
       ),
       settlement: presentOrderEditSettlement(snapshot),
-      financialStatus: snapshot.fullyPaid ? "Paid" : "Payment outstanding",
-      warehouseStatus: warehouse.editable
-        ? "Not yet picking"
-        : "Editing unavailable",
+      financialStatus: presentOrderEditFinancialStatus(snapshot),
+      warehouseStatus: fulfillment?.label ?? "Status unavailable",
+      ...(fulfillment ? { fulfillment } : {}),
     });
   }
   async quote(
@@ -571,7 +582,9 @@ export class OrderEditService {
     return this.present(record, codeEntryVersion);
   }
   async get(id: string, codeEntryVersion?: "v1") {
-    return this.present(await this.store.get(id), codeEntryVersion);
+    const record = await this.store.get(id);
+    this.requireEdit(record);
+    return this.present(record, codeEntryVersion);
   }
   async commit(id: string, key: string, actorId: string) {
     return this.locked(id, async (initial) => {
@@ -693,7 +706,11 @@ export class OrderEditService {
       this.clock(),
     )) {
       try {
-        await this.reconcile(id);
+        const record = await this.store.get(id);
+        if (record.kind === "cancel_order") {
+          if (!this.cancellations) throw new OrderEditError("ORDER_CANCELLATION_UNAVAILABLE", "Cancellation reconciliation is unavailable.");
+          await this.cancellations.reconcile(id);
+        } else await this.reconcile(id);
       } catch (error) {
         const known = this.failure(error);
         this.report({ operationId: id, code: known.code });
@@ -1190,9 +1207,13 @@ export class OrderEditService {
     work: (record: OrderEditRecord) => Promise<T>,
   ) {
     const record = await this.store.get(id);
+    this.requireEdit(record);
     return this.store.withOrderLock(record.omsOrderId, async () =>
       work(await this.store.get(id)),
     );
+  }
+  private requireEdit(record: OrderEditRecord): void {
+    if (record.kind === "cancel_order") throw new OrderEditError("ORDER_CANCELLATION_SEPARATE_FLOW", "Open Manage order to check this cancellation.");
   }
   private reportSubmissionFailure(
     record: OrderEditRecord,
