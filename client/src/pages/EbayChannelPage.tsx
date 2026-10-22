@@ -82,7 +82,8 @@ import { ProductTypeManager } from "@/components/ebay/ProductTypeManager";
 import { EbayCategoryPicker } from "@/components/ebay/EbayCategoryPicker";
 import { AspectEditor } from "@/components/ebay/AspectEditor";
 import { PushProgressModal } from "@/components/ebay/PushProgressModal";
-import { SyncProgressModal } from "@/components/ebay/SyncProgressModal";
+import { ChannelSyncProgress } from "@/components/channels/ChannelSyncProgress";
+import { useChannelSyncBatches } from "@/hooks/use-channel-sync-batches";
 import { EbayListingIssueCard } from "@/components/ebay/EbayListingIssueCard";
 import { EbayMappingRepairDialog } from "@/components/ebay/EbayMappingRepairDialog";
 import { EbaySyncRecoveryDialog } from "@/components/ebay/EbaySyncRecoveryDialog";
@@ -320,7 +321,7 @@ function PolicyOverrideRow({ label, fulfillmentPolicyId, returnPolicyId, payment
 // ============================================================================
 
 export default function EbayChannelPage() {
-  const { hasPermission } = useAuth();
+  const { user, hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -730,7 +731,14 @@ export default function EbayChannelPage() {
 
   // ---- Durable eBay publication ----
   const [pushModalOpen, setPushModalOpen] = useState(false);
-  const [syncModalOpen, setSyncModalOpen] = useState(false);
+  const syncBatches = useChannelSyncBatches(config?.channel?.id, user?.id ? String(user.id) : undefined);
+  const batchActivity = syncBatches.batch?.items.map(item => `${item.operationId}:${item.state}:${item.updatedAt}`).join("|");
+  useEffect(() => {
+    if (!batchActivity) return;
+    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
+    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"] });
+  }, [batchActivity, queryClient]);
   const [pushProductIds, setPushProductIds] = useState<number[]>([]);
   const [pushRunId, setPushRunId] = useState(0);
 
@@ -755,9 +763,7 @@ export default function EbayChannelPage() {
   };
 
   // ---- Sync All Listings ----
-  const handleSyncAll = () => {
-    setSyncModalOpen(true);
-  };
+  const handleSyncAll = () => { void syncBatches.start(); };
 
   // ---- Sync Single Product ----
   const [syncingProductIds, setSyncingProductIds] = useState<Set<number>>(new Set());
@@ -1262,6 +1268,11 @@ export default function EbayChannelPage() {
     <div className="p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 max-w-6xl mx-auto" onClickCapture={handlePolicyAnchorClick}>
       {/* Page Header */}
       <ChannelWorkspaceHeader name="eBay" description="Store setup, category mapping, and listing feed" />
+      <ChannelSyncProgress controller={syncBatches} canEdit={hasPermission("channels", "edit")}
+        onReview={item => {
+          if (item.operationId) setPublicationStatusTarget({ jobId: item.operationId, productId: item.productId, name: item.name });
+          else window.location.assign(`/products/${item.productId}`);
+        }} />
       {config?.channel?.id && <ListingIntentChanges scope={{ kind: "channel", channelId: config.channel.id }}
         canEdit={hasPermission("channels", "edit")}
         onReview={row => {
@@ -1888,7 +1899,7 @@ export default function EbayChannelPage() {
                 variant="outline"
                 size="sm"
                 className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
-                disabled={existingListingCount === 0 || !!feedError || syncJobsQuery.isError}
+                disabled={!hasPermission("channels", "edit") || existingListingCount === 0 || !!feedError || syncJobsQuery.isError || syncJobsQuery.isPending || syncBatches.query.isError || syncBatches.query.isPending || syncBatches.starting || syncBatches.permissionDenied}
                 onClick={handleSyncAll}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
@@ -3002,12 +3013,6 @@ export default function EbayChannelPage() {
           onCompleted={handleListingChangesComplete}
         />
       )}
-
-      <SyncProgressModal
-        open={syncModalOpen}
-        onClose={() => setSyncModalOpen(false)}
-        onIssueAction={handleIssueAction}
-      />
 
       {publicationStatusTarget && <EbayListingJobStatusDialog
         key={publicationStatusTarget.jobId} jobId={publicationStatusTarget.jobId} productId={publicationStatusTarget.productId}
