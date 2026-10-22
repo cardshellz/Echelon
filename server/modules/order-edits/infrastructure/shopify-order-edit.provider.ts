@@ -384,20 +384,22 @@ export class ShopifyOrderEditProvider
   }
 
   async readOrderSummaries(connectionId: number, externalOrderIds: readonly string[]) {
-    const ids = z.array(z.string().regex(/^[1-9]\d*$/)).min(1).max(CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE).parse(externalOrderIds);
+    const ids = z.array(z.string().max(30).regex(/^[1-9]\d*$/)).min(1).max(CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE).parse(externalOrderIds);
     if (new Set(ids).size !== ids.length) fail("ACCOUNT_ORDER_IDENTITIES_INVALID", "Duplicate order identities are not allowed.");
     const expected = ids.map(id => gid("Order", id));
+    const credentials = await this.credentials(connectionId);
     const raw = parse(z.object({ nodes: z.array(z.object({
       id: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9]\d*$/), name: z.string().min(1).max(50),
       customer: z.object({ id: z.string().regex(/^gid:\/\/shopify\/Customer\/[1-9]\d*$/) }).nullable(),
       cancelledAt: z.string().nullable(), displayFinancialStatus: z.enum(["AUTHORIZED", "EXPIRED", "PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED", "PENDING", "REFUNDED", "VOIDED"]),
       currentTotalPriceSet: BAG,
-    }).nullable()).length(ids.length) }), await this.request(await this.credentials(connectionId), gql.ACCOUNT_SUMMARIES_QUERY, { ids: expected }));
+    }).nullable()).length(ids.length) }), await this.request(credentials, gql.ACCOUNT_SUMMARIES_QUERY, { ids: expected }));
     return raw.nodes.flatMap((order, index) => {
       if (!order) return [];
       if (order.id !== expected[index]) fail("ORDER_IDENTITY_MISMATCH", "Shopify returned a different order.");
       const financialStatus = order.displayFinancialStatus.toLowerCase().replaceAll("_", " ");
       return [{ externalOrderId: ids[index], orderReference: order.name, customerId: order.customer?.id ?? null,
+        channelId: credentials.channelId, shopDomain: credentials.shopDomain,
         currency: "USD" as const, totalCents: money(order.currentTotalPriceSet), cancelled: order.cancelledAt !== null,
         financialStatus: financialStatus.charAt(0).toUpperCase() + financialStatus.slice(1) }];
     });
@@ -407,8 +409,11 @@ export class ShopifyOrderEditProvider
     connectionId: number,
     externalOrderId: string,
     expectedCustomerId?: string,
+    expectedShopDomain?: string,
   ): Promise<OrderEditSnapshot> {
     const credentials = await this.credentials(connectionId);
+    if (expectedShopDomain !== undefined && credentials.shopDomain !== expectedShopDomain)
+      fail("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.");
     const orderId = gid("Order", externalOrderId);
     const raw = parse(
       READ,

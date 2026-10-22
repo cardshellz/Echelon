@@ -24,6 +24,19 @@ function DirectOrderFinancials({
   if (query.data)
     return (
       <div className="csz-account-ui">
+        {query.isError && (
+          <div role="alert">
+            <p>We couldn’t refresh your order details. Please try again.</p>
+            <button
+              type="button"
+              className="csz-action"
+              disabled={query.isFetching}
+              onClick={() => void query.refetch()}
+            >
+              Try again
+            </button>
+          </div>
+        )}
         <OrderEditSummary
           financials={query.data.financials}
           totals={[{ label: "Order total", totalCents: query.data.totalCents }]}
@@ -37,6 +50,7 @@ function DirectOrderFinancials({
         <button
           type="button"
           className="csz-action"
+          disabled={query.isFetching}
           onClick={() => void query.refetch()}
         >
           Try again

@@ -3,7 +3,10 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
-import type { CustomerAccountOrderContextReader, CustomerAccountOrderContext } from "../application/customer-account-order-queries.service";
+import type {
+  CustomerAccountOrderContextReader,
+  CustomerAccountOrderContext,
+} from "../application/customer-account-order-queries.service";
 import { CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE } from "@shared/customer-account/customer-account-orders";
 import { OrderEditError } from "../../order-edits/domain/order-edit-error";
 
@@ -38,7 +41,9 @@ export class PostgresCustomerAccountOrderContextReader
   implements CustomerAccountOrderContextReader
 {
   constructor(private readonly pool: Pick<Pool, "query">) {}
-  async read(raw: Parameters<CustomerAccountOrderContextReader["read"]>[0]): Promise<CustomerAccountOrderContext[]> {
+  async read(
+    raw: Parameters<CustomerAccountOrderContextReader["read"]>[0],
+  ): Promise<CustomerAccountOrderContext[]> {
     const input = inputSchema.parse(raw);
     try {
       const result = await this.pool.query(

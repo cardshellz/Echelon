@@ -1,4 +1,4 @@
-export type NativeCustomerOrderSummary = Omit<import("@shared/customer-account/customer-account-orders").CustomerAccountOrderSummary, "omsOrderId" | "fulfillment"> & { customerId: string | null };
+export type NativeCustomerOrderSummary = Omit<import("@shared/customer-account/customer-account-orders").CustomerAccountOrderSummary, "omsOrderId" | "fulfillment"> & { customerId: string | null; channelId: number; shopDomain: string };
 
 export interface OrderEditCredentials {
   connectionId: number;
@@ -197,6 +197,7 @@ export interface OrderEditProvider {
     connectionId: number,
     externalOrderId: string,
     expectedCustomerId?: string,
+    expectedShopDomain?: string,
   ): Promise<OrderEditSnapshot>;
   searchVariants(
     connectionId: number,

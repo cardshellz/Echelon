@@ -341,17 +341,17 @@ export class OrderEditService {
       throw new OrderEditError("CUSTOMER_ACCOUNT_HISTORY_UNAVAILABLE", "Order history is temporarily unavailable. Please try again.", 503);
     return this.provider.readOrderSummaries(connectionId, externalOrderIds);
   }
-  async customerOrderDetails(connectionId: number, externalOrderId: string, expectedCustomerId: string) {
-    if (!/^gid:\/\/shopify\/Customer\/[1-9]\d*$/.test(expectedCustomerId))
+  async customerOrderDetails(connectionId: number, externalOrderId: string, expectedCustomerId: string, scope: { channelId: number; shopDomain: string }) {
+    if (!/^gid:\/\/shopify\/Customer\/[1-9]\d*$/.test(expectedCustomerId) || !Number.isSafeInteger(scope.channelId) || scope.channelId <= 0 || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(scope.shopDomain))
       throw new OrderEditError("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.", 404);
     let snapshot: OrderEditSnapshot;
-    try { snapshot = await this.provider.readOrder(connectionId, externalOrderId, expectedCustomerId); }
+    try { snapshot = await this.provider.readOrder(connectionId, externalOrderId, expectedCustomerId, scope.shopDomain); }
     catch (cause) {
       if (cause instanceof OrderEditProviderError && ["ORDER_NOT_FOUND", "CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE"].includes(cause.code))
         throw new OrderEditError("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.", 404);
       throw cause;
     }
-    if (snapshot.connectionId !== connectionId || snapshot.orderId !== `gid://shopify/Order/${externalOrderId}` || snapshot.customerId !== expectedCustomerId)
+    if (snapshot.connectionId !== connectionId || snapshot.channelId !== scope.channelId || snapshot.orderId !== `gid://shopify/Order/${externalOrderId}` || snapshot.customerId !== expectedCustomerId)
       throw new OrderEditError("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.", 404);
     return customerAccountOrderDetailsSchema.parse({
       externalOrderId, orderReference: snapshot.name, currency: snapshot.currency, totalCents: snapshot.totalCents,

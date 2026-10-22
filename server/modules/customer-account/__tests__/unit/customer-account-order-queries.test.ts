@@ -27,6 +27,8 @@ const identity = { externalOrderId: "99", orderReference: "#49180" };
 const summary = {
   ...identity,
   customerId: "gid://shopify/Customer/100",
+  channelId: 2,
+  shopDomain: principal.shopDomain,
   totalCents: 0,
   currency: "USD" as const,
   cancelled: true,
@@ -88,6 +90,8 @@ describe("owned, query-only account history", () => {
   it.each([
     { ...summary, customerId: "gid://shopify/Customer/101" },
     { ...summary, customerId: null },
+    { ...summary, channelId: 3 },
+    { ...summary, shopDomain: "another.myshopify.com" },
     { ...summary, externalOrderId: "98" },
     { ...summary, orderReference: "#other" },
   ])(
@@ -112,6 +116,23 @@ describe("owned, query-only account history", () => {
     expect(result.statusUnavailable).toBe(true);
     expect(h.report).toHaveBeenCalledExactlyOnceWith({
       code: "CUSTOMER_ACCOUNT_STATUS_UNAVAILABLE",
+    });
+  });
+  it("reports ambiguous numeric/GID OMS aliases without hiding verified native money or choosing an arbitrary order", async () => {
+    const h = fixture();
+    h.context.read.mockResolvedValueOnce(
+      [9, 10].map((omsOrderId) => ({
+        externalOrderId: "99",
+        omsOrderId,
+        warehouseStatuses: ["ready"],
+        held: false,
+      })),
+    );
+    const result = await h.service.summaries({ orders: [identity] });
+    expect(result.orders[0]).toMatchObject({ totalCents: 0, omsOrderId: null });
+    expect(result.statusUnavailable).toBe(true);
+    expect(h.report).toHaveBeenCalledExactlyOnceWith({
+      code: "CUSTOMER_ACCOUNT_ORDER_AMBIGUOUS",
     });
   });
   it("uses canonical picking presentation while distinguishing a stopped warehouse order from Shopify cancellation", async () => {
@@ -163,6 +184,7 @@ describe("owned, query-only account history", () => {
       4,
       "99",
       "gid://shopify/Customer/100",
+      { channelId: 2, shopDomain: principal.shopDomain },
     );
     expect(h.context.read).not.toHaveBeenCalled();
     h.edits.customerOrderDetails.mockResolvedValueOnce({
@@ -292,18 +314,23 @@ it("the existing details reader authorizes the native customer without warehouse
     4,
     "100",
     "gid://shopify/Customer/8",
+    { channelId: 36, shopDomain: "fixture.myshopify.com" },
   );
   expect(details.totalCents).toBe(2000);
   expect(h.provider.readOrder).toHaveBeenCalledExactlyOnceWith(
     4,
     "100",
     "gid://shopify/Customer/8",
+    "fixture.myshopify.com",
   );
   expect(h.warehouse.inspect).not.toHaveBeenCalled();
   expect(h.provider.quote).not.toHaveBeenCalled();
   expect(h.provider.commit).not.toHaveBeenCalled();
   await expect(
-    h.service.customerOrderDetails(4, "100", "gid://shopify/Customer/9"),
+    h.service.customerOrderDetails(4, "100", "gid://shopify/Customer/9", {
+      channelId: 36,
+      shopDomain: "fixture.myshopify.com",
+    }),
   ).rejects.toMatchObject({ code: "CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE" });
 });
 

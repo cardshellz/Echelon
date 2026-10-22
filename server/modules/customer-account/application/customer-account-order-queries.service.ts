@@ -1,6 +1,7 @@
 import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
 import type { OrderEditService } from "../../order-edits/application/order-edit.service";
 import type { OrderEditConnection } from "@shared/order-edits/order-edit.contract";
+import { orderEditConnectionSchema } from "@shared/order-edits/order-edit.contract";
 import { customerAccountOrderIdentityInputSchema } from "@shared/customer-account/customer-account.contract";
 import {
   customerAccountOrderSummariesInputSchema,
@@ -12,7 +13,11 @@ import {
   presentCustomerOrderLifecycle,
 } from "@shared/customer-account/order-fulfillment";
 import { OrderEditError } from "../../order-edits/domain/order-edit-error";
-import type { CustomerAccountOrderSummary, CustomerAccountOrderSummaries, CustomerAccountOrderDetails } from "@shared/customer-account/customer-account-orders";
+import type {
+  CustomerAccountOrderSummary,
+  CustomerAccountOrderSummaries,
+  CustomerAccountOrderDetails,
+} from "@shared/customer-account/customer-account-orders";
 
 export interface CustomerAccountOrderContext {
   externalOrderId: string;
@@ -40,10 +45,25 @@ export class CustomerAccountOrderQueriesService {
       report(event: { code: string; causeCode?: string }): void;
     },
   ) {}
+  private async connection(): Promise<OrderEditConnection> {
+    const connection = orderEditConnectionSchema.parse(
+      await this.dependencies.connection(),
+    );
+    if (
+      connection.channelId !== this.dependencies.principal.channelId ||
+      connection.shopDomain !== this.dependencies.principal.shopDomain
+    )
+      throw new OrderEditError(
+        "CUSTOMER_ACCOUNT_CONNECTION_UNAVAILABLE",
+        "Order history is temporarily unavailable. Please try again.",
+        503,
+      );
+    return connection;
+  }
 
   async summaries(raw: unknown): Promise<CustomerAccountOrderSummaries> {
     const input = customerAccountOrderSummariesInputSchema.parse(raw);
-    const connection = await this.dependencies.connection();
+    const connection = await this.connection();
     const principal = this.dependencies.principal;
     const ids = input.orders.map((order) => order.externalOrderId);
     const [native, contexts] = await Promise.all([
@@ -76,6 +96,8 @@ export class CustomerAccountOrderQueriesService {
       // Do not distinguish a missing purchase from another customer's purchase.
       if (
         !order ||
+        order.channelId !== principal.channelId ||
+        order.shopDomain !== principal.shopDomain ||
         order.customerId !== expectedCustomerId ||
         order.orderReference !== requested.orderReference
       ) {
@@ -92,7 +114,12 @@ export class CustomerAccountOrderQueriesService {
       }
       const context =
         matchingContexts.length === 1 ? matchingContexts[0] : undefined;
-      const { customerId: _customerId, ...summary } = order;
+      const {
+        customerId: _customerId,
+        channelId: _channelId,
+        shopDomain: _shopDomain,
+        ...summary
+      } = order;
       orders.push({
         ...summary,
         omsOrderId: context?.omsOrderId ?? null,
@@ -117,11 +144,15 @@ export class CustomerAccountOrderQueriesService {
 
   async details(raw: unknown): Promise<CustomerAccountOrderDetails> {
     const input = customerAccountOrderIdentityInputSchema.parse(raw);
-    const connection = await this.dependencies.connection();
+    const connection = await this.connection();
     const details = await this.dependencies.edits.customerOrderDetails(
       connection.connectionId,
       input.externalOrderId,
       `gid://shopify/Customer/${this.dependencies.principal.externalCustomerId}`,
+      {
+        channelId: this.dependencies.principal.channelId,
+        shopDomain: this.dependencies.principal.shopDomain,
+      },
     );
     if (details.orderReference !== input.orderReference)
       throw new OrderEditError(

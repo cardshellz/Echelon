@@ -50,9 +50,10 @@ export function CustomerOrderPanelLoader(props: {
     if (!omsOrderId) {
       setState({
         loading: false,
-        error: props.statusUnavailable || props.summary?.status === "failed"
-          ? "Order options couldn’t be loaded."
-          : null,
+        error:
+          props.statusUnavailable || props.summary?.status === "failed"
+            ? "Order options couldn’t be loaded."
+            : null,
         order: null,
         omsOrderId: null,
         returnOrder: null,

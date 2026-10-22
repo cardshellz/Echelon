@@ -39,6 +39,15 @@ status when available. Neither a missing OMS import nor a failed status lookup
 removes a verified native total. Ambiguous OMS aliases disable management for
 that identity and report the conflict; they do not change the money.
 
+Migration `900000026000018960001_customer_account_order_lookup_index.sql` indexes
+the canonical channel + OMS-link expression. A disposable PostgreSQL test proves
+the actual lookup uses that index across 25,000 unrelated warehouse rows without
+forcing the planner, including numeric/GID identities and malformed legacy
+references. The existing transactional migration runner bounds lock acquisition
+and retries. The index build also has a 30-second statement deadline. It can
+briefly block warehouse writes; failure rolls back the index and migration
+record together. No business record is rewritten.
+
 The transport verifies complete, unique response coverage and exact native ID /
 order-reference matching. A foreign, missing, substituted, incomplete or invalid
 financial response cannot populate another order's total. No fallback uses the
@@ -56,6 +65,13 @@ Shopify customer before saved discount-history enrichment and needs no OMS row.
 The accordion and direct order page share a financial query keyed to the native
 identity. Failed detail reads expose their own retry, without resubmitting any
 financial command or discarding other orders.
+Accordion merchandise lines reuse `orderEditItemSubtotal` for the verified price
+after product/Club savings. Order rewards/coupons remain separate summary rows;
+the display never reconstructs a missing historical Club allocation.
+Escaped, inert Shopify order markup supplies descriptive shipping/billing
+addresses and known original quantities for removed lines. The panel renders
+text, never cloned HTML. These fields cannot price an order, authorize an edit,
+change an address, or alter the persisted financial snapshot/fingerprint.
 
 ## Cancellation lifecycle
 

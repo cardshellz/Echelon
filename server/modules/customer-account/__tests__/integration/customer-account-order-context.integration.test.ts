@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
 import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
@@ -27,6 +28,25 @@ describe.skipIf(!url || !disposable)(
         disposable,
         fixtureSql,
       );
+      const migration = await readFile(
+        new URL(
+          "../../../../../migrations/900000026000018960001_customer_account_order_lookup_index.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const client = await database.pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SET LOCAL lock_timeout='5000ms'");
+        await client.query(migration);
+        await client.query("COMMIT");
+      } catch (cause) {
+        await client.query("ROLLBACK");
+        throw cause;
+      } finally {
+        client.release();
+      }
     });
     afterAll(async () => {
       await database?.close();
@@ -105,6 +125,59 @@ describe.skipIf(!url || !disposable)(
           externalOrderIds: ["102"],
         }),
       ).toEqual([]);
+    });
+    it("indexes valid leading-zero and legacy references without casting invalid or oversized IDs", async () => {
+      await database.pool.query(`INSERT INTO wms.orders VALUES
+      (6,2,'oms','0009',NULL,'ready',0,NULL),
+      (7,2,'oms','999999999999999999999999999','10','pending',0,NULL),
+      (8,2,'legacy',NULL,'not-an-id','ready',0,NULL),
+      (9,2,'oms','gid://shopify/Order/99',NULL,'ready',0,NULL);`);
+      const result = await new PostgresCustomerAccountOrderContextReader(
+        database.pool,
+      ).read({
+        channelId: 2,
+        externalCustomerId: "100",
+        externalOrderIds: ["99", "100"],
+      });
+      expect(result).toEqual([
+        {
+          externalOrderId: "99",
+          omsOrderId: 9,
+          warehouseStatuses: ["ready", "cancelled", "ready"],
+          held: true,
+        },
+        {
+          externalOrderId: "100",
+          omsOrderId: 10,
+          warehouseStatuses: ["picking", "pending"],
+          held: false,
+        },
+      ]);
+    });
+    it("uses the canonical-link index for a populated warehouse without forcing the query planner", async () => {
+      await database.pool.query(`INSERT INTO wms.orders
+      SELECT 10000+i,2,'oms',(1000000+i)::text,NULL,'ready',0,NULL FROM generate_series(1,25000) AS i;
+      ANALYZE wms.orders; ANALYZE oms.oms_orders;`);
+      let plan: unknown;
+      const reader = new PostgresCustomerAccountOrderContextReader({
+        query: async (text: string, values: unknown[]) => {
+          plan = (
+            await database.pool.query("EXPLAIN (FORMAT JSON) " + text, values)
+          ).rows[0]["QUERY PLAN"];
+          return database.pool.query(text, values);
+        },
+      } as never);
+      const result = await reader.read({
+        channelId: 2,
+        externalCustomerId: "100",
+        externalOrderIds: ["99", "100"],
+      });
+      expect(result.map((row) => row.omsOrderId)).toEqual([9, 10]);
+      expect(JSON.stringify(plan)).toContain("idx_wms_orders_channel_oms_link");
+      const invalid = await database.pool.query(
+        `SELECT indisvalid FROM pg_index WHERE indexrelid='wms.idx_wms_orders_channel_oms_link'::regclass`,
+      );
+      expect(invalid.rows).toEqual([{ indisvalid: true }]);
     });
   },
 );

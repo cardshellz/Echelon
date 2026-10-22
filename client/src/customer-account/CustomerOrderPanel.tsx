@@ -332,6 +332,8 @@ export function CustomerOrderPanel({
             {row.dataset.externalOrderId && row.dataset.orderReference && (
               <CustomerOrderDetails
                 api={api}
+                row={row}
+                ready={connectionId !== null}
                 externalOrderId={row.dataset.externalOrderId}
                 orderReference={row.dataset.orderReference}
               />
