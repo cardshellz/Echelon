@@ -37,6 +37,12 @@ import type {
   CancellationPushResult,
 } from "../channel-adapter.interface";
 import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
+import {
+  SHOPIFY_INVENTORY_WRITE_PATH,
+  ShopifyInventoryWriteRejectedError,
+  isShopifyInventoryWrite,
+  shopifyInventoryWriteRejectionCode,
+} from "./shopify-inventory-write.error";
 import { providerRestIdentitySchema } from "../channel-identity.domain";
 import { ShopifyMarketplaceListingConnector } from "../listing-connectors/shopify-listing.connector";
 import type { QuantityPublicationAdmission } from "../../inventory-planning/application/quantity-publication-admission.port";
@@ -209,7 +215,9 @@ export class ShopifyAdapter implements IChannelAdapter {
           pushedQty: 0,
           status: "error",
           error: error instanceof Error ? error.message : String(error),
-          ...(error instanceof InventoryPublicationConfigurationError
+          // Permanent for this exact request: the outbox dead-letters it instead
+          // of retrying (configuration errors, and Shopify's 404/422 stock write).
+          ...(error instanceof InventoryPublicationConfigurationError || error instanceof ShopifyInventoryWriteRejectedError
             ? { errorCode: error.code, retryable: false }
             : {}),
         });
@@ -283,7 +291,7 @@ export class ShopifyAdapter implements IChannelAdapter {
     locationId: string,
     available: number,
   ): Promise<void> {
-    await this.shopifyPost(creds, "/inventory_levels/set.json", {
+    await this.shopifyPost(creds, SHOPIFY_INVENTORY_WRITE_PATH, {
       location_id: shopifyRestId(locationId, "location ID"),
       inventory_item_id: shopifyRestId(inventoryItemId, "inventory item ID"),
       available,
@@ -693,7 +701,7 @@ export class ShopifyAdapter implements IChannelAdapter {
     path: string,
     body?: any,
   ): Promise<any> {
-    if (method !== "GET" && path === "/inventory_levels/set.json") {
+    if (isShopifyInventoryWrite(method, path)) {
       if (!this.quantityAdmission) throw new Error("QUANTITY_PUBLICATION_ADMISSION_REQUIRED: Shopify quantity writes require an admitted owner.");
       return this.quantityAdmission.run({ destinationKind: "channel_connection", connectionId: creds.channelConnectionId!,
         providerKey: "shopify", providerScopeType: "location", externalScopeId: String(body.location_id),
@@ -736,7 +744,11 @@ export class ShopifyAdapter implements IChannelAdapter {
           await this.delay(backoff);
           continue;
         }
-        throw new Error(`Shopify API ${method} ${path} failed (${response.status}): ${errorBody}`);
+        const failure = `Shopify API ${method} ${path} failed (${response.status}): ${errorBody}`;
+        // Only the stock write's 404/422 are typed (permanent); every other answer keeps its plain Error.
+        const rejection = shopifyInventoryWriteRejectionCode(method, path, response.status);
+        if (rejection) throw new ShopifyInventoryWriteRejectedError(rejection, failure, response.status);
+        throw new Error(failure);
       }
 
       return await response.json();

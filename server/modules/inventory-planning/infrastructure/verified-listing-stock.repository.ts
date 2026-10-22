@@ -7,6 +7,7 @@ import { readPublicationStockSelection } from "./inventory-publication-selection
 import { prepareVerifiedStockMapping } from "./verified-listing-stock-mapping.repository";
 import { assertRecreatedListingStockReady, readRecreationStockScope, recordRecreationStockReceipt } from "./listing-recreation-stock.repository";
 import { PublicationMappingPreparationStore, applyMappingPreparation, mappingPreparationDigest, mappingTargetBlockers, readTargets, reviewMappingPreparation } from "./publication-mapping-preparation.repository";
+import { blockedOnlyByMissingStockLink } from "../application/inventory-availability-runtime-publication.service";
 export class PostgresVerifiedListingStockStore implements VerifiedListingStockStore {
     private readonly transactions: PublicationMappingPreparationStore;
     constructor(pool: Pick<Pool, "connect">) { this.transactions = new PublicationMappingPreparationStore(pool); }
@@ -63,10 +64,21 @@ export class PostgresVerifiedListingStockStore implements VerifiedListingStockSt
             if (!changed && !recreation)
                 return { state: "already_connected", dryRun, receipt: null, quantities: [] };
             const command = { publicationTargetId: target.id, expectedTargetRevision: target.revision, productId: owner.productId, productVariantIds: [input.productVariantId] };
-            const { review } = await reviewMappingPreparation(client, command, true);
+            const { review, targetRows } = await reviewMappingPreparation(client, command, true);
             if (!review.ready)
                 throw new InventoryPublicationMembershipError("STOCK_LISTING_ATP_NOT_READY", review.blockers.map(row => row.message).join(" "));
-            const receipt = await applyMappingPreparation(client, scopeKeys, { ...command, expectedReviewHash: review.reviewHash, idempotencyKey: `verified-stock:${requestHash}` }, actor, requestHash, now,
+            // Publish only this verified size. Each Walmart size links through its own
+            // verified listing, so a selected sibling that is not linked yet must not
+            // refuse this publication and roll the new link back (PLAN-CH-v3 PR1).
+            // That is the only sibling problem skipped. Any other sibling blocker makes
+            // every later fan-out withhold this whole destination (rowIsolatedVariantIds),
+            // which would freeze this size at its link-time quantity, so refuse as before.
+            const blockedSibling = targetRows.find(row => row.productVariantId !== input.productVariantId
+                && row.blockers.length > 0 && !blockedOnlyByMissingStockLink(row.blockers));
+            if (blockedSibling)
+                throw new InventoryPublicationMembershipError("STOCK_LISTING_ATP_NOT_READY",
+                    `Another size of this product (variant ${blockedSibling.productVariantId}) is not ready for this Walmart store: ${blockedSibling.blockers.map(row => row.message).join(" ")}`);
+            const receipt = await applyMappingPreparation(client, scopeKeys, { ...command, exactVariantScope: true, expectedReviewHash: review.reviewHash, idempotencyKey: `verified-stock:${requestHash}` }, actor, requestHash, now,
                 changed ? [input.productVariantId] : [], recreation ? [input.productVariantId] : []);
             if (recreation) await recordRecreationStockReceipt(client, recreation.id, target.id, input, actor, now);
             return { state: "connected", dryRun, receipt, quantities: review.quantities, ...(recreation ? { publicationState: "queued" as const } : {}) };
