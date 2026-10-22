@@ -1485,7 +1485,9 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
             buildMillsToRoundedCents(totalMills).toString(),
             unitMirror.toString(),
             totalMills.toString(),
-            input.occurredAt,
+            // COGS stores UTC wall time in a timestamp-without-time-zone column.
+            // Sending a Date would let pg serialize the Node runtime's timezone.
+            input.occurredAt.toISOString(),
             exactAllocation?.id ?? null,exactAllocation?.costs.poMills.toString() ?? null,
             exactAllocation?.costs.packagingMills.toString() ?? null,exactAllocation?.costs.landedMills.toString() ?? null,
           ],
@@ -1650,7 +1652,8 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
             (-buildMillsToRoundedCents(totalMills)).toString(),
             effectiveUnitMills.toString(),
             (-totalMills).toString(),
-            input.occurredAt,
+            // Match the positive COGS writer's explicit UTC timestamp contract.
+            input.occurredAt.toISOString(),
             exactReversal?.id ?? null,exactReversal?(-exactReversal.costs.poMills).toString():null,
             exactReversal?(-exactReversal.costs.packagingMills).toString():null,exactReversal?(-exactReversal.costs.landedMills).toString():null,
           ],

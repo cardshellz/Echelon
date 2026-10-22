@@ -36,12 +36,12 @@ dbDescribe.sequential("row isolation for a Dropship eBay destination, real Postg
      WHERE publication_target_id=$1 AND product_variant_id=$2 ORDER BY desired_revision`, [publicationTargetId, variantId])).rows;
   const decrementStock = (units: number) => database.pool.query(`UPDATE inventory.inventory_levels SET variant_qty=variant_qty-$1 WHERE product_variant_id=101;
     UPDATE inventory.inventory_lots SET qty_on_hand=qty_on_hand-$1 WHERE product_variant_id=101`.replaceAll("$1", String(units)));
-  const fanOutPreview = async () => {
+  const fanOutPreview = async (logger: typeof quiet = quiet) => {
     const client = await database.pool.connect();
     try {
       // Caller-owned publication requires SERIALIZABLE read-write; the dry run is rolled back.
       await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
-      const routed = await createTransactionScopedInventoryPublicationService(client, { logger: quiet })
+      const routed = await createTransactionScopedInventoryPublicationService(client, { logger })
         .publishProduct({ productId: F.productId, dryRun: true, triggeredBy: "row_isolation_test", blockedTargets: "isolate" },
           async () => { throw new Error("Canonical publication is required."); });
       await client.query("ROLLBACK");
@@ -107,17 +107,73 @@ dbDescribe.sequential("row isolation for a Dropship eBay destination, real Postg
     expect(await outbox(VARIANT_B)).toEqual([]);
   });
 
-  it("keeps whole-destination isolation for a channel destination with an unlinked selected row", async () => {
-    // The channel eBay destination (target 3) links 101 but not its selected sibling 102.
-    await sealDropshipMapping(database.pool, 3, F.variantId, "P5");
-    await database.pool.query(`INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status)
-      VALUES(2,67,102,'NEW','offer-NEW','listing-20','synced');
-      UPDATE channels.channel_listings SET external_product_id='listing-20',external_variant_id='offer-P5' WHERE id=1`);
-    const preview = await fanOutPreview();
-    expect(preview.rows.filter(row => row.publicationTargetId === 3)).toEqual([]);
-    expect(preview.blockedTargets?.find(entry => entry.publicationTargetId === 3)).toMatchObject({ isolation: "target",
-      errorCode: "CANONICAL_PUBLICATION_MAPPING_MISSING", productVariantIds: [VARIANT_B] });
-    // The Dropship destination is unaffected by the channel destination's isolation.
+  // Channels PR1 (PLAN-CH-v3 section 7, owner decision: one unlinked size must not freeze its
+  // linked sizes). Each channel destination below sells three sizes of product 20: 101 and 103
+  // are linked, 102 is selected but not linked. Every outbox row writes one item absolutely
+  // (Shopify item at one location, Walmart SKU at the ship node, eBay SKU), so the linked
+  // sizes publish and only 102 is withheld, logged and recorded. Any other blocker still
+  // withholds the whole destination.
+  const channelDestinations = [
+    { label: "Shopify location", targetId: 1, channelId: 35, items: { 101: "test-item", 103: "item-103" } },
+    { label: "Walmart ship node", targetId: 2, channelId: 36, items: { 101: "P5", 103: "UNCERTAIN" } },
+    { label: "Card Shellz eBay account", targetId: 3, channelId: 67, items: { 101: "P5", 103: "UNCERTAIN" } },
+  ] as const;
+  const sellThreeSizes = async (destination: typeof channelDestinations[number]) => {
+    if (destination.channelId === 67) {
+      await database.pool.query(`UPDATE channels.channel_listings SET external_product_id='listing-20',external_sku='P5' WHERE id=1;
+        INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status)
+        VALUES(2,67,102,'NEW','offer-NEW','listing-20','synced'),(3,67,103,'UNCERTAIN','offer-UNCERTAIN','listing-20','synced')`);
+    } else {
+      // Shopify and Walmart select a size through its active channel feed.
+      await database.pool.query(`INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id,is_active)
+        SELECT $1,v.id,v.sku,v.sku,1 FROM catalog.product_variants v
+        WHERE v.id IN (101,102,103) AND NOT EXISTS (SELECT 1 FROM channels.channel_feeds f WHERE f.channel_id=$1 AND f.product_variant_id=v.id)`,
+      [destination.channelId]);
+    }
+    await database.pool.query("UPDATE channels.channels SET status='active' WHERE id=$1", [destination.channelId]);
+    for (const [variantId, item] of Object.entries(destination.items)) {
+      const linked = await database.pool.query(`SELECT 1 FROM inventory.publication_variant_mapping_heads
+        WHERE publication_target_id=$1 AND product_variant_id=$2 AND active_mapping_id IS NOT NULL`, [destination.targetId, Number(variantId)]);
+      if (!linked.rowCount) await sealDropshipMapping(database.pool, destination.targetId, Number(variantId), item);
+    }
+    await database.pool.query(`UPDATE inventory.inventory_publication_targets SET state='live',revision=revision+1
+      WHERE id=$1 AND state<>'live'`, [destination.targetId]);
+  };
+
+  it.each(channelDestinations)("publishes the two linked sizes of a channel $label destination and withholds only the unlinked one", async (destination) => {
+    await sellThreeSizes(destination);
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const preview = await fanOutPreview(logger);
+    expect(preview.rows.filter(row => row.publicationTargetId === destination.targetId)
+      .map(row => [row.productVariantId, row.externalInventoryItemId])).toEqual([[101, destination.items[101]], [103, destination.items[103]]]);
+    expect(preview.blockedTargets?.filter(entry => entry.publicationTargetId === destination.targetId)).toEqual([expect.objectContaining({
+      errorCode: "CANONICAL_PUBLICATION_MAPPING_MISSING", blockerCodes: ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"],
+      productVariantIds: [VARIANT_B], isolation: "rows" })]);
+    // The withheld size stays visible: the run logs it by id. (A caller-owned transaction's
+    // publisher reports through warn, marked pending_commit; see its factory.)
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ event: "canonical_inventory_publication_target_isolated",
+      outcome: "rows_skipped", isolation: "rows", error_code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+      publicationTargetId: destination.targetId, productVariantIds: [VARIANT_B], transactionState: "pending_commit" }));
+    // The Dropship destination is unaffected.
+    expect(preview.rows.filter(row => row.publicationTargetId === targetId).map(row => row.productVariantId)).toEqual([F.variantId]);
+  });
+
+  it.each(channelDestinations)("still withholds the whole channel $label destination when a linked size has another blocker", async (destination) => {
+    await sellThreeSizes(destination);
+    // A quarantined saved channel identity of linked size 103 is a selection blocker, not a missing link.
+    // (eBay selects through its listing, so its feed row exists only to carry the quarantine.)
+    await database.pool.query(`INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id,is_active)
+      SELECT $1,103,'UNCERTAIN','UNCERTAIN',1 WHERE NOT EXISTS (SELECT 1 FROM channels.channel_feeds WHERE channel_id=$1 AND product_variant_id=103)`,
+    [destination.channelId]);
+    await database.pool.query("UPDATE channels.channel_feeds SET quarantined_at=transaction_timestamp() WHERE channel_id=$1 AND product_variant_id=103",
+      [destination.channelId]);
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const preview = await fanOutPreview(logger);
+    expect(preview.rows.filter(row => row.publicationTargetId === destination.targetId)).toEqual([]);
+    expect(preview.blockedTargets?.find(entry => entry.publicationTargetId === destination.targetId)).toMatchObject({ isolation: "target",
+      blockerCodes: ["CHANNEL_SELECTION_MAPPING_QUARANTINED", "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"], productVariantIds: [VARIANT_B, 103] });
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ event: "canonical_inventory_publication_target_isolated",
+      outcome: "target_skipped", isolation: "target", publicationTargetId: destination.targetId }));
     expect(preview.rows.filter(row => row.publicationTargetId === targetId).map(row => row.productVariantId)).toEqual([F.variantId]);
   });
 });

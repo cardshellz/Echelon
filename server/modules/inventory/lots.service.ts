@@ -517,6 +517,14 @@ export class InventoryLotService {
       }
     }
 
+    const clockValue = this.clock();
+    if (!(clockValue instanceof Date) || !Number.isFinite(clockValue.getTime())) {
+      throw new ValidationError("The lot-pick clock must return a valid date");
+    }
+    // Freeze one instant for quantity evidence and COGS. Drizzle serializes this
+    // Date as UTC, independently of the database session's timestamp default.
+    const occurredAt = new Date(clockValue.getTime());
+
     await lockInventoryCostGraph(this.db);
     const lots = await this.db
       .select()
@@ -572,7 +580,7 @@ export class InventoryLotService {
       // Every exact-cost consumption owns quantity intervals, including
       // replacement picks that intentionally do not post another COGS row.
       const exactAllocation = hasExactLotCostTotals(lotCostRecord(lot))
-        ? await allocateLotQuantityCost(this.db, lot.id, take, "system:lot-pick", this.clock(), {
+        ? await allocateLotQuantityCost(this.db, lot.id, take, "system:lot-pick", occurredAt, {
             orderId: params.orderId, orderItemId: params.orderItemId,
           })
         : null;
@@ -600,6 +608,7 @@ export class InventoryLotService {
           packagingTotalCostMills:exactAllocation?moneyToSafeNumber(exactAllocation.costs.packagingMills,"cogs.packagingTotal"):null,
           landedTotalCostMills:exactAllocation?moneyToSafeNumber(exactAllocation.costs.landedMills,"cogs.landedTotal"):null,
           costPrecisionVersion: 1,
+          createdAt: occurredAt,
         });
       }
 

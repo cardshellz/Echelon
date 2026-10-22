@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { saveChannelSyncSelection, assertSyncSelection } from "./save-channel-sync-selection";
 import {
   CHANNEL_SYNC_BATCH_LIMIT,
   startChannelSyncBatchSchema,
@@ -8,7 +9,6 @@ import {
   ChannelSyncAdmissionRefused,
   ChannelSyncBatchError,
   projectSyncBatch,
-  savedSyncBatchSchema,
   type SyncAdmissionRefusal,
   type SavedSyncBatch,
   type SyncCommandStatus,
@@ -17,7 +17,7 @@ import {
 } from "../domain/channel-sync-batch";
 
 export interface ChannelSyncBatchAdapter {
-  select(channelId: number): Promise<{
+  select(channelId: number, productIds?: number[]): Promise<{
     destination: SyncDestination;
     products: Omit<SyncBatchMember, "commandKey">[];
   }>;
@@ -62,13 +62,13 @@ export class ChannelSyncBatchService {
   ): Promise<ChannelSyncBatch> {
     channelIdSchema.parse(channelId);
     actor = z.string().trim().min(1).max(200).parse(actor);
-    const { commandKey } = startChannelSyncBatchSchema.parse(input);
+    const { commandKey, productIds } = startChannelSyncBatchSchema.parse(input);
     const prior = await this.deps.store.get(commandKey);
     if (prior) {
-      this.assertRequester(prior, channelId, actor);
+      assertSyncSelection(prior, channelId, actor, productIds);
       return this.project(prior);
     }
-    const selection = await this.deps.adapter(channelId).select(channelId);
+    const selection = await this.deps.adapter(channelId).select(channelId, productIds);
     if (selection.destination.channelId !== channelId)
       throw new ChannelSyncBatchError(
         "SYNC_DESTINATION_INVALID",
@@ -80,21 +80,11 @@ export class ChannelSyncBatchService {
         "This selection exceeds the maximum saved batch size. Contact an administrator before retrying.",
         422,
       );
-    const batch = savedSyncBatchSchema.parse({
-      id: commandKey,
-      destination: selection.destination,
-      actor,
-      createdAt: this.deps.now().toISOString(),
-      admissionCompletedAt: null,
-      admissionError: null,
-      members: selection.products.map((product) => ({
-        ...product,
-        commandKey: this.deps.uuid(),
-      })),
-    });
-    // A concurrent replay returns the winner's immutable selection and keys.
-    const saved = await this.deps.store.create(batch);
-    this.assertRequester(saved, channelId, actor);
+    if (productIds && (selection.products.length !== productIds.length
+      || selection.products.some(product => !productIds.includes(product.productId))))
+      throw new ChannelSyncBatchError("SYNC_SELECTION_UNAVAILABLE", "A selected product no longer exists. Refresh the listing feed.", 422);
+    const saved = await saveChannelSyncSelection({ commandKey, actor, destination: selection.destination,
+      products: selection.products, requestedProductIds: productIds, now: this.deps.now(), uuid: this.deps.uuid }, this.deps.store);
     return this.project(saved);
   }
 
@@ -226,17 +216,5 @@ export class ChannelSyncBatchService {
         this.deps.now(),
       );
     }
-  }
-
-  private assertRequester(
-    batch: SavedSyncBatch,
-    channelId: number,
-    actor: string,
-  ): void {
-    if (batch.destination.channelId !== channelId || batch.actor !== actor)
-      throw new ChannelSyncBatchError(
-        "SYNC_BATCH_REPLAY_CONFLICT",
-        "This request key belongs to another channel or requester.",
-      );
   }
 }

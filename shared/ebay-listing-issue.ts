@@ -389,9 +389,20 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
         : "Retry this product. Echelon checks the saved request and existing listing before sending another update.",
       input.state !== "recovering", input.state === "recovering" ? "check_status" : "retry_sync",
       input.state === "recovering" ? "View update status" : "Retry this product");
+  if (code === "CHANNEL_SYNC_PRODUCT_INACTIVE")
+    return issue("Activate this product", "The catalog product is archived or inactive.",
+      "Open the product, activate it, then return here and Sync.", false, "edit_listing", "Open product", productPath);
+  if (code === "CHANNEL_SYNC_PRODUCT_EXCLUDED")
+    return issue("Include this product", "This product or its product type is excluded from the channel.",
+      "Enable the product and its type in this listing feed. Including the product saves a sync request automatically.",
+      false, "edit_listing", "Review inclusion", "/channels/ebay");
+  if (code === "CHANNEL_SYNC_VARIANTS_REQUIRED")
+    return issue("Include a sellable variant", "No active, sellable variants are included for this product.",
+      "Expand the product's variant settings and include the variants you intend to sell, then Sync.",
+      false, "edit_listing", "Review variants", "/channels/ebay");
   if (["EBAY_SYNC_PRODUCT_NOT_ELIGIBLE", "EBAY_SYNC_CONTENT_SCOPE_EMPTY"].includes(code))
     return issue("Review which variants are included", "This product has no eligible existing listing update.",
-      "Check the product and variant inclusion switches in the eBay listing feed. Enable the intended sellable variants; use Publish for a product without an existing eBay listing.",
+      "Check the product and variant inclusion switches in the eBay listing feed. Enable the intended sellable variants, then Sync. Sync creates a missing listing after checking the channel and updates an existing listing.",
       false, "edit_listing", "Open listing feed", "/channels/ebay");
   if (["EBAY_SHIPPING_POLICY_REJECTED", "EBAY_POLICY_UNAVAILABLE", "EBAY_POLICY_REQUIRED"].includes(code)) {
     const source = input.policySource;

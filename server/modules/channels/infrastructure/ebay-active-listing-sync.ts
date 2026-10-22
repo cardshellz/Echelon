@@ -69,7 +69,7 @@ export interface SyncFilter {
   productTypeSlugs?: string[];
   variantIds?: number[];
 }
-const filterSchema = z
+export const syncFilterSchema = z
   .object({
     productIds: z.array(z.number().int().positive().max(2147483647)).max(500).optional(),
     productTypeSlugs: z.array(z.string().min(1).max(200)).max(500).optional(),
@@ -514,18 +514,10 @@ export const ebayListingSyncService = new EbayListingSyncService(
   randomUUID,
   ebayPublicationReconciliationRepository,
 );
-/** Batch selection uses exactly the same eligibility owner as manual Sync. */
-export async function selectActiveEbaySyncProducts() {
-  const ctx = await context();
-  const rows = await readActiveEbaySyncRows(null);
-  const selected = new Map(rows.map(row => [row.product_id, {
-    productId: row.product_id, name: row.product_name ?? row.product_sku ?? `Product ${row.product_id}`, sku: row.product_sku,
-  }]));
-  return {
-    destination: { channelId: EBAY_CHANNEL_ID, provider: "ebay", connectionId: ctx.conn.id,
-      accountId: ctx.account.externalAccountId, environment: ctx.authService.getEnvironment(), marketplaceId: ctx.marketplaceId },
-    products: [...selected.values()],
-  };
+export async function readEbaySyncDestination(options: MappingSourceReadOptions = {}) {
+  const ctx = await context(options.database, options.authService);
+  return { channelId: EBAY_CHANNEL_ID, provider: "ebay", connectionId: ctx.conn.id,
+    accountId: ctx.account.externalAccountId, environment: ctx.authService.getEnvironment(), marketplaceId: ctx.marketplaceId };
 }
 export async function syncActiveListings(
   filter: SyncFilter | null,
@@ -533,8 +525,9 @@ export async function syncActiveListings(
   commandKey?: string,
   expectedDestination?: { connectionId: number; accountId: string; environment?: "production" | "sandbox"; marketplaceId?: string },
   commandKeys?: ReadonlyMap<number, string>,
+  options: { inspectRetainedIdentity?: boolean } = {},
 ): Promise<EbayProductSyncResult> {
-  filter = filterSchema.parse(filter);
+  filter = syncFilterSchema.parse(filter);
   const validatedActor = z.string().trim().min(1).max(200).parse(actor);
   if (commandKey !== undefined) z.string().uuid().parse(commandKey);
   if (commandKeys) {
@@ -553,7 +546,11 @@ export async function syncActiveListings(
       || (expected.marketplaceId !== undefined && ctx.marketplaceId !== expected.marketplaceId))
       throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The eBay connection changed. The earlier recovery cannot update a different account.");
   }
-  const selected = await readActiveEbaySyncRows(filter);
+  // Explicit shared Sync requests inspect retained identities even if the saved
+  // projection says ended/deleted. The worker observes the provider before any
+  // update or reviewed replacement. Recurring stock maintenance keeps its
+  // existing candidate predicate and cannot request new publication.
+  const selected = await readActiveEbaySyncRows(filter, options.inspectRetainedIdentity === true);
   const selectedProductIds = [...new Set(selected.map(row => row.product_id))];
   const requestedProductIds = [...new Set(filter?.productIds ?? [])];
   const absentProductIds = requestedProductIds.filter(id => !selectedProductIds.includes(id));
