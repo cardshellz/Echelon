@@ -136,6 +136,8 @@ asynchronous refusal, refunds, rewards outages, hold cleanup and worker restart.
 The existing PostgreSQL warehouse suite additionally exercises cancellation
 proofs and transactional completion. Club's PostgreSQL CI suite covers consumed
 points conservation, concurrent replay, code disablement and projection rollback.
+The account order-context suite is registered in the shared PostgreSQL CI manifest;
+it verifies read-only scope, legacy identities and natural lookup-index use.
 
 The theme suite runs the compiled bundle with the actual Liquid templates and
 native reorder methods. It covers desktop/390px/320px drawer geometry, keyboard
