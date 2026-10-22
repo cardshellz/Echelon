@@ -5,6 +5,7 @@ import type {
   OrderEditOrder,
 } from "../../shared/order-edits/order-edit.contract";
 import type { CustomerAccountRequest } from "../../shared/customer-account/customer-account.contract";
+import type { CustomerAccountOrderSummaries } from "../../shared/customer-account/customer-account-orders";
 
 const id = "00000000-0000-4000-8000-000000000001";
 const paymentUrl = "https://fixture.myshopify.com/pay-difference";
@@ -72,6 +73,25 @@ const order: OrderEditOrder = {
     },
   ],
 };
+function summaries(
+  totalCents = order.totalCents,
+): CustomerAccountOrderSummaries {
+  return {
+    orders: [
+      {
+        externalOrderId: "99",
+        orderReference: order.orderNumber,
+        omsOrderId: order.omsOrderId,
+        currency: order.currency,
+        totalCents,
+        financialStatus: "Paid",
+        cancelled: false,
+      },
+    ],
+    unavailableExternalOrderIds: [],
+    statusUnavailable: false,
+  };
+}
 function operation(
   status: OrderEditOperation["status"] = "awaiting_payment",
 ): OrderEditOperation {
@@ -116,11 +136,15 @@ function operation(
     error: null,
   };
 }
-async function setup(page: Page, options: {
-  openEditor?: boolean;
-  orderRead?: () => Promise<OrderEditOrder | null>;
-  customerId?: string;
-} = {}) {
+async function setup(
+  page: Page,
+  options: {
+    openEditor?: boolean;
+    orderRead?: () => Promise<OrderEditOrder | null>;
+    summaryRead?: () => Promise<CustomerAccountOrderSummaries | null>;
+    customerId?: string;
+  } = {},
+) {
   await page.clock.install({ time: new Date("2026-10-21T12:00:00Z") });
   const requests: CustomerAccountRequest[] = [];
   const errors: string[] = [];
@@ -163,20 +187,45 @@ async function setup(page: Page, options: {
           },
         },
       });
-    if (input.path === "/account/resolve")
-      return route.fulfill({
-        json: { connectionId: 4, omsOrderId: 1, externalOrderId: "99" },
+    if (input.path === "/account/order-summaries") {
+      expect(input.method).toBe("POST");
+      expect(input.commandKey).toBeUndefined();
+      expect(input.body).toEqual({
+        orders: [{ externalOrderId: "99", orderReference: "#fixture" }],
       });
+      const result = options.summaryRead
+        ? await options.summaryRead()
+        : summaries();
+      return result
+        ? route.fulfill({ json: result })
+        : route.fulfill({
+            status: 503,
+            json: {
+              error: {
+                code: "ORDER_READ_UNAVAILABLE",
+                message: "Synthetic summary read failure",
+              },
+            },
+          });
+    }
     if (input.path === "/returns/returns")
       return route.fulfill({
         json: { returns: [], nextBeforeAuthorizationId: null },
       });
     if (input.path === "/order-edits/orders/1") {
-      const currentOrder = options.orderRead ? await options.orderRead() : order;
-      if (!currentOrder) return route.fulfill({
-        status: 503,
-        json: { error: { code: "ORDER_READ_UNAVAILABLE", message: "Synthetic order read failure" } },
-      });
+      const currentOrder = options.orderRead
+        ? await options.orderRead()
+        : order;
+      if (!currentOrder)
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              code: "ORDER_READ_UNAVAILABLE",
+              message: "Synthetic order read failure",
+            },
+          },
+        });
       return route.fulfill({
         json: { ...currentOrder, activeOperationId: activeOperation },
       });
@@ -222,7 +271,7 @@ async function setup(page: Page, options: {
     <body><main data-csz-customer-account><div data-csz-account-tools-status></div>
       <article data-csz-account-order data-order-reference="#fixture" data-external-order-id="99" data-fulfillment="unfulfilled" data-cancelled="false">
         <span data-csz-order-total role="status"></span>
-        <button data-csz-account-action="edit" hidden>Edit order</button><p data-csz-order-tools-status></p>
+        <span data-csz-order-panel-trigger></span><p data-csz-order-tools-status></p>
       </article><div id="csz-customer-account-tools"></div></main>
       <script id="csz-customer-account-config" type="application/json">${JSON.stringify({ themeId: "174740308127", customerId: options.customerId ?? "100", proxyPath: "/apps/echelon-returns" })}</script>
       <script type="module" src="/@fs/${resolve(process.cwd(), "client/src/customer-account/entry.tsx").replaceAll("\\", "/")}"></script>
@@ -231,7 +280,12 @@ async function setup(page: Page, options: {
   );
   await page.goto("/account?preview_theme_id=174740308127");
   if (options.openEditor !== false) {
-    await page.getByRole("button", { name: "Edit order", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Manage order #fixture", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Continue order update", exact: true })
+      .click();
     await expect(
       page.getByRole("link", { name: "Pay the difference", exact: true }),
     ).toBeVisible();
@@ -268,7 +322,7 @@ async function setup(page: Page, options: {
           (request) =>
             ![
               "/account/bootstrap",
-              "/account/resolve",
+              "/account/order-summaries",
               "/returns/returns",
               "/order-edits/orders/1",
               `/order-edits/operations/${id}`,
@@ -285,28 +339,39 @@ async function setup(page: Page, options: {
   };
 }
 
-test("account totals wait for the owned current financial facts without submitting an edit", async ({ page }) => {
+test("account totals wait for the owned current financial facts without submitting an edit", async ({
+  page,
+}) => {
   let release!: () => void;
-  const pending = new Promise<void>(resolve => { release = resolve; });
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   const fixture = await setup(page, {
     openEditor: false,
-    orderRead: async () => {
+    summaryRead: async () => {
       await pending;
-      return { ...order, totalCents: after.totalCents, financials: after };
+      return summaries(after.totalCents);
     },
   });
   const total = page.locator("[data-csz-order-total]");
   await expect(total).toHaveText("Checking total…");
   release();
   await expect(total).toHaveText("$10.76 USD");
+  expect(
+    fixture.requests.filter((request) =>
+      request.path.startsWith("/order-edits/"),
+    ),
+  ).toEqual([]);
   fixture.assertNoFinancialCommands();
 });
 
-test("account totals recover from a failed current read through an explicit read-only retry", async ({ page }) => {
+test("account totals recover from a failed current read through an explicit read-only retry", async ({
+  page,
+}) => {
   let reads = 0;
   const fixture = await setup(page, {
     openEditor: false,
-    orderRead: async () => ++reads === 1 ? null : order,
+    summaryRead: async () => (++reads === 1 ? null : summaries()),
   });
   const total = page.locator("[data-csz-order-total]");
   await expect(total).toHaveText("Total unavailable");
@@ -316,13 +381,50 @@ test("account totals recover from a failed current read through an explicit read
   fixture.assertNoFinancialCommands();
 });
 
-test("account totals leave the loading state when startup configuration is invalid", async ({ page }) => {
+test("account totals leave the loading state when startup configuration is invalid", async ({
+  page,
+}) => {
   const fixture = await setup(page, { openEditor: false, customerId: "" });
-  await expect(page.locator("[data-csz-order-total]")).toHaveText("Total unavailable");
-  await expect(page.getByRole("alert")).toHaveText("Order options could not be loaded. Please refresh this page.");
+  await expect(page.locator("[data-csz-order-total]")).toHaveText(
+    "Total unavailable",
+  );
+  await expect(page.getByRole("alert")).toHaveText(
+    "Order options could not be loaded. Please refresh this page.",
+  );
   expect(fixture.requests).toEqual([]);
   fixture.assertNoFinancialCommands();
 });
+
+for (const mismatch of [
+  { name: "native identity", value: { externalOrderId: "98" } },
+  { name: "order reference", value: { orderReference: "#other" } },
+  { name: "negative amount", value: { totalCents: -1 } },
+  { name: "unsafe amount", value: { totalCents: Number.MAX_SAFE_INTEGER + 1 } },
+]) {
+  test(`account totals reject an invalid ${mismatch.name}`, async ({
+    page,
+  }) => {
+    const fixture = await setup(page, {
+      openEditor: false,
+      summaryRead: async () => {
+        const response = summaries();
+        return {
+          ...response,
+          orders: [{ ...response.orders[0], ...mismatch.value }],
+        };
+      },
+    });
+    await expect(page.locator("[data-csz-order-total]")).toHaveText(
+      "Total unavailable",
+    );
+    expect(
+      fixture.requests.filter((request) =>
+        request.path.startsWith("/order-edits/"),
+      ),
+    ).toEqual([]);
+    fixture.assertNoFinancialCommands();
+  });
+}
 
 for (const mismatch of [
   { name: "connection", value: { connectionId: 5 } },
@@ -330,16 +432,64 @@ for (const mismatch of [
   { name: "order number", value: { orderNumber: "#other" } },
   { name: "financial total", value: { totalCents: 830 } },
 ]) {
-  test(`account totals reject a mismatched ${mismatch.name}`, async ({ page }) => {
+  test(`order management rejects a mismatched ${mismatch.name} without discarding the verified native total`, async ({
+    page,
+  }) => {
     const fixture = await setup(page, {
       openEditor: false,
       orderRead: async () => ({ ...order, ...mismatch.value }),
     });
-    await expect(page.locator("[data-csz-order-total]")).toHaveText("Total unavailable");
-    await expect(page.getByRole("button", { name: "Edit order", exact: true })).toBeHidden();
+    await expect(page.locator("[data-csz-order-total]")).toHaveText(
+      "$8.29 USD",
+    );
+    await page
+      .getByRole("button", { name: "Manage order #fixture", exact: true })
+      .click();
+    await expect(page.getByRole("alert")).toContainText(
+      "Some order options couldn’t be loaded.",
+    );
+    await expect(
+      page.getByRole("button", { name: "Edit order", exact: true }),
+    ).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: "Continue order update", exact: true }),
+    ).toBeHidden();
+    await expect(page.locator("[data-csz-order-total]")).toHaveText(
+      "$8.29 USD",
+    );
     fixture.assertNoFinancialCommands();
   });
 }
+
+test("closing order options preserves the account session and totals without new reads", async ({
+  page,
+}) => {
+  const fixture = await setup(page, { openEditor: false });
+  await expect(page.locator("[data-csz-order-total]")).toHaveText("$8.29 USD");
+  await page
+    .getByRole("button", { name: "Manage order #fixture", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Continue order update", exact: true }),
+  ).toBeVisible();
+  const reads = fixture.requests.length;
+  await page
+    .getByRole("button", { name: "Close order options", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.locator("[data-csz-order-total]")).toHaveText("$8.29 USD");
+  await page.clock.fastForward(5000);
+  expect(fixture.requests).toHaveLength(reads);
+  expect(
+    fixture.requests.filter((request) => request.path === "/account/bootstrap"),
+  ).toHaveLength(1);
+  expect(
+    fixture.requests.filter(
+      (request) => request.path === "/account/order-summaries",
+    ),
+  ).toHaveLength(1);
+  fixture.assertNoFinancialCommands();
+});
 
 test("payment stays in the same tab and the verified completed edit reopens after returning", async ({
   page,
@@ -362,7 +512,9 @@ test("payment stays in the same tab and the verified completed edit reopens afte
   await expect(
     page.getByText("Your order has been updated.", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText('Payment deadline:',{exact:false})).toHaveCount(0);
+  await expect(
+    page.getByText("Payment deadline:", { exact: false }),
+  ).toHaveCount(0);
   await page.screenshot({
     path: resolve(
       process.cwd(),
