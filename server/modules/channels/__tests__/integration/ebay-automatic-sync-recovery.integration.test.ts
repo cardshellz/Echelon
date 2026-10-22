@@ -86,7 +86,7 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
       "0732_ebay_listing_sync_identity_admission.sql",
       "0736_ebay_listing_mapping_repairs.sql",
       "0737_ebay_publication_completion.sql",
-      "0741_ebay_durable_withdrawal.sql",
+      "0741_ebay_durable_withdrawal.sql", "900000021000018880001_channel_lifecycle_recovery.sql", "900000023000018880003_listing_work_settlement.sql",
     ]) await database.pool.query(readFileSync(resolve("migrations", file), "utf8"));
     await database.pool.query(`ALTER TABLE channels.channel_listings
       ADD COLUMN last_synced_price integer, ADD COLUMN last_synced_qty integer,

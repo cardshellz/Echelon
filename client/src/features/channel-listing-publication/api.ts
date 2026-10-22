@@ -13,10 +13,10 @@ export async function publicationRequest<T>(
   } catch (error) {
     if (!(error instanceof Error))
       throw new Error("The channel request failed. Please try again.");
-    const match = /^\d{3}: ([\s\S]+)$/.exec(error.message);
+    const match = /^(\d{3}): ([\s\S]+)$/.exec(error.message);
     if (match) {
       try {
-        const body: unknown = JSON.parse(match[1]);
+        const body: unknown = JSON.parse(match[2]);
         if (body && typeof body === "object") {
           const record = body as Record<string, unknown>;
           const message =
@@ -25,7 +25,7 @@ export async function publicationRequest<T>(
               : typeof record.error === "string"
                 ? record.error
                 : null;
-          if (message) throw new PublicationRequestError(message);
+          if (message) throw new PublicationRequestError(message, Number(match[1]), typeof record.code === "string" ? record.code : undefined);
         }
       } catch (parsed) {
         if (parsed instanceof PublicationRequestError) throw parsed;
@@ -52,4 +52,6 @@ export async function publicationRequest<T>(
   return result.data;
 }
 
-class PublicationRequestError extends Error {}
+export class PublicationRequestError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) { super(message); }
+}

@@ -195,10 +195,9 @@ export class PostgresEbayListingMappingRepairRepository implements EbayListingMa
     if (receipt.channel_id !== lookup.channelId || receipt.product_id !== lookup.productId
       || (lookup.requestHash !== undefined && receipt.request_hash !== lookup.requestHash)
       || (lookup.actor !== undefined && receipt.actor !== lookup.actor)) throw replayConflict();
-    const row = (await db.query(`SELECT id::text,product_id AS "productId",operation,state,error_code AS code,error_message AS message,
-      next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt" FROM channels.ebay_listing_sync_jobs WHERE id=$1`, [receipt.job_id])).rows[0];
+    const row = await this.sync.readSavedJob(receipt.job_id, db);
     if (!row) throw new EbayListingSyncError("EBAY_MAPPING_PERSISTENCE_FAILED", "The saved mapping repair is missing its follow-up sync request. Ask support to inspect the repair receipt.");
-    const job = ebayListingSyncJobSchema.parse({ ...row, nextAttemptAt: row.nextAttemptAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
+    const job = ebayListingSyncJobSchema.parse(row);
     return ebayListingMappingResultSchema.parse({ repairStatus: "queued",job,replayed:true,
       receipt: { commandKey: receipt.command_key, productId: receipt.product_id, reviewHash:receipt.review_hash, appliedAt: receipt.applied_at.toISOString() } });
   }

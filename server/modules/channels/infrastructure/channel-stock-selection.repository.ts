@@ -79,11 +79,25 @@ export async function readChannelStockSelectionFacts(client: StockSelectionQuery
   return facts;
 }
 
+import { hasListingWorkObligation, type ListingWorkPhase } from "../../marketplace-listings/domain/listing-work-obligation";
+
 /** The sync owner explicitly supersedes only idle jobs without a publication
  * barrier. Those retained historical refusals carry no remaining execution duty. */
 export async function hasOutstandingEbayListingWork(client: StockSelectionQueryClient,
   input: {channelId:number;connectionId:number;productId:number}):Promise<boolean> {
-  const rows=await client.query("SELECT 1 FROM channels.ebay_listing_sync_jobs WHERE channel_id=$1 AND connection_id=$2 AND product_id=$3 AND state<>'completed' AND error_code IS DISTINCT FROM 'EBAY_SYNC_SOURCE_SUPERSEDED' LIMIT 1",
+  return (await readOutstandingEbayListingWork(client,input)).length>0;
+}
+
+export async function readOutstandingEbayListingWork(client: StockSelectionQueryClient,
+  input: {channelId:number;connectionId:number;productId:number}) {
+  const rows = await client.query<{ id:string; operation:string; state:string; error_code:string|null; settled:boolean }>(
+    `SELECT j.id::text,j.operation,j.state,j.error_code,
+      EXISTS(SELECT 1 FROM channels.ebay_listing_sync_settlements s WHERE s.failed_job_id=j.id) settled
+      FROM channels.ebay_listing_sync_jobs j WHERE channel_id=$1 AND connection_id=$2 AND product_id=$3`,
     [id.parse(input.channelId),id.parse(input.connectionId),id.parse(input.productId)]);
-  return rows.rows.length>0;
+  return rows.rows.filter(row => {
+    const phase: ListingWorkPhase = row.settled || row.error_code === "EBAY_SYNC_SOURCE_SUPERSEDED" ? "settled"
+      : row.state === "completed" ? "completed" : row.state === "needs_attention" ? "attention" : "pending";
+    return hasListingWorkObligation(phase);
+  });
 }

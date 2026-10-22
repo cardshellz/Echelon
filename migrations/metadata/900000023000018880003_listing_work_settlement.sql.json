@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000023000018880003_listing_work_settlement.sql",
+  "generation": 23,
+  "pr": 1888,
+  "ordinal": 3,
+  "after": [
+    "900000022000018880002_listing_member_recovery.sql"
+  ]
+}

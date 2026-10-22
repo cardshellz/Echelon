@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000021000018880001_channel_lifecycle_recovery.sql",
+  "generation": 21,
+  "pr": 1888,
+  "ordinal": 1,
+  "after": [
+    "900000020000018840001_shared_publication_recovery.sql"
+  ]
+}
