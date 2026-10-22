@@ -1065,6 +1065,9 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       })] })],
     }));
     const statements = fake.query.mock.calls.map(([text]) => String(text));
+    const movementEvidenceQuery = statements.find((text) =>
+      text.includes("FROM inventory.availability_claim_pick_movements"));
+    expect(movementEvidenceQuery).toContain("movement.order_item_cost_id");
     expect(statements.findIndex((text) => text.startsWith("UPDATE wms.order_items")))
       .toBeLessThan(statements.findIndex((text) => text.startsWith("INSERT INTO inventory.availability_claim_commands")));
     expect(fake.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
