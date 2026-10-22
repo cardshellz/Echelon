@@ -111,7 +111,8 @@ export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, o
               : "No unresolved request is currently recorded for this product. Retry Publish to check its existing eBay offers and finish setup using current inventory."}</p>}
             {recovery.data.attempts.map((attempt) => <section key={attempt.attemptId} className="rounded-md border p-3 space-y-2">
               <h3 className="font-medium break-words">{attempt.skus.join(", ")} · Attempt {attempt.attemptId}</h3>
-              <p>The final outcome of this earlier quantity request has not been resolved.</p>
+              <p>The final outcome of this earlier channel update has not been resolved.</p>
+              {attempt.requests.length === 0 && <p>No request or response receipt was retained by the older workflow. Echelon cannot prove whether it reached eBay. Recovery keeps that uncertainty in the audit history and requests a fresh check using current values.</p>}
               <details className="text-xs text-muted-foreground">
                 <summary className="cursor-pointer py-1">Recorded response details</summary>
                 <p className="py-1">State: {attempt.state} · Started {new Date(attempt.startedAt).toLocaleString()}</p>
@@ -124,6 +125,7 @@ export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, o
               </details>
             </section>)}
             {recovery.data.blockReason === "active_request" && <p>A request may still be running. Wait for it to finish, then refresh these details.</p>}
+            {recovery.data.blockReason === "unsupported_owner" && <p>This request belongs to another publication workflow. Its owning workflow must finish or recover it before this listing can resume.</p>}
             {recovery.data.blockReason === "broader_scope" && <p>This request also affects other listings. An inventory administrator must review all affected listings before resuming it. Share the attempt references above.</p>}
             {!recovery.data.canRecover && (recovery.data.attempts.length > 0 || publicationRetry) && <p>An inventory administrator must authorize this recovery. Share {publicationRetry ? `saved ${withdrawal ? "removal" : "publishing"} request ${jobId}` : "the attempt references above"} with them.</p>}
             {recovery.data.canResume && recovery.data.canRecover && operationKnown && <div className="space-y-3 rounded-md border border-amber-300 p-3">

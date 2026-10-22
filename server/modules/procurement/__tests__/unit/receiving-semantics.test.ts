@@ -547,6 +547,7 @@ describe("ReceivingService - close reconciliation semantics", () => {
           return { rows: [{ id: order.id }] };
         }
         if (text.includes("procurement.receiving_custody_fence")) return { rows: [{ singleton: true }] };
+        if (text.includes("with purchase_lines as materialized")) return { rows: [{ observations: [], acceptances: [], unidentifiedAcceptances: [] }] };
         if (text.includes("procurement.receiving_quarantine_")) return { rows: [] };
         if (text.includes("units_per_variant")) {
           return { rows: [{ id: 5, product_id: 1, units_per_variant: 1, is_active: true }] };
@@ -624,6 +625,9 @@ describe("ReceivingService - close reconciliation semantics", () => {
     const tx = {
       execute: vi.fn(async (query: any) => {
         const text = sqlToStr(query);
+        if (text.includes("with receipt_rows as materialized")) return { rows: [{
+          receivingLines: [], postedReceipts: [], reversals: [], custodyObservations: [], custodyAcceptances: [],
+        }] };
         if (text.includes("from procurement.receiving_orders") && text.includes("for update")) {
           return { rows: [{ id: order.id }] };
         }
@@ -636,6 +640,8 @@ describe("ReceivingService - close reconciliation semantics", () => {
         if (text.includes("from procurement.purchase_orders")) return { rows: [{ status: "sent" }] };
         if (text.includes("from procurement.inbound_shipments")) return { rows: [{ status: "delivered" }] };
         if (text.includes("from procurement.inbound_shipment_lines")) {
+          if (text.includes('as "qtyshipped"')) return { rows: lines.map(line => ({ id: line.id,
+            purchaseOrderId: 1, purchaseOrderLineId: line.id, qtyShipped: line.expectedQty })) };
           if (text.includes('as "inboundshipmentid"')) return { rows: lines.map((line) => ({ id: line.id, inboundShipmentId: 84,
             purchaseOrderId: 1, purchaseOrderLineId: line.id })) };
           const sourceId = new PgDialect().sqlToQuery(query).params[0];

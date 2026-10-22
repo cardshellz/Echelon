@@ -52,6 +52,10 @@ import type {
 import type {
   DropshipEbayManagedLocationProvider,
 } from "../application/dropship-ebay-managed-location-service";
+import type { DropshipEbayStockReadinessPort } from "../application/dropship-ebay-stock-readiness-port";
+import {
+  PUBLICATION_SCOPE_BUSY_BACKOFF_MS, PUBLICATION_SCOPE_BUSY_CODE, stockLinkError, stockLinkRefusal,
+} from "../domain/stock-link-readiness";
 
 type FetchLike = typeof fetch;
 interface Clock {
@@ -108,6 +112,25 @@ const EBAY_BASE_URLS = {
   production: "https://api.ebay.com",
 } as const;
 
+/** Collaborators added after the positional ones; every field is optional at construction. */
+export interface EbayDropshipListingPushProviderOptions {
+  /**
+   * Required for every eBay listing push (pushListing refuses without it, like the
+   * fulfillment policy guard and managed locations): under canonical authority a
+   * live managed listing needs its stock link before the first eBay write. The
+   * replacement composition builds this provider without it and never pushes.
+   */
+  readonly stockReadiness?: DropshipEbayStockReadinessPort;
+  /** Injected wait for the bounded PUBLICATION_SCOPE_BUSY retry (tests pass a recorder). */
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly logger?: { debug(event: Record<string, unknown>): void; warn(event: Record<string, unknown>): void };
+}
+
+const defaultScopeBusyLogger = {
+  debug: (event: Record<string, unknown>) => console.debug(JSON.stringify({ level: "debug", ...event })),
+  warn: (event: Record<string, unknown>) => console.warn(JSON.stringify({ level: "warn", ...event })),
+};
+
 export class EbayDropshipListingPushProvider implements DropshipMarketplaceListingPushProvider {
   private readonly tokenOwner: DropshipEbayTokenOwner;
   private readonly listingConnector = new EbayMarketplaceListingConnector();
@@ -121,6 +144,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     private readonly managedLocations?: DropshipEbayManagedLocationProvider,
     private readonly quantityAdmission?: (credential: DropshipMarketplaceStoreCredentials) => EbayQuantityRequestAdmission,
     private readonly existingPublication?: DropshipEbayPushPublicationReader,
+    private readonly options: EbayDropshipListingPushProviderOptions = {},
   ) {
     this.tokenOwner = new DropshipEbayTokenOwner({ credentials, fetchFn: fetchImpl, clock });
   }
@@ -128,11 +152,15 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
   async pushListing(
     input: DropshipMarketplaceListingPushRequest,
   ): Promise<DropshipMarketplaceListingPushResult> {
+    const stockReadiness = this.requiredStockReadiness();
     const credential = await this.tokenOwner.loadFreshForStoreConnection({
       vendorId: input.vendorId,
       storeConnectionId: input.storeConnectionId,
       operation: "listing_push",
     });
+    // Before any eBay call: legacy authority returns at once; canonical authority
+    // refuses a positive push of a store that is not live + managed (plan F2 2.8).
+    const stock = await stockReadiness.begin({ request: input, credential });
     const config = {
       ...parseEbayListingConfig(
         input.listingIntent.marketplaceConfig,
@@ -152,11 +180,22 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     );
     // The shared connector refuses with EbayListingSyncError, which the worker
     // cannot classify; see rethrowConnectorFailure.
+    const sku = draft.inventoryItems[0]?.sku;
     const connectorResult = await this.listingConnector.pushListing({
-      client: this.createConnectorClient({ credential, config, baseUrl }),
+      client: this.createConnectorClient({ credential, config, baseUrl, correlation: {
+        job_id: input.jobId, job_item_id: input.jobItemId, listing_id: input.listingId, product_variant_id: input.productVariantId } }),
       resolvePublishedIdentity: this.existingPublication
         ? discovered => this.existingPublication!.resolve({ ...input,
             listingIntent: { ...input.listingIntent, marketplaceConfig: { ...input.listingIntent.marketplaceConfig, marketplaceId: config.marketplaceId } } }, credential, discovered)
+        : undefined,
+      // After the connector matched the SKU's existing offers and proved any
+      // published identity, before its first write: the stock link is made for
+      // exactly the offer eBay will use, and a refusal leaves eBay untouched. An
+      // automatic re-queue's run always passes through it, so it never adopts an
+      // eBay listing the vendor listing did not record (review TW-1).
+      beforeFirstMutation: stock.mustLink || input.automaticRetry === true
+        ? resolved => stockReadiness.ensureLinked({ request: input, credential, environment: config.environment,
+            sku: sku ?? "", resolved, ...(stock.mustLink ? {} : { linkStock: false }) })
         : undefined,
       draft: {
         productId: input.productVariantId,
@@ -348,6 +387,8 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     credential: DropshipMarketplaceStoreCredentials;
     config: EbayListingConfig;
     baseUrl: string;
+    /** Push ids for the quantity request's own log lines (absent for replacement sessions). */
+    correlation?: Readonly<Record<string, unknown>>;
   }): DropshipEbayListingLifecycleClient {
     return {
       getInventoryItemGroup: async (groupKey) => {
@@ -357,6 +398,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           >({
             credential: input.credential,
             config: input.config,
+            correlation: input.correlation,
             method: "GET",
             path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
             baseUrl: input.baseUrl,
@@ -372,6 +414,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           return await this.requestEbay<EbayInventoryItem>({
             credential: input.credential,
             config: input.config,
+            correlation: input.correlation,
             method: "GET",
             path: `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
             baseUrl: input.baseUrl,
@@ -385,6 +428,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         await this.requestEbay({
           credential: input.credential,
           config: input.config,
+          correlation: input.correlation,
           method: "PUT",
           path: `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
           body: item,
@@ -398,6 +442,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           result = await this.requestEbay<EbayOfferResponse>({
             credential: input.credential,
             config: input.config,
+            correlation: input.correlation,
             method: "GET",
             path: `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${encodeURIComponent(marketplaceId)}`,
             baseUrl: input.baseUrl,
@@ -430,6 +475,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         const result = await this.requestEbay<{ offerId?: string }>({
           credential: input.credential,
           config: input.config,
+          correlation: input.correlation,
           method: "POST",
           path: "/sell/inventory/v1/offer",
           body: offer,
@@ -448,6 +494,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         await this.requestEbay({
           credential: input.credential,
           config: input.config,
+          correlation: input.correlation,
           method: "PUT",
           path: `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`,
           body: offer,
@@ -459,6 +506,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         await this.requestEbay({
           credential: input.credential,
           config: input.config,
+          correlation: input.correlation,
           method: "PUT",
           path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
           body: { ...group, inventoryItemGroupKey: groupKey },
@@ -470,6 +518,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         await this.requestEbay({
           credential: input.credential,
           config: input.config,
+          correlation: input.correlation,
           method: "DELETE",
           path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
           expectNoContent: true,
@@ -480,6 +529,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         return await this.requestEbay<{ listingId?: string }>({
           credential: input.credential,
           config: input.config,
+          correlation: input.correlation,
           method: "POST",
           path: `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`,
           baseUrl: input.baseUrl,
@@ -489,6 +539,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         return await this.requestEbay<{ listingId?: string }>({
           credential: input.credential,
           config: input.config,
+          correlation: input.correlation,
           method: "POST",
           path: "/sell/inventory/v1/offer/publish_by_inventory_item_group",
           body: { inventoryItemGroupKey: groupKey, marketplaceId },
@@ -499,6 +550,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         return await this.requestEbay<EbayBulkPriceQuantityResponse>({
           credential: input.credential,
           config: input.config,
+          correlation: input.correlation,
           method: "POST",
           path: "/sell/inventory/v1/bulk_update_price_quantity",
           body,
@@ -509,6 +561,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         await this.requestEbay({
           credential: input.credential,
           config: input.config,
+          correlation: input.correlation,
           method: "POST",
           path: `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`,
           baseUrl: input.baseUrl,
@@ -518,6 +571,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         await this.requestEbay({
           credential: input.credential,
           config: input.config,
+          correlation: input.correlation,
           method: "POST",
           path: "/sell/inventory/v1/offer/withdraw_by_inventory_item_group",
           body: { inventoryItemGroupKey: groupKey, marketplaceId },
@@ -535,14 +589,55 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     body?: unknown;
     expectNoContent?: boolean;
     baseUrl: string;
+    correlation?: Readonly<Record<string, unknown>>;
   }): Promise<T> {
     if (ebayQuantityMutationIdentity(input.method, input.path, input.body)) {
       if (!this.quantityAdmission) throw new DropshipError("QUANTITY_PUBLICATION_ADMISSION_REQUIRED", "eBay listing quantity writes require an admitted owner.", { retryable: false });
-      return executeAdmittedEbayQuantityRequest<T>(input, this.quantityAdmission(input.credential), request =>
-        this.requestEbayUnadmitted({ ...input, ...request, method: request.method as typeof input.method,
-          expectNoContent: request.expectNoContent }));
+      const admission = this.quantityAdmission(input.credential);
+      // PUBLICATION_SCOPE_BUSY is raised when the exact SKU's provider scope
+      // try-lock is held (often the outbox draining the row the stock link just
+      // queued), before planning or any provider I/O, and its durable catch-up
+      // is an upsert. Repeating the same request is therefore safe; it is
+      // bounded, and the last refusal is rethrown unchanged.
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          return await executeAdmittedEbayQuantityRequest<T>(input, admission, request =>
+            this.requestEbayUnadmitted({ ...input, ...request, method: request.method as typeof input.method,
+              expectNoContent: request.expectNoContent }));
+        } catch (error) {
+          // A multi-row bulk request is admitted row by row; a later row's refusal
+          // can follow an earlier row's provider write, so it is never repeated here.
+          if (!isPublicationScopeBusy(error) || isMultiRowBulkRequest(input)) throw error;
+          const context = { action: "dropship.listing_push.quantity_request", error_code: PUBLICATION_SCOPE_BUSY_CODE,
+            vendor_id: input.credential.vendorId, store_connection_id: input.credential.storeConnectionId,
+            ...input.correlation, endpoint: `${input.method} ${input.path}`, attempt };
+          if (attempt > PUBLICATION_SCOPE_BUSY_BACKOFF_MS.length) {
+            this.scopeBusyLogger().warn({ ...context, outcome: "gave_up", classification: "transient",
+              message: "The exact eBay SKU stayed busy after every bounded retry; the push fails retryable." });
+            throw error;
+          }
+          const waitMs = PUBLICATION_SCOPE_BUSY_BACKOFF_MS[attempt - 1]!;
+          this.scopeBusyLogger().debug({ ...context, outcome: "retry", wait_ms: waitMs });
+          await this.sleep(waitMs);
+        }
+      }
     }
     return this.requestEbayUnadmitted(input);
+  }
+
+  private requiredStockReadiness(): DropshipEbayStockReadinessPort {
+    // Fail closed like the other required push collaborators: without the port a
+    // canonical push could write quantity to an unlinked listing.
+    if (!this.options.stockReadiness) throw stockLinkError(stockLinkRefusal("DROPSHIP_STOCK_READINESS_REQUIRED"));
+    return this.options.stockReadiness;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return this.options.sleep ? this.options.sleep(ms) : new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private scopeBusyLogger() {
+    return this.options.logger ?? defaultScopeBusyLogger;
   }
 
   private async requestEbayUnadmitted<T = Record<string, unknown>>(input: {
@@ -645,6 +740,18 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
 
 function isEbayNotFound(error: unknown): boolean {
   return error instanceof DropshipError && error.context?.status === 404;
+}
+
+function isMultiRowBulkRequest(input: { path: string; body?: unknown }): boolean {
+  const requests = input.body && typeof input.body === "object" ? (input.body as { requests?: unknown }).requests : undefined;
+  return input.path.includes("bulk_update_price_quantity") && Array.isArray(requests) && requests.length > 1;
+}
+
+/** The inventory admission's own refusal (QuantityPublicationAdmissionError), matched by name and code
+ * so this provider does not import an inventory-planning internal. */
+function isPublicationScopeBusy(error: unknown): boolean {
+  return error instanceof Error && error.name === "QuantityPublicationAdmissionError"
+    && (error as { code?: unknown }).code === PUBLICATION_SCOPE_BUSY_CODE;
 }
 
 function assertRebuildMarketplaceMatches(

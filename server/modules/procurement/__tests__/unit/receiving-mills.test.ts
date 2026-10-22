@@ -184,6 +184,10 @@ function buildService(
   const upvRows = { rows: [{ id: 11, product_id: 1, units_per_variant: opts.unitsPerVariant ?? 1, is_active: true }] };
   const execute = async (query: any) => {
     const rendered = new PgDialect().sqlToQuery(query);
+    if (rendered.sql.includes("WITH purchase_lines AS MATERIALIZED")) return { rows: [{ observations: [], acceptances: [], unidentifiedAcceptances: [] }] };
+    if (rendered.sql.includes("WITH receipt_rows AS MATERIALIZED")) return { rows: [{
+      receivingLines: [], postedReceipts: [], reversals: [], custodyObservations: [], custodyAcceptances: [],
+    }] };
     if (rendered.sql.includes("procurement.receiving_custody_fence")) return { rows: [{ singleton: true }] };
     if (rendered.sql.includes("procurement.receiving_quarantine_")) return { rows: [] };
     if (rendered.sql.includes("FROM warehouse.warehouses")) return { rows: [{ isActive: 1 }] };
@@ -197,7 +201,8 @@ function buildService(
     if (rendered.sql.includes("FROM procurement.inbound_shipment_lines")) {
       return { rows: versionedLines.filter((line) => line.purchaseOrderLineId).map((line) => ({ id: line.id + 1000,
         inboundShipmentId: opts.inboundShipmentId, purchaseOrderId: 123, purchaseOrderLineId: line.purchaseOrderLineId,
-        inbound_shipment_id: opts.inboundShipmentId, purchase_order_id: 123, purchase_order_line_id: line.purchaseOrderLineId, qty_shipped: 10000 })) };
+        inbound_shipment_id: opts.inboundShipmentId, purchase_order_id: 123, purchase_order_line_id: line.purchaseOrderLineId,
+        qtyShipped: 10000, qty_shipped: 10000 })) };
     }
     if (rendered.sql.includes("INSERT INTO procurement.receipt_cost_requests")) {
       const lineId = Number(rendered.params[1]);

@@ -260,7 +260,10 @@ async function runConsumer(name: ConsumerName, repo: DropshipMarketplaceCredenti
   }, {
     ensureForStoreConnection: async () => location,
     ensureWithAccessToken: async () => location,
-  }, () => createAdmittedEbayQuantityTestOwner());
+  }, () => createAdmittedEbayQuantityTestOwner(), undefined, {
+    // Legacy inventory authority: the push links no stock (Fix PR 2a-2 gate).
+    stockReadiness: { begin: async () => ({ authority: "legacy", mustLink: false }), ensureLinked: async () => undefined },
+  });
   if (name === "listing replacement") {
     return provider.createReplacementLifecycleClient({ ...identity, marketplaceConfig: policyConfig });
   }

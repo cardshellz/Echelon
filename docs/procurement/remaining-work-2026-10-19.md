@@ -2,11 +2,23 @@
 
 ## Current state verified October 21, 2026
 
+PR1883 is now merged and its exact merge has a successful deployment record. Independent readback confirms sampled receipt/PO/shipment quantity agreement, posted shipment-cost agreement, and AP totals. Final verification also identified a concrete receiving CSV retry obstruction in the failed hosted browser shard. The bounded correction, release evidence and remaining acceptance limits are tracked in [final verification](final-verification-2026-10-21.md). No further major corrective feature batch is listed; this follow-up and its release verification remain open. Historical cost exceptions and unavailable production scenarios are stated explicitly rather than certified by the deployment.
+
+### Pre-deployment acceptance checkpoint
+
+This acceptance pass started from fetched main `b0edad6447da59f4aa1a8f4b2147c4fa48f874df` and incorporated `1b7910d9223c7253a44f252be726d60b93ae7b42` before final local validation. RFQ PR1875 merged as `e5c5a7071da92ea4212d045775319ac4ccc0fe4e`; all 59 PR checks and post-merge Core CI `39652973253` passed. The merge is an ancestor of the pinned main. GitHub deployment status records confirm successful Heroku deployment of that merge and its later replacement by `b0edad644`. Deployment metadata does not establish correctness of every saved business record.
+
+Combined acceptance reproduced a new custody bypass: an ordinary second receipt could post held goods while the original quarantine observation still retained them. The correction and connected acceptance evidence are recorded in [lifecycle acceptance](lifecycle-acceptance-2026-10-21.md). This finding prevents marking the entire effort complete merely because the earlier batches deployed.
+
+The correction and bounded combined acceptance now pass local validation: 4,920 unit/guard cases, 331 PostgreSQL cases, 186 browser cases, four typechecks and the build. Read-only deployed sampling confirmed saved shipment/PO cost agreement; the RFQ list contained no saved RFQs, so its real quote/conversion recovery could not be verified. The remaining release work is hosted CI, deployment of this custody correction and independent readback of that deployed version within available saved-record and permission evidence. Historical data repair, new supplier communication, cash transfers and production test transactions are not implied.
+
+## Previous corrective checkpoint
+
 This continuation began on fetched main `93be8ccd76f5246369284748f0bd2887b11455a9` and incorporated `bf1507790dc0acb79af19ca4f645f37b1ba74038` before final validation. PR1868 was merged into PR1857, then PR1857 was reconciled with main and merged as `4d137ca98018c76228b6d174ba0b78dd7eb5217d`. All 59 PR checks passed. Post-merge Core CI run `39490362528` and Returns portal admin preview run `39490362883` passed. These are repository and CI facts; no independent production readback is established here.
 
 The AP advance/calendar-date/quarantine recovery work, supplier credits, full-quarantine zero-effect completion, accepted-stock returns and credit-difference review are now incorporated in main. Their supported accounting and provenance boundaries remain in `supplier-credits-and-returns.md`; unsupported writeoffs, cash refunds, claims, GL posting or mixed stock provenance are not inferred as completed.
 
-The **RFQ recovery and work-list reachability** batch is implemented and locally validated. The current trace confirmed the in-memory request identity, lack of actor-bound success/rejection receipts, latest-25 list, and read-permission mismatch described below. Existing version/link safeguards remain enforced; duplicate purchase creation is not a demonstrated defect. See `../procurement-rfq-workflow.md` for the implemented contract and validation record. Publication, hosted checks, merge and deployed readback are separate states.
+The **RFQ recovery and work-list reachability** batch was implemented and locally validated at this checkpoint. The trace confirmed the in-memory request identity, lack of actor-bound success/rejection receipts, latest-25 list, and read-permission mismatch described below. Existing version/link safeguards remain enforced; duplicate purchase creation is not a demonstrated defect. See `../procurement-rfq-workflow.md` for the implemented contract and validation record. Its later merge and deployment evidence are recorded above.
 
 After this batch, the remaining planned work is **combined lifecycle acceptance**, followed by **independent deployed readback**. Failures found in those exercises become concrete follow-up defects; they must not be hidden by calling focused suite results full-system acceptance.
 

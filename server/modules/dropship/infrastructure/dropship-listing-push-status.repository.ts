@@ -2,6 +2,8 @@ import type { Pool } from "pg";
 import { z } from "zod";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { STOCK_LINK_RESEND_CODE, isAutomaticRequeueCode } from "../domain/listing-push-automatic-requeue";
+import { readAutomaticRequeuePendingItemIds } from "./dropship-listing-push-ops.repository";
 import type {
   DropshipListingPushStatusRepository,
   MarketplaceEnvironment,
@@ -38,8 +40,14 @@ const itemRowSchema = z.object({
   product_name: z.string(),
 }).strict();
 
+/** Which failed items of a job the push sweep will queue again by itself (the ops repository's guarded selection). */
+export type AutomaticRequeuePendingReader = (database: Pick<Pool, "query">, jobId: number) => Promise<readonly number[]>;
+
 export class PgDropshipListingPushStatusRepository implements DropshipListingPushStatusRepository {
-  constructor(private readonly pool: Pool = defaultPool) {}
+  constructor(
+    private readonly pool: Pool = defaultPool,
+    private readonly readPendingAutomaticRequeue: AutomaticRequeuePendingReader = readAutomaticRequeuePendingItemIds,
+  ) {}
 
   async findVendorIdByMemberId(memberId: string): Promise<number | null> {
     const result = await this.pool.query<{ id: number }>(
@@ -77,6 +85,15 @@ export class PgDropshipListingPushStatusRepository implements DropshipListingPus
        ORDER BY i.id`,
       [input.jobId],
     );
+    const parsedItems = items.rows.map((row) => parseRow(itemRowSchema, row, "item"));
+    // Review V2-2: the portal says "Card Shellz will try this listing again
+    // automatically" only for an item the push sweep will re-queue. Read only when a
+    // failed item has a code the automatic re-queue owns (the Q4 code's words never
+    // promise a retry, review TW-2), so other jobs cost no extra statement.
+    const pending = parsedItems.some((item) => item.status === "failed" && isAutomaticRequeueCode(item.error_code)
+      && item.error_code !== STOCK_LINK_RESEND_CODE)
+      ? new Set(await this.readPendingAutomaticRequeue(this.pool, job.id))
+      : new Set<number>();
     return {
       jobId: job.id,
       vendorId: job.vendor_id,
@@ -87,8 +104,7 @@ export class PgDropshipListingPushStatusRepository implements DropshipListingPus
       createdAt: job.created_at,
       updatedAt: job.updated_at,
       completedAt: job.completed_at,
-      items: items.rows.map((row): VendorListingPushItemRecord => {
-        const item = parseRow(itemRowSchema, row, "item");
+      items: parsedItems.map((item): VendorListingPushItemRecord => {
         return {
           itemId: item.id,
           listingId: item.listing_id,
@@ -102,6 +118,7 @@ export class PgDropshipListingPushStatusRepository implements DropshipListingPus
           retryable: item.retryable,
           externalListingId: item.external_listing_id,
           published: item.published,
+          automaticRetryPending: pending.has(item.id),
         };
       }),
     };

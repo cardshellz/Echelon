@@ -36,7 +36,11 @@ import { readPoShipmentCostSummary, readPoShipmentCosts } from "./po-shipment-co
 
 import { randomUUID } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { readClosedShipmentReceivedBaseQtyByLine, ShipmentReceiptCoverageError } from "./receiving-shipment-coverage";
+import { ShipmentReceiptCoverageError } from "./receiving-shipment-coverage";
+import { readShipmentReceiptCustodyCoverage } from "./shipment-receipt-custody.repository";
+import { readPoDirectCustodySources } from "./po-direct-receipt-custody.repository";
+import { PoDirectCustodySourceError } from "./domain/po-direct-receipt-custody";
+import { summarizeShipmentReceiptCustodyCoverage, type ShipmentReceiptCustodyCoverage } from "./domain/shipment-receipt-custody";
 import { readReceiptCustodyPresence } from "./receiving-quarantine.repository";
 import { ReceivingUnitSnapshotError } from "./receiving-unit-snapshot";
 import { shipmentReceiptSourceVersion } from "./shipment-receipt-source-version";
@@ -68,7 +72,7 @@ import {
   requestForQuotes as requestForQuotesTable,
   requestForQuoteLines as requestForQuoteLinesTable,
 } from "@shared/schema";
-import type { PoLineType, PoPhysicalStatus, PoFinancialStatus } from "@shared/schema/procurement.schema";
+import type { PoLineType, PoPhysicalStatus, PoFinancialStatus, PurchaseOrderLine } from "@shared/schema/procurement.schema";
 import {
   PO_LINE_TYPES,
   isPoLineType,
@@ -3431,6 +3435,12 @@ export function createPurchasingService(
           purchaseOrderId,
         });
       }
+      if (error instanceof PoDirectCustodySourceError || error instanceof ShipmentReceiptCoverageError) {
+        console.warn(JSON.stringify({ event: "procurement.receiving.custody_admission_rejected", command: "create_po_receipt",
+          actorId: userId ?? null, purchaseOrderId, code: error.details.code }));
+        // Lifecycle HTTP commands forward the purchasing owner's typed error.
+        throw new PurchasingError(error.message, error.statusCode, error.details);
+      }
       throw error;
     }
   }
@@ -3444,6 +3454,13 @@ export function createPurchasingService(
     return existingReceipts.find((receipt: any) =>
       ["draft", "open", "receiving", "verified"].includes(receipt.status),
     );
+  }
+
+  function isReceivablePurchaseProductLine(line: Pick<PurchaseOrderLine, "status" | "orderQty" | "receivedQty" | "cancelledQty">
+    & { lineType?: PurchaseOrderLine["lineType"] }): boolean {
+    return (line.lineType ?? "product") === "product"
+      && (line.status === "open" || line.status === "partially_received")
+      && line.orderQty - (line.receivedQty || 0) - (line.cancelledQty || 0) > 0;
   }
 
   async function createReceiptFromPOUnlocked(purchaseOrderId: number, userId: string | undefined, executor: any) {
@@ -3462,16 +3479,14 @@ export function createPurchasingService(
 
     await executor.execute(sql`SELECT id FROM procurement.purchase_order_lines WHERE purchase_order_id = ${purchaseOrderId} ORDER BY id FOR UPDATE`);
     const lines = await storage.getPurchaseOrderLines(purchaseOrderId, executor);
-    const receivableLines = lines.filter((l: any) =>
-      // Only product lines are physically received. Discount/fee/tax/rebate/
-      // adjustment lines are accounting-only and never create inventory.
-      // Rows without lineType (pre-migration-0563) default to 'product'.
-      ((l.lineType ?? "product") === "product") &&
-      (l.status === "open" || l.status === "partially_received") &&
-      (l.orderQty - (l.receivedQty || 0) - (l.cancelledQty || 0)) > 0
-    );
+    const candidateLines = lines.filter(isReceivablePurchaseProductLine);
+    const custodySources = await readPoDirectCustodySources(executor, purchaseOrderId);
+    const receivableLines = candidateLines.filter((line: any) => !custodySources.has(line.id));
 
     if (receivableLines.length === 0) {
+      const blocked = new Map<number, readonly number[]>(candidateLines.filter((line: any) => custodySources.has(line.id))
+        .map((line: any) => [line.id, custodySources.get(line.id)!]));
+      if (blocked.size > 0) throw new PoDirectCustodySourceError(purchaseOrderId, blocked);
       throw new PurchasingError("No receivable lines on this PO", 400);
     }
 
@@ -3561,6 +3576,11 @@ export function createPurchasingService(
     lineCount: number;
     qtyShipped: number;
     receivedBaseQty: number | null;
+    custodyBaseQty: number | null;
+    excessBaseQty: number | null;
+    heldBaseQty: number | null;
+    returnedBaseQty: number | null;
+    custodyReceiptIds: number[];
     remainingBaseQty: number | null;
     missingPurchaseOrderLineCount: number;
     receivable: boolean;
@@ -3587,6 +3607,11 @@ export function createPurchasingService(
   type ShipmentReceiptCoverageSummary = {
     totalExpectedBaseQty: number;
     totalReceivedBaseQty: number;
+    totalCustodyBaseQty: number;
+    totalExcessBaseQty: number;
+    totalHeldBaseQty: number;
+    totalReturnedBaseQty: number;
+    custodyReceiptIds: number[];
     totalRemainingBaseQty: number;
     remainingLines: any[];
   };
@@ -3688,8 +3713,8 @@ export function createPurchasingService(
       summary.inventoryTransactionCount === 0;
   }
 
-  async function getClosedShipmentReceivedBaseQtyByLine(purchaseOrderId: number, inboundShipmentId: number, shipmentLines: any[], executor: any = db): Promise<Map<number, number>> {
-    return readClosedShipmentReceivedBaseQtyByLine(executor, { purchaseOrderId, inboundShipmentId, shipmentLines });
+  async function getShipmentReceiptCoverage(purchaseOrderId: number, inboundShipmentId: number, shipmentLines: any[], executor: any = db): Promise<ShipmentReceiptCustodyCoverage> {
+    return readShipmentReceiptCustodyCoverage(executor, { purchaseOrderId, inboundShipmentId, shipmentLines });
   }
 
   function adjustShipmentLineToRemainingBaseQty(line: any, remainingBaseQty: number): any {
@@ -3702,32 +3727,17 @@ export function createPurchasingService(
 
   function summarizeShipmentReceiptCoverage(
     shipmentLines: any[],
-    receivedBaseQtyByLine: Map<number, number>,
+    evidence: ShipmentReceiptCustodyCoverage,
   ): ShipmentReceiptCoverageSummary {
-    const remainingLines: any[] = [];
-    let totalExpectedBaseQty = 0;
-    let totalReceivedBaseQty = 0;
+    const { remainingBaseQtyByLine, ...summary } = summarizeShipmentReceiptCustodyCoverage(shipmentLines, evidence);
+    return { ...summary, remainingLines: shipmentLines.filter(line => (remainingBaseQtyByLine.get(line.id) ?? 0) > 0)
+      .map(line => adjustShipmentLineToRemainingBaseQty(line, remainingBaseQtyByLine.get(line.id)!)) };
+  }
 
-    for (const line of shipmentLines) {
-      const expectedBaseQty = Number(line.qtyShipped ?? line.qty_shipped) || 0;
-      if (expectedBaseQty <= 0) continue;
-      totalExpectedBaseQty += expectedBaseQty;
-
-      const appliedReceived = receivedBaseQtyByLine.get(line.id) ?? 0;
-      totalReceivedBaseQty += appliedReceived;
-
-      const remainingBaseQty = Math.max(0, expectedBaseQty - appliedReceived);
-      if (remainingBaseQty > 0) {
-        remainingLines.push(adjustShipmentLineToRemainingBaseQty(line, remainingBaseQty));
-      }
-    }
-
-    return {
-      totalExpectedBaseQty,
-      totalReceivedBaseQty,
-      totalRemainingBaseQty: remainingLines.reduce((sum: number, line: any) => sum + line.qtyShipped, 0),
-      remainingLines,
-    };
+  function shipmentCustodyCoverageMessage(coverage: ShipmentReceiptCoverageSummary): string {
+    return coverage.totalHeldBaseQty > 0
+      ? "All remaining shipped pieces are already in quarantine. Resolve held goods from their original receipt."
+      : "All shipped pieces are already received or recorded as returned. Returned goods do not become a new arrival on this shipment.";
   }
 
   function variantIsActive(variant: any): boolean {
@@ -3811,13 +3821,10 @@ export function createPurchasingService(
     shipmentLines: any[],
     existing: ShipmentReceiptExistingState,
   ): Promise<{ coverage: ShipmentReceiptCoverageSummary | null; coverageIssue: string | null }> {
-    // Opening/repairing an existing record creates no receiving quantity. Do
-    // not let unprovable older history hide that record or invent its remainder.
-    if (["active", "empty_active", "zero_post_closed"].includes(existing.kind)) {
-      return { coverage: null, coverageIssue: null };
-    }
+    // A failed preview must not hide an existing receipt. The option builder
+    // still permits opening that record, while close rechecks physical custody.
     try {
-      const received = await getClosedShipmentReceivedBaseQtyByLine(purchaseOrderId, inboundShipmentId, shipmentLines);
+      const received = await getShipmentReceiptCoverage(purchaseOrderId, inboundShipmentId, shipmentLines);
       return { coverage: summarizeShipmentReceiptCoverage(shipmentLines, received), coverageIssue: null };
     } catch (error) {
       if (!(error instanceof ShipmentReceiptCoverageError) && !(error instanceof ReceivingUnitSnapshotError)) throw error;
@@ -3881,9 +3888,12 @@ export function createPurchasingService(
     } else if (coverage.totalRemainingBaseQty <= 0) {
       receivable = false;
       action = "blocked";
-      reason = "This shipment has already been received for this PO.";
+      reason = coverage.totalCustodyBaseQty > 0 ? shipmentCustodyCoverageMessage(coverage)
+        : "This shipment has already been received for this PO.";
     } else if (existing.kind === "closed") {
-      reason = `A prior shipment receipt was short; ${coverage.totalRemainingBaseQty} of ${coverage.totalExpectedBaseQty} shipped base units remain to receive.`;
+      reason = coverage.totalCustodyBaseQty > 0
+        ? `${coverage.totalReceivedBaseQty} pieces were accepted; ${coverage.totalCustodyBaseQty} are recorded in quarantine custody or returns. ${coverage.totalRemainingBaseQty} shipped pieces remain to receive.`
+        : `A prior shipment receipt was short; ${coverage.totalRemainingBaseQty} of ${coverage.totalExpectedBaseQty} shipped base units remain to receive.`;
     }
 
     const existingReceipt = existing.kind === "none" ? null : existing.receipt;
@@ -3899,6 +3909,11 @@ export function createPurchasingService(
       lineCount,
       qtyShipped,
       receivedBaseQty: coverage?.totalReceivedBaseQty ?? null,
+      custodyBaseQty: coverage?.totalCustodyBaseQty ?? null,
+      excessBaseQty: coverage?.totalExcessBaseQty ?? null,
+      heldBaseQty: coverage?.totalHeldBaseQty ?? null,
+      returnedBaseQty: coverage?.totalReturnedBaseQty ?? null,
+      custodyReceiptIds: coverage?.custodyReceiptIds ?? [],
       remainingBaseQty: coverage?.totalRemainingBaseQty ?? null,
       missingPurchaseOrderLineCount,
       receivable,
@@ -3952,7 +3967,25 @@ export function createPurchasingService(
       return b.shipmentId - a.shipmentId;
     });
 
-    const poDirectAllowed = ["sent", "acknowledged", "partially_received"].includes(po.status);
+    const poDirectStatusAllowed = ["sent", "acknowledged", "partially_received"].includes(po.status);
+    let directCustodySources = new Map<number, number[]>();
+    let directEvidenceIssue: PoDirectCustodySourceError | null = null;
+    try {
+      directCustodySources = await readPoDirectCustodySources(db, purchaseOrderId);
+    } catch (error) {
+      if (!(error instanceof PoDirectCustodySourceError)) throw error;
+      // Unprovable direct-source history blocks that creation path; it must not
+      // hide independently actionable shipment or existing-receipt navigation.
+      directEvidenceIssue = error;
+    }
+    const directPurchaseLines = directCustodySources.size > 0 ? await storage.getPurchaseOrderLines(purchaseOrderId) : [];
+    const blockedDirectLines = directPurchaseLines.filter((line: any) => isReceivablePurchaseProductLine(line) && directCustodySources.has(line.id));
+    const blockedDirectLineLabels = blockedDirectLines.map((line: any) => line.sku
+      ? `${line.sku} (line ${line.lineNumber ?? line.id})` : `purchase line ${line.lineNumber ?? line.id}`);
+    const blockedDirectSources = new Map<number, readonly number[]>(blockedDirectLines.map((line: any) => [line.id, directCustodySources.get(line.id)!]));
+    const directSourceIssue = directEvidenceIssue ?? (blockedDirectSources.size > 0 ? new PoDirectCustodySourceError(purchaseOrderId, blockedDirectSources) : null);
+    const poDirectAllowed = poDirectStatusAllowed && directEvidenceIssue === null && (directCustodySources.size === 0
+      || directPurchaseLines.some((line: any) => isReceivablePurchaseProductLine(line) && !directCustodySources.has(line.id)));
     const linkedShipmentCount = shipmentOptions.length;
     return {
       purchaseOrderId,
@@ -3962,8 +3995,13 @@ export function createPurchasingService(
       shipmentOptions,
       poDirect: {
         allowed: poDirectAllowed,
-        reason: poDirectAllowed ? null : `Cannot create receipt for PO in '${po.status}' status`,
-        warning: linkedShipmentCount > 0
+        reason: poDirectAllowed ? null : !poDirectStatusAllowed ? `Cannot create receipt for PO in '${po.status}' status`
+          : directSourceIssue?.message ?? "No receivable lines on this PO",
+        blockedPurchaseOrderLineIds: directSourceIssue?.details.purchaseOrderLineIds ?? [],
+        custodyReceiptIds: directSourceIssue?.details.custodyReceiptIds ?? [],
+        warning: directEvidenceIssue ? directEvidenceIssue.message : directSourceIssue
+          ? `PO-direct receiving excludes ${blockedDirectLineLabels.join(", ")} because these lines have quarantine history. Use their shipment or original quarantine receipt.${poDirectAllowed ? " Unrelated eligible lines remain available for PO-direct receiving." : ""}`
+          : linkedShipmentCount > 0
           ? "PO-direct receiving does not attach shipment freight to the received lots."
           : "No inbound shipment exists for this PO. PO-direct receiving is appropriate for no-freight or domestic receipts.",
       },
@@ -4069,8 +4107,9 @@ export function createPurchasingService(
     const poLines = await storage.getPurchaseOrderLines(purchaseOrderId);
     const poLineById = new Map<number, any>(poLines.map((line: any) => [line.id, line]));
     const scopedShipmentLines = linkedShipmentLines.filter((sl: any) => Number(sl.purchaseOrderId) === purchaseOrderId);
-    const received = await getClosedShipmentReceivedBaseQtyByLine(purchaseOrderId, inboundShipmentId, scopedShipmentLines);
-    const receivableShipmentLines = summarizeShipmentReceiptCoverage(scopedShipmentLines, received).remainingLines;
+    const received = await getShipmentReceiptCoverage(purchaseOrderId, inboundShipmentId, scopedShipmentLines);
+    const coverage = summarizeShipmentReceiptCoverage(scopedShipmentLines, received);
+    const receivableShipmentLines = coverage.remainingLines;
 
     const productIds = new Set<number>();
     for (const sl of receivableShipmentLines) {
@@ -4127,11 +4166,20 @@ export function createPurchasingService(
       status: shipment.status ?? null,
       purchaseOrderId,
       poNumber: po.poNumber ?? po.po_number ?? null,
+      qtyShipped: coverage.totalExpectedBaseQty,
+      receivedBaseQty: coverage.totalReceivedBaseQty,
+      remainingBaseQty: coverage.totalRemainingBaseQty,
+      custodyBaseQty: coverage.totalCustodyBaseQty,
+      excessBaseQty: coverage.totalExcessBaseQty,
+      heldBaseQty: coverage.totalHeldBaseQty,
+      returnedBaseQty: coverage.totalReturnedBaseQty,
+      custodyReceiptIds: coverage.custodyReceiptIds,
       canCreateReceipt: shipmentIsReceivable && lines.length > 0 && blockingLines.length === 0,
       unresolvedCount: blockingLines.length,
       lineCount: lines.length,
       issue: shipmentIsReceivable
-        ? (lines.length === 0 ? "Shipment has no positive-quantity lines linked to this PO." : null)
+        ? (lines.length === 0 ? coverage.totalCustodyBaseQty > 0 ? shipmentCustodyCoverageMessage(coverage)
+          : "Shipment has no remaining quantity linked to this PO." : null)
         : `Cannot receive a shipment in '${(shipment as any).status}' status.`,
       lines,
     };
@@ -4215,7 +4263,7 @@ export function createPurchasingService(
         },
       );
     }
-    const receivedBaseQtyByLine = await getClosedShipmentReceivedBaseQtyByLine(
+    const receivedBaseQtyByLine = await getShipmentReceiptCoverage(
       purchaseOrderId,
       inboundShipmentId,
       receivableShipmentLines,
@@ -4224,9 +4272,11 @@ export function createPurchasingService(
     const receiptShipmentLines = coverage.remainingLines;
     if (existingReceipt.kind === "closed" && coverage.totalRemainingBaseQty <= 0) {
       throw new PurchasingError(
-        "This shipment has already been received for this PO.",
+        coverage.totalCustodyBaseQty > 0 ? shipmentCustodyCoverageMessage(coverage) : "This shipment has already been received for this PO.",
         409,
-        { receivingOrderId: existingReceipt.receipt.id, purchaseOrderId, inboundShipmentId },
+        { receivingOrderId: existingReceipt.receipt.id, purchaseOrderId, inboundShipmentId,
+          ...(coverage.totalCustodyBaseQty > 0 ? { code: "SHIPMENT_RECEIPT_CUSTODY_ACCOUNTED",
+            custodyBaseQty: coverage.totalCustodyBaseQty, custodyReceiptIds: coverage.custodyReceiptIds } : {}) },
       );
     }
     if (receiptShipmentLines.length === 0) {
@@ -4389,7 +4439,7 @@ export function createPurchasingService(
         }
 
         const lockedScope = lockedShipmentLines.filter((line: any) => Number(line.purchaseOrderId) === purchaseOrderId && line.qtyShipped > 0 && line.purchaseOrderLineId);
-        const lockedReceived = await getClosedShipmentReceivedBaseQtyByLine(purchaseOrderId, inboundShipmentId, lockedScope, tx);
+        const lockedReceived = await getShipmentReceiptCoverage(purchaseOrderId, inboundShipmentId, lockedScope, tx);
         const lockedCoverage = summarizeShipmentReceiptCoverage(lockedScope, lockedReceived);
         const coverageVersion = (value: ShipmentReceiptCoverageSummary) => canonicalJson({ ...value, remainingLines: [...value.remainingLines].sort((a, b) => a.id - b.id) });
         if (coverageVersion(lockedCoverage) !== coverageVersion(coverage)) {

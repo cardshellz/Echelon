@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitControl";
 import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingCompleteAllCommand, recordedReceivingFactor, receivingBaseQuantity, receivingVariantChange, receivingCountChange, receivingSelectedFactor, receivingAddQuantity } from "../../receiving-units";
-import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "../../shipment-receipt-units";
+import { parsePoDirectReceiveOption, parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel, shipmentCustodyReceiptIds } from "../../shipment-receipt-units";
 
 const version = "a".repeat(64);
 const line = { id: 7, receivingOrderId: 31, productId: 10, productVariantId: 2, expectedQty: 501, receivedQty: 401, damagedQty: 3, unitsPerVariantSnapshot: 1, unitVersion: version };
@@ -65,6 +65,12 @@ describe("shipment receive plan preflight", () => {
     const bad = resolution(); bad.lines[0].receivePlan.expectedQty = 500;
     expect(() => parseShipmentReceiptResolution(bad, { shipmentId: 42, purchaseOrderId: 17 })).toThrow(/verified/);
     expect(() => parseShipmentReceiptResolution({ ...resolution(), lines: [{ ...resolution().lines[0], receivePlan: null }] }, { shipmentId: 42, purchaseOrderId: 17 })).toThrow(/verified/);
+  });
+  it("retains validated source excess in the pack-resolution contract", () => {
+    expect(parseShipmentReceiptResolution({ ...resolution(), excessBaseQty: 10 }, { shipmentId: 42, purchaseOrderId: 17 }).excessBaseQty).toBe(10);
+    for (const excessBaseQty of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => parseShipmentReceiptResolution({ ...resolution(), excessBaseQty }, { shipmentId: 42, purchaseOrderId: 17 })).toThrow(/incomplete/);
+    }
   });
 });
 
@@ -130,10 +136,83 @@ describe("reviewed catalog factor", () => {
 });
 
 describe("receipt coverage read labels", () => {
+  it("preserves direct-receipt exclusions and custody links while refusing incomplete eligibility", () => {
+    const option = { allowed: true, warning: "Use the original receipt for excluded lines.", reason: null,
+      blockedPurchaseOrderLineIds: [7], custodyReceiptIds: [31] };
+    expect(parsePoDirectReceiveOption(option)).toEqual(option);
+    expect(parsePoDirectReceiveOption({ allowed: false, warning: "Receipt blocked." })).toEqual({ allowed: false, warning: "Receipt blocked." });
+    for (const invalid of [undefined, null, {}, { ...option, allowed: "true" },
+      { ...option, blockedPurchaseOrderLineIds: [-1] }, { ...option, custodyReceiptIds: ["31"] }]) {
+      expect(parsePoDirectReceiveOption(invalid)).toEqual({ allowed: false,
+        warning: "Receiving options could not be verified. Refresh before creating a receipt." });
+    }
+  });
   it("keeps unknown coverage separate from zero and never hides an existing receipt behind a received badge", () => {
     expect(shipmentReceiveCoverageLabel({ action: "open_existing_receipt", receivable: false, remainingBaseQty: null, receivedBaseQty: null, qtyShipped: 501 })).toEqual({ fullyReceived: false, text: "Receipt coverage needs review" });
     expect(shipmentReceiveCoverageLabel({ action: "open_existing_receipt", receivable: false, remainingBaseQty: 0, receivedBaseQty: 501, qtyShipped: 501 }).fullyReceived).toBe(false);
     expect(shipmentReceiveCoverageLabel({ action: "blocked", receivable: false, remainingBaseQty: 0, receivedBaseQty: 501, qtyShipped: 501 }).fullyReceived).toBe(true);
     expect(shipmentReceiveCoverageLabel({ receivable: true, remainingBaseQty: 1, receivedBaseQty: 500, qtyShipped: 501 }).text).toBe("1 of 501 pieces remaining");
+  });
+  it.each([
+    [0, 100, 0, 0, "0 pieces received into inventory · 100 held in quarantine · 0 pieces remaining to receive"],
+    [60, 40, 0, 0, "60 pieces received into inventory · 40 held in quarantine · 0 pieces remaining to receive"],
+    [0, 0, 100, 0, "0 pieces received into inventory · 100 returned to supplier · 0 pieces remaining to receive"],
+    [20, 30, 10, 40, "20 pieces received into inventory · 30 held in quarantine · 10 returned to supplier · 40 pieces remaining to receive"],
+  ] as const)("separates posted %i, held %i, returned %i and fresh remainder %i", (received, held, returned, remaining, text) => {
+    expect(shipmentReceiveCoverageLabel({ action: remaining ? "create_receipt" : "blocked", receivable: remaining > 0,
+      qtyShipped: 100, receivedBaseQty: received, custodyBaseQty: held + returned,
+      heldBaseQty: held, returnedBaseQty: returned, remainingBaseQty: remaining }))
+      .toEqual({ fullyReceived: false, text });
+  });
+  it("fails closed on incomplete or inconsistent custody instead of treating zero remainder as receipt proof", () => {
+    const complete = { action: "blocked", receivable: false, qtyShipped: 100, receivedBaseQty: 60,
+      custodyBaseQty: 40, heldBaseQty: 40, returnedBaseQty: 0, remainingBaseQty: 0 };
+    for (const invalid of [{ ...complete, custodyBaseQty: null }, { ...complete, heldBaseQty: undefined },
+      { ...complete, returnedBaseQty: 1 }, { ...complete, receivedBaseQty: 59 },
+      { ...complete, remainingBaseQty: 1 }, { ...complete, receivedBaseQty: 61, remainingBaseQty: 1 }]) {
+      expect(shipmentReceiveCoverageLabel(invalid)).toEqual({ fullyReceived: false, text: "Receipt coverage needs review" });
+    }
+    expect(shipmentReceiveCoverageLabel({ ...complete, receivedBaseQty: 100, custodyBaseQty: 0, heldBaseQty: 0 }))
+      .toEqual({ fullyReceived: true, text: "100 shipped pieces" });
+  });
+  it.each([
+    [0, 110, 0, "0 pieces received into inventory · 110 held in quarantine · 0 pieces remaining to receive · 10 pieces above shipped quantity"],
+    [60, 30, 20, "60 pieces received into inventory · 30 held in quarantine · 20 returned to supplier · 0 pieces remaining to receive · 10 pieces above shipped quantity"],
+    [0, 0, 110, "0 pieces received into inventory · 110 returned to supplier · 0 pieces remaining to receive · 10 pieces above shipped quantity"],
+    [110, 0, 0, "110 pieces received into inventory · 0 pieces remaining to receive · 10 pieces above shipped quantity"],
+  ] as const)("preserves over-observed counts of posted %i, held %i and returned %i without calling the shipment fully received", (received, held, returned, text) => {
+    expect(shipmentReceiveCoverageLabel({ action: "blocked", receivable: false, qtyShipped: 100,
+      receivedBaseQty: received, custodyBaseQty: held + returned, heldBaseQty: held, returnedBaseQty: returned,
+      remainingBaseQty: 0 })).toEqual({ fullyReceived: false, text });
+  });
+  it.each([
+    [60, 30, 20, 100, 10],
+    [160, 70, 20, 50, 100],
+  ] as const)("retains owner-proven mixed-line excess alongside a fresh remainder: received %i, held %i, returned %i, remaining %i, excess %i", (received, held, returned, remaining, excess) => {
+    const coverage = { action: "create_receipt", receivable: true, qtyShipped: 200,
+      receivedBaseQty: received, custodyBaseQty: held + returned, heldBaseQty: held, returnedBaseQty: returned,
+      remainingBaseQty: remaining, excessBaseQty: excess };
+    expect(shipmentReceiveCoverageLabel(coverage)).toEqual({ fullyReceived: false,
+      text: `${received} pieces received into inventory · ${held} held in quarantine · ${returned} returned to supplier · ${remaining} pieces remaining to receive · ${excess} pieces above shipped quantity` });
+    // The aggregate cannot recover per-line excess: older evidence must remain explicitly unresolved.
+    expect(shipmentReceiveCoverageLabel({ ...coverage, excessBaseQty: undefined }))
+      .toEqual({ fullyReceived: false, text: "Receipt coverage needs review" });
+  });
+  it("requires explicit excess to be complete and agree with coverage instead of silently falling back", () => {
+    const coverage = { action: "create_receipt", receivable: true, qtyShipped: 200,
+      receivedBaseQty: 60, custodyBaseQty: 50, heldBaseQty: 30, returnedBaseQty: 20,
+      remainingBaseQty: 100, excessBaseQty: 10 };
+    for (const excessBaseQty of [null, -1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1, 0, 9, 11]) {
+      expect(shipmentReceiveCoverageLabel({ ...coverage, excessBaseQty }))
+        .toEqual({ fullyReceived: false, text: "Receipt coverage needs review" });
+    }
+    expect(shipmentReceiveCoverageLabel({ ...coverage, receivedBaseQty: 200, custodyBaseQty: 0,
+      heldBaseQty: 0, returnedBaseQty: 0, remainingBaseQty: 0, excessBaseQty: 0, receivable: false }))
+      .toEqual({ fullyReceived: true, text: "200 shipped pieces" });
+  });
+  it("retains only validated exact custody receipt identities without guessing a PO receipt", () => {
+    expect(shipmentCustodyReceiptIds({ custodyReceiptIds: [32, 31, 32] })).toEqual([31, 32]);
+    expect(shipmentCustodyReceiptIds({})).toEqual([]);
+    expect(shipmentCustodyReceiptIds({ custodyReceiptIds: [31, -1] })).toEqual([]);
   });
 });

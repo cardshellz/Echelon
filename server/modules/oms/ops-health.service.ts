@@ -13,6 +13,20 @@ import { getOmsOpsAlertSchedulerHeartbeat } from "./oms-ops-alert-heartbeat";
 import { getEbayOrderPollHeartbeat } from "./ebay-order-poll-heartbeat";
 import { getWebhookRetryWorkerHeartbeat } from "./webhook-retry.worker";
 import {
+  DROPSHIP_EBAY_STOCK_OFFER_UNVERIFIED_CODE,
+  DROPSHIP_EBAY_STOCK_OFFER_UNVERIFIED_MESSAGE,
+  DROPSHIP_STOCK_DESTINATION_HELD_CODE,
+  DROPSHIP_STOCK_DESTINATION_HELD_MESSAGE,
+  dropshipEbayStockOfferUnverifiedCountSql,
+  dropshipEbayStockOfferUnverifiedSampleSql,
+  DROPSHIP_STOCK_DESTINATION_MISSING_CODE,
+  DROPSHIP_STOCK_DESTINATION_MISSING_MESSAGE,
+  dropshipStockDestinationHeldCountSql,
+  dropshipStockDestinationHeldSampleSql,
+  dropshipStockDestinationMissingCountSql,
+  dropshipStockDestinationMissingSampleSql,
+} from "./dropship-stock-destination-health";
+import {
   HELD_LINE_AGING_DAYS,
   allLinesHeldCountQuery,
   allLinesHeldSampleQuery,
@@ -144,6 +158,9 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     allLinesHeldOrders,
     dropshipTrackingNotSent,
     channelListingPublicationBlocked,
+    dropshipStockDestinationMissing,
+    dropshipStockDestinationHeld,
+    dropshipEbayStockOfferUnverified,
   ] = await Promise.all([
     collectOmsFlowReconciliationIssues(db),
     countAndSample(
@@ -868,6 +885,22 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         LIMIT 10
       `,
     ),
+    // A Dropship eBay store that should publish Card Shellz stock has no single
+    // live stock destination: its pushes are refused before any eBay write and
+    // its quantities are frozen until someone sets the destination up (Q1).
+    countAndSample(
+      db,
+      dropshipStockDestinationMissingCountSql(sql`NOW() - INTERVAL '14 days'`),
+      dropshipStockDestinationMissingSampleSql(sql`NOW() - INTERVAL '14 days'`, 10),
+    ),
+    // The same store's one live destination is on hold: shown, not paged (a deliberate operator pause).
+    countAndSample(
+      db,
+      dropshipStockDestinationHeldCountSql(sql`NOW() - INTERVAL '14 days'`),
+      dropshipStockDestinationHeldSampleSql(sql`NOW() - INTERVAL '14 days'`, 10),
+    ),
+    // A published Dropship eBay offer whose stock updates the outbox refuses for good (offer identity): frozen quantity.
+    countAndSample(db, dropshipEbayStockOfferUnverifiedCountSql(), dropshipEbayStockOfferUnverifiedSampleSql(10)),
   ]);
   const channelWriteback = await getChannelWritebackHealth(db, {
     windowDays: 14,
@@ -1096,6 +1129,27 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       count: channelListingPublicationBlocked.count,
       message: "A channel listing is not safe to publish, so its stock is not updating. Fix the listing mapping; other channels still update.",
       sample: channelListingPublicationBlocked.sample,
+    }),
+    issue({
+      code: DROPSHIP_STOCK_DESTINATION_MISSING_CODE,
+      severity: "critical",
+      count: dropshipStockDestinationMissing.count,
+      message: DROPSHIP_STOCK_DESTINATION_MISSING_MESSAGE,
+      sample: dropshipStockDestinationMissing.sample,
+    }),
+    issue({
+      code: DROPSHIP_STOCK_DESTINATION_HELD_CODE,
+      severity: "warning",
+      count: dropshipStockDestinationHeld.count,
+      message: DROPSHIP_STOCK_DESTINATION_HELD_MESSAGE,
+      sample: dropshipStockDestinationHeld.sample,
+    }),
+    issue({
+      code: DROPSHIP_EBAY_STOCK_OFFER_UNVERIFIED_CODE,
+      severity: "critical",
+      count: dropshipEbayStockOfferUnverified.count,
+      message: DROPSHIP_EBAY_STOCK_OFFER_UNVERIFIED_MESSAGE,
+      sample: dropshipEbayStockOfferUnverified.sample,
     }),
     issue({
       code: "CHANNEL_WRITEBACK_MASKED_SPLIT",

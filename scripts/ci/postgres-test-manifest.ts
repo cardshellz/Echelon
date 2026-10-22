@@ -28,6 +28,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/procurement/__tests__/integration/shipment-billing-ownership.integration.test.ts",
   "server/modules/procurement/__tests__/integration/shipment-value-allocation.integration.test.ts",
   "server/modules/procurement/__tests__/integration/receiving-quarantine.integration.test.ts",
+  "server/modules/procurement/__tests__/integration/procurement-lifecycle-quarantine.integration.test.ts",
   "server/modules/inventory/__tests__/integration/receiving-custody-count-guard.integration.test.ts",
   "server/modules/procurement/__tests__/integration/procurement-settings.integration.test.ts",
   "server/modules/procurement/__tests__/integration/supplier-evidence-import.integration.test.ts",
@@ -217,4 +218,8 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/marketplace-listings/__tests__/integration/listing-member-lifecycle.integration.test.ts",
   "server/modules/marketplace-listings/__tests__/integration/listing-presence.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/publication-mapping-preparation-dropship-target.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/dropship-ebay-stock-readiness.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/runtime-publication-row-isolation.integration.test.ts",
+  "server/modules/dropship/__tests__/integration/dropship-ebay-push-stock-link.integration.test.ts",
 ]);

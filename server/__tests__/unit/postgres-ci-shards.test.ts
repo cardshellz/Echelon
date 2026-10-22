@@ -191,6 +191,12 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/marketplace-listings/__tests__/integration/listing-member-lifecycle.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/listing-presence.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
+      // Dropship eBay stock link: mapping-preparation destinations by store platform, the link writer, and row isolation.
+      "server/modules/inventory-planning/__tests__/integration/publication-mapping-preparation-dropship-target.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/dropship-ebay-stock-readiness.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/runtime-publication-row-isolation.integration.test.ts",
+      // Dropship eBay push end to end with its automatic stock link (real admission, planner and reader; fake eBay HTTP).
+      "server/modules/dropship/__tests__/integration/dropship-ebay-push-stock-link.integration.test.ts",
     ];
     addedSuites.push(
       "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",
@@ -203,6 +209,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/shipment-billing-ownership.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-value-allocation.integration.test.ts",
       "server/modules/procurement/__tests__/integration/receiving-quarantine.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/procurement-lifecycle-quarantine.integration.test.ts",
       "server/modules/inventory/__tests__/integration/receiving-custody-count-guard.integration.test.ts",
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";

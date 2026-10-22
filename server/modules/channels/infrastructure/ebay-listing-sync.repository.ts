@@ -50,7 +50,11 @@ const currentPublicationStart = `evidence.event='stage_started' AND evidence.evi
       OR (retry_receipt.event='stage_completed' AND retry_receipt.evidence->>'key' IN ('publication_rejected','publication_not_sent')))),0)`;
 const rowSql = `SELECT id::text,product_id AS "productId",state,error_code AS code,error_message AS message,
   next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt",identity,revision::text,claimed_revision::text AS "claimedRevision",
-  owner_token::text AS "ownerToken",attempts,result,verification_intent_hash AS "verificationIntentHash",
+  owner_token::text AS "ownerToken",attempts,result,
+  (SELECT evidence.evidence->'diagnostic'->'context'->'providerRead' FROM channels.ebay_listing_sync_events evidence
+   WHERE evidence.job_id=ebay_listing_sync_jobs.id AND evidence.revision=ebay_listing_sync_jobs.revision
+     AND evidence.evidence->>'code'=ebay_listing_sync_jobs.error_code
+   ORDER BY evidence.id DESC LIMIT 1) AS "providerRead",verification_intent_hash AS "verificationIntentHash",
   verification_revision::text AS "verificationRevision",provider_identity AS "providerIdentity",operation,requested_by AS "requestedBy",
   EXISTS(SELECT 1 FROM channels.ebay_listing_sync_events evidence WHERE evidence.job_id=channels.ebay_listing_sync_jobs.id
     AND evidence.event='stage_completed' AND evidence.evidence->>'key'='withdraw') AS "withdrawalWriteCompleted",
@@ -365,7 +369,13 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
   async authorizePublicationRetry(input: EbayPublicationRetryAuthorization, now: Date): Promise<{job:StoredEbayListingSyncJob;replayed:boolean}> {
     input=publicationRetryInputSchema.parse(input);
     const client=await this.pool.connect();
-    try { return await this.transaction(client,async()=>{
+    try { return await this.transaction(client, () => this.authorizePublicationRetryInsideTransaction(client, input, now)); }
+    finally { client.release(); }
+  }
+
+  /** The caller owns BEGIN/COMMIT/ROLLBACK when coordinating recovery. */
+  async authorizePublicationRetryInsideTransaction(client: PoolClient, input: EbayPublicationRetryAuthorization, now: Date): Promise<{job:StoredEbayListingSyncJob;replayed:boolean}> {
+    input = publicationRetryInputSchema.parse(input);
       const initial=(await client.query("SELECT channel_id,product_id FROM channels.ebay_listing_sync_jobs WHERE id=$1",[input.jobId])).rows[0];
       if(!initial || initial.channel_id!==input.channelId) throw new EbayListingSyncError("EBAY_SYNC_JOB_NOT_FOUND","The saved listing request was not found for this channel.");
       await client.query("SELECT pg_advisory_xact_lock($1,hashtext($2))",[LOCK_NAMESPACE,`enqueue:${input.channelId}:${initial.product_id}`]);
@@ -408,15 +418,18 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       await client.query(`UPDATE channels.ebay_listing_sync_jobs SET revision=revision+1,state='queued',owner_token=NULL,claimed_revision=NULL,
         attempts=0,error_code=NULL,error_message=NULL,result=NULL,next_attempt_at=$2,updated_at=$2 WHERE id=$1`,[input.jobId,now.toISOString()]);
       return {job:decode((await client.query(rowSql+" WHERE id=$1",[input.jobId])).rows[0]),replayed:false};
-    }); } finally {client.release();}
   }
   async list(channelId: number): Promise<EbayListingSyncJob[]> {
     const jobs = (
       await this.pool.query(
         `SELECT * FROM (SELECT DISTINCT ON ("productId") * FROM (
           SELECT id::text,product_id AS "productId",'sync' AS kind,operation,state,error_code AS code,error_message AS message,
-          next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt" FROM channels.ebay_listing_sync_jobs WHERE channel_id=$1
-          UNION ALL SELECT command_key::text,product_id,'admission',operation,'needs_attention',error_code,error_message,created_at,created_at
+          next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt",
+          (SELECT evidence.evidence->'diagnostic'->'context'->'providerRead' FROM channels.ebay_listing_sync_events evidence
+           WHERE evidence.job_id=ebay_listing_sync_jobs.id AND evidence.revision=ebay_listing_sync_jobs.revision
+             AND evidence.evidence->>'code'=ebay_listing_sync_jobs.error_code ORDER BY evidence.id DESC LIMIT 1) AS "providerRead"
+          FROM channels.ebay_listing_sync_jobs WHERE channel_id=$1
+          UNION ALL SELECT command_key::text,product_id,'admission',operation,'needs_attention',error_code,error_message,created_at,created_at,NULL::jsonb
           FROM channels.ebay_listing_sync_admission_failures WHERE channel_id=$1) all_jobs
           ORDER BY "productId","updatedAt" DESC,id DESC)
           latest ORDER BY "updatedAt" DESC LIMIT 500`,

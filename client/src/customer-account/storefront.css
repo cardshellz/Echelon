@@ -9,4 +9,5 @@
 .csz-modal-close:disabled { opacity: .4; cursor: wait; }
 .csz-account-ui [data-slot="card"] { box-shadow: none; }
 .csz-account-notice { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 14px 16px; margin: 16px 0; border: 1px solid #e9d5bf; border-radius: 8px; background: #fff8f1; font-size: 14px; }
+[data-csz-order-total]:empty::before, [data-csz-order-financials]:empty::before { content: "Checking total…"; }
 @media (max-width: 600px) { .csz-account-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); } .csz-dialog-body { padding: 14px; } .csz-dialog-heading { padding: 16px; gap: 12px; } .csz-dialog-heading h2 { font-size: 21px; } }
