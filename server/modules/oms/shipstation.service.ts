@@ -301,6 +301,7 @@ export interface WmsOrderRow {
   financial_status?: string | null;
   cancelled_at?: Date | string | null;
   order_edit_operation_id?: string | null;
+  on_hold?: number | null;
   sort_rank: string | null;
   customer_name: string | null;
   customer_email: string | null;
@@ -5141,6 +5142,12 @@ export function createShipStationService(
       touched += 1;
     }
 
+    if (touched !== shipmentRows.length) {
+      throw new Error(
+        `ShipStation hold sync updated ${touched} of ${shipmentRows.length} linked shipment(s) for WMS order ${wmsOrderId}`,
+      );
+    }
+
     if (mode === "hold") {
       await updateSortRankForShipmentRowsBestEffort(
         wmsOrderId,
@@ -5588,6 +5595,7 @@ export function createShipStationService(
       financial_status: wmsOrders.financialStatus,
       cancelled_at: wmsOrders.cancelledAt,
       order_edit_operation_id: wmsOrders.orderEditOperationId,
+      on_hold: wmsOrders.onHold,
       sort_rank: wmsOrders.sortRank,
       external_order_id: wmsOrders.externalOrderId,
       customer_name: wmsOrders.customerName,
@@ -5624,6 +5632,17 @@ export function createShipStationService(
     const finalFinancialStatus = String(orderRow.financial_status ?? "").toLowerCase();
     if (orderRow.order_edit_operation_id != null) {
       throw new OrderEditError("ORDER_EDIT_PROVIDER_HELD", "This order is held for an edit; ordinary shipment pushes cannot resume it.");
+    }
+    if (Number(orderRow.on_hold) === 1) {
+      throw new ShipStationPushError(
+        `WMS order ${orderRow.id} is on hold and cannot be pushed to ShipStation`,
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "order.on_hold",
+          value: true,
+        },
+      );
     }
     if (
       orderRow.warehouse_status === "cancelled" ||

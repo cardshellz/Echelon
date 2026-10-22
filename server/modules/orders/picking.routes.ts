@@ -10,7 +10,6 @@ import { orders, orderItems, pickingLogs, outboundShipments } from "@shared/sche
 import { broadcastOrdersUpdated } from "../../websocket";
 import { db } from "../../db";
 import {
-  enqueueShipStationHoldSyncRetry,
   enqueueShipStationSortRankSyncRetry,
   enqueueShipStationShipmentPushRetry,
 } from "../oms/webhook-retry.worker";
@@ -32,17 +31,17 @@ export function registerPickingRoutes(app: Express) {
     error: "Picker replen confirmation has been removed",
     message: "Replenishment is system-owned. Use replenishment/admin workflows for task execution or cancellation; picker input is limited to pick exceptions and QA review signals.",
   });
-  const queueShipStationHoldSync = async (
+  const syncShipStationHoldNow = async (
     orderId: number,
     mode: "hold" | "release",
     context: string,
   ) => {
-    await enqueueShipStationHoldSyncRetry(db, orderId, mode, context);
-
     const { shippingEngine } = app.locals.services || {} as any;
-    if (!shippingEngine?.isConfigured?.()) return;
+    if (!shippingEngine?.isConfigured?.()) {
+      return { status: "pending" as const, linkedShipments: 0, touched: 0 };
+    }
 
-    void (async () => {
+    try {
       const rows = await db.execute(sql`
         SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
                shipstation_order_id, shipstation_order_key
@@ -52,25 +51,40 @@ export function registerPickingRoutes(app: Express) {
           AND status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost')
         ORDER BY id
       `);
+      const linkedShipments = rows.rows?.length ?? 0;
+      let touched = 0;
+      let failed = 0;
       for (const row of rows.rows ?? []) {
         const ref = engineRefFromRow(row as any);
-        if (!ref) continue;
+        if (!ref) {
+          failed += 1;
+          continue;
+        }
         try {
           if (mode === "hold") {
             await shippingEngine.hold(ref);
           } else {
             await shippingEngine.releaseHold(ref);
           }
+          touched += 1;
         } catch (err: any) {
+          failed += 1;
           console.warn(`[${context}] engine ${mode} failed for ref ${ref.engineOrderRef}: ${err?.message}`);
         }
       }
-    })().catch((err: any) => {
+
+      return {
+        status: failed === 0 ? "applied" as const : "pending" as const,
+        linkedShipments,
+        touched,
+      };
+    } catch (err: any) {
       console.warn(
         `[${context}] immediate engine ${mode} sync failed for order ${orderId}; retry queued:`,
         err?.message ?? err,
       );
-    });
+      return { status: "pending" as const, linkedShipments: 0, touched: 0 };
+    }
   };
   const queueShipStationSortRankSync = async (
     orderId: number,
@@ -432,9 +446,13 @@ export function registerPickingRoutes(app: Express) {
         return res.status(404).json({ error: "Order not found" });
       }
 
+      broadcastOrdersUpdated();
+
       // Local WMS state is authoritative; ShipStation sync is retried durably.
-      await queueShipStationHoldSync(id, "hold", "Hold");
-      await queueShipStationSortRankSync(id, "HoldSortRank");
+      const providerHoldSync = await syncShipStationHoldNow(id, "hold", "Hold");
+      await queueShipStationSortRankSync(id, "HoldSortRank").catch((error: any) => {
+        console.warn(`[HoldSortRank] order ${id} refresh deferred: ${error?.message ?? error}`);
+      });
       
       // Log the hold action (non-blocking)
       storage.createPickingLog({
@@ -451,7 +469,10 @@ export function registerPickingRoutes(app: Express) {
         sessionId: req.sessionID,
       }).catch(err => console.warn("[PickingLog] Failed to log order_held:", err.message));
       
-      res.json(order);
+      res.status(providerHoldSync.status === "pending" ? 202 : 200).json({
+        ...order,
+        providerHoldSync,
+      });
     } catch (error: any) {
       console.error("Error holding order:", error);
       res.status(500).json({ error: "Failed to hold order" });
@@ -473,9 +494,13 @@ export function registerPickingRoutes(app: Express) {
         return res.status(404).json({ error: "Order not found" });
       }
 
+      broadcastOrdersUpdated();
+
       // Local WMS state is authoritative; ShipStation sync is retried durably.
-      await queueShipStationHoldSync(id, "release", "ReleaseHold");
-      await queueShipStationSortRankSync(id, "ReleaseHoldSortRank");
+      const providerHoldSync = await syncShipStationHoldNow(id, "release", "ReleaseHold");
+      await queueShipStationSortRankSync(id, "ReleaseHoldSortRank").catch((error: any) => {
+        console.warn(`[ReleaseHoldSortRank] order ${id} refresh deferred: ${error?.message ?? error}`);
+      });
 
       // An order held before its shipment ever reached the engine has nothing
       // for the hold-release sync above to release — re-reserve and push its
@@ -496,7 +521,10 @@ export function registerPickingRoutes(app: Express) {
         sessionId: req.sessionID,
       }).catch(err => console.warn("[PickingLog] Failed to log order_unhold:", err.message));
       
-      res.json(order);
+      res.status(providerHoldSync.status === "pending" ? 202 : 200).json({
+        ...order,
+        providerHoldSync,
+      });
     } catch (error: any) {
       console.error("Error releasing hold:", error);
       res.status(500).json({ error: "Failed to release hold" });

@@ -1449,6 +1449,12 @@ export async function dispatchShipStationHoldSyncRetry(
         if (mode === "hold") { await eng.hold(ref); } else { await eng.releaseHold(ref); }
         touched++;
       }
+      const expected = shipments.rows?.length ?? 0;
+      if (touched !== expected) {
+        throw new Error(
+          `ShipStation hold sync updated ${touched} of ${expected} linked shipment(s) for WMS order ${wmsOrderId}`,
+        );
+      }
     } else {
       const result = await ssSvc!.syncWmsOrderShipStationHoldState!(wmsOrderId, mode);
       touched = result?.touched ?? 0;
