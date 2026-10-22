@@ -60,6 +60,14 @@ describe("writer-ratchet (P2.1)", () => {
         "modules/catalog"
     ],
     [
+        "marketplace.channel_sync_batches",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.channel_sync_batch_members",
+        "modules/marketplace-listings"
+    ],
+    [
         "marketplace.listing_intent_changes",
         "modules/marketplace-listings"
     ],
