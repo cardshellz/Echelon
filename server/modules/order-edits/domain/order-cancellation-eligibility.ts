@@ -1,5 +1,17 @@
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import { orderEditHasUnresolvedPayment } from "../application/order-edit-identity";
+import { orderEditPlanInputSchema } from "@shared/order-edits/order-edit.contract";
+
+/** The existing operation document records the purchased lines being cancelled.
+ * Reuse its validation before offering confirmation, rather than discovering an
+ * unsupported or malformed line set after the customer has approved it. */
+export function orderCancellationLineEvidence(
+  snapshot: OrderEditSnapshot,
+): Array<{ lineItemId: string; quantity: 0 }> {
+  return snapshot.lines
+    .filter((line) => line.quantity > 0)
+    .map((line) => ({ lineItemId: line.id, quantity: 0 }));
+}
 
 /** Customer self-service uses the existing pre-pick warehouse cutoff. Shopify
  * editability is not cancellation authority: cancellation does not replace lines
@@ -47,7 +59,10 @@ export function orderCancellationEligibilityReasons(input: {
     !snapshot.customerId ||
     snapshot.evidence.countryCode !== "US" ||
     snapshot.lines.some((line) => line.quantity > 0 && line.unsupported) ||
-    !snapshot.lines.some((line) => line.quantity > 0)
+    !orderEditPlanInputSchema.safeParse({
+      changes: orderCancellationLineEvidence(snapshot),
+      additions: [],
+    }).success
   )
     reasons.push("Contact us to cancel this order.");
   return reasons;

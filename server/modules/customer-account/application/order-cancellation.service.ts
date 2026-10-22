@@ -19,7 +19,10 @@ import {
   type OrderEditProvider,
 } from "../../order-edits/application/order-edit-provider";
 import { assertOrderEditIdentity } from "../../order-edits/application/order-edit-identity";
-import { orderCancellationEligibilityReasons } from "../../order-edits/domain/order-cancellation-eligibility";
+import {
+  orderCancellationEligibilityReasons,
+  orderCancellationLineEvidence,
+} from "../../order-edits/domain/order-cancellation-eligibility";
 import { OrderEditError } from "../../order-edits/domain/order-edit-error";
 import { matchesOrderCancellationSettlement } from "../../order-edits/domain/order-edit-financials";
 import {
@@ -181,9 +184,7 @@ export class OrderCancellationService {
         // cancelled; no edit quote is created and editCommit is never invoked.
         input: {
           ...input,
-          changes: baseline.lines
-            .filter((line) => line.quantity > 0)
-            .map((line) => ({ lineItemId: line.id, quantity: 0 })),
+          changes: orderCancellationLineEvidence(baseline),
           additions: [],
         },
         baseline,
