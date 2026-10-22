@@ -130,6 +130,9 @@
   "channels.ebay_listing_sync_jobs": [
     "modules/channels"
   ],
+  "channels.ebay_listing_sync_settlements": [
+    "modules/channels"
+  ],
   "channels.partner_profiles": [
     "modules/channels"
   ],
@@ -980,6 +983,9 @@
     "modules/marketplace-listings"
   ],
   "marketplace.listing_intent_delivery_sources": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_member_recovery_commands": [
     "modules/marketplace-listings"
   ],
   "marketplace.listing_member_retirement_events": [

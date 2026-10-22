@@ -38,6 +38,8 @@ export const ebayListingSyncJobSchema = z.object({
   code: z.string().max(100).nullable(), message: z.string().max(1000).nullable(),
   nextAttemptAt: z.string().datetime(), updatedAt: z.string().datetime(),
   issue: ebayListingIssueSchema.optional(),
+  // Scheduling may pause while the original uncertain write remains fenced.
+  readRetryPaused: z.boolean().optional(),
   providerRead: channelProviderReadDiagnosticSchema.nullish().transform(value => value ?? undefined),
   // Older saved responses remain readable while the server adds event evidence.
   progress: ebayListingSyncProgressSchema.optional(),

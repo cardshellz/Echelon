@@ -49,7 +49,7 @@ export async function withEbayListingJobProgress<
       CASE WHEN job.state='queued' THEN NULL ELSE stage.event END AS stage_event,
       CASE WHEN job.state='queued' THEN (
         SELECT count(*)::integer FROM channels.ebay_listing_sync_jobs preceding
-        WHERE preceding.state IN('queued','running','recovering','awaiting_evidence')
+        WHERE preceding.state IN('queued','running','recovering','awaiting_evidence') AND NOT preceding.read_retry_paused
           AND preceding.next_attempt_at<=CURRENT_TIMESTAMP
           AND (preceding.next_attempt_at,preceding.id)<(job.next_attempt_at,job.id)
       ) ELSE NULL END AS queued_ahead

@@ -41,6 +41,8 @@ import { ebayListingPublicationScopes } from "../ebay-listing-request-recovery";
 import { proveLegacyEbayPublicationPreflight, validateEbayPublicationStageContract, type EbayPublicationStageEvent } from "../ebay-publication-preflight-evidence";
 
 const LOCK_NAMESPACE = 918427;
+import { canSettleUnsentListingFailure } from "../../marketplace-listings/domain/listing-work-obligation";
+
 const PUBLICATION_EVIDENCE_RECHECK_MS = 30_000;
 // Terminal rejection/no-send evidence retires only the corresponding start.
 // The original events stay immutable; accepted responses remain barriers.
@@ -50,7 +52,7 @@ const currentPublicationStart = `evidence.event='stage_started' AND evidence.evi
       OR (retry_receipt.event='stage_completed' AND retry_receipt.evidence->>'key' IN ('publication_rejected','publication_not_sent')))),0)`;
 const rowSql = `SELECT id::text,product_id AS "productId",state,error_code AS code,error_message AS message,
   next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt",identity,revision::text,claimed_revision::text AS "claimedRevision",
-  owner_token::text AS "ownerToken",attempts,result,
+  owner_token::text AS "ownerToken",attempts,result,read_failure_count AS "readFailureCount",read_retry_paused AS "readRetryPaused",
   (SELECT evidence.evidence->'diagnostic'->'context'->'providerRead' FROM channels.ebay_listing_sync_events evidence
    WHERE evidence.job_id=ebay_listing_sync_jobs.id AND evidence.revision=ebay_listing_sync_jobs.revision
      AND evidence.evidence->>'code'=ebay_listing_sync_jobs.error_code
@@ -295,6 +297,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         // barriers. The worker still revalidates every inventory fence; history
         // stays in the immutable events even when the current error is cleared.
         `UPDATE channels.ebay_listing_sync_jobs SET revision=revision+1,updated_at=$2,next_attempt_at=$2,
+          read_retry_paused=false,read_failure_count=0,
           state=CASE WHEN $3::boolean THEN 'queued' ELSE state END,
           error_code=CASE WHEN $3::boolean THEN NULL ELSE error_code END,
           error_message=CASE WHEN $3::boolean THEN NULL ELSE error_message END
@@ -416,7 +419,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         ownerTransactionId:(await client.query("SELECT pg_current_xact_id()::text AS id")).rows[0].id,
       },now);
       await client.query(`UPDATE channels.ebay_listing_sync_jobs SET revision=revision+1,state='queued',owner_token=NULL,claimed_revision=NULL,
-        attempts=0,error_code=NULL,error_message=NULL,result=NULL,next_attempt_at=$2,updated_at=$2 WHERE id=$1`,[input.jobId,now.toISOString()]);
+        attempts=0,read_failure_count=0,read_retry_paused=false,error_code=NULL,error_message=NULL,result=NULL,next_attempt_at=$2,updated_at=$2 WHERE id=$1`,[input.jobId,now.toISOString()]);
       return {job:decode((await client.query(rowSql+" WHERE id=$1",[input.jobId])).rows[0]),replayed:false};
   }
   async list(channelId: number): Promise<EbayListingSyncJob[]> {
@@ -424,12 +427,12 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       await this.pool.query(
         `SELECT * FROM (SELECT DISTINCT ON ("productId") * FROM (
           SELECT id::text,product_id AS "productId",'sync' AS kind,operation,state,error_code AS code,error_message AS message,
-          next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt",
+          next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt",read_retry_paused AS "readRetryPaused",
           (SELECT evidence.evidence->'diagnostic'->'context'->'providerRead' FROM channels.ebay_listing_sync_events evidence
            WHERE evidence.job_id=ebay_listing_sync_jobs.id AND evidence.revision=ebay_listing_sync_jobs.revision
              AND evidence.evidence->>'code'=ebay_listing_sync_jobs.error_code ORDER BY evidence.id DESC LIMIT 1) AS "providerRead"
           FROM channels.ebay_listing_sync_jobs WHERE channel_id=$1
-          UNION ALL SELECT command_key::text,product_id,'admission',operation,'needs_attention',error_code,error_message,created_at,created_at,NULL::jsonb
+          UNION ALL SELECT command_key::text,product_id,'admission',operation,'needs_attention',error_code,error_message,created_at,created_at,false,NULL::jsonb
           FROM channels.ebay_listing_sync_admission_failures WHERE channel_id=$1) all_jobs
           ORDER BY "productId","updatedAt" DESC,id DESC)
           latest ORDER BY "updatedAt" DESC LIMIT 500`,
@@ -461,7 +464,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(command_key) DO NOTHING`, [input.commandKey,input.channelId,input.productId,input.variantIds,input.actor,input.code,input.message,hash,now.toISOString(),operation]);
         const row = (await client.query("SELECT *,command_key::text AS id,product_id AS \"productId\" FROM channels.ebay_listing_sync_admission_failures WHERE command_key=$1", [input.commandKey])).rows[0];
         if (row.request_hash !== hash || row.operation !== operation) throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This rejected command belongs to a different request.");
-        return ebayListingSyncJobSchema.parse({ id: row.id,productId: row.productId,kind: "admission",operation:row.operation,state: "needs_attention",code: row.error_code,message: row.error_message,nextAttemptAt: row.created_at.toISOString(),updatedAt: row.created_at.toISOString() });
+        return ebayListingSyncJobSchema.parse({ id: row.id,productId: row.productId,kind: "admission",readRetryPaused:false,providerRead:undefined,operation:row.operation,state: "needs_attention",code: row.error_code,message: row.error_message,nextAttemptAt: row.created_at.toISOString(),updatedAt: row.created_at.toISOString() });
       });
     } finally { client.release(); }
   }
@@ -592,14 +595,19 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         [job.id,job.ownerToken,canonicalJson(accepted),hash]);
     });
   }
+  /** The same saved projection serves command receipts and normal status reads. */
+  async readSavedJob(id: string, reader: Pick<Pool, "query"> | PoolClient = this.pool): Promise<StoredEbayListingSyncJob | null> {
+    const row = (await reader.query(rowSql + " WHERE id=$1", [id])).rows[0];
+    return row ? decode(row) : null;
+  }
   async get(id: string): Promise<StoredEbayListingSyncJob> {
-    const row = (await this.pool.query(rowSql + " WHERE id=$1", [id])).rows[0];
-    if (!row)
+    const job = await this.readSavedJob(id);
+    if (!job)
       throw new EbayListingSyncError(
         "EBAY_SYNC_JOB_NOT_FOUND",
         "The listing sync job was not found.",
       );
-    return (await withEbayListingJobProgress(this.pool, [decode(row)]))[0];
+    return (await withEbayListingJobProgress(this.pool, [job]))[0];
   }
   async getByCommand(commandKey: string, channelId: number, options: { transactionClient?: PoolClient; expectedActor?: string;
     expectedOperation?: StoredEbayListingSyncJob["operation"] } = {}): Promise<StoredEbayListingSyncJob | null> {
@@ -631,13 +639,13 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         j.connection_id AS "connectionId",j.identity->>'accountId' AS "accountId",
         j.identity->>'marketplaceId' AS "marketplaceId",
         j.id::text,j.product_id AS "productId",j.operation,'sync' AS kind,
-        j.state,j.error_code AS code,j.error_message AS message,j.next_attempt_at AS "nextAttemptAt",
+        j.state,j.read_retry_paused AS "readRetryPaused",j.error_code AS code,j.error_message AS message,j.next_attempt_at AS "nextAttemptAt",
         GREATEST(j.updated_at,(SELECT max(e.created_at) FROM channels.ebay_listing_sync_events e WHERE e.job_id=j.id)) AS "updatedAt"
       FROM channels.ebay_listing_sync_commands c JOIN channels.ebay_listing_sync_jobs j ON j.id=c.job_id
       WHERE c.command_key=ANY($1::uuid[])
       UNION ALL
       SELECT f.command_key::text,f.actor,f.channel_id,NULL,NULL,NULL,f.command_key::text,f.product_id,f.operation,'admission',
-        'needs_attention',f.error_code,f.error_message,f.created_at,f.created_at
+        'needs_attention',false,f.error_code,f.error_message,f.created_at,f.created_at
       FROM channels.ebay_listing_sync_admission_failures f WHERE f.command_key=ANY($1::uuid[])
       AND NOT EXISTS(SELECT 1 FROM channels.ebay_listing_sync_commands c WHERE c.command_key=f.command_key)`, [keys])).rows;
     const scope = z.object({ commandKey: z.string().uuid(),actor: z.string().min(1),
@@ -650,7 +658,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
   async getAdmission(id: string, channelId: number): Promise<EbayListingSyncJob | null> {
     const row = (await this.pool.query(`SELECT command_key::text AS id,product_id AS "productId",operation,error_code AS code,error_message AS message,created_at
       FROM channels.ebay_listing_sync_admission_failures WHERE command_key=$1 AND channel_id=$2`, [id,channelId])).rows[0];
-    return row ? ebayListingSyncJobSchema.parse({ ...row, kind: "admission",state: "needs_attention",
+    return row ? ebayListingSyncJobSchema.parse({ ...row, kind: "admission",readRetryPaused:false,providerRead:undefined,state: "needs_attention",
       nextAttemptAt: row.created_at.toISOString(),updatedAt: row.created_at.toISOString() }) : null;
   }
   async claim(
@@ -666,7 +674,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       const rows = (
         await client.query<{ id: string; channel_id: number; product_id: number }>(
           `SELECT id::text,channel_id,product_id FROM channels.ebay_listing_sync_jobs
-        WHERE state IN ('queued','running','recovering','awaiting_evidence') AND next_attempt_at<=$1 AND ($2::uuid IS NULL OR id=$2)
+        WHERE state IN ('queued','running','recovering','awaiting_evidence') AND NOT read_retry_paused AND next_attempt_at<=$1 AND ($2::uuid IS NULL OR id=$2)
         ORDER BY next_attempt_at,id LIMIT 20 FOR UPDATE SKIP LOCKED`,
           [now.toISOString(), id ?? null],
         )
@@ -903,6 +911,8 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         error_message=CASE WHEN revision>claimed_revision THEN NULL ELSE $5 END,
         result=$6::jsonb,next_attempt_at=CASE WHEN revision>claimed_revision THEN $7::timestamptz ELSE $8::timestamptz END,
         attempts=CASE WHEN $9::boolean THEN 0 ELSE attempts END,
+        read_failure_count=CASE WHEN revision>claimed_revision THEN 0 ELSE $10 END,
+        read_retry_paused=CASE WHEN revision>claimed_revision THEN false ELSE $11 END,
         updated_at=$7 WHERE id=$1 AND owner_token=$2 RETURNING id`,
         [
           job.id,
@@ -914,6 +924,8 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
           now.toISOString(),
           outcome.nextAttemptAt.toISOString(),
           outcome.resetAttempts ?? false,
+          outcome.readRetry?.failures ?? 0,
+          outcome.readRetry?.paused ?? false,
         ],
       );
       if (changed.rowCount !== 1)
@@ -926,10 +938,36 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         job,
         outcome.state,
         { code: outcome.code, message: outcome.message,
+          ...(outcome.readRetry ? { readRetry: outcome.readRetry } : {}),
           ...(outcome.diagnostic ? { diagnostic: ebayListingFailureDiagnosticSchema.parse(outcome.diagnostic) } : {}) },
         now,
       );
+      if (outcome.state === "completed" && currentRevision === job.claimedRevision && job.operation === "sync")
+        await this.settleUnsentFailures(client, job, now);
     });
+  }
+  private async settleUnsentFailures(client: PoolClient, replacement: StoredEbayListingSyncJob, now: Date): Promise<void> {
+    const verified = (await client.query(`SELECT 1 FROM channels.ebay_listing_sync_events
+      WHERE job_id=$1 AND revision=$2 AND event='stage_completed' AND evidence->>'key'='verification'
+      AND evidence->>'preparedIntentHash'=(SELECT verification_intent_hash FROM channels.ebay_listing_sync_jobs WHERE id=$1)`,
+      [replacement.id,replacement.claimedRevision])).rows.length > 0;
+    if (!verified) return;
+    const candidates = await client.query<{id: string; identity_hash: string; before_record: unknown; preparation_started: boolean; other_stage: boolean}>(`
+      SELECT old.id,old.identity_hash,to_jsonb(old) before_record,
+        EXISTS(SELECT 1 FROM channels.ebay_listing_sync_events e WHERE e.job_id=old.id AND e.event='stage_started' AND e.evidence->>'key'='prepare_listing') preparation_started,
+        EXISTS(SELECT 1 FROM channels.ebay_listing_sync_events e WHERE e.job_id=old.id AND e.event IN ('stage_started','stage_completed')
+          AND (e.evidence->>'key' IS DISTINCT FROM 'prepare_listing' OR e.event='stage_completed')) other_stage
+      FROM channels.ebay_listing_sync_jobs old WHERE old.operation='sync' AND old.state='needs_attention'
+        AND old.identity_hash=$1 AND old.id<>$2
+        AND NOT EXISTS(SELECT 1 FROM channels.ebay_listing_sync_settlements s WHERE s.failed_job_id=old.id)
+      FOR UPDATE OF old`, [syncIdentityHash(replacement.identity),replacement.id]);
+    for (const failed of candidates.rows) {
+      if (!canSettleUnsentListingFailure({ failed:true, dispatchProvenAbsent:failed.preparation_started && !failed.other_stage,
+        failedScope:failed.identity_hash,replacementScope:syncIdentityHash(replacement.identity),replacementVerified:verified })) continue;
+      await client.query(`INSERT INTO channels.ebay_listing_sync_settlements(failed_job_id,replacement_job_id,before_record,actor,resolved_at)
+        VALUES($1,$2,$3,$4,$5) ON CONFLICT(failed_job_id) DO NOTHING`,
+        [failed.id,replacement.id,JSON.stringify(failed.before_record),replacement.requestedBy ?? "system:listing-lifecycle",now]);
+    }
   }
   private async projectWithdrawal(client: PoolClient, job: StoredEbayListingSyncJob,
     result: NonNullable<Parameters<EbayListingSyncStore["finish"]>[1]["result"]>, now: Date): Promise<void> {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ListingMemberRecoveryService, type ListingMemberRecoveryScope } from "./listing-member-recovery.service";
 import type { ListingMemberLifecycleDependencies } from "./listing-member-lifecycle.port";
 import { processListingMemberRetirement } from "./process-listing-member-retirement";
 import {
@@ -61,10 +62,25 @@ export class ListingLifecycleService {
   private now(): Date {
     return z.date().parse(this.dependencies.now());
   }
-  async memberHistory(channelId: number, input: unknown) {
+  private memberRecovery(): ListingMemberRecoveryService {
+    if (!this.dependencies.members) throw new ListingPublicationError("LISTING_LIFECYCLE_UNAVAILABLE", "Listing retirement recovery is unavailable.", 503);
+    return new ListingMemberRecoveryService(this.dependencies.members, () => this.now());
+  }
+  memberRecoveryPreview(channelId: ListingMemberRecoveryScope, input: unknown) {
+    const request = z.object({ operationId: z.string().uuid() }).strict().parse(input);
+    return this.memberRecovery().preview(channelId, request.operationId);
+  }
+  resumeMemberRecovery(channelId: ListingMemberRecoveryScope, input: unknown, actor: string) {
+    return this.memberRecovery().resume(channelId, input, actor);
+  }
+  async memberHistory(channelId: ListingMemberRecoveryScope, input: unknown) {
     const request = z.object({ productId: channelIdSchema, limit: z.number().int().min(1).max(250).default(100) }).strict().parse(input);
     if (!this.dependencies.members) throw new ListingPublicationError("LISTING_LIFECYCLE_UNAVAILABLE", "Listing retirement history is unavailable.", 503);
-    return { items: await this.dependencies.members.store.listForChannel(channelIdSchema.parse(channelId), request.productId, request.limit) };
+    if (typeof channelId === "number")
+      return { items: await this.dependencies.members.store.listForChannel(channelIdSchema.parse(channelId), request.productId, request.limit) };
+    const scope = z.object({connectionId:channelIdSchema,vendorId:channelIdSchema}).strict().parse(channelId);
+    if (!this.dependencies.members.store.listForDropship) throw new ListingPublicationError("LISTING_LIFECYCLE_UNAVAILABLE","Listing retirement history is unavailable.",503);
+    return {items:await this.dependencies.members.store.listForDropship(scope.connectionId,scope.vendorId,request.productId,request.limit)};
   }
   async list(channelId: number, rawSkus: unknown) {
     const skus = z.array(listingLifecycleSkuSchema).max(250).parse(rawSkus);

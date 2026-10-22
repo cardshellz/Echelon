@@ -69,6 +69,8 @@ const configured =
         "0736_ebay_listing_mapping_repairs.sql",
         "0737_ebay_publication_completion.sql",
         "0741_ebay_durable_withdrawal.sql",
+        "900000021000018880001_channel_lifecycle_recovery.sql",
+        "900000023000018880003_listing_work_settlement.sql",
         "900000008000018120001_ebay_automatic_sync_recovery.sql",
         "900000011000018230001_ebay_publication_preflight_recovery.sql",
       ])
@@ -376,6 +378,80 @@ const configured =
       });
       expect((await f.service.list(1)).batches[0].state).toBe("working");
     });
+
+    it.each(["recovering", "awaiting_evidence"] as const)(
+      "shows a paused %s job as attention and resumes the same batch member when its owner queues recovery",
+      async (state) => {
+        const f = ebayFixture();
+        const started = await f.service.start(1, actor, {
+          commandKey: randomUUID(),
+        });
+        await f.service.processDue(1);
+        const queued = await f.service.get(1, started.id);
+        const operationId = queued.items[0].operationId!;
+        const claim = await f.repository.claim(now, randomUUID(), operationId);
+        expect(claim).not.toBeNull();
+        try {
+          await f.repository.finish(
+            claim!.job,
+            {
+              state,
+              code: "EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID",
+              message: "The listing response could not be validated.",
+              result: null,
+              nextAttemptAt: now,
+              readRetry: { failures: 5, paused: true },
+            },
+            now,
+          );
+        } finally {
+          await claim!.release();
+        }
+        const paused = await f.service.get(1, started.id);
+        expect(paused.items[0]).toMatchObject({
+          operationId,
+          commandKey: queued.items[0].commandKey,
+          state: "needs_attention",
+          code: "EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID",
+          nextAttemptAt: null,
+        });
+        expect(paused.counts).toMatchObject({
+          needsAttention: 1,
+          queued: 1,
+          verifying: 0,
+          retrying: 0,
+          completed: 0,
+        });
+        expect(await f.repository.get(operationId)).toMatchObject({
+          state,
+          readRetryPaused: true,
+        });
+        expect(
+          await f.repository.claim(now, randomUUID(), operationId),
+        ).toBeNull();
+
+        // Only the existing execution owner can resume scheduling. The batch
+        // reads that same command receipt and never creates a replacement job.
+        await f.repository.enqueue(
+          f.identity(productIds[0]),
+          randomUUID(),
+          actor,
+          now,
+        );
+        const resumed = await f.service.get(1, started.id);
+        expect(resumed.items[0]).toMatchObject({
+          operationId,
+          commandKey: queued.items[0].commandKey,
+          state: "queued",
+        });
+        expect(resumed.counts).toMatchObject({
+          needsAttention: 0,
+          queued: 2,
+          completed: 0,
+        });
+      },
+    );
+
     it("records empty selection without queueing provider work", async () => {
       const f = fixture();
       f.adapter.select = vi.fn(async () => ({ destination, products: [] }));

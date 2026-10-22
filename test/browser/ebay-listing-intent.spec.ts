@@ -3,6 +3,35 @@ import { expect, test, type Page } from "@playwright/test";
 import { setupEbayChannelPage } from "./fixtures/ebay-channel-page.fixture";
 import { resolveEbayListingIssue } from "../../shared/ebay-listing-issue";
 
+
+test("AUDIT: excluded pending work opens its removal owner instead of the publication editor", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  state.excluded = true;
+  state.feedStatus = "excluded";
+  state.jobs = [{ ...withdrawal, state: "needs_attention", code: "EBAY_LISTING_SYNC_FAILED", message: "Removal needs review." }];
+  state.intentChanges.items = [channelIntentChange(67, {
+    state: "waiting_lifecycle", last_error_code: "LISTING_INTENT_LIFECYCLE_PENDING",
+    last_error_message: "These members are excluded from content updates. Channel clearing or removal is still outstanding.",
+    lifecycle: { assessedAt: "2026-10-20T20:00:00.000Z", selectionFingerprint: "a".repeat(64),
+      members: [{ productVariantId: 11, duty: "stock_clear", state: "pending",
+        code: "LISTING_LIFECYCLE_PRIOR_WORK", message: "Removal needs completion.", references: [withdrawal.id], nextActions: [{owner:"ebay_listing_sync",operationId:withdrawal.id}] }] },
+  })];
+  const publishingCalls: unknown[] = [];
+  await page.route("**/api/ebay/listings/push", route => {
+    publishingCalls.push(route.request().postDataJSON());
+    // This is the real publication admission owner's excluded-product refusal.
+    return route.fulfill({ json: { results: [{ productId: 1, success: false,
+      error: "This product is excluded from eBay. Enable it in the listing feed before publishing." }] } });
+  });
+  await page.reload();
+  const panel = page.getByTestId("listing-intent-changes");
+  await panel.locator("summary").first().click();
+  await panel.getByRole("button", { name: "Review listing", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("heading", { name: "Removal status", exact: true })).toBeVisible();
+  expect(publishingCalls).toEqual([]);
+});
+
 const withdrawal = { id: "543b9237-920d-4786-a950-31c6fe941c8f", productId: 1, kind: "sync", operation: "withdraw", state: "queued", code: null, message: null,
   nextAttemptAt: "2026-10-12T12:00:00.000Z", updatedAt: "2026-10-12T12:00:00.000Z" };
 const switchFor = (page: Page, included = true) => page.getByTitle(included ? "Exclude from eBay listings" : "Include in eBay listings", { exact: true });
@@ -247,3 +276,72 @@ for (const readOnly of [false, true]) {
     expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
   });
 }
+
+const archivedMember = {
+  operationId:"f287ac52-dc4c-41dc-8b20-06af2d0cf057",sourceRevision:"catalog-v1",version:3,
+  identity:{destinationKind:"channel_connection",connectionId:4,channelId:67,vendorId:null,provider:"ebay",
+    accountId:"seller",environment:"production",market:"EBAY_US",productId:1,productVariantId:11,
+    externalSku:"ARCHIVED-PACK",externalProductId:"listing-1",externalVariantId:"offer-11",externalInventoryItemId:null,identityConflict:false},
+  state:"failed",code:"LISTING_MEMBER_RECOVERY_REQUIRED",message:"The exact member is still published. Review removal recovery.",
+  verifiedAt:null,dispatchStatus:"unknown",dispatchKey:"f287ac52-dc4c-41dc-8b20-06af2d0cf057",verificationAttempts:1,recoveryRequired:true,
+};
+function memberChange() {
+  return channelIntentChange(67,{state:"waiting_lifecycle",lifecycle:{
+    assessedAt:"2026-10-20T20:00:00.000Z",selectionFingerprint:"a".repeat(64),
+    members:[{productVariantId:11,duty:"retirement",state:"attention",code:"LISTING_MEMBER_RECOVERY_REQUIRED",
+      message:"Removal needs review.",references:[archivedMember.operationId],
+      nextActions:[{owner:"listing_member_retirement",operationId:archivedMember.operationId}]}],
+  }});
+}
+for (const readOnly of [false,true]) test(`archived recovery uses the shared owner and preserves a lost-response command (read only: ${readOnly})`, async ({page}) => {
+  const state=await setupEbayChannelPage(page,{readOnly}); state.excluded=true; state.feedStatus="excluded";
+  state.intentChanges.items=[memberChange()];
+  const commands:Array<{operationId:string;commandKey:string;reviewHash:string}>=[];
+  let accepted=false;
+  await page.route("**/api/channels/67/listing-lifecycle/members**",route=>{
+    const path=new URL(route.request().url()).pathname;
+    const record=accepted ? {...archivedMember,state:"pending",dispatchStatus:"authorized",recoveryRequired:false,version:4} : archivedMember;
+    if (path.endsWith("/resume")) {
+      commands.push(route.request().postDataJSON()); accepted=true;
+      return commands.length===1 ? route.abort("failed") : route.fulfill({json:record});
+    }
+    if (path.endsWith("/recovery")) return route.fulfill({json:{record,observation:{identity:archivedMember.identity,retired:false},
+      reviewHash:"d".repeat(64),canResume:!accepted,message:"The exact archived member is still published. Continuing authorizes another removal attempt."}});
+    return route.fulfill({json:{items:[record]}});
+  });
+  await page.reload();
+  const panel=page.getByTestId("listing-intent-changes"); await panel.locator("summary").first().click();
+  await panel.getByRole("button",{name:"Review listing",exact:true}).click();
+  await page.getByRole("button",{name:"Review removal: ARCHIVED-PACK",exact:true}).click();
+  let dialog=page.getByRole("dialog");
+  await expect(dialog.getByRole("heading",{name:"Archived member removal recovery",exact:true})).toBeVisible();
+  if (readOnly) {
+    await expect(dialog.getByRole("button",{name:"Authorize removal recovery",exact:true})).toHaveCount(0);
+    expect(commands).toEqual([]); return;
+  }
+  await dialog.getByRole("button",{name:"Authorize removal recovery",exact:true}).click();
+  await expect(dialog.getByRole("button",{name:"Retry saved recovery",exact:true})).toBeEnabled();
+  await dialog.getByRole("button",{name:"Close",exact:true}).first().click();
+  await page.getByRole("button",{name:"Review removal: ARCHIVED-PACK",exact:true}).click();
+  dialog=page.getByRole("dialog");
+  await dialog.getByRole("button",{name:"Retry saved recovery",exact:true}).click();
+  await expect(dialog.getByRole("status")).toContainText("Recovery saved");
+  expect(commands).toHaveLength(2); expect(commands[1]).toEqual(commands[0]);
+  expect(commands[0]).toMatchObject({operationId:archivedMember.operationId,reviewHash:"d".repeat(64)});
+  expect(state.requests.some(path=>path.includes("/listings/push"))).toBe(false);
+});
+
+test("disabled-category work still opens the saved removal operation",async({page})=>{
+  const state=await setupEbayChannelPage(page);
+  state.feedStatus="type_disabled"; state.jobs=[{...withdrawal,state:"needs_attention",code:"EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN"}];
+  state.intentChanges.items=[channelIntentChange(67,{state:"waiting_lifecycle",lifecycle:{
+    assessedAt:"2026-10-20T20:00:00.000Z",selectionFingerprint:"a".repeat(64),members:[{
+      productVariantId:11,duty:"stock_clear",state:"pending",code:"LISTING_LIFECYCLE_PRIOR_WORK",message:"Saved removal is unfinished.",
+      references:[withdrawal.id],nextActions:[{owner:"ebay_listing_sync",operationId:withdrawal.id}],
+    }],
+  }})];
+  await page.reload();
+  const panel=page.getByTestId("listing-intent-changes");await panel.locator("summary").first().click();
+  await panel.getByRole("button",{name:"Review listing",exact:true}).click();
+  await expect(page.getByRole("dialog").getByRole("heading",{name:"Removal status",exact:true})).toBeVisible();
+});

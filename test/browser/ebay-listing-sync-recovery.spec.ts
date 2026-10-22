@@ -1640,3 +1640,57 @@ test("the selected bulk run remains exact when a newer run moves it off the hist
   expect(batches.posts).toHaveLength(1);
   expect(state.errors).toEqual([]);expect(state.unexpected).toEqual([]);
 });
+
+
+test("a paused batch member opens its saved recovery instead of spinning indefinitely", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  const paused = {
+    ...job, state: "awaiting_evidence", readRetryPaused: true,
+    code: "EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID",
+    message: "The listing response could not be validated.",
+    providerRead: {
+      provider: "ebay", resource: "offers", method: "GET", kind: "invalid_response",
+      httpStatus: 200, requestId: "paused-batch-read",
+    },
+  };
+  state.jobs = [paused];
+  const batch = batchFixture(["needs_attention"]);
+  batch.items[0] = { ...batch.items[0], operationId: job.id, code: paused.code, message: paused.message };
+  const batches = await mockSyncBatches(page, batch);
+  batches.saved = true;
+  await page.reload();
+  const progress = page.getByRole("region", { name: "Channel sync progress" });
+  await expect(progress).toContainText("Sync finished with issues");
+  await expect(progress).toContainText("1 need attention");
+  await progress.getByRole("button", { name: "View sync progress", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Review listing", exact: true }).click();
+  const recovery = page.getByRole("dialog");
+  await expect(recovery.getByRole("status")).toContainText("Listing check paused");
+  await expect(recovery).not.toContainText("Next automatic check eligible");
+  await expect(recovery.getByRole("button", { name: "Retry Sync", exact: true })).toBeEnabled();
+  expect(batches.posts).toEqual([]);
+  expect(state.commands).toEqual([]);
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+});
+
+for (const operation of ["publish","withdraw"] as const) test(`paused ${operation} read retains diagnostics and exposes deliberate recovery`,async({page})=>{
+  const state=await setupEbayChannelPage(page);
+  state.feedStatus=operation==="publish" ? "publication_incomplete" : "excluded";
+  state.excluded=operation==="withdraw";
+  state.jobs=[{...job,operation,state:"awaiting_evidence",readRetryPaused:true,code:"EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID",
+    message:"The listing response could not be validated.",providerRead:{
+      provider:"ebay",resource:"offers",method:"GET",kind:"invalid_response",httpStatus:200,
+      requestId:"paused-read-123",issues:[{path:"offers.0.offerId",code:"invalid_type"}],
+    }}];
+  await page.reload();
+  const label=operation==="publish" ? "View publishing status" : "View removal status";
+  await page.getByRole("button",{name:label,exact:true}).filter({visible:true}).click();
+  const dialog=page.getByRole("dialog");
+  await expect(dialog.getByRole("status")).toContainText("Listing check paused");
+  await expect(dialog).not.toContainText("Next automatic check eligible");
+  await expect(dialog.getByRole("button",{name:"Retry Sync",exact:true})).toBeEnabled();
+  await expect(dialog.getByRole("button",{name:"Review earlier requests",exact:true})).toBeEnabled();
+  await dialog.getByRole("button",{name:operation==="publish" ? "Refresh publishing status" : "Refresh removal status",exact:true}).click();
+  expect(state.commands).toEqual([]);
+});

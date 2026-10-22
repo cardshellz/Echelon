@@ -131,8 +131,11 @@ export class EbaySyncBatchAdapter implements ChannelSyncBatchAdapter {
       return {
         commandKey: receipt.commandKey,
         operationId: job.id,
-        state:
-          job.state === "recovering"
+        // A paused observation retains its write barrier, but needs operator
+        // attention rather than an active-progress spinner in the batch.
+        state: job.readRetryPaused
+          ? "needs_attention"
+          : job.state === "recovering"
             ? "retrying"
             : job.state === "awaiting_evidence"
               ? "verifying"
@@ -140,11 +143,11 @@ export class EbaySyncBatchAdapter implements ChannelSyncBatchAdapter {
         code: job.code,
         message: job.message,
         updatedAt: job.updatedAt,
-        nextAttemptAt: ["recovering", "awaiting_evidence", "queued"].includes(
-          job.state,
-        )
-          ? job.nextAttemptAt
-          : null,
+        nextAttemptAt:
+          !job.readRetryPaused &&
+          ["recovering", "awaiting_evidence", "queued"].includes(job.state)
+            ? job.nextAttemptAt
+            : null,
       };
     });
   }

@@ -643,6 +643,16 @@ function DropshipPortalCatalogPage() {
                 else leaveGuard(() => navigate(dropshipPortalPath(link.href)));
               } else leaveGuard(() => navigate(stepHref("setup")));
             }}
+            onOpenWork={(_row,action) => {
+              if (action.owner === "dropship_listing_push" && action.operationId && /^[1-9][0-9]*$/.test(action.operationId)) {
+                const jobId = Number(action.operationId);
+                if (Number.isSafeInteger(jobId)) { setIntentJob({storeConnectionId:selectedStoreConnectionIdNumber,jobId}); return true; }
+              }
+              if (action.owner === "stock_publication" || action.owner === "listing_mapping") {
+                leaveGuard(() => navigate(stepHref("setup"))); return true;
+              }
+              return false;
+            }}
             onOpenOperation={row => {
               if (row.receipt?.owner !== "dropship_listing_push" || !/^[1-9][0-9]*$/.test(row.receipt.operationId)) return;
               const jobId = Number(row.receipt.operationId);

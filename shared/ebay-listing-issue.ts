@@ -27,9 +27,9 @@ export function resolveEbayListingJobIssue(job: EbayListingSyncJob): EbayListing
   if (isUnresolvedListingRequest(code)) return resolveEbayListingIssue({ code,
     message: job.message, productId: job.productId, jobId: job.id, state: job.state, operation: job.operation });
   if (job.providerRead || code === "PUBLICATION_RECOVERY_REVIEW_REQUIRED" || code?.startsWith("EBAY_REGISTRATION_"))
-    return resolveEbayListingIssue({ code, productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead });
+    return resolveEbayListingIssue({ code, productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead, readRetryPaused: job.readRetryPaused });
   return job.issue ?? resolveEbayListingIssue({ code: job.code, message: job.message,
-    productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead });
+    productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead, readRetryPaused: job.readRetryPaused });
 }
 
 export interface EbayListingIssueInput {
@@ -42,6 +42,7 @@ export interface EbayListingIssueInput {
   quantityBlockerCodes?: readonly string[];
   policySource?: EbayPolicySource;
   providerRead?: ChannelProviderReadDiagnostic | null;
+  readRetryPaused?: boolean;
 }
 
 /** One presentation contract for API results, saved work, and older server responses.
@@ -84,12 +85,12 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     readFailure.httpStatus === 401 || readFailure.httpStatus === 403
       ? "Open connection settings and check the seller authorization, then retry Sync."
       : "Review the saved read details before retrying. The endpoint and HTTP status identify the refused request.",
-    false, readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "reconnect" : "check_status",
-    readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "Open connection settings" : "View update status",
+    readFailure.httpStatus !== 401 && readFailure.httpStatus !== 403, readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "reconnect" : "retry_sync",
+    readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "Open connection settings" : "Retry Sync",
     readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "/channels/ebay#connection" : undefined);
   if (isObservationReadFailure) {
-    const retrying = input.state === "recovering";
-    const result = issue(retrying ? "Retrying the listing check" : "The listing check could not finish",
+    const retrying = !input.readRetryPaused && (input.state === "recovering" || (input.state === "awaiting_evidence" && input.readRetryPaused === false));
+    const result = issue(input.readRetryPaused ? "Listing check paused" : retrying ? "Retrying the listing check" : "The listing check could not finish",
       "Echelon could not read a complete, valid listing response. This does not establish that the product or its settings are wrong.",
       retrying ? "The saved update will check again automatically before making another change. Its existing request history stays protected."
         : "Retry Sync to check the listing again. If it still cannot be read, copy the technical details for investigation. Recovery details also show any earlier unresolved requests.",

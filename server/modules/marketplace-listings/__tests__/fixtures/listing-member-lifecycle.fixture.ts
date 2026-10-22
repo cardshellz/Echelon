@@ -25,6 +25,6 @@ export async function installListingMemberLifecycleFixture(pool: Pool) {
       external_account_identity_scheme text,external_account_verified_at timestamptz);`);
   for (const file of ["0707_channel_listing_publication.sql", "0724_channel_listing_updates.sql",
     "259_channel_listing_lifecycle.sql", "0748_walmart_listing_presence.sql",
-    "900000013000018480001_shared_listing_member_lifecycle.sql"])
+    "900000013000018480001_shared_listing_member_lifecycle.sql", "900000022000018880002_listing_member_recovery.sql"])
     await pool.query(readFileSync(resolve("migrations", file), "utf8"));
 }
