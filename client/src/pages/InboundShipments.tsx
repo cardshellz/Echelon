@@ -1,3 +1,4 @@
+import { shipmentListState } from "@/lib/shipment-list-navigation";
 import { shipmentWarehouseOptionsSchema } from "@shared/procurement/shipment-create-source";
 import { useShipmentCreation } from "@/hooks/use-shipment-creation";
 import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateRecovery";
@@ -7,7 +8,7 @@ import { shipmentWorkListPageSchema, SHIPMENT_LIST_PAGE_SIZE, type ShipmentWorkL
 import { landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { ShipmentPurchaseOrderLinks } from "@/features/purchasing/ShipmentPurchaseOrderLinks";
 import { procurementChildHref } from "@/lib/procurement-navigation";
 import { Card, CardContent } from "@/components/ui/card";
@@ -85,17 +86,22 @@ export default function InboundShipments() {
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
 
-  // Filters
-  const [statusFilter, setStatusFilterValue] = useState("active");
-  const [modeFilter, setModeFilterValue] = useState("all");
-  const [landedCostFilter, setLandedCostFilterValue] = useState<LandedCostFollowupFilter>("all");
-  const [searchQuery, setSearchQueryValue] = useState("");
-
-  const [offset, setOffset] = useState(0);
-  const setStatusFilter = (value: string) => { setOffset(0); setStatusFilterValue(value); };
-  const setModeFilter = (value: string) => { setOffset(0); setModeFilterValue(value); };
-  const setLandedCostFilter = (value: LandedCostFollowupFilter) => { setOffset(0); setLandedCostFilterValue(value); };
-  const setSearchQuery = (value: string) => { setOffset(0); setSearchQueryValue(value); };
+  const listSearch = useSearch();
+  const listState = shipmentListState(listSearch);
+  const { status: statusFilter, mode: modeFilter, costFilter: landedCostFilter, search: searchQuery, offset } = listState;
+  function updateFilters(changes: Record<string, string | number>) {
+    const params = new URLSearchParams(listSearch);
+    for (const [key, value] of Object.entries(changes)) params.set(key, String(value));
+    if (params.get("mode") === "all") params.delete("mode");
+    navigate(`/shipments?${params}`, { replace: true });
+  }
+  const setOffset = (value: number) => updateFilters({ offset: value });
+  const setStatusFilter = (value: string) => updateFilters({ status: value, offset: 0 });
+  const setModeFilter = (value: string) => updateFilters({ mode: value, offset: 0 });
+  const setLandedCostFilter = (value: LandedCostFollowupFilter) => updateFilters({ costFilter: value, offset: 0 });
+  const setSearchQuery = (value: string) => updateFilters({ search: value, offset: 0 });
+  const shipmentHref = (shipment: InboundShipment) => procurementChildHref("/shipments", listSearch,
+    `/shipments/${shipment.id}?document=${encodeURIComponent(shipment.shipmentNumber)}`);
 
   // Create dialog
   const [showCreateDialog, setShowCreateDialog] = useState(false);
@@ -500,7 +506,7 @@ export default function InboundShipments() {
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Search shipment #, carrier, container #..."
+              placeholder="Search shipment, PO, SKU, carrier or container..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               className="pl-9 h-10"
@@ -579,13 +585,13 @@ export default function InboundShipments() {
             <Card
               key={shipment.id}
               className="cursor-pointer active:bg-accent/50"
-              onClick={() => navigate(`/shipments/${shipment.id}`)}
+              onClick={() => navigate(shipmentHref(shipment))}
             >
               <CardContent className="p-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-mono font-medium text-sm">{shipment.shipmentNumber}</span>
+                      <Link href={shipmentHref(shipment)} onClick={event => event.stopPropagation()} className="font-mono font-medium text-sm text-primary hover:underline">{shipment.shipmentNumber}</Link>
                       <Badge
                         variant={STATUS_BADGES[shipment.status]?.variant || "secondary"}
                         className={`text-xs ${STATUS_BADGES[shipment.status]?.color || ""}`}
@@ -599,7 +605,7 @@ export default function InboundShipments() {
                     <div className="mt-1 text-sm" data-testid={`shipment-purchases-${shipment.id}`}>
                       <ShipmentPurchaseOrderLinks
                         purchaseOrders={shipment.purchaseOrders}
-                        hrefFor={(id) => procurementChildHref(`/shipments/${shipment.id}`, "", `/purchase-orders/${id}?tab=shipments`)}
+                        hrefFor={(id, poNumber) => procurementChildHref("/shipments", listSearch, `/purchase-orders/${id}?tab=shipments&poScope=${id}&document=${encodeURIComponent(poNumber)}`)}
                       />
                     </div>
                     <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
@@ -649,16 +655,16 @@ export default function InboundShipments() {
                 <TableRow
                   key={shipment.id}
                   className="cursor-pointer"
-                  onClick={() => navigate(`/shipments/${shipment.id}`)}
+                  onClick={() => navigate(shipmentHref(shipment))}
                 >
-                  <TableCell className="font-mono font-medium">{shipment.shipmentNumber}</TableCell>
+                  <TableCell className="font-mono font-medium"><Link href={shipmentHref(shipment)} onClick={event => event.stopPropagation()} className="text-primary hover:underline">{shipment.shipmentNumber}</Link></TableCell>
                   <TableCell>{renderModeBadge(shipment.mode)}</TableCell>
                   <TableCell>{shipment.carrierName || "—"}</TableCell>
                   <TableCell className="font-mono text-sm">{shipment.containerNumber || "—"}</TableCell>
                   <TableCell className="min-w-[10rem]" data-testid={`shipment-purchases-${shipment.id}`}>
                     <ShipmentPurchaseOrderLinks
                       purchaseOrders={shipment.purchaseOrders}
-                      hrefFor={(id) => procurementChildHref(`/shipments/${shipment.id}`, "", `/purchase-orders/${id}?tab=shipments`)}
+                      hrefFor={(id, poNumber) => procurementChildHref("/shipments", listSearch, `/purchase-orders/${id}?tab=shipments&poScope=${id}&document=${encodeURIComponent(poNumber)}`)}
                     />
                   </TableCell>
                   <TableCell className="text-sm">{renderRoute(shipment)}</TableCell>

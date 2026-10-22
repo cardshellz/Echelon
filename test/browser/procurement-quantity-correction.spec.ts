@@ -81,6 +81,18 @@ async function install(
   await page.route("**/api/**", async (route) => {
     const request = route.request(),
       path = new URL(request.url()).pathname;
+    const relationship = path.match(/^\/api\/procurement\/relationships\/(purchase|shipment|receipt)\/(\d+)$/);
+    if (relationship) return route.fulfill({ json: {
+      root: { kind: relationship[1], id: Number(relationship[2]) },
+      purchases: [{ id: 17, number: "TEST-PO-17" }],
+      purchaseLines: [{ id: 171, purchaseId: 17, lineNumber: 1, sku: "TEST-SKU", product: "Test product", orderedPieces: 2000 }],
+      shipments: [{ id: 42, number: "TEST-SHIP-42", status: "closed" }],
+      shipmentLines: [{ id: 1, shipmentId: 42, purchaseId: 17, purchaseLineId: 171, sku: "TEST-SKU", product: "Test product", shippedPieces: posted ? 2000 : 200 }],
+      receipts: [{ id: 31, number: "TEST-RECEIPT-31", status: "closed", purchaseId: 17, shipmentId: 42 }],
+      receiptLines: [{ id: 32, receiptId: 31, shipmentLineId: 1, purchaseLineId: 171, sku: "TEST-SKU", receivedUnits: 2, reversedUnits: 0, piecesPerUnit: posted || shipmentEdit ? 1000 : 100 }],
+      charges: [{ id: 401, shipmentId: 42, currency: "USD", cents: 5000 }],
+      allocations: [{ costId: 401, shipmentLineId: 1, currency: "USD", cents: 5000 }], costIssues: [],
+    } });
     if (missingHistory && path === "/api/purchase-orders/17/shipment-costs")
       return route.fulfill({
         json: {
@@ -423,11 +435,9 @@ test("shipment edit reviews and saves shipped pieces while the correct receipt s
   expect(commands).toHaveLength(1);
   expect(commands[0].body).toEqual(expected);
   await dialog.getByRole("button", { name: "Done", exact: true }).click();
-  if (info.project.name === "mobile") {
-    await expect(
-      page.getByText("2,000 pieces", { exact: true }).filter({ visible: true }),
-    ).toBeVisible();
-  } else await expect(page.getByRole("table").first()).toContainText("2,000");
+  const relationshipLine = page.getByTestId("relationship-line-1");
+  await expect(relationshipLine).toContainText("2,000");
+  await expect(relationshipLine).toContainText("2,000 pieces received");
   await page.goto("/purchase-orders/17?tab=lines");
   await expect(
     page.getByRole("button", {

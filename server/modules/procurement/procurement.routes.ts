@@ -1,4 +1,8 @@
 import { registerPurchasePipelineRoutes } from "./purchase-pipeline.routes";
+import { db } from "../../db";
+import { registerDocumentRelationshipRoutes } from "./document-relationships.routes";
+import { createDocumentRelationshipRepository } from "./document-relationships.repository";
+import { createDocumentRelationshipService } from "./document-relationships.service";
 import type { Express } from "express";
 import { procurementStorage } from "../procurement";
 import { catalogStorage } from "../catalog";
@@ -23,6 +27,7 @@ import { registerEnterpriseDashboardRoutes } from "./enterprise-dashboard.routes
 import { registerPurchaseForecastBacktestingRoutes } from "./purchase-forecast-backtesting.routes";
 
 export function registerPurchasingRoutes(app: Express) {
+  registerDocumentRelationshipRoutes(app, createDocumentRelationshipService(createDocumentRelationshipRepository(db)));
   // ===== VENDORS API =====
   
   app.get("/api/vendors", requirePermission("purchasing", "view"), async (req, res) => {
