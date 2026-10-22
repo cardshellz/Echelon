@@ -16,11 +16,11 @@ const progressing = new Set<OrderEditStatus>([
 export const orderEditWatchesStatus = (status: OrderEditStatus): boolean =>
   progressing.has(status);
 
-interface StatusOptions {
+interface StatusOptions<T extends { operationId: string; status: string } = OrderEditOperation> {
   operationId: string | null;
   watching: boolean;
-  read(id: string, signal: AbortSignal): Promise<OrderEditOperation>;
-  received(operation: OrderEditOperation): void;
+  read(id: string, signal: AbortSignal): Promise<T>;
+  received(operation: T): void;
   busy(): boolean;
   revision(): number;
   clock?: () => number;
@@ -28,7 +28,7 @@ interface StatusOptions {
 /** Display-only observer. Financial progress belongs to the canonical worker;
  * neither timers nor browser-return events may submit reconciliation commands.
  */
-export function useOrderEditStatus(options: StatusOptions): {
+export function useCustomerOperationStatus<T extends { operationId: string; status: string }>(options: StatusOptions<T> & { isProgressing(operation: T): boolean }): {
   error: string | null;
   reading: boolean;
   retry(): void;
@@ -93,7 +93,7 @@ export function useOrderEditStatus(options: StatusOptions): {
         failed = false;
         setError(null);
         latest.current.received(result);
-        if (!orderEditWatchesStatus(result.status)) stopped = true;
+        if (!latest.current.isProgressing(result)) stopped = true;
       } catch (cause) {
         if (!stopped && !controller.signal.aborted) {
           failed = true;
@@ -141,4 +141,8 @@ export function useOrderEditStatus(options: StatusOptions): {
     };
   }, [options.operationId, options.watching, attempt]);
   return { error, reading, retry: () => setAttempt((value) => value + 1) };
+}
+
+export function useOrderEditStatus(options: StatusOptions) {
+  return useCustomerOperationStatus({ ...options, isProgressing: operation => orderEditWatchesStatus(operation.status) });
 }

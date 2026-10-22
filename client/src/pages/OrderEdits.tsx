@@ -41,6 +41,7 @@ import {
   orderEditMatchesInput,
 } from "@/lib/order-edit-confirmation";
 import { OrderEditCodeEntry } from "@/components/order-edits/OrderEditCodeEntry";
+import { OrderCancellationAdmin } from "@/components/order-edits/OrderCancellationAdmin";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
   nextOrderEditPreviewInput,
@@ -1820,12 +1821,15 @@ export default function OrderEdits() {
           <Badge variant="outline">Staff only</Badge>
         </div>
         <p className="text-sm text-muted-foreground">
-          Changes apply to the original Shopify order. Customer access is off.
-          This pilot does not request order-update or refund emails.
+          Review order updates and saved customer cancellations. Changes apply to
+          the original Shopify order. Customer cancellations use Shopify’s
+          cancellation notification and original payment refund flow.
         </p>
       </header>
       {invalidLink ? (
         <ErrorMessage text="This operation link is invalid. Use the exact saved operation link." />
+      ) : operationId && operation.error instanceof OrderEditRequestError && operation.error.code === "ORDER_CANCELLATION_SEPARATE_FLOW" ? (
+        <OrderCancellationAdmin operationId={operationId} />
       ) : operationId && !changingItems ? (
         <>
           {operation.isLoading && <p role="status">Loading order edit…</p>}

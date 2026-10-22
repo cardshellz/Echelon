@@ -12,6 +12,7 @@ import { OrderEditPreviewService } from "./application/order-edit-preview.servic
 import { createMemberPlanPresentationReader } from "../membership";
 import { ClubOrderEditCodeRedemptions } from "./infrastructure/club-order-edit-code-redemptions";
 import { PostgresOrderEditCodeHistory } from "./infrastructure/postgres-order-edit-code-history";
+import { OrderCancellationService } from "../customer-account/application/order-cancellation.service";
 
 const credentialSchema = z.object({
   connectionId: z.number().int().positive(),
@@ -84,5 +85,7 @@ export function createOrderEditService(
     new OrderEditPreviewService(store, provider, warehouse, clock),
     provider.catalog,
     codeRedemptions,
+    new OrderCancellationService({ store, provider, warehouse, rewards: codeRedemptions, clock, uuid: randomUUID,
+      report: event => console.error(JSON.stringify({ event: "customer_order_cancellation_pending", ...event })) }),
   );
 }

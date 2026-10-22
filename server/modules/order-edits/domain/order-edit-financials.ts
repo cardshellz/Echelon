@@ -197,3 +197,27 @@ export function presentOrderEditSettlement(
     );
   return result.data;
 }
+
+/** One presentation owner for account rows and their management panel. A
+ * settled refund must not be labelled "payment outstanding" just because the
+ * provider no longer reports the cancelled order as fullyPaid. */
+export function presentOrderEditFinancialStatus(snapshot: SettlementEvidence & { cancelled: boolean; fullyPaid: boolean }): string {
+  const settled = presentOrderEditSettlement(snapshot);
+  const pending = settled.activity.filter(entry => !["SUCCESS", "FAILURE", "ERROR"].includes(entry.status));
+  if (pending.some(entry => entry.kind === "refund")) return "Refund processing";
+  if (settled.outstandingCents > 0) return "Payment due";
+  if (settled.refundedCents > 0) return settled.netPaidCents === 0 ? "Refunded" : "Partially refunded";
+  if (snapshot.cancelled) return settled.netPaidCents > 0 ? "Refund pending" : "Cancelled";
+  if (pending.length) return "Payment processing";
+  return snapshot.fullyPaid ? "Paid" : "Payment pending";
+}
+
+/** Full cancellation must refund the approved remaining payment, without an
+ * extra capture or a changed refund amount being hidden by a zero net balance. */
+export function matchesOrderCancellationSettlement(before: SettlementEvidence, after: SettlementEvidence, refundCents: number): boolean {
+  if (!Number.isSafeInteger(refundCents) || refundCents < 0) return false;
+  const original = presentOrderEditSettlement(before), current = presentOrderEditSettlement(after);
+  return original.netPaidCents === refundCents && current.netPaidCents === 0 && current.outstandingCents === 0
+    && original.receivedCents === current.receivedCents
+    && BigInt(current.refundedCents) - BigInt(original.refundedCents) === BigInt(refundCents);
+}
