@@ -57,6 +57,8 @@ import {
 import type { OrderCancellationService } from "../../customer-account/application/order-cancellation.service";
 import { orderCancellationEligibilityReasons } from "../domain/order-cancellation-eligibility";
 import { presentCustomerOrderLifecycle } from "@shared/customer-account/order-fulfillment";
+import { customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
+import { orderAddressEligibility } from "../domain/order-address-eligibility";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
 // Bound each scheduler pass so one store cannot monopolize the worker.
@@ -278,6 +280,10 @@ export class OrderEditService {
     ];
     const cancellationEnabled = this.cancellations ? (await this.store.settings(connectionId)).enabled : false;
     const fulfillment = warehouse.fulfillment && presentCustomerOrderLifecycle(warehouse.fulfillment, snapshot.cancelled);
+    const cancellationReasons = orderCancellationEligibilityReasons({ snapshot, warehouseReasons: warehouse.cancellationReasons ?? warehouse.reasons,
+      activeOperationId: reference.activeOperationId, activeOperationStatus: active?.status, enabled: cancellationEnabled });
+    const addressEligibility = orderAddressEligibility({ editEligible: warehouse.editable && reasons.length === 0,
+      editReasons: reasons, activeOperationId: reference.activeOperationId, activeOperationStatus: active?.status });
     return orderEditOrderSchema.parse({
       ...(codeEntryVersion === "v1"
         ? {
@@ -291,10 +297,11 @@ export class OrderEditService {
       customerName: reference.customerName,
       customerEmail: reference.customerEmail,
       activeOperationId: reference.activeOperationId,
-      ...(active ? { activeOperationKind: active.kind ?? "edit" } : {}),
+      ...(active ? { activeOperationKind: active.kind ?? "edit", activeOperationStatus: active.status } : {}),
+      addressEligibility,
       cancellation: {
-        canReview: orderCancellationEligibilityReasons({ snapshot, warehouseReasons: warehouse.cancellationReasons ?? warehouse.reasons,
-          activeOperationId: reference.activeOperationId, enabled: cancellationEnabled }).length === 0,
+        canReview: cancellationReasons.length === 0,
+        reasons: cancellationReasons,
         requestKey: active?.kind === "cancel_order" && active.actorId === actorId ? active.requestKey : null,
       },
       currency: snapshot.currency,
@@ -325,6 +332,33 @@ export class OrderEditService {
       financialStatus: presentOrderEditFinancialStatus(snapshot),
       warehouseStatus: fulfillment?.label ?? "Status unavailable",
       ...(fulfillment ? { fulfillment } : {}),
+    });
+  }
+  /** Query-only account reads deliberately do not resolve OMS, inspect warehouse
+   * eligibility, prepare calculated orders, or create an operation/hold. */
+  async orderSummaries(connectionId: number, externalOrderIds: readonly string[]) {
+    if (!this.provider.readOrderSummaries)
+      throw new OrderEditError("CUSTOMER_ACCOUNT_HISTORY_UNAVAILABLE", "Order history is temporarily unavailable. Please try again.", 503);
+    return this.provider.readOrderSummaries(connectionId, externalOrderIds);
+  }
+  async customerOrderDetails(connectionId: number, externalOrderId: string, expectedCustomerId: string) {
+    if (!/^gid:\/\/shopify\/Customer\/[1-9]\d*$/.test(expectedCustomerId))
+      throw new OrderEditError("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.", 404);
+    let snapshot: OrderEditSnapshot;
+    try { snapshot = await this.provider.readOrder(connectionId, externalOrderId, expectedCustomerId); }
+    catch (cause) {
+      if (cause instanceof OrderEditProviderError && ["ORDER_NOT_FOUND", "CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE"].includes(cause.code))
+        throw new OrderEditError("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.", 404);
+      throw cause;
+    }
+    if (snapshot.connectionId !== connectionId || snapshot.orderId !== `gid://shopify/Order/${externalOrderId}` || snapshot.customerId !== expectedCustomerId)
+      throw new OrderEditError("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.", 404);
+    return customerAccountOrderDetailsSchema.parse({
+      externalOrderId, orderReference: snapshot.name, currency: snapshot.currency, totalCents: snapshot.totalCents,
+      lines: snapshot.lines.map(line => ({ lineItemId: line.id, variantId: line.variantId, title: line.title,
+        variantTitle: line.variantTitle, sku: line.sku, quantity: line.quantity, unitPriceCents: line.discountedUnitPriceCents,
+        totalCents: snapshot.financials?.lines.find(entry => entry.id === line.id)?.netCents ?? line.totalCents })),
+      financials: presentOrderEditCodeBreakdown(snapshot.financials, snapshot.codePricing, snapshotProductPrices(snapshot)),
     });
   }
   async quote(

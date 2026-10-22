@@ -58,6 +58,23 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_REQUEST_FAILED", path: "/account/bootstrap", causeCode: "55P03" });
     expect(JSON.stringify(await response.json())).not.toContain("private database");
   });
+  it("keeps batched history and inline details behind the same signed, staging-only boundary without a financial command", async () => {
+    const summary = { externalOrderId: "99", orderReference: "#49180", omsOrderId: null, currency: "USD", totalCents: 0, cancelled: true, financialStatus: "Refunded" };
+    const orders = { summaries: vi.fn(async () => ({ orders: [summary], unavailableExternalOrderIds: [], statusUnavailable: false })),
+      details: vi.fn(async () => ({ externalOrderId: "99", orderReference: "#49180", currency: "USD", totalCents: 0, lines: [] })) };
+    services.mockImplementation(() => ({ edits: { connection }, orders, returns: vi.fn() }));
+    const input = { externalOrderId: "99", orderReference: "#49180" };
+    const sessionKey = (await (await request()).json()).session.sessionKey;
+    const history = await request({ method: "POST", path: "/account/order-summaries", sessionKey, body: { orders: [input] } });
+    expect(history.status).toBe(200); expect((await history.json()).orders).toEqual([summary]);
+    const details = await request({ method: "POST", path: "/account/order-details", sessionKey, body: input });
+    expect(details.status).toBe(200); expect((await details.json()).totalCents).toBe(0);
+    expect(orders.summaries).toHaveBeenCalledExactlyOnceWith({ orders: [input] });
+    expect(orders.details).toHaveBeenCalledExactlyOnceWith(input);
+    enabled = false;
+    expect((await request({ method: "POST", path: "/account/order-details", sessionKey, body: input })).status).toBe(403);
+    expect(orders.details).toHaveBeenCalledTimes(1);
+  });
   it.each([
     { signed: () => `${proof()}&signature=duplicate` },
     { signed: () => proof({ timestamp: String(Math.floor(now.getTime() / 1000) - 301) }) },
