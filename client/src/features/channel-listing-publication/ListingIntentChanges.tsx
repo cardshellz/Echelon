@@ -1,4 +1,6 @@
 import { useState } from "react";
+import type { ListingWorkAction } from "@shared/listing-work-action";
+import { ListingRemainingWorkDialog, remainingWorkActions } from "./ListingRemainingWorkDialog";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -25,6 +27,7 @@ interface Props {
   onReview(row: ListingIntentChangeStatus): void;
 
   onOpenOperation?(row: ListingIntentChangeStatus): void;
+  onOpenWork?(row: ListingIntentChangeStatus, action: ListingWorkAction): boolean;
 
 }
 
@@ -40,8 +43,15 @@ export function ListingIntentChanges(props: Props) {
 
 }
 
-function ListingIntentChangesPanel({ base, canEdit, active = true, onReview, onOpenOperation }: Props & { base: string }) {
+function ListingIntentChangesPanel({ base, scope, canEdit, active = true, onReview, onOpenOperation, onOpenWork }: Props & { base: string }) {
 
+  const [remainingWork,setRemainingWork] = useState<ListingIntentChangeStatus | null>(null);
+  function review(row: ListingIntentChangeStatus) {
+    if (row.state !== "waiting_lifecycle") { onReview(row); return; }
+    const actions = remainingWorkActions(row);
+    if (actions.length === 1 && onOpenWork?.(row,actions[0])) return;
+    setRemainingWork(row);
+  }
   const client = useQueryClient();
 
   const [offset, setOffset] = useState(0);
@@ -108,6 +118,7 @@ function ListingIntentChangesPanel({ base, canEdit, active = true, onReview, onO
 
     </summary>
 
+    {remainingWork && <ListingRemainingWorkDialog row={remainingWork} scope={scope} canEdit={canEdit} onClose={() => setRemainingWork(null)} onOpenWork={onOpenWork} />}
     <div className="space-y-3 border-t px-3 py-3">
 
       <p className="text-xs text-muted-foreground">Product and settings changes are saved here. Some changes need review before an update can be requested.</p>
@@ -142,7 +153,7 @@ function ListingIntentChangesPanel({ base, canEdit, active = true, onReview, onO
 
             <div className="flex flex-wrap gap-2 pt-1">
 
-              {row.state !== "delivered" && row.state !== "not_applicable" && <Button size="sm" variant="outline" onClick={() => onReview(row)}>{row.last_error_resolution ? "Resolve issue" : "Review listing"}</Button>}
+              {row.state !== "delivered" && row.state !== "not_applicable" && <Button size="sm" variant="outline" onClick={() => review(row)}>{row.last_error_resolution ? "Resolve issue" : "Review listing"}</Button>}
 
               {row.receipt && onOpenOperation && <Button size="sm" variant="outline" onClick={() => onOpenOperation(row)}>View update status</Button>}
 

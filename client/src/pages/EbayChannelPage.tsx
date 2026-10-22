@@ -221,7 +221,7 @@ interface FeedItem {
 }
 
 function listingNeedsAttention(item: FeedItem, job: z.infer<typeof ebayListingSyncJobSchema> | undefined, hasLocalIssue: boolean): boolean {
-  if (item.priceIssue || item.inventoryIssue || hasLocalIssue || job?.inventoryReconciliation?.state === "needs_attention"
+  if (item.priceIssue || item.inventoryIssue || hasLocalIssue || job?.readRetryPaused || job?.inventoryReconciliation?.state === "needs_attention"
     || (job && ["needs_attention", "awaiting_evidence"].includes(job.state))) return true;
   if (job && ["queued", "running", "recovering"].includes(job.state)) return false;
   return item.status === "error" || item.status === "publication_incomplete";
@@ -1188,8 +1188,8 @@ export default function EbayChannelPage() {
 
   const filteredFeed = useMemo(() => {
     if (!feedData?.feed) return [];
-    // Filter out type_disabled products entirely — they're controlled by the category mapping toggle
-    let items = feedData.feed.filter((i) => i.status !== "type_disabled");
+    // Category exclusion does not hide an unfinished operation or its recovery controls.
+    let items = feedData.feed.filter(i => i.status !== "type_disabled" || (latestSyncJobs.get(i.id)?.state && latestSyncJobs.get(i.id)?.state !== "completed") || listingNeedsAttention(i,latestSyncJobs.get(i.id),localSyncIssues.has(i.id)));
     if (feedFilter === "excluded") {
       items = items.filter((i) => i.status === "excluded");
     } else if (feedFilter === "missing_specifics") {
@@ -1214,8 +1214,7 @@ export default function EbayChannelPage() {
 
   const feedCounts = useMemo(() => {
     if (!feedData?.feed) return { all: 0, ready: 0, missing_config: 0, missing_specifics: 0, listed: 0, excluded: 0, ended: 0, errors: 0 };
-    // Exclude type_disabled from all counts
-    const feed = feedData.feed.filter((f) => f.status !== "type_disabled");
+    const feed = feedData.feed.filter(i => i.status !== "type_disabled" || (latestSyncJobs.get(i.id)?.state && latestSyncJobs.get(i.id)?.state !== "completed") || listingNeedsAttention(i,latestSyncJobs.get(i.id),localSyncIssues.has(i.id)));
     return {
       all: feed.length,
       ready: feed.filter((f) => f.status === "ready" && !["queued", "running", "recovering"].includes(latestSyncJobs.get(f.id)?.state ?? "")).length,
@@ -1269,6 +1268,16 @@ export default function EbayChannelPage() {
           const product = feedData?.feed.find(item => item.id === row.product_id);
           if (product) setListingChangesTarget(product);
           else window.location.assign(`/products/${row.product_id}`);
+        }}
+        onOpenWork={(row,action) => {
+          const name = feedData?.feed.find(item => item.id === row.product_id)?.name ?? `Product ${row.product_id}`;
+          if (action.owner === "ebay_listing_sync" && action.operationId) {
+            setPublicationStatusTarget({ jobId:action.operationId,productId:row.product_id,name }); return true;
+          }
+          if (action.owner === "listing_mapping") {
+            setRecoveryTarget({jobId:null,productId:row.product_id,name,issue:null,mode:"mapping"}); return true;
+          }
+          return false;
         }}
         onOpenOperation={row => {
           if (row.receipt?.owner === "ebay_listing_sync") setPublicationStatusTarget({
@@ -1994,12 +2003,12 @@ export default function EbayChannelPage() {
                   <TableBody>
                     {filteredFeed.map((item) => {
                       const syncJob = latestSyncJobs.get(item.id);
-                      const syncPending = syncJob && ["queued","running","recovering"].includes(syncJob.state);
-                      const publicationPending = syncPending && syncJob?.operation === "publish";
+                      const syncPending = syncJob && !syncJob.readRetryPaused && ["queued","running","recovering"].includes(syncJob.state);
+                      const publicationPending = (syncPending || syncJob?.readRetryPaused) && syncJob?.operation === "publish";
                       const withdrawalJob = syncJob?.operation === "withdraw" ? syncJob : null;
                       const withdrawalUnfinished = withdrawalJob != null && withdrawalJob.state !== "completed";
                       const savedSyncIssue = syncJob ? resolveEbayListingJobIssue(syncJob) : null;
-                      const syncIssue = item.priceIssue ?? localSyncIssues.get(item.id)?.issue ?? (syncJob && ["awaiting_evidence", "needs_attention"].includes(syncJob.state)
+                      const syncIssue = item.priceIssue ?? localSyncIssues.get(item.id)?.issue ?? (syncJob && (syncJob.readRetryPaused || ["awaiting_evidence", "needs_attention"].includes(syncJob.state))
                         ? savedSyncIssue
                         : item.status === "error" && item.syncError && !syncPending
                           ? resolveEbayListingIssue({ message: item.syncError, productId: item.id }) : null);
@@ -2133,7 +2142,7 @@ export default function EbayChannelPage() {
                               <Badge variant="outline" className="text-xs">
                                 {item.productTypeName || item.productType}
                               </Badge>
-                              {publicationPending && <><Badge className="bg-blue-600 text-xs">Publishing</Badge><Button variant="outline" size="sm" className="min-h-[44px] px-3 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name }); }}>View publishing status</Button></>}
+                              {publicationPending && <><Badge className="bg-blue-600 text-xs">{syncJob.readRetryPaused ? "Publishing needs attention" : "Publishing"}</Badge><Button variant="outline" size="sm" className="min-h-[44px] px-3 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name }); }}>View publishing status</Button></>}
                               {item.status === "publication_incomplete" && !publicationPending && <>
                                 <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs">Publication incomplete</Badge>
                                 <Button variant="outline" size="sm" className="min-h-[44px] px-3 text-xs"
@@ -2280,7 +2289,7 @@ export default function EbayChannelPage() {
                           <TableCell className="hidden sm:table-cell text-center">
                             <div className="flex flex-col items-center gap-1">
                               <div className="flex items-center justify-center gap-1.5 flex-wrap">
-                                {publicationPending && <><Badge className="bg-blue-600 text-xs">Publishing</Badge><Button variant="outline" size="sm" className="min-h-9 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name }); }}>View publishing status</Button></>}
+                                {publicationPending && <><Badge className="bg-blue-600 text-xs">{syncJob.readRetryPaused ? "Publishing needs attention" : "Publishing"}</Badge><Button variant="outline" size="sm" className="min-h-9 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name }); }}>View publishing status</Button></>}
                                 {item.status === "publication_incomplete" && !publicationPending && <>
                                   <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs">Publication incomplete</Badge>
                                   <Button variant="outline" size="sm" className="min-h-9 text-xs"

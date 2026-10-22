@@ -87,6 +87,7 @@ export const storedEbayListingSyncJobSchema = ebayListingSyncJobSchema.extend({
     .nullable(),
   ownerToken: z.string().uuid().nullable(),
   attempts: z.number().int().nonnegative(),
+  readFailureCount: z.number().int().nonnegative().optional(),
   result: ebayProductSyncResultSchema.nullable(),
   verificationIntentHash: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   verificationRevision: z.string().regex(/^[1-9][0-9]*$/).nullable(),
@@ -159,7 +160,9 @@ export function syncFailure(
   error: unknown,
   attempts: number,
   now: Date,
+  readFailureCount = 0,
 ): {
+  readRetry?: { failures: number; paused: boolean };
   state: "recovering" | "awaiting_evidence" | "needs_attention";
   code: string;
   message: string;
@@ -169,7 +172,7 @@ export function syncFailure(
   const { code } = ebayListingFailureDiagnostic(error);
   const waiting = WAIT_CODES.has(code);
   const readFailure = providerReadDiagnosticFromError(error);
-  const retrying = readFailure ? providerReadShouldRetry(readFailure, attempts) :
+  const retrying = readFailure ? providerReadShouldRetry(readFailure, readFailureCount + 1) :
     waiting || AUTOMATIC_RECOVERY_CODES.has(code) ||
     ((RETRY_CODES.has(code) || code === "EBAY_LISTING_SYNC_FAILED") &&
       attempts < SYNC_RETRY_LIMIT);
@@ -196,6 +199,7 @@ export function syncFailure(
       ? error.message.slice(0, 1000)
       : "The listing update could not finish. Inspect the saved sync job before retrying.";
   return {
+    ...(readFailure ? { readRetry: { failures: readFailureCount + 1, paused: !retrying } } : {}),
     state:
       code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" || code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN" || code === "EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN"
         ? "awaiting_evidence"

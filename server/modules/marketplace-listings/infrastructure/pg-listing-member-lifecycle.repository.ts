@@ -5,7 +5,7 @@ import { listingMemberIdentitySchema, listingMemberRetirementSchema, type Listin
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 import { listingMemberRemoteKey } from "../domain/listing-member-lifecycle";
-import type { ListingMemberLifecycleSession, ListingMemberLifecycleStore } from "../application/listing-member-lifecycle.port";
+import type { ListingMemberLifecycleSession, ListingMemberLifecycleStore, ListingMemberProgress, ListingMemberRecoveryAuthorization } from "../application/listing-member-lifecycle.port";
 import type { ListingAccount } from "@shared/types/channel-listing-publication";
 import { ListingPublicationError } from "../domain/listing-publication";
 
@@ -13,7 +13,7 @@ const RETRY_MS = 60_000;
 const LOCK_NAMESPACE = 2591013;
 const positiveId = z.number().int().positive().max(2_147_483_647);
 const batchLimit = z.number().int().min(1).max(250);
-interface Row { id: string; identity: unknown; source_identity: unknown; source_revision: string; state: string; code: string | null; message: string | null; verified_at: Date | null }
+interface Row { id: string; identity: unknown; source_identity: unknown; source_revision: string; state: string; code: string | null; message: string | null; verified_at: Date | null; version: number; dispatch_status: string; dispatch_key: string | null; verification_attempts: number; recovery_required: boolean }
 
 const localIdentitySchema = listingMemberIdentitySchema.pick({
   destinationKind: true, connectionId: true, channelId: true, vendorId: true, productId: true, productVariantId: true,
@@ -54,6 +54,8 @@ function discoveredIdentity(source: unknown): { identity: ListingMemberIdentity;
 }
 function record(row: Row): ListingMemberRetirement {
   return listingMemberRetirementSchema.parse({ operationId: row.id, identity: row.identity, sourceRevision: row.source_revision,
+    version: row.version, dispatchStatus: row.dispatch_status === "none" && row.state === "retiring" ? "unknown" : row.dispatch_status,
+    dispatchKey: row.dispatch_key, verificationAttempts: row.verification_attempts, recoveryRequired: row.recovery_required,
     state: row.state, code: row.code, message: row.message, verifiedAt: row.verified_at?.toISOString() ?? null });
 }
 
@@ -96,6 +98,14 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
     try { return (await client.query<Row>(`SELECT * FROM marketplace.listing_member_retirements
       WHERE identity->>'destinationKind'='channel_connection' AND identity->>'channelId'=$1 AND product_id=$2
       ORDER BY created_at DESC,id DESC LIMIT $3`, [String(channelId), productId, limit])).rows.map(record); }
+    finally { client.release(); }
+  }
+  async listForDropship(connectionId:number,vendorId:number,productId:number,limit:number):Promise<ListingMemberRetirement[]> {
+    positiveId.parse(connectionId); positiveId.parse(vendorId); positiveId.parse(productId); batchLimit.parse(limit);
+    const client = await this.pool.connect();
+    try { return (await client.query<Row>(`SELECT * FROM marketplace.listing_member_retirements
+      WHERE identity->>'destinationKind'='dropship_store_connection' AND identity->>'connectionId'=$1 AND identity->>'vendorId'=$2 AND product_id=$3
+      ORDER BY created_at DESC,id DESC LIMIT $4`,[String(connectionId),String(vendorId),productId,limit])).rows.map(record); }
     finally { client.release(); }
   }
   async discover(now: Date, limit: number): Promise<void> {
@@ -167,7 +177,12 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
       const result = await work({ current,
         isCurrent: async () => (await client.query(`SELECT 1 FROM marketplace.listing_member_retirement_sources
           WHERE identity=$1 AND source_revision=$2`, [row.source_identity, current.sourceRevision])).rowCount === 1,
-        save: (state, code, message, now) => this.saveProgress(id, state, code, message, now),
+        save: (state, code, message, now, progress) => this.saveProgress(id, state, code, message, now, progress),
+        recoveryCommand: async commandKey => {
+          const saved = (await client.query("SELECT operation_id,actor,review_hash FROM marketplace.listing_member_recovery_commands WHERE command_key=$1", [commandKey])).rows[0];
+          return saved ? { operationId: saved.operation_id, actor: saved.actor, reviewHash: saved.review_hash } : null;
+        },
+        authorizeRecovery: (input, now) => this.authorizeRecovery(id, input, now),
       });
       await client.query("COMMIT");
       return result;
@@ -176,19 +191,41 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
   }
 
   private async saveProgress(id: string, state: ListingMemberRetirement["state"], code: string | null,
-    message: string, now: Date): Promise<ListingMemberRetirement> {
+    message: string, now: Date, progress: ListingMemberProgress = {}): Promise<ListingMemberRetirement> {
     // The remote-member and catalog locks remain on the worker connection.
     // Commit intent/evidence independently so a crash after dispatch cannot
     // roll back the durable "retiring" marker and cause blind resubmission.
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const before = (await client.query<Row>("SELECT * FROM marketplace.listing_member_retirements WHERE id=$1 FOR UPDATE", [id])).rows[0];
+      const before = (await client.query<Row & {snapshot:unknown}>("SELECT r.*,to_jsonb(r) snapshot FROM marketplace.listing_member_retirements r WHERE id=$1 FOR UPDATE", [id])).rows[0];
       const saved = (await client.query<Row>(`UPDATE marketplace.listing_member_retirements SET state=$2,code=$3,message=$4,
-        verified_at=$5,next_attempt_at=$6,updated_at=$7,version=version+1 WHERE id=$1 RETURNING *`,
+        verified_at=$5,next_attempt_at=$6,updated_at=$7,version=version+1,
+        dispatch_status=COALESCE($8,dispatch_status),dispatch_key=COALESCE($9,dispatch_key),
+        verification_attempts=COALESCE($10,verification_attempts),recovery_required=CASE WHEN $2 IN ('retired','superseded') THEN false ELSE COALESCE($11,recovery_required) END WHERE id=$1 RETURNING *`,
       [id, state, code, message, state === "retired" ? now : null,
-        state === "retired" || state === "superseded" ? null : new Date(now.getTime() + RETRY_MS), now])).rows[0];
+        state === "retired" || state === "superseded" ? null : new Date(now.getTime() + RETRY_MS), now, progress.dispatchStatus ?? null, progress.dispatchKey ?? null,
+        progress.verificationAttempts ?? null, progress.recoveryRequired ?? null])).rows[0];
       await audit(client, id, record(before), now);
+      await client.query("COMMIT");
+      return record(saved);
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+  }
+  private async authorizeRecovery(id: string, input: ListingMemberRecoveryAuthorization, now: Date): Promise<ListingMemberRetirement> {
+    // withMember retains the remote identity, catalog and mapping locks on its
+    // other connection. Commit authorization independently, just like dispatch.
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const before = (await client.query<Row & {snapshot:unknown}>("SELECT r.*,to_jsonb(r) snapshot FROM marketplace.listing_member_retirements r WHERE id=$1 FOR UPDATE", [id])).rows[0];
+      await client.query(`INSERT INTO marketplace.listing_member_recovery_commands(command_key,operation_id,actor,review_hash,before_record,observation,authorized_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7)`, [input.commandKey,id,input.actor,input.reviewHash,JSON.stringify(before.snapshot),JSON.stringify(input.observation),now]);
+      const saved = (await client.query<Row>(`UPDATE marketplace.listing_member_retirements SET state='pending',code=NULL,
+        message='Removal recovery authorized. The exact saved member will be checked before dispatch.',
+        dispatch_status='authorized',dispatch_key=$2,verification_attempts=0,recovery_required=false,
+        next_attempt_at=$3,updated_at=$3,version=version+1 WHERE id=$1 RETURNING *`, [id,input.commandKey,now])).rows[0];
+      await audit(client,id,record(before),now,input.actor);
       await client.query("COMMIT");
       return record(saved);
     } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -196,7 +233,7 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
   }
 }
 
-async function audit(client: PoolClient, id: string, before: ListingMemberRetirement | null, now: Date) {
+async function audit(client: PoolClient, id: string, before: ListingMemberRetirement | null, now: Date, actor = "system:listing-lifecycle") {
   await client.query(`INSERT INTO marketplace.listing_member_retirement_events(operation_id,version,actor,before_state,after_state,occurred_at)
-    SELECT id,version,'system:listing-lifecycle',$2,to_jsonb(r),$3 FROM marketplace.listing_member_retirements r WHERE id=$1`, [id, before, now]);
+    SELECT id,version,$4,$2,to_jsonb(r),$3 FROM marketplace.listing_member_retirements r WHERE id=$1`, [id, before, now, actor]);
 }

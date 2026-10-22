@@ -1,3 +1,4 @@
+import type { ListingWorkAction } from "@shared/listing-work-action";
 import type { StockPublicationSelection } from "@shared/types/stock-publication-selection";
 import type { ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 import { listingIntentLifecycleEvidenceSchema } from "@shared/listing-intent-lifecycle";
@@ -9,6 +10,11 @@ export interface ListingIntentRemainingWork {
   code: string;
   message: string;
   references: string[];
+  nextActions?: ListingWorkAction[];
+}
+export interface ListingContentWork {
+  state: "pending" | "attention";
+  action: ListingWorkAction;
 }
 
 /** Listing lifecycle owns disposition, not selection, quantities or provider execution.
@@ -19,7 +25,7 @@ export function resolveListingIntentLifecycle(input: {
   retainedVariantIds: readonly number[];
   retirements: readonly ListingMemberRetirement[];
   stock: readonly ListingIntentRemainingWork[];
-  pendingContent: boolean;
+  contentWork: readonly ListingContentWork[];
   now: Date;
 }): IntentHandoff | null {
   const { selection } = input;
@@ -47,6 +53,7 @@ export function resolveListingIntentLifecycle(input: {
           ...base,
           state: "attention",
           code: member.blockers[0].code,
+          nextActions: [{ owner: "listing_mapping" }],
           message: member.blockers[0].message,
           references: [],
         };
@@ -55,15 +62,18 @@ export function resolveListingIntentLifecycle(input: {
           row.productVariantId === member.productVariantId &&
           row.state === "pending",
       );
-      if (outstanding) return { ...base, ...outstanding };
-      if (input.pendingContent)
+      if (outstanding) return { ...base, ...outstanding, nextActions: [{ owner: "stock_publication" as const }] };
+      if (input.contentWork.length > 0)
         return {
           ...base,
           state: "pending",
           code: "LISTING_LIFECYCLE_PRIOR_WORK",
           message:
-            "An earlier listing operation still needs completion or reconciliation in the listing workspace.",
-          references: [],
+            input.contentWork.length > 100
+              ? `${input.contentWork.length} earlier listing operations remain unresolved. Showing the first 100; refresh after resolving them.`
+              : "An earlier listing operation still needs completion or reconciliation in the listing workspace.",
+          references: [...new Set(input.contentWork.flatMap(work => work.action.operationId ? [work.action.operationId] : []))].slice(0,100),
+          nextActions: [...new Map(input.contentWork.map(work => [JSON.stringify(work.action),work.action])).values()].slice(0,100),
         };
       if (member.catalogArchived) {
         const matching = input.retirements.filter(
@@ -86,17 +96,19 @@ export function resolveListingIntentLifecycle(input: {
             retired?.message ??
             "The listing lifecycle must confirm removal of this archived member.",
           references: retired ? [retired.operationId] : [],
+          nextActions: [{ owner: "listing_member_retirement", ...(retired ? { operationId: retired.operationId } : {}) }],
         };
       }
       if (member.action === "zero") {
         const work = input.stock.filter(
           (row) => row.productVariantId === member.productVariantId,
         );
-        if (work.length === 1) return { ...base, ...work[0] };
+        if (work.length === 1) return { ...base, ...work[0], ...(work[0].state === "settled" ? {} : { nextActions: [{ owner: "stock_publication" as const }] }) };
         return {
           ...base,
           state: "attention",
           code: "LISTING_LIFECYCLE_CLEARING_UNPROVEN",
+          nextActions: [{ owner: "stock_publication" }],
           message:
             "This excluded member still needs stock clearing. Review its stock connection; completion has not been verified.",
           references: [],
@@ -112,6 +124,7 @@ export function resolveListingIntentLifecycle(input: {
           ...base,
           state: "attention",
           code: "LISTING_LIFECYCLE_REMOVAL_UNPROVEN",
+          nextActions: [{ owner: "listing_mapping" }],
           message:
             "A saved channel identity remains, but removal has not been confirmed for this account. Review its listing status and connection.",
           references: [],

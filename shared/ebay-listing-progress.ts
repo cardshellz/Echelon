@@ -95,7 +95,7 @@ export function presentEbayListingJob(job: EbayListingSyncJob): EbayListingJobPr
   }
   // A review-required missing response is not a promise that passing this
   // timestamp will unblock it. Only automatic retry states expose eligibility.
-  if (job.state === "recovering") {
+  if (job.state === "recovering" && !job.readRetryPaused) {
     times.push({ label: "Next automatic check eligible at", at: job.nextAttemptAt });
   }
   return {

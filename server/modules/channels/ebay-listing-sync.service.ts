@@ -233,6 +233,7 @@ export interface EbayListingSyncStore {
       message: string | null;
       nextAttemptAt: Date;
       resetAttempts?: boolean;
+      readRetry?: { failures: number; paused: boolean };
       diagnostic?: EbayListingFailureDiagnostic;
     },
     now: Date,
@@ -406,7 +407,7 @@ export class EbayListingSyncService {
           result.processed++;
         } catch (error) {
           result.failed++;
-          const failure = syncFailure(error, job.attempts, this.now());
+          const failure = syncFailure(error, job.attempts, this.now(), job.readFailureCount ?? 0);
           // Never retire a publication's unresolved write barrier. A new command
           // must join this job and retain its acceptance/start evidence.
           if (job.operation === "publish" && (publicationProgress.started || publicationProgress.completed || publicationProgress.accepted)) {

@@ -1560,3 +1560,24 @@ test("explicit permission denial is not presented as a lost request that can be 
   await expect(page.getByRole("button", { name: "Retry this request", exact: true })).toHaveCount(0);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
+
+for (const operation of ["publish","withdraw"] as const) test(`paused ${operation} read retains diagnostics and exposes deliberate recovery`,async({page})=>{
+  const state=await setupEbayChannelPage(page);
+  state.feedStatus=operation==="publish" ? "publication_incomplete" : "excluded";
+  state.excluded=operation==="withdraw";
+  state.jobs=[{...job,operation,state:"awaiting_evidence",readRetryPaused:true,code:"EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID",
+    message:"The listing response could not be validated.",providerRead:{
+      provider:"ebay",resource:"offers",method:"GET",kind:"invalid_response",httpStatus:200,
+      requestId:"paused-read-123",issues:[{path:"offers.0.offerId",code:"invalid_type"}],
+    }}];
+  await page.reload();
+  const label=operation==="publish" ? "View publishing status" : "View removal status";
+  await page.getByRole("button",{name:label,exact:true}).filter({visible:true}).click();
+  const dialog=page.getByRole("dialog");
+  await expect(dialog.getByRole("status")).toContainText("Listing check paused");
+  await expect(dialog).not.toContainText("Next automatic check eligible");
+  await expect(dialog.getByRole("button",{name:"Retry Sync",exact:true})).toBeEnabled();
+  await expect(dialog.getByRole("button",{name:"Review earlier requests",exact:true})).toBeEnabled();
+  await dialog.getByRole("button",{name:operation==="publish" ? "Refresh publishing status" : "Refresh removal status",exact:true}).click();
+  expect(state.commands).toEqual([]);
+});

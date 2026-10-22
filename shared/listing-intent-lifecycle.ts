@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { listingWorkActionSchema } from "./listing-work-action";
 
 export const listingIntentLifecycleEvidenceSchema = z
   .object({
@@ -13,6 +14,7 @@ export const listingIntentLifecycleEvidenceSchema = z
             state: z.enum(["settled", "pending", "attention"]),
             code: z.string().min(1).max(100),
             message: z.string().min(1).max(1000),
+            nextActions: z.array(listingWorkActionSchema).max(100).optional(),
             references: z.array(z.string().min(1).max(200)).max(100),
           })
           .strict(),

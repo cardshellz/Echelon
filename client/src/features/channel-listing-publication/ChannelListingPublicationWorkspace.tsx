@@ -646,7 +646,11 @@ export function ChannelListingPublicationWorkspace({
       )}
       <div hidden={workbench} className="space-y-4">
         <ListingIntentChanges scope={{ kind: "channel", channelId }} canEdit={canEdit} active={active && !workbench}
-          onReview={() => setTab("listings")} />
+          onReview={() => setTab("listings")}
+          onOpenWork={(_row,action) => {
+            if (action.owner !== "channel_listing_update" && action.owner !== "channel_listing_publication") return false;
+            setTab("activity"); setActivityTab(action.owner === "channel_listing_update" ? "changes" : "publications"); return true;
+          }} />
         {bulkItems && bulkDirty && (
           <div className="space-y-2 rounded-md border p-3">
             <p role="status" className="text-sm">

@@ -27,12 +27,31 @@ export const listingMemberRetirementSchema = z.object({
   operationId: z.string().uuid(),
   identity: listingMemberIdentitySchema,
   sourceRevision: z.string().min(1),
+  version: z.number().int().positive().optional(),
+  dispatchStatus: z.enum(["none", "unknown", "accepted", "authorized"]).optional(),
+  dispatchKey: z.string().uuid().nullable().optional(),
+  verificationAttempts: z.number().int().nonnegative().optional(),
+  recoveryRequired: z.boolean().optional(),
   state: z.enum(["pending", "retiring", "retired", "failed", "superseded"]),
   code: z.string().nullable(),
   message: z.string().nullable(),
   verifiedAt: z.string().datetime().nullable(),
 }).strict();
 export type ListingMemberRetirement = z.infer<typeof listingMemberRetirementSchema>;
+
+export const listingMemberObservationSchema = z.object({ identity: listingMemberIdentitySchema, retired: z.boolean() }).strict();
+export const listingMemberRecoveryReviewSchema = z.object({
+  record: listingMemberRetirementSchema,
+  observation: listingMemberObservationSchema,
+  reviewHash: z.string().regex(/^[a-f0-9]{64}$/),
+  canResume: z.boolean(),
+  message: z.string().min(1).max(1000),
+}).strict();
+export type ListingMemberRecoveryReview = z.infer<typeof listingMemberRecoveryReviewSchema>;
+export const listingMemberRecoveryCommandSchema = z.object({
+  operationId: z.string().uuid(), commandKey: z.string().uuid(),
+  reviewHash: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
 
 /** Completion may have no live listing ID: an exact unpublished offer is valid
  * evidence. Never manufacture an ID just to satisfy inventory's old contract. */

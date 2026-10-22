@@ -184,7 +184,7 @@ import { listingIntentBase } from "../fixtures/listing-intent.fixture";
         "0732_ebay_listing_sync_identity_admission.sql",
         "0736_ebay_listing_mapping_repairs.sql",
         "0737_ebay_publication_completion.sql",
-        "0741_ebay_durable_withdrawal.sql",
+        "0741_ebay_durable_withdrawal.sql", "900000021000018880001_channel_lifecycle_recovery.sql", "900000023000018880003_listing_work_settlement.sql",
         "900000010000018170001_ebay_saved_publication_continuation.sql",
       ])
         await database.pool.query(
