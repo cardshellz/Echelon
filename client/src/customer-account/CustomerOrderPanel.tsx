@@ -7,6 +7,8 @@ import type { CustomerAccountAccessNotice } from "./customer-account-access";
 import { CustomerOrderCancellation } from "./CustomerOrderCancellation";
 import { formatOrderEditMoney } from "@/lib/order-edits";
 import { knownCustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
+import type { CustomerAccountOrderSummary } from "@shared/customer-account/customer-account-orders";
+import { CustomerOrderDetails } from "./CustomerOrderDetails";
 
 export interface CustomerOrderPanelState {
   loading: boolean;
@@ -55,10 +57,13 @@ export function CustomerOrderPanel({
   onEdit,
   onReturn,
   onLabel,
+  summary,
+  onChanged,
 }: {
   row: HTMLElement;
   opener: HTMLButtonElement;
   state: CustomerOrderPanelState;
+  summary?: OrderEditOrder | CustomerAccountOrderSummary | null;
   api: CustomerAccountTransport;
   customerId: string;
   connectionId: number | null;
@@ -67,6 +72,7 @@ export function CustomerOrderPanel({
   signInUrl: string;
   history: ReturnHistory | null;
   onClose(): void;
+  onChanged?(): void;
   onRetry(): void;
   onEdit(omsOrderId: number): void;
   onReturn(order: CustomerReturnCustomerOrder): void;
@@ -85,12 +91,13 @@ export function CustomerOrderPanel({
     error: null as string | null,
   });
   const order = state.order;
+  const displayedOrder = order ?? summary;
   const fulfillmentLabel =
-    knownCustomerOrderFulfillment(order?.fulfillment)?.label ??
+    knownCustomerOrderFulfillment(displayedOrder?.fulfillment)?.label ??
     (row
       .querySelector<HTMLElement>("[data-csz-order-fulfillment-native]")
-      ?.textContent?.trim() || "Status unavailable");
-  const viewUrl = safeLink(row, "[data-csz-account-view]");
+      ?.textContent?.trim() ||
+      "Status unavailable");
   const addressUrl = safeLink(row, "[data-csz-account-action='address']");
   const trackUrl = safeLink(row, "[data-csz-account-track]");
   const reorder = row.querySelector<HTMLButtonElement>(
@@ -145,6 +152,26 @@ export function CustomerOrderPanel({
       state.omsOrderId &&
       (cancellationRequest || (enabled && order?.cancellation?.canReview)),
   );
+  const showChangeActions =
+    row.dataset.cancelled !== "true" && row.dataset.fulfillment !== "fulfilled";
+  const canChangeAddress = Boolean(
+    enabled &&
+      addressUrl &&
+      order &&
+      (order.addressEligibility?.editable ??
+        (order.eligibility.editable && !order.activeOperationId)),
+  );
+  const addressReason =
+    order?.addressEligibility?.reasons[0] ??
+    order?.eligibility.reasons[0] ??
+    (state.loading
+      ? "Checking whether the address can be changed…"
+      : "Contact us to change this order’s shipping address.");
+  const cancellationReason =
+    order?.cancellation?.reasons?.[0] ??
+    (state.loading
+      ? "Checking whether the order can be cancelled…"
+      : "Contact us to cancel this order.");
   useEffect(() => {
     const element = dialog.current;
     element?.showModal();
@@ -224,17 +251,22 @@ export function CustomerOrderPanel({
           </button>
         </header>
         {view === "options" &&
-          (state.loading && !order ? (
+          (state.loading && !displayedOrder ? (
             <p role="status">Loading order details…</p>
           ) : (
             <div className="csz-panel-summary">
               <span>{fulfillmentLabel}</span>
               <strong>
-                {order
-                  ? formatOrderEditMoney(order.totalCents, order.currency)
+                {displayedOrder
+                  ? formatOrderEditMoney(
+                      displayedOrder.totalCents,
+                      displayedOrder.currency,
+                    )
                   : "Total unavailable"}
               </strong>
-              {order && <small>{order.financialStatus}</small>}
+              {displayedOrder && (
+                <small>{displayedOrder.financialStatus}</small>
+              )}
             </div>
           ))}
         {view === "cancellation" && connectionId && state.omsOrderId ? (
@@ -243,7 +275,10 @@ export function CustomerOrderPanel({
             scope={{ customerId, connectionId, omsOrderId: state.omsOrderId }}
             existingRequestKey={cancellationRequest}
             onBack={() => setView("options")}
-            onDone={onClose}
+            onDone={() => {
+              onChanged?.();
+              onClose();
+            }}
           />
         ) : (
           <>
@@ -294,25 +329,49 @@ export function CustomerOrderPanel({
               </div>
             )}
             <h3 className="csz-panel-group">Your order</h3>
-            {viewUrl && (
-              <a className="csz-panel-option" href={viewUrl}>
-                <span>View order details</span>
-                <ChevronRight aria-hidden="true" size={16} />
-              </a>
+            {row.dataset.externalOrderId && row.dataset.orderReference && (
+              <CustomerOrderDetails
+                api={api}
+                row={row}
+                ready={connectionId !== null}
+                externalOrderId={row.dataset.externalOrderId}
+                orderReference={row.dataset.orderReference}
+              />
             )}
             {canEdit &&
-              option(editing ? "Continue order update" : "Edit order", () =>
-                onEdit(order!.omsOrderId),
+              option(
+                order?.activeOperationStatus === "review_required"
+                  ? "Review order update"
+                  : editing
+                    ? "Continue order update"
+                    : "Edit order",
+                () => onEdit(order!.omsOrderId),
               )}
-            {order?.eligibility.editable &&
-              !order.activeOperationId &&
+            {showChangeActions &&
               addressUrl &&
-              enabled && (
+              (canChangeAddress ? (
                 <a className="csz-panel-option" href={addressUrl}>
                   <span>Change shipping address</span>
                   <ChevronRight aria-hidden="true" size={16} />
                 </a>
-              )}
+              ) : (
+                <div>
+                  <button
+                    type="button"
+                    className="csz-panel-option"
+                    disabled
+                    aria-describedby="csz-address-restriction"
+                  >
+                    Change shipping address
+                  </button>
+                  <p
+                    id="csz-address-restriction"
+                    className="csz-panel-restriction"
+                  >
+                    {addressReason}
+                  </p>
+                </div>
+              ))}
             {reorder && (
               <button
                 type="button"
@@ -389,12 +448,30 @@ export function CustomerOrderPanel({
                 </button>
               </div>
             )}
-            {showCancellation &&
-              option(
-                cancellationRequest ? "View cancellation" : "Cancel order",
-                () => setView("cancellation"),
-                !cancellationRequest,
-              )}
+            {showCancellation
+              ? option(
+                  cancellationRequest ? "View cancellation" : "Cancel order",
+                  () => setView("cancellation"),
+                  !cancellationRequest,
+                )
+              : showChangeActions && (
+                  <div>
+                    <button
+                      type="button"
+                      className="csz-panel-option csz-panel-cancel"
+                      disabled
+                      aria-describedby="csz-cancellation-restriction"
+                    >
+                      Cancel order
+                    </button>
+                    <p
+                      id="csz-cancellation-restriction"
+                      className="csz-panel-restriction"
+                    >
+                      {cancellationReason}
+                    </p>
+                  </div>
+                )}
             {isCancellation && !cancellationRequest && (
               <p>
                 An order cancellation is being reviewed. Contact us for help.

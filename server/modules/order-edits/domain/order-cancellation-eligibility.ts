@@ -20,6 +20,7 @@ export function orderCancellationEligibilityReasons(input: {
   snapshot: OrderEditSnapshot;
   warehouseReasons: readonly string[];
   activeOperationId: string | null;
+  activeOperationStatus?: string;
   enabled: boolean;
 }): string[] {
   const { snapshot } = input;
@@ -28,7 +29,9 @@ export function orderCancellationEligibilityReasons(input: {
     reasons.push("Online order changes are unavailable. Contact us for help.");
   if (input.activeOperationId)
     reasons.push(
-      "Finish or cancel the existing order update before cancelling this order.",
+      input.activeOperationStatus === "review_required"
+        ? "Your previous order update needs review before you can cancel this order online. Contact us for help."
+        : "Finish or cancel the existing order update before cancelling this order.",
     );
   if (snapshot.cancelled || snapshot.closed)
     reasons.push("This order is already cancelled or closed.");

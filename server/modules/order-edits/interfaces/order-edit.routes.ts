@@ -226,7 +226,7 @@ export function registerOrderEditRoutes(
         .object({
           connectionId: positiveId,
           codeEntryVersion: z.literal("v1").optional(),
-          managementVersion: z.literal("v1").optional(),
+          managementVersion: z.enum(["v1", "v2"]).optional(),
         })
         .strict()
         .parse(req.query);

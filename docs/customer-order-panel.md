@@ -12,17 +12,66 @@ restriction beneath action buttons.
   address/tracking to native theme links, and reorder to the existing theme
   handler. The reorder handler emits its error to the panel; there is no second
   cart implementation.
+- **View order details** expands an accessible inline accordion. It reuses the
+  owned native order reader and existing merchandise/discount/tax presentation;
+  it does not navigate, prepare a calculated order, or acquire an edit hold.
 - `presentCustomerOrderFulfillment` projects canonical warehouse partitions.
   Unknown evidence is unavailable; it never infers picking from an edit refusal.
   Stopped warehouse work is labelled **Picking stopped** unless Shopify confirms
   the order itself is cancelled. When warehouse evidence is unavailable, the
   table and panel preserve the known native Shopify fulfillment label.
-  Financial labels come from the existing settlement presentation owner.
-- `managementVersion=v1` opts strict account/staff clients into new fulfillment
-  and cancellation metadata. Older open tabs retain their original DTO shape.
+  History rows use Shopify's native financial-status label. An opened edit uses
+  the existing detailed settlement presentation owner.
+- `managementVersion=v2` adds active-operation status and address/cancellation
+  restriction explanations. `v1` retains its deployed fulfillment/cancellation
+  shape, and clients without either version retain the original strict DTO.
 - Signed Shopify ownership, staging gates, staff grants and same-origin command
   checks remain at their existing HTTP boundaries. Customer status reads cannot
   invoke financial reconciliation or accept a staff actor.
+
+## History lookup and performance
+
+`/account/order-summaries` is a bounded, read-only POST envelope, like the existing
+owned identity resolver. It accepts at most the theme's 20 order identities per
+page. One native `nodes` query reads `currentTotalPriceSet` and the actual owning
+Shopify customer. One parameterized, channel/customer-scoped SELECT adds OMS/WMS
+status when available. Neither a missing OMS import nor a failed status lookup
+removes a verified native total. Ambiguous OMS aliases disable management for
+that identity and report the conflict; they do not change the money.
+
+Migration `900000026000018960001_customer_account_order_lookup_index.sql` indexes
+the canonical channel + OMS-link expression. A disposable PostgreSQL test proves
+the actual lookup uses that index across 25,000 unrelated warehouse rows without
+forcing the planner, including numeric/GID identities and malformed legacy
+references. The existing transactional migration runner bounds lock acquisition
+and retries. The index build also has a 30-second statement deadline. It can
+briefly block warehouse writes; failure rolls back the index and migration
+record together. No business record is rewritten.
+
+The transport verifies complete, unique response coverage and exact native ID /
+order-reference matching. A foreign, missing, substituted, incomplete or invalid
+financial response cannot populate another order's total. No fallback uses the
+historical original total, coupon face value or an on-screen price calculation.
+
+`CustomerOrderPanelLoader` reads existing edit/return eligibility only for the
+open order. A normal panel close preserves totals and the session. Closing an
+editor or completing a cancellation refreshes the affected row; final edit
+completion retains the existing page reload to refresh native Shopify markup.
+Request generations and abort signals prevent an older refresh from overwriting
+a later one.
+
+`/account/order-details` is also a query-only envelope. It verifies the expected
+Shopify customer before saved discount-history enrichment and needs no OMS row.
+The accordion and direct order page share a financial query keyed to the native
+identity. Failed detail reads expose their own retry, without resubmitting any
+financial command or discarding other orders.
+Accordion merchandise lines reuse `orderEditItemSubtotal` for the verified price
+after product/Club savings. Order rewards/coupons remain separate summary rows;
+the display never reconstructs a missing historical Club allocation.
+Escaped, inert Shopify order markup supplies descriptive shipping/billing
+addresses and known original quantities for removed lines. The panel renders
+text, never cloned HTML. These fields cannot price an order, authorize an edit,
+change an address, or alter the persisted financial snapshot/fingerprint.
 
 ## Cancellation lifecycle
 
@@ -70,6 +119,11 @@ manual points adjustment or unverified hold-release command.
   `pending` row requires the existing flow to finish or staff assistance. The
   canonical cancellation cascade does not transition legacy `pending` rows;
   this UI does not add another warehouse-status writer to bypass that limit.
+- Address/cancellation controls explain their unavailability instead of silently
+  disappearing on an unfulfilled order. An unresolved financial review offers
+  **Review order update**, not a promise that another edit can proceed. This is
+  presentation of existing restrictions, not authority to clear an operation,
+  release its hold or repeat a refund.
 - Provider ambiguity, identity changes, inconsistent rewards and financial
   evidence fail closed. Refund/provider delays cannot report completion early.
 - Disabling new submissions does not disable reconciliation of saved requests.
@@ -82,6 +136,8 @@ asynchronous refusal, refunds, rewards outages, hold cleanup and worker restart.
 The existing PostgreSQL warehouse suite additionally exercises cancellation
 proofs and transactional completion. Club's PostgreSQL CI suite covers consumed
 points conservation, concurrent replay, code disablement and projection rollback.
+The account order-context suite is registered in the shared PostgreSQL CI manifest;
+it verifies read-only scope, legacy identities and natural lookup-index use.
 
 The theme suite runs the compiled bundle with the actual Liquid templates and
 native reorder methods. It covers desktop/390px/320px drawer geometry, keyboard
