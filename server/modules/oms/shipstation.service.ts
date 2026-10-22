@@ -4695,10 +4695,10 @@ export function createShipStationService(
    * the original provider hold before mutation, and never creates a new label.
    */
   async function synchronizeOrderEditShipment(input: {
-    shipmentId: number; operationId: string; mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped" | "release_unsubmitted";
+    shipmentId: number; operationId: string; mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped" | "verify_cancelled" | "release_unsubmitted";
   }): Promise<void> {
     z.object({ shipmentId: z.number().int().positive(), operationId: z.string().uuid(),
-      mode: z.enum(["hold", "verify", "synchronize", "release", "verify_shipped", "release_unsubmitted"]) }).strict().parse(input);
+      mode: z.enum(["hold", "verify", "synchronize", "release", "verify_shipped", "verify_cancelled", "release_unsubmitted"]) }).strict().parse(input);
     const providerSchema = z.object({ orderId: z.number().int().positive(), orderNumber: z.string().min(1), orderStatus: z.string(),
       items: z.array(z.object({ lineItemKey: z.string(), quantity: z.number().int().nonnegative() }).passthrough()) }).passthrough();
     const itemSchema = z.object({ id: z.number().int().positive(), qty: z.number().int().positive(),
@@ -4734,7 +4734,7 @@ export function createShipStationService(
         WHERE os.id=${input.shipmentId} FOR UPDATE OF os`);
       const row = headerSchema.parse(result.rows?.[0]);
       if (row.order_edit_operation_id !== input.operationId || (input.mode !== "release_unsubmitted" && (row.requires_review ||
-        (input.mode === "verify_shipped" ? row.warehouse_status !== "shipped" : !["planned", "queued", "on_hold"].includes(row.status))))) {
+        (input.mode === "verify_shipped" ? row.warehouse_status !== "shipped" : input.mode === "verify_cancelled" ? row.warehouse_status !== "cancelled" || !["cancelled", "voided"].includes(row.status) : !["planned", "queued", "on_hold"].includes(row.status))))) {
         throw new OrderEditError("ORDER_EDIT_SHIPMENT_CHANGED", "The shipment is no longer held by this editable operation.");
       }
       // A timed-out push may have created a remote order before its identity
@@ -4742,9 +4742,10 @@ export function createShipStationService(
       if (row.provider_order_id === null) throw new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_UNVERIFIED", "Wait for the warehouse shipment to finish linking to ShipStation before editing this order.");
       return { ...row, provider_order_id: row.provider_order_id };
     }
-    async function readProvider(providerOrderId: number, fulfilled = false) {
+    async function readProvider(providerOrderId: number, terminal?: "shipped" | "cancelled") {
+      const fulfilled = terminal === "shipped";
       const live = providerSchema.parse(await apiRequest<unknown>("GET", `/orders/${providerOrderId}`));
-      if (live.orderId !== providerOrderId || (fulfilled ? live.orderStatus !== "shipped" : !["awaiting_shipment", "on_hold"].includes(live.orderStatus))) {
+      if (live.orderId !== providerOrderId || (terminal ? live.orderStatus !== terminal : !["awaiting_shipment", "on_hold"].includes(live.orderStatus))) {
         throw new OrderEditError("ORDER_EDIT_PROVIDER_NOT_EDITABLE", "ShipStation no longer reports an editable shipment.");
       }
       // Provider splits can acquire a different orderId while keeping the
@@ -4756,6 +4757,12 @@ export function createShipStationService(
       }
       const related = z.object({ orders: z.array(z.object({ orderId: z.number().int().positive(), orderNumber: z.string(), orderStatus: z.string() }).passthrough()),
         pages: z.number().int().nonnegative() }).passthrough().parse(await apiRequest<unknown>("GET", `/orders?orderNumber=${encodeURIComponent(live.orderNumber)}&page=1&pageSize=100`));
+      if (terminal === "cancelled") {
+        if (related.pages > 1 || !related.orders.some(order => order.orderId === live.orderId && order.orderNumber === live.orderNumber)
+          || related.orders.some(order => order.orderNumber === live.orderNumber && order.orderStatus !== "cancelled"))
+          throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_PENDING", "Every related provider shipment must be cancelled before this request can finish.");
+        return live;
+      }
       if (fulfilled) {
         // A shipped split may no longer be mapped to this old edit. All number-scoped
         // provider work must be terminal; this path never sends a hold/release mutation.
@@ -4852,7 +4859,11 @@ export function createShipStationService(
           return;
         }
         if (input.mode === "verify_shipped") {
-          await readProvider(row.provider_order_id, true);
+          await readProvider(row.provider_order_id, "shipped");
+          return;
+        }
+        if (input.mode === "verify_cancelled") {
+          await readProvider(row.provider_order_id, "cancelled");
           return;
         }
         const live = await readProvider(row.provider_order_id);

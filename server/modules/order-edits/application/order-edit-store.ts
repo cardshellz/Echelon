@@ -23,6 +23,8 @@ export interface OrderEditOrderReference {
   activeOperationId: string | null;
 }
 export interface OrderEditRecord {
+  kind?: "cancel_order";
+  cancellation?: import("zod").infer<typeof import("@shared/customer-account/order-cancellation").orderCancellationDocumentSchema>;
   id: string;
   omsOrderId: number;
   connectionId: number;
@@ -54,6 +56,7 @@ export interface OrderEditReleaseProof {
   ownership?: "owned" | "none";
   allocationRequired?: boolean;
   fulfilledCancellation?: boolean;
+  cancelledOrder?: boolean;
   /** No Shopify financial command was sent; only this operation's hold is removed. */
   unsubmitted?: boolean;
 }
@@ -91,7 +94,7 @@ export interface OrderEditWarehouse {
   inspect(
     omsOrderId: number,
     operationId?: string,
-  ): Promise<{ editable: boolean; reasons: string[]; wmsOrderIds: number[] }>;
+  ): Promise<{ editable: boolean; reasons: string[]; cancellationReasons?: string[]; wmsOrderIds: number[]; fulfillment?: import("@shared/customer-account/order-fulfillment").CustomerOrderFulfillment }>;
   acquire(omsOrderId: number, operationId: string): Promise<void>;
   assertHeld(omsOrderId: number, operationId: string): Promise<void>;
   releaseUnsubmitted(
@@ -108,6 +111,10 @@ export interface OrderEditWarehouse {
     operationId: string,
   ): Promise<OrderEditReleaseProof>;
   releaseFulfilledUnsubmitted(
+    omsOrderId: number,
+    operationId: string,
+  ): Promise<OrderEditReleaseProof>;
+  cancellationReleaseProof?(
     omsOrderId: number,
     operationId: string,
   ): Promise<OrderEditReleaseProof>;

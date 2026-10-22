@@ -20,6 +20,7 @@ import {
   customerAccountOrderIdentityInputSchema,
   customerAccountOrderIdentitySchema,
 } from "@shared/customer-account/customer-account.contract";
+import { customerOrderCancellationInputSchema } from "@shared/customer-account/order-cancellation";
 
 export class CustomerOrderEditService {
   private readonly actorId: string;
@@ -46,6 +47,7 @@ export class CustomerOrderEditService {
         | "reconcile"
         | "resume"
         | "abandon"
+        | "cancellations"
       >;
     },
   ) {
@@ -113,6 +115,25 @@ export class CustomerOrderEditService {
         };
     }
     return order;
+  }
+  async cancellationReview(connectionId: number, omsOrderId: number) {
+    await this.ownedScope(connectionId, omsOrderId);
+    return this.cancellations().review(connectionId, omsOrderId);
+  }
+  async submitCancellation(connectionId: number, omsOrderId: number, raw: unknown, commandKey: string) {
+    const body = customerOrderCancellationInputSchema.omit({ connectionId: true, omsOrderId: true }).parse(raw);
+    if (body.requestKey !== z.string().uuid().parse(commandKey)) throw new OrderEditError("ORDER_CANCELLATION_KEY_MISMATCH", "The cancellation reference does not match.", 400);
+    await this.ownedScope(connectionId, omsOrderId);
+    return this.cancellations().submit({ connectionId, omsOrderId, ...body }, this.actorId);
+  }
+  async cancellationStatus(connectionId: number, omsOrderId: number, requestKey: string) {
+    await this.ownedScope(connectionId, omsOrderId);
+    return this.cancellations().get(connectionId, omsOrderId, requestKey, this.actorId);
+  }
+  private cancellations() {
+    const service = this.dependencies.edits.cancellations;
+    if (!service) throw new OrderEditError("ORDER_CANCELLATION_UNAVAILABLE", "Online cancellation is temporarily unavailable.", 503);
+    return service;
   }
   async catalogCategories(connectionId: number, raw: unknown) {
     await this.ownedConnection(connectionId);

@@ -310,7 +310,7 @@ test("account totals recover from a failed current read through an explicit read
   });
   const total = page.locator("[data-csz-order-total]");
   await expect(total).toHaveText("Total unavailable");
-  await page.getByRole("button", { name: "Retry order actions", exact: true }).click();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(total).toHaveText("$8.29 USD");
   expect(reads).toBe(2);
   fixture.assertNoFinancialCommands();

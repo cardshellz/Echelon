@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { customerOrderFulfillmentSchema } from "../customer-account/order-fulfillment";
 import { orderEditShippingRepricingSchema } from "./order-edit-shipping";
 import {
   orderEditRequestedCodesSchema,
@@ -99,6 +100,9 @@ export const orderEditOrderSchema = orderEditOrderSummarySchema
     totalCents: money,
     financialStatus: z.string(),
     warehouseStatus: z.string(),
+    fulfillment: customerOrderFulfillmentSchema.optional(),
+    activeOperationKind: z.enum(["edit", "cancel_order"]).optional(),
+    cancellation: z.object({ canReview: z.boolean(), requestKey: z.string().uuid().nullable() }).strict().optional(),
     financials: orderEditFinancialsSchema.optional(),
     settlement: orderEditSettlementSchema.optional(),
     codeEntryAvailable: z.boolean().optional(),

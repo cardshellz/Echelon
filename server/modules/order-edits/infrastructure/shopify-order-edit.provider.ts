@@ -349,6 +349,39 @@ export class ShopifyOrderEditProvider
       fail("INVALID_CONFIGURATION", "A positive request timeout is required.");
   }
 
+  /** Full cancellation uses Shopify's cancellation/refund owner. Do not issue
+   * a separate refundCreate or turn cancellation into a zero-line order edit. */
+  async cancelOrder(connectionId: number, externalOrderId: string, operationId: string): Promise<{ jobId: string; done: boolean }> {
+    validateOperation(operationId);
+    const credentials = await this.credentials(connectionId);
+    const raw = await this.request(credentials, `mutation EchelonCustomerOrderCancel($id: ID!, $note: String!) {
+      orderCancel(orderId: $id, reason: CUSTOMER, notifyCustomer: true, restock: true,
+        refundMethod: { originalPaymentMethodsRefund: true }, staffNote: $note) {
+        jobResult { id done } orderCancelUserErrors { code message field } userErrors { message field }
+      }
+    }`, { id: gid("Order", externalOrderId), note: `Customer cancellation ${operationId}` }, true);
+    const result = parse(z.object({ orderCancel: z.object({
+      jobResult: z.object({ id: z.string().regex(/^gid:\/\/shopify\/(?:Job|OrderCancelJobResult)\/.+$/), done: z.boolean() }).nullable(),
+      orderCancelUserErrors: USER_ERRORS, userErrors: USER_ERRORS,
+    }) }), raw, true).orderCancel;
+    if (result.orderCancelUserErrors.length || result.userErrors.length)
+      fail("ORDER_CANCELLATION_REJECTED", "Shopify could not cancel this order. Contact us for help.", result.jobResult ? "unknown" : "rejected");
+    if (!result.jobResult) fail("ORDER_CANCELLATION_RESULT_UNCERTAIN", "The cancellation result could not be verified. Check its status before trying again.", "unknown");
+    return { jobId: result.jobResult.id, done: result.jobResult.done };
+  }
+  async cancellationJob(connectionId: number, jobId: string): Promise<{ done: boolean; failed: boolean; orderId: string | null }> {
+    z.string().regex(/^gid:\/\/shopify\/(?:Job|OrderCancelJobResult)\/.+$/).parse(jobId);
+    const raw = await this.request(await this.credentials(connectionId), `query EchelonCancellationJob($id: ID!) {
+      node(id: $id) { id __typename ... on OrderCancelJobResult { done status errors { code message field } order { id } } }
+    }`, { id: jobId });
+    const job = parse(z.object({ node: z.object({ id: z.literal(jobId), __typename: z.literal("OrderCancelJobResult"), done: z.boolean(),
+      status: z.enum(["STARTED", "FAILED", "SUCCEEDED"]), errors: USER_ERRORS, order: z.object({ id: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9]\d*$/) }).nullable(),
+    }) }), raw).node;
+    if (job.done !== (job.status !== "STARTED") || (job.status === "SUCCEEDED" && job.errors.length))
+      fail("ORDER_CANCELLATION_JOB_UNVERIFIED", "The cancellation job returned inconsistent status. We’re checking the request.");
+    return { done: job.done, failed: job.status === "FAILED", orderId: job.order?.id ?? null };
+  }
+
   async readOrder(
     connectionId: number,
     externalOrderId: string,
