@@ -138,8 +138,8 @@ export class OrderCancellationService {
       const review = await this.review(input.connectionId, input.omsOrderId);
       if (!review.eligibility.allowed)
         throw new OrderEditError(
-          "ORDER_CANCELLATION_UNAVAILABLE",
-          "This order can’t be cancelled online. Contact us for help.",
+          "ORDER_CANCELLATION_REVIEW_CHANGED",
+          "The cancellation options changed. Review the order again.",
         );
       if (review.revision !== input.expectedRevision)
         throw new OrderEditError(

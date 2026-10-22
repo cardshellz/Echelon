@@ -131,6 +131,14 @@ describe("customer cancellation reuses durable order ownership", () => {
     expect(h.provider.cancelOrder).not.toHaveBeenCalled();
     expect(h.rewards.settleCancellation).not.toHaveBeenCalled();
   });
+  it("requires a fresh review if cancellation becomes unavailable before submission", async () => {
+    const h = fixture(), input = await h.input();
+    h.setCurrent({ closed: true });
+    await expect(h.service.submit(input, actor)).rejects.toMatchObject({ code: "ORDER_CANCELLATION_REVIEW_CHANGED" });
+    expect(h.record()).toBeNull();
+    expect(h.warehouse.acquire).not.toHaveBeenCalled();
+    expect(h.provider.cancelOrder).not.toHaveBeenCalled();
+  });
   it("submits Shopify cancellation exactly once and never calls editCommit or refundCreate", async () => {
     const h = fixture(),
       input = await h.input();
