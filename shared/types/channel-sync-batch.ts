@@ -102,5 +102,6 @@ export const channelSyncBatchesSchema = z
 export const startChannelSyncBatchSchema = z
   .object({
     commandKey: z.string().uuid(),
+    productIds: z.array(id).min(1).max(500).refine(ids => new Set(ids).size === ids.length, "Product selection must be unique").optional(),
   })
   .strict();

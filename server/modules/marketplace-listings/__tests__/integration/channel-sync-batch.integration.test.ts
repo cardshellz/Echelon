@@ -1,3 +1,6 @@
+import { ChannelListingSyncService } from "../../application/channel-listing-sync.service";
+import { EbayChannelListingSyncAdapter, syncResultForJob } from "../../../channels/adapters/ebay/ebay-channel-listing-sync.adapter";
+import { admitEbayPublication } from "../../../channels/ebay-publication-admission.service";
 import {
   afterAll,
   beforeAll,
@@ -465,6 +468,99 @@ const configured =
         (await store.get(started.id))!.admissionCompletedAt,
       ).not.toBeNull();
     });
+
+    function unifiedFixture() {
+      const f = ebayFixture();
+      const state = new Map(productIds.map((id, index) => [id, { active: true, included: true, includedVariantCount: 1, hasPublishedIdentity: index === 0 }]));
+      const owner = new ChannelListingSyncService(new EbayChannelListingSyncAdapter({
+        receipt: async command => await f.repository.getByCommand(command.commandKey, 1, { expectedActor: command.actor })
+          ?? await f.repository.getAdmission(command.commandKey, 1),
+        state: async id => {
+          const product = (await db.pool.query("SELECT is_active FROM catalog.products WHERE id=$1", [id])).rows[0];
+          return { ...state.get(id)!, active: product.is_active };
+        },
+        update: async command => syncResultForJob(await f.repository.enqueue(f.identity(command.productId), command.commandKey, command.actor, now)),
+        publish: command => admitEbayPublication({ productId: command.productId, commandKey: command.commandKey, actor: command.actor }, {
+          channelId: 1, jobs: f.execution,
+          readSource: async id => ({ ...f.identity(id), groupKey: null, variants: f.identity(id).variants.map(v => ({
+            ...v, offerId: null, listingId: null, externalSku: null, mappingExists: false,
+          })) }),
+        }),
+        block: (command, blocker) => f.execution.recordAdmissionFailure({ ...command, ...blocker, variantIds: [] }),
+      }));
+      return { ...f, state, owner };
+    }
+    it("the shared owner admits existing and missing products into the actual update and publication queues", async () => {
+      const f = unifiedFixture();
+      const results = await Promise.all(productIds.map(productId => f.owner.request({ channelId: 1, productId, commandKey: randomUUID(), actor })));
+      expect(results.map(r => r.jobs[0].operation)).toEqual(["sync", "publish"]);
+      expect(results.every(r => r.pending === 1 && r.synced === 0)).toBe(true);
+      const jobs = await db.pool.query("SELECT operation FROM channels.ebay_listing_sync_jobs WHERE product_id=ANY($1::int[]) ORDER BY product_id", [productIds]);
+      expect(jobs.rows.map(row => row.operation)).toEqual(["sync", "publish"]);
+    });
+    it("concurrent create commands coalesce through the actual unique active-job index and replay after identity changes", async () => {
+      const f = unifiedFixture(), productId = productIds[1], command = { channelId: 1, productId, commandKey: randomUUID(), actor };
+      const responses = await Promise.all(Array.from({ length: 8 }, () => f.owner.request(command)));
+      expect(new Set(responses.map(r => r.jobs[0].id)).size).toBe(1);
+      f.state.set(productId, { active: true, included: false, includedVariantCount: 0, hasPublishedIdentity: true });
+      const replay = await f.owner.request(command);
+      expect(replay.jobs[0].id).toBe(responses[0].jobs[0].id);
+      expect(replay.jobs[0].operation).toBe("publish");
+      expect((await db.pool.query("SELECT count(*)::int AS n FROM channels.ebay_listing_sync_jobs WHERE product_id=$1", [productId])).rows[0].n).toBe(1);
+      await expect(f.owner.request({ ...command, actor: "different-requester" })).rejects.toMatchObject({ code: "EBAY_SYNC_REPLAY_CONFLICT" });
+    });
+    it("archival blocks new admission durably; reactivation permits a fresh request without rewriting the rejected receipt", async () => {
+      const f = unifiedFixture(), productId = productIds[1], command = { channelId: 1, productId, commandKey: randomUUID(), actor };
+      await db.pool.query("UPDATE catalog.products SET is_active=false WHERE id=$1", [productId]);
+      const blocked = await f.owner.request(command);
+      expect(blocked.jobs[0]).toMatchObject({ kind: "admission", code: "CHANNEL_SYNC_PRODUCT_INACTIVE" });
+      await db.pool.query("UPDATE catalog.products SET is_active=true WHERE id=$1", [productId]);
+      expect((await f.owner.request(command)).jobs[0].id).toBe(blocked.jobs[0].id);
+      expect((await f.owner.request({ ...command, commandKey: randomUUID() })).jobs[0]).toMatchObject({ operation: "publish", state: "queued" });
+      expect((await f.repository.getAdmission(command.commandKey, 1))!.code).toBe("CHANNEL_SYNC_PRODUCT_INACTIVE");
+    });
+    it("an uncertain creation source read leaves no false refusal and the same command can recover", async () => {
+      const f = unifiedFixture(), productId = productIds[1], command = { productId, commandKey: randomUUID(), actor };
+      const source = { ...f.identity(productId), groupKey: null, variants: f.identity(productId).variants.map(v => ({ ...v, offerId: null, listingId: null, externalSku: null, mappingExists: false })) };
+      const readSource = vi.fn().mockRejectedValueOnce(new Error("source read connection lost")).mockResolvedValue(source);
+      const deps = { channelId: 1, jobs: f.execution, readSource };
+      expect(await admitEbayPublication(command, deps)).toMatchObject({ code: "EBAY_SYNC_ADMISSION_UNSAVED" });
+      expect(await f.repository.getAdmission(command.commandKey, 1)).toBeNull();
+      expect(await f.repository.getByCommand(command.commandKey, 1)).toBeNull();
+      const recovered = await admitEbayPublication(command, deps);
+      expect(recovered.job).toMatchObject({ operation: "publish", state: "queued" });
+      expect((await f.repository.getByCommand(command.commandKey, 1))!.id).toBe(recovered.job!.id);
+    });
+    it("concurrent Sync All retries retain the first committed selection when inclusion changes", async () => {
+      const f = fixture();
+      let selected = 0;
+      let release!: () => void;
+      const bothSelected = new Promise<void>(resolve => { release = resolve; });
+      f.adapter.select = vi.fn(async () => {
+        const snapshot = saved().members.slice(0, ++selected).map(({ commandKey: _key, ...member }) => member);
+        if (selected === 2) release();
+        await bothSelected;
+        return { destination, products: snapshot };
+      });
+      const commandKey = randomUUID();
+      const responses = await Promise.all([
+        f.service.start(1, actor, { commandKey }), f.service.start(1, actor, { commandKey }),
+      ]);
+      expect(responses[0].items).toEqual(responses[1].items);
+      expect(responses[0].id).toBe(commandKey);
+      const persisted = await store.get(commandKey);
+      expect(persisted!.members.map(m => m.productId)).toEqual(responses[0].items.map(i => i.productId));
+    });
+    it("an explicit single-product batch cannot be replayed for another product", async () => {
+      const f = fixture();
+      f.adapter.select = vi.fn(async (_channel, selected) => ({ destination, products: saved().members
+        .filter(member => !selected || selected.includes(member.productId)).map(({ commandKey: _key, ...member }) => member) }));
+      const commandKey = randomUUID();
+      const first = await f.service.start(1, actor, { commandKey, productIds: [productIds[0]] });
+      expect(first.items.map(item => item.productId)).toEqual([productIds[0]]);
+      await expect(f.service.start(1, actor, { commandKey, productIds: [productIds[1]] })).rejects.toMatchObject({ code: "SYNC_BATCH_REPLAY_CONFLICT" });
+    });
+
     function ebayFixture() {
       destination = { ...destination, provider: "ebay" };
       const repository = new PostgresEbayListingSyncRepository(db.pool);

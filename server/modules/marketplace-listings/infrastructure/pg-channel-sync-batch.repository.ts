@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import {
   savedSyncBatchSchema,
   type SavedSyncBatch,
@@ -30,7 +30,10 @@ export class PostgresChannelSyncBatchRepository
   constructor(private readonly pool: Pick<Pool, "connect" | "query">) {}
 
   async get(id: string): Promise<SavedSyncBatch | null> {
-    const row = (await this.pool.query(selectBatch + " WHERE b.id=$1", [id]))
+    return this.getInsideTransaction(this.pool, id);
+  }
+  async getInsideTransaction(database: Pick<PoolClient, "query">, id: string): Promise<SavedSyncBatch | null> {
+    const row = (await database.query(selectBatch + " WHERE b.id=$1", [id]))
       .rows[0];
     return row ? decode(row) : null;
   }
@@ -39,6 +42,18 @@ export class PostgresChannelSyncBatchRepository
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      const saved = await this.createInsideTransaction(client, batch);
+      await client.query("COMMIT");
+      return saved;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  async createInsideTransaction(client: PoolClient, input: SavedSyncBatch): Promise<SavedSyncBatch> {
+      const batch = savedSyncBatchSchema.parse(input);
       const inserted = await client.query(
         `INSERT INTO marketplace.channel_sync_batches
         (id,channel_id,destination,actor,member_count,created_at,next_attempt_at)
@@ -64,14 +79,7 @@ export class PostgresChannelSyncBatchRepository
         (await client.query(selectBatch + " WHERE b.id=$1", [batch.id]))
           .rows[0],
       );
-      await client.query("COMMIT");
       return saved;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
   }
   async list(channelId: number, offset: number): Promise<SavedSyncBatch[]> {
     return (

@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import type { InclusionSyncHandoff } from "./ebay-inclusion-sync";
 import { z } from "zod";
 import { ebayProductExclusionRequestSchema, ebayProductExclusionResultSchema, type EbayProductExclusionResult } from "@shared/types/ebay-listing-exclusion";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
@@ -26,6 +27,7 @@ export class PostgresEbayListingExclusionRepository {
     private readonly channelId: number,
     private readonly readSource: (client: PoolClient, productId: number) => Promise<EbayListingSyncIdentity>,
     private readonly clock: () => Date,
+    private readonly inclusionSync: InclusionSyncHandoff,
   ) {
     idSchema.parse(channelId);
     this.jobs = new PostgresEbayListingSyncRepository(pool);
@@ -106,6 +108,7 @@ export class PostgresEbayListingExclusionRepository {
       } else if ((await client.query("SELECT 1 FROM channels.ebay_listing_sync_commands WHERE command_key=$1", [command.commandKey])).rowCount) {
         throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This command key already belongs to a listing job.");
       }
+      if (!command.excluded) await this.inclusionSync.save(client, { productId, commandKey: command.commandKey, actor, now });
       const row = (await client.query<ExclusionReceipt>(`INSERT INTO channels.ebay_listing_exclusion_commands
         (command_key,channel_id,product_id,actor,excluded,job_id,before_intent,created_at)
         VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8) RETURNING *`,
@@ -133,7 +136,8 @@ export class PostgresEbayListingExclusionRepository {
     const job = row.job_id ? await this.jobs.getByCommand(row.command_key, row.channel_id, { transactionClient: client }) : null;
     if (row.job_id && (!job || job.id !== row.job_id || job.operation !== "withdraw" || job.productId !== row.product_id))
       throw new EbayListingSyncError("EBAY_EXCLUSION_PERSISTENCE_FAILED", "The saved exclusion receipt is missing its exact withdrawal job. Keep this command reference and inspect its saved status.");
-    return ebayProductExclusionResultSchema.parse({ success: true, productId: row.product_id, excluded: row.excluded,
+    const syncBatchId = row.excluded ? null : await this.inclusionSync.read(client ?? this.pool, { productId: row.product_id, commandKey: row.command_key, actor: row.actor });
+    return ebayProductExclusionResultSchema.parse({ syncBatchId, success: true, productId: row.product_id, excluded: row.excluded,
       commandKey: row.command_key, replayed, job: job ? ebayListingSyncJobSchema.parse(job) : null,
       remoteAction: row.job_id ? "queued_withdrawal" : row.excluded ? "local_exclusion" : "included" });
   }

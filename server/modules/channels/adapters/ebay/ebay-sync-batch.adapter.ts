@@ -8,9 +8,9 @@ import {
   type SyncAdmissionRefusal,
 } from "../../../marketplace-listings/domain/channel-sync-batch";
 import type {
-  selectActiveEbaySyncProducts,
-  syncActiveListings,
-} from "../../infrastructure/ebay-active-listing-sync";
+  selectIncludedEbaySyncProducts,
+  syncChannelListings,
+} from "../../infrastructure/ebay-channel-listing-sync";
 import type { PostgresEbayListingSyncRepository } from "../../infrastructure/ebay-listing-sync.repository";
 import { z } from "zod";
 
@@ -36,25 +36,25 @@ function admissionRefusal(error: unknown): SyncAdmissionRefusal | null {
     };
   return null;
 }
-/** Translation only: eligibility, durable commands and provider state still
- * belong to the existing eBay listing owner. No provider calls live here. */
+/** Translation only: the shared Sync owner decides inclusion and create/update;
+ * the existing execution owner verifies provider state. No provider calls live here. */
 export class EbaySyncBatchAdapter implements ChannelSyncBatchAdapter {
   constructor(
     private readonly deps: {
       channelId: number;
-      select: typeof selectActiveEbaySyncProducts;
-      sync: typeof syncActiveListings;
+      select: typeof selectIncludedEbaySyncProducts;
+      sync: typeof syncChannelListings;
       status: Pick<PostgresEbayListingSyncRepository, "readCommandStatuses">;
     },
   ) {}
-  async select(channelId: number) {
+  async select(channelId: number, productIds?: number[]) {
     if (channelId !== this.deps.channelId)
       throw new ChannelSyncBatchError(
         "SYNC_CHANNEL_MISMATCH",
         "This adapter belongs to another channel.",
       );
     try {
-      return await this.deps.select();
+      return await this.deps.select(productIds);
     } catch (error) {
       const refusal = admissionRefusal(error);
       if (refusal)
