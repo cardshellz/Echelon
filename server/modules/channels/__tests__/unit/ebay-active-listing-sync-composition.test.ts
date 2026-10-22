@@ -121,6 +121,14 @@ describe("active existing-listing selection to admission composition", () => {
     expect(fixture.failures).toEqual([]);
   });
 
+  it.each(["ended", "deleted"])("explicit Sync inspects a retained %s identity without inventing a replacement", async status => {
+    fixture.rows = rows(3, "CAT-3", "EBAY-3").map(row => ({ ...row, listing_sync_status: status }));
+    const result = await syncActiveListings({ productIds: [3] }, "operator", undefined, undefined, undefined, { inspectRetainedIdentity: true });
+    expect(result).toMatchObject({ pending: 1, errors: 0 });
+    expect(fixture.queued).toEqual([expect.objectContaining({ identity: expect.objectContaining({
+      variants: [expect.objectContaining({ listingId: "listing-3", offerId: "offer-3-0" }), expect.objectContaining({ listingId: "listing-3", offerId: "offer-3-1" })],
+    }) })]);
+  });
   it("queues recovery content through normal Sync with the exact account and stable command", async () => {
     fixture.rows = rows(3, "CAT-3", "EBAY-3");
     const commandKey = "00000000-0000-4000-8000-000000000003";

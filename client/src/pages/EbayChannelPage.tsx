@@ -81,7 +81,6 @@ import {
 import { ProductTypeManager } from "@/components/ebay/ProductTypeManager";
 import { EbayCategoryPicker } from "@/components/ebay/EbayCategoryPicker";
 import { AspectEditor } from "@/components/ebay/AspectEditor";
-import { PushProgressModal } from "@/components/ebay/PushProgressModal";
 import { ChannelSyncProgress } from "@/components/channels/ChannelSyncProgress";
 import { useChannelSyncBatches } from "@/hooks/use-channel-sync-batches";
 import { EbayListingIssueCard } from "@/components/ebay/EbayListingIssueCard";
@@ -730,7 +729,6 @@ export default function EbayChannelPage() {
   });
 
   // ---- Durable eBay publication ----
-  const [pushModalOpen, setPushModalOpen] = useState(false);
   const syncBatches = useChannelSyncBatches(config?.channel?.id, user?.id ? String(user.id) : undefined);
   const batchActivity = syncBatches.batch?.items.map(item => `${item.operationId}:${item.state}:${item.updatedAt}`).join("|");
   useEffect(() => {
@@ -739,29 +737,6 @@ export default function EbayChannelPage() {
     void queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
     void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"] });
   }, [batchActivity, queryClient]);
-  const [pushProductIds, setPushProductIds] = useState<number[]>([]);
-  const [pushRunId, setPushRunId] = useState(0);
-
-  const handlePushAll = () => {
-    if (syncJobsQuery.isError || syncJobsQuery.isPending || feedError) return;
-    const readyProducts = feedData?.feed?.filter((f) => f.status === "ready" && !["queued", "running", "recovering"].includes(latestSyncJobs.get(f.id)?.state ?? "")) || [];
-    if (readyProducts.length === 0) return;
-    const ids = readyProducts.map((f) => f.id);
-    setPushProductIds(ids);
-    setPushRunId((previous) => previous + 1);
-    setPushModalOpen(true);
-  };
-
-  const handlePushSingle = (productId: number) => {
-    if (syncJobsQuery.isError || syncJobsQuery.isPending || feedError) {
-      toast({ title: "Refresh saved status first", description: "The latest publishing requests could not be checked. Refresh the saved status in the listing feed before starting another publication." });
-      return;
-    }
-    setPushProductIds([productId]);
-    setPushRunId((previous) => previous + 1);
-    setPushModalOpen(true);
-  };
-
   // ---- Sync All Listings ----
   const handleSyncAll = () => { void syncBatches.start(); };
 
@@ -784,6 +759,7 @@ export default function EbayChannelPage() {
     for (const receipt of commandReceipts) {
       if (!receipt.data) continue;
       const { commandKey, job } = receipt.data;
+      forgetSyncCommand(job.productId, commandKey);
       if (localSyncIssues.get(job.productId)?.commandKey !== commandKey) continue;
       // The server resolves exact command membership, including commands that
       // coalesced into an older active job. A product's old completion is no proof.
@@ -795,6 +771,47 @@ export default function EbayChannelPage() {
     }
   }, [commandReceipts, localSyncIssues, queryClient]);
 
+  const syncCommandStorageKey = (productId: number) => `channel-listing-sync-command:${user?.id}:${config?.channel?.id}:${productId}`;
+  function readSavedSyncCommand(productId: number): string | null {
+    const current = sessionStorage.getItem(syncCommandStorageKey(productId));
+    if (current) return z.string().uuid().parse(current);
+    // Preserve unacknowledged requests from the retired Push UI. The server
+    // verifies requester/account scope before replaying these exact commands.
+    const legacy = sessionStorage.getItem(`ebay:publication-command:${productId}`);
+    if (!legacy) return null;
+    const command = z.object({ productId: z.literal(productId), commandKey: z.string().uuid() }).strict().parse(JSON.parse(legacy));
+    return command.commandKey;
+  }
+  useEffect(() => {
+    if (!user?.id || !config?.channel?.id || !feedData?.feed) return;
+    const recovered = new Map<number, { issue: EbayListingIssue; commandKey: string | null }>();
+    try {
+      for (const product of feedData.feed) {
+        const key = readSavedSyncCommand(product.id);
+        if (key) recovered.set(product.id, { commandKey: z.string().uuid().parse(key),
+          issue: resolveEbayListingIssue({ code: "EBAY_SYNC_ADMISSION_UNSAVED", productId: product.id }) });
+      }
+    } catch {
+      toast({ title: "Saved sync request could not be read", description: "Allow browser storage and reload before starting another sync. Existing server requests remain available in sync progress.", variant: "destructive" });
+      return;
+    }
+    if (recovered.size) setLocalSyncIssues(previous => new Map([...previous, ...recovered]));
+  }, [user?.id, config?.channel?.id, feedData?.feed, toast]);
+  function forgetSyncCommand(productId: number, commandKey: string) {
+    try {
+      if (sessionStorage.getItem(syncCommandStorageKey(productId)) === commandKey) sessionStorage.removeItem(syncCommandStorageKey(productId));
+      const legacyKey = `ebay:publication-command:${productId}`;
+      const legacy = sessionStorage.getItem(legacyKey);
+      if (legacy) {
+        const command = z.object({ productId: z.literal(productId), commandKey: z.string().uuid() }).strict().parse(JSON.parse(legacy));
+        if (command.commandKey === commandKey) sessionStorage.removeItem(legacyKey);
+      }
+    }
+    catch {
+      // Retain the key so the next request can only replay the exact server receipt.
+      toast({ title: "Sync saved; browser recovery key retained", description: "Allow browser storage and reload before requesting another update.", variant: "destructive" });
+    }
+  }
   const syncProductMutation = useMutation({
     mutationFn: async ({ productId, commandKey }: { productId: number; commandKey: string }) => {
       const resp = await apiRequest("POST", `/api/ebay/listings/sync-product/${productId}`, { commandKey });
@@ -810,6 +827,7 @@ export default function EbayChannelPage() {
       const errorMessage = data.details.find(detail => !detail.success && detail.error)?.error;
       const failure = data.details.find(detail => !detail.success);
       const savedJob = data.jobs.find((candidate) => candidate.productId === productId);
+      if (savedJob || data.errors === 0 && data.pending === 0) forgetSyncCommand(productId, commandKey);
       setLocalSyncIssues((previous) => {
         const current = previous.get(productId);
         if (current?.commandKey && current.commandKey !== commandKey) return previous;
@@ -842,9 +860,22 @@ export default function EbayChannelPage() {
     },
   });
 
-  const handleSyncProduct = (productId: number, commandKey: string = crypto.randomUUID()) => {
-    setSyncingProductIds((prev) => new Set([...prev, productId]));
-    syncProductMutation.mutate({ productId, commandKey });
+  const handleSyncProduct = (productId: number, commandKey?: string) => {
+    if (syncJobsQuery.isError || syncJobsQuery.isPending || feedError) {
+      toast({ title: "Refresh saved status first", description: "Refresh the listing feed and saved requests before starting another sync." });
+      return;
+    }
+    try {
+      if (!user?.id || !config?.channel?.id) throw new Error("The channel session is not ready.");
+      const saved = readSavedSyncCommand(productId);
+      const key = z.string().uuid().parse(saved ?? commandKey ?? crypto.randomUUID());
+      if (saved && commandKey && saved !== commandKey) throw new Error("An earlier sync request must be checked first.");
+      sessionStorage.setItem(syncCommandStorageKey(productId), key);
+      setSyncingProductIds((prev) => new Set([...prev, productId]));
+      syncProductMutation.mutate({ productId, commandKey: key });
+    } catch {
+      toast({ title: "Sync request not sent", description: "Echelon could not retain this request safely. Allow browser storage, reload the page, then check the saved request before retrying.", variant: "destructive" });
+    }
   };
 
   const clearUntrackedLocalIssue = (productId: number) => {
@@ -866,7 +897,7 @@ export default function EbayChannelPage() {
   });
   const continueSavedRecovery = async () => {
     if (!recoveryTarget || checkingRecovery) return;
-    if (!recoveryTarget.jobId) { handlePushSingle(recoveryTarget.productId); return; }
+    if (!recoveryTarget.jobId) { handleSyncProduct(recoveryTarget.productId); return; }
     setCheckingRecovery(true);
     try {
       const { job } = z.object({ job: ebayListingSyncJobSchema }).parse(await (await apiRequest("GET", `/api/ebay/listings/sync-jobs/${recoveryTarget.jobId}`)).json());
@@ -915,12 +946,7 @@ export default function EbayChannelPage() {
       // older job's operation must not redirect that retry to publish/withdraw.
       if (commandKey) handleSyncProduct(productId, commandKey);
       else if (latestSyncJobs.get(productId)?.operation === "withdraw") retryWithdrawal(productId);
-      else if (latestSyncJobs.get(productId)?.operation === "publish" && latestSyncJobs.get(productId)?.state !== "completed") handleSyncProduct(productId);
-      // A missing aggregate listing ID can mean conflicting saved identities,
-      // not a new listing. Keep a sync retry in the existing-listing owner so
-      // its fresh identity check reports the conflict without publishing.
-      else if (latestSyncJobs.get(productId)?.operation === "sync" || item?.isListed || item?.externalListingId) handleSyncProduct(productId);
-      else handlePushSingle(productId);
+      else handleSyncProduct(productId);
       return;
     }
     if (issue.action.kind === "check_recovery" || issue.action.kind === "review_mapping") {
@@ -1233,8 +1259,8 @@ export default function EbayChannelPage() {
     };
   }, [feedData, latestSyncJobs, localSyncIssues]);
 
-  const existingListingCount = (feedData?.feed ?? []).filter((item) =>
-    item.canSyncExistingListing ?? Boolean(item.externalListingId && ["listed", "error"].includes(item.status)),
+  const includedListingCount = (feedData?.feed ?? []).filter((item) =>
+    !item.isExcluded && item.status !== "type_disabled",
   ).length;
 
   const storeCats = storeCatsData?.categories || [];
@@ -1899,11 +1925,11 @@ export default function EbayChannelPage() {
                 variant="outline"
                 size="sm"
                 className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
-                disabled={!hasPermission("channels", "edit") || existingListingCount === 0 || !!feedError || syncJobsQuery.isError || syncJobsQuery.isPending || syncBatches.query.isError || syncBatches.query.isPending || syncBatches.starting || syncBatches.permissionDenied}
+                disabled={!hasPermission("channels", "edit") || includedListingCount === 0 || !!feedError || syncJobsQuery.isError || syncJobsQuery.isPending || syncBatches.query.isError || syncBatches.query.isPending || syncBatches.starting || syncBatches.permissionDenied}
                 onClick={handleSyncAll}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Sync All ({existingListingCount})
+                Sync All ({includedListingCount})
               </Button>
               <Button
                 variant="outline"
@@ -1918,16 +1944,6 @@ export default function EbayChannelPage() {
                   <ShieldCheck className="h-4 w-4 mr-2" />
                 )}
                 Verify ({feedCounts.listed})
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
-                disabled={feedCounts.ready === 0 || !!feedError || syncJobsQuery.isError || syncJobsQuery.isPending}
-                onClick={handlePushAll}
-              >
-                <Zap className="h-4 w-4 mr-2" />
-                Push to eBay ({feedCounts.ready})
               </Button>
             </div>
           </div>
@@ -2025,11 +2041,19 @@ export default function EbayChannelPage() {
                           ? resolveEbayListingIssue({ message: item.syncError, productId: item.id }) : null);
                       // Sync admission checks saved responses and current settings;
                       // requesting that check does not bypass the provider-write guard.
-                      const canSyncExistingListing = !withdrawalUnfinished && (!syncIssue || (syncIssue.retryable && syncIssue.action.kind === "retry_sync")
-                        || ["EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED",
-                          "PUBLICATION_REQUEST_EVIDENCE_INCOMPLETE", "EBAY_SHIPPING_POLICY_REJECTED", "EBAY_QUANTITY_REJECTED"].includes(syncIssue.code));
+                      // A saved blocker may have been corrected. Sync rechecks it
+                      // through the owner; the UI never overrides write barriers.
+                      const canSyncExistingListing = !withdrawalUnfinished;
                       const syncExistingListing = () => handleSyncProduct(item.id, localSyncIssues.get(item.id)?.commandKey ?? undefined);
                       const isExcluded = item.isExcluded;
+                      const readinessSyncAction = ["missing_config", "missing_specifics", "ended", "deleted"].includes(item.status)
+                        && !syncPending && !isExcluded ? (
+                          <Button variant="outline" size="sm" className="min-h-11 text-xs"
+                            disabled={withdrawalUnfinished || syncingProductIds.has(item.id) || syncJobsQuery.isError || syncJobsQuery.isPending}
+                            onClick={event => { event.stopPropagation(); syncExistingListing(); }}>
+                            <RefreshCw className="h-4 w-4 mr-1" />Sync
+                          </Button>
+                        ) : null;
                       const isExpanded = expandedProducts.has(item.id);
                       const hasVariants = item.variants && item.variants.length > 0;
                       const allIncluded = item.includedVariantCount === item.variantCount;
@@ -2101,7 +2125,9 @@ export default function EbayChannelPage() {
                                   )}
                               </button>
                               <EbayProductListingIntentControl productId={item.id} productName={item.name} excluded={isExcluded} currentJob={syncJob}
-                                disabled={syncJobsQuery.isError || syncJobsQuery.isPending} retryRequested={withdrawalRetryRequests.get(item.id)} onRetryHandled={withdrawalRetryHandled} onIssueAction={handleIssueAction} />
+                                disabled={syncJobsQuery.isError || syncJobsQuery.isPending} retryRequested={withdrawalRetryRequests.get(item.id)} onRetryHandled={withdrawalRetryHandled} onIssueAction={handleIssueAction}
+                                onSync={() => handleSyncProduct(item.id)}
+                                onSyncSaved={batchId => { syncBatches.setSelectedId(batchId); syncBatches.setOpen(true); void syncBatches.query.refetch(); }} />
                               <span className="text-xs text-muted-foreground sm:hidden">
                                 {isExcluded ? "Excluded" : "Included"}
                               </span>
@@ -2171,10 +2197,10 @@ export default function EbayChannelPage() {
                                     size="sm"
                                     className="min-h-[44px] min-w-[44px] px-3 text-xs"
                                     disabled={syncJobsQuery.isError || syncJobsQuery.isPending}
-                                    onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
+                                    onClick={(e) => { e.stopPropagation(); handleSyncProduct(item.id); }}
                                   >
-                                    <Zap className="h-4 w-4 mr-1" />
-                                    Push
+                                    <RefreshCw className="h-4 w-4 mr-1" />
+                                    Sync
                                   </Button>
                                 </>
                               )}
@@ -2188,8 +2214,7 @@ export default function EbayChannelPage() {
                                     disabled={syncingProductIds.has(item.id) || syncJobsQuery.isError || syncJobsQuery.isPending}
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      if (item.externalListingId) handleSyncProduct(item.id);
-                                      else handlePushSingle(item.id);
+                                      handleSyncProduct(item.id);
                                     }}
                                   >
                                     {syncingProductIds.has(item.id) ? (
@@ -2236,6 +2261,7 @@ export default function EbayChannelPage() {
                                   {item.status === "deleted" ? "Deleted" : "Ended"}
                                 </Badge>
                               )}
+                              {readinessSyncAction}
                               {item.status === "excluded" && <Badge variant="outline" className="text-muted-foreground text-xs">{withdrawalJob?.state === "completed" ? "Ended on eBay · excluded" : withdrawalJob ? "Excluded · removal pending" : "Excluded locally"}</Badge>}
                               {withdrawalJob && <Button variant="outline" size="sm" className="min-h-11 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: withdrawalJob.id, productId: item.id, name: item.name }); }}>View removal status</Button>}
                               {reconciliationAction && (
@@ -2316,12 +2342,12 @@ export default function EbayChannelPage() {
                                     <Button
                                       variant="ghost"
                                       size="sm"
-                                      className="h-6 w-6 p-0"
+                                      className="h-8 px-2"
                                       disabled={syncJobsQuery.isError || syncJobsQuery.isPending}
-                                      onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
-                                      title="Push to eBay"
+                                      onClick={(e) => { e.stopPropagation(); handleSyncProduct(item.id); }}
+                                      title="Sync this product"
                                     >
-                                      <Zap className="h-3.5 w-3.5" />
+                                      <RefreshCw className="h-3.5 w-3.5 mr-1" />Sync
                                     </Button>
                                   </>
                                 )}
@@ -2335,8 +2361,7 @@ export default function EbayChannelPage() {
                                       disabled={syncingProductIds.has(item.id) || syncJobsQuery.isError || syncJobsQuery.isPending}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        if (item.externalListingId) handleSyncProduct(item.id);
-                                        else handlePushSingle(item.id);
+                                        handleSyncProduct(item.id);
                                       }}
                                       title={item.externalListingId ? "Retry listing sync" : "Retry push"}
                                     >
@@ -2395,7 +2420,8 @@ export default function EbayChannelPage() {
                                     {item.status === "deleted" ? "Deleted" : "Ended"}
                                   </Badge>
                                 )}
-                                {item.status === "excluded" && <Badge variant="outline" className="text-muted-foreground text-xs">{withdrawalJob?.state === "completed" ? "Ended on eBay · excluded" : withdrawalJob ? "Excluded · removal pending" : "Excluded locally"}</Badge>}
+                                {readinessSyncAction}
+                              {item.status === "excluded" && <Badge variant="outline" className="text-muted-foreground text-xs">{withdrawalJob?.state === "completed" ? "Ended on eBay · excluded" : withdrawalJob ? "Excluded · removal pending" : "Excluded locally"}</Badge>}
                                 {withdrawalJob && <Button variant="outline" size="sm" className="min-h-9 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: withdrawalJob.id, productId: item.id, name: item.name }); }}>View removal status</Button>}
                                 {reconciliationAction && (
                                   <Button
@@ -3058,14 +3084,6 @@ export default function EbayChannelPage() {
         }}
       />}
 
-      {/* Saved publication progress */}
-      <PushProgressModal
-        key={pushRunId}
-        open={pushModalOpen}
-        onClose={() => setPushModalOpen(false)}
-        productIds={pushProductIds}
-        onIssueAction={handleIssueAction}
-      />
     </div>
   );
 }
