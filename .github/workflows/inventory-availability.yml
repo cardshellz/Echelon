@@ -33,7 +33,9 @@ jobs:
     name: Inventory availability browser journeys (${{ matrix.shard }}/4)
     needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Browser dependency setup has exceeded 11 minutes on hosted runners;
+    # leave time for the full shard without changing its test coverage.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
