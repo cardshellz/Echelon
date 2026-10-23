@@ -3371,6 +3371,9 @@ export default function PurchaseOrderDetail() {
               lines.map((line: any) => {
                 const canEditThisLine = canEditLine(line);
                 const isEditingSkuMobile = canEditThisLine && editingLineId === line.id && editingLineField === "sku";
+                const shipping = shippingByLine.get(line.id);
+                const orderedPieces = shipping?.line.orderedPieces ?? line.orderQty ?? 0;
+                const receivedPieces = shipping?.line.receivedPieces ?? line.receivedQty ?? 0;
                 return (
                 <Card key={line.id} data-testid={`po-line-${line.id}`} className={shippingByLine.get(line.id)?.shipments.some(shipment => shipment.shipmentLineId === procurementNavigation.record?.relationship?.line) ? "border-primary" : undefined}>
                   <CardContent className="p-3">
@@ -3417,7 +3420,7 @@ export default function PurchaseOrderDetail() {
                             onClick={() => canEditThisLine && startPricingEdit(line)}
                             title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
                           >
-                            Ordered: {(line.orderQty || 0).toLocaleString()} pcs
+                            Ordered: {orderedPieces.toLocaleString()} pcs
                           </span>
                           <span
                             className={canEditThisLine ? "cursor-pointer underline decoration-dotted" : ""}
@@ -3432,7 +3435,7 @@ export default function PurchaseOrderDetail() {
                           <dl className="grid grid-cols-3 gap-2 my-3 text-sm" aria-label="Shipment progress">
                             <div><dt className="text-xs text-muted-foreground">Shipped</dt><dd data-testid="shipped-pieces"><PoLineShippingQuantity progress={shippingByLine.get(line.id)} kind="shipped" loading={relationshipsQuery.isPending} /></dd></div>
                             <div><dt className="text-xs text-muted-foreground">Still to ship</dt><dd data-testid="remaining-pieces"><PoLineShippingQuantity progress={shippingByLine.get(line.id)} kind="remaining" loading={relationshipsQuery.isPending} /></dd></div>
-                            <div><dt className="text-xs text-muted-foreground">Received</dt><dd data-testid="received-pieces" className="tabular-nums">{(line.receivedQty || 0).toLocaleString()}</dd></div>
+                            <div><dt className="text-xs text-muted-foreground">Received</dt><dd data-testid="received-pieces" className="tabular-nums">{receivedPieces.toLocaleString()}</dd></div>
                           </dl>
                           <PoLineShipmentLinks progress={shippingByLine.get(line.id)} loading={relationshipsQuery.isPending} navigation={procurementNavigation} poNumber={po.poNumber} />
                         </>}
@@ -3496,6 +3499,9 @@ export default function PurchaseOrderDetail() {
                   lines.map((line: any) => {
                     const canEditThisLine = canEditLine(line);
                     const isEditingSku = canEditThisLine && editingLineId === line.id && editingLineField === "sku";
+                    const shipping = shippingByLine.get(line.id);
+                    const orderedPieces = shipping?.line.orderedPieces ?? line.orderQty ?? 0;
+                    const receivedPieces = shipping?.line.receivedPieces ?? line.receivedQty ?? 0;
                     return (
                     <TableRow key={line.id} data-testid={`po-line-${line.id}`} className={shippingByLine.get(line.id)?.shipments.some(shipment => shipment.shipmentLineId === procurementNavigation.record?.relationship?.line) ? "bg-primary/5" : undefined}>
                       <TableCell className="text-muted-foreground">{line.lineNumber}</TableCell>
@@ -3542,8 +3548,8 @@ export default function PurchaseOrderDetail() {
                           title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
                         >
                           {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
-                            ? <>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></>
-                            : (line.orderQty || 0).toLocaleString()}
+                            ? <>{orderedPieces.toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil(orderedPieces / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></>
+                            : orderedPieces.toLocaleString()}
                         </span>
                       </TableCell>
                       <TableCell className="text-right" data-testid="shipped-pieces">
@@ -3554,8 +3560,8 @@ export default function PurchaseOrderDetail() {
                       </TableCell>
                       <TableCell className="text-right" data-testid="received-pieces">
                         {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
-                          ? <span>{(line.receivedQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.receivedQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></span>
-                          : (line.receivedQty || 0).toLocaleString()}
+                          ? <span>{receivedPieces.toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil(receivedPieces / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></span>
+                          : receivedPieces.toLocaleString()}
                         {(line.damagedQty || 0) > 0 && (
                           <span className="text-red-500 ml-1">({line.damagedQty} dmg)</span>
                         )}

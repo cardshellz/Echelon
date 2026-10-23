@@ -324,3 +324,17 @@ test("departing a planned shipment refreshes PO line progress on return without 
   await expect(poLine(page, 101)).toContainText("100,000 pcs · Shipped · In transit");
   expect(departures).toBe(1); expect(failures).toEqual([]);
 });
+
+test("quantity columns use one relationship snapshot even when the separate PO header read is older", async ({ page }) => {
+  const failures = await setup(page); await installPoLineProgress(page);
+  await page.route("**/api/purchase-orders/17", route => route.fulfill({ json: {
+    ...po(17), lines: [{ id: 101, lineNumber: 1, sku: "SAME-SKU", productName: "Sleeves", lineType: "product", status: "open",
+      orderQty: 150000, receivedQty: 60000, cancelledQty: 0, unitCostMills: 100, lineTotalCents: 5000 }],
+  } }));
+  await page.goto("/purchase-orders/17?tab=lines");
+  await expect(poLine(page, 101).getByTestId("received-pieces")).toHaveText("100,000");
+  await expect(poLine(page, 101).getByText(/200,000/)).toBeVisible();
+  await expect(poLine(page, 101).getByTestId("remaining-pieces")).toHaveText("100,000100,000 planned");
+  await expect(poLine(page, 101)).not.toContainText("150,000");
+  expect(failures).toEqual([]);
+});
