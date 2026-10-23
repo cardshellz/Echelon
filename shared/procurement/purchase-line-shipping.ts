@@ -69,6 +69,9 @@ export function projectPurchaseLineShipping(snapshot: RelationshipSnapshot): Map
         // A contradictory header could belong to either PO. No SKU inference.
         flagPurchase(line.purchaseId, message);
         flagPurchase(owner.purchaseLine?.purchaseId ?? null, message);
+        // A shipment discovered through a receipt can have neither PO link.
+        // Its unassigned pieces could belong to this PO; absence is not zero.
+        if (owner.issue === "missing_po" && data.root.kind === "purchase") flagPurchase(data.root.id, message);
       }
       if (!target) continue;
       target.shipments.push({ shipmentId: shipment.id, shipmentNumber: shipment.number,

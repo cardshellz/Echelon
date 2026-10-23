@@ -102,6 +102,9 @@ describe("PO line shipping progress", () => {
     source.shipmentLines[0].purchaseId = 17; source.shipmentLines[0].purchaseLineId = null;
     expect(projectPurchaseLineShipping(source).get(101)!.shipments.map(row => row.shipmentLineId)).toEqual([203]);
     expect(projectPurchaseLineShipping(source).get(101)!.stillToShipPieces).toBeNull();
+    source.shipmentLines[0].purchaseId = null;
+    expect(projectPurchaseLineShipping(source).get(101)).toMatchObject({ shippedPieces: 0, stillToShipPieces: null, quantitiesComplete: false });
+    expect(projectPurchaseLineShipping(source).get(103)!.stillToShipPieces).toBeNull();
   });
   it("does not tell users to ship directly received goods again or guess absent cancellation counters", () => {
     const source = sample(); source.purchaseLines[0].receivedPieces = 150000;
