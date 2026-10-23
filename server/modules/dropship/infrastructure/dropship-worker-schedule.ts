@@ -12,7 +12,8 @@ export type DropshipWorkerScheduleName =
   | "usdcWatcher"
   | "costDetection"
   | "categoryMarks"
-  | "rulesConversion";
+  | "rulesConversion"
+  | "marketplaceSyncBack";
 
 interface DropshipWorkerScheduleDefinition {
   initialDelayEnvironmentVariable: string;
@@ -70,6 +71,12 @@ const SCHEDULE_DEFINITIONS: Record<
   rulesConversion: {
     initialDelayEnvironmentVariable: "DROPSHIP_RULES_CONVERSION_WORKER_INITIAL_DELAY_MS",
     defaultInitialDelayMs: 240_000,
+  },
+  // eBay sync-back (plan v4 §6.1) ticks every 15 minutes; it boots after the
+  // rules conversion job, in a phase of its own.
+  marketplaceSyncBack: {
+    initialDelayEnvironmentVariable: "DROPSHIP_MARKETPLACE_SYNC_BACK_WORKER_INITIAL_DELAY_MS",
+    defaultInitialDelayMs: 300_000,
   },
 };
 

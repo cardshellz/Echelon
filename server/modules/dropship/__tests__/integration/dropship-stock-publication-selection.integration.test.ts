@@ -4,6 +4,8 @@ import { readDropshipListingStockSelection } from "../../stock-publication-selec
 
 const configured = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const now = new Date("2026-10-12T12:00:00Z");
+/** The fingerprint main's reader (65f26268b) computes for this fixture's first read: a listing without a limit hashes as before. */
+const MAIN_FINGERPRINT = "b0ef162dd96302db265a41d5a820f3e73b7d2520f7aece6d3b06a9c3a039adbf";
 (configured ? describe : describe.skip).sequential("Dropship stock selection owner SQL", () => {
   let database: InventoryCutoverTestDatabase;
   beforeAll(async () => {
@@ -24,7 +26,8 @@ const now = new Date("2026-10-12T12:00:00Z");
         product_id integer,product_variant_id integer,category text,auto_connect_new_skus boolean,auto_list_new_skus boolean,is_active boolean,priority integer);
       CREATE TABLE dropship.dropship_vendor_variant_overrides(vendor_id integer,product_variant_id integer,enabled_override boolean);
       CREATE TABLE dropship.dropship_vendor_listings(id integer PRIMARY KEY,vendor_id integer,store_connection_id integer,
-        product_variant_id integer,platform text,status text,external_listing_id text,external_offer_id text,updated_at timestamptz);
+        product_variant_id integer,platform text,status text,external_listing_id text,external_offer_id text,updated_at timestamptz,
+        vendor_quantity_limit integer);
       CREATE TABLE dropship.dropship_listing_push_jobs(id integer PRIMARY KEY,vendor_id integer,store_connection_id integer,job_type text,status text);
       CREATE TABLE dropship.dropship_listing_push_job_items(id integer PRIMARY KEY,job_id integer,listing_id integer,product_variant_id integer,
         action text,status text,result jsonb,created_at timestamptz);
@@ -139,6 +142,21 @@ const now = new Date("2026-10-12T12:00:00Z");
     const after = await read([101], new Date("2026-10-12T13:00:00Z"));
     expect(after.variants[0].action).toBe("zero");
     expect(after.fingerprint).not.toBe(before.fingerprint);
+  });
+
+  // eBay sync-back owner rule 1 (plan v4 SB29): the vendor's limit rides on the publish decision; without one, nothing changes.
+  it("carries the vendor's limit on the publish decision, and keeps every no-limit fingerprint exactly main's", async () => {
+    const before = await read();
+    expect(before.fingerprint).toBe(MAIN_FINGERPRINT);
+    expect(before.variants[0]).not.toHaveProperty("publishLimitUnits");
+    await database.pool.query("UPDATE dropship.dropship_vendor_listings SET vendor_quantity_limit=5 WHERE id=50");
+    const limited = await read();
+    expect(limited.variants[0]).toMatchObject({ productVariantId: 101, action: "publish", publishLimitUnits: 5 });
+    expect(limited.fingerprint).not.toBe(before.fingerprint);
+    await database.pool.query("UPDATE dropship.dropship_vendor_listings SET vendor_quantity_limit=0 WHERE id=50");
+    expect((await read()).variants[0]).toMatchObject({ publishLimitUnits: 0 });
+    await database.pool.query("UPDATE dropship.dropship_vendor_listings SET vendor_quantity_limit=NULL WHERE id=50");
+    expect((await read()).fingerprint).toBe(before.fingerprint);
   });
 
   it("rejects duplicate/invalid IDs and a missing store", async () => {

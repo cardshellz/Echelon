@@ -192,6 +192,7 @@ describe("PgDropshipOrderProcessingRepository", () => {
       externalOrderId: source.external_order_id,
       status: "processing",
       paymentHoldExpiresAt: source.payment_hold_expires_at,
+      processingAttemptCount: 0,
       normalizedPayload: source.normalized_payload,
     };
 
@@ -245,6 +246,7 @@ function makeQuoteIntake(): DropshipOrderProcessingIntakeRecord {
     externalOrderId: source.external_order_id,
     status: "processing",
     paymentHoldExpiresAt: source.payment_hold_expires_at,
+    processingAttemptCount: 0,
     normalizedPayload: source.normalized_payload,
   };
 }

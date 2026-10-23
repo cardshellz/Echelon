@@ -29,6 +29,9 @@ import { DropshipError } from "../domain/errors";
 import { LISTING_PUSH_RUN_CODES, isReservedListingPushJobKey } from "../domain/listing-push-run";
 import { LISTING_PUSH_RUN_WORDS } from "../domain/listing-push-run-words";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
+import { hasMarketplaceListing } from "../domain/listing-live-status";
+import { isLivePolicyIncompatibilityTolerated } from "../domain/marketplace-sync-decision";
+import { publishableQuantity } from "../domain/marketplace-sync-sweep";
 import { listingPhotoLeftOutReason } from "../domain/listing-photo-reasons";
 import {
   listingTierForVariantUomType,
@@ -135,6 +138,13 @@ export interface DropshipExistingVendorListing {
   vendorRetailPriceCents: number | null;
   quantityCap: number | null;
   externalListingId: string | null;
+  /**
+   * eBay sync-back (owner rule 1): the vendor's limit on this listing; a push
+   * publishes min(ATP, limit). Absent or null: no limit.
+   */
+  vendorQuantityLimit?: number | null;
+  /** The shipping policy last seen live on this listing on eBay (the live-policy rule, SB10); absent or null when unknown. */
+  observedFulfillmentPolicyId?: string | null;
 }
 
 export interface DropshipPricingPolicyRecord {
@@ -1314,6 +1324,10 @@ function buildListingPreviewRow(input: {
     blockers.push(`listing_tier:${input.tierStatus.reason}`);
   }
   const marketplaceQuantity = tierOffSale ? 0 : input.selectionDecision.marketplaceQuantity;
+  // eBay sync-back, owner rule 1: the row keeps ATP exactly as today (what the sweep decides against); the push
+  // publishes min(ATP, the vendor's limit on this listing). Without a limit the intent is today's.
+  const vendorQuantityLimit = input.existingListing?.vendorQuantityLimit ?? null;
+  const intentQuantity = vendorQuantityLimit === null ? marketplaceQuantity : publishableQuantity(marketplaceQuantity, vendorQuantityLimit);
   if (!input.config) {
     blockers.push("listing_config_required");
   } else if (input.config.platform !== input.context.platform) {
@@ -1360,7 +1374,7 @@ function buildListingPreviewRow(input: {
         config: input.config,
         content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory, input.listingPhotos),
         priceCents,
-        quantity: marketplaceQuantity,
+        quantity: intentQuantity,
         storeCategoryNames: input.storeCategoryNames,
       })
     : { intent: null, blockers: [], warnings: [] };
@@ -1368,8 +1382,19 @@ function buildListingPreviewRow(input: {
   warnings.push(...marketplaceValidation.warnings);
   warnings.push(...unpublishablePhotoWarnings(input.listingPhotos));
   if (input.ebayFulfillmentPreflight?.compatible === false) {
-    blockers.push(...input.ebayFulfillmentPreflight.issues.map(
-      (issue) => `ebay_fulfillment_policy:${issue.code}`,
+    const issues = input.ebayFulfillmentPreflight.issues;
+    // The live-policy rule (SB10, owner rule 4): the vendor's shipping policy already live on this very listing is kept
+    // (a warning; staff and the vendor hear of it from the sweep's policy check). A policy Card Shellz would introduce,
+    // or one whose check could not be verified, stays a blocker.
+    const tolerated = isLivePolicyIncompatibilityTolerated({
+      effectivePolicyId: input.ebayFulfillmentPreflight.fulfillmentPolicyId,
+      observedPolicyId: input.existingListing?.observedFulfillmentPolicyId ?? null,
+      listingLive: input.existingListing !== null && input.existingListing.status !== "ended"
+        && hasMarketplaceListing(input.existingListing.externalListingId),
+      issueCodes: issues.map((issue) => issue.code),
+    });
+    (tolerated ? warnings : blockers).push(...issues.map(
+      (issue) => `${tolerated ? "ebay_fulfillment_policy_live" : "ebay_fulfillment_policy"}:${issue.code}`,
     ));
   }
   blockers.push(...input.ebayReturnPaymentPolicyBlockers);

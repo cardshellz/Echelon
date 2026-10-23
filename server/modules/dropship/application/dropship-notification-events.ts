@@ -51,6 +51,16 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   COST_CHANGE_LISTINGS_PAUSED: "dropship_cost_change_listings_paused",
   /** Paused listings selling again because their price covers the cost (cost change controls, C5). */
   COST_CHANGE_LISTINGS_RESUMED: "dropship_cost_change_listings_resumed",
+  // PROPOSED (sync-back): eBay sync-back's listing notices (owner rule 7a-c). A shipping policy Card Shellz can't ship
+  // under, a changed custom label, or a listing Card Shellz can no longer find: always sent (critical).
+  EBAY_LISTING_ACTION_NEEDED: "dropship_ebay_listing_action_needed",
+  // PROPOSED (sync-back): an eBay price below the Card Shellz cost, or a listing Card Shellz can no longer update.
+  EBAY_LISTING_WARNING: "dropship_ebay_listing_warning",
+  // PROPOSED (sync-back): an accepted order eBay cancelled that Card Shellz could not stop (owner rule 7d): always sent.
+  EBAY_ORDER_ACTION_NEEDED: "dropship_ebay_order_action_needed",
+  // PROPOSED (sync-back): an order eBay cancelled and Card Shellz refunded to the wallet, or an order on an eBay item
+  // number Card Shellz does not know (owner rule 7d).
+  EBAY_ORDER_UPDATE: "dropship_ebay_order_update",
 } as const;
 
 export type DropshipNotificationEventType =

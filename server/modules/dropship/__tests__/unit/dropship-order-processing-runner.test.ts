@@ -25,6 +25,7 @@ describe("runDropshipOrderProcessingSweep", () => {
       repository,
       paymentHoldExpirationService: new FakePaymentHoldExpirationService(calls),
       orderCancellationService: new FakeOrderCancellationService(calls),
+      marketplaceCancelStopService: new FakeMarketplaceCancelStopService(calls, { stopped: 2, review: 1, retrying: 3, notWired: 0 }),
       orderProcessingService: service,
       // The sweep reads the hold-expiry warning window from the wallet policy,
       // so the resolver is injected rather than reaching for a database.
@@ -44,6 +45,9 @@ describe("runDropshipOrderProcessingSweep", () => {
       cancellationSucceeded: 0,
       cancellationRetrying: 0,
       cancellationFailed: 0,
+      marketplaceCancelStopped: 2,
+      marketplaceCancelReview: 1,
+      marketplaceCancelRetrying: 3,
       staleProcessingRecovered: 1,
     });
     expect(repository.recoverInput).toEqual({
@@ -56,6 +60,8 @@ describe("runDropshipOrderProcessingSweep", () => {
       "expire-holds",
       "notify-expiring-holds",
       "process-cancellations",
+      // Accepted orders eBay cancelled are stopped next to the outbound cancellations (plan v4 §7.2).
+      "process-marketplace-cancel-stops",
       "recover-stale",
       "list-processable",
       "process-91",
@@ -79,6 +85,7 @@ describe("runDropshipOrderProcessingSweep", () => {
         repository: new FakeOrderProcessingQueueRepository(calls, [], []),
         paymentHoldExpirationService: holdExpiration,
         orderCancellationService: new FakeOrderCancellationService(calls),
+        marketplaceCancelStopService: new FakeMarketplaceCancelStopService(calls),
         orderProcessingService: new FakeOrderProcessingService(calls),
         walletPolicy: fakeWalletPolicy(45),
         batchSize: 25,
@@ -105,7 +112,7 @@ describe("PgDropshipOrderProcessingQueueRepository", () => {
 
     expect(result).toEqual([91]);
     const [sql, params] = query.mock.calls[0] ?? [];
-    expect(String(sql)).toContain("oi.status IN ('received', 'retrying')");
+    expect(String(sql)).toContain("WHERE oi.status = 'received'");
     expect(String(sql)).toContain("oi.status = 'payment_hold'");
     expect(String(sql)).toContain("oi.payment_hold_expires_at > $2");
     expect(String(sql)).toContain("FROM dropship.dropship_wallet_accounts wa");
@@ -113,6 +120,20 @@ describe("PgDropshipOrderProcessingQueueRepository", () => {
     expect(String(sql)).toContain("wa.updated_at >= oi.updated_at");
     expect(String(sql)).not.toContain("payment_hold_expires_at IS NULL");
     expect(params).toEqual([10, now]);
+  });
+
+  it("takes a retrying intake only once its next attempt is due, oldest due first (plan v4 §7.1)", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const repository = new PgDropshipOrderProcessingQueueRepository({ query } as unknown as Pool);
+
+    await repository.listProcessableIntakeIds({ limit: 10, now });
+
+    const sql = String((query.mock.calls[0] as unknown[] | undefined)?.[0]).replace(/\s+/g, " ");
+    expect(sql).toContain("oi.status = 'retrying' AND (oi.next_processing_attempt_at IS NULL OR oi.next_processing_attempt_at <= $2)");
+    // A held intake eBay cancelled is due too, so the claim can cancel it (plan v4 §7.2).
+    expect(sql).toContain("oi.status = 'payment_hold' AND oi.marketplace_cancelled_at IS NOT NULL");
+    expect(sql).toContain("ORDER BY COALESCE(oi.next_processing_attempt_at, oi.received_at) ASC, oi.id ASC");
+    expect(sql).not.toContain("oi.status IN ('received', 'retrying')");
   });
 
   it("requeues stale processing intakes and writes audit events in one transaction", async () => {
@@ -247,6 +268,21 @@ class FakeOrderCancellationService {
       retrying: 0,
       failed: 0,
     };
+  }
+}
+
+class FakeMarketplaceCancelStopService {
+  constructor(
+    private readonly calls: string[],
+    private readonly summary = { stopped: 0, review: 0, retrying: 0, notWired: 0 },
+  ) {}
+
+  inputs: Array<{ limit: number; workerId: string }> = [];
+
+  async processDueStops(input: { limit: number; workerId: string }) {
+    this.calls.push("process-marketplace-cancel-stops");
+    this.inputs.push(input);
+    return this.summary;
   }
 }
 

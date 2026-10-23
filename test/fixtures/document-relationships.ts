@@ -6,9 +6,9 @@ export function relationshipFixture(root: RelationshipRoot = { kind: "shipment",
     root,
     purchases: [{ id: 17, number: "TEST-PO-17" }, { id: 99, number: "TEST-PO-99" }],
     purchaseLines: [
-      { id: 101, purchaseId: 17, lineNumber: 1, sku: "SAME-SKU", product: "Sleeves", orderedPieces: 200000 },
-      { id: 102, purchaseId: 99, lineNumber: 2, sku: "SAME-SKU", product: "Sleeves", orderedPieces: 50000 },
-      { id: 103, purchaseId: 17, lineNumber: 3, sku: "NOT-SHIPPED", product: "Holders", orderedPieces: 100 },
+      { id: 101, purchaseId: 17, lineNumber: 1, sku: "SAME-SKU", product: "Sleeves", orderedPieces: 200000, receivedPieces: 200000, cancelledPieces: 0 },
+      { id: 102, purchaseId: 99, lineNumber: 2, sku: "SAME-SKU", product: "Sleeves", orderedPieces: 50000, receivedPieces: 50000, cancelledPieces: 0 },
+      { id: 103, purchaseId: 17, lineNumber: 3, sku: "NOT-SHIPPED", product: "Holders", orderedPieces: 100, receivedPieces: 0, cancelledPieces: 0 },
     ],
     shipments: [{ id: 42, number: "TEST-SHIP-42", status: "closed" }, { id: 43, number: "TEST-SHIP-43", status: "closed" }],
     shipmentLines: [

@@ -57,6 +57,14 @@ export class PgDropshipListingPriceRepository implements ListingPriceRepository 
 }
 
 /**
+ * Who writes a price: the vendor (every route and the listing-settings
+ * transaction; the default) or the system (eBay sync-back keeping the price a
+ * vendor set on eBay, plan v4 §1.3). The revision's actor_id is `memberId`
+ * either way; the audit row's actor_type is this.
+ */
+export type ListingPriceWriteActorType = "vendor" | "system";
+
+/**
  * The price transaction for one size on a client that already holds this file's
  * locks (request key when keyed, store, owner rows, selection SHARE locks and the
  * size FOR SHARE; see execute). It takes no lock itself. Its key guards accept only
@@ -64,7 +72,8 @@ export class PgDropshipListingPriceRepository implements ListingPriceRepository 
  * transaction, plan D29) controls which key may write.
  */
 export function listingPriceTransactionForClient(client: Client,
-  target: ListingPriceTarget & { vendorId: number; memberId: string; idempotencyKey?: string }): ListingPriceTransaction {
+  target: ListingPriceTarget & { vendorId: number; memberId: string; idempotencyKey?: string;
+    actorType?: ListingPriceWriteActorType }): ListingPriceTransaction {
   return {
     vendorId: target.vendorId, catalog: PgDropshipListingPreviewRepository.readerForTransaction(client),
     loadSaved: () => loadSaved(client, target),
@@ -117,7 +126,7 @@ async function findReplay(client: Client, target: ListingPriceTarget & { vendorI
 }
 
 async function saveWithClient(client: Client,
-  target: ListingPriceTarget & { vendorId: number; memberId: string },
+  target: ListingPriceTarget & { vendorId: number; memberId: string; actorType?: ListingPriceWriteActorType },
   input: SaveListingPriceInput & { requestHash: string; now: Date }): Promise<{ saved: SavedListingPriceRevision; idempotentReplay: boolean }> {
   // Replay the operation's saved revision, never overwrite a later edit.
   const replay = await findReplay(client, target, input);
@@ -149,9 +158,10 @@ async function saveWithClient(client: Client,
     pricingMode: input.pricingMode ?? (input.priceCents === null ? "catalog_default" : "fixed"), updatedAt: input.now.toISOString() };
   await client.query(`INSERT INTO dropship.dropship_audit_events
     (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
-    VALUES ($1,$2,'dropship_listing_price_setting',$3,'listing_price_saved','vendor',$4,'info',$5::jsonb,$6)`,
+    VALUES ($1,$2,'dropship_listing_price_setting',$3,'listing_price_saved',$7,$4,'info',$5::jsonb,$6)`,
+    // The actor type is the last parameter, so every earlier one keeps the position it has always had.
     [target.vendorId, target.storeConnectionId, String(target.productVariantId), target.memberId,
-      JSON.stringify({ before, after: saved }), input.now]);
+      JSON.stringify({ before, after: saved }), input.now, target.actorType ?? "vendor"]);
   return { saved, idempotentReplay: false };
 }
 function mapSaved(row: PriceRow): SavedListingPriceRevision {

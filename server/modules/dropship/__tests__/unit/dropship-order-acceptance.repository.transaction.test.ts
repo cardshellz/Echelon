@@ -481,6 +481,18 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(db.calls.at(-1)?.sql).toBe("COMMIT");
   });
 
+  it("OR-3: reports a line the buyer paid less for than Card Shellz charges, on a freshly accepted order only", async () => {
+    const below = createFakeDb(baseHandlers({
+      listings: { match: "FROM dropship.dropship_vendor_listings dl", rows: [listingCandidateRow({ vendor_retail_price_cents: 700 })] },
+    }));
+    const result = await createRepository(below, availableCost()).repository.acceptOrder(acceptanceInput());
+    expect(result).toMatchObject({ outcome: "accepted", belowCostSaleLines: [{ listingId: 501, retailUnitPriceCents: 700,
+      unitCostCents: UNIT_COST_CENTS, itemLabel: "Armalope Envelope (SKU ARM-ENV-SGL-P50)" }] });
+
+    const covered = await createRepository(createFakeDb(baseHandlers()), availableCost()).repository.acceptOrder(acceptanceInput());
+    expect(covered.belowCostSaleLines).toBeUndefined();
+  });
+
   it("grants the OMS line authority after the debit on the legacy path, in the same transaction", async () => {
     const db = createFakeDb(baseHandlers());
     const { repository } = createRepository(db, availableCost());
@@ -819,6 +831,64 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(loadProductCosts).not.toHaveBeenCalled();
     expect(db.calls.some((call) => call.sql === "COMMIT")).toBe(false);
     expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(0);
+  });
+
+  // eBay sync-back's order fixes (plan v4 §7.3 steps 7-8).
+  it("accepts an order placed before sync-back saw its listing end, logs why, and writes the end time nowhere", async () => {
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    try {
+      const db = createFakeDb(baseHandlers({
+        listings: { match: "FROM dropship.dropship_vendor_listings dl", rows: [listingCandidateRow({ listing_status: "ended",
+          marketplace_ended_at: new Date("2026-09-12T15:00:00.000Z"), previous_external_listing_ids: [] })] },
+      }));
+      const { repository } = createRepository(db, availableCost());
+
+      await expect(repository.acceptOrder(acceptanceInput())).resolves.toMatchObject({ outcome: "accepted" });
+
+      expect(info).toHaveBeenCalledWith("dropship.order.listing_acceptable_before_end", expect.objectContaining({
+        listing_id: 501, intake_id: 1, line_index: 0, marketplace_ended_at: "2026-09-12T15:00:00.000Z", path: "acceptance" }));
+      for (const call of db.calls) {
+        expect(JSON.stringify(call.params ?? [])).not.toMatch(/marketplaceEndedAt|previousExternalListingIds/);
+      }
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("refuses an order placed after sync-back saw its listing end, before any financial write", async () => {
+    const db = createFakeDb(baseHandlers({
+      listings: { match: "FROM dropship.dropship_vendor_listings dl", rows: [listingCandidateRow({ listing_status: "ended",
+        marketplace_ended_at: new Date("2026-09-12T13:59:59.000Z") })] },
+    }));
+    const { repository } = createRepository(db, availableCost());
+    await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_LISTING_NOT_ACCEPTABLE", context: expect.objectContaining({ listingStatus: "ended" }) });
+    expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(0);
+  });
+
+  it("matches an eBay line on the item number its listing had before a relist", async () => {
+    const db = createFakeDb(baseHandlers({
+      intake: { match: "FROM dropship.dropship_order_intake", rows: [intakeRow({ normalized_payload: {
+        ...intakeRow().normalized_payload, lines: [{ externalListingId: "OLD-L1", quantity: 2, sku: "ARM-ENV-SGL-P50", externalLineItemId: "li-1" }] } })] },
+      listings: { match: "FROM dropship.dropship_vendor_listings dl", rows: [listingCandidateRow({ previous_external_listing_ids: ["OLD-L1"] })] },
+    }));
+    const { repository } = createRepository(db, availableCost());
+    await expect(repository.acceptOrder(acceptanceInput())).resolves.toMatchObject({ outcome: "accepted" });
+    const listingQuery = db.calls.find((call) => call.sql.includes("FROM dropship.dropship_vendor_listings dl"));
+    expect(listingQuery?.sql).toContain("prev.external_listing_id = ANY($4::text[])");
+  });
+
+  it("refuses a line sold from a multi-variation eBay listing for good, before reading listings or money", async () => {
+    const db = createFakeDb(baseHandlers({
+      intake: { match: "FROM dropship.dropship_order_intake", rows: [intakeRow({ normalized_payload: {
+        ...intakeRow().normalized_payload, lines: [{ externalListingId: "L1", externalOfferId: "variation-9", marketplaceVariation: true, quantity: 1,
+          externalLineItemId: "li-1" }] } })] },
+    }));
+    const { repository, loadProductCosts } = createRepository(db, availableCost());
+    await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_LINE_VARIATION_UNSUPPORTED", context: expect.objectContaining({ intakeId: 1, lineIndex: 0, retryable: false }) });
+    expect(db.calls.some((call) => call.sql.includes("FROM dropship.dropship_vendor_listings dl"))).toBe(false);
+    expect(loadProductCosts).not.toHaveBeenCalled();
   });
 
   it("logs nothing for an order on an active listing (the long-standing rule)", async () => {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isReservedMarketplaceSyncKey, RESERVED_MARKETPLACE_SYNC_KEY_MESSAGE } from "./listing-rules-conversion-keys";
 
 // Existing publication-price columns are PostgreSQL integers. This is a storage
 // limit, not a suggested retail price or a marketplace-specific pricing rule.
@@ -40,7 +41,9 @@ export const saveListingPriceInputSchema = z.object({
   priceCents: listingPriceCentsSchema.nullable(),
   pricingMode: listingPricingModeSchema.optional(),
   expectedRevisionId: z.number().int().positive().max(2_147_483_647).nullable(),
-  idempotencyKey: z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/),
+  // eBay sync-back writes its system price revisions under `ebay-sync:` keys in the same per-vendor key space (SB34).
+  idempotencyKey: z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/)
+    .refine((key) => !isReservedMarketplaceSyncKey(key), RESERVED_MARKETPLACE_SYNC_KEY_MESSAGE),
 }).strict().refine((input) => !input.pricingMode || (input.pricingMode === "fixed") === (input.priceCents !== null),
   "Only a fixed price may contain a price override.");
 export const listingPriceSettingSchema = listingPriceTargetSchema.extend({

@@ -21,6 +21,7 @@
  * repository fills them from one bag of values, so the order is written once.
  */
 
+import { MARKETPLACE_CANCEL_REFUND_REFERENCE_TYPES } from "../domain/marketplace-order-cancel";
 import {
   FINANCE_STALE_PENDING_DEPOSIT_DAYS,
   FINANCE_TIME_ZONE,
@@ -715,14 +716,25 @@ export function poolStatement(tables: FinanceRawTables): FinanceSqlStatement {
     ? `(SELECT COALESCE(SUM(pl.amount_cents), 0)::bigint FROM dropship.dropship_insurance_pool_ledger pl WHERE ${where})`
     : "0::bigint";
   const topUps = "pl.entry_type IN ('claim_replenishment', 'manual_adjustment')";
+  // An order eBay cancelled and Card Shellz refunded gave its pool share back with the refund (review MS3/ARCH-1):
+  // it leaves the set-aside when the refund posted.
+  const refundedShare = (when: string) => tables.ledger
+    ? `(SELECT COALESCE(SUM(e.insurance_pool_cents), 0)::bigint FROM dropship.dropship_order_economics_snapshots e
+         JOIN (SELECT l.reference_id, MIN(l.created_at) AS refunded_at FROM ${LEDGER} l
+               WHERE l.status = 'settled' AND l.reference_type IN (${ORDER_REFUND_REFERENCE_TYPES_SQL}) GROUP BY l.reference_id) r
+           ON r.reference_id = e.intake_id::text
+         WHERE ${when} AND ${vendorFilter("e.vendor_id", "$3")})`
+    : "0::bigint";
   return {
     params: ["startBound", "endBound", "vendorId"],
     text: `
 SELECT
-  (SELECT COALESCE(SUM(e.insurance_pool_cents), 0)::bigint FROM dropship.dropship_order_economics_snapshots e
-     WHERE e.created_at < $1::timestamptz AND ${vendorFilter("e.vendor_id", "$3")}) AS set_aside_before_start,
-  (SELECT COALESCE(SUM(e.insurance_pool_cents), 0)::bigint FROM dropship.dropship_order_economics_snapshots e
-     WHERE e.created_at >= $1::timestamptz AND e.created_at < $2::timestamptz AND ${vendorFilter("e.vendor_id", "$3")}) AS set_aside_p,
+  ((SELECT COALESCE(SUM(e.insurance_pool_cents), 0)::bigint FROM dropship.dropship_order_economics_snapshots e
+     WHERE e.created_at < $1::timestamptz AND ${vendorFilter("e.vendor_id", "$3")})
+   - ${refundedShare("r.refunded_at < $1::timestamptz")}) AS set_aside_before_start,
+  ((SELECT COALESCE(SUM(e.insurance_pool_cents), 0)::bigint FROM dropship.dropship_order_economics_snapshots e
+     WHERE e.created_at >= $1::timestamptz AND e.created_at < $2::timestamptz AND ${vendorFilter("e.vendor_id", "$3")})
+   - ${refundedShare("r.refunded_at >= $1::timestamptz AND r.refunded_at < $2::timestamptz")}) AS set_aside_p,
   ${poolSum(`${topUps} AND pl.created_at < $1::timestamptz`)} AS topped_up_before_start,
   ${poolSum(`${topUps} AND pl.created_at >= $1::timestamptz AND pl.created_at < $2::timestamptz`)} AS topped_up_p,
   ${poolSum("pl.created_at < $2::timestamptz")} AS recorded_ledger_at_end`,
@@ -853,6 +865,8 @@ export interface FinanceCheckSql {
 }
 
 const LEDGER = "dropship.dropship_wallet_ledger";
+/** The wallet references of an order eBay cancelled that Card Shellz stopped and refunded (cash and points). */
+const ORDER_REFUND_REFERENCE_TYPES_SQL = `'${MARKETPLACE_CANCEL_REFUND_REFERENCE_TYPES.cash}', '${MARKETPLACE_CANCEL_REFUND_REFERENCE_TYPES.rewards}'`;
 const ACCOUNTS = "dropship.dropship_wallet_accounts";
 const ECONOMICS = "dropship.dropship_order_economics_snapshots";
 const ORDER_TABLES: readonly FinanceTableKey[] = [
@@ -1501,17 +1515,30 @@ LEFT JOIN ${LEDGER} l ON l.id = pl.wallet_ledger_entry_id
 WHERE pl.entry_type = 'no_inspection_payout' AND ${vendorFilter("l.vendor_id", "$1")}`;
 
 /**
- * N1: no order we charged for was cancelled in OMS (recon 9). The difference
- * is what was charged for the cancelled orders (nothing has refunded it:
- * no refund path exists). $1 vendor.
+ * N1: no order we charged for was cancelled in OMS while it stays charged
+ * (recon 9). An order eBay cancelled that Card Shellz stopped is refunded
+ * (eBay sync-back, review MS3/ARCH-1): its cash and points refund, less the
+ * advance fee that is not part of the order's total, is what was given back.
+ * The difference is what is still charged. $1 vendor.
  */
 const N1_SQL = `
+WITH refunded AS (
+  SELECT l.reference_id,
+         SUM(l.amount_cents::bigint) - COALESCE(SUM(${sqlInt("l.metadata->>'advanceFeeRefundCents'")}) FILTER (WHERE l.type = 'refund_credit'), 0)
+           AS refunded_cents
+  FROM ${LEDGER} l
+  WHERE l.status = 'settled' AND l.reference_type IN (${ORDER_REFUND_REFERENCE_TYPES_SQL}) AND ${vendorFilter("l.vendor_id", "$1")}
+  GROUP BY l.reference_id
+)
 SELECT 'order'::text AS item_kind, e.intake_id::text AS item_id, e.vendor_id, e.intake_id,
        'charged_but_cancelled_in_oms'::text AS detail_key,
-       0::bigint AS expected_cents, e.total_debit_cents::bigint AS found_cents, e.total_debit_cents::bigint AS difference_cents,
-       COALESCE(oo.cancelled_at IS NOT NULL OR oo.status = 'cancelled', false) AS is_exception
+       0::bigint AS expected_cents, (e.total_debit_cents::bigint - COALESCE(r.refunded_cents, 0)) AS found_cents,
+       (e.total_debit_cents::bigint - COALESCE(r.refunded_cents, 0)) AS difference_cents,
+       COALESCE((oo.cancelled_at IS NOT NULL OR oo.status = 'cancelled')
+         AND e.total_debit_cents::bigint - COALESCE(r.refunded_cents, 0) <> 0, false) AS is_exception
 FROM ${ECONOMICS} e
 JOIN oms.oms_orders oo ON oo.id = e.oms_order_id
+LEFT JOIN refunded r ON r.reference_id = e.intake_id::text
 WHERE ${vendorFilter("e.vendor_id", "$1")}`;
 
 /** N2 (program only): no intake that ended without a charge left its OMS order pending (recon 9, spot check 9). No parameters. */
@@ -1525,6 +1552,10 @@ FROM dropship.dropship_order_intake i
 JOIN oms.oms_orders oo ON oo.id = i.oms_order_id
 WHERE i.status IN ('cancelled', 'rejected', 'failed', 'exception')`;
 
+/** A type nothing should write: refund_credit is expected only as an order refund (review MS3/ARCH-1, program-finance-lines.ts isOrderRefund). */
+const UNEXPECTED_TYPE_SQL = `(l.type = 'manual_adjustment'
+  OR (l.type = 'refund_credit' AND l.reference_type IS DISTINCT FROM '${MARKETPLACE_CANCEL_REFUND_REFERENCE_TYPES.cash}'))`;
+
 /**
  * N3: no wallet entry has a type nothing should write, an unexpected status,
  * a settled entry without a settle time, or a settle time that differs from
@@ -1532,13 +1563,13 @@ WHERE i.status IN ('cancelled', 'rejected', 'failed', 'exception')`;
  */
 const N3_SQL = `
 SELECT 'ledger_entry'::text AS item_kind, l.id::text AS item_id, l.vendor_id, NULL::integer AS intake_id,
-       CASE WHEN l.type IN ('refund_credit', 'manual_adjustment') THEN 'unexpected_type'
+       CASE WHEN ${UNEXPECTED_TYPE_SQL} THEN 'unexpected_type'
             WHEN l.status = 'voided' OR (l.type <> 'funding' AND l.status <> 'settled') THEN 'unexpected_status'
             WHEN l.status = 'settled' AND l.settled_at IS NULL THEN 'settled_without_time'
             WHEN l.status = 'settled' AND l.type <> 'funding' AND l.settled_at IS DISTINCT FROM l.created_at THEN 'settle_time_differs'
             ELSE 'expected' END AS detail_key,
        NULL::bigint AS expected_cents, NULL::bigint AS found_cents, NULL::bigint AS difference_cents,
-       COALESCE(l.type IN ('refund_credit', 'manual_adjustment')
+       COALESCE(${UNEXPECTED_TYPE_SQL}
              OR l.status = 'voided' OR (l.type <> 'funding' AND l.status <> 'settled')
              OR (l.status = 'settled' AND l.settled_at IS NULL)
              OR (l.status = 'settled' AND l.type <> 'funding' AND l.settled_at IS DISTINCT FROM l.created_at), true) AS is_exception
@@ -1575,7 +1606,7 @@ export const FINANCE_CHECK_SQL: readonly FinanceCheckSql[] = Object.freeze([
   { id: "K2", requires: ORDER_TABLES, programOnly: false, build: k2Sql },
   { id: "R1", requires: ["ledger", "economics", "settlements", "return_cases", "rmas", "inspections"], programOnly: false, build: fixed(PERIOD_VENDOR, R1_SQL) },
   { id: "R2", requires: ["ledger", "pool_ledger"], programOnly: false, build: fixed(VENDOR_ONLY, R2_SQL) },
-  { id: "N1", requires: ["economics", "oms_orders"], programOnly: false, build: fixed(VENDOR_ONLY, N1_SQL) },
+  { id: "N1", requires: ["economics", "oms_orders", "ledger"], programOnly: false, build: fixed(VENDOR_ONLY, N1_SQL) },
   { id: "N2", requires: ["intake", "oms_orders", "economics"], programOnly: true, build: fixed([], N2_SQL) },
   { id: "N3", requires: ["ledger"], programOnly: false, build: fixed(VENDOR_ONLY, N3_SQL) },
   { id: "K3", requires: ORDER_TABLES, programOnly: false, build: k3Sql },

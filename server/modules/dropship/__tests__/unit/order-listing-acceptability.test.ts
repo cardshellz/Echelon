@@ -8,6 +8,10 @@ import {
 import {
   admittedWhilePushing,
   decideListingOrderAcceptability,
+  assertNoMarketplaceVariationLines,
+  isUnsupportedMarketplaceVariationLine,
+  ORDER_LINE_VARIATION_UNSUPPORTED_CODE,
+  parseIntakeOrderedAt,
   PUSH_PROGRESS_LISTING_STATUSES,
 } from "../../domain/order-listing-acceptability";
 
@@ -24,7 +28,7 @@ const EXPECTED: Record<(typeof ALL_STATUSES)[number], { withId: boolean; without
   pushing: { withId: true, withoutId: false },
   failed: { withId: true, withoutId: false },
   blocked: { withId: true, withoutId: false },
-  // PR C adds the rule for orders placed before an end; in A an ended listing refuses.
+  // An ended listing refuses unless both its end time and the order's time prove the order came first (below).
   ended: { withId: false, withoutId: false },
   not_listed: { withId: false, withoutId: false },
   preview_ready: { withId: false, withoutId: false },
@@ -96,5 +100,63 @@ describe("decideListingOrderAcceptability (step 1 plan S2-5 §4.7)", () => {
   it("does not mutate its input", () => {
     const input = Object.freeze({ status: "pushing", externalListingId: "110012345678" });
     expect(() => decideListingOrderAcceptability(input)).not.toThrow();
+  });
+});
+
+describe("an order on a listing sync-back saw end (eBay sync-back plan v4 §7.3 step 8)", () => {
+  const endedAt = new Date("2026-10-20T12:00:00.000Z");
+  const ended = (orderedAt: Date | null, marketplaceEndedAt: Date | null = endedAt) =>
+    decideListingOrderAcceptability({ status: "ended", externalListingId: "110012345678", marketplaceEndedAt, orderedAt });
+
+  it("accepts an order placed before the end, or at the very time sync-back saw it", () => {
+    // FF-3: before the rule, every order on an ended listing was refused.
+    expect(ended(new Date("2026-10-20T11:59:59.999Z"))).toEqual({ acceptable: true, reason: "ordered_before_listing_ended" });
+    expect(ended(endedAt)).toEqual({ acceptable: true, reason: "ordered_before_listing_ended" });
+    // Not a push-progress admission: the shipping rules for a listing being pushed do not apply.
+    expect(admittedWhilePushing(ended(endedAt))).toBe(false);
+  });
+
+  it("refuses an order placed after the end", () => {
+    expect(ended(new Date("2026-10-20T12:00:00.001Z"))).toEqual({ acceptable: false, reason: "listing_ended" });
+  });
+
+  it("refuses when either time is missing: no time, no proof", () => {
+    expect(ended(null)).toEqual({ acceptable: false, reason: "listing_ended" });
+    expect(ended(new Date("2026-10-19T00:00:00.000Z"), null)).toEqual({ acceptable: false, reason: "listing_ended" });
+    expect(decideListingOrderAcceptability({ status: "ended", externalListingId: "1" })).toEqual({ acceptable: false, reason: "listing_ended" });
+  });
+
+  it("does not let the times change any other status", () => {
+    const times = { marketplaceEndedAt: endedAt, orderedAt: new Date("2026-10-19T00:00:00.000Z") };
+    for (const status of ALL_STATUSES.filter((entry) => entry !== "ended")) {
+      expect(decideListingOrderAcceptability({ status, externalListingId: "110012345678", ...times }))
+        .toEqual(decideListingOrderAcceptability({ status, externalListingId: "110012345678" }));
+    }
+  });
+});
+
+describe("a line sold from a multi-variation eBay listing (plan v4 §7.3 step 7)", () => {
+  // Review ARCH-10: the canonical flag the marketplace's mapper sets, never a marketplace's own id field.
+  it("is refused only when the mapper marked the line as sold from a multi-variation listing", () => {
+    expect(isUnsupportedMarketplaceVariationLine({ marketplaceVariation: true })).toBe(true);
+    // A marketplace id alone (the eBay mapper's externalOfferId) never decides it.
+    const idOnly: { marketplaceVariation?: boolean; externalOfferId?: string } = { externalOfferId: "variation-1" };
+    expect(isUnsupportedMarketplaceVariationLine(idOnly)).toBe(false);
+    expect(isUnsupportedMarketplaceVariationLine({})).toBe(false);
+    expect(ORDER_LINE_VARIATION_UNSUPPORTED_CODE).toBe("DROPSHIP_ORDER_LINE_VARIATION_UNSUPPORTED");
+  });
+
+  it("refuses the whole order once, for good, in the vendor's words, naming the line", () => {
+    expect(() => assertNoMarketplaceVariationLines([{ externalListingId: "L0" }, { externalListingId: "L1", marketplaceVariation: true }],
+      { intakeId: 7 })).toThrow(expect.objectContaining({ code: "DROPSHIP_ORDER_LINE_VARIATION_UNSUPPORTED",
+      message: "This order has an item sold from an eBay listing with several sizes or options. Card Shellz lists each size on its own, so it can't fill this order.",
+      context: { intakeId: 7, lineIndex: 1, externalListingId: "L1", retryable: false } }));
+    expect(() => assertNoMarketplaceVariationLines([{ externalListingId: "L0" }], { intakeId: 7 })).not.toThrow();
+  });
+
+  it("reads an intake's order time, or none when it is missing or not a time", () => {
+    expect(parseIntakeOrderedAt("2026-10-22T12:00:00.000Z")).toEqual(new Date("2026-10-22T12:00:00.000Z"));
+    expect(parseIntakeOrderedAt(undefined)).toBeNull();
+    expect(parseIntakeOrderedAt("not a time")).toBeNull();
   });
 });

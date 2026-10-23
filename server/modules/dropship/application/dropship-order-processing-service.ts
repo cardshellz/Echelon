@@ -1,6 +1,15 @@
 import { createHash } from "crypto";
 import { z } from "zod";
+import { logger as platformLogger } from "../../../platform/observability/logger";
 import { DropshipError } from "../domain/errors";
+import {
+  decideOrderProcessingFailure,
+  ORDER_INVENTORY_CLAIM_COMPENSATION_FAILED_CODE,
+  ORDER_INVENTORY_CLAIM_FAILED_CODE,
+  ORDER_INVENTORY_SHORTFALL_CODE,
+  ORDER_PROCESSING_MAX_ATTEMPTS,
+  ORDER_PROCESSING_RETRIES_EXHAUSTED_CODE,
+} from "../domain/order-processing-retry";
 import { isDropshipFundingDeclineError } from "../domain/vendor-standing";
 import { syncDropshipAcceptedOrderToWmsSafely } from "./dropship-fulfillment-sync-dispatch";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
@@ -56,6 +65,8 @@ export interface DropshipOrderProcessingIntakeRecord {
   status: DropshipOrderIntakeStatus;
   paymentHoldExpiresAt: Date | null;
   normalizedPayload: NormalizedDropshipOrderPayload;
+  /** Failed processing attempts so far (plan v4 §7.1); Ops Retry resets it. */
+  processingAttemptCount: number;
 }
 
 export interface DropshipOrderProcessingConfig {
@@ -104,6 +115,12 @@ export interface DropshipOrderProcessingRepository {
     errorCode: string;
     errorMessage: string;
     retryable: boolean;
+    /** The failed attempts including this one, and when the next may run (null when no retry follows). */
+    attemptCount: number;
+    nextAttemptAt: Date | null;
+    /** When retries ran out: the last failure itself, for staff on the audit row (the vendor sees errorMessage). */
+    lastErrorCode?: string;
+    lastErrorMessage?: string;
     now: Date;
   }): Promise<void>;
 
@@ -244,29 +261,40 @@ export class DropshipOrderProcessingService {
           };
         }
       }
+      // Bounded retries (plan v4 §7.1): a retryable failure waits its backoff and the 64th stops for review,
+      // so a stuck intake never takes every pass and never retries forever. A permanent one never retries.
+      const failureAt = this.deps.clock.now();
+      const decision = decideOrderProcessingFailure({
+        attemptsBefore: claim.intake.processingAttemptCount,
+        retryable: classified.retryable,
+        now: failureAt,
+      });
+      // The reason is shown to the vendor (rejection_reason), so it carries no internal code; the last failure's own
+      // code and message go on the audit row for staff (review ARCH-12).
+      const recorded = decision.exhausted
+        ? {
+          code: ORDER_PROCESSING_RETRIES_EXHAUSTED_CODE,
+          message: RETRIES_EXHAUSTED_VENDOR_MESSAGE,
+          retryable: false,
+          classification: "permanent" as const,
+        }
+        : classified;
       await this.deps.repository.markIntakeFailure({
         intakeId: claim.intake.intakeId,
         vendorId: claim.intake.vendorId,
         storeConnectionId: claim.intake.storeConnectionId,
         workerId: parsed.workerId,
-        status: classified.retryable ? "retrying" : "failed",
-        errorCode: classified.code,
-        errorMessage: classified.message,
-        retryable: classified.retryable,
-        now: this.deps.clock.now(),
+        status: decision.status,
+        errorCode: recorded.code,
+        errorMessage: recorded.message,
+        retryable: recorded.retryable,
+        attemptCount: decision.attemptCount,
+        nextAttemptAt: decision.nextAttemptAt,
+        ...(decision.exhausted ? { lastErrorCode: classified.code, lastErrorMessage: classified.message } : {}),
+        now: failureAt,
       });
-      await this.notifyProcessingFailure(claim, classified);
-      this.deps.logger.warn({
-        code: "DROPSHIP_ORDER_PROCESSING_FAILED",
-        message: "Dropship order intake processing failed.",
-        context: {
-          intakeId: claim.intake.intakeId,
-          vendorId: claim.intake.vendorId,
-          storeConnectionId: claim.intake.storeConnectionId,
-          errorCode: classified.code,
-          retryable: classified.retryable,
-        },
-      });
+      await this.notifyProcessingFailure(claim, recorded);
+      this.logProcessingFailure(claim, recorded, decision.attemptCount, classified.code);
       return {
         outcome: "failed",
         intakeId: claim.intake.intakeId,
@@ -276,10 +304,44 @@ export class DropshipOrderProcessingService {
         omsOrderId: null,
         walletLedgerEntryId: null,
         economicsSnapshotId: null,
-        failureCode: classified.code,
-        failureMessage: classified.message,
-        retryable: classified.retryable,
+        failureCode: recorded.code,
+        failureMessage: recorded.message,
+        retryable: recorded.retryable,
       };
+    }
+  }
+
+  /**
+   * Level discipline (CLAUDE.md §10): a first retryable failure is WARN and
+   * its repeats DEBUG (an expected wait); a failure that stops for a person
+   * (permanent after retries, or fatal) is ERROR; any other permanent one WARN.
+   */
+  private logProcessingFailure(
+    claim: DropshipOrderProcessingClaim,
+    recorded: OrderProcessingErrorClassification,
+    attemptCount: number,
+    lastErrorCode: string,
+  ): void {
+    const event = {
+      code: "DROPSHIP_ORDER_PROCESSING_FAILED",
+      message: "Dropship order intake processing failed.",
+      context: {
+        intakeId: claim.intake.intakeId,
+        vendorId: claim.intake.vendorId,
+        storeConnectionId: claim.intake.storeConnectionId,
+        errorCode: recorded.code,
+        errorClass: recorded.classification,
+        lastErrorCode,
+        retryable: recorded.retryable,
+        attemptCount,
+      },
+    };
+    if (recorded.code === ORDER_PROCESSING_RETRIES_EXHAUSTED_CODE || recorded.classification === "fatal") {
+      this.deps.logger.error(event);
+    } else if (recorded.retryable && attemptCount > 1) {
+      (this.deps.logger.debug ?? this.deps.logger.info).call(this.deps.logger, event);
+    } else {
+      this.deps.logger.warn(event);
     }
   }
 
@@ -642,7 +704,7 @@ export class DropshipOrderProcessingService {
 
   private async notifyProcessingFailure(
     claim: DropshipOrderProcessingClaim,
-    classified: { code: string; message: string; retryable: boolean },
+    classified: Pick<OrderProcessingErrorClassification, "code" | "message" | "retryable">,
   ): Promise<void> {
     const vendorFailureMessage = vendorFacingFailureMessage(classified);
     await sendDropshipNotificationSafely(this.deps, {
@@ -778,6 +840,8 @@ export function deriveOrderProcessingIdempotencyKey(
 
 export function makeDropshipOrderProcessingLogger(): DropshipLogger {
   return {
+    // Expected repeats (CLAUDE.md §10): the platform logger's debug level, off at the default LOG_LEVEL (review ARCH-5).
+    debug: (event) => platformLogger.debug(event.code, { message: event.message, context: event.context ?? {} }),
     info: (event) => logDropshipOrderProcessingEvent("info", event),
     warn: (event) => logDropshipOrderProcessingEvent("warn", event),
     error: (event) => logDropshipOrderProcessingEvent("error", event),
@@ -889,33 +953,71 @@ const INTERNAL_ERROR_CODES: ReadonlySet<string> = new Set([
   DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
 ]);
 
+/** // PROPOSED (sync-back): the vendor's words when automatic retries stop (the full last error stays on the intake for staff). */
+const RETRIES_EXHAUSTED_VENDOR_MESSAGE =
+  "Card Shellz kept trying for about 15 hours and stopped; the order is saved and Card Shellz staff will look at it";
+
 function vendorFacingFailureMessage(classified: { code: string; message: string }): string {
+  if (classified.code === ORDER_PROCESSING_RETRIES_EXHAUSTED_CODE) return RETRIES_EXHAUSTED_VENDOR_MESSAGE;
   return INTERNAL_ERROR_CODES.has(classified.code) ? INTERNAL_ERROR_VENDOR_MESSAGE : classified.message;
 }
 
-export function classifyOrderProcessingError(error: unknown): {
+export interface OrderProcessingErrorClassification {
   code: string;
   message: string;
   retryable: boolean;
-} {
+  /** CLAUDE.md §6: transient retries within the cap; permanent and fatal never retry (fatal also needs a person now). */
+  classification: "transient" | "permanent" | "fatal";
+}
+
+/** The legacy acceptance's shortfall codes (dropship-order-acceptance-service.ts assertInventoryCanReserve; repository validation). */
+const LEGACY_SHORTFALL_CODES: ReadonlySet<string> = new Set([ORDER_INVENTORY_SHORTFALL_CODE, "DROPSHIP_ORDER_INVENTORY_RESERVATION_FAILED"]);
+/**
+ * OMS's refused whole-order claim, by its published stable code and
+ * `shortfall` flag (server/modules/oms/wms-sync.service.ts
+ * WMS_REQUIRED_INVENTORY_CLAIM_FAILED_CODE, pinned by
+ * oms/__tests__/unit/wms-sync-dropship-acceptance-claim.test.ts): dropship
+ * reads the classification OMS publishes and never its context shape.
+ */
+const WMS_REQUIRED_INVENTORY_CLAIM_FAILED_CODE = "WMS_REQUIRED_INVENTORY_CLAIM_FAILED";
+
+export function classifyOrderProcessingError(error: unknown): OrderProcessingErrorClassification {
+  // A stock shortfall in either inventory system is the same passing condition (plan v4 §7.1): retried within the cap.
+  if (error instanceof DropshipError && LEGACY_SHORTFALL_CODES.has(error.code)) {
+    return { code: ORDER_INVENTORY_SHORTFALL_CODE, message: error.message, retryable: true, classification: "transient" };
+  }
   if (error instanceof DropshipError) {
+    const retryable = error.context?.retryable === true;
     return {
       code: error.code,
       message: error.message,
-      retryable: error.context?.retryable === true,
+      retryable,
+      classification: error.context?.classification === "fatal" ? "fatal" : retryable ? "transient" : "permanent",
     };
   }
   const message = error instanceof Error ? error.message : String(error);
+  // The claim and its give-back both failed (wms-sync.service.ts compensateFailedRequiredReservation): stock may be held
+  // for an order that is not accepted. Fatal: no retry claims again over it; a person checks the stock.
+  if (error instanceof AggregateError) {
+    return { code: ORDER_INVENTORY_CLAIM_COMPENSATION_FAILED_CODE, message, retryable: false, classification: "fatal" };
+  }
+  if (error instanceof Error && (error as { code?: unknown }).code === WMS_REQUIRED_INVENTORY_CLAIM_FAILED_CODE) {
+    return (error as { shortfall?: unknown }).shortfall === true
+      ? { code: ORDER_INVENTORY_SHORTFALL_CODE, message, retryable: true, classification: "transient" }
+      : { code: ORDER_INVENTORY_CLAIM_FAILED_CODE, message, retryable: false, classification: "permanent" };
+  }
   const permanentCode = permanentDatabaseErrorCode(error);
   if (permanentCode) {
-    return { code: permanentCode, message, retryable: false };
+    return { code: permanentCode, message, retryable: false, classification: "permanent" };
   }
   return {
     code: "DROPSHIP_ORDER_PROCESSING_UNEXPECTED_ERROR",
     message,
     retryable: true,
+    classification: "transient",
   };
 }
+
 
 function logDropshipOrderProcessingEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
   const payload = JSON.stringify({
