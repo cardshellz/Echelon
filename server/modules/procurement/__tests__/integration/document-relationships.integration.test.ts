@@ -7,6 +7,7 @@ import { inboundShipments, inboundShipmentLines, purchaseOrders, purchaseOrderLi
   inboundFreightCosts, inboundFreightAllocations, supplierCreditLines, supplierCredits, vendorInvoiceLines, vendorInvoices } from "@shared/schema";
 import { createDocumentRelationshipRepository } from "../../document-relationships.repository";
 import { projectDocumentRelationships } from "@shared/procurement/document-relationships";
+import { projectPurchaseLineShipping } from "@shared/procurement/purchase-line-shipping";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
@@ -26,8 +27,8 @@ suite.sequential("document relationship read model against PostgreSQL", () => {
       await pool.query(`CREATE TABLE "${config.schema}"."${config.name}" (${columns.join(",")})`);
     }
     await pool.query(`INSERT INTO procurement.purchase_orders(id,po_number) VALUES (17,'TEST-PO-17'),(99,'TEST-PO-99');
-      INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,sku,product_name,order_qty) VALUES
-        (101,17,1,'SAME','Sleeves',200000),(102,99,1,'SAME','Sleeves',50000);
+      INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,sku,product_name,order_qty,received_qty,cancelled_qty) VALUES
+        (101,17,1,'SAME','Sleeves',200000,100000,10000),(102,99,1,'SAME','Sleeves',50000,0,0);
       INSERT INTO procurement.inbound_shipments(id,shipment_number,status) VALUES (42,'TEST-SHIP-42','closed'),(43,'TEST-SHIP-43','booked');
       INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,sku,qty_shipped) VALUES
         (201,42,17,101,'SAME',100000),(202,42,99,102,'SAME',50000),(203,43,NULL,101,'SAME',100000);
@@ -38,6 +39,14 @@ suite.sequential("document relationship read model against PostgreSQL", () => {
       INSERT INTO procurement.inbound_freight_costs(id,inbound_shipment_id,cost_type,currency,actual_cents) VALUES (401,42,'freight','USD',10001);
       INSERT INTO procurement.inbound_freight_allocations(id,shipment_cost_id,inbound_shipment_line_id,allocated_cents) VALUES
         (501,401,201,6001),(502,401,202,4000);`);
+  });
+  it("reads posted receipt/cancellation counters with split shipment statuses and derives progress without changing costs", async () => {
+    const data = await createDocumentRelationshipRepository(drizzle(pool)).read({ kind: "purchase", id: 17 });
+    const progress = projectPurchaseLineShipping(data!);
+    expect(progress.get(101)).toMatchObject({ line: { receivedPieces: 100000, cancelledPieces: 10000 },
+      shippedPieces: 100000, plannedPieces: 100000, stillToShipPieces: 90000 });
+    expect(progress.get(102)).toMatchObject({ shippedPieces: 50000, plannedPieces: 0, stillToShipPieces: 0 });
+    expect(data!.allocations.map(row => row.cents)).toEqual([6001, 4000]);
   });
   afterAll(async () => {
     if (!pool) return;

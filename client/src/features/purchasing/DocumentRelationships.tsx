@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
 import { relationshipSnapshotSchema, projectDocumentRelationships, receivedRelationshipPieces,
   type RelationshipRoot, type RelationshipAmounts, type RelationshipLine, type RelationshipSnapshot } from "@shared/procurement/document-relationships";
+import { projectPurchaseLineShipping } from "@shared/procurement/purchase-line-shipping";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -18,6 +19,7 @@ export async function loadDocumentRelationships(root: RelationshipRoot, signal?:
     : response.status === 404 ? "This document is no longer available." : "Document links and cost shares could not be loaded.");
   const data = relationshipSnapshotSchema.parse(await response.json());
   if (data.root.kind !== root.kind || data.root.id !== root.id) throw new Error("The document links belong to a different record. Reload this section.");
+  projectPurchaseLineShipping(data); // Reject incomplete identities/unsafe totals at the read boundary.
   return data;
 }
 

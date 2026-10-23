@@ -13,6 +13,8 @@ export const relationshipSnapshotSchema = z.object({
   purchaseLines: z.array(z.object({
     id: relationshipIdSchema, purchaseId: relationshipIdSchema, lineNumber: quantity,
     sku: z.string().nullable(), product: z.string().nullable(), orderedPieces: quantity,
+    // Optional for older snapshots. Missing counters are unknown, never zero.
+    receivedPieces: quantity.nullish(), cancelledPieces: quantity.nullish(),
   })),
   shipments: z.array(z.object({ id: relationshipIdSchema, number: z.string().min(1), status: z.string() })),
   shipmentLines: z.array(z.object({
