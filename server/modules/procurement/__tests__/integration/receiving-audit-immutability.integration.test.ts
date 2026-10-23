@@ -14,10 +14,9 @@ const discardAuditMigration = readFileSync(
   resolve(process.cwd(), "migrations/900000010000018200001_receiving_discard_audit_guard.sql"),
   "utf8",
 );
-// The reviewed SQL remains unallocated until a real draft PR owns its generated
-// filename. Publication must preserve these bytes and update this exact path.
+// PR #1903 allocates the unchanged reviewed SQL under the final release filename.
 const entryAuditMigration = readFileSync(
-  resolve(process.cwd(), "migrations/pending/receiving_entry_audit_guard.sql"),
+  resolve(process.cwd(), "migrations/900000027000019030001_receiving_entry_audit_guard.sql"),
   "utf8",
 );
 

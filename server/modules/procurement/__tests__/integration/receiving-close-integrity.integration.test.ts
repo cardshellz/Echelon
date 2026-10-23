@@ -115,7 +115,7 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     for (const migration of [
       "900000001000017770001_receiving_integrity_audit_guard.sql",
       "900000010000018200001_receiving_discard_audit_guard.sql",
-      "pending/receiving_entry_audit_guard.sql",
+      "900000027000019030001_receiving_entry_audit_guard.sql",
     ]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }

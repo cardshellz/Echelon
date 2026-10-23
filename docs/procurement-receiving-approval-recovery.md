@@ -46,14 +46,11 @@ Session storage preserves recovery across reloads in the same browser session; i
 
 ## Additive audit migration
 
-`migrations/pending/receiving_entry_audit_guard.sql` extends `guard_receiving_integrity_audit_history` for `procurement.receiving.entry.create` and `procurement.receiving.entry.add-line`. It retains all three existing protected actions and rejects UPDATE, DELETE, TRUNCATE and rewriting an unrelated row into protected evidence. It updates the guard function, not historical business or audit rows.
+`migrations/900000027000019030001_receiving_entry_audit_guard.sql` extends `guard_receiving_integrity_audit_history` for `procurement.receiving.entry.create` and `procurement.receiving.entry.add-line`. It retains all three existing protected actions and rejects UPDATE, DELETE, TRUNCATE and rewriting an unrelated row into protected evidence. It updates the guard function, not historical business or audit rows.
 
-The SQL is deliberately unallocated until an actual PR exists, as required by [migration allocation](migration-allocation.md). **This is not a release-ready migration filename.** Before publication is completed:
+The actual [draft PR #1903](https://github.com/cardshellz/Echelon/pull/1903) owns the allocation, as required by [migration allocation](migration-allocation.md). Its metadata declares the existing receiving discard guard and the latest migration visible during allocation as dependencies. The SQL was transferred without changing its bytes: SHA256 `11a30f13ffa4265ebb02d784bf1c4d684da2c2180605aa35548ffd466317c9c2`. Both receiving integration fixtures load the final filename. Allocation creates local source/metadata only; it does not execute SQL.
 
-1. Refresh main and create the authorized draft PR.
-2. Generate its actual PR-owned migration with dependency `900000010000018200001_receiving_discard_audit_guard.sql`.
-3. Transfer the reviewed SQL without changing its bytes; remove the pending file and update both receiving integration fixture paths and this reference.
-4. Run migration catalog/base/PR checks and the two receiving database suites on that final allocation.
+Publication also incorporates main `d5d3cc45c442366f972b4aabb1de71c2c5c66836`, including its PO shipment-progress UI. Final allocation/merge validation is recorded separately under `outputs/procurement-receiving-approval-2026-10-23/publication-1903/`; the implementation checkpoint below retains its original source and counts. Hosted checks and production deployment remain separate evidence.
 
 Retain the additive guard during application rollback. Removing it would permit alteration of already-recorded entry evidence. No migration has been applied to a live database by this task.
 
