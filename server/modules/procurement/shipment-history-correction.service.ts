@@ -15,13 +15,13 @@ export function createShipmentHistoryCorrectionService(database: AmendmentDataba
   const repository = createDrizzleFinancialCommandRepository(database);
   return {
     context: (id: number, actorId: string) => database.transaction(async tx =>
-      (await readShipmentHistorySource(tx, shipmentHistoryId.parse(id), actorId)).context),
+      (await readShipmentHistorySource(tx, shipmentHistoryId.parse(id), actorId)).context, { isolationLevel: "repeatable read" }),
     preview: (id: number, raw: unknown, actorId: string) => database.transaction(async tx => {
       const input = shipmentHistoryInputSchema.parse(raw);
       const source = await readShipmentHistorySource(tx, shipmentHistoryId.parse(id), actorId);
       const review = planShipmentHistoryCorrection(source.context, input, source.protectedRecordsVersion, z.date().parse(clock()));
       return shipmentHistoryPreviewSchema.parse({ review, previewVersion: historyFingerprint({ actorId, input, review }) });
-    }),
+    }, { isolationLevel: "repeatable read" }),
     async approve(id: number, raw: unknown, actorId: string, descriptor: FinancialCommandDescriptor) {
       const shipmentId = shipmentHistoryId.parse(id), approval = shipmentHistoryApprovalSchema.parse(raw);
       const scope = shipmentHistoryScope(shipmentId);
