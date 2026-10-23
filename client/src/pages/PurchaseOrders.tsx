@@ -1,3 +1,5 @@
+import { PurchaseOrderStatusBadge } from "@/features/purchasing/PurchaseOrderStatusBadge";
+import { purchaseOrderStatus, resolveCurrentPhysicalStatus } from "@shared/procurement/purchase-order-status";
 import { useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -63,19 +65,6 @@ import {
   AlertCircle,
   Trash2,
 } from "lucide-react";
-
-// Status badge config
-const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outline" | "destructive"; label: string; color?: string }> = {
-  draft: { variant: "secondary", label: "Draft" },
-  pending_approval: { variant: "outline", label: "Pending Approval", color: "text-amber-600 border-amber-300" },
-  approved: { variant: "default", label: "Approved" },
-  sent: { variant: "default", label: "Sent", color: "bg-blue-500" },
-  acknowledged: { variant: "default", label: "Acknowledged", color: "bg-indigo-500" },
-  partially_received: { variant: "outline", label: "Partial Receipt", color: "text-orange-600 border-orange-300" },
-  received: { variant: "default", label: "Received", color: "bg-green-600" },
-  closed: { variant: "secondary", label: "Closed" },
-  cancelled: { variant: "destructive", label: "Cancelled" },
-};
 
 function formatCents(cents: number | null | undefined): string {
   if (!cents) return "$0.00";
@@ -159,7 +148,7 @@ function DualTrackCell({ po }: { po: PurchaseOrder }) {
     <div className="space-y-1">
       <div className="grid grid-cols-[50px_1fr] items-center gap-1.5">
         <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Phys</span>
-        {po.physicalStatus === "cancelled" ? <span className="text-xs text-red-700">Cancelled</span> : <MiniTrack segments={physicalSegments(po.physicalStatus)} />}
+        {resolveCurrentPhysicalStatus(po) === "cancelled" ? <span className="text-xs text-red-700">Cancelled</span> : <MiniTrack segments={physicalSegments(resolveCurrentPhysicalStatus(po))} />}
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Financial</span>
@@ -753,12 +742,7 @@ export default function PurchaseOrders() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-mono font-medium text-sm">{po.poNumber}</span>
-                      <Badge
-                        variant={STATUS_BADGES[po.status]?.variant || "secondary"}
-                        className={`text-xs ${STATUS_BADGES[po.status]?.color || ""}`}
-                      >
-                        {STATUS_BADGES[po.status]?.label || po.status}
-                      </Badge>
+                      <PurchaseOrderStatusBadge purchaseOrder={po} />
                       {po.priority === "rush" && <Badge variant="destructive" className="text-xs">Rush</Badge>}
                       {po.priority === "high" && <Badge variant="outline" className="text-xs text-orange-600 border-orange-300">High</Badge>}
                     </div>
@@ -842,11 +826,7 @@ export default function PurchaseOrders() {
                         separate Status column. Cancelled / closed POs are
                         labeled explicitly. */}
                     <div className="text-[10px] text-muted-foreground mt-1 leading-tight">
-                      {po.status === "cancelled"
-                        ? "cancelled"
-                        : po.status === "closed"
-                        ? "closed"
-                        : po.physicalStatus ?? "draft"}
+                      {purchaseOrderStatus(po).label}
                     </div>
                   </TableCell>
                   <TableCell className="text-right">{po.lineCount || 0}</TableCell>
