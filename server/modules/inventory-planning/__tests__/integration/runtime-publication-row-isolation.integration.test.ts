@@ -10,6 +10,8 @@ import {
 } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { PostgresPublicationSelectionWork } from "../../infrastructure/publication-selection-work.repository";
 import { publishOperationalShipmentInsideTransaction } from "../../infrastructure/inventory-availability-dispatch-publication";
+import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
+import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
 
 // P4 (PLAN-F2-v2 section 9.2, C3b, owner decision Q6 = Yes). Variant A (101) is a
 // linked live Dropship eBay listing; its sibling B (102) has a saved live push
@@ -65,6 +67,23 @@ dbDescribe.sequential("row isolation for a Dropship eBay destination, real Postg
       publicationTargetId: targetId, productVariantIds: [F.variantId], dryRun: false, triggeredBy: "fixture_initial_quantity" }, async () => null);
   }, 60_000);
   afterEach(async () => { await database?.close(); runtime.pool = null; });
+
+  // eBay sync-back owner rule 1 (plan v4 SB29): the listing owner's limit bounds the published quantity, at planning and at admission.
+  it("refuses at admission a quantity planned before the vendor's limit, then plans min(ATP, limit)", async () => {
+    const now = new Date(Date.now() + 60_000);
+    const claims = await new PostgresInventoryPublicationOutboxRepository(database.pool).claimDue({ batchSize: 25, leaseSeconds: 120,
+      leaseToken: "vendor-limit-stale", now });
+    const claim = claims.find(row => row.publicationTargetId === targetId && row.productVariantId === F.variantId)!;
+    expect(claim.desiredQuantity).toBe("17");
+    await database.pool.query("UPDATE dropship.dropship_vendor_listings SET vendor_quantity_limit=5 WHERE id=1");
+    const send = vi.fn(async () => undefined);
+    await expect(new PostgresQuantityPublicationAdmission(database.pool, () => now).runOutbox(claim, send)).rejects.toMatchObject({
+      code: "PUBLICATION_SELECTION_CHANGED", context: expect.objectContaining({ publishLimitUnits: 5, retryable: true }) });
+    expect(send).not.toHaveBeenCalled();
+    await createAuthorityAwareInventoryPublicationService(database.pool, { logger: quiet }).publishProduct({ productId: F.productId,
+      publicationTargetId: targetId, productVariantIds: [F.variantId], dryRun: false, triggeredBy: "vendor_limit_test" }, async () => null);
+    expect((await outbox(F.variantId)).at(-1)).toMatchObject({ desired_quantity: 5 });
+  });
 
   it("selects the unlinked sibling for publication and reports only its row", async () => {
     expect(await outbox(F.variantId)).toEqual([{ desired_revision: "1", desired_quantity: 17, state: "queued" }]);

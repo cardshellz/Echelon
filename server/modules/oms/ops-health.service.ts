@@ -30,6 +30,7 @@ import {
   channelStockUpdateDeadLetterDestinationCountSql,
   channelStockUpdateDeadLetterDestinationSampleSql,
 } from "../inventory-planning/channel-stock-update-dead-letters";
+import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../dropship/marketplace-sync-health";
 import {
   HELD_LINE_AGING_DAYS,
   allLinesHeldCountQuery,
@@ -924,6 +925,13 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     // Channel stores with a stock update the outbox refused for good and no later update the store accepted.
     countAndSample(db, channelStockUpdateDeadLetterDestinationCountSql(), channelStockUpdateDeadLetterDestinationSampleSql(10)),
   ]);
+  // Dropship eBay sync-back, through dropship's published read port (dropship/marketplace-sync-health.ts): one count and sample each.
+  const marketplaceSyncIssues = await Promise.all(DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS.map(async (check) => issue({
+    code: check.code,
+    severity: check.severity,
+    message: check.message,
+    ...(await countAndSample(db, check.countSql, check.sampleSql)),
+  })));
   const channelWriteback = await getChannelWritebackHealth(db, {
     windowDays: 14,
     sampleLimit: 50,
@@ -1180,6 +1188,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       message: CHANNEL_STOCK_UPDATE_DEAD_LETTER_MESSAGE,
       sample: channelStockUpdateDeadLetter.sample,
     }),
+    ...marketplaceSyncIssues,
     issue({
       code: "CHANNEL_WRITEBACK_MASKED_SPLIT",
       severity: "critical",

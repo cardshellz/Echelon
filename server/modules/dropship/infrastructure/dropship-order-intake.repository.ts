@@ -264,6 +264,25 @@ async function insertOrderIntakeWithClient(
   ));
 }
 
+/**
+ * An eBay order edit (a changed payload) updates the order's details, but its
+ * status changes only while the intake is still `received` (plan v4 SB21).
+ * An intake already being processed, retrying, failed, on payment hold or in
+ * exception keeps its status, reason and cancellation status, and with them
+ * its retry count and due time (columns this update never writes), so an
+ * edit never restarts a stuck order's retries or undoes a failure a person
+ * must review.
+ */
+export function intakeStatusAfterPayloadUpdate(
+  existing: Pick<DropshipOrderIntakeRecord, "status" | "rejectionReason" | "cancellationStatus">,
+  input: Pick<DropshipOrderIntakeRepositoryInput, "status" | "rejectionReason" | "cancellationStatus">,
+): { status: DropshipOrderIntakeStatus; rejectionReason: string | null; cancellationStatus: string | null } {
+  if (existing.status === "received") {
+    return { status: input.status, rejectionReason: input.rejectionReason, cancellationStatus: input.cancellationStatus };
+  }
+  return { status: existing.status, rejectionReason: existing.rejectionReason, cancellationStatus: existing.cancellationStatus };
+}
+
 async function updateExistingIntakeWithClient(
   client: PoolClient,
   input: {
@@ -272,6 +291,7 @@ async function updateExistingIntakeWithClient(
     channelId: number;
   },
 ): Promise<DropshipOrderIntakeRecord> {
+  const next = intakeStatusAfterPayloadUpdate(input.existing, input.input);
   const result = await client.query<OrderIntakeRow>(
     `UPDATE dropship.dropship_order_intake
      SET channel_id = $2,
@@ -297,9 +317,9 @@ async function updateExistingIntakeWithClient(
       input.input.platform,
       input.input.externalOrderNumber ?? input.existing.externalOrderNumber,
       input.input.sourceOrderId ?? input.existing.sourceOrderId,
-      input.input.status,
-      input.input.rejectionReason,
-      input.input.cancellationStatus,
+      next.status,
+      next.rejectionReason,
+      next.cancellationStatus,
       JSON.stringify(input.input.rawPayload),
       JSON.stringify(input.input.normalizedPayload),
       input.input.payloadHash,

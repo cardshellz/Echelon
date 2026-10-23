@@ -713,11 +713,14 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       }, { productId: product.product_id, productVariantIds: [claim.productVariantId], now: this.clock() });
       const selected = selection.variants[0];
       if (!selected || selected.blockers.length > 0 || !selectionRequiresPublication(selected.action)
-        || (BigInt(claim.desiredQuantity) > BigInt(0) && selected.action !== "publish")) {
+        || (BigInt(claim.desiredQuantity) > BigInt(0) && selected.action !== "publish")
+        // The listing owner's limit (eBay sync-back owner rule 1): a quantity planned before the limit was set or
+        // lowered never goes out above it. The limit change's selection invalidation re-plans min(quantity, limit).
+        || (selected.publishLimitUnits !== undefined && BigInt(claim.desiredQuantity) > BigInt(selected.publishLimitUnits))) {
         fail("PUBLICATION_SELECTION_CHANGED",
           "The channel selection changed after this stock update was saved. The saved selection change will recalculate stock automatically.",
           { productVariantId: claim.productVariantId, action: selected?.action ?? "none",
-            blockers: selected?.blockers ?? [], retryable: true });
+            blockers: selected?.blockers ?? [], publishLimitUnits: selected?.publishLimitUnits ?? null, retryable: true });
       }
     }
   }

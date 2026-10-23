@@ -16,6 +16,9 @@ import {
   itemTransientPauses,
 } from "../domain/listing-push-run";
 import { LISTING_PUSH_RUN_WORDS } from "../domain/listing-push-run-words";
+import { isVendorRelistAllowed } from "../domain/marketplace-push-rule";
+import { MARKETPLACE_SYNC_CODES } from "../domain/marketplace-sync-errors";
+import { MARKETPLACE_PUSH_STOP_WORDS } from "../domain/marketplace-sync-words";
 import { QuantityPublicationAdmissionError } from "../../inventory-planning/domain/quantity-publication-admission";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
@@ -32,7 +35,9 @@ import type {
 import type {
   DropshipMarketplaceListingPushProvider,
   DropshipMarketplaceListingPushResult,
+  DropshipMarketplaceListingPushSent,
 } from "./dropship-marketplace-listing-push-provider";
+import type { MarketplacePrePushInput, MarketplacePrePushResult } from "./dropship-marketplace-sync-service";
 import {
   processListingPushJobInputSchema,
   queuedEbayCategorySchema,
@@ -172,6 +177,19 @@ export interface DropshipListingPushWorkerRepository {
     workerId: string;
     now: Date;
   }): Promise<DropshipListingPushWorkerItemRecord>;
+  /**
+   * eBay sync-back's quiet stop: nothing is sent for the item and it is not a
+   * failure (cancelled, no failure email, never re-queued): the vendor ended
+   * the listing on eBay and this item may not relist it.
+   */
+  skipItem(input: {
+    job: DropshipListingPushWorkerJobRecord;
+    item: DropshipListingPushWorkerItemRecord;
+    code: string;
+    message: string;
+    workerId: string;
+    now: Date;
+  }): Promise<DropshipListingPushWorkerItemRecord>;
   finalizeJob(input: {
     jobId: number;
     workerId: string;
@@ -224,6 +242,12 @@ export interface DropshipListingIntentRefreshInput {
   queuedMarketplaceCategory: QueuedEbayCategory | null;
 }
 
+/** eBay sync-back's push-time rule (plan v4 §5), as the worker uses it (DropshipMarketplaceSyncService). */
+export interface DropshipListingPushMarketplaceSync {
+  syncListingBeforePush(input: MarketplacePrePushInput): Promise<MarketplacePrePushResult>;
+  recordPushAttempt(input: { listingId: number; jobId: number; jobItemId: number; sent: DropshipMarketplaceListingPushSent }): Promise<void>;
+}
+
 export interface DropshipListingPushWorkerServiceDependencies {
   /**
    * Rebuilds the listing intent at push time. `queuedPriceCents` is the price
@@ -245,6 +269,11 @@ export interface DropshipListingPushWorkerServiceDependencies {
    * only for those. Absent: no item is promised one.
    */
   automaticRequeueOutlook?: DropshipAutomaticRequeueOutlook;
+  /**
+   * eBay sync-back's pre-read of a listing already on eBay, before its push
+   * writes anything (plan v4 §5). Absent: pushes run as before it existed.
+   */
+  marketplaceSync?: DropshipListingPushMarketplaceSync;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -359,6 +388,8 @@ export class DropshipListingPushWorkerService {
     }
 
     try {
+      // eBay sync-back's pre-read (§5 step 2) comes first: what the vendor owns is adopted before the refresh reads it.
+      const synced = await this.preReadMarketplace(claim, item);
       // Persisted job intent identifies work, not a quantity snapshot to replay later.
       const currentIntent = this.deps.refreshListingIntent ? await this.deps.refreshListingIntent({
         jobId: claim.job.jobId, jobItemId: item.itemId,
@@ -375,11 +406,17 @@ export class DropshipListingPushWorkerService {
         productVariantId: item.productVariantId,
         platform: claim.job.platform,
         listingIntent: currentIntent,
-        existingExternalListingId: item.listing!.externalListingId,
-        existingExternalOfferId: item.listing!.externalOfferId,
+        // A relist eBay made under a new item number is followed (SB6): the pre-read answers the ids to push to.
+        existingExternalListingId: synced ? synced.externalListingId : item.listing!.externalListingId,
+        existingExternalOfferId: synced ? synced.externalOfferId : item.listing!.externalOfferId,
         idempotencyKey: `${parsed.idempotencyKey}:${item.itemId}`,
         // The stock link re-queue's own run never adopts an unrecorded published eBay listing (review TW-1).
         ...(isAutomaticStockLinkRequeueRun(item.result) ? { automaticRetry: true } : {}),
+        ...(synced ? { marketplaceSync: {
+          guard: synced.guard, passthrough: synced.passthrough, liveFulfillmentPolicyId: synced.liveFulfillmentPolicyId,
+          beforeFirstWrite: (sent: DropshipMarketplaceListingPushSent) => this.deps.marketplaceSync!.recordPushAttempt({
+            listingId: item.listing!.listingId, jobId: claim.job.jobId, jobItemId: item.itemId, sent }),
+        } } : {}),
       });
       assertValidPushResult(pushResult);
       await this.deps.repository.completeItem({
@@ -393,9 +430,19 @@ export class DropshipListingPushWorkerService {
       state.consecutivePauses = 0;
       return "done";
     } catch (error) {
+      if (error instanceof DropshipError && error.code === MARKETPLACE_SYNC_CODES.endedOnEbay) {
+        // The vendor ended it on eBay and this item may not relist it (SB9): nothing is sent, quietly (owner rule 7).
+        await this.deps.repository.skipItem({ job: claim.job, item, code: error.code, message: error.message,
+          workerId: parsed.workerId, now: this.deps.clock.now() });
+        this.deps.logger.info({ code: error.code, message: "A listing the vendor ended on eBay was not relisted by this push.",
+          context: { jobId: claim.job.jobId, itemId: item.itemId, vendorId: claim.job.vendorId,
+            storeConnectionId: claim.job.storeConnectionId, listingId: item.listingId, outcome: "skipped" } });
+        return "done";
+      }
       const transient = await this.handleTransientPause(parsed, claim, item, state, error);
       // A stop came while it was sent and nothing was done: cancelled, and the job goes on to its finalize (review MC4).
-      if (transient === "stopped") return "done";
+      // A quantity that waited out its pauses is stopped quietly (review OR-4).
+      if (transient === "stopped" || transient === "skipped") return "done";
       if (transient) return transient;
       if (isNoLongerSelected(error)) {
         // Permanent for this push, never retried: the vendor took the size out of their selection (§4.5).
@@ -501,6 +548,24 @@ export class DropshipListingPushWorkerService {
   }
 
   /**
+   * eBay sync-back's pre-read (plan v4 §5 step 2) for an eBay listing Card
+   * Shellz pushed before (it has a saved offer id). Null otherwise, or when
+   * sync-back is not wired: the push runs as before. Its refusals propagate:
+   * a pause (eBay changed, a quantity waits for the order poll), the quiet
+   * ended stop, or a listing it cannot prove is ours.
+   */
+  private async preReadMarketplace(claim: DropshipListingPushWorkerClaim,
+    item: DropshipListingPushWorkerItemRecord): Promise<MarketplacePrePushResult | null> {
+    const listing = item.listing;
+    if (!this.deps.marketplaceSync || claim.job.platform !== "ebay" || !listing?.externalOfferId?.trim()) return null;
+    return this.deps.marketplaceSync.syncListingBeforePush({
+      vendorId: claim.job.vendorId, storeConnectionId: claim.job.storeConnectionId, listingId: listing.listingId,
+      productVariantId: item.productVariantId, jobId: claim.job.jobId, jobItemId: item.itemId,
+      relistAllowed: isVendorRelistAllowed(item.result),
+    });
+  }
+
+  /**
    * A marketplace call that did nothing (429, a token rejection, a read with a
    * 5xx or no answer) pauses the job instead of failing the item; after too
    * many pauses the item, or the whole job, fails as before. Null: not a
@@ -512,7 +577,7 @@ export class DropshipListingPushWorkerService {
     item: DropshipListingPushWorkerItemRecord,
     state: { consecutivePauses: number },
     error: unknown,
-  ): Promise<"paused" | "breaker_tripped" | "stopped" | null> {
+  ): Promise<"paused" | "breaker_tripped" | "stopped" | "skipped" | null> {
     const pause = decideListingPushTransientPause(error);
     if (!pause.pause) return null;
     const itemPauses = itemTransientPauses(item.result);
@@ -524,6 +589,16 @@ export class DropshipListingPushWorkerService {
       storeConnectionId: claim.job.storeConnectionId, listingId: item.listingId, productVariantId: item.productVariantId,
       errorCode: code, reason: pause.reason, itemPauses, jobConsecutivePauses: state.consecutivePauses,
     };
+    if (action.action !== "pause" && code === MARKETPLACE_SYNC_CODES.quantityPending) {
+      // Review OR-4 (owner rules 1 and 7): a lower eBay number still waiting for the order poll is neither a failure
+      // (no failure email) nor eBay being unavailable (no breaker). The size is stopped quietly, as an ended listing
+      // is; its saved observation keeps it in the sync job's next read, which decides the number.
+      await this.deps.repository.skipItem({ job: claim.job, item, code, message: MARKETPLACE_PUSH_STOP_WORDS[MARKETPLACE_SYNC_CODES.quantityPending],
+        workerId: parsed.workerId, now: this.deps.clock.now() });
+      this.deps.logger.info({ code, message: "A size whose eBay quantity still waited for the order poll was not sent by this push.",
+        context: { ...context, outcome: "skipped", action: action.action } });
+      return "skipped";
+    }
     if (action.action === "fail_item") {
       this.deps.logger.warn({ code: "DROPSHIP_LISTING_PUSH_ITEM_PAUSE_LIMIT", message: "A listing push item paused too often; it fails, retryable.", context });
       return null;

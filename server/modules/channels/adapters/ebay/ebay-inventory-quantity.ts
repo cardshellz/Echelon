@@ -101,6 +101,8 @@ export interface EbayResolvedPublishedOffer {
   readonly offerId: string;
   readonly sku: string;
   readonly marketplaceId: string;
+  /** The offer's quantity on eBay now; null when eBay sent no whole number (the write path validates it separately). */
+  readonly availableQuantity: number | null;
 }
 
 export interface EbayInventoryQuantityOptions {
@@ -114,7 +116,9 @@ export interface EbayInventoryQuantityOptions {
 }
 
 function checkExpectedOffer(offer: z.infer<typeof offerSchema>, options: EbayInventoryQuantityOptions): void {
-  options.expectOffer?.({ offerId: offer.offerId, sku: offer.sku, marketplaceId: offer.marketplaceId });
+  const availableQuantity = quantitySchema.safeParse(offer.availableQuantity);
+  options.expectOffer?.({ offerId: offer.offerId, sku: offer.sku, marketplaceId: offer.marketplaceId,
+    availableQuantity: availableQuantity.success ? availableQuantity.data : null });
 }
 
 /** Provider availability, not an ATP formula: eBay caps a listing by BOTH quantities. */

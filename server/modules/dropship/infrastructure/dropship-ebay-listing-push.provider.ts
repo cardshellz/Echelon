@@ -1,5 +1,13 @@
+import { logger as platformLogger } from "../../../platform/observability/logger";
 import { DropshipError } from "../domain/errors";
 import { resolveEbayMpn } from "../domain/ebay-product-identifiers";
+import { marketplaceSyncError, MARKETPLACE_SYNC_CODES } from "../domain/marketplace-sync-errors";
+import { sha256Hex } from "../domain/marketplace-listing-observation";
+import {
+  isLivePolicyIncompatibilityTolerated,
+  marketplacePushGuardChanges,
+  type MarketplacePushGuard,
+} from "../domain/marketplace-sync-decision";
 import { describeEbayErrors, parseEbayErrorBody } from "./ebay-error-body";
 import { ebaySellRequestHeaders } from "./ebay-sell-headers";
 import { createProviderRequestDeadline } from "../../channels/provider-request-limits";
@@ -9,6 +17,7 @@ import type {
   DropshipMarketplaceListingPushProvider,
   DropshipMarketplaceListingPushRequest,
   DropshipMarketplaceListingPushResult,
+  DropshipMarketplaceListingPushSent,
 } from "../application/dropship-marketplace-listing-push-provider";
 import type {
   DropshipMarketplaceCredentialRepository,
@@ -16,6 +25,7 @@ import type {
 } from "./dropship-marketplace-credentials";
 import {
   EbayMarketplaceListingConnector,
+  type EbayResolvedPushOffers,
   type EbayListingConnectorDraft,
   type EbayListingLifecycleClient,
   type EbayListingRebuildPreview,
@@ -30,6 +40,7 @@ import type {
   EbayBulkPriceQuantityResponse,
   EbayInventoryItem,
   EbayInventoryItemGroup,
+  EbayListingPolicies,
   EbayOffer,
 } from "../../channels/adapters/ebay/ebay-types";
 import { ebayListingImagesFromUrls } from "../../channels/ebay-listing-photos.domain";
@@ -95,6 +106,19 @@ export interface DropshipEbayListingLifecycleClient extends EbayListingLifecycle
   ): Promise<void>;
 }
 
+/**
+ * What readLiveListing got from eBay (eBay sync-back, plan v4 SB2): both raw
+ * answers, validated by the caller before any field is trusted; a 404 on the
+ * offer; and null for an answer that is not JSON or an inventory item eBay
+ * does not have, which the caller's validation reads as unreadable.
+ */
+export type DropshipEbayLiveListingRead =
+  | { kind: "read"; offer: unknown; inventoryItem: unknown }
+  | { kind: "offer_missing" };
+
+/** The answer of eBay that was not JSON (parseEbayJson below): read as no answer, never retried as if eBay had not answered. */
+const INVALID_RESPONSE_CODE = "DROPSHIP_EBAY_LISTING_PUSH_INVALID_RESPONSE";
+
 export interface DropshipEbayReplacementSession {
   readonly marketplaceId: string;
   readonly client: DropshipEbayListingLifecycleClient;
@@ -125,6 +149,12 @@ export interface EbayDropshipListingPushProviderOptions {
   readonly sleep?: (ms: number) => Promise<void>;
   readonly logger?: { debug(event: Record<string, unknown>): void; warn(event: Record<string, unknown>): void };
 }
+
+/** The platform logger in this provider's event shape (the action is the event's own). */
+const platformEventLogger = {
+  debug: (event: Record<string, unknown>) => platformLogger.debug(String(event.action ?? "dropship.listing_push"), event),
+  warn: (event: Record<string, unknown>) => platformLogger.warn(String(event.action ?? "dropship.listing_push"), event),
+};
 
 const defaultScopeBusyLogger = {
   debug: (event: Record<string, unknown>) => console.debug(JSON.stringify({ level: "debug", ...event })),
@@ -170,7 +200,11 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     };
 
     assertEbayReady(input, config);
-    const preflight = await this.assertFulfillmentPolicyCompatible({ credential, config });
+    const sync = input.marketplaceSync;
+    const preflight = await this.assertFulfillmentPolicyCompatible({ credential, config,
+      liveFulfillmentPolicyId: sync?.liveFulfillmentPolicyId ?? null,
+      correlation: { listing_id: input.listingId, vendor_id: input.vendorId, job_id: input.jobId, job_item_id: input.jobItemId,
+        product_variant_id: input.productVariantId } });
     await this.reconcileManagedLocation({ credential, config, preflight });
     const baseUrl = EBAY_BASE_URLS[config.environment];
     const draft = buildDropshipEbayListingDraft(
@@ -181,6 +215,18 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     // The shared connector refuses with EbayListingSyncError, which the worker
     // cannot classify; see rethrowConnectorFailure.
     const sku = draft.inventoryItems[0]?.sku;
+    // eBay sync-back (plan v4 §5): what this push writes, recorded as its attempt just before the first write. The
+    // listing builder prices every offer in USD (ebay-listing-builder.ts pricingSummary), so that is the currency sent.
+    const text = dropshipEbaySentText(input);
+    const sent: DropshipMarketplaceListingPushSent = {
+      priceCents: input.listingIntent.priceCents, currency: "USD", sku: sku ?? "",
+      fulfillmentPolicyId: config.businessPolicies.fulfillmentPolicyId, returnPolicyId: config.businessPolicies.returnPolicyId,
+      paymentPolicyId: config.businessPolicies.paymentPolicyId,
+      // Review OR-1: what this push writes is "what Card Shellz last sent"; a passed-through field keeps Card Shellz's own.
+      titleHash: text.carried.title ?? sha256Hex(text.title),
+      descriptionHash: text.carried.description ?? sha256Hex(text.description),
+    };
+    const linkStock = stock.mustLink || input.automaticRetry === true;
     const connectorResult = await this.listingConnector.pushListing({
       client: this.createConnectorClient({ credential, config, baseUrl, correlation: {
         job_id: input.jobId, job_item_id: input.jobItemId, listing_id: input.listingId, product_variant_id: input.productVariantId } }),
@@ -189,13 +235,22 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
             listingIntent: { ...input.listingIntent, marketplaceConfig: { ...input.listingIntent.marketplaceConfig, marketplaceId: config.marketplaceId } } }, credential, discovered)
         : undefined,
       // After the connector matched the SKU's existing offers and proved any
-      // published identity, before its first write: the stock link is made for
-      // exactly the offer eBay will use, and a refusal leaves eBay untouched. An
-      // automatic re-queue's run always passes through it, so it never adopts an
-      // eBay listing the vendor listing did not record (review TW-1).
-      beforeFirstMutation: stock.mustLink || input.automaticRetry === true
-        ? resolved => stockReadiness.ensureLinked({ request: input, credential, environment: config.environment,
-            sku: sku ?? "", resolved, ...(stock.mustLink ? {} : { linkStock: false }) })
+      // published identity, before its first write: eBay sync-back's guard first
+      // (eBay changed since the pre-read: nothing is written, the push pauses);
+      // then the stock link is made for exactly the offer eBay will use, and a
+      // refusal leaves eBay untouched. An automatic re-queue's run always passes
+      // through it, so it never adopts an eBay listing the vendor listing did not
+      // record (review TW-1). Last, the attempt is recorded, so a refusal above
+      // leaves no attempt behind.
+      beforeFirstMutation: linkStock || sync
+        ? async resolved => {
+          if (sync) assertMarketplaceUnchanged(sync.guard, resolved, input.productVariantId);
+          if (linkStock) {
+            await stockReadiness.ensureLinked({ request: input, credential, environment: config.environment,
+              sku: sku ?? "", resolved, ...(stock.mustLink ? {} : { linkStock: false }) });
+          }
+          if (sync) await sync.beforeFirstWrite(sent);
+        }
         : undefined,
       draft: {
         productId: input.productVariantId,
@@ -238,7 +293,64 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         listingMode: input.listingIntent.listingMode,
         published: connectorResult.published,
       },
+      sent,
     };
+  }
+
+  /**
+   * eBay sync-back's read of one live listing (plan v4 SB2): the offer by its
+   * saved id and the inventory item by our SKU, with the vendor's token, GET
+   * only, so nothing on eBay changes. Neither read is marketplace-scoped. The
+   * answers are returned raw: the caller validates them
+   * (parseMarketplaceListingObservation). A 404 on the offer is `offer_missing`;
+   * a 404 on the inventory item, or an answer that is not JSON, is returned as
+   * null. Every other refusal throws this provider's classified HTTP error
+   * (status, endpoint, method GET); a 401 or 403 is recorded on the credential
+   * as on every other call here, so the next load refreshes the token. A
+   * credential that cannot be loaded or refreshed is the whole store's
+   * problem: DROPSHIP_MARKETPLACE_SYNC_STORE_UNAVAILABLE. Nothing is retried here.
+   */
+  async readLiveListing(input: {
+    vendorId: number; storeConnectionId: number; offerId: string; sku: string;
+  }): Promise<DropshipEbayLiveListingRead> {
+    if (!input.offerId.trim() || !input.sku.trim()) {
+      throw marketplaceSyncError(MARKETPLACE_SYNC_CODES.invariantFailed, "A live listing read needs the saved offer id and SKU.", "fatal",
+        { storeConnectionId: input.storeConnectionId });
+    }
+    let credential: DropshipMarketplaceStoreCredentials;
+    try {
+      credential = await this.tokenOwner.loadFreshForStoreConnection({
+        vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, operation: "marketplace_sync_back",
+      });
+    } catch (error) {
+      throw marketplaceSyncError(MARKETPLACE_SYNC_CODES.storeUnavailable, "The store's eBay credentials could not be loaded.", "transient", {
+        storeConnectionId: input.storeConnectionId, causeCode: error instanceof DropshipError ? error.code : "UNCLASSIFIED",
+      });
+    }
+    const baseUrl = EBAY_BASE_URLS[resolveDropshipEbayProviderEnvironment(credential)];
+    const read = async (path: string): Promise<unknown> => {
+      try {
+        return await this.requestEbayUnadmitted<unknown>({ credential, config: { marketplaceId: null }, method: "GET", path, baseUrl });
+      } catch (error) {
+        if (error instanceof DropshipError && error.code === INVALID_RESPONSE_CODE) return null;
+        throw error;
+      }
+    };
+    let offer: unknown;
+    try {
+      offer = await read(`/sell/inventory/v1/offer/${encodeURIComponent(input.offerId)}`);
+    } catch (error) {
+      if (isEbayNotFound(error)) return { kind: "offer_missing" };
+      throw error;
+    }
+    let inventoryItem: unknown;
+    try {
+      inventoryItem = await read(`/sell/inventory/v1/inventory_item/${encodeURIComponent(input.sku)}`);
+    } catch (error) {
+      if (!isEbayNotFound(error)) throw error;
+      inventoryItem = null;
+    }
+    return { kind: "read", offer, inventoryItem };
   }
 
   async previewListingRebuild(
@@ -306,6 +418,10 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
   private async assertFulfillmentPolicyCompatible(input: {
     credential: DropshipMarketplaceStoreCredentials;
     config: EbayListingConfig;
+    /** The policy live on this listing now (eBay sync-back pre-read); null for a first push or a listing not on sale. */
+    liveFulfillmentPolicyId?: string | null;
+    /** The push's correlation ids for its log lines (CLAUDE.md §10). */
+    correlation?: Readonly<Record<string, unknown>>;
   }): Promise<DropshipEbayFulfillmentPolicyPreflight> {
     if (!this.fulfillmentPolicyGuard) {
       throw new DropshipError(
@@ -322,6 +438,21 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       environment: input.config.environment,
       fresh: true,
     });
+    if (!preflight.compatible && isLivePolicyIncompatibilityTolerated({
+      effectivePolicyId: preflight.fulfillmentPolicyId,
+      observedPolicyId: input.liveFulfillmentPolicyId ?? null,
+      listingLive: (input.liveFulfillmentPolicyId ?? null) !== null,
+      issueCodes: preflight.issues.map((issue) => issue.code),
+    })) {
+      // The live-policy rule (plan v4 SB10, owner rule 4): the vendor's shipping policy already live on this listing is
+      // kept; the push goes on. The sweep's per-store policy check tells the vendor and staff (critical notice, WARN), so
+      // every push of it is an expected condition: DEBUG, through the platform logger by default (review ARCH-11).
+      (this.options.logger ?? platformEventLogger).debug({ action: "dropship.listing_push.live_policy_kept", outcome: "tolerated",
+        error_code: "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE", store_connection_id: input.credential.storeConnectionId,
+        fulfillment_policy_id: preflight.fulfillmentPolicyId, issue_codes: preflight.issues.map((issue) => issue.code),
+        ...(input.correlation ?? {}) });
+      return preflight;
+    }
     if (!preflight.compatible) {
       throw new DropshipError(
         "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE",
@@ -641,7 +772,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
   }
 
   private async requestEbayUnadmitted<T = Record<string, unknown>>(input: {
-    credential: DropshipMarketplaceStoreCredentials; config: EbayListingConfig;
+    credential: DropshipMarketplaceStoreCredentials; config: { marketplaceId: string | null };
     method: "GET" | "POST" | "PUT" | "DELETE"; path: string; body?: unknown;
     expectNoContent?: boolean; baseUrl: string;
   }): Promise<T> {
@@ -705,7 +836,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
    * plan S2-5, §4.5, SAFETY18). Retryable, as any unexpected error was before.
    */
   private async fetchEbay(input: {
-    credential: DropshipMarketplaceStoreCredentials; config: EbayListingConfig;
+    credential: DropshipMarketplaceStoreCredentials; config: { marketplaceId: string | null };
     method: "GET" | "POST" | "PUT" | "DELETE"; path: string; body?: unknown; baseUrl: string;
   }, signal: AbortSignal): Promise<Response> {
     try {
@@ -887,12 +1018,58 @@ function isPublishableEbayWeightGrams(weightGrams: number | null): weightGrams i
   return typeof weightGrams === "number" && Number.isFinite(weightGrams) && weightGrams > 0;
 }
 
+/**
+ * The connector's last look before its first write (eBay sync-back SB5):
+ * the offer it found for this variant must be the one the pre-read saw, field
+ * for field; any change (a vendor edit, a sale, a relist) refuses the push
+ * retryably with nothing written, and the next attempt reads eBay again.
+ */
+function assertMarketplaceUnchanged(guard: MarketplacePushGuard, resolved: EbayResolvedPushOffers, productVariantId: number): void {
+  const offer = resolved.offers.find((entry) => entry.variantId === productVariantId)?.observedOffer ?? null;
+  const changed = marketplacePushGuardChanges(guard, offer);
+  if (changed.length === 0) return;
+  // PROPOSED (sync-back): kept on the job item while it waits.
+  throw marketplaceSyncError(MARKETPLACE_SYNC_CODES.changedDuringPush,
+    "eBay changed this listing while Card Shellz was updating it; it will be checked again before anything is written.", "transient",
+    { productVariantId, offerId: guard.offerId, changedFields: changed });
+}
+
+/** The vendor's Best Offer terms, carried unchanged into every offer this push writes (SB25). */
+function withBestOfferTerms(policies: EbayListingPolicies, bestOfferTerms: Readonly<Record<string, unknown>>): EbayListingPolicies {
+  return Object.assign({}, policies, { bestOfferTerms });
+}
+
+/**
+ * The title and description a push writes. Owner rule 2: a title or
+ * description the vendor edited on eBay goes back exactly as eBay showed it
+ * (the pre-read's passthrough), with Card Shellz's own fingerprint carried
+ * forward for it; otherwise Card Shellz's current text goes, as today. The
+ * passthrough never touches the intent, so the stored intent stays Card
+ * Shellz's own text.
+ */
+function dropshipEbaySentText(input: Pick<DropshipMarketplaceListingPushRequest, "listingIntent" | "marketplaceSync">): {
+  title: string; description: string; carried: { title: string | null; description: string | null };
+} {
+  const intent = input.listingIntent;
+  const passthrough = input.marketplaceSync?.passthrough ?? null;
+  return {
+    title: passthrough?.title ?? intent.title,
+    description: passthrough?.description ?? intent.description ?? intent.title,
+    carried: {
+      title: passthrough?.title != null ? passthrough.carriedFingerprints.title : null,
+      description: passthrough?.description != null ? passthrough.carriedFingerprints.description : null,
+    },
+  };
+}
+
 export function buildDropshipEbayListingDraft(
-  input: Pick<DropshipMarketplaceListingPushRequest, "productVariantId" | "listingIntent" | "existingExternalOfferId">,
+  input: Pick<DropshipMarketplaceListingPushRequest, "productVariantId" | "listingIntent" | "existingExternalOfferId" | "marketplaceSync">,
   config: EbayListingConfig,
   listingBuilder: EbayListingBuilder,
 ) {
   const intent = input.listingIntent;
+  const passthrough = input.marketplaceSync?.passthrough ?? null;
+  const { title, description: descriptionHtml } = dropshipEbaySentText(input);
   const marketplaceCategoryId = intent.marketplaceCategoryId?.trim();
   if (!marketplaceCategoryId) {
     throw new DropshipError(
@@ -913,8 +1090,8 @@ export function buildDropshipEbayListingDraft(
   }
   const listing: ChannelListingPayload = {
     productId: input.productVariantId,
-    title: intent.title,
-    description: intent.description ?? intent.title,
+    title,
+    description: descriptionHtml,
     category: intent.category,
     tags: null,
     status: "active",
@@ -950,15 +1127,19 @@ export function buildDropshipEbayListingDraft(
     [input.productVariantId, intent.quantity],
   ]);
 
-  return listingBuilder.buildListingDraft(listing, sharedConfig, {
+  const draft = listingBuilder.buildListingDraft(listing, sharedConfig, {
     availableQuantityByVariantId: quantityByVariantId,
     categoryIdOverride: marketplaceCategoryId,
     conditionOverride: mapEbayCondition(intent.condition),
-    descriptionHtmlOverride: intent.description ?? intent.title,
+    descriptionHtmlOverride: descriptionHtml,
     includeOfferTax: false,
     requirePackageWeight: true,
     storeCategoryNames: intent.storeCategoryNames,
   });
+  const bestOfferTerms = passthrough?.bestOfferTerms ?? null;
+  if (bestOfferTerms === null) return draft;
+  return { ...draft, offers: draft.offers.map((offer) => ({ ...offer,
+    payload: { ...offer.payload, listingPolicies: withBestOfferTerms(offer.payload.listingPolicies, bestOfferTerms) } })) };
 }
 
 function buildEbayAspects(

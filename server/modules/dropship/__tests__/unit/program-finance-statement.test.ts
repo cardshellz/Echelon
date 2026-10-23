@@ -267,7 +267,8 @@ describe("buildFinanceSummary: the contract §6.4 seeded program (mtd, all vendo
       "returns.net": ["equals", 3_250],
       "returns.staff_credits": ["none", 2_500, 1],
     });
-    expect(lineOf(summary, "returns", "returns.memo.order_refunds")).toMatchObject({ status: "not_recorded", reasonKey: "no_refund_path" });
+    // An order refund is recorded now (eBay sync-back's marketplace-cancel refund, review MS3/ARCH-1); the program has none.
+    expect(lineOf(summary, "returns", "returns.memo.order_refunds")).toMatchObject({ status: "recorded", amount: 0, count: 0 });
   });
 
   it("walks what we owe from the period start to now", () => {

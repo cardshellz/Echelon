@@ -131,6 +131,8 @@ interface ExistingListingRow {
   vendor_retail_price_cents: string | number | null;
   quantity_cap: number | null;
   external_listing_id: string | null;
+  vendor_quantity_limit: number | null;
+  observed_fulfillment_policy_id: string | null;
 }
 
 interface PricingPolicyRow {
@@ -500,7 +502,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     try {
       const result = await client.query<ExistingListingRow>(
         `SELECT id, product_variant_id, status, vendor_retail_price_cents,
-                quantity_cap, external_listing_id
+                quantity_cap, external_listing_id, vendor_quantity_limit, observed_fulfillment_policy_id
          FROM dropship.dropship_vendor_listings
          WHERE store_connection_id = $1
            AND product_variant_id = ANY($2::int[])`,
@@ -865,6 +867,9 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
           idempotencyKey: `${input.idempotencyKey}:${row.productVariantId}`,
           row,
           now: input.now,
+          // eBay sync-back SB9: only the vendor's own press (a push or a publish run they started) may relist a
+          // listing they ended on eBay; every automatic or staff push leaves it ended (isVendorRelistAllowed).
+          relistAllowed: input.requestedBy.actorType === "vendor",
           ...(listingStatusBeforeQueue !== undefined ? { listingStatusBeforeQueue } : {}),
         }));
       }
@@ -1045,6 +1050,8 @@ async function insertJobItemForPreview(
     now: Date;
     /** A run chunk's item only: the listing's status before the queue (verify V7). */
     listingStatusBeforeQueue?: string | null;
+    /** The vendor's own press queued it (SB9). */
+    relistAllowed?: boolean;
   },
 ): Promise<void> {
   const status = input.row.previewStatus === "blocked" ? "blocked" : "queued";
@@ -1067,6 +1074,7 @@ async function insertJobItemForPreview(
         warnings: input.row.warnings,
         listingIntent: input.row.listingIntent,
         ...(input.listingStatusBeforeQueue ? { listingStatusBeforeQueue: input.listingStatusBeforeQueue } : {}),
+        ...(input.relistAllowed === true ? { relistAllowed: true } : {}),
       }),
       input.idempotencyKey,
       input.now,
@@ -1203,6 +1211,8 @@ function mapExistingListingRow(row: ExistingListingRow): DropshipExistingVendorL
     vendorRetailPriceCents: row.vendor_retail_price_cents === null ? null : Number(row.vendor_retail_price_cents),
     quantityCap: row.quantity_cap,
     externalListingId: row.external_listing_id,
+    vendorQuantityLimit: row.vendor_quantity_limit,
+    observedFulfillmentPolicyId: row.observed_fulfillment_policy_id,
   };
 }
 

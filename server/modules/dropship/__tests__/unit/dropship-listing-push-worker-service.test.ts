@@ -19,6 +19,9 @@ import {
   type DropshipListingPushWorkerRepository,
 } from "../../application/dropship-listing-push-worker-service";
 import type { DropshipMarketplaceListingIntent, DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
+import type { MarketplacePrePushInput, MarketplacePrePushResult } from "../../application/dropship-marketplace-sync-service";
+import type { MarketplacePushGuard } from "../../domain/marketplace-sync-decision";
+import { marketplaceSyncError, MARKETPLACE_SYNC_CODES } from "../../domain/marketplace-sync-errors";
 
 const now = new Date("2026-05-01T19:00:00.000Z");
 
@@ -868,6 +871,143 @@ describe("DropshipListingPushWorkerService pauses, breakers and runs (step 1 pla
   });
 });
 
+describe("DropshipListingPushWorkerService: eBay sync-back's push-time rule (plan v4 §5)", () => {
+  const guard: MarketplacePushGuard = { offerId: "OFFER-1", listingId: "110000000002", priceCents: 1400, currency: "USD",
+    fulfillmentPolicyId: "F-9", returnPolicyId: "R-1", paymentPolicyId: "P-1", bestOfferTermsHash: null, offerDescriptionHash: "d".repeat(64),
+    availableQuantity: 10 };
+  const passthrough = { bestOfferTerms: null, title: "Vendor's own title", description: null,
+    carriedFingerprints: { title: "c".repeat(64), description: null } };
+  const sent = { priceCents: 1400, currency: "USD", sku: "SKU-101", fulfillmentPolicyId: "F-9", returnPolicyId: "R-1", paymentPolicyId: "P-1",
+    titleHash: "a".repeat(64), descriptionHash: "b".repeat(64) };
+
+  function setup(options: { preRead?: MarketplacePrePushResult | Error; platform?: "ebay" | "shopify"; offerId?: string | null;
+    result?: Record<string, unknown>; wired?: boolean } = {}) {
+    const repository = new FakeListingPushWorkerRepository();
+    const platform = options.platform ?? "ebay";
+    repository.job = { ...repository.job, platform };
+    repository.config = { ...repository.config, platform };
+    const item = makeQueuedItem();
+    repository.items = [{ ...item, result: { ...item.result, ...options.result, listingIntent: { ...parseIntent(item.result), platform } },
+      listing: { ...item.listing!, status: "active", externalListingId: "110000000001",
+        externalOfferId: options.offerId === undefined ? "OFFER-1" : options.offerId } }];
+    const marketplacePush = new FakeMarketplacePushProvider();
+    const notificationSender = new FakeNotificationSender();
+    const order: string[] = [];
+    const preReads: MarketplacePrePushInput[] = [];
+    const attempts: Array<{ listingId: number; jobId: number; jobItemId: number; sent: unknown }> = [];
+    const logs: DropshipLogEvent[] = [];
+    const preRead = options.preRead ?? { externalListingId: "110000000002", externalOfferId: "OFFER-1", guard, passthrough,
+      liveFulfillmentPolicyId: "F-9" };
+    const service = new DropshipListingPushWorkerService({
+      repository, marketplacePush, notificationSender,
+      refreshListingIntent: async (input) => { order.push("refresh"); return { ...parseIntent(repository.items[0].result), priceCents: 1400,
+        productVariantId: input.productVariantId }; },
+      ...(options.wired === false ? {} : { marketplaceSync: {
+        async syncListingBeforePush(input) { order.push("pre_read"); preReads.push(input); if (preRead instanceof Error) throw preRead; return preRead; },
+        async recordPushAttempt(input) { attempts.push(input); },
+      } }),
+      clock: { now: () => now },
+      logger: { info: (event) => logs.push(event), warn: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+    marketplacePush.beforeAnswer = async () => { order.push("push"); };
+    return { service, repository, marketplacePush, notificationSender, order, preReads, attempts, logs };
+  }
+
+  it("reads eBay before the refresh, then pushes to the ids it answers with its guard and passthrough, recording the attempt", async () => {
+    const f = setup({ result: { relistAllowed: true } });
+    await f.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "sync-push-001" });
+
+    expect(f.order).toEqual(["pre_read", "refresh", "push"]);
+    expect(f.preReads).toEqual([{ vendorId: 10, storeConnectionId: 22, listingId: 100, productVariantId: 101, jobId: 30, jobItemId: 1,
+      relistAllowed: true }]);
+    const request = f.marketplacePush.requests[0]!;
+    // SB6: a relist eBay made under a new item number is pushed to that number.
+    expect(request).toMatchObject({ existingExternalListingId: "110000000002", existingExternalOfferId: "OFFER-1", listingIntent: { priceCents: 1400 },
+      marketplaceSync: { guard, passthrough, liveFulfillmentPolicyId: "F-9" } });
+    await request.marketplaceSync!.beforeFirstWrite(sent);
+    expect(f.attempts).toEqual([{ listingId: 100, jobId: 30, jobItemId: 1, sent }]);
+    expect(f.repository.items[0]).toMatchObject({ status: "completed" });
+  });
+
+  it.each([
+    ["a first push (no saved offer id)", { offerId: null }],
+    ["a listing on another marketplace", { platform: "shopify" as const }],
+    ["a worker without sync-back wired", { wired: false }],
+  ])("reads nothing for %s and pushes exactly as before", async (_name, options) => {
+    const f = setup(options);
+    await f.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "sync-push-002" });
+    expect(f.preReads).toEqual([]);
+    expect(f.marketplacePush.requests[0]).not.toHaveProperty("marketplaceSync");
+    expect(f.marketplacePush.requests[0]).toMatchObject({ existingExternalListingId: "110000000001" });
+  });
+
+  it("never relists a listing the vendor ended: the item is skipped quietly, nothing is refreshed or sent, and no email goes", async () => {
+    const f = setup({ preRead: marketplaceSyncError(MARKETPLACE_SYNC_CODES.endedOnEbay, "ended", "permanent") });
+    const result = await f.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "sync-push-003" });
+
+    expect(f.order).toEqual(["pre_read"]);
+    expect(f.marketplacePush.requests).toEqual([]);
+    expect(f.repository.skipInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_LISTING_ENDED_ON_EBAY", workerId: "worker-1" })]);
+    expect(f.repository.failInputs).toEqual([]);
+    expect(f.repository.items[0]!.status).toBe("cancelled");
+    expect(result.job.status).toBe("completed");
+    expect(f.notificationSender.sent).toEqual([]);
+    expect(f.logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_LISTING_ENDED_ON_EBAY",
+      context: expect.objectContaining({ outcome: "skipped", listingId: 100 }) }));
+  });
+
+  it.each([
+    [MARKETPLACE_SYNC_CODES.quantityPending, "pre_read"],
+    [MARKETPLACE_SYNC_CODES.adoptionRetry, "pre_read"],
+    [MARKETPLACE_SYNC_CODES.changedDuringPush, "push"],
+  ])("pauses the item with nothing written when %s", async (code, where) => {
+    const refusal = marketplaceSyncError(code, "wait", "transient");
+    const f = setup(where === "pre_read" ? { preRead: refusal } : {});
+    if (where === "push") f.marketplacePush.errors = [refusal];
+    const result = await f.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "sync-push-004" });
+
+    expect(f.repository.pauseInputs).toEqual([expect.objectContaining({ code, reason: "marketplace_sync" })]);
+    expect(f.repository.failInputs).toEqual([]);
+    expect(f.repository.items[0]!.status).toBe("queued");
+    expect(result.job.status).toBe("queued");
+    if (where === "pre_read") expect(f.marketplacePush.requests).toEqual([]);
+  });
+
+  // Review OR-4 (owner rules 1 and 7): a lower eBay number waiting for the order poll is no failure and no notice.
+  it.each([
+    ["the item's pause limit", { transientPauses: 5 }, 0],
+    ["the job's pause breaker", {}, 6],
+  ])("stops the item quietly when a lower number still waits for the order poll at %s: no failure, no email, no breaker",
+    async (_name, result, jobPauses) => {
+      const f = setup({ preRead: marketplaceSyncError(MARKETPLACE_SYNC_CODES.quantityPending, "wait", "transient"), result });
+      f.repository.job = { ...f.repository.job, consecutivePauseCount: jobPauses };
+      const outcome = await f.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "sync-push-006" });
+
+      expect(f.marketplacePush.requests).toEqual([]);
+      expect(f.repository.skipInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_MARKETPLACE_SYNC_QUANTITY_PENDING",
+        message: "This size was not sent this time: eBay's newest orders were still loading, so its quantity could not be checked yet.",
+        workerId: "worker-1" })]);
+      expect(f.repository.failInputs).toEqual([]);
+      expect(f.repository.tripInputs).toEqual([]);
+      expect(f.repository.items[0]!.status).toBe("cancelled");
+      expect(outcome.job.status).toBe("completed");
+      expect(f.notificationSender.sent).toEqual([]);
+      expect(f.logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_MARKETPLACE_SYNC_QUANTITY_PENDING",
+        context: expect.objectContaining({ outcome: "skipped", listingId: 100 }) }));
+    });
+
+  it("fails, never retried as is, a listing the pre-read cannot prove is Card Shellz's", async () => {
+    const f = setup({ preRead: marketplaceSyncError(MARKETPLACE_SYNC_CODES.identityUnproven, "not ours", "permanent") });
+    await f.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "sync-push-005" });
+    expect(f.marketplacePush.requests).toEqual([]);
+    expect(f.repository.failInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_LISTING_MARKETPLACE_IDENTITY_UNPROVEN", retryable: false })]);
+  });
+});
+
+function parseIntent(result: Record<string, unknown> | null): DropshipMarketplaceListingIntent {
+  return (result as { listingIntent: DropshipMarketplaceListingIntent }).listingIntent;
+}
+
 class FakeMarketplacePushProvider implements DropshipMarketplaceListingPushProvider {
   requests: Parameters<DropshipMarketplaceListingPushProvider["pushListing"]>[0][] = [];
   error: Error | null = null;
@@ -1035,6 +1175,15 @@ class FakeListingPushWorkerRepository implements DropshipListingPushWorkerReposi
       errorCode: input.code,
       errorMessage: input.message,
     };
+    return this.items[index];
+  }
+
+  skipInputs: Array<Parameters<DropshipListingPushWorkerRepository["skipItem"]>[0]> = [];
+
+  async skipItem(input: Parameters<DropshipListingPushWorkerRepository["skipItem"]>[0]): Promise<DropshipListingPushWorkerItemRecord> {
+    this.skipInputs.push(input);
+    const index = this.items.findIndex((item) => item.itemId === input.item.itemId);
+    this.items[index] = { ...this.items[index], status: "cancelled", errorCode: input.code, errorMessage: input.message };
     return this.items[index];
   }
 

@@ -1,3 +1,4 @@
+import { DropshipError } from "./errors";
 /**
  * Whether an order line may be taken on a vendor listing, judged by the
  * listing's Echelon status (step 1 plan S2-5 §4.7, SAFETY16, D30).
@@ -16,9 +17,11 @@
  * this and is unchanged, so an item Card Shellz no longer offers is still
  * refused.
  *
- * `ended` is refused here. Ending listings arrives with PR C, which adds the
- * rule for orders placed before the end (§6.7) together with the end time it
- * needs; no `ended_at` exists before then.
+ * `ended` is refused, except for an order placed before the end (eBay
+ * sync-back, plan v4 §7.3 step 8): sync-back writes `ended` with
+ * `marketplace_ended_at`, the time it saw the end. That time is later than
+ * the real end, so every order genuinely placed while the listing was live
+ * passes; an order placed after it is refused as before.
  *
  * This rule builds on the live-status rule (domain/listing-live-status), the
  * one definition of the statuses that always take orders and of a
@@ -58,7 +61,7 @@ export function isPushProgressListingOnMarketplace(input: ListingOrderAcceptabil
 }
 
 export type ListingOrderAcceptability =
-  | { acceptable: true; reason: "listing_orderable" | "listing_live_on_marketplace" }
+  | { acceptable: true; reason: "listing_orderable" | "listing_live_on_marketplace" | "ordered_before_listing_ended" }
   | { acceptable: false; reason: "listing_ended" | "listing_not_on_marketplace" | "listing_status_not_orderable" };
 
 export interface ListingOrderAcceptabilityInput {
@@ -66,6 +69,10 @@ export interface ListingOrderAcceptabilityInput {
   status: string;
   /** `dropship_vendor_listings.external_listing_id` as stored. */
   externalListingId: string | null;
+  /** `dropship_vendor_listings.marketplace_ended_at`: when sync-back saw the listing ended; null otherwise. */
+  marketplaceEndedAt?: Date | null;
+  /** The order's own time (the intake's `orderedAt`); null when the marketplace sent none. */
+  orderedAt?: Date | null;
 }
 
 export function decideListingOrderAcceptability(input: ListingOrderAcceptabilityInput): ListingOrderAcceptability {
@@ -74,7 +81,7 @@ export function decideListingOrderAcceptability(input: ListingOrderAcceptability
     return { acceptable: true, reason: "listing_orderable" };
   }
   if (input.status === "ended") {
-    return { acceptable: false, reason: "listing_ended" };
+    return endedBeforeOrder(input) ? { acceptable: false, reason: "listing_ended" } : { acceptable: true, reason: "ordered_before_listing_ended" };
   }
   if (PUSH_PROGRESS_LISTING_STATUSES.has(input.status)) {
     return isPushProgressListingOnMarketplace(input)
@@ -83,6 +90,54 @@ export function decideListingOrderAcceptability(input: ListingOrderAcceptability
   }
   // `not_listed`, `preview_ready` and any value outside the CHECK (0086:284).
   return { acceptable: false, reason: "listing_status_not_orderable" };
+}
+
+/** An ended listing refuses the order unless both times are known and the order came first (no time, no proof). */
+function endedBeforeOrder(input: ListingOrderAcceptabilityInput): boolean {
+  const endedAt = input.marketplaceEndedAt ?? null;
+  const orderedAt = input.orderedAt ?? null;
+  if (endedAt === null || orderedAt === null) return true;
+  return orderedAt.getTime() > endedAt.getTime();
+}
+
+/**
+ * A line sold from a multi-variation listing, as its marketplace's mapper
+ * marked it (`marketplaceVariation`, review ARCH-10: the eBay mapper sets it
+ * for a line with eBay's legacyVariationId, dropship-ebay-order-intake.mapper.ts
+ * buildEbayOrderLine). Card Shellz lists each size on its own, so such a line
+ * is not one of its listings: refused (plan v4 §7.3 step 7, SB20), permanent
+ * and for review. A SKU that differs without the flag ships as today.
+ */
+export function isUnsupportedMarketplaceVariationLine(line: { marketplaceVariation?: boolean | null }): boolean {
+  return line.marketplaceVariation === true;
+}
+
+/** The refusal of a variation line (permanent: no retry makes it one of Card Shellz's listings). */
+export const ORDER_LINE_VARIATION_UNSUPPORTED_CODE = "DROPSHIP_ORDER_LINE_VARIATION_UNSUPPORTED";
+// PROPOSED (sync-back): kept on the intake as its refusal and shown to the vendor.
+export const ORDER_LINE_VARIATION_UNSUPPORTED_MESSAGE =
+  "This order has an item sold from an eBay listing with several sizes or options. Card Shellz lists each size on its own, so it can't fill this order.";
+
+/**
+ * The one variation refusal both order processing and acceptance run before
+ * reading listings or money: the first variation line refuses the whole
+ * order, permanently (never retried).
+ */
+export function assertNoMarketplaceVariationLines(
+  lines: readonly { marketplaceVariation?: boolean | null; externalListingId?: string | null }[],
+  context: Readonly<Record<string, unknown>>,
+): void {
+  const lineIndex = lines.findIndex(isUnsupportedMarketplaceVariationLine);
+  if (lineIndex < 0) return;
+  throw new DropshipError(ORDER_LINE_VARIATION_UNSUPPORTED_CODE, ORDER_LINE_VARIATION_UNSUPPORTED_MESSAGE,
+    { ...context, lineIndex, externalListingId: lines[lineIndex]!.externalListingId ?? null, retryable: false });
+}
+
+/** An intake's order time (normalizedPayload.orderedAt); null when it is missing or not a time (the listing rule then has no proof). */
+export function parseIntakeOrderedAt(value: string | undefined): Date | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 /** True when the new push-progress rule (not the long-standing one) admitted the order. */

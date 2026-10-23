@@ -36,7 +36,32 @@ export function isReservedConversionKey(key: string): boolean {
   return RESERVED_CONVERSION_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
-/** A vendor's request key schema that also refuses the reserved prefixes (a `custom` issue on the key). */
+/**
+ * eBay sync-back's system keys (sync-back plan v4, SB34): the price and
+ * policy revisions it writes when it keeps a vendor's eBay change, its
+ * quantity restore push jobs and its notice batches all start with this. They
+ * share the vendor's `UNIQUE (vendor_id, idempotency_key)` spaces, and every
+ * part after the prefix is a public fact (a listing id, a price, a revision
+ * id), so a vendor key with the prefix could take the system's one key for a
+ * change and leave it refused for good. Refused by every vendor key schema
+ * that reaches those tables.
+ */
+export const MARKETPLACE_SYNC_KEY_PREFIX = "ebay-sync:";
+/** // PROPOSED (sync-back): the refusal's issue message, shown to the vendor (the route answers it in its own 400 shape). */
+export const RESERVED_MARKETPLACE_SYNC_KEY_MESSAGE = "This key is kept for Card Shellz's own eBay updates.";
+
+/** True for a key only eBay sync-back may use. Leading spaces are ignored, as the push job route trims; case-sensitive. */
+export function isReservedMarketplaceSyncKey(key: string): boolean {
+  return key.trimStart().startsWith(MARKETPLACE_SYNC_KEY_PREFIX);
+}
+
+/**
+ * A vendor's request key schema that also refuses the reserved prefixes (a
+ * `custom` issue on the key): a conversion's, and eBay sync-back's.
+ */
 export function refusingReservedConversionKeys<T extends z.ZodType<string, z.ZodTypeDef, string>>(schema: T): z.ZodEffects<T, string, string> {
-  return schema.refine((key) => !isReservedConversionKey(key), RESERVED_CONVERSION_KEY_MESSAGE);
+  return schema.superRefine((key, context) => {
+    if (isReservedConversionKey(key)) context.addIssue({ code: "custom", message: RESERVED_CONVERSION_KEY_MESSAGE });
+    else if (isReservedMarketplaceSyncKey(key)) context.addIssue({ code: "custom", message: RESERVED_MARKETPLACE_SYNC_KEY_MESSAGE });
+  });
 }

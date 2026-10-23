@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DropshipError } from "../../domain/errors";
 import {
   DATABASE_CONSTRAINT_VIOLATION_CODE,
@@ -1012,7 +1012,118 @@ describe("DropshipOrderProcessingService", () => {
   });
 });
 
+describe("stuck orders: bounded retries (eBay sync-back plan v4 §7.1)", () => {
+  function serviceFailingWith(error: unknown, attemptsBefore: number, logger = recordingLogger()) {
+    const repository = new FakeProcessingRepository(makeClaim({ intake: { ...baseIntake(), processingAttemptCount: attemptsBefore } }));
+    const notificationSender = new FakeNotificationSender();
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: { replayQuoteSnapshot: unexpectedQuoteReplay, quote: async () => { throw error; } },
+      orderAcceptance: new FakeAcceptanceService(),
+      notificationSender,
+      clock: { now: () => now },
+      logger,
+    });
+    return { service, repository, notificationSender, logger };
+  }
+  const run = (service: DropshipOrderProcessingService) =>
+    service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
+  const unexpected = new Error("connection reset");
+
+  it("waits 1 minute after a first passing failure and says so at WARN", async () => {
+    const { service, repository, logger } = serviceFailingWith(unexpected, 0);
+    await run(service);
+    expect(repository.failure).toMatchObject({ status: "retrying", attemptCount: 1, nextAttemptAt: new Date(now.getTime() + 60_000) });
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits 5 minutes after the second and logs the repeat at DEBUG", async () => {
+    const { service, repository, logger } = serviceFailingWith(unexpected, 1);
+    await run(service);
+    expect(repository.failure).toMatchObject({ status: "retrying", attemptCount: 2, nextAttemptAt: new Date(now.getTime() + 5 * 60_000) });
+    expect(logger.debug).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("stops for review at the 64th failure: failed, a critical notice in plain words, ERROR", async () => {
+    const { service, repository, notificationSender, logger } = serviceFailingWith(unexpected, 63);
+    const result = await run(service);
+    expect(result).toMatchObject({ outcome: "failed", failureCode: "DROPSHIP_ORDER_PROCESSING_RETRIES_EXHAUSTED", retryable: false });
+    expect(repository.failure).toMatchObject({ status: "failed", attemptCount: 64, nextAttemptAt: null,
+      errorCode: "DROPSHIP_ORDER_PROCESSING_RETRIES_EXHAUSTED", retryable: false });
+    // ARCH-12: the vendor sees the reason (rejection_reason); the last failure's internal code stays on the audit row only.
+    expect(repository.failure?.errorMessage).not.toContain("DROPSHIP_");
+    expect(repository.failure).toMatchObject({ lastErrorCode: "DROPSHIP_ORDER_PROCESSING_UNEXPECTED_ERROR", lastErrorMessage: "connection reset" });
+    expect(notificationSender.sent[0]).toMatchObject({ eventType: "dropship_order_processing_failed", critical: true });
+    expect(notificationSender.sent[0]?.message).not.toContain("DROPSHIP_");
+    expect(logger.error).toHaveBeenCalledTimes(1);
+  });
+
+  it("never retries a permanent failure: failed with no next attempt", async () => {
+    const { service, repository } = serviceFailingWith(new DropshipError("DROPSHIP_X", "No.", { retryable: false }), 4);
+    await run(service);
+    expect(repository.failure).toMatchObject({ status: "failed", attemptCount: 5, nextAttemptAt: null, errorCode: "DROPSHIP_X" });
+  });
+});
+
 describe("dropship order processing helpers", () => {
+  it("classifies a canonical whole-order claim shortfall as a passing shortfall (FF-2: it was a retryable UNEXPECTED_ERROR forever)", () => {
+    const shortfall = Object.assign(new Error("Dropship acceptance requires a complete whole-order inventory claim."), {
+      name: "WmsRequiredInventoryClaimError", code: "WMS_REQUIRED_INVENTORY_CLAIM_FAILED", shortfall: true,
+      context: { failed: [{ sku: "SKU-1" }], reserved: 0, promised: 0 },
+    });
+    expect(classifyOrderProcessingError(shortfall)).toMatchObject({ code: "DROPSHIP_ORDER_INVENTORY_SHORTFALL", retryable: true,
+      classification: "transient" });
+  });
+
+  it("ARCH-6: reads a whole-order claim shortfall from OMS's published flag, never from the error's context shape", () => {
+    const flagged = Object.assign(new Error("claim short"), {
+      name: "WmsRequiredInventoryClaimError", code: "WMS_REQUIRED_INVENTORY_CLAIM_FAILED", shortfall: true, context: { wmsOrderId: 1 },
+    });
+    expect(classifyOrderProcessingError(flagged)).toMatchObject({ code: "DROPSHIP_ORDER_INVENTORY_SHORTFALL", classification: "transient" });
+    const shaped = Object.assign(new Error("warehouse mismatch"), {
+      name: "WmsRequiredInventoryClaimError", code: "WMS_REQUIRED_INVENTORY_CLAIM_FAILED", shortfall: false,
+      context: { failed: [{ sku: "SKU-1" }], reserved: 0 },
+    });
+    expect(classifyOrderProcessingError(shaped)).toMatchObject({ code: "DROPSHIP_ORDER_INVENTORY_CLAIM_FAILED", classification: "permanent" });
+  });
+
+  it("ARCH-5: the production logger has a debug level, through the platform logger (suppressed at the default level)", async () => {
+    const platform = await import("../../../../platform/observability/logger");
+    const debug = vi.spyOn(platform.logger, "debug").mockImplementation(() => undefined);
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      const { makeDropshipOrderProcessingLogger } = await import("../../application/dropship-order-processing-service");
+      const production = makeDropshipOrderProcessingLogger();
+      expect(typeof production.debug).toBe("function");
+      production.debug?.({ code: "DROPSHIP_ORDER_PROCESSING_FAILED", message: "repeat", context: { intakeId: 1 } });
+      expect(debug).toHaveBeenCalledWith("DROPSHIP_ORDER_PROCESSING_FAILED", expect.objectContaining({ message: "repeat",
+        context: { intakeId: 1 } }));
+      expect(info).not.toHaveBeenCalled();
+    } finally {
+      debug.mockRestore();
+      info.mockRestore();
+    }
+  });
+
+  it("classifies the legacy shortfall codes as the same passing shortfall", () => {
+    for (const code of ["DROPSHIP_ORDER_INVENTORY_SHORTFALL", "DROPSHIP_ORDER_INVENTORY_RESERVATION_FAILED"]) {
+      expect(classifyOrderProcessingError(new DropshipError(code, "Short."))).toMatchObject({
+        code: "DROPSHIP_ORDER_INVENTORY_SHORTFALL", retryable: true, classification: "transient" });
+    }
+  });
+
+  it("classifies any other whole-order claim refusal as permanent, and a failed claim with a failed give-back as fatal", () => {
+    const refused = Object.assign(new Error("Dropship acceptance WMS order does not match the frozen quote warehouse."), {
+      name: "WmsRequiredInventoryClaimError", code: "WMS_REQUIRED_INVENTORY_CLAIM_FAILED", shortfall: false,
+      context: { wmsOrderId: 1, failed: [{ sku: "SKU-1" }] },
+    });
+    expect(classifyOrderProcessingError(refused)).toMatchObject({ code: "DROPSHIP_ORDER_INVENTORY_CLAIM_FAILED", retryable: false,
+      classification: "permanent" });
+    expect(classifyOrderProcessingError(new AggregateError([new Error("a"), new Error("b")], "both failed"))).toMatchObject({
+      code: "DROPSHIP_ORDER_INVENTORY_CLAIM_COMPENSATION_FAILED", retryable: false, classification: "fatal" });
+  });
+
   it.each(["23000", "23502", "23503", "23505", "23514", "23P01"])(
     "classifies SQLSTATE %s, an integrity constraint violation, as permanent",
     (code) => {
@@ -1020,6 +1131,7 @@ describe("dropship order processing helpers", () => {
         code: DATABASE_CONSTRAINT_VIOLATION_CODE,
         message: "refused",
         retryable: false,
+        classification: "permanent",
       });
     },
   );
@@ -1031,6 +1143,7 @@ describe("dropship order processing helpers", () => {
         code: DATABASE_QUERY_INVALID_CODE,
         message: "refused",
         retryable: false,
+        classification: "permanent",
       });
     },
   );
@@ -1049,17 +1162,19 @@ describe("dropship order processing helpers", () => {
       code: "DROPSHIP_ORDER_PROCESSING_UNEXPECTED_ERROR",
       message: "try again",
       retryable: true,
+      classification: "transient",
     });
   });
 
   it("leaves a DropshipError's own retryable flag in charge, and classifies non-Error throws", () => {
     expect(classifyOrderProcessingError(
       new DropshipError("DROPSHIP_X", "Refused.", { retryable: false, code: "40001" }),
-    )).toEqual({ code: "DROPSHIP_X", message: "Refused.", retryable: false });
+    )).toEqual({ code: "DROPSHIP_X", message: "Refused.", retryable: false, classification: "permanent" });
     expect(classifyOrderProcessingError("boom")).toEqual({
       code: "DROPSHIP_ORDER_PROCESSING_UNEXPECTED_ERROR",
       message: "boom",
       retryable: true,
+      classification: "transient",
     });
     expect(classifyOrderProcessingError(null)).toMatchObject({ retryable: true });
   });
@@ -1381,6 +1496,7 @@ function baseIntake(): DropshipOrderProcessingIntakeRecord {
     externalOrderId: "EXT-1",
     status: "processing",
     paymentHoldExpiresAt: null,
+    processingAttemptCount: 0,
     normalizedPayload: {
       lines: [{
         productVariantId: 101,
@@ -1425,3 +1541,7 @@ const noopLogger = {
   warn: () => undefined,
   error: () => undefined,
 };
+
+function recordingLogger() {
+  return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+}

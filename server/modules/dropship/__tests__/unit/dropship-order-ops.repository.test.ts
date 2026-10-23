@@ -427,6 +427,9 @@ describe("PgDropshipOrderOpsRepository", () => {
       String(call[0]).includes("UPDATE dropship.dropship_order_intake"),
     );
     expect(updateCall?.[1]).toEqual([42, now]);
+    // A person's retry starts the bounded retries again (eBay sync-back plan v4 §7.1).
+    expect(String(updateCall?.[0])).toContain("processing_attempt_count = 0");
+    expect(String(updateCall?.[0])).toContain("next_processing_attempt_at = NULL");
 
     const auditCall = query.mock.calls.find((call) =>
       String(call[0]).includes("INSERT INTO dropship.dropship_audit_events"),

@@ -479,12 +479,15 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
         );
       }
 
+      // A person's retry starts the bounded retries again (plan v4 §7.1): the count and the wait are cleared.
       const updated = await client.query<ActionIntakeRow>(
         `UPDATE dropship.dropship_order_intake
          SET status = 'retrying',
              payment_hold_expires_at = NULL,
              rejection_reason = NULL,
              cancellation_status = NULL,
+             processing_attempt_count = 0,
+             next_processing_attempt_at = NULL,
              updated_at = $2
          WHERE id = $1
          RETURNING id, vendor_id, store_connection_id, external_order_id, status,

@@ -16,6 +16,8 @@ export async function installPublicationSelectionWorkFixture(pool: Pick<Pool, "q
     ALTER TABLE dropship.dropship_store_connections ADD COLUMN IF NOT EXISTS provider_environment text;
     CREATE TABLE IF NOT EXISTS dropship.dropship_vendor_listings(id integer,vendor_id integer,store_connection_id integer,product_variant_id integer,
       platform text,status text,external_listing_id text,external_offer_id text,updated_at timestamptz);
+    -- The listing owner's quantity limit the Dropship selection reader reads (eBay sync-back migration *_dropship_ebay_sync_back.sql).
+    ALTER TABLE dropship.dropship_vendor_listings ADD COLUMN IF NOT EXISTS vendor_quantity_limit integer;
     CREATE TABLE IF NOT EXISTS dropship.dropship_listing_push_jobs(id integer,vendor_id integer,store_connection_id integer,job_type text,status text);
     CREATE TABLE IF NOT EXISTS dropship.dropship_listing_push_job_items(id integer,job_id integer,listing_id integer,product_variant_id integer,
       action text,status text,result jsonb,created_at timestamptz);`);
