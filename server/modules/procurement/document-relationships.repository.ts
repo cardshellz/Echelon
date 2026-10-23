@@ -65,7 +65,8 @@ export function createDocumentRelationshipRepository(database: RelationshipDatab
           FROM procurement.receiving_lines rl WHERE rl.receiving_order_id ${ids(receipts.map(row => costInteger(row.id, "receiptId", 1)))} ORDER BY rl.id`);
         const poLineIds = [...new Set([...shipmentLines, ...receiptLines].flatMap(row => row.purchaseLineId === null ? [] : [costInteger(row.purchaseLineId, "purchaseLineId", 1)]))];
         const purchaseLines = await rows(tx, sql`
-          SELECT id,purchase_order_id AS "purchaseId",line_number AS "lineNumber",sku,product_name AS product,order_qty AS "orderedPieces"
+          SELECT id,purchase_order_id AS "purchaseId",line_number AS "lineNumber",sku,product_name AS product,order_qty AS "orderedPieces",
+            COALESCE(received_qty,0) AS "receivedPieces",COALESCE(cancelled_qty,0) AS "cancelledPieces"
           FROM procurement.purchase_order_lines WHERE id ${ids(poLineIds)}
             OR ${root.kind === "purchase" ? sql`purchase_order_id=${root.id}` : sql`false`} ORDER BY purchase_order_id,line_number,id`);
         const poIds = [...new Set([...shipmentLines, ...receipts, ...purchaseLines].flatMap(row => row.purchaseId === null ? [] : [costInteger(row.purchaseId, "purchaseId", 1)]))];

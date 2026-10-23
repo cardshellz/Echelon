@@ -1,4 +1,6 @@
 import { DocumentRelationships, loadDocumentRelationships, relationshipQueryKey } from "@/features/purchasing/DocumentRelationships";
+import { projectPurchaseLineShipping, type PurchaseLineShipping } from "@shared/procurement/purchase-line-shipping";
+import { PoLineShipmentLinks, PoLineShippingQuantity } from "@/features/purchasing/PoLineShipping";
 import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
@@ -1293,7 +1295,7 @@ export default function PurchaseOrderDetail() {
     enabled: showAddLineDialog && !!po?.vendorId,
   });
 
-  const { data: relatedDocuments } = useQuery({
+  const relationshipsQuery = useQuery({
     queryKey: relationshipQueryKey({ kind: "purchase", id: poId ?? 0 }),
     queryFn: ({ signal }) => {
       if (poId === null) throw new Error("A valid purchase order is required to load document links.");
@@ -1301,6 +1303,9 @@ export default function PurchaseOrderDetail() {
     },
     enabled: !!poId,
   });
+  const relatedDocuments = relationshipsQuery.data;
+  const shippingByLine = React.useMemo(() => relationshipsQuery.isSuccess && relatedDocuments
+    ? projectPurchaseLineShipping(relatedDocuments) : new Map<number, PurchaseLineShipping>(), [relatedDocuments, relationshipsQuery.isSuccess]);
   const linkedShipments = relatedDocuments?.shipments ?? [];
 
   const { data: receiveOptions, isLoading: receiveOptionsLoading } = useQuery<any>({
@@ -3310,7 +3315,7 @@ export default function PurchaseOrderDetail() {
       )}
 
       {/* Phase 2: Tabs + Quick Actions side rail */}
-      <div className="flex flex-col md:flex-row gap-4 items-start">
+      <div className={`flex flex-col ${activeTab === "lines" ? "2xl:flex-row" : "md:flex-row"} gap-4 items-start`}>
       <div className="flex-1 min-w-0 w-full">
       {/* Tabs: Lines, Receipts, History */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
@@ -3332,7 +3337,14 @@ export default function PurchaseOrderDetail() {
         </TabsContent>
 
         {/* ── Lines Tab ── */}
-        <TabsContent value="lines" className="space-y-4">
+        <TabsContent value="lines" className="@container/po-lines space-y-4">
+          {lines.length > 0 && <p className="text-xs text-muted-foreground">
+            Quantities are pieces. Shipped counts departed shipments. Still to ship excludes cancellations and includes planned shipments. Received is the posted receipt count.
+          </p>}
+          {relationshipsQuery.isError && <div role="alert" className="rounded-md border border-destructive p-3 text-sm">
+            <p>Shipment progress could not be loaded. Shipped and still-to-ship quantities are unavailable.</p>
+            <Button variant="outline" size="sm" className="mt-2" onClick={() => void relationshipsQuery.refetch()}>Retry shipment progress</Button>
+          </div>}
           {lines.length > 0 && <div className="text-xs text-muted-foreground" role="status">
             {landedCosts.status === "complete"
               ? <>Landed costs include the supplier line amount and its allocated shipment charges. Per-piece rates are rounded; line totals keep exact cents.
@@ -3348,7 +3360,7 @@ export default function PurchaseOrderDetail() {
           )}
 
           {/* Mobile cards */}
-          <div className="md:hidden space-y-3">
+          <div className="@4xl/po-lines:hidden space-y-3">
             {lines.length === 0 ? (
               <Card>
                 <CardContent className="p-4 text-center text-muted-foreground">
@@ -3359,8 +3371,11 @@ export default function PurchaseOrderDetail() {
               lines.map((line: any) => {
                 const canEditThisLine = canEditLine(line);
                 const isEditingSkuMobile = canEditThisLine && editingLineId === line.id && editingLineField === "sku";
+                const shipping = shippingByLine.get(line.id);
+                const orderedPieces = shipping?.line.orderedPieces ?? line.orderQty ?? 0;
+                const receivedPieces = shipping?.line.receivedPieces ?? line.receivedQty ?? 0;
                 return (
-                <Card key={line.id}>
+                <Card key={line.id} data-testid={`po-line-${line.id}`} className={shippingByLine.get(line.id)?.shipments.some(shipment => shipment.shipmentLineId === procurementNavigation.record?.relationship?.line) ? "border-primary" : undefined}>
                   <CardContent className="p-3">
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
@@ -3405,9 +3420,7 @@ export default function PurchaseOrderDetail() {
                             onClick={() => canEditThisLine && startPricingEdit(line)}
                             title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
                           >
-                            {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
-                              ? `${(line.orderQty || 0).toLocaleString()} pcs (${Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)`
-                              : `Qty: ${line.receivedQty || 0}/${line.orderQty}`}
+                            Ordered: {orderedPieces.toLocaleString()} pcs
                           </span>
                           <span
                             className={canEditThisLine ? "cursor-pointer underline decoration-dotted" : ""}
@@ -3418,6 +3431,14 @@ export default function PurchaseOrderDetail() {
                           </span>
                           <span className="font-medium">Supplier {formatCents(line.lineTotalCents)}</span>
                         </div>
+                        {(!line.lineType || line.lineType === "product") && <>
+                          <dl className="grid grid-cols-3 gap-2 my-3 text-sm" aria-label="Shipment progress">
+                            <div><dt className="text-xs text-muted-foreground">Shipped</dt><dd data-testid="shipped-pieces"><PoLineShippingQuantity progress={shippingByLine.get(line.id)} kind="shipped" loading={relationshipsQuery.isPending} /></dd></div>
+                            <div><dt className="text-xs text-muted-foreground">Still to ship</dt><dd data-testid="remaining-pieces"><PoLineShippingQuantity progress={shippingByLine.get(line.id)} kind="remaining" loading={relationshipsQuery.isPending} /></dd></div>
+                            <div><dt className="text-xs text-muted-foreground">Received</dt><dd data-testid="received-pieces" className="tabular-nums">{receivedPieces.toLocaleString()}</dd></div>
+                          </dl>
+                          <PoLineShipmentLinks progress={shippingByLine.get(line.id)} loading={relationshipsQuery.isPending} navigation={procurementNavigation} poNumber={po.poNumber} />
+                        </>}
                         {formatStoredLineQuote(line) && <div className="mt-1 text-xs text-muted-foreground">
                           Vendor quote: {formatStoredLineQuote(line)}
                         </div>}
@@ -3451,19 +3472,19 @@ export default function PurchaseOrderDetail() {
           </div>
 
           {/* Desktop table */}
-          <Card className="hidden md:block">
+          <Card className="hidden @4xl/po-lines:block">
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12">#</TableHead>
-                  <TableHead>SKU</TableHead>
-                  <TableHead>Product</TableHead>
-                  <TableHead>Vendor SKU</TableHead>
+                  <TableHead>Product / SKU</TableHead>
                   <TableHead className="text-right">Ordered</TableHead>
+                  <TableHead className="text-right">Shipped</TableHead>
+                  <TableHead className="text-right">Still to ship</TableHead>
                   <TableHead className="text-right">Received</TableHead>
+                  <TableHead>Shipments</TableHead>
                   <TableHead className="text-right">Cost / piece</TableHead>
                   <TableHead className="text-right">Total landed cost</TableHead>
-                  <TableHead>Status</TableHead>
                   {canEditLines && <TableHead className="w-12"></TableHead>}
                 </TableRow>
               </TableHeader>
@@ -3478,10 +3499,13 @@ export default function PurchaseOrderDetail() {
                   lines.map((line: any) => {
                     const canEditThisLine = canEditLine(line);
                     const isEditingSku = canEditThisLine && editingLineId === line.id && editingLineField === "sku";
+                    const shipping = shippingByLine.get(line.id);
+                    const orderedPieces = shipping?.line.orderedPieces ?? line.orderQty ?? 0;
+                    const receivedPieces = shipping?.line.receivedPieces ?? line.receivedQty ?? 0;
                     return (
-                    <TableRow key={line.id}>
+                    <TableRow key={line.id} data-testid={`po-line-${line.id}`} className={shippingByLine.get(line.id)?.shipments.some(shipment => shipment.shipmentLineId === procurementNavigation.record?.relationship?.line) ? "bg-primary/5" : undefined}>
                       <TableCell className="text-muted-foreground">{line.lineNumber}</TableCell>
-                      <TableCell className="font-mono">
+                      <TableCell className="max-w-[200px]">
                         {isEditingSku ? (
                           <div className="space-y-1">
                             {skuVariants.length === 0 ? (
@@ -3507,15 +3531,16 @@ export default function PurchaseOrderDetail() {
                           </div>
                         ) : (
                           <span
-                            className={canEditThisLine ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
+                            className={`font-mono text-xs ${canEditThisLine ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}`}
                             onClick={() => canEditThisLine && startSkuEdit(line)}
                           >
                             {line.sku || "—"}
                           </span>
                         )}
+                        <p className="truncate" title={line.productName}>{line.productName || "—"}</p>
+                        {line.vendorSku && <p className="text-xs text-muted-foreground truncate" title={line.vendorSku}>Vendor SKU: {line.vendorSku}</p>}
+                        <Badge variant="outline" className="text-xs mt-1">{line.status}</Badge>
                       </TableCell>
-                      <TableCell className="max-w-[200px] truncate">{line.productName || "—"}</TableCell>
-                      <TableCell className="font-mono text-xs">{line.vendorSku || "—"}</TableCell>
                       <TableCell className="text-right">
                         <span
                           className={canEditThisLine ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
@@ -3523,17 +3548,26 @@ export default function PurchaseOrderDetail() {
                           title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
                         >
                           {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
-                            ? <>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></>
-                            : line.orderQty}
+                            ? <>{orderedPieces.toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil(orderedPieces / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></>
+                            : orderedPieces.toLocaleString()}
                         </span>
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className="text-right" data-testid="shipped-pieces">
+                        {(!line.lineType || line.lineType === "product") ? <PoLineShippingQuantity progress={shippingByLine.get(line.id)} kind="shipped" loading={relationshipsQuery.isPending} /> : "—"}
+                      </TableCell>
+                      <TableCell className="text-right" data-testid="remaining-pieces">
+                        {(!line.lineType || line.lineType === "product") ? <PoLineShippingQuantity progress={shippingByLine.get(line.id)} kind="remaining" loading={relationshipsQuery.isPending} /> : "—"}
+                      </TableCell>
+                      <TableCell className="text-right" data-testid="received-pieces">
                         {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
-                          ? <span>{(line.receivedQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.receivedQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></span>
-                          : line.receivedQty || 0}
+                          ? <span>{receivedPieces.toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil(receivedPieces / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></span>
+                          : receivedPieces.toLocaleString()}
                         {(line.damagedQty || 0) > 0 && (
                           <span className="text-red-500 ml-1">({line.damagedQty} dmg)</span>
                         )}
+                      </TableCell>
+                      <TableCell className="min-w-[170px] max-w-[240px]">
+                        {(!line.lineType || line.lineType === "product") ? <PoLineShipmentLinks progress={shippingByLine.get(line.id)} loading={relationshipsQuery.isPending} navigation={procurementNavigation} poNumber={po.poNumber} /> : "—"}
                       </TableCell>
                       <TableCell className="text-right font-mono">
                         <span
@@ -3549,9 +3583,6 @@ export default function PurchaseOrderDetail() {
                         <PoLineLandedCost line={landedCostByLine.get(line.id)} currency={landedCurrency} kind="unit" />
                       </TableCell>
                       <TableCell className="text-right"><PoLineLandedCost line={landedCostByLine.get(line.id)} currency={landedCurrency} kind="total" supplierCents={line.lineTotalCents} /></TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className="text-xs">{line.status}</Badge>
-                      </TableCell>
                       {canEditThisLine && (
                         <TableCell>
                           <Button
@@ -3957,7 +3988,7 @@ export default function PurchaseOrderDetail() {
       </div>{/* end main column */}
 
       {/* ── Quick Actions Side Rail (Phase 2) ── */}
-      <div className={activeTab === "lifecycle" ? "hidden" : "w-full md:w-64 shrink-0 space-y-3"}>
+      <div className={activeTab === "lifecycle" ? "hidden" : `w-full ${activeTab === "lines" ? "2xl:w-64" : "md:w-64"} shrink-0 space-y-3`}>
         <Card role="region" aria-label="Purchase order actions">
           <CardHeader className="pb-2 pt-3 px-4">
             <CardTitle className="text-sm">Quick actions</CardTitle>
