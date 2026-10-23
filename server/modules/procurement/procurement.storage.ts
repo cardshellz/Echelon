@@ -1237,7 +1237,8 @@ export const procurementMethods: IProcurementStorage = {
     const subIds = await db
       .selectDistinct({ id: inboundShipmentLines.inboundShipmentId })
       .from(inboundShipmentLines)
-      .where(eq(inboundShipmentLines.purchaseOrderId, purchaseOrderId));
+      .leftJoin(purchaseOrderLines, eq(purchaseOrderLines.id, inboundShipmentLines.purchaseOrderLineId))
+      .where(or(eq(inboundShipmentLines.purchaseOrderId, purchaseOrderId), eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId)));
     if (subIds.length === 0) return [];
     return await db.select().from(inboundShipments)
       .where(inArray(inboundShipments.id, subIds.map(r => r.id)))

@@ -68,7 +68,9 @@ test("opens invoice match issues by keyboard and returns to PO Exceptions after 
   const copied = await context.newPage();
   const copiedFailures = await setup(copied);
   await copied.goto(invoiceUrl);
-  await copied.getByRole("link", { name: "Back to purchase #17", exact: true }).first().click();
+  // The origin shortcut leaves the journey; the immediate Back link above
+  // retains its parent trail. Exercise both actions after a copied deep link.
+  await copied.getByRole("link", { name: "Return to purchase #17", exact: true }).click();
   await expect(copied).toHaveURL("/purchase-orders/17?tab=exceptions");
   await expect(copied.getByRole("tab", { name: /^Exceptions/ })).toHaveAttribute("data-state", "active");
   expect(failures.concat(copiedFailures)).toEqual([]);

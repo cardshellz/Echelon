@@ -1,3 +1,4 @@
+import { DocumentRelationships } from "@/features/purchasing/DocumentRelationships";
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { shipmentRecordedUnitSummary, shipmentDimensionBasisLabel } from "@/lib/shipment-unit-entry";
@@ -1128,7 +1129,7 @@ export default function InboundShipmentDetail() {
               <ShipmentPurchaseOrderLinks
                 purchaseOrders={shipment.purchaseOrders}
                 legacyPurchaseOrderIds={linkedPurchaseOrderIds}
-                hrefFor={(id) => procurementNavigation.childHref(`/purchase-orders/${id}?tab=shipments`)}
+                hrefFor={(id, poNumber) => procurementNavigation.childHref(`/purchase-orders/${id}?tab=shipments&poScope=${id}&document=${encodeURIComponent(poNumber)}`, { currentLabel: shipment.shipmentNumber })}
               />
             </div>
           )}
@@ -1454,6 +1455,15 @@ export default function InboundShipmentDetail() {
             </div>
           )}
 
+          <DocumentRelationships root={{ kind: "shipment", id: shipment.id }} lineActions={isEditable ? (relationshipLine) => {
+            const source = lines.find((line: { id: number }) => line.id === relationshipLine.id);
+            return source ? <div className="flex gap-1">
+              <Button variant="outline" size="sm" aria-label="Edit shipment line" onClick={() => lineActions.openEditor(source)}>Edit line</Button>
+              <Button variant="ghost" size="sm" aria-label="Remove shipment line" disabled={lineActions.busy} onClick={() => lineActions.remove(source)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+            </div> : null;
+          } : undefined} />
+          <details className="rounded-lg border p-3">
+            <summary className="cursor-pointer text-sm font-medium">Packing and measurements</summary>
           {/* Mobile cards */}
           <div className="md:hidden space-y-3">
             {lines.length === 0 ? (
@@ -1591,6 +1601,7 @@ export default function InboundShipmentDetail() {
               </div>
             </div>
           )}
+          </details>
         </TabsContent>
 
         {/* ══ Tab 2: Costs ══ */}
