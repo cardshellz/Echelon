@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { relationshipFixture } from "../fixtures/document-relationships";
 import { shipmentListItem } from "../fixtures/shipment-work-list";
-import { installFixtures, receipt } from "./procurement-fixtures";
+import { installFixtures, po, receipt } from "./procurement-fixtures";
 
 async function setup(page: Page) {
   const failures = await installFixtures(page);
@@ -200,5 +200,141 @@ test("read failures have an inline retry; missing links never turn into zero cos
   await expect(connections(page)).toContainText("PO not linked");
   await expect(connections(page)).toContainText("piece conversion not saved");
   await expect(connections(page)).toContainText("Allocation is incomplete");
+  expect(failures).toEqual([]);
+});
+
+async function installPoLineProgress(page: Page, initialStatus = "booked") {
+  let status = initialStatus;
+  let unavailable = false;
+  await page.route("**/api/procurement/relationships/**", route => {
+    if (unavailable) return route.fulfill({ status: 503, json: { error: "Unavailable" } });
+    const parts = new URL(route.request().url()).pathname.split("/");
+    const data = relationshipFixture({ kind: parts[4] as "purchase" | "shipment" | "receipt", id: Number(parts[5]) });
+    data.purchaseLines[0].receivedPieces = 100000;
+    const second = data.shipments.find(shipment => shipment.id === 43);
+    if (second) second.status = status;
+    data.receipts = data.receipts.filter(receipt => receipt.id !== 34);
+    data.receiptLines = data.receiptLines.filter(line => line.receiptId !== 34);
+    return route.fulfill({ json: data });
+  });
+  for (const id of [17, 99]) await page.route(`**/api/purchase-orders/${id}`, route => route.fulfill({ json: {
+    ...po(id), currency: "USD", lines: relationshipFixture().purchaseLines.filter(line => line.purchaseId === id).map(line => ({
+      id: line.id, lineNumber: line.lineNumber, sku: line.sku, productName: line.product, lineType: "product", status: "open",
+      orderQty: line.orderedPieces, receivedQty: line.id === 101 ? 100000 : line.receivedPieces, cancelledQty: 0,
+      unitCostMills: 100, lineTotalCents: 5000, vendorSku: "SUPPLIER-SKU",
+    })),
+  } }));
+  return { setStatus: (next: string) => { status = next; }, setUnavailable: (next: boolean) => { unavailable = next; } };
+}
+const poLine = (page: Page, id: number) => page.getByTestId(`po-line-${id}`).filter({ visible: true });
+
+test("PO Lines shows split shipment progress and returns to the same line after shipment and receiving, including copied links", async ({ page, context }, info) => {
+  const failures = await setup(page);
+  await installPoLineProgress(page);
+  await page.goto("/purchase-orders/17?tab=lines");
+  const line = poLine(page, 101);
+  await expect(line.getByTestId("shipped-pieces")).toHaveText("100,000");
+  await expect(line.getByTestId("remaining-pieces")).toHaveText("100,000100,000 planned");
+  await expect(line.getByTestId("received-pieces")).toHaveText("100,000");
+  await expect(line.getByRole("link", { name: "TEST-SHIP-42", exact: true })).toBeVisible();
+  await expect(line).toContainText("100,000 pcs · Planned · Booked");
+  await expect(poLine(page, 103).getByTestId("remaining-pieces")).toHaveText("100");
+  await expect(poLine(page, 103)).toContainText("No linked shipments");
+  await page.getByRole("tabpanel", { name: "Lines (2)" }).screenshot({ path: info.outputPath("po-lines-shipment-progress.png") });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  await line.getByRole("link", { name: "TEST-SHIP-42", exact: true }).click();
+  await expect(connections(page).getByLabel("Show purchase order")).toHaveValue("17");
+  await expect(connections(page).getByTestId("relationship-line-201").getByRole("button", { name: "Hide details" })).toBeVisible();
+  await expect(connections(page).getByRole("region", { name: "TEST-PO-17", exact: true })).toContainText("USD 60.01");
+  await connections(page).getByRole("link", { name: "TEST-RECEIPT-31", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  const url = page.url();
+  const copied = await context.newPage();
+  const copiedFailures = await setup(copied); await installPoLineProgress(copied); await copied.goto(url);
+  for (const current of [page, copied]) {
+    await current.reload();
+    await current.getByRole("link", { name: "Back to TEST-SHIP-42", exact: true }).click();
+    await current.getByRole("link", { name: "Back to TEST-PO-17", exact: true }).click();
+    await expect(current.getByRole("tab", { name: "Lines (2)", exact: true })).toHaveAttribute("data-state", "active");
+    await expect(current).toHaveURL(/shipmentLine=201/);
+    await expect(poLine(current, 101).getByRole("group", { name: "Shipments for PO line 1", exact: true })).toBeFocused();
+    await expect(poLine(current, 101).getByTestId("shipped-pieces")).toHaveText("100,000");
+  }
+  expect(failures.concat(copiedFailures)).toEqual([]);
+});
+
+test("PO Lines refreshes departure/cancellation and fails visibly with retry instead of zeroing shipped counts", async ({ page }) => {
+  const failures = await setup(page); const controls = await installPoLineProgress(page);
+  await page.goto("/purchase-orders/17?tab=lines");
+  await expect(poLine(page, 101).getByTestId("shipped-pieces")).toHaveText("100,000");
+  controls.setStatus("in_transit"); await page.reload();
+  await expect(poLine(page, 101).getByTestId("shipped-pieces")).toHaveText("200,000");
+  await expect(poLine(page, 101).getByTestId("remaining-pieces")).toHaveText("0");
+  await expect(poLine(page, 101).getByTestId("received-pieces")).toHaveText("100,000");
+  controls.setStatus("cancelled"); await page.reload();
+  await expect(poLine(page, 101).getByTestId("shipped-pieces")).toHaveText("100,000");
+  await expect(poLine(page, 101).getByTestId("remaining-pieces")).toHaveText("100,000");
+  await expect(poLine(page, 101)).toContainText("Cancelled · Not counted");
+  controls.setUnavailable(true); await page.reload();
+  await expect(page.getByRole("alert").filter({ hasText: "Shipment progress could not be loaded" })).toBeVisible();
+  await expect(poLine(page, 101).getByTestId("shipped-pieces")).toHaveText("Unavailable");
+  await expect(poLine(page, 101).getByTestId("received-pieces")).toHaveText("100,000");
+  controls.setUnavailable(false); await page.getByRole("button", { name: "Retry shipment progress" }).click();
+  await expect(poLine(page, 101).getByTestId("shipped-pieces")).toHaveText("100,000");
+  expect(failures).toEqual([]);
+});
+
+test("unknown shipment status keeps known counts visible with a direct review path", async ({ page }) => {
+  const failures = await setup(page); await installPoLineProgress(page, "historical_import");
+  await page.goto("/purchase-orders/17?tab=lines");
+  await expect(poLine(page, 101).getByTestId("shipped-pieces")).toContainText("100,000");
+  await expect(poLine(page, 101).getByTestId("remaining-pieces")).toHaveText("Unverified");
+  await expect(poLine(page, 101)).toContainText("TEST-SHIP-43 has an unrecognized shipment status");
+  await poLine(page, 101).getByRole("link", { name: "Review shipment links", exact: true }).click();
+  await expect(page.getByRole("tab", { name: /^Shipments/ })).toHaveAttribute("data-state", "active");
+  await expect(connections(page).getByRole("article", { name: "Shipment TEST-SHIP-43", exact: true })).toBeVisible();
+  expect(failures).toEqual([]);
+});
+
+test("departing a planned shipment refreshes PO line progress on return without a page reload", async ({ page }) => {
+  const failures = await setup(page); const controls = await installPoLineProgress(page);
+  let status = "booked"; let departures = 0;
+  await page.route("**/api/inbound-shipments/43", route => route.fulfill({ json: {
+    id: 43, shipmentNumber: "TEST-SHIP-43", status, mode: "air", createdAt: "2026-10-01T12:00:00Z",
+    estimatedTotalCostCents: 500, actualTotalCostCents: 500, totalCartons: 100, totalWeightKg: "120", totalVolumeCbm: "1.5",
+    purchaseOrders: [{ id: 17, poNumber: "TEST-PO-17" }],
+    lines: [{ id: 203, purchaseOrderId: 17, purchaseOrderLineId: 101, sku: "SAME-SKU", productName: "Sleeves", qtyShipped: 100000, cartonCount: 100, allocatedCostCents: 500 }],
+    costs: [], statusHistory: [],
+  } }));
+  await page.route("**/api/inbound-shipments/43/in-transit", route => {
+    expect(route.request().method()).toBe("POST");
+    departures += 1; status = "in_transit"; controls.setStatus(status);
+    return route.fulfill({ json: { id: 43, status } });
+  });
+  await page.goto("/purchase-orders/17?tab=lines");
+  await expect(poLine(page, 101).getByTestId("shipped-pieces")).toHaveText("100,000");
+  await poLine(page, 101).getByRole("link", { name: "TEST-SHIP-43", exact: true }).click();
+  await page.getByRole("button", { name: "Mark In Transit", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Mark In Transit", exact: true })).toHaveCount(0);
+  await page.getByRole("link", { name: "Back to TEST-PO-17", exact: true }).click();
+  await expect(poLine(page, 101).getByTestId("shipped-pieces")).toHaveText("200,000");
+  await expect(poLine(page, 101).getByTestId("remaining-pieces")).toHaveText("0");
+  await expect(poLine(page, 101).getByTestId("received-pieces")).toHaveText("100,000");
+  await expect(poLine(page, 101)).toContainText("100,000 pcs · Shipped · In transit");
+  expect(departures).toBe(1); expect(failures).toEqual([]);
+});
+
+test("quantity columns use one relationship snapshot even when the separate PO header read is older", async ({ page }) => {
+  const failures = await setup(page); await installPoLineProgress(page);
+  await page.route("**/api/purchase-orders/17", route => route.fulfill({ json: {
+    ...po(17), lines: [{ id: 101, lineNumber: 1, sku: "SAME-SKU", productName: "Sleeves", lineType: "product", status: "open",
+      orderQty: 150000, receivedQty: 60000, cancelledQty: 0, unitCostMills: 100, lineTotalCents: 5000 }],
+  } }));
+  await page.goto("/purchase-orders/17?tab=lines");
+  await expect(poLine(page, 101).getByTestId("received-pieces")).toHaveText("100,000");
+  await expect(poLine(page, 101).getByText(/200,000/)).toBeVisible();
+  await expect(poLine(page, 101).getByTestId("remaining-pieces")).toHaveText("100,000100,000 planned");
+  await expect(poLine(page, 101)).not.toContainText("150,000");
   expect(failures).toEqual([]);
 });
