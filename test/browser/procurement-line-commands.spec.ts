@@ -1,6 +1,7 @@
 import { workListPage } from "./procurement-ap-work-list-fixtures";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
+import { relationshipFixture } from "../fixtures/document-relationships";
 
 const version = "a".repeat(64);
 const nextVersion = "b".repeat(64);
@@ -32,6 +33,17 @@ async function setup(page: Page, options: { configured?: boolean; dimensionRevie
   await page.route("**/api/**", async (route: Route) => {
     const request = route.request(); const path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
+      if (/^\/api\/procurement\/relationships\/shipment\/(42|43)$/.test(path)) {
+        const id = Number(path.split("/").at(-1));
+        const lines = id === 42 ? state.lines : [{ ...fixtureLine(27), inboundShipmentId: 43, sku: "OTHER-SHIPMENT" }];
+        const relationships = relationshipFixture({ kind: "shipment", id });
+        relationships.shipments = [{ id, number: `TEST-SHIP-${id}`, status: state.status }];
+        relationships.purchases = [{ id: 17, number: "TEST-PO-17" }];
+        relationships.purchaseLines = lines.map(line => ({ id: line.purchaseOrderLineId, purchaseId: 17, lineNumber: line.id, sku: line.sku, product: line.productName, orderedPieces: 525000 }));
+        relationships.shipmentLines = lines.map(line => ({ id: line.id, shipmentId: id, purchaseId: 17, purchaseLineId: line.purchaseOrderLineId, sku: line.sku, product: line.productName, shippedPieces: line.qtyShipped }));
+        relationships.allocations = []; relationships.charges = []; relationships.receipts = []; relationships.receiptLines = [];
+        return route.fulfill({ json: relationships });
+      }
       if (options.poCaller && path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), lines: [{ id: 15, purchaseOrderId: 17, lineType: "product", lineNumber: 1, sku: "PO-REMAINING", productName: "PO product", orderQty: 1000, receivedQty: 0, unitCostCents: 10, subtotalCents: 10000 }] } });
       if (path === "/api/vendors") return route.fulfill({ json: [{ id: 2, name: "Test vendor" }] });
       if (path === "/api/purchase-orders") return route.fulfill({ json: { purchaseOrders: [{ id: 17, poNumber: "TEST-PO-17" }] } });

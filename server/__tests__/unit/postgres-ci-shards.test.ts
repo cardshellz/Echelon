@@ -58,6 +58,7 @@ function runnerFixture() {
 describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves prior coverage with the explicitly retired duplicate invoice owner, the retired bulk policy writer suite and reviewed additions", () => {
     const addedSuites = [
+      "server/modules/procurement/__tests__/integration/document-relationships.integration.test.ts",
       "server/modules/customer-account/__tests__/integration/customer-account-order-context.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/channel-sync-batch.integration.test.ts",
       "server/modules/procurement/__tests__/integration/rfq-work-list.integration.test.ts",

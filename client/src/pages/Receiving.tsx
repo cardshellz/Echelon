@@ -1,3 +1,4 @@
+import { DocumentRelationships } from "@/features/purchasing/DocumentRelationships";
 import { receiptReversalSourceCapability } from "@/lib/receipt-reversal-capability";
 import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
 import { parseReceivingImportCsv, parseReceivingImportResult, receivingImportError } from "@/lib/receiving-import";
@@ -1955,6 +1956,10 @@ DEF-456,25,,,5.00,,Location TBD`;
                     Shipment #{selectedReceipt.inboundShipmentId}
                   </Link>
                 )}
+                <details key={`relationships-${selectedReceipt.id}`} open={!!procurementNavigation.record?.relationship?.line} className="min-w-0 open:basis-full">
+                  <summary className="cursor-pointer text-primary">PO, shipment and receipt links</summary>
+                  <div className="mt-3"><DocumentRelationships root={{ kind: "receipt", id: selectedReceipt.id }} purchaseId={selectedReceipt.purchaseOrderId ?? undefined} /></div>
+                </details>
               </nav>
 
               <div className="space-y-4">

@@ -1,3 +1,4 @@
+import { DocumentRelationships, loadDocumentRelationships, relationshipQueryKey } from "@/features/purchasing/DocumentRelationships";
 import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
@@ -1292,11 +1293,15 @@ export default function PurchaseOrderDetail() {
     enabled: showAddLineDialog && !!po?.vendorId,
   });
 
-  const { data: linkedShipmentsRaw = [] } = useQuery<any[]>({
-    queryKey: [`/api/purchase-orders/${poId}/shipments`],
-    enabled: !!poId && activeTab === "shipments",
+  const { data: relatedDocuments } = useQuery({
+    queryKey: relationshipQueryKey({ kind: "purchase", id: poId ?? 0 }),
+    queryFn: ({ signal }) => {
+      if (poId === null) throw new Error("A valid purchase order is required to load document links.");
+      return loadDocumentRelationships({ kind: "purchase", id: poId }, signal);
+    },
+    enabled: !!poId,
   });
-  const linkedShipments = linkedShipmentsRaw.filter((s: any) => s.status !== "cancelled");
+  const linkedShipments = relatedDocuments?.shipments ?? [];
 
   const { data: receiveOptions, isLoading: receiveOptionsLoading } = useQuery<any>({
     queryKey: [`/api/purchase-orders/${poId}/receive-options`],
@@ -3664,74 +3669,7 @@ export default function PurchaseOrderDetail() {
             )}
           </div>
 
-          {linkedShipments.length === 0 ? (
-            <Card>
-              <CardContent className="p-6 text-center text-muted-foreground">
-                <Ship className="h-8 w-8 mx-auto mb-2 opacity-30" />
-                <p>No shipments linked to this PO yet.</p>
-                {lines.length > 0 && !["closed", "cancelled"].includes(po.status) && (
-                  <p className="text-xs mt-1">Use "Create Shipment" above to start a new inbound shipment.</p>
-                )}
-              </CardContent>
-            </Card>
-          ) : (
-            <Card>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Shipment #</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Mode</TableHead>
-                    <TableHead>Carrier</TableHead>
-                    <TableHead>ETA</TableHead>
-                    <TableHead className="text-right">Est. Cost</TableHead>
-                    <TableHead className="text-right">Actual Cost</TableHead>
-                    <TableHead className="w-10"></TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {linkedShipments.map((s: any) => {
-                    const shipBadge: Record<string, { variant: "default" | "secondary" | "outline" | "destructive"; label: string; color?: string }> = {
-                      draft: { variant: "secondary", label: "Draft" },
-                      booked: { variant: "outline", label: "Booked", color: "text-blue-600 border-blue-300" },
-                      in_transit: { variant: "default", label: "In Transit", color: "bg-blue-500" },
-                      at_port: { variant: "default", label: "At Port", color: "bg-indigo-500" },
-                      customs_clearance: { variant: "outline", label: "Customs", color: "text-amber-600 border-amber-300" },
-                      delivered: { variant: "default", label: "Delivered", color: "bg-green-600" },
-                      costing: { variant: "outline", label: "Costing", color: "text-purple-600 border-purple-300" },
-                      closed: { variant: "secondary", label: "Closed" },
-                      cancelled: { variant: "destructive", label: "Cancelled" },
-                    };
-                    const badge = shipBadge[s.status] || { variant: "secondary" as const, label: s.status };
-                    return (
-                      <TableRow key={s.id}>
-                        <TableCell className="font-mono font-medium">
-                          <Link href={procurementNavigation.childHref(`/shipments/${s.id}`)} className="text-primary hover:underline">
-                            {s.shipmentNumber}
-                          </Link>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={badge.variant} className={badge.color || ""}>{badge.label}</Badge>
-                        </TableCell>
-                        <TableCell className="capitalize">{s.mode?.replace(/_/g, " ") || "—"}</TableCell>
-                        <TableCell>{s.carrierName || s.forwarderName || "—"}</TableCell>
-                        <TableCell className="text-sm">
-                          {s.eta ? format(new Date(s.eta), "MMM d, yyyy") : "—"}
-                        </TableCell>
-                        <TableCell className="text-right font-mono">{formatCents(s.estimatedTotalCostCents)}</TableCell>
-                        <TableCell className="text-right font-mono">{formatCents(s.actualTotalCostCents)}</TableCell>
-                        <TableCell>
-                          <Link href={procurementNavigation.childHref(`/shipments/${s.id}`)} aria-label={`Open shipment ${s.shipmentNumber}`} className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center text-muted-foreground hover:text-primary">
-                            <ExternalLink className="h-3 w-3" />
-                          </Link>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </Card>
-          )}
+          <DocumentRelationships root={{ kind: "purchase", id: po.id }} />
         </TabsContent>
 
         {/* ── History Tab ── */}

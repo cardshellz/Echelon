@@ -3,13 +3,15 @@ import { purchaseCostTraceFixture } from "../../../../../../test/fixtures/purcha
 import React, { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Router } from "wouter";
-import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { purchaseWorkspaceSchema, type PurchaseWorkspace } from "@shared/procurement/purchase-workspace";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { loadPurchaseWorkspace, purchaseWorkspaceQueryOptions, PurchaseLifecycleWorkspaceView } from "../../PurchaseLifecycleWorkspace";
 import { resolveWorkspaceRecord } from "../../PurchaseRecordInspector";
 import { formatWorkspaceMoney, formatWorkspaceMills } from "../../purchase-workspace-format";
+import { relationshipSnapshotSchema, type RelationshipSnapshot } from "@shared/procurement/document-relationships";
+import { relationshipQueryKey } from "../../DocumentRelationships";
 
 export function workspaceFixture(): PurchaseWorkspace {
   return purchaseWorkspaceSchema.parse({
@@ -55,12 +57,56 @@ export function workspaceFixture(): PurchaseWorkspace {
   });
 }
 
-function renderWorkspace(search: string, data = workspaceFixture()): string {
+function workspaceRelationships(data: PurchaseWorkspace, currency: string | null = "CAD"): RelationshipSnapshot {
+  // Shipment currency is independent of the USD purchase. The relationship
+  // response also contains PO-line owners, which expose the contradictory link.
+  return relationshipSnapshotSchema.parse({
+    root: { kind: "purchase", id: data.purchase.id },
+    purchases: [{ id: data.purchase.id, number: data.purchase.poNumber }, { id: 99, number: "PO-0099" }],
+    purchaseLines: [
+      { id: 1, purchaseId: 17, lineNumber: 1, sku: "SKU-A", product: "Example product", orderedPieces: 100 },
+      { id: 991, purchaseId: 99, lineNumber: 1, sku: "SKU-B", product: null, orderedPieces: 400 },
+      { id: 992, purchaseId: 99, lineNumber: 2, sku: "SKU-C", product: null, orderedPieces: 4 },
+    ],
+    shipments: data.shipments.map(row => ({ id: row.id, number: row.shipmentNumber, status: row.status })),
+    shipmentLines: data.shipments.flatMap(shipment => shipment.lines.map(line => ({
+      id: line.id, shipmentId: shipment.id, purchaseId: line.purchaseOrderId, purchaseLineId: line.purchaseOrderLineId,
+      sku: line.sku, product: null, shippedPieces: line.qtyShipped,
+    }))),
+    receipts: data.receipts.map(row => ({ id: row.id, number: row.receiptNumber, status: row.status,
+      purchaseId: row.purchaseOrderId, shipmentId: row.inboundShipmentId })),
+    receiptLines: [],
+    charges: [{ id: 401, shipmentId: 42, currency, cents: 240000 }],
+    allocations: [
+      { costId: 401, shipmentLineId: 421, currency, cents: 120000 },
+      { costId: 401, shipmentLineId: 422, currency, cents: 100000 },
+      { costId: 401, shipmentLineId: 423, currency, cents: 10000 },
+      { costId: 401, shipmentLineId: 424, currency, cents: 10000 },
+    ],
+    costIssues: [],
+  });
+}
+
+function renderWorkspace(search: string, data = workspaceFixture(), relationships = workspaceRelationships(data)): string {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity } } });
+  for (const shipment of relationships.shipments) {
+    const root = { kind: "shipment" as const, id: shipment.id };
+    queryClient.setQueryData(relationshipQueryKey(root), { ...relationships, root });
+  }
+  for (const receipt of relationships.receipts) {
+    const root = { kind: "receipt" as const, id: receipt.id };
+    queryClient.setQueryData(relationshipQueryKey(root), { ...relationships, root });
+  }
   function Page() {
     const navigation = useProcurementNavigation();
     return createElement(PurchaseLifecycleWorkspaceView, { data, navigation });
   }
-  return renderToStaticMarkup(createElement(Router, { ssrPath: "/purchase-orders/17", ssrSearch: search }, createElement(Page)));
+  try {
+    return renderToStaticMarkup(createElement(QueryClientProvider, { client: queryClient },
+      createElement(Router, { ssrPath: "/purchase-orders/17", ssrSearch: search }, createElement(Page))));
+  } finally {
+    queryClient.clear();
+  }
 }
 
 describe("purchase lifecycle workspace rendering", () => {
@@ -105,12 +151,23 @@ describe("purchase lifecycle workspace rendering", () => {
 
   it("does not assign the PO currency to a shared shipment or hide conflicting lineage", () => {
     const markup = renderWorkspace("tab=lifecycle&inspect=shipment:42");
-    expect(markup).toContain("View shipment costs");
-    expect(markup).toContain("currency basis of shipment cost totals is unavailable");
+    expect(markup).toContain("Whole shipment charges, after credits");
+    expect(markup).toContain("CAD 2,400.00");
+    expect(markup).toContain("CAD 1,200.00");
+    expect(markup).not.toContain("USD 2,400.00");
+    expect(markup).toContain("Conflicting PO links");
+    expect(markup).toContain("PO links disagree");
+    expect(markup).toContain("On this shipment");
+    expect(markup).toContain("PO not linked");
+  });
+
+  it("keeps unknown shipment currency incomplete instead of inheriting the PO currency", () => {
+    const data = workspaceFixture();
+    const markup = renderWorkspace("tab=lifecycle&inspect=shipment:42", data, workspaceRelationships(data, null));
+    expect(markup).toContain("Allocation is incomplete");
+    expect(markup).toContain("Review costs");
     expect(markup).not.toContain("2,400.00");
-    expect(markup).toContain("Conflicting links: #17 / #99");
-    expect(markup).toContain("Recorded qty");
-    expect(markup).toContain("Not linked");
+    expect(markup).not.toContain("1,200.00");
   });
 
   it("shows record status without asserting posting or sale availability", () => {

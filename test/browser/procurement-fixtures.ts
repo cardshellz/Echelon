@@ -1,3 +1,4 @@
+import { relationshipFixture } from "../fixtures/document-relationships";
 import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import type { Page } from "@playwright/test";
 
@@ -19,7 +20,11 @@ export async function installFixtures(page: Page) {
     }
     const path = new URL(request.url()).pathname;
     let json: unknown = [];
-    if (path === "/api/auth/me") json = { user: { id: "test-user", username: "test", role: "admin" }, permissions: [], roles: ["admin"] };
+    if (/^\/api\/procurement\/relationships\/(purchase|shipment|receipt)\/\d+$/.test(path)) {
+      const parts = path.split("/");
+      json = relationshipFixture({ kind: parts[4] as "purchase" | "shipment" | "receipt", id: Number(parts[5]) });
+    }
+    else if (path === "/api/auth/me") json = { user: { id: "test-user", username: "test", role: "admin" }, permissions: [], roles: ["admin"] };
     else if (path === "/api/settings/procurement") json = { useNewPoEditor: true };
     else if (/^\/api\/purchase-orders\/\d+\/financial-evidence$/.test(path)) json = {
       purchaseOrderId: Number(path.split("/")[3]), currency: "USD", state: "complete",
