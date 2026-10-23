@@ -382,7 +382,7 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
   if (["EBAY_SYNC_READBACK_PENDING", "EBAY_PHOTO_READ_FAILED", "EBAY_SYNC_PERSISTENCE_FAILED", "PUBLICATION_RESPONSE_RECOVERY_FAILED",
     "PUBLICATION_SCOPE_BUSY", "PUBLICATION_ADMISSION_CAPACITY_BUSY", "QUANTITY_PUBLICATION_DRAIN_BUSY", "EBAY_SYNC_ADMISSION_UNSAVED",
     "EBAY_SYNC_ADMISSION_FAILED", "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED", "EBAY_AUTH_UNAVAILABLE", "EBAY_AUTH_REFRESH_SUPERSEDED",
-    "EBAY_LISTING_SYNC_FAILED", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED"].includes(code))
+    "EBAY_LISTING_SYNC_FAILED", "DATABASE_POOL_ACQUIRE_TIMEOUT", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED"].includes(code))
     return issue(input.state === "recovering" ? "Echelon is recovering this update" : "The update could not finish",
       "A temporary provider or local persistence failure interrupted the update.",
       input.state === "recovering" ? "The saved update will retry automatically. Open its status to see the latest result."
@@ -398,8 +398,8 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       false, "edit_listing", "Review inclusion", "/channels/ebay");
   if (code === "CHANNEL_SYNC_VARIANTS_REQUIRED")
     return issue("Include a sellable variant", "No active, sellable variants are included for this product.",
-      "Expand the product's variant settings and include the variants you intend to sell, then Sync.",
-      false, "edit_listing", "Review variants", "/channels/ebay");
+      "Open the catalog product to add or activate a sellable variant. Then review its channel inclusion and Sync.",
+      false, "edit_listing", "Review variants", `${productPath}?tab=variants`);
   if (["EBAY_SYNC_PRODUCT_NOT_ELIGIBLE", "EBAY_SYNC_CONTENT_SCOPE_EMPTY"].includes(code))
     return issue("Review which variants are included", "This product has no eligible existing listing update.",
       "Check the product and variant inclusion switches in the eBay listing feed. Enable the intended sellable variants, then Sync. Sync creates a missing listing after checking the channel and updates an existing listing.",

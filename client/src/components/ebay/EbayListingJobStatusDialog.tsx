@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { EbayListingIssueCard } from "./EbayListingIssueCard";
 import { EbayWithdrawalIssueCard } from "./EbayWithdrawalIssueCard";
 import { EbayListingJobProgress } from "./EbayListingJobProgress";
+import { refreshChannelProjection } from "@/hooks/use-channel-projection-refresh";
 
 /** Read-only observation of an accepted job. Refresh never publishes or grants
  * permission to replace an unknown provider outcome. */
@@ -37,8 +38,8 @@ export function EbayListingJobStatusDialog({ jobId, productId, productName, onCl
     if (!job) return;
     // This may be an older request. Refresh the authoritative product list
     // instead of replacing a newer job with the status of this selected job.
-    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"], exact: true });
-    if (job.state === "completed") void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"], exact: true }, { cancelRefetch: false });
+    if (job.state === "completed") void refreshChannelProjection(queryClient, ["/api/ebay/listing-feed"]);
   }, [status.data, productId, queryClient]);
   const job = status.data;
   const withdrawal = job?.operation === "withdraw";

@@ -174,7 +174,7 @@ export function syncFailure(
   const readFailure = providerReadDiagnosticFromError(error);
   const retrying = readFailure ? providerReadShouldRetry(readFailure, readFailureCount + 1) :
     waiting || AUTOMATIC_RECOVERY_CODES.has(code) ||
-    ((RETRY_CODES.has(code) || code === "EBAY_LISTING_SYNC_FAILED") &&
+    ((RETRY_CODES.has(code) || code === "EBAY_LISTING_SYNC_FAILED" || code === "DATABASE_POOL_ACQUIRE_TIMEOUT") &&
       attempts < SYNC_RETRY_LIMIT);
   const retryAfter =
     error instanceof Error &&
@@ -186,7 +186,9 @@ export function syncFailure(
       : NaN;
   const minimum =
     now.getTime() + Math.min(15 * 60_000, 30_000 * 2 ** Math.min(attempts, 5));
-  const message = readFailure
+  const message = code === "DATABASE_POOL_ACQUIRE_TIMEOUT"
+    ? "The database connection queue timed out. The saved update retains its earlier write evidence and can be retried safely."
+    : readFailure
     ? readFailure.kind === "refused" ? "The channel refused the listing read. Review the saved read diagnostic before retrying."
       : "Echelon could not read a complete, valid listing response. Existing write evidence remains protected."
     : code === "INVENTORY_PUBLICATION_TARGET_BUSY"
