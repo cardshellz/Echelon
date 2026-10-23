@@ -58,6 +58,7 @@ function runnerFixture() {
 describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves prior coverage with the explicitly retired duplicate invoice owner, the retired bulk policy writer suite and reviewed additions", () => {
     const addedSuites = [
+      "server/modules/procurement/__tests__/integration/document-relationships.integration.test.ts",
       "server/modules/customer-account/__tests__/integration/customer-account-order-context.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/channel-sync-batch.integration.test.ts",
       "server/modules/procurement/__tests__/integration/rfq-work-list.integration.test.ts",
@@ -456,6 +457,25 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(new Set(databaseNames).size).toBe(firstShardFileCount);
   });
 
+  it("executes a selected one-file plan in its own database and rejects mismatched or empty plans before connecting", async () => {
+    const fixture = runnerFixture();
+    const selected = POSTGRES_TEST_FILES[0];
+    const environment = { ...disposableEnvironment, POSTGRES_SELECTED_TEST_FILES: JSON.stringify([selected]) };
+    expect(await runPostgresShard(["1/1"], environment, fixture.dependencies)).toBe(0);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledOnce();
+    expect(vi.mocked(fixture.dependencies.runTest).mock.calls[0][0]).toContain(selected);
+    expect(fixture.connections).toHaveLength(1);
+    expect(fixture.connections[0].query.mock.calls.map(call => call[0])).toEqual([
+      'CREATE DATABASE "echelon_ci_s1_00000000000040008000000000000001"',
+      'DROP DATABASE "echelon_ci_s1_00000000000040008000000000000001" WITH (FORCE)',
+    ]);
+    const invalid = runnerFixture();
+    for (const args of [["1/8"], ["2/1"]])
+      await expect(runPostgresShard(args, environment, invalid.dependencies)).rejects.toThrow("Shard index");
+    await expect(runPostgresShard(["1/1"], { ...environment, POSTGRES_SELECTED_TEST_FILES: "[]" }, invalid.dependencies)).rejects.toThrow();
+    expect(invalid.createAdminConnection).not.toHaveBeenCalled();
+  });
+
   it("never drops a database when CREATE fails or collides, and continues the remaining files", async () => {
     const fixture = runnerFixture();
     const ordinaryCreate = fixture.createAdminConnection.getMockImplementation()!;
@@ -539,25 +559,25 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(fixture.dependencies.runTest).not.toHaveBeenCalled();
   });
 
-  it("keeps all shards on every PR/main push and retains both stable check identities", () => {
+  it("uses an explicit selected plan and retains both stable check identities", () => {
     const workflow = readFileSync(resolve(POSTGRES_REPOSITORY_ROOT, ".github/workflows/ci.yml"), "utf8");
     expect(workflow).toMatch(/on:\s*pull_request:\s*push:\s*branches: \[main\]/);
     expect(workflow).not.toMatch(/paths(?:-ignore)?:|continue-on-error:/);
     expect(workflow).toContain("name: Typecheck + unit tests");
     expect(workflow).toContain("run: npm run check");
-    expect(workflow).toContain("run: npm run test:unit");
+    expect(workflow).toContain("run: node scripts/ci/run-test-lane.mjs unit");
     expect(workflow).toContain("fail-fast: false");
     expect(workflow).toContain("timeout-minutes: 20");
-    expect(workflow).toContain("shard: [1, 2, 3, 4, 5, 6, 7, 8]");
-    expect(workflow).toContain("POSTGRES_SHARD: " + "$" + "{{ matrix.shard }}/8");
+    expect(workflow).toContain("matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}");
+    expect(workflow).toContain("POSTGRES_SELECTED_TEST_FILES: ${{ needs.preflight.outputs.files }}");
+    expect(workflow).toContain("POSTGRES_SHARD: ${{ matrix.shard }}/${{ matrix.count }}");
     expect(workflow).toContain('node --import tsx scripts/ci/postgres-tests.ts "$POSTGRES_SHARD"');
     expect(workflow).toContain("image: postgres:16");
     expect(workflow).toContain('ECHELON_TEST_DATABASE_DISPOSABLE: "true"');
     expect(workflow).toContain("path: test-results/postgres-hardening-" + "$" + "{{ matrix.shard }}/");
     expect(workflow).toContain("name: PostgreSQL hardening tests");
-    expect(workflow).toContain("needs: [postgres-hardening-shard]");
+    expect(workflow).toContain("needs: [preflight, postgres-hardening-shard]");
     expect(workflow).toContain("if: " + "$" + "{{ always() }}");
-    expect(workflow).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
-    expect(workflow).toMatch(/exit 1\s+fi/);
+    expect(workflow).toContain("node scripts/ci/require-selected-success.mjs postgres-hardening-shard");
   });
 });

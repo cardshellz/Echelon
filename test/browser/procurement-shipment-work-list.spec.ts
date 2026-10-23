@@ -56,7 +56,7 @@ test("search and mode changes reset pagination and search the complete matching 
   const nav=page.getByRole("navigation",{name:"Shipment pages"});
   await nav.getByRole("button",{name:"Next shipments"}).click();
   await expect(nav).toContainText("51–100");
-  await page.getByPlaceholder("Search shipment #, carrier, container #...").fill("needle");
+  await page.getByPlaceholder("Search shipment, PO, SKU, carrier or container...").fill("needle");
   await expect(nav).toContainText("Showing 1–2 of 2 matching shipments");
   expect(state.queries.at(-1)!.get("offset")).toBe("0");
   await page.getByRole("combobox").click();await page.getByRole("option",{name:"Air",exact:true}).click();
@@ -105,7 +105,7 @@ test("loading and successful empty results are visibly different",async({page})=
   await page.goto("/shipments");await expect(page.getByText("Loading shipments…",{exact:true})).toBeVisible();
   await expect(page.getByText("No inbound shipments match these filters.")).toHaveCount(0);
   state.gate=null;release();await expect(page.getByRole("navigation",{name:"Shipment pages"})).toBeVisible();
-  await page.getByPlaceholder("Search shipment #, carrier, container #...").fill("no matching shipment");
+  await page.getByPlaceholder("Search shipment, PO, SKU, carrier or container...").fill("no matching shipment");
   await expect(page.getByRole("navigation",{name:"Shipment pages"})).toContainText("0 matching shipments");
   await expect(page.getByText("No inbound shipments match these filters.").filter({visible:true})).toBeVisible();
 });
@@ -115,7 +115,7 @@ test("returning to a cached filter rechecks evidence and hides the old list afte
   const {state}=await fixture(page);await page.goto("/shipments");
   const nav=page.getByRole("navigation",{name:"Shipment pages"});
   await expect(nav).toContainText("103 matching shipments");
-  const search=page.getByPlaceholder("Search shipment #, carrier, container #...");
+  const search=page.getByPlaceholder("Search shipment, PO, SKU, carrier or container...");
   await search.fill("needle");await expect(nav).toContainText("2 matching shipments");
   state.status=503;await search.fill("");
   const alert=page.getByRole("alert").filter({hasText:"Shipments could not be loaded"});
