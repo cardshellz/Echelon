@@ -5,16 +5,28 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { DialogPortalContainerContext } from "@/components/ui/dialog";
 import { CustomerWorkspace } from "@/pages/CustomerReturnCustomerPortal";
 import { CustomerOrderEditor } from "./CustomerOrderEditor";
-import { CustomerAccountOrderTotals, type CustomerOrderTotalsState } from "./CustomerAccountOrderTotals";
+import {
+  CustomerAccountOrderTotals,
+  type CustomerOrderTotalsState,
+} from "./CustomerAccountOrderTotals";
 import { CustomerAccountOrderStatus } from "./CustomerAccountOrderStatus";
+import { CustomerAccountOrderHistory } from "./CustomerAccountOrderHistory";
 import { CustomerOrderPanelLoader } from "./CustomerOrderPanelLoader";
 import type { OrderEditOrder } from "@shared/order-edits/order-edit.contract";
 import {
   loadOrderEditPaymentReturn,
   orderEditPaymentReturnStorage,
 } from "./order-edit-payment-return";
-import { createCustomerAccountTransport, customerAccountPageConfigSchema, type CustomerAccountTransport } from "./customer-account.transport";
-import { customerAccountAccessNotice, customerAccountSignInUrl, type CustomerAccountAccessNotice } from "./customer-account-access";
+import {
+  createCustomerAccountTransport,
+  customerAccountPageConfigSchema,
+  type CustomerAccountTransport,
+} from "./customer-account.transport";
+import {
+  customerAccountAccessNotice,
+  customerAccountSignInUrl,
+  type CustomerAccountAccessNotice,
+} from "./customer-account-access";
 import type { CustomerReturnCustomerOrder } from "@shared/returns/customer-return-access.contract";
 import type { CustomerReturnCustomerLabelStatus } from "@shared/returns/customer-return-customer.contract";
 import "../index.css";
@@ -28,42 +40,119 @@ type Choice = {
   returnOrder?: CustomerReturnCustomerOrder;
   returnStatus?: CustomerReturnCustomerLabelStatus;
 };
-const message = (cause: unknown) => cause instanceof Error ? cause.message : "Your order could not be loaded. Please try again.";
-function AccountModal({ api, session, choice, onClose, customerId }: {
-  api: CustomerAccountTransport; session: Bootstrap; choice: Choice; onClose: () => void; customerId: string;
+const message = (cause: unknown) =>
+  cause instanceof Error
+    ? cause.message
+    : "Your order could not be loaded. Please try again.";
+function AccountModal({
+  api,
+  session,
+  choice,
+  onClose,
+  customerId,
+}: {
+  api: CustomerAccountTransport;
+  session: Bootstrap;
+  choice: Choice;
+  onClose: () => void;
+  customerId: string;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [portalRoot, setPortalRoot] = useState<HTMLDivElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const returnApi = useRef(api.returns(session.session.sessionKey!));
-  useEffect(() => { dialog.current?.showModal(); return () => dialog.current?.close(); }, []);
   useEffect(() => {
-    const warn = (event: BeforeUnloadEvent) => { if (busy) { event.preventDefault(); } };
+    dialog.current?.showModal();
+    return () => dialog.current?.close();
+  }, []);
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (busy) {
+        event.preventDefault();
+      }
+    };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [busy]);
-  return <dialog ref={dialog} className="csz-account-dialog" aria-labelledby="csz-account-dialog-title"
-    onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}>
-    <div className="csz-account-ui" ref={setPortalRoot}>
-      <header className="csz-dialog-heading">
-        <div><h2 id="csz-account-dialog-title">{choice.kind === "edit" ? "Edit your order" : "Return items"}</h2>
-          <p>{choice.kind === "edit" ? "Update your items, then apply your changes." : "Choose the items and quantities you want to send back."}</p></div>
-        <button type="button" className="csz-modal-close" aria-label="Close order tools" disabled={busy} onClick={onClose}>×</button>
-      </header>
-      <div className="csz-dialog-body">
-      {error && <p role="alert" className="rounded-md border p-3 text-sm text-destructive">{error}</p>}
-      <DialogPortalContainerContext.Provider value={portalRoot ?? undefined}>
-        {choice.kind === "edit" ? <CustomerOrderEditor api={api} connectionId={session.connection.connectionId} omsOrderId={choice.omsOrderId}
-          actorKey={`customer:${session.session.sessionKey}`} enabled={session.connection.enabled} onBusy={setBusy}
-          paymentOwner={customerId} returnOperationId={choice.returnOperationId}
-          onDone={() => { onClose(); window.location.reload(); }} />
-          : (choice.returnOrder || choice.returnStatus) && <CustomerWorkspace embedded initialOrder={choice.returnOrder} initialStatus={choice.returnStatus} sessionKey={session.session.sessionKey!}
-            transport={returnApi.current} downloadRequest={api.request} onDenied={setError} onSignedOut={onClose} />}
-      </DialogPortalContainerContext.Provider>
+  return (
+    <dialog
+      ref={dialog}
+      className="csz-account-dialog"
+      aria-labelledby="csz-account-dialog-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!busy) onClose();
+      }}
+    >
+      <div className="csz-account-ui" ref={setPortalRoot}>
+        <header className="csz-dialog-heading">
+          <div>
+            <h2 id="csz-account-dialog-title">
+              {choice.kind === "edit" ? "Edit your order" : "Return items"}
+            </h2>
+            <p>
+              {choice.kind === "edit"
+                ? "Update your items, then apply your changes."
+                : "Choose the items and quantities you want to send back."}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="csz-modal-close"
+            aria-label="Close order tools"
+            disabled={busy}
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </header>
+        <div className="csz-dialog-body">
+          {error && (
+            <p
+              role="alert"
+              className="rounded-md border p-3 text-sm text-destructive"
+            >
+              {error}
+            </p>
+          )}
+          <DialogPortalContainerContext.Provider
+            value={portalRoot ?? undefined}
+          >
+            {choice.kind === "edit" ? (
+              <CustomerOrderEditor
+                api={api}
+                connectionId={session.connection.connectionId}
+                omsOrderId={choice.omsOrderId}
+                actorKey={`customer:${session.session.sessionKey}`}
+                enabled={session.connection.enabled}
+                onBusy={setBusy}
+                paymentOwner={customerId}
+                returnOperationId={choice.returnOperationId}
+                onDone={() => {
+                  onClose();
+                  window.location.reload();
+                }}
+              />
+            ) : (
+              (choice.returnOrder || choice.returnStatus) && (
+                <CustomerWorkspace
+                  embedded
+                  initialOrder={choice.returnOrder}
+                  initialStatus={choice.returnStatus}
+                  sessionKey={session.session.sessionKey!}
+                  transport={returnApi.current}
+                  downloadRequest={api.request}
+                  onDenied={setError}
+                  onSignedOut={onClose}
+                />
+              )
+            )}
+          </DialogPortalContainerContext.Provider>
+        </div>
       </div>
-    </div>
-  </dialog>;
+    </dialog>
+  );
 }
 function CustomerAccount({
   root,
@@ -83,6 +172,9 @@ function CustomerAccount({
   const [rows] = useState(() =>
     Array.from(root.querySelectorAll<HTMLElement>("[data-csz-account-order]")),
   );
+  const accessSurface = root.querySelector("[data-csz-order-history-content]")
+    ? "history"
+    : "order";
   const [managed, setManaged] = useState<{
     row: HTMLElement;
     opener: HTMLButtonElement;
@@ -115,6 +207,15 @@ function CustomerAccount({
       selected: HTMLElement[],
       signal = accountRequests.current?.signal,
     ) => {
+      if (!selected.length) return;
+      setError(null);
+      setTotals((previous) => {
+        const next = new Map(previous);
+        for (const row of selected)
+          if (previous.get(row)?.status !== "verified")
+            next.set(row, { status: "loading" });
+        return next;
+      });
       const generations = new Map(
         selected.map((row) => {
           const generation = (requestGeneration.current.get(row) ?? 0) + 1;
@@ -133,6 +234,11 @@ function CustomerAccount({
           signal,
         );
         if (signal?.aborted) return;
+        if (result.unavailableExternalOrderIds.length) {
+          // Do not reveal a partially verified page or blank a previously
+          // verified amount when a refresh cannot account for every row.
+          throw new Error("The current order history could not be verified.");
+        }
         const currentRows = selected.filter(
           (row) => requestGeneration.current.get(row) === generations.get(row),
         );
@@ -161,7 +267,9 @@ function CustomerAccount({
         setError(null);
       } catch (cause) {
         if (signal?.aborted) return;
-        const currentRows = selected.filter(row => requestGeneration.current.get(row) === generations.get(row));
+        const currentRows = selected.filter(
+          (row) => requestGeneration.current.get(row) === generations.get(row),
+        );
         if (!currentRows.length) return;
         setTotals((previous) => {
           const next = new Map(previous);
@@ -174,16 +282,19 @@ function CustomerAccount({
           }
           return next;
         });
-        setError(customerAccountAccessNotice(cause));
+        setError(customerAccountAccessNotice(cause, accessSurface));
       }
     },
-    [api],
+    [api, accessSurface],
   );
 
   const verifiedOrder = useCallback(
     (row: HTMLElement, order: OrderEditOrder) => {
       // Prevent an earlier list request from replacing newer detailed native facts.
-      requestGeneration.current.set(row, (requestGeneration.current.get(row) ?? 0) + 1);
+      requestGeneration.current.set(
+        row,
+        (requestGeneration.current.get(row) ?? 0) + 1,
+      );
       setTotals((previous) =>
         new Map(previous).set(row, { status: "verified", order }),
       );
@@ -256,7 +367,7 @@ function CustomerAccount({
       })
       .catch((cause) => {
         if (!controller.signal.aborted) {
-          setError(customerAccountAccessNotice(cause));
+          setError(customerAccountAccessNotice(cause, accessSurface));
           setTotals(
             (previous) =>
               new Map(
@@ -274,7 +385,7 @@ function CustomerAccount({
       controller.abort();
       client.clear();
     };
-  }, [api, rows, attempt, client, customerId, loadSummaries]);
+  }, [api, rows, attempt, client, customerId, loadSummaries, accessSurface]);
 
   async function showReturn(
     authorizationId: number,
@@ -314,6 +425,12 @@ function CustomerAccount({
   return (
     <QueryClientProvider client={client}>
       <CustomerAccountOrderTotals root={root} states={totals} api={api} />
+      <CustomerAccountOrderHistory
+        root={root}
+        states={totals}
+        hasAccessError={error !== null}
+        onRetry={() => void loadSummaries(rows)}
+      />
       <CustomerAccountOrderStatus states={totals} />
       {rows.flatMap((row) => {
         const target = row.querySelector<HTMLElement>(
@@ -452,18 +569,55 @@ const root = document.querySelector<HTMLElement>("[data-csz-customer-account]");
 const mount = document.getElementById("csz-customer-account-tools");
 const configElement = document.getElementById("csz-customer-account-config");
 if (root && mount && configElement) {
-  const statusTarget = root.querySelector<HTMLElement>("[data-csz-account-tools-status]");
+  const statusTarget = root.querySelector<HTMLElement>(
+    "[data-csz-account-tools-status]",
+  );
   try {
-    const config = customerAccountPageConfigSchema.parse(JSON.parse(configElement.textContent ?? "null"));
+    const config = customerAccountPageConfigSchema.parse(
+      JSON.parse(configElement.textContent ?? "null"),
+    );
     const api = createCustomerAccountTransport(config);
-    const signInUrl = customerAccountSignInUrl(config.loginPath, `${window.location.pathname}${window.location.search}`);
-    createRoot(mount).render(<CustomerAccount root={root} api={api} statusTarget={statusTarget} signInUrl={signInUrl} customerId={config.customerId} />);
+    const signInUrl = customerAccountSignInUrl(
+      config.loginPath,
+      `${window.location.pathname}${window.location.search}`,
+    );
+    // The template supplies a loader before JavaScript runs. Transfer this
+    // portal target to React without leaving a second server-rendered loader.
+    root
+      .querySelector<HTMLElement>("[data-csz-order-history-status]")
+      ?.replaceChildren();
+    createRoot(mount).render(
+      <CustomerAccount
+        root={root}
+        api={api}
+        statusTarget={statusTarget}
+        signInUrl={signInUrl}
+        customerId={config.customerId}
+      />,
+    );
   } catch {
     // React has not mounted when page configuration fails validation.
-    root.querySelectorAll<HTMLElement>("[data-csz-order-total], [data-csz-order-financials]")
-      .forEach(target => { target.textContent = "Total unavailable"; });
-    const notice = document.createElement("p"); notice.setAttribute("role", "alert");
-    notice.textContent = "Order options could not be loaded. Please refresh this page.";
+    root
+      .querySelector<HTMLElement>("[data-csz-order-history-status]")
+      ?.replaceChildren();
+    const history = root.querySelector<HTMLElement>(
+      "[data-csz-order-history-content]",
+    );
+    if (history) history.hidden = true;
+    root
+      .querySelectorAll<HTMLElement>(
+        "[data-csz-order-total], [data-csz-order-financials]",
+      )
+      .forEach((target) => {
+        target.textContent = history
+          ? ""
+          : "Order details could not be loaded.";
+      });
+    const notice = document.createElement("p");
+    notice.setAttribute("role", "alert");
+    notice.textContent = history
+      ? "Your orders could not be loaded. Please refresh this page."
+      : "Order options could not be loaded. Please refresh this page.";
     (statusTarget ?? mount).append(notice);
   }
 }

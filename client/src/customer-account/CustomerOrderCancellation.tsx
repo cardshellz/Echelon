@@ -15,7 +15,7 @@ import {
   clearCancellationRequest,
   type CancellationRequestScope,
 } from "./order-cancellation-request";
-import { useCustomerOperationStatus } from "./use-order-edit-status";
+import { useCustomerStatusObservation } from "./use-order-edit-status";
 
 const progressing = (value: Cancellation): boolean =>
   !["completed", "not_submitted", "review_required"].includes(value.status);
@@ -41,6 +41,9 @@ export function CustomerOrderCancellation({
   const [loading, setLoading] = useState(true);
   const [attempt, setAttempt] = useState(0);
   const [uncertain, setUncertain] = useState(false);
+  const [recoveryRequestKey, setRecoveryRequestKey] = useState<string | null>(
+    existingRequestKey,
+  );
   const approved = useRef<CustomerOrderCancellationInput | null>(null);
   const busy = useRef(false);
   const revision = useRef(0);
@@ -60,6 +63,7 @@ export function CustomerOrderCancellation({
   const received = useCallback(
     (result: Cancellation) => {
       setOperation(result);
+      setRecoveryRequestKey(result.requestKey);
       setUncertain(false);
       setError(null);
       if (["completed", "not_submitted"].includes(result.status)) {
@@ -81,19 +85,37 @@ export function CustomerOrderCancellation({
     },
     [scope.customerId, scope.connectionId, scope.omsOrderId],
   );
-  const observation = useCustomerOperationStatus({
-    operationId: operation?.operationId ?? null,
-    watching: operation !== null && progressing(operation),
-    read: async (_id, signal) =>
-      check(
+  const observedRequestKey = operation?.requestKey ?? recoveryRequestKey;
+  const requestIdentity = (requestKey: string, omsOrderId = scope.omsOrderId) =>
+    `${scope.connectionId}:${omsOrderId}:${requestKey}`;
+  // The approval key exists before POST. Observing that key recovers a lost
+  // response without needing its operation ID or replaying a financial command.
+  const observation = useCustomerStatusObservation({
+    identity: observedRequestKey ? requestIdentity(observedRequestKey) : null,
+    identityType: "cancellation_request",
+    identify: (result: Cancellation) =>
+      requestIdentity(result.requestKey, result.omsOrderId),
+    watching:
+      !loading &&
+      observedRequestKey !== null &&
+      (operation ? progressing(operation) : uncertain),
+    readImmediately: operation === null,
+    read: async (_id, signal) => {
+      if (!observedRequestKey)
+        throw new Error("A saved cancellation request is required.");
+      const result = check(
         await api.cancellation.status(
           scope.connectionId,
           scope.omsOrderId,
-          operation!.requestKey,
+          observedRequestKey,
           signal,
         ),
-        operation!.requestKey,
-      ),
+        observedRequestKey,
+      );
+      if (operation && result.operationId !== operation.operationId)
+        throw new Error("The cancellation operation changed unexpectedly.");
+      return result;
+    },
     received,
     busy: () => busy.current,
     revision: () => revision.current,
@@ -115,6 +137,7 @@ export function CustomerOrderCancellation({
         const saved = loadCancellationRequest(window.sessionStorage, scope);
         approved.current = saved;
         const requestKey = existingRequestKey ?? saved?.requestKey;
+        setRecoveryRequestKey(requestKey ?? null);
         if (requestKey) {
           const result = check(
             await api.cancellation.status(
@@ -144,8 +167,18 @@ export function CustomerOrderCancellation({
             setOperation(null);
           }
         }
-      } catch {
+      } catch (cause) {
         if (!controller.signal.aborted) {
+          console.warn(
+            JSON.stringify({
+              event: "customer_cancellation_load_failed",
+              omsOrderId: scope.omsOrderId,
+              code:
+                cause instanceof CustomerAccountRequestError
+                  ? cause.code
+                  : "CANCELLATION_DETAILS_UNAVAILABLE",
+            }),
+          );
           setError(
             "We couldn’t load the cancellation details. Please try again.",
           );
@@ -186,6 +219,7 @@ export function CustomerOrderCancellation({
       };
       saveCancellationRequest(window.sessionStorage, scope, input);
       approved.current = input;
+      setRecoveryRequestKey(input.requestKey);
       const result = check(
         await api.cancellation.submit(input),
         input.requestKey,
@@ -208,6 +242,7 @@ export function CustomerOrderCancellation({
               approved.current.requestKey,
             );
             approved.current = null;
+            setRecoveryRequestKey(null);
             setReview(null);
             setUncertain(false);
             setError(
@@ -222,10 +257,21 @@ export function CustomerOrderCancellation({
         } else {
           setError(
             approved.current
-              ? "We couldn’t confirm the cancellation response. Check its status before trying again."
+              ? null
               : "We couldn’t save this request. No cancellation was submitted from this screen.",
           );
           setUncertain(Boolean(approved.current));
+          console.warn(
+            JSON.stringify({
+              event: "customer_cancellation_response_unconfirmed",
+              omsOrderId: scope.omsOrderId,
+              requestKey: approved.current?.requestKey,
+              code:
+                cause instanceof CustomerAccountRequestError
+                  ? cause.code
+                  : "CANCELLATION_RESPONSE_UNCONFIRMED",
+            }),
+          );
         }
       }
     } finally {
@@ -234,7 +280,7 @@ export function CustomerOrderCancellation({
     }
   }
   const retryRead = () => {
-    if (operation) observation.retry();
+    if (operation || (uncertain && observedRequestKey)) observation.retry();
     else setAttempt((value) => value + 1);
   };
   if (!operation)
@@ -250,20 +296,40 @@ export function CustomerOrderCancellation({
               : "Loading cancellation details…"}
           </p>
         )}
-        {error && (
+        {uncertain && !error && !observation.error && (
+          <p role="status">
+            Your request is saved. We’re checking its status automatically.
+          </p>
+        )}
+        {(error || observation.error) && (
           <div className="csz-panel-error" role="alert">
-            <p>{error}</p>
+            <p>{error ?? observation.error}</p>
             <button
               type="button"
               className="csz-action"
-              disabled={loading}
-              onClick={() => {
-                if (uncertain && approved.current) void submit();
-                else retryRead();
-              }}
+              disabled={loading || observation.reading}
+              onClick={retryRead}
             >
               Try again
             </button>
+            {uncertain &&
+              approved.current &&
+              observation.errorCode === "ORDER_CANCELLATION_UNAVAILABLE" && (
+                <>
+                  <p>
+                    We couldn’t find the saved request’s status. You can check
+                    again or continue the cancellation you already approved.
+                  </p>
+                  <button
+                    type="button"
+                    className="csz-action"
+                    disabled={loading || observation.reading}
+                    onClick={() => void submit()}
+                  >
+                    Continue cancellation
+                  </button>
+                </>
+              )}
           </div>
         )}
         {!uncertain && review && !loading && (
@@ -325,10 +391,14 @@ export function CustomerOrderCancellation({
     );
   const done = operation.status === "completed",
     notSubmitted = operation.status === "not_submitted";
+  const cancelled =
+    done ||
+    operation.status === "refunding" ||
+    operation.status === "synchronizing";
   return (
     <section aria-labelledby="csz-cancellation-status-title">
       <h3 id="csz-cancellation-status-title">
-        {done
+        {cancelled
           ? "Order cancelled"
           : notSubmitted
             ? "Cancellation not submitted"
@@ -343,7 +413,11 @@ export function CustomerOrderCancellation({
             ? "This cancellation request was not submitted. Return to your order options to see the current status."
             : operation.status === "review_required"
               ? "Your request is saved. Contact us with the cancellation reference below so we can verify it."
-              : "We’re confirming your cancellation and refund. This will update automatically."}
+              : operation.status === "refunding"
+                ? "Your order is cancelled. Your refund is being processed. This page will update automatically."
+                : operation.status === "synchronizing"
+                  ? "Your order is cancelled. We’re finishing your order update. This page will update automatically."
+                  : "We’re confirming your cancellation and refund. This will update automatically."}
       </p>
       {!notSubmitted && (
         <dl className="csz-panel-amounts">
