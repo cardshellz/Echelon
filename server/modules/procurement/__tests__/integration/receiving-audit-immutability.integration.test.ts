@@ -8,9 +8,16 @@ import { fixtureTable } from "./shipment-line-fixture";
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const run = databaseUrl && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const discardAction = "procurement.receiving.discard";
-const protectedActions = ["procurement.receiving.source_resolved", "procurement.receiving.default_location_applied", discardAction];
+const entryActions = ["procurement.receiving.entry.create", "procurement.receiving.entry.add-line"];
+const protectedActions = ["procurement.receiving.source_resolved", "procurement.receiving.default_location_applied", discardAction, ...entryActions];
 const discardAuditMigration = readFileSync(
   resolve(process.cwd(), "migrations/900000010000018200001_receiving_discard_audit_guard.sql"),
+  "utf8",
+);
+// The reviewed SQL remains unallocated until a real draft PR owns its generated
+// filename. Publication must preserve these bytes and update this exact path.
+const entryAuditMigration = readFileSync(
+  resolve(process.cwd(), "migrations/pending/receiving_entry_audit_guard.sql"),
   "utf8",
 );
 
@@ -38,6 +45,8 @@ run.sequential("Receiving integrity audit migration", () => {
     await client!.query("BEGIN");
     await client!.query("SAVEPOINT original_audit_guard");
     await client!.query(discardAuditMigration);
+    await client!.query("SAVEPOINT before_entry_audit_upgrade");
+    await client!.query(entryAuditMigration);
   });
   afterEach(async () => { await client?.query("ROLLBACK"); });
   afterAll(async () => {
@@ -104,6 +113,25 @@ run.sequential("Receiving integrity audit migration", () => {
     await client!.query("UPDATE public.audit_events SET changes='{}' WHERE id=$1", [legacyId]);
     await client!.query("DELETE FROM public.audit_events WHERE id=$1", [legacyId]);
     expect((await client!.query("SELECT action FROM public.audit_events")).rows).toEqual([{ action: protectedActions[0] }]);
+  });
+
+  it.each(entryActions)("protects previously recorded %s evidence without changing its snapshot", async action => {
+    await client!.query("ROLLBACK TO SAVEPOINT before_entry_audit_upgrade");
+    const original = await client!.query(`INSERT INTO public.audit_events(timestamp,actor,action,target,changes,context)
+      VALUES('2026-10-23T12:00:00Z','receiving-entry-operator',$1,'receiving-order:50',
+        '{"before":{"expectedTotalUnits":0},"after":{"order":{"id":50,"expectedTotalUnits":5},"line":{"id":51,"receivedQty":5}}}',
+        '{"receivingOrderId":50,"commandKey":"receiving-entry-upgrade-proof"}') RETURNING id`, [action]);
+    const id = original.rows[0].id;
+    for (const existingAction of protectedActions.slice(0, 3)) await insert(existingAction);
+    const before = (await client!.query("SELECT * FROM public.audit_events ORDER BY id")).rows;
+
+    await client!.query(entryAuditMigration);
+    expect((await client!.query("SELECT * FROM public.audit_events ORDER BY id")).rows).toEqual(before);
+    await rejectsMutation("UPDATE public.audit_events SET actor='another-actor',changes='{}',context='{}' WHERE id=$1", [id]);
+    await rejectsMutation("UPDATE public.audit_events SET action='unrelated.legacy' WHERE id=$1", [id]);
+    await rejectsMutation("DELETE FROM public.audit_events WHERE id=$1", [id]);
+    await rejectsMutation("TRUNCATE public.audit_events");
+    expect((await client!.query("SELECT * FROM public.audit_events ORDER BY id")).rows).toEqual(before);
   });
 
   it.each(protectedActions)("allows transaction rollback of a newly inserted %s decision", async (action) => {

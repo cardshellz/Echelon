@@ -1,3 +1,5 @@
+import { registerReceivingEntryRecoveryCases } from "./receiving-entry-recovery.cases";
+import { registerReceivingEntryHttpRecoveryCases } from "./receiving-entry-http.cases";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,9 +22,16 @@ import { createDrizzleFinancialCommandRepository } from "../../../../platform/co
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import { RECEIPT_REVERSAL_MAX_REASON_LENGTH, receiptReversalCommandResultSchema, type ReceiptReversalAction } from "@shared/procurement/receipt-reversal-command";
 
-// Same module-global exclusion as the existing active-ledger integration suite.
-// Every storage operation used below is bound to the dedicated real SQL executor.
-vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
+// Redirect only the connection boundary. HTTP permissions and the default
+// command repository execute against this test's disposable PostgreSQL database.
+const connection = vi.hoisted(() => ({ database: null as ReturnType<typeof drizzle<typeof schema>> | null }));
+vi.mock("../../../../db", () => ({ pool: {}, db: new Proxy({}, {
+  get(_target, property) {
+    if (!connection.database) throw new Error("Receiving test database not initialized");
+    const value = Reflect.get(connection.database, property);
+    return typeof value === "function" ? value.bind(connection.database) : value;
+  },
+}) }));
 const enabled = !!process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const run = enabled ? describe : describe.skip;
 const ACTOR = "receiving-integrity-operator";
@@ -39,6 +48,15 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
   beforeEach(async () => {
     context = await createQuantityLedgerTestContext(process.env.ECHELON_TEST_DATABASE_URL, true);
     const pool = context.pool;
+    const identityTables = [schema.users, schema.authRoles, schema.authPermissions, schema.authRolePermissions, schema.authUserRoles] as const;
+    await pool.query("CREATE SCHEMA identity");
+    for (const table of identityTables) await pool.query(fixtureTable(table));
+    for (const statement of fixtureForeignKeys(identityTables)) await pool.query(statement);
+    await pool.query("INSERT INTO identity.users(id,username,password,active) VALUES($1,'receiving-entry-operator','unused-test-password',1),('another-receiver','another-receiver','unused-test-password',1)", [ACTOR]);
+    await pool.query(`INSERT INTO identity.auth_roles(id,name) VALUES(1,'receiving-entry-role');
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(1,'inventory','adjust','inventory');
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,1)`);
+    await pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,1),('another-receiver',1)", [ACTOR]);
     await prepareQuantityLotCreationMetadata(pool);
     await pool.query(`ALTER TABLE inventory.inventory_lots ALTER COLUMN received_at TYPE timestamp USING received_at AT TIME ZONE 'UTC'`);
     // The quantity fixture installs an empty custody reader prerequisite. This
@@ -92,10 +110,23 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
+    // Command rollback/retry is exercised with the actual immutable audit
+    // triggers enabled; protection must not prevent transaction rollback.
+    for (const migration of [
+      "900000001000017770001_receiving_integrity_audit_guard.sql",
+      "900000010000018200001_receiving_discard_audit_guard.sql",
+      "pending/receiving_entry_audit_guard.sql",
+    ]) {
+      await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
+    }
     await pool.query(`CREATE UNIQUE INDEX review_receipt_reversal_identity ON procurement.receipt_reversals(idempotency_key);
       ALTER TABLE procurement.receiving_lines ADD CHECK(reversed_qty >= 0 AND reversed_qty <= received_qty)`);
     const database = drizzle(pool, { schema });
+    connection.database = database;
     const storage = {
+      generateReceiptNumber: (tx = database) => procurementMethods.generateReceiptNumber(tx),
+      createReceivingOrder: (data: Parameters<typeof procurementMethods.createReceivingOrder>[0], tx = database) => procurementMethods.createReceivingOrder(data, tx),
+      createReceivingLine: (data: Parameters<typeof procurementMethods.createReceivingLine>[0], tx = database) => procurementMethods.createReceivingLine(data, tx),
       getReceivingOrderById: (id: number, tx = database) => procurementMethods.getReceivingOrderById(id, tx),
       getReceivingLineById: (id: number, tx = database) => procurementMethods.getReceivingLineById(id, tx),
       getReceivingLines: (id: number, tx = database) => procurementMethods.getReceivingLines(id, tx),
@@ -118,7 +149,9 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     service = new ReceivingService(database, inventory, { queueSyncAfterInventoryChange: async () => undefined },
       storage as unknown as ConstructorParameters<typeof ReceivingService>[3], purchasing, null, null, null, null, null, () => NOW);
   }, 60_000);
-  afterEach(async () => { await context?.close(); });
+  afterEach(async () => {
+    try { await context?.close(); } finally { connection.database = null; }
+  });
 
   async function physicalState() {
     return (await context.pool.query(`SELECT ro.status AS receipt_status,ro.warehouse_id AS header_warehouse,
@@ -526,5 +559,8 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     await expect(service.close(50, ACTOR)).rejects.toThrow(/receipt integrity injected PO history failure/);
     expect(await state()).toEqual(before);
   });
+  registerReceivingEntryRecoveryCases({ context: () => context, service: () => service, actorId: ACTOR, now: NOW });
+  registerReceivingEntryHttpRecoveryCases({ context: () => context, service: () => service, actorId: ACTOR });
+
 });
 import { installQuantityAmendmentFixture } from "./quantity-amendment-fixture";

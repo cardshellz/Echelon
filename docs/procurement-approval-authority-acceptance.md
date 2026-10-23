@@ -1,5 +1,7 @@
 # Purchase approval authority acceptance
 
+This document records the original authority checkpoint. The later [receiving entry and reviewed approval recovery](procurement-receiving-approval-recovery.md) batch replaces the approval route's retry boundary, binds approval to the displayed version/total/line fingerprint and extends preparation/dispatch checks. Its validation record supersedes the counts below for that batch; the policy explanations remain applicable.
+
 ## What the code definitely does
 
 The Settings editor calls the field **Required Approver Role** and offers `lead` and `admin` (`client/src/pages/Settings.tsx`, approval-tier editor). `identity.domain.ts:SYSTEM_ROLES` maps those keys to the named system roles Team Lead and Administrator. `seedRBACUseCase` creates those roles and migrates legacy memberships. Neither contract defines a minimum-role hierarchy. This implementation therefore requires the exact configured role; Administrator does not implicitly satisfy a Team Lead requirement. An explicitly named custom role must match exactly.

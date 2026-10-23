@@ -1,4 +1,6 @@
 import { getPurchaseOrderWorkList } from "./purchase-order-work-list.service";
+import { purchaseApprovalCommandScope } from "./purchase-approval.commands";
+import { purchaseApprovalLinesFingerprint } from "./purchase-approval-review";
 import { getPurchaseOrderList, PurchaseOrderListQueryError } from "./purchase-order-list.service";
 import { procurementSettingsCommands, PROCUREMENT_SETTINGS_COMMAND_SCOPE } from "./procurement-settings.commands";
 import type { Express, Request, Response } from "express";
@@ -316,6 +318,8 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
     if (req.body?.notes !== undefined) input.notes = req.body.notes;
     if (req.body?.confirmedSentExternally !== undefined) input.confirmedSentExternally = req.body.confirmedSentExternally;
     if (req.body?.expectedUpdatedAt !== undefined) input.expectedUpdatedAt = req.body.expectedUpdatedAt;
+    if (req.body?.expectedTotalCents !== undefined) input.expectedTotalCents = req.body.expectedTotalCents;
+    if (req.body?.expectedLinesFingerprint !== undefined) input.expectedLinesFingerprint = req.body.expectedLinesFingerprint;
     if (req.body?.reason !== undefined) input.reason = req.body.reason;
     if (req.body?.vendorRefNumber !== undefined) input.vendorRefNumber = req.body.vendorRefNumber;
     if (req.body?.confirmedDeliveryDate !== undefined) {
@@ -551,6 +555,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       res.json({
         ...withLifecycle({ ...po, financialWorkflow }),
         lines,
+        approvalLinesFingerprint: purchaseApprovalLinesFingerprint(lines),
         vendor,
         openExceptionCount: exceptionCount.count,
         maxOpenSeverity: exceptionCount.maxSeverity,
@@ -1033,7 +1038,22 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
   });
 
   app.post("/api/purchase-orders/:id/approve", requirePermission("purchasing", "approve"), async (req, res) => {
-    await handleLifecycleCommand(req, res, "approve");
+    try {
+      if (Object.keys(req.query).length) return res.status(400).json({ code: "PO_APPROVAL_QUERY_INVALID", error: "Purchase approval does not accept query parameters." });
+      const id = Number(req.params.id);
+      const descriptor = financialCommandFromRequest(req, purchaseApprovalCommandScope(id));
+      const result = await purchasing.approveCommand(id, req.body, descriptor.actorId, descriptor);
+      res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+      const body = result.terminalState === "rejected"
+        ? { ...(result.body as Record<string, unknown>), details: { ...((result.body as any)?.details ?? {}), purchaseApprovalOutcome: "rejected", idempotencyKey: descriptor.idempotencyKey } }
+        : result.body;
+      return res.status(result.httpStatus).json(body);
+    } catch (error) {
+      if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
+      console.error(JSON.stringify({ event: "procurement.approval.command_failed", purchaseOrderId: req.params.id, errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(500).json({ code: "PO_APPROVAL_TRANSIENT_FAILURE", error: "Purchase approval could not be confirmed. Recover the saved request." });
+    }
   });
 
   app.post("/api/purchase-orders/:id/send", requirePermission("purchasing", "create"), async (req, res) => {

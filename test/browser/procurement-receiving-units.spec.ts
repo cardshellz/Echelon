@@ -8,7 +8,7 @@ const variants = [
 ];
 const makeLine = () => ({ id: 7, receivingOrderId: 31, sku: "TEST-PC1", productName: "Partial carton product", productId: 10, productVariantId: 2 as number | null,
   unitsPerVariantSnapshot: 1 as number | null, unitVersion: version, inboundShipmentLineId: 17, expectedQty: 501, receivedQty: 401, damagedQty: 3,
-  status: "partial", putawayLocationId: 5, putawayComplete: 0, unitCost: 25, notes: null, purchaseOrderLineId: 9 });
+  status: "partial", putawayLocationId: 5, putawayComplete: 0, barcode: null, unitCost: 25 as number | null, unitCostMills: 250 as number | null, notes: null, purchaseOrderLineId: 9 });
 
 function receiptWithLines(id: number, lines: ReturnType<typeof makeLine>[], status = "receiving") {
   return { ...receipt(id), status, sourceType: "shipment", warehouseId: 1, receivingLocationId: 5,
@@ -29,15 +29,16 @@ async function setup(page: Page, options: { legacy?: boolean; unresolved?: boole
     ...(options.legacy ? { unitsPerVariantSnapshot: null } : {}), ...(options.unresolved ? { productVariantId: null } : {}),
     ...(options.drift ? { unitsPerVariantSnapshot: 50, expectedQty: 10, receivedQty: 8, damagedQty: 1 } : {}),
     ...(options.shipmentCase ? { sku: "TEST-TOP-STD-SLV-CLR", productName: "Toploader Essentials Clear and Easy Glide Combo Pack", productVariantId: 3, unitsPerVariantSnapshot: 1000, expectedQty: 525, receivedQty: 0, damagedQty: 0, status: "pending" } : {}) },
-    commands: [] as Command[], opened: !options.draft, conflictUsed: false, reads: 0, committed: false, manualConflictUsed: false, catalogConflictUsed: false };
+    commands: [] as Command[], addedLines: [] as ReturnType<typeof makeLine>[], opened: !options.draft, conflictUsed: false, reads: 0, committed: false, manualConflictUsed: false, catalogConflictUsed: false };
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   await page.route("**/api/**", async (route) => {
     const req = route.request(), path = new URL(req.url()).pathname;
     const order = (id: number) => receiptWithLines(id,
-      [{ ...state.line, ...(id === 32 ? { id: 8, receivingOrderId: 32, sku: "OTHER-RECEIPT", receivedQty: 12 } : {}) }],
+      [{ ...state.line, ...(id === 32 ? { id: 8, receivingOrderId: 32, sku: "OTHER-RECEIPT", receivedQty: 12 } : {}) }, ...(id === 31 ? state.addedLines : [])],
       options.draft ? (state.opened ? "open" : "draft") : "receiving");
     if (req.method() === "GET") {
+      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" }, roles: ["admin"], permissions: ["inventory:adjust"] } });
       if (path === "/api/product-variants") return route.fulfill({ json: catalog });
       if (path === "/api/warehouse/locations") return route.fulfill({ json: [{ id: 5, code: "RCV-01", name: "Receiving", warehouseId: 1, isActive: 1, locationType: "receiving" }] });
       if (/^\/api\/receiving\/(31|32)$/.test(path)) {
@@ -62,11 +63,12 @@ async function setup(page: Page, options: { legacy?: boolean; unresolved?: boole
       const body = req.postDataJSON(); state.commands.push({ path, body });
       if (options.manualConflict && !state.manualConflictUsed) {
         state.manualConflictUsed = true; catalog[1].unitsPerVariant = 100;
-        return route.fulfill({ status: 409, json: { error: "The catalog factor changed.", code: "RECEIVING_UNIT_CHANGED" } });
+        return route.fulfill({ status: 409, json: { error: "The catalog factor changed.", code: "RECEIVING_UNIT_CHANGED", details: { receivingEntryOutcome: "rejected", idempotencyKey: req.headers()["idempotency-key"] } } });
       }
       if (body.expectedUnitsPerVariant !== catalog.find((variant) => variant.id === body.productVariantId)?.unitsPerVariant) return route.fulfill({ status: 409, json: { error: "The selected factor was not reviewed" } });
-      const current = order(31);
-      return route.fulfill({ status: 201, json: { ...current, lines: [...current.lines, { ...makeLine(), ...body, id: 9, unitsPerVariantSnapshot: body.expectedUnitsPerVariant, unitVersion: nextVersion }] } });
+      state.addedLines.push({ ...makeLine(), ...body, id: 9, damagedQty: 0, unitCost: null, unitCostMills: null, unitsPerVariantSnapshot: body.expectedUnitsPerVariant, unitVersion: nextVersion });
+      return route.fulfill({ status: 201, json: { ...order(31),
+        entryCommand: { action: "add-line", targetId: 31, receivingOrderId: 31, receivingLineId: 9, actorId: "test-user", idempotencyKey: req.headers()["idempotency-key"] } } });
     }
     if (path === "/api/receiving/31/complete-all") {
       state.commands.push({ path, body: req.postDataJSON() });
@@ -519,7 +521,7 @@ test("manual add retains the selected factor and requires review after a stale c
   await dialog.getByRole("combobox", { name: "Put-away location", exact: true }).click();
   await page.getByRole("option", { name: /RCV-01/ }).click();
   await dialog.getByTestId("btn-confirm-add-line").click();
-  await expect(dialog.getByRole("alert")).toContainText("Refresh and reselect");
+  await expect(dialog.getByRole("alert").filter({ hasText: "Refresh and reselect" })).toContainText("Refresh and reselect");
   expect(state.commands[0].body).toMatchObject({ expectedQty: 10, receivedQty: 0, productVariantId: 3, expectedUnitsPerVariant: 50 });
   expect(state.commands[0].body).not.toHaveProperty("status");
   await expect(dialog.getByTestId("btn-confirm-add-line")).toBeDisabled();
