@@ -1378,6 +1378,9 @@
   "procurement.shipment_cost_exception_decisions": [
     "modules/procurement"
   ],
+  "procurement.shipment_history_corrections": [
+    "modules/procurement"
+  ],
   "procurement.supplier_credit_application_reversals": [
     "modules/procurement"
   ],
