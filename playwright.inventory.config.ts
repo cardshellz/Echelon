@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { browserFeatureTestMatch } from "./scripts/ci/browser-feature-manifest.mjs";
 
 const port = Number(process.env.INVENTORY_PLAYWRIGHT_PORT ?? 5191);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) {
@@ -8,7 +9,7 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: "./test/browser",
-  testMatch: [
+  testMatch: browserFeatureTestMatch("inventory", process.env.BROWSER_FEATURE) ?? [
     "bulk-inventory-tracking.spec.ts",
     "picking-inventory-policy.spec.ts",
     "picking-hold-controls.spec.ts",

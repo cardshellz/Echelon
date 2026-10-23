@@ -5,8 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { POSTGRES_SHARD_COUNT, POSTGRES_TEST_FILES } from "./postgres-test-manifest";
-import { planPostgresShards } from "./postgres-shard-planner";
-import { POSTGRES_TEST_DURATION_MS } from "./postgres-test-timings";
+import { selectedPostgresShards, validatePostgresSelection } from "./postgres-test-impact";
 
 export interface PostgresShard {
   readonly index: number;
@@ -31,15 +30,18 @@ export const POSTGRES_REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.met
 const ADMIN_CONNECTION_TIMEOUT_MS = 10_000;
 const ADMIN_STATEMENT_TIMEOUT_MS = 60_000;
 const ADMIN_QUERY_TIMEOUT_MS = ADMIN_STATEMENT_TIMEOUT_MS + 5_000;
-const SHARD_PLAN = planPostgresShards(POSTGRES_TEST_FILES, POSTGRES_TEST_DURATION_MS, POSTGRES_SHARD_COUNT);
+const SHARD_PLAN = selectedPostgresShards(POSTGRES_TEST_FILES);
+type ShardPlan = typeof SHARD_PLAN;
 
-export function parsePostgresShard(args: readonly string[]): PostgresShard {
+export function parsePostgresShard(args: readonly string[], expectedCount = POSTGRES_SHARD_COUNT): PostgresShard {
+  if (!Number.isInteger(expectedCount) || expectedCount < 1 || expectedCount > POSTGRES_SHARD_COUNT)
+    throw new Error("Invalid PostgreSQL shard plan count.");
   const match = args.length === 1 ? /^([1-9]\d*)\/([1-9]\d*)$/.exec(args[0]) : null;
   if (!match) throw new Error("Expected exactly one shard argument, for example 1/" + POSTGRES_SHARD_COUNT + ".");
   const index = Number(match[1]);
   const count = Number(match[2]);
-  if (!Number.isSafeInteger(index) || count !== POSTGRES_SHARD_COUNT || index > count) {
-    throw new Error("Shard index must be 1.." + POSTGRES_SHARD_COUNT + " and count must be " + POSTGRES_SHARD_COUNT + ".");
+  if (!Number.isSafeInteger(index) || count !== expectedCount || index > count) {
+    throw new Error("Shard index must be 1.." + expectedCount + " and count must be " + expectedCount + ".");
   }
   return { index, count };
 }
@@ -93,13 +95,13 @@ export function validatePostgresManifest(root: string, files: readonly string[])
   }
 }
 
-export function selectPostgresShardFiles(shard: PostgresShard): readonly string[] {
-  const validated = parsePostgresShard([shard.index + "/" + shard.count]);
-  return SHARD_PLAN.shards[validated.index - 1].files;
+export function selectPostgresShardFiles(shard: PostgresShard, plan: ShardPlan = SHARD_PLAN): readonly string[] {
+  const validated = parsePostgresShard([shard.index + "/" + shard.count], plan.shards.length);
+  return plan.shards[validated.index - 1].files;
 }
 
-export function buildPostgresVitestArgs(shard: PostgresShard, file: string): string[] {
-  const selected = selectPostgresShardFiles(shard);
+export function buildPostgresVitestArgs(shard: PostgresShard, file: string, plan: ShardPlan = SHARD_PLAN): string[] {
+  const selected = selectPostgresShardFiles(shard, plan);
   const selectedIndex = selected.indexOf(file);
   if (selectedIndex < 0) throw new Error("Test file is not assigned to this PostgreSQL shard.");
   return [
@@ -118,7 +120,7 @@ export function buildPostgresVitestArgs(shard: PostgresShard, file: string): str
 }
 
 export function createOwnedDatabaseName(shard: PostgresShard, randomId: string): string {
-  parsePostgresShard([shard.index + "/" + shard.count]);
+  parsePostgresShard([shard.index + "/" + shard.count], shard.count);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(randomId)) {
     throw new Error("PostgreSQL CI database identity must be a UUID.");
   }
@@ -183,6 +185,7 @@ async function runPostgresFile(
   file: string,
   env: NodeJS.ProcessEnv,
   dependencies: PostgresRunnerDependencies,
+  plan: ShardPlan,
 ): Promise<boolean> {
   let connection: PostgresAdminConnection | undefined;
   let databaseCreated = false;
@@ -213,7 +216,7 @@ async function runPostgresFile(
     delete childEnvironment.DATABASE_URL;
     delete childEnvironment.EXTERNAL_DATABASE_URL;
     phase = "test execution";
-    const child = dependencies.runTest(buildPostgresVitestArgs(shard, file), childEnvironment);
+    const child = dependencies.runTest(buildPostgresVitestArgs(shard, file, plan), childEnvironment);
     if (child.error) reportFailure(phase, safeFailureCode(child.error));
     else if (child.signal) reportFailure(phase, "signal=" + child.signal);
     else if (child.status !== 0) reportFailure(phase, "exit=" + String(child.status));
@@ -245,18 +248,20 @@ export async function runPostgresShard(
   env: NodeJS.ProcessEnv,
   dependencies: PostgresRunnerDependencies = defaultDependencies,
 ): Promise<number> {
-  const shard = parsePostgresShard(args);
+  const selection = validatePostgresSelection(env.POSTGRES_SELECTED_TEST_FILES);
+  const plan = selectedPostgresShards(selection);
+  const shard = parsePostgresShard(args, plan.shards.length);
   validatePostgresTestEnvironment(env);
   validatePostgresManifest(POSTGRES_REPOSITORY_ROOT, POSTGRES_TEST_FILES);
-  const files = selectPostgresShardFiles(shard);
+  const files = selectPostgresShardFiles(shard, plan);
   dependencies.info(JSON.stringify({ event: "postgres_ci_shard_start", shard: shard.index, count: shard.count, files,
-    estimatedDurationMs: SHARD_PLAN.shards[shard.index - 1].estimatedDurationMs,
-    fallbackDurationMs: SHARD_PLAN.fallbackDurationMs,
-    unmeasuredFiles: SHARD_PLAN.unmeasuredFiles.filter((file) => files.includes(file)),
-    unusedTimingFiles: SHARD_PLAN.unusedTimingFiles }));
+    estimatedDurationMs: plan.shards[shard.index - 1].estimatedDurationMs,
+    fallbackDurationMs: plan.fallbackDurationMs,
+    unmeasuredFiles: plan.unmeasuredFiles.filter((file) => files.includes(file)),
+    unusedTimingFiles: plan.unusedTimingFiles }));
   let failedFiles = 0;
   for (const file of files) {
-    if (!await runPostgresFile(shard, file, env, dependencies)) failedFiles += 1;
+    if (!await runPostgresFile(shard, file, env, dependencies, plan)) failedFiles += 1;
   }
   dependencies.info(JSON.stringify({ event: "postgres_ci_shard_complete", shard: shard.index, files: files.length, failedFiles }));
   return failedFiles === 0 ? 0 : 1;
