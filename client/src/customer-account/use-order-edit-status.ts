@@ -16,7 +16,9 @@ const progressing = new Set<OrderEditStatus>([
 export const orderEditWatchesStatus = (status: OrderEditStatus): boolean =>
   progressing.has(status);
 
-interface StatusOptions<T extends { operationId: string; status: string } = OrderEditOperation> {
+interface StatusOptions<
+  T extends { operationId: string; status: string } = OrderEditOperation,
+> {
   operationId: string | null;
   watching: boolean;
   read(id: string, signal: AbortSignal): Promise<T>;
@@ -28,21 +30,38 @@ interface StatusOptions<T extends { operationId: string; status: string } = Orde
 /** Display-only observer. Financial progress belongs to the canonical worker;
  * neither timers nor browser-return events may submit reconciliation commands.
  */
-export function useCustomerOperationStatus<T extends { operationId: string; status: string }>(options: StatusOptions<T> & { isProgressing(operation: T): boolean }): {
+interface StatusObservationOptions<
+  T extends { operationId: string; status: string },
+> extends Omit<StatusOptions<T>, "operationId"> {
+  identity: string | null;
+  identityType: "operation" | "cancellation_request";
+  identify(result: T): string;
+  isProgressing(result: T): boolean;
+  readImmediately?: boolean;
+}
+
+export function useCustomerStatusObservation<
+  T extends { operationId: string; status: string },
+>(
+  options: StatusObservationOptions<T>,
+): {
   error: string | null;
+  errorCode: string | null;
   reading: boolean;
   retry(): void;
 } {
   const latest = useRef(options);
   latest.current = options;
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [reading, setReading] = useState(false);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     setError(null);
+    setErrorCode(null);
     setReading(false);
-    if (!options.operationId || !options.watching) return;
-    const id = options.operationId;
+    if (!options.identity || !options.watching) return;
+    const id = options.identity;
     let stopped = false;
     let failed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -83,32 +102,36 @@ export function useCustomerOperationStatus<T extends { operationId: string; stat
         if (
           stopped ||
           controller.signal.aborted ||
-          latest.current.operationId !== id ||
+          latest.current.identity !== id ||
           latest.current.busy() ||
           latest.current.revision() !== revision
         )
           return;
-        if (result.operationId !== id)
-          throw new Error("The order status did not match this edit.");
+        if (latest.current.identify(result) !== id)
+          throw new Error("The order status did not match the saved request.");
         failed = false;
         setError(null);
+        setErrorCode(null);
         latest.current.received(result);
         if (!latest.current.isProgressing(result)) stopped = true;
       } catch (cause) {
         if (!stopped && !controller.signal.aborted) {
           failed = true;
+          const code =
+            typeof cause === "object" &&
+            cause !== null &&
+            "code" in cause &&
+            typeof cause.code === "string"
+              ? cause.code
+              : "ORDER_STATUS_UNAVAILABLE";
           setError("We couldn’t check your order’s status. Please try again.");
+          setErrorCode(code);
           console.warn(
             JSON.stringify({
-              event: "customer_order_edit_status_read_failed",
-              operationId: id,
-              code:
-                typeof cause === "object" &&
-                cause !== null &&
-                "code" in cause &&
-                typeof cause.code === "string"
-                  ? cause.code
-                  : "ORDER_EDIT_STATUS_UNAVAILABLE",
+              event: "customer_order_status_read_failed",
+              identityType: options.identityType,
+              identity: id,
+              code,
             }),
           );
         }
@@ -130,7 +153,11 @@ export function useCustomerOperationStatus<T extends { operationId: string; stat
     window.addEventListener("focus", wake);
     window.addEventListener("pageshow", wake);
     document.addEventListener("visibilitychange", wake);
-    schedule(attempt > 0 ? 0 : ORDER_EDIT_STATUS_POLL_MS);
+    // readImmediately only controls the first read of this observation. The
+    // recovered response must not restart it when the caller learns its ID.
+    schedule(
+      attempt > 0 || options.readImmediately ? 0 : ORDER_EDIT_STATUS_POLL_MS,
+    );
     return () => {
       stopped = true;
       cancelTimer();
@@ -139,10 +166,29 @@ export function useCustomerOperationStatus<T extends { operationId: string; stat
       window.removeEventListener("pageshow", wake);
       document.removeEventListener("visibilitychange", wake);
     };
-  }, [options.operationId, options.watching, attempt]);
-  return { error, reading, retry: () => setAttempt((value) => value + 1) };
+  }, [options.identity, options.watching, attempt]);
+  return {
+    error,
+    errorCode,
+    reading,
+    retry: () => setAttempt((value) => value + 1),
+  };
+}
+
+export function useCustomerOperationStatus<
+  T extends { operationId: string; status: string },
+>(options: StatusOptions<T> & { isProgressing(operation: T): boolean }) {
+  return useCustomerStatusObservation({
+    ...options,
+    identity: options.operationId,
+    identityType: "operation",
+    identify: (result) => result.operationId,
+  });
 }
 
 export function useOrderEditStatus(options: StatusOptions) {
-  return useCustomerOperationStatus({ ...options, isProgressing: operation => orderEditWatchesStatus(operation.status) });
+  return useCustomerOperationStatus({
+    ...options,
+    isProgressing: (operation) => orderEditWatchesStatus(operation.status),
+  });
 }

@@ -79,16 +79,17 @@ export function CustomerAccountOrderTotals({
       {[...states].flatMap(([row, state]) => {
         const order = state.status === "verified" ? state.order : null;
         const pending = state.status === "loading";
-        const unavailable = pending ? "Checking total…" : "Total unavailable";
+        // History has one loading/error boundary. A total is never displayed as
+        // being calculated, nor replaced with an unverified fallback amount.
         const targets = [
           ...row.querySelectorAll<HTMLElement>("[data-csz-order-total]"),
         ];
         const portals = targets.map((target, index) =>
           createPortal(
-            <span aria-busy={pending}>
+            <span>
               {order
                 ? `${formatOrderEditMoney(order.totalCents, order.currency)} ${order.currency}`
-                : unavailable}
+                : null}
             </span>,
             target,
             `${row.dataset.externalOrderId}:total:${index}`,
@@ -105,7 +106,9 @@ export function CustomerAccountOrderTotals({
                   <DirectOrderFinancials api={api} row={row} />
                 ) : (
                   <p role="status" aria-busy={pending}>
-                    {unavailable}
+                    {pending
+                      ? "Loading order details…"
+                      : "Order details could not be loaded."}
                   </p>
                 ),
                 target,

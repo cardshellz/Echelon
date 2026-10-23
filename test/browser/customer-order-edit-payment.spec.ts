@@ -142,12 +142,19 @@ async function setup(
     openEditor?: boolean;
     orderRead?: () => Promise<OrderEditOrder | null>;
     summaryRead?: () => Promise<CustomerAccountOrderSummaries | null>;
+    multipleOrders?: boolean;
     customerId?: string;
   } = {},
 ) {
   await page.clock.install({ time: new Date("2026-10-21T12:00:00Z") });
   const requests: CustomerAccountRequest[] = [];
   const errors: string[] = [];
+  const identities = [
+    { externalOrderId: "99", orderReference: "#fixture" },
+    ...(options.multipleOrders
+      ? [{ externalOrderId: "100", orderReference: "#older" }]
+      : []),
+  ];
   let current = operation();
   let failReads = false;
   let activeOperation: string | null = id;
@@ -190,9 +197,7 @@ async function setup(
     if (input.path === "/account/order-summaries") {
       expect(input.method).toBe("POST");
       expect(input.commandKey).toBeUndefined();
-      expect(input.body).toEqual({
-        orders: [{ externalOrderId: "99", orderReference: "#fixture" }],
-      });
+      expect(input.body).toEqual({ orders: identities });
       const result = options.summaryRead
         ? await options.summaryRead()
         : summaries();
@@ -269,10 +274,14 @@ async function setup(
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <script type="module">import RefreshRuntime from '/@react-refresh'; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;</script></head>
     <body><main data-csz-customer-account><div data-csz-account-tools-status></div>
+      <div data-csz-order-history-status><p role="status">Loading your orders…</p></div>
+      <div data-csz-order-history-content hidden>
       <article data-csz-account-order data-order-reference="#fixture" data-external-order-id="99" data-fulfillment="unfulfilled" data-cancelled="false">
         <span data-csz-order-total role="status"></span>
         <span data-csz-order-panel-trigger></span><p data-csz-order-tools-status></p>
-      </article><div id="csz-customer-account-tools"></div></main>
+      </article>
+      ${options.multipleOrders ? '<article data-csz-account-order data-order-reference="#older" data-external-order-id="100" data-fulfillment="fulfilled" data-cancelled="false"><span data-csz-order-total></span><span data-csz-order-panel-trigger></span></article>' : ""}
+      </div><div id="csz-customer-account-tools"></div></main>
       <script id="csz-customer-account-config" type="application/json">${JSON.stringify({ themeId: "174740308127", customerId: options.customerId ?? "100", proxyPath: "/apps/echelon-returns" })}</script>
       <script type="module" src="/@fs/${resolve(process.cwd(), "client/src/customer-account/entry.tsx").replaceAll("\\", "/")}"></script>
     </body></html>`,
@@ -354,7 +363,10 @@ test("account totals wait for the owned current financial facts without submitti
     },
   });
   const total = page.locator("[data-csz-order-total]");
-  await expect(total).toHaveText("Checking total…");
+  await expect(
+    page.getByRole("status").filter({ hasText: "Loading your orders…" }),
+  ).toBeVisible();
+  await expect(page.locator("[data-csz-order-history-content]")).toBeHidden();
   release();
   await expect(total).toHaveText("$10.76 USD");
   expect(
@@ -374,10 +386,139 @@ test("account totals recover from a failed current read through an explicit read
     summaryRead: async () => (++reads === 1 ? null : summaries()),
   });
   const total = page.locator("[data-csz-order-total]");
-  await expect(total).toHaveText("Total unavailable");
+  await expect(page.getByRole("alert")).toContainText(
+    "We couldn’t load your orders.",
+  );
+  await expect(page.locator("[data-csz-order-history-content]")).toBeHidden();
   await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(total).toHaveText("$8.29 USD");
   expect(reads).toBe(2);
+  fixture.assertNoFinancialCommands();
+});
+
+test("a slow history lookup reveals every verified total together without per-row calculation states", async ({
+  page,
+}) => {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const fixture = await setup(page, {
+    openEditor: false,
+    multipleOrders: true,
+    summaryRead: async () => {
+      await pending;
+      const response = summaries();
+      return {
+        ...response,
+        orders: [
+          ...response.orders,
+          {
+            externalOrderId: "100",
+            orderReference: "#older",
+            omsOrderId: null,
+            currency: "USD",
+            totalCents: 476,
+            financialStatus: "Partially refunded",
+            cancelled: false,
+          },
+        ],
+      };
+    },
+  });
+  const history = page.locator("[data-csz-order-history-content]");
+  await expect(history).toBeHidden();
+  await expect(
+    page.getByText("Loading your orders…", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/Checking total|Total unavailable/)).toHaveCount(
+    0,
+  );
+  await page.clock.fastForward(10_000);
+  await expect(history).toBeHidden();
+  expect(
+    fixture.requests.filter(
+      (request) => request.path === "/account/order-summaries",
+    ),
+  ).toHaveLength(1);
+  release();
+  await expect(history).toBeVisible();
+  await expect(history.locator("[data-csz-order-total]")).toHaveText([
+    "$8.29 USD",
+    "$4.76 USD",
+  ]);
+  await expect(
+    page.getByText("Loading your orders…", { exact: true }),
+  ).toHaveCount(0);
+  expect(
+    fixture.requests.filter((request) =>
+      request.path.startsWith("/order-edits/"),
+    ),
+  ).toEqual([]);
+  fixture.assertNoFinancialCommands();
+});
+
+test("an incomplete history response stays behind one retry instead of revealing a partially priced page", async ({
+  page,
+}) => {
+  let attempts = 0;
+  const fixture = await setup(page, {
+    openEditor: false,
+    multipleOrders: true,
+    summaryRead: async () => {
+      const response = summaries();
+      if (++attempts === 1)
+        return { ...response, unavailableExternalOrderIds: ["100"] };
+      return {
+        ...response,
+        orders: [
+          ...response.orders,
+          {
+            externalOrderId: "100",
+            orderReference: "#older",
+            omsOrderId: null,
+            currency: "USD",
+            totalCents: 0,
+            financialStatus: "Refunded",
+            cancelled: true,
+          },
+        ],
+      };
+    },
+  });
+  const history = page.locator("[data-csz-order-history-content]");
+  await expect(page.getByRole("alert")).toContainText(
+    "We couldn’t load your orders.",
+  );
+  await expect(history).toBeHidden();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(history).toBeVisible();
+  await expect(history.locator("[data-csz-order-total]")).toHaveText([
+    "$8.29 USD",
+    "$0.00 USD",
+  ]);
+  expect(attempts).toBe(2);
+  fixture.assertNoFinancialCommands();
+});
+
+test("a failed background refresh retains every previously verified amount", async ({
+  page,
+}) => {
+  let reads = 0;
+  const fixture = await setup(page, {
+    summaryRead: async () => (++reads === 1 ? summaries() : null),
+  });
+  await page
+    .getByRole("button", { name: "Close order tools", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "We couldn’t load your orders.",
+  );
+  await expect(page.locator("[data-csz-order-history-content]")).toBeVisible();
+  await expect(page.locator("[data-csz-order-total]")).toHaveText("$8.29 USD");
+  await expect(
+    page.getByText(/Checking total|Total unavailable|Loading your orders/),
+  ).toHaveCount(0);
   fixture.assertNoFinancialCommands();
 });
 
@@ -385,11 +526,9 @@ test("account totals leave the loading state when startup configuration is inval
   page,
 }) => {
   const fixture = await setup(page, { openEditor: false, customerId: "" });
-  await expect(page.locator("[data-csz-order-total]")).toHaveText(
-    "Total unavailable",
-  );
+  await expect(page.locator("[data-csz-order-history-content]")).toBeHidden();
   await expect(page.getByRole("alert")).toHaveText(
-    "Order options could not be loaded. Please refresh this page.",
+    "Your orders could not be loaded. Please refresh this page.",
   );
   expect(fixture.requests).toEqual([]);
   fixture.assertNoFinancialCommands();
@@ -414,9 +553,10 @@ for (const mismatch of [
         };
       },
     });
-    await expect(page.locator("[data-csz-order-total]")).toHaveText(
-      "Total unavailable",
+    await expect(page.getByRole("alert")).toContainText(
+      "We couldn’t load your orders.",
     );
+    await expect(page.locator("[data-csz-order-history-content]")).toBeHidden();
     expect(
       fixture.requests.filter((request) =>
         request.path.startsWith("/order-edits/"),
