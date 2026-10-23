@@ -17,6 +17,15 @@ import { summarizeWorkerItems } from "../application/dropship-listing-push-worke
 import { LISTING_PUSH_RUN_CODES, isItemInFlightAtStop, itemTransientPauses, pushPauseBackoffMs } from "../domain/listing-push-run";
 import { LISTING_PUSH_RUN_WORDS } from "../domain/listing-push-run-words";
 import { restoreListingsOfCancelledItems, syncRunTargetsOfItems } from "./dropship-listing-push-run-items";
+import { updateMarketplaceIssueCodesWithClient } from "./dropship-marketplace-listing-sync-state.repository";
+import { recordPreviousMarketplaceIdWithClient } from "./dropship-marketplace-previous-ids.repository";
+import type { MarketplaceIssueCode } from "../domain/marketplace-sync-decision";
+
+/**
+ * Listing issues a completed push disproves (eBay sync-back plan v4 §5 step 7): eBay took the write, so the listing
+ * is on eBay under its SKU and offer again. A dead letter (sync_requires_review) is never lifted here: only a person does.
+ */
+const ISSUES_CLEARED_BY_COMPLETED_PUSH: readonly MarketplaceIssueCode[] = ["ended_out_of_stock", "offer_missing", "sku_changed"];
 
 /** The source of the listing sync events the worker writes when it puts a cancelled item's listing back (verify V7). */
 const WORKER_SYNC_SOURCE = "dropship_worker";
@@ -326,6 +335,11 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
         },
         now: input.now,
       });
+      // The item numbers before this completion (eBay sync-back): the item, then the listing, as before.
+      const listingBefore = input.item.listingId === null ? null : (await client.query<{
+        external_listing_id: string | null; external_offer_id: string | null;
+      }>(`SELECT external_listing_id, external_offer_id FROM dropship.dropship_vendor_listings WHERE id = $1 FOR UPDATE`,
+      [input.item.listingId])).rows[0] ?? null;
       await client.query(
         `UPDATE dropship.dropship_vendor_listings
          SET status = $8,
@@ -355,6 +369,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
           listingStatusAfterCompletedPush(input.intent.listingMode),
         ],
       );
+      if (input.item.listingId !== null) await this.recordCompletedPushOnListing(client, input, listingBefore);
       // The run's target says completed in the same transaction (verify V1), so the run's count moves now. Item, then
       // listing, then target: the order a stop keeps for the items it cancels.
       await syncRunTargetsOfItems(client, { itemIds: [input.item.itemId] });
@@ -369,6 +384,14 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
           externalOfferId: input.pushResult.externalOfferId,
           quantity: input.intent.quantity,
           priceCents: input.intent.priceCents,
+          // What eBay took (eBay sync-back SB3): Card Shellz's baseline for the vendor-owned fields.
+          ...(input.pushResult.sent ? {
+            currency: input.pushResult.sent.currency, sku: input.pushResult.sent.sku,
+            fulfillmentPolicyId: input.pushResult.sent.fulfillmentPolicyId, returnPolicyId: input.pushResult.sent.returnPolicyId,
+            paymentPolicyId: input.pushResult.sent.paymentPolicyId,
+            // Review OR-1: the fingerprints of the text this push wrote (owner rule 2's "what Card Shellz last sent").
+            titleHash: input.pushResult.sent.titleHash, descriptionHash: input.pushResult.sent.descriptionHash,
+          } : {}),
         },
         occurredAt: input.now,
       });
@@ -386,6 +409,88 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
         },
         occurredAt: input.now,
       });
+      const item = await getJobItemWithClient(client, input.item.itemId);
+      await client.query("COMMIT");
+      return item;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * eBay sync-back's facts a completed push proves (plan v4 §5 step 7), in the
+   * completion's transaction: the shipping policy now live, the item number
+   * the listing had before (when eBay gave it a new one), the issues eBay's
+   * acceptance disproves, no vendor end, and the listing due for the sweep's
+   * next read. The stored intent (result.listingIntent) is never patched.
+   */
+  private async recordCompletedPushOnListing(client: PoolClient,
+    input: Parameters<DropshipListingPushWorkerRepository["completeItem"]>[0],
+    before: { external_listing_id: string | null; external_offer_id: string | null } | null): Promise<void> {
+    const listingId = input.item.listingId!;
+    await client.query(
+      `UPDATE dropship.dropship_vendor_listings
+       SET observed_fulfillment_policy_id = COALESCE($2, observed_fulfillment_policy_id),
+           marketplace_ended_at = NULL,
+           marketplace_sync_attempted_at = NULL
+       WHERE id = $1`,
+      [listingId, input.pushResult.sent?.fulfillmentPolicyId ?? null],
+    );
+    const previous = before?.external_listing_id?.trim() || null;
+    // A staged draft records its offer id as its item number: that was never an eBay item number.
+    if (previous !== null && previous !== input.pushResult.externalListingId && previous !== before?.external_offer_id) {
+      await recordPreviousMarketplaceIdWithClient(client, { listingId, externalListingId: previous, reason: "republished",
+        replacedAt: input.now });
+    }
+    await updateMarketplaceIssueCodesWithClient(client, { listingId, add: [], remove: ISSUES_CLEARED_BY_COMPLETED_PUSH, at: input.now });
+  }
+
+  /**
+   * eBay sync-back's quiet stop (plan v4 §5, owner rules 5 and 7): the vendor
+   * ended the listing on eBay and this item may not relist it, so nothing is
+   * sent. The item is cancelled, not failed: no failure email (no notice for
+   * an ended listing), and nothing re-queues it. The listing keeps the
+   * status the pre-read wrote. Only an item still queued or being sent.
+   */
+  async skipItem(input: Parameters<DropshipListingPushWorkerRepository["skipItem"]>[0]): Promise<DropshipListingPushWorkerItemRecord> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const skipped = await client.query(
+        `UPDATE dropship.dropship_listing_push_job_items
+         SET status = 'cancelled', error_code = $2, error_message = $3,
+             result = COALESCE(result, '{}'::jsonb) || $4::jsonb, updated_at = $5
+         WHERE id = $1 AND status IN ('queued', 'processing')`,
+        [input.item.itemId, input.code, input.message,
+          JSON.stringify({ push: { status: "skipped", errorCode: input.code, errorMessage: input.message, retryable: false,
+            workerId: input.workerId, processedAt: input.now.toISOString() } }),
+          input.now],
+      );
+      if (skipped.rowCount === 1) {
+        if (input.item.listingId !== null) {
+          await recordListingSyncEvent(client, {
+            listingId: input.item.listingId,
+            eventType: "listing_push_skipped",
+            source: WORKER_SYNC_SOURCE,
+            payload: { jobId: input.job.jobId, jobItemId: input.item.itemId, code: input.code },
+            occurredAt: input.now,
+          });
+        }
+        await syncRunTargetsOfItems(client, { itemIds: [input.item.itemId] });
+        await recordAuditEvent(client, {
+          vendorId: input.job.vendorId,
+          storeConnectionId: input.job.storeConnectionId,
+          entityType: "dropship_listing_push_job_item",
+          entityId: String(input.item.itemId),
+          eventType: "listing_push_item_skipped",
+          actorId: input.workerId,
+          payload: { jobId: input.job.jobId, listingId: input.item.listingId, code: input.code, before: "processing", after: "cancelled" },
+          occurredAt: input.now,
+        });
+      }
       const item = await getJobItemWithClient(client, input.item.itemId);
       await client.query("COMMIT");
       return item;

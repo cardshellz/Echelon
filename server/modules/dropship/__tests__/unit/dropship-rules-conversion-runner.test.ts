@@ -188,7 +188,10 @@ describe("the rules conversion worker (PR 11e2, plan 9.2, 9.4, 13.1)", () => {
     const block = /if \(!schedulersDisabled\(\)\) \{\n([\s\S]*?)\n\s*\} else \{\n\s*logSchedulerDisabled\("scheduler", "Dropship workers"\);/.exec(index);
     expect(block).not.toBeNull();
     const started = block![1].split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
-    expect(started.slice(-2)).toEqual(["startDropshipCategoryMarksWorker();", "startDropshipRulesConversionWorker();"]);
+    // eBay sync-back's worker starts after it (dropship-marketplace-sync-runner.test.ts pins that).
+    const rulesConversion = started.indexOf("startDropshipRulesConversionWorker();");
+    expect(started.slice(rulesConversion - 1, rulesConversion + 1)).toEqual(["startDropshipCategoryMarksWorker();",
+      "startDropshipRulesConversionWorker();"]);
     // Started nowhere else (one start per process).
     expect(index.match(/startDropshipRulesConversionWorker\(\)/g)).toHaveLength(1);
   });

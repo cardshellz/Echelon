@@ -35,6 +35,9 @@ export { reviewEbayPublicationReadiness, assertEbayPublicationReady, ensureEbayP
 // Card Shellz destination). Dropship calls these only through this file.
 export { ensureDropshipEbayStockReady, reviewDropshipEbayStockReadiness, readDropshipEbayStockAuthority } from "./infrastructure/dropship-ebay-stock-readiness.repository";
 export type { DropshipEbayStockReadinessLogger } from "./infrastructure/dropship-ebay-stock-readiness.repository";
+// What inventory planning last published to a Dropship eBay store, per size (eBay sync-back's quantity baseline; read-only).
+export { readDropshipEbayPublishedQuantities } from "./infrastructure/dropship-ebay-published-quantity.reader";
+export type { DropshipEbayPublishedQuantity } from "./infrastructure/dropship-ebay-published-quantity.reader";
 export { readDropshipEbayStockDestination } from "./infrastructure/dropship-ebay-stock-coverage.reader";
 export { dropshipEbayStockCommandKey, FENCE_HOLD_WARN_MS as DROPSHIP_EBAY_STOCK_FENCE_HOLD_WARN_MS } from "./domain/dropship-ebay-stock-readiness";
 export type { DropshipEbayStockReadinessInput, DropshipEbayStockReadinessResult, DropshipEbayStockDestination, DropshipEbayStockActor } from "@shared/types/dropship-ebay-stock-readiness";

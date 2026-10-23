@@ -45,6 +45,7 @@ import {
   listingPushRunsBaseFixtureSql,
   listingPushRunsMigrationSql,
 } from "../fixtures/listing-push-runs.fixture";
+import { ebaySyncBackListingColumnsSql } from "../fixtures/ebay-sync-back.fixture";
 
 /**
  * Publish runs against a real PostgreSQL (step 1 plan S2-5, PR A, §4.13): the
@@ -188,7 +189,9 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
   }
 
   beforeAll(async () => {
-    database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, listingPushRunsBaseFixtureSql);
+    // Plus the eBay sync-back listing columns a completed push writes (plan v4 §5 step 7), from the real migration.
+    database = await createInventoryCutoverTestDatabase(databaseUrl, disposable,
+      `${listingPushRunsBaseFixtureSql}\n${ebaySyncBackListingColumnsSql()}`);
     pool = database.pool;
     wide = new pg.Pool({ connectionString: database.connectionString, max: 8 });
 

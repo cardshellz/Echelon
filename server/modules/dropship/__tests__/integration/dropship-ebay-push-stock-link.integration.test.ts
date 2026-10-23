@@ -43,6 +43,7 @@ import type { DropshipMarketplaceCredentialRepository, DropshipMarketplaceStoreC
 import * as destinationHealth from "../../../oms/dropship-stock-destination-health";
 import { FakeEbayInventory } from "../fixtures/fake-ebay-inventory";
 import { listingPushRunsMigrationSql } from "../fixtures/listing-push-runs.fixture";
+import { ebaySyncBackListingColumnsSql } from "../fixtures/ebay-sync-back.fixture";
 import { DropshipError } from "../../domain/errors";
 
 // P3 (PLAN-F2-v2 section 9.3): a Dropship eBay push end to end over real
@@ -159,6 +160,10 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
     await database.pool.query(WORKER_SCHEMA_SQL);
     await database.pool.query(PUBLISH_RUNS_PREREQUISITES_SQL);
     await database.pool.query(listingPushRunsMigrationSql());
+    // The eBay sync-back listing columns the push path reads and writes (plan v4 §5), from the real migration; its
+    // previous item numbers table references the listings' primary key (0086), which the reduced schema lacks.
+    await database.pool.query("ALTER TABLE dropship.dropship_vendor_listings ADD PRIMARY KEY (id)");
+    await database.pool.query(ebaySyncBackListingColumnsSql());
   }, 90_000);
   afterEach(async () => { await database?.close(); runtime.pool = null; });
 
@@ -850,7 +855,10 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
 
       expect((await h.process(1)).items[0]).toMatchObject({ status: "completed" });
 
-      expect(resolvedOffers).toEqual([{ offers: [{ variantId: F.variantId, sku: F.sku, existingOfferId: "orphan-offer" }], verifiedPublishedListingId: null }]);
+      // eBay sync-back (SB5): the hook also gets the orphan offer exactly as this push's own lookup saw it.
+      expect(resolvedOffers).toEqual([{ offers: [{ variantId: F.variantId, sku: F.sku, existingOfferId: "orphan-offer",
+        observedOffer: expect.objectContaining({ offerId: "orphan-offer", status: "UNPUBLISHED", availableQuantity: 0 }) }],
+      verifiedPublishedListingId: null }]);
       expect(h.fake.offersForSku(F.sku)).toEqual([expect.objectContaining({ offerId: "orphan-offer", status: "PUBLISHED", availableQuantity: 17 })]);
       expect(h.fake.calls.some(call => call.method === "POST" && call.path === "/sell/inventory/v1/offer")).toBe(false);
       expect(await counts(targetId)).toMatchObject({ mappings: 1, preparations: 1 });

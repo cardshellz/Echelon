@@ -21,6 +21,8 @@ export interface DropshipStockListingState {
   externalOfferId: string | null;
   /** Only a saved, noncancelled live push intent for this exact destination. */
   livePushItemId: number | null;
+  /** eBay sync-back (owner rule 1): the vendor's limit on this listing; absent or null when it has none. */
+  vendorQuantityLimit?: number | null;
 }
 
 export interface DropshipStockSelectionConfig {
@@ -98,6 +100,11 @@ export function decideDropshipStockPublicationSelection(input: {
   if (!managedLive) return result(retainedDuty ? "zero" : "read_only", "managed_live_publication_not_enabled");
   // Merely creating a failed/preview row is not consent to publish. A saved live
   // intent or retained destination does carry duty through queued/failed/blocked.
-  if (retainedDuty) return result("publish", savedLivePush ? "saved_live_push" : "selected_existing_listing");
+  if (retainedDuty) {
+    const published = result("publish", savedLivePush ? "saved_live_push" : "selected_existing_listing");
+    // Owner rule 1: inventory planning publishes min(its quantity, the vendor's limit). No limit, no field.
+    const limit = listing?.vendorQuantityLimit ?? null;
+    return limit === null ? published : { ...published, publishLimitUnits: limit };
+  }
   return result("read_only", "selected_catalog_preview");
 }

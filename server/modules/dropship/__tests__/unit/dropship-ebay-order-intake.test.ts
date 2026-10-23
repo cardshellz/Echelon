@@ -10,7 +10,9 @@ import {
   DropshipEbayOrderIntakePollService,
   type DropshipEbayOrderIntakeProvider,
   type DropshipEbayOrderIntakeRepository,
+  type DropshipEbayMarketplaceOrderEffects,
   type DropshipEbayOrderIntakeStoreConnection,
+  type DropshipParkedOrderLine,
 } from "../../application/dropship-ebay-order-intake-poll-service";
 import type {
   DropshipMarketplaceCredentialRepository,
@@ -22,8 +24,10 @@ import {
   buildEbayDropshipOrderIntakeInput,
   parseEbayDiscountCents,
   parseEbayMoneyCents,
+  readEbayOrderPollFacts,
   selectEbayDropshipLineItems,
   shouldRecordEbayDropshipOrder,
+  type EbayStoreItemIndex,
 } from "../../infrastructure/dropship-ebay-order-intake.mapper";
 import { EbayDropshipOrderIntakeProvider } from "../../infrastructure/dropship-ebay-order-intake.provider";
 import { PgDropshipEbayOrderIntakeRepository } from "../../infrastructure/dropship-ebay-order-intake.repository";
@@ -69,6 +73,8 @@ describe("eBay dropship order intake mapper", () => {
             externalLineItemId: "line-1",
             externalListingId: "listing-1",
             externalOfferId: "variation-1",
+            // Review ARCH-10: the mapper says what eBay's variation id means; nothing past it reads eBay's ids for that.
+            marketplaceVariation: true,
             sku: "SKU-101",
             quantity: 2,
             unitRetailPriceCents: 1299,
@@ -321,7 +327,7 @@ describe("EbayDropshipOrderIntakeProvider", () => {
       until: new Date("2026-05-03T15:30:00.000Z"),
     });
 
-    expect(result).toEqual({ orders: [], ignored: 0 });
+    expect(result).toEqual({ orders: [], ignored: 0, saleLines: [], cancelledOrders: [], unmatchedLines: [] });
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(loadForStoreConnection).not.toHaveBeenCalled();
   });
@@ -398,7 +404,8 @@ describe("DropshipEbayOrderIntakePollService", () => {
     const repository = new FakePollRepository();
     const healthService = new FakeOrderIntakeHealthService();
     const provider: DropshipEbayOrderIntakeProvider = {
-      fetchOrders: vi.fn(async () => ({
+      fetchOrder: vi.fn(async () => ({ kind: "not_found" as const })),
+      fetchOrders: vi.fn(async () => ({ saleLines: [], cancelledOrders: [], unmatchedLines: [],
         ignored: 1,
         orders: [
           {
@@ -441,6 +448,7 @@ describe("DropshipEbayOrderIntakePollService", () => {
           },
         })),
       },
+      marketplaceOrders: new FakeMarketplaceOrders(),
       clock: { now: () => new Date("2026-05-03T15:00:00.000Z") },
       logger: nullLogger(),
     });
@@ -475,8 +483,10 @@ describe("DropshipEbayOrderIntakePollService", () => {
     const service = new DropshipEbayOrderIntakePollService({
       repository,
       healthService,
-      provider: { fetchOrders: vi.fn(async () => ({ ignored: 0, orders: [] })) },
+      provider: { fetchOrder: vi.fn(async () => ({ kind: "not_found" as const })),
+      fetchOrders: vi.fn(async () => ({ saleLines: [], cancelledOrders: [], unmatchedLines: [], ignored: 0, orders: [] })) },
       orderIntakeService: { recordMarketplaceOrder: vi.fn() },
+      marketplaceOrders: new FakeMarketplaceOrders(),
       clock: { now: () => new Date("2026-05-03T15:00:00.000Z") },
       logger: nullLogger(),
     });
@@ -495,8 +505,10 @@ describe("DropshipEbayOrderIntakePollService", () => {
     const service = new DropshipEbayOrderIntakePollService({
       repository,
       healthService,
-      provider: { fetchOrders: vi.fn(async () => ({ ignored: 0, orders: [] })) },
+      provider: { fetchOrder: vi.fn(async () => ({ kind: "not_found" as const })),
+      fetchOrders: vi.fn(async () => ({ saleLines: [], cancelledOrders: [], unmatchedLines: [], ignored: 0, orders: [] })) },
       orderIntakeService: { recordMarketplaceOrder: vi.fn() },
+      marketplaceOrders: new FakeMarketplaceOrders(),
       clock: { now: () => new Date("2026-05-03T15:00:00.000Z") },
       logger,
     });
@@ -517,7 +529,8 @@ describe("DropshipEbayOrderIntakePollService", () => {
       repository,
       healthService,
       provider: {
-        fetchOrders: vi.fn(async () => ({
+        fetchOrder: vi.fn(async () => ({ kind: "not_found" as const })),
+      fetchOrders: vi.fn(async () => ({ saleLines: [], cancelledOrders: [], unmatchedLines: [],
           ignored: 0,
           orders: [
             {
@@ -535,6 +548,7 @@ describe("DropshipEbayOrderIntakePollService", () => {
           throw new Error("database unavailable");
         }),
       },
+      marketplaceOrders: new FakeMarketplaceOrders(),
       clock: { now: () => new Date("2026-05-03T15:00:00.000Z") },
       logger: nullLogger(),
     });
@@ -578,9 +592,11 @@ describe("DropshipEbayOrderIntakePollService", () => {
       repository,
       healthService,
       provider: {
-        fetchOrders: vi.fn(async () => ({ ignored: 0, orders })),
+        fetchOrder: vi.fn(async () => ({ kind: "not_found" as const })),
+      fetchOrders: vi.fn(async () => ({ saleLines: [], cancelledOrders: [], unmatchedLines: [], ignored: 0, orders })),
       },
       orderIntakeService: { recordMarketplaceOrder },
+      marketplaceOrders: new FakeMarketplaceOrders(),
       clock: { now: () => new Date("2026-05-03T15:00:00.000Z") },
       logger,
     });
@@ -618,7 +634,8 @@ describe("DropshipEbayOrderIntakePollService", () => {
       repository,
       healthService,
       provider: {
-        fetchOrders: vi.fn(async () => ({ ignored: 0, orders: [makePollOrder("ORDER-1")] })),
+        fetchOrder: vi.fn(async () => ({ kind: "not_found" as const })),
+      fetchOrders: vi.fn(async () => ({ saleLines: [], cancelledOrders: [], unmatchedLines: [], ignored: 0, orders: [makePollOrder("ORDER-1")] })),
       },
       orderIntakeService: {
         recordMarketplaceOrder: vi.fn(async () => {
@@ -629,6 +646,7 @@ describe("DropshipEbayOrderIntakePollService", () => {
           );
         }),
       },
+      marketplaceOrders: new FakeMarketplaceOrders(),
       clock: { now: () => new Date("2026-05-03T15:00:00.000Z") },
       logger: nullLogger(),
     });
@@ -642,6 +660,276 @@ describe("DropshipEbayOrderIntakePollService", () => {
     expect(result).toMatchObject({ storesSucceeded: 0, storesFailed: 1, ordersConflicted: 0 });
     expect(repository.immutableConflicts).toHaveLength(0);
     expect(healthService.successes).toHaveLength(0);
+    expect(healthService.failures).toHaveLength(1);
+  });
+});
+
+describe("eBay order poll facts (sync-back plan v4 §6.4, §7.2, §7.3)", () => {
+  const index: EbayStoreItemIndex = {
+    listingIdByItemNumber: new Map([["listing-1", 1], ["listing-old", 1]]),
+    listingIdsBySku: new Map([["SKU-101", [1]], ["SKU-SHARED", [2, 3]]]),
+  };
+  const order = (overrides: Partial<EbayOrder> & { lines?: Array<Record<string, unknown>> } = {}): EbayOrder => {
+    const { lines, ...rest } = overrides;
+    return { ...makeEbayOrder(), ...rest, lineItems: (lines ?? [{}]).map((line) => ({ ...makeEbayOrder().lineItems![0], ...line })) } as EbayOrder;
+  };
+
+  it("counts every line on a known item number as a sale, paid or not, the old number of a relist included", () => {
+    const facts = readEbayOrderPollFacts(order({ orderPaymentStatus: "PENDING", lines: [{}, { lineItemId: "line-2", legacyItemId: "listing-old", quantity: 3 }] }), index);
+    expect(facts).toEqual({
+      saleLines: [
+        { listingId: 1, externalOrderId: "11-11111-11111", externalLineItemId: "line-1", quantity: 2, orderedAt: new Date("2026-05-03T14:30:00.000Z") },
+        { listingId: 1, externalOrderId: "11-11111-11111", externalLineItemId: "line-2", quantity: 3, orderedAt: new Date("2026-05-03T14:30:00.000Z") },
+      ],
+      unmatchedLines: [], undatedSaleLines: 0, cancelled: false, hasDropshipLine: true,
+    });
+  });
+
+  it("parks a line on an unknown item number whose custom label is exactly one listing's (FF-4)", () => {
+    const facts = readEbayOrderPollFacts(order({ lines: [{ legacyItemId: "999000", sku: "sku-101" }] }), index);
+    expect(facts.saleLines).toEqual([]);
+    expect(facts.hasDropshipLine).toBe(false);
+    expect(facts.unmatchedLines).toEqual([{ externalOrderId: "11-11111-11111", externalLineItemId: "line-1", externalListingId: "999000",
+      sku: "sku-101", candidateListingId: 1, orderedAt: new Date("2026-05-03T14:30:00.000Z") }]);
+  });
+
+  it("leaves the vendor's own sale alone: no label, a label no listing has, or one two listings share", () => {
+    for (const sku of [undefined, "VENDOR-OWN", "SKU-SHARED"]) {
+      expect(readEbayOrderPollFacts(order({ lines: [{ legacyItemId: "999000", sku }] }), index).unmatchedLines, String(sku)).toEqual([]);
+    }
+  });
+
+  it("reports a cancelled order that sold through the store's listings, and parks nothing of it (FF-7)", () => {
+    const cancelled = { cancelStatus: { cancelState: "CANCELED" } } as Partial<EbayOrder>;
+    expect(readEbayOrderPollFacts(order({ ...cancelled, lines: [{}, { lineItemId: "line-2", legacyItemId: "999000" }] }), index)).toMatchObject({
+      cancelled: true, hasDropshipLine: true, unmatchedLines: [], saleLines: [expect.objectContaining({ externalLineItemId: "line-1" })] });
+    // A cancel request eBay is still deciding is not a cancel.
+    expect(readEbayOrderPollFacts(order({ cancelStatus: { cancelState: "CANCEL_REQUESTED" } } as Partial<EbayOrder>), index).cancelled).toBe(false);
+  });
+
+  it("leaves out of the ledger a line with no order time or no whole quantity", () => {
+    expect(readEbayOrderPollFacts(order({ creationDate: "not-a-date" }), index)).toMatchObject({ saleLines: [], undatedSaleLines: 1, hasDropshipLine: true });
+    expect(readEbayOrderPollFacts(order({ lines: [{ quantity: 0 }, { lineItemId: "line-2", quantity: 1.5 }] }), index).saleLines).toEqual([]);
+  });
+});
+
+describe("EbayDropshipOrderIntakeProvider.fetchOrder (sync-back plan v2 §7.2 hourly check)", () => {
+  const provider = (fetchImpl: ReturnType<typeof vi.fn>) =>
+    new EbayDropshipOrderIntakeProvider(new FakeCredentialRepository(), fetchImpl as any, { now: () => new Date("2026-05-03T15:30:00.000Z") });
+
+  it("reads one order by id with a GET and says whether eBay cancelled it, and what intake would record", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toContain("/sell/fulfillment/v1/order/11-11111-11111");
+      expect(init?.method ?? "GET").toBe("GET");
+      return new Response(JSON.stringify({ ...makeEbayOrder(), cancelStatus: { cancelState: "CANCELED" } }), { status: 200 });
+    });
+    expect(await provider(fetchImpl).fetchOrder({ connection: makeProviderConnection(), externalOrderId: "11-11111-11111" }))
+      .toEqual({ kind: "order", cancelled: true, fulfilled: false, recordable: null });
+
+    const open = vi.fn(async () => new Response(JSON.stringify(makeEbayOrder()), { status: 200 }));
+    const read = await provider(open).fetchOrder({ connection: makeProviderConnection(), externalOrderId: "11-11111-11111" });
+    expect(read).toMatchObject({ kind: "order", cancelled: false, fulfilled: false, recordable: { externalOrderId: "11-11111-11111" } });
+  });
+
+  it("answers not_found for an order eBay does not have, and throws any other failure for the next poll", async () => {
+    expect(await provider(vi.fn(async () => new Response("{}", { status: 404 })))
+      .fetchOrder({ connection: makeProviderConnection(), externalOrderId: "gone" })).toEqual({ kind: "not_found" });
+    await expect(provider(vi.fn(async () => new Response("busy", { status: 503 })))
+      .fetchOrder({ connection: makeProviderConnection(), externalOrderId: "11-1" })).rejects.toBeInstanceOf(DropshipError);
+  });
+
+  it("refuses a blank order id without calling eBay", async () => {
+    const fetchImpl = vi.fn();
+    await expect(provider(fetchImpl).fetchOrder({ connection: makeProviderConnection(), externalOrderId: "  " }))
+      .rejects.toMatchObject({ code: "DROPSHIP_EBAY_ORDER_ID_REQUIRED" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("DropshipEbayOrderIntakePollService order-side effects (sync-back plan v4 §7.2, §7.3)", () => {
+  const NOW = new Date("2026-05-03T15:00:00.000Z");
+  const fetched = (overrides: Partial<Awaited<ReturnType<DropshipEbayOrderIntakeProvider["fetchOrders"]>>> = {}) => ({
+    ignored: 0, orders: [], saleLines: [], cancelledOrders: [], unmatchedLines: [], ...overrides });
+
+  function poll(input: {
+    effects: FakeMarketplaceOrders;
+    fetchOrders?: DropshipEbayOrderIntakeProvider["fetchOrders"];
+    fetchOrder?: DropshipEbayOrderIntakeProvider["fetchOrder"];
+    recordMarketplaceOrder?: ReturnType<typeof vi.fn>;
+    events?: string[];
+  }) {
+    const healthService = new FakeOrderIntakeHealthService();
+    const events = input.events ?? input.effects.events;
+    healthService.recordPollSucceeded = async (success) => {
+      events.push("poll succeeded");
+      healthService.successes.push(success);
+    };
+    const logger = { ...nullLogger(), debug: vi.fn() };
+    const recordMarketplaceOrder = input.recordMarketplaceOrder ?? vi.fn(async (order: { externalOrderId: string }) =>
+      makeRecordedIntakeResult(order.externalOrderId, 301));
+    const service = new DropshipEbayOrderIntakePollService({
+      repository: new FakePollRepository(),
+      healthService,
+      provider: {
+        fetchOrders: input.fetchOrders ?? vi.fn(async () => fetched()),
+        fetchOrder: input.fetchOrder ?? vi.fn(async () => ({ kind: "not_found" as const })),
+      },
+      orderIntakeService: { recordMarketplaceOrder },
+      marketplaceOrders: input.effects,
+      clock: { now: () => NOW },
+      logger,
+    });
+    return { service, healthService, logger, recordMarketplaceOrder };
+  }
+  const run = (service: DropshipEbayOrderIntakePollService) =>
+    service.pollConnectedStores({ limit: 10, initialLookbackMinutes: 240, overlapMinutes: 15 });
+
+  it("writes the ledger and parked lines first, applies eBay cancels before the sync point moves, then starts the ledger", async () => {
+    const effects = new FakeMarketplaceOrders();
+    effects.linesParked = 1;
+    const saleLine = { listingId: 1, externalOrderId: "A", externalLineItemId: "l1", quantity: 1, orderedAt: NOW };
+    const unmatched = { externalOrderId: "B", externalLineItemId: "l2", externalListingId: "999", sku: "SKU-101", candidateListingId: 1, orderedAt: NOW };
+    const { service, logger } = poll({ effects,
+      fetchOrders: vi.fn(async () => fetched({ saleLines: [saleLine], unmatchedLines: [unmatched], cancelledOrders: [{ externalOrderId: "C" }] })) });
+
+    const result = await run(service);
+
+    expect(effects.events).toEqual(["record poll facts", "cancel C", "poll succeeded", "start sales ledger"]);
+    expect(effects.pollFacts).toEqual([{ storeConnectionId: 22, saleLines: [saleLine], unmatchedLines: [unmatched], seenAt: NOW }]);
+    expect(effects.ledgerStarts).toEqual([{ storeConnectionId: 22, since: new Date(NOW.getTime() + 60 * 60_000) }]);
+    expect(result).toMatchObject({ storesSucceeded: 1, linesParked: 1, cancellationsApplied: 1, cancellationsDeadLettered: 0 });
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_ORDER_UNMATCHED_LISTING" }));
+    expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_EBAY_ORDER_CANCEL_APPLIED",
+      context: expect.objectContaining({ externalOrderId: "C", intakeId: 1, action: "cancel_intake" }) }));
+  });
+
+  it("logs a cancel that needed nothing new at DEBUG and does not count it", async () => {
+    const effects = new FakeMarketplaceOrders();
+    effects.cancellationAnswer = async () => ({ action: "already_applied", intakeId: 1 });
+    const { service, logger } = poll({ effects, fetchOrders: vi.fn(async () => fetched({ cancelledOrders: [{ externalOrderId: "C" }] })) });
+    expect(await run(service)).toMatchObject({ storesSucceeded: 1, cancellationsApplied: 0 });
+    expect(logger.debug).toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_EBAY_ORDER_CANCEL_SEEN" }));
+    expect(logger.info).not.toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_EBAY_ORDER_CANCEL_APPLIED" }));
+  });
+
+  it("fails the store's pass on a cancel that failed in passing, so the sync point stays and the cancel comes again", async () => {
+    const effects = new FakeMarketplaceOrders();
+    effects.cancellationAnswer = async () => { throw Object.assign(new Error("deadlock detected"), { code: "40P01" }); };
+    const { service, healthService } = poll({ effects, fetchOrders: vi.fn(async () => fetched({ cancelledOrders: [{ externalOrderId: "C" }] })) });
+
+    expect(await run(service)).toMatchObject({ storesSucceeded: 0, storesFailed: 1, cancellationsDeadLettered: 0 });
+    expect(healthService.successes).toEqual([]);
+    expect(healthService.failures).toHaveLength(1);
+    expect(effects.deadLetters).toEqual([]);
+    expect(effects.ledgerStarts).toEqual([]);
+  });
+
+  it("dead-letters a cancel no retry fixes once for a person and goes on with the pass", async () => {
+    for (const failure of [
+      new DropshipError("DROPSHIP_EBAY_ORDER_CANCEL_UNPROCESSABLE", "uncovered status", { classification: "permanent", retryable: false }),
+      Object.assign(new Error("check violation"), { code: "23514" }),
+    ]) {
+      const effects = new FakeMarketplaceOrders();
+      effects.cancellationAnswer = async (externalOrderId) => {
+        if (externalOrderId === "C") throw failure;
+        return { action: "cancel_intake", intakeId: 2 };
+      };
+      const { service, healthService, logger } = poll({ effects,
+        fetchOrders: vi.fn(async () => fetched({ cancelledOrders: [{ externalOrderId: "C" }, { externalOrderId: "D" }] })) });
+
+      expect(await run(service)).toMatchObject({ storesSucceeded: 1, cancellationsApplied: 1, cancellationsDeadLettered: 1 });
+      expect(effects.deadLetters).toEqual([expect.objectContaining({ vendorId: 10, storeConnectionId: 22, externalOrderId: "C", at: NOW,
+        failureCode: failure instanceof DropshipError ? "DROPSHIP_EBAY_ORDER_CANCEL_UNPROCESSABLE" : expect.any(String) })]);
+      expect(healthService.successes).toHaveLength(1);
+      expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_EBAY_ORDER_CANCEL_UNPROCESSABLE" }));
+    }
+  });
+
+  it("ARCH-2: counts a dead-lettered cancel only the first time; a replay of one already dead-lettered logs and counts nothing", async () => {
+    const effects = new FakeMarketplaceOrders();
+    effects.deadLetterCreated = false;
+    effects.cancellationAnswer = async () => {
+      throw new DropshipError("DROPSHIP_EBAY_ORDER_CANCEL_UNPROCESSABLE", "uncovered status", { classification: "permanent", retryable: false });
+    };
+    const { service, logger } = poll({ effects, fetchOrders: vi.fn(async () => fetched({ cancelledOrders: [{ externalOrderId: "C" }] })) });
+    expect(await run(service)).toMatchObject({ storesSucceeded: 1, cancellationsDeadLettered: 0 });
+    expect(effects.deadLetters).toHaveLength(1);
+    expect(logger.error).not.toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_EBAY_ORDER_CANCEL_UNPROCESSABLE" }));
+  });
+
+  it("ARCH-5: the production logger has a debug level, through the platform logger", async () => {
+    const platform = await import("../../../../platform/observability/logger");
+    const debug = vi.spyOn(platform.logger, "debug").mockImplementation(() => undefined);
+    try {
+      const { makeDropshipEbayOrderIntakeLogger } = await import("../../application/dropship-ebay-order-intake-poll-service");
+      makeDropshipEbayOrderIntakeLogger().debug?.({ code: "DROPSHIP_EBAY_ORDER_CANCEL_SEEN", message: "seen" });
+      expect(debug).toHaveBeenCalledWith("DROPSHIP_EBAY_ORDER_CANCEL_SEEN", expect.objectContaining({ message: "seen" }));
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
+  it("asks eBay about accepted orders by id: applies a cancel it finds, marks the rest checked, and stops at a failed read", async () => {
+    const effects = new FakeMarketplaceOrders();
+    effects.acceptedToCheck = [{ intakeId: 1, externalOrderId: "A" }, { intakeId: 2, externalOrderId: "B" },
+      { intakeId: 3, externalOrderId: "C" }, { intakeId: 4, externalOrderId: "D" }];
+    const fetchOrder = vi.fn(async ({ externalOrderId }: { externalOrderId: string }) => {
+      if (externalOrderId === "A") return { kind: "order" as const, cancelled: true, fulfilled: false, recordable: null };
+      if (externalOrderId === "B") return { kind: "order" as const, cancelled: false, fulfilled: false, recordable: null };
+      throw new Error("eBay unavailable");
+    });
+    const { service, logger } = poll({ effects, fetchOrder });
+
+    expect(await run(service)).toMatchObject({ storesSucceeded: 1, cancellationsApplied: 1 });
+    expect(effects.cancellations.map((entry) => entry.externalOrderId)).toEqual(["A"]);
+    // D is never asked: a failed read leaves the rest (their check time unchanged) for the next poll.
+    expect(fetchOrder).toHaveBeenCalledTimes(3);
+    expect(effects.checked).toEqual([{ intakeIds: [2], at: NOW }]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_EBAY_ACCEPTED_ORDER_CHECK_SKIPPED" }));
+  });
+
+  it("takes in the order of a parked line once its item number is proven, asks the vendor about an unproven one, and waits otherwise", async () => {
+    const effects = new FakeMarketplaceOrders();
+    const seen = new Date("2026-05-03T10:00:00.000Z");
+    const parked = (id: number, externalOrderId: string, overrides: Partial<DropshipParkedOrderLine>): DropshipParkedOrderLine => ({
+      id, externalOrderId, externalListingId: "999", sku: "SKU-101", candidateListingId: 1, firstSeenAt: seen,
+      candidateExternalListingId: "listing-1", candidateHadItemNumber: false, candidateReadAt: null, ...overrides });
+    effects.parkedLines = [
+      parked(1, "R", { candidateExternalListingId: "999" }),
+      parked(2, "R", { candidateHadItemNumber: true }),
+      parked(3, "X", { candidateHadItemNumber: true }),
+      parked(4, "Q", { externalListingId: "888", candidateReadAt: new Date(seen.getTime() + 60_000) }),
+      parked(5, "W", {}),
+    ];
+    const recordable = makePollOrder("R");
+    const fetchOrder = vi.fn(async ({ externalOrderId }: { externalOrderId: string }) => externalOrderId === "R"
+      ? { kind: "order" as const, cancelled: false, fulfilled: false, recordable }
+      : { kind: "order" as const, cancelled: true, fulfilled: false, recordable: null });
+    const { service, recordMarketplaceOrder } = poll({ effects, fetchOrder });
+
+    const result = await run(service);
+
+    expect(recordMarketplaceOrder).toHaveBeenCalledWith(recordable.input);
+    expect(effects.resolved).toEqual([{ ids: [1, 2], resolution: "relinked", at: NOW }, { ids: [3], resolution: "cancelled", at: NOW }]);
+    expect(effects.asked).toEqual([{ vendorId: 10, storeConnectionId: 22, externalListingId: "888", sku: "SKU-101", at: NOW }]);
+    expect(fetchOrder.mock.calls.map(([call]) => call.externalOrderId)).toEqual(["R", "X"]);
+    expect(result).toMatchObject({ storesSucceeded: 1, ordersCreated: 1, parkedLinesResolved: 3 });
+  });
+
+  it("defers the sales ledger start to the next poll when it cannot be written, without failing the pass", async () => {
+    const effects = new FakeMarketplaceOrders();
+    effects.startLedgerError = new Error("database unavailable");
+    const { service, healthService, logger } = poll({ effects });
+    expect(await run(service)).toMatchObject({ storesSucceeded: 1, storesFailed: 0 });
+    expect(healthService.successes).toHaveLength(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_EBAY_SALES_LEDGER_START_DEFERRED" }));
+  });
+
+  it("does not record the poll's facts, apply cancels or start the ledger when eBay could not be read", async () => {
+    const effects = new FakeMarketplaceOrders();
+    const { service, healthService } = poll({ effects, fetchOrders: vi.fn(async () => { throw new Error("eBay unavailable"); }) });
+    expect(await run(service)).toMatchObject({ storesFailed: 1 });
+    expect(effects.events).toEqual([]);
     expect(healthService.failures).toHaveLength(1);
   });
 });
@@ -674,6 +962,8 @@ describe("PgDropshipEbayOrderIntakeRepository", () => {
           platform: "ebay",
           last_order_sync_at: null,
           dropship_listing_ids: ["168741367796"],
+          item_numbers: [{ listingId: 5, externalListingId: "168741367796" }],
+          listing_skus: [{ listingId: 5, sku: "SKU-101" }],
         }],
       })),
     };
@@ -687,6 +977,8 @@ describe("PgDropshipEbayOrderIntakeRepository", () => {
       platform: "ebay",
       lastOrderSyncAt: null,
       dropshipListingIds: ["168741367796"],
+      itemNumbers: [{ listingId: 5, externalListingId: "168741367796" }],
+      listingSkus: [{ listingId: 5, sku: "SKU-101" }],
     }]);
     const sql = String(dbPool.query.mock.calls[0]?.[0]);
     expect(sql).toContain("FROM dropship.dropship_vendor_listings dl");
@@ -811,6 +1103,80 @@ class FakePollRepository implements DropshipEbayOrderIntakeRepository {
   }
 }
 
+/** Records the poll's order-side writes (plan v4 §6.4, §7.2, §7.3); each answer can be set per test. */
+class FakeMarketplaceOrders implements DropshipEbayMarketplaceOrderEffects {
+  events: string[];
+  pollFacts: Array<Parameters<DropshipEbayMarketplaceOrderEffects["recordPollFacts"]>[0]> = [];
+  cancellations: Array<Parameters<DropshipEbayMarketplaceOrderEffects["applyCancellation"]>[0]> = [];
+  deadLetters: Array<Parameters<DropshipEbayMarketplaceOrderEffects["recordCancellationDeadLetter"]>[0]> = [];
+  checked: Array<Parameters<DropshipEbayMarketplaceOrderEffects["markMarketplaceStatusChecked"]>[0]> = [];
+  resolved: Array<Parameters<DropshipEbayMarketplaceOrderEffects["resolveParkedLines"]>[0]> = [];
+  asked: Array<Parameters<DropshipEbayMarketplaceOrderEffects["askAboutUnknownItem"]>[0]> = [];
+  ledgerStarts: Array<Parameters<DropshipEbayMarketplaceOrderEffects["startSalesLedger"]>[0]> = [];
+  linesParked = 0;
+  cancellationAnswer: (externalOrderId: string) => Promise<{ action: string; intakeId: number | null }> =
+    async () => ({ action: "cancel_intake", intakeId: 1 });
+  acceptedToCheck: Array<{ intakeId: number; externalOrderId: string }> = [];
+  parkedLines: DropshipParkedOrderLine[] = [];
+  startLedgerError: Error | null = null;
+  deadLetterCreated = true;
+
+  constructor(events: string[] = []) {
+    this.events = events;
+  }
+
+  async recordPollFacts(input: Parameters<DropshipEbayMarketplaceOrderEffects["recordPollFacts"]>[0]) {
+    this.events.push("record poll facts");
+    this.pollFacts.push(input);
+    return { saleLinesRecorded: input.saleLines.length, linesParked: this.linesParked };
+  }
+
+  async applyCancellation(input: Parameters<DropshipEbayMarketplaceOrderEffects["applyCancellation"]>[0]) {
+    this.events.push(`cancel ${input.externalOrderId}`);
+    this.cancellations.push(input);
+    return this.cancellationAnswer(input.externalOrderId);
+  }
+
+  async recordCancellationDeadLetter(input: Parameters<DropshipEbayMarketplaceOrderEffects["recordCancellationDeadLetter"]>[0]) {
+    this.events.push(`dead-letter ${input.externalOrderId}`);
+    this.deadLetters.push(input);
+    return this.deadLetterCreated;
+  }
+
+  async listAcceptedOrdersToCheck() {
+    return this.acceptedToCheck;
+  }
+
+  async markMarketplaceStatusChecked(input: Parameters<DropshipEbayMarketplaceOrderEffects["markMarketplaceStatusChecked"]>[0]) {
+    this.checked.push(input);
+  }
+
+  async listOpenParkedLines() {
+    return this.parkedLines;
+  }
+
+  async resolveParkedLines(input: Parameters<DropshipEbayMarketplaceOrderEffects["resolveParkedLines"]>[0]) {
+    this.resolved.push(input);
+    return input.ids.length;
+  }
+
+  async askAboutUnknownItem(input: Parameters<DropshipEbayMarketplaceOrderEffects["askAboutUnknownItem"]>[0]) {
+    this.asked.push(input);
+    return true;
+  }
+
+  async expireParkedLines() {
+    return 0;
+  }
+
+  async startSalesLedger(input: Parameters<DropshipEbayMarketplaceOrderEffects["startSalesLedger"]>[0]) {
+    this.events.push("start sales ledger");
+    if (this.startLedgerError) throw this.startLedgerError;
+    this.ledgerStarts.push(input);
+    return true;
+  }
+}
+
 class FakeOrderIntakeHealthService {
   restores: Array<{ platform: string; limit: number }> = [];
   restoreError: Error | null = null;
@@ -858,6 +1224,8 @@ function makeProviderConnection(
     platform: "ebay",
     lastOrderSyncAt: null,
     dropshipListingIds: ["listing-1"],
+    itemNumbers: [{ listingId: 1, externalListingId: "listing-1" }],
+    listingSkus: [{ listingId: 1, sku: "SKU-101" }],
     ...overrides,
   };
 }

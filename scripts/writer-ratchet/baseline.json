@@ -237,6 +237,9 @@
   "dropship.dropship_ebay_category_rule_revisions": [
     "modules/dropship"
   ],
+  "dropship.dropship_ebay_fulfillment_policy_checks": [
+    "modules/dropship"
+  ],
   "dropship.dropship_ebay_listing_policy_override_revisions": [
     "modules/dropship"
   ],
@@ -270,6 +273,12 @@
   "dropship.dropship_listing_content_settings": [
     "modules/dropship"
   ],
+  "dropship.dropship_listing_marketplace_sales": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_listing_previous_marketplace_ids": [
+    "modules/dropship"
+  ],
   "dropship.dropship_listing_price_revisions": [
     "modules/dropship"
   ],
@@ -292,6 +301,9 @@
     "modules/dropship"
   ],
   "dropship.dropship_listing_sync_events": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_marketplace_sync_notices": [
     "modules/dropship"
   ],
   "dropship.dropship_marketplace_tracking_pushes": [
@@ -403,6 +415,9 @@
     "modules/dropship"
   ],
   "dropship.dropship_store_setup_checks": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_unmatched_marketplace_orders": [
     "modules/dropship"
   ],
   "dropship.dropship_usdc_deposit_addresses": [

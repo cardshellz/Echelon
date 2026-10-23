@@ -1,3 +1,4 @@
+import type { BelowCostSaleLine } from "../domain/marketplace-sync-decision";
 import { createHash } from "crypto";
 import { CountryCodeValidationError, requireCountryCode, type CountryCode } from "@shared/country-code";
 import {
@@ -114,6 +115,13 @@ export interface DropshipOrderAcceptanceResult {
    */
   advance: DropshipOrderAcceptanceAdvanceSummary | null;
   idempotentReplay: boolean;
+  /** A fresh acceptance's lines the buyer paid less for than Card Shellz charges (plan v3 §7.4); absent when none or on a replay. */
+  belowCostSaleLines?: readonly BelowCostSaleLine[];
+}
+
+/** Writes the below-cost warning of an accepted order to the vendor notice outbox (plan v3 §7.4, owner rule 7a). */
+export interface DropshipBelowCostSaleNotices {
+  enqueue(input: { vendorId: number; storeConnectionId: number; intakeId: number; lines: readonly BelowCostSaleLine[]; at: Date }): Promise<number>;
 }
 
 export interface DropshipOrderAcceptanceRepository {
@@ -148,6 +156,8 @@ export interface DropshipCanonicalOrderAcceptancePrepared {
   warehouseId: number;
   omsOrderId: number;
   idempotentReplay: boolean;
+  /** The lines' below-cost facts (plan v3 §7.4), carried to the finalized result; absent when none or on a replay. */
+  belowCostSaleLines?: readonly BelowCostSaleLine[];
 }
 
 export interface DropshipCanonicalOrderAcceptanceCompensationRequired {
@@ -326,6 +336,8 @@ export class DropshipOrderAcceptanceService {
       inventoryAuthority: DropshipInventoryRuntimeAuthorityGate;
       canonicalFulfillment: DropshipCanonicalAcceptanceFulfillment;
       notificationSender?: DropshipNotificationSender;
+      /** Absent in processes that do not send vendor notices: no below-cost warning is written. */
+      belowCostSaleNotices?: DropshipBelowCostSaleNotices;
       clock: DropshipClock;
       logger: DropshipLogger;
     },
@@ -371,7 +383,31 @@ export class DropshipOrderAcceptanceService {
     if (options.notify !== false) {
       await this.notifyAcceptanceOutcome(result);
     }
+    await this.warnBelowCostSale(result, acceptedAt);
     return result;
+  }
+
+  /**
+   * The below-cost warning (plan v3 §7.4), after the acceptance committed. A
+   * deliberate best-effort side channel: the order is accepted and charged
+   * whatever happens here, so a failed write is logged (WARN) and never
+   * fails or retries the acceptance; the next below-cost sale or price read
+   * of the listing writes it again. A replay warns of nothing.
+   */
+  private async warnBelowCostSale(result: DropshipOrderAcceptanceResult, at: Date): Promise<void> {
+    const lines = result.belowCostSaleLines ?? [];
+    if (!this.deps.belowCostSaleNotices || result.outcome !== "accepted" || result.idempotentReplay || lines.length === 0) return;
+    try {
+      await this.deps.belowCostSaleNotices.enqueue({ vendorId: result.vendorId, storeConnectionId: result.storeConnectionId,
+        intakeId: result.intakeId, lines, at });
+    } catch (error) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_ORDER_BELOW_COST_NOTICE_FAILED",
+        message: "The below-cost warning of an accepted order could not be written; the order is accepted.",
+        context: { intakeId: result.intakeId, vendorId: result.vendorId, storeConnectionId: result.storeConnectionId,
+          listingIds: lines.map((line) => line.listingId), error: error instanceof Error ? error.message : String(error) },
+      });
+    }
   }
 
   private async acceptCanonicalOrder(
@@ -411,7 +447,9 @@ export class DropshipOrderAcceptanceService {
 
     const result = await this.deps.repository.finalizeCanonicalOrder(input);
     if (result.outcome !== "payment_hold") {
-      return result;
+      return result.outcome === "accepted" && !result.idempotentReplay && preparation.belowCostSaleLines
+        ? { ...result, belowCostSaleLines: preparation.belowCostSaleLines }
+        : result;
     }
 
     return this.completeCanonicalPaymentHoldCompensation(input, {
@@ -712,6 +750,16 @@ export function buildDropshipOrderAcceptancePlan(
       },
     },
   };
+}
+
+/** The plan's lines the buyer paid less for than Card Shellz charges, per unit in integer cents (plan v3 §7.4). */
+export function belowCostSaleLinesOf(plan: Pick<DropshipOrderAcceptancePlan, "lines">): BelowCostSaleLine[] {
+  return plan.lines.filter((line) => line.retailLineTotalCents < line.wholesaleLineTotalCents).map((line) => ({
+    listingId: line.listingId,
+    itemLabel: line.sku ? `${line.title} (SKU ${line.sku})` : line.title,
+    retailUnitPriceCents: line.observedRetailUnitPriceCents,
+    unitCostCents: line.wholesaleUnitCostCents,
+  }));
 }
 
 export function hashDropshipOrderAcceptanceRequest(input: AcceptDropshipOrderInput): string {
