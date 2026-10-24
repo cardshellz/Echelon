@@ -23,6 +23,85 @@ const pending = {
   jobs: [job],
 };
 const statusName = "Sync status for 55PT Toploader Combo Pack";
+
+test("canonical bulk count excludes a retained review-only listing", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  state.syncIncludedCount = 0;
+  await page.reload();
+  await expect(page.getByText("55PT Toploader Combo Pack", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sync All (0)", exact: true })).toBeDisabled();
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("unchanged progress polls do not restart the expensive listing feed", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  state.jobs = [{ ...job, state: "running" }];
+  const batches = await mockSyncBatches(page, batchFixture(["running"]));
+  batches.saved = true;
+  let feedReads = 0, statusReads = 0;
+  page.on("request", request => {
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/ebay/listing-feed") feedReads++;
+    if (path === "/api/ebay/listings/sync-jobs") statusReads++;
+  });
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Channel sync progress" })).toContainText("1 updating");
+  await page.clock.install();
+  const baseline = feedReads;
+  for (let iteration = 1; iteration <= 3; iteration++) {
+    const previous = statusReads;
+    state.jobs = [{ ...job, state: "running", updatedAt: `2026-10-23T12:00:0${iteration}.000Z` }];
+    await page.clock.fastForward(10_100);
+    await expect.poll(() => statusReads).toBeGreaterThan(previous);
+  }
+  expect(feedReads).toBe(baseline);
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("completion during a slow feed queues one follow-up without overlapping or cancelling reads", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  state.jobs = [{ ...job, state: "running" }];
+  const batches = await mockSyncBatches(page, batchFixture(["running"])); batches.saved = true;
+  const initial = page.waitForResponse(response => new URL(response.url()).pathname === "/api/ebay/listing-feed");
+  await page.reload(); const payload = await (await initial).json();
+  await expect(page.getByRole("region", { name: "Channel sync progress" })).toContainText("1 updating");
+  await page.clock.install();
+  let reads = 0, active = 0, peak = 0;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/ebay/listing-feed", async route => {
+    reads++; active++; peak = Math.max(peak, active);
+    if (reads === 1) await held;
+    await route.fulfill({ json: payload }); active--;
+  });
+  state.jobs = [{ ...job, state: "completed" }];
+  await page.clock.fastForward(10_100); await expect.poll(() => reads).toBe(1);
+  batches.batch = refreshBatch({ ...batches.batch, items: batches.batch.items.map(item => ({ ...item, state: "completed" })) });
+  await page.clock.fastForward(5_100);
+  await expect(page.getByRole("region", { name: "Channel sync progress" })).toContainText("Sync complete");
+  expect(reads).toBe(1);
+  release(); await expect.poll(() => reads).toBe(2);
+  await expect.poll(() => active).toBe(0);
+  expect(peak).toBe(1); expect(state.requests).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a saved no-variant refusal reaches the catalog even when its product is outside the current feed", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  const issue = resolveEbayListingIssue({ code: "CHANNEL_SYNC_VARIANTS_REQUIRED", productId: 7, jobId: job.id });
+  state.jobs = [{ ...job, productId: 7, state: "needs_attention", code: issue.code, message: issue.message }];
+  const batch = batchFixture(["needs_attention"]);
+  batch.items[0] = { ...batch.items[0], productId: 7, name: "Unconfigured product", operationId: job.id, code: issue.code, message: issue.message };
+  const batches = await mockSyncBatches(page, batch); batches.saved = true;
+  await page.route("**/products/7?tab=variants", route => route.fulfill({ contentType: "text/html", body: "<h1>Catalog variant editor</h1>" }));
+  await page.reload();
+  await page.getByRole("button", { name: "View sync progress", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Review listing", exact: true }).click();
+  const link = page.getByRole("dialog").getByRole("link", { name: "Review variants", exact: true });
+  await expect(link).toHaveAttribute("href", "/products/7?tab=variants");
+  await link.click(); await expect(page).toHaveURL(/\/products\/7\?tab=variants$/);
+  await expect(page.getByRole("heading", { name: "Catalog variant editor" })).toBeVisible();
+  expect(state.commands).toEqual([]); expect(batches.posts).toEqual([]); expect(state.errors).toEqual([]);
+});
 const recordedProgress = {
   phase: null, phaseState: null, requestedAt: "2026-10-15T13:34:50.000Z",
   lastActivityAt: "2026-10-15T13:34:50.000Z", lastWorkerActivityAt: "2026-10-15T13:45:00.000Z", queuedAhead: 28,
@@ -155,6 +234,9 @@ test("the same policy issue link reopens its editor after collapse, including ke
   await toggle.click();
   await expect(editor).toHaveCount(0);
   state.feedProducts = [{ ...initialFeed.feed[0], name: "55PT Toploader Combo Pack refreshed" }];
+  // A different saved operation settling refreshes the projection without
+  // changing this product's unresolved policy issue or reopening its editor.
+  state.jobs.push({ ...job, id: "6e4d8e03-3197-4d21-a6d7-aa1ddaecc776", productId: 2, state: "completed" });
   await page.clock.fastForward(10_100);
   await expect(page.getByText("55PT Toploader Combo Pack refreshed", { exact: true })).toBeVisible();
   await expect(editor).toHaveCount(0);
@@ -625,6 +707,7 @@ test("Sync All includes new products and retained existing identities in the sam
     { ...feed[0], id: 3, name: "Ended product", status: "ready", externalListingId: "ended-listing", isListed: false, canSyncExistingListing: false },
   ];
   const batches = await mockSyncBatches(page, batchFixture(["queued", "queued", "queued"]));
+  state.syncIncludedCount = 3;
   batches.onPost = () => { state.jobs = [{ ...job, operation: "publish", state: "running",
     progress: { ...recordedProgress, phase: "recover_prior_requests", phaseState: "started", queuedAhead: null } }]; };
   await page.reload();
@@ -938,8 +1021,9 @@ test("feed failure preserves safe diagnostics and blocks every bulk action on ca
     reads += 1;
     return failing ? route.fulfill({ status: 503, json: { code: issue.code, error: "raw internal failure", issue } }) : route.fallback();
   });
-  // The existing saved-job poll invalidates the loaded feed; this is a failed
-  // background read with cached rows, not a fresh empty-page fixture.
+  // A newly completed operation refreshes the already loaded feed. Heartbeat
+  // polls alone no longer restart that expensive projection.
+  state.jobs = [{ ...job, state: "completed" }];
   await expect(page.getByRole("alert")).toContainText(issue.message, { timeout: 20_000 });
   await expect(page.getByRole("button", { name: "Sync All (1)", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Verify (1)", exact: true })).toBeDisabled();

@@ -83,6 +83,7 @@ import { EbayCategoryPicker } from "@/components/ebay/EbayCategoryPicker";
 import { AspectEditor } from "@/components/ebay/AspectEditor";
 import { ChannelSyncProgress } from "@/components/channels/ChannelSyncProgress";
 import { useChannelSyncBatches } from "@/hooks/use-channel-sync-batches";
+import { useChannelProjectionRefresh } from "@/hooks/use-channel-projection-refresh";
 import { EbayListingIssueCard } from "@/components/ebay/EbayListingIssueCard";
 import { EbayMappingRepairDialog } from "@/components/ebay/EbayMappingRepairDialog";
 import { EbaySyncRecoveryDialog } from "@/components/ebay/EbaySyncRecoveryDialog";
@@ -347,7 +348,7 @@ export default function EbayChannelPage() {
   });
 
   // ---- Listing feed ----
-  const { data: feedData, isLoading: feedLoading, isFetching: feedFetching, error: feedError, refetch: refetchFeed } = useQuery<{ feed: FeedItem[]; total: number }>({
+  const { data: feedData, isLoading: feedLoading, isFetching: feedFetching, error: feedError, refetch: refetchFeed } = useQuery<{ feed: FeedItem[]; total: number; syncIncludedCount?: number }>({
     queryKey: ["/api/ebay/listing-feed"],
     enabled: !!config?.connected,
   });
@@ -362,9 +363,6 @@ export default function EbayChannelPage() {
     for (const job of syncJobsQuery.data ?? []) if (!jobs.has(job.productId)) jobs.set(job.productId,job);
     return jobs;
   }, [syncJobsQuery.data]);
-  useEffect(() => {
-    queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
-  }, [syncJobsQuery.dataUpdatedAt, queryClient]);
 
   const registrationStatusProductIds = useMemo(
     () => [...new Set(
@@ -730,13 +728,15 @@ export default function EbayChannelPage() {
 
   // ---- Durable eBay publication ----
   const syncBatches = useChannelSyncBatches(config?.channel?.id, user?.id ? String(user.id) : undefined);
-  const batchActivity = syncBatches.batch?.items.map(item => `${item.operationId}:${item.state}:${item.updatedAt}`).join("|");
-  useEffect(() => {
-    if (!batchActivity) return;
-    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
-    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
-    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"] });
-  }, [batchActivity, queryClient]);
+  // Progress polls update their own views. Only settled outcomes can require a
+  // new content projection; checked-at timestamps are not content changes.
+  const projectionRevision = syncJobsQuery.data === undefined ? undefined : JSON.stringify([
+    syncJobsQuery.data.filter(job => job.state === "completed" || job.state === "needs_attention")
+      .map(job => [job.id, job.state, job.code]),
+    (syncBatches.batch?.items ?? []).filter(item => item.state === "completed" || item.state === "needs_attention")
+      .map(item => [item.operationId, item.state, item.code]),
+  ]);
+  useChannelProjectionRefresh(projectionRevision, [["/api/ebay/listing-feed"], ["/api/ebay/effective-prices"]]);
   // ---- Sync All Listings ----
   const handleSyncAll = () => { void syncBatches.start(); };
 
@@ -1259,9 +1259,9 @@ export default function EbayChannelPage() {
     };
   }, [feedData, latestSyncJobs, localSyncIssues]);
 
-  const includedListingCount = (feedData?.feed ?? []).filter((item) =>
-    !item.isExcluded && item.status !== "type_disabled",
-  ).length;
+  // Older servers omit this field during rolling deploys. Never manufacture a
+  // count from a separate client-side selection rule.
+  const includedListingCount = feedData?.syncIncludedCount;
 
   const storeCats = storeCatsData?.categories || [];
 
@@ -1929,7 +1929,7 @@ export default function EbayChannelPage() {
                 onClick={handleSyncAll}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Sync All ({includedListingCount})
+                Sync All{includedListingCount === undefined ? "" : ` (${includedListingCount})`}
               </Button>
               <Button
                 variant="outline"

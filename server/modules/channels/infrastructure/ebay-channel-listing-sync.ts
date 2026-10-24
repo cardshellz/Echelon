@@ -23,8 +23,8 @@ function assertDestination(destination: SyncDestination, expected?: ExpectedDest
 }
 export async function selectIncludedEbaySyncProducts(productIds?: number[]) {
   const destination = await readEbaySyncDestination();
-  const products = (await selection.read(productIds ? { productIds } : null)).filter(row => productIds || row.state.active && row.state.included)
-    .map(({ state: _state, ...product }) => product);
+  const products = (await selection.read(productIds ? { productIds } : null)).filter(row => productIds || row.selection.syncIncluded)
+    .map(({ productId, name, sku }) => ({ productId, name, sku }));
   return { destination, products };
 }
 /** Compatibility facade shared by HTTP, change propagation and durable batches.
@@ -45,7 +45,7 @@ export async function syncChannelListings(filter: SyncFilter | null, actor = "eb
   // catalog is read. Only a new bulk selection needs current eligibility here.
   const products = filter?.productIds?.length
     ? [...new Set(filter.productIds)].map(productId => ({ productId }))
-    : (await selection.read(filter)).filter(row => row.state.active && row.state.included);
+    : (await selection.read(filter)).filter(row => row.selection.syncIncluded);
   if (commandKey && products.length !== 1 || commandKeys && (commandKey || commandKeys.size !== products.length || products.some(p => !commandKeys.has(p.productId))))
     throw new EbayListingSyncError("EBAY_SYNC_COMMAND_SCOPE_INVALID", "Saved commands must match the selected products exactly.");
   const owner = new ChannelListingSyncService(new EbayChannelListingSyncAdapter({

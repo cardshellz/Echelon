@@ -18,9 +18,9 @@ export function createEbayInclusionSync(input: {
   const store = new PostgresChannelSyncBatchRepository(input.pool);
   return {
     async save(client, command) {
-      const { state: _state, ...product } = await new EbaySyncSelectionReader(client, input.channelId).product(command.productId);
+      const { productId, name, sku } = await new EbaySyncSelectionReader(client, input.channelId).product(command.productId);
       await saveChannelSyncSelection({ commandKey: command.commandKey, actor: command.actor,
-        destination: await input.destination(client), products: [product], requestedProductIds: [command.productId], now: command.now, uuid: input.uuid },
+        destination: await input.destination(client), products: [{ productId, name, sku }], requestedProductIds: [command.productId], now: command.now, uuid: input.uuid },
         { create: batch => store.createInsideTransaction(client, batch) });
     },
     async read(client, command) {

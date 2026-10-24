@@ -26,7 +26,7 @@ import {
   type EbayQuantityRequestAdmission,
 } from "../quantity-publication-request";
 
-import { isMissingEbayInventoryResource } from "../adapters/ebay/ebay-api-error";
+import { EbayApiRequestError, isMissingEbayInventoryResource, isMissingEbayOfferCollection } from "../adapters/ebay/ebay-api-error";
 import { readExistingEbayListingPhotos } from "../adapters/ebay/ebay-listing-photos.reader";
 import type {
   EbayListingPhotoPlan,
@@ -231,7 +231,7 @@ export function createEbayRouteListingClient(
         );
         return { offers: normalizeEbayObservedOffers(response) };
       } catch (error: any) {
-        if (isMissingEbayInventoryResource(error)) {
+        if (error instanceof EbayApiRequestError && isMissingEbayOfferCollection(error.statusCode, error.errorIds)) {
           return { offers: [] };
         }
         throw error;

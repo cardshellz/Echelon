@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { providerReadDiagnosticFromError } from "@shared/channel-provider-read";
 import { ebayReadDiagnostic, ebayReadFailureKind } from "./ebay-read-diagnostic";
+import { isMissingEbayOfferCollection } from "../../../../channels/adapters/ebay/ebay-api-error";
 
 import { listingRegistrationOwnerSnapshotSchema } from "../../../application/registration-dtos";
 import type {
@@ -40,6 +41,14 @@ const EBAY_PROVIDER = "ebay" as const;
 const DEFAULT_PAGE_SIZE = 200;
 const DEFAULT_MAX_PAGES = 1_000;
 const LIVE_LISTING_STATUSES = new Set(["ACTIVE", "OUT_OF_STOCK"]);
+
+const missingOffersSchema = z.object({
+  errors: z.array(z.object({ errorId: z.number().int() })).min(1),
+});
+function isMissingOfferCollection(response: EbayRegistrationReadResponse): boolean {
+  const parsed = missingOffersSchema.safeParse(response.body);
+  return parsed.success && isMissingEbayOfferCollection(response.status, parsed.data.errors.map(error => error.errorId));
+}
 
 const identityResponseSchema = z
   .object({
@@ -657,6 +666,10 @@ export class EbayMarketplaceRegistrationObserver
         accessToken: credential.accessToken,
         marketplaceId,
       });
+      // getOffers reports an absent SKU with 404/25713, not only a 200 empty
+      // collection. Only an authoritative first-page absence is an empty read;
+      // disappearance during pagination is inconsistent evidence, never create authority.
+      if (offset === 0 && isMissingOfferCollection(response)) return [];
       assertSuccessfulRead(response, "offers", { sku });
       const page = parseProviderResponse(
         offersPageSchema,
