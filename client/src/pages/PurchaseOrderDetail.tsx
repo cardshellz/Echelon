@@ -1,3 +1,5 @@
+import { PurchaseOrderStatusBadge } from "@/features/purchasing/PurchaseOrderStatusBadge";
+import { resolveCurrentPhysicalStatus } from "@shared/procurement/purchase-order-status";
 import { DocumentRelationships, loadDocumentRelationships, relationshipQueryKey } from "@/features/purchasing/DocumentRelationships";
 import { projectPurchaseLineShipping, type PurchaseLineShipping } from "@shared/procurement/purchase-line-shipping";
 import { PoLineShipmentLinks, PoLineShippingQuantity } from "@/features/purchasing/PoLineShipping";
@@ -602,7 +604,7 @@ function DualTrackHeader({
           <div className="flex-1 overflow-x-auto">
             <TrackTimeline
               stages={PHYSICAL_TRACK_STAGES}
-              currentStatus={po.physicalStatus ?? "draft"}
+              currentStatus={resolveCurrentPhysicalStatus(po)}
               timestamps={physTimestamps}
             />
           </div>
@@ -2782,12 +2784,7 @@ export default function PurchaseOrderDetail() {
         <div className="flex-1">
           <div className="flex items-center gap-3 flex-wrap">
             <h1 className="text-xl md:text-2xl font-bold font-mono">{po.poNumber}</h1>
-            <Badge
-              variant={STATUS_BADGES[po.status]?.variant || "secondary"}
-              className={`text-sm ${STATUS_BADGES[po.status]?.color || ""}`}
-            >
-              {STATUS_BADGES[po.status]?.label || po.status}
-            </Badge>
+            <PurchaseOrderStatusBadge purchaseOrder={po} />
             {po.priority === "rush" && <Badge variant="destructive">Rush</Badge>}
             {po.priority === "high" && <Badge variant="outline" className="text-orange-600 border-orange-300">High</Badge>}
             {Number(po.overReceiptTolerancePct) > 0 && <Badge variant="outline" className="border-blue-300 text-blue-700 bg-blue-50">Tol: {Number(po.overReceiptTolerancePct)}%</Badge>}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000028000019050001_shipment_history_corrections.sql",
+  "generation": 28,
+  "pr": 1905,
+  "ordinal": 1,
+  "after": [
+    "900000027000019000001_dropship_ebay_sync_back.sql"
+  ]
+}

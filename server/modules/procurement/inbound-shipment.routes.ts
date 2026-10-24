@@ -1,4 +1,6 @@
 import { readShipmentPackingUnitOptions, ShipmentUnitOptionsError } from "./shipment-unit-options.service";
+import { registerShipmentHistoryCorrectionRoutes } from "./shipment-history-correction.routes";
+import { createShipmentHistoryCorrectionService } from "./shipment-history-correction.service";
 import { registerReceiptShipmentQuantityCorrectionRoutes } from "./receipt-shipment-quantity-correction.routes";
 import { createReceiptShipmentQuantityCorrectionService } from "./receipt-shipment-quantity-correction.service";
 import { db } from "../../db";
@@ -26,6 +28,7 @@ function getActorId(req: any): string | undefined {
 }
 
 export function registerInboundShipmentRoutes(app: Express) {
+  registerShipmentHistoryCorrectionRoutes(app, createShipmentHistoryCorrectionService(db, () => new Date()));
   registerShipmentCostExceptionRoutes(app);
   registerShipmentInvoiceRoutes(app);
   const { shipmentTracking } = app.locals.services;

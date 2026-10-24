@@ -1,4 +1,5 @@
 import { DocumentRelationships } from "@/features/purchasing/DocumentRelationships";
+import { ShipmentHistoryCorrection } from "@/features/purchasing/ShipmentHistoryCorrection";
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { shipmentRecordedUnitSummary, shipmentDimensionBasisLabel } from "@/lib/shipment-unit-entry";
@@ -1194,6 +1195,7 @@ export default function InboundShipmentDetail() {
 
         {/* Action buttons */}
         <div className="flex gap-2 flex-wrap w-full sm:w-auto">
+          <ShipmentHistoryCorrection key={`history-${shipment.id}`} shipmentId={shipment.id} />
           {shipment.status !== "cancelled" && lines.length > 0 && (
             <ShipmentQuantityEditor key={shipment.id} shipmentLines={lines} />
           )}
@@ -2078,6 +2080,7 @@ export default function InboundShipmentDetail() {
 
         {/* ══ Tab 5: Timeline ══ */}
         <TabsContent value="timeline" className="space-y-4">
+          <ShipmentHistoryCorrection shipmentId={shipment.id} buttonLabel="View history corrections and approvals" />
           {statusHistory.length === 0 ? (
             <Card>
               <CardContent className="p-4 text-center text-muted-foreground">
