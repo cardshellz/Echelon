@@ -679,7 +679,9 @@ test("J29 (review round 1 CLI-1, TST-2) a save with no sure answer, then the box
     changeAnswers: ["drop-after-commit", "server-error", "server-error"] });
   await unsureSaveThatWentThrough(page, state);
 
-  await box(page, "Select Envelope Single Pocket, Pack of 100").uncheck();
+  // A plain click, not uncheck(): the page reads the saved choices again and ticks the box back (the save went
+  // through), so uncheck()'s own "did the state change" check races that re-read and fails when it is fast.
+  await box(page, "Select Envelope Single Pocket, Pack of 100").click();
   await expect(row(page, 102)).toContainText("Picked by you");
   await expect(box(page, "Select Envelope Single Pocket, Pack of 100")).toBeChecked();
   await expectSelectedCount(page, 2);
