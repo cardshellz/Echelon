@@ -169,7 +169,15 @@ async function unpickItem(itemId: number, qty: number, reason: string = "Picker 
   });
 }
 
-async function holdOrder(orderId: number): Promise<Order> {
+type OrderHoldResponse = Order & {
+  providerHoldSync?: {
+    status: "applied" | "pending";
+    linkedShipments: number;
+    touched: number;
+  };
+};
+
+async function holdOrder(orderId: number): Promise<OrderHoldResponse> {
   const res = await fetch(`/api/orders/${orderId}/hold`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -179,7 +187,7 @@ async function holdOrder(orderId: number): Promise<Order> {
   return res.json();
 }
 
-async function releaseHoldOrder(orderId: number): Promise<Order> {
+async function releaseHoldOrder(orderId: number): Promise<OrderHoldResponse> {
   const res = await fetch(`/api/orders/${orderId}/release-hold`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1008,7 +1016,15 @@ function PickingWorkspace() {
       if (apiOrder.status === "completed") {
         return apiOrder;
       }
-      return localOrder || apiOrder;
+      return localOrder
+        ? {
+            ...localOrder,
+            status: apiOrder.status,
+            onHold: apiOrder.onHold,
+            assignee: apiOrder.assignee,
+            pickerName: apiOrder.pickerName,
+          }
+        : apiOrder;
     });
 
     // Add completed orders from local state that aren't in API anymore (recently completed).
@@ -1099,8 +1115,12 @@ function PickingWorkspace() {
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
       playSound("success");
       toast({
-        title: "Order on hold",
-        description: `Order ${data.orderNumber} has been placed on hold`,
+        title: data.providerHoldSync?.status === "pending"
+          ? "Order held; ShipStation update pending"
+          : "Order on hold",
+        description: data.providerHoldSync?.status === "pending"
+          ? `Order ${data.orderNumber} is blocked in Echelon. ShipStation will retry automatically.`
+          : `Order ${data.orderNumber} has been placed on hold everywhere.`,
       });
     },
     onError: (error) => {
@@ -1121,8 +1141,12 @@ function PickingWorkspace() {
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
       playSound("success");
       toast({
-        title: "Hold removed",
-        description: `The order hold on ${data.orderNumber} has been removed.`,
+        title: data.providerHoldSync?.status === "pending"
+          ? "Echelon hold removed; ShipStation update pending"
+          : "Hold removed",
+        description: data.providerHoldSync?.status === "pending"
+          ? `Echelon released order ${data.orderNumber}, but ShipStation is still retrying. Do not process it there until the status updates.`
+          : `The order hold on ${data.orderNumber} has been removed everywhere.`,
       });
     },
     onError: (error) => {
@@ -1644,6 +1668,18 @@ function PickingWorkspace() {
   const completedItems = activeWork?.items.filter(i => i.status === "completed" || i.status === "short").length || 0;
   const totalItems = activeWork?.items.length || 0;
   const progressPercent = totalItems > 0 ? (completedItems / totalItems) * 100 : 0;
+
+  useEffect(() => {
+    if (pickingMode !== "single" || !activeOrderId || !activeOrder?.onHold) return;
+
+    setActiveOrderId(null);
+    setCurrentItemIndex(0);
+    toast({
+      title: "Order placed on hold",
+      description: "Picking was closed immediately. Release the hold before resuming this order.",
+      variant: "default",
+    });
+  }, [activeOrder?.onHold, activeOrderId, pickingMode, toast]);
 
   // Dedicated replen bin per line item — fetched lazily only while an order is
   // open for picking (keeps the queue poll light). Informational: the exact
@@ -3530,6 +3566,14 @@ function PickingWorkspace() {
                 }
                 onClick={() => {
                   console.log("Card clicked:", order.id, "status:", order.status, "onHold:", order.onHold, "assignee:", order.assignee);
+                  if (order.onHold) {
+                    toast({
+                      title: "Order is on hold",
+                      description: "Release the hold before opening this order for picking.",
+                      variant: "default",
+                    });
+                    return;
+                  }
                   if (order.status === "ready" && !order.onHold) {
                     if (shouldShowReleasedPickProgress(order)) {
                       toast({

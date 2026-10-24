@@ -1618,6 +1618,20 @@ describe("pushShipment :: error cases", () => {
     expect(err?.context.value).toBe(true);
   });
 
+  it("throws when the owning WMS order is held before ShipStation push", async () => {
+    const shipmentRow = okShipment({ status: "queued" });
+    const mock = makeDb([
+      { rows: [shipmentRow] },
+      { rows: [okOrder({ on_hold: 1 })] },
+    ]);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    const err = await svc.pushShipment(shipmentRow.id).catch((e: any) => e);
+
+    expect(err).toBeInstanceOf(ShipStationPushError);
+    expect(err?.context.field).toBe("order.on_hold");
+    expect(err?.context.value).toBe(true);
+  });
+
   it("throws when the owning WMS order is cancelled/refunded", async () => {
     const shipmentRow = okShipment({ status: "queued" });
     const mock = makeDb([

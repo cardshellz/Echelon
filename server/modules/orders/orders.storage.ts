@@ -33,6 +33,7 @@ import {
   setWmsOrderItemLocation,
   syncWmsOrderItemsFulfilledFromOms,
 } from "../wms/order-item-commands";
+import { enqueueShipStationHoldSyncInTransaction } from "../oms/shipstation-hold-retry.command";
 
 /**
  * Order statuses that are DERIVED from the underlying shipments via
@@ -782,6 +783,8 @@ export const orderMethods: IOrderStorage = {
         eq(orders.id, orderId),
         eq(orders.assignedPickerId, pickerId),
         eq(orders.warehouseStatus, "in_progress"),
+        eq(orders.onHold, 0),
+        isNull(orders.orderEditOperationId),
       )
     );
 
@@ -991,23 +994,60 @@ export const orderMethods: IOrderStorage = {
   },
 
   async holdOrder(orderId: number): Promise<Order | null> {
-    const result = await db
-      .update(orders)
-      .set({ onHold: 1, heldAt: new Date() })
-      .where(eq(orders.id, orderId))
-      .returning();
-    if (result[0]) await recomputeSortRank(orderId);
-    return result[0] || null;
+    const now = new Date();
+    const order = await db.transaction(async (tx) => {
+      const result = await tx
+        .update(orders)
+        .set({
+          onHold: 1,
+          heldAt: now,
+          assignedPickerId: null,
+          startedAt: null,
+        })
+        .where(eq(orders.id, orderId))
+        .returning();
+      if (!result[0]) return null;
+
+      await enqueueShipStationHoldSyncInTransaction(tx, {
+        wmsOrderId: orderId,
+        requestedMode: "hold",
+        reason: "Order hold committed; provider state must converge",
+        now,
+      });
+      return result[0];
+    });
+    if (order) {
+      await recomputeSortRank(orderId).catch((error: any) => {
+        console.warn(`[Hold] sort-rank recompute failed for order ${orderId}; hold remains authoritative: ${error?.message ?? error}`);
+      });
+    }
+    return order;
   },
 
   async releaseHoldOrder(orderId: number): Promise<Order | null> {
-    const result = await db
-      .update(orders)
-      .set({ onHold: 0, heldAt: null })
-      .where(eq(orders.id, orderId))
-      .returning();
-    if (result[0]) await recomputeSortRank(orderId);
-    return result[0] || null;
+    const now = new Date();
+    const order = await db.transaction(async (tx) => {
+      const result = await tx
+        .update(orders)
+        .set({ onHold: 0, heldAt: null })
+        .where(eq(orders.id, orderId))
+        .returning();
+      if (!result[0]) return null;
+
+      await enqueueShipStationHoldSyncInTransaction(tx, {
+        wmsOrderId: orderId,
+        requestedMode: "release",
+        reason: "Order hold release committed; provider state must converge",
+        now,
+      });
+      return result[0];
+    });
+    if (order) {
+      await recomputeSortRank(orderId).catch((error: any) => {
+        console.warn(`[ReleaseHold] sort-rank recompute failed for order ${orderId}; release remains authoritative: ${error?.message ?? error}`);
+      });
+    }
+    return order;
   },
 
   // Line-item hold (LINE-ITEM-HOLD-DESIGN.md P1): mark a single line held so it
