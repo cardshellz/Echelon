@@ -236,6 +236,11 @@ export interface OrderEditProvider {
     intent: OrderEditRefundIntent,
     firstAttemptAt: string,
   ): Promise<OrderEditRefundResult>;
+  /** Observe only: this method must never create or retry a refund command. */
+  observeRefund(
+    connectionId: number,
+    intent: OrderEditRefundIntent,
+  ): Promise<OrderEditRefundResult | null>;
   recoverUnpaid(
     connectionId: number,
     baseline: OrderEditSnapshot,

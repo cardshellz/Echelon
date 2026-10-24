@@ -61,6 +61,7 @@ import {
 } from "./webhook-retry.worker";
 import type { ShippingEngine } from "../shipping/engine";
 import { recordShopifyRefundReturnCase } from "../returns/application/shopify-return-case.service";
+import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1925,16 +1926,9 @@ export function registerOmsWebhooks(
 
       // Determine financial status
       const refundLineItems = refundPayload.refund_line_items || [];
-      const omsLines = await db
-        .select()
-        .from(omsOrderLines)
-        .where(eq(omsOrderLines.orderId, existing.id));
-
-      // This-payload full-line-refund signal (kept as a secondary trigger for
-      // 'refunded'; the primary trigger is CUMULATIVE money — see the UPDATE).
-      const totalOrderQty = omsLines.reduce((s: number, l: any) => s + l.quantity, 0);
-      const refundedQty = refundLineItems.reduce((s: number, l: any) => s + (l.quantity || 0), 0);
-      const fullQtyRefundedThisPayload = totalOrderQty > 0 && refundedQty >= totalOrderQty;
+      // Replacing an order-edit line can create a transaction-free bookkeeping
+      // refund for its entire old quantity. Physical disposition is owned by the
+      // cascade; quantities are never evidence that money was fully refunded.
 
       // Compute refund amount from Shopify transactions (authoritative source)
       const transactions: any[] = Array.isArray(refundPayload.transactions) ? refundPayload.transactions : [];
@@ -1973,16 +1967,29 @@ export function registerOmsWebhooks(
           return;
         }
 
+        const financialEvidence: {
+          rows: Array<{
+            total_cents: number | string | null;
+            refund_amount_cents: number | string | null;
+            financial_status: string | null;
+          }>;
+        } = await tx.execute(sql`
+          SELECT total_cents,refund_amount_cents,financial_status
+          FROM oms.oms_orders WHERE id=${existing.id} FOR UPDATE
+        `);
+        const financialRow = financialEvidence?.rows?.[0];
+        if (!financialRow) throw new Error("The refunded order no longer exists.");
+        const financialStatus = deriveShopifyRefundFinancialStatus({
+          totalCents: financialRow.total_cents,
+          previousRefundCents: financialRow.refund_amount_cents,
+          refundCents: thisRefundCents,
+          previousFinancialStatus: financialRow.financial_status,
+        });
         const updated: any = await tx.execute(sql`
           UPDATE oms.oms_orders SET
             refund_amount_cents = COALESCE(refund_amount_cents, 0) + ${thisRefundCents},
-            financial_status = CASE
-              WHEN COALESCE(refund_amount_cents, 0) + ${thisRefundCents} >= COALESCE(NULLIF(total_cents, 0), 2147483647)
-                THEN 'refunded'
-              WHEN ${fullQtyRefundedThisPayload} THEN 'refunded'
-              ELSE 'partially_refunded'
-            END,
-            refunded_at = ${now},
+            financial_status = ${financialStatus},
+            refunded_at = CASE WHEN ${thisRefundCents} > 0 THEN ${now} ELSE refunded_at END,
             updated_at = ${now}
           WHERE id = ${existing.id}
           RETURNING refund_amount_cents, financial_status

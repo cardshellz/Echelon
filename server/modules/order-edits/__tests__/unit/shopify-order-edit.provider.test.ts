@@ -4418,6 +4418,101 @@ describe("ShopifyOrderEditProvider", () => {
     },
   );
 
+  it("treats incomplete creation readback as retryable and finds the same refund on the next observation", async () => {
+    const raw = rawOrder({
+      lineItems: { nodes: [line(1, 10, 1)], pageInfo: { hasNextPage: false } },
+      currentSubtotalPriceSet: bag("10.00"),
+      currentTotalPriceSet: bag("10.00"),
+      totalOutstandingSet: bag("-10.00"),
+    });
+    const completed = {
+      id: id("Refund", 9),
+      note: "Echelon order edit edit-1",
+      totalRefundedSet: bag("10.00"),
+      transactions: {
+        nodes: [tx(2, "10.00", "REFUND", "SUCCESS", 1)],
+        pageInfo: { hasNextPage: false },
+      },
+    };
+    const h = harness([
+      raw,
+      raw,
+      {
+        refundCreate: {
+          refund: {
+            ...completed,
+            note: null,
+            totalRefundedSet: bag("0.00"),
+            transactions: { nodes: [], pageInfo: { hasNextPage: false } },
+          },
+          userErrors: [],
+        },
+      },
+      {
+        ...raw,
+        order: {
+          ...raw.order,
+          refunds: [
+            {
+              ...completed,
+              id: id("Refund", 8),
+              note: null,
+              totalRefundedSet: bag("0.00"),
+              transactions: { nodes: [], pageInfo: { hasNextPage: false } },
+            },
+            completed,
+          ],
+        },
+      },
+    ]);
+    const intent = refundIntent(await h.provider.readOrder(4, "100"));
+    await expect(
+      h.provider.refund(4, intent, NOW.toISOString()),
+    ).rejects.toMatchObject({ code: "REFUND_READBACK_PENDING" });
+    expect(await h.provider.observeRefund(4, intent)).toMatchObject({
+      status: "succeeded",
+      refundId: id("Refund", 9),
+    });
+    expect(
+      h.requests.filter((request) => request.query.includes("refundCreate")),
+    ).toHaveLength(1);
+  });
+
+  it("observes an absent refund without submitting a command even inside the idempotency window", async () => {
+    const h = harness([rawOrder(), rawOrder()]);
+    const intent = refundIntent(await h.provider.readOrder(4, "100"));
+    expect(await h.provider.observeRefund(4, intent)).toBeNull();
+    expect(
+      h.requests.every((request) => !request.query.includes("refundCreate")),
+    ).toBe(true);
+  });
+
+  it("leaves conflicting refund evidence for staff review without resubmitting", async () => {
+    const h = harness([
+      rawOrder(),
+      rawOrder({
+        refunds: [
+          {
+            id: id("Refund", 9),
+            note: "Echelon order edit edit-1",
+            totalRefundedSet: bag("10.00"),
+            transactions: {
+              nodes: [tx(2, "9.00", "REFUND", "SUCCESS", 1)],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        ],
+      }),
+    ]);
+    const intent = refundIntent(await h.provider.readOrder(4, "100"));
+    await expect(h.provider.observeRefund(4, intent)).rejects.toMatchObject({
+      code: "REFUND_REVIEW_EVIDENCE_MISMATCH",
+    });
+    expect(
+      h.requests.every((request) => !request.query.includes("refundCreate")),
+    ).toBe(true);
+  });
+
   it.each(["PENDING", "AWAITING_RESPONSE", "UNKNOWN"])(
     "reads an existing %s refund with no settled money without sending it again",
     async (status) => {

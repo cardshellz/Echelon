@@ -95,6 +95,8 @@ export interface TransitionRequest {
   reason: string;
   setCompletedAt?: boolean;
   setCancelledAt?: boolean;
+  /** Background cleanup must not close an order owned by an edit in progress. */
+  requireNoOrderEdit?: boolean;
 }
 
 export interface TransitionResult {
@@ -146,7 +148,7 @@ export async function transitionOrderStatus(
   request: TransitionRequest,
   clock: () => Date = () => new Date(),
 ): Promise<TransitionResult> {
-  const { from, to, reason, setCompletedAt, setCancelledAt } = request;
+  const { from, to, reason, setCompletedAt, setCancelledAt, requireNoOrderEdit } = request;
 
   // Filter `from` states to only those with a legal transition to `to`
   const legalFrom = from.filter((f) => isTransitionAllowed(f, to));
@@ -183,6 +185,7 @@ export async function transitionOrderStatus(
         ${setCancelledAt ? sql`, cancelled_at = COALESCE(cancelled_at, ${now})` : sql``}
     WHERE id = ${orderId}
       AND warehouse_status IN (${sql.raw(fromList)})
+      ${requireNoOrderEdit ? sql`AND order_edit_operation_id IS NULL` : sql``}
     RETURNING warehouse_status AS new_status
   `);
 
@@ -216,6 +219,7 @@ export async function cancelOrder(
   db: any,
   orderId: number,
   reason: string,
+  guards?: Pick<TransitionRequest, "requireNoOrderEdit">,
 ): Promise<TransitionResult> {
   return transitionOrderStatus(db, orderId, {
     from: [
@@ -226,6 +230,7 @@ export async function cancelOrder(
     to: "cancelled",
     reason,
     setCancelledAt: true,
+    ...guards,
   });
 }
 
@@ -259,6 +264,7 @@ export async function completeOrder(
   db: any,
   orderId: number,
   reason: string,
+  guards?: Pick<TransitionRequest, "requireNoOrderEdit">,
 ): Promise<TransitionResult> {
   return transitionOrderStatus(db, orderId, {
     from: [
@@ -269,6 +275,7 @@ export async function completeOrder(
     to: "completed",
     reason,
     setCompletedAt: true,
+    ...guards,
   });
 }
 

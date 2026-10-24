@@ -22,7 +22,7 @@
  * Callers get `releaseFailed` to surface `requires_review` events.
  */
 import { sql } from "drizzle-orm";
-import { cancelOrder, completeOrder, type TransitionResult } from "./order-status-core";
+import { cancelOrder, completeOrder, type TransitionResult, type TransitionRequest } from "./order-status-core";
 
 export interface ReservationReleaser {
   releaseOrderReservation(
@@ -49,8 +49,9 @@ export async function cancelWmsOrderAndRelease(
   orderId: number,
   reason: string,
   userId?: string,
+  guards?: Pick<TransitionRequest, "requireNoOrderEdit">,
 ): Promise<CancelWmsOrderOutcome> {
-  const trans = await cancelOrder(db, orderId, reason);
+  const trans = await cancelOrder(db, orderId, reason, guards);
   if (!trans.transitioned) {
     return { ...trans, releasedItems: 0, releaseFailed: false };
   }
@@ -83,8 +84,9 @@ export async function completeWmsOrderAndRelease(
   orderId: number,
   reason: string,
   userId?: string,
+  guards?: Pick<TransitionRequest, "requireNoOrderEdit">,
 ): Promise<CancelWmsOrderOutcome> {
-  const trans = await completeOrder(db, orderId, reason);
+  const trans = await completeOrder(db, orderId, reason, guards);
   if (!trans.transitioned) {
     return { ...trans, releasedItems: 0, releaseFailed: false };
   }
