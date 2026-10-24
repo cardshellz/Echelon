@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import { createRfqCommandClient, createRfqRecoveryStore, type RfqCommandRecovery } from "@/lib/rfq-command";
-import { rfqCommandReceiptSchema, type RfqCommandIntent, type RfqCommandReceipt } from "@shared/procurement/rfq-command";
+import { rfqRecoverableReceiptSchema, type RfqRecoverableIntent, type RfqRecoverableReceipt } from "@shared/procurement/rfq-command";
 
 const RECOVERY_CHANGED = "echelon:rfq-recovery-changed";
 const RECEIPT_CONFIRMED = "echelon:rfq-receipt-confirmed";
@@ -11,7 +11,8 @@ export async function invalidateRfqQueries(client: QueryClient): Promise<void> {
     const key = query.queryKey[0];
     return typeof key === "string" && (key === "rfq-workflow" || key === "rfq-quote-history"
       || /^\/api\/purchasing\/(?:rfqs|rfq-queue|auto-draft\/runs|recommendation-decisions)(?:[/?]|$)/.test(key)
-      || /^\/api\/purchase-orders(?:[/?]|$)/.test(key));
+      || /^\/api\/purchase-orders(?:[/?]|$)/.test(key)
+      || ["/api/purchasing/reorder-analysis", "/api/purchasing/recommendation-review-queue", "/api/purchasing/supplier-setup-gaps", "/api/vendor-products"].includes(key));
   } });
 }
 
@@ -28,7 +29,7 @@ export function useRfqCommands(scopeRfqId?: number) {
   const queryClient = useQueryClient();
   const [recovery, setRecovery] = useState<RfqCommandRecovery | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
-  const [confirmed, setConfirmed] = useState<RfqCommandReceipt | null>(null);
+  const [confirmed, setConfirmed] = useState<RfqRecoverableReceipt | null>(null);
   const resetFeedback = useRef<() => void>(() => undefined);
   const read = useCallback(() => {
     if (!mounted.current || context.current.userId !== userId) return;
@@ -38,7 +39,7 @@ export function useRfqCommands(scopeRfqId?: number) {
   useEffect(() => {
     setConfirmed(null); read();
     const receive = (event: Event) => {
-      const receipt = rfqCommandReceiptSchema.safeParse((event as CustomEvent<unknown>).detail);
+      const receipt = rfqRecoverableReceiptSchema.safeParse((event as CustomEvent<unknown>).detail);
       if (!mounted.current || context.current.userId !== userId || context.current.scopeRfqId !== scopeRfqId
         || !receipt.success || receipt.data.actorId !== userId
         || (scopeRfqId !== undefined && receipt.data.intent.rfqId !== scopeRfqId)) return;
@@ -48,12 +49,12 @@ export function useRfqCommands(scopeRfqId?: number) {
     window.addEventListener(RECOVERY_CHANGED, read); window.addEventListener("storage", read); window.addEventListener("focus", read);
     return () => { window.removeEventListener(RECEIPT_CONFIRMED, receive); window.removeEventListener(RECOVERY_CHANGED, read); window.removeEventListener("storage", read); window.removeEventListener("focus", read); };
   }, [read, scopeRfqId]);
-  const permitted = (intent: RfqCommandIntent) => mounted.current && context.current.userId === userId && context.current.canEdit
+  const permitted = (intent: RfqRecoverableIntent) => mounted.current && context.current.userId === userId && context.current.canEdit
     && context.current.scopeRfqId === scopeRfqId && (scopeRfqId === undefined || intent.rfqId === scopeRfqId);
   const feedbackScope = useRef<{ userId: string | null; scopeRfqId?: number } | null>(null);
   const mutation = useMutation({
     retry: false, networkMode: "always",
-    mutationFn: async ({ intent, pinned }: { intent: RfqCommandIntent; pinned?: RfqCommandRecovery }) => {
+    mutationFn: async ({ intent, pinned }: { intent: RfqRecoverableIntent; pinned?: RfqCommandRecovery }) => {
       if (!store || !userId) throw new Error("Sign in before creating or recovering an RFQ request.");
       return createRfqCommandClient(() => crypto.randomUUID(), store, {
         canExecute: permitted, changed: () => window.dispatchEvent(new Event(RECOVERY_CHANGED)),
@@ -80,7 +81,8 @@ export function useRfqCommands(scopeRfqId?: number) {
     error: feedbackIsCurrent ? mutation.error : null, refresh: read,
     blocked: !store || mutation.isPending || recovery !== null || storageError !== null,
     recoverAllowed: currentRecovery !== null && permitted(currentRecovery.body),
-    submit: (intent: RfqCommandIntent) => mutation.mutate({ intent }),
+    submit: (intent: RfqRecoverableIntent) => mutation.mutate({ intent }),
+    execute: (intent: RfqRecoverableIntent) => mutation.mutateAsync({ intent }),
     recover: () => { if (currentRecovery) mutation.mutate({ intent: currentRecovery.body, pinned: currentRecovery }); },
   };
 }

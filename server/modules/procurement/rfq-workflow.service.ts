@@ -18,6 +18,7 @@ import {
   type RfqWorkflowDetail,
 } from "@shared/procurement/rfq-workflow";
 import type { CreatePurchaseOrderWithLinesInput } from "./purchasing.service";
+import type { PurchaseOrderEntryTransaction } from "./purchase-order-entry.repository";
 import {
   releaseRfqRequest, appendRfqAudit, insertRfqPurchaseLink, insertRfqQuoteRevision, loadCreatedPurchaseLines,
   loadRfqWorkflow, readRfqLineAuditSnapshot, readRfqQuoteHistory, updateRfqQuoteMirrors, type RfqWorkflowExecutor, type RfqWorkflowSnapshot,
@@ -34,9 +35,9 @@ export class RfqWorkflowError extends Error {
   }
 }
 
-export interface RfqWorkflowTransaction extends RfqWorkflowExecutor {
-  transaction<T>(work: (tx: RfqWorkflowTransaction) => Promise<T>): Promise<T>;
-}
+// Conversion passes this same transaction to the purchase owner, which also
+// reads catalog references through Drizzle before opening a nested savepoint.
+export type RfqWorkflowTransaction = PurchaseOrderEntryTransaction;
 export interface RfqWorkflowDatabase {
   transaction<T>(work: (tx: RfqWorkflowTransaction) => Promise<T>, options?: { isolationLevel: "repeatable read"; accessMode: "read only" }): Promise<T>;
 }

@@ -66,8 +66,8 @@ describe("reorder engine UI contract", () => {
   });
 
   it("wires the Order Builder to EXACTLY the allowed mutations (PR 3)", () => {
-    // Every mutation flows through the single postPurchasingCommand seam with
-    // a literal endpoint at the call site — collect them all and pin the set.
+    // Recommendation mutations use the page seam. Initial RFQs use the same
+    // persistent recovery owner as quote/release/convert, never a second POST.
     const commandCalls = Array.from(page.matchAll(/postPurchasingCommand\(\s*"([^"]+)"/g)).map(
       (match) => match[1],
     );
@@ -77,7 +77,6 @@ describe("reorder engine UI contract", () => {
         "/api/purchasing/recommendation-runs", // manual refresh + RFQ snapshot fallback
         "/api/purchasing/recommendation-decisions", // accepted_for_po per line
         "/api/purchasing/recommendation-accepted-queue/create-po", // one per vendor group
-        "/api/purchasing/rfq-queue", // one idempotent batch
       ]),
     );
     // …and no mutation exists outside the seam: the only literal HTTP method
@@ -85,6 +84,10 @@ describe("reorder engine UI contract", () => {
     expect(page.match(/method: "/g)).toHaveLength(1);
     expect(page).toContain('method: "POST"');
     expect(page).not.toMatch(/"(?:PATCH|PUT|DELETE)"/);
+    expect(page).toContain('const intent: RfqCreateIntent = { operation: "create_batch"');
+    expect(page).toContain('rfqCommands.execute(intent)');
+    expect(page).toContain("<RfqCommandRecovery commands={rfqCommands}");
+    expect(page).toContain("rfqCommands.blocked");
   });
 
   it("collects the full decision-evidence and override-evidence contracts", () => {
@@ -102,9 +105,9 @@ describe("reorder engine UI contract", () => {
     // Risk-proportional note: flagged lines demand >=10 chars, clean orders
     // record the auto-note.
     expect(helpers).toContain('"Manual order via Order Builder"');
-    // RFQ batches are idempotent from dialog-open.
-    expect(page).toContain("idempotencyKey: rfqIdempotencyKey");
-    expect(page).toContain("crypto.randomUUID()");
+    // The shared command owner, not dialog-open state, owns persisted identity.
+    expect(page).not.toContain("rfqIdempotencyKey");
+    expect(page).toContain("useRfqCommands()");
   });
 
   it("keeps the client PO-handoff batch cap in lockstep with the server schema", () => {

@@ -24,7 +24,7 @@ vi.mock("@tanstack/react-query", () => ({ useQueryClient: () => ({ invalidateQue
   useQuery: () => ({ data: state.workflow, isPending: false, error: state.loadError, isFetching: state.fetching, refetch: vi.fn() }) }));
 function commands(overrides: Partial<RfqCommands> = {}): RfqCommands {
   return { userId: "operator-a", canEdit: true, recovery: null, storageError: null, confirmed: null, pending: false, error: null,
-    refresh: vi.fn(), blocked: false, recoverAllowed: false, submit: state.submit, recover: state.recover, ...overrides };
+    refresh: vi.fn(), blocked: false, recoverAllowed: false, submit: state.submit, execute: vi.fn(), recover: state.recover, ...overrides };
 }
 function saved() { const values = new Map<string, string>(); return createRfqRecoveryStore(() => ({ getItem: key => values.get(key) ?? null,
   setItem: (key, value) => { values.set(key, value); }, removeItem: key => { values.delete(key); } }), "operator-a").acquire(rfqIntents[0], () => "rfq-request-1"); }

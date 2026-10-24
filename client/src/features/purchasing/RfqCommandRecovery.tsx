@@ -1,6 +1,7 @@
 import React from "react";
 import { Link } from "wouter";
 import { rfqConversionResultSchema } from "@shared/procurement/rfq-workflow";
+import { rfqCreateReceiptSchema } from "@shared/procurement/rfq-create-command";
 import { Button } from "@/components/ui/button";
 import type { RfqCommands } from "./use-rfq-commands";
 
@@ -11,18 +12,20 @@ export function RfqCommandRecovery({ commands, showPending = true }: { commands:
   if (!saved && !storageError && !confirmed && !commands.error) return null;
   const conversion = confirmed?.intent.operation === "convert"
     ? rfqConversionResultSchema.safeParse(confirmed.result) : null;
+  const creation = confirmed?.intent.operation === "create_batch" ? rfqCreateReceiptSchema.safeParse(confirmed) : null;
   return <section aria-label={showPending ? "RFQ request recovery" : "RFQ command result"} className="space-y-2 rounded-md border p-3 text-sm">
     {storageError && <div role="alert"><p>{storageError}</p><Button variant="outline" onClick={commands.refresh}>Check saved RFQ request</Button></div>}
     {saved && <>
       <p role="status">An RFQ request needs recovery. The original action and reviewed values are saved.</p>
-      <p>RFQ #{saved.body.rfqId} · {saved.body.operation === "capture_quote" ? `Quote for line #${saved.body.lineId}` : saved.body.operation === "convert" ? "Create draft purchase order" : "Release unconverted request"}</p>
+      <p>{saved.body.operation === "create_batch" ? `Create RFQ drafts · ${saved.body.payload.lines.length} saved selection${saved.body.payload.lines.length === 1 ? "" : "s"}` : <>RFQ #{saved.body.rfqId} · {saved.body.operation === "capture_quote" ? `Quote for line #${saved.body.lineId}` : saved.body.operation === "convert" ? "Create draft purchase order" : "Release unconverted request"}</>}</p>
+      {saved.body.operation === "create_batch" && <p>The original supplier selections and quantities will be retried without recalculating demand.</p>}
       <div className="flex flex-wrap gap-2">
-        <Link className="inline-flex min-h-[44px] items-center underline" href={`/procurement/rfqs?rfqId=${saved.body.rfqId}`}>Open original RFQ #{saved.body.rfqId}</Link>
+        {saved.body.operation !== "create_batch" && <Link className="inline-flex min-h-[44px] items-center underline" href={`/procurement/rfqs?rfqId=${saved.body.rfqId}`}>Open original RFQ #{saved.body.rfqId}</Link>}
         <Button variant="outline" disabled={!commands.recoverAllowed || commands.pending} onClick={commands.recover}>{commands.pending ? "Recovering…" : "Recover saved RFQ request"}</Button>
       </div>
       {!commands.canEdit && <p>Purchasing edit permission is required to recover this request.</p>}
     </>}
     {commands.error && <p role="alert" className="text-destructive">{commands.error.message}</p>}
-    {confirmed && <p role="status">{conversion?.success ? <>Draft created: <Link className="font-semibold underline" href={`/purchase-orders/${conversion.data.purchaseOrderId}`}>{conversion.data.poNumber}</Link></> : confirmed.intent.operation === "release" ? "Unconverted request reservations released. Linked purchase orders remain unchanged." : "Quote revision saved. The preserved receipt confirms the original request."}</p>}
+    {confirmed && <p role="status">{creation?.success ? <>RFQ drafts confirmed: {creation.data.result.rfqs.map((rfq, index) => <React.Fragment key={rfq.id}>{index > 0 ? ", " : ""}<Link className="font-semibold underline" href={`/procurement/rfqs?rfqId=${rfq.id}`}>{rfq.rfqNumber}</Link></React.Fragment>)}</> : conversion?.success ? <>Draft created: <Link className="font-semibold underline" href={`/purchase-orders/${conversion.data.purchaseOrderId}`}>{conversion.data.poNumber}</Link></> : confirmed.intent.operation === "release" ? "Unconverted request reservations released. Linked purchase orders remain unchanged." : "Quote revision saved. The preserved receipt confirms the original request."}</p>}
   </section>;
 }
