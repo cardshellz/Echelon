@@ -17,7 +17,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       UPDATE catalog.product_variants SET weight_grams=3175.25,length_mm=152.40,width_mm=101.60,height_mm=25.40 WHERE id=101;`);
     await database.pool.query(await readFile("migrations/900000018000018580002_listing_intent_propagation.sql", "utf8"));
     await database.pool.query(await readFile("migrations/900000019000018700001_listing_intent_lifecycle_disposition.sql", "utf8"));
-    await database.pool.query(await readFile("migrations/pending/catalog_shipping_package_type.sql", "utf8"));
+    await database.pool.query(await readFile("migrations/900000030000019110001_catalog_shipping_package_type.sql", "utf8"));
   });
   afterEach(async () => { await database?.close(); });
   const packageRow = async () => (await database.pool.query("SELECT weight_grams,length_mm,width_mm,height_mm,shipping_package_type FROM catalog.product_variants WHERE id=101")).rows[0];
