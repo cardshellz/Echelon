@@ -82,5 +82,10 @@ export interface ListingPublicationProvider {
   observe(
     account: ListingAccount,
     sku: string,
-  ): Promise<{ item: ChannelCatalogItem; priceCents: number | null }>;
+  ): Promise<{
+    item: ChannelCatalogItem;
+    priceCents: number | null;
+    /** Provider item-level reasons, separate from feed ingestion acceptance. */
+    issues?: ListingIssue[];
+  }>;
 }
