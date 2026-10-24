@@ -320,7 +320,7 @@ describe("EbayDropshipInventoryPublicationTransportAdapter offer identity", () =
   it("is built with the Dropship listing identity reader by the production factory", () => {
     const source = readFileSync(resolve(__dirname, "../../infrastructure/dropship-ebay-inventory-publication.adapter.ts"), "utf8");
     const factory = source.slice(source.indexOf("export function createEbayDropshipInventoryPublicationTransportAdapterFromEnv"));
-    expect(factory.slice(0, factory.indexOf("\n}\n"))).toMatch(/new EbayDropshipInventoryPublicationTransportAdapter\([\s\S]*new PgDropshipInventoryListingIdentityReader\(\),\s*\);/);
+    expect(factory.slice(0, factory.indexOf("\n}\n"))).toMatch(/new EbayDropshipInventoryPublicationTransportAdapter\([\s\S]*new PgDropshipInventoryListingIdentityReader\(\),[\s\S]*\);/);
   });
 
   it("fails closed, before any eBay call, when built without the identity reader", async () => {
@@ -334,10 +334,66 @@ describe("EbayDropshipInventoryPublicationTransportAdapter offer identity", () =
   });
 });
 
+// eBay sync-back owner rule 1 (plan v4 §6.4 SB31, review OR-2): a stock update never erases a vendor's lower eBay
+// number before the sync job decides it. B = 10 settled before the read, 2 sold since, so E_low = 8.
+describe("EbayDropshipInventoryPublicationTransportAdapter quantity pre-write guard", () => {
+  const NOW = new Date("2026-09-04T12:00:00.000Z");
+  const facts = (overrides: Record<string, unknown> = {}) => ({ listingId: 501,
+    baseline: { quantity: 10, at: new Date("2026-09-04T10:00:00.000Z"), settled: true }, salesAll: 2,
+    salesLedgerSince: new Date("2026-09-01T00:00:00.000Z"), listingLive: true, ...overrides });
+  const posts = (fetchFn: ReturnType<typeof vi.fn>) => fetchFn.mock.calls.filter(([, init]) => (init as RequestInit).method === "POST");
+  const acknowledged = () => jsonResponse({ responses: [{ sku: "SKU-101", offerId: "offer-1", statusCode: 200 }] });
+
+  it("refuses a raise over eBay's unexplained lower number before any write, and marks the listing for the sync job", async () => {
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(4)));
+    const { adapter, guard } = fixture(fetchFn, {}, undefined, facts());
+    await expect(adapter.publishAbsolute({ ...request(), desiredQuantity: 10 })).rejects.toMatchObject({
+      code: "DROPSHIP_QUANTITY_VENDOR_CHANGE_PENDING", effect: "not_sent", retryable: true,
+      context: { storeConnectionId: 77, productVariantId: 101, listingId: 501, desiredQuantity: 10, observedQuantity: 4, expectedLow: 8 } });
+    expect(posts(fetchFn)).toEqual([]);
+    expect(guard.load).toHaveBeenCalledWith(77, 101, NOW);
+    expect(guard.markDue).toHaveBeenCalledExactlyOnceWith(501);
+  });
+
+  it("publishes when eBay's number is explained by sales, when the write is not a raise, and without a judgeable listing", async () => {
+    for (const [offerQuantity, desiredQuantity, loaded] of [[8, 10, facts()], [4, 3, facts()], [4, 4, facts()], [4, 10, null],
+      [4, 10, facts({ baseline: null })], [4, 10, facts({ salesLedgerSince: null })]] as const) {
+      const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(offerQuantity)))
+        .mockResolvedValueOnce(desiredQuantity === offerQuantity ? jsonResponse(inventoryItem(offerQuantity)) : acknowledged());
+      const { adapter, guard } = fixture(fetchFn, {}, undefined, loaded);
+      await expect(adapter.publishAbsolute({ ...request(), desiredQuantity })).resolves.toMatchObject({ publishedQuantity: desiredQuantity });
+      expect(guard.markDue).not.toHaveBeenCalled();
+    }
+  });
+
+  it("still refuses, as not sent, when marking the listing due fails", async () => {
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(4)));
+    const { adapter, guard } = fixture(fetchFn, {}, undefined, facts());
+    guard.markDue.mockRejectedValueOnce(new Error("connection reset"));
+    await expect(adapter.publishAbsolute({ ...request(), desiredQuantity: 10 })).rejects.toMatchObject({
+      code: "DROPSHIP_QUANTITY_VENDOR_CHANGE_PENDING", effect: "not_sent", retryable: true });
+    expect(posts(fetchFn)).toEqual([]);
+  });
+
+  it("never guards the read-back", async () => {
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(4))).mockResolvedValueOnce(jsonResponse(inventoryItem(4)));
+    const { adapter, guard } = fixture(fetchFn, {}, undefined, facts());
+    await expect(adapter.readAbsolute(request())).resolves.toMatchObject({ observedQuantity: 4 });
+    expect(guard.load).not.toHaveBeenCalled();
+  });
+
+  it("is built with the Dropship quantity guard reader by the production factory", () => {
+    const source = readFileSync(resolve(__dirname, "../../infrastructure/dropship-ebay-inventory-publication.adapter.ts"), "utf8");
+    const factory = source.slice(source.indexOf("export function createEbayDropshipInventoryPublicationTransportAdapterFromEnv"));
+    expect(factory.slice(0, factory.indexOf("\n}\n"))).toMatch(/new PgDropshipQuantityPreWriteGuardReader\(\),\s*\);/);
+  });
+});
+
 function fixture(
   fetchFn: ReturnType<typeof vi.fn>,
   credentialOverrides: Partial<DropshipMarketplaceStoreCredentials> = {},
   identity: { externalOfferId: string | null; pushInFlight: boolean } = { externalOfferId: "offer-1", pushInFlight: false },
+  guardFacts: Record<string, unknown> | null = null,
 ) {
   const destinations = {
     load: vi.fn(async () => ({
@@ -353,6 +409,8 @@ function fixture(
   const health = { recordAuthFailure: vi.fn(async () => ({}) as never) };
   // The listing's recorded offer (the last completed push) and whether a push runs now.
   const identities = { load: vi.fn(async () => identity) };
+  // What the pre-write quantity guard judges (null: nothing to judge, the write goes as before).
+  const guard = { load: vi.fn(async () => guardFacts as never), markDue: vi.fn(async () => undefined) };
   return {
     adapter: new EbayDropshipInventoryPublicationTransportAdapter(
       destinations,
@@ -361,10 +419,12 @@ function fixture(
       fetchFn as typeof fetch,
       { now: () => new Date("2026-09-04T12:00:00.000Z") },
       identities,
+      guard,
     ),
     credentials,
     health,
     identities,
+    guard,
   };
 }
 

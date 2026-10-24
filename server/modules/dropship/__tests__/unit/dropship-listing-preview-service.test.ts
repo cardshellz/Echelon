@@ -1053,6 +1053,49 @@ describe("DropshipListingPreviewService", () => {
     });
   });
 
+  // eBay sync-back's live-policy rule (plan v4 SB10, owner rule 4): the vendor's policy already live on this listing never freezes pushes.
+  describe("the vendor's shipping policy already live on the listing (SB10)", () => {
+    const livePolicyPreview = async (listing: Partial<DropshipExistingVendorListing>) => {
+      repository.context = { ...repository.context, platform: "ebay" };
+      repository.config = { ...repository.config!, platform: "ebay", marketplaceConfig: { profileId: "profile-1", marketplaceId: "EBAY_US",
+        businessPolicies: { fulfillmentPolicyId: "fulfillment-policy" } } };
+      ebayPolicyPreflight = { compatible: false, fulfillmentPolicyId: "fulfillment-policy", capabilityEvidenceHash: "capability-hash-2",
+        issues: [{ code: "shipping_service_unsupported:VendorCourier", message: "VendorCourier is unsupported." }] };
+      repository.existingListings = [{ productVariantId: 101, listingId: 1, status: "active", vendorRetailPriceCents: null, quantityCap: null,
+        externalListingId: "110000000001", observedFulfillmentPolicyId: "fulfillment-policy", ...listing }];
+      return (await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299 })).rows[0]!;
+    };
+
+    it("keeps it as a warning, not a blocker, while it is the very policy live on the listing", async () => {
+      const row = await livePolicyPreview({});
+      expect(row.blockers).not.toContain("ebay_fulfillment_policy:shipping_service_unsupported:VendorCourier");
+      expect(row.warnings).toContain("ebay_fulfillment_policy_live:shipping_service_unsupported:VendorCourier");
+    });
+
+    it.each([
+      ["a policy Card Shellz would introduce", { observedFulfillmentPolicyId: "another-policy" }],
+      ["a listing never read", { observedFulfillmentPolicyId: null }],
+      ["an ended listing", { status: "ended" }],
+      ["a listing not on eBay yet", { externalListingId: null }],
+    ])("still blocks %s", async (_name, listing) => {
+      const row = await livePolicyPreview(listing as Partial<DropshipExistingVendorListing>);
+      expect(row.blockers).toContain("ebay_fulfillment_policy:shipping_service_unsupported:VendorCourier");
+    });
+  });
+
+  // eBay sync-back owner rule 1 (plan v4 SB29, legacy authority): the push publishes min(ATP as today, the vendor's limit).
+  it.each([
+    [null, 4],
+    [2, 2],
+    [10, 4],
+  ])("keeps ATP on the row and pushes min(ATP, limit) for a vendor limit of %s", async (vendorQuantityLimit, pushed) => {
+    repository.existingListings = [{ productVariantId: 101, listingId: 1, status: "active", vendorRetailPriceCents: null, quantityCap: null,
+      externalListingId: "ebay-1", vendorQuantityLimit }];
+    const row = (await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299 })).rows[0]!;
+    expect(row.marketplaceQuantity).toBe(4);
+    expect(row.listingIntent).toMatchObject({ quantity: pushed });
+  });
+
   it("applies store-and-variant policy overrides and validates the effective fulfillment policy", async () => {
     repository.context = { ...repository.context, platform: "ebay" };
     repository.config = {

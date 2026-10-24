@@ -76,8 +76,7 @@ export function shouldRecordEbayDropshipOrder(input: {
   if (lineItems.length === 0) {
     return { record: false, reason: "no_dropship_listing" };
   }
-  const cancelState = readOptionalString(input.order.cancelStatus?.cancelState)?.toUpperCase();
-  if (cancelState === "CANCELED" || cancelState === "CANCELLED") {
+  if (isEbayOrderCancelled(input.order)) {
     return { record: false, reason: "order_cancelled" };
   }
   if (input.order.orderPaymentStatus !== "PAID") {
@@ -87,6 +86,97 @@ export function shouldRecordEbayDropshipOrder(input: {
     return { record: false, reason: "order_already_fulfilled" };
   }
   return { record: true, lineItems };
+}
+
+/** Whether eBay cancelled the order (cancelStatus.cancelState; a request still being decided is not a cancel, plan v2 §7.2). */
+export function isEbayOrderCancelled(order: EbayOrder): boolean {
+  const cancelState = readOptionalString(order.cancelStatus?.cancelState)?.toUpperCase();
+  return cancelState === "CANCELED" || cancelState === "CANCELLED";
+}
+
+/** What the poll knows of one store's listings: its item numbers now and before, and its custom labels. */
+export interface EbayStoreItemIndex {
+  /** eBay item number → listing id, for every number the store's listings have or had (plan v4 §7.3 step 1). */
+  listingIdByItemNumber: ReadonlyMap<string, number>;
+  /** UPPER-cased custom label → the listings with it (COALESCE(variant SKU, product SKU)). */
+  listingIdsBySku: ReadonlyMap<string, readonly number[]>;
+}
+
+export interface EbayOrderSaleLine {
+  listingId: number;
+  externalOrderId: string;
+  externalLineItemId: string;
+  quantity: number;
+  orderedAt: Date;
+}
+
+export interface EbayOrderUnmatchedLine {
+  externalOrderId: string;
+  externalLineItemId: string;
+  externalListingId: string;
+  sku: string;
+  candidateListingId: number;
+  orderedAt: Date | null;
+}
+
+export interface EbayOrderPollFacts {
+  /** Every line on one of the store's item numbers, paid or not: the sales ledger (plan v4 §6.4, §7.3 step 2). */
+  saleLines: EbayOrderSaleLine[];
+  /** Lines on an item number the store never had whose custom label is exactly one of its listings' (§7.3 step 3). */
+  unmatchedLines: EbayOrderUnmatchedLine[];
+  /** Lines on a known item number left out of the ledger because eBay sent no valid order time (the ledger needs one). */
+  undatedSaleLines: number;
+  cancelled: boolean;
+  /** At least one line sold through one of the store's item numbers. */
+  hasDropshipLine: boolean;
+}
+
+/**
+ * The facts one eBay order gives the poll besides its intake (pure). A line
+ * on a known item number is a sale, whatever the order's payment state. A
+ * line on an unknown number whose custom label matches exactly one listing is
+ * parked for the sweep to prove (a copy, or a relist Card Shellz has not seen
+ * yet); no match, or two, is the vendor's own sale, as today. A cancelled
+ * order parks nothing: there is nothing to ship.
+ */
+export function readEbayOrderPollFacts(order: EbayOrder, index: EbayStoreItemIndex): EbayOrderPollFacts {
+  const externalOrderId = readOptionalString(order.orderId);
+  const lineItems = Array.isArray(order.lineItems) ? order.lineItems : [];
+  const cancelled = isEbayOrderCancelled(order);
+  const orderedAt = readValidDate(order.creationDate);
+  const facts: EbayOrderPollFacts = { saleLines: [], unmatchedLines: [], undatedSaleLines: 0, cancelled, hasDropshipLine: false };
+  if (!externalOrderId) return facts;
+  for (const item of lineItems) {
+    const itemNumber = readOptionalString(item.legacyItemId);
+    const lineItemId = readOptionalString(item.lineItemId);
+    if (!itemNumber || !lineItemId) continue;
+    const listingId = index.listingIdByItemNumber.get(itemNumber);
+    if (listingId !== undefined) {
+      facts.hasDropshipLine = true;
+      const quantity = typeof item.quantity === "number" ? item.quantity : Number(item.quantity);
+      if (!Number.isSafeInteger(quantity) || quantity < 1) continue;
+      if (!orderedAt) {
+        facts.undatedSaleLines += 1;
+        continue;
+      }
+      facts.saleLines.push({ listingId, externalOrderId, externalLineItemId: lineItemId, quantity, orderedAt });
+      continue;
+    }
+    const sku = readOptionalString(item.sku);
+    if (cancelled || !sku) continue;
+    const candidates = index.listingIdsBySku.get(sku.toUpperCase()) ?? [];
+    if (candidates.length !== 1) continue;
+    facts.unmatchedLines.push({ externalOrderId, externalLineItemId: lineItemId, externalListingId: itemNumber, sku,
+      candidateListingId: candidates[0]!, orderedAt });
+  }
+  return facts;
+}
+
+function readValidDate(value: unknown): Date | null {
+  const text = readOptionalString(value);
+  if (!text) return null;
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 /**
@@ -164,10 +254,13 @@ function buildEbayOrderLine(
     ? lineTotalCents / quantity
     : undefined;
 
+  const variationId = readOptionalString(item.legacyVariationId);
   return {
     externalLineItemId: readRequiredString(item.lineItemId, `lineItems.${index}.lineItemId`),
     externalListingId: readOptionalString(item.legacyItemId) ?? undefined,
-    externalOfferId: readOptionalString(item.legacyVariationId) ?? undefined,
+    externalOfferId: variationId ?? undefined,
+    // eBay sends a legacyVariationId only for a line of a multi-variation listing (plan v4 SB20, review ARCH-10).
+    ...(variationId ? { marketplaceVariation: true as const } : {}),
     sku: readOptionalString(item.sku) ?? undefined,
     quantity,
     unitRetailPriceCents: exactUnitCents,

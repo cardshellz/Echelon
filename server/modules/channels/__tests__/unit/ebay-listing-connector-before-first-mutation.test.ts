@@ -36,7 +36,9 @@ describe("EbayMarketplaceListingConnector beforeFirstMutation", () => {
     await f.connector.pushListing({ ...f, beforeFirstMutation: hook });
 
     expect(hook).toHaveBeenCalledTimes(1);
-    expect(hook).toHaveBeenCalledWith({ offers: [{ variantId: 101, sku: "P5", existingOfferId: "offer-101" }], verifiedPublishedListingId: null });
+    // eBay sync-back (SB5): the hook also gets the offer exactly as this push's own lookup returned it.
+    expect(hook).toHaveBeenCalledWith({ offers: [{ variantId: 101, sku: "P5", existingOfferId: "offer-101",
+      observedOffer: { ...f.observed, status: "UNPUBLISHED", listingId: undefined } }], verifiedPublishedListingId: null });
     expect(order.slice(0, 3)).toEqual(["getOffers", "hook", "updateOffer"]);
     expect(order.indexOf("hook")).toBeLessThan(order.indexOf("createOrReplaceInventoryItem"));
   });
@@ -47,7 +49,8 @@ describe("EbayMarketplaceListingConnector beforeFirstMutation", () => {
     vi.mocked(f.client.createOffer).mockResolvedValue("offer-new");
     const hook = vi.fn(async () => {});
     await f.connector.pushListing({ ...f, beforeFirstMutation: hook });
-    expect(hook).toHaveBeenCalledWith({ offers: [{ variantId: 101, sku: "P5", existingOfferId: null }], verifiedPublishedListingId: null });
+    expect(hook).toHaveBeenCalledWith({ offers: [{ variantId: 101, sku: "P5", existingOfferId: null, observedOffer: null }],
+      verifiedPublishedListingId: null });
   });
 
   it("passes the proven published listing after the identity check", async () => {
@@ -63,7 +66,8 @@ describe("EbayMarketplaceListingConnector beforeFirstMutation", () => {
     }));
     await f.connector.pushListing({ ...f, resolvePublishedIdentity, beforeFirstMutation: hook });
     expect(resolvePublishedIdentity).toHaveBeenCalledTimes(1);
-    expect(hook).toHaveBeenCalledWith({ offers: [{ variantId: 101, sku: "P5", existingOfferId: "offer-101" }], verifiedPublishedListingId: "listing-20" });
+    expect(hook).toHaveBeenCalledWith({ offers: [{ variantId: 101, sku: "P5", existingOfferId: "offer-101", observedOffer: f.observed }],
+      verifiedPublishedListingId: "listing-20" });
   });
 
   it.each([

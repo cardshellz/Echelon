@@ -6,6 +6,7 @@ import type { DropshipMarketplaceListingIntent } from "../../application/dropshi
 import { PgDropshipListingPushJobQueueRepository } from "../../infrastructure/dropship-listing-push-job-runner";
 import { PgDropshipListingPushWorkerRepository } from "../../infrastructure/dropship-listing-push-worker.repository";
 import { listingPushRunsMigrationSql } from "../fixtures/listing-push-runs.fixture";
+import { ebaySyncBackListingColumnsSql } from "../fixtures/ebay-sync-back.fixture";
 
 /**
  * The worker repository against a real PostgreSQL: claim, item outcome and
@@ -85,6 +86,8 @@ describeDatabase.sequential("listing push worker repository (PostgreSQL)", () =>
       INSERT INTO dropship.dropship_store_listing_configs (store_connection_id, platform, listing_mode) VALUES (22, 'ebay', 'live');
     `));
     await pool.query(qualify(listingPushRunsMigrationSql()));
+    // The eBay sync-back listing columns a completed push writes (plan v4 §5 step 7), from the real migration.
+    await pool.query(qualify(ebaySyncBackListingColumnsSql()));
     const scopedPool = {
       query: (sql: string, values?: unknown[]) => pool!.query(qualify(sql), values),
       connect: async () => {
@@ -250,6 +253,79 @@ describeDatabase.sequential("listing push worker repository (PostgreSQL)", () =>
       pushResult: { status: "created", externalListingId: "123456789012", externalOfferId: "offer-1", rawResult: {} } });
     const reset = await pool!.query(qualify("SELECT consecutive_pause_count FROM dropship.dropship_listing_push_jobs WHERE id = $1"), [seeded.jobId]);
     expect(reset.rows[0]).toEqual({ consecutive_pause_count: 0 });
+  });
+
+  // eBay sync-back's push-time rule (plan v4 §5 step 7): what a completed push proves, in the completion's transaction.
+  describe("eBay sync-back facts a completed push proves", () => {
+    const sent = { priceCents: 1299, currency: "USD", sku: "SKU-101", fulfillmentPolicyId: "F-9", returnPolicyId: "R-1", paymentPolicyId: "P-1",
+      titleHash: "a".repeat(64), descriptionHash: "b".repeat(64) };
+    async function complete(listing: { externalListingId: string | null; externalOfferId: string | null }, pushedListingId: string) {
+      const seeded = await seedJob({ jobStatus: "queued", itemStatus: "queued" });
+      await pool!.query(qualify(`UPDATE dropship.dropship_vendor_listings SET external_listing_id = $2, external_offer_id = $3, status = 'ended',
+        marketplace_issue_codes = '{offer_missing,quantity_restore_blocked,sync_requires_review}', marketplace_ended_at = $4,
+        marketplace_sync_attempted_at = $4 WHERE id = $1`), [seeded.listingId, listing.externalListingId, listing.externalOfferId,
+        new Date(NOW.getTime() - 3_600_000)]);
+      const claim = await repository.claimJob({ jobId: seeded.jobId, workerId: WORKER, idempotencyKey: "process-sb", now: NOW });
+      await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: NOW, workerId: WORKER });
+      await repository.completeItem({ job: claim.job, item: claim.items[0]!, intent: intent(), workerId: WORKER, now: NOW,
+        pushResult: { status: "updated", externalListingId: pushedListingId, externalOfferId: "offer-1", sent,
+          rawResult: { provider: "ebay", marketplaceId: "EBAY_US", listingMode: "live", published: true } } });
+      return seeded;
+    }
+
+    it("records the policy now live, the item number it replaced, the issues eBay's acceptance disproves (never a dead letter); no vendor end, due for the sweep", async () => {
+      const seeded = await complete({ externalListingId: "110000000001", externalOfferId: "offer-1" }, "110000000002");
+
+      expect((await pool!.query(qualify(`SELECT status, external_listing_id, observed_fulfillment_policy_id, marketplace_issue_codes,
+        marketplace_ended_at, marketplace_sync_attempted_at FROM dropship.dropship_vendor_listings WHERE id = $1`), [seeded.listingId])).rows[0])
+        .toEqual({ status: "active", external_listing_id: "110000000002", observed_fulfillment_policy_id: "F-9",
+          marketplace_issue_codes: ["quantity_restore_blocked", "sync_requires_review"], marketplace_ended_at: null, marketplace_sync_attempted_at: null });
+      expect((await pool!.query(qualify(`SELECT external_listing_id, reason, replaced_at FROM dropship.dropship_listing_previous_marketplace_ids
+        WHERE listing_id = $1`), [seeded.listingId])).rows).toEqual([{ external_listing_id: "110000000001", reason: "republished", replaced_at: NOW }]);
+      // SB3: Card Shellz's baseline for price and policies, from what eBay took.
+      expect((await pool!.query(qualify(`SELECT payload FROM dropship.dropship_listing_sync_events
+        WHERE listing_id = $1 AND event_type = 'listing_push_completed'`), [seeded.listingId])).rows[0]!.payload)
+        .toMatchObject({ priceCents: 1299, currency: "USD", sku: "SKU-101", fulfillmentPolicyId: "F-9", returnPolicyId: "R-1", paymentPolicyId: "P-1",
+          // Review OR-1: the fingerprints of the title and description this push wrote (owner rule 2's "what Card Shellz last sent").
+          titleHash: "a".repeat(64), descriptionHash: "b".repeat(64) });
+      // Rule 2: the stored intent stays Card Shellz's own; only result.push is added.
+      expect((await pool!.query(qualify(`SELECT result -> 'listingIntent' AS intent, result -> 'push' ->> 'status' AS push
+        FROM dropship.dropship_listing_push_job_items WHERE id = $1`), [seeded.itemId])).rows[0]).toEqual({ intent: intent(), push: "updated" });
+    });
+
+    it.each([
+      ["a first publish", { externalListingId: null, externalOfferId: null }],
+      ["a staged draft (its offer id stood in for the item number)", { externalListingId: "offer-1", externalOfferId: "offer-1" }],
+      ["the same item number", { externalListingId: "110000000002", externalOfferId: "offer-1" }],
+    ])("records no previous item number for %s", async (_name, listing) => {
+      const seeded = await complete(listing, "110000000002");
+      expect((await pool!.query(qualify(`SELECT count(*)::int AS count FROM dropship.dropship_listing_previous_marketplace_ids
+        WHERE listing_id = $1`), [seeded.listingId])).rows[0].count).toBe(0);
+    });
+  });
+
+  it("skips an item quietly for a listing the vendor ended: cancelled, not failed, with its event and audit row, once", async () => {
+    const seeded = await seedJob({ jobStatus: "queued", itemStatus: "queued" });
+    await pool!.query(qualify(`UPDATE dropship.dropship_vendor_listings SET status = 'ended' WHERE id = $1`), [seeded.listingId]);
+    const claim = await repository.claimJob({ jobId: seeded.jobId, workerId: WORKER, idempotencyKey: "process-skip", now: NOW });
+    await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: NOW, workerId: WORKER });
+    const input = { job: claim.job, item: claim.items[0]!, code: "DROPSHIP_LISTING_ENDED_ON_EBAY", message: "Ended on eBay.", workerId: WORKER, now: NOW };
+
+    expect(await repository.skipItem(input)).toMatchObject({ status: "cancelled", errorCode: "DROPSHIP_LISTING_ENDED_ON_EBAY" });
+    expect(await repository.skipItem(input)).toMatchObject({ status: "cancelled" });
+
+    expect((await pool!.query(qualify(`SELECT result -> 'push' AS push FROM dropship.dropship_listing_push_job_items WHERE id = $1`),
+      [seeded.itemId])).rows[0].push).toMatchObject({ status: "skipped", errorCode: "DROPSHIP_LISTING_ENDED_ON_EBAY", retryable: false });
+    expect((await pool!.query(qualify(`SELECT event_type, payload FROM dropship.dropship_listing_sync_events WHERE listing_id = $1`),
+      [seeded.listingId])).rows).toEqual([{ event_type: "listing_push_skipped",
+      payload: { jobId: seeded.jobId, jobItemId: seeded.itemId, code: "DROPSHIP_LISTING_ENDED_ON_EBAY" } }]);
+    expect((await pool!.query(qualify(`SELECT event_type, payload FROM dropship.dropship_audit_events WHERE event_type = 'listing_push_item_skipped'`)))
+      .rows).toEqual([{ event_type: "listing_push_item_skipped", payload: { jobId: seeded.jobId, listingId: seeded.listingId,
+      code: "DROPSHIP_LISTING_ENDED_ON_EBAY", before: "processing", after: "cancelled" } }]);
+    expect((await pool!.query(qualify(`SELECT status FROM dropship.dropship_vendor_listings WHERE id = $1`), [seeded.listingId])).rows[0])
+      .toEqual({ status: "ended" });
+    const finalized = await repository.finalizeJob({ jobId: seeded.jobId, workerId: WORKER, now: NOW });
+    expect(finalized.job.status).not.toBe("failed");
   });
 
   it("never turns an item a stop cancelled into blocked or failed, and then writes nothing for its listing (review MC9)", async () => {

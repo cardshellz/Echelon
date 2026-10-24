@@ -27,6 +27,9 @@ import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
 import { PoQuantityAmendment } from '@/features/purchasing/PoQuantityAmendment';
 import { useAuth } from "@/lib/auth";
 import { useShipmentCreation } from "@/hooks/use-shipment-creation";
+import { usePurchaseApproval } from "@/hooks/use-purchase-approval";
+import type { PurchaseApprovalIntent, PurchaseApprovalRecovery } from "@/lib/purchase-approval-command";
+import { PurchaseApprovalRecovery as PurchaseApprovalRecoveryNotice } from "@/features/purchasing/PurchaseApprovalRecovery";
 import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateRecovery";
 import { shipmentCreateSchema, type ShipmentCreateInput } from "@shared/procurement/shipment-create-command";
 import type { ShipmentCreateRecovery as ShipmentRecovery } from "@/lib/shipment-create-command";
@@ -974,6 +977,7 @@ function parsePositiveInt(value: string | null): number | null {
 export default function PurchaseOrderDetail() {
   const { user: shipmentCommandUser, hasPermission } = useAuth();
   const shipmentCreation = useShipmentCreation();
+  const purchaseApproval = usePurchaseApproval();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [location, navigate] = useLocation();
@@ -1490,7 +1494,37 @@ export default function PurchaseOrderDetail() {
 
   const submitMutation = createTransitionMutation("submit");
   const returnToDraftMutation = createTransitionMutation("return-to-draft");
-  const approveMutation = createTransitionMutation("approve");
+  const approveMutation = useMutation({
+    networkMode: "always", retry: false,
+    mutationFn: async (request: { body: PurchaseApprovalIntent; recovery?: PurchaseApprovalRecovery; navigation: NavigationSnapshot; visit: ReturnType<typeof purchaseApproval.captureVisit> }) => {
+      if (!request.navigation.isCurrent() || !request.visit.isCurrent()) throw new Error("The purchase review changed. Review the current purchase and operator before approving.");
+      return purchaseApproval.execute(request.body, request.recovery);
+    },
+    onSuccess: (_approved, request) => {
+      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${request.body.purchaseOrderId}`] });
+      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${request.body.purchaseOrderId}/history`] });
+      void queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      if (request.navigation.isCurrent() && request.visit.isCurrent()) toast({ title: "Purchase approval confirmed", description: "The reviewed purchase terms and approval are saved in history." });
+    },
+    onError: (error: Error, request) => {
+      if (!request.navigation.isCurrent() || !request.visit.isCurrent()) return;
+      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${request.body.purchaseOrderId}`] });
+      toast({ title: "Purchase approval was not confirmed", description: error.message, variant: "destructive" });
+    },
+  });
+  const approvalBlocked = approveMutation.isPending || !purchaseApproval.allowed || !purchaseApproval.ready || Boolean(purchaseApproval.recovery || purchaseApproval.error);
+  function approveReviewedPurchase() {
+    if (approvalBlocked || !poId || !po || po.id !== poId) return;
+    try {
+      const expectedUpdatedAt = supplierDispatchReviewedVersion(po.updatedAt);
+      approveMutation.mutate({ body: { purchaseOrderId: poId, expectedUpdatedAt, expectedTotalCents: po.totalCents, expectedLinesFingerprint: po.approvalLinesFingerprint }, navigation: captureNavigation(), visit: purchaseApproval.captureVisit() });
+    } catch (error) {
+      toast({ title: "Purchase review required", description: error instanceof Error ? error.message : "Reload and review the current purchase terms.", variant: "destructive" });
+    }
+  }
+  function recoverPurchaseApproval(recovery: PurchaseApprovalRecovery) {
+    approveMutation.mutate({ body: recovery.body, recovery, navigation: captureNavigation(), visit: purchaseApproval.captureVisit() });
+  }
   const sendMutation = useMutation({
     mutationFn: async (review: ExternalSendReview) => {
       if (!review.isCurrent()) throw new Error("The selected PO changed. Review the current PO before recording an external send.");
@@ -2565,7 +2599,7 @@ export default function PurchaseOrderDetail() {
         submitMutation.mutate();
         return;
       case "approve":
-        approveMutation.mutate();
+        approveReviewedPurchase();
         return;
       case "send":
         openExternalSendConfirmation();
@@ -2615,7 +2649,7 @@ export default function PurchaseOrderDetail() {
       case "submit":
         return submitMutation.isPending;
       case "approve":
-        return approveMutation.isPending;
+        return approvalBlocked;
       case "send":
         return sendMutation.isPending;
       case "send_to_vendor":
@@ -2667,10 +2701,14 @@ export default function PurchaseOrderDetail() {
     (reviewAutoDraftFinances && financialGuidanceLoading) ||
     (!reviewAutoDraftFinances && ["done", "cancelled"].includes(autoDraftActionPlan.primaryAction.id));
 
+  const approvalRecoveryPanel = <PurchaseApprovalRecoveryNotice recovery={purchaseApproval.recovery} error={purchaseApproval.error}
+    pending={approveMutation.isPending} allowed={purchaseApproval.allowed} onRecover={recoverPurchaseApproval} onRefresh={purchaseApproval.refresh} />;
+
   if (isLoading) {
     return (
       <div className="p-2 md:p-6 space-y-4">
         <ProcurementContext navigation={procurementNavigation} />
+        {approvalRecoveryPanel}
         <Button variant="ghost" size="sm" asChild>
           <Link href={procurementNavigation.backHref("/purchase-orders")}>
             {procurementNavigation.backLabel ?? "Back to purchase orders"}
@@ -2688,6 +2726,7 @@ export default function PurchaseOrderDetail() {
     return (
       <div className="p-2 md:p-6 space-y-4">
         <ProcurementContext navigation={procurementNavigation} />
+        {approvalRecoveryPanel}
         <div role="alert" className="rounded-lg border p-4 space-y-3">
           <p className="font-medium">{notFound ? "Purchase order not found." : "Unable to load purchase order."}</p>
           {!notFound && (
@@ -2718,6 +2757,7 @@ export default function PurchaseOrderDetail() {
       <div className="p-6 text-center">
         <p className="text-muted-foreground">Purchase order not found.</p>
         <ProcurementContext navigation={procurementNavigation} />
+        {approvalRecoveryPanel}
         <Button variant="link" asChild>
           <Link href={procurementNavigation.backHref("/purchase-orders")}>
             {procurementNavigation.backLabel ?? "Back to purchase orders"}
@@ -2730,6 +2770,7 @@ export default function PurchaseOrderDetail() {
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
       <ProcurementContext navigation={procurementNavigation} />
+      {approvalRecoveryPanel}
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start gap-4">
         <Button variant="ghost" size="sm" asChild className="min-h-[44px]">
@@ -2836,7 +2877,7 @@ export default function PurchaseOrderDetail() {
           {(canApprovePo || canReturnPoToDraft) && po.status === "pending_approval" && (
             <>
               {canApprovePo && (
-                <Button onClick={() => approveMutation.mutate()} disabled={approveMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+                <Button onClick={approveReviewedPurchase} disabled={approvalBlocked} className="flex-1 sm:flex-none min-h-[44px]">
                   <CheckCircle className="h-4 w-4 mr-2" />
                   Approve
                 </Button>

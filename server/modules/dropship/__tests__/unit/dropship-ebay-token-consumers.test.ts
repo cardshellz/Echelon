@@ -225,7 +225,8 @@ async function runConsumer(name: ConsumerName, repo: DropshipMarketplaceCredenti
   if (name === "order intake") {
     return new EbayDropshipOrderIntakeProvider(repo, fetchFn, clock).fetchOrders({
       // A store with no dropship listing never calls eBay, so this store has one.
-      connection: { ...identity, platform: "ebay", lastOrderSyncAt: null, dropshipListingIds: ["listing-1"] },
+      connection: { ...identity, platform: "ebay", lastOrderSyncAt: null, dropshipListingIds: ["listing-1"],
+        itemNumbers: [{ listingId: 1, externalListingId: "listing-1" }], listingSkus: [] },
       since: NOW, until: NOW,
     });
   }

@@ -9,6 +9,7 @@ import {
   getDropshipInventoryRuntimeAuthorityGate,
 } from "./dropship-fulfillment-sync.registry";
 import { PgDropshipOrderAcceptanceRepository } from "./dropship-order-acceptance.repository";
+import { PgDropshipBelowCostSaleNotices } from "./dropship-marketplace-sync-notices.repository";
 
 export function createDropshipOrderAcceptanceServiceFromEnv(): DropshipOrderAcceptanceService {
   const inventoryAuthority = getDropshipInventoryRuntimeAuthorityGate();
@@ -23,6 +24,7 @@ export function createDropshipOrderAcceptanceServiceFromEnv(): DropshipOrderAcce
     inventoryAuthority,
     canonicalFulfillment,
     notificationSender: createDropshipNotificationServiceFromEnv(),
+    belowCostSaleNotices: new PgDropshipBelowCostSaleNotices(),
     clock: systemDropshipOrderAcceptanceClock,
     logger: makeDropshipOrderAcceptanceLogger(),
   });

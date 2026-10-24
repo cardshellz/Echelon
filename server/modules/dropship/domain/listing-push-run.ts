@@ -9,6 +9,7 @@ import {
   type ListingPushRunStatus,
   type ListingPushRunTargetOutcome,
 } from "../../../../shared/dropship/listing-push-runs";
+import { isReservedMarketplaceSyncKey } from "../../../../shared/dropship/listing-rules-conversion-keys";
 import { DropshipError } from "./errors";
 import { AUTOMATIC_REQUEUE_CODES, STOCK_LINK_RESEND_CODE } from "./listing-push-automatic-requeue";
 import { hasMarketplaceListing, isLiveListingStatus, LIVE_LISTING_STATUSES } from "./listing-live-status";
@@ -129,8 +130,9 @@ const CHUNK_CONFLICT_ERROR_CODES: ReadonlySet<string> = new Set([
   "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
 ]);
 
+/** A run chunk's key, or eBay sync-back's (its quantity restore jobs share the vendor's job key space, SB34). */
 export function isReservedListingPushJobKey(key: string): boolean {
-  return key.trim().startsWith(RESERVED_JOB_KEY_PREFIX);
+  return key.trim().startsWith(RESERVED_JOB_KEY_PREFIX) || isReservedMarketplaceSyncKey(key);
 }
 
 /** The key of the push job that carries out one chunk of a run. Unique per vendor, as job keys must be. */
@@ -246,6 +248,22 @@ export function listingPushRunProblemCount(counts: ListingPushRunCounts): number
   return counts.failed + counts.blocked + counts.price_review + counts.stale;
 }
 
+/**
+ * eBay sync-back's push-time refusals that pause the item instead of failing
+ * it (plan v4 SB26), each raised before any eBay write: eBay changed between
+ * the pre-read and the connector's last look (DROPSHIP_EBAY_LISTING_CHANGED_DURING_PUSH),
+ * a needed adoption could not commit for a passing reason (..._ADOPTION_RETRY),
+ * or a lower number on eBay waits for the order poll (..._QUANTITY_PENDING).
+ * The item pause limit and the job breaker still bound them; at either bound
+ * a QUANTITY_PENDING item stops quietly instead (no failure email, no breaker:
+ * owner rules 1 and 7, review OR-4; dropship-listing-push-worker-service.ts).
+ */
+export const PAUSABLE_LISTING_PUSH_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_EBAY_LISTING_CHANGED_DURING_PUSH",
+  "DROPSHIP_MARKETPLACE_SYNC_ADOPTION_RETRY",
+  "DROPSHIP_MARKETPLACE_SYNC_QUANTITY_PENDING",
+]);
+
 /** The backoff after the n-th consecutive pause (n counted after this pause). */
 export function pushPauseBackoffMs(consecutivePauseCount: number): number {
   if (!Number.isSafeInteger(consecutivePauseCount) || consecutivePauseCount < 1) {
@@ -263,6 +281,8 @@ export function pushPauseBackoffMs(consecutivePauseCount: number): number {
  */
 export function decideListingPushTransientPause(error: unknown): { pause: true; reason: string } | { pause: false } {
   if (!(error instanceof DropshipError)) return { pause: false };
+  // eBay sync-back's push-time refusals (plan v4 §5, SB26): nothing was written, and a later attempt decides afresh.
+  if (PAUSABLE_LISTING_PUSH_CODES.has(error.code)) return { pause: true, reason: "marketplace_sync" };
   const context = error.context ?? {};
   const status = typeof context.status === "number" ? context.status : null;
   const method = typeof context.method === "string" ? context.method.toUpperCase() : null;

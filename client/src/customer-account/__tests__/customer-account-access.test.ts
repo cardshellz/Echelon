@@ -19,6 +19,12 @@ describe("order page access presentation", () => {
     expect(customerAccountAccessNotice(new TypeError("Failed to fetch"))).toMatchObject({ action: "retry" });
     expect(customerAccountAccessNotice(null).message).not.toMatch(/tools|returns|sign.in/i);
   });
+  it("uses order history copy for lookup failures while preserving verified sign-in handling", () => {
+    expect(customerAccountAccessNotice(new TypeError("Private upstream detail"), "history"))
+      .toEqual({ message: "We couldn’t load your orders. Please try again.", action: "retry" });
+    expect(customerAccountAccessNotice(new CustomerAccountRequestError("CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", "Private session detail"), "history"))
+      .toEqual({ message: "Your sign-in is no longer active. Sign in again to make changes.", action: "sign_in" });
+  });
   it("preserves the exact order and staging preview after sign-in using Shopify's localized route", () => {
     const link = customerAccountSignInUrl("/en-us/account/login", "/en-us/account/orders/fixture?preview_theme_id=174740308127");
     const parsed = new URL(link, "https://store.test");

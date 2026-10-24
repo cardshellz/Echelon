@@ -11,7 +11,10 @@ import { DropshipEbayRegistrationCredentialAdapter } from "../../infrastructure/
 import { createAdmittedEbayQuantityTestOwner } from "../../../channels/__tests__/fixtures/quantity-publication-admission";
 import type {
   DropshipMarketplaceListingPushRequest,
+  DropshipMarketplaceListingPushSent,
 } from "../../application/dropship-marketplace-listing-push-provider";
+import { sha256Hex, observedOfferGuardFields } from "../../domain/marketplace-listing-observation";
+import type { MarketplacePushGuard, MarketplacePushPassthrough } from "../../domain/marketplace-sync-decision";
 import { ShopifyDropshipListingPushProvider } from "../../infrastructure/dropship-shopify-listing-push.provider";
 import { EbayDropshipListingPushProvider, type EbayDropshipListingPushProviderOptions } from "../../infrastructure/dropship-ebay-listing-push.provider";
 import { QuantityProviderEvidenceCollector, type QuantityProviderResponseEvidence } from "../../../inventory-planning/application/quantity-provider-request-evidence";
@@ -1236,5 +1239,113 @@ describe("eBay listing push stock link (Fix PR 2a-2)", () => {
     expect(quantityAdmission.item).toHaveBeenCalledTimes(2);
     // The first row reached eBay once and was not sent again.
     expect(fetcher.calls.filter(call => call.url.endsWith("/sell/inventory/v1/bulk_update_price_quantity"))).toHaveLength(1);
+  });
+});
+
+// eBay sync-back's push-time rule in the provider (plan v4 §5 steps 4-6, owner rules 2 and 4).
+describe("eBay listing push: sync-back pre-write guard, attempt and passthrough", () => {
+  beforeEach(() => { quantityAdmission = createAdmittedEbayQuantityTestOwner(); });
+
+  const VENDOR_TITLE = "Vendor's own eBay title";
+  const VENDOR_DESCRIPTION = "<p>Vendor's own description</p>";
+  const BEST_OFFER = { bestOfferEnabled: true, autoAcceptPrice: { value: "12.00", currency: "USD" } };
+  /** The offer eBay shows for the SKU, as both the pre-read and the connector's own lookup see it. */
+  const liveOffer = (patch: Record<string, unknown> = {}) => ({ offerId: "offer-101", sku: "SKU-101", marketplaceId: "EBAY_US",
+    format: "FIXED_PRICE", status: "UNPUBLISHED", availableQuantity: 4, listingDescription: VENDOR_DESCRIPTION,
+    pricingSummary: { price: { value: "12.99", currency: "USD" } },
+    listingPolicies: { fulfillmentPolicyId: "fulfillment-policy", returnPolicyId: "return-policy", paymentPolicyId: "payment-policy",
+      bestOfferTerms: BEST_OFFER }, ...patch });
+  const guardOf = (offer: Record<string, unknown>): MarketplacePushGuard => {
+    const fields = observedOfferGuardFields(offer)!;
+    return { offerId: fields.offerId, listingId: fields.listingId, priceCents: fields.priceCents!, currency: fields.currency,
+      ...fields.policies, bestOfferTermsHash: fields.bestOfferTermsHash, offerDescriptionHash: fields.offerDescriptionHash,
+      availableQuantity: fields.availableQuantity };
+  };
+  function request(sync: { passthrough: MarketplacePushPassthrough; guard?: MarketplacePushGuard; liveFulfillmentPolicyId?: string | null },
+    attempts: Array<{ sent: DropshipMarketplaceListingPushSent; fetcherCalls: number }>, fetcher: FakeFetch): DropshipMarketplaceListingPushRequest {
+    const base = makeRequest({ platform: "ebay", marketplaceConfig: ebayMarketplaceConfig() });
+    return { ...base, existingExternalOfferId: "offer-101", existingExternalListingId: "offer-101", marketplaceSync: {
+      guard: sync.guard ?? guardOf(liveOffer()), passthrough: sync.passthrough, liveFulfillmentPolicyId: sync.liveFulfillmentPolicyId ?? null,
+      beforeFirstWrite: async (sent) => { attempts.push({ sent, fetcherCalls: fetcher.calls.length }); } } };
+  }
+  const writes = (fetcher: FakeFetch) => fetcher.calls.filter((call) => call.init.method !== "GET");
+  const body = (fetcher: FakeFetch, suffix: string) => JSON.parse(String(fetcher.calls.find((call) => call.init.method === "PUT"
+    && call.url.endsWith(suffix))!.init.body));
+
+  /** Card Shellz's own last title and description fingerprints, which a passed-through field carries forward (review OR-1). */
+  const CARRIED = { title: sha256Hex("Card Shellz title sent before"), description: sha256Hex("<p>Card Shellz words sent before</p>") };
+  const NONE_CARRIED = { title: null, description: null };
+
+  it("FF-14: sends the vendor's own title and description back exactly as eBay showed them, with their Best Offer terms, after recording the attempt", async () => {
+    const fetcher = new FakeFetch([jsonResponse({ offers: [liveOffer()] }), emptyResponse(), emptyResponse()]);
+    const attempts: Array<{ sent: DropshipMarketplaceListingPushSent; fetcherCalls: number }> = [];
+
+    const result = await createEbayProvider(new FakeCredentialRepository(ebayCredential()), fetcher.fetch).pushListing(
+      request({ passthrough: { title: VENDOR_TITLE, description: VENDOR_DESCRIPTION, bestOfferTerms: BEST_OFFER, carriedFingerprints: CARRIED } },
+        attempts, fetcher));
+
+    expect(fetcher.calls.map((call) => call.init.method)).toEqual(["GET", "PUT", "PUT"]);
+    expect(body(fetcher, "/inventory_item/SKU-101").product).toMatchObject({ title: VENDOR_TITLE, description: VENDOR_DESCRIPTION });
+    const offer = body(fetcher, "/offer/offer-101");
+    expect(offer.listingDescription).toBe(VENDOR_DESCRIPTION);
+    expect(offer.listingPolicies).toEqual({ fulfillmentPolicyId: "fulfillment-policy", returnPolicyId: "return-policy",
+      paymentPolicyId: "payment-policy", bestOfferTerms: BEST_OFFER });
+    // listing_push_attempted (SB3): once, after the connector's lookup and before its first write, with what the push writes.
+    // Review OR-1: the vendor's text is never recorded as Card Shellz's; the carried fingerprints stay Card Shellz's own.
+    const sent = { priceCents: 1299, currency: "USD", sku: "SKU-101", fulfillmentPolicyId: "fulfillment-policy",
+      returnPolicyId: "return-policy", paymentPolicyId: "payment-policy", titleHash: CARRIED.title, descriptionHash: CARRIED.description };
+    expect(attempts).toEqual([{ sent, fetcherCalls: 1 }]);
+    expect(result.sent).toEqual(sent);
+  });
+
+  it("sends Card Shellz's current title and description, as today, when eBay shows what Card Shellz last sent", async () => {
+    const fetcher = new FakeFetch([jsonResponse({ offers: [liveOffer()] }), emptyResponse(), emptyResponse()]);
+    const attempts: Array<{ sent: DropshipMarketplaceListingPushSent; fetcherCalls: number }> = [];
+    const result = await createEbayProvider(new FakeCredentialRepository(ebayCredential()), fetcher.fetch).pushListing(
+      request({ passthrough: { title: null, description: null, bestOfferTerms: null, carriedFingerprints: NONE_CARRIED } }, attempts, fetcher));
+    expect(body(fetcher, "/inventory_item/SKU-101").product).toMatchObject({ title: "Toploader", description: "Rigid card protection." });
+    // Review OR-1: what this push actually wrote (the refreshed intent's text) is what it records as sent.
+    expect(attempts[0]!.sent).toMatchObject({ titleHash: sha256Hex("Toploader"), descriptionHash: sha256Hex("Rigid card protection.") });
+    expect(result.sent).toMatchObject({ titleHash: sha256Hex("Toploader"), descriptionHash: sha256Hex("Rigid card protection.") });
+    const offer = body(fetcher, "/offer/offer-101");
+    expect(offer.listingDescription).toBe("Rigid card protection.");
+    expect(offer.listingPolicies).not.toHaveProperty("bestOfferTerms");
+  });
+
+  it.each([
+    ["the price", { pricingSummary: { price: { value: "14.00", currency: "USD" } } }, ["priceCents"]],
+    ["the description", { listingDescription: "<p>Edited again</p>" }, ["offerDescriptionHash"]],
+    ["the quantity", { availableQuantity: 2 }, ["availableQuantity"]],
+  ])("refuses retryably, writing nothing and recording no attempt, when the vendor changed %s after the pre-read", async (_name, patch, changed) => {
+    const fetcher = new FakeFetch([jsonResponse({ offers: [liveOffer(patch)] })]);
+    const attempts: Array<{ sent: DropshipMarketplaceListingPushSent; fetcherCalls: number }> = [];
+    await expect(createEbayProvider(new FakeCredentialRepository(ebayCredential()), fetcher.fetch).pushListing(
+      request({ passthrough: { title: null, description: null, bestOfferTerms: null, carriedFingerprints: NONE_CARRIED } }, attempts, fetcher))).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_LISTING_CHANGED_DURING_PUSH", context: expect.objectContaining({ changedFields: changed, retryable: true }) });
+    expect(writes(fetcher)).toEqual([]);
+    expect(attempts).toEqual([]);
+  });
+
+  it("keeps the vendor's shipping policy already live on the listing even when the fresh check flags it (SB10); never one it would introduce", async () => {
+    const debug = vi.fn();
+    const warn = vi.fn();
+    const provider = (fetcher: FakeFetch) => new EbayDropshipListingPushProvider(new FakeCredentialRepository(ebayCredential()), fetcher.fetch,
+      { now: () => new Date("2026-09-01T12:00:00.000Z") },
+      { evaluateForStoreConnection: async () => incompatiblePreflight(), evaluateWithAccessToken: async () => incompatiblePreflight() },
+      managedLocationProvider(), () => quantityAdmission, undefined, { stockReadiness: legacyStockReadiness(), sleep: async () => {},
+        logger: { debug, warn } });
+    const kept = new FakeFetch([jsonResponse({ offers: [liveOffer()] }), emptyResponse(), emptyResponse()]);
+    const keptRequest = request({ passthrough: { title: null, description: null, bestOfferTerms: null, carriedFingerprints: NONE_CARRIED },
+      liveFulfillmentPolicyId: "fulfillment-policy" }, [], kept);
+    await expect(provider(kept).pushListing(keptRequest)).resolves.toMatchObject({ externalOfferId: "offer-101" });
+    // ARCH-11: expected and already told to the vendor and staff, so DEBUG on every push, with the push's correlation ids.
+    expect(debug).toHaveBeenCalledWith(expect.objectContaining({ action: "dropship.listing_push.live_policy_kept",
+      listing_id: keptRequest.listingId, vendor_id: keptRequest.vendorId, job_id: keptRequest.jobId, job_item_id: keptRequest.jobItemId }));
+    expect(warn).not.toHaveBeenCalledWith(expect.objectContaining({ action: "dropship.listing_push.live_policy_kept" }));
+
+    const other = new FakeFetch([]);
+    await expect(provider(other).pushListing(request({ passthrough: { title: null, description: null, bestOfferTerms: null, carriedFingerprints: NONE_CARRIED },
+      liveFulfillmentPolicyId: "another-policy" }, [], other))).rejects.toMatchObject({ code: "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE" });
+    expect(other.calls).toEqual([]);
   });
 });

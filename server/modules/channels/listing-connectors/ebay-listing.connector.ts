@@ -115,10 +115,14 @@ export type EbayPublishedListingIdentityResolver = (
 ) => Promise<MarketplaceObservedListingPublication>;
 
 /** What the connector accepted for this push: every draft offer with the exact
- * existing eBay offer it will reuse (null: it creates one), and the published
+ * existing eBay offer it will reuse (null: it creates one) and that offer as
+ * eBay showed it in this push's own lookup (null: none), and the published
  * listing whose identity the resolver proved (null: none was published). */
 export interface EbayResolvedPushOffers {
-  readonly offers: ReadonlyArray<{ readonly variantId: number; readonly sku: string; readonly existingOfferId: string | null }>;
+  readonly offers: ReadonlyArray<{
+    readonly variantId: number; readonly sku: string; readonly existingOfferId: string | null;
+    readonly observedOffer: EbayObservedOffer | null;
+  }>;
   readonly verifiedPublishedListingId: string | null;
 }
 
@@ -186,6 +190,7 @@ interface EbayMarketplaceListingConnectorOptions {
 interface ResolvedPushOffer {
   offer: BuiltOffer;
   existingOfferId: string | null;
+  observedOffer: EbayObservedOffer | null;
 }
 
 async function runSyncStage(
@@ -297,7 +302,8 @@ export class EbayMarketplaceListingConnector {
     // Dropship stock link) does it here, so a refusal leaves eBay untouched.
     if (input.beforeFirstMutation) {
       await input.beforeFirstMutation({
-        offers: resolvedOffers.map(({ offer, existingOfferId }) => ({ variantId: offer.variantId, sku: offer.sku, existingOfferId })),
+        offers: resolvedOffers.map(({ offer, existingOfferId, observedOffer }) => ({
+          variantId: offer.variantId, sku: offer.sku, existingOfferId, observedOffer })),
         verifiedPublishedListingId: verifiedPublishedListingId ?? null,
       });
     }
@@ -762,7 +768,7 @@ export class EbayMarketplaceListingConnector {
         throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", `SKU ${offer.sku} belongs to eBay listing ${listingId}, which differs from this product's other saved or observed listing. Review the mapping before publishing.`);
       }
       if (listingId) firstListingId = listingId;
-      resolvedOffers.push({ offer, existingOfferId: existingOffer?.offerId ?? null });
+      resolvedOffers.push({ offer, existingOfferId: existingOffer?.offerId ?? null, observedOffer: existingOffer ?? null });
     }
     return { resolvedOffers, firstListingId, hasPublishedOffer };
   }

@@ -580,8 +580,10 @@ describe("sizePrice (W9's own transaction for one size)", () => {
     expect(result).toMatchObject({ saved: { productVariantId: 101, revisionId: 31, overridePriceCents: 1299 }, idempotentReplay: false });
     const insert = client.sql.findIndex((sql) => sql.startsWith("INSERT INTO dropship.dropship_listing_price_revisions"));
     expect(client.params[insert]).toEqual([VENDOR, STORE, 101, null, 1299, childKey, HASH, MEMBER, NOW, "fixed"]);
-    const audit = client.sql.findIndex((sql) => sql.includes("'listing_price_saved','vendor'"));
+    // The audit's actor type is its last parameter (eBay sync-back writes the same row as the system): here the vendor.
+    const audit = client.sql.findIndex((sql) => sql.includes("'listing_price_saved',$7"));
     expect(client.params[audit].slice(0, 4)).toEqual([VENDOR, STORE, "101", MEMBER]);
+    expect(client.params[audit][6]).toBe("vendor");
     expect(client.sql.at(-1)).toBe("COMMIT");
   });
 
