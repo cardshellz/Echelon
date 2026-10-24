@@ -17,6 +17,17 @@ export const channelProviderReadDiagnosticSchema = z.object({
 }).strict();
 export type ChannelProviderReadDiagnostic = z.infer<typeof channelProviderReadDiagnosticSchema>;
 
+/** Restore a validated read diagnostic when a transport-neutral DTO crosses
+ * back into an exception path. Error translations must retain this as cause. */
+export class ChannelProviderReadError extends Error {
+  readonly context: { providerRead: ChannelProviderReadDiagnostic };
+  constructor(read: ChannelProviderReadDiagnostic) {
+    super("Channel provider read did not complete.");
+    this.name = "ChannelProviderReadError";
+    this.context = { providerRead: channelProviderReadDiagnosticSchema.parse(read) };
+  }
+}
+
 // Repeated schema failures may require an adapter fix. Stop after a bounded
 // number of reads while retaining the failed job and all diagnostic evidence.
 export const INVALID_PROVIDER_READ_RETRY_LIMIT = 5;

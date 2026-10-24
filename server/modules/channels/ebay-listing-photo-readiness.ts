@@ -9,7 +9,7 @@ import { EBAY_LISTING_MAX_PHOTOS } from "./ebay-listing-photos.domain";
 
 /** Readiness is a projection of the publication selector, never a raw asset count. */
 export async function readEbayListingPhotoReadiness(
-  client: PoolClient,
+  client: Pick<PoolClient, "query">,
   input: {
     productId: number;
     channelId: number;

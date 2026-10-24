@@ -32,6 +32,7 @@ export async function setupEbayChannelPage(page: Page, options: { readOnly?: boo
     connectionIssue: null as EbayListingIssue | null,
     syncError: null as string | null,
     feedProducts: null as unknown[] | null,
+    syncIncludedCount: 1,
     commands: [] as string[],
     requests: [] as string[],
     errors: [] as string[],
@@ -107,6 +108,7 @@ export async function setupEbayChannelPage(page: Page, options: { readOnly?: boo
       return route.fulfill({
         json: {
           total: state.feedProducts?.length ?? 1,
+          syncIncludedCount: state.syncIncludedCount,
           feed: state.feedProducts ?? [
             {
               id: 1,

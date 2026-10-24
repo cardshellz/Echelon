@@ -3,6 +3,7 @@ import { z } from "zod";
 import { VARIANT_SALES_ELIGIBILITIES } from "@shared/catalog/variant-sales-eligibility";
 import { isProductEffectivelyListed, isVariantSellable } from "../ebay-listing-eligibility";
 import type { ChannelListingSyncState } from "../../marketplace-listings/domain/channel-listing-sync";
+import { selectChannelListing } from "../../marketplace-listings/domain/channel-listing-selection";
 import { EbayListingSyncError } from "../ebay-listing-sync.domain";
 import type { SyncFilter } from "./ebay-active-listing-sync";
 
@@ -16,6 +17,7 @@ const rowSchema = z.object({
   productType: z.string().nullable(), active: z.boolean().nullable(),
   excluded: z.boolean().nullable(), isListed: z.number().nullable(),
   typeEnabled: z.boolean().nullable(), hasPublishedIdentity: z.boolean(),
+  configured: z.boolean(), hasRetainedIdentity: z.boolean(), hasSavedWork: z.boolean(),
   variants: z.array(variant),
 });
 export class EbaySyncSelectionReader {
@@ -25,6 +27,12 @@ export class EbaySyncSelectionReader {
       SELECT p.id,COALESCE(p.name,p.sku,'Product '||p.id::text) AS name,p.sku,
         p.product_type AS "productType",p.is_active AS active,p.ebay_listing_excluded AS excluded,
         co.is_listed AS "isListed",cm.listing_enabled AS "typeEnabled",
+        (NULLIF(btrim(p.product_type),'') IS NOT NULL OR NULLIF(btrim(p.ebay_browse_category_id),'') IS NOT NULL) AS configured,
+        EXISTS(SELECT 1 FROM channels.channel_listings l JOIN catalog.product_variants v ON v.id=l.product_variant_id
+          WHERE l.channel_id=$1 AND v.product_id=p.id
+            AND (l.external_product_id IS NOT NULL OR l.external_variant_id IS NOT NULL)) AS "hasRetainedIdentity",
+        (EXISTS(SELECT 1 FROM channels.ebay_listing_sync_jobs j WHERE j.channel_id=$1 AND j.product_id=p.id)
+          OR EXISTS(SELECT 1 FROM channels.ebay_listing_sync_admission_failures f WHERE f.channel_id=$1 AND f.product_id=p.id)) AS "hasSavedWork",
         EXISTS(SELECT 1 FROM channels.channel_listings l JOIN catalog.product_variants v ON v.id=l.product_variant_id
           WHERE l.channel_id=$1 AND v.product_id=p.id AND l.external_product_id IS NOT NULL) AS "hasPublishedIdentity",
         COALESCE((SELECT jsonb_agg(jsonb_build_object('id',v.id,'active',v.is_active,
@@ -48,7 +56,10 @@ export class EbaySyncSelectionReader {
         })).length,
         hasPublishedIdentity: row.hasPublishedIdentity,
       };
-      return { productId: row.id, name: row.name, sku: row.sku, state };
+      const selection = selectChannelListing({ active: state.active, included: state.included,
+        configured: row.configured, explicitlySelected: row.isListed === 1,
+        hasRetainedIdentity: row.hasRetainedIdentity, hasSavedWork: row.hasSavedWork });
+      return { productId: row.id, name: row.name, sku: row.sku, state, selection };
     });
   }
   async product(productId: number) {

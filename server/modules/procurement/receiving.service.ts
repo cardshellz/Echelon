@@ -1,3 +1,8 @@
+import { readCommandAuthorityActor } from "../identity";
+import { recordReceivingEntryAudit, type ReceivingEntryTransaction } from "./receiving-entry.repository";
+import { assertReceivingEntryAuthority } from "./domain/receiving-entry";
+import type { ReceivingEntryCommand } from "@shared/procurement/receiving-entry-command";
+import { receivingEntryLineFields } from "@shared/procurement/receiving-entry-command";
 import { enqueueReceiptCostRequests, processReceiptCostRequests } from "./receipt-cost-queue.service";
 import { RECEIPT_COST_RECOVERY_ACTOR } from "./receipt-cost-recovery.domain";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
@@ -1041,7 +1046,18 @@ export class ReceivingService {
     }
   }
 
+  /** Trusted in-process callers retain their existing contract. HTTP entry uses
+   * executeEntryInTransaction so intent, actor, mutation and audit commit together. */
   async createOrder(input: Record<string, unknown>, userId?: string | null) {
+    const normalized = this.normalizeOrderCreate(input, userId);
+    return this.db.transaction(tx => this.insertOrderInTransaction(tx, normalized));
+  }
+
+  private async createOrderInTransaction(tx: ReceivingEntryTransaction, input: Record<string, unknown>, userId?: string | null) {
+    return this.insertOrderInTransaction(tx, this.normalizeOrderCreate(input, userId));
+  }
+
+  private normalizeOrderCreate(input: Record<string, unknown>, userId?: string | null) {
     assertOnlyAllowedFields(input, RECEIVING_ORDER_CREATE_FIELDS, "Receiving order create");
 
     const sourceType = normalizeOptionalString(input.sourceType, "sourceType", 20) ?? "blind";
@@ -1071,24 +1087,44 @@ export class ReceivingService {
       createdBy: userId ?? null,
     };
 
+    return normalized;
+  }
+
+  private async insertOrderInTransaction(tx: ReceivingEntryTransaction, normalized: ReturnType<ReceivingService["normalizeOrderCreate"]>) {
     let receiptNumber: string | null = null;
     try {
-      return await this.db.transaction(async (tx) => {
-        receiptNumber = await this.storage.generateReceiptNumber(tx);
-        return await this.storage.createReceivingOrder({
-          receiptNumber,
-          ...normalized,
-        }, tx);
-      });
+      receiptNumber = await this.storage.generateReceiptNumber(tx);
+      return await this.storage.createReceivingOrder({ receiptNumber, ...normalized }, tx);
     } catch (error: any) {
       if (error?.code === "23505" || error?.cause?.code === "23505") {
         throw new ReceivingError("Receiving order creation conflicted with an existing active receipt", 409, {
-          code: "RECEIVING_ORDER_CREATE_CONFLICT",
-          receiptNumber,
+          code: "RECEIVING_ORDER_CREATE_CONFLICT", receiptNumber,
         });
       }
       throw error;
     }
+  }
+
+  /** Recovery still requires current authority, including when the saved result
+   * is already terminal. The mutation repeats this check under its own locks. */
+  async assertEntryAuthority(actorId: string): Promise<void> {
+    await this.db.transaction(async tx => assertReceivingEntryAuthority(await readCommandAuthorityActor(tx, actorId)));
+  }
+
+  async executeEntryInTransaction(tx: ReceivingEntryTransaction, command: ReceivingEntryCommand, actorId: string, commandKey: string) {
+    assertReceivingEntryAuthority(await readCommandAuthorityActor(tx, actorId));
+    const recordedAt = this.clock();
+    if (!Number.isFinite(recordedAt.getTime())) throw new ReceivingError("Receiving entry requires a valid clock", 500);
+    if (command.action === "create") {
+      const order = await this.createOrderInTransaction(tx, command.payload, actorId);
+      await recordReceivingEntryAudit(tx, { action: command.action, actorId, commandKey, recordedAt,
+        receivingOrderId: order.id, before: null, after: order });
+      return { order, receivingLineId: null };
+    }
+    const result = await this.addLineInTransaction(tx, command.targetId, receivingEntryLineFields(command.payload));
+    await recordReceivingEntryAudit(tx, { action: command.action, actorId, commandKey, recordedAt,
+      receivingOrderId: result.order.id, before: result.before, after: { order: result.order, line: result.line } });
+    return { order: { ...result.order, lines: result.lines.map(withReceivingUnitVersion) }, receivingLineId: result.line.id };
   }
 
   async updateOrderDetails(orderId: number, input: Record<string, unknown>, actorId?: string | null) {
@@ -1166,6 +1202,12 @@ export class ReceivingService {
   }
 
   async addLine(orderId: number, input: Record<string, unknown>) {
+    const result = await this.db.transaction(tx => this.addLineInTransaction(tx, orderId, input));
+    const vendor = result.order?.vendorId ? await this.storage.getVendorById(result.order.vendorId) : null;
+    return { ...result.order, lines: result.lines.map(withReceivingUnitVersion), vendor };
+  }
+
+  private async addLineInTransaction(tx: ReceivingEntryTransaction, orderId: number, input: Record<string, unknown>) {
     const { expectedUnitsPerVariant, ...fields } = input;
     assertOnlyAllowedFields(fields, RECEIVING_LINE_EDITABLE_FIELDS, "Receiving line create");
     const lineData = this.normalizeLineMutation(fields, null);
@@ -1176,42 +1218,35 @@ export class ReceivingService {
       throw new ReceivingError("A reviewed pack size requires a selected receive variant.", 400);
     }
 
-    const result = await this.db.transaction(async (tx) => {
-      const order = await this.lockReceivingOrder(tx, orderId);
-      this.assertReceivingOrderMutable(order);
-      const productVariantId = lineData.productVariantId;
-      const unitData = productVariantId
-        ? await this.loadReceiveVariant(tx, Number(productVariantId), lineData.productId)
-        : null;
-      if (unitData && unitData.unitsPerVariant !== expectedFactor) {
-        throw new ReceivingError("The selected catalog pack changed. Select the receive unit again and review its counts before adding the line.", 409, {
-          code: "RECEIVING_UNIT_CHANGED", productVariantId,
-        });
-      }
-      const unitsPerVariantSnapshot = unitData?.unitsPerVariant ?? null;
-      if (lineData.putawayLocationId) await this.validateLocations(tx, order, [{ putawayLocationId: Number(lineData.putawayLocationId) }]);
-      const counts = { expectedQty: 0, receivedQty: 0, damagedQty: 0, ...lineData };
-      for (const field of ["expectedQty", "receivedQty", "damagedQty"] as const) receiptInteger(counts[field], field);
-      if (unitsPerVariantSnapshot !== null) this.validateReceiptBaseCounts(counts, unitsPerVariantSnapshot);
-      const line = await this.storage.createReceivingLine({
-        ...lineData,
-        productId: unitData?.productId ?? lineData.productId,
-        unitsPerVariantSnapshot,
-        receivingOrderId: orderId,
-        status: this.receivingLineStatus(
-          Number(lineData.receivedQty) || 0,
-          Number(lineData.expectedQty) || 0,
-        ),
-      }, tx);
-      const lines = await this.updateReceivingOrderTotals(orderId, tx);
-      const updatedOrder = await this.storage.getReceivingOrderById(orderId, tx);
-      return { order: updatedOrder, lines, line };
-    });
-
-    const vendor = result.order?.vendorId
-      ? await this.storage.getVendorById(result.order.vendorId)
+    const order = await this.lockReceivingOrder(tx, orderId);
+    this.assertReceivingOrderMutable(order);
+    const productVariantId = lineData.productVariantId;
+    const unitData = productVariantId
+      ? await this.loadReceiveVariant(tx, Number(productVariantId), lineData.productId)
       : null;
-    return { ...result.order, lines: result.lines.map(withReceivingUnitVersion), vendor };
+    if (unitData && unitData.unitsPerVariant !== expectedFactor) {
+      throw new ReceivingError("The selected catalog pack changed. Select the receive unit again and review its counts before adding the line.", 409, {
+        code: "RECEIVING_UNIT_CHANGED", productVariantId,
+      });
+    }
+    const unitsPerVariantSnapshot = unitData?.unitsPerVariant ?? null;
+    if (lineData.putawayLocationId) await this.validateLocations(tx, order, [{ putawayLocationId: Number(lineData.putawayLocationId) }]);
+    const counts = { expectedQty: 0, receivedQty: 0, damagedQty: 0, ...lineData };
+    for (const field of ["expectedQty", "receivedQty", "damagedQty"] as const) receiptInteger(counts[field], field);
+    if (unitsPerVariantSnapshot !== null) this.validateReceiptBaseCounts(counts, unitsPerVariantSnapshot);
+    const line = await this.storage.createReceivingLine({
+      ...lineData,
+      productId: unitData?.productId ?? lineData.productId,
+      unitsPerVariantSnapshot,
+      receivingOrderId: orderId,
+      status: this.receivingLineStatus(
+        Number(lineData.receivedQty) || 0,
+        Number(lineData.expectedQty) || 0,
+      ),
+    }, tx);
+    const lines = await this.updateReceivingOrderTotals(orderId, tx);
+    const updatedOrder = await this.storage.getReceivingOrderById(orderId, tx);
+    return { order: updatedOrder, lines, line, before: order };
   }
 
   private async loadReceiveVariant(tx: any, variantId: number, expectedProductId?: unknown): Promise<{ id: number; productId: number; unitsPerVariant: number }> {

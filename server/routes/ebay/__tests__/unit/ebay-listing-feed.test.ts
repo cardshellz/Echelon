@@ -3,9 +3,9 @@ import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({ variants: [] as Array<Record<string, unknown>>,
-  query: vi.fn(), release: vi.fn(), getQuantities: vi.fn(), price: vi.fn(), hasPhotos: true, productExcluded: false, secondProduct: false,
+  query: vi.fn(), connect: vi.fn(), getQuantities: vi.fn(), price: vi.fn(), hasPhotos: true, productExcluded: false, secondProduct: false,
 }));
-vi.mock("../../../../db", () => ({ db: {}, pool: { connect: async () => ({ query: fixture.query, release: fixture.release }) } }));
+vi.mock("../../../../db", () => ({ db: {}, pool: { query: fixture.query, connect: fixture.connect } }));
 vi.mock("../../../middleware", () => ({ requireAuth: (_req: unknown, _res: unknown, next: () => void) => next(),
   requireAuthOrInternalApiKey: (_req: unknown, _res: unknown, next: () => void) => next(), requirePermission: () => (_req: unknown, _res: unknown, next: () => void) => next() }));
 vi.mock("../../ebay-utils", () => ({ EBAY_CHANNEL_ID: 67, getAuthService: vi.fn(), getChannelConnection: vi.fn(),
@@ -41,6 +41,15 @@ describe("eBay listing feed current content intent", () => {
       ebay_listing_excluded: id === 3, variant_override_is_listed: id === 3 ? 0 : 1,
       listing_id: id, external_listing_id: "listing-20", external_offer_id: `offer-${id}`, listing_status: id === 3 ? "error" : "synced", listing_sync_error: id === 3 ? "Old excluded member failed" : null }));
     fixture.query.mockReset().mockImplementation(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('AS "productType"')) return { rows: (fixture.secondProduct ? [20, 21] : [20]).map(id => ({
+        id, name: `Product ${id}`, sku: `PRODUCT-${id}`, productType: "Toploaders", active: true,
+        excluded: fixture.productExcluded, isListed: 1, typeEnabled: true, configured: true,
+        hasPublishedIdentity: true, hasRetainedIdentity: true, hasSavedWork: false,
+        variants: fixture.variants.filter(row => row.product_id === id).map(row => ({
+          id: row.id, active: true, excluded: row.ebay_listing_excluded, isListed: row.variant_override_is_listed,
+          salesEligibility: "sellable",
+        })),
+      })) };
       if (sql.includes('AS "assetIds"')) return { rows: [{
         variants: fixture.variants.filter(variant => variant.product_id === params[0]).map(variant => ({ variantId: variant.id, sku: variant.sku })),
         assetIds: fixture.hasPhotos ? [100] : [],
@@ -58,7 +67,7 @@ describe("eBay listing feed current content intent", () => {
       if (sql.includes("FROM product_variants pv")) return { rows: fixture.variants };
       return { rows: [] };
     });
-    fixture.release.mockClear();
+    fixture.connect.mockClear();
     const app = express(); app.use(router);
     server = app.listen(0, "127.0.0.1");
     await new Promise<void>(resolve => server.once("listening", resolve));
@@ -104,7 +113,7 @@ describe("eBay listing feed current content intent", () => {
     expect(feed[0].variants[2]).toMatchObject({ id: 3, effectivelyListed: false });
     expect(fixture.variants).toEqual(before);
     expect(fixture.query.mock.calls.every(([sql]) => !/^\s*(UPDATE|INSERT|DELETE)/i.test(sql))).toBe(true);
-    expect(fixture.release).toHaveBeenCalledOnce();
+    expect(fixture.connect).not.toHaveBeenCalled();
   });
 
   it("keeps a current included member's later failure visible despite other successful members", async () => {
@@ -225,7 +234,7 @@ describe("eBay listing feed current content intent", () => {
     expect(ebayListingIssueSchema.safeParse(body.feed[0].inventoryIssue).success).toBe(true);
     expect(JSON.stringify(body)).not.toContain("private runtime diagnostic");
     expect(fixture.query.mock.calls.every(([sql]) => !/^\s*(UPDATE|INSERT|DELETE)/i.test(sql))).toBe(true);
-    expect(fixture.release).toHaveBeenCalledOnce();
+    expect(fixture.connect).not.toHaveBeenCalled();
   });
 
   it("does not display missing quantity rows as zero and reloads current quantities without changing listing state", async () => {
@@ -273,6 +282,6 @@ describe("eBay listing feed current content intent", () => {
     expect(ebayListingIssueSchema.safeParse(body.issue).success).toBe(true);
     expect(body.issue.reference).toMatch(/^[a-f0-9-]{36}$/);
     expect(JSON.stringify(body)).not.toMatch(/secret_column|private_table|private-value/);
-    expect(fixture.release).toHaveBeenCalledOnce();
+    expect(fixture.connect).not.toHaveBeenCalled();
   });
 });

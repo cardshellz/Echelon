@@ -1,3 +1,4 @@
+import { registerReceivingEntryRoutes } from "./receiving-entry.routes";
 import { ReceivingError } from "./receiving.service";
 import { registerReceiptReversalRoutes } from "./receipt-reversal.routes";
 import { registerReceivingQuarantineRoutes } from "./receiving-quarantine.routes";
@@ -64,6 +65,7 @@ function resolveUnitCostPair(
 }
 
 export function registerReceivingRoutes(app: Express) {
+  registerReceivingEntryRoutes(app);
   registerReceivingQuarantineRoutes(app);
   registerReceiptReversalRoutes(app);
   // ===== RECEIVING ORDERS API =====
@@ -120,29 +122,6 @@ export function registerReceivingRoutes(app: Express) {
       console.error("[RECEIVING] Error fetching receiving order:", error?.message || error);
       console.error("[RECEIVING] Stack:", error?.stack);
       res.status(500).json({ error: "Failed to fetch receiving order", details: error?.message });
-    }
-  });
-  
-  app.post("/api/receiving", requirePermission("inventory", "adjust"), async (req, res) => {
-    try {
-      const { sourceType, vendorId, warehouseId, poNumber, asnNumber, expectedDate, notes } = req.body;
-      const { receiving: rcvService } = req.app.locals.services;
-      const order = await rcvService.createOrder({
-        sourceType,
-        vendorId,
-        warehouseId,
-        poNumber,
-        asnNumber,
-        expectedDate,
-        notes,
-      }, req.session.user?.id || null);
-      
-      res.status(201).json(order);
-    } catch (error: any) {
-      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error creating receiving order:", error?.message || error);
-      if (error?.stack) console.error(error.stack);
-      res.status(500).json({ error: "Failed to create receiving order", details: error?.message });
     }
   });
   
@@ -240,59 +219,6 @@ export function registerReceivingRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching receiving lines:", error);
       res.status(500).json({ error: "Failed to fetch receiving lines" });
-    }
-  });
-  
-  app.post("/api/receiving/:orderId/lines", requirePermission("inventory", "adjust"), async (req, res) => {
-    try {
-      const orderId = parseInt(req.params.orderId);
-      const {
-        sku,
-        productName,
-        expectedQty,
-        receivedQty,
-        productVariantId,
-        expectedUnitsPerVariant,
-        productId,
-        barcode,
-        unitCost,
-        unit_cost_mills,
-        unitCostMills,
-        putawayLocationId,
-      } = req.body;
-
-      // Accept both snake_case (API idiom) and camelCase (internal idiom).
-      // Mills is authoritative when provided; cents is either independently
-      // provided or derived. Disagreeing pairs are rejected to match the PO
-      // contract (purchasing.service.validateCreateWithLinesInput).
-      const resolved = resolveUnitCostPair(
-        unit_cost_mills ?? unitCostMills,
-        unitCost,
-      );
-      if (resolved.error) {
-        return res.status(400).json({ error: resolved.error });
-      }
-
-      const { receiving: rcvService } = req.app.locals.services;
-      const updatedOrder = await rcvService.addLine(orderId, {
-        sku: sku || null,
-        productName: productName || null,
-        expectedQty: expectedQty ?? 0,
-        receivedQty: receivedQty ?? 0,
-        damagedQty: 0,
-        productVariantId: productVariantId || null,
-        expectedUnitsPerVariant,
-        productId: productId || null,
-        barcode: barcode || null,
-        unitCost: resolved.cents,
-        unitCostMills: resolved.mills,
-        putawayLocationId: putawayLocationId || null,
-      });
-      res.status(201).json(updatedOrder);
-    } catch (error: any) {
-      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error creating receiving line:", error);
-      res.status(500).json({ error: "Failed to create receiving line" });
     }
   });
   

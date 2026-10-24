@@ -33,7 +33,7 @@ describe("unified eBay Sync composition", () => {
     f.destination.mockResolvedValue(destination);
     f.receipt.mockResolvedValue(null); f.statuses.mockResolvedValue([]);
     f.product.mockImplementation(async productId => ({ productId, state }));
-    f.select.mockResolvedValue([{ productId: 1, name: "Product 1", sku: "SKU-1", state }]);
+    f.select.mockResolvedValue([{ productId: 1, name: "Product 1", sku: "SKU-1", state, selection: { visible: true, syncIncluded: true } }]);
     f.source.mockImplementation(async productId => ({ ...destination, productId }));
     f.publish.mockImplementation(async (command, dependencies) => {
       await dependencies.readSource(command.productId);

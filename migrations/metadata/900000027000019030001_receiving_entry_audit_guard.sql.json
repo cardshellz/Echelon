@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000027000019030001_receiving_entry_audit_guard.sql",
+  "generation": 27,
+  "pr": 1903,
+  "ordinal": 1,
+  "after": [
+    "900000010000018200001_receiving_discard_audit_guard.sql",
+    "900000026000018960001_customer_account_order_lookup_index.sql"
+  ]
+}

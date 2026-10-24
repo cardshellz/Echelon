@@ -71,7 +71,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       CREATE TABLE channels.channel_connections(id integer PRIMARY KEY,channel_id integer REFERENCES channels.channels,metadata jsonb);
       CREATE TABLE ebay.ebay_oauth_tokens(channel_id integer REFERENCES channels.channels,environment text,external_account_id text,
         external_account_identity_scheme text,external_account_verified_at timestamptz,PRIMARY KEY(channel_id,environment));
-      CREATE TABLE catalog.products(id integer PRIMARY KEY,name text,sku text,is_active boolean DEFAULT true,product_type text DEFAULT 'test',ebay_listing_excluded boolean NOT NULL DEFAULT false);
+      CREATE TABLE catalog.products(id integer PRIMARY KEY,name text,sku text,is_active boolean DEFAULT true,product_type text DEFAULT 'test',ebay_listing_excluded boolean NOT NULL DEFAULT false,ebay_browse_category_id text);
       CREATE TABLE channels.channel_product_overrides(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_id integer REFERENCES catalog.products,is_listed integer,created_at timestamptz,updated_at timestamptz,UNIQUE(channel_id,product_id));
       CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer REFERENCES catalog.products,sku text,is_active boolean,sales_eligibility text DEFAULT 'sellable',ebay_listing_excluded boolean DEFAULT false);
       CREATE TABLE channels.channel_variant_overrides(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_variant_id integer REFERENCES catalog.product_variants,is_listed integer);

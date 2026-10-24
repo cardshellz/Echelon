@@ -1,5 +1,6 @@
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -57,6 +58,7 @@ import { EbayListingSyncError, type EbayListingSyncIdentity } from "../../ebay-l
 import { resolveExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
 import { hasOutstandingEbayListingWork } from "../../channel-stock-selection";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
+import { publicationCompletionFixture } from "../fixtures/ebay-publication-completion.fixture";
 vi.mock("../../../../db", () => ({ pool: {} }));
 const configured =
   process.env.ECHELON_TEST_DATABASE_URL &&
@@ -99,6 +101,21 @@ const configured =
       external_product_id text,last_synced_price integer,last_synced_qty integer,sync_status text,sync_error text,last_synced_at timestamptz,updated_at timestamptz,
       PRIMARY KEY(channel_id,product_variant_id));
       INSERT INTO channels.channel_listings VALUES(1,101,'P5','offer-101','listing-20',999,999,'error','original block',NULL,NULL)`);
+      // Read-only canonical mapping/account dependencies; the job migrations above own writes.
+      await database.pool.query(`CREATE SCHEMA IF NOT EXISTS marketplace; CREATE SCHEMA IF NOT EXISTS ebay;
+      CREATE TABLE ebay.ebay_oauth_tokens(channel_id integer,environment text,external_account_id text,external_account_identity_scheme text,external_account_verified_at timestamptz);
+      CREATE TABLE marketplace.provider_accounts(id integer PRIMARY KEY,owner_kind text,channel_id integer,provider text,account_namespace text,external_account_id text);
+      CREATE TABLE marketplace.listing_scopes(id integer PRIMARY KEY,owner_kind text,provider text,marketplace_id text,product_id integer);
+      CREATE TABLE marketplace.channel_listing_scopes(scope_id integer,channel_id integer,product_id integer,marketplace_id text);
+      CREATE TABLE marketplace.listing_publications(id integer PRIMARY KEY,scope_id integer,status text,external_listing_id text,provider_publication_key text);
+      CREATE TABLE marketplace.listing_scope_provider_accounts(scope_id integer,provider_account_id integer);
+      CREATE TABLE marketplace.listing_publication_members(id integer PRIMARY KEY,publication_id integer,product_variant_id integer,disposition text,
+        sku_snapshot text,external_variant_id text,external_offer_id text,external_inventory_item_id text);
+      CREATE TABLE marketplace.provider_identity_claims(provider_account_id integer,scope_id integer,publication_id integer,member_id integer,
+        identity_role text,identity_namespace text,external_id text);
+      CREATE TABLE marketplace.listing_replacement_operations(scope_id integer,status text);
+      CREATE TABLE marketplace.listing_registrations(scope_id integer);
+`);
     }, 60000);
     beforeEach(async () => {
       // Jobs are immutable and retained between cases. Keep newer test requests
@@ -114,6 +131,12 @@ const configured =
     });
     afterAll(async () => {
       await database?.close();
+    });
+    afterEach(async () => {
+      // Publication cases use independent channels. Remove their mutable read
+      // projections so older fixture assertions still concern channel 1 only;
+      // immutable job/command/event evidence remains intact for the suite.
+      if (identity.channelId >= 3000) await database.pool.query("DELETE FROM channels.channel_listings WHERE channel_id=$1", [identity.channelId]);
     });
     const clock = () => new Date(timestamp);
     const scope = (item: string): QuantityPublicationScope => ({
@@ -491,6 +514,72 @@ const configured =
         .toMatchObject({ action: { kind: "retry_sync" }, retryable: true });
     });
 
+
+    async function separatePublicationChannel() {
+      identity = { ...identity, channelId: 3000 + sequence, connectionId: 3000 + sequence };
+      await database.pool.query("INSERT INTO channels.channels(id,name,provider) VALUES($1,'Publication read recovery','ebay')", [identity.channelId]);
+      await database.pool.query("INSERT INTO channels.channel_connections(id,channel_id) VALUES($1,$1)", [identity.connectionId]);
+    }
+    async function seedPublicationMapping(source: EbayListingSyncIdentity) {
+      await database.pool.query("INSERT INTO ebay.ebay_oauth_tokens VALUES($1,'production',$2,'provider_user_id',$3)", [source.channelId, source.accountId, clock()]);
+      await database.pool.query("INSERT INTO channels.channel_listings(channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status) VALUES($1,101,NULL,$2,NULL,'pending')", [source.channelId, source.variants[0].offerId]);
+    }
+    it("creates a missing offer after real 404/25713 observation and persists one completion under concurrent replay", async () => {
+      await separatePublicationChannel();
+      const f = await publicationCompletionFixture(undefined, { source: identity, missing: true });
+      await seedPublicationMapping(f.source);
+      const store = new PostgresEbayListingSyncRepository(database.pool);
+      const service = new EbayListingSyncService(store, f.executor, clock, randomUUID);
+      const key = randomUUID();
+      const admitted = await Promise.all([service.enqueue(f.source, "operator", key, "publish"), service.enqueue(f.source, "operator", key, "publish")]);
+      expect(admitted[0].id).toBe(admitted[1].id);
+      await service.processDue(1, admitted[0].id);
+      expect(await store.get(admitted[0].id)).toMatchObject({ state: "completed", publicationWriteCompleted: true,
+        publicationAccepted: { listingId: "listing-20", offerIds: { 101: "offer-101" } } });
+      await service.enqueue(f.source, "operator", key, "publish");
+      await service.processDue(1, admitted[0].id);
+      expect(f.client.createOffer).toHaveBeenCalledTimes(1); expect(f.client.publishOffer).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["preparation", "readback"] as const)("retains translated %s read evidence in the real publication queue and recovers without duplicate creation", async phase => {
+      await separatePublicationChannel();
+      const f = await publicationCompletionFixture(undefined, { source: identity });
+      await seedPublicationMapping(f.source);
+      const originalPrepare = f.prepare.getMockImplementation()!;
+      const read = { provider: "ebay", resource: "offers", method: "GET" as const, kind: "unavailable" as const,
+        httpStatus: 503, requestId: "provider-read-request" };
+      if (phase === "preparation") f.setReadResponse({ status: 503, body: { errors: [{ errorId: 999 }] }, requestId: read.requestId });
+      else {
+        const prepared = await originalPrepare();
+        f.prepare.mockResolvedValue({ ...prepared, inspect: async () => ({ ...prepared.inspection, publication: null,
+          skus: prepared.inspection.skus.map(row => ({ ...row, issue: { code: "EBAY_REGISTRATION_PROVIDER_READ_FAILED", message: "Provider unavailable", providerRead: read } })) }) });
+      }
+      const store = new PostgresEbayListingSyncRepository(database.pool);
+      const service = new EbayListingSyncService(store, f.executor, clock, randomUUID);
+      const saved = await service.enqueue(f.source, "operator", randomUUID(), "publish");
+      await service.processDue(1, saved.id);
+      expect(await store.get(saved.id)).toMatchObject({ state: "recovering", providerRead: read });
+      const events = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='recovering'", [saved.id])).rows;
+      expect(events[0].evidence.diagnostic.context.providerRead).toEqual(read);
+      expect(f.client.publishOffer).toHaveBeenCalledTimes(phase === "readback" ? 1 : 0);
+      f.setReadResponse(null); f.prepare.mockImplementation(originalPrepare);
+      advance(); await service.processDue(1, saved.id);
+      expect(await store.get(saved.id)).toMatchObject({ state: "completed" });
+      expect(f.client.createOffer).not.toHaveBeenCalled(); expect(f.client.publishOffer).toHaveBeenCalledTimes(1);
+    });
+
+    it("persists an uncoded pool timeout as a classified retry with safe evidence", async () => {
+      const f = fixture();
+      f.prepare.mockRejectedValueOnce(new Error("timeout exceeded when trying to connect"));
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "recovering", code: "DATABASE_POOL_ACQUIRE_TIMEOUT" });
+      const events = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='recovering'", [saved.id])).rows;
+      expect(events[0].evidence.diagnostic.context.failure).toMatchObject({ category: "pool_acquisition_timeout", fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      expect(f.mutations).toEqual([]);
+      advance(); await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed" });
+    });
 
     const malformedRead = () => Object.assign(new Error("private response body"), {
       code: "EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID", context: { providerRead: {
