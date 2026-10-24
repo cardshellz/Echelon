@@ -1,6 +1,6 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "target": "ES2022", "incremental": false, "noEmit": true },
-  "include": ["scripts/verify-order-cancellation-staging.ts"],
+  "include": ["scripts/verify-order-cancellation-staging.ts", "scripts/verify-order-refund-recovery-staging.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -140,6 +140,8 @@ export function CustomerOrderPanel({
   const editing = Boolean(
     order?.activeOperationId && order.activeOperationKind !== "cancel_order",
   );
+  const reviewNotice =
+    editing && order?.activeOperationStatus === "review_required";
   const canEdit =
     enabled &&
     order &&
@@ -328,6 +330,16 @@ export function CustomerOrderPanel({
                 </button>
               </div>
             )}
+            {reviewNotice && (
+              <p
+                id="csz-order-review-notice"
+                className="csz-panel-explanation"
+                role="status"
+              >
+                Your previous order update needs our review. Address changes and
+                cancellation are unavailable until it is resolved.
+              </p>
+            )}
             <h3 className="csz-panel-group">Your order</h3>
             {row.dataset.externalOrderId && row.dataset.orderReference && (
               <CustomerOrderDetails
@@ -341,7 +353,7 @@ export function CustomerOrderPanel({
             {canEdit &&
               option(
                 order?.activeOperationStatus === "review_required"
-                  ? "Review order update"
+                  ? "View order update"
                   : editing
                     ? "Continue order update"
                     : "Edit order",
@@ -360,16 +372,22 @@ export function CustomerOrderPanel({
                     type="button"
                     className="csz-panel-option"
                     disabled
-                    aria-describedby="csz-address-restriction"
+                    aria-describedby={
+                      reviewNotice
+                        ? "csz-order-review-notice"
+                        : "csz-address-restriction"
+                    }
                   >
                     Change shipping address
                   </button>
-                  <p
-                    id="csz-address-restriction"
-                    className="csz-panel-restriction"
-                  >
-                    {addressReason}
-                  </p>
+                  {!reviewNotice && (
+                    <p
+                      id="csz-address-restriction"
+                      className="csz-panel-restriction"
+                    >
+                      {addressReason}
+                    </p>
+                  )}
                 </div>
               ))}
             {reorder && (
@@ -460,16 +478,22 @@ export function CustomerOrderPanel({
                       type="button"
                       className="csz-panel-option csz-panel-cancel"
                       disabled
-                      aria-describedby="csz-cancellation-restriction"
+                      aria-describedby={
+                        reviewNotice
+                          ? "csz-order-review-notice"
+                          : "csz-cancellation-restriction"
+                      }
                     >
                       Cancel order
                     </button>
-                    <p
-                      id="csz-cancellation-restriction"
-                      className="csz-panel-restriction"
-                    >
-                      {cancellationReason}
-                    </p>
+                    {!reviewNotice && (
+                      <p
+                        id="csz-cancellation-restriction"
+                        className="csz-panel-restriction"
+                      >
+                        {cancellationReason}
+                      </p>
+                    )}
                   </div>
                 )}
             {isCancellation && !cancellationRequest && (

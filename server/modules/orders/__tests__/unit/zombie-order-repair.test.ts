@@ -44,8 +44,8 @@ describe("startup zombie-order repair", () => {
 
     const summary = await runStartupZombieOrderRepair({ db, reservation });
 
-    expect(cancelWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 1, ZOMBIE_REPAIR_REASON);
-    expect(completeWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 2, ZOMBIE_REPAIR_REASON);
+    expect(cancelWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 1, ZOMBIE_REPAIR_REASON, undefined, { requireNoOrderEdit: true });
+    expect(completeWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 2, ZOMBIE_REPAIR_REASON, undefined, { requireNoOrderEdit: true });
     expect(summary.transitioned).toEqual(["#1→cancelled", "#2→completed"]);
     expect(summary.skipped).toEqual([]);
   });
@@ -79,7 +79,7 @@ describe("startup zombie-order repair", () => {
 
     const summary = await runStartupZombieOrderRepair({ db, reservation });
 
-    expect(cancelWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 5, ZOMBIE_REPAIR_REASON);
+    expect(cancelWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 5, ZOMBIE_REPAIR_REASON, undefined, { requireNoOrderEdit: true });
     expect(summary.transitioned).toEqual(["#5→cancelled"]);
   });
 

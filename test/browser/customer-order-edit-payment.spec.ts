@@ -278,6 +278,7 @@ async function setup(
       <div data-csz-order-history-content hidden>
       <article data-csz-account-order data-order-reference="#fixture" data-external-order-id="99" data-fulfillment="unfulfilled" data-cancelled="false">
         <span data-csz-order-total role="status"></span>
+        <a data-csz-account-action="address" href="/account/orders/fixture/address" hidden>Change address</a>
         <span data-csz-order-panel-trigger></span><p data-csz-order-tools-status></p>
       </article>
       ${options.multipleOrders ? '<article data-csz-account-order data-order-reference="#older" data-external-order-id="100" data-fulfillment="fulfilled" data-cancelled="false"><span data-csz-order-total></span><span data-csz-order-panel-trigger></span></article>' : ""}
@@ -600,6 +601,54 @@ for (const mismatch of [
     fixture.assertNoFinancialCommands();
   });
 }
+
+test("a staff review has one explanation shared by disabled address and cancellation actions", async ({
+  page,
+}) => {
+  const fixture = await setup(page, {
+    openEditor: false,
+    orderRead: async () => ({
+      ...order,
+      activeOperationStatus: "review_required",
+      addressEligibility: {
+        editable: false,
+        reasons: ["Repeated address warning"],
+      },
+      cancellation: {
+        canReview: false,
+        reasons: ["Repeated cancellation warning"],
+        requestKey: null,
+      },
+    }),
+  });
+  await page
+    .getByRole("button", { name: "Manage order #fixture", exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "Your previous order update needs our review. Address changes and cancellation are unavailable until it is resolved.",
+      { exact: true },
+    ),
+  ).toHaveCount(1);
+  await expect(
+    page.getByRole("button", { name: "View order update", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Review order update", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Cancel order", exact: true }),
+  ).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Change shipping address", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Change shipping address", exact: true }))
+    .toHaveAttribute("aria-describedby", "csz-order-review-notice");
+  await expect(page.getByRole("button", { name: "Cancel order", exact: true }))
+    .toHaveAttribute("aria-describedby", "csz-order-review-notice");
+  await expect(
+    page.getByText(/Repeated (address|cancellation) warning/),
+  ).toHaveCount(0);
+  fixture.assertNoFinancialCommands();
+});
 
 test("closing order options preserves the account session and totals without new reads", async ({
   page,
