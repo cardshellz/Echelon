@@ -18,6 +18,10 @@ describe("variant package helpers", () => {
     expect(buildVariantPackagePatch({ ...input, heightIn: "" }, original)).toEqual({ heightMm: null });
     expect(buildVariantPackagePatch({ ...input, lengthIn: "8" }, original)).toEqual({ lengthMm: 203.2 });
   });
+  it("does not reject or rewrite an unchanged stored fact smaller than the display precision", () => {
+    const original = { weightGrams: 0.01, lengthMm: 0.01 };
+    expect(buildVariantPackagePatch(variantPackageInputFromVariant(original), original)).toEqual({});
+  });
   it("converts stored grams and millimeters to editable pound and inch inputs", () => {
     expect(variantPackageInputFromVariant({
       weightGrams: 226.8,

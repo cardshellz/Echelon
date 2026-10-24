@@ -34,6 +34,14 @@ describe("eBay package transport", () => {
     const extended = { ...observed, providerExtension: { handling: "fragile" } };
     expect(resolveEbayListingPackage({ source, sku: "P5", observed: extended }).payload).toMatchObject({ providerExtension: { handling: "fragile" } });
   });
+  it("preserves provider flags when an older draft contains a default irregular flag", async () => {
+    const provider = syncProviderFixture(), prepared = await provider.prepare();
+    provider.currentItem().packageWeightAndSize = structuredClone(observed);
+    prepared.draft.inventoryItems[0].payload.packageWeightAndSize = { weight: { value: 120.25, unit: "GRAM" }, shippingIrregular: false };
+    const draft = await prepareEbayListingPackages(provider.client, prepared.draft);
+    expect(draft.inventoryItems[0].payload.packageWeightAndSize).toEqual({ ...observed, weight: { value: 120.25, unit: "GRAM" } });
+    await expect(assertEbayPackagePreservation(provider.client, draft.inventoryItems)).resolves.toBeUndefined();
+  });
   it("detects edits to preserved fields before writes and permits edits to catalog-owned fields", async () => {
     const provider = syncProviderFixture(), prepared = await provider.prepare();
     provider.currentItem().packageWeightAndSize = structuredClone(observed);

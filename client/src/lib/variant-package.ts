@@ -125,12 +125,16 @@ export function buildVariantPackageDisplay(variant: VariantPackageSource) {
  * display units. A cleared field is explicit null; an unchanged field is omitted. */
 export function buildVariantPackagePatch(input: VariantPackageInput, original: VariantPackageSource): VariantPackagePayload {
   const before = variantPackageInputFromVariant(original);
-  const values = buildVariantPackagePayload(input, "null");
+  const changed = { ...input };
+  const cleared: VariantPackagePayload = {};
   const fields = { weightLb: "weightGrams", lengthIn: "lengthMm", widthIn: "widthMm", heightIn: "heightMm" } as const;
   for (const key of Object.keys(fields) as Array<keyof typeof fields>) {
-    if (input[key].trim() === before[key].trim()) delete values[fields[key]];
+    // Do not parse rounded, unchanged displays back into physical facts. A valid
+    // stored measurement can even display as zero at the editor's precision.
+    if (input[key].trim() === before[key].trim()) changed[key] = "";
+    else if (!input[key].trim()) cleared[fields[key]] = null;
   }
-  return values;
+  return { ...buildVariantPackagePayload(changed, "omit"), ...cleared };
 }
 
 export function escapeCsvCell(value: string | number | null | undefined): string {

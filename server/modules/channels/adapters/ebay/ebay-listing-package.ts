@@ -84,7 +84,13 @@ export async function prepareEbayListingPackages<T extends { productId: number; 
         variantId: member.variantId, sku: item.sku,
         catalog: observedValues(legacy), observed: observedValues(current?.packageWeightAndSize),
         requirements: { weight: false, dimensions: false, packageType: false } });
-      payload = { ...structuredClone(current?.packageWeightAndSize ?? {}), ...structuredClone(legacy ?? {}) };
+      // Old builders supplied default provider flags without a catalog source.
+      // Only the three selected physical facts are authoritative in that draft;
+      // preserve provider flags and extensions instead of replaying defaults.
+      payload = structuredClone(current?.packageWeightAndSize ?? {});
+      if (plan.sources.weight === "catalog") payload.weight = structuredClone(legacy!.weight);
+      if (plan.sources.dimensions === "catalog") payload.dimensions = structuredClone(legacy!.dimensions);
+      if (plan.sources.packageType === "catalog") payload.packageType = legacy!.packageType;
     }
     inventoryItems.push({ ...item, packagePlan: plan,
       payload: { ...item.payload, ...(Object.keys(payload).length ? { packageWeightAndSize: payload } : {}) } });

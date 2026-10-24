@@ -448,6 +448,26 @@ const configured =
         .toEqual({ weight_grams: "3175.25", length_mm: null, shipping_package_type: null });
     });
 
+    it("completes an older package draft without overwriting provider flags or duplicating work", async () => {
+      const f = fixture();
+      const existing = { weight: { value: 7, unit: "POUND" as const }, dimensions: { length: 12, width: 8, height: 4, unit: "INCH" as const },
+        packageType: "MAILING_BOX", shippingIrregular: true };
+      f.provider.currentItem().packageWeightAndSize = structuredClone(existing);
+      f.prepare.mockImplementation(async () => {
+        const prepared = await f.provider.prepare();
+        prepared.draft.inventoryItems[0].payload.packageWeightAndSize = { weight: { value: 120.25, unit: "GRAM" }, shippingIrregular: false };
+        return { ...prepared, identity: structuredClone(identity), client: f.client,
+          draft: await prepareEbayListingPackages(f.client, prepared.draft) };
+      });
+      const saved = await f.service.enqueue(identity, "operator");
+      await processConcurrently(f, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed" });
+      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ ...existing, weight: { value: 120.25, unit: "GRAM" } });
+      const writes = f.mutations.length;
+      expect(await f.service.processDue(1, saved.id)).toEqual({ processed: 0, failed: 0 });
+      expect(f.mutations).toHaveLength(writes);
+    });
+
     it("blocks incomplete calculated packages before any write and completes after an exact catalog correction", async () => {
       const f = fixture();
       await prepareFromCatalog(f, 120.25, true);

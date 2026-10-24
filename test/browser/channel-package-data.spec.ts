@@ -44,6 +44,7 @@ test("saving shipping type preserves exact existing package measurements and per
   expect(state.variant).toMatchObject({ weightGrams: 3175.25, lengthMm: 152.41, widthMm: 101.61, heightMm: 25.41 });
   await page.reload();
   await expect(dialog.getByLabel("Shipping package type")).toContainText("Parcel / thick envelope");
+  await dialog.getByLabel("Shipping package type").scrollIntoViewIfNeeded();
   await page.screenshot({ path: info.outputPath("package-type-editor.png"), fullPage: true });
 });
 
