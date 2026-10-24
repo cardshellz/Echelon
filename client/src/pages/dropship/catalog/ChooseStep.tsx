@@ -609,14 +609,20 @@ export function ChooseStep({ selection, changes, onChanges, next, summary, onSav
   /**
    * "Load more". The button is off while the page loads (and gone after the last one), so keyboard focus falls to the
    * page: once the new rows are drawn, it moves to the first new row's box (review DUX8).
+   *
+   * Whether focus was lost is checked once the new rows are drawn, not when the read returns: a fast answer can come
+   * back before the button was ever drawn off, so it still has focus at that moment and only loses it when the last
+   * page's render removes it (seen in CI on J5).
    */
   async function loadMore() {
     const before = rows.length;
     await catalog.fetchNextPage();
-    if (focusIsLost()) setFocusRowAt(before);
+    setFocusRowAt(before);
   }
   useEffect(() => {
     if (focusRowAt === null || !merged) return;
+    // The new page is not drawn yet: this runs again when it is (or when the read ends without it).
+    if (merged.rows.length <= focusRowAt && catalog.isFetchingNextPage) return;
     setFocusRowAt(null);
     if (!focusIsLost()) return;
     const firstNew = merged.rows[focusRowAt];
@@ -625,7 +631,7 @@ export function ChooseStep({ selection, changes, onChanges, next, summary, onSav
       : null;
     if (box && !box.disabled) box.focus();
     else shownRef.current?.focus();
-  }, [focusRowAt, merged]);
+  }, [focusRowAt, merged, catalog.isFetchingNextPage]);
 
   const filtered = search !== "" || category !== ALL_CATEGORIES || show !== "all";
   const catalogError = catalog.error;
