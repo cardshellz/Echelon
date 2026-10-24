@@ -13,6 +13,8 @@ interface SettlementTransaction {
   kind: string;
   status: string;
   amountCents: number;
+  parentId?: string | null;
+  gateway?: string;
 }
 interface SettlementEvidence {
   transactions: SettlementTransaction[];
@@ -220,4 +222,69 @@ export function matchesOrderCancellationSettlement(before: SettlementEvidence, a
   return original.netPaidCents === refundCents && current.netPaidCents === 0 && current.outstandingCents === 0
     && original.receivedCents === current.receivedCents
     && BigInt(current.refundedCents) - BigInt(original.refundedCents) === BigInt(refundCents);
+}
+
+/** Confirmed receipts and completed refunds can leave less than the order
+ * total (including zero) available to return. A status or net balance alone
+ * cannot prove this. Merchandise cancellation remains a separate command. */
+export function isOrderCancellationPaymentSettled(
+  snapshot: SettlementEvidence & {
+    fullyPaid: boolean;
+    capturableCents: number;
+    totalCents: number;
+  },
+  allowSettledRefundBalance = false,
+): boolean {
+  const settlement = presentOrderEditSettlement(snapshot);
+  if (
+    !Number.isSafeInteger(snapshot.totalCents) ||
+    snapshot.totalCents < 0 ||
+    snapshot.capturableCents !== 0 ||
+    snapshot.outstandingCents !== 0 ||
+    settlement.activity.some(
+      (entry) => !["SUCCESS", "FAILURE", "ERROR"].includes(entry.status),
+    )
+  )
+    return false;
+  if (snapshot.fullyPaid && snapshot.netPaidCents === snapshot.totalCents)
+    return true;
+  const transactions = new Map<string, SettlementTransaction>();
+  for (const transaction of [
+    ...snapshot.transactions,
+    ...snapshot.refunds.flatMap((refund) => refund.transactions),
+  ]) {
+    // presentOrderEditSettlement already rejects contradictory duplicates.
+    transactions.set(transaction.id, transaction);
+  }
+  const refundedByParent = new Map<string, bigint>();
+  for (const refund of transactions.values()) {
+    if (refund.kind !== "REFUND" || refund.status !== "SUCCESS") continue;
+    const parent = refund.parentId
+      ? transactions.get(refund.parentId)
+      : undefined;
+    if (
+      !parent ||
+      !["SALE", "CAPTURE"].includes(parent.kind) ||
+      parent.status !== "SUCCESS" ||
+      !refund.gateway ||
+      refund.gateway !== parent.gateway
+    )
+      return false;
+    const refunded =
+      (refundedByParent.get(parent.id) ?? BigInt(0)) +
+      BigInt(refund.amountCents);
+    if (refunded > BigInt(parent.amountCents)) return false;
+    refundedByParent.set(parent.id, refunded);
+  }
+  return (
+    allowSettledRefundBalance &&
+    settlement.receivedCents > 0 &&
+    // A completed price-reducing edit can make the current total smaller than
+    // the original receipt. Require enough captured money to cover that total.
+    settlement.receivedCents >= snapshot.totalCents &&
+    settlement.refundedCents > 0 &&
+    settlement.refundedCents <= settlement.receivedCents &&
+    BigInt(settlement.receivedCents) - BigInt(settlement.refundedCents) ===
+      BigInt(snapshot.netPaidCents)
+  );
 }

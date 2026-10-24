@@ -89,7 +89,7 @@ describe("D-SINGLEWRITER: physical shipment projection has one authority", () =>
       SERVER_INDEX_SRC.indexOf("OMS<->WMS cancellation reconciliation"),
       SERVER_INDEX_SRC.indexOf("Startup reconciliation for orders"),
     );
-    expect(reconcileBlock).toContain("oms.status IN ('cancelled', 'refunded')");
+    expect(reconcileBlock).toContain('omsWarehouseCancellationSql("oms")');
     expect(reconcileBlock).not.toContain("markOrderShipped");
     expect(reconcileBlock).not.toContain("oms.status IN ('cancelled', 'shipped', 'refunded')");
   });

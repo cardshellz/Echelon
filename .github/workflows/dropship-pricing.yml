@@ -61,7 +61,7 @@ jobs:
       max-parallel: 4
       # Job-level if runs before matrix expansion: an explicit safe skip starts
       # no browsers. If selection crashes without output, run the full suite.
-      matrix: ${{ fromJSON(needs.select.outputs.matrix || '{"include":[{"feature":"all","label":"Full coverage fallback","shard":1,"shards":2},{"feature":"all","label":"Full coverage fallback","shard":2,"shards":2}]}') }}
+      matrix: ${{ fromJSON(needs.select.outputs.matrix || '{"include":[{"feature":"all","label":"Full coverage fallback","shard":1,"shards":4},{"feature":"all","label":"Full coverage fallback","shard":2,"shards":4},{"feature":"all","label":"Full coverage fallback","shard":3,"shards":4},{"feature":"all","label":"Full coverage fallback","shard":4,"shards":4}]}') }}
     env:
       BROWSER_FEATURE: ${{ matrix.feature }}
     steps:

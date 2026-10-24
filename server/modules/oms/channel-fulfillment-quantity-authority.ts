@@ -11,6 +11,9 @@ const evidenceSchema = z.object({
   refundedQuantity: quantity,
   refundCancelQuantity: quantity,
   refundOtherQuantity: quantity,
+  useChannelQuantities: z.boolean().optional(),
+  channelCurrentQuantity: quantity.nullable().optional(),
+  channelQuantityUpdatedAt: z.string().datetime({ offset: true }).optional(),
 }).strict().superRefine((input, context) => {
   if (input.paidQuantity > input.lifetimePaidQuantity
     || input.channelRemainingQuantity > input.paidQuantity) {
@@ -19,8 +22,13 @@ const evidenceSchema = z.object({
   if (input.refundedQuantity !== input.refundCancelQuantity + input.refundOtherQuantity) {
     context.addIssue({ code: "custom", message: "Refund counter and line dispositions disagree" });
   }
+  if (input.useChannelQuantities && (input.channelCurrentQuantity == null
+    || input.channelQuantityUpdatedAt == null
+    || input.channelCurrentQuantity > input.paidQuantity || input.channelRemainingQuantity > input.channelCurrentQuantity)) {
+    context.addIssue({ code: "custom", message: "Verified channel merchandise and paid dispatch authority disagree" });
+  }
   if (Math.max(input.cancelledQuantity, input.refundCancelQuantity) + input.refundOtherQuantity
-    > input.paidQuantity) {
+    > (input.useChannelQuantities ? input.lifetimePaidQuantity : input.paidQuantity)) {
     context.addIssue({ code: "custom", message: "Line dispositions exceed paid quantity" });
   }
 });
@@ -58,6 +66,7 @@ export function deriveChannelFulfillmentQuantityAuthority(
   const disposition = deriveRefundAuthority({
     ...evidence,
     previousAuthorityFulfillableQuantity: evidence.paidQuantity,
+    channelCurrentQuantity: evidence.useChannelQuantities ? evidence.channelCurrentQuantity : null,
   });
   return Object.freeze({
     ...evidence,

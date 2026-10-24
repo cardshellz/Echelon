@@ -61,6 +61,7 @@ import { presentCustomerOrderLifecycle } from "@shared/customer-account/order-fu
 import { customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
 import { orderAddressEligibility } from "../domain/order-address-eligibility";
 import { canObserveOrderEditRefundReview } from "../domain/order-edit-refund-recovery";
+import { channelMerchandiseAuthorityEnabled } from "../../oms/channel-merchandise-rollout";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
 // Bound each scheduler pass so one store cannot monopolize the worker.
@@ -85,6 +86,7 @@ export class OrderEditService {
     private readonly catalog?: OrderEditCatalog,
     private readonly codeRedemptions?: OrderEditCodeRedemptions,
     readonly cancellations?: OrderCancellationService,
+    private readonly stoppedRefundRecoveryEnabled: (channelId: number) => boolean = channelMerchandiseAuthorityEnabled,
   ) {}
 
   async warmPreview(input: OrderEditPreviewScope, actorId: string) {
@@ -766,6 +768,7 @@ export class OrderEditService {
         errorCode: record.error?.code ?? null,
         cancellation: record.kind === "cancel_order",
         submitted: record.commitStartedAt !== null,
+        stoppedRecoveryEnabled: this.stoppedRefundRecoveryEnabled(record.baseline.channelId),
         refundRequested:
           record.refundIntent !== null && record.refundStartedAt !== null,
       })
@@ -867,7 +870,17 @@ export class OrderEditService {
         );
       // Even if the balance is now zero, reconcile OUR persisted refund before
       // releasing. An unrelated refund is not proof this command succeeded.
-      if (record.refundIntent) return await this.settleRefund(record, actorId);
+      if (record.refundIntent) {
+        if (record.status === "synchronizing") {
+          // Success was already persisted before entering warehouse sync.
+          // A retry may observe that refund, but must never reopen submission
+          // merely because a provider read temporarily omits the record.
+          const refund = await this.provider.observeRefund(record.connectionId, record.refundIntent);
+          if (!refund) throw new OrderEditProviderError("REFUND_READBACK_PENDING", "Waiting to verify the already-settled refund; no new refund will be submitted.", "unknown");
+          return await this.settleRefund(record, actorId, refund);
+        }
+        return await this.settleRefund(record, actorId);
+      }
       if (orderEditHasUnresolvedPayment(snapshot)) {
         if (
           snapshot.transactions.some(
@@ -1076,9 +1089,14 @@ export class OrderEditService {
         record.refundIntent!,
       );
       if (observed) {
-        // Readback alone cannot authorize code finalization or release after
-        // another workflow has changed the warehouse ownership.
-        await this.warehouse.assertHeld(record.omsOrderId, record.id);
+        try {
+          await this.warehouse.assertHeld(record.omsOrderId, record.id);
+        } catch (error) {
+          // Only this legacy cutoff proceeds to financial verification. The
+          // stopped-work recovery independently checks picking, labels, exact
+          // contents and ownership before code finalization or hold release.
+          if (!(error instanceof OrderEditError) || error.code !== "ORDER_EDIT_PICKING_CUTOFF") throw error;
+        }
         return await this.settleRefund(record, actorId, observed);
       }
       return this.refundReviewReadbackPending(record, actorId);
@@ -1181,6 +1199,7 @@ export class OrderEditService {
       "refund_confirmed",
     );
     try {
+      await this.warehouse.assertHeld(record.omsOrderId, record.id, refunded);
       await this.codes(record, "finalize");
       const proof = await this.warehouse.reconcileAndRelease(
         record.omsOrderId,

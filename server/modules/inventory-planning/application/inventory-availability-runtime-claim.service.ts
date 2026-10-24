@@ -465,9 +465,14 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
     const sourceEventId = nonblank(command.sourceEventId, "sourceEventId", 500);
     const reason = nonblank(command.reason, "reason", 1000);
     const releaseTargets = validateRefundReleaseTargets(command.releaseTargets);
+    if (command.requiredAuthority !== undefined && command.requiredAuthority !== "canonical")
+      throw new Error("Invalid required inventory authority.");
 
     return this.executor.execute(async (context) => {
       if (context.authority === "legacy") {
+        if (command.requiredAuthority === "canonical")
+          throw unsupportedCanonicalMutation("CANONICAL_REFUND_DEMAND_REQUIRED",
+            "Channel merchandise demand requires canonical whole-order inventory reconciliation.", context, { orderId, sourceEventId });
         return context.legacy.reconcileRefundOrderDemand({
           ...command,
           orderId,

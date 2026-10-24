@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { channelMerchandiseAuthorityEnabled } from "../../oms/channel-merchandise-rollout";
 import { z } from "zod";
 import {
   customerOrderCancellationInputSchema,
@@ -59,6 +60,7 @@ export class OrderCancellationService {
         phase: string;
         occurredAt: string;
       }) => void;
+      allowSettledRefundBalance?: (channelId: number) => boolean;
     },
   ) {}
 
@@ -80,6 +82,7 @@ export class OrderCancellationService {
       warehouseReasons: inspection.cancellationReasons ?? inspection.reasons,
       activeOperationId: reference.activeOperationId,
       enabled: settings.enabled,
+      allowSettledRefundBalance: (this.dependencies.allowSettledRefundBalance ?? channelMerchandiseAuthorityEnabled)(snapshot.channelId),
     });
     const rewardReview = snapshot.customerId
       ? await rewards.reviewCancellation({

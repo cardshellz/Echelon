@@ -227,8 +227,10 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(browser).toContain("max-parallel: 4");
     expect(browser).toContain("fail-fast: false");
     expect(browser).toContain("fromJSON(needs.select.outputs.matrix ||");
-    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":1,"shards":2');
-    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":2,"shards":2');
+    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":1,"shards":4');
+    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":2,"shards":4');
+    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":3,"shards":4');
+    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":4,"shards":4');
     expect(browser).toContain("BROWSER_FEATURE: ${{ matrix.feature }}");
     expect(browser).toContain("--shard=${{ matrix.shard }}/${{ matrix.shards }} --forbid-only");
     expect(browser).toContain("feature-browser-traces-${{ matrix.feature }}-${{ matrix.shard }}");
