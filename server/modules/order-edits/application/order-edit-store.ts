@@ -96,7 +96,7 @@ export interface OrderEditWarehouse {
     operationId?: string,
   ): Promise<{ editable: boolean; reasons: string[]; cancellationReasons?: string[]; wmsOrderIds: number[]; fulfillment?: import("@shared/customer-account/order-fulfillment").CustomerOrderFulfillment }>;
   acquire(omsOrderId: number, operationId: string): Promise<void>;
-  assertHeld(omsOrderId: number, operationId: string): Promise<void>;
+  assertHeld(omsOrderId: number, operationId: string, settledRefund?: OrderEditSnapshot): Promise<void>;
   releaseUnsubmitted(
     omsOrderId: number,
     operationId: string,

@@ -4,6 +4,7 @@ import { PackageAllocationSourceIdentityError } from "../shipping/package-alloca
 
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import { channelMerchandiseAuthorityEnabled } from "./channel-merchandise-rollout";
 import {
   canonicalCarrierValue,
   carrierIdentity,
@@ -287,6 +288,9 @@ interface LegacyPackageRow {
   channel_order_line_id: string | null;
   oms_order_status: string | null;
   oms_financial_status: string | null;
+  channel_id?: number;
+  channel_current_quantity?: number | null;
+  channel_quantity_updated_at?: Date | string | null;
   paid_quantity: number | null;
   authority_fulfillable_quantity: number | null;
   cancelled_quantity: number | null;
@@ -693,6 +697,11 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
         refundedQuantity: row.refunded_quantity,
         refundCancelQuantity: row.refund_cancel_quantity,
         refundOtherQuantity: row.refund_other_quantity,
+        ...(row.channel_id != null && channelMerchandiseAuthorityEnabled(row.channel_id) && channelProvider === "shopify"
+          && row.channel_current_quantity != null && row.channel_quantity_updated_at != null
+          && Number.isFinite(new Date(row.channel_quantity_updated_at).getTime())
+          ? { useChannelQuantities: true, channelCurrentQuantity: row.channel_current_quantity,
+            channelQuantityUpdatedAt: new Date(row.channel_quantity_updated_at).toISOString() } : {}),
       });
     } catch (error) {
       if (!(error instanceof ChannelFulfillmentQuantityAuthorityError)) throw error;
@@ -906,6 +915,7 @@ async function loadPackageAllocationCommercialCustomerItems(
       oms_line.external_line_item_id AS channel_order_line_id,
       oms_order.status AS oms_order_status,
       oms_order.financial_status AS oms_financial_status,
+      oms_order.channel_id,oms_line.channel_current_quantity,oms_line.channel_quantity_updated_at,
       oms_line.paid_quantity::int AS paid_quantity,
       oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
       oms_line.cancelled_quantity::int AS cancelled_quantity,
@@ -1246,6 +1256,7 @@ async function loadLegacyPackageRows(
       oms_line.external_line_item_id AS channel_order_line_id,
       oms_order.status AS oms_order_status,
       oms_order.financial_status AS oms_financial_status,
+      oms_order.channel_id,oms_line.channel_current_quantity,oms_line.channel_quantity_updated_at,
       oms_line.paid_quantity::int AS paid_quantity,
       oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
       oms_line.cancelled_quantity::int AS cancelled_quantity,
@@ -2336,6 +2347,10 @@ async function findLineWritebackDecisions(
       reviewReason: item.reviewReason,
       commercialAuthorizedQuantity: item.commercialAuthorizedQuantity,
       cumulativePhysicalQuantity: shippedQuantity,
+        ...(item.quantityAuthority.useChannelQuantities === true ? { verifiedShopifyQuantity: {
+          currentQuantity: item.quantityAuthority.channelCurrentQuantity!, paidQuantity: item.quantityAuthority.paidQuantity,
+          sourceUpdatedAt: item.quantityAuthority.channelQuantityUpdatedAt!,
+        } } : {}),
       ...(quantityBasis === "commercial"
         ? { cumulativeCommercialQuantity: commercialQuantity }
         : {}),

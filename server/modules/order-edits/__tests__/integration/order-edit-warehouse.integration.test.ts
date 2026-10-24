@@ -41,8 +41,11 @@ import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
 import { orderEditQuoteSchema } from "../../application/order-edit-provider.schema";
 import { serviceHarness } from "../fixtures/order-edit-service.fixture";
 import { createShipStationService } from "../../../oms/shipstation.service";
+import { registerStoppedRefundDeferredShipment } from "../../infrastructure/order-edit-deferred-shipment";
+import { sql } from "drizzle-orm";
 import { OrderEditPaidProjection } from "../../../oms/order-edit-paid-projection";
 import { paidRewardFixture } from "../fixtures/order-edit-paid-reward.fixture";
+import { settledRefundEditFixture } from "../fixtures/settled-refund-edit.fixture";
 import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "../../../orders/cancel-wms-order";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -63,12 +66,12 @@ CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY,order_id bigint REFERENCE
   quantity integer,paid_quantity integer,authority_fulfillable_quantity integer,product_variant_id integer DEFAULT 100,authority_source_topic text);
 CREATE TABLE wms.orders(id integer PRIMARY KEY,source text,oms_fulfillment_order_id text,source_table_id text,channel_id integer,
   external_order_id text,warehouse_status text NOT NULL DEFAULT 'ready',on_hold integer NOT NULL DEFAULT 0,
-  assigned_picker_id text,started_at timestamptz,picked_count integer NOT NULL DEFAULT 0,combined_group_id integer,cancelled_at timestamptz);
+  assigned_picker_id text,started_at timestamptz,picked_count integer NOT NULL DEFAULT 0,combined_group_id integer,cancelled_at timestamptz,updated_at timestamptz);
 CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),oms_order_line_id bigint,
   quantity integer,picked_quantity integer DEFAULT 0,fulfilled_quantity integer DEFAULT 0,status text DEFAULT 'pending',on_hold boolean DEFAULT false,
   product_id integer DEFAULT 100,catalog_product_id integer DEFAULT 200,sku text DEFAULT 'SKU');
 CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),status text DEFAULT 'planned',
-  held boolean DEFAULT false,requires_review boolean DEFAULT false,shipstation_order_id integer,shipping_engine text,engine_order_ref text,
+  held boolean DEFAULT false,requires_review boolean DEFAULT false,review_reason text,shipstation_order_id integer,shipping_engine text,engine_order_ref text,
   tracking_number text,shipped_at timestamptz);
 CREATE TABLE wms.outbound_shipment_items(id integer PRIMARY KEY,shipment_id integer REFERENCES wms.outbound_shipments(id),order_item_id integer,qty integer);
 CREATE TABLE inventory.availability_runtime_authority(singleton_key boolean PRIMARY KEY,authority text,activation_run_id bigint,revision bigint);
@@ -76,7 +79,7 @@ CREATE TABLE inventory.availability_claims(id bigint PRIMARY KEY,order_id intege
 CREATE TABLE inventory.availability_claim_lines(id bigint PRIMARY KEY,claim_id bigint REFERENCES inventory.availability_claims(id),order_item_id integer,target_variant_id integer,requested_qty bigint,planned_qty bigint,shortfall_qty bigint,released_target_qty bigint,consumed_target_qty bigint,picked_target_qty bigint);
 CREATE TABLE inventory.availability_claim_resources(id bigint PRIMARY KEY,claim_id bigint REFERENCES inventory.availability_claims(id),claimed_qty bigint);
 CREATE TABLE inventory.availability_claim_lot_allocations(id bigint PRIMARY KEY,claim_id bigint REFERENCES inventory.availability_claims(id),claimed_qty bigint);
-CREATE TABLE oms.webhook_retry_queue(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,provider text,topic text,payload jsonb,attempts integer,status text,last_error text,next_retry_at timestamptz);
+CREATE TABLE oms.webhook_retry_queue(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,provider text,topic text,payload jsonb,attempts integer,status text,last_error text,next_retry_at timestamptz,retry_key text,source_inbox_id integer,created_at timestamptz DEFAULT now(),updated_at timestamptz DEFAULT now());
 INSERT INTO inventory.availability_runtime_authority VALUES(true,'canonical',1,1);
 INSERT INTO identity.users VALUES('staff'); INSERT INTO channels.channels(id) VALUES(36),(37);
 INSERT INTO channels.channel_connections(id,channel_id) VALUES(4,36),(5,37);
@@ -310,7 +313,9 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           previous_authority_fulfillable_quantity int,previous_authorization_status text,channel_observed_quantity int,
           paid_quantity int,authority_fulfillable_quantity int,cancelled_quantity int,refunded_quantity int,
           authorization_status text,authorized_at timestamptz,authorized_by_event_id text,created_at timestamptz);
+        CREATE TABLE oms.order_line_adjustments(id bigint PRIMARY KEY);
       `);
+      await database.pool.query(await readFile(new URL("../../../../../migrations/900000029000019090001_channel_merchandise_quantity_authority.sql", import.meta.url), "utf8"));
     }, 30000);
     afterAll(async () => {
       await database?.close();
@@ -1332,6 +1337,207 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         ).toBe(status);
       },
     );
+    async function seedStoppedRefundEdit() {
+      const now = new Date("2026-10-05T00:01:00Z");
+      const operation = settledRefundEditFixture(OP, now);
+      const store = new PostgresOrderEditStore(database.pool);
+      await store.save({ ...operation, version: 1 }, 0, "staff", "synthetic_stopped_refund_fixture");
+      await database.pool.query(`UPDATE wms.orders SET warehouse_status='cancelled',cancelled_at=now(),on_hold=1,
+          order_edit_operation_id='00000000-0000-4000-8000-000000000001' WHERE id=10;
+        UPDATE wms.order_items SET quantity=0,status='cancelled' WHERE id=40;
+        UPDATE oms.oms_order_lines SET authority_fulfillable_quantity=0,refunded_quantity=1,authorization_status='refunded' WHERE id=30;`);
+      return { now, operation, store, snapshot: operation.lastSnapshot! };
+    }
+
+    it("restores only empty owned work for a settled refund, retains all holds and audits once across retries", async () => {
+      const { snapshot } = await seedStoppedRefundEdit();
+      const enabledGateway = new OrderEditWarehouseGateway(database.pool,
+        { isConfigured: () => true, synchronizeOrderEditShipment: vi.fn() }, vi.fn(), () => new Date("2026-10-05T00:01:00Z"), () => true);
+      await enabledGateway.assertHeld(20, OP, snapshot);
+      await enabledGateway.assertHeld(20, OP, snapshot);
+      expect((await database.pool.query("SELECT warehouse_status,cancelled_at,on_hold,order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0])
+        .toEqual({ warehouse_status: "ready", cancelled_at: null, on_hold: 1, order_edit_operation_id: OP });
+      expect((await database.pool.query("SELECT count(*)::int AS n FROM oms.order_edit_events WHERE action='stopped_refund_warehouse_restored'")).rows[0].n).toBe(1);
+      expect((await database.pool.query("SELECT status,quantity FROM wms.order_items WHERE id=40")).rows[0])
+        .toEqual({ status: "cancelled", quantity: 0 });
+    });
+
+    async function seedRetiredProvider() {
+      const seeded = await seedStoppedRefundEdit();
+      await database.pool.query(`INSERT INTO wms.outbound_shipments(id,order_id,status,shipping_engine,shipstation_order_id,engine_order_ref)
+        VALUES(51,10,'cancelled','shipstation',551,'551');
+        INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held)
+        VALUES('00000000-0000-4000-8000-000000000001',51,551,true);`);
+      return seeded;
+    }
+
+    it("verifies the retired provider job before recovery and again on retry while preserving its receipt", async () => {
+      const { snapshot, now } = await seedRetiredProvider();
+      const provider = vi.fn(async () => {});
+      const enabledGateway = new OrderEditWarehouseGateway(database.pool,
+        { isConfigured: () => true, synchronizeOrderEditShipment: provider }, vi.fn(), () => now, () => true);
+      await enabledGateway.assertHeld(20, OP, snapshot);
+      await enabledGateway.assertHeld(20, OP, snapshot);
+      expect(provider.mock.calls).toEqual([
+        [{ shipmentId: 51, operationId: OP, mode: "verify_retired" }],
+        [{ shipmentId: 51, operationId: OP, mode: "verify_retired" }],
+      ]);
+      expect((await database.pool.query("SELECT released_at,was_held FROM oms.order_edit_provider_holds WHERE shipment_id=51")).rows)
+        .toEqual([{ released_at: null, was_held: true }]);
+    });
+
+    it("uses the existing ShipStation owner for GET-only retired-job verification on both sides of header recovery", async () => {
+      const { snapshot, now } = await seedRetiredProvider();
+      vi.stubEnv("SHIPSTATION_API_KEY", "synthetic-key");
+      vi.stubEnv("SHIPSTATION_API_SECRET", "synthetic-secret");
+      const request = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        expect(init?.method).toBe("GET");
+        const path = new URL(String(url)).pathname;
+        const job = { orderId: 551, orderNumber: "#1", orderStatus: "cancelled", items: [] };
+        const result = path === "/orders/551" ? job : path === "/orders" ? { orders: [job], pages: 1 }
+          : path === "/shipments" ? { shipments: [], pages: 0 } : null;
+        if (!result) throw new Error("Unexpected synthetic provider read");
+        return new Response(JSON.stringify(result), { status: 200 });
+      });
+      vi.stubGlobal("fetch", request);
+      try {
+        const provider = createShipStationService(drizzle(database.pool), undefined, { sessionLock: async (_key, work) => work() });
+        const enabledGateway = new OrderEditWarehouseGateway(database.pool, provider, vi.fn(), () => now, () => true);
+        await enabledGateway.assertHeld(20, OP, snapshot);
+        await enabledGateway.assertHeld(20, OP, snapshot);
+        expect(request).toHaveBeenCalledTimes(6);
+        expect((await database.pool.query("SELECT warehouse_status FROM wms.orders WHERE id=10")).rows[0].warehouse_status).toBe("ready");
+      } finally { vi.unstubAllGlobals(); vi.unstubAllEnvs(); }
+    });
+
+    it.each(["remote_active", "identity_missing", "receipt_missing", "receipt_changed", "concurrent_physical_change"])(
+      "retains stopped ownership when retired provider proof has %s", async failure => {
+        const { snapshot, now } = await seedRetiredProvider();
+        if (failure === "identity_missing") await database.pool.query("UPDATE wms.outbound_shipments SET shipstation_order_id=NULL,engine_order_ref=NULL WHERE id=51");
+        if (failure === "receipt_missing") await database.pool.query("DELETE FROM oms.order_edit_provider_holds WHERE shipment_id=51");
+        if (failure === "receipt_changed") await database.pool.query("UPDATE oms.order_edit_provider_holds SET provider_order_id=552 WHERE shipment_id=51");
+        const provider = vi.fn(async () => {
+          if (failure === "remote_active") throw new Error("Remote cancellation not confirmed");
+          if (failure === "concurrent_physical_change") await database.pool.query("UPDATE wms.orders SET started_at=now() WHERE id=10");
+        });
+        const enabledGateway = new OrderEditWarehouseGateway(database.pool,
+          { isConfigured: () => true, synchronizeOrderEditShipment: provider }, vi.fn(), () => now, () => true);
+        await expect(enabledGateway.assertHeld(20, OP, snapshot)).rejects.toThrow();
+        expect((await database.pool.query("SELECT warehouse_status,on_hold,order_edit_operation_id FROM wms.orders WHERE id=10")).rows)
+          .toEqual([{ warehouse_status: "cancelled", on_hold: 1, order_edit_operation_id: OP }]);
+      },
+    );
+
+    it.each(["picked", "started", "label", "owner", "contents", "source_cancelled", "refund_pending"])(
+      "does not restore stopped work when %s evidence is unsafe", async kind => {
+        const { snapshot } = await seedStoppedRefundEdit();
+        if (kind === "picked") await database.pool.query("UPDATE wms.order_items SET picked_quantity=1 WHERE id=40");
+        if (kind === "started") await database.pool.query("UPDATE wms.orders SET started_at=now() WHERE id=10");
+        if (kind === "label") await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,status,tracking_number) VALUES(51,10,'cancelled','TRACKING')");
+        if (kind === "owner") await database.pool.query("UPDATE wms.orders SET order_edit_operation_id=NULL WHERE id=10");
+        if (kind === "contents") await database.pool.query("UPDATE wms.order_items SET quantity=1,status='pending' WHERE id=40");
+        if (kind === "source_cancelled") await database.pool.query("UPDATE oms.oms_orders SET status='cancelled',cancelled_at=now() WHERE id=20");
+        if (kind === "refund_pending") snapshot.refunds[0].transactions[0].status = "PENDING";
+        const enabledGateway = new OrderEditWarehouseGateway(database.pool,
+          { isConfigured: () => true, synchronizeOrderEditShipment: vi.fn() }, vi.fn(), () => new Date("2026-10-05T00:01:00Z"), () => true);
+        await expect(enabledGateway.assertHeld(20, OP, snapshot)).rejects.toThrow();
+        expect((await database.pool.query("SELECT warehouse_status,order_edit_operation_id,on_hold FROM wms.orders WHERE id=10")).rows[0])
+          .toMatchObject({ warehouse_status: "cancelled", on_hold: 1 });
+        expect((await database.pool.query("SELECT count(*)::int AS n FROM oms.order_edit_events WHERE action='stopped_refund_warehouse_restored'")).rows[0].n).toBe(0);
+      });
+
+    it.each([false, true])("completes the stopped refund edit through retries without another financial command (dispatch queue failure=%s)", async failQueue => {
+      const { now, operation, snapshot } = await seedRetiredProvider();
+      const legacy = { ...operation, version: 1, status: "review_required", error: { code: "ORDER_EDIT_PICKING_CUTOFF", message: "Legacy stopped warehouse" } };
+      await database.pool.query("UPDATE oms.order_edit_operations SET status='review_required',document=$2::jsonb WHERE id=$1", [OP, JSON.stringify(legacy)]);
+      await database.pool.query(`INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,quantity,paid_quantity,
+        authority_fulfillable_quantity,product_variant_id,authorization_status,paid_price_cents,retail_price_cents,total_price_cents)
+        VALUES(31,20,'102',1,0,0,100,'seen',900,900,900)`);
+      // The default release cannot resume this historical operation on deployment alone.
+      expect(await new PostgresOrderEditStore(database.pool).pending(25, now)).toEqual([]);
+      const store = new PostgresOrderEditStore(database.pool, () => [36]);
+      expect(await store.pending(25, now)).toEqual([OP]);
+      const saveErrors: string[] = [];
+      const save = store.save.bind(store);
+      vi.spyOn(store, "save").mockImplementation(async (...args) => {
+        try { return await save(...args); }
+        catch (error) { saveErrors.push((error as Error).message + " " + String((error as Error).cause)); throw error; }
+      });
+      const inventory = inventoryProjection();
+      inventory.claim!.claimId = "2";
+      inventory.claim!.lines[0] = { ...inventory.claim!.lines[0], claimLineId: "2", lineKey: "item:41", orderItemId: 41 };
+      const projector = new OrderEditPaidProjection(database.pool, () => now, () => true);
+      let failed = false;
+      const materialize = vi.fn(async () => {
+        if (!failed) { failed = true; throw new Error("Synthetic interrupted synchronization"); }
+        // This query fixture supplies the WMS/claim contract. The ordinary WMS
+        // materializer and real canonical reservations have their own PG suite.
+        await drizzle(database.pool).transaction(async tx => {
+          await tx.execute(sql`INSERT INTO wms.order_items(id,order_id,oms_order_line_id,quantity) VALUES(41,10,31,1) ON CONFLICT DO NOTHING;
+            UPDATE inventory.availability_claims SET status='released' WHERE id=1;
+            INSERT INTO inventory.availability_claims VALUES(2,10,'active',1,'satisfied',1,1,repeat('f',64)) ON CONFLICT DO NOTHING;
+            INSERT INTO inventory.availability_claim_lines VALUES(2,2,41,100,1,1,0,0,0,0) ON CONFLICT DO NOTHING;`);
+          const created = await tx.execute(sql`INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES(52,10,'planned') ON CONFLICT DO NOTHING RETURNING id`);
+          if (created.rows.length) await registerStoppedRefundDeferredShipment(tx,
+            { omsOrderId: 20, wmsOrderId: 10, shipmentId: 52, operationId: OP, now });
+        });
+        return 10;
+      });
+      const synchronizer = new OrderEditOmsSynchronizer(database.pool, { syncOmsOrderToWms: materialize },
+        { getOrderReservationStatus: vi.fn(async () => inventory) }, (id, op, source) => projector.project(id, op, source));
+      const enabledGateway = new OrderEditWarehouseGateway(database.pool,
+        { isConfigured: () => true, synchronizeOrderEditShipment: vi.fn() },
+        (id, source, op) => synchronizer.synchronize(id, source, op), () => now, () => true);
+      const synchronizeErrors: string[] = [];
+      const reconcile = enabledGateway.reconcileAndRelease.bind(enabledGateway);
+      vi.spyOn(enabledGateway, "reconcileAndRelease").mockImplementation(async (...args) => {
+        try { return await reconcile(...args); }
+        catch (error) { synchronizeErrors.push((error as Error).message); throw error; }
+      });
+      const h = serviceHarness();
+      h.provider.observeRefund.mockResolvedValue({ status: "succeeded", refundId: snapshot.refunds[0].id, evidence: snapshot.refunds[0] });
+      h.provider.reconcileCommit.mockResolvedValue({ status: "applied", snapshot });
+      const service = new OrderEditService(store, h.provider, enabledGateway, () => now, () => OP, h.report,
+        undefined, undefined, undefined, undefined, () => true);
+      await service.sweep();
+      expect((await store.get(OP)).status).toBe("synchronizing");
+      expect((await database.pool.query("SELECT warehouse_status,on_hold,order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0])
+        .toEqual({ warehouse_status: "ready", on_hold: 1, order_edit_operation_id: OP });
+      if (failQueue) await database.pool.query(`CREATE SEQUENCE synthetic_deferred_queue_attempt;
+        CREATE FUNCTION synthetic_fail_deferred_queue() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          IF NEW.topic='shipstation_shipment_push' AND nextval('synthetic_deferred_queue_attempt')=1 THEN
+            RAISE EXCEPTION 'Synthetic deferred dispatch failure'; END IF; RETURN NEW; END; $$;
+        CREATE TRIGGER synthetic_fail_deferred_queue BEFORE INSERT ON oms.webhook_retry_queue
+          FOR EACH ROW EXECUTE FUNCTION synthetic_fail_deferred_queue();`);
+      await service.sweep();
+      if (failQueue) {
+        expect((await store.get(OP)).status).toBe("synchronizing");
+        expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBe(OP);
+        expect((await database.pool.query("SELECT released_at FROM oms.order_edit_provider_holds WHERE shipment_id=51")).rows[0].released_at).toBeNull();
+      }
+      await service.sweep();
+      expect(synchronizeErrors).toEqual(["Synthetic interrupted synchronization"]);
+      expect(saveErrors).toHaveLength(failQueue ? 1 : 0);
+      if (failQueue) {
+        expect(saveErrors[0]).toContain("Synthetic deferred dispatch failure");
+        await database.pool.query("DROP TRIGGER synthetic_fail_deferred_queue ON oms.webhook_retry_queue; DROP FUNCTION synthetic_fail_deferred_queue(); DROP SEQUENCE synthetic_deferred_queue_attempt;");
+      }
+      expect((await store.get(OP)).error).toBeNull();
+      expect((await store.get(OP)).status).toBe("completed");
+      expect(await store.pending(25, now)).toEqual([]);
+      expect((await database.pool.query("SELECT on_hold,order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0])
+        .toEqual({ on_hold: 1, order_edit_operation_id: null });
+      expect((await enabledGateway.inspect(20)).cancellationReasons).toEqual([]);
+      expect((await database.pool.query("SELECT count(*)::int AS n FROM oms.order_edit_events WHERE action='stopped_refund_warehouse_restored'")).rows[0].n).toBe(1);
+      expect((await database.pool.query("SELECT released_at FROM oms.order_edit_provider_holds WHERE shipment_id=51")).rows[0].released_at).not.toBeNull();
+      expect((await database.pool.query("SELECT status FROM wms.outbound_shipments WHERE id=51")).rows[0].status).toBe("cancelled");
+      expect((await database.pool.query("SELECT status,shipstation_order_id FROM wms.outbound_shipments WHERE id=52")).rows[0])
+        .toEqual({ status: "planned", shipstation_order_id: null });
+      expect((await database.pool.query("SELECT count(*)::int AS n FROM oms.webhook_retry_queue WHERE topic='shipstation_shipment_push' AND payload->>'shipmentId'='52'")).rows[0].n).toBe(1);
+      expect(h.provider.refund).not.toHaveBeenCalled();
+      expect(h.provider.commit).not.toHaveBeenCalled();
+    });
+
     it("finishes an already-paid reward edit through the worker and real paid projector after a failed release", async () => {
       const now = new Date("2026-10-05T00:01:00Z");
       const operation = paidRewardFixture(OP, now);

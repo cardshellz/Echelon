@@ -4,9 +4,18 @@ import type { ShopifyGraphQLResponse } from "../subscription.types";
 
 const SHOPIFY_API_VERSION = "2024-10";
 
-export async function shopifyGraphQL<T = any>(query: string, variables?: Record<string, any>): Promise<T> {
+export interface ShopifyGraphQLRequestOptions {
+  apiVersion?: string;
+  timeoutMs?: number;
+}
+
+export async function shopifyGraphQL<T = any>(query: string, variables?: Record<string, any>, options: ShopifyGraphQLRequestOptions = {}): Promise<T> {
+  const version = options.apiVersion ?? SHOPIFY_API_VERSION;
+  if (!/^\d{4}-(01|04|07|10)$/.test(version)) throw new Error("Invalid Shopify API version.");
+  if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0))
+    throw new Error("Shopify request timeout must be a positive integer.");
   const config = getShopifyConfig();
-  const url = `https://${config.domain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
+  const url = `https://${config.domain}/admin/api/${version}/graphql.json`;
 
   const response = await fetch(url, {
     method: "POST",
@@ -15,6 +24,7 @@ export async function shopifyGraphQL<T = any>(query: string, variables?: Record<
       "X-Shopify-Access-Token": config.accessToken,
     },
     body: JSON.stringify({ query, variables }),
+    ...(options.timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(options.timeoutMs) }),
   });
 
   if (!response.ok) {

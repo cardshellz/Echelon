@@ -2,8 +2,47 @@ import { describe, expect, it } from "vitest";
 import { orderCancellationEligibilityReasons } from "../../domain/order-cancellation-eligibility";
 import { serviceHarness } from "../fixtures/order-edit-service.fixture";
 import { cancellationPaymentsSettled } from "../../../customer-account/application/order-cancellation.ports";
+import { settledRefundEditFixture } from "../fixtures/settled-refund-edit.fixture";
 
 describe("customer cancellation boundary", () => {
+  function refundedSnapshot(refundCents: number) {
+    const operation = settledRefundEditFixture("00000000-0000-4000-8000-000000000001", new Date("2026-10-24T12:00:00Z"));
+    const snapshot = structuredClone(operation.lastSnapshot!);
+    snapshot.customerId = "gid://shopify/Customer/8";
+    snapshot.totalCents = 900;
+    snapshot.fullyPaid = false;
+    snapshot.netPaidCents = 1000 - refundCents;
+    snapshot.refunds[0].amountCents = refundCents;
+    snapshot.refunds[0].transactions[0].amountCents = refundCents;
+    snapshot.transactions[1].amountCents = refundCents;
+    return snapshot;
+  }
+  it.each([200,1000])("permits a separately requested cancellation after a verified settled %s-cent refund", refundCents => {
+    expect(orderCancellationEligibilityReasons({ snapshot: refundedSnapshot(refundCents), enabled: true,
+      warehouseReasons: [], activeOperationId: null, allowSettledRefundBalance: true })).toEqual([]);
+    expect(orderCancellationEligibilityReasons({ snapshot: refundedSnapshot(refundCents), enabled: true,
+      warehouseReasons: [], activeOperationId: null })).not.toEqual([]);
+  });
+  it.each(["pending", "unpaid", "mismatch", "outstanding", "capturable", "picking", "active", "missing_parent", "wrong_gateway", "over_refund"])(
+    "keeps %s protection when cancelling a previously refunded order", kind => {
+      const snapshot = refundedSnapshot(1000);
+      if (kind === "pending") { snapshot.refunds[0].transactions[0].status = "PENDING"; snapshot.transactions[1].status = "PENDING"; }
+      if (kind === "unpaid") { snapshot.totalCents = 2000; }
+      if (kind === "mismatch") { snapshot.netPaidCents = 1; }
+      if (kind === "outstanding") { snapshot.outstandingCents = 1; }
+      if (kind === "capturable") { snapshot.capturableCents = 1; }
+      if (kind === "missing_parent") { snapshot.refunds[0].transactions[0].parentId = null; snapshot.transactions[1].parentId = null; }
+      if (kind === "wrong_gateway") { snapshot.refunds[0].transactions[0].gateway = "different"; snapshot.transactions[1].gateway = "different"; }
+      if (kind === "over_refund") { snapshot.refunds[0].transactions[0].amountCents = 1001; snapshot.transactions[1].amountCents = 1001; }
+      expect(orderCancellationEligibilityReasons({ snapshot, enabled: true, allowSettledRefundBalance: true,
+        warehouseReasons: kind === "picking" ? ["Picking started"] : [], activeOperationId: kind === "active" ? "owned-edit" : null })).not.toEqual([]);
+    });
+  it("rejects contradictory refund-parent evidence through the existing settlement validator", () => {
+    const snapshot = refundedSnapshot(1000);
+    snapshot.transactions[1].parentId = "gid://shopify/OrderTransaction/99";
+    expect(() => orderCancellationEligibilityReasons({ snapshot, enabled: true, allowSettledRefundBalance: true,
+      warehouseReasons: [], activeOperationId: null })).toThrow(expect.objectContaining({ code: "ORDER_EDIT_PAYMENT_EVIDENCE_CONFLICT" }));
+  });
   it("permits paid US physical pre-pick orders independently of replacement editability", () => {
     const snapshot = {
       ...serviceHarness().snapshot(),

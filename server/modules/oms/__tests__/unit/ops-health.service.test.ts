@@ -42,7 +42,7 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toMatch(/COALESCE\(oi\.requires_shipping, 1\) <> 0/);
     expect(OPS_HEALTH_SRC).toMatch(/COALESCE\(oi\.quantity, 0\) > COALESCE\(oi\.fulfilled_quantity, 0\)/);
     expect(OPS_HEALTH_SRC).toMatch(/JOIN wms\.order_items oi ON oi\.id = osi\.order_item_id/);
-    expect(OPS_HEALTH_SRC).toMatch(/oo\.financial_status = 'refunded'/);
+    expect(OPS_HEALTH_SRC).toContain('omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })');
   });
 
   it("treats voided-only ShipStation shipments as missing shipment work", () => {

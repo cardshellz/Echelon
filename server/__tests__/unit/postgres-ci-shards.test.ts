@@ -233,6 +233,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/receiving-quarantine.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-lifecycle-quarantine.integration.test.ts",
       "server/modules/inventory/__tests__/integration/receiving-custody-count-guard.integration.test.ts",
+      "server/modules/oms/__tests__/integration/channel-merchandise-quantity.integration.test.ts",
+      "server/modules/oms/__tests__/integration/shopify-merchandise-refund.integration.test.ts",
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);
