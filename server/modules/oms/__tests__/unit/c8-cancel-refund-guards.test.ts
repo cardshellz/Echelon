@@ -65,7 +65,7 @@ describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
   });
 
   it("the entrypoint releases reservations after a successful transition", () => {
-    const cancelPos = CANCEL_HELPER_SRC.indexOf("await cancelOrder(db, orderId, reason)");
+    const cancelPos = CANCEL_HELPER_SRC.indexOf("await cancelOrder(db, orderId, reason, guards)");
     const releasePos = CANCEL_HELPER_SRC.indexOf("const rel = await reservation.releaseOrderReservation(");
     expect(cancelPos).toBeGreaterThan(-1);
     expect(releasePos).toBeGreaterThan(cancelPos);
@@ -170,9 +170,9 @@ describe("P0.5: refund financial update is atomic and serialized", () => {
 
   it("derives financial_status from the CUMULATIVE amount vs order total", () => {
     const handler = extractRefundHandler();
-    expect(handler).toMatch(
-      /COALESCE\(refund_amount_cents, 0\) \+ \$\{thisRefundCents\} >= COALESCE\(NULLIF\(total_cents, 0\)/,
-    );
+    expect(handler).toContain("deriveShopifyRefundFinancialStatus({");
+    expect(handler).toContain("previousRefundCents: financialRow.refund_amount_cents");
+    expect(handler).not.toContain("fullQtyRefundedThisPayload");
   });
 
   it("checks the replay marker INSIDE the locked transaction", () => {

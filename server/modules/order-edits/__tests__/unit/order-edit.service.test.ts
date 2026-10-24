@@ -605,6 +605,174 @@ describe("private order edit orchestration", () => {
       h.provider.refund.mock.calls[1].slice(1),
     );
   });
+  it("recovers a legacy refund review by observing its successful refund without another financial command", async () => {
+    const h = serviceHarness(1);
+    await h.service.quote(h.input, "staff");
+    h.provider.refund.mockRejectedValueOnce(
+      new OrderEditProviderError(
+        "REFUND_UNCONFIRMED",
+        "Incomplete creation response",
+        "unknown",
+      ),
+    );
+    expect((await h.service.commit(OP, OP, "staff")).status).toBe(
+      "review_required",
+    );
+    h.setCurrent({ netPaidCents: 1000, outstandingCents: 0 });
+    h.provider.observeRefund.mockResolvedValue({
+      status: "succeeded",
+      refundId: "existing-refund",
+      evidence: {
+        id: "existing-refund",
+        note: "refund",
+        amountCents: 1000,
+        transactions: [],
+      },
+    });
+    await h.service.sweep();
+    expect(h.record().status).toBe("completed");
+    expect(h.provider.observeRefund).toHaveBeenCalledExactlyOnceWith(
+      4,
+      h.record().refundIntent,
+    );
+    expect(h.provider.refund).toHaveBeenCalledTimes(1);
+    expect(h.provider.prepareRefund).toHaveBeenCalledTimes(1);
+    expect(h.provider.commit).toHaveBeenCalledTimes(1);
+    await h.service.sweep();
+    expect(h.provider.observeRefund).toHaveBeenCalledTimes(1);
+    expect(h.warehouse.reconcileAndRelease).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an unobserved legacy refund in read-only recovery, including outages and retries", async () => {
+    const h = serviceHarness(1);
+    await h.service.quote(h.input, "staff");
+    h.provider.refund.mockRejectedValueOnce(
+      new OrderEditProviderError(
+        "REFUND_UNCONFIRMED",
+        "Incomplete response",
+        "unknown",
+      ),
+    );
+    await h.service.commit(OP, OP, "staff");
+    h.provider.observeRefund.mockRejectedValueOnce(
+      new OrderEditProviderError(
+        "SHOPIFY_UNAVAILABLE",
+        "Unavailable",
+        "unknown",
+      ),
+    );
+    await h.service.sweep();
+    expect(h.record().error?.code).toBe(
+      "ORDER_EDIT_REFUND_REVIEW_READBACK_PENDING",
+    );
+    await h.service.sweep();
+    expect(h.record().status).toBe("review_required");
+    expect(h.provider.observeRefund).toHaveBeenCalledTimes(2);
+    expect(h.provider.refund).toHaveBeenCalledTimes(1);
+    expect(h.warehouse.reconcileAndRelease).not.toHaveBeenCalled();
+    h.provider.observeRefund.mockResolvedValue({
+      status: "succeeded",
+      refundId: "existing-refund",
+      evidence: {
+        id: "existing-refund",
+        note: "refund",
+        amountCents: 1000,
+        transactions: [],
+      },
+    });
+    h.setCurrent({ netPaidCents: 1000, outstandingCents: 0 });
+    await h.service.sweep();
+    expect(h.record().status).toBe("completed");
+    expect(h.provider.refund).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains staff review when refund readback succeeds after warehouse ownership changes", async () => {
+    const h = serviceHarness(1);
+    await h.service.quote(h.input, "staff");
+    h.provider.refund.mockRejectedValueOnce(
+      new OrderEditProviderError(
+        "REFUND_UNCONFIRMED",
+        "Incomplete reply",
+        "unknown",
+      ),
+    );
+    await h.service.commit(OP, OP, "staff");
+    h.provider.observeRefund.mockResolvedValue({
+      status: "succeeded",
+      refundId: "existing-refund",
+      evidence: {
+        id: "existing-refund",
+        note: "refund",
+        amountCents: 1000,
+        transactions: [],
+      },
+    });
+    h.warehouse.assertHeld.mockRejectedValueOnce(
+      new OrderEditError("ORDER_EDIT_HOLD_OWNER_INVALID", "Ownership changed"),
+    );
+    await h.service.sweep();
+    expect(h.record().status).toBe("review_required");
+    expect(h.record().error?.code).toBe("ORDER_EDIT_HOLD_OWNER_INVALID");
+    expect(h.provider.refund).toHaveBeenCalledTimes(1);
+    expect(h.warehouse.reconcileAndRelease).not.toHaveBeenCalled();
+  });
+
+  it("clears the historical warning once readback proves the matching refund is pending", async () => {
+    const h = serviceHarness(1);
+    await h.service.quote(h.input, "staff");
+    h.provider.refund.mockRejectedValueOnce(
+      new OrderEditProviderError(
+        "REFUND_UNCONFIRMED",
+        "Incomplete reply",
+        "unknown",
+      ),
+    );
+    await h.service.commit(OP, OP, "staff");
+    h.provider.observeRefund.mockResolvedValue({
+      status: "pending",
+      refundId: "existing-refund",
+      evidence: {
+        id: "existing-refund",
+        note: "refund",
+        amountCents: 0,
+        transactions: [],
+      },
+    });
+    await h.service.sweep();
+    expect(h.record().status).toBe("refunding");
+    expect(h.record().error).toBeNull();
+    expect(h.provider.refund).toHaveBeenCalledTimes(1);
+    expect(h.warehouse.reconcileAndRelease).not.toHaveBeenCalled();
+  });
+
+  it("retains warehouse protection after a completed refund when fulfillment still conflicts", async () => {
+    const h = serviceHarness(1);
+    await h.service.quote(h.input, "staff");
+    h.provider.refund.mockRejectedValueOnce(
+      new OrderEditProviderError(
+        "REFUND_READBACK_PENDING",
+        "Incomplete response",
+        "unknown",
+      ),
+    );
+    expect((await h.service.commit(OP, OP, "staff")).status).toBe("refunding");
+    h.warehouse.reconcileAndRelease.mockRejectedValueOnce(
+      new OrderEditError("ORDER_EDIT_INVENTORY_PENDING", "Warehouse mismatch"),
+    );
+    await h.service.sweep();
+    expect(h.record().status).toBe("synchronizing");
+    expect(h.record().error?.code).toBe("ORDER_EDIT_INVENTORY_PENDING");
+    await h.service.sweep();
+    expect(h.record().status).toBe("completed");
+    expect(h.provider.prepareRefund).toHaveBeenCalledTimes(1);
+    expect(h.provider.refund).toHaveBeenCalledTimes(3);
+    expect(
+      h.provider.refund.mock.calls.every(
+        (call) => call[1].idempotencyKey === REFUND_KEY,
+      ),
+    ).toBe(true);
+  });
+
   it("keeps the hold when warehouse synchronization fails and retries readback, not the financial mutation", async () => {
     const h = serviceHarness(1);
     await h.service.quote(h.input, "staff");

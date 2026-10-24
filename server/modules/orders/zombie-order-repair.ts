@@ -107,6 +107,7 @@ const ZOMBIE_CANDIDATES_SQL = sql`
     ${OMS_STILL_OWES_UNCARRIED_UNITS_FOR_WMS_ORDER_O} AS oms_still_owes_uncarried_units
   FROM wms.orders o
   WHERE o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+    AND o.order_edit_operation_id IS NULL
     AND NOT EXISTS (
       SELECT 1 FROM wms.order_items oi
       WHERE oi.order_id = o.id
@@ -159,8 +160,8 @@ export async function runStartupZombieOrderRepair(deps: {
     // Terminal transitions must release leftover reservations (P0.1c /
     // 'completed'-status fix) — raw transitions here leaked them.
     const outcome = action === "cancel"
-      ? await cancelWmsOrderAndRelease(deps.db, deps.reservation, candidate.wmsOrderId, ZOMBIE_REPAIR_REASON)
-      : await completeWmsOrderAndRelease(deps.db, deps.reservation, candidate.wmsOrderId, ZOMBIE_REPAIR_REASON);
+      ? await cancelWmsOrderAndRelease(deps.db, deps.reservation, candidate.wmsOrderId, ZOMBIE_REPAIR_REASON, undefined, { requireNoOrderEdit: true })
+      : await completeWmsOrderAndRelease(deps.db, deps.reservation, candidate.wmsOrderId, ZOMBIE_REPAIR_REASON, undefined, { requireNoOrderEdit: true });
     if (outcome.transitioned) {
       summary.transitioned.push(`${candidate.orderNumber}→${candidate.targetStatus}`);
     }
