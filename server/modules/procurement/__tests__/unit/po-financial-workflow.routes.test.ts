@@ -61,7 +61,8 @@ vi.mock("../../../../routes/middleware", () => {
       } as typeof req.session;
       next();
     };
-  return { requirePermission: permission, requireAnyPermission: permission };
+  return { requirePermission: permission, requireAnyPermission: permission,
+    requireAuth: (_req: Request, _res: Response, next: NextFunction) => next() };
 });
 vi.mock("../../../../middleware/idempotency", () => ({
   requireIdempotency:

@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
+import { useRfqCommands } from "@/features/purchasing/use-rfq-commands";
+import { RfqCommandRecovery } from "@/features/purchasing/RfqCommandRecovery";
+import { rfqCreateReceiptSchema } from "@shared/procurement/rfq-create-command";
 import {
   Activity,
   AlertTriangle,
@@ -649,10 +652,13 @@ function createPurchasingCommandIdempotencyKey(prefix: string): string {
 }
 
 export default function PurchasingView() {
+  const rfqCommands = useRfqCommands();
   const [sortField, setSortField] = useState("status");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [location, navigate] = useLocation();
+  const rfqContext = useRef({ actorId: rfqCommands.userId, location });
+  rfqContext.current = { actorId: rfqCommands.userId, location };
   const [candidateBandFilter, setCandidateBandFilter] = useState<CandidateBandFilter>(() => {
     const params = reorderAnalysisSearchParams(location);
     const requested = params.get("candidateBand");
@@ -682,9 +688,12 @@ export default function PurchasingView() {
   const [selectedRfqLineIds, setSelectedRfqLineIds] = useState<Set<number>>(new Set());
   const [rfqSelections, setRfqSelections] = useState<Record<number, RfqSelection>>({});
   const [rfqBatchDialogOpen, setRfqBatchDialogOpen] = useState(false);
-  const [rfqBatchIdempotencyKey, setRfqBatchIdempotencyKey] = useState("");
   const [rfqRequestNote, setRfqRequestNote] = useState("");
   const [rfqResponseDueDate, setRfqResponseDueDate] = useState("");
+  useEffect(() => {
+    setRfqBatchDialogOpen(false); setSelectedRfqLineIds(new Set()); setRfqSelections({});
+    setRfqRequestNote(""); setRfqResponseDueDate("");
+  }, [rfqCommands.userId]);
   const [planningPolicyOpen, setPlanningPolicyOpen] = useState(false);
   const [decisionNote, setDecisionNote] = useState("");
   const [reviewedControlCodes, setReviewedControlCodes] = useState<Set<string>>(new Set());
@@ -864,8 +873,10 @@ export default function PurchasingView() {
   });
 
   const createRfqMutation = useMutation({
+    retry: false, networkMode: "always",
     mutationFn: async (input: {
-      idempotencyKey: string;
+      actorId: string | null;
+      location: string;
       lines: Array<{
         recommendationLineId: number;
         vendorId: number;
@@ -877,11 +888,8 @@ export default function PurchasingView() {
       requestNote: string;
       responseDueDate: string;
     }) => {
-      const res = await fetch("/api/purchasing/rfq-queue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          idempotencyKey: input.idempotencyKey,
+      if (input.actorId !== rfqContext.current.actorId || input.location !== rfqContext.current.location) throw new Error("The purchasing operator or page changed. Review the current selection.");
+      const receipt = rfqCreateReceiptSchema.parse(await rfqCommands.execute({ operation: "create_batch", rfqId: null, payload: {
           lines: input.lines.map((line) => ({
             ...line,
             vendorSku: line.vendorSku.trim() || null,
@@ -890,13 +898,11 @@ export default function PurchasingView() {
           })),
           requestNote: input.requestNote.trim() || null,
           responseDueDate: input.responseDueDate || null,
-        }),
-      });
-      const body = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(body?.error ?? "Failed to create RFQ draft");
-      return body;
+      } }));
+      return receipt.result;
     },
-    onSuccess: (data) => {
+    onSuccess: (data, input) => {
+      if (input.actorId !== rfqContext.current.actorId || input.location !== rfqContext.current.location) return;
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/rfq-queue"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
@@ -905,7 +911,6 @@ export default function PurchasingView() {
       setRfqBatchDialogOpen(false);
       setSelectedRfqLineIds(new Set());
       setRfqSelections({});
-      setRfqBatchIdempotencyKey("");
       setRfqRequestNote("");
       setRfqResponseDueDate("");
       toast({
@@ -913,7 +918,8 @@ export default function PurchasingView() {
         description: `${data.rfqs?.length ?? 0} supplier RFQ${data.rfqs?.length === 1 ? "" : "s"} created from ${data.lines?.length ?? 0} recommendation line${data.lines?.length === 1 ? "" : "s"}.`,
       });
     },
-    onError: (error: Error) => {
+    onError: (error: Error, input) => {
+      if (input.actorId !== rfqContext.current.actorId || input.location !== rfqContext.current.location) return;
       toast({ title: "RFQ not created", description: error.message, variant: "destructive" });
     },
   });
@@ -1224,6 +1230,7 @@ export default function PurchasingView() {
   );
 
   const openRfqBatchDialog = () => {
+    if (rfqCommands.blocked || !rfqCommands.canEdit) return;
     const invalid = selectedRfqItems.find((item) => {
       const selection = selectionForRfqItem(item);
       return !selection.vendorId
@@ -1240,8 +1247,6 @@ export default function PurchasingView() {
       });
       return;
     }
-    const randomPart = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
-    setRfqBatchIdempotencyKey(`purchasing-rfq-${randomPart}`);
     setRfqRequestNote("");
     const defaultDueDate = new Date();
     defaultDueDate.setDate(defaultDueDate.getDate() + 7);
@@ -1250,9 +1255,9 @@ export default function PurchasingView() {
   };
 
   const submitRfqDraft = () => {
-    if (!rfqBatchIdempotencyKey || selectedRfqItems.length === 0) return;
+    if (rfqCommands.blocked || !rfqCommands.canEdit || selectedRfqItems.length === 0) return;
     createRfqMutation.mutate({
-      idempotencyKey: rfqBatchIdempotencyKey,
+      actorId: rfqCommands.userId, location,
       lines: selectedRfqItems.map((item) => {
         const selection = selectionForRfqItem(item);
         return {
@@ -1304,6 +1309,7 @@ export default function PurchasingView() {
 
   return (
     <div className="flex flex-col h-full bg-zinc-50 dark:bg-zinc-950">
+      <RfqCommandRecovery commands={rfqCommands} />
       {/* HEADER */}
       <div className="border-b bg-white dark:bg-zinc-900 sticky top-0 z-10 px-6 py-4 shadow-sm">
         <div className="flex items-center justify-between">
@@ -2165,6 +2171,7 @@ export default function PurchasingView() {
               The selected recommendation quantities will be grouped into one multi-line draft per supplier. Missing catalog SKUs are created without a price.
             </DialogDescription>
           </DialogHeader>
+          <RfqCommandRecovery commands={rfqCommands} />
           <div className="space-y-3">
             {Array.from(selectedRfqGroups.entries()).map(([vendorId, group]) => (
               <div key={vendorId} className="rounded-md border p-3">
@@ -2220,7 +2227,7 @@ export default function PurchasingView() {
             <Button variant="outline" disabled={createRfqMutation.isPending} onClick={() => setRfqBatchDialogOpen(false)}>
               Cancel
             </Button>
-            <Button disabled={selectedRfqItems.length === 0 || createRfqMutation.isPending} onClick={submitRfqDraft}>
+            <Button disabled={selectedRfqItems.length === 0 || createRfqMutation.isPending || rfqCommands.blocked || !rfqCommands.canEdit} onClick={submitRfqDraft}>
               {createRfqMutation.isPending ? "Creating drafts..." : `Create ${selectedRfqGroups.size} RFQ draft${selectedRfqGroups.size === 1 ? "" : "s"}`}
             </Button>
           </DialogFooter>

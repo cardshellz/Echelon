@@ -1,5 +1,5 @@
 import { batchFixture, refreshBatch, mockSyncBatches } from "./fixtures/channel-sync-batch.fixture";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { setupEbayChannelPage } from "./fixtures/ebay-channel-page.fixture";
 import { resolveEbayListingIssue } from "../../shared/ebay-listing-issue";
 
@@ -23,6 +23,136 @@ const pending = {
   jobs: [job],
 };
 const statusName = "Sync status for 55PT Toploader Combo Pack";
+
+async function scopedInventoryFeed(page: Page, state: Awaited<ReturnType<typeof setupEbayChannelPage>>) {
+  await page.route("**/api/ebay/category-aspects/183438", route => route.fulfill({ json: { aspects: [], categoryId: "183438" } }));
+  await page.route("**/api/ebay/product-aspects/1", route => route.fulfill({ json: { overrides: {} } }));
+  await page.route("**/api/ebay/type-aspect-defaults/toploaders", route => route.fulfill({ json: { defaults: {} } }));
+  const response = page.waitForResponse(response => new URL(response.url()).pathname === "/api/ebay/listing-feed");
+  await page.reload();
+  const payload = await (await response).json();
+  state.feedProducts = [{ ...payload.feed[0], inventoryReadState: "not_requested", inventoryIssue: null,
+    variants: [{ id: 101, sku: "PACK-1", name: "Each", priceCents: 500, ebayListingExcluded: false,
+      explicitlyExcluded: false, excludedByProduct: false, effectivelyListed: true, inventoryQuantity: null,
+      fulfillmentPolicyOverride: null, returnPolicyOverride: null, paymentPolicyOverride: null }] }];
+}
+
+test("scoped inventory loading leaves listing controls and persistent Sync All progress usable", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  await scopedInventoryFeed(page, state);
+  const batches = await mockSyncBatches(page, batchFixture(["running"])); batches.saved = true;
+  let reads = 0, release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/ebay/listing-feed/1/inventory", async route => {
+    reads++; await held;
+    await route.fulfill({ json: { productId: 1, quantities: [{ variantId: 101, quantity: 7 }], issue: null } });
+  });
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Channel sync progress" })).toContainText("1 updating");
+  expect(reads).toBe(0);
+  await page.getByText("55PT Toploader Combo Pack", { exact: true }).click();
+  await expect(page.getByText("Loading inventory…", { exact: true }).filter({ visible: true })).toBeVisible();
+  await page.getByRole("button", { name: "View sync progress", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).last().click();
+  await expect(page.getByRole("region", { name: "Channel sync progress" })).toContainText("1 updating");
+  expect(reads).toBe(1);
+  release();
+  await expect(page.getByText("7 qty", { exact: true }).filter({ visible: true })).toBeVisible();
+  await page.clock.install();
+  batches.batch = refreshBatch({ ...batches.batch, items: batches.batch.items.map(item => ({ ...item, state: "completed" })) });
+  await page.clock.fastForward(5_100);
+  await expect(page.getByRole("region", { name: "Channel sync progress" })).toContainText("Sync complete");
+  await page.screenshot({ path: info.outputPath("scoped-inventory-sync-progress.png"), fullPage: true });
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("a scoped inventory read failure survives collapse and reloads with its reference without publishing", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  await scopedInventoryFeed(page, state);
+  const issue = resolveEbayListingIssue({ code: "EBAY_FEED_QUANTITY_UNAVAILABLE", productId: 1, jobId: job.id });
+  let reads = 0;
+  await page.route("**/api/ebay/listing-feed/1/inventory", route => {
+    reads++;
+    return reads === 1 ? route.fulfill({ status: 503, json: { code: issue.code, error: issue.message, issue } })
+      : route.fulfill({ json: { productId: 1, quantities: [{ variantId: 101, quantity: 0 }], issue: null } });
+  });
+  await page.reload();
+  await page.getByText("55PT Toploader Combo Pack", { exact: true }).click();
+  const inventory = page.getByRole("region", { name: "Inventory availability for 55PT Toploader Combo Pack" });
+  await expect(inventory).toContainText(issue.message);
+  await expect(page.getByText("Unavailable", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("0 qty", { exact: true })).toHaveCount(0);
+  await page.getByText("55PT Toploader Combo Pack", { exact: true }).click();
+  await expect(inventory).toBeVisible();
+  await inventory.locator("summary").click();
+  await expect(inventory).toContainText(job.id);
+  await page.screenshot({ path: info.outputPath("scoped-inventory-diagnostic.png"), fullPage: true });
+  await inventory.getByRole("button", { name: "Reload inventory", exact: true }).click();
+  await expect(inventory).toHaveCount(0);
+  expect(reads).toBe(2);
+  await page.getByText("55PT Toploader Combo Pack", { exact: true }).click();
+  await expect(page.getByText("0 qty", { exact: true }).filter({ visible: true })).toBeVisible();
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("a saved preparation refusal identifies the variant and opens its actual correction control", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  const issue = resolveEbayListingIssue({ code: "CHANNEL_LISTING_VALIDATION_FAILED", productId: 1, jobId: job.id,
+    validation: { field: "package_weight", reason: "required", productId: 1, variantId: 101 } });
+  state.jobs = [{ ...job, state: "needs_attention", code: issue.code, message: issue.message, issue }];
+  await page.route("**/products/1?tab=variants", route => route.fulfill({ contentType: "text/html", body: "<h1>Catalog variant editor</h1>" }));
+  await page.reload();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Add the variant's package weight");
+  const link = page.getByRole("link", { name: "Open product variants", exact: true });
+  await expect(link).toHaveAttribute("href", "/products/1?tab=variants");
+  await page.clock.install(); await page.clock.fastForward(30_100);
+  expect(state.requests).toEqual([]);
+  await page.screenshot({ path: info.outputPath("preparation-variant-correction.png"), fullPage: true });
+  await link.click(); await expect(page.getByRole("heading", { name: "Catalog variant editor" })).toBeVisible();
+  expect(state.commands).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("inventory scope changes refresh listing membership before retrying the read", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  await scopedInventoryFeed(page, state);
+  await page.route("**/api/ebay/listing-feed/1/inventory", route => route.fulfill({
+    json: { productId: 1, quantities: [{ variantId: 101, quantity: 7 }, { variantId: 102, quantity: 14 }], issue: null },
+  }));
+  await page.reload();
+  await page.getByText("55PT Toploader Combo Pack", { exact: true }).click();
+  const inventory = page.getByRole("region", { name: "Inventory availability for 55PT Toploader Combo Pack" });
+  await expect(inventory).toContainText("Reload the listing variants");
+  const product = state.feedProducts![0] as { variants: Record<string, unknown>[] };
+  state.feedProducts = [{ ...product, variants: [...product.variants,
+    { ...product.variants[0], id: 102, sku: "CASE-2", name: "Case" }] }];
+  await inventory.getByRole("button", { name: "Reload listings", exact: true }).click();
+  await expect(inventory).toHaveCount(0);
+  await expect(page.getByText("7 qty", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("14 qty", { exact: true }).filter({ visible: true })).toBeVisible();
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("a corrected preparation blocker completes through normal Sync without clearing its old receipt", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  const issue = resolveEbayListingIssue({ code: "CHANNEL_LISTING_VALIDATION_FAILED", productId: 1, jobId: job.id,
+    validation: { field: "package_weight", reason: "required", productId: 1, variantId: 101, variantSku: "PACK-1" } });
+  const failed = { ...job, state: "needs_attention", code: issue.code, message: issue.message, issue };
+  state.jobs = [failed];
+  await page.reload();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Add the variant's package weight");
+  // The API represents the source after correction. The real PG case exercises
+  // the catalog save, builder, admission and provider completion behind this UI.
+  const replacement = { ...job, id: "c2417366-f052-457a-b055-edfbb822e198", state: "queued" };
+  state.response = { ...pending, jobs: [replacement] };
+  await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Queued for eBay");
+  state.jobs = [{ ...replacement, state: "completed" }, failed];
+  await page.clock.install(); await page.clock.fastForward(10_100);
+  await expect(page.getByRole("button", { name: "Errors (0)", exact: true })).toBeVisible();
+  await expect(page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true })).toBeEnabled();
+  expect(state.requests).toEqual(["/api/ebay/listings/sync-product/1"]);
+  expect(state.commands).toHaveLength(1); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
 
 test("canonical bulk count excludes a retained review-only listing", async ({ page }) => {
   const state = await setupEbayChannelPage(page);

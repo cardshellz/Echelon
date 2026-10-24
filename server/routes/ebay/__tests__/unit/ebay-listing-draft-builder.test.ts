@@ -8,12 +8,18 @@ describe("buildEbayRouteListingDraft", () => {
       resolvedPoliciesByVariantId: new Map(),
       effectivePolicies: fixturePolicies([463]).get(463)!,
     };
-    expect(() => buildEbayRouteListingDraft(input)).toThrow("A validated eBay policy selection is required");
+    expect(() => buildEbayRouteListingDraft(input)).toThrowError(expect.objectContaining({
+      code: "CHANNEL_LISTING_VALIDATION_FAILED",
+      context: { validation: { productId: 232, field: "policies", reason: "required" } },
+    }));
   });
 
   it("rejects a resolved map that omits a published variant instead of borrowing another variant's policy", () => {
     expect(() => buildEbayRouteListingDraft({ ...fixturePolicyInput(), resolvedPoliciesByVariantId: fixturePolicies([999]) }))
-      .toThrow("The resolved eBay policy scope is missing variant 463");
+      .toThrowError(expect.objectContaining({
+        code: "CHANNEL_LISTING_VALIDATION_FAILED",
+        context: { validation: { productId: 232, variantId: 463, field: "policies", reason: "required" } },
+      }));
   });
 
   it("keeps shared required item specifics on each multi-variant inventory item", () => {
@@ -87,7 +93,9 @@ describe("buildEbayRouteListingDraft", () => {
     expect(draft.offers[0].payload.availableQuantity).toBe(10);
     expect(draft.offers[0].payload.categoryId).toBe("183438");
     expect(draft.offers[0].payload.storeCategoryNames).toEqual(["Toploaders"]);
-    expect(draft.offers[0].payload).not.toHaveProperty("listingDescription");
+    expect(draft.inventoryItems.map(item => item.payload.product.description)).toEqual(["<p>Toploader</p>", "<p>Toploader</p>"]);
+    expect(draft.itemGroup?.payload.description).toBe("<p>Toploader</p>");
+    expect(draft.offers.map(offer => offer.payload.listingDescription)).toEqual(["<p>Toploader</p>", "<p>Toploader</p>"]);
     expect(draft.offers[1].payload.listingPolicies.returnPolicyId).toBe("variant-return-policy");
     expect((draft.itemGroup?.payload as any).variantSKUs).toEqual([
       "SHLZ-TOP-130PT-P10",
@@ -176,7 +184,7 @@ describe("buildEbayRouteListingDraft", () => {
     );
   });
 
-  it("rejects missing eBay offer prices before building marketplace payloads", () => {
+  it("rejects a zero eBay offer price before building marketplace payloads", () => {
     expect(() => buildEbayRouteListingDraft({
       productId: 232,
       product: {
@@ -207,7 +215,25 @@ describe("buildEbayRouteListingDraft", () => {
       resolvedPoliciesByVariantId: fixturePolicies([463]),
       storeCategoryNames: ["Toploaders"],
       merchantLocationKey: "card-shellz-hq",
-    })).toThrow("eBay listing price is required and must be at least $0.99 for SKU SHLZ-TOP-180PT-BLU-P10.");
+    })).toThrowError(expect.objectContaining({
+      code: "CHANNEL_LISTING_VALIDATION_FAILED",
+      context: { validation: { productId: 232, variantId: 463, variantSku: "SHLZ-TOP-180PT-BLU-P10", field: "price", reason: "invalid" } },
+    }));
+  });
+
+  it.each([{ price: null, reason: "required" }, { price: 98, reason: "invalid" }])(
+    "reports a $reason price correction for a saved price of $price cents", ({ price, reason }) => {
+      const input = fixturePolicyInput();
+      expect(() => buildEbayRouteListingDraft({ ...input, variantPrices: new Map(),
+        variants: input.variants.map(variant => ({ ...variant, price_cents: price })) }))
+        .toThrowError(expect.objectContaining({ code: "CHANNEL_LISTING_VALIDATION_FAILED",
+          context: { validation: { productId: 232, variantId: 463, variantSku: "TOP-P10", field: "price", reason } } }));
+    });
+
+  it("uses the same escaped fallback description for the item and offer when the catalog description is absent", () => {
+    const draft = buildEbayRouteListingDraft({ ...fixturePolicyInput(), product: { name: "Holder & Case", sku: "HOLDER" } });
+    expect(draft.inventoryItems[0].payload.product.description).toBe("<p>Holder &amp; Case</p>");
+    expect(draft.offers[0].payload.listingDescription).toBe("<p>Holder &amp; Case</p>");
   });
 
   it("rejects missing package weight before calling eBay", () => {
@@ -242,7 +268,10 @@ describe("buildEbayRouteListingDraft", () => {
       resolvedPoliciesByVariantId: fixturePolicies([463]),
       storeCategoryNames: ["Toploaders"],
       merchantLocationKey: "card-shellz-hq",
-    })).toThrow(/eBay package weight is required for SKU SHLZ-TOP-180PT-BLU-P10/);
+    })).toThrowError(expect.objectContaining({
+      code: "CHANNEL_LISTING_VALIDATION_FAILED",
+      context: { validation: { productId: 232, variantId: 463, variantSku: "SHLZ-TOP-180PT-BLU-P10", field: "package_weight", reason: "required" } },
+    }));
   });
 });
 

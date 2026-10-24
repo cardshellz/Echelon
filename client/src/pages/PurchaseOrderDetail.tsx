@@ -1,3 +1,5 @@
+import { usePurchaseOrderEntry } from "@/hooks/use-purchase-order-entry";
+import { PurchaseOrderEntryRecoveryNotice } from "@/features/purchasing/PurchaseOrderEntryRecovery";
 import { PurchaseOrderStatusBadge } from "@/features/purchasing/PurchaseOrderStatusBadge";
 import { resolveCurrentPhysicalStatus } from "@shared/procurement/purchase-order-status";
 import { DocumentRelationships, loadDocumentRelationships, relationshipQueryKey } from "@/features/purchasing/DocumentRelationships";
@@ -980,6 +982,8 @@ export default function PurchaseOrderDetail() {
   const { user: shipmentCommandUser, hasPermission } = useAuth();
   const shipmentCreation = useShipmentCreation();
   const purchaseApproval = usePurchaseApproval();
+  const purchaseEntry = usePurchaseOrderEntry();
+  const entryBlocked = !purchaseEntry.ready || purchaseEntry.pending || Boolean(purchaseEntry.recovery || purchaseEntry.error);
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [location, navigate] = useLocation();
@@ -1656,30 +1660,51 @@ export default function PurchaseOrderDetail() {
   });
 
   const sendToVendorMutation = useMutation({
-    onMutate: captureNavigation,
+    // Persist immediately even offline; reconnecting must never auto-submit a saved form.
+    networkMode: "always",
+    onMutate: () => ({ navigation: captureNavigation(), visit: purchaseEntry.captureVisit() }),
     mutationFn: async () => {
       const targetId = poId;
       if (!targetId) throw new Error("Select a PO before preparing supplier review.");
-      const res = await fetch(`/api/purchase-orders/${targetId}/send-to-vendor`, { method: "POST" });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to prepare PO for supplier review"); }
-      return parseSupplierPreparationResult(await res.json(), targetId);
+      if (entryBlocked) throw new Error("Recover the saved purchase request before preparing another purchase.");
+      const result = await purchaseEntry.execute({ action: "prepare", targetId, payload: {} });
+      return parseSupplierPreparationResult(result.po, targetId);
     },
-    onSuccess: (updatedPo, _variables, context) => {
+    onSuccess: async (updatedPo, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${updatedPo.id}`] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
-      if (!context?.isCurrent()) return;
-      toast({ title: updatedPo.status === "pending_approval" ? "Submitted for approval" : "PO ready for supplier review",
-        description: "Supplier dispatch has not been recorded. Review the document before sending it outside Echelon." });
-      if (updatedPo.status === "approved") {
+      if (!context?.navigation.isCurrent() || !context.visit.isCurrent()) return;
+      const current = await refetchPo();
+      if (!context.navigation.isCurrent() || !context.visit.isCurrent()) return;
+      if (!current.error && current.data?.id === updatedPo.id && current.data.status === "approved") {
         setShowDocDialog(true);
         void loadDocumentPreview();
       }
+      toast({ title: updatedPo.status === "pending_approval" ? "Submitted for approval" : "PO ready for supplier review",
+        description: "Supplier dispatch has not been recorded. Review the document before sending it outside Echelon." });
+
     },
     onError: (err: Error, _variables, context) => {
-      if (!context?.isCurrent()) return;
+      if (!context?.navigation.isCurrent() || !context.visit.isCurrent()) return;
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
+
+  async function recoverPurchaseEntry() {
+    const saved = purchaseEntry.recovery;
+    if (!saved) return;
+    const visit = purchaseEntry.captureVisit();
+    const navigation = captureNavigation();
+    try {
+      const result = await purchaseEntry.execute(saved.body, saved);
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${result.po.id}`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      if (!visit.isCurrent() || !navigation.isCurrent()) return;
+      toast({ title: "Purchase request confirmed", description: "Review the current purchase order before continuing." });
+      if (result.po.id !== poId) navigate(`/purchase-orders/${result.po.id}`);
+      else void refetchPo();
+    } catch { /* The recovery notice retains the request and reports the failure. */ }
+  }
 
   const createReceiptMutation = useMutation({
     onMutate: captureNavigation,
@@ -2655,7 +2680,7 @@ export default function PurchaseOrderDetail() {
       case "send":
         return sendMutation.isPending;
       case "send_to_vendor":
-        return po?.status === "approved" ? sendMutation.isPending : sendToVendorMutation.isPending || submitMutation.isPending;
+        return po?.status === "approved" ? sendMutation.isPending : entryBlocked || (isSoloMode && !purchaseEntry.allowed("prepare")) || sendToVendorMutation.isPending || submitMutation.isPending;
       case "mark_shipped":
         return markShippedMutation.isPending;
       case "mark_in_transit":
@@ -2703,6 +2728,10 @@ export default function PurchaseOrderDetail() {
     (reviewAutoDraftFinances && financialGuidanceLoading) ||
     (!reviewAutoDraftFinances && ["done", "cancelled"].includes(autoDraftActionPlan.primaryAction.id));
 
+  const entryRecoveryPanel = <PurchaseOrderEntryRecoveryNotice recovery={purchaseEntry.recovery} storageError={purchaseEntry.error}
+    error={purchaseEntry.commandError} pending={purchaseEntry.pending} allowed={purchaseEntry.recovery ? purchaseEntry.allowed(purchaseEntry.recovery.body.action) : false}
+    onRecover={recoverPurchaseEntry} onRead={purchaseEntry.refresh} />;
+
   const approvalRecoveryPanel = <PurchaseApprovalRecoveryNotice recovery={purchaseApproval.recovery} error={purchaseApproval.error}
     pending={approveMutation.isPending} allowed={purchaseApproval.allowed} onRecover={recoverPurchaseApproval} onRefresh={purchaseApproval.refresh} />;
 
@@ -2711,6 +2740,7 @@ export default function PurchaseOrderDetail() {
       <div className="p-2 md:p-6 space-y-4">
         <ProcurementContext navigation={procurementNavigation} />
         {approvalRecoveryPanel}
+        {entryRecoveryPanel}
         <Button variant="ghost" size="sm" asChild>
           <Link href={procurementNavigation.backHref("/purchase-orders")}>
             {procurementNavigation.backLabel ?? "Back to purchase orders"}
@@ -2729,6 +2759,7 @@ export default function PurchaseOrderDetail() {
       <div className="p-2 md:p-6 space-y-4">
         <ProcurementContext navigation={procurementNavigation} />
         {approvalRecoveryPanel}
+        {entryRecoveryPanel}
         <div role="alert" className="rounded-lg border p-4 space-y-3">
           <p className="font-medium">{notFound ? "Purchase order not found." : "Unable to load purchase order."}</p>
           {!notFound && (
@@ -2760,6 +2791,7 @@ export default function PurchaseOrderDetail() {
         <p className="text-muted-foreground">Purchase order not found.</p>
         <ProcurementContext navigation={procurementNavigation} />
         {approvalRecoveryPanel}
+        {entryRecoveryPanel}
         <Button variant="link" asChild>
           <Link href={procurementNavigation.backHref("/purchase-orders")}>
             {procurementNavigation.backLabel ?? "Back to purchase orders"}
@@ -2773,6 +2805,7 @@ export default function PurchaseOrderDetail() {
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
       <ProcurementContext navigation={procurementNavigation} />
       {approvalRecoveryPanel}
+        {entryRecoveryPanel}
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start gap-4">
         <Button variant="ghost" size="sm" asChild className="min-h-[44px]">
@@ -2859,7 +2892,7 @@ export default function PurchaseOrderDetail() {
         <div className="flex gap-2 flex-wrap w-full sm:w-auto">
           {/* Prepare approved terms; external dispatch is recorded separately. */}
           {canSendPoToVendor && po.status === "draft" && isSoloMode && (
-            <Button onClick={() => sendToVendorMutation.mutate()} disabled={sendToVendorMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+            <Button onClick={() => sendToVendorMutation.mutate()} disabled={entryBlocked || !purchaseEntry.allowed("prepare") || sendToVendorMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Send className="h-4 w-4 mr-2" />
               {sendToVendorMutation.isPending ? "Submitting..." : "Prepare for supplier"}
             </Button>
@@ -4040,7 +4073,7 @@ export default function PurchaseOrderDetail() {
                 className="w-full justify-start"
                 size="sm"
                 onClick={() => sendToVendorMutation.mutate()}
-                disabled={sendToVendorMutation.isPending}
+                disabled={entryBlocked || !purchaseEntry.allowed("prepare") || sendToVendorMutation.isPending}
               >
                 <Send className="h-3.5 w-3.5 mr-2" />
                 Prepare for supplier

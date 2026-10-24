@@ -1,4 +1,8 @@
 import { hasPoInvoiceHistory, readPoInvoiceHistory } from "./po-invoice-history.repository";
+import type { PurchaseOrderEntryAction, PurchaseOrderEntryCommand } from "@shared/procurement/purchase-order-entry-command";
+import { executePurchaseOrderEntry } from "./purchase-order-entry.service";
+import { assertNoLegacyPurchaseOrderEntry, type PurchaseOrderEntryTransaction } from "./purchase-order-entry.repository";
+import { assertPurchaseOrderEntryAuthority } from "./domain/purchase-order-entry";
 import { supplierDispatchConfirmationSchema } from "@shared/procurement/supplier-dispatch";
 import { purchaseApprovalInputSchema } from "@shared/procurement/purchase-approval-command";
 import { createPurchaseApprovalCommands } from "./purchase-approval.commands";
@@ -12,6 +16,8 @@ import { loadSupplierSourcingRecords } from "./supplier-sourcing.repository";
 import { isPurchaseOrderHistoryConstraintViolation, readPurchaseOrderHistoryPresence } from "./purchase-order-history.repository";
 import { PURCHASE_ORDER_HISTORY_DELETE_MESSAGE, retainedPurchaseOrderHistoryKinds } from "./purchase-order-history.policy";
 import { readPurchaseApprovalActor, readCommandAuthorityActor, type CommandAuthorityActor, type PurchaseApprovalActor } from "../identity";
+import type { RfqCreatePayload } from "@shared/procurement/rfq-create-command";
+import type { RfqWorkflowTransaction } from "./rfq-workflow.service";
 import { readProcurementSettings } from "./procurement-settings.repository";
 import { ProcurementSettingsError } from "./procurement-settings.policy";
 import type { ProcurementSettingsSnapshot } from "@shared/procurement/procurement-settings";
@@ -125,7 +131,7 @@ import {
   purchasingSkuAllocationKey,
 } from "./purchasing-rfq.service";
 import {
-  buildRfqBatchRequestHash,
+  buildRfqCreationRequestHash,
   evaluateRfqAllocationOverride,
   type RfqAllocationOverrideEvidence,
 } from "./purchasing-rfq-allocation";
@@ -223,7 +229,7 @@ interface Storage {
   updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData: any, executor?: any): Promise<any>;
   deletePurchaseOrder(id: number, executor?: any): Promise<boolean>;
   getRecommendationPoHandoffForPo(purchaseOrderId: number): Promise<any | undefined>;
-  generatePoNumber(): Promise<string>;
+  generatePoNumber(executor?: any, recordedAt?: Date): Promise<string>;
 
   // PO Lines
   getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<any[]>;
@@ -260,17 +266,17 @@ interface Storage {
   getMatchingApprovalTier(totalCents: number): Promise<any>;
 
   // Vendor Products
-  getVendorProducts(filters?: any): Promise<any[]>;
-  getVendorProductById(id: number): Promise<any>;
+  getVendorProducts(filters?: any, executor?: any): Promise<any[]>;
+  getVendorProductById(id: number, executor?: any): Promise<any>;
   getPreferredVendorProduct(productId: number, productVariantId?: number): Promise<any>;
 
   // Vendors
-  getVendorById(id: number): Promise<any>;
+  getVendorById(id: number, executor?: any): Promise<any>;
 
   // Products
   getProductVariantById(id: number, executor?: any): Promise<any>;
   getProductVariantsByProductId?(productId: number, executor?: any): Promise<any[]>;
-  getProductById(id: number): Promise<any>;
+  getProductById(id: number, executor?: any): Promise<any>;
 
   // Receiving
   createReceivingOrder(data: any, executor?: any): Promise<any>;
@@ -353,7 +359,7 @@ export type UpdateDraftPurchaseOrderWithLinesInput =
 type CreatePurchaseOrderInternalOptions = {
   // Internal financial owners reuse their existing transaction. Nested Drizzle
   // transactions are savepoints, so a PO-number conflict can retry atomically.
-  transaction?: { transaction<T>(work: (tx: any) => Promise<T>): Promise<T> };
+  transaction?: PurchaseOrderEntryTransaction;
   source?: "inline_editor" | "rfq_quote";
   additionalEvent?: {
     eventType: string;
@@ -2570,8 +2576,9 @@ export function createPurchasingService(
       sentNotes: string;
       recordExternalSend: boolean;
     },
+    transaction?: PurchaseOrderEntryTransaction,
   ): Promise<LockedSendResult> {
-    return db.transaction(async (tx: any) => {
+    return (transaction ?? db).transaction(async (tx: any) => {
       await lockInventoryCostGraph(tx);
       const economics = await lockLifecycleEconomics(tx, poId, expectation);
       const po = economics.po;
@@ -5313,6 +5320,7 @@ export function createPurchasingService(
 
   async function resolvePurchaseOrderLines(
     input: CreatePurchaseOrderWithLinesInput,
+    transaction?: PurchaseOrderEntryTransaction,
   ): Promise<ResolvedPurchaseOrderLine[]> {
     return Promise.all(
       input.lines.map(async (line) => {
@@ -5323,7 +5331,7 @@ export function createPurchasingService(
         let vendorProduct: any = null;
         let receiveConfigurationNormalization: ResolvedPurchaseOrderLine["receiveConfigurationNormalization"] = null;
         if (lineType === "product") {
-          product = await storage.getProductById(line.productId as number);
+          product = await storage.getProductById(line.productId as number, transaction);
           if (!product) {
             throw new PurchasingError(`Product ${line.productId} not found`, 404);
           }
@@ -5337,7 +5345,7 @@ export function createPurchasingService(
           // without an explicit choice, so there is nothing to fall back to.
           const expectedReceiveVariantId = line.expectedReceiveVariantId ?? null;
           if (expectedReceiveVariantId) {
-            variant = await storage.getProductVariantById(expectedReceiveVariantId);
+            variant = await storage.getProductVariantById(expectedReceiveVariantId, transaction);
             if (!variant) {
               throw new PurchasingError(
                 `Expected receive variant ${expectedReceiveVariantId} not found`,
@@ -5385,7 +5393,7 @@ export function createPurchasingService(
           }
 
           if (effectiveLine.vendorProductId !== undefined && effectiveLine.vendorProductId !== null) {
-            vendorProduct = await storage.getVendorProductById(effectiveLine.vendorProductId);
+            vendorProduct = await storage.getVendorProductById(effectiveLine.vendorProductId, transaction);
             if (
               !vendorProduct ||
               Number(vendorProduct.vendorId) !== input.vendorId ||
@@ -5912,10 +5920,10 @@ export function createPurchasingService(
   ): Promise<any> {
     validateCreateWithLinesInput(input);
 
-    const vendor = await storage.getVendorById(input.vendorId);
+    const vendor = await storage.getVendorById(input.vendorId, internalOptions?.transaction);
     if (!vendor) throw new PurchasingError("Vendor not found", 404);
     requireUsdPurchaseOrderCurrency(vendor.currency);
-    const resolvedLines = await resolvePurchaseOrderLines(input);
+    const resolvedLines = await resolvePurchaseOrderLines(input, internalOptions?.transaction);
 
     const subtotalCentsBigInt = resolvedLines.reduce(
       (sum, r) => sum + BigInt(r.costs.lineTotalCents),
@@ -6016,7 +6024,9 @@ export function createPurchasingService(
 
     let lastConflictingPoNumber: string | null = null;
     for (let attempt = 1; attempt <= PO_NUMBER_ALLOCATION_ATTEMPTS; attempt++) {
-      const poNumber = await storage.generatePoNumber();
+      const poNumber = internalOptions?.transaction
+        ? await storage.generatePoNumber(internalOptions.transaction, now())
+        : await storage.generatePoNumber();
       try {
         return await createAttempt(poNumber);
       } catch (error: any) {
@@ -6047,6 +6057,7 @@ export function createPurchasingService(
     id: number,
     input: UpdateDraftPurchaseOrderWithLinesInput,
     userId?: string,
+    transaction?: PurchaseOrderEntryTransaction,
   ): Promise<{ po: any; lines: any[] }> {
     if (!Number.isSafeInteger(id) || id <= 0 || id > PG_INTEGER_MAX) {
       throw new PurchasingError("Purchase order id must be a positive integer", 400, {
@@ -6066,9 +6077,9 @@ export function createPurchasingService(
     }
     validateCreateWithLinesInput(input, { allowExistingLineIds: true });
 
-    const vendor = await storage.getVendorById(input.vendorId);
+    const vendor = await storage.getVendorById(input.vendorId, transaction);
     if (!vendor) throw new PurchasingError("Vendor not found", 404);
-    const resolvedLines = await resolvePurchaseOrderLines(input);
+    const resolvedLines = await resolvePurchaseOrderLines(input, transaction);
     const subtotalCents = safeIntegerMoney(
       resolvedLines.reduce(
         (sum, resolved) => sum + BigInt(resolved.costs.lineTotalCents),
@@ -6077,7 +6088,7 @@ export function createPurchasingService(
       "subtotal_cents",
     );
 
-    return db.transaction(async (tx: any) => {
+    return (transaction ?? db).transaction(async (tx: any) => {
       await lockInventoryCostGraph(tx);
       const lockedHeaders = await tx
         .select()
@@ -6569,6 +6580,7 @@ export function createPurchasingService(
   async function findDuplicateCatalogQuote(
     targetVendorId: number,
     src: any,
+    transaction?: PurchaseOrderEntryTransaction,
   ): Promise<{ vendorProduct: any; pricing: PoLinePricingInput } | null> {
     const productId = Number(src.productId);
     const receiveVariantId = src.expectedReceiveVariantId ?? src.productVariantId ?? null;
@@ -6576,7 +6588,7 @@ export function createPurchasingService(
       vendorId: targetVendorId,
       productId,
       isActive: 1,
-    }) ?? [];
+    }, transaction) ?? [];
 
     const candidates = catalogRows
       .filter((row: any) =>
@@ -6651,10 +6663,11 @@ export function createPurchasingService(
     sourceId: number,
     overrides: { vendorId?: number; expectedDeliveryDate?: Date | null } | undefined,
     userId?: string,
+    transaction?: PurchaseOrderEntryTransaction,
   ): Promise<any> {
-    const source = await storage.getPurchaseOrderById(sourceId);
+    const source = await storage.getPurchaseOrderById(sourceId, transaction);
     if (!source) throw new PurchasingError("Source purchase order not found", 404);
-    const sourceLines = await storage.getPurchaseOrderLines(sourceId);
+    const sourceLines = await storage.getPurchaseOrderLines(sourceId, transaction);
     if (sourceLines.length === 0) {
       throw new PurchasingError("Source PO has no lines to duplicate", 400);
     }
@@ -6739,7 +6752,7 @@ export function createPurchasingService(
         );
       }
 
-      const catalogQuote = await findDuplicateCatalogQuote(targetVendorId, src);
+      const catalogQuote = await findDuplicateCatalogQuote(targetVendorId, src, transaction);
       if (catalogQuote) {
         dupLines.push({
           ...baseLine,
@@ -6809,6 +6822,7 @@ export function createPurchasingService(
       },
       userId,
       {
+        transaction,
         additionalEvent: {
           eventType: "duplicated_from",
           payload: {
@@ -6821,6 +6835,34 @@ export function createPurchasingService(
     );
 
     return created;
+  }
+
+  async function assertPurchaseEntryAuthority(action: PurchaseOrderEntryAction, actorId: string, key: string): Promise<void> {
+    await db.transaction(async (tx: PurchaseOrderEntryTransaction) => {
+      assertPurchaseOrderEntryAuthority(await readCommandAuthorityActor(tx, actorId), action);
+      await assertNoLegacyPurchaseOrderEntry(tx, key);
+    });
+  }
+
+  async function executePurchaseEntryInTransaction(tx: PurchaseOrderEntryTransaction, command: PurchaseOrderEntryCommand, actorId: string, key: string) {
+    // Match the established owner lock order before acquiring Identity and PO
+    // locks. Reentrant nested savepoints remain part of this command's commit.
+    await lockInventoryCostGraph(tx);
+    return executePurchaseOrderEntry(tx, command, actorId, key, {
+      now,
+      generatePoNumber: () => storage.generatePoNumber(tx, now()),
+      create: (transaction, input, actor) => createPurchaseOrderWithLines(input, actor, { transaction }),
+      save: (transaction, id, input, actor) => updateDraftPurchaseOrderWithLines(id, input, actor, transaction),
+      duplicate: (transaction, id, overrides, actor) => duplicatePurchaseOrder(id, overrides, actor, transaction),
+      async prepare(transaction, id, actor, solo) {
+        const [po] = await transaction.select().from(purchaseOrdersTable).where(eq(purchaseOrdersTable.id, id)).limit(1).for("update");
+        if (!po) throw new PurchasingError("Purchase order not found", 404);
+        if (!["draft", "approved"].includes(po.status)) throw new PurchasingError(`Cannot prepare PO in '${po.status}' status (must be draft or approved)`, 400);
+        const expectation = { status: po.status, updatedAtMs: po.updatedAt ? po.updatedAt.getTime() : null };
+        return sendWithLockedEconomics(id, actor, expectation, { allowDraft: true, soloModeOnly: solo,
+          sentNotes: "Prepared for supplier review", recordExternalSend: false }, transaction);
+      },
+    });
   }
 
   // ── BULK UPSERT VENDOR CATALOG (Spec A follow-up) ─────────────────
@@ -7252,13 +7294,14 @@ export function createPurchasingService(
     actorType: "user" | "system",
     actorId: string,
     promoted: { vendorId: number; productId: number; productVariantId: number | null },
+    action: "vendor_catalog.preferred_demoted" | "vendor_catalog.rfq_preferred_demoted" = "vendor_catalog.preferred_demoted",
   ): void {
     for (const demotion of demotions) {
       const vendorProductId = Number(demotion.after.id);
       target.push({
         level: "AUDIT",
         actor: `${actorType}:${actorId}`,
-        action: "vendor_catalog.preferred_demoted",
+        action,
         target: `vendor_product:${vendorProductId}`,
         changes: {
           before: demotion.before,
@@ -7526,7 +7569,7 @@ export function createPurchasingService(
     requestNote?: string | null;
     responseDueDate?: string | null;
     lines: CreateRfqBatchLineInput[];
-  }, userId?: string | null): Promise<{ rfqs: any[]; lines: any[]; reused: boolean }> {
+  }, userId?: string | null, existingTransaction?: RfqWorkflowTransaction): Promise<{ rfqs: any[]; lines: any[]; reused: boolean }> {
     const idempotencyKey = input.idempotencyKey?.trim();
     if (!idempotencyKey || idempotencyKey.length > 160) {
       throw new PurchasingError("idempotencyKey is required and cannot exceed 160 characters", 400);
@@ -7563,28 +7606,23 @@ export function createPurchasingService(
       allocationOverrideApproved: line.allocationOverrideApproved === true,
     }));
     const vendorIds = Array.from(new Set(normalizedLines.map((line) => line.vendorId)));
-    const requestHash = buildRfqBatchRequestHash({
-      requestNote: normalizedRequestNote,
-      responseDueDate: input.responseDueDate ?? null,
-      approvedBy: actorType === "user" ? actorId : null,
-      lines: normalizedLines.map((line) => ({
-        recommendationLineId: line.recommendationLineId,
-        vendorId: line.vendorId,
-        ...(line.vendorProductId === undefined ? {} : { vendorProductId: line.vendorProductId }),
-        vendorSku: line.vendorSku,
-        requestedPieces: line.requestedPieces,
-        quantityOverrideReason: line.quantityOverrideReason,
-        allocationOverrideApproved: line.allocationOverrideApproved,
-      })),
-    });
+    const requestHash = buildRfqCreationRequestHash(input, actorType === "user" ? actorId : null);
 
     try {
-      return await db.transaction(async (tx: any) => {
-      await lockInventoryCostGraph(tx);
+      const work = async (tx: any) => {
+        if (actorType !== "user" || !userId) throw new PurchasingError("An authenticated RFQ operator is required", 401, { code: "RFQ_ACTOR_REQUIRED" });
+        await assertRfqCreationAuthorityInTransaction(tx, userId);
         const priorRfqs = await tx.select().from(requestForQuotesTable).where(
           eq(requestForQuotesTable.idempotencyKey, idempotencyKey),
         );
         if (priorRfqs.length > 0) {
+          // Legacy RFQs predate the scoped command ledger. Their recorded
+          // creator, never an inferred actor, owns recovery of the saved key.
+          if (priorRfqs.some((rfq: any) => rfq.createdBy == null || rfq.createdBy !== userId)) {
+            throw new PurchasingError("The saved RFQ request belongs to another operator or has no verified creator", 409, {
+              code: "RFQ_IDEMPOTENCY_ACTOR_CONFLICT",
+            });
+          }
           if (
             priorRfqs.length !== vendorIds.length
             || priorRfqs.some((rfq: any) => !vendorIds.includes(Number(rfq.vendorId)))
@@ -7711,7 +7749,7 @@ export function createPurchasingService(
                 vendorId,
                 productId: Number(recommendation.productId),
                 productVariantId: variantId,
-              });
+              }, "vendor_catalog.rfq_preferred_demoted");
             }
 
             let vendorProduct: any;
@@ -7772,6 +7810,7 @@ export function createPurchasingService(
                 action: "purchase_rfq.allocation_override_approved",
                 target: `request_for_quote_line:${rfqLine.id}`,
                 changes: {
+                  before: null,
                   after: {
                     recommendationLineId: recommendation.id,
                     recommendedPieces: selection.recommendedPieces,
@@ -7791,7 +7830,7 @@ export function createPurchasingService(
               actor: `${actorType}:${actorId}`,
               action: `vendor_catalog.rfq_${catalogAction}`,
               target: `vendor_product:${vendorProduct.id}`,
-              changes: { after: catalogAuditSnapshot(vendorProduct) },
+              changes: { before: existingMapping ? catalogAuditSnapshot(existingMapping) : null, after: catalogAuditSnapshot(vendorProduct) },
               context: { recommendationLineId: recommendation.id, rfqId: rfq.id, requestedPieces: selection.requestedPieces },
             });
           }
@@ -7800,13 +7839,23 @@ export function createPurchasingService(
             actor: `${actorType}:${actorId}`,
             action: "purchase_rfq.batch_created",
             target: `request_for_quote:${rfq.id}`,
-            changes: { after: { rfqNumber: rfq.rfqNumber, vendorId, lineCount: selections.length, status: "draft" } },
-            context: { idempotencyKey },
+            changes: { before: null, after: { rfqNumber: rfq.rfqNumber, vendorId, lineCount: selections.length, status: "draft" } },
+            context: { idempotencyKey, requestHash, request: {
+              requestNote: normalizedRequestNote,
+              responseDueDate: input.responseDueDate ?? null,
+              // Each supplier event preserves its own selections. Together the
+              // immutable events retain the original batch after ledger expiry.
+              lines: selections.map(selection => ({ recommendationLineId: selection.recommendationLineId, vendorId,
+                ...(selection.vendorProductId === undefined ? {} : { vendorProductId: selection.vendorProductId }),
+                vendorSku: selection.vendorSku ?? null, requestedPieces: selection.requestedPieces,
+                quantityOverrideReason: selection.quantityOverrideReason, allocationOverrideApproved: selection.allocationOverrideApproved === true })),
+            } },
           });
         }
-        if (auditRows.length > 0) await tx.insert(auditEventsTable).values(auditRows);
+        if (auditRows.length > 0) await tx.insert(auditEventsTable).values(auditRows.map(row => ({ ...row, timestamp: writeTime })));
         return { rfqs: createdRfqs, lines: createdLines, reused: false };
-      });
+      };
+      return existingTransaction ? await work(existingTransaction) : await db.transaction(work);
     } catch (error: any) {
       if (error?.code === "23514" && String(error?.message ?? "").includes("RFQ_SUPPLY_SNAPSHOT_STALE")) {
         throw new PurchasingError("Purchase supply changed after this recommendation run. Generate fresh recommendations before creating another RFQ.", 409, { code: "RFQ_SUPPLY_SNAPSHOT_STALE" });
@@ -7818,6 +7867,22 @@ export function createPurchasingService(
       }
       rethrowVendorCatalogWriteError(error);
     }
+  }
+
+  async function assertRfqCreationAuthorityInTransaction(tx: RfqWorkflowTransaction, actorId: string): Promise<void> {
+    await lockInventoryCostGraph(tx);
+    const authority = await readCommandActor(tx, actorId);
+    if (!authority.active || !authority.permissions.includes("purchasing:edit")) {
+      throw new PurchasingError("Current unrestricted purchasing edit permission is required to create or recover an RFQ", 403, { code: "RFQ_CREATE_AUTHORITY_REQUIRED" });
+    }
+  }
+
+  async function assertRfqCreationAuthority(actorId: string): Promise<void> {
+    await db.transaction((tx: RfqWorkflowTransaction) => assertRfqCreationAuthorityInTransaction(tx, actorId));
+  }
+
+  async function createRfqBatchInTransaction(tx: RfqWorkflowTransaction, input: RfqCreatePayload, actorId: string, idempotencyKey: string) {
+    return createRfqBatch({ ...input, idempotencyKey }, actorId, tx);
   }
 
   /** Reviewed imports always use the same locked owner as ordinary catalog writes. */
@@ -8733,9 +8798,13 @@ export function createPurchasingService(
     applyReviewedSupplierEvidenceImport,
     snapshotPurchaseRecommendations,
     createRfqBatch,
+    createRfqBatchInTransaction,
+    assertRfqCreationAuthority,
 
     // Spec A: inline create, one-click send, duplicate, preload, settings.
     createPurchaseOrderWithLines,
+    assertPurchaseEntryAuthority,
+    executePurchaseEntryInTransaction,
     updateDraftPurchaseOrderWithLines,
     sendPurchaseOrder,
     duplicatePurchaseOrder,

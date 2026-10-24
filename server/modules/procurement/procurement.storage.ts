@@ -96,7 +96,7 @@ export interface IProcurementStorage {
   bulkCreateReceivingLines(lines: InsertReceivingLine[], executor?: any): Promise<ReceivingLine[]>;
   getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }, executor?: any): Promise<VendorProduct[]>;
   getVendorProductsByProductIds(productIds: number[]): Promise<VendorProduct[]>;
-  getVendorProductById(id: number): Promise<VendorProduct | undefined>;
+  getVendorProductById(id: number, executor?: any): Promise<VendorProduct | undefined>;
   getPreferredVendorProduct(productId: number, productVariantId?: number): Promise<VendorProduct | undefined>;
   createVendorProduct(data: InsertVendorProduct): Promise<VendorProduct>;
   updateVendorProduct(id: number, updates: Partial<InsertVendorProduct>): Promise<VendorProduct | null>;
@@ -157,7 +157,7 @@ export interface IProcurementStorage {
   updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor?: any): Promise<PurchaseOrder | null>;
   updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>, executor?: any): Promise<PurchaseOrder | null>;
   deletePurchaseOrder(id: number, executor?: any): Promise<boolean>;
-  generatePoNumber(): Promise<string>;
+  generatePoNumber(executor?: any, recordedAt?: Date): Promise<string>;
   getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<PurchaseOrderLine[]>;
   getPurchaseOrderLineById(id: number, executor?: any): Promise<PurchaseOrderLine | undefined>;
   createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine>;
@@ -404,8 +404,8 @@ export const procurementMethods: IProcurementStorage = {
       .orderBy(vendorProducts.productId, desc(vendorProducts.isPreferred), asc(vendorProducts.vendorId));
   },
 
-  async getVendorProductById(id: number): Promise<VendorProduct | undefined> {
-    const result = await db.select().from(vendorProducts).where(eq(vendorProducts.id, id)).limit(1);
+  async getVendorProductById(id: number, executor: any = db): Promise<VendorProduct | undefined> {
+    const result = await executor.select().from(vendorProducts).where(eq(vendorProducts.id, id)).limit(1);
     return result[0];
   },
 
@@ -868,12 +868,11 @@ export const procurementMethods: IProcurementStorage = {
     return result.length > 0;
   },
 
-  async generatePoNumber(): Promise<string> {
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+  async generatePoNumber(executor: any = db, recordedAt: Date = new Date()): Promise<string> {
+    const dateStr = recordedAt.toISOString().slice(0, 10).replace(/-/g, '');
     const prefix = `PO-${dateStr}-`;
 
-    const existing = await db.select({ poNumber: purchaseOrders.poNumber })
+    const existing = await executor.select({ poNumber: purchaseOrders.poNumber })
       .from(purchaseOrders)
       .where(like(purchaseOrders.poNumber, `${prefix}%`))
       .orderBy(desc(purchaseOrders.poNumber))

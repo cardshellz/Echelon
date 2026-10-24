@@ -129,7 +129,7 @@ describe("RFQ recovery receipts", () => {
   it("keeps malformed stored authority evidence retryable instead of labeling it invalid operator input", async () => {
     const f = fixture("release"), h = harness();
     const tx = { execute: vi.fn().mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ id: actor, active: "malformed" }] }), transaction: vi.fn() };
+      .mockResolvedValueOnce({ rows: [{ id: actor, active: "malformed" }] }), transaction: vi.fn(), select: vi.fn(), insert: vi.fn() };
     const service = createRfqWorkflowService({ transaction: vi.fn() }, { createPurchaseOrderWithLines: vi.fn() });
     let failure: unknown;
     try { await service.executeInTransaction(tx, f.command, actor, at, key); }

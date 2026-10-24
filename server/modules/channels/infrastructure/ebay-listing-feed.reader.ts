@@ -8,6 +8,12 @@ import type { EbayListingFeedInventoryService } from "../application/ebay-listin
 import { resolveEbayFeedListingState, type EbayFeedVariantListingState } from "../ebay-listing-feed-status";
 import { isValidEbayFixedPriceCents, normalizeCents } from "../ebay-listing-draft";
 import { EbaySyncSelectionReader } from "./ebay-sync-selection.reader";
+import { mapChannelReads } from "../../marketplace-listings/application/channel-read-work";
+import { z } from "zod";
+
+// Four independent projections leave the default 20-slot pool capacity for
+// workers and interactive writes. Inventory is read separately on expansion.
+const FEED_READ_CONCURRENCY = 4;
 
 interface FeedDependencies {
   inventory: Pick<EbayListingFeedInventoryService, "readProduct">;
@@ -34,6 +40,22 @@ interface ListingFeedVariant {
 export class EbayListingFeedReader {
   constructor(private readonly database: Pick<Pool, "query">, private readonly channelId: number,
     private readonly dependencies: FeedDependencies) {}
+
+  async readInventory(productId: number) {
+    z.number().int().positive().max(2_147_483_647).parse(productId);
+    const product = await new EbaySyncSelectionReader(this.database, this.channelId).product(productId);
+    if (!product.selection.visible) throw new Error("The product is outside this channel's listing workspace.");
+    const { rows } = await this.database.query(`SELECT v.id,v.requires_shipping,v.track_inventory,
+      v.ebay_listing_excluded,vo.is_listed FROM catalog.product_variants v
+      LEFT JOIN channels.channel_variant_overrides vo ON vo.channel_id=$2 AND vo.product_variant_id=v.id
+      WHERE v.product_id=$1 AND v.sku IS NOT NULL AND v.is_active=true AND v.sales_eligibility='sellable'
+      ORDER BY v.id`, [productId, this.channelId]);
+    const result = await this.dependencies.inventory.readProduct(productId, rows.map(row => row.id),
+      rows.filter(row => product.state.active && product.state.included && row.ebay_listing_excluded !== true && row.is_listed !== 0
+        && isInventoryManagedVariant({ requiresShipping: row.requires_shipping, trackInventory: row.track_inventory }))
+        .map(row => row.id));
+    return { productId, quantities: [...result.quantities].map(([variantId, quantity]) => ({ variantId, quantity })), issue: result.issue };
+  }
   async read() {
     const client = this.database;
     // The same selection owner defines feed visibility and bulk membership.
@@ -86,7 +108,6 @@ export class EbayListingFeedReader {
     const productIds = result.rows.map((r: any) => r.id);
     const variantsByProduct = new Map<number, ListingFeedVariant[]>();
     const listingStatesByProduct = new Map<number, Array<EbayFeedVariantListingState & { externalOfferId: string | null }>>();
-    const inventoryManagedVariantIds = new Set<number>();
     if (productIds.length > 0) {
       const varResult = await client.query(`
         SELECT
@@ -115,9 +136,6 @@ export class EbayListingFeedReader {
 
       for (const v of varResult.rows) {
         const pid = v.product_id;
-        if (isInventoryManagedVariant({ requiresShipping: v.requires_shipping, trackInventory: v.track_inventory })) {
-          inventoryManagedVariantIds.add(v.id);
-        }
         if (!listingStatesByProduct.has(pid)) listingStatesByProduct.set(pid, []);
         listingStatesByProduct.get(pid)!.push({ variantId: v.id, listingRecordId: v.listing_id,
           externalListingId: v.external_listing_id?.trim() || null,
@@ -200,8 +218,7 @@ export class EbayListingFeedReader {
     }
 
     // Determine readiness for each product
-    const feed: any[] = [];
-    for (const row of result.rows) {
+    const feed = await mapChannelReads(result.rows, FEED_READ_CONCURRENCY, async row => {
       // Effective category: product override wins, then type mapping
       const effectiveCategoryId = row.product_ebay_browse_category_id || row.ebay_browse_category_id || null;
       const effectiveCategoryName = row.product_ebay_browse_category_name || row.ebay_browse_category_name || null;
@@ -234,14 +251,11 @@ export class EbayListingFeedReader {
           effectivelyListed,
         };
       });
-      // Reuse the listing and inventory eligibility owners for expected rows.
-      // Read failures are local to this product and never trigger publication.
-      const inventory = await this.dependencies.inventory.readProduct(row.id,
-        listingVariants.map((variant: { id: number }) => variant.id),
-        listingVariants.filter((variant: { id: number; effectivelyListed: boolean }) => variant.effectivelyListed
-          && inventoryManagedVariantIds.has(variant.id)).map((variant: { id: number }) => variant.id));
+      // Quantities are not a content-readiness input. Reading the whole catalog's
+      // planner here made a collapsed listing screen perform thousands of SQL
+      // calls. The scoped read above delegates to the same inventory owner.
       const variants = listingVariants.map((variant) => ({ ...variant,
-        inventoryQuantity: inventory.quantities.get(variant.id) ?? null }));
+        inventoryQuantity: null }));
       const includedVariants = variants.filter((v: any) => v.effectivelyListed);
       const mediaReadiness = await this.dependencies.readPhotos({
         productId: row.id, channelId: this.channelId, variantIds: includedVariants.map(variant => variant.id),
@@ -319,7 +333,7 @@ export class EbayListingFeedReader {
       if (!hasImages) missingItems.push("images");
       if (!hasValidEbayPrices) missingItems.push("valid eBay prices");
 
-      feed.push({
+      return {
         id: row.id,
         syncIncluded: selected.get(row.id)!.syncIncluded,
         name: row.name,
@@ -340,7 +354,8 @@ export class EbayListingFeedReader {
         canSyncExistingListing,
         isExcluded,
         syncError: listingSyncError,
-        inventoryIssue: inventory.issue,
+        inventoryIssue: null,
+        inventoryReadState: "not_requested" as const,
         externalListingId: row.external_product_id_count === 1
           ? row.external_product_id
           : null,
@@ -355,8 +370,8 @@ export class EbayListingFeedReader {
         fulfillmentPolicyOverride: row.product_fulfillment_override ?? null,
         returnPolicyOverride: row.product_return_override ?? null,
         paymentPolicyOverride: row.product_payment_override ?? null,
-      });
-    }
+      };
+    });
 
 
     return { feed, total: feed.length, syncIncludedCount: selection.filter(row => row.selection.syncIncluded).length };
