@@ -2547,33 +2547,9 @@ export class ShopifyOrderEditProvider
     intent: OrderEditRefundIntent,
     firstAttemptAt: string,
   ): Promise<OrderEditRefundResult> {
-    parse(orderEditRefundIntentSchema, intent);
-    this.bind(connectionId, intent);
-    validateOperation(intent.operationId);
-    validateOperation(intent.idempotencyKey);
-    if (
-      !Number.isSafeInteger(intent.amountCents) ||
-      intent.amountCents <= 0 ||
-      intent.currency !== "USD" ||
-      intent.note !== marker(intent.operationId)
-    )
-      fail("REFUND_INTENT_INVALID", "The saved refund intent is invalid.");
-    const current = await this.readOrder(connectionId, intent.orderId);
-    if (current.channelId !== intent.channelId)
-      fail(
-        "CONNECTION_MISMATCH",
-        "The refund's channel does not match the connection.",
-      );
-    const matches = current.refunds.filter(
-      (entry) => entry.note === intent.note,
-    );
-    if (matches.length > 1)
-      fail(
-        "REFUND_AMBIGUOUS",
-        "Multiple refunds match this command. Manual reconciliation is required.",
-        "unknown",
-      );
-    if (matches.length === 1) return proveRefund(matches[0], intent);
+    const current = await this.readRefundSource(connectionId, intent);
+    const existing = matchingRefund(current.refunds, intent);
+    if (existing) return proveRefund(existing, intent);
     const started = Date.parse(firstAttemptAt);
     const age = this.now().getTime() - started;
     if (!Number.isFinite(started) || age < 0 || age >= IDEMPOTENCY_RETENTION_MS)
@@ -2617,7 +2593,64 @@ export class ShopifyOrderEditProvider
       },
       "refundCreate",
     );
-    return proveRefund(refund(parse(REFUND, result.refund, true)), intent);
+    const observed = refund(parse(REFUND, result.refund, true));
+    // Creation responses can precede the note/transaction projection. Retain
+    // the original intent and let readback prove settlement on the next pass.
+    if (observed.note !== intent.note || observed.transactions.length === 0)
+      fail(
+        "REFUND_READBACK_PENDING",
+        "Waiting for Shopify to confirm the saved refund.",
+        "unknown",
+      );
+    return proveRefund(observed, intent);
+  }
+
+  async observeRefund(
+    connectionId: number,
+    intent: OrderEditRefundIntent,
+  ): Promise<OrderEditRefundResult | null> {
+    const current = await this.readRefundSource(connectionId, intent);
+    const existing = matchingRefund(current.refunds, intent);
+    if (!existing) return null;
+    try {
+      return proveRefund(existing, intent);
+    } catch (error) {
+      if (
+        error instanceof OrderEditProviderError &&
+        error.code === "REFUND_UNCONFIRMED"
+      )
+        throw new OrderEditProviderError(
+          "REFUND_REVIEW_EVIDENCE_MISMATCH",
+          error.message,
+          "unknown",
+          error.context,
+        );
+      throw error;
+    }
+  }
+
+  private async readRefundSource(
+    connectionId: number,
+    intent: OrderEditRefundIntent,
+  ): Promise<OrderEditSnapshot> {
+    parse(orderEditRefundIntentSchema, intent);
+    this.bind(connectionId, intent);
+    validateOperation(intent.operationId);
+    validateOperation(intent.idempotencyKey);
+    if (
+      !Number.isSafeInteger(intent.amountCents) ||
+      intent.amountCents <= 0 ||
+      intent.currency !== "USD" ||
+      intent.note !== marker(intent.operationId)
+    )
+      fail("REFUND_INTENT_INVALID", "The saved refund intent is invalid.");
+    const current = await this.readOrder(connectionId, intent.orderId);
+    if (current.channelId !== intent.channelId)
+      fail(
+        "CONNECTION_MISMATCH",
+        "The refund's channel does not match the connection.",
+      );
+    return current;
   }
 
   async recoverUnpaid(
@@ -4291,10 +4324,34 @@ function assertRecoveryLineage(quote: OrderEditQuote): void {
     );
   }
 }
+function matchingRefund(
+  refunds: readonly OrderEditRefund[],
+  intent: OrderEditRefundIntent,
+): OrderEditRefund | null {
+  const matches = refunds.filter((entry) => entry.note === intent.note);
+  if (matches.length > 1)
+    fail(
+      "REFUND_AMBIGUOUS",
+      "Multiple refunds match this command. Manual reconciliation is required.",
+      "unknown",
+    );
+  return matches[0] ?? null;
+}
+
 function proveRefund(
   actual: OrderEditRefund,
   intent: OrderEditRefundIntent,
 ): OrderEditRefundResult {
+  if (
+    actual.note === intent.note &&
+    actual.transactions.length === 0 &&
+    actual.amountCents === 0
+  )
+    fail(
+      "REFUND_READBACK_PENDING",
+      "Waiting for Shopify to confirm the saved refund transaction.",
+      "unknown",
+    );
   if (actual.note !== intent.note || actual.transactions.length !== 1)
     fail(
       "REFUND_UNCONFIRMED",

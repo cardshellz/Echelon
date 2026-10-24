@@ -229,6 +229,7 @@ export function serviceHarness(
       note: "refund",
       contentFingerprint: current.contentFingerprint,
     })),
+    observeRefund: vi.fn<OrderEditProvider["observeRefund"]>(async () => null),
     refund: vi.fn<OrderEditProvider["refund"]>(async () => {
       current = {
         ...current,

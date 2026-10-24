@@ -32,6 +32,7 @@ import type {
 import type {
   OrderEditProvider,
   OrderEditSnapshot,
+  OrderEditRefundResult,
 } from "./order-edit-provider";
 import {
   OrderEditCommitNotSentError,
@@ -59,6 +60,7 @@ import { orderCancellationEligibilityReasons } from "../domain/order-cancellatio
 import { presentCustomerOrderLifecycle } from "@shared/customer-account/order-fulfillment";
 import { customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
 import { orderAddressEligibility } from "../domain/order-address-eligibility";
+import { canObserveOrderEditRefundReview } from "../domain/order-edit-refund-recovery";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
 // Bound each scheduler pass so one store cannot monopolize the worker.
@@ -69,6 +71,7 @@ const retryableProviderReadback = new Set([
   "SHOPIFY_HTTP_ERROR",
   "SHOPIFY_GRAPHQL_ERROR",
   "SHOPIFY_RESPONSE_INVALID",
+  "REFUND_READBACK_PENDING",
 ]);
 export class OrderEditService {
   constructor(
@@ -757,6 +760,17 @@ export class OrderEditService {
   ): Promise<OrderEditRecord> {
     let record = initial;
     if (terminal.has(record.status)) return record;
+    if (
+      canObserveOrderEditRefundReview({
+        status: record.status,
+        errorCode: record.error?.code ?? null,
+        cancellation: record.kind === "cancel_order",
+        submitted: record.commitStartedAt !== null,
+        refundRequested:
+          record.refundIntent !== null && record.refundStartedAt !== null,
+      })
+    )
+      return this.observeRefundReview(record, actorId);
     if (!orderEditHasSubmissionEvidence(record)) {
       record = await this.releaseUnsubmitted(record, actorId);
       if (record.error?.code === "ORDER_EDIT_HOLD_RELEASE_PENDING")
@@ -1052,9 +1066,56 @@ export class OrderEditService {
       return this.review(record, actorId, error);
     }
   }
+  private async observeRefundReview(
+    record: OrderEditRecord,
+    actorId: string | null,
+  ): Promise<OrderEditRecord> {
+    try {
+      const observed = await this.provider.observeRefund(
+        record.connectionId,
+        record.refundIntent!,
+      );
+      if (observed) {
+        // Readback alone cannot authorize code finalization or release after
+        // another workflow has changed the warehouse ownership.
+        await this.warehouse.assertHeld(record.omsOrderId, record.id);
+        return await this.settleRefund(record, actorId, observed);
+      }
+      return this.refundReviewReadbackPending(record, actorId);
+    } catch (error) {
+      if (
+        error instanceof OrderEditProviderError &&
+        retryableProviderReadback.has(error.code)
+      )
+        return this.refundReviewReadbackPending(record, actorId);
+      return this.review(record, actorId, error);
+    }
+  }
+
+  private refundReviewReadbackPending(
+    record: OrderEditRecord,
+    actorId: string | null,
+  ): Promise<OrderEditRecord> {
+    // Touch the durable observation and audit timestamp so an unresolved old
+    // refund cannot monopolize the scheduler's oldest-first bounded batch.
+    return this.update(
+      record,
+      {
+        error: {
+          code: "ORDER_EDIT_REFUND_REVIEW_READBACK_PENDING",
+          message:
+            "Waiting to verify the existing refund. No new refund will be submitted.",
+        },
+      },
+      actorId,
+      "refund_review_readback_pending",
+    );
+  }
+
   private async settleRefund(
     initial: OrderEditRecord,
     actorId: string | null,
+    observedRefund?: OrderEditRefundResult,
   ): Promise<OrderEditRecord> {
     let record = initial;
     if (!record.refundIntent || !record.refundStartedAt || !record.quote)
@@ -1062,15 +1123,17 @@ export class OrderEditService {
         "ORDER_EDIT_REFUND_INTENT_MISSING",
         "The saved refund intent requires staff review.",
       );
-    const result = await this.provider.refund(
-      record.connectionId,
-      record.refundIntent,
-      record.refundStartedAt,
-    );
+    const result =
+      observedRefund ??
+      (await this.provider.refund(
+        record.connectionId,
+        record.refundIntent,
+        record.refundStartedAt,
+      ));
     if (result.status !== "succeeded")
       return this.update(
         record,
-        { status: "refunding" },
+        { status: "refunding", error: null },
         actorId,
         "refund_pending",
       );

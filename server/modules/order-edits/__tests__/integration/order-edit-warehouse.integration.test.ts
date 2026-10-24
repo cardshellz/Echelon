@@ -43,6 +43,7 @@ import { serviceHarness } from "../fixtures/order-edit-service.fixture";
 import { createShipStationService } from "../../../oms/shipstation.service";
 import { OrderEditPaidProjection } from "../../../oms/order-edit-paid-projection";
 import { paidRewardFixture } from "../fixtures/order-edit-paid-reward.fixture";
+import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "../../../orders/cancel-wms-order";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -332,6 +333,82 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         .query(`INSERT INTO inventory.availability_claims VALUES(1,10,'active',1,'satisfied',1,1,repeat('f',64));
       INSERT INTO inventory.availability_claim_lines VALUES(1,1,40,100,1,1,0,0,0,0);`);
     });
+
+    it("admits only submitted refund reviews for read-only scheduler recovery", async () => {
+      const store = new PostgresOrderEditStore(database.pool);
+      const h = serviceHarness(1);
+      await h.service.quote(h.input, "staff");
+      h.provider.refund.mockRejectedValueOnce(
+        new (
+          await import("../../application/order-edit-provider")
+        ).OrderEditProviderError(
+          "REFUND_UNCONFIRMED",
+          "Incomplete reply",
+          "unknown",
+        ),
+      );
+      await h.service.commit(h.record().id, h.record().id, "staff");
+      const value = { ...h.record(), id: OP, omsOrderId: 20 };
+      await database.pool.query(
+        "UPDATE oms.order_edit_operations SET status=$2,document=$3::jsonb WHERE id=$1",
+        [OP, value.status, JSON.stringify(value)],
+      );
+      expect(await store.pending(25, new Date("2026-10-05T12:10:00Z"))).toEqual(
+        [OP],
+      );
+      for (const code of [
+        "REFUND_FAILED",
+        "REFUND_AMBIGUOUS",
+        "REFUND_REVIEW_EVIDENCE_MISMATCH",
+      ]) {
+        value.error = { code, message: "Staff review" };
+        await database.pool.query(
+          "UPDATE oms.order_edit_operations SET document=$2::jsonb WHERE id=$1",
+          [OP, JSON.stringify(value)],
+        );
+        expect(
+          await store.pending(25, new Date("2026-10-05T12:10:00Z")),
+        ).toEqual([]);
+      }
+    });
+
+    it.each(["cancel", "complete"])(
+      "prevents startup %s when an edit takes ownership after candidate discovery",
+      async (action) => {
+        await database.pool.query(
+          "ALTER TABLE wms.orders ADD COLUMN IF NOT EXISTS updated_at timestamptz, ADD COLUMN IF NOT EXISTS completed_at timestamptz",
+        );
+        const reservation = {
+          releaseOrderReservation: vi.fn(async () => ({
+            released: 1,
+            failed: [],
+          })),
+        };
+        const command =
+          action === "cancel"
+            ? cancelWmsOrderAndRelease
+            : completeWmsOrderAndRelease;
+        await gateway.acquire(20, OP);
+        const orm = drizzle(database.pool);
+        const result = await command(
+          orm,
+          reservation,
+          10,
+          "synthetic-startup-cleanup",
+          undefined,
+          { requireNoOrderEdit: true },
+        );
+        expect(result.transitioned).toBe(false);
+        expect(reservation.releaseOrderReservation).not.toHaveBeenCalled();
+        expect(
+          (
+            await database.pool.query(
+              "SELECT warehouse_status,order_edit_operation_id FROM wms.orders WHERE id=10",
+            )
+          ).rows,
+        ).toEqual([{ warehouse_status: "ready", order_edit_operation_id: OP }]);
+      },
+    );
 
     it("inspects committed availability without waiting for an order writer or observing its uncommitted hold", async () => {
       const writer = await database.pool.connect();
