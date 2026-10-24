@@ -731,7 +731,13 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
           const activity = (await pool.query<{ blocked: boolean; wait_event: string | null }>(
             "SELECT cardinality(pg_blocking_pids(pid))>0 AS blocked,wait_event FROM pg_stat_activity WHERE pid=$1", [importerPid],
           )).rows[0];
-          if (activity?.blocked) { waitEvent = activity.wait_event; break; }
+          // A blocker without a named wait does not yet identify the lock.
+          // Keep polling within the same deadline; any other named lock still
+          // fails the advisory assertion and supplier NOWAIT proof below.
+          if (activity?.blocked && typeof activity.wait_event === "string") {
+            waitEvent = activity.wait_event;
+            break;
+          }
           await new Promise(resolve => setTimeout(resolve, 10));
         }
         // Without the common graph lock the importer holds this supplier row
