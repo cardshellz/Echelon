@@ -1,4 +1,6 @@
 import type { PoFinancialStatus, PoPhysicalStatus } from "@shared/schema/procurement.schema";
+import { resolveCurrentPhysicalStatus } from "@shared/procurement/purchase-order-status";
+export { resolveCurrentPhysicalStatus } from "@shared/procurement/purchase-order-status";
 import { poFinancialWorkflowSchema, type PoFinancialWorkflow } from "@shared/procurement/po-financial-workflow";
 import { getPurchaseOrderCancellationPermission } from "./domain/purchase-order-cancellation-authority";
 
@@ -56,18 +58,6 @@ export const PHYSICAL_TO_LEGACY_STATUS: Partial<Record<PoPhysicalStatus, string>
   cancelled: "cancelled",
 };
 
-const LEGACY_TO_PHYSICAL_STATUS: Partial<Record<string, PoPhysicalStatus>> = {
-  draft: "draft",
-  pending_approval: "draft",
-  approved: "draft",
-  sent: "sent",
-  acknowledged: "acknowledged",
-  partially_received: "receiving",
-  received: "received",
-  closed: "received",
-  cancelled: "cancelled",
-};
-
 const PHYSICAL_TIMESTAMP_COLUMN: Partial<Record<PoPhysicalStatus, string>> = {
   sent: "sentToVendorAt",
   shipped: "firstShippedAt",
@@ -75,18 +65,6 @@ const PHYSICAL_TIMESTAMP_COLUMN: Partial<Record<PoPhysicalStatus, string>> = {
   received: "actualDeliveryDate",
   cancelled: "cancelledAt",
 };
-
-export function resolveCurrentPhysicalStatus(po: Record<string, any>): PoPhysicalStatus {
-  const physical = (po.physicalStatus ?? "draft") as PoPhysicalStatus;
-
-  // Back-compat for pre-dual-track rows where legacy status had advanced but
-  // physical_status still had its default draft value.
-  if (physical === "draft") {
-    return LEGACY_TO_PHYSICAL_STATUS[po.status] ?? physical;
-  }
-
-  return physical;
-}
 
 export function getAllowedLegacyTransitions(currentStatus: string): string[] {
   return LEGACY_PO_TRANSITIONS[currentStatus] ?? [];
