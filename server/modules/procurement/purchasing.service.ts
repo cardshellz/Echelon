@@ -1,5 +1,9 @@
 import { hasPoInvoiceHistory, readPoInvoiceHistory } from "./po-invoice-history.repository";
 import { supplierDispatchConfirmationSchema } from "@shared/procurement/supplier-dispatch";
+import { purchaseApprovalInputSchema } from "@shared/procurement/purchase-approval-command";
+import { createPurchaseApprovalCommands } from "./purchase-approval.commands";
+import { purchaseApprovalLinesFingerprint } from "./purchase-approval-review";
+import { createDrizzleFinancialCommandRepository } from "../../platform/commands/command-results.repository";
 import { supplierEvidenceCatalogStateFingerprint } from "./supplier-evidence-catalog-state";
 import { RECEIVABLE_SHIPMENT_STATUSES } from "./receiving-close-integrity.domain";
 import { readPrimaryReceivingLocations } from "./receiving-close-integrity.repository";
@@ -379,6 +383,8 @@ const PHYSICAL_LIFECYCLE_EVENTS: Partial<Record<PoPhysicalStatus, string>> = {
 type PoLifecycleCommandInput = {
   confirmedSentExternally?: unknown;
   expectedUpdatedAt?: unknown;
+  expectedTotalCents?: unknown;
+  expectedLinesFingerprint?: unknown;
   notes?: string;
   reason?: string;
   vendorRefNumber?: string;
@@ -1011,9 +1017,9 @@ export function createPurchasingService(
   ): Promise<LockedLifecycleEconomics> {
     const po = await lockLifecycleHeader(tx, id, expectation);
 
-    // Header-first lock ordering matches all hardened line commands. Once the
-    // header is locked, no line writer can enter; locking every active line
-    // then gives this transaction a stable economic snapshot.
+    // Header-first lock ordering matches the hardened line commands. Lock each
+    // active line as well: catalog SKU synchronization locks lines directly,
+    // so the header alone does not establish a stable supplier-term snapshot.
     const lines = await tx
       .select({
         ...getTableColumns(purchaseOrderLinesTable),
@@ -1380,6 +1386,7 @@ export function createPurchasingService(
   function approvalCoversLockedEconomics(
     economics: LockedLifecycleEconomics,
     tier: any,
+    reviewedLinesFingerprint: unknown,
   ): boolean {
     const approvedAtMs = economics.po.approvedAt == null
       ? Number.NaN
@@ -1389,6 +1396,14 @@ export function createPurchasingService(
       Number(economics.po.approvalTierId) !== Number(tier.id) ||
       economics.correctedLegacyEconomics
     ) {
+      return false;
+    }
+    // New explicit approvals bind the exact persisted supplier terms, including
+    // catalog SKU changes whose timestamp can predate the approval transaction.
+    // Historical and amendment approvals without this evidence retain their
+    // existing amount, authority and timestamp checks; no evidence is backfilled.
+    if (reviewedLinesFingerprint !== undefined &&
+        reviewedLinesFingerprint !== purchaseApprovalLinesFingerprint(economics.lines)) {
       return false;
     }
     return economics.newestLineUpdatedAtMs === null || economics.newestLineUpdatedAtMs <= approvedAtMs;
@@ -2607,7 +2622,7 @@ export function createPurchasingService(
           snapshot: approvalEvents[0]?.payloadJson?.approval_authority, tier,
           totalCents: economics.totalCents, approvedBy: po.approvedBy ?? null,
         });
-        if (!approvalCoversLockedEconomics(economics, tier) || !authorityStillCovers) {
+        if (!approvalCoversLockedEconomics(economics, tier, approvalEvents[0]?.payloadJson?.reviewed_lines_fingerprint) || !authorityStillCovers) {
           const pendingPo = await moveLockedPoToPendingApproval(
             tx,
             economics,
@@ -2767,26 +2782,40 @@ export function createPurchasingService(
     });
   }
 
-  async function approve(id: number, userId?: string, notes?: string) {
+  async function approveInTransaction(tx: any, id: number, userId: string | undefined, input: unknown) {
     if (!userId?.trim()) {
       console.warn(JSON.stringify({ event: "procurement.approval.denied", purchaseOrderId: id, code: "PO_APPROVAL_ACTOR_REQUIRED" }));
       throw new PurchasingError("An authenticated user is required to approve this purchase order.", 403, { code: "PO_APPROVAL_ACTOR_REQUIRED" });
     }
-    const expectation = await observeLifecycleState(
-      id,
-      ["draft", "pending_approval"],
-      (status) => `Cannot approve PO in '${status}' status`,
-    );
-    return db.transaction(async (tx: any) => {
+    try {
       await lockInventoryCostGraph(tx);
       const actor = assertPurchaseApprovalPermission(await readApprovalActor(tx, userId));
+      const parsed = purchaseApprovalInputSchema.safeParse(input);
+      if (!parsed.success) throw new PurchasingError("Reload and review the purchase order before approving its current terms.", 400, { code: "PO_APPROVAL_REVIEW_REQUIRED" });
+      const { expectedUpdatedAt, expectedTotalCents, expectedLinesFingerprint, notes } = parsed.data;
+      const headers = await tx.select({ ...getTableColumns(purchaseOrdersTable) }).from(purchaseOrdersTable)
+        .where(eq(purchaseOrdersTable.id, id)).limit(1).for("update");
+      const reviewed = headers[0];
+      if (!reviewed) throw new PurchasingError("Purchase order not found", 404);
+      if (new Date(reviewed.updatedAt).getTime() !== Date.parse(expectedUpdatedAt)) {
+        throw new PurchasingError("Purchase order changed since your review. Reload and review the current terms before approving.", 409, { code: "PO_APPROVAL_REVIEW_STALE" });
+      }
+      if (!["draft", "pending_approval"].includes(reviewed.status)) throw new PurchasingError(`Cannot approve PO in '${reviewed.status}' status`, 409, { code: "PO_APPROVAL_STATUS_CHANGED" });
+      const expectation = { status: reviewed.status, updatedAtMs: Date.parse(expectedUpdatedAt) };
       const economics = await lockLifecycleEconomics(tx, id, expectation);
+      if (purchaseApprovalLinesFingerprint(economics.lines) !== expectedLinesFingerprint) {
+        throw new PurchasingError("Purchase order lines changed since your review. Reload and review the current supplier terms before approving.", 409, { code: "PO_APPROVAL_LINES_REVIEW_STALE" });
+      }
       await assertLifecycleReadyToAdvanceTx(tx, economics);
       const settings = await getProcurementSettingsTx(tx);
       const currentTier = settings.requireApproval ? await getMatchingApprovalTierTx(tx, economics.totalCents) : null;
       const approvalAuthority = buildPurchaseApprovalSnapshot({
         actor, requireApproval: settings.requireApproval, tier: currentTier, totalCents: economics.totalCents,
       });
+      if (economics.correctedLegacyEconomics || economics.totalCents !== expectedTotalCents
+        || Number(economics.po.totalCents) !== expectedTotalCents) {
+        throw new PurchasingError("The saved purchase amounts do not match the reviewed terms. Return the PO to draft, save its corrected terms, and review it again before approval.", 409, { code: "PO_APPROVAL_ECONOMICS_REVIEW_REQUIRED" });
+      }
       if (
         economics.po.status === "pending_approval" &&
         currentTier &&
@@ -2827,12 +2856,14 @@ export function createPurchasingService(
             tier_id: currentTier?.id ?? economics.po.approvalTierId ?? null,
             total_cents: economics.totalCents,
             approval_authority: approvalAuthority,
+            reviewed_updated_at: expectedUpdatedAt,
+            reviewed_lines_fingerprint: expectedLinesFingerprint,
           },
         }],
         userId,
       );
-      return updated;
-    }).catch((error: unknown) => {
+      return { ...updated, reviewedUpdatedAt: expectedUpdatedAt, reviewedLinesFingerprint: expectedLinesFingerprint };
+    } catch (error: unknown) {
       if (error instanceof PurchaseApprovalAuthorityError) {
         console.warn(JSON.stringify({ event: "procurement.approval.denied", purchaseOrderId: id, actorId: userId, ...error.details }));
         throw new PurchasingError(error.message, error.statusCode, error.details);
@@ -2840,8 +2871,23 @@ export function createPurchasingService(
       console.error(JSON.stringify({ event: "procurement.approval.failed", purchaseOrderId: id, actorId: userId,
         code: error instanceof PurchasingError ? error.details?.code ?? "PO_APPROVAL_REJECTED" : "PO_APPROVAL_TRANSACTION_FAILED" }));
       throw error;
-    });
+    }
   }
+
+  async function approve(id: number, userId?: string, notes?: string, review?: { expectedUpdatedAt: unknown; expectedTotalCents: unknown; expectedLinesFingerprint: unknown }) {
+    return db.transaction((tx: any) => approveInTransaction(tx, id, userId, { ...review, ...(notes === undefined ? {} : { notes }) }));
+  }
+
+  const approvalCommands = createPurchaseApprovalCommands({
+    authorize: async (actorId) => {
+      try { await db.transaction(async (tx: any) => assertPurchaseApprovalPermission(await readApprovalActor(tx, actorId))); }
+      catch (error) {
+        if (error instanceof PurchaseApprovalAuthorityError) throw new PurchasingError(error.message, error.statusCode, error.details);
+        throw error;
+      }
+    },
+    approve: approveInTransaction,
+  }, createDrizzleFinancialCommandRepository(db));
 
   async function send(id: number, userId?: string, confirmation?: unknown) {
     if (!userId?.trim()) throw new PurchasingError("An authenticated operator is required to record supplier dispatch.", 401, { code: "PO_DISPATCH_ACTOR_REQUIRED" });
@@ -3366,7 +3412,7 @@ export function createPurchasingService(
       case "return_to_draft":
         return returnToDraft(id, userId, input.notes);
       case "approve":
-        return approve(id, userId, input.notes);
+        return approve(id, userId, input.notes, { expectedUpdatedAt: input.expectedUpdatedAt, expectedTotalCents: input.expectedTotalCents, expectedLinesFingerprint: input.expectedLinesFingerprint });
       case "send":
         return send(id, userId, { confirmedSentExternally: input.confirmedSentExternally, expectedUpdatedAt: input.expectedUpdatedAt });
       case "send_to_vendor":
@@ -8627,6 +8673,7 @@ export function createPurchasingService(
     submit,
     returnToDraft,
     approve,
+    approveCommand: approvalCommands.execute,
     send,
     sendToVendor,
     acknowledge,
