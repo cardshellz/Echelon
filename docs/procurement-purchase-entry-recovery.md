@@ -37,7 +37,7 @@ Legacy callers without the receipt-version header retain their existing response
 
 Existing financial command tables provide durable results, and migration 227 protects all PO events against update, delete and truncate. Financial-command terminal updates are guarded, but expired command receipts can be deliberately purged; they are not the long-term audit authority. Review found that RFQ creation audit rows lacked an equivalent database guard.
 
-The pending additive source migrations/pending/rfq_creation_audit_guard.sql protects the five RFQ creation, allocation-override and supplier-mapping audit actions from update, delete, rewriting unrelated rows into protected evidence and truncate. Existing rows are not rewritten. Creation now records the locked supplier mapping before/after values and the injected command timestamp. The source must receive its generated PR-owned filename and metadata before merge; allocation must preserve its SQL bytes. Only disposable tests apply this SQL during development.
+The additive migration migrations/900000029000019070001_rfq_creation_audit_guard.sql protects the five RFQ creation, allocation-override and supplier-mapping audit actions from update, delete, rewriting unrelated rows into protected evidence and truncate. Existing rows are not rewritten. Creation now records the locked supplier mapping before/after values and the injected command timestamp. PR #1907 owns the generated filename and metadata. Allocation preserved the tested SQL bytes (SHA-256 746ecae58d1c8e11d1b6aa94c2397c50f767459475a2ca04b44b733e73263031). Only disposable tests apply this SQL during development. After allocation, all 73 RFQ PostgreSQL cases and 63 migration guards passed; migration policy validates the generated ownership and ordering.
 
 ## Regression coverage and limits
 
@@ -49,7 +49,7 @@ Final run reports and exact source fingerprints are recorded under outputs/procu
 
 ## Current-main compatibility
 
-Reconciled main commit 9206840bca20537d6f61c7d4c83a4b449421ec1a before handoff. The two merge conflicts were import blocks in the PO list/detail pages; shared status displays and recovery controls are both retained. Post-merge verification passed 192 targeted unit/guard cases, all 78 PO browser cases, all four typechecks and the production build. The 110 RFQ browser cases retain identical product source. The server change extracted the existing physical-status resolver without changing its behavior; it introduced no PO/RFQ fixture dependency, so the 226 database cases were not repeated. Migration policy passes against this pinned main (550 existing migrations); the new audit SQL remains pending PR allocation.
+Reconciled main commit 9206840bca20537d6f61c7d4c83a4b449421ec1a before handoff. The two merge conflicts were import blocks in the PO list/detail pages; shared status displays and recovery controls are both retained. Post-merge verification passed 192 targeted unit/guard cases, all 78 PO browser cases, all four typechecks and the production build. The 110 RFQ browser cases retain identical product source. The server change extracted the existing physical-status resolver without changing its behavior; it introduced no PO/RFQ fixture dependency, so the 226 database cases were not repeated. Migration policy passes against this pinned main (550 existing migrations); the new audit SQL is allocated to PR #1907 without changing its bytes.
 
 ## Remaining procurement closeout
 

@@ -73,7 +73,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) { await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true; }
     if (!ownsAudit || (await pool.query("SELECT to_regprocedure('public.guard_rfq_creation_audit_history()') AS guard")).rows[0].guard) throw new Error("RFQ audit fixture requires its own audit table and guard");
     const historical = (await pool.query("INSERT INTO public.audit_events(level,actor,action,target,changes,context) VALUES('AUDIT',$1,'purchase_rfq.batch_created','legacy:fixture','{\"after\":{\"legacy\":true}}','{\"original\":true}') RETURNING *", [`user:${actorId}`])).rows[0];
-    await pool.query(readFileSync(resolve(process.cwd(), "migrations/pending/rfq_creation_audit_guard.sql"), "utf8")); ownsCreationAuditGuard = true;
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000029000019070001_rfq_creation_audit_guard.sql"), "utf8")); ownsCreationAuditGuard = true;
     expect((await pool.query("SELECT * FROM public.audit_events WHERE id=$1", [historical.id])).rows[0]).toEqual(historical);
     auditUpgradePreserved = true;
     ownsCommands = !(await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation;
