@@ -1,4 +1,3 @@
-import { createHash } from "crypto";
 import {
   evaluateDropshipCatalogExposure,
   type DropshipCatalogExposureDecision,
@@ -12,7 +11,6 @@ import {
   type DropshipListingTierStatus,
 } from "../domain/listing-tiers";
 import {
-  assertDropshipVendorSelectionRuleTarget,
   evaluateDropshipVendorCatalogSelection,
   type DropshipVendorCatalogSelectionDecision,
   type DropshipVendorSelectionRule,
@@ -25,16 +23,12 @@ import {
   listDropshipVendorSelectionRulesInputSchema,
   previewDropshipVendorCatalogInputSchema,
   readDropshipVendorSelectionSummaryInputSchema,
-  replaceDropshipVendorSelectionRulesInputSchema,
   resolveCatalogSelectionFilter,
   type DropshipVendorCatalogCandidateFilter,
   type ListDropshipVendorSelectionRulesInput,
-  type PreviewDropshipVendorCatalogInput,
-  type ReplaceDropshipVendorSelectionRule,
-  type ReplaceDropshipVendorSelectionRulesInput,
 } from "./dropship-selection-dtos";
 import { CATALOG_READ_WORDS } from "../domain/catalog-read-words";
-import { isReservedSelectionIdempotencyKey } from "../domain/selection-release";
+import { isCatalogAccessBlockedVendorStatus } from "../domain/vendor-standing";
 import {
   DROPSHIP_CATALOG_READ_ERROR_CODES,
   DROPSHIP_CATALOG_SELECTION_CAP,
@@ -83,9 +77,15 @@ export interface DropshipVendorCatalogCandidate extends DropshipCatalogVariantCa
   variantName: string;
   unitsPerVariant: number;
   productLineNames: string[];
+  /**
+   * Whether the vendor picked this size (its one-time picks, PLAN-B v4.1 §9
+   * row 1), read with the candidate. The evaluator decides `selected` from
+   * it; the catalog row carries it as `selectionDecision.picked` only.
+   */
+  picked: boolean;
 }
 
-export interface DropshipVendorCatalogPreviewRow extends DropshipVendorCatalogCandidate {
+export interface DropshipVendorCatalogPreviewRow extends Omit<DropshipVendorCatalogCandidate, "picked"> {
   adminExposureDecision: DropshipCatalogExposureDecision;
   selectionDecision: DropshipVendorCatalogSelectionDecision;
   /** The listing tier this SKU sells in and whether it is on sale for the vendor. */
@@ -117,21 +117,6 @@ export interface DropshipVendorCatalogFacets {
   products: DropshipVendorCatalogProductFacet[];
 }
 
-export interface ReplaceDropshipVendorSelectionRulesRepositoryInput {
-  vendorId: number;
-  idempotencyKey: string;
-  requestHash: string;
-  actor: ReplaceDropshipVendorSelectionRulesInput["actor"];
-  rules: NormalizedDropshipVendorSelectionRule[];
-  now: Date;
-}
-
-export interface ReplaceDropshipVendorSelectionRulesRepositoryResult {
-  revisionId: number;
-  idempotentReplay: boolean;
-  rules: DropshipVendorSelectionRuleRecord[];
-}
-
 /** The selection summary's numbers, read in one snapshot (§4.8). */
 export interface DropshipVendorSelectionCountRecord {
   selectionRevisionId: number | null;
@@ -143,10 +128,8 @@ export interface DropshipVendorSelectionCountRecord {
 export interface DropshipSelectionAtpRepository {
   findVendorByMemberId(memberId: string): Promise<DropshipVendorProfile | null>;
   listCatalogExposureRules(): Promise<DropshipCatalogExposureRule[]>;
+  /** The frozen rules, for the rules GET only (one release; PLAN-B v4.1 §8.4). Writes are retired. */
   listSelectionRules(input: ListDropshipVendorSelectionRulesInput): Promise<DropshipVendorSelectionRuleRecord[]>;
-  replaceSelectionRules(
-    input: ReplaceDropshipVendorSelectionRulesRepositoryInput,
-  ): Promise<ReplaceDropshipVendorSelectionRulesRepositoryResult>;
   listVendorCatalogCandidates(input: DropshipVendorCatalogCandidateFilter): Promise<DropshipVendorCatalogCandidate[]>;
   /** Refuses a store that is not the vendor's (DROPSHIP_STORE_CONNECTION_REQUIRED). */
   readSelectionCounts(input: {
@@ -172,6 +155,17 @@ export interface DropshipAtpSnapshot {
   quantities: ReadonlyMap<number, number>;
 }
 
+/**
+ * The new-items notice's "new for the vendor" sizes (PLAN-B v4.1 §11.4;
+ * dropship-catalog-arrivals-service.ts `listNewVariantIds`): what the catalog
+ * GET's `selection=new` keeps, decided by the notice's own rule and reads, so
+ * the rows equal the counts `GET /api/dropship/catalog/new-items` shows
+ * (TESTS-8). Ascending size ids; read only.
+ */
+export interface DropshipCatalogNewItemsReader {
+  listNewVariantIds(input: { vendorId: number; categoryId: number | null; now: Date }): Promise<number[]>;
+}
+
 export interface DropshipSelectionAtpServiceDependencies {
   clock: DropshipClock;
   logger: DropshipLogger;
@@ -179,14 +173,8 @@ export interface DropshipSelectionAtpServiceDependencies {
   atp: DropshipAtpProvider;
   /** Which of the vendor's listing tiers are on sale, for the catalog rows. */
   listingTiers: { resolveForVendor(vendorId: number): Promise<{ eligibility: DropshipListingTierEligibility }> };
-}
-
-export interface NormalizedDropshipVendorSelectionRule extends ReplaceDropshipVendorSelectionRule {
-  productLineId: number | null;
-  productId: number | null;
-  productVariantId: number | null;
-  category: string | null;
-  metadata: Record<string, unknown>;
+  /** Read only for `selection=new`. */
+  newItems: DropshipCatalogNewItemsReader;
 }
 
 export class DropshipSelectionAtpService {
@@ -201,7 +189,7 @@ export class DropshipSelectionAtpService {
       );
     }
 
-    if (["closed", "lapsed", "suspended"].includes(vendor.status)) {
+    if (isCatalogAccessBlockedVendorStatus(vendor.status)) {
       throw new DropshipError(
         "DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED",
         "Dropship vendor status does not allow catalog access.",
@@ -216,47 +204,6 @@ export class DropshipSelectionAtpService {
     const parsed = listDropshipVendorSelectionRulesInputSchema.parse(input);
     const rules = await this.deps.repository.listSelectionRules(parsed);
     return { rules };
-  }
-
-  async replaceSelectionRules(input: unknown): Promise<ReplaceDropshipVendorSelectionRulesRepositoryResult> {
-    const parsed = replaceDropshipVendorSelectionRulesInputSchema.parse(input);
-    // B's release writes its backfill revisions under this prefix (CHK10, Risk 17).
-    if (isReservedSelectionIdempotencyKey(parsed.idempotencyKey)) {
-      throw new DropshipError("DROPSHIP_IDEMPOTENCY_KEY_RESERVED", CATALOG_READ_WORDS.keyReserved, {
-        vendorId: parsed.vendorId,
-        retryable: false,
-      });
-    }
-    const normalizedRules = parsed.rules.map(normalizeVendorSelectionRule);
-    for (const rule of normalizedRules) {
-      assertDropshipVendorSelectionRuleTarget(rule);
-    }
-
-    const requestHash = hashVendorSelectionRules(normalizedRules);
-    const result = await this.deps.repository.replaceSelectionRules({
-      vendorId: parsed.vendorId,
-      idempotencyKey: parsed.idempotencyKey,
-      requestHash,
-      actor: parsed.actor,
-      rules: normalizedRules,
-      now: this.deps.clock.now(),
-    });
-
-    this.deps.logger.info({
-      code: result.idempotentReplay
-        ? "DROPSHIP_VENDOR_SELECTION_REPLAYED"
-        : "DROPSHIP_VENDOR_SELECTION_REPLACED",
-      message: result.idempotentReplay
-        ? "Dropship vendor selection ruleset replayed by idempotency key."
-        : "Dropship vendor selection ruleset replaced.",
-      context: {
-        vendorId: parsed.vendorId,
-        revisionId: result.revisionId,
-        ruleCount: result.rules.length,
-      },
-    });
-
-    return result;
   }
 
   async previewCatalog(input: unknown): Promise<{
@@ -281,7 +228,9 @@ export class DropshipSelectionAtpService {
         return evaluateDropshipCatalogExposure(candidate, decided.adminRules, decided.now).exposed;
       }));
 
-    const filteredRows = filterBySelection(decided.exposedRows, resolveCatalogSelectionFilter(parsed));
+    const selection = resolveCatalogSelectionFilter(parsed);
+    const newIds = await this.newVariantIdsFor(selection, parsed, decided.now);
+    const filteredRows = filterBySelection(decided.exposedRows, selection, newIds);
     const start = (parsed.page - 1) * parsed.limit;
     const pageRows = filteredRows.slice(start, start + parsed.limit);
 
@@ -297,13 +246,13 @@ export class DropshipSelectionAtpService {
       }))),
       this.deps.listingTiers.resolveForVendor(parsed.vendorId),
     ]);
-    const rows = pageRows.map(({ candidate, adminExposureDecision, override }) => ({
+    const rows = pageRows.map(({ candidate: { picked, ...candidate }, adminExposureDecision, override }) => ({
       ...candidate,
       adminExposureDecision,
       selectionDecision: evaluateDropshipVendorCatalogSelection({
         candidate,
         adminExposureDecision,
-        rules: decided.selectionRules,
+        picked,
         rawAtpUnits: atp.quantities.get(candidate.productVariantId) ?? 0,
         override,
         applyMarketplaceQuantityCap: atp.authority === "legacy",
@@ -331,7 +280,9 @@ export class DropshipSelectionAtpService {
   async listCatalogIds(input: unknown): Promise<DropshipCatalogIdsAnswer> {
     const parsed = listDropshipVendorCatalogIdsInputSchema.parse(input);
     const decided = await this.decideCatalogRows(parsed);
-    const changeable = filterBySelection(decided.exposedRows, resolveCatalogSelectionFilter(parsed))
+    const selection = resolveCatalogSelectionFilter(parsed);
+    const newIds = await this.newVariantIdsFor(selection, parsed, decided.now);
+    const changeable = filterBySelection(decided.exposedRows, selection, newIds)
       .filter((row) => row.override?.enabledOverride !== false);
     const selectedIds = changeable.filter((row) => row.selected).map((row) => row.candidate.productVariantId);
     const notSelectedIds = changeable.filter((row) => !row.selected).map((row) => row.candidate.productVariantId);
@@ -413,13 +364,32 @@ export class DropshipSelectionAtpService {
   }
 
   /**
+   * `selection=new` only (§11.4): the notice's new sizes for the vendor, in
+   * the filter's category when it names one, at the read's own time. Every
+   * other filter reads nothing more.
+   */
+  private async newVariantIdsFor(
+    selection: DropshipCatalogSelectionFilter,
+    filter: Pick<DropshipVendorCatalogCandidateFilter, "vendorId" | "categoryId">,
+    now: Date,
+  ): Promise<ReadonlySet<number>> {
+    if (selection !== "new") return NO_NEW_VARIANT_IDS;
+    return new Set(await this.deps.newItems.listNewVariantIds({
+      vendorId: filter.vendorId,
+      categoryId: filter.categoryId ?? null,
+      now,
+    }));
+  }
+
+  /**
    * One scan of the filter's candidates with exposure and selection decided
-   * for each, without stock (the shared start of every catalog read).
+   * for each, without stock (the shared start of every catalog read). The
+   * vendor's picks come with the candidates (`picked`); the frozen rules are
+   * never read here (they serve only the frozen rules GET).
    */
   private async decideCatalogRows(filter: DropshipVendorCatalogCandidateFilter): Promise<{
     now: Date;
     adminRules: DropshipCatalogExposureRule[];
-    selectionRules: DropshipVendorSelectionRuleRecord[];
     exposedRows: DecidedCatalogRow[];
   }> {
     const candidateFilter: DropshipVendorCatalogCandidateFilter = {
@@ -431,9 +401,8 @@ export class DropshipSelectionAtpService {
       productLineIds: filter.productLineIds,
       productId: filter.productId,
     };
-    const [adminRules, selectionRules, candidates] = await Promise.all([
+    const [adminRules, candidates] = await Promise.all([
       this.deps.repository.listCatalogExposureRules(),
-      this.deps.repository.listSelectionRules({ vendorId: filter.vendorId, includeInactive: false }),
       this.deps.repository.listVendorCatalogCandidates(candidateFilter),
     ]);
     const now = this.deps.clock.now();
@@ -450,13 +419,13 @@ export class DropshipSelectionAtpService {
       const selected = evaluateDropshipVendorCatalogSelection({
         candidate,
         adminExposureDecision,
-        rules: selectionRules,
+        picked: candidate.picked,
         rawAtpUnits: 0,
         override,
       }).selected;
       exposedRows.push({ candidate, adminExposureDecision, override, selected });
     }
-    return { now, adminRules, selectionRules, exposedRows };
+    return { now, adminRules, exposedRows };
   }
 }
 
@@ -467,13 +436,22 @@ interface DecidedCatalogRow {
   selected: boolean;
 }
 
+const NO_NEW_VARIANT_IDS: ReadonlySet<number> = new Set();
+
 /**
  * `not_selected` is every exposed row that is not selected for any reason,
- * a size turned off by the vendor's override included (TESTS2).
+ * a size turned off by the vendor's override included (TESTS2). `new` is the
+ * exposed rows among the notice's new sizes (`newIds`) that are not selected:
+ * a size picked since the notice was read is no longer new (§11.4).
  */
-function filterBySelection(rows: readonly DecidedCatalogRow[], selection: DropshipCatalogSelectionFilter): DecidedCatalogRow[] {
+function filterBySelection(
+  rows: readonly DecidedCatalogRow[],
+  selection: DropshipCatalogSelectionFilter,
+  newIds: ReadonlySet<number>,
+): DecidedCatalogRow[] {
   if (selection === "selected") return rows.filter((row) => row.selected);
   if (selection === "not_selected") return rows.filter((row) => !row.selected);
+  if (selection === "new") return rows.filter((row) => !row.selected && newIds.has(row.candidate.productVariantId));
   return [...rows];
 }
 
@@ -545,61 +523,10 @@ function sortFacetsByLabel<T extends { label: string }>(facets: T[]): T[] {
   return facets.sort((left, right) => left.label.localeCompare(right.label));
 }
 
-export function hashVendorSelectionRules(
-  rules: readonly NormalizedDropshipVendorSelectionRule[],
-): string {
-  const canonicalRules = [...rules]
-    .map((rule) => ({
-      scopeType: rule.scopeType,
-      action: rule.action,
-      productLineId: rule.productLineId,
-      productId: rule.productId,
-      productVariantId: rule.productVariantId,
-      category: rule.category,
-      autoConnectNewSkus: rule.autoConnectNewSkus,
-      autoListNewSkus: rule.autoListNewSkus,
-      priority: rule.priority,
-      metadata: sortJsonValue(rule.metadata),
-    }))
-    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
-
-  return createHash("sha256").update(JSON.stringify(canonicalRules)).digest("hex");
-}
-
-export function normalizeVendorSelectionRule(
-  rule: ReplaceDropshipVendorSelectionRule,
-): NormalizedDropshipVendorSelectionRule {
-  return {
-    ...rule,
-    productLineId: rule.productLineId ?? null,
-    productId: rule.productId ?? null,
-    productVariantId: rule.productVariantId ?? null,
-    category: rule.category?.trim() || null,
-    metadata: rule.metadata ?? {},
-  };
-}
-
 export const systemDropshipSelectionAtpClock: DropshipClock = {
   now: () => new Date(),
 };
 
 function uniqueNumbers(values: readonly number[]): number[] {
   return [...new Set(values)];
-}
-
-function sortJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(sortJsonValue);
-  }
-
-  if (value && typeof value === "object") {
-    return Object.keys(value as Record<string, unknown>)
-      .sort()
-      .reduce<Record<string, unknown>>((sorted, key) => {
-        sorted[key] = sortJsonValue((value as Record<string, unknown>)[key]);
-        return sorted;
-      }, {});
-  }
-
-  return value;
 }

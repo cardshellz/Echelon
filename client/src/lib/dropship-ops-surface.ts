@@ -290,7 +290,10 @@ export interface DropshipOnboardingState {
   };
   catalog: {
     adminExposureRuleCount: number;
+    /** One release only (PLAN-B v4.1 V17): the same value as `vendorSelectedItemCount` from PR B's server. */
     vendorSelectionRuleCount: number;
+    /** The sizes the vendor picked (PR B); absent from an older server's answer, so it is never printed as a number then. */
+    vendorSelectedItemCount?: number;
     adminCatalogAvailable: boolean;
     hasVendorSelection: boolean;
   };
@@ -604,7 +607,10 @@ export interface DropshipDogfoodReadinessItem {
     dropshipOmsChannelCount: number;
     defaultWarehouseId: number | null;
     adminCatalogIncludeRuleCount: number;
+    /** One release only (PLAN-B v4.1 V17): the same value as `vendorSelectedItemCount` from PR B's server. */
     vendorSelectionIncludeRuleCount: number;
+    /** The sizes the vendor picked (PR B); absent from an older server's answer. */
+    vendorSelectedItemCount?: number;
     activeShippingBoxCount: number;
     activeShippingZoneRuleCount: number;
     activeShippingRateTableCount: number;
@@ -1865,49 +1871,6 @@ export interface DropshipEbayShipFromRepairRequest {
   expectedRevision: number;
   idempotencyKey: string;
 }
-
-export type DropshipVendorSelectionScope =
-  "catalog" | "product_line" | "category" | "product" | "variant";
-export type DropshipVendorSelectionAction = "include" | "exclude";
-
-export interface DropshipVendorSelectionRule {
-  id?: number;
-  revisionId?: number | null;
-  vendorId?: number;
-  scopeType: DropshipVendorSelectionScope;
-  action: DropshipVendorSelectionAction;
-  productLineId?: number | null;
-  productId?: number | null;
-  productVariantId?: number | null;
-  category?: string | null;
-  autoConnectNewSkus?: boolean;
-  autoListNewSkus?: boolean;
-  priority?: number;
-  metadata?: Record<string, unknown> | null;
-  isActive?: boolean;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
-export interface DropshipVendorSelectionRuleInput {
-  scopeType: DropshipVendorSelectionScope;
-  action: DropshipVendorSelectionAction;
-  productLineId?: number | null;
-  productId?: number | null;
-  productVariantId?: number | null;
-  category?: string | null;
-  autoConnectNewSkus: boolean;
-  autoListNewSkus: boolean;
-  priority: number;
-  metadata?: Record<string, unknown>;
-}
-
-export type DropshipVendorSelectionScopeTarget =
-  | { scopeType: "catalog" }
-  | { scopeType: "product_line"; productLineId: number }
-  | { scopeType: "category"; category: string }
-  | { scopeType: "product"; productId: number }
-  | { scopeType: "variant"; productVariantId: number };
 
 export interface DropshipOrderListItem {
   intakeId: number;
@@ -4755,127 +4718,6 @@ function parseNullableDollarInputToCents(
 ): number | null {
   const normalized = value.trim();
   return normalized ? parseDollarInputToCents(normalized, field) : null;
-}
-
-export function buildScopedSelectionReplacement(input: {
-  existingRules: readonly DropshipVendorSelectionRule[];
-  target: DropshipVendorSelectionScopeTarget;
-  action: DropshipVendorSelectionAction;
-}): DropshipVendorSelectionRuleInput[] {
-  const actionRule = scopedSelectionRuleInput(input.target, input.action);
-  const activeRules = input.existingRules
-    .filter((rule) => rule.isActive !== false)
-    .map(toReplaceableSelectionRule)
-    .filter((rule) => !isSameSelectionTarget(rule, actionRule));
-
-  return [...activeRules, actionRule];
-}
-
-function toReplaceableSelectionRule(
-  rule: DropshipVendorSelectionRule,
-): DropshipVendorSelectionRuleInput {
-  return {
-    scopeType: rule.scopeType,
-    action: rule.action,
-    productLineId: rule.productLineId ?? null,
-    productId: rule.productId ?? null,
-    productVariantId: rule.productVariantId ?? null,
-    category: rule.category?.trim() || null,
-    autoConnectNewSkus: rule.autoConnectNewSkus !== false,
-    autoListNewSkus: rule.autoListNewSkus === true,
-    priority: Number.isInteger(rule.priority) ? rule.priority! : 0,
-    metadata: rule.metadata ?? {},
-  };
-}
-
-function scopedSelectionRuleInput(
-  target: DropshipVendorSelectionScopeTarget,
-  action: DropshipVendorSelectionAction,
-): DropshipVendorSelectionRuleInput {
-  const base = {
-    action,
-    productLineId: null,
-    productId: null,
-    productVariantId: null,
-    category: null,
-    autoConnectNewSkus: action === "include",
-    autoListNewSkus: false,
-    priority: action === "include" ? 50 : 150,
-    metadata: {
-      source: "portal_catalog_scope",
-    },
-  };
-
-  if (target.scopeType === "catalog") {
-    return {
-      ...base,
-      scopeType: "catalog",
-    };
-  }
-  if (target.scopeType === "product_line") {
-    return {
-      ...base,
-      scopeType: "product_line",
-      productLineId: assertPositiveInteger(
-        target.productLineId,
-        "productLineId",
-      ),
-    };
-  }
-  if (target.scopeType === "category") {
-    const category = target.category.trim();
-    if (!category) {
-      throw new Error("category is required for category selection.");
-    }
-    return {
-      ...base,
-      scopeType: "category",
-      category,
-    };
-  }
-  if (target.scopeType === "product") {
-    return {
-      ...base,
-      scopeType: "product",
-      productId: assertPositiveInteger(target.productId, "productId"),
-    };
-  }
-  return {
-    ...base,
-    scopeType: "variant",
-    productVariantId: assertPositiveInteger(
-      target.productVariantId,
-      "productVariantId",
-    ),
-  };
-}
-
-function isSameSelectionTarget(
-  left: Pick<
-    DropshipVendorSelectionRuleInput,
-    | "scopeType"
-    | "productLineId"
-    | "productId"
-    | "productVariantId"
-    | "category"
-  >,
-  right: Pick<
-    DropshipVendorSelectionRuleInput,
-    | "scopeType"
-    | "productLineId"
-    | "productId"
-    | "productVariantId"
-    | "category"
-  >,
-): boolean {
-  return (
-    left.scopeType === right.scopeType &&
-    (left.productLineId ?? null) === (right.productLineId ?? null) &&
-    (left.productId ?? null) === (right.productId ?? null) &&
-    (left.productVariantId ?? null) === (right.productVariantId ?? null) &&
-    (left.category?.trim().toLowerCase() ?? null) ===
-      (right.category?.trim().toLowerCase() ?? null)
-  );
 }
 
 function uniquePositiveVariantIds(

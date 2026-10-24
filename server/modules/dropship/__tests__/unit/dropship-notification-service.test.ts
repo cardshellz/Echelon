@@ -210,6 +210,48 @@ describe("DropshipNotificationService", () => {
     })).rejects.toMatchObject({ code: "DROPSHIP_NOTIFICATION_CRITICAL_MUTE_REJECTED" });
   });
 
+  it("registers the new-items and conversion notices as mutable, non-critical events (PLAN-B v4.1 §11.3, V41)", async () => {
+    expect(DROPSHIP_NOTIFICATION_EVENTS.CATALOG_NEW_ITEMS).toBe("dropship_catalog_new_items");
+    expect(DROPSHIP_NOTIFICATION_EVENTS.SELECTION_RULES_CONVERTED).toBe("dropship_selection_rules_converted");
+    for (const eventType of [DROPSHIP_NOTIFICATION_EVENTS.CATALOG_NEW_ITEMS, DROPSHIP_NOTIFICATION_EVENTS.SELECTION_RULES_CONVERTED]) {
+      expect(DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.filter((preference) => preference.eventType === eventType))
+        .toEqual([{ eventType, critical: false }]);
+    }
+    const repository = new FakeNotificationRepository();
+    const service = makeService(repository, new FakeEmailSender(), []);
+    // A vendor may mute the new-items email (not critical, so the mute is accepted).
+    await expect(service.updatePreference({
+      vendorId: 10, eventType: DROPSHIP_NOTIFICATION_EVENTS.CATALOG_NEW_ITEMS, emailEnabled: false, inAppEnabled: false,
+    })).resolves.toMatchObject({ critical: false, emailEnabled: false, inAppEnabled: false });
+    await service.send({
+      vendorId: 10, eventType: DROPSHIP_NOTIFICATION_EVENTS.SELECTION_RULES_CONVERTED, critical: false,
+      title: "Your automatic choices were turned into items", message: "m", payload: {}, idempotencyKey: "selection-rules-converted:10",
+    });
+    expect(repository.lastSend).toMatchObject({ critical: false, channels: ["email", "in_app"] });
+  });
+
+  it("looks the events of one key up without sending, and validates the lookup (§11.3, FIDELITY-2)", async () => {
+    const repository = new FakeNotificationRepository();
+    const stored = makeEvent({ idempotencyKey: "catalog-new-items:10:2026-05-02", payload: { throughArrivalId: 7 } });
+    repository.storedByKey.set("10 catalog-new-items:10:2026-05-02", [stored]);
+    const emailSender = new FakeEmailSender();
+    const service = makeService(repository, emailSender, []);
+
+    await expect(service.listEventsByKey({ vendorId: 10, idempotencyKey: "catalog-new-items:10:2026-05-02" })).resolves.toEqual([stored]);
+    await expect(service.listEventsByKey({ vendorId: 10, idempotencyKey: "catalog-new-items:10:2026-05-03" })).resolves.toEqual([]);
+    expect(repository.lookups).toEqual([
+      { vendorId: 10, idempotencyKey: "catalog-new-items:10:2026-05-02" },
+      { vendorId: 10, idempotencyKey: "catalog-new-items:10:2026-05-03" },
+    ]);
+    expect(repository.lastSend).toBeNull();
+    expect(emailSender.sent).toEqual([]);
+    for (const invalid of [{ vendorId: 0, idempotencyKey: "catalog-new-items:10:x" }, { vendorId: 10, idempotencyKey: "short" },
+      { vendorId: 10, idempotencyKey: "catalog-new-items:10:x", extra: true }]) {
+      await expect(service.listEventsByKey(invalid)).rejects.toMatchObject({ code: "DROPSHIP_NOTIFICATION_INVALID_LOOKUP" });
+    }
+    expect(repository.lookups).toHaveLength(2);
+  });
+
   it("rejects muting catalog-critical preferences even when critical is omitted", async () => {
     const service = makeService(new FakeNotificationRepository(), new FakeEmailSender(), []);
 
@@ -224,6 +266,8 @@ describe("DropshipNotificationService", () => {
 
 class FakeNotificationRepository implements DropshipNotificationRepository {
   lastSend: RecordDropshipNotificationEventsRepositoryInput | null = null;
+  storedByKey = new Map<string, DropshipNotificationEventRecord[]>();
+  lookups: Array<{ vendorId: number; idempotencyKey: string }> = [];
   preferences: DropshipNotificationPreferenceRecord[] = [];
   contact: DropshipNotificationVendorContact = { vendorId: 10, email: "vendor@cardshellz.test" };
 
@@ -249,6 +293,11 @@ class FakeNotificationRepository implements DropshipNotificationRepository {
 
   async listEvents(): Promise<DropshipNotificationListResult> {
     return { items: [], total: 0, page: 1, limit: 50, unreadOnly: false };
+  }
+
+  async listEventsByKey(input: { vendorId: number; idempotencyKey: string }): Promise<DropshipNotificationEventRecord[]> {
+    this.lookups.push(input);
+    return this.storedByKey.get(`${input.vendorId} ${input.idempotencyKey}`) ?? [];
   }
 
   async getVendorContact(): Promise<DropshipNotificationVendorContact> {

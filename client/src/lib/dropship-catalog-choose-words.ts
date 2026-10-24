@@ -1,17 +1,21 @@
 /**
- * The vendor's words for Catalog step 1, "Choose what to sell" (step 1 stage
- * 1). Words marked "Interim (step 1 PROPOSAL)" are new in stage 1 and live
- * here only, so a later stage can change them in one place; words marked
- * "kept" are the step's words from before stage 1. No function returns a raw
- * reason code or a product-line name (owner Q2). Pure: no React, no network,
- * no clock.
+ * The vendor's words for Catalog step 1, "Choose what to sell". Words marked
+ * "Interim (step 1 PROPOSAL)" are stage 1's, words marked "Kept" are the
+ * step's words from before stage 1, and words marked "Stage 3/5 (step 1 plan
+ * S2-5)" are PR B's one-time picks (PLAN-B v4.1 §13, PROPOSED), so a later
+ * stage can change them in one place. No function returns a raw reason code
+ * or a product-line name (owner Q2). Pure: no React, no network, no clock.
  */
+import { SELECTION_CHANGE_CAP } from "@shared/dropship/vendor-selection-changes";
 import { formatStatus, type DropshipCatalogListingTier } from "./dropship-ops-surface";
 
 /** "1,433": every count the step shows. */
 export function formatChooseCount(value: number): string {
   return value.toLocaleString("en-US");
 }
+
+/** The selection cap as the words print it ("10,000"); the server's cap, so the words never drift from it. */
+const CAP_WORDS = formatChooseCount(SELECTION_CHANGE_CAP);
 
 /** The How column's words, by `ChooseHow`. */
 const HOW_WORDS = Object.freeze({
@@ -21,23 +25,18 @@ const HOW_WORDS = Object.freeze({
   willRemove: "Will be removed",
   // Interim (step 1 PROPOSAL): selected by the vendor's own pick of this size.
   picked: "Picked by you",
-  // Interim (step 1 PROPOSAL): selected only by an older, broader rule (category, product, product line or whole catalog).
-  olderInclude: "Selected by an older setting",
-  // Interim (step 1 PROPOSAL): kept out by the vendor's own keep-out for this size.
-  removed: "Removed by you",
-  // Interim (step 1 PROPOSAL): kept out by an older, broader rule; the box is off.
-  olderExclude: "Kept out by an older setting",
-  // Interim (step 1 PROPOSAL): no rule selects it.
+  // Interim (step 1 PROPOSAL): not picked.
   notSelected: "Not selected",
-  // Interim (step 1 PROPOSAL): `disabled_by_vendor_override`; the box is off.
+  // Interim (step 1 PROPOSAL): `disabled_by_vendor_override`.
   turnedOff: "Turned off for you",
   // Interim (step 1 PROPOSAL): `not_exposed_by_admin` (the catalog read drops these; shown only defensively).
   notOffered: "Not offered by Card Shellz",
-  // Interim (step 1 PROPOSAL): selected, while the saved choices load.
-  selected: "Selected",
-  // Interim (step 1 PROPOSAL): kept out, while the saved choices load.
-  keptOut: "Kept out",
 });
+
+/** The per-store effect lines of the save question: "listing is" or "listings are", by count. */
+function listingsAre(n: number): string {
+  return n === 1 ? "1 listing is" : `${formatChooseCount(n)} listings are`;
+}
 
 export const CHOOSE_WORDS = Object.freeze({
   // Interim (step 1 PROPOSAL): replaces "Choose the variants you want to sell. Catalog selection does not require verification."
@@ -62,7 +61,9 @@ export const CHOOSE_WORDS = Object.freeze({
   showAll: "All",
   // Interim (step 1 PROPOSAL): replaces "Selected only". The server filters by what is saved, so the option says so (review DUX1).
   showSelected: "Saved as selected",
-  // Interim (step 1 PROPOSAL): over the table while Show is "Saved as selected" and changes aren't saved (review DUX1).
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. Show = `selection=not_selected`.
+  showNotSelected: "Not selected",
+  // Interim (step 1 PROPOSAL): over the table while Show filters by what is saved and changes aren't saved (review DUX1).
   showSavedNote: "This list shows what is saved. Items you check or uncheck move in or out of it after you save.",
   // Kept.
   categoryLabel: "Category",
@@ -93,12 +94,6 @@ export const CHOOSE_WORDS = Object.freeze({
   noQuantitySr: "No quantity: not selected",
   // Interim (step 1 PROPOSAL): the How column, each entry marked above.
   how: HOW_WORDS,
-  // Interim (step 1 PROPOSAL): under "Removed by you".
-  removedHint: "Check it to sell it again.",
-  // Interim (step 1 PROPOSAL): under "Selected by an older setting" (review DUX6): unchecking writes a keep-out for this size.
-  olderIncludeHint: "Uncheck it to keep it out.",
-  // Interim (step 1 PROPOSAL): under "Kept out by an older setting" (review DUX6). Never names the setting (owner Q2) or offers a rule (Q3).
-  olderExcludeHint: "Contact Card Shellz support to change this setting.",
   // Interim (step 1 PROPOSAL): under "Turned off for you" when the vendor's own pick of the size is saved; its box removes the pick (verify V6).
   turnedOffPickHint: "You picked it, but it can't be sold now. Uncheck it to remove your pick.",
   // Interim (step 1 PROPOSAL): the line over the table.
@@ -120,7 +115,7 @@ export const CHOOSE_WORDS = Object.freeze({
   loadMoreFailed: "Couldn't load more items.",
   // Interim (step 1 PROPOSAL).
   tryAgain: "Try again",
-  // Interim (step 1 PROPOSAL): no rows under a search, a category or Show = Selected.
+  // Interim (step 1 PROPOSAL): no rows under a search, a category or a Show filter.
   emptyFilteredTitle: "No matching items",
   // Interim (step 1 PROPOSAL).
   emptyFilteredText: "No items match your search and filters.",
@@ -132,14 +127,8 @@ export const CHOOSE_WORDS = Object.freeze({
   catalogFailedTitle: "Catalog unavailable",
   // Interim (step 1 PROPOSAL): replaces "The catalog API request failed."
   catalogFailedText: "The catalog couldn't be loaded.",
-  // Interim (step 1 PROPOSAL): an answer that is not the catalog's contract.
-  catalogUnreadable: "The catalog couldn't be read. Reload the page.",
   // Interim (step 1 PROPOSAL): the list couldn't be read again after the saved choices moved; its boxes stay off until it can (verify V5).
   listBehindSave: "The list couldn't be refreshed after the last save, so it may not show what is saved. Press Try again.",
-  // Interim (step 1 PROPOSAL): the saved choices failed to load; boxes and Save stay off.
-  rulesFailed: "Your saved choices couldn't be loaded, so changes can't be saved yet.",
-  // Interim (step 1 PROPOSAL): an answer that is not the rules' contract.
-  rulesUnreadable: "Your saved choices couldn't be read. Reload the page.",
   // Interim (step 1 PROPOSAL): the bar, with both numbers always shown.
   pendingLine: (add: number, remove: number) => `Not saved: ${formatChooseCount(add)} to add · ${formatChooseCount(remove)} to remove`,
   // Interim (step 1 PROPOSAL).
@@ -148,62 +137,106 @@ export const CHOOSE_WORDS = Object.freeze({
   saving: "Saving…",
   // Interim (step 1 PROPOSAL).
   undo: "Undo changes",
-  // The cap comes from the caller (MAX_SELECTION_RULES; review CT8); the words say how far over and never name "Undo",
-  // which clears every change (review DUX4).
-  // Interim (step 1 PROPOSAL): the server's rule cap (owner Q4), stopped before sending.
-  tooManyChoices: (count: number, cap: number) =>
-    `You can keep up to ${formatChooseCount(cap)} saved choices: each item you pick, each item you keep out and each older setting counts as one. This save would make ${formatChooseCount(count)}, which is ${formatChooseCount(Math.max(0, count - cap))} over. Change some marked items back, then save.`,
-  // Interim (step 1 PROPOSAL): the 100 KiB body limit, stopped before sending, and a 413.
+  // Interim (step 1 PROPOSAL): the bulk parser's 413 (`DROPSHIP_REQUEST_TOO_LARGE`, PLAN-B v4.1 §14 `tooLarge`).
   tooLarge: "These changes are too large to save at once. Change some marked items back, then save.",
+
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. The categories card's heading.
+  categoriesHeading: "Categories",
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. One category's line.
+  categoryLine: (name: string, selected: number, total: number) =>
+    `${name} · ${formatChooseCount(selected)} of ${formatChooseCount(total)} selected`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. A category's box, read out.
+  categoryBox: (name: string) => `Select all in ${name}`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. A category's name button, read out.
+  categoryShowOnly: (name: string) => `Show only ${name}`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. Under the categories list.
+  noCategory: "Items with no category aren't listed here. Choose them in the table.",
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. A category ticked: what it adds, and that later items are not added.
+  tickAdds: (n: number, name: string) => `${n === 1 ? `Adds the 1 item in ${name} that isn't selected yet.`
+    : `Adds the ${formatChooseCount(n)} items in ${name} that aren't selected yet.`} Items Card Shellz adds to ${name} later aren't added; you'll see them in a notice here instead.`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. A category unticked.
+  tickRemoves: (n: number, name: string) => (n === 1 ? `Removes the 1 selected item in ${name}.`
+    : `Removes all ${formatChooseCount(n)} selected items in ${name}.`),
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. Every shown row checked, more match.
+  checkAllShown: (shown: number) => `All ${formatChooseCount(shown)} shown are checked.`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED.
+  checkAll: (total: number) => `Check all ${formatChooseCount(total)} that match`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED.
+  uncheckAll: (total: number) => `Uncheck all ${formatChooseCount(total)} that match`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. The match count moved since the rows loaded.
+  matchChanged: (now: number, was: number) => `${formatChooseCount(now)} now match (was ${formatChooseCount(was)}).`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. The id list the change needs is longer than one change takes.
+  tooManyMatch: (n: number) => `Too many to change at once (${formatChooseCount(n)}). Search or pick a category to narrow the list.`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED.
+  selectEverything: (n: number) => `Select everything (${formatChooseCount(n)})`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED.
+  everythingAdds: (n: number) =>
+    `Adds every item Card Shellz offers that isn't selected yet (${formatChooseCount(n)}). Items Card Shellz adds later aren't added. You'll see a notice for new items in categories you sell from.`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. The room left under the cap.
+  room: (selected: number, room: number) =>
+    `You can have up to ${CAP_WORDS} selected. ${selected === 1 ? "1 is" : `${formatChooseCount(selected)} are`} selected, so ${formatChooseCount(Math.max(0, room))} more can be added.`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. A growing change over the cap (also the server's 422).
+  overCapAdd: (after: number) => `This would make ${formatChooseCount(after)} selected, over the ${CAP_WORDS} limit. Undo some additions to save.`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. The saved selection is over the cap.
+  overCapState: (selected: number) =>
+    `${formatChooseCount(selected)} selected, over the ${CAP_WORDS} limit. Publishing refuses more than ${CAP_WORDS}. Remove some, then publish.`,
   // Interim (step 1 PROPOSAL): the question before every save.
   confirmTitle: "Save your changes?",
-  // No "soon", and nothing about what eBay shows for quantity 0 (the seller's eBay setting; not in the code) (review MC5,
-  // DUX7). When: with the listing's next stock update, which waits while another size of that listing is blocked
-  // (inventory-channel-exposure-runtime.service.ts publishes a target only when every row is clean) (verify V7).
-  // Each size is its own eBay listing (dropship-ebay-listing-push.provider.ts sends one variant per listing).
-  // Interim (step 1 PROPOSAL): today's behaviour for a removed size (owner Q5): quantity 0, nothing ended, others keep theirs.
-  confirmRemove: "Sizes you remove that are listed on eBay are set to quantity 0 there the next time Card Shellz updates that listing's stock, so buyers can't buy them. Card Shellz changes only their quantity. Sizes you keep checked don't change.",
-  // Interim (step 1 PROPOSAL): today's behaviour for an added size.
-  confirmAdd: "Items you add that still have an eBay listing can start selling again soon after you save. Items that were never listed stay off eBay until you publish them in step 3.",
-  // Interim (step 1 PROPOSAL): no listing data reaches this page yet.
-  confirmUnknown: "This page can't tell yet which of these items are on eBay. Your choice applies to all your stores.",
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. The server's counts of the change.
+  confirmCounts: (add: number, remove: number, already: number) => {
+    const counts = `${formatChooseCount(add)} added · ${formatChooseCount(remove)} removed`;
+    if (already <= 0) return counts;
+    return `${counts} · ${already === 1 ? "1 was" : `${formatChooseCount(already)} were`} already as you chose`;
+  },
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. Only what Echelon does on the store (FIDELITY2).
+  confirmZero: (store: string, n: number) => `On ${store}: ${listingsAre(n)} set to quantity 0, so buyers can't buy ${n === 1 ? "it" : "them"}.`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED (V23): the price is the one on eBay now (#1900 adopts the vendor's eBay price).
+  confirmResume: (store: string, n: number) => (n === 1
+    ? `On ${store}: 1 listing gets its quantity back shortly after you save, at the price it has on eBay now. To send today's price, publish it in step 3.`
+    : `On ${store}: ${formatChooseCount(n)} listings get their quantity back shortly after you save, at the price they have on eBay now. To send today's prices, publish them in step 3.`),
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED (V23). No store has any entry.
+  confirmNone: "Nothing changes on your eBay listings now.",
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED.
+  confirmScope: "Your choice applies to all your stores.",
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. B only: PR C ends removed listings and replaces this line.
+  confirmNotEnded: "Removed items are set to quantity 0 on eBay. Their listings aren't ended.",
   // Interim (step 1 PROPOSAL).
   confirmSave: "Save changes",
   // Interim (step 1 PROPOSAL).
   confirmCancel: "Cancel",
-  // Interim (step 1 PROPOSAL): after a save, with the changes that took (review MC4).
-  savedLine: (add: number, remove: number) => {
-    const parts = [
-      ...(add > 0 ? [`${formatChooseCount(add)} added`] : []),
-      ...(remove > 0 ? [`${formatChooseCount(remove)} removed`] : []),
-    ];
-    return parts.length > 0 ? `Saved. ${parts.join(", ")}.` : "Saved.";
-  },
-  // Interim (step 1 PROPOSAL): after the saved line, the changes saved whose rows still don't read as marked (review MC4, CT3).
-  notTakenLine: (count: number) => (count === 1
-    ? "1 change didn't take effect: its row says why."
-    : `${formatChooseCount(count)} changes didn't take effect: their rows say why.`),
-  // Interim (step 1 PROPOSAL): the rules changed since the first mark; nothing was sent.
-  stale: "Your choices were changed in another tab. Review them and save again.",
-  // Interim (step 1 PROPOSAL): another tab's save already matches every change, so nothing was sent and nothing is left (verify V1).
-  staleNothingLeft: "Your choices were saved in another tab, and they already match your changes. Nothing is left to save.",
-  // Interim (step 1 PROPOSAL): an earlier save whose answer was lost went through, and changes are left to save.
-  lastSaveWentThrough: "Your last save went through. Review your changes and save again.",
-  // Interim (step 1 PROPOSAL): nothing of this save was written (the rules couldn't be read first, or every answer was "busy").
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. Added sizes Card Shellz stopped offering.
+  skipped: (n: number) => (n === 1 ? "1 is no longer offered by Card Shellz and was skipped."
+    : `${formatChooseCount(n)} are no longer offered by Card Shellz and were skipped.`),
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. After a save, from the server's answer.
+  saved: (added: number, removed: number) => `Saved. ${formatChooseCount(added)} added, ${formatChooseCount(removed)} removed.`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. A removal-only save whose effects moved between the question and the save (§7.5).
+  savedDrift: (n: number) => `Saved. A few listings changed on eBay while you were deciding; ${listingsAre(n)} set to quantity 0.`,
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. While the server answers busy and the page sends the same save again.
+  savingStill: "Still saving… eBay updates are in progress. Your changes are kept.",
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. Busy past every try.
+  busy: "Saving is busy right now. Your changes are kept; try again in a minute.",
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. Replaces stage 1's "…in another tab…": a follow-up tidy can change them too (FIDELITY-6).
+  stale: "Your saved choices changed after this page loaded. Review them and save again.",
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. On the second question after the effects moved.
+  effectsChanged: "Something on eBay changed while you were deciding. Check the new numbers and save again.",
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. While the page sends the same save again during an update.
+  paused: "Saving is paused for a few minutes while Card Shellz updates the site. Your changes are kept, and saving will try again by itself.",
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. After the paused window (FIDELITY-7).
+  pausedStill: "Saving is still paused while Card Shellz updates the site. Your changes are kept; press Save again in a few minutes.",
+  // Review round 1 CLI-1, TST-2 (not in §13; owner to confirm): Undo, or every box unticked back, after a save with no
+  // sure answer, once the saved choices read again moved past that save's base. Stage 1's reviewed `pendingMoved`,
+  // first sentence (the list may still fail to read; it says so itself).
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED.
+  undoneSaveMoved: "Your saved choices changed: your last save may have gone through, or another tab saved.",
+  // Interim (step 1 PROPOSAL): nothing of this save was written (every answer was "try again" with nothing written).
   notSaved: "Your changes weren't saved. Check your connection, then press Save changes again.",
-  // Interim (step 1 PROPOSAL): no answer, so the save may have gone through; the next press checks first (review MC1).
+  // Interim (step 1 PROPOSAL): no answer, so the save may have gone through; the next press sends the same save, which replays (review MC1).
   unconfirmed: "We couldn't confirm your save. Press Save changes again to check whether it went through.",
-  // Interim (step 1 PROPOSAL): Undo after an unconfirmed save, which the rules show went through (review MC1).
-  undoneButSaved: "Your last save went through after all. The list now shows what is saved.",
-  // Interim (step 1 PROPOSAL): Undo (or a reload) after an unconfirmed save, and the rules changed some other way since (verify V2).
-  pendingMoved: "Your saved choices changed: your last save may have gone through, or another tab saved. The list now shows what is saved.",
-  // Interim (step 1 PROPOSAL): Undo after an unconfirmed save, and the rules couldn't be read to check (review MC1).
-  undoneUnknown: "We couldn't check whether your last save went through. Reload the page to see what is saved.",
   // Interim (step 1 PROPOSAL): a refusal this page can't fix. Never "reload": that drops every change and fixes nothing (review DUX10).
   rejected: "Your changes couldn't be saved. They're still here. If this keeps happening, contact Card Shellz support.",
-  // §4.11 retired: the save once PR B froze the old rules. This page is out of date, nothing was saved, and only a
-  // reload fixes it (the one refusal where Reload is offered; CHK9). The server sends the same words
-  // (server/modules/dropship/domain/catalog-read-words.ts).
+  // §4.11 retired: the save once PR B froze the old rules, and PR C's "page outdated". This page is out of date, nothing
+  // was saved, and only a reload fixes it (the one refusal where Reload is offered; CHK9). The server sends the same
+  // words (server/modules/dropship/domain/catalog-read-words.ts).
   // Stage 2 (step 1 plan S2-5): PROPOSED.
   retired: "This page was updated, so your last changes weren't saved. Reload it and make them again.",
   // Stage 2 (step 1 plan S2-5): PROPOSED. The button beside `retired`.

@@ -131,6 +131,13 @@ export class PgDropshipNotificationRepository implements DropshipNotificationRep
     };
   }
 
+  async listEventsByKey(
+    input: Parameters<DropshipNotificationRepository["listEventsByKey"]>[0],
+  ): Promise<DropshipNotificationEventRecord[]> {
+    // No lock (PLAN-B v4.1 §11.3): the arrivals job's runner lock excludes a second writer of its key.
+    return listEventsByIdempotencyKey(this.dbPool, input.vendorId, input.idempotencyKey, false);
+  }
+
   async getVendorContact(vendorId: number): Promise<DropshipNotificationVendorContact> {
     const result = await this.dbPool.query<VendorContactRow>(
       `SELECT id, email
@@ -273,7 +280,7 @@ export class PgDropshipNotificationRepository implements DropshipNotificationRep
 }
 
 async function listEventsByIdempotencyKey(
-  client: PoolClient,
+  client: Pick<PoolClient, "query">,
   vendorId: number,
   idempotencyKey: string,
   forUpdate: boolean,

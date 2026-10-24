@@ -33,6 +33,7 @@ import { PgDropshipListingPreviewRepository } from "../../infrastructure/dropshi
 import { PgDropshipListingPriceRepository } from "../../infrastructure/dropship-listing-price.repository";
 import { PgDropshipListingSettingWritesRepository } from "../../infrastructure/dropship-listing-setting-writes.repository";
 import { PgDropshipListingSettingsRepository } from "../../infrastructure/dropship-listing-settings.repository";
+import { seedPicks } from "../fixtures/listing-push-runs.fixture";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -49,7 +50,10 @@ const HELD_AT = new Date("2026-10-05T09:30:00.000Z");
  */
 const OBJECTS: ReadonlySet<string> = new Set([
   "dropship.dropship_vendors", "dropship.dropship_store_connections", "dropship.dropship_store_listing_configs",
-  "dropship.dropship_catalog_rules", "dropship.dropship_vendor_selection_rules", "dropship.dropship_vendor_variant_overrides",
+  // The vendor's selection is its one-time picks with their revisions (PLAN-B v4.1 §9); the frozen rules table is not
+  // named, so a read that still reaches it fails here.
+  "dropship.dropship_catalog_rules", "dropship.dropship_vendor_selected_variants",
+  "dropship.dropship_vendor_selection_rule_set_revisions", "dropship.dropship_vendor_variant_overrides",
   "dropship.dropship_pricing_policies", "dropship.dropship_vendor_listings", "dropship.dropship_cost_change_listing_holds",
   "dropship.dropship_audit_events",
   "dropship.dropship_listing_price_revisions", "dropship.dropship_listing_price_settings",
@@ -91,6 +95,10 @@ const NAMED_BY_REVISION_ID: ReadonlyMap<string, string> = new Map([
   ["dropship_ebay_category_rule_revisions", "dropship_ebay_category_rule_profiles.revision_id (migration 0717)"],
   ["dropship_product_listing_setting_revisions", "dropship_product_listing_settings.revision_id (migration 0738)"],
   ["dropship_category_listing_setting_revisions", "dropship_category_listing_settings.revision_id (migration 0739)"],
+  // Not a revision table: the vendor's picks change, but every picks write (a save, the conversion, its follow-up)
+  // writes a selection revision, and the fingerprint holds the vendor's head one (PLAN-B v4.1 §9 row 5). A pick a
+  // catalog size delete cascades away goes with the size (covered, like every catalog fact, by the time limit).
+  ["dropship_vendor_selected_variants", "the vendor's head dropship_vendor_selection_rule_set_revisions id (PLAN-B v4.1 §9 row 5)"],
 ]);
 
 const REAL_MIGRATIONS = [
@@ -121,6 +129,9 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     return `"${schema}"."${object}"`;
   });
   const execute = (sql: string, values?: unknown[]) => pool.query(qualify(sql), values);
+  /** The vendor picks these sizes as one save would: a selection revision and the picks (listing-push-runs.fixture). */
+  const pickSizes = (vendorId: number, productVariantIds: readonly number[]) =>
+    seedPicks({ query: (text: string, values?: unknown[]) => execute(text, values) }, vendorId, productVariantIds);
 
   /**
    * The repositories' own SQL against the isolated schema. Records every
@@ -345,12 +356,15 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
         action varchar(20) NOT NULL DEFAULT 'include', product_line_id integer, product_id integer, product_variant_id integer,
         category varchar(200), priority integer NOT NULL DEFAULT 0, is_active boolean NOT NULL DEFAULT true,
         starts_at timestamptz, ends_at timestamptz, notes text, updated_at timestamptz NOT NULL DEFAULT now());
-      CREATE TABLE dropship.dropship_vendor_selection_rules (id integer PRIMARY KEY,
-        vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id), scope_type varchar(30) NOT NULL,
-        action varchar(20) NOT NULL DEFAULT 'include', product_line_id integer, product_id integer, product_variant_id integer,
-        category varchar(200), auto_connect_new_skus boolean NOT NULL DEFAULT true, auto_list_new_skus boolean NOT NULL DEFAULT false,
-        priority integer NOT NULL DEFAULT 0, is_active boolean NOT NULL DEFAULT true, revision_id integer,
-        updated_at timestamptz NOT NULL DEFAULT now());
+      -- 0091's revisions (reduced) and the vendor's one-time picks (*_dropship_vendor_selected_variants.sql, reduced).
+      CREATE TABLE dropship.dropship_vendor_selection_rule_set_revisions (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+        vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id), idempotency_key varchar(200) NOT NULL,
+        request_hash varchar(128) NOT NULL, actor_type varchar(40) NOT NULL, actor_id varchar(255), rule_count integer NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (vendor_id, idempotency_key));
+      CREATE TABLE dropship.dropship_vendor_selected_variants (vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id),
+        product_variant_id integer NOT NULL, revision_id integer NOT NULL
+          REFERENCES dropship.dropship_vendor_selection_rule_set_revisions(id),
+        source varchar(30) NOT NULL, selected_at timestamptz NOT NULL, PRIMARY KEY (vendor_id, product_variant_id));
       CREATE TABLE dropship.dropship_vendor_variant_overrides (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
         vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id), product_variant_id integer NOT NULL,
         enabled_override boolean, marketplace_quantity_cap integer, notes text);
@@ -420,13 +434,14 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
         ('ops-105', 'ops', '7000000105', '8000000007', 'fixed_price', 80.00, NULL, true),
         ('ops-201', 'ops', '7000000201', '8000000008', 'fixed_price', 3.00, NULL, true);
       INSERT INTO dropship.dropship_catalog_rules (id, scope_type, action) VALUES (1, 'catalog', 'include');
-      -- Vendor 10 chooses the whole catalog except the 500 pack; vendor 11 chooses everything.
-      INSERT INTO dropship.dropship_vendor_selection_rules (id, vendor_id, scope_type, action, product_variant_id, priority)
-        VALUES (1, 10, 'catalog', 'include', NULL, 0), (2, 10, 'variant', 'exclude', 105, 10), (3, 11, 'catalog', 'include', NULL, 0);
       INSERT INTO dropship.dropship_pricing_policies (id, scope_type, mode, floor_price_cents) VALUES (1, 'catalog', 'warn_only', 500);
       INSERT INTO dropship.dropship_vendor_listings (vendor_id, store_connection_id, product_variant_id, platform, external_listing_id, status, vendor_retail_price_cents)
         VALUES (10, 22, 101, 'ebay', 'ebay-22-101', 'active', 1299), (10, 24, 101, 'ebay', 'ebay-24-101', 'active', 1099);
     `);
+    // Vendor 10 chose the whole catalog except the 500 pack; vendor 11 everything: at main a `catalog` include (and a
+    // variant exclude of 105), now the picks the conversion makes of them (PLAN-B v4.1 §6 step 4).
+    await pickSizes(10, [101, 102, 103, 104, 201]);
+    await pickSizes(11, [101, 102, 103, 104, 105, 201]);
     await savePricingProfile(3000);
     await savePrice(STORE_RULES, 101, 1299, "rules-store-101-exact");
     await savePrice(STORE_RULES, 201, null, "rules-store-201-catalog");
@@ -582,7 +597,8 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     ["a store shelf set", () => setShelf(102, "Mailers")],
     // The old per-size shelf writer (deleted in PR 12) deleted the row on clear.
     ["a store shelf cleared", () => execute("DELETE FROM dropship.dropship_ebay_store_category_assignments WHERE product_variant_id = 101")],
-    ["the vendor's selection", () => execute("UPDATE dropship.dropship_vendor_selection_rules SET is_active = false WHERE id = 2")],
+    // A picks save writes the vendor's next selection revision (PLAN-B v4.1 §9 row 5).
+    ["the vendor's selection", () => pickSizes(10, [105])],
     ["a size switched off", () => execute("INSERT INTO dropship.dropship_vendor_variant_overrides (vendor_id, product_variant_id, enabled_override) VALUES (10, 102, false)")],
     ["Card Shellz exposure", () => execute("UPDATE dropship.dropship_catalog_rules SET ends_at = $1 WHERE id = 1", [NOW])],
     ["a Card Shellz price limit", () => execute("UPDATE dropship.dropship_pricing_policies SET floor_price_cents = 600 WHERE id = 1")],
@@ -622,7 +638,7 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
 
   const unrelated: Array<[string, () => Promise<unknown>]> = [
     ["another store's price", () => savePrice(STORE_NO_RULES, 102, 1999, "other-store-102")],
-    ["another vendor's selection", () => execute("UPDATE dropship.dropship_vendor_selection_rules SET priority = 5 WHERE vendor_id = 11")],
+    ["another vendor's selection", () => pickSizes(11, [])],
     ["another store's hold", () => execute(`INSERT INTO dropship.dropship_cost_change_listing_holds
       (vendor_id, store_connection_id, product_variant_id, held_at) VALUES (10, 24, 101, $1)`, [NOW])],
     ["columns the views do not read", () => execute(`
@@ -923,8 +939,8 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
       VALUES (10, 'TL2', 'Toploader 2', 'Toploaders', $1, 'toploader')`, [TOPLOADERS]);
     await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, sales_eligibility)
       VALUES (1001, 10, 'TL2-25', 'Pack of 25', 'sellable'), (1002, 10, 'TL2-100', 'Pack of 100', 'sellable')`);
-    await execute(`INSERT INTO dropship.dropship_vendor_selection_rules (id, vendor_id, scope_type, action, product_variant_id, priority)
-      VALUES (4, 10, 'variant', 'exclude', 1002, 10)`);
+    // The vendor picks 1001 only (at main its `catalog` include chose it and a variant exclude kept 1002 out).
+    await pickSizes(10, [1001]);
     await setShelf(1002, "Unchosen");
     await saveProductSetting(10, { returnPolicy: { id: "return-p", name: "Product returns" } }, "round-trip-product-10");
     const reads = new DropshipListingSettingsService({
@@ -991,6 +1007,7 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     await execute(`INSERT INTO catalog.products (id, sku, name, category, product_type) VALUES (9, 'BULK', 'Bulk sleeves', 'Sleeves', 'sleeve');
       INSERT INTO catalog.product_variants (id, product_id, sku, name, sales_eligibility)
         SELECT 100000 + x, 9, 'BULK-' || x, 'Size ' || x, 'sellable' FROM generate_series(1, 10000) x`);
+    await pickSizes(10, Array.from({ length: 10_000 }, (_, index) => 100_001 + index));
     const result = await load();
     expect(result).toMatchObject({ state: "too_large", store: { storeConnectionId: STORE_RULES },
       storeLevel: { pricing: { revisionId: 1 }, listingConfig: { storeConnectionId: STORE_RULES } } });
@@ -1363,6 +1380,8 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
       await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
         SELECT $1::int + i, $3::int + i / $4::int, 'CONVERT-SIZE-' || i, 'Size ' || i, (7400000000 + i)::text, 100, 'sellable'
         FROM generate_series(0, $2::int - 1) i`, [FIRST_SIZE, BULK_SIZES, FIRST_PRODUCT, SIZES_PER_PRODUCT]);
+      // The vendor picks every bulk size (at main its `catalog` include chose them as they were created).
+      await pickSizes(10, Array.from({ length: BULK_SIZES }, (_, index) => FIRST_SIZE + index));
       await execute(`INSERT INTO public.shopify_variants (id, product_id, sku, price)
         SELECT (7400000000 + i)::text, (9300000000 + $2::int + i / $3::int)::text, 'CONVERT-SIZE-' || i, 9.99 FROM generate_series(0, $1::int - 1) i`,
       [BULK_SIZES, FIRST_PRODUCT, SIZES_PER_PRODUCT]);

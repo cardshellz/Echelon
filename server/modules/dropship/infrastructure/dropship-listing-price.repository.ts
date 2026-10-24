@@ -41,7 +41,7 @@ export class PgDropshipListingPriceRepository implements ListingPriceRepository 
         // short SHARE locks block admin rule replacement and insertion phantoms,
         // not concurrent catalog reads. The repository performs no remote work.
         await client.query(`LOCK TABLE dropship.dropship_catalog_rules,
-          dropship.dropship_vendor_selection_rules, dropship.dropship_vendor_variant_overrides,
+          dropship.dropship_vendor_selected_variants, dropship.dropship_vendor_variant_overrides,
           catalog.product_line_products IN SHARE MODE`);
         await client.query(`SELECT pv.id FROM catalog.product_variants pv
           JOIN catalog.products p ON p.id = pv.product_id WHERE pv.id = $1 FOR SHARE OF pv, p`, [input.productVariantId]);

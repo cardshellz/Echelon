@@ -249,7 +249,7 @@ describe("fast CI preserves coverage and required checks", () => {
   it("gives the server test typecheck a heap above Node's ~4 GB default", () => {
     const typecheck = job(workflow, "typecheck");
     const step = typecheck.slice(typecheck.indexOf("- name: Server test types"), typecheck.indexOf("- name: Client test types"));
-    expect(step).toContain("NODE_OPTIONS: --max-old-space-size=6144");
+    expect(step).toContain("NODE_OPTIONS: --max-old-space-size=8192");
     expect(step).toContain("run: npx tsc -p tsconfig.tests.server.json");
   });
 
@@ -291,6 +291,13 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/lib/__tests__/dropship-catalog-choose-requests.test.ts",
       "client/src/lib/__tests__/dropship-catalog-choose-words.test.ts",
       "client/src/pages/dropship/__tests__/DropshipCatalogChoose.test.ts",
+      // PLAN-B v4.1 §15.4, §17 (B3): step 1's new-items notice (model, requests, words).
+      "client/src/lib/__tests__/dropship-catalog-new-items.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-new-items-requests.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-new-items-words.test.ts",
+      // PLAN-B v4.1 V31, TESTS-13: the chosen-items words of onboarding and the dashboard (both green at cea5cb027).
+      "client/src/lib/__tests__/dropship-onboarding.test.ts",
+      "client/src/pages/dropship/__tests__/DropshipPortalDashboard.test.ts",
       // Step 1 plan S2-5 §4.9 item 3: "site updating" for the requests stages 2-5 add.
       "client/src/lib/__tests__/dropship-api-json.test.ts",
       // Step 1 plan S2-5 PR A §4.10: Catalog step 3 on publish runs.
@@ -348,6 +355,8 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/lib/__tests__/dropship-listing-push-status.test.ts",
       "client/src/lib/__tests__/dropship-cost-changes.test.ts",
       "client/src/pages/__tests__/dropship-portal-cost-changes-page.test.ts",
+      // PLAN-B v4.1 V17 (B2b deviation 11; review CLI-7/TST-3): the only pin of the admin "Items chosen" label.
+      "client/src/pages/__tests__/dropship-launch-readiness-panels.test.ts",
       "shared/dropship/__tests__/program-finance-money.test.ts",
       "shared/dropship/__tests__/program-finance-contract.test.ts",
       "shared/dropship/__tests__/program-finance-definitions.test.ts",
@@ -359,6 +368,8 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(contracts).toContain("      - name: Dropship catalog browser stub types");
     for (const file of ["test/browser/dropship-policy-catalog-stubs.ts", "test/browser/dropship-policy-listing-settings-*.ts",
       "test/browser/dropship-policy-catalog-steps.spec.ts", "test/browser/dropship-policy-catalog-choose.spec.ts",
+      // PLAN-B v4.1 V29: step 1 at scale, on the same stubs.
+      "test/browser/dropship-policy-catalog-choose-scale.spec.ts",
       "test/browser/dropship-policy-catalog-publish-runs.spec.ts", "test/browser/dropship-policy-listing-access.spec.ts",
       // Review round 2 CT12: every file the step names, the cost changes portal spec too.
       "test/browser/dropship-policy-cost-changes-portal.spec.ts"]) {

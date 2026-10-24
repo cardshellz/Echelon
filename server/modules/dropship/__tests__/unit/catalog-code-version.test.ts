@@ -18,8 +18,8 @@ vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
  * release decision, so this pins it.
  */
 describe("catalog code version (S2-5 §4.9)", () => {
-  it("is 1 in PR A", () => {
-    expect(DROPSHIP_CATALOG_CODE_VERSION).toBe(1);
+  it("is 2 in PR B (one-time picks; PLAN-B v4.1 V9)", () => {
+    expect(DROPSHIP_CATALOG_CODE_VERSION).toBe(2);
   });
 
   it("keeps the grace longer than four missed beats, and the settle and alert longer than the grace", () => {
@@ -32,7 +32,9 @@ describe("catalog code version (S2-5 §4.9)", () => {
   it("answers only a page newer than the server with 'page newer'", () => {
     expect(decideCatalogPageVersion(null)).toBe("current");
     expect(decideCatalogPageVersion(1)).toBe("current");
-    expect(decideCatalogPageVersion(2)).toBe("page_newer_than_server");
+    expect(decideCatalogPageVersion(2)).toBe("current");
+    // PR C's page reaching a B server.
+    expect(decideCatalogPageVersion(3)).toBe("page_newer_than_server");
     expect(decideCatalogPageVersion(3, 3)).toBe("current");
     expect(decideCatalogPageVersion(2, 3)).toBe("current");
   });

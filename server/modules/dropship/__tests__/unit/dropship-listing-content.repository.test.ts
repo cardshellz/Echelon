@@ -33,7 +33,7 @@ const SQL = {
   storeLock: "SELECT pg_advisory_xact_lock(hashtext('dropship_listing_push_job'), $1::integer)",
   owner: "SELECT v.id AS vendor_id FROM dropship.dropship_vendors v JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id "
     + "WHERE v.member_id::text = $1 AND sc.id = $2 FOR SHARE OF v, sc",
-  selectionLocks: "LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selection_rules, "
+  selectionLocks: "LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selected_variants, "
     + "dropship.dropship_vendor_variant_overrides, catalog.product_line_products IN SHARE MODE",
   sizeLock: "SELECT pv.id FROM catalog.product_variants pv JOIN catalog.products p ON p.id = pv.product_id WHERE pv.id = $1 FOR SHARE OF pv, p",
   readProfile: "SELECT r.id, r.profile, r.created_at FROM dropship.dropship_content_profiles p "

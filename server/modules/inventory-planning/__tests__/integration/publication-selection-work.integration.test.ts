@@ -5,6 +5,7 @@ import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase }
 import { PostgresPublicationSelectionWork } from "../../infrastructure/publication-selection-work.repository";
 import { publicationSelectionBusyIssue } from "../../publication-selection-work";
 import type { InventoryAvailabilityTransactionQueryClient } from "../../application/inventory-availability-transaction-query.port";
+import { PICKS_SELECTION_TRIGGERS_SQL } from "../../../dropship/infrastructure/dropship-selection-conversion.sql";
 
 const configured = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const migration = readFileSync(resolve(process.cwd(), "migrations/0743_publication_selection_work.sql"), "utf8");
@@ -27,6 +28,8 @@ CREATE TABLE dropship.dropship_catalog_rules(scope_type text,action text,product
 CREATE TABLE dropship.dropship_vendor_selection_rules(vendor_id integer,scope_type text,action text,product_line_id integer,product_id integer,
  product_variant_id integer,category text,auto_connect_new_skus boolean,auto_list_new_skus boolean,is_active boolean,priority integer);
 CREATE TABLE dropship.dropship_vendor_variant_overrides(vendor_id integer,product_variant_id integer,enabled_override boolean);
+-- The vendor's one-time picks (PLAN-B v4.1 §5), reduced; their triggers follow 0743 (V33).
+CREATE TABLE dropship.dropship_vendor_selected_variants(vendor_id integer,product_variant_id integer,PRIMARY KEY(vendor_id,product_variant_id));
 CREATE TABLE dropship.dropship_store_listing_configs(store_connection_id integer,listing_mode text,inventory_mode text,is_active boolean);
 CREATE TABLE dropship.dropship_store_connections(status text);
 CREATE TABLE dropship.dropship_vendor_listings(vendor_id integer,store_connection_id integer,product_variant_id integer,status text,external_listing_id text,external_offer_id text,pushed_quantity integer);
@@ -48,6 +51,7 @@ INSERT INTO channels.channel_feeds VALUES(3,101,1,NULL,'v101','i101','SKU-101',4
     await database.pool.query("DROP SCHEMA IF EXISTS inventory,catalog,channels,dropship,ebay CASCADE");
     await database.pool.query(fixture);
     await database.pool.query(migration);
+    await database.pool.query(PICKS_SELECTION_TRIGGERS_SQL);
     now = new Date(Date.now() + 1_000);
   });
   afterAll(async () => { await database?.close(); });
@@ -97,6 +101,56 @@ INSERT INTO channels.channel_feeds VALUES(3,101,1,NULL,'v101','i101','SKU-101',4
     } finally { await provider.query("SELECT pg_advisory_unlock_shared(918419,0)"); provider.release(); }
     await database.pool.query("UPDATE channels.channel_feeds SET is_active=0");
     expect((await database.pool.query("SELECT is_active FROM channels.channel_feeds")).rows[0].is_active).toBe(0);
+  });
+
+  it("gates a vendor pick and invalidates only the picked size's product, as the overrides do (PLAN-B v4.1 V33)", async () => {
+    const work = async () => (await database.pool.query(`SELECT product_id, revision::text
+      FROM inventory.publication_selection_work ORDER BY product_id`)).rows;
+    const before = await work();
+    expect(before).toEqual([{ product_id: 20, revision: "1" }]);
+    // A pick of an unmapped product's size (102 of 21) queues nothing; a pick of 101 bumps its mapped product 20 once.
+    await database.pool.query("INSERT INTO dropship.dropship_vendor_selected_variants VALUES(10,102)");
+    expect(await work()).toEqual(before);
+    await database.pool.query("INSERT INTO dropship.dropship_vendor_selected_variants VALUES(10,101)");
+    expect(await work()).toEqual([{ product_id: 20, revision: "2" }]);
+    // An update that touches no watched column changes nothing; a removal bumps the product again.
+    await database.pool.query("UPDATE dropship.dropship_vendor_selected_variants SET vendor_id=vendor_id WHERE product_variant_id=101");
+    expect(await work()).toEqual([{ product_id: 20, revision: "2" }]);
+    const provider = await database.pool.connect();
+    try {
+      await provider.query("SELECT pg_advisory_lock_shared(918419,0)");
+      const failure = await database.pool.query("DELETE FROM dropship.dropship_vendor_selected_variants WHERE product_variant_id=101")
+        .catch(error => error);
+      expect(publicationSelectionBusyIssue(failure)).toMatchObject({ code: "PUBLICATION_SELECTION_BUSY", retryable: true });
+    } finally { await provider.query("SELECT pg_advisory_unlock_shared(918419,0)"); provider.release(); }
+    await database.pool.query("DELETE FROM dropship.dropship_vendor_selected_variants WHERE product_variant_id=101");
+    expect(await work()).toEqual([{ product_id: 20, revision: "3" }]);
+  });
+
+  it("re-plans exactly the mapped products a many-row pick statement touches, as a row at a time would (PLAN-B v4.1 R4)", async () => {
+    const work = async () => Object.fromEntries((await database.pool.query<{ product_id: number; revision: string }>(`SELECT product_id,
+      revision::text FROM inventory.publication_selection_work ORDER BY product_id`)).rows.map((row) => [row.product_id, row.revision]));
+    // Products 22 (sizes 103, 104) and 23 (sizes 105, 106) are mapped through one size each; 21 (size 102) is not.
+    await database.pool.query(`INSERT INTO catalog.products VALUES(22,true,'active','toploader','supplies',false),(23,true,'active','toploader','supplies',false);
+      INSERT INTO catalog.product_variants VALUES(103,22,true,true,true,'sellable',false,'SKU-103','pack'),(104,22,true,true,true,'sellable',false,'SKU-104','pack'),
+        (105,23,true,true,true,'sellable',false,'SKU-105','pack'),(106,23,true,true,true,'sellable',false,'SKU-106','pack');
+      INSERT INTO inventory.publication_variant_mapping_heads VALUES(3,103,403),(3,105,405);`);
+    expect(await work()).toEqual({ 20: "1", 22: "1", 23: "1" });
+    // One statement adds both sizes of 22, one of 23, the unmapped 102, and 103 for a second vendor.
+    await database.pool.query(`INSERT INTO dropship.dropship_vendor_selected_variants VALUES(10,103),(10,104),(10,105),(10,102),(11,103)`);
+    expect(await work()).toEqual({ 20: "1", 22: "2", 23: "2" });
+    // A replayed add that inserts no row re-plans nothing.
+    await database.pool.query(`INSERT INTO dropship.dropship_vendor_selected_variants VALUES(10,103),(11,103) ON CONFLICT DO NOTHING`);
+    expect(await work()).toEqual({ 20: "1", 22: "2", 23: "2" });
+    // Moving a pick to another product's size re-plans both products (0743's row path).
+    await database.pool.query("UPDATE dropship.dropship_vendor_selected_variants SET product_variant_id=101 WHERE vendor_id=10 AND product_variant_id=105");
+    expect(await work()).toEqual({ 20: "2", 22: "2", 23: "3" });
+    // One statement removes picks of 20, 22 and 21; 23 has none left and is not touched.
+    await database.pool.query("DELETE FROM dropship.dropship_vendor_selected_variants");
+    expect(await work()).toEqual({ 20: "3", 22: "3", 23: "3" });
+    // A removal that deletes no row re-plans nothing.
+    await database.pool.query("DELETE FROM dropship.dropship_vendor_selected_variants WHERE product_variant_id=105");
+    expect(await work()).toEqual({ 20: "3", 22: "3", 23: "3" });
   });
 
   it("keeps quantity and progress-only projections out of the invalidation loop", async () => {

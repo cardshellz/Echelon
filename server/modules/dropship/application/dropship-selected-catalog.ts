@@ -8,25 +8,32 @@ import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "../../../../shared/dropship/catal
 
 export interface SelectedCatalogReader {
   vendorId: number; catalog: ListingPriceCatalogReader;
+  /**
+   * The vendor's picked sizes that are sellable, ascending by id after
+   * `afterId` (a keyset over the vendor's picks, PLAN-B v4.1 §9 row 3;
+   * FIDELITY-3): every id it yields is picked, so the scan decides each with
+   * `picked: true`, and a sellable size the vendor did not pick is never read.
+   */
   listVariantIds(afterId: number, limit: number): Promise<number[]>;
   listProductLines(ids: number[]): Promise<Array<{ id: number; name: string }>>;
 }
 export type SelectedCatalogPurpose = "pricing_review" | "category_review" | "listing_settings" | "listing_push_run";
 /** Stage 2 (step 1 plan S2-5): the page's runTooLarge words (PROPOSED, §4.11), also the server's refusal. */
 export const LISTING_PUSH_RUN_TOO_LARGE_MESSAGE = LISTING_PUSH_RUN_WORDS.runTooLarge;
-/** The keyset scan's batch: this many sellable sizes are read, and their candidates held, at a time. */
+/** The keyset scan's batch: this many picked sellable sizes are read, and their candidates held, at a time. */
 const SELECTED_CATALOG_BATCH_SIZE = 250;
 
 /**
  * The vendor's selected sizes, one keyset batch at a time, in ascending size
- * id: every sellable size, independent of the browser's filters, pages and
- * 500-item listing publication request cap, kept only when Card Shellz
- * exposes it and the vendor's selection chooses it. Each batch is handed to
- * the caller before the next is read, so a caller that keeps less than a
- * candidate (loadSelectedProductIds) holds one batch of candidates at most.
+ * id: every sellable size the vendor picked (the reader's keyset, O(selected)),
+ * independent of the browser's filters, pages and 500-item listing
+ * publication request cap, kept only when Card Shellz exposes it and the
+ * vendor's override does not turn it off. Each batch is handed to the caller
+ * before the next is read, so a caller that keeps less than a candidate
+ * (loadSelectedProductIds) holds one batch of candidates at most.
  */
 async function* selectedCandidateBatches(tx: SelectedCatalogReader, now: Date): AsyncGenerator<DropshipListingCatalogCandidate[]> {
-  const [exposureRules, selectionRules] = await Promise.all([tx.catalog.listCatalogExposureRules(), tx.catalog.listSelectionRules(tx.vendorId)]);
+  const exposureRules = await tx.catalog.listCatalogExposureRules();
   let afterId = 0;
   for (;;) {
     const ids = await tx.listVariantIds(afterId, SELECTED_CATALOG_BATCH_SIZE);
@@ -38,8 +45,9 @@ async function* selectedCandidateBatches(tx: SelectedCatalogReader, now: Date): 
     const selected: DropshipListingCatalogCandidate[] = [];
     for (const candidate of candidates) {
       const exposure = evaluateDropshipCatalogExposure(candidate, exposureRules, now);
+      // Picked: the keyset yields only the vendor's picks (listVariantIds).
       const selection = evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
-        rules: selectionRules, rawAtpUnits: 0, override: overrideById.get(candidate.productVariantId) ?? null });
+        picked: true, rawAtpUnits: 0, override: overrideById.get(candidate.productVariantId) ?? null });
       if (exposure.exposed && selection.selected) selected.push(candidate);
     }
     yield selected;
@@ -126,17 +134,50 @@ export async function loadSelectedProductIds(tx: SelectedCatalogReader, now: Dat
 }
 
 /**
+ * The categories the vendor sells from: the Card Shellz categories of its
+ * selected sizes, ascending (the new-items notice, PLAN-B v4.1 §11.1 stage
+ * 3). Ids only, with no cap, one batch of candidates at a time, like
+ * loadSelectedProductIds; a selected size whose product has no category adds
+ * nothing.
+ */
+export async function loadSelectedCategoryIds(tx: SelectedCatalogReader, now: Date): Promise<number[]> {
+  const categoryIds = new Set<number>();
+  for await (const batch of selectedCandidateBatches(tx, now)) {
+    for (const candidate of batch) if (candidate.categoryId !== null) categoryIds.add(candidate.categoryId);
+  }
+  return [...categoryIds].sort((left, right) => left - right);
+}
+
+/**
  * Which of the given sizes the vendor's selection chooses now, by the same
  * evaluation as the scans above but reading only those sizes (a publish run
  * chunk's pre-filter, step 1 plan S2-5, §4.3 step 2; TESTS10): a size that is
- * not sellable, not exposed or not selected is left out.
+ * not sellable, not exposed, not picked or turned off is left out. The picks
+ * are a bounded lookup over the chunk's ids, not a keyset (PLAN-B v4.1 §9
+ * row 3b).
  */
 export async function selectedVariantIdsAmong(tx: SelectedCatalogReader, productVariantIds: readonly number[], now: Date): Promise<Set<number>> {
+  return decidedVariantIdsAmong(tx, productVariantIds, now, "picks");
+}
+
+/**
+ * Which of the given sizes Card Shellz offers the vendor now: sellable,
+ * exposed by the admin rules and not turned off by the vendor's override,
+ * picked or not (a step 1 save's plan, PLAN-B v4.1 §7.3, §8.3 step 5). The
+ * same evaluation as selectedVariantIdsAmong with every size taken as
+ * picked, so "selected" is always "picked and offered".
+ */
+export async function offeredVariantIdsAmong(tx: SelectedCatalogReader, productVariantIds: readonly number[], now: Date): Promise<Set<number>> {
+  return decidedVariantIdsAmong(tx, productVariantIds, now, "every_size_picked");
+}
+
+async function decidedVariantIdsAmong(tx: SelectedCatalogReader, productVariantIds: readonly number[], now: Date,
+  picks: "picks" | "every_size_picked"): Promise<Set<number>> {
   const ids = [...new Set(productVariantIds)].sort((left, right) => left - right);
   if (ids.length === 0) return new Set();
   // One after another: the reader is one transaction's client, which runs one query at a time.
   const exposureRules = await tx.catalog.listCatalogExposureRules();
-  const selectionRules = await tx.catalog.listSelectionRules(tx.vendorId);
+  const pickedIds = picks === "picks" ? await tx.catalog.listPickedVariantIds(tx.vendorId, ids) : null;
   const candidates = await tx.catalog.listCatalogCandidates(ids);
   const overrides = await tx.catalog.listVariantOverrides({ vendorId: tx.vendorId, productVariantIds: ids });
   const overrideById = new Map(overrides.map((row) => [row.productVariantId, row]));
@@ -144,7 +185,8 @@ export async function selectedVariantIdsAmong(tx: SelectedCatalogReader, product
   for (const candidate of candidates) {
     const exposure = evaluateDropshipCatalogExposure(candidate, exposureRules, now);
     const selection = evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
-      rules: selectionRules, rawAtpUnits: 0, override: overrideById.get(candidate.productVariantId) ?? null });
+      picked: pickedIds === null || pickedIds.has(candidate.productVariantId), rawAtpUnits: 0,
+      override: overrideById.get(candidate.productVariantId) ?? null });
     if (exposure.exposed && selection.selected) selected.add(candidate.productVariantId);
   }
   return selected;

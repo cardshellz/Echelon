@@ -45,3 +45,33 @@ export async function readCatalogStockSelectionFacts(client: StockSelectionQuery
   [input.productId, [...new Set(input.productVariantIds)]])).rows : [];
   return { product: productSchema.parse(product), variants: z.array(variantSchema).parse(variants) };
 }
+
+/** One size's facts with its own product's (readCatalogStockSelectionFactsForVariants). */
+export interface CatalogStockVariantFacts {
+  product: z.infer<typeof productSchema>;
+  variant: z.infer<typeof variantSchema>;
+}
+
+/**
+ * The same facts as readCatalogStockSelectionFacts for sizes of any products,
+ * each size with its own product, in one statement (the dropship selection
+ * effects reader decides a save's touched sizes across products, PLAN-B v4.1
+ * §7.7). A requested id with no catalog row is absent, as there. Ascending
+ * by size id.
+ */
+export async function readCatalogStockSelectionFactsForVariants(client: StockSelectionQueryClient,
+  variantIds: readonly number[]): Promise<CatalogStockVariantFacts[]> {
+  const ids = [...new Set(z.array(id).parse(variantIds))];
+  if (ids.length === 0) return [];
+  const rows = (await client.query<Record<string, unknown>>(`SELECT pv.id,pv.product_id AS "productId",pv.sku,
+    pv.uom_type AS "uomType",pv.is_active AS "isActive",pv.requires_shipping AS "requiresShipping",
+    pv.track_inventory AS "trackInventory",pv.sales_eligibility AS "salesEligibility",
+    pv.ebay_listing_excluded AS "ebayListingExcluded",
+    json_build_object('id',p.id,'isActive',p.is_active,'status',p.status,'productType',p.product_type,
+      'category',p.category,'ebayListingExcluded',p.ebay_listing_excluded,
+      'productLineIds',ARRAY(SELECT product_line_id FROM catalog.product_line_products
+        WHERE product_id=p.id ORDER BY product_line_id)) AS product
+    FROM catalog.product_variants pv INNER JOIN catalog.products p ON p.id=pv.product_id
+    WHERE pv.id=ANY($1::integer[]) ORDER BY pv.id`, [ids])).rows;
+  return rows.map(({ product, ...variant }) => ({ product: productSchema.parse(product), variant: variantSchema.parse(variant) }));
+}

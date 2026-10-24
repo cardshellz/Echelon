@@ -212,6 +212,9 @@ export interface DropshipDogfoodReadinessItem {
     dropshipOmsChannelCount: number;
     defaultWarehouseId: number | null;
     adminCatalogIncludeRuleCount: number;
+    /** How many sizes the vendor picked (PLAN-B v4.1 V17). */
+    vendorSelectedItemCount: number;
+    /** @deprecated One release only: the same value as `vendorSelectedItemCount`, for an older admin page. */
     vendorSelectionIncludeRuleCount: number;
     activeShippingBoxCount: number;
     activeShippingZoneRuleCount: number;

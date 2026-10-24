@@ -14,8 +14,14 @@ import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "./catalog-scope";
  * DUX13). The server sends what its parse returns, so nothing unlisted leaves.
  */
 
-/** Which rows the catalog GET returns by their selection decision. `selectedOnly=true` is the one-release alias of `selected`. */
-export const DROPSHIP_CATALOG_SELECTION_FILTERS = ["all", "selected", "not_selected"] as const;
+/**
+ * Which rows the catalog GET returns by their selection decision. `selectedOnly=true` is the one-release alias of
+ * `selected`. `new` (PR B, PLAN-B v4.1 §11.4) is the new-items notice's Review: the sizes Card Shellz added that are
+ * new for the vendor (`GET /api/dropship/catalog/new-items` counts the same sizes), in the `categoryId` sent, or in
+ * every category the vendor sells from when none is sent. An older server answers a page that sends it 503 first
+ * (its `clientVersion` check), never every row.
+ */
+export const DROPSHIP_CATALOG_SELECTION_FILTERS = ["all", "selected", "not_selected", "new"] as const;
 export type DropshipCatalogSelectionFilter = (typeof DROPSHIP_CATALOG_SELECTION_FILTERS)[number];
 
 /** What an `idsOnly` read is for: the ids to add (not selected) or to remove (selected). */
@@ -41,6 +47,10 @@ export const DROPSHIP_CATALOG_READ_ERROR_CODES = {
    * all read it from here, so a rename on one side cannot silently break the other (review CT4).
    */
   rulesRetired: "DROPSHIP_SELECTION_RULES_RETIRED",
+  /** 400: "Got it" named an arrival past the newest one (PLAN-B v4.1 §11.4, §14); the page reads the notice again. */
+  noticeAcknowledgeInvalid: "DROPSHIP_CATALOG_NOTICE_ACK_INVALID",
+  /** 400: a new-items request (the acknowledge body, or the service's own input) failed its schema. */
+  newItemsInvalidInput: "DROPSHIP_CATALOG_NEW_ITEMS_INVALID_INPUT",
 } as const;
 
 /** The `reason` a catalog read answers a page that is newer than the server with (503, transient). */
@@ -48,6 +58,8 @@ export const DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON = "page_newer_than_server";
 
 const count = z.number().int().nonnegative();
 const id = z.number().int().positive();
+/** An arrival id (`dropship.dropship_catalog_arrivals.id`, bigint): a whole number the page can hold exactly. */
+const arrivalId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 
 /** The catalog GET's counts for its filter, apart from `selection`: rows that match, and how many of them are selected. */
 export const dropshipCatalogReadSummarySchema = z.object({
@@ -103,3 +115,52 @@ export const dropshipCatalogSelectionSummarySchema = z.object({
   message: "A store's live and not live counts add up to the selected total.",
 });
 export type DropshipCatalogSelectionSummary = z.infer<typeof dropshipCatalogSelectionSummarySchema>;
+
+/**
+ * `GET /api/dropship/catalog/new-items` (PLAN-B v4.1 §11.4): per category the
+ * vendor sells from, the sizes Card Shellz added that are new for the vendor
+ * since its last "Got it" (`seen_through`): not part of the baseline, still
+ * offered, not turned off and not picked. A category without new sizes, or
+ * without a mark yet, is not listed. `throughArrivalId` is what "Got it" sends
+ * back. Read only; computed live.
+ */
+export const dropshipCatalogNewItemsAnswerSchema = z.object({
+  categories: z.array(z.object({
+    categoryId: id,
+    categoryName: z.string(),
+    productCount: z.number().int().positive(),
+    sizeCount: z.number().int().positive(),
+    throughArrivalId: arrivalId,
+  })),
+});
+export type DropshipCatalogNewItemsAnswer = z.infer<typeof dropshipCatalogNewItemsAnswerSchema>;
+
+/**
+ * Only the page version of a step 1 POST body, read before its strict schema
+ * (§8.1, SAFETY-13): optional, a whole number ≥ 1; every other field passes
+ * through untouched, so a later page's field never turns into a 400 here.
+ */
+export const dropshipPageVersionBodySchema = z.object({
+  clientVersion: z.number().int().positive().optional(),
+}).passthrough();
+
+/**
+ * `POST /api/dropship/catalog/new-items/acknowledge` ("Got it", §11.4): both
+ * watermarks of the vendor's mark of the category move up to
+ * `throughArrivalId`. Strict: an unknown field is refused (400). The vendor is
+ * always the session's; the body never names one.
+ */
+export const dropshipCatalogNoticeAcknowledgeRequestSchema = z.object({
+  clientVersion: z.number().int().positive().optional(),
+  categoryId: id.max(2_147_483_647),
+  throughArrivalId: arrivalId,
+}).strict();
+export type DropshipCatalogNoticeAcknowledgeRequest = z.infer<typeof dropshipCatalogNoticeAcknowledgeRequestSchema>;
+
+/** The acknowledge answer: `already_seen` when the mark was already there (nothing written, no audit row). */
+export const dropshipCatalogNoticeAcknowledgeAnswerSchema = z.object({
+  outcome: z.enum(["acknowledged", "already_seen"]),
+  categoryId: id,
+  seenThroughArrivalId: arrivalId,
+});
+export type DropshipCatalogNoticeAcknowledgeAnswer = z.infer<typeof dropshipCatalogNoticeAcknowledgeAnswerSchema>;

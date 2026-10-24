@@ -17,6 +17,7 @@ import {
   hiddenRunExpired,
   hiddenRunIdFromStorageKey,
   hiddenRunStorageKey,
+  isOlderCatalogServerError,
   isRunFinished,
   isTransientPublishError,
   mergeSelectedPages,
@@ -539,7 +540,8 @@ export function PublishStep(props: PublishStepProps) {
 
   const shownMore = moreProblems?.runId === runId && runDetail && moreProblems.afterFirstPage === firstPageLastId(runDetail) ? moreProblems : null;
   const firstIds = new Set(runDetail?.problems.items.map((problem) => problem.productVariantId) ?? []);
-  const summarySiteUpdating = props.summary.isFetching && props.summary.failureCount > 0 && isDropshipSiteUpdatingError(props.summary.failureReason);
+  // An older catalog server's 503 for this newer page is "updating" too (review round 1 CLI-2).
+  const summarySiteUpdating = props.summary.isFetching && props.summary.failureCount > 0 && isOlderCatalogServerError(props.summary.failureReason);
   // Any other passing failure of the count, while it is read again (or waits for the network): neutral words instead
   // of a blank card for up to 7 minutes (verify VC5).
   const summaryRetrying = !summarySiteUpdating && !props.summary.data

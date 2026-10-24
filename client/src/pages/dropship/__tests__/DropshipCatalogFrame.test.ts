@@ -193,7 +193,9 @@ describe("catalog page steps", () => {
     expect(shell).toContain("onClick={() => leaveGuard(() => { void signOut(); })}");
     expect(shell).not.toContain("onClick={() => setLocation(href)}");
     // Step 1 reports its save while it runs; the question then offers no discard.
-    expect(source).toContain("{ changes: chooseChanges.marks.length, discard: discardChooseChanges, saving: chooseSaving }");
+    // One-time picks (PLAN-B v4.1 §12.1): the count is the ids to add and to remove.
+    expect(source).toContain("const chooseChangeCount = chooseChanges.add.size + chooseChanges.remove.size;");
+    expect(source).toContain("{ changes: chooseChangeCount, discard: discardChooseChanges, saving: chooseSaving }");
     expect(guard).toContain("const saving = anyDraftSaving(asking);");
     expect(guard).toContain("<AlertDialogCancel>{LEAVE_WHILE_SAVING_WORDS.stay}</AlertDialogCancel>");
     const savingStart = guard.indexOf("{saving ? (");

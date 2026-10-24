@@ -49,7 +49,7 @@ import {
   isPausedForFunding,
   type VendorStandingNotice,
 } from "@/lib/dropship-vendor-standing";
-import { isOnboardingVendor, walletTodoDetail } from "@/lib/dropship-onboarding";
+import { describeChosenItems, isOnboardingVendor, walletTodoDetail } from "@/lib/dropship-onboarding";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type DropshipWalletLedgerEntry = DropshipWalletResponse["wallet"]["recentLedger"][number];
@@ -868,7 +868,7 @@ function launchStepDetail(step: DropshipOnboardingStep, onboarding: DropshipOnbo
   }
   if (step.key === "catalog_selection") {
     return onboarding.catalog.hasVendorSelection
-      ? `${onboarding.catalog.vendorSelectionRuleCount} vendor selection rule(s) saved.`
+      ? `${describeChosenItems(onboarding.catalog.vendorSelectedItemCount)}.`
       : "No product selection has been saved yet.";
   }
   return walletGateDetail(onboarding);
@@ -884,7 +884,7 @@ function catalogMetricValue(onboarding: DropshipOnboardingState | undefined): st
   if (!onboarding) return "Loading";
   if (!onboarding.catalog.adminCatalogAvailable) return "Not available";
   if (!onboarding.catalog.hasVendorSelection) return "Selection needed";
-  return `${onboarding.catalog.vendorSelectionRuleCount} rule(s)`;
+  return describeChosenItems(onboarding.catalog.vendorSelectedItemCount);
 }
 
 function catalogMetricDetail(onboarding: DropshipOnboardingState | undefined): string {

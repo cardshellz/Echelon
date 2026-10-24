@@ -100,7 +100,7 @@ class FakeTransaction {
   readonly catalog = {
     loadStoreContext: vi.fn(async () => { this.calls.push("gate"); return storeContext; }),
     listCatalogExposureRules: vi.fn(async () => { this.calls.push("exposureRules"); return [{ id: 1, scopeType: "catalog", action: "include" }]; }),
-    listSelectionRules: vi.fn(async () => { this.calls.push("selectionRules"); return [{ id: 2, scopeType: "catalog", action: "include", isActive: true }]; }),
+    listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => { this.calls.push("picks"); return new Set(ids); }),
     listCatalogCandidates: vi.fn(async (ids: readonly number[]) => {
       this.calls.push("candidates");
       return ids.flatMap((id) => this.catalogSizes.get(id) ?? []);
@@ -269,7 +269,7 @@ describe("DropshipListingProductSettingsService.saveForMember (W5, plan PR 9, 6.
     expect(repository.order).toEqual([`execute:${KEY}`]);
     expect(repository.tx.calls).toEqual([
       "gate", "probe", "listProductSizes", "lockCatalog", "listProductSizes",
-      "exposureRules", "selectionRules", "candidates", "overrides",
+      "exposureRules", "candidates", "overrides", "picks",
       "loadProducts", "savedPrices",
       "pricingProfile", "loadCategories", "existingListings", "costs", "pricingPolicies",
       "saveProduct", "sizePrice:101", "w9:101", "clearSizeLeftovers",

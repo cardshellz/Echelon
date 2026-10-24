@@ -64,10 +64,7 @@ import type {
   DropshipVendorProvisioningService,
 } from "../../application/dropship-vendor-provisioning-service";
 import type { DropshipCatalogExposureRule } from "../../domain/catalog-exposure";
-import type {
-  DropshipVendorSelectionRule,
-  DropshipVendorVariantOverride,
-} from "../../domain/vendor-selection";
+import type { DropshipVendorVariantOverride } from "../../domain/vendor-selection";
 import { ConfigDrivenDropshipMarketplaceListingProvider } from "../../infrastructure/dropship-config-driven-marketplace-listing.provider";
 import { toDropshipVendorListingPreview } from "../../application/dropship-listing-dtos";
 import type { DropshipListingPreviewResult as ClientListingPreviewResult } from "../../../../../client/src/lib/dropship-ops-surface";
@@ -169,6 +166,18 @@ describe("DropshipListingPreviewService", () => {
       },
     };
     service = new DropshipListingPreviewService(serviceDeps);
+  });
+
+  it("blocks a size the vendor did not pick, by its picks of the previewed sizes only (PLAN-B v4.1 §9 row 2)", async () => {
+    const picked = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(picked.rows[0].blockers.filter((blocker) => blocker.startsWith("selection:"))).toEqual([]);
+    expect(repository.pickReads.at(-1)?.productVariantIds).toEqual([101]);
+
+    repository.unpickedVariantIds = new Set([101]);
+    const unpicked = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(unpicked.rows[0].previewStatus).toBe("blocked");
+    expect(unpicked.rows[0].blockers).toContain("selection:missing_vendor_include_rule");
+    expect(unpicked.rows[0].selectionDecision).toMatchObject({ picked: false, selected: false });
   });
 
   it("reports the tier a SKU sells in and leaves an on-sale tier alone", async () => {
@@ -2209,15 +2218,13 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
     return [{ id: 1, scopeType: "catalog", action: "include" }];
   }
 
-  async listSelectionRules(): Promise<DropshipVendorSelectionRule[]> {
-    return [{
-      id: 2,
-      scopeType: "catalog",
-      action: "include",
-      autoConnectNewSkus: true,
-      autoListNewSkus: true,
-      isActive: true,
-    }];
+  /** Sizes the vendor did not pick; every other requested size is picked. */
+  unpickedVariantIds = new Set<number>();
+  readonly pickReads: Array<{ vendorId: number; productVariantIds: number[] }> = [];
+
+  async listPickedVariantIds(vendorId: number, productVariantIds: readonly number[]): Promise<Set<number>> {
+    this.pickReads.push({ vendorId, productVariantIds: [...productVariantIds] });
+    return new Set(productVariantIds.filter((id) => !this.unpickedVariantIds.has(id)));
   }
 
   async listCatalogCandidates(): Promise<DropshipListingCatalogCandidate[]> {

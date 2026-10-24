@@ -19,6 +19,8 @@ import {
   type ListingPushRunView,
 } from "@shared/dropship/listing-push-runs";
 import {
+  DROPSHIP_CATALOG_READ_ERROR_CODES,
+  DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON,
   dropshipCatalogReadSummarySchema,
   type DropshipCatalogSelectionSummary,
 } from "@shared/dropship/vendor-catalog-reads";
@@ -47,10 +49,11 @@ import { PUBLISH_WORDS, type RunCountParts } from "./dropship-catalog-publish-wo
 /**
  * The catalog code version this page was built for (§4.8, CHK7): every catalog
  * read sends it, and a server older than the page answers 503 "try again".
- * Equals the server's `DROPSHIP_CATALOG_CODE_VERSION` in PR A
- * (server/modules/dropship/domain/catalog-code-version.ts); PR B sets both to 2.
+ * Equals the server's `DROPSHIP_CATALOG_CODE_VERSION`
+ * (server/modules/dropship/domain/catalog-code-version.ts): 2 since PR B
+ * (one-time picks), set with the server's in one commit (PLAN-B v4.1 V9).
  */
-export const CATALOG_PAGE_CLIENT_VERSION = 1;
+export const CATALOG_PAGE_CLIENT_VERSION = 2;
 /** Sizes per Check request: under the preview's 500 cap (createListingPushJobInputSchema), as the redesign asks (RD:568-570). */
 export const CHECK_CHUNK_SIZE = 200;
 /** "Selected items" reads 200 rows a page (the catalog read's `limit` cap) and shows at most 1,000 (as step 1 does). */
@@ -98,6 +101,21 @@ export function isTransientPublishError(error: unknown): boolean {
       || error.code === DROPSHIP_SITE_UPDATING_CODE || error.code === LISTING_PUSH_RUN_ERROR_CODES.busy;
   }
   return error instanceof TypeError || error instanceof SyntaxError;
+}
+
+/**
+ * An answer from code older than this page, while it is read again (the site-updating line, §12.2): the client-made
+ * `DROPSHIP_SITE_UPDATING` (an older server's HTML, or JSON without a field this page needs), or an older catalog
+ * server's own refusal of this page's version, 503 `DROPSHIP_SELECTION_WRITES_PAUSED` with reason
+ * `page_newer_than_server` (cea5cb027 dropship-vendor-catalog.routes.ts `assertPageNotNewerThanServer`: an A dyno
+ * answers every step 1 and step 3 catalog read of this page so; plan §4 row 3, §12.6; review round 1 CLI-2). Nothing
+ * else: no answer or a plain 5xx is not "Card Shellz is updating the site" (B2a deviation 4).
+ */
+export function isOlderCatalogServerError(error: unknown): boolean {
+  if (!(error instanceof DropshipApiError)) return false;
+  if (error.code === DROPSHIP_SITE_UPDATING_CODE) return true;
+  return error.status === 503 && error.code === DROPSHIP_CATALOG_READ_ERROR_CODES.writesPaused
+    && error.context?.reason === DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON;
 }
 
 export function isAbortError(error: unknown): boolean {

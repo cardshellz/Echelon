@@ -347,7 +347,7 @@ describe("lockCatalog", () => {
     }));
 
     expect(client.afterOwner()).toEqual([
-      "LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selection_rules, "
+      "LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selected_variants, "
         + "dropship.dropship_vendor_variant_overrides, catalog.product_line_products IN SHARE MODE",
       "SELECT id FROM catalog.product_categories WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE",
       "SELECT id FROM catalog.products WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE",
@@ -1141,7 +1141,7 @@ describe("the W5 reads (plan PR 9, 6.2 #1, #2, #6)", () => {
   it("types tx.catalog without the readers that commit on the transaction's client (plan 6.2 #2, R9)", () => {
     type Catalog = ListingSettingWriteTransaction["catalog"];
     expectTypeOf<keyof Catalog>().toEqualTypeOf<"loadStoreContext" | "listCatalogCandidates" | "listCatalogExposureRules"
-      | "listSelectionRules" | "listVariantOverrides" | "listExistingListings" | "listSavedListingPrices" | "listPricingPolicies"
+      | "listPickedVariantIds" | "listVariantOverrides" | "listExistingListings" | "listSavedListingPrices" | "listPricingPolicies"
       | "getStoreListingConfig">();
     expectTypeOf<keyof ListingSettingPreflightTransaction["catalog"]>().toEqualTypeOf<"loadStoreContext" | "getStoreListingConfig">();
     // Never called: these lines are checked by the compiler (npm run check:tests). The first three are the

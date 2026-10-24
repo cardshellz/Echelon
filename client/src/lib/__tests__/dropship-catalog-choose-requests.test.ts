@@ -1,356 +1,554 @@
-import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
+import { DROPSHIP_CATALOG_READ_ERROR_CODES } from "@shared/dropship/vendor-catalog-reads";
 import {
-  buildChooseSelectionSave,
-  chooseMarksKey,
-  rulesFingerprint,
-  toSelectionRuleInput,
-  type ChooseCatalogRow,
-  type ChooseMark,
-  type ChooseSelectionRule,
+  SELECTION_CHANGE_ERROR_CODES,
+  selectionChangeRequestSchema,
+  type SelectionChangeAnswer,
+  type SelectionChangePreviewAnswer,
+  type SelectionChangePreviewRequest,
+  type SelectionChangeRequest,
+} from "@shared/dropship/vendor-selection-changes";
+import {
+  CHOOSE_BUSY_BACKOFF_MS,
+  CHOOSE_PAUSED_MAX_SENDS,
+  CHOOSE_SAVE_BACKOFF_MS,
+  PAUSED_RETRY_WINDOW_MS,
+  type ChooseChanges,
 } from "../dropship-catalog-choose";
-import { ChooseUnverifiedAnswerError } from "../dropship-catalog-choose";
 import {
-  checkChoosePending,
-  ChooseReadError,
+  CHOOSE_EVERYTHING_FILTERS,
   chooseCatalogQueryOptions,
   chooseCatalogUrl,
+  chooseCategoriesQueryOptions,
+  chooseCategoriesUrl,
+  chooseCategoryFilters,
+  chooseIdsQueryOptions,
+  chooseIdsUrl,
+  choosePendingAfter,
   chooseReadErrorData,
-  putChooseSelectionRules,
+  chooseUndoneAfterUnsure,
+  describeChooseSaveOutcome,
+  describeChooseSaveStatus,
+  postChooseChange,
+  postChoosePreview,
   readChooseCatalogPage,
+  readChooseIds,
   runChooseSave,
-  selectionRulesQueryOptions,
+  SELECTION_CHANGES_PREVIEW_URL,
+  SELECTION_CHANGES_URL,
+  type ChooseFetch,
   type ChoosePendingSave,
-  type ChooseSaveBody,
   type ChooseSaveDeps,
+  type ChooseSaveOutcome,
+  type ChooseSaveStatus,
 } from "../dropship-catalog-choose-requests";
 import { CHOOSE_WORDS } from "../dropship-catalog-choose-words";
-import { DropshipApiError } from "../dropship-ops-surface";
+import { retryPublishRead } from "../dropship-catalog-publish";
+import { DROPSHIP_SITE_UPDATING_CODE, DropshipApiError } from "../dropship-ops-surface";
+import { NEW_VERSION_SETTLE_MS, OLDER_PROCESS_GRACE_MS } from "../../../../server/modules/dropship/domain/catalog-code-version";
 
-function rule(id: number, scopeType: ChooseSelectionRule["scopeType"], action: ChooseSelectionRule["action"], target: Partial<ChooseSelectionRule> = {}): ChooseSelectionRule {
+function frozenSet(ids: Iterable<number>): ReadonlySet<number> {
+  const set = new Set(ids);
+  const refuse = (): never => { throw new Error("a change set was mutated"); };
+  Object.assign(set, { add: refuse, delete: refuse, clear: refuse });
+  return Object.freeze(set);
+}
+
+function changes(add: Iterable<number>, remove: Iterable<number>, baseRevisionId: number | null = 7): ChooseChanges {
+  return Object.freeze({ add: frozenSet(add), remove: frozenSet(remove), baseRevisionId });
+}
+
+const CHANGES = changes([105, 102], [101]);
+const range = (from: number, count: number) => Array.from({ length: count }, (_, index) => from + index);
+const HASH_A = "a".repeat(64);
+const HASH_B = "b".repeat(64);
+
+function preview(overrides: Partial<SelectionChangePreviewAnswer> = {}): SelectionChangePreviewAnswer {
   return Object.freeze({
-    id, revisionId: 3, scopeType, action, productLineId: null, productId: null, productVariantId: null, category: null,
-    autoConnectNewSkus: action === "include", autoListNewSkus: false, priority: action === "include" ? 100 : 200,
-    metadata: { source: "portal_catalog" }, isActive: true, ...target,
-  });
+    headRevisionId: 7, toAdd: 2, toRemove: 1, alreadySelected: 0, alreadyNotSelected: 0, skipped: { count: 0, first: [] },
+    selectedBefore: 10, selectedAfter: 11, cap: 10_000, overCapAfter: false, refused: null,
+    effects: [{ storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 1, startsSelling: 2 }],
+    effectsHash: HASH_A,
+    ...overrides,
+  } as SelectionChangePreviewAnswer);
 }
 
-const RULES: readonly ChooseSelectionRule[] = Object.freeze([
-  rule(1, "variant", "include", { productVariantId: 101 }),
-  rule(2, "category", "include", { category: "Mailers", priority: 50 }),
-]);
-const FINGERPRINT = rulesFingerprint(RULES);
-const ADD_105: ChooseMark = Object.freeze<ChooseMark>({ productVariantId: 105, to: "selected", basis: { reason: "missing_vendor_include_rule", includeRuleIds: [], excludeRuleIds: [] } });
-const REMOVE_101: ChooseMark = Object.freeze<ChooseMark>({ productVariantId: 101, to: "not_selected", basis: { reason: "selected", includeRuleIds: [1, 2], excludeRuleIds: [] } });
-const MARKS = Object.freeze([REMOVE_101, ADD_105]);
-
-/** The rules after a committed save of `sent`: the same content under new ids. */
-function committed(sent: ChooseSaveBody, firstId = 900): ChooseSelectionRule[] {
-  return sent.rules.map((input, index) => rule(firstId + index, input.scopeType, input.action, {
-    productLineId: input.productLineId ?? null, productId: input.productId ?? null, productVariantId: input.productVariantId ?? null,
-    category: input.category ?? null, autoConnectNewSkus: input.autoConnectNewSkus, autoListNewSkus: input.autoListNewSkus,
-    priority: input.priority, metadata: input.metadata,
-  }));
+function answer(overrides: Partial<SelectionChangeAnswer> = {}): SelectionChangeAnswer {
+  const { headRevisionId: _head, refused: _refused, ...planned } = preview();
+  return Object.freeze({ ...planned, revisionId: 8, confirmedEffectsHash: HASH_A, drifted: false, ...overrides } as SelectionChangeAnswer);
 }
 
-const busy = () => new DropshipApiError({ status: 409, code: "PUBLICATION_SELECTION_BUSY",
-  message: "A stock update is finishing. Your selection was not saved; retry it in a moment." });
+const api = (status: number, code: string | null, context: Record<string, unknown> | null = null) =>
+  new DropshipApiError({ status, code, context, message: "Server words." });
+const busy = () => api(409, SELECTION_CHANGE_ERROR_CODES.busy);
+const paused = () => api(503, SELECTION_CHANGE_ERROR_CODES.writesPaused, { reason: "older_version_running" });
 
-/** Injected deps with scripted answers; every call is recorded in order. */
-function harness(reads: Array<readonly ChooseSelectionRule[] | Error>, puts: Array<{ idempotentReplay: boolean } | Error>) {
+type Scripted<T> = Array<T | Error>;
+
+/** Injected deps with scripted answers, an injected clock that sleeps advance, and every call recorded in order. */
+function harness(input: {
+  previews?: Scripted<SelectionChangePreviewAnswer>;
+  posts?: Scripted<{ answer: SelectionChangeAnswer; replay: boolean }>;
+  confirms?: boolean[];
+  /** Milliseconds each network call takes on the clock. */
+  callMs?: number;
+  /** False: the clock never moves (sleeps included). */
+  clockMoves?: boolean;
+} = {}) {
+  const previews = [...(input.previews ?? [])];
+  const posts = [...(input.posts ?? [])];
+  const confirms = [...(input.confirms ?? [])];
+  const moves = input.clockMoves !== false;
+  let clock = 1_000_000;
   const calls: string[] = [];
-  const bodies: ChooseSaveBody[] = [];
   const sleeps: number[] = [];
+  const statuses: ChooseSaveStatus[] = [];
+  const previewed: SelectionChangePreviewRequest[] = [];
+  const posted: SelectionChangeRequest[] = [];
+  const questions: Array<{ preview: SelectionChangePreviewAnswer; effectsChanged: boolean }> = [];
   let keys = 0;
+  function next<T>(script: Scripted<T>, what: string): T {
+    if (moves) clock += input.callMs ?? 0;
+    const value = script.shift();
+    if (value === undefined) throw new Error(`unscripted ${what}`);
+    if (value instanceof Error) throw value;
+    return value;
+  }
   const deps: ChooseSaveDeps = {
-    readRules: async () => {
-      calls.push("GET");
-      const next = reads.shift();
-      if (next === undefined) throw new Error("unscripted read");
-      if (next instanceof Error) throw next;
-      return next;
+    preview: async (body) => { calls.push("preview"); previewed.push(body); return next(previews, "preview"); },
+    post: async (body) => { calls.push("post"); posted.push(body); return next(posts, "post"); },
+    confirm: async (shown, context) => {
+      calls.push("confirm");
+      questions.push({ preview: shown, effectsChanged: context.effectsChanged });
+      return confirms.shift() ?? true;
     },
-    putRules: async (body) => {
-      calls.push("PUT");
-      bodies.push(body);
-      const next = puts.shift();
-      if (next === undefined) throw new Error("unscripted put");
-      if (next instanceof Error) throw next;
-      return next;
-    },
-    sleep: async (ms) => { sleeps.push(ms); },
-    newKey: () => { keys += 1; return `catalog-selection:key-${keys}`; },
+    sleep: async (ms) => { sleeps.push(ms); if (moves) clock += ms; },
+    now: () => clock,
+    newKey: () => `catalog-selection:key-${++keys}`,
+    onStatus: (status) => { statuses.push(status); },
   };
-  return { deps, calls, bodies, sleeps, keyCount: () => keys };
+  return { deps, calls, sleeps, statuses, previewed, posted, questions };
 }
 
-describe("runChooseSave", () => {
-  it("S1 saves on the first try: one fresh read, one PUT of exactly the builder's rules", async () => {
-    const run = harness([RULES], [{ idempotentReplay: false }]);
-    const outcome = await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null });
-    expect(outcome).toEqual({ kind: "saved", replay: false });
-    expect(run.calls).toEqual(["GET", "PUT"]);
-    expect(run.bodies).toEqual([{ idempotencyKey: "catalog-selection:key-1", rules: buildChooseSelectionSave(RULES, MARKS) }]);
+function sameKeyAndBody(posted: readonly SelectionChangeRequest[]) {
+  expect(posted.length).toBeGreaterThan(0);
+  for (const body of posted) expect(body).toEqual(posted[0]);
+}
+
+describe("reads (§12.2)", () => {
+  it("Q1 the list sends search, the category id, Show, no facets, this page's version, the page and 200 rows; never selectedOnly or a name", () => {
+    const url = chooseCatalogUrl({ search: "  toploader ", categoryId: 5, show: "not_selected" }, 2);
+    expect(url).toBe("/api/dropship/catalog?search=toploader&categoryId=5&selection=not_selected&includeFacets=false&clientVersion=2&page=2&limit=200");
+    expect(chooseCatalogUrl({ search: "", categoryId: null, show: "all" }, 1))
+      .toBe("/api/dropship/catalog?selection=all&includeFacets=false&clientVersion=2&page=1&limit=200");
+    expect(chooseCatalogUrl({ search: "x".repeat(250), categoryId: null, show: "selected" }, 1)).toContain(`search=${"x".repeat(200)}&`);
+    for (const value of [url, chooseIdsUrl({ search: "a", categoryId: 5, show: "all" }, "add")]) {
+      expect(value).not.toMatch(/selectedOnly|category=|productLine|productId/);
+    }
+  });
+
+  it("Q2 the id reads: Check all with the table's filters, a category's box with its id only, Select everything with none", () => {
+    expect(chooseIdsUrl({ search: "sleeve", categoryId: null, show: "selected" }, "remove"))
+      .toBe("/api/dropship/catalog?search=sleeve&selection=selected&idsOnly=true&purpose=remove&clientVersion=2");
+    expect(chooseIdsUrl(chooseCategoryFilters(12), "add")).toBe("/api/dropship/catalog?categoryId=12&selection=all&idsOnly=true&purpose=add&clientVersion=2");
+    expect(chooseIdsUrl(CHOOSE_EVERYTHING_FILTERS, "add")).toBe("/api/dropship/catalog?selection=all&idsOnly=true&purpose=add&clientVersion=2");
+    expect(chooseCategoriesUrl()).toBe("/api/dropship/catalog/categories?clientVersion=2");
+  });
+
+  function respond(body: unknown, status = 200, contentType = "application/json"): Response {
+    return new Response(typeof body === "string" ? body : JSON.stringify(body), { status, headers: { "content-type": contentType } });
+  }
+  function fetcher(...answers: Response[]): { fetch: ChooseFetch; requests: Array<{ url: string; init?: RequestInit }> } {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    return {
+      requests,
+      fetch: async (url, init) => {
+        requests.push({ url, init });
+        const next = answers.shift();
+        if (!next) throw new Error("unscripted fetch");
+        return next;
+      },
+    };
+  }
+  const goodRow = {
+    productId: 1, productVariantId: 2, productSku: null, productName: "P", variantSku: null, variantName: "S", category: null, categoryId: 5,
+    selectionDecision: { selected: true, reason: "selected", marketplaceQuantity: 4, picked: true },
+  };
+
+  it("Q3 a page from older code (HTML, or a row without picked) is site updating; a page of the contract is read", async () => {
+    const html = fetcher(respond("<!doctype html><html></html>", 200, "text/html"));
+    await expect(readChooseCatalogPage("/x", html.fetch)).rejects.toMatchObject({ code: DROPSHIP_SITE_UPDATING_CODE, context: { reason: "not_json" } });
+    const { picked: _picked, ...olderDecision } = goodRow.selectionDecision;
+    const older = fetcher(respond({ rows: [{ ...goodRow, selectionDecision: olderDecision }], total: 1, page: 1, limit: 200, facets: null,
+      summary: { matching: 1, matchingSelected: 1 } }));
+    await expect(readChooseCatalogPage("/x", older.fetch)).rejects.toMatchObject({ code: DROPSHIP_SITE_UPDATING_CODE, context: { reason: "answer_shape" } });
+    const good = fetcher(respond({ rows: [goodRow], total: 1, page: 1, limit: 200, facets: null, summary: { matching: 1, matchingSelected: 1 } }));
+    expect((await readChooseCatalogPage("/x", good.fetch)).rows[0].selectionDecision.picked).toBe(true);
+    expect(good.requests[0].init).toMatchObject({ method: "GET", credentials: "include" });
+  });
+
+  it("Q4 every step 1 read retries the transient failures on step 3's schedule, never retry: false", () => {
+    const filters = { search: "", categoryId: null, show: "all" as const };
+    expect(chooseCatalogQueryOptions(filters).retry).toBe(retryPublishRead);
+    expect(chooseCategoriesQueryOptions().retry).toBe(retryPublishRead);
+    expect(chooseIdsQueryOptions(filters, "add").retry).toBe(retryPublishRead);
+    expect(chooseCatalogQueryOptions(filters).queryKey).toEqual(["/api/dropship/catalog", "choose", { search: "", categoryId: null, show: "all" }]);
+    expect(retryPublishRead(0, new DropshipApiError({ status: 503, code: DROPSHIP_SITE_UPDATING_CODE, message: "x" }))).toBe(true);
+    expect(retryPublishRead(0, new DropshipApiError({ status: 422, code: DROPSHIP_CATALOG_READ_ERROR_CODES.idsTooMany, message: "x" }))).toBe(false);
+  });
+
+  it("Q5 an id read whose needed list is null is off its contract; the other list may be null", async () => {
+    const offContract = fetcher(respond({ selectedIds: [1], notSelectedIds: null, total: 10_050 }));
+    await expect(readChooseIds(CHOOSE_EVERYTHING_FILTERS, "add", offContract.fetch)).rejects.toMatchObject({ code: "DROPSHIP_CATALOG_IDS_OFF_CONTRACT" });
+    const fine = fetcher(respond({ selectedIds: null, notSelectedIds: [3, 4], total: 10_052 }));
+    expect(await readChooseIds(CHOOSE_EVERYTHING_FILTERS, "add", fine.fetch)).toEqual({ selectedIds: null, notSelectedIds: [3, 4], total: 10_052 });
+    expect(fine.requests[0].url).toBe("/api/dropship/catalog?selection=all&idsOnly=true&purpose=add&clientVersion=2");
+  });
+
+  it("Q6 a failure card names the code and, for older code's answer, why", () => {
+    expect(chooseReadErrorData(new DropshipApiError({ status: 503, code: DROPSHIP_SITE_UPDATING_CODE, context: { reason: "answer_shape" }, message: "x" })))
+      .toEqual({ "data-error-code": DROPSHIP_SITE_UPDATING_CODE, "data-error-reason": "answer_shape" });
+    expect(chooseReadErrorData(new TypeError("Failed to fetch"))).toEqual({});
+  });
+
+  it("Q7 the two POSTs send JSON to their routes; the save tells a replay (200) from a first answer (201)", async () => {
+    const body = { clientVersion: 2, expectedRevisionId: 7, add: { productVariantIds: [1] }, remove: { productVariantIds: [] } };
+    const previewFetch = fetcher(respond(preview()));
+    expect(await postChoosePreview(body, previewFetch.fetch)).toEqual(preview());
+    expect(previewFetch.requests[0]).toMatchObject({ url: SELECTION_CHANGES_PREVIEW_URL,
+      init: { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } });
+    const saveBody = { ...body, idempotencyKey: "catalog-selection:k-1", expectedEffectsHash: HASH_A };
+    const first = fetcher(respond(answer(), 201));
+    expect(await postChooseChange(saveBody, first.fetch)).toEqual({ answer: answer(), replay: false });
+    expect(first.requests[0].url).toBe(SELECTION_CHANGES_URL);
+    const replay = fetcher(respond(answer(), 200));
+    expect((await postChooseChange(saveBody, replay.fetch)).replay).toBe(true);
+  });
+
+  it("Q8 (C11) the save answered HTML, then a 413 without code, then writes paused, then saved: same key and body, paused shown", async () => {
+    const saveFetch = fetcher(
+      respond("<!doctype html>", 200, "text/html"),
+      respond({ error: { message: "request entity too large" } }, 413),
+      respond({ error: { code: SELECTION_CHANGE_ERROR_CODES.writesPaused, message: "x", context: { reason: "older_version_running" } } }, 503),
+      respond(answer(), 201),
+    );
+    const run = harness({ previews: [preview()] });
+    run.deps.post = (sent) => { run.posted.push(sent); return postChooseChange(sent, saveFetch.fetch); };
+    const outcome = await runChooseSave(run.deps, { changes: CHANGES, pending: null });
+    expect(outcome).toEqual({ kind: "saved", answer: answer(), replay: false });
+    expect(run.posted).toHaveLength(4);
+    sameKeyAndBody(run.posted);
+    expect(saveFetch.requests.map((request) => request.init?.body)).toEqual(Array(4).fill(JSON.stringify(run.posted[0])));
+    expect(run.sleeps).toEqual([2_000, 4_000, 8_000]);
+    expect(run.statuses).toEqual(["paused", "paused", "paused"]);
+  });
+});
+
+describe("the save (§12.4)", () => {
+  it("S1 preview, question, save: both bodies carry clientVersion 2, the base revision and every id; the save adds the key and the confirmed hash", async () => {
+    const run = harness({ previews: [preview()], posts: [{ answer: answer(), replay: false }] });
+    const outcome = await runChooseSave(run.deps, { changes: CHANGES, pending: null });
+    expect(outcome).toEqual({ kind: "saved", answer: answer(), replay: false });
+    expect(run.calls).toEqual(["preview", "confirm", "post"]);
+    expect(run.previewed[0]).toEqual({ clientVersion: 2, expectedRevisionId: 7, add: { productVariantIds: [102, 105] }, remove: { productVariantIds: [101] } });
+    expect(run.posted[0]).toEqual({ ...run.previewed[0], idempotencyKey: "catalog-selection:key-1", expectedEffectsHash: HASH_A });
+    expect(run.questions).toEqual([{ preview: preview(), effectsChanged: false }]);
+    expect(describeChooseSaveOutcome(outcome)).toEqual({ kind: "saved", message: "Saved. 2 added, 1 removed." });
+  });
+
+  it("S2 a head revision other than the base stops before the question: stale, nothing sent, the changes untouched", async () => {
+    const run = harness({ previews: [preview({ headRevisionId: 9 })] });
+    expect(await runChooseSave(run.deps, { changes: CHANGES, pending: null })).toEqual({ kind: "stale", headRevisionId: 9 });
+    expect(run.calls).toEqual(["preview"]);
+    expect(describeChooseSaveOutcome({ kind: "stale", headRevisionId: 9 })).toEqual({ kind: "error", message: CHOOSE_WORDS.stale });
+  });
+
+  it("S3 Cancel sends nothing; a change over the cap is stopped before the question", async () => {
+    const cancelled = harness({ previews: [preview()], confirms: [false] });
+    expect(await runChooseSave(cancelled.deps, { changes: CHANGES, pending: null })).toEqual({ kind: "cancelled" });
+    expect(cancelled.calls).toEqual(["preview", "confirm"]);
+    expect(describeChooseSaveOutcome({ kind: "cancelled" })).toBeNull();
+    const over = harness({ previews: [preview({ refused: "too_large", selectedAfter: 10_001, overCapAfter: true })] });
+    expect(await runChooseSave(over.deps, { changes: CHANGES, pending: null })).toEqual({ kind: "overCap", after: 10_001 });
+    expect(over.calls).toEqual(["preview"]);
+    expect(describeChooseSaveOutcome({ kind: "overCap", after: 10_001 })?.message).toBe(CHOOSE_WORDS.overCapAdd(10_001));
+  });
+
+  it("S4 busy: six more sends on 2, 4, 8, 15, 15, 15 s with savingStill, the same key and body each time, then busy", async () => {
+    const run = harness({ previews: [preview()], posts: Array.from({ length: 7 }, busy) });
+    const outcome = await runChooseSave(run.deps, { changes: CHANGES, pending: null });
+    expect(outcome.kind).toBe("busy");
+    expect(run.posted).toHaveLength(7);
+    sameKeyAndBody(run.posted);
+    expect(run.sleeps).toEqual([...CHOOSE_BUSY_BACKOFF_MS]);
+    expect(run.sleeps).toEqual([2_000, 4_000, 8_000, 15_000, 15_000, 15_000]);
+    expect(run.statuses).toEqual(Array(6).fill("savingStill"));
+    expect(describeChooseSaveStatus("savingStill")).toBe(CHOOSE_WORDS.savingStill);
+    expect(describeChooseSaveOutcome(outcome)).toEqual({ kind: "error", message: CHOOSE_WORDS.busy });
+    // The next press of the same changes sends the kept save again, with no preview and no question.
+    const kept = choosePendingAfter(outcome, null);
+    expect(kept?.body).toEqual(run.posted[0]);
+    const again = harness({ posts: [{ answer: answer(), replay: false }] });
+    expect((await runChooseSave(again.deps, { changes: CHANGES, pending: kept })).kind).toBe("saved");
+    expect(again.calls).toEqual(["post"]);
+    expect(again.posted[0]).toEqual(run.posted[0]);
+  });
+
+  it("S5 busy twice, then saved, with the same key", async () => {
+    const run = harness({ previews: [preview()], posts: [busy(), busy(), { answer: answer(), replay: false }] });
+    expect((await runChooseSave(run.deps, { changes: CHANGES, pending: null })).kind).toBe("saved");
+    sameKeyAndBody(run.posted);
+    expect(run.sleeps).toEqual([2_000, 4_000]);
+  });
+
+  it("S6 paused: 2, 4, 8 s, then every 15 s on the injected clock until 420,000 ms since the first paused answer, then pausedStill", async () => {
+    expect(PAUSED_RETRY_WINDOW_MS).toBe(NEW_VERSION_SETTLE_MS + OLDER_PROCESS_GRACE_MS);
+    expect(PAUSED_RETRY_WINDOW_MS).toBe(420_000);
+    const run = harness({ previews: [preview()], posts: Array.from({ length: 40 }, paused) });
+    const outcome = await runChooseSave(run.deps, { changes: CHANGES, pending: null });
+    expect(outcome.kind).toBe("pausedStill");
+    // 32 sends: the window has passed at the 32nd answer (434 s), not at the 31st (419 s).
+    expect(run.posted).toHaveLength(32);
+    expect(run.posted).toHaveLength(CHOOSE_PAUSED_MAX_SENDS);
+    sameKeyAndBody(run.posted);
+    expect(run.sleeps).toEqual([2_000, 4_000, 8_000, ...Array(28).fill(15_000)]);
+    expect(run.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(434_000);
+    expect(run.statuses).toEqual(Array(31).fill("paused"));
+    expect(describeChooseSaveStatus("paused")).toBe(CHOOSE_WORDS.paused);
+    expect(describeChooseSaveOutcome(outcome)).toEqual({ kind: "error", message: CHOOSE_WORDS.pausedStill });
+    // The changes stay; the next press starts a new window with the same key and body.
+    const kept = choosePendingAfter(outcome, null);
+    expect(kept?.body).toEqual(run.posted[0]);
+    const again = harness({ posts: [paused(), { answer: answer(), replay: true }] });
+    expect(await runChooseSave(again.deps, { changes: CHANGES, pending: kept })).toEqual({ kind: "saved", answer: answer(), replay: true });
+    expect(again.posted).toEqual([run.posted[0], run.posted[0]]);
+    expect(again.sleeps).toEqual([2_000]);
+  });
+
+  it("S7 the window is time, not sends: slow answers end it sooner; a clock that never moves ends it at the send cap", async () => {
+    const slow = harness({ previews: [preview()], posts: Array.from({ length: 40 }, paused), callMs: 30_000 });
+    expect((await runChooseSave(slow.deps, { changes: CHANGES, pending: null })).kind).toBe("pausedStill");
+    // Measured from the first paused answer: answer n lands 0, 32, 66, 104 s, then 45 s apart (15 s pause + 30 s call),
+    // so the 11th lands at 419 s and the 12th at 464 s, past the window.
+    expect(slow.posted.length).toBeLessThan(CHOOSE_PAUSED_MAX_SENDS);
+    expect(slow.posted).toHaveLength(12);
+    expect(slow.sleeps).toEqual([2_000, 4_000, 8_000, ...Array(8).fill(15_000)]);
+    const frozen = harness({ previews: [preview()], posts: Array.from({ length: 40 }, paused), clockMoves: false });
+    expect((await runChooseSave(frozen.deps, { changes: CHANGES, pending: null })).kind).toBe("pausedStill");
+    expect(frozen.posted).toHaveLength(CHOOSE_PAUSED_MAX_SENDS);
+  });
+
+  it("S8 the preview retries any transient failure on the paused schedule (it writes nothing), then asks", async () => {
+    const run = harness({
+      previews: [paused(), api(413, null), new TypeError("Failed to fetch"), api(503, DROPSHIP_SITE_UPDATING_CODE, { reason: "not_json" }), preview()],
+      posts: [{ answer: answer(), replay: false }],
+    });
+    expect((await runChooseSave(run.deps, { changes: CHANGES, pending: null })).kind).toBe("saved");
+    expect(run.calls).toEqual(["preview", "preview", "preview", "preview", "preview", "confirm", "post"]);
+    expect(run.sleeps).toEqual([2_000, 4_000, 8_000, 15_000]);
+    expect(run.statuses).toEqual(["paused", "paused", "retrying", "paused"]);
+    for (const body of run.previewed) expect(body).toEqual(run.previewed[0]);
+  });
+
+  it("S9 a preview paused past the window says pausedStill; one that never answered says not saved; neither keeps a save", async () => {
+    const stillPaused = harness({ previews: Array.from({ length: 40 }, paused) });
+    const outcome = await runChooseSave(stillPaused.deps, { changes: CHANGES, pending: null });
+    expect(outcome).toEqual({ kind: "pausedStill", pending: null });
+    expect(stillPaused.calls).not.toContain("confirm");
+    const noAnswer = harness({ previews: Array.from({ length: 40 }, () => new TypeError("Failed to fetch")) });
+    expect(await runChooseSave(noAnswer.deps, { changes: CHANGES, pending: null })).toEqual({ kind: "notSaved", pending: null });
+    expect(choosePendingAfter({ kind: "pausedStill", pending: null }, null)).toBeNull();
+  });
+
+  it("S10 no answer or a 5xx: three sends on 1 s and 2 s, then unconfirmed with the save kept; the next press replays it", async () => {
+    const run = harness({ previews: [preview()], posts: [new TypeError("Failed to fetch"), api(502, null), api(500, "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR")] });
+    const outcome = await runChooseSave(run.deps, { changes: CHANGES, pending: null });
+    expect(outcome.kind).toBe("unconfirmed");
+    expect(run.sleeps).toEqual([...CHOOSE_SAVE_BACKOFF_MS]);
+    expect(run.sleeps).toEqual([1_000, 2_000]);
+    expect(run.statuses).toEqual(["retrying", "retrying"]);
+    expect(describeChooseSaveStatus("retrying")).toBeNull();
+    sameKeyAndBody(run.posted);
+    expect(describeChooseSaveOutcome(outcome)).toEqual({ kind: "error", message: CHOOSE_WORDS.unconfirmed });
+    const kept = choosePendingAfter(outcome, null);
+    const again = harness({ posts: [{ answer: answer(), replay: true }] });
+    expect(await runChooseSave(again.deps, { changes: CHANGES, pending: kept })).toEqual({ kind: "saved", answer: answer(), replay: true });
+    expect(again.posted[0]).toEqual(run.posted[0]);
+  });
+
+  it("S11 408 and 429 three times wrote nothing: not saved, the save kept", async () => {
+    const run = harness({ previews: [preview()], posts: [api(429, DROPSHIP_CATALOG_READ_ERROR_CODES.rateLimited), api(408, null), api(429, null)] });
+    const outcome = await runChooseSave(run.deps, { changes: CHANGES, pending: null });
+    expect(outcome.kind).toBe("notSaved");
+    expect(choosePendingAfter(outcome, null)?.body).toEqual(run.posted[0]);
+    expect(describeChooseSaveOutcome(outcome)).toEqual({ kind: "error", message: CHOOSE_WORDS.notSaved });
+  });
+
+  it("S12 effects changed: the question is asked again saying so, and the next save has a new key", async () => {
+    const run = harness({
+      previews: [preview(), preview({ effectsHash: HASH_B })],
+      posts: [api(409, SELECTION_CHANGE_ERROR_CODES.effectsChanged), { answer: answer({ effectsHash: HASH_B, confirmedEffectsHash: HASH_B }), replay: false }],
+    });
+    const outcome = await runChooseSave(run.deps, { changes: CHANGES, pending: null });
+    expect(outcome.kind).toBe("saved");
+    expect(run.calls).toEqual(["preview", "confirm", "post", "preview", "confirm", "post"]);
+    expect(run.questions.map((question) => question.effectsChanged)).toEqual([false, true]);
+    expect(run.posted.map((body) => [body.idempotencyKey, body.expectedEffectsHash])).toEqual([
+      ["catalog-selection:key-1", HASH_A], ["catalog-selection:key-2", HASH_B],
+    ]);
     expect(run.sleeps).toEqual([]);
   });
 
-  it("S2 busy, then saved: the same key and the same body, after a pause and a fresh look at the rules (review MC2)", async () => {
-    const run = harness([RULES, RULES], [busy(), { idempotentReplay: false }]);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null })).toEqual({ kind: "saved", replay: false });
-    expect(run.calls).toEqual(["GET", "PUT", "GET", "PUT"]);
-    expect(run.bodies[1]).toBe(run.bodies[0]);
-    expect(run.sleeps).toEqual([1_000]);
-    expect(run.keyCount()).toBe(1);
+  it("S13 effects that keep moving stop after three questions; Cancel on the second question sends nothing more", async () => {
+    const moved = () => api(409, SELECTION_CHANGE_ERROR_CODES.effectsChanged);
+    const run = harness({ previews: [preview(), preview(), preview()], posts: [moved(), moved(), moved()] });
+    const outcome = await runChooseSave(run.deps, { changes: CHANGES, pending: null });
+    expect(outcome).toEqual({ kind: "effectsChanged" });
+    expect(run.posted.map((body) => body.idempotencyKey)).toEqual(["catalog-selection:key-1", "catalog-selection:key-2", "catalog-selection:key-3"]);
+    expect(describeChooseSaveOutcome(outcome)).toEqual({ kind: "error", message: CHOOSE_WORDS.effectsChanged });
+    const cancelled = harness({ previews: [preview(), preview()], posts: [moved()], confirms: [true, false] });
+    expect(await runChooseSave(cancelled.deps, { changes: CHANGES, pending: null })).toEqual({ kind: "cancelled" });
+    expect(cancelled.posted).toHaveLength(1);
   });
 
-  it("S3 no answer, then a replay: saved", async () => {
-    const run = harness([RULES, RULES], [new TypeError("Failed to fetch"), { idempotentReplay: true }]);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null })).toEqual({ kind: "saved", replay: true });
-    expect(run.bodies[1].idempotencyKey).toBe(run.bodies[0].idempotencyKey);
+  it("S14 the save's revision conflict is stale with the head the server named; a key conflict is rejected (a new key next press)", async () => {
+    const stale = harness({ previews: [preview()], posts: [api(409, SELECTION_CHANGE_ERROR_CODES.revisionConflict, { currentRevisionId: 11 })] });
+    const staleOutcome = await runChooseSave(stale.deps, { changes: CHANGES, pending: null });
+    expect(staleOutcome).toEqual({ kind: "stale", headRevisionId: 11 });
+    expect(choosePendingAfter(staleOutcome, null)).toBeNull();
+    const conflict = harness({ previews: [preview()], posts: [api(409, SELECTION_CHANGE_ERROR_CODES.keyConflict)] });
+    const conflictOutcome = await runChooseSave(conflict.deps, { changes: CHANGES, pending: null });
+    expect(conflictOutcome).toEqual({ kind: "rejected", message: CHOOSE_WORDS.rejected });
+    expect(choosePendingAfter(conflictOutcome, null)).toBeNull();
+    expect(conflict.posted).toHaveLength(1);
   });
 
-  it("S4 three tries without an answer, then the rules show our content under new ids: saved", async () => {
-    const sent = { idempotencyKey: "catalog-selection:key-1", rules: buildChooseSelectionSave(RULES, MARKS) };
-    const run = harness([RULES, RULES, RULES, committed(sent)], [new DropshipApiError({ status: 500, message: "x" }), new TypeError("x"), new DropshipApiError({ status: 503, message: "x" })]);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null })).toEqual({ kind: "saved", replay: true });
-    expect(run.calls).toEqual(["GET", "PUT", "GET", "PUT", "GET", "PUT", "GET"]);
-    expect(run.sleeps).toEqual([1_000, 2_000]);
-    expect(new Set(run.bodies.map((body) => body.idempotencyKey))).toEqual(new Set(["catalog-selection:key-1"]));
+  it("S15 PR C's 409 page outdated and the 410 both say retired with Reload; the bulk parser's 413 is too large; none is sent again", async () => {
+    for (const [error, expected] of [
+      [api(409, SELECTION_CHANGE_ERROR_CODES.pageOutdated), { kind: "retired" }],
+      [api(410, SELECTION_CHANGE_ERROR_CODES.rulesRetired), { kind: "retired" }],
+      [api(413, SELECTION_CHANGE_ERROR_CODES.requestTooLarge), { kind: "tooLarge" }],
+      [api(422, SELECTION_CHANGE_ERROR_CODES.tooLarge, { selectedAfter: 10_002 }), { kind: "overCap", after: 10_002 }],
+      [api(400, SELECTION_CHANGE_ERROR_CODES.invalidInput), { kind: "rejected", message: CHOOSE_WORDS.rejected }],
+      [api(403, "DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED"), { kind: "rejected", message: "Server words." }],
+    ] as const) {
+      const run = harness({ previews: [preview()], posts: [error] });
+      expect(await runChooseSave(run.deps, { changes: CHANGES, pending: null })).toEqual(expected);
+      expect(run.posted).toHaveLength(1);
+      expect(run.sleeps).toEqual([]);
+    }
+    expect(describeChooseSaveOutcome({ kind: "retired" })).toEqual({ kind: "error", message: CHOOSE_WORDS.retired, reload: true });
+    expect(describeChooseSaveOutcome({ kind: "tooLarge" })).toEqual({ kind: "error", message: CHOOSE_WORDS.tooLarge });
+    // The preview's refusals stop too, before any question.
+    const outdated = harness({ previews: [api(409, SELECTION_CHANGE_ERROR_CODES.pageOutdated)] });
+    expect(await runChooseSave(outdated.deps, { changes: CHANGES, pending: null })).toEqual({ kind: "retired" });
+    expect(outdated.calls).toEqual(["preview"]);
   });
 
-  it("S5 three busy answers and the rules unchanged: not saved (busy writes nothing), the attempt kept", async () => {
-    const lastError = busy();
-    const run = harness([RULES, RULES, RULES, RULES], [busy(), busy(), lastError]);
-    const outcome = await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null });
-    expect(outcome).toEqual({
-      kind: "notSaved",
-      busyMessage: "A stock update is finishing. Your selection was not saved; retry it in a moment.",
-      error: lastError,
-      pending: { idempotencyKey: "catalog-selection:key-1", body: run.bodies[0], baseFingerprint: FINGERPRINT, marksKey: chooseMarksKey(MARKS), mayHaveCommitted: false },
+  it("S16 savedDrift: a removal whose effects moved went through; the bar says so with the save's quantity-0 count", async () => {
+    const drifted = answer({ toAdd: 0, toRemove: 3, drifted: true, effectsHash: HASH_B,
+      effects: [{ storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 2, startsSelling: 0 }] });
+    const run = harness({ previews: [preview({ toAdd: 0, toRemove: 3 })], posts: [{ answer: drifted, replay: false }] });
+    const outcome = await runChooseSave(run.deps, { changes: changes([], [101, 102, 103]), pending: null });
+    expect(describeChooseSaveOutcome(outcome)).toEqual({
+      kind: "saved", message: "Saved. A few listings changed on eBay while you were deciding; 2 listings are set to quantity 0.",
     });
   });
 
-  it("S6 the next press with the same marks resends the same key and body, and makes no new key", async () => {
-    const first = harness([RULES, RULES, RULES, RULES], [new TypeError("x"), new TypeError("x"), new TypeError("x")]);
-    const failed = await runChooseSave(first.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null });
-    if (failed.kind !== "unconfirmed") throw new Error("expected a kept attempt");
-    const again = harness([RULES], [{ idempotentReplay: false }]);
-    expect(await runChooseSave(again.deps, { marks: [ADD_105, REMOVE_101], baseFingerprint: FINGERPRINT, pending: failed.pending }))
-      .toEqual({ kind: "saved", replay: false });
-    expect(again.bodies[0]).toBe(failed.pending.body);
-    expect(again.keyCount()).toBe(0);
+  it("S17 a kept save is sent again only for exactly its changes; other changes get a new preview, question and key", async () => {
+    const first = harness({ previews: [preview()], posts: [busy(), busy(), busy(), busy(), busy(), busy(), busy()] });
+    const kept = choosePendingAfter(await runChooseSave(first.deps, { changes: CHANGES, pending: null }), null) as ChoosePendingSave;
+    const other = harness({ previews: [preview()], posts: [{ answer: answer(), replay: false }] });
+    expect((await runChooseSave(other.deps, { changes: changes([105], [101]), pending: kept })).kind).toBe("saved");
+    expect(other.calls).toEqual(["preview", "confirm", "post"]);
+    expect(other.posted[0].idempotencyKey).toBe("catalog-selection:key-1");
+    expect(other.posted[0].add.productVariantIds).toEqual([105]);
+    // A rebase moves the base, so the kept save (counted from the old base) is not reused either.
+    const rebased = harness({ previews: [preview({ headRevisionId: 9 })], posts: [{ answer: answer(), replay: false }] });
+    expect((await runChooseSave(rebased.deps, { changes: changes([105, 102], [101], 9), pending: kept })).kind).toBe("saved");
+    expect(rebased.calls).toEqual(["preview", "confirm", "post"]);
+    // Cancel keeps an earlier kept save as it was.
+    expect(choosePendingAfter({ kind: "cancelled" }, kept)).toBe(kept);
+    expect(choosePendingAfter({ kind: "saved", answer: answer(), replay: false }, kept)).toBeNull();
   });
 
-  it("S7 the next press after the earlier try went through: nothing sent, it says so", async () => {
-    const body = { idempotencyKey: "catalog-selection:key-1", rules: buildChooseSelectionSave(RULES, MARKS) };
-    const pending: ChoosePendingSave = { idempotencyKey: body.idempotencyKey, body, baseFingerprint: FINGERPRINT, marksKey: chooseMarksKey(MARKS), mayHaveCommitted: true };
-    const run = harness([committed(body)], []);
-    // The marks the earlier save sent come back, so the page can drop them all (review MC3).
-    expect(await runChooseSave(run.deps, { marks: [ADD_105], baseFingerprint: FINGERPRINT, pending })).toEqual({ kind: "committedEarlier", marksKey: chooseMarksKey(MARKS) });
-    expect(run.calls).toEqual(["GET"]);
+  it("S18 20,000 ids go in one body that parses with the server's schema; the frozen change set is never written", async () => {
+    const big = changes(range(1, 10_000), range(100_001, 10_000));
+    const run = harness({ previews: [preview({ toAdd: 10_000, toRemove: 10_000 })], posts: [{ answer: answer(), replay: false }] });
+    expect((await runChooseSave(run.deps, { changes: big, pending: null })).kind).toBe("saved");
+    const sent = run.posted[0];
+    expect(sent.add.productVariantIds).toHaveLength(10_000);
+    expect(sent.remove.productVariantIds).toHaveLength(10_000);
+    expect(sent.add.productVariantIds[0]).toBe(1);
+    expect(sent.remove.productVariantIds.at(-1)).toBe(110_000);
+    expect(selectionChangeRequestSchema.safeParse(sent).success).toBe(true);
+    expect([big.add.size, big.remove.size]).toEqual([10_000, 10_000]);
   });
 
-  it("S8 another tab saved since the first change: nothing sent", async () => {
-    const moved = [...RULES, rule(3, "variant", "include", { productVariantId: 300 })];
-    const run = harness([moved], []);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null })).toEqual({ kind: "stale" });
-    expect(run.calls).toEqual(["GET"]);
-    expect(run.keyCount()).toBe(0);
-  });
-
-  it("S9 a 400 is sent once, never again", async () => {
-    const run = harness([RULES], [new DropshipApiError({ status: 400, code: "DROPSHIP_VENDOR_CATALOG_INVALID_INPUT", message: "Dropship vendor catalog input failed validation." })]);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null })).toEqual({ kind: "rejected", message: CHOOSE_WORDS.rejected });
-    expect(run.calls).toEqual(["GET", "PUT"]);
-    expect(run.sleeps).toEqual([]);
-  });
-
-  it("S10 a 403 shows the server's words, never sent again", async () => {
-    const run = harness([RULES], [new DropshipApiError({ status: 403, code: "DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED", message: "Dropship vendor status does not allow catalog access." })]);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null }))
-      .toEqual({ kind: "rejected", message: "Dropship vendor status does not allow catalog access." });
-    expect(run.calls).toEqual(["GET", "PUT"]);
-  });
-
-  it("S10b (step 1 plan S2-5 §4.9 item 2) PR B froze the rules: 410 retired is sent once, with Reload offered", async () => {
-    const run = harness([RULES], [new DropshipApiError({ status: 410, code: "DROPSHIP_SELECTION_RULES_RETIRED", message: CHOOSE_WORDS.retired })]);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null }))
-      .toEqual({ kind: "rejected", message: CHOOSE_WORDS.retired, reload: true });
-    expect(run.calls).toEqual(["GET", "PUT"]);
-    expect(run.sleeps).toEqual([]);
-  });
-
-  it("S11 past the 500-rule cap on the rules just read: stopped before sending", async () => {
-    const many = Array.from({ length: 499 }, (_, index) => rule(10 + index, "variant", "include", { productVariantId: 5_000 + index }));
-    const marks: ChooseMark[] = [ADD_105, { ...ADD_105, productVariantId: 106 }];
-    const run = harness([many], []);
-    expect(await runChooseSave(run.deps, { marks, baseFingerprint: rulesFingerprint(many), pending: null }))
-      .toEqual({ kind: "blocked", block: { kind: "tooManyRules", count: 501 } });
-    expect(run.calls).toEqual(["GET"]);
-    expect(run.keyCount()).toBe(0);
-  });
-
-  it("S12 the rules can't be read: not saved, nothing sent, an earlier attempt kept", async () => {
-    const readError = new TypeError("Failed to fetch");
-    const run = harness([readError], []);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null }))
-      .toEqual({ kind: "notSaved", pending: null, busyMessage: null, error: readError });
-    expect(run.calls).toEqual(["GET"]);
-    const pending: ChoosePendingSave = { idempotencyKey: "k".repeat(10), body: { idempotencyKey: "k".repeat(10), rules: [] }, baseFingerprint: FINGERPRINT, marksKey: "x", mayHaveCommitted: false };
-    const kept = harness([readError], []);
-    expect(await runChooseSave(kept.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending })).toMatchObject({ kind: "notSaved", pending });
-    // An earlier attempt that may have gone through stays unconfirmed (review MC1).
-    const unsure = { ...pending, mayHaveCommitted: true };
-    const still = harness([readError], []);
-    expect(await runChooseSave(still.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: unsure })).toEqual({ kind: "unconfirmed", pending: unsure, error: readError });
-  });
-
-  it("S13 changes made after a failed try get a new key, and the stale check still applies", async () => {
-    const body = { idempotencyKey: "catalog-selection:old", rules: buildChooseSelectionSave(RULES, MARKS) };
-    const pending: ChoosePendingSave = { idempotencyKey: body.idempotencyKey, body, baseFingerprint: FINGERPRINT, marksKey: chooseMarksKey(MARKS), mayHaveCommitted: false };
-    const run = harness([RULES], [{ idempotentReplay: false }]);
-    expect(await runChooseSave(run.deps, { marks: [ADD_105], baseFingerprint: FINGERPRINT, pending })).toEqual({ kind: "saved", replay: false });
-    expect(run.bodies[0].idempotencyKey).toBe("catalog-selection:key-1");
-    expect(run.bodies[0].rules).toEqual(buildChooseSelectionSave(RULES, [ADD_105]));
-    const moved = harness([[...RULES, rule(3, "catalog", "exclude")]], []);
-    expect(await runChooseSave(moved.deps, { marks: [ADD_105], baseFingerprint: FINGERPRINT, pending })).toEqual({ kind: "stale" });
-  });
-
-  it("refuses to run with no changes (a programming error, before anything is read)", async () => {
-    const run = harness([], []);
-    await expect(runChooseSave(run.deps, { marks: [], baseFingerprint: null, pending: null })).rejects.toThrow("needs at least one change");
+  it("S19 a press with no changes, or a body the schema refuses, is a programming error before anything is sent", async () => {
+    const run = harness();
+    await expect(runChooseSave(run.deps, { changes: changes([], []), pending: null })).rejects.toThrow(/at least one change/);
+    await expect(runChooseSave(run.deps, { changes: changes([0], []), pending: null })).rejects.toThrow();
     expect(run.calls).toEqual([]);
   });
-});
 
-describe("the PUT", () => {
-  const body: ChooseSaveBody = { idempotencyKey: "catalog-selection:key-1", rules: [toSelectionRuleInput(RULES[0])] };
-
-  it("reads the replay flag from a 2xx answer in the route's contract", async () => {
-    const sent: Array<[string, unknown]> = [];
-    expect(await putChooseSelectionRules(body, async (url, payload) => { sent.push([url, payload]); return { revisionId: 4, idempotentReplay: true, rules: [] }; }))
-      .toEqual({ idempotentReplay: true });
-    expect(sent).toEqual([["/api/dropship/catalog/selection-rules", body]]);
+  it("S21 (review round 1 CLI-1, TST-2) a kept save says whether it may have committed: after unconfirmed yes, and busy, paused or 408s on a later press keep it", async () => {
+    const lost = [new TypeError("Failed to fetch"), api(502, null), api(500, "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR")];
+    const unsure = await runChooseSave(harness({ previews: [preview()], posts: [...lost] }).deps, { changes: CHANGES, pending: null });
+    const kept = choosePendingAfter(unsure, null);
+    expect(unsure.kind).toBe("unconfirmed");
+    expect(kept?.mayHaveCommitted).toBe(true);
+    // Every answer said nothing was written: a fresh save that was never unsure.
+    const refused = await runChooseSave(harness({ previews: [preview()], posts: [api(429, null), api(408, null), api(429, null)] }).deps,
+      { changes: CHANGES, pending: null });
+    expect(refused.kind).toBe("notSaved");
+    expect(choosePendingAfter(refused, null)?.mayHaveCommitted).toBe(false);
+    const busyOnly = await runChooseSave(harness({ previews: [preview()], posts: Array.from({ length: 7 }, busy) }).deps, { changes: CHANGES, pending: null });
+    expect(choosePendingAfter(busyOnly, null)?.mayHaveCommitted).toBe(false);
+    // An earlier press may have committed, so a later press that only hears 408s, busy or paused keeps saying so.
+    for (const posts of [[api(408, null), api(429, null), api(408, null)], Array.from({ length: 7 }, busy), Array.from({ length: 40 }, paused)]) {
+      const later = await runChooseSave(harness({ posts }).deps, { changes: CHANGES, pending: kept });
+      expect(["notSaved", "busy", "pausedStill"]).toContain(later.kind);
+      const keptAgain = choosePendingAfter(later, kept);
+      expect(keptAgain?.mayHaveCommitted).toBe(true);
+      expect(keptAgain?.body).toEqual(kept?.body);
+    }
+    // One send of a press with no sure answer, then busy past every try: it may have committed too.
+    const mixed = await runChooseSave(harness({ previews: [preview()], posts: [api(502, null), ...Array.from({ length: 7 }, busy)] }).deps,
+      { changes: CHANGES, pending: null });
+    expect(mixed.kind).toBe("busy");
+    expect(choosePendingAfter(mixed, null)?.mayHaveCommitted).toBe(true);
+    // A preview that never answered sent no save: the kept one stays as it was, flag and all.
+    const previewLost = await runChooseSave(harness({ previews: Array.from({ length: 40 }, () => new TypeError("Failed to fetch")) }).deps,
+      { changes: changes([105], [101]), pending: kept });
+    expect(choosePendingAfter(previewLost, kept)).toBe(kept);
   });
 
-  it("(review CT6) a 2xx the page can't read is not taken as saved: it is unverified, for the runner to check against the rules", async () => {
-    // Off the route's contract, or not JSON (putJson throws a SyntaxError only for a 2xx body; the route always answers JSON,
-    // so such an answer may come from something in between).
-    await expect(putChooseSelectionRules(body, async () => ({ unexpected: true }))).rejects.toBeInstanceOf(ChooseUnverifiedAnswerError);
-    await expect(putChooseSelectionRules(body, async () => { throw new SyntaxError("Unexpected token <"); })).rejects.toBeInstanceOf(ChooseUnverifiedAnswerError);
+  it("S22 (review round 1 CLI-1, TST-2) the page reads the saved choices again when the changes are gone while a kept save may have committed, and only then", () => {
+    const pending = (mayHaveCommitted: boolean) => ({ body: {} as SelectionChangeRequest, changesKey: "k", confirmed: preview(), mayHaveCommitted });
+    const none = changes([], []);
+    // Undo, or every box unticked back, after an unsure save.
+    expect(chooseUndoneAfterUnsure(pending(true), none)).toBe(true);
+    // Changes still pending: the next press sends the kept save, which replays it (review MC1).
+    expect(chooseUndoneAfterUnsure(pending(true), CHANGES)).toBe(false);
+    expect(chooseUndoneAfterUnsure(pending(true), changes([102], []))).toBe(false);
+    // Nothing of it can have been written (408s, 429s, busy, paused), or no save kept: nothing to read.
+    expect(chooseUndoneAfterUnsure(pending(false), none)).toBe(false);
+    expect(chooseUndoneAfterUnsure(null, none)).toBe(false);
   });
 
-  it("passes every refusal through for the runner to classify", async () => {
-    const refusal = busy();
-    await expect(putChooseSelectionRules(body, async () => { throw refusal; })).rejects.toBe(refusal);
-  });
-});
-
-describe("reads", () => {
-  const ROW: ChooseCatalogRow = {
-    productId: 11, productVariantId: 101, productSku: "ENV-SGL", productName: "Envelope Single Pocket", variantSku: "ENV-SGL-P50",
-    variantName: "Pack of 50", category: "Mailers",
-    selectionDecision: { selected: true, reason: "selected", marketplaceQuantity: 25, includeRuleIds: [1], excludeRuleIds: [] },
-  };
-
-  it("S14 both reads check their answer and say so in words when it is off contract", async () => {
-    const client = new QueryClient();
-    const rules = await client.fetchQuery(selectionRulesQueryOptions(async () => ({ rules: RULES })));
-    expect(rules.rules).toEqual(RULES);
-    const offRules = new QueryClient().fetchQuery(selectionRulesQueryOptions(async () => ({ rules: [{ id: 1, scopeType: "variant", action: "include", isActive: true }] })));
-    await expect(offRules).rejects.toBeInstanceOf(ChooseReadError);
-    await expect(offRules).rejects.toThrow(CHOOSE_WORDS.rulesUnreadable);
-
-    const pageAnswer = { rows: [{ ...ROW, productLineIds: [], productLineNames: [] }], total: 1, page: 1, limit: 200, facets: { categories: [], productLines: [], products: [] } };
-    const filters = { search: "", category: null, selectedOnly: false };
-    const data = await new QueryClient().fetchInfiniteQuery(chooseCatalogQueryOptions(filters, async () => pageAnswer));
-    expect(data.pages[0].rows).toEqual([ROW]);
-    const offCatalog = readChooseCatalogPage("/api/dropship/catalog", async () => ({ ...pageAnswer, rows: [{ ...ROW, selectionDecision: { ...ROW.selectionDecision, reason: "not_selected" } }] }));
-    await expect(offCatalog).rejects.toThrow(CHOOSE_WORDS.catalogUnreadable);
-    await expect(offCatalog).rejects.toMatchObject({ code: "DROPSHIP_CATALOG_CHOOSE_OFF_CONTRACT", context: { read: "catalog" } });
-  });
-
-  it("S15 the list URL carries only search, category, Show, the page and 200 rows: never a product line or product", async () => {
-    expect(chooseCatalogUrl({ search: "  sleeves  ", category: "Mailers", selectedOnly: true }, 2))
-      .toBe("/api/dropship/catalog?search=sleeves&category=Mailers&selectedOnly=true&page=2&limit=200");
-    expect(chooseCatalogUrl({ search: "", category: null, selectedOnly: false }, 1)).toBe("/api/dropship/catalog?page=1&limit=200");
-    const long = chooseCatalogUrl({ search: "a".repeat(250), category: null, selectedOnly: false }, 1);
-    expect(new URL(long, "http://x").searchParams.get("search")).toBe("a".repeat(200));
-
-    const urls: string[] = [];
-    const page = (number: number) => ({ rows: [{ ...ROW, productVariantId: 100 + number }], total: 450, page: number, limit: 200, facets: { categories: [] } });
-    const client = new QueryClient();
-    const options = chooseCatalogQueryOptions({ search: "pocket", category: null, selectedOnly: false }, async (url) => {
-      urls.push(url);
-      return page(Number(new URL(url, "http://x").searchParams.get("page")));
-    });
-    await client.fetchInfiniteQuery({ ...options, pages: 3 });
-    expect(urls).toEqual([1, 2, 3].map((number) => `/api/dropship/catalog?search=pocket&page=${number}&limit=200`));
-    for (const url of urls) expect(url).not.toMatch(/productLine|productId/);
-  });
-});
-
-describe("review round (step 1 stage 1)", () => {
-  const sentBody = () => ({ idempotencyKey: "catalog-selection:key-1", rules: buildChooseSelectionSave(RULES, MARKS) });
-
-  it("S16 (MC1) three tries without an answer and the last read fails: unconfirmed (it may have gone through), the attempt kept", async () => {
-    const readError = new TypeError("Failed to fetch");
-    const run = harness([RULES, RULES, RULES, readError], [new TypeError("x"), new DropshipApiError({ status: 502, message: "x" }), new TypeError("x")]);
-    const outcome = await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null });
-    expect(outcome).toEqual({ kind: "unconfirmed", error: readError,
-      pending: { idempotencyKey: "catalog-selection:key-1", body: run.bodies[0], baseFingerprint: FINGERPRINT, marksKey: chooseMarksKey(MARKS), mayHaveCommitted: true } });
-  });
-
-  it("S17 (MC1) no answer and then the rules read unchanged: still unconfirmed, since a late commit can land after the read", async () => {
-    const run = harness([RULES, RULES, RULES, RULES], [new TypeError("x"), busy(), busy()]);
-    const outcome = await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null });
-    expect(outcome).toMatchObject({ kind: "unconfirmed", pending: { mayHaveCommitted: true } });
-  });
-
-  it("S18 (MC2) busy, then another tab saves during the pause: stopped, nothing sent over it", async () => {
-    const moved = [...RULES, rule(3, "variant", "include", { productVariantId: 300 })];
-    const run = harness([RULES, moved], [busy()]);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null })).toEqual({ kind: "stale" });
-    expect(run.calls).toEqual(["GET", "PUT", "GET"]);
-  });
-
-  it("S19 (MC2) no answer, then the rules show our content: saved without sending again", async () => {
-    const run = harness([RULES, committed(sentBody())], [new TypeError("x")]);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null })).toEqual({ kind: "saved", replay: true });
-    expect(run.calls).toEqual(["GET", "PUT", "GET"]);
-  });
-
-  it("S20 (MC2) a look at the rules that fails sends nothing that try; the last read decides", async () => {
-    const run = harness([RULES, new TypeError("x"), new TypeError("x"), committed(sentBody())], [new TypeError("x")]);
-    expect(await runChooseSave(run.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null })).toEqual({ kind: "saved", replay: true });
-    expect(run.calls).toEqual(["GET", "PUT", "GET", "GET", "GET"]);
-    expect(run.sleeps).toEqual([1_000, 2_000]);
-  });
-
-  it("S21 (CT6) an unreadable 2xx is checked against the rules: our content means saved; unchanged rules mean the same key is sent again", async () => {
-    const checked = harness([RULES, committed(sentBody())], [new ChooseUnverifiedAnswerError("not JSON")]);
-    expect(await runChooseSave(checked.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null })).toEqual({ kind: "saved", replay: true });
-    const resent = harness([RULES, RULES], [new ChooseUnverifiedAnswerError("not JSON"), { idempotentReplay: false }]);
-    expect(await runChooseSave(resent.deps, { marks: MARKS, baseFingerprint: FINGERPRINT, pending: null })).toEqual({ kind: "saved", replay: false });
-    expect(resent.bodies[1]).toBe(resent.bodies[0]);
-  });
-
-  it("S22 (MC1; verify V2) the check behind Undo: went through, moved some other way, not seen, or the rules can't be read", async () => {
-    const body = sentBody();
-    const pending: ChoosePendingSave = { idempotencyKey: body.idempotencyKey, body, baseFingerprint: FINGERPRINT, marksKey: chooseMarksKey(MARKS), mayHaveCommitted: true };
-    expect(await checkChoosePending(async () => committed(body), pending)).toBe("wentThrough");
-    expect(await checkChoosePending(async () => RULES, pending)).toBe("notSeen");
-    // Verify V2 (pin moved from "notSeen"): the rules moved, but not to what this attempt sent (our save and another tab's
-    // on top, or another tab's alone). The page must read everything again and say so, so it is its own answer.
-    expect(await checkChoosePending(async () => [...RULES, rule(3, "catalog", "exclude")], pending)).toBe("moved");
-    expect(await checkChoosePending(async () => [...committed(body), rule(950, "variant", "include", { productVariantId: 300 })], pending)).toBe("moved");
-    expect(await checkChoosePending(async () => { throw new TypeError("x"); }, pending)).toBe("unreadable");
-  });
-
-  it("S23 (CT7) an off-contract read's code and issue paths reach the failure card as data attributes", () => {
-    const error = new ChooseReadError("rules", [{ code: "invalid_type", path: ["rules", 0, "scopeType"], message: "x", expected: "string", received: "number" }]);
-    expect(chooseReadErrorData(error)).toEqual({ "data-error-code": "DROPSHIP_CATALOG_CHOOSE_OFF_CONTRACT", "data-error-issues": "rules.0.scopeType:invalid_type" });
-    expect(chooseReadErrorData(new Error("x"))).toEqual({});
-    expect(chooseReadErrorData(null)).toEqual({});
+  it("S20 every outcome has words, except Cancel", () => {
+    const pending = { body: {} as SelectionChangeRequest, changesKey: "k", confirmed: preview(), mayHaveCommitted: false };
+    const outcomes: ChooseSaveOutcome[] = [
+      { kind: "saved", answer: answer({ skipped: { count: 1, first: [9] } }), replay: false },
+      { kind: "stale", headRevisionId: undefined }, { kind: "overCap", after: null }, { kind: "retired" }, { kind: "tooLarge" },
+      { kind: "rejected", message: "Refused." }, { kind: "effectsChanged" }, { kind: "busy", pending }, { kind: "pausedStill", pending },
+      { kind: "unconfirmed", pending }, { kind: "notSaved", pending: null },
+    ];
+    expect(outcomes.map((outcome) => describeChooseSaveOutcome(outcome)?.message)).toEqual([
+      "Saved. 2 added, 1 removed. 1 is no longer offered by Card Shellz and was skipped.",
+      CHOOSE_WORDS.stale, CHOOSE_WORDS.rejected, CHOOSE_WORDS.retired, CHOOSE_WORDS.tooLarge, "Refused.", CHOOSE_WORDS.effectsChanged,
+      CHOOSE_WORDS.busy, CHOOSE_WORDS.pausedStill, CHOOSE_WORDS.unconfirmed, CHOOSE_WORDS.notSaved,
+    ]);
   });
 });
