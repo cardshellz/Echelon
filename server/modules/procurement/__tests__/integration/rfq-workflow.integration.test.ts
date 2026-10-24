@@ -24,6 +24,7 @@ import type { AutomaticRecommendationPoHandoffCommand } from "../../recommendati
 import type { RfqWorkflowCommand } from "../../rfq-workflow.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 import { RFQ_AUTHORITY_TABLES, seedRfqEditActor, legacyRfqTestCommands } from "./rfq-authority.fixture";
+import { registerRfqCreationRecoveryCases } from "./rfq-create-recovery.cases";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -40,6 +41,8 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   let ownsCommands = false;
   let ownsRecoveries = false;
   let ownsAutoDraftRuns = false;
+  let ownsCreationAuditGuard = false;
+  let auditUpgradePreserved = false;
   let pool: pg.Pool;
   let lease: pg.PoolClient | undefined;
   let modulePool: pg.Pool | undefined;
@@ -68,6 +71,11 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     await pool.query("CREATE UNIQUE INDEX vendor_products_vendor_product_variant_key_uidx ON procurement.vendor_products(vendor_id,product_id,COALESCE(product_variant_id,0))");
     for (const migration of ["130_atomic_recommendation_po_handoffs.sql", "148_purchase_rfq_requests.sql", "158_rfq_allocation_override_evidence.sql", "224_rfq_quote_revisions_and_purchase_links.sql", "228_supplier_sourcing_policies.sql", "232_rfq_product_reservation_scope.sql"]) await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) { await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true; }
+    if (!ownsAudit || (await pool.query("SELECT to_regprocedure('public.guard_rfq_creation_audit_history()') AS guard")).rows[0].guard) throw new Error("RFQ audit fixture requires its own audit table and guard");
+    const historical = (await pool.query("INSERT INTO public.audit_events(level,actor,action,target,changes,context) VALUES('AUDIT',$1,'purchase_rfq.batch_created','legacy:fixture','{\"after\":{\"legacy\":true}}','{\"original\":true}') RETURNING *", [`user:${actorId}`])).rows[0];
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/pending/rfq_creation_audit_guard.sql"), "utf8")); ownsCreationAuditGuard = true;
+    expect((await pool.query("SELECT * FROM public.audit_events WHERE id=$1", [historical.id])).rows[0]).toEqual(historical);
+    auditUpgradePreserved = true;
     ownsCommands = !(await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation;
     ownsRecoveries = !(await pool.query("SELECT to_regclass('public.financial_command_recoveries') AS relation")).rows[0].relation;
     for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
@@ -108,7 +116,13 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     // Disable only the fixture's immutable TRUNCATE guard for isolated reset.
     await pool.query(`BEGIN; ALTER TABLE procurement.supplier_sourcing_revisions DISABLE TRIGGER supplier_sourcing_history_truncate_immutable; TRUNCATE ${TABLES.map(qualifiedTable).join(",")}, procurement.purchase_recommendation_runs RESTART IDENTITY CASCADE; ALTER TABLE procurement.supplier_sourcing_revisions ENABLE TRIGGER supplier_sourcing_history_truncate_immutable; COMMIT`);
     await pool.query("TRUNCATE public.auto_draft_runs RESTART IDENTITY CASCADE");
-    await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, `user:${actorId}`]]);
+    if (!ownsAudit || !ownsCreationAuditGuard) throw new Error("RFQ fixture cannot reset unowned audit evidence");
+    const resetAudit = await pool.connect();
+    try {
+      await resetAudit.query("BEGIN; ALTER TABLE public.audit_events DISABLE TRIGGER rfq_creation_audit_history_immutable");
+      await resetAudit.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, `user:${actorId}`]]);
+      await resetAudit.query("ALTER TABLE public.audit_events ENABLE TRIGGER rfq_creation_audit_history_immutable; COMMIT");
+    } catch (error) { await resetAudit.query("ROLLBACK"); throw error; } finally { resetAudit.release(); }
     await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
     await seedRfqEditActor(pool, actorId);
     await pool.query(`
@@ -128,6 +142,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     try {
       if (pool) {
         if (ownsAudit) await pool.query("DROP TABLE public.audit_events"); else if ((await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, `user:${actorId}`]]);
+        if (ownsCreationAuditGuard) await pool.query("DROP FUNCTION public.guard_rfq_creation_audit_history()");
         if (ownsRecoveries) await pool.query("DROP TABLE public.financial_command_recoveries");
         if (ownsCommands) await pool.query("DROP TABLE public.financial_command_results"); else if ((await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
         if (ownsAutoDraftRuns) await pool.query("DROP TABLE public.auto_draft_runs CASCADE");
@@ -143,6 +158,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const scope = commandScope(command);
     return { actorType: "service", actorId: commandPrincipal, ...scope, idempotencyKey: `rfq-${suffix}-${key}`, requestHash: hashHttpFinancialCommand({ ...scope, body: command.body }), contractVersion: 1 };
   }
+  registerRfqCreationRecoveryCases({ pool: () => pool, database: () => database, owner: () => purchasingOwner, actorId, suffix, now: NOW, auditUpgradePreserved: () => auditUpgradePreserved });
   async function capture(lineId = 20, patch: Record<string, unknown> = {}) {
     const before = await service.getDetail(10);
     const command: RfqWorkflowCommand = { operation: "capture_quote", rfqId: 10, lineId, body: { expectedVersion: before.version, quote: {

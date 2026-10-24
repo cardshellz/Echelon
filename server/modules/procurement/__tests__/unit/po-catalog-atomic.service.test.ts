@@ -52,7 +52,7 @@ describe("atomic PO and vendor-catalog persistence", () => {
     expect(updateWritePosition).toBeGreaterThan(updateCatalogPosition);
     expect(createFlow).toContain("(internalOptions?.transaction ?? db).transaction(async (tx: any)");
     expect(createFlow.indexOf("lockInventoryCostGraph(tx)")).toBeLessThan(createCatalogPosition);
-    expect(updateFlow).toContain("return db.transaction(async (tx: any)");
+    expect(updateFlow).toContain("return (transaction ?? db).transaction(async (tx: any)");
   });
 
   it("keeps the PO quote source unchanged when the same manual quote is captured", () => {

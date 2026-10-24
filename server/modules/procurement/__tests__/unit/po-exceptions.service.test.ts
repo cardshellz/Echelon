@@ -5,9 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 //
 // Covers:
 //   - computePayloadHash: deterministic, key order independent
-//   - upsertException: insert when no match, update when (po_id, kind,
-//     payload_hash) matches an open/acknowledged row
-//   - acknowledge / resolve / dismiss: status transitions + audit fields
+//   - upsertException: preserve exact-source accepted match variance
 //   - resolve requires resolutionNote
 //   - listExceptions: filters by includeResolved
 //   - countOpenExceptions: returns count + maxSeverity correctly
@@ -24,7 +22,6 @@ const dbState = {
   selectChain: [] as any[],
   insertReturn: null as any,
   updateReturn: null as any,
-  txCallback: null as any,
 };
 
 function makeChain(finalValue: any): any {
@@ -67,13 +64,10 @@ vi.mock("../../../../db", () => {
 import {
   computePayloadHash,
   upsertException,
-  acknowledgeException,
   resolveException,
-  dismissException,
   listExceptions,
   countOpenExceptions,
   detectQtyVariance,
-  PoExceptionError,
 } from "../../po-exceptions.service";
 
 beforeEach(() => {
@@ -116,79 +110,8 @@ describe("computePayloadHash", () => {
   });
 });
 
-// ─── upsertException ────────────────────────────────────────────────────────
-//
-// NOTE: upsertException + lifecycle transitions (acknowledge/resolve/dismiss)
-// hit DB chains complex enough that a hand-rolled in-memory mock drifts from
-// production behavior. These are flagged for integration tests against a real
-// test DB rather than mocked unit tests. The other tests below cover the
-// pure-function helpers and detection rule logic.
-
-describe.skip("upsertException", () => {
-  it("inserts a new row when no matching exception exists", async () => {
-    // First select: payload_hash lookup returns nothing
-    dbState.selectChain.push([]);
-    // Insert: returns the new row
-    dbState.insertReturn = [
-      {
-        id: 1,
-        poId: 123,
-        kind: "qty_short",
-        severity: "warn",
-        status: "open",
-        title: "Short by 2",
-      },
-    ];
-
-    const result = await upsertException({
-      poId: 123,
-      kind: "qty_short",
-      severity: "warn",
-      title: "Short by 2",
-      payload: { lineId: 1, shortedQty: 2 },
-    });
-
-    expect(result.id).toBe(1);
-    expect(result.kind).toBe("qty_short");
-  });
-
-  it("updates an existing open exception when payload_hash matches", async () => {
-    // First select: existing exception found
-    dbState.selectChain.push([
-      {
-        id: 5,
-        poId: 123,
-        kind: "qty_short",
-        severity: "warn",
-        status: "open",
-        payloadHash: computePayloadHash(123, "qty_short", { lineId: 1, shortedQty: 2 }),
-      },
-    ]);
-    dbState.updateReturn = [
-      {
-        id: 5,
-        poId: 123,
-        kind: "qty_short",
-        severity: "warn",
-        status: "open",
-        title: "Short by 2 (updated)",
-      },
-    ];
-
-    const result = await upsertException({
-      poId: 123,
-      kind: "qty_short",
-      severity: "warn",
-      title: "Short by 2 (updated)",
-      payload: { lineId: 1, shortedQty: 2 },
-    });
-
-    expect(result.id).toBe(5);
-  });
-});
-
-// ─── acknowledge / resolve / dismiss ────────────────────────────────────────
-
+// Public-owner insertion and lifecycle persistence are covered in
+// ../integration/po-exception-lifecycle.integration.test.ts with real PostgreSQL.
 describe("source-bound exception acceptance", () => {
   it("keeps an exact-source accepted match variance resolved on re-detection", async () => {
     const accepted = {
@@ -222,79 +145,10 @@ describe("source-bound exception acceptance", () => {
   });
 });
 
-describe.skip("acknowledgeException", () => {
-  it("transitions an open exception to acknowledged", async () => {
-    dbState.selectChain.push([{ id: 1, poId: 100, status: "open", title: "x" }]);
-    dbState.updateReturn = [
-      {
-        id: 1,
-        poId: 100,
-        status: "acknowledged",
-        acknowledgedAt: new Date(),
-        acknowledgedBy: "user:42",
-      },
-    ];
-
-    const result = await acknowledgeException(1, "user:42");
-    expect(result.status).toBe("acknowledged");
-    expect(result.acknowledgedBy).toBe("user:42");
-  });
-
-  it("rejects acknowledging a resolved exception", async () => {
-    dbState.selectChain.push([{ id: 1, poId: 100, status: "resolved", title: "x" }]);
-
-    await expect(acknowledgeException(1, "user:42")).rejects.toThrow(PoExceptionError);
-  });
-});
-
 describe("resolveException — note required (pure validation)", () => {
   it("requires a non-empty resolution note", async () => {
     await expect(resolveException(1, "user:42", "")).rejects.toThrow(/resolution/i);
     await expect(resolveException(1, "user:42", "   ")).rejects.toThrow(/resolution/i);
-  });
-});
-
-describe.skip("resolveException — DB-dependent paths", () => {
-
-  it("transitions to resolved with the provided note", async () => {
-    dbState.selectChain.push([{ id: 1, poId: 100, status: "open", title: "x" }]);
-    dbState.updateReturn = [
-      {
-        id: 1,
-        poId: 100,
-        status: "resolved",
-        resolvedAt: new Date(),
-        resolvedBy: "user:42",
-        resolutionNote: "Vendor issued credit",
-      },
-    ];
-
-    const result = await resolveException(1, "user:42", "Vendor issued credit");
-    expect(result.status).toBe("resolved");
-    expect(result.resolutionNote).toBe("Vendor issued credit");
-  });
-});
-
-describe.skip("dismissException", () => {
-  it("transitions to dismissed; note is optional", async () => {
-    dbState.selectChain.push([{ id: 1, poId: 100, status: "open", title: "x" }]);
-    dbState.updateReturn = [
-      {
-        id: 1,
-        poId: 100,
-        status: "dismissed",
-        resolvedAt: new Date(),
-        resolvedBy: "user:42",
-      },
-    ];
-
-    const result = await dismissException(1, "user:42");
-    expect(result.status).toBe("dismissed");
-  });
-
-  it("rejects dismissing an already-resolved exception", async () => {
-    dbState.selectChain.push([{ id: 1, poId: 100, status: "resolved", title: "x" }]);
-    await expect(dismissException(1, "user:42")).rejects.toThrow(PoExceptionError);
   });
 });
 

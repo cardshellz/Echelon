@@ -72,6 +72,16 @@ vi.mock("../../po-email-outbox.service", () => ({
   },
 }));
 
+const entryCommandMocks = vi.hoisted(() => ({ execute: vi.fn(), factory: vi.fn() }));
+vi.mock("../../purchase-order-entry.commands", async original => ({
+  ...await original<typeof import("../../purchase-order-entry.commands")>(),
+  createPurchaseOrderEntryCommands: (owner: unknown) => {
+    entryCommandMocks.factory(owner);
+    return { execute: entryCommandMocks.execute };
+  },
+}));
+import { hashPurchaseOrderEntryCommandIdentity, purchaseOrderEntryCommandScope, PURCHASE_ORDER_ENTRY_COMMAND_PRINCIPAL } from "../../purchase-order-entry.commands";
+
 // Now import the router registrar after mocks are in place.
 import { registerPurchasingRoutes } from "../../procurement.routes";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
@@ -199,383 +209,102 @@ describe("GET /api/purchase-orders/new-preload", () => {
   });
 });
 
-describe("POST /api/purchase-orders (dual-mode)", () => {
+describe("scoped purchase-order entry command routes", () => {
   let server: { url: string; close: () => Promise<void> };
   let purchasing: ReturnType<typeof buildPurchasingMock>;
-
   beforeEach(async () => {
+    entryCommandMocks.execute.mockReset(); entryCommandMocks.factory.mockReset();
     purchasing = buildPurchasingMock();
     server = await startServer(buildApp(purchasing));
   });
+  afterEach(async () => { await server.close(); });
 
-  afterEach(async () => {
-    await server.close();
-  });
-
-  it("legacy empty-create path calls createPO", async () => {
-    purchasing.createPO.mockResolvedValue({ id: 1, status: "draft" });
-    const { status } = await jsonRequest(server.url, "POST", "/api/purchase-orders", {
-      vendorId: 1,
-      poType: "standard",
+  it.each([
+    { method: "POST", path: "/api/purchase-orders", action: "create", targetId: null, payload: { vendorId: 1, poType: "standard" }, status: 201 },
+    { method: "POST", path: "/api/purchase-orders", action: "create", targetId: null, payload: { vendor_id: 1, lines: [{ product_variant_id: 10, quantity_ordered: 3, unit_cost_cents: 250 }] }, status: 201 },
+    { method: "PUT", path: "/api/purchase-orders/42/draft", action: "save-draft", targetId: 42, payload: { vendor_id: 3, expected_updated_at: "2026-07-11T00:30:00.000Z", lines: [{ line_id: 10, client_id: "line-10", quantity_ordered: 500 }] }, status: 200 },
+    { method: "POST", path: "/api/purchase-orders/5/duplicate", action: "duplicate", targetId: 5, payload: { vendor_id: 3, expected_delivery_date: "2026-08-01" }, status: 201 },
+    { method: "POST", path: "/api/purchase-orders/42/send-pdf", action: "prepare-document", targetId: 42, payload: {}, status: 200 },
+    { method: "POST", path: "/api/purchase-orders/42/send-to-vendor", action: "prepare", targetId: 42, payload: {}, status: 200 },
+  ])("delegates $method $path with exact unmodified payload and a shared intent scope", async scenario => {
+    const response = { po: { id: 42 }, lines: [], entryCommand: { action: scenario.action } };
+    entryCommandMocks.execute.mockResolvedValue({ httpStatus: scenario.status, body: response, replayed: false });
+    const key = "entry-route:exact-request";
+    const result = await jsonRequest(server.url, scenario.method, scenario.path, scenario.payload, key);
+    const command = { action: scenario.action, targetId: scenario.targetId, payload: scenario.payload };
+    expect(result.status).toBe(scenario.status); expect(result.body).toEqual(response);
+    expect(result.headers.get("Idempotency-Replayed")).toBe("false");
+    expect(entryCommandMocks.factory).toHaveBeenCalledExactlyOnceWith(purchasing);
+    expect(entryCommandMocks.execute).toHaveBeenCalledExactlyOnceWith(command, "test-user", {
+      ...purchaseOrderEntryCommandScope(), actorType: "service", actorId: PURCHASE_ORDER_ENTRY_COMMAND_PRINCIPAL,
+      idempotencyKey: key, requestHash: hashPurchaseOrderEntryCommandIdentity(command, "test-user"), contractVersion: 1,
     });
-    expect(status).toBe(201);
-    expect(purchasing.createPO).toHaveBeenCalled();
+    expect(purchasing.createPO).not.toHaveBeenCalled();
     expect(purchasing.createPurchaseOrderWithLines).not.toHaveBeenCalled();
-  });
-
-  it("inline-lines path calls createPurchaseOrderWithLines", async () => {
-    purchasing.createPurchaseOrderWithLines.mockResolvedValue({ id: 7, poNumber: "PO-1" });
-    const { status, body } = await jsonRequest(server.url, "POST", "/api/purchase-orders", {
-      vendor_id: 1,
-      lines: [{ product_variant_id: 10, quantity_ordered: 3, unit_cost_cents: 250 }],
-    });
-    expect(status).toBe(201);
-    expect(purchasing.createPurchaseOrderWithLines).toHaveBeenCalledTimes(1);
-    expect(purchasing.sendPurchaseOrder).not.toHaveBeenCalled();
-    expect(body.po.id).toBe(7);
-  });
-
-  it("maps the catalog directive without accepting duplicate catalog economics", async () => {
-    purchasing.createPurchaseOrderWithLines.mockResolvedValue({ id: 8, poNumber: "PO-2" });
-    const { status } = await jsonRequest(server.url, "POST", "/api/purchase-orders", {
-      vendor_id: 3,
-      lines: [{
-        product_id: 101,
-        expected_receive_variant_id: 202,
-        pricing_source: "manual",
-        pricing: {
-          basis: "per_purchase_uom",
-          purchase_uom: "case",
-          uom_quantity: 2,
-          pieces_per_uom: 12,
-          quoted_cost_mills_per_uom: 125_500,
-        },
-        quoted_at: "2026-07-14T00:00:00.000Z",
-        catalog_write: { mode: "upsert", set_preferred: true },
-      }],
-    });
-
-    expect(status).toBe(201);
-    const input = purchasing.createPurchaseOrderWithLines.mock.calls[0][0];
-    expect(input.lines[0]).toMatchObject({
-      productId: 101,
-      expectedReceiveVariantId: 202,
-      pricingSource: "manual",
-      catalogWrite: { mode: "upsert", setPreferred: true },
-      pricing: {
-        basis: "per_purchase_uom",
-        purchaseUom: "case",
-        uomQuantity: 2,
-        piecesPerUom: 12,
-        quotedCostMillsPerUom: 125_500,
-      },
-    });
-    expect(input.lines[0].quotedAt).toEqual(new Date("2026-07-14T00:00:00.000Z"));
-    expect(input.lines[0]).not.toHaveProperty("unitCostMills");
-    expect(input.lines[0]).not.toHaveProperty("packSize");
-  });
-
-  it("rejects conflicting catalog directive flags before service execution", async () => {
-    const { status, body } = await jsonRequest(server.url, "POST", "/api/purchase-orders", {
-      vendor_id: 3,
-      lines: [{
-        product_id: 101,
-        pricing: { basis: "per_piece", quantity_pieces: 2, unit_cost_mills: 1_000 },
-        quoted_at: "2026-07-14T00:00:00.000Z",
-        catalog_write: { mode: "upsert", set_preferred: true, setPreferred: false },
-      }],
-    });
-
-    expect(status).toBe(400);
-    expect(body.details.code).toBe("PO_LINE_CATALOG_WRITE_INVALID");
-    expect(purchasing.createPurchaseOrderWithLines).not.toHaveBeenCalled();
-  });
-
-  it("legacy advance_to_sent prepares but explicitly reports that no dispatch occurred", async () => {
-    purchasing.createPurchaseOrderWithLines.mockResolvedValue({ id: 7, poNumber: "PO-1" });
-    purchasing.sendPurchaseOrder.mockResolvedValue({
-      po: { id: 7, status: "approved" },
-      status: "approved",
-      pdf: null,
-      pendingApproval: false,
-    });
-    const { status, body } = await jsonRequest(server.url, "POST", "/api/purchase-orders", {
-      vendor_id: 1,
-      lines: [{ product_variant_id: 10, quantity_ordered: 3, unit_cost_cents: 250 }],
-      advance_to_sent: true,
-    });
-    expect(status).toBe(201);
-    expect(purchasing.sendPurchaseOrder).toHaveBeenCalledWith(7, "test-user");
-    expect(body.pdf).toBeNull();
-    expect(body.dispatch_recorded).toBe(false);
-    expect(body.status).toBe("approved");
-    expect(body.sendError).toContain("No supplier dispatch was recorded");
-  });
-
-  it("returns the created draft when the follow-up send fails", async () => {
-    purchasing.createPurchaseOrderWithLines.mockResolvedValue({
-      id: 8,
-      poNumber: "PO-2",
-      status: "draft",
-    });
-    purchasing.sendPurchaseOrder.mockRejectedValue(
-      new Error("Purchase order changed during the lifecycle transition"),
-    );
-
-    const { status, body } = await jsonRequest(server.url, "POST", "/api/purchase-orders", {
-      vendor_id: 1,
-      lines: [{ product_variant_id: 10, quantity_ordered: 3, unit_cost_cents: 250 }],
-      advance_to_sent: true,
-    });
-
-    expect(status).toBe(201);
-    expect(body).toEqual({
-      po: { id: 8, poNumber: "PO-2", status: "draft" },
-      status: "draft",
-      dispatch_recorded: false,
-      sendError: "Purchase order changed during the lifecycle transition",
-    });
-    expect(purchasing.createPurchaseOrderWithLines).toHaveBeenCalledTimes(1);
-    expect(purchasing.sendPurchaseOrder).toHaveBeenCalledWith(8, "test-user");
-  });
-});
-
-describe("PUT /api/purchase-orders/:id/draft", () => {
-  let server: { url: string; close: () => Promise<void> };
-  let purchasing: ReturnType<typeof buildPurchasingMock>;
-
-  beforeEach(async () => {
-    purchasing = buildPurchasingMock();
-    server = await startServer(buildApp(purchasing));
-  });
-
-  afterEach(async () => {
-    await server.close();
-  });
-
-  it("maps the full editor payload and preserves existing line ids", async () => {
-    purchasing.updateDraftPurchaseOrderWithLines.mockResolvedValue({
-      po: { id: 42, updatedAt: "2026-07-11T01:00:00.000Z" },
-      lines: [{ id: 10, clientId: "line-10" }],
-    });
-    const { status, body } = await jsonRequest(
-      server.url,
-      "PUT",
-      "/api/purchase-orders/42/draft",
-      {
-        vendor_id: 3,
-        warehouse_id: null,
-        po_type: "standard",
-        priority: "high",
-        expected_delivery_date: "2026-08-01T00:00:00.000Z",
-        expected_updated_at: "2026-07-11T00:30:00.000Z",
-        lines: [
-          {
-            line_id: 10,
-            client_id: "line-10",
-            line_type: "product",
-            product_id: 7,
-            expected_receive_variant_id: 70,
-            expected_receive_units_per_variant: 100,
-            quantity_ordered: 500,
-            total_product_cost_cents: 1_250,
-            packaging_cost_cents: 50,
-          },
-        ],
-      },
-    );
-
-    expect(status).toBe(200);
-    expect(body.po.id).toBe(42);
-    expect(purchasing.updateDraftPurchaseOrderWithLines).toHaveBeenCalledWith(
-      42,
-      expect.objectContaining({
-        vendorId: 3,
-        warehouseId: null,
-        poType: "standard",
-        priority: "high",
-        expectedDeliveryDate: new Date("2026-08-01T00:00:00.000Z"),
-        expectedUpdatedAt: new Date("2026-07-11T00:30:00.000Z"),
-        lines: [
-          expect.objectContaining({
-            lineId: 10,
-            clientId: "line-10",
-            productId: 7,
-            expectedReceiveVariantId: 70,
-            orderQty: 500,
-            totalProductCostCents: 1_250,
-            packagingCostCents: 50,
-          }),
-        ],
-      }),
-      "test-user",
-    );
-    expect(purchasing.createPurchaseOrderWithLines).not.toHaveBeenCalled();
-  });
-
-  it("prepares the same PO after an atomic draft update", async () => {
-    purchasing.updateDraftPurchaseOrderWithLines.mockResolvedValue({
-      po: { id: 42, status: "draft" },
-      lines: [{ id: 10, clientId: "line-10" }],
-    });
-    purchasing.sendPurchaseOrder.mockResolvedValue({
-      po: { id: 42, status: "approved" },
-      status: "approved",
-      pdf: null,
-      pendingApproval: false,
-    });
-
-    const { status, body } = await jsonRequest(
-      server.url,
-      "PUT",
-      "/api/purchase-orders/42/draft",
-      {
-        vendor_id: 3,
-        expected_updated_at: "2026-07-11T00:30:00.000Z",
-        prepare_for_supplier: true,
-        lines: [
-          {
-            line_id: 10,
-            client_id: "line-10",
-            line_type: "product",
-            product_id: 7,
-            quantity_ordered: 1,
-            total_product_cost_cents: 100,
-          },
-        ],
-      },
-    );
-
-    expect(status).toBe(200);
-    expect(purchasing.sendPurchaseOrder).toHaveBeenCalledWith(42, "test-user");
-    expect(body.status).toBe("approved");
-    expect(body.lines).toEqual([{ id: 10, clientId: "line-10" }]);
-  });
-
-  it("reports a partial outcome when the draft update commits but sending fails", async () => {
-    purchasing.updateDraftPurchaseOrderWithLines.mockResolvedValue({
-      po: { id: 42, status: "draft", updatedAt: "2026-07-11T01:00:00.000Z" },
-      lines: [{ id: 10, clientId: "line-10" }],
-    });
-    purchasing.sendPurchaseOrder.mockRejectedValue(new Error("supplier review temporarily unavailable"));
-
-    const { status, body } = await jsonRequest(
-      server.url,
-      "PUT",
-      "/api/purchase-orders/42/draft",
-      {
-        vendor_id: 3,
-        expected_updated_at: "2026-07-11T00:30:00.000Z",
-        prepare_for_supplier: true,
-        lines: [
-          {
-            line_id: 10,
-            line_type: "product",
-            product_id: 7,
-            quantity_ordered: 1,
-            total_product_cost_cents: 100,
-          },
-        ],
-      },
-    );
-
-    expect(status).toBe(200);
-    expect(body.po).toMatchObject({ id: 42, status: "draft" });
-    expect(body.sendError).toBe("supplier review temporarily unavailable");
-  });
-
-  it("requires an optimistic concurrency version", async () => {
-    const { status, body } = await jsonRequest(
-      server.url,
-      "PUT",
-      "/api/purchase-orders/42/draft",
-      {
-        vendor_id: 3,
-        lines: [
-          {
-            line_id: 10,
-            line_type: "product",
-            product_id: 7,
-            quantity_ordered: 1,
-            total_product_cost_cents: 100,
-          },
-        ],
-      },
-    );
-
-    expect(status).toBe(400);
-    expect(body.details.code).toBe("PO_DRAFT_EXPECTED_VERSION_REQUIRED");
     expect(purchasing.updateDraftPurchaseOrderWithLines).not.toHaveBeenCalled();
-  });
-});
-
-describe("POST /api/purchase-orders/:id/send-pdf", () => {
-  let server: { url: string; close: () => Promise<void> };
-  let purchasing: ReturnType<typeof buildPurchasingMock>;
-
-  beforeEach(async () => {
-    purchasing = buildPurchasingMock();
-    server = await startServer(buildApp(purchasing));
+    expect(purchasing.sendPurchaseOrder).not.toHaveBeenCalled();
+    expect(purchasing.duplicatePurchaseOrder).not.toHaveBeenCalled();
   });
 
-  afterEach(async () => {
-    await server.close();
+  it.each([
+    { method: "POST", path: "/api/purchase-orders", body: { vendorId: 1 } },
+    { method: "PUT", path: "/api/purchase-orders/42/draft", body: { vendor_id: 1, lines: [] } },
+    { method: "POST", path: "/api/purchase-orders/42/send-to-vendor", body: {} },
+  ])("requires a command key before dispatching $path", async scenario => {
+    const response = await jsonRequest(server.url, scenario.method, scenario.path, scenario.body, null);
+    expect(response.status).toBe(400); expect(response.body.code).toBe("FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REQUIRED");
+    expect(entryCommandMocks.execute).not.toHaveBeenCalled();
   });
 
-  it("returns { po, status, pdf, pending_approval }", async () => {
-    purchasing.sendPurchaseOrder.mockResolvedValue({
-      po: { id: 42, status: "approved" },
-      status: "approved",
-      pdf: null,
-      pendingApproval: false,
-    });
-    const { status, body } = await jsonRequest(
-      server.url,
-      "POST",
-      "/api/purchase-orders/42/send-pdf",
-    );
-    expect(status).toBe(200);
-    expect(body.pdf).toBeNull();
-    expect(body.dispatch_recorded).toBe(false);
-    expect(body.pending_approval).toBe(false);
+  it.each(["duplicate", "send-to-vendor", "send-pdf"])("preserves bodyless keyed legacy %s requests as an empty payload", async suffix => {
+    entryCommandMocks.execute.mockResolvedValue({ httpStatus: 200, body: { ok: true }, replayed: false });
+    const response = await jsonRequest(server.url, "POST", `/api/purchase-orders/42/${suffix}`, undefined);
+    expect(response.status).toBe(200);
+    expect(entryCommandMocks.execute.mock.calls[0][0]).toMatchObject({ targetId: 42, payload: {} });
   });
 
-  it("pending_approval path returns no pdf", async () => {
-    purchasing.sendPurchaseOrder.mockResolvedValue({
-      po: { id: 42, status: "pending_approval" },
-      status: "pending_approval",
-      pdf: null,
-      pendingApproval: true,
-    });
-    const { body } = await jsonRequest(server.url, "POST", "/api/purchase-orders/42/send-pdf");
-    expect(body.pdf).toBeNull();
-    expect(body.pending_approval).toBe(true);
-  });
-});
-
-describe("POST /api/purchase-orders/:id/duplicate", () => {
-  let server: { url: string; close: () => Promise<void> };
-  let purchasing: ReturnType<typeof buildPurchasingMock>;
-
-  beforeEach(async () => {
-    purchasing = buildPurchasingMock();
-    server = await startServer(buildApp(purchasing));
+  it("does not normalize explicit JSON null into an empty preparation payload", async () => {
+    const response = await jsonRequest(server.url, "POST", "/api/purchase-orders/42/send-to-vendor", null);
+    // The mounted production-style strict JSON parser refuses null before any
+    // command dispatch; the route only normalizes an absent body.
+    expect(response.status).toBe(400);
+    expect(entryCommandMocks.execute).not.toHaveBeenCalled();
   });
 
-  afterEach(async () => {
-    await server.close();
+  it.each([
+    { status: 201, path: "/api/purchase-orders", method: "POST", body: { po: { id: 7, status: "approved" }, status: "approved", pdf: null, pending_approval: false, dispatch_recorded: false, sendError: "No supplier dispatch was recorded" } },
+    { status: 201, path: "/api/purchase-orders", method: "POST", body: { po: { id: 8, status: "draft" }, status: "draft", dispatch_recorded: false, sendError: "Purchase order changed during the lifecycle transition" } },
+    { status: 200, path: "/api/purchase-orders/42/draft", method: "PUT", body: { po: { id: 42, status: "approved" }, lines: [{ id: 10, clientId: "line-10" }], status: "approved", dispatch_recorded: false } },
+    { status: 200, path: "/api/purchase-orders/42/draft", method: "PUT", body: { po: { id: 42, status: "draft" }, lines: [{ id: 10 }], sendError: "Supplier quote requires review", dispatch_recorded: false } },
+    { status: 200, path: "/api/purchase-orders/42/send-pdf", method: "POST", body: { po: { id: 42, status: "pending_approval" }, status: "pending_approval", pdf: null, pending_approval: true, dispatch_recorded: false } },
+    { status: 201, path: "/api/purchase-orders/5/duplicate", method: "POST", body: { id: 99, po_number: "PO-99" } },
+  ])("replays exact saved status $status and partial/preparation/duplicate evidence from $path", async scenario => {
+    entryCommandMocks.execute.mockResolvedValue({ httpStatus: scenario.status, body: scenario.body, replayed: true });
+    const response = await jsonRequest(server.url, scenario.method, scenario.path, { prepare_for_supplier: true });
+    expect(response.status).toBe(scenario.status); expect(response.body).toEqual(scenario.body);
+    expect(response.headers.get("Idempotency-Replayed")).toBe("true");
   });
 
-  it("returns the new PO id + number", async () => {
-    purchasing.duplicatePurchaseOrder.mockResolvedValue({ id: 99, poNumber: "PO-99" });
-    const { status, body } = await jsonRequest(
-      server.url,
-      "POST",
-      "/api/purchase-orders/5/duplicate",
-      {},
-    );
-    expect(status).toBe(201);
-    expect(body).toEqual({ id: 99, po_number: "PO-99" });
+  it.each(["PO_DRAFT_EXPECTED_VERSION_REQUIRED", "PO_LINE_CATALOG_WRITE_INVALID"])("preserves durable input rejection %s without converting it to success", async code => {
+    const body = { error: "Review the request", code, details: { purchaseOrderEntryOutcome: "rejected" } };
+    entryCommandMocks.execute.mockResolvedValue({ httpStatus: 400, body, replayed: true });
+    const response = await jsonRequest(server.url, "PUT", "/api/purchase-orders/42/draft", { lines: [] });
+    expect(response.status).toBe(400); expect(response.body).toEqual(body);
+    expect(response.headers.get("Idempotency-Replayed")).toBe("true");
+  });
+
+  it("retains unresolved legacy keys as explicit non-durable conflicts", async () => {
+    entryCommandMocks.execute.mockRejectedValue(new FinancialCommandError("Review original outcome", 409, "PURCHASE_ORDER_ENTRY_LEGACY_REVIEW_REQUIRED"));
+    const result = await jsonRequest(server.url, "POST", "/api/purchase-orders", { vendorId: 1 });
+    expect(result.status).toBe(409); expect(result.body.code).toBe("PURCHASE_ORDER_ENTRY_LEGACY_REVIEW_REQUIRED");
+    expect(result.body.details).not.toHaveProperty("purchaseOrderEntryOutcome");
+  });
+
+  it("keeps unexpected persistence failures unresolved without exposing internal details", async () => {
+    entryCommandMocks.execute.mockRejectedValue(new Error("private database diagnostic"));
+    const result = await jsonRequest(server.url, "POST", "/api/purchase-orders", { vendorId: 1 });
+    expect(result.status).toBe(503); expect(JSON.stringify(result.body)).not.toContain("private database diagnostic");
+    expect(result.body).not.toHaveProperty("purchaseOrderEntryOutcome");
   });
 });
 

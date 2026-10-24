@@ -3,6 +3,10 @@ import { assertRfqSupplySnapshotCurrent, isActiveRfqReservation, rfqPendingSourc
 import { purchaseBuyingCounts } from "@shared/procurement/purchase-buying-review";
 import { loadLinkedRfqPurchases } from "./rfq-sourcing-reservation.repository";
 import { registerRfqWorkflowRoutes } from "./rfq-workflow.routes";
+import { RFQ_RECEIPT_VERSION_HEADER } from "@shared/procurement/rfq-command";
+import { financialCommandFromRequest } from "../../platform/commands/http-command";
+import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
+import { createRfqCreateCommands, hashRfqCreateIdentity, RFQ_CREATE_COMMAND_PRINCIPAL, rfqCreateCommandScope } from "./rfq-create.commands";
 import type { Express } from "express";
 import { registerPurchasePlanningPolicyRoutes } from "./purchase-planning-policy.routes";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
@@ -1353,6 +1357,23 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
 
   app.post("/api/purchasing/rfq-queue", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
+      const receiptVersion = req.header(RFQ_RECEIPT_VERSION_HEADER);
+      if (receiptVersion !== undefined) {
+        if (receiptVersion !== "1") throw new FinancialCommandError("Unsupported RFQ receipt version", 400, "RFQ_RECEIPT_VERSION_UNSUPPORTED");
+        if (Object.keys(req.query).length) throw new FinancialCommandError("RFQ creation does not accept query parameters", 400, "RFQ_CREATE_QUERY_INVALID");
+        const actorId = (req as any).user?.id ?? req.session?.user?.id;
+        if (typeof actorId !== "string" || !actorId) throw new FinancialCommandError("An authenticated RFQ operator is required", 401, "RFQ_ACTOR_REQUIRED");
+        const purchasing = app.locals.services?.purchasing;
+        if (!purchasing?.createRfqBatchInTransaction || !purchasing?.assertRfqCreationAuthority) {
+          return res.status(503).json({ code: "RFQ_CREATE_UNAVAILABLE", error: "Purchasing RFQ service is unavailable. Keep the saved request." });
+        }
+        const descriptor = financialCommandFromRequest(req, { actorType: "service", actorId: RFQ_CREATE_COMMAND_PRINCIPAL, ...rfqCreateCommandScope() });
+        const result = await createRfqCreateCommands(purchasing).execute(req.body, actorId, {
+          ...descriptor, requestHash: hashRfqCreateIdentity(req.body, actorId),
+        });
+        res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+        return res.status(result.httpStatus).json(result.body);
+      }
       if (!Array.isArray(req.body?.lines) || req.body.lines.length === 0) {
         return res.status(400).json({ error: "lines must include at least one recommendation selection" });
       }
@@ -1377,13 +1398,17 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       }, userId);
       res.status(result.reused ? 200 : 201).json(result);
     } catch (error: any) {
+      if (error instanceof FinancialCommandError) {
+        for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
+        return res.status(error.statusCode).json({ code: error.code, error: error.message });
+      }
       console.error("Error creating purchasing RFQ batch:", error);
       const statusCode = Number(error?.statusCode);
       if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
         return res.status(statusCode).json({
           error: error.message,
-          code: error.code ?? error.context?.code ?? "RFQ_CREATE_REJECTED",
-          context: error.context ?? {},
+          code: error.code ?? error.details?.code ?? error.context?.code ?? "RFQ_CREATE_REJECTED",
+          context: error.details ?? error.context ?? {},
         });
       }
       res.status(500).json({ error: "Failed to create RFQ drafts" });

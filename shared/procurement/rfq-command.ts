@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { canonicalJson } from "../utils/canonical-json";
+import { rfqCreateIntentSchema, rfqCreateReceiptSchema, rfqCreateRejectionDetailsSchema } from "./rfq-create-command";
 import {
   rfqConversionResultSchema, rfqConvertSchema, rfqQuoteCaptureSchema,
   rfqReleaseSchema, rfqResourceIdSchema, rfqWorkflowDetailSchema,
@@ -75,3 +76,11 @@ export function matchesRfqCommandReceipt(
     && parsed.data.idempotencyKey === expected.idempotencyKey
     && canonicalJson(parsed.data.intent) === canonicalJson(expected.intent);
 }
+
+// Keep the existing workflow command contract unchanged for server owners while
+// making the same v1 browser recovery record readable for initial creation.
+export const rfqRecoverableIntentSchema = z.union([rfqCommandIntentSchema, rfqCreateIntentSchema]);
+export const rfqRecoverableReceiptSchema = z.union([rfqCommandReceiptSchema, rfqCreateReceiptSchema]);
+export const rfqRecoverableRejectionDetailsSchema = z.union([rfqCommandRejectionDetailsSchema, rfqCreateRejectionDetailsSchema]);
+export type RfqRecoverableIntent = z.infer<typeof rfqRecoverableIntentSchema>;
+export type RfqRecoverableReceipt = z.infer<typeof rfqRecoverableReceiptSchema>;
