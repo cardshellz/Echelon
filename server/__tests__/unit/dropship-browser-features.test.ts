@@ -126,7 +126,8 @@ describe("affected feature browser selection", () => {
       const output = path.join(directory, "outputs");
       const plan = runDropshipBrowserSelection({ BROWSER_EVENT_NAME: "workflow_dispatch", GITHUB_OUTPUT: output });
       expect(readFileSync(output, "utf8")).toBe(`run=true\nmatrix=${JSON.stringify(plan.matrix)}\n`);
-      expect(plan.matrix.include.map(entry => entry.feature)).toEqual(["all", "all"]);
+      expect(plan.matrix.include.map(entry => [entry.feature, entry.shard, entry.shards]))
+        .toEqual([["all", 1, 4], ["all", 2, 4], ["all", 3, 4], ["all", 4, 4]]);
       expect(runDropshipBrowserSelection({ BROWSER_BASE_SHA: "main; echo injected", BROWSER_HEAD_SHA: "0".repeat(40) }).matrix)
         .toEqual(plan.matrix);
     } finally {

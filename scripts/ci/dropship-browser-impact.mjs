@@ -7,11 +7,15 @@ import { DROPSHIP_BROWSER_FEATURES, validateDropshipFeatureCoverage } from "./dr
 
 // If coverage registration or diff evidence cannot be trusted, the original
 // unfiltered Playwright configuration still discovers and runs all specs.
+// Two full-suite shards exceeded the workflow's 15-minute job budget. Keep
+// complete coverage and the existing budget while using its four worker slots.
+const FULL_BROWSER_SHARDS = 4;
 export function fullDropshipBrowserPlan(reason) {
-  return { run: true, decisions: [{ feature: "all", run: true, reason }], matrix: { include: [
-    { feature: "all", label: "Full coverage fallback", shard: 1, shards: 2 },
-    { feature: "all", label: "Full coverage fallback", shard: 2, shards: 2 },
-  ] } };
+  return { run: true, decisions: [{ feature: "all", run: true, reason }], matrix: { include:
+    Array.from({ length: FULL_BROWSER_SHARDS }, (_, index) => ({
+      feature: "all", label: "Full coverage fallback", shard: index + 1, shards: FULL_BROWSER_SHARDS,
+    })),
+  } };
 }
 
 export function selectDropshipBrowserFeatures({ changes, files, readSource, previous, force = false }) {
