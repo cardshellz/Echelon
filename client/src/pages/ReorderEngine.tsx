@@ -1,4 +1,9 @@
 import { SupplierSelectionEvidence } from "@/features/purchasing/SupplierSelectionEvidence";
+import { useRfqCommands } from "@/features/purchasing/use-rfq-commands";
+import { RfqCommandRecovery } from "@/features/purchasing/RfqCommandRecovery";
+import type { RfqCreateIntent, RfqCreatePayload } from "@shared/procurement/rfq-create-command";
+import { rfqCreateReceiptSchema } from "@shared/procurement/rfq-create-command";
+import { canonicalJson } from "@shared/utils/canonical-json";
 import { comparePurchaseBuyingPriority, purchaseBuyingCounts, purchaseBuyingDisposition } from "@shared/procurement/purchase-buying-review";
 import { formatForecastWeight, formatOrderRounding } from "@/features/purchasing/reorder-explanation-format";
 import type { PurchaseOrderRounding } from "@shared/procurement/purchase-order-rounding";
@@ -337,10 +342,11 @@ interface CommandResult {
 }
 
 /**
- * The ONLY mutation seam on this page (pinned by
+ * The recommendation mutation seam on this page (pinned by
  * reorder-engine-ui-contract.test.ts): every POST goes through here with a
  * literal endpoint string at the call site, so the contract test can prove no
- * other mutations exist. Never swallows errors — callers branch on `ok` and
+ * other recommendation mutations exist. Initial RFQs use the shared persistent
+ * RFQ command owner below. Never swallows errors — callers branch on `ok` and
  * surface `error` verbatim.
  */
 async function postPurchasingCommand(url: string, payload?: unknown): Promise<CommandResult> {
@@ -1038,6 +1044,9 @@ function matchesSearch(item: CockpitItem, query: string): boolean {
 
 export default function ReorderEngine() {
   const [location, navigate] = useLocation();
+  const rfqCommands = useRfqCommands();
+  const submissionContext = useRef({ actorId: rfqCommands.userId, location });
+  submissionContext.current = { actorId: rfqCommands.userId, location };
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const tableRef = useRef<HTMLDivElement | null>(null);
@@ -1252,10 +1261,6 @@ export default function ReorderEngine() {
   const [ackedControls, setAckedControls] = useState<ReadonlySet<string>>(new Set());
   const [approvedExceptions, setApprovedExceptions] = useState<ReadonlySet<string>>(new Set());
   const [decisionNote, setDecisionNote] = useState("");
-  // RFQ idempotency key minted at builder open (and re-minted after a
-  // successful batch) so a retry of the SAME confirm can never create a
-  // duplicate batch, while a genuinely new order is a new financial command.
-  const [rfqIdempotencyKey, setRfqIdempotencyKey] = useState("");
   const [pieceDrafts, setPieceDrafts] = useState<Record<string, string>>({});
   const [roundedHints, setRoundedHints] = useState<Record<string, string>>({});
   const [submitResult, setSubmitResult] = useState<OrderSubmissionResult | null>(null);
@@ -1265,6 +1270,26 @@ export default function ReorderEngine() {
   // submissions — each recording its own accepted_for_po decisions. The ref
   // flips before the first await and closes that window.
   const submitInFlightRef = useRef(false);
+  const submittedRfq = useRef<{ intent: RfqCreateIntent; skus: string[] } | null>(null);
+  useEffect(() => {
+    submittedRfq.current = null;
+    setBuilderOpen(false); setOrderSelection(new Map()); setSubmitResult(null);
+    setSupplierOverrides({}); setVendorMode({}); setDecisionNote("");
+    setApprovedExceptions(new Set()); setAckedControls(new Set());
+  }, [rfqCommands.userId]);
+  useEffect(() => {
+    const original = submittedRfq.current;
+    const receipt = rfqCommands.confirmed;
+    if (isSubmitting || !original || receipt?.intent.operation !== "create_batch"
+      || canonicalJson(original.intent) !== canonicalJson(receipt.intent)) return;
+    submittedRfq.current = null;
+    // A peer recovery confirms the original batch, not the current cart. Clear
+    // stale result feedback while retaining every selection for fresh review.
+    const originalSkus = new Set(original.skus);
+    const creation = rfqCreateReceiptSchema.parse(receipt).result;
+    setSubmitResult(current => current ? { ...current, rfqCreatedCount: creation.rfqs.length, rfqLineCount: creation.lines.length, rfqReused: creation.reused,
+      failures: current.failures.filter(failure => failure.step !== "rfq" || !originalSkus.has(failure.sku)) } : current);
+  }, [rfqCommands.confirmed, isSubmitting]);
 
   // Everything addable to an order: active items plus non-excluded skipped
   // rows (dual-listed rows prefer the active entry). Excluded rows are never
@@ -1389,7 +1414,6 @@ export default function ReorderEngine() {
     setSubmitResult(null);
     setPieceDrafts({});
     setRoundedHints({});
-    setRfqIdempotencyKey(crypto.randomUUID());
     setBuilderOpen(true);
   };
 
@@ -1466,7 +1490,14 @@ export default function ReorderEngine() {
    * POST covers every RFQ vendor (the service splits per vendor internally).
    */
   const submitOrder = async () => {
-    if (submitInFlightRef.current) return;
+    // Recover saved RFQ intent through its own action before recalculating new
+    // demand. Its committed reservation may already make remainingPieces zero.
+    if (submitInFlightRef.current || rfqCommands.blocked
+      || (confirmView.rfqGroups.length > 0 && !rfqCommands.canEdit)) return;
+    const submittedContext = submissionContext.current;
+    const submittedSelection = new Map(orderSelection);
+    const isCurrentSubmission = () => submissionContext.current.actorId === submittedContext.actorId
+      && submissionContext.current.location === submittedContext.location;
     submitInFlightRef.current = true;
     setIsSubmitting(true);
     const failures: OrderLineFailure[] = [];
@@ -1648,7 +1679,7 @@ export default function ReorderEngine() {
             }
           }
         }
-        const rfqLineBodies: Array<Parameters<typeof postPurchasingCommand>[1]> = [];
+        const rfqLineBodies: RfqCreatePayload["lines"] = [];
         const rfqLineIds: string[] = [];
         for (const { item, state, group } of allRfqLines) {
           const mapped = lineMap.get(item.recommendationId);
@@ -1680,27 +1711,27 @@ export default function ReorderEngine() {
           rfqLineIds.push(item.recommendationId);
         }
         if (rfqLineBodies.length > 0) {
-          const batch = await postPurchasingCommand("/api/purchasing/rfq-queue", {
-            idempotencyKey: rfqIdempotencyKey,
-            requestNote: allRfqLines.filter(({ item }) => item.manualSourcingOverride).map(({ item, state }) => `${item.sku}: supplier override to ${item.preferredVendorName} (mapping ${item.supplierBasis.vendorProductId}). ${state.exceedReason.trim()}`).join("\n") || null,
-            responseDueDate: null,
-            lines: rfqLineBodies,
-          });
-          if (!batch.ok) {
+          try {
+            if (!isCurrentSubmission()) throw new Error("The operator or purchasing page changed. Review the current selection before submitting.");
+            const intent: RfqCreateIntent = { operation: "create_batch", rfqId: null, payload: {
+              requestNote: allRfqLines.filter(({ item }) => item.manualSourcingOverride).map(({ item, state }) => `${item.sku}: supplier override to ${item.preferredVendorName} (mapping ${item.supplierBasis.vendorProductId}). ${state.exceedReason.trim()}`).join("\n") || null,
+              responseDueDate: null,
+              lines: rfqLineBodies,
+            } };
+            submittedRfq.current = { intent, skus: allRfqLines.filter(({ item }) => rfqLineIds.includes(item.recommendationId)).map(({ item }) => item.sku) };
+            const receipt = rfqCreateReceiptSchema.parse(await rfqCommands.execute(intent));
+            rfqCreatedCount = receipt.result.rfqs.length;
+            rfqLineCount = receipt.result.lines.length;
+            rfqReused = receipt.result.reused;
+            for (const id of rfqLineIds) submittedIds.add(id);
+          } catch (error) {
             for (const id of rfqLineIds) {
               failures.push({
                 sku: orderableById.get(id)?.sku ?? id,
                 step: "rfq",
-                message: batch.error,
+                message: error instanceof Error ? error.message : "RFQ creation was not confirmed. Recover the saved request.",
               });
             }
-          } else {
-            rfqCreatedCount = Array.isArray(batch.body?.rfqs) ? batch.body.rfqs.length : 0;
-            rfqLineCount = Array.isArray(batch.body?.lines) ? batch.body.lines.length : rfqLineBodies.length;
-            rfqReused = batch.body?.reused === true;
-            for (const id of rfqLineIds) submittedIds.add(id);
-            // The key is spent — mint a new one for any follow-up order.
-            setRfqIdempotencyKey(crypto.randomUUID());
           }
         }
       }
@@ -1709,11 +1740,13 @@ export default function ReorderEngine() {
       setIsSubmitting(false);
     }
 
+    if (!isCurrentSubmission()) return;
+
     // Successfully submitted lines leave the order; failed lines stay
     // selected (with their edits) so the operator can retry after fixing.
     setOrderSelection((current) => {
       const next = new Map(current);
-      for (const id of submittedIds) next.delete(id);
+      for (const id of submittedIds) if (current.get(id) === submittedSelection.get(id)) next.delete(id);
       return next;
     });
     invalidateAfterOrderMutations();
@@ -1843,6 +1876,7 @@ export default function ReorderEngine() {
 
   return (
     <div className="p-4 md:p-6">
+      <RfqCommandRecovery commands={rfqCommands} />
       {/* ---------------- Topbar ---------------- */}
       <div className="mb-2 flex flex-wrap items-start gap-3">
         <div className="min-w-0">
@@ -2287,6 +2321,7 @@ export default function ReorderEngine() {
           </SheetHeader>
 
           <div className="flex-1 space-y-4 px-5 py-4">
+            <RfqCommandRecovery commands={rfqCommands} />
             {/* ---------------- Stage 1: edit ---------------- */}
             {builderStage === "edit" && (
               <>
@@ -2922,7 +2957,7 @@ export default function ReorderEngine() {
                     </Button>
                     <Button
                       size="sm"
-                      disabled={confirmMissing !== null || isSubmitting}
+                      disabled={confirmMissing !== null || isSubmitting || rfqCommands.blocked || (confirmView.rfqGroups.length > 0 && !rfqCommands.canEdit)}
                       title={confirmMissing ?? ""}
                       onClick={submitOrder}
                     >

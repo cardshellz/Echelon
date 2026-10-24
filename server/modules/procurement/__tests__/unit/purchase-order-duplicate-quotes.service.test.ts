@@ -327,7 +327,7 @@ describe("duplicatePurchaseOrder quote provenance", () => {
       vendorId: 2,
       productId: 100,
       isActive: 1,
-    });
+    }, undefined);
   });
 
   it("blocks a vendor change when the only UOM quote would alter the source quantity", async () => {

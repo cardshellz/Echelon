@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000029000019070001_rfq_creation_audit_guard.sql",
+  "generation": 29,
+  "pr": 1907,
+  "ordinal": 1,
+  "after": [
+    "900000028000019050001_shipment_history_corrections.sql"
+  ]
+}

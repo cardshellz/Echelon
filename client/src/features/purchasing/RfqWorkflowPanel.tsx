@@ -102,7 +102,12 @@ function RfqWorkflowScope({ rfqId, showRecovery, sourceVerified }: { rfqId: numb
   const command = useRfqCommands(rfqId);
   const canEdit = command.canEdit;
   const submittedIntent = useRef<RfqCommandIntent | null>(null);
-  const submit = (intent: RfqCommandIntent) => { submittedIntent.current = intent; command.submit(intent); };
+  const submit: RfqCommands["submit"] = (intent) => {
+    if (intent.operation === "create_batch" || intent.rfqId !== rfqId) {
+      throw new Error("Recover the original RFQ creation request from the RFQ work list before editing this request.");
+    }
+    submittedIntent.current = intent; command.submit(intent);
+  };
   const editorCommand = { ...command, submit };
   const [editingId, setEditingId] = useState<number | null>(null);
   const [historyId, setHistoryId] = useState<number | null>(null);

@@ -1,3 +1,4 @@
+import { purchaseEntryFixture, purchasingAuthFixture } from "./procurement-purchase-order-entry-fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 
@@ -18,6 +19,7 @@ async function setup(page: Page, mode: Mode) {
   const purchase = { ...po(17), vendor, status, physicalStatus: "draft", updatedAt: "2026-10-18T12:00:00.000Z" };
   await page.route("**/api/**", async (route) => {
     const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: purchasingAuthFixture });
     if (request.method() === "GET") {
       if (path === "/api/settings/procurement") return route.fulfill({ json: { useNewPoEditor: false } });
       if (path === "/api/purchasing/approval-tiers") return route.fulfill({ json: { tiers: [] } });
@@ -35,10 +37,10 @@ async function setup(page: Page, mode: Mode) {
       commands.push({ body: request.postDataJSON(), key: request.headers()["idempotency-key"] });
       if (mode === "malformed") return route.fulfill({ status: 201, json: { po: { ...purchase, id: "17" }, status, dispatch_recorded: false } });
       if (mode === "unavailable" && commands.length === 1) return route.fulfill({ status: 503, json: { error: "Creation response is unavailable. Retry the same request." } });
-      if (mode === "draft") return route.fulfill({ status: 201, json: { po: purchase } });
-      if (mode === "preparation_failed") return route.fulfill({ status: 201, json: { po: purchase, status, dispatch_recorded: false, sendError: "The supplier quote needs review." } });
-      return route.fulfill({ status: 201, json: { po: { ...purchase, status: mode === "unavailable" ? "approved" : status },
-        status: mode === "unavailable" ? "approved" : status, dispatch_recorded: false, pending_approval: status === "pending_approval" } });
+      if (mode === "draft") return route.fulfill({ status: 201, json: purchaseEntryFixture(request, "create", null, { po: purchase }) });
+      if (mode === "preparation_failed") return route.fulfill({ status: 201, json: purchaseEntryFixture(request, "create", null, { po: purchase, status, dispatch_recorded: false, sendError: "The supplier quote needs review." }) });
+      return route.fulfill({ status: 201, json: purchaseEntryFixture(request, "create", null, { po: { ...purchase, status: mode === "unavailable" ? "approved" : status },
+        status: mode === "unavailable" ? "approved" : status, dispatch_recorded: false, pending_approval: status === "pending_approval" }) });
     }
     return route.fallback();
   });
@@ -94,7 +96,7 @@ test("legacy Save Draft does not request supplier preparation", async ({ page })
 test("legacy malformed creation keeps the draft visible without false success or navigation", async ({ page }) => {
   const { dialog, commands, failures } = await setup(page, "malformed");
   await dialog.getByRole("button", { name: "Create & Review", exact: true }).click();
-  await expect(page.getByText("PO save could not be verified. Reload purchase orders and check whether this PO was saved before retrying.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert", { name: "Purchase order recovery" })).toContainText("could not be verified");
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("TEST-EACH");
   await expect(page).toHaveURL(/\/purchase-orders$/);
@@ -106,11 +108,11 @@ test("legacy malformed creation keeps the draft visible without false success or
 test("legacy uncertain creation retries the same intent with the same idempotency key", async ({ page }) => {
   const { dialog, commands, failures } = await setup(page, "unavailable");
   await dialog.getByRole("button", { name: "Create & Review", exact: true }).click();
-  await expect(page.getByText("Creation response is unavailable. Retry the same request.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert", { name: "Purchase order recovery" })).toContainText("Creation response is unavailable");
   await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Create & Review", exact: true }).click();
+  await dialog.getByRole("button", { name: "Recover saved purchase request", exact: true }).click();
   await expect(page).toHaveURL(/\/purchase-orders\/17(?:\?|$)/);
-  await expect(page.getByText("PO ready for supplier review", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert", { name: "Purchase order recovery" })).toHaveCount(0);
   expect(commands).toHaveLength(2);
   expect(commands[1]).toEqual(commands[0]);
   expect(failures).toEqual([]);
@@ -125,6 +127,7 @@ async function setupEditorRetry(page: Page, firstResult: "unavailable" | "malfor
       orderQty: 1, unitCostMills: 100000, unitCostCents: 1000, totalProductCostCents: 1000, packagingCostCents: 0, parentLineId: null }] };
   await page.route("**/api/**", async (route) => {
     const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: purchasingAuthFixture });
     if (request.method() === "GET" && path === "/api/vendors") return route.fulfill({ json: [vendor] });
     if (request.method() === "GET" && path === "/api/purchase-orders/17") return route.fulfill({ json: draft });
     if (request.method() === "GET" && path === "/api/purchase-orders/17/workspace") return route.fulfill({ json: purchaseWorkspace(draft) });
@@ -132,8 +135,8 @@ async function setupEditorRetry(page: Page, firstResult: "unavailable" | "malfor
       commands.push({ body: request.postDataJSON(), key: request.headers()["idempotency-key"] });
       if (commands.length === 1 && firstResult === "unavailable") return route.fulfill({ status: 503, json: { error: "Save response is unavailable. Retry the same request." } });
       if (commands.length > 1) Object.assign(draft, { status: "approved", updatedAt: "2026-10-18T12:01:00.000Z" });
-      return route.fulfill({ json: { po: { ...draft, id: commands.length === 1 ? 99 : 17, status: "approved", updatedAt: "2026-10-18T12:01:00.000Z" },
-        status: "approved", pending_approval: false, dispatch_recorded: false } });
+      return route.fulfill({ json: purchaseEntryFixture(request, "save-draft", 17, { po: { ...draft, id: commands.length === 1 ? 99 : 17, status: "approved", updatedAt: "2026-10-18T12:01:00.000Z" },
+        status: "approved", pending_approval: false, dispatch_recorded: false }) });
     }
     return route.fallback();
   });
@@ -148,11 +151,12 @@ for (const firstResult of ["unavailable", "malformed"] as const) {
   test(`full editor ${firstResult} response retains the reviewed intent and retry key`, async ({ page }) => {
     const { save, commands, failures } = await setupEditorRetry(page, firstResult);
     await save.click();
-    await expect(page.getByText("Preparation failed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("alert", { name: "Purchase order recovery" })).toBeVisible();
     await expect(page).toHaveURL(/\/purchase-orders\/17\/edit$/);
     await expect(page.getByText("PO ready for supplier review", { exact: true })).toHaveCount(0);
-    await save.click();
-    await expect(page.getByText("PO ready for supplier review", { exact: true })).toBeVisible();
+    await expect(save).toBeDisabled();
+    await page.getByRole("button", { name: "Recover saved purchase request", exact: true }).click();
+    await expect(page.getByText("Purchase request confirmed", { exact: true })).toBeVisible();
     await expect(page).toHaveURL(/\/purchase-orders\/17(?:\?|$)/);
     expect(commands).toHaveLength(2);
     expect(commands[0].key).toBeTruthy();
@@ -162,15 +166,33 @@ for (const firstResult of ["unavailable", "malformed"] as const) {
   });
 }
 
-test("full editor intentionally changed payload creates a different command after an uncertain save", async ({ page }) => {
+test("full editor blocks changed terms until the original uncertain save is confirmed", async ({ page }) => {
   const { save, commands, failures } = await setupEditorRetry(page, "unavailable");
   await save.click();
-  await expect(page.getByText("Preparation failed", { exact: true })).toBeVisible();
-  await page.getByTestId("input-line-description-0").filter({ visible: true }).fill("Reviewed supplier handling fee");
-  await save.click();
-  await expect(page.getByText("PO ready for supplier review", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert", { name: "Purchase order recovery" })).toBeVisible();
+  await expect(page.getByTestId("input-line-description-0").filter({ visible: true })).toBeDisabled();
+  await expect(save).toBeDisabled();
+  await page.getByRole("button", { name: "Recover saved purchase request", exact: true }).click();
+  await expect(page).toHaveURL(/\/purchase-orders\/17(?:\?|$)/);
   expect(commands).toHaveLength(2);
-  expect(commands[1].key).not.toBe(commands[0].key);
-  expect(commands[1].body).toMatchObject({ lines: [{ description: "Reviewed supplier handling fee" }] });
+  expect(commands[1]).toEqual(commands[0]);
+  expect(failures).toEqual([]);
+});
+
+test("legacy offline creation saves recovery immediately and reconnect never submits it automatically", async ({ page }) => {
+  const { dialog, commands, failures } = await setup(page, "approved");
+  let offline = true;
+  await page.route("**/api/purchase-orders", route => route.request().method() === "POST" && offline ? route.abort("internetdisconnected") : route.fallback());
+  await page.context().setOffline(true);
+  await dialog.getByRole("button", { name: "Create & Review", exact: true }).click();
+  const recover = dialog.getByRole("button", { name: "Recover saved purchase request", exact: true });
+  await expect(recover).toBeEnabled();
+  const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem("echelon:purchase-order-entry:v1:test-user")!));
+  expect(saved.body).toMatchObject({ action: "create", payload: { vendorId: 2, prepare_for_supplier: true } });
+  expect(commands).toHaveLength(0);
+  offline = false; await page.context().setOffline(false); await page.waitForLoadState("networkidle");
+  expect(commands).toHaveLength(0);
+  await recover.click(); await expect(dialog).toBeHidden();
+  expect(commands).toHaveLength(1); expect(commands[0]).toEqual({ key: saved.key, body: saved.body.payload });
   expect(failures).toEqual([]);
 });
