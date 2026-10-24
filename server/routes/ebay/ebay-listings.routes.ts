@@ -1,4 +1,5 @@
 import { ChannelReadCoordinator } from "../../modules/marketplace-listings/application/channel-read-coordinator";
+import { channelListingInventorySchema } from "@shared/types/channel-listing-inventory";
 import { EbayListingFeedReader } from "../../modules/channels/infrastructure/ebay-listing-feed.reader";
 import { ebayListingPushRequestSchema, ebayListingPushService } from "../../modules/channels/ebay-listing-push";
 import { PostgresEbayListingRecoveryContinuation } from "../../modules/channels/infrastructure/ebay-listing-recovery-continuation";
@@ -48,6 +49,7 @@ const feedReader = new EbayListingFeedReader(pool, EBAY_CHANNEL_ID, {
   resolvePrice: (productId, variantId, basePriceCents) => resolveChannelPrice(db, EBAY_CHANNEL_ID, productId, variantId, basePriceCents),
 });
 const feedReads = new ChannelReadCoordinator<Awaited<ReturnType<EbayListingFeedReader["read"]>>>();
+const inventoryReads = new ChannelReadCoordinator<Awaited<ReturnType<EbayListingFeedReader["readInventory"]>>>();
 const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncService,
   new EbayPublicationRecoveryService(new PostgresEbayPublicationRecoveryRepository(pool), () => new Date()),
   new PostgresEbayListingRecoveryContinuation(pool, ebayListingSyncRepository), readEbayPushRecoveryIdentity);
@@ -56,13 +58,43 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
   // -----------------------------------------------------------------------
   router.get("/api/ebay/listing-feed", requireAuth, async (req: Request, res: Response) => {
     try {
-      res.json(await feedReads.read(EBAY_CHANNEL_ID, () => feedReader.read()));
+      res.json(await feedReads.read(EBAY_CHANNEL_ID, async () => {
+        const startedAt = performance.now();
+        const poolAtStart = { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount };
+        let productCount: number | null = null;
+        try {
+          const result = await feedReader.read();
+          productCount = result.total;
+          return result;
+        } finally {
+          // One measurement per coalesced load, including failed loads. This
+          // distinguishes slow projection work from connection acquisition.
+          console.info({ event: "channel_listing_feed_read", channelId: EBAY_CHANNEL_ID,
+            elapsedMs: Math.round(performance.now() - startedAt), productCount, poolAtStart,
+            poolAtFinish: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount } });
+        }
+      }));
     } catch (error) {
       const reference = randomUUID();
       const issue = resolveEbayListingIssue({ code: "EBAY_LISTING_FEED_UNAVAILABLE", jobId: reference });
       console.error({ event: "ebay_listing_feed_failed", reference,
         error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown listing feed read failure" });
       res.status(500).json({ code: issue.code, error: issue.message, issue });
+    }
+  });
+
+  router.get("/api/ebay/listing-feed/:productId/inventory", requireAuth, requirePermission("channels", "view"), async (req: Request, res: Response) => {
+    const productId = z.coerce.number().int().positive().max(2_147_483_647).safeParse(req.params.productId);
+    if (!productId.success) { res.status(400).json({ error: "Choose a valid product." }); return; }
+    try {
+      res.json(channelListingInventorySchema.parse(
+        await inventoryReads.read(productId.data, () => feedReader.readInventory(productId.data))));
+    } catch (error) {
+      const reference = randomUUID();
+      const issue = resolveEbayListingIssue({ code: "EBAY_FEED_QUANTITY_UNAVAILABLE", productId: productId.data, jobId: reference });
+      console.error({ event: "ebay_listing_inventory_failed", reference, productId: productId.data,
+        error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown inventory read failure" });
+      res.status(503).json({ code: issue.code, error: issue.message, issue });
     }
   });
 

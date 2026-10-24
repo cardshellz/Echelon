@@ -1,4 +1,5 @@
 import { ebayAvailablePolicyValuesSchema, type EbayAvailablePolicyValues } from "@shared/ebay-business-policies";
+import { ChannelListingValidationError } from "@shared/channel-listing-validation";
 import {
   EbayListingBuilder,
   type BuiltEbayListingDraft,
@@ -62,12 +63,12 @@ export function buildEbayRouteListingDraft(
   input: EbayRouteListingDraftInput,
 ): BuiltEbayListingDraft {
   const firstPolicies = input.resolvedPoliciesByVariantId?.values().next().value;
-  if (!firstPolicies) throw new Error("A validated eBay policy selection is required before building a listing draft.");
+  if (!firstPolicies) throw new ChannelListingValidationError({ field: "policies", reason: "required", productId: input.productId });
   const listingPolicies = ebayAvailablePolicyValuesSchema.parse(firstPolicies);
   const groupKey = input.existingGroupKey === undefined
     ? input.product.sku || `PROD-${input.productId}` : input.existingGroupKey;
   if (input.existingGroupKey !== undefined && input.isMultiVariant && groupKey === null) {
-    throw new Error("An existing multi-variant eBay listing requires its verified group key.");
+    throw new ChannelListingValidationError({ field: "listing_identity", reason: "required", productId: input.productId });
   }
   const descriptionHtml = input.product.description || `<p>${escapeHtml(input.product.name)}</p>`;
   const variants: ChannelVariantPayload[] = [];
@@ -79,13 +80,12 @@ export function buildEbayRouteListingDraft(
     const sku = String(routeVariant.sku ?? "").trim();
     if (!sku) continue;
 
-    const variantId = normalizeRequiredPositiveInteger(routeVariant.id, `Invalid eBay variant id for SKU ${sku}.`);
+    const variantId = normalizeRequiredPositiveInteger(routeVariant.id, input.productId);
     const isListed = routeVariant.isListed !== false;
     const priceCents = normalizeCents(input.variantPrices.get(variantId) ?? routeVariant.price_cents);
     if (isListed && (priceCents === null || !isValidEbayFixedPriceCents(priceCents))) {
-      throw new Error(
-        `eBay listing price is required and must be at least ${formatEbayMinimumPrice()} for SKU ${sku}.`,
-      );
+      throw new ChannelListingValidationError({ field: "price", reason: priceCents === null ? "required" : "invalid",
+        productId: input.productId, variantId, variantSku: sku });
     }
 
     const availableQty = isListed
@@ -96,7 +96,7 @@ export function buildEbayRouteListingDraft(
     variationValueByVariantId.set(variantId, variationValue);
 
     const resolvedPolicies = input.resolvedPoliciesByVariantId.get(variantId);
-    if (isListed && !resolvedPolicies) throw new Error(`The resolved eBay policy scope is missing variant ${variantId}.`);
+    if (isListed && !resolvedPolicies) throw new ChannelListingValidationError({ field: "policies", reason: "required", productId: input.productId, variantId });
     if (resolvedPolicies) {
       variantListingPoliciesByVariantId.set(variantId, ebayAvailablePolicyValuesSchema.parse(resolvedPolicies));
     }
@@ -160,15 +160,18 @@ export function buildEbayRouteListingDraft(
     includeVariantSkusInGroup: true,
     retainUnlistedVariantsInGroup: input.retainUnlistedVariantsInGroup === true,
     includeEmptyAspectsImageVariesBy: true,
-    includeOfferListingDescription: false,
+    // updateOffer replaces the offer. Its description must come from the same
+    // prepared catalog revision as the inventory item and group, including when
+    // repairing a legacy listing whose provider description is missing.
+    includeOfferListingDescription: true,
     includeOfferTax: false,
   });
 }
 
-function normalizeRequiredPositiveInteger(value: unknown, errorMessage: string): number {
+function normalizeRequiredPositiveInteger(value: unknown, productId: number): number {
   const numeric = typeof value === "string" ? Number(value) : value;
   if (typeof numeric !== "number" || !Number.isInteger(numeric) || numeric <= 0) {
-    throw new Error(errorMessage);
+    throw new ChannelListingValidationError({ field: "variant_identity", reason: "invalid", productId });
   }
   return numeric;
 }
