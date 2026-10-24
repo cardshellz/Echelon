@@ -489,7 +489,7 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
   buildOrderId: integer("build_order_id").references(() => buildOrders.id, { onDelete: "set null" }),
   buildOrderComponentId: integer("build_order_component_id").references(() => buildOrderComponents.id, { onDelete: "set null" }),
   referenceType: varchar("reference_type", { length: 30 }), // "order", "receiving", "cycle_count", "manual"
-  referenceId: varchar("reference_id", { length: 100 }), // External reference ID
+  referenceId: varchar("reference_id", { length: 500 }), // External reference ID; composite claim references (migration 900000012000018360001)
   notes: text("notes"),
   isImplicit: integer("is_implicit").notNull().default(0), // 1 = auto-generated, 0 = explicit scan
   userId: varchar("user_id", { length: 100 }), // Who performed the action
