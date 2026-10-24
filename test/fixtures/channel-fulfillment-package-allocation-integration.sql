@@ -17,10 +17,10 @@ CREATE TABLE oms.oms_order_lines (
   fulfillment_provider VARCHAR(40),
   paid_quantity INTEGER NOT NULL,
   authority_fulfillable_quantity INTEGER NOT NULL,
-  channel_current_quantity INTEGER,
-  channel_quantity_updated_at TIMESTAMPTZ,
   cancelled_quantity INTEGER NOT NULL DEFAULT 0,
-  refunded_quantity INTEGER NOT NULL DEFAULT 0
+  refunded_quantity INTEGER NOT NULL DEFAULT 0,
+  channel_current_quantity INTEGER,
+  channel_quantity_updated_at TIMESTAMPTZ
 );
 
 CREATE TABLE oms.order_line_adjustments (
