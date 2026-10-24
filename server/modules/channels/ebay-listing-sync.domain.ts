@@ -1,4 +1,6 @@
 import { providerReadDiagnosticFromError, providerReadShouldRetry } from "@shared/channel-provider-read";
+import { providerWriteDiagnosticFromError, providerWriteShouldRetry } from "@shared/channel-provider-write";
+import { channelListingValidationFromError, ChannelListingValidationError } from "@shared/channel-listing-validation";
 import { ChannelPricingResolutionError } from "./channel-pricing-resolver";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -140,7 +142,6 @@ const RETRY_CODES = new Set([
   "STOCK_MAPPING_CLEANUP_UNCERTAIN",
   "STOCK_MAPPING_REVIEW_STALE",
   "STOCK_MAPPING_TARGET_CHANGED",
-  "EBAY_QUANTITY_REJECTED",
   "EBAY_QUANTITY_DAILY_LIMIT",
 ]);
 export const SYNC_RETRY_LIMIT = 5;
@@ -172,7 +173,10 @@ export function syncFailure(
   const { code } = ebayListingFailureDiagnostic(error);
   const waiting = WAIT_CODES.has(code);
   const readFailure = providerReadDiagnosticFromError(error);
-  const retrying = readFailure ? providerReadShouldRetry(readFailure, readFailureCount + 1) :
+  const writeFailure = providerWriteDiagnosticFromError(error);
+  const validation = channelListingValidationFromError(error);
+  const retrying = validation ? false : writeFailure ? providerWriteShouldRetry(writeFailure)
+    : readFailure ? providerReadShouldRetry(readFailure, readFailureCount + 1) :
     waiting || AUTOMATIC_RECOVERY_CODES.has(code) ||
     ((RETRY_CODES.has(code) || code === "EBAY_LISTING_SYNC_FAILED" || code === "DATABASE_POOL_ACQUIRE_TIMEOUT") &&
       attempts < SYNC_RETRY_LIMIT);
@@ -195,6 +199,7 @@ export function syncFailure(
     ? "An inventory update is using this listing. The saved listing update will retry automatically."
     : code === "CANONICAL_PUBLICATION_MAPPING_MISSING"
       ? "Inventory setup stopped this listing update before its pictures could be confirmed. Retry Sync to prepare this listing's inventory connection."
+    : validation ? new ChannelListingValidationError(validation).message
     : error instanceof Error &&
     (error instanceof EbayListingSyncError || error instanceof ChannelPricingResolutionError ||
       (code !== "EBAY_LISTING_SYNC_FAILED" && /^(EBAY_|PUBLICATION_|QUANTITY_)/.test(code)))

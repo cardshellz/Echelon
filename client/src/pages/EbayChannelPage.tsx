@@ -18,8 +18,9 @@ import { EbayProductListingIntentControl } from "@/components/ebay/EbayProductLi
 import { EbayWithdrawalIssueCard } from "@/components/ebay/EbayWithdrawalIssueCard";
 import { ebayListingIssueSchema, type EbayListingIssue } from "@shared/types/ebay-listing-issue";
 import { resolveEbayListingIssue, resolveEbayListingJobIssue } from "@shared/ebay-listing-issue";
-import { listingFeedIssueFromError, listingIssueFromError, listingSyncIssueFromError } from "@/lib/ebay-listing-issue";
+import { listingFeedIssueFromError, listingInventoryIssueFromError, listingIssueFromError, listingSyncIssueFromError } from "@/lib/ebay-listing-issue";
 import { z } from "zod";
+import { channelListingInventorySchema, ChannelListingInventoryScopeError } from "@shared/types/channel-listing-inventory";
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { EbayPolicyValues, EbayPolicyPatch, EbayPolicyScope } from "@shared/ebay-business-policies";
 import { EbayPolicyFields, PolicyDraftConflict, policyChanges, useEbayPolicyDraft, type PolicyCatalogStatus } from "@/features/channels/EbayPolicyFields";
@@ -208,6 +209,8 @@ interface FeedItem {
   isExcluded: boolean;
   syncError: string | null;
   inventoryIssue?: EbayListingIssue | null;
+  inventoryReadState?: "not_requested";
+  inventoryLoading?: boolean;
   priceIssue?: EbayListingIssue | null;
   externalListingId: string | null;
   externalListingIdentityConflict: boolean;
@@ -219,6 +222,15 @@ interface FeedItem {
   fulfillmentPolicyOverride: string | null;
   returnPolicyOverride: string | null;
   paymentPolicyOverride: string | null;
+}
+
+interface ProductInventoryRead {
+  productId: number;
+  quantities: Array<{ variantId: number; quantity: number | null }>;
+  issue: EbayListingIssue | null;
+}
+function combineInventoryReads(reads: readonly { data?: ProductInventoryRead; error: unknown; isFetching: boolean }[]) {
+  return reads.map(({ data, error, isFetching }) => ({ data, error, isFetching }));
 }
 
 function listingNeedsAttention(item: FeedItem, job: z.infer<typeof ebayListingSyncJobSchema> | undefined, hasLocalIssue: boolean): boolean {
@@ -348,10 +360,54 @@ export default function EbayChannelPage() {
   });
 
   // ---- Listing feed ----
-  const { data: feedData, isLoading: feedLoading, isFetching: feedFetching, error: feedError, refetch: refetchFeed } = useQuery<{ feed: FeedItem[]; total: number; syncIncludedCount?: number }>({
+  const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
+  const { data: rawFeedData, dataUpdatedAt: feedRevision, isLoading: feedLoading, isFetching: feedFetching, error: feedError, refetch: refetchFeed } = useQuery<{ feed: FeedItem[]; total: number; syncIncludedCount?: number }>({
     queryKey: ["/api/ebay/listing-feed"],
     enabled: !!config?.connected,
   });
+  const inventoryKey = (id: number) => ["/api/ebay/listing-inventory", id] as const;
+  useEffect(() => {
+    if (!feedRevision) return;
+    // Refresh expanded products after content changes without discarding a
+    // collapsed product's failed-read evidence. Expanding it resumes the read.
+    void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-inventory"] });
+  }, [feedRevision]);
+  const inventoryProducts = (rawFeedData?.feed ?? []).filter(item => item.inventoryReadState === "not_requested"
+    && (expandedProducts.has(item.id) || queryClient.getQueryState(inventoryKey(item.id))));
+  const inventoryQueryOptions = (item: FeedItem) => ({
+    queryKey: inventoryKey(item.id), enabled: expandedProducts.has(item.id), retry: false,
+    refetchOnWindowFocus: false, staleTime: 0,
+    queryFn: async () => {
+      const response = channelListingInventorySchema.parse(await (await apiRequest("GET", `/api/ebay/listing-feed/${item.id}/inventory`)).json());
+      if (response.productId !== item.id || response.quantities.length !== item.variants.length ||
+        response.quantities.some(row => !item.variants.some(variant => variant.id === row.variantId)))
+        throw new ChannelListingInventoryScopeError();
+      return { ...response, issue: ebayListingIssueSchema.nullable().parse(response.issue) };
+    },
+  });
+  const inventoryQueries = useQueries({ combine: combineInventoryReads, queries: inventoryProducts.map(inventoryQueryOptions) });
+  const reloadInventory = async (item: FeedItem): Promise<void> => {
+    let current = item;
+    if (item.inventoryIssue?.code === "CHANNEL_LISTING_INVENTORY_SCOPE_CHANGED" || item.inventoryReadState !== "not_requested") {
+      const refreshed = await refetchFeed();
+      if (refreshed.error) return; // The feed renders its own read failure.
+      const refreshedItem = refreshed.data?.feed.find(row => row.id === item.id);
+      if (!refreshedItem || refreshedItem.inventoryReadState !== "not_requested") return;
+      current = refreshedItem;
+    }
+    try { await queryClient.fetchQuery({ ...inventoryQueryOptions(current), staleTime: 0 }); }
+    catch { /* The query's saved error remains visible in the inventory section. */ }
+  };
+  const inventoryByProduct = new Map(inventoryProducts.map((item, index) => [item.id, inventoryQueries[index]]));
+  const inventoryProductIds = inventoryProducts.map(item => item.id).join(",");
+  const feedData = useMemo(() => rawFeedData ? { ...rawFeedData, feed: rawFeedData.feed.map(item => {
+    const read = inventoryByProduct.get(item.id);
+    if (!read) return item;
+    const quantities = new Map(read.error ? [] : read.data?.quantities.map(row => [row.variantId, row.quantity] as const));
+    return { ...item, inventoryLoading: read.isFetching,
+      inventoryIssue: read.error ? listingInventoryIssueFromError(read.error, item.id) : read.data?.issue ?? null,
+      variants: item.variants.map(variant => ({ ...variant, inventoryQuantity: quantities.get(variant.id) ?? null })) };
+  }) } : undefined, [rawFeedData, inventoryQueries, inventoryProductIds]);
   const feedReadIssue = useMemo(() => feedError ? listingFeedIssueFromError(feedError) : null, [feedError]);
   const syncJobsQuery = useQuery({
     queryKey: ["/api/ebay/listings/sync-jobs"],
@@ -475,7 +531,6 @@ export default function EbayChannelPage() {
   // Feed filters
   const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "ended" | "errors">("all");
   const [feedSearch, setFeedSearch] = useState("");
-  const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
   const [policyAnchor, setPolicyAnchor] = useState(() => window.location.hash);
   const [policyAnchorActivation, setPolicyAnchorActivation] = useState(0);
   const consumedPolicyAnchor = useRef<string | null>(null);
@@ -2485,7 +2540,10 @@ export default function EbayChannelPage() {
                                 : <EbayListingIssueCard issue={item.inventoryIssue}
                                 onAction={["review_mapping", "check_status"].includes(item.inventoryIssue.action.kind)
                                   ? (issue) => handleIssueAction(issue, item.id, syncJob?.id) : undefined} />}
-                              <Button variant="outline" size="sm" disabled={feedFetching} onClick={() => refetchFeed()}>{feedFetching ? "Reloading inventory…" : "Reload inventory"}</Button>
+                              <Button variant="outline" size="sm" disabled={item.inventoryLoading || feedFetching}
+                                onClick={() => void reloadInventory(item)}>
+                                {item.inventoryLoading ? "Reloading inventory…" : item.inventoryIssue.code === "CHANNEL_LISTING_INVENTORY_SCOPE_CHANGED"
+                                  ? "Reload listings" : "Reload inventory"}</Button>
                             </section>
                           </TableCell>
                         </TableRow>}
@@ -2538,7 +2596,7 @@ export default function EbayChannelPage() {
                             </TableCell>
                             {/* Qty — desktop */}
                             <TableCell className="hidden sm:table-cell py-1.5">
-                              <span className="text-xs">{variant.inventoryQuantity === null ? "Unavailable" : `${variant.inventoryQuantity} qty`}</span>
+                              <span className="text-xs">{item.inventoryLoading ? "Loading inventory…" : variant.inventoryQuantity === null ? "Unavailable" : `${variant.inventoryQuantity} qty`}</span>
                             </TableCell>
                             {/* Policy toggle — desktop */}
                             <TableCell className="hidden sm:table-cell py-1.5">
@@ -2572,7 +2630,7 @@ export default function EbayChannelPage() {
                                   return <span>{formatPrice(ep.effectivePriceCents)}</span>;
                                 })()}
                                 <span>·</span>
-                                <span>{variant.inventoryQuantity === null ? "Unavailable" : `${variant.inventoryQuantity} qty`}</span>
+                                <span>{item.inventoryLoading ? "Loading inventory…" : variant.inventoryQuantity === null ? "Unavailable" : `${variant.inventoryQuantity} qty`}</span>
                                 <button
                                   className={`p-1 rounded hover:bg-muted min-w-[44px] min-h-[44px] flex items-center justify-center ${
                                     [variant.fulfillmentPolicyOverride, variant.returnPolicyOverride, variant.paymentPolicyOverride].some(value => value !== null && value !== undefined)

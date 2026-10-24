@@ -2,6 +2,9 @@ import { channelProviderReadDiagnosticSchema, providerReadDetails, type ChannelP
 import { ebayListingIssueSchema, type EbayListingIssue } from "./types/ebay-listing-issue";
 import type { EbayPolicySource } from "./ebay-business-policies";
 import type { EbayListingSyncJob } from "./types/ebay-listing-sync";
+import { channelListingValidationSchema, type ChannelListingValidation } from "./channel-listing-validation";
+import { channelOperationFailureSchema } from "./channel-operation-failure";
+import type { z } from "zod";
 
 function isAutomaticResponseRecovery(code: string | null | undefined, state: string | undefined): boolean {
   return state === "recovering" && (code === "EBAY_QUANTITY_RESPONSE_UNCERTAIN" || code === "QUANTITY_PROVIDER_REQUEST_TIMEOUT");
@@ -43,6 +46,8 @@ export interface EbayListingIssueInput {
   policySource?: EbayPolicySource;
   providerRead?: ChannelProviderReadDiagnostic | null;
   readRetryPaused?: boolean;
+  validation?: ChannelListingValidation;
+  failure?: z.infer<typeof channelOperationFailureSchema>;
 }
 
 /** One presentation contract for API results, saved work, and older server responses.
@@ -73,7 +78,25 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     ebayListingIssueSchema.parse({ code, title, message: message || fallback, nextStep, retryable,
       action: { kind, label, ...(href ? { href } : {}) }, ...(reference ? { reference } : {}),
       details: [...(input.productId ? [{ label: "Product ID", value: String(input.productId) }] : []),
-        ...(readFailure ? providerReadDetails(readFailure) : [])] });
+        ...(readFailure ? providerReadDetails(readFailure) : []),
+        ...(input.failure ? [{ label: "Failure reference", value: input.failure.fingerprint },
+          ...(input.failure.locations ?? []).map(value => ({ label: "Code location", value }))] : [])] });
+
+  if (code === "CHANNEL_LISTING_VALIDATION_FAILED") {
+    const parsed = channelListingValidationSchema.safeParse(input.validation);
+    const validation = parsed.success ? parsed.data : undefined;
+    if (validation?.field === "package_weight") {
+      const result = issue("Add the variant's package weight", "A selected variant has no valid shipping weight.",
+        "Open product variants, edit the affected variant and save its package weight. Then Sync this product again.",
+        false, "edit_listing", "Open product variants", `${productPath}?tab=variants`);
+      return { ...result, details: [...result.details ?? [],
+        ...(validation.variantSku ? [{ label: "Variant SKU", value: validation.variantSku }] : []),
+        ...(validation.variantId ? [{ label: "Variant ID", value: String(validation.variantId) }] : [])] };
+    }
+    return issue("Correct the listing source", "The saved listing input is missing or invalid.",
+      "Correct the reported price, policy or identity in the product's channel settings, then Sync this product again.",
+      false, "edit_listing", "Open product settings", validation?.field === "variant_identity" ? `${productPath}?tab=variants` : `${productPath}?tab=channels`);
+  }
 
   if (code === "PUBLICATION_RECOVERY_REVIEW_REQUIRED")
     return issue("An earlier update needs a recovery decision",
@@ -114,6 +137,10 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Inventory could not be loaded", "Echelon could not read this product's current eBay quantity. Other products can still be viewed.",
       "Use Reload inventory to try this read again. If it still fails, copy the diagnostic reference for an administrator. Publishing checks current stock separately.",
       false, "contact_support", "Copy diagnostic details");
+  if (code === "CHANNEL_LISTING_INVENTORY_SCOPE_CHANGED")
+    return issue("Reload the listing variants", "The inventory response does not match the variants currently displayed for this product.",
+      "Use Reload listings to read the current variants and their inventory together. No listing update is sent.",
+      false, "edit_listing", "Open listing feed", "/channels/ebay");
   if (code === "EBAY_FEED_QUANTITY_MISSING")
     return issue("A variant has no stock destination quantity", "The inventory reader did not return a quantity for one or more selected, inventory-managed variants in this product.",
       "Open inventory settings for this product and check the eBay destination and variant eligibility. After correcting the reported setup, use Reload inventory. An unavailable quantity is not zero stock.",
@@ -384,7 +411,8 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     "EBAY_SYNC_ADMISSION_FAILED", "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED", "EBAY_AUTH_UNAVAILABLE", "EBAY_AUTH_REFRESH_SUPERSEDED",
     "EBAY_LISTING_SYNC_FAILED", "DATABASE_POOL_ACQUIRE_TIMEOUT", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED"].includes(code))
     return issue(input.state === "recovering" ? "Echelon is recovering this update" : "The update could not finish",
-      "A temporary provider or local persistence failure interrupted the update.",
+      code === "EBAY_LISTING_SYNC_FAILED" ? "An unexpected failure interrupted the update. Its saved diagnostic reference identifies the failure for investigation."
+        : "A provider or local persistence failure interrupted the update.",
       input.state === "recovering" ? "The saved update will retry automatically. Open its status to see the latest result."
         : "Retry this product. Echelon checks the saved request and existing listing before sending another update.",
       input.state !== "recovering", input.state === "recovering" ? "check_status" : "retry_sync",

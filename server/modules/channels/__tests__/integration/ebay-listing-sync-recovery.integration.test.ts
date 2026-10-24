@@ -59,6 +59,7 @@ import { resolveExistingEbayListingIdentity } from "../../ebay-existing-listing-
 import { hasOutstandingEbayListingWork } from "../../channel-stock-selection";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
 import { publicationCompletionFixture } from "../fixtures/ebay-publication-completion.fixture";
+import { buildEbayRouteListingDraft } from "../../ebay-listing-draft";
 vi.mock("../../../../db", () => ({ pool: {} }));
 const configured =
   process.env.ECHELON_TEST_DATABASE_URL &&
@@ -152,7 +153,8 @@ const configured =
     const advance = () => {
       timestamp = new Date(timestamp.getTime() + 20 * 60_000);
     };
-    function fixture(options: { beforeGroup?: () => Promise<void>; photoUrls?: readonly string[] } = {}) {
+    function fixture(options: { beforeGroup?: () => Promise<void>; photoUrls?: readonly string[];
+      reject?: (request: EbayQuantityHttpRequest) => Response | undefined } = {}) {
       const provider = syncProviderFixture(),
         admission = new PostgresQuantityPublicationAdmission(
           database.pool,
@@ -204,6 +206,8 @@ const configured =
           now: clock,
           request: async () => {
             mutations.push(structuredClone(request));
+            const refused = options.reject?.(request);
+            if (refused) return refused;
             if (request.path.includes("inventory_item_group") && failGroup) {
               const failure = failGroup;
               failGroup = null;
@@ -307,6 +311,35 @@ const configured =
     });
     const galleryPhotos = ["https://example.com/current-front.jpg", "https://example.com/current-back.jpg"];
 
+    async function prepareFromCatalog(f: ReturnType<typeof fixture>, weight: number | null = 120) {
+      // Catalog read dependencies are fixtures; all queue/receipt/audit indexes
+      // and constraints above come from the unchanged production migrations.
+      await database.pool.query(`ALTER TABLE catalog.product_variants ADD COLUMN IF NOT EXISTS weight_grams numeric(10,2);
+        ALTER TABLE catalog.products ADD COLUMN IF NOT EXISTS description text;`);
+      await database.pool.query("UPDATE catalog.product_variants SET weight_grams=$1 WHERE id=101", [weight]);
+      await database.pool.query("UPDATE catalog.products SET description=$1 WHERE id=20", ["<p>Current catalog description</p>"]);
+      f.prepare.mockImplementation(async () => {
+        const product = (await database.pool.query("SELECT name,sku,description FROM catalog.products WHERE id=20")).rows[0];
+        const variants = (await database.pool.query("SELECT id,sku,name,weight_grams FROM catalog.product_variants WHERE id=101")).rows;
+        const draft = buildEbayRouteListingDraft({ productId: 20, product, variants,
+          photoPlan: { byVariantId: new Map([[101, galleryPhotos]]), groupImageUrls: galleryPhotos },
+          aspects: { Brand: ["Shellz"] }, isMultiVariant: false, variationAspectName: "Pack Size",
+          variantPrices: new Map([[101, 1149]]), atpByVariantId: new Map([[101, 7]]),
+          marketplaceId: "EBAY_US", ebayBrowseCategoryId: "183454",
+          resolvedPoliciesByVariantId: new Map([[101, { fulfillmentPolicyId: "fulfillment", returnPolicyId: "return", paymentPolicyId: "payment" }]]),
+          storeCategoryNames: [], merchantLocationKey: "HQ", existingGroupKey: identity.groupKey });
+        return { ...await f.provider.prepare(), identity: structuredClone(identity), client: f.client,
+          draft: { ...draft, productId: 20, marketplaceId: "EBAY_US" } };
+      });
+    }
+
+    function processConcurrently(f: ReturnType<typeof fixture>, jobId: string) {
+      // Separate worker instances cannot share the service's in-memory running
+      // flag: the real PostgreSQL claim/lease must serialize these executions.
+      const restartedWorker = new EbayListingSyncService(f.store, f.executor, clock, randomUUID);
+      return Promise.all([f.service.processDue(1, jobId), restartedWorker.processDue(1, jobId)]);
+    }
+
     function withRetiredUnpublishedMember(f: ReturnType<typeof fixture>) {
       const currentSource: EbayListingSyncIdentity = { ...identity, variants: [
         { ...identity.variants[0], contentSyncEnabled: true },
@@ -388,6 +421,87 @@ const configured =
       }
       expect((await database.pool.query("SELECT replacement_job_id,actor FROM channels.ebay_listing_sync_settlements WHERE failed_job_id=$1",[failed.id])).rows)
         .toEqual([{replacement_job_id:replacement.id,actor:"system:listing-lifecycle"}]);
+    });
+
+    it("repairs legacy item/group descriptions before replacing an offer and completes once under concurrent replay", async () => {
+      const description = "<p>Current catalog description</p>";
+      let f: ReturnType<typeof fixture>;
+      f = fixture({ reject: request => {
+        if (request.path.includes("/offer/") &&
+          (f.provider.currentItem().product.description !== description || f.provider.currentGroup().description !== description ||
+            (request.body as { listingDescription?: string }).listingDescription !== description)) {
+          return new Response(JSON.stringify({ errors: [{ errorId: 25002, category: "REQUEST", message: "Description is required." }] }), { status: 400 });
+        }
+      } });
+      await prepareFromCatalog(f);
+      // Model the observed provider state without altering the catalog source.
+      f.provider.currentItem().product.description = "";
+      f.provider.currentGroup().description = "";
+      const key = randomUUID();
+      const admitted = await Promise.all([f.service.enqueue(identity, "operator", key), f.service.enqueue(identity, "operator", key)]);
+      expect(admitted[0].id).toBe(admitted[1].id);
+      await processConcurrently(f, admitted[0].id);
+      expect(await f.store.get(admitted[0].id)).toMatchObject({ state: "completed" });
+      expect(f.mutations.map(request => request.path)).toEqual([
+        "/sell/inventory/v1/inventory_item/P5", "/sell/inventory/v1/inventory_item_group/PACK", "/sell/inventory/v1/offer/offer-101" ]);
+      expect(f.provider.currentItem().product.description).toBe(description);
+      expect(f.provider.currentGroup().description).toBe(description);
+      expect(f.mutations[2].body).toMatchObject({ listingDescription: description });
+      await f.service.enqueue(identity, "operator", key);
+      expect(await f.service.processDue(1, admitted[0].id)).toEqual({ processed: 0, failed: 0 });
+      expect(f.mutations).toHaveLength(3);
+    });
+
+    it.each([25002, 25016])("retains definitive HTTP 400/%i evidence, stops unchanged retries and safely resumes after correction", async errorId => {
+      let reject = true;
+      const f = fixture({ reject: request => reject && request.path.includes("/offer/")
+        ? new Response(JSON.stringify({ errors: [{ errorId, category: "REQUEST", message: "Correct the saved listing content." }] }), { status: 400 }) : undefined });
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      const failed = await f.store.get(saved.id);
+      expect(failed).toMatchObject({ state: "needs_attention", code: "EBAY_QUANTITY_REJECTED", attempts: 1 });
+      expect(failed.message).toContain(String(errorId));
+      const events = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows;
+      expect(events[0].evidence.diagnostic.context.providerWrite).toEqual({ provider: "ebay", kind: "validation", httpStatus: 400, errorCodes: [String(errorId)] });
+      const writes = f.mutations.length;
+      advance();
+      expect(await f.service.processDue(1, saved.id)).toEqual({ processed: 0, failed: 0 });
+      expect(f.mutations).toHaveLength(writes);
+      reject = false;
+      const key = randomUUID();
+      const resumed = await Promise.all([f.service.enqueue(identity, "operator", key), f.service.enqueue(identity, "operator", key)]);
+      expect(resumed[0].id).toBe(resumed[1].id);
+      await processConcurrently(f, resumed[0].id);
+      expect(await f.store.get(resumed[0].id)).toMatchObject({ state: "completed" });
+      // The failed receipt remains audit evidence, not a manufactured success.
+      expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(events);
+    });
+
+    it("persists the actual builder's missing-weight cause and resumes from corrected catalog input without duplicate writes", async () => {
+      const f = fixture();
+      await prepareFromCatalog(f, null);
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      const failed = await f.store.get(saved.id);
+      expect(failed).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED", attempts: 1,
+        progress: { phase: "prepare_listing", phaseState: "started" },
+        issue: { title: "Add the variant's package weight", action: { href: "/products/20?tab=variants" } } });
+      expect(failed.issue?.details).toContainEqual({ label: "Variant ID", value: "101" });
+      expect(f.mutations).toEqual([]);
+      const events = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows;
+      expect(events[0].evidence.diagnostic.context.validation).toEqual({ field: "package_weight", reason: "required", productId: 20, variantId: 101, variantSku: "P5" });
+      expect((await f.service.list(identity.channelId)).find(job => job.id === saved.id)?.issue).toEqual(failed.issue);
+      advance();
+      expect(await f.service.processDue(1, saved.id)).toEqual({ processed: 0, failed: 0 });
+      await database.pool.query("UPDATE catalog.product_variants SET weight_grams=250 WHERE id=101");
+      const key = randomUUID();
+      const resumed = await Promise.all([f.service.enqueue(identity, "operator", key), f.service.enqueue(identity, "operator", key)]);
+      expect(resumed[0].id).toBe(resumed[1].id);
+      await processConcurrently(f, resumed[0].id);
+      expect(await f.store.get(resumed[0].id)).toMatchObject({ state: "completed" });
+      expect(f.provider.currentItem().packageWeightAndSize?.weight).toEqual({ value: 250, unit: "GRAM" });
+      expect(f.mutations).toHaveLength(3);
+      expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(events);
     });
 
     it("does not settle a partial provider write or a failure for another account", async () => {
@@ -576,6 +690,29 @@ const configured =
       expect(await f.store.get(saved.id)).toMatchObject({ state: "recovering", code: "DATABASE_POOL_ACQUIRE_TIMEOUT" });
       const events = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='recovering'", [saved.id])).rows;
       expect(events[0].evidence.diagnostic.context.failure).toMatchObject({ category: "pool_acquisition_timeout", fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      expect(f.mutations).toEqual([]);
+      advance(); await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed" });
+    });
+
+    it("retains an unexpected preparation failure's database cause and code location through status reads", async () => {
+      const f = fixture();
+      f.prepare.mockImplementationOnce(async () => {
+        try { await database.pool.query("SELECT missing_listing_column FROM catalog.products WHERE id=20"); }
+        catch (cause) { throw new Error("Private preparation query failed", { cause }); }
+        throw new Error("Expected PostgreSQL to reject the missing fixture column");
+      });
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      const failed = await f.store.get(saved.id);
+      expect(failed).toMatchObject({ state: "recovering", code: "EBAY_LISTING_SYNC_FAILED" });
+      const event = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='recovering'", [saved.id])).rows[0];
+      const failure = event.evidence.diagnostic.context.failure;
+      expect(failure).toMatchObject({ category: "database", codes: ["42703"], fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      expect(failure.locations.some((location: string) => location.startsWith("server/modules/channels/"))).toBe(true);
+      const status = (await f.service.list(identity.channelId)).find(job => job.id === saved.id)!;
+      expect(status.issue?.details).toContainEqual({ label: "Failure reference", value: failure.fingerprint });
+      expect(JSON.stringify(status)).not.toMatch(/missing_listing_column|Private preparation|SELECT /);
       expect(f.mutations).toEqual([]);
       advance(); await f.service.processDue(1, saved.id);
       expect(await f.store.get(saved.id)).toMatchObject({ state: "completed" });
@@ -1552,7 +1689,7 @@ const configured =
         job = await f.service.enqueue(identity, "operator");
       await database.pool
         .query(`CREATE FUNCTION channels.test_stage_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
-        IF NEW.event='stage_completed' AND NEW.evidence->>'key'='offer:offer-101' THEN RAISE EXCEPTION 'injected stage audit failure'; END IF;RETURN NEW;END $$;
+        IF NEW.event='stage_completed' AND NEW.evidence->>'key'='item:P5' THEN RAISE EXCEPTION 'injected stage audit failure'; END IF;RETURN NEW;END $$;
         CREATE TRIGGER test_stage_audit_failure BEFORE INSERT ON channels.ebay_listing_sync_events FOR EACH ROW EXECUTE FUNCTION channels.test_stage_audit_failure()`);
       try {
         await f.service.processDue(1, job.id);

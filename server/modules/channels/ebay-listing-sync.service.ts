@@ -459,6 +459,9 @@ export class EbayListingSyncService {
     return job ? this.withIssue(job) : null;
   }
   private withIssue<T extends EbayListingSyncJob>(job: T): T {
+    // The repository's revision-fenced diagnostic projection carries source
+    // fields that a code-only fallback cannot reconstruct. Keep that evidence.
+    if (job.issue?.code === job.code) return job;
     return job.code || job.state === "needs_attention" || job.state === "awaiting_evidence"
       ? { ...job, issue: resolveEbayListingIssue({ ...job, jobId: job.id }) }
       : job;

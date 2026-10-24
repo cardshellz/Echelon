@@ -937,6 +937,7 @@ export class EbayMarketplaceListingConnector {
     const updatedOfferIds: Record<number, string> = {};
     const missingOfferVariantIds: number[] = [];
     const policyChangedVariantIds: number[] = [];
+    const resolvedOffers: Array<{ offerId: string; variantId: number; payload: EbayOffer }> = [];
     let itemGroupUpdated = false;
 
     for (const offer of input.draft.offers) {
@@ -971,16 +972,13 @@ export class EbayMarketplaceListingConnector {
         policyChangedVariantIds.push(offer.variantId);
       }
       const payload = withOfferId(offer.payload, existingOffer.offerId);
-      await runSyncStage(
-        input.stage,
-        `offer:${existingOffer.offerId}`,
-        payload,
-        () => input.client.updateOffer(existingOffer.offerId, payload),
-      );
-      updatedOfferIds[offer.variantId] = existingOffer.offerId;
-      await this.delay(this.offerDelayMs);
+      resolvedOffers.push({ offerId: existingOffer.offerId, variantId: offer.variantId, payload });
     }
 
+    // Resolve every offer identity before the first write. eBay validates the
+    // current inventory content when replacing an active offer, so repair item
+    // content first. The durable stage owner still fences and journals each
+    // request; a failed item stage cannot be bypassed by an offer update.
     for (const item of input.draft.inventoryItems) {
       await runSyncStage(input.stage, `item:${item.sku}`, item.payload, () =>
         input.client.createOrReplaceInventoryItem(item.sku, item.payload),
@@ -1006,6 +1004,13 @@ export class EbayMarketplaceListingConnector {
           ),
       );
       itemGroupUpdated = true;
+    }
+
+    for (const offer of resolvedOffers) {
+      await runSyncStage(input.stage, `offer:${offer.offerId}`, offer.payload,
+        () => input.client.updateOffer(offer.offerId, offer.payload));
+      updatedOfferIds[offer.variantId] = offer.offerId;
+      await this.delay(this.offerDelayMs);
     }
 
     return {

@@ -300,7 +300,7 @@ describe("marketplace listing connectors", () => {
     expect(client.createOffer).not.toHaveBeenCalled();
     expect(client.publishOffer).not.toHaveBeenCalled();
     expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
-    expect(calls).toEqual(["get_offers", "update_offer", "put_inventory", "put_group"]);
+    expect(calls).toEqual(["get_offers", "put_inventory", "put_group", "update_offer"]);
     expect(client.updateOffer).toHaveBeenCalledWith(
       "offer-1",
       expect.objectContaining({ offerId: "offer-1" }),
