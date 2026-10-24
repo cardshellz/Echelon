@@ -96,7 +96,7 @@ class FakeTransaction {
   readonly catalog = {
     loadStoreContext: vi.fn(async () => { this.calls.push("gate"); return storeContext; }),
     listCatalogExposureRules: vi.fn(async () => { this.calls.push("exposureRules"); return [{ id: 1, scopeType: "catalog", action: "include" }]; }),
-    listSelectionRules: vi.fn(async () => { this.calls.push("selectionRules"); return [{ id: 2, scopeType: "catalog", action: "include", isActive: true }]; }),
+    listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => { this.calls.push("picks"); return new Set(ids); }),
     listCatalogCandidates: vi.fn(async (ids: readonly number[]) => { this.calls.push("candidates"); return ids.map(candidate); }),
     listVariantOverrides: vi.fn(async (input: { productVariantIds: readonly number[] }) => {
       this.calls.push("overrides");
@@ -277,7 +277,7 @@ describe("DropshipListingCategorySettingsService.saveForMember (W12, plan PR 9, 
     // No eBay id set: no preflight; no clear: no gate.
     expect(repository.order).toEqual([`execute:${KEY}`]);
     expect(repository.tx.calls).toEqual(["gate", "probe", "groups", "categoryProducts", "lockCatalog", "productSizes",
-      "exposureRules", "selectionRules", "candidates", "overrides", "saveCategory"]);
+      "exposureRules", "candidates", "overrides", "picks", "saveCategory"]);
     expect(repository.tx.lockCatalog).toHaveBeenCalledWith({ categoryIds: [CATEGORY], productIds: [7, 8, 9] });
     // Ids only, and one chosen size is all it asks (v3r, C-money-8, C-feas-14).
     expect(chosen.spy).toHaveBeenCalledExactlyOnceWith(expect.anything(), [101, 102, 103, 104], NOW, { keepCandidates: false, firstOnly: true });
@@ -306,7 +306,7 @@ describe("DropshipListingCategorySettingsService.saveForMember (W12, plan PR 9, 
     expect(result).toEqual({ outcome: "changed", categoryId: CATEGORY, revisionId: 41, clearedProductCount: 2 });
     expect(repository.order).toEqual(["gate:enter", `execute:${KEY}`, "gate:leave"]);
     expect(repository.tx.calls).toEqual(["gate", "probe", "groups", "categoryProducts", "lockCatalog", "productSizes",
-      "exposureRules", "selectionRules", "candidates", "overrides", "categoryProducts", "leftovers", "settingFacts", "textBytes",
+      "exposureRules", "candidates", "overrides", "picks", "categoryProducts", "leftovers", "settingFacts", "textBytes",
       "saveCategory", "saveProductsBulk", "clearSizeLeftovers"]);
     // Every chosen size: with a clear the whole set is needed.
     expect(chosen.spy).toHaveBeenCalledExactlyOnceWith(expect.anything(), [101, 102, 103, 104], NOW, { keepCandidates: false, firstOnly: false });

@@ -217,6 +217,12 @@ describe("PostgreSQL CI coverage and isolation", () => {
       // eBay sync-back's order fixes (plan v4 §7): stuck orders, eBay cancels with OMS's stop and the refund, parked lines; OMS's stop.
       "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-orders.integration.test.ts",
       "server/modules/oms/__tests__/integration/dropship-marketplace-cancel.integration.test.ts",
+      // One-time picks (step 1 plan S2-5, PR B, B1): the picks migration suite, its oracle and golden recorded at main first.
+      "server/modules/dropship/__tests__/integration/dropship-selection-picks-migration.integration.test.ts",
+      // One-time picks (PR B, B1): the picks save's transaction, gates, retries and 10,000-pick scale case.
+      "server/modules/dropship/__tests__/integration/dropship-selection-change.integration.test.ts",
+      // The new-items notice (PR B, B3): the arrivals ledger, marks, daily email and step 1 reads, and the conversion follow-up.
+      "server/modules/dropship/__tests__/integration/dropship-catalog-arrivals.integration.test.ts",
     ];
     addedSuites.push(
       "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",

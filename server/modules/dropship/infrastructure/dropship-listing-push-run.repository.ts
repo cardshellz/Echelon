@@ -116,7 +116,7 @@ export class PgDropshipListingPushRunRepository implements DropshipListingPushRu
 
       // The server's own snapshot of the selection at that revision (D10): the vendor lock keeps it from moving.
       const selectedIds = await loadSelectedVariantIds(
-        { vendorId: input.vendorId, ...selectedCatalogReaderForTransaction(client) }, input.now, "listing_push_run");
+        selectedCatalogReaderForTransaction(client, input.vendorId), input.now, "listing_push_run");
       const liveIds = input.scope === "not_live"
         ? await listLiveVariantIds(client, { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, productVariantIds: selectedIds })
         : new Set<number>();

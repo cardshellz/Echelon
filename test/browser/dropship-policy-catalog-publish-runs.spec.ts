@@ -8,8 +8,9 @@ import {
   STEP_UP_CODE,
   chooseRowsFixture,
   openCatalog,
+  pageNewerThanServerAnswer,
+  picksOf,
   saveFromAnotherTab,
-  selectionRule,
   type ChooseRowFact,
   type StubRun,
   type StubRunFrame,
@@ -33,9 +34,10 @@ const SITE_UPDATING = "Card Shellz is updating the site. This page will try agai
 /** A run poll is every 3 s for the first 2 minutes (runPollDelayMs); a few polls fit in this. */
 const POLL_TIMEOUT_MS = 15_000;
 
-/** `count` selected sizes: the stub's catalog fixture under one whole-catalog include (an older broad rule). */
+/** `count` selected sizes: the stub's catalog fixture, every size picked (PR B's one-time picks, V28). */
 function selected(count: number): Partial<StubState> {
-  return { chooseRows: chooseRowsFixture(count), selectionRules: [selectionRule(1, "catalog", "include")] };
+  const chooseRows = chooseRowsFixture(count);
+  return { chooseRows, picks: picksOf(chooseRows) };
 }
 
 function card(page: Page): Locator {
@@ -66,8 +68,8 @@ test("P1 1,234 selected: Check runs 7 sequential previews of at most 200 with pr
   await expect(card(page).getByTestId("publish-selected-shown")).toHaveText("Showing 400 of 1,234");
   const listReads = state.reads.filter((read) => read.path === "/api/dropship/catalog" && read.search.includes("selection=selected&selectedOnly=true"));
   expect(listReads.map((read) => read.search)).toEqual([
-    "?selection=selected&selectedOnly=true&includeFacets=false&clientVersion=1&page=1&limit=200",
-    "?selection=selected&selectedOnly=true&includeFacets=false&clientVersion=1&page=2&limit=200",
+    "?selection=selected&selectedOnly=true&includeFacets=false&clientVersion=2&page=1&limit=200",
+    "?selection=selected&selectedOnly=true&includeFacets=false&clientVersion=2&page=2&limit=200",
   ]);
 
   await card(page).getByRole("button", { name: "Check listings" }).click();
@@ -77,7 +79,7 @@ test("P1 1,234 selected: Check runs 7 sequential previews of at most 200 with pr
   expect(new Set(state.previewBodies.map((body) => body.storeConnectionId))).toEqual(new Set([MARZ.storeConnectionId]));
   // One id read for the check, this page's version on it.
   expect(state.reads.filter((read) => read.search.includes("idsOnly=true")).map((read) => read.search))
-    .toEqual(["?selection=selected&idsOnly=true&purpose=remove&clientVersion=1"]);
+    .toEqual(["?selection=selected&idsOnly=true&purpose=remove&clientVersion=2"]);
   // The check's table replaces the list; nothing was published.
   await expect(card(page).getByTestId("publish-selected")).toHaveCount(0);
   expect(state.runCreates).toEqual([]);
@@ -129,7 +131,8 @@ test("P4 another tab changed the selection: selectionChanged, the count read aga
   await expect(card(page).getByRole("button", { name: "Publish 3 new" })).toBeEnabled();
   const summaryReads = () => state.reads.filter((read) => read.path === "/api/dropship/catalog/selection").length;
   const before = summaryReads();
-  saveFromAnotherTab(state, [selectionRule(0, "catalog", "include")]);
+  // Another tab's save that leaves the same sizes picked: only the revision moves.
+  saveFromAnotherTab(state, {});
   await card(page).getByRole("button", { name: "Publish 3 new" }).click();
   await expect(card(page).getByTestId("publish-error")).toHaveText("Your choices changed since this page loaded. Check the count and publish again.");
   await expect.poll(summaryReads).toBeGreaterThan(before);
@@ -271,6 +274,18 @@ test("P12 an older dyno answers HTML: the create is sent again with the same key
   expect(state.runCreates.map((create) => create.status)).toEqual([200, 202]);
   expect(state.runCreates[1].body).toEqual(state.runCreates[0].body);
   expect(state.runs).toHaveLength(1);
+  expectClean(state);
+});
+
+test("P25 (review round 1 CLI-2) an older (A) dyno refuses the count for this newer page: site updating while it is read again, then the count", async ({ page }) => {
+  // What an A dyno answers clientVersion 2 (plan §4 row 3, §12.6): 503 page_newer_than_server, never the app's HTML.
+  const state = await openCatalog(page, PUBLISH_PATH, { ...selected(3), proofs: { bulk_listing_push: LIVE_PROOF },
+    selectionSummaryAnswers: [pageNewerThanServerAnswer(), pageNewerThanServerAnswer()] });
+  await expect(card(page).getByTestId("publish-site-updating")).toHaveText(SITE_UPDATING);
+  await expect(card(page).getByTestId("publish-count-retrying")).toHaveCount(0);
+  await expect(card(page).getByRole("button", { name: "Publish 3 new" })).toBeEnabled({ timeout: POLL_TIMEOUT_MS });
+  await expect(card(page).getByTestId("publish-site-updating")).toHaveCount(0);
+  expect(state.selectionSummaryAnswers).toEqual([]);
   expectClean(state);
 });
 
@@ -473,19 +488,26 @@ test("P23 a run that left nothing wrong is not shown again by itself (verify VC1
   expectClean(clean);
 });
 
+const RETIRED = "This page was updated, so your last changes weren't saved. Reload it and make them again.";
 const SECOND_SIZE: ChooseRowFact = { ...ROW_FACT, productVariantId: 102, variantName: "Pack of 100", variantSku: "ENV-SGL-P100", stock: 40 };
 
 test("P24 step 1's 410 'page was updated': Reload reloads at once, without the browser asking again (verify VC10)", async ({ page }) => {
-  const state = await openCatalog(page, `${CATALOG_PATH}/choose`, { chooseRows: [ROW_FACT, SECOND_SIZE] });
-  await page.route("**/api/dropship/catalog/selection-rules", async (route) => {
-    if (route.request().method() !== "PUT") return route.fallback();
-    return route.fulfill({ status: 410, json: { error: { code: "DROPSHIP_SELECTION_RULES_RETIRED",
-      message: "This page was updated, so your last changes weren't saved. Reload it and make them again." } } });
-  });
+  // PR B's page saves through `/selection/changes`; the 410 is what a page older than the server is told (§4.9 item 2).
+  const state = await openCatalog(page, `${CATALOG_PATH}/choose`, { chooseRows: [ROW_FACT, SECOND_SIZE],
+    changeAnswers: [{ status: 410, code: "DROPSHIP_SELECTION_RULES_RETIRED", message: RETIRED }] });
   await page.getByRole("checkbox", { name: "Select Envelope Single Pocket, Pack of 100", exact: true }).check();
   await page.getByTestId("catalog-choose-bar").getByRole("button", { name: "Save changes" }).click();
   await page.getByRole("alertdialog").getByRole("button", { name: "Save changes" }).click();
-  await expect(page.getByTestId("catalog-choose-error")).toHaveText("This page was updated, so your last changes weren't saved. Reload it and make them again.");
+  await expect(page.getByTestId("catalog-choose-error")).toHaveText(RETIRED);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([410]);
+  // A stage 1 tab still open saves through the frozen rules route: the same 410 and words, before any write (V10, §8.4).
+  const olderTab = await page.evaluate(async () => {
+    const response = await fetch("/api/dropship/catalog/selection-rules", { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idempotencyKey: "catalog-selection:older-tab", rules: [] }) });
+    return { status: response.status, body: await response.json() as { error?: { code?: string; message?: string } } };
+  });
+  expect(olderTab).toEqual({ status: 410, body: { error: { code: "DROPSHIP_SELECTION_RULES_RETIRED", message: RETIRED,
+    context: { retryable: false, classification: "permanent" } } } });
   const dialogs: string[] = [];
   page.on("dialog", (dialog) => { dialogs.push(dialog.type()); void dialog.dismiss(); });
   await Promise.all([page.waitForEvent("load"), page.getByTestId("catalog-choose-reload").click()]);

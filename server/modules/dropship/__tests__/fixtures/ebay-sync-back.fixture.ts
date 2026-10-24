@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Pool } from "pg";
+import { PICKS_SELECTION_TRIGGERS_SQL } from "../../infrastructure/dropship-selection-conversion.sql";
 
 /**
  * The eBay sync-back migration (plan v4 §8), found by its name, never by its
@@ -20,10 +21,14 @@ export function ebaySyncBackMigrationSql(): string {
   return readFileSync(resolve(process.cwd(), "migrations", EBAY_SYNC_BACK_MIGRATION_FILE), "utf8");
 }
 
-/** The real migration this one builds on: the selection trigger it recreates (0743). */
+/**
+ * The real migration this one builds on: the selection trigger it recreates (0743); then the vendor picks'
+ * triggers on the reduced picks table, exactly as the picks migration installs them after 0743 (PLAN-B v4.1
+ * V14, V33).
+ */
 export function ebaySyncBackPrerequisiteSql(): string[] {
-  return ["0743_publication_selection_work.sql"]
-    .map((file) => readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
+  return [...["0743_publication_selection_work.sql"]
+    .map((file) => readFileSync(resolve(process.cwd(), "migrations", file), "utf8")), PICKS_SELECTION_TRIGGERS_SQL];
 }
 
 /**
@@ -72,6 +77,11 @@ export const ebaySyncBackBaseFixtureSql = `
     action text, product_line_id integer, product_id integer, product_variant_id integer, category text, auto_connect_new_skus boolean,
     auto_list_new_skus boolean, is_active boolean, priority integer);
   CREATE TABLE dropship.dropship_vendor_variant_overrides (vendor_id integer, product_variant_id integer, enabled_override boolean);
+  -- The vendor's one-time picks (*_dropship_vendor_selected_variants.sql), reduced: every selection reader and the
+  -- selection SHARE locks name it (PLAN-B v4.1 §9 rows 2-4, 11; V14).
+  CREATE TABLE dropship.dropship_vendor_selected_variants (vendor_id integer NOT NULL, product_variant_id integer NOT NULL,
+    revision_id integer, source varchar(30) NOT NULL DEFAULT 'vendor', selected_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (vendor_id, product_variant_id));
 
   -- 0086
   CREATE TABLE dropship.dropship_vendor_listings (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,

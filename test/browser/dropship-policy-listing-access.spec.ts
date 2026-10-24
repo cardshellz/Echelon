@@ -9,7 +9,12 @@ import {
   listingPushRunDetailResponseSchema,
   type ListingPushRunView,
 } from "../../shared/dropship/listing-push-runs";
-import { dropshipCatalogIdsAnswerSchema, dropshipCatalogSelectionSummarySchema } from "../../shared/dropship/vendor-catalog-reads";
+import {
+  dropshipCatalogCategoriesAnswerSchema,
+  dropshipCatalogIdsAnswerSchema,
+  dropshipCatalogNewItemsAnswerSchema,
+  dropshipCatalogSelectionSummarySchema,
+} from "../../shared/dropship/vendor-catalog-reads";
 import type { z } from "zod";
 import { listingIntentChangePage } from "./fixtures/listing-intent-changes.fixture";
 
@@ -38,8 +43,10 @@ const EBAY_STORE = {
 };
 const SELECTED_ROW = {
   productId: 11, productVariantId: 101, productSku: "ENV-SGL", productName: "Envelope Single Pocket", variantSku: "ENV-SGL-P50",
-  variantName: "Pack of 50", category: "Mailers", productLineIds: [], productLineNames: [], unitsPerVariant: 50,
-  selectionDecision: { selected: true, reason: "selected", marketplaceQuantity: 25, quantityCapApplied: false, autoConnectNewSkus: true, autoListNewSkus: false },
+  variantName: "Pack of 50", category: "Mailers", categoryId: 30, productLineIds: [], productLineNames: [], unitsPerVariant: 50,
+  // PR B's row (V24, V27): the vendor's pick, and the category id step 1 filters by.
+  selectionDecision: { selected: true, reason: "selected", picked: true, marketplaceQuantity: 25, quantityCapApplied: false,
+    autoConnectNewSkus: false, autoListNewSkus: false },
   listingTier: { tier: "pack", eligible: true, reason: null, policyMinimumCents: 10_000, reserveShortfallCents: 0, balanceShortfallCents: 0 },
 };
 const PREVIEW_ROW = {
@@ -80,7 +87,7 @@ function onboardingJson(state: StubState) {
       subscriptionId: "sub-1", includesDropship: true, reasonCode: "active" },
     storeConnections: { activeCount: 1, connectedCount: 1, launchReadyConnectedCount: state.storeReady ? 1 : 0, credentialAttentionCount: 0,
       needsAttentionCount: 0, totalCount: 1, includedLimit: 1, canConnectStore: false },
-    catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
+    catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, vendorSelectedItemCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
     wallet: { availableBalanceCents: 10_000, pendingBalanceCents: 0, activeFundingMethodCount: 1, activeStripeFundingMethodCount: 1,
       activeStripeCardFundingMethodCount: 1, activeUsdcBaseFundingMethodCount: 0, autoReloadEnabled: true, autoReloadFundingMethodId: 10,
       autoReloadFundingMethodActive: true, autoReloadFundingMethodReady: true, autoReloadFundingMethodIsCard: true, hasActiveFundingMethod: true,
@@ -168,6 +175,16 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
       return route.fulfill({ json: { rows: [SELECTED_ROW], total: 1, page: 1, limit: Number(url.searchParams.get("limit") ?? 50),
         facets: url.searchParams.get("includeFacets") === "false" ? null : { categories: [], productLines: [], products: [] },
         summary: { matching: 1, matchingSelected: 1 } } });
+    }
+    // A journey that leaves the Catalog page lands on a portal path the harness renders as step 1, whose categories
+    // card reads its counts on mount (PLAN-B v4.1 §12.2, V26).
+    if (path === "/api/dropship/catalog/categories" && method === "GET") {
+      return route.fulfill({ json: contractAnswer(dropshipCatalogCategoriesAnswerSchema, {
+        categories: [{ categoryId: 30, name: "Mailers", rowCount: 1, selectedCount: 1 }], uncategorizedCount: 0 }) });
+    }
+    // The same step 1 reads its new-items notice on mount (PLAN-B v4.1 §11.4, B3): nothing new here.
+    if (path === "/api/dropship/catalog/new-items" && method === "GET") {
+      return route.fulfill({ json: contractAnswer(dropshipCatalogNewItemsAnswerSchema, { categories: [] }) });
     }
     if (path === "/api/dropship/catalog/selection" && method === "GET") {
       const store = url.searchParams.get("storeConnectionId");

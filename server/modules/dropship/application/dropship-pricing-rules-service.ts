@@ -22,6 +22,7 @@ export interface PricingRulesTransaction {
   vendorId: number;
   catalog: DropshipListingPreviewRepository;
   costs: DropshipProductCostReader;
+  /** The vendor's picked sellable sizes after `afterId`, ascending (SelectedCatalogReader.listVariantIds). */
   listVariantIds(afterId: number, limit: number): Promise<number[]>;
   listProductLines(ids: number[]): Promise<Array<{ id: number; name: string }>>;
   loadProfile(): Promise<PricingProfileState>;

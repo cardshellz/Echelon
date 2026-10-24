@@ -62,6 +62,14 @@ describe("Dropship launch readiness panels", () => {
     expect(smoke).toContain("{smoke.message}");
   });
 
+  it("(PLAN-B v4.1 V17) counts the vendor's chosen items, not rules, and shows a dash when an older server sends no count", () => {
+    const table = componentSource("function DogfoodReadinessTable", "\nfunction ");
+    expect(table).toContain("Items chosen:{\" \"}");
+    expect(table).toContain('{item.metrics.vendorSelectedItemCount ?? "—"}');
+    expect(table).not.toContain("Vendor include");
+    expect(table).not.toContain("vendorSelectionIncludeRuleCount");
+  });
+
   it("keeps the environment panel and the manual sweeps as their own jobs", () => {
     const tab = componentSource("function DogfoodReadinessTab", "function ListingPushOpsTab");
 

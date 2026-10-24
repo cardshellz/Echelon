@@ -170,7 +170,7 @@ describe("the rules conversion worker (PR 11e2, plan 9.2, 9.4, 13.1)", () => {
 
   it("starts after the first-mark worker's phase, on a phase and a lock no other worker uses", () => {
     const names = ["listingPush", "orderProcessing", "ebayOrderIntake", "returnIntake", "returnsMaintenance", "usdcWatcher", "costDetection",
-      "categoryMarks", "rulesConversion"] as const;
+      "categoryMarks", "rulesConversion", "catalogArrivals"] as const;
     const delays = names.map((name) => resolveDropshipWorkerSchedule(name, {}).initialDelayMs);
     expect(new Set(delays).size).toBe(names.length);
     expect(resolveDropshipWorkerSchedule("rulesConversion", {}).initialDelayMs)
