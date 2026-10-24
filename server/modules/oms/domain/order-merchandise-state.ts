@@ -3,6 +3,8 @@ export function isMerchandiseOrderCancelled(order: {
   status: string | null | undefined;
   cancelledAt?: Date | string | null;
 }): boolean {
-  return String(order.status ?? "").toLowerCase() === "cancelled" || order.cancelledAt != null;
+  return (
+    String(order.status ?? "").toLowerCase() === "cancelled" ||
+    order.cancelledAt != null
+  );
 }
-

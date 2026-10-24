@@ -765,7 +765,8 @@ describe("private order edit orchestration", () => {
     await h.service.sweep();
     expect(h.record().status).toBe("completed");
     expect(h.provider.prepareRefund).toHaveBeenCalledTimes(1);
-    expect(h.provider.refund).toHaveBeenCalledTimes(3);
+    expect(h.provider.refund).toHaveBeenCalledTimes(2);
+    expect(h.provider.observeRefund).toHaveBeenCalledTimes(1);
     expect(
       h.provider.refund.mock.calls.every(
         (call) => call[1].idempotencyKey === REFUND_KEY,
@@ -785,6 +786,22 @@ describe("private order edit orchestration", () => {
     expect((await h.service.reconcile(OP, "staff")).status).toBe("completed");
     expect(h.provider.commit).toHaveBeenCalledTimes(1);
     expect(h.provider.prepareRefund).toHaveBeenCalledTimes(1);
+  });
+  it("never reopens refund submission when a retry temporarily cannot see an already-settled refund", async () => {
+    const h = serviceHarness(1);
+    await h.service.quote(h.input, "staff");
+    h.warehouse.reconcileAndRelease.mockRejectedValueOnce(new Error("Synthetic synchronization outage"));
+    expect((await h.service.commit(OP, OP, "staff")).status).toBe("synchronizing");
+    const existing = h.snapshot().refunds[0];
+    h.provider.observeRefund.mockResolvedValueOnce(null);
+    const waiting = await h.service.reconcile(OP, "staff");
+    expect(waiting.status).toBe("synchronizing");
+    expect(waiting.error?.code).toBe("REFUND_READBACK_PENDING");
+    expect(h.provider.refund).toHaveBeenCalledTimes(1);
+    expect(h.warehouse.reconcileAndRelease).toHaveBeenCalledTimes(1);
+    h.provider.observeRefund.mockResolvedValueOnce({ status: "succeeded", refundId: existing.id, evidence: existing });
+    expect((await h.service.reconcile(OP, "staff")).status).toBe("completed");
+    expect(h.provider.refund).toHaveBeenCalledTimes(1);
   });
   it("abandons an unsubmitted quote without Shopify commit/refund", async () => {
     const h = serviceHarness();

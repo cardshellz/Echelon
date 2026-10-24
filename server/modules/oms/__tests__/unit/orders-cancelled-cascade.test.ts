@@ -62,6 +62,13 @@ function makeDb(scripted: ScriptedResponse[]) {
 const NOW = new Date("2026-04-26T12:00:00Z");
 
 describe("deriveOmsUpdateFinality — cancel cascade must not self-perpetuate", () => {
+  it.each(["refunded", "voided"])("keeps %s money separate after scoped native merchandise verification", financial_status => {
+    expect(deriveOmsUpdateFinality({ financial_status }, "refunded", { enabled: true, verifiedCancelled: false }))
+      .toEqual({ cancelNow: false, isFinal: false });
+    expect(deriveOmsUpdateFinality({ financial_status }, "processing", { enabled: true, verifiedCancelled: true }))
+      .toEqual({ cancelNow: true, isFinal: true });
+    expect(() => deriveOmsUpdateFinality({ financial_status }, "processing", { enabled: true, verifiedCancelled: null })).toThrow();
+  });
   it("cancels on a real channel signal (cancelled_at)", () => {
     expect(deriveOmsUpdateFinality({ cancelled_at: "2026-06-01T00:00:00Z", financial_status: "paid" }, "processing"))
       .toEqual({ cancelNow: true, isFinal: true });

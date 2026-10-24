@@ -80,7 +80,7 @@ export function buildOmsLineAuthorityEvent(
     `topic:${compactEventPart(input.authority.authoritySourceTopic)}`,
     `source:${compactEventPart(sourceEventId ?? input.authority.authoritySourceInboxId)}`,
     `observed:${input.authority.channelObservedQuantity}`,
-    `current:${input.authority.channelCurrentQuantity ?? "unknown"}`,
+    ...(input.authority.channelCurrentQuantity == null ? [] : [`current:${input.authority.channelCurrentQuantity}`]),
     `paid:${input.authority.paidQuantity}`,
     `fulfillable:${input.authority.authorityFulfillableQuantity}`,
     `cancelled:${cancelledQuantity}`,

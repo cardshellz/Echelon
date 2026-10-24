@@ -1,4 +1,4 @@
-import { observeChannelMerchandiseQuantity } from "./domain/channel-merchandise-quantity";
+import { ChannelQuantityEvidenceError, observeChannelMerchandiseQuantity } from "./domain/channel-merchandise-quantity";
 
 export const OMS_LINE_AUTHORIZATION_STATUSES = [
   "seen",
@@ -113,6 +113,8 @@ function finiteNonNegativeIntegerOrNull(
   field: string,
 ): number | null {
   if (value === null || value === undefined) return null;
+  if (field === "currentQuantity" && (!Number.isSafeInteger(value) || value < 0 || value > 2_147_483_647))
+    throw new ChannelQuantityEvidenceError("Current channel quantity must be a nonnegative PostgreSQL integer.");
   return requireNonNegativeInteger(value, field);
 }
 
@@ -188,13 +190,18 @@ export function deriveOmsLineAuthority(
     input.quantity,
     "quantity",
   );
+  // Legacy callers may have current_quantity without a source version. Keep
+  // their existing cap behavior, but never manufacture dated channel evidence
+  // from processing time or overwrite a verified observation with undated data.
+  if (input.currentQuantity != null && input.channelUpdatedAt == null && input.previous?.channelQuantityUpdatedAt != null)
+    throw new Error("A verified channel quantity cannot be replaced by an undated observation.");
   const merchandise = observeChannelMerchandiseQuantity({
     purchasedQuantity: observedQuantity,
-    currentQuantity: input.currentQuantity,
-    updatedAt: input.channelUpdatedAt ?? input.now ?? new Date(),
+    currentQuantity: input.channelUpdatedAt == null ? null : input.currentQuantity,
+    updatedAt: input.channelUpdatedAt,
     previous: input.previous,
   });
-  const merchandiseValues = {
+  const merchandiseValues = merchandise.channelCurrentQuantity === null ? {} : {
     channelCurrentQuantity: merchandise.channelCurrentQuantity,
     channelQuantityUpdatedAt: merchandise.channelQuantityUpdatedAt,
   };
@@ -214,7 +221,7 @@ export function deriveOmsLineAuthority(
     canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
     isPaidFinancialStatus(input.financialStatus);
   const incomingCurrentQuantity = finiteNonNegativeIntegerOrNull(
-    merchandise.channelCurrentQuantity,
+    merchandise.channelCurrentQuantity ?? input.currentQuantity,
     "currentQuantity",
   );
 
@@ -315,7 +322,7 @@ export function deriveOmsLineAuthority(
         incomingCurrentQuantity,
       }),
     )
-    : Math.min(previousFulfillableQuantity, paidQuantity, merchandise.channelCurrentQuantity ?? observedQuantity);
+    : Math.min(previousFulfillableQuantity, paidQuantity, incomingCurrentQuantity ?? observedQuantity);
 
   return {
     channelObservedQuantity: observedQuantity,

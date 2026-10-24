@@ -4730,6 +4730,32 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       .toEqual([{ requires_review: true, review_reason: "physical_shipment_exceeds_current_line_authority" }]);
   });
 
+  it("keeps channel-confirmed shipped merchandise separate from financial refunds across command retries", async () => {
+    const { source, repository, firstInput, secondInput } = await seedHistoricalSplitBackfill(3);
+    const order = (await pool.query<{ channel_id: number; id: string }>(`SELECT orders.id::text,orders.channel_id FROM oms.oms_orders orders
+      JOIN oms.oms_order_lines line ON line.order_id=orders.id WHERE line.id=$1`, [source.oms_order_line_id])).rows[0];
+    await pool.query(`ALTER TABLE oms.oms_order_lines ADD COLUMN IF NOT EXISTS channel_current_quantity integer,
+      ADD COLUMN IF NOT EXISTS channel_quantity_updated_at timestamptz;
+      UPDATE oms.oms_order_lines SET paid_quantity=2,authority_fulfillable_quantity=2,refunded_quantity=1,
+        channel_current_quantity=2,channel_quantity_updated_at='2026-10-24T12:00:00Z';
+      UPDATE oms.oms_orders SET financial_status='refunded';
+      INSERT INTO oms.order_line_adjustments(order_id,order_line_id,adjustment_type,restock_policy,quantity)
+        SELECT order_id,id,'refund','no_restock',1 FROM oms.oms_order_lines;`);
+    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", "true");
+    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_CHANNEL_IDS", String(order.channel_id));
+    try {
+      const inventoryBefore = (await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows;
+      const results = await Promise.all([repository.materializePhysicalPackage(firstInput), repository.materializePhysicalPackage(firstInput)]);
+      expect(results.map(result => result.channelCommands.length)).toEqual([1,1]);
+      expect(results.map(result => result.channelCommands[0].replayed).sort()).toEqual([false,true]);
+      const second = await repository.materializePhysicalPackage(secondInput);
+      expect(second.channelCommands).toHaveLength(1);
+      expect((await pool.query("SELECT quantity_planned,quantity_cancelled,quantity_shipped FROM wms.fulfillment_plan_lines")).rows)
+        .toEqual([{ quantity_planned: 3, quantity_cancelled: 1, quantity_shipped: 2 }]);
+      expect((await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows).toEqual(inventoryBefore);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it.each(["cancel", "refund", "cancel_refund"] as const)("keeps historical backfill blocked by a real %s disposition", async (kind) => {
     const { source, repository, firstInput, secondInput } = await seedHistoricalSplitBackfill();
     await repository.materializePhysicalPackage(firstInput);

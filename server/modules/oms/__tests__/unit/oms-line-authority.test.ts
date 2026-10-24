@@ -23,8 +23,6 @@ describe("OMS line authority", () => {
 
     expect(authority).toEqual({
       channelObservedQuantity: 2,
-      channelCurrentQuantity: null,
-      channelQuantityUpdatedAt: null,
       paidQuantity: 0,
       authorityFulfillableQuantity: 0,
       authorizationStatus: "seen",

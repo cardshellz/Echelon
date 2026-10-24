@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { presentCustomerOrderFulfillment, type CustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
 import { createHash } from "node:crypto";
@@ -12,6 +13,11 @@ import { orderEditSnapshotSchema } from "../application/order-edit-provider.sche
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
 import { getOmsLineMaterializableQuantity } from "../../oms/oms-line-authority";
 import { retireOrderEditProviderHolds } from "../../oms/order-edit-provider-hold.commands";
+import { restoreStoppedRefundEditOrder } from "../../orders/order-status-core";
+import { proveStoppedRefundEditRecovery } from "./order-edit-refund-warehouse-evidence";
+import { appendOrderEditAudit } from "./order-edit-audit.writer";
+import { channelMerchandiseAuthorityEnabled } from "../../oms/channel-merchandise-rollout";
+import { readDeferredRefundShipmentIds } from "./order-edit-deferred-shipment";
 import {
   assertOrderEditWarehouseItemIdentities,
   readOrderEditWarehouseItems,
@@ -34,6 +40,8 @@ const orderSchema = z.object({
   picked_count: z.number().int().nonnegative(),
   combined_group_id: positiveId.nullable(),
   cancelled: z.boolean(),
+  cancelled_at: z.unknown().nullable().optional(),
+  updated_at: z.unknown().nullable().optional(),
   has_pick_work: z.boolean(),
   has_label: z.boolean(),
 });
@@ -70,6 +78,7 @@ export interface OrderEditWarehouseProvider {
       | "release"
       | "verify_shipped"
       | "verify_cancelled"
+      | "verify_retired"
       | "release_unsubmitted";
   }): Promise<void>;
 }
@@ -632,6 +641,7 @@ export async function finalizeOrderEditWarehouseRelease(
   // receipt with completion and audit, including when an independent manual
   // hold must remain physically in place. A failed transaction retains both.
   const retirementTime = z.string().datetime().parse(releasedAt);
+  const deferredShipments = await readDeferredRefundShipmentIds(client, operationId);
   await retireOrderEditProviderHolds(client, {
     operationId,
     now: new Date(retirementTime),
@@ -646,6 +656,11 @@ export async function finalizeOrderEditWarehouseRelease(
       "ORDER_EDIT_RELEASE_OWNER_CHANGED",
       "Warehouse hold ownership changed.",
     );
+  if (deferredShipments.length > 0) {
+    const { enqueueShipStationShipmentPushRetry } = await import("../../oms/webhook-retry.worker");
+    for (const shipmentId of deferredShipments)
+      await enqueueShipStationShipmentPushRetry(drizzle(client), shipmentId, "settled refund edit released for ordinary provider dispatch");
+  }
 }
 
 /** Pure pre-picking cutoff. A prior pick/unpick still has started_at and stays blocked. */
@@ -695,6 +710,10 @@ export class OrderEditWarehouseGateway {
       snapshot: OrderEditSnapshot,
       operationId: string,
     ) => Promise<void>,
+    private readonly clock: () => Date = () => new Date(),
+    private readonly stoppedRefundRecoveryEnabled: (
+      channelId: number,
+    ) => boolean = channelMerchandiseAuthorityEnabled,
   ) {}
 
   private async transaction<T>(
@@ -744,6 +763,7 @@ export class OrderEditWarehouseGateway {
     const result = await client.query(
       `SELECT wo.id, wo.channel_id, wo.warehouse_status, wo.on_hold,
       wo.order_edit_operation_id, wo.assigned_picker_id, wo.started_at, wo.picked_count, wo.combined_group_id,
+      wo.cancelled_at,wo.updated_at,
       (wo.cancelled_at IS NOT NULL) AS cancelled,
       EXISTS(SELECT 1 FROM wms.order_items oi WHERE oi.order_id=wo.id
         AND (oi.picked_quantity<>0 OR oi.fulfilled_quantity<>0 OR oi.status NOT IN ('pending','cancelled'))) AS has_pick_work,
@@ -770,7 +790,8 @@ export class OrderEditWarehouseGateway {
         )
       ).rows,
     );
-    if (lockMode === "update" &&
+    if (
+      lockMode === "update" &&
       shipments.some(
         (shipment) =>
           shipment.requires_review ||
@@ -804,20 +825,45 @@ export class OrderEditWarehouseGateway {
     // Availability is advisory. Use one consistent committed snapshot without
     // competing with cancellation/picking; commands recheck under update locks.
     return this.transaction(async (client) => {
-      const { orders, shipments } = await this.evidence(client, omsOrderId, "none");
+      const { orders, shipments } = await this.evidence(
+        client,
+        omsOrderId,
+        "none",
+      );
       const reasons = orderEditWarehouseBlockers(orders, operationId);
-      if (shipments.some(shipment => shipment.requires_review || !["planned", "queued", "on_hold"].includes(shipment.status) || (shipment.shipping_engine !== null && shipment.shipping_engine !== "shipstation")))
-        reasons.push("This shipment can no longer be changed online. Contact us for help.");
+      if (
+        shipments.some(
+          (shipment) =>
+            shipment.requires_review ||
+            !["planned", "queued", "on_hold"].includes(shipment.status) ||
+            (shipment.shipping_engine !== null &&
+              shipment.shipping_engine !== "shipstation"),
+        )
+      )
+        reasons.push(
+          "This shipment can no longer be changed online. Contact us for help.",
+        );
       return {
         editable: reasons.length === 0,
         reasons,
         // The canonical cancellation cascade only accepts canonical warehouse
         // states. Legacy pending rows need staff normalization, not a new writer.
-        cancellationReasons: orders.some(order => order.warehouse_status === "pending")
-          ? [...reasons, "Contact us to cancel this order."] : reasons,
+        cancellationReasons: orders.some(
+          (order) => order.warehouse_status === "pending",
+        )
+          ? [...reasons, "Contact us to cancel this order."]
+          : reasons,
         status: orders.map((order) => order.warehouse_status).join(", "),
         wmsOrderIds: orders.map((order) => order.id),
-        fulfillment: presentCustomerOrderFulfillment(orders.map(order => order.warehouse_status), { held: orders.some(order => order.on_hold !== 0 || order.order_edit_operation_id !== null) }),
+        fulfillment: presentCustomerOrderFulfillment(
+          orders.map((order) => order.warehouse_status),
+          {
+            held: orders.some(
+              (order) =>
+                order.on_hold !== 0 || order.order_edit_operation_id !== null,
+            ),
+          },
+        ),
       };
     }, "read");
   }
@@ -874,9 +920,19 @@ export class OrderEditWarehouseGateway {
       | "release"
       | "verify_shipped"
       | "verify_cancelled"
+      | "verify_retired"
       | "release_unsubmitted",
   ): Promise<void> {
+    const deferred =
+      shipments.some((shipment) => shipment.provider_order_id === null) &&
+      ["hold", "verify", "synchronize", "release"].includes(mode)
+        ? await this.transaction((client) =>
+            readDeferredRefundShipmentIds(client, operationId),
+          )
+        : [];
     for (const shipment of shipments) {
+      if (shipment.provider_order_id === null && deferred.includes(shipment.id))
+        continue;
       // Even an unlinked shipment must pass the provider's push lock: a push
       // may have started before acquisition and not persisted its identity yet.
       if (shipment.provider_order_id !== null && !this.provider.isConfigured())
@@ -897,7 +953,210 @@ export class OrderEditWarehouseGateway {
     await this.providerPhase(shipments, operationId, "hold");
     await this.assertHeld(omsOrderId, operationId);
   }
-  async assertHeld(omsOrderId: number, operationId: string): Promise<void> {
+  private async stoppedRefundEvidence(
+    client: PoolClient,
+    omsOrderId: number,
+    operationId: string,
+    expected: OrderEditSnapshot,
+  ) {
+    const { orders } = await this.evidence(client, omsOrderId);
+    const stopped = orders.filter(
+      (order) => order.warehouse_status === "cancelled",
+    );
+    const retired = z
+      .array(
+        shipmentSchema.extend({
+          receipt_provider_id: z.coerce
+            .number()
+            .int()
+            .positive()
+            .safe()
+            .nullable(),
+          tracking_number: z.string().nullable(),
+          shipped_at: z.unknown().nullable(),
+        }),
+      )
+      .parse(
+        (
+          await client.query(
+            `SELECT os.id,os.order_id,os.shipping_engine,os.status,os.held,os.requires_review,
+        COALESCE(os.shipstation_order_id,CASE WHEN os.shipping_engine='shipstation' AND os.engine_order_ref ~ '^[0-9]+$'
+          AND length(os.engine_order_ref)<10 THEN os.engine_order_ref::integer END) AS provider_order_id,
+        h.provider_order_id AS receipt_provider_id,os.tracking_number,os.shipped_at
+        FROM wms.outbound_shipments os LEFT JOIN oms.order_edit_provider_holds h
+          ON h.shipment_id=os.id AND h.operation_id=$1 AND h.released_at IS NULL
+        WHERE os.order_id=ANY($2::int[]) AND os.status IN ('cancelled','voided')
+          AND (os.order_id=ANY($3::int[]) OR h.shipment_id IS NOT NULL)
+        ORDER BY os.id FOR UPDATE OF os`,
+            [
+              operationId,
+              orders.map((order) => order.id),
+              stopped.map((order) => order.id),
+            ],
+          )
+        ).rows,
+      );
+    if (
+      retired.some(
+        (shipment) =>
+          shipment.shipping_engine !== "shipstation" ||
+          shipment.provider_order_id === null ||
+          shipment.receipt_provider_id !== shipment.provider_order_id ||
+          shipment.requires_review ||
+          shipment.tracking_number !== null ||
+          shipment.shipped_at !== null,
+      )
+    )
+      throw new OrderEditError(
+        "ORDER_EDIT_RETIRED_PROVIDER_UNPROVEN",
+        "A stopped shipment's provider identity or cancellation still requires verification.",
+      );
+    if (stopped.length === 0)
+      return {
+        orders,
+        stopped,
+        retired,
+        proof: null,
+        fingerprint: JSON.stringify({ orders, retired }),
+      };
+    const source = (
+      await client.query(
+        "SELECT channel_id,external_order_id FROM oms.oms_orders WHERE id=$1",
+        [omsOrderId],
+      )
+    ).rows[0];
+    if (
+      source.channel_id !== expected.channelId ||
+      String(source.external_order_id).replace(
+        /^gid:\/\/shopify\/Order\//,
+        "",
+      ) !== expected.orderId.replace(/^gid:\/\/shopify\/Order\//, "")
+    )
+      throw new OrderEditError(
+        "ORDER_EDIT_SOURCE_CHANGED",
+        "The settled refund does not belong to this channel order.",
+      );
+    const operation = await client.query(
+      `SELECT document FROM oms.order_edit_operations
+        WHERE id=$1 AND oms_order_id=$2 AND status='synchronizing' FOR UPDATE`,
+      [operationId, omsOrderId],
+    );
+    if (operation.rows.length !== 1)
+      throw new OrderEditError(
+        "ORDER_EDIT_STOPPED_RECOVERY_UNPROVEN",
+        "The stopped warehouse work requires a settled refund edit.",
+      );
+    const proof = proveStoppedRefundEditRecovery({
+      operationId,
+      omsOrderId,
+      document: operation.rows[0].document,
+      snapshot: expected,
+    });
+    // Validate every physical cutoff as usual; only the stopped header state
+    // can be corrected. Every partition must still belong to this operation.
+    const blockers = orderEditWarehouseBlockers(
+      orders.map((order) =>
+        order.warehouse_status === "cancelled"
+          ? { ...order, warehouse_status: "ready", cancelled: false }
+          : order,
+      ),
+      operationId,
+    );
+    if (
+      blockers.length ||
+      orders.some((order) => order.order_edit_operation_id !== operationId)
+    )
+      throw new OrderEditError(
+        "ORDER_EDIT_PICKING_CUTOFF",
+        blockers.join(" ") || "Warehouse hold ownership changed.",
+      );
+    return {
+      orders,
+      stopped,
+      retired,
+      proof,
+      fingerprint: JSON.stringify({
+        orders,
+        retired,
+        document: operation.rows[0].document,
+      }),
+    };
+  }
+
+  private async recoverStoppedRefundWork(
+    omsOrderId: number,
+    operationId: string,
+    expected: OrderEditSnapshot,
+  ): Promise<void> {
+    if (!this.stoppedRefundRecoveryEnabled(expected.channelId)) return;
+    const before = await this.transaction((client) =>
+      this.stoppedRefundEvidence(client, omsOrderId, operationId, expected),
+    );
+    // Provider GETs run outside the header transaction. Their own push lock
+    // prevents a concurrent push from turning an uncertain job into proof.
+    await this.providerPhase(before.retired, operationId, "verify_retired");
+    await this.transaction(async (client) => {
+      const after = await this.stoppedRefundEvidence(
+        client,
+        omsOrderId,
+        operationId,
+        expected,
+      );
+      if (after.fingerprint !== before.fingerprint)
+        throw new OrderEditError(
+          "ORDER_EDIT_STOPPED_RECOVERY_CHANGED",
+          "Stopped warehouse evidence changed during provider verification. Please try again.",
+        );
+      if (!after.proof) return;
+      const { orders, stopped, proof } = after;
+      const now = z.date().parse(this.clock());
+      for (const order of stopped) {
+        if (
+          !(await restoreStoppedRefundEditOrder(client, {
+            orderId: order.id,
+            omsOrderId,
+            operationId,
+            now,
+          }))
+        )
+          throw new OrderEditError(
+            "ORDER_EDIT_STOPPED_RECOVERY_UNPROVEN",
+            "Stopped warehouse work contains physical activity or its ownership changed.",
+          );
+      }
+      await appendOrderEditAudit(client, {
+        operationId,
+        connectionId: proof.connectionId,
+        actorId: proof.actorId,
+        action: "stopped_refund_warehouse_restored",
+        before: { orders },
+        after: {
+          orders: (await this.evidence(client, omsOrderId)).orders,
+          restoredOrderIds: stopped.map((order) => order.id),
+          sourceFingerprint: expected.fingerprint,
+          verifiedRetiredShipmentIds: after.retired.map(
+            (shipment) => shipment.id,
+          ),
+          refundId: proof.refundId,
+          editHoldRetained: true,
+          manualHoldsPreserved: true,
+        },
+        occurredAt: now,
+      });
+    });
+  }
+
+  async assertHeld(
+    omsOrderId: number,
+    operationId: string,
+    settledRefund?: OrderEditSnapshot,
+  ): Promise<void> {
+    if (settledRefund)
+      await this.recoverStoppedRefundWork(
+        omsOrderId,
+        operationId,
+        settledRefund,
+      );
     await this.providerPhase(
       await this.heldEvidence(omsOrderId, operationId),
       operationId,
@@ -1020,6 +1279,7 @@ export class OrderEditWarehouseGateway {
         "ORDER_EDIT_PAYMENT_REQUIRED",
         "Payment must be fully reconciled before fulfillment resumes.",
       );
+    await this.assertHeld(omsOrderId, operationId, expected);
     // A prior release may have reached the provider before the local terminal
     // transaction failed. Reassert our saved hold ownership before retrying.
     await this.providerPhase(
@@ -1115,17 +1375,51 @@ export class OrderEditWarehouseGateway {
     return after;
   }
 
-  async cancellationReleaseProof(omsOrderId: number, operationId: string): Promise<OrderEditReleaseProof> {
-    const { before, shipments } = await this.transaction(async client => {
-      const before = await readReleaseProof(client, omsOrderId, operationId, "owned", false, false, true);
-      const receipts = await client.query("SELECT shipment_id AS id,provider_order_id FROM oms.order_edit_provider_holds WHERE operation_id=$1 AND released_at IS NULL ORDER BY shipment_id", [operationId]);
-      const shipments = z.array(z.object({ id: positiveId, provider_order_id: z.coerce.number().int().positive().safe() })).parse(receipts.rows);
+  async cancellationReleaseProof(
+    omsOrderId: number,
+    operationId: string,
+  ): Promise<OrderEditReleaseProof> {
+    const { before, shipments } = await this.transaction(async (client) => {
+      const before = await readReleaseProof(
+        client,
+        omsOrderId,
+        operationId,
+        "owned",
+        false,
+        false,
+        true,
+      );
+      const receipts = await client.query(
+        "SELECT shipment_id AS id,provider_order_id FROM oms.order_edit_provider_holds WHERE operation_id=$1 AND released_at IS NULL ORDER BY shipment_id",
+        [operationId],
+      );
+      const shipments = z
+        .array(
+          z.object({
+            id: positiveId,
+            provider_order_id: z.coerce.number().int().positive().safe(),
+          }),
+        )
+        .parse(receipts.rows);
       return { before, shipments };
     });
     await this.providerPhase(shipments, operationId, "verify_cancelled");
-    const after = await this.transaction(client => readReleaseProof(client, omsOrderId, operationId, "owned", false, false, true));
+    const after = await this.transaction((client) =>
+      readReleaseProof(
+        client,
+        omsOrderId,
+        operationId,
+        "owned",
+        false,
+        false,
+        true,
+      ),
+    );
     if (before.contentFingerprint !== after.contentFingerprint)
-      throw new OrderEditError("ORDER_CANCELLATION_RELEASE_CHANGED", "The warehouse cancellation changed during verification.");
+      throw new OrderEditError(
+        "ORDER_CANCELLATION_RELEASE_CHANGED",
+        "The warehouse cancellation changed during verification.",
+      );
     return after;
   }
 

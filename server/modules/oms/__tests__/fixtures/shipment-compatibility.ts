@@ -40,6 +40,7 @@ CREATE TABLE oms.oms_orders(id bigint PRIMARY KEY, channel_id integer, external_
  status text, financial_status text);
 CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY, order_id bigint, fulfillment_provider text,
  external_line_item_id text, paid_quantity integer, authority_fulfillable_quantity integer,
+ channel_current_quantity integer, channel_quantity_updated_at timestamptz,
  cancelled_quantity integer NOT NULL DEFAULT 0, refunded_quantity integer NOT NULL DEFAULT 0,
       catalog_product_id integer, inventory_tracking boolean
     );

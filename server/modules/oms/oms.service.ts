@@ -163,6 +163,9 @@ function buildLineAuthorityState(
   data: OrderData,
   item: LineItemData,
   previous?: {
+    channelObservedQuantity?: number | null;
+    channelCurrentQuantity?: number | null;
+    channelQuantityUpdatedAt?: Date | string | null;
     paidQuantity?: number | null;
     authorityFulfillableQuantity?: number | null;
     authorizationStatus?: string | null;

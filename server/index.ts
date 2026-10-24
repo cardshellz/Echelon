@@ -78,6 +78,7 @@ import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
 import { cancelWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
 import { runStartupZombieOrderRepair } from "./modules/orders/zombie-order-repair";
+import { omsWarehouseCancellationSql } from "./modules/oms/order-merchandise-state.sql";
 import { startPickingFollowupWorker } from "./modules/wms/picking-followup.worker";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
@@ -1131,7 +1132,7 @@ function startEchelonSyncScheduler(
                   (w.source = 'oms'     AND w.oms_fulfillment_order_id = oms.id::text)
               OR  (w.source = 'shopify' AND w.source_table_id = oms.id::text)
                 )
-          WHERE oms.status IN ('cancelled', 'refunded')
+          WHERE ${omsWarehouseCancellationSql("oms")}
             AND w.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'completed')
         `);
         const corrected: any[] = [];

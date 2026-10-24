@@ -8,6 +8,9 @@ import Decimal from "decimal.js";
 import { ShopifyOrderEditProvider } from "../server/modules/order-edits/infrastructure/shopify-order-edit.provider";
 import { OrderEditService } from "../server/modules/order-edits/application/order-edit.service";
 import { OrderEditError } from "../server/modules/order-edits/domain/order-edit-error";
+import { readShopifyMerchandiseSnapshot } from "../server/modules/oms/infrastructure/shopify-merchandise-snapshot";
+import { proveStoppedRefundEditRecovery } from "../server/modules/order-edits/infrastructure/order-edit-refund-warehouse-evidence";
+import { OrderCancellationService } from "../server/modules/customer-account/application/order-cancellation.service";
 import type {
   OrderEditRecord,
   OrderEditStore,
@@ -38,6 +41,8 @@ let baseline: OrderEditSnapshot | null = null,
   saved: OrderEditRecord | null = null,
   locked = false;
 const events: string[] = [];
+const records = new Map<string, OrderEditRecord>();
+let warehouseStopped = false, synchronizationInterrupted = false;
 const userErrors = z.array(z.object({ message: z.string() }));
 async function saveReport(): Promise<void> {
   await mkdir(".codex-artifacts", { recursive: true });
@@ -46,10 +51,10 @@ async function saveReport(): Promise<void> {
     JSON.stringify({ ...report, events, saved }, null, 2),
   );
 }
-async function request(
+async function request<T = unknown>(
   query: string,
   variables: Record<string, unknown> = {},
-): Promise<unknown> {
+): Promise<T> {
   const response = await fetch(
     `https://${shop}/admin/api/2026-10/graphql.json`,
     {
@@ -71,7 +76,9 @@ async function request(
     .parse(await response.json());
   assert.equal(response.ok, true, `Shopify HTTP ${response.status}`);
   assert.equal(value.errors, undefined, JSON.stringify(value.errors));
-  return value.data;
+  // The shared GraphQL transport is generic; each acceptance read validates
+  // its actual response with the corresponding Zod boundary before use.
+  return value.data as T;
 }
 const identity = z.object({ id: z.string().min(1) });
 const provider = new ShopifyOrderEditProvider({
@@ -102,6 +109,10 @@ const provider = new ShopifyOrderEditProvider({
     const body = z
       .object({ query: z.string() })
       .parse(JSON.parse(String(init?.body)));
+    if (body.query.includes("orderCancel("))
+      report.cancellationCommands = Number(report.cancellationCommands ?? 0) + 1;
+    if (body.query.includes("refundCreate"))
+      report.merchandiseBeforeRefund = await readShopifyMerchandiseSnapshot({ request }, { shopDomain: shop, orderId: orderId! });
     const response = await fetch(input, init);
     if (!body.query.includes("refundCreate")) {
       const projection = await response.clone().json();
@@ -208,34 +219,38 @@ const store: OrderEditStore = {
     }
   },
   findByRequestKey: async (key) =>
-    saved?.requestKey === key ? structuredClone(saved) : null,
+    structuredClone([...records.values()].find(record => record.requestKey === key) ?? null),
   get: async (id) => {
-    assert.equal(saved?.id, id);
-    return structuredClone(saved!);
+    assert.ok(records.has(id));
+    return structuredClone(records.get(id)!);
   },
   create: async (record) => {
-    assert.equal(saved, null);
+    assert.ok(!saved || ["completed", "recovered", "failed", "expired"].includes(saved.status));
     saved = structuredClone(record);
+    records.set(record.id, saved);
     await saveReport();
   },
   save: async (record, version, _actor, action, proof) => {
-    assert.equal(saved?.version, version);
+    assert.equal(records.get(record.id)?.version, version);
     if (["completed", "recovered", "expired"].includes(record.status))
       assert.ok(proof);
     saved = structuredClone(record);
+    records.set(record.id, saved);
     events.push(action);
     await saveReport();
   },
-  pending: async () =>
-    saved &&
-    !["completed", "recovered", "failed", "expired"].includes(saved.status)
-      ? [saved.id]
-      : [],
+  pending: async () => [...records.values()].filter(record => !["completed", "recovered", "failed", "expired"].includes(record.status)).map(record => record.id),
 };
 const warehouse: OrderEditWarehouse = {
   inspect: async () => ({ editable: true, reasons: [], wmsOrderIds: [1] }),
   acquire: async () => {},
-  assertHeld: async () => {},
+  assertHeld: async (_id, operation, snapshot) => {
+    if (!warehouseStopped) return;
+    if (!snapshot) throw new OrderEditError("ORDER_EDIT_PICKING_CUTOFF", "Synthetic stopped warehouse work");
+    proveStoppedRefundEditRecovery({ operationId: operation, omsOrderId: 1, document: await store.get(operation), snapshot });
+    warehouseStopped = false;
+    report.stoppedWarehouseProofVerified = true;
+  },
   releaseUnsubmitted: async () => ({
     ownership: "none",
     unsubmitted: true,
@@ -254,6 +269,10 @@ const warehouse: OrderEditWarehouse = {
   reconcileAndRelease: async (_id, _operation, snapshot) => {
     assert.equal(snapshot.netPaidCents, snapshot.totalCents);
     assert.equal(snapshot.outstandingCents, 0);
+    if (!synchronizationInterrupted) {
+      synchronizationInterrupted = true;
+      throw new Error("Synthetic interrupted synchronization after verified refund");
+    }
     report.warehouseReleases = Number(report.warehouseReleases) + 1;
     return {
       wmsOrderIds: [1],
@@ -261,6 +280,12 @@ const warehouse: OrderEditWarehouse = {
       contentFingerprint: "synthetic",
       allocationRequired: true,
     };
+  },
+  cancellationReleaseProof: async () => {
+    const snapshot = await provider.readOrder(4, orderId!);
+    assert.equal(snapshot.cancelled, true);
+    assert.equal(snapshot.netPaidCents, 0);
+    return { cancelledOrder: true, wmsOrderIds: [1], shipmentIds: [], contentFingerprint: "synthetic-cancelled" };
   },
 };
 let uuidIndex = 0;
@@ -273,6 +298,7 @@ const service = new OrderEditService(
   (event) => {
     report.lastDiagnostic = event.code;
   },
+  undefined, undefined, undefined, undefined, () => true,
 );
 
 try {
@@ -437,7 +463,7 @@ try {
     status: "review_required",
     version: existingRecord.version + 1,
     error: {
-      code: "REFUND_UNCONFIRMED",
+      code: "ORDER_EDIT_PICKING_CUTOFF",
       message: "Synthetic historical creation-readback mismatch",
     },
   };
@@ -447,6 +473,7 @@ try {
     "synthetic-acceptance",
     "simulate_legacy_review",
   );
+  warehouseStopped = true;
   for (let attempt = 0; attempt < 30; attempt += 1) {
     await service.sweep();
     if ((await store.get(operationId)).status === "completed") break;
@@ -457,6 +484,8 @@ try {
   assert.equal(completed.error, null);
   assert.equal(report.refundCreateCommands, 1);
   assert.equal(report.warehouseReleases, 1);
+  assert.equal(report.stoppedWarehouseProofVerified, true);
+  assert.equal(synchronizationInterrupted, true);
   const settled = await provider.readOrder(4, nativeOrderId);
   assert.equal(settled.totalCents, unitCents);
   assert.equal(settled.netPaidCents, unitCents);
@@ -470,6 +499,73 @@ try {
   await service.reconcile(operationId, "synthetic-acceptance");
   assert.equal(report.refundCreateCommands, 1);
   assert.equal(report.warehouseReleases, 1);
+  const merchandise = await readShopifyMerchandiseSnapshot({ request }, { shopDomain: shop, orderId: nativeOrderId });
+  const beforeRefund = report.merchandiseBeforeRefund as typeof merchandise;
+  assert.deepEqual(merchandise.lines.map(line => [line.id, line.currentQuantity]), beforeRefund.lines.map(line => [line.id, line.currentQuantity]));
+  assert.equal(merchandise.cancelled, false);
+  assert.equal(merchandise.lines.reduce((sum, line) => sum + line.currentQuantity, 0), 1);
+  report.nativeMerchandiseAfterRefund = merchandise;
+  report.refundOperationCompleted = completed.id;
+  let expectedCancellationRefund = unitCents;
+  if (process.env.TEST_FULL_MONEY_REFUND === "true") {
+    // Separate administrative money-only refund on this freshly-created TEST
+    // order. No line quantities, catalog inventory or Club balance are changed.
+    const payment = baseline.transactions.filter(tx => ["SALE", "CAPTURE"].includes(tx.kind) && tx.status === "SUCCESS");
+    assert.equal(payment.length, 1);
+    const moneyVariables = { key: randomUUID(), input: { orderId: nativeOrderId, currency: "USD", notify: false,
+      note: `Synthetic money-only ${fixture}`, transactions: [{ orderId: nativeOrderId, parentId: payment[0].id,
+        gateway: payment[0].gateway, kind: "REFUND", amount: new Decimal(unitCents).div(100).toFixed(2) }] } };
+    const mutation = `mutation SyntheticMerchandiseMoneyRefund($input:RefundInput!,$key:String!){
+      refundCreate(input:$input) @idempotent(key:$key){refund{id}userErrors{message}}}`;
+    const moneyResponse = z.object({ refundCreate: z.object({ refund: identity, userErrors }) });
+    const money = moneyResponse.parse(await request(mutation, moneyVariables)).refundCreate;
+    assert.deepEqual(money.userErrors, []);
+    const retried = moneyResponse.parse(await request(mutation, moneyVariables)).refundCreate;
+    assert.deepEqual(retried.userErrors, []);
+    assert.equal(retried.refund.id, money.refund.id);
+    let refunded = await provider.readOrder(4, nativeOrderId);
+    for (let attempt = 0; refunded.netPaidCents !== 0 && attempt < 30; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      refunded = await provider.readOrder(4, nativeOrderId);
+    }
+    assert.equal(refunded.netPaidCents, 0);
+    const afterMoney = await readShopifyMerchandiseSnapshot({ request }, { shopDomain: shop, orderId: nativeOrderId });
+    assert.deepEqual(afterMoney.lines.map(line => [line.id, line.currentQuantity]), merchandise.lines.map(line => [line.id, line.currentQuantity]));
+    const requests = z.object({ order: z.object({ fulfillmentOrders: z.object({ nodes: z.array(z.object({
+      id: z.string(), status: z.string(), lineItems: z.object({ nodes: z.array(z.object({ remainingQuantity: z.number().int().nonnegative() })) }),
+    })) }) }) }).parse(await request(`query($id:ID!){order(id:$id){fulfillmentOrders(first:10){nodes{
+      id status lineItems(first:10){nodes{remainingQuantity}}}}}}`, { id: nativeOrderId }));
+    assert.equal(requests.order.fulfillmentOrders.nodes.flatMap(order => order.lineItems.nodes).reduce((sum, line) => sum + line.remainingQuantity, 0), 1);
+    report.fullMoneyRefund = { refundId: money.refund.id, retryReturnedSameRefund: true,
+      netPaidCents: refunded.netPaidCents, outstandingCents: refunded.outstandingCents, fullyPaid: refunded.fullyPaid,
+      merchandise: afterMoney, fulfillmentOrders: requests.order.fulfillmentOrders.nodes };
+    expectedCancellationRefund = 0;
+    await saveReport();
+  }
+  // Explicit cancellation is a separate command after recovery, over only the
+  // remaining settled payment. Rewards here are a zero-points synthetic port.
+  const noRewards = { fingerprint: "0".repeat(64), returnedPoints: "0.00", deductedEarnedPoints: "0.00", settled: false };
+  const cancellation = new OrderCancellationService({ store, provider, warehouse,
+    allowSettledRefundBalance: () => true,
+    rewards: { reviewCancellation: async () => noRewards, settleCancellation: async () => ({ ...noRewards, settled: true }) },
+    clock: () => new Date(), uuid: randomUUID, report: event => { report.cancellationDiagnostic = event.code; } });
+  const review = await cancellation.review(4, 1);
+  assert.equal(review.eligibility.allowed, true, JSON.stringify(review.eligibility.reasons));
+  assert.equal(review.refundCents, expectedCancellationRefund);
+  const cancellationInput = { connectionId: 4, omsOrderId: 1, requestKey: randomUUID(), expectedRevision: review.revision };
+  let cancelled = await cancellation.submit(cancellationInput, "synthetic-acceptance");
+  for (let attempt = 0; cancelled.status !== "completed" && attempt < 30; attempt++) {
+    await cancellation.reconcile(cancelled.operationId);
+    cancelled = await cancellation.staffGet(cancelled.operationId);
+    if (cancelled.status !== "completed") await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  assert.equal(cancelled.status, "completed");
+  await cancellation.submit(cancellationInput, "synthetic-acceptance");
+  await cancellation.reconcile(cancelled.operationId);
+  assert.equal(report.cancellationCommands, 1);
+  assert.equal(report.refundCreateCommands, 1);
+  assert.equal((await store.pending(25, new Date())).length, 0);
+  report.cancellationCompletedAfterRefundRecovery = true;
   report.accepted = true;
 } catch (error) {
   report.failure =

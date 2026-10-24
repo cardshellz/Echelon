@@ -60,6 +60,14 @@ describe("AuthorityAwareReservationService.refreshShortClaimSupply", () => {
 });
 
 describe("AuthorityAwareReservationService", () => {
+  it("refuses channel quantity reconciliation through legacy inventory mutation", async () => {
+    const legacy = fakeLegacy();
+    const service = new AuthorityAwareReservationService(executor({ authority: "legacy", legacy }));
+    await expect(service.reconcileRefundOrderDemand({ orderId: 42, sourceEventId: "native:quantity",
+      requiredAuthority: "canonical", releaseTargets: [{ orderItemId: 11, quantity: 1 }], reason: "Confirmed channel merchandise" }))
+      .rejects.toMatchObject({ code: "CANONICAL_REFUND_DEMAND_REQUIRED" });
+    expect(legacy.reconcileRefundOrderDemand).not.toHaveBeenCalled();
+  });
   it("delegates reservation and demand reconciliation unchanged while legacy owns authority", async () => {
     const legacy = fakeLegacy();
     const service = new AuthorityAwareReservationService(executor({ authority: "legacy", legacy }));
