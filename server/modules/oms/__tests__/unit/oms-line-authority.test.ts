@@ -23,6 +23,8 @@ describe("OMS line authority", () => {
 
     expect(authority).toEqual({
       channelObservedQuantity: 2,
+      channelCurrentQuantity: null,
+      channelQuantityUpdatedAt: null,
       paidQuantity: 0,
       authorityFulfillableQuantity: 0,
       authorizationStatus: "seen",
@@ -385,7 +387,7 @@ describe("OMS line authority under Shopify fulfillment holds", () => {
   it("rejects a negative current_quantity before authority can be persisted", () => {
     expect(() =>
       refresh({ fulfillableQuantity: 15, currentQuantity: -1, previous: PAID_15 }),
-    ).toThrow(/currentQuantity must be a non-negative integer/);
+    ).toThrow(expect.objectContaining({ code: "CHANNEL_QUANTITY_EVIDENCE_INVALID" }));
   });
 });
 

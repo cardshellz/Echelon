@@ -1,3 +1,5 @@
+import { observeChannelMerchandiseQuantity } from "./domain/channel-merchandise-quantity";
+
 export const OMS_LINE_AUTHORIZATION_STATUSES = [
   "seen",
   "authorized",
@@ -19,13 +21,15 @@ export interface OmsLineAuthorityInput {
   quantity: number | null | undefined;
   fulfillableQuantity?: number | null;
   /**
-   * Shopify line `current_quantity`: the ordered quantity minus units removed
-   * by an order edit or cancellation. This, not `fulfillable_quantity`, is the
-   * commercial ceiling for what the warehouse still owes. Null/undefined when
-   * the channel payload does not carry it.
+   * Shopify's current merchandise (excludes removed/refunded units). A refund
+   * amount is never used to infer this quantity. Fulfillable is remaining work.
    */
   currentQuantity?: number | null;
+  channelUpdatedAt?: Date | string | null;
   previous?: {
+    channelObservedQuantity?: number | null;
+    channelCurrentQuantity?: number | null;
+    channelQuantityUpdatedAt?: Date | string | null;
     paidQuantity?: number | null;
     authorityFulfillableQuantity?: number | null;
     cancelledQuantity?: number | null;
@@ -39,6 +43,9 @@ export interface OmsLineAuthorityInput {
 
 export interface OmsLineAuthorityState {
   channelObservedQuantity: number;
+  channelCurrentQuantity?: number | null;
+  channelQuantityUpdatedAt?: Date | null;
+  staleChannelObservation?: boolean;
   paidQuantity: number;
   authorityFulfillableQuantity: number;
   authorizationStatus: OmsLineAuthorizationStatus;
@@ -181,11 +188,33 @@ export function deriveOmsLineAuthority(
     input.quantity,
     "quantity",
   );
+  const merchandise = observeChannelMerchandiseQuantity({
+    purchasedQuantity: observedQuantity,
+    currentQuantity: input.currentQuantity,
+    updatedAt: input.channelUpdatedAt ?? input.now ?? new Date(),
+    previous: input.previous,
+  });
+  const merchandiseValues = {
+    channelCurrentQuantity: merchandise.channelCurrentQuantity,
+    channelQuantityUpdatedAt: merchandise.channelQuantityUpdatedAt,
+  };
+  if (merchandise.stale) return {
+    staleChannelObservation: true,
+    channelObservedQuantity: requireNonNegativeInteger(input.previous?.channelObservedQuantity ?? observedQuantity, "previous.channelObservedQuantity"),
+    ...merchandiseValues,
+    paidQuantity: requireNonNegativeInteger(input.previous?.paidQuantity, "previous.paidQuantity"),
+    authorityFulfillableQuantity: requireNonNegativeInteger(input.previous?.authorityFulfillableQuantity, "previous.authorityFulfillableQuantity"),
+    authorizationStatus: statusAfterNonAuthorizingUpdate(input.previous?.paidQuantity ?? 0, input.previous?.authorizationStatus ?? "seen"),
+    authorizedAt: coerceDate(input.previous?.authorizedAt),
+    authorizedByEventId: input.previous?.authorizedByEventId ?? null,
+    authoritySourceTopic: input.sourceTopic,
+    authoritySourceInboxId: input.sourceInboxId ?? null,
+  };
   const eventCanAuthorize =
     canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
     isPaidFinancialStatus(input.financialStatus);
   const incomingCurrentQuantity = finiteNonNegativeIntegerOrNull(
-    input.currentQuantity,
+    merchandise.channelCurrentQuantity,
     "currentQuantity",
   );
 
@@ -231,6 +260,7 @@ export function deriveOmsLineAuthority(
 
     return {
       channelObservedQuantity: observedQuantity,
+      ...merchandiseValues,
       paidQuantity: observedQuantity,
       authorityFulfillableQuantity,
       authorizationStatus,
@@ -285,16 +315,18 @@ export function deriveOmsLineAuthority(
         incomingCurrentQuantity,
       }),
     )
-    : Math.min(previousFulfillableQuantity, paidQuantity);
+    : Math.min(previousFulfillableQuantity, paidQuantity, merchandise.channelCurrentQuantity ?? observedQuantity);
 
   return {
     channelObservedQuantity: observedQuantity,
+    ...merchandiseValues,
     paidQuantity,
     authorityFulfillableQuantity,
-    authorizationStatus: statusAfterNonAuthorizingUpdate(
-      paidQuantity,
-      previousAuthorizationStatus,
-    ),
+    authorizationStatus: merchandise.channelCurrentQuantity !== null && previousAuthorizationStatus !== "review"
+      ? merchandise.channelCurrentQuantity === 0 ? "cancelled"
+        : paidQuantity === 0 ? "seen"
+          : merchandise.channelCurrentQuantity < paidQuantity ? "partially_cancelled" : "authorized"
+      : statusAfterNonAuthorizingUpdate(paidQuantity, previousAuthorizationStatus),
     authorizedAt: coerceDate(input.previous?.authorizedAt),
     authorizedByEventId: input.previous?.authorizedByEventId ?? null,
     authoritySourceTopic: input.sourceTopic,

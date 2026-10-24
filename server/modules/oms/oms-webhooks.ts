@@ -62,6 +62,7 @@ import {
 import type { ShippingEngine } from "../shipping/engine";
 import { recordShopifyRefundReturnCase } from "../returns/application/shopify-return-case.service";
 import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
+import { readShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -73,6 +74,8 @@ const RETURN_CASE_SHOPIFY_RUNTIME_ENABLED = process.env.RETURN_CASE_SHOPIFY_RUNT
 function authorityLinePatch(state: OmsLineAuthorityState) {
   return {
     channelObservedQuantity: state.channelObservedQuantity,
+    channelCurrentQuantity: state.channelCurrentQuantity,
+    channelQuantityUpdatedAt: state.channelQuantityUpdatedAt,
     paidQuantity: state.paidQuantity,
     authorityFulfillableQuantity: state.authorityFulfillableQuantity,
     authorizationStatus: state.authorizationStatus,
@@ -637,6 +640,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): ShopifyOrderData {
     notes: shopifyOrder.note || undefined,
     tags: shopifyOrder.tags ? shopifyOrder.tags.split(",").map((t: string) => t.trim()) : undefined,
     orderedAt: shopifyOrder.created_at ? new Date(shopifyOrder.created_at) : new Date(),
+    channelUpdatedAt: shopifyOrder.updated_at ?? null,
     lineItems,
   };
 }

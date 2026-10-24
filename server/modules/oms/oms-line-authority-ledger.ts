@@ -13,6 +13,7 @@ export type OmsLineAuthorityEventType =
 
 export interface OmsLineAuthorityPreviousState {
   channelObservedQuantity?: number | null;
+  channelCurrentQuantity?: number | null;
   paidQuantity?: number | null;
   authorityFulfillableQuantity?: number | null;
   authorizationStatus?: string | null;
@@ -79,6 +80,7 @@ export function buildOmsLineAuthorityEvent(
     `topic:${compactEventPart(input.authority.authoritySourceTopic)}`,
     `source:${compactEventPart(sourceEventId ?? input.authority.authoritySourceInboxId)}`,
     `observed:${input.authority.channelObservedQuantity}`,
+    `current:${input.authority.channelCurrentQuantity ?? "unknown"}`,
     `paid:${input.authority.paidQuantity}`,
     `fulfillable:${input.authority.authorityFulfillableQuantity}`,
     `cancelled:${cancelledQuantity}`,
@@ -95,10 +97,13 @@ export function buildOmsLineAuthorityEvent(
     sourceEventId,
     sourceInboxId: input.authority.authoritySourceInboxId,
     previousChannelObservedQuantity,
+    previousChannelCurrentQuantity: input.previous?.channelCurrentQuantity ?? null,
     previousPaidQuantity,
     previousAuthorityFulfillableQuantity,
     previousAuthorizationStatus: input.previous?.authorizationStatus ?? null,
     channelObservedQuantity: input.authority.channelObservedQuantity,
+    channelCurrentQuantity: input.authority.channelCurrentQuantity ?? null,
+    channelQuantityUpdatedAt: input.authority.channelQuantityUpdatedAt ?? null,
     paidQuantity: input.authority.paidQuantity,
     authorityFulfillableQuantity: input.authority.authorityFulfillableQuantity,
     cancelledQuantity,
