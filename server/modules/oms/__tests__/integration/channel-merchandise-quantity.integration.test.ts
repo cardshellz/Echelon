@@ -10,7 +10,7 @@ import {
 } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { omsWarehouseCancellationSql } from "../../order-merchandise-state.sql";
+import { omsWarehouseCancellationSql, omsWarehouseFinancialStopSql } from "../../order-merchandise-state.sql";
 import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
@@ -66,6 +66,23 @@ INSERT INTO oms.oms_order_lines VALUES(1,3,3,3);`;
       vi.stubEnv("OMS_CHANNEL_MERCHANDISE_CHANNEL_IDS", "36");
       expect(await cancelled()).toEqual([4, 5]);
       expect(await cancelled(true)).toEqual([4, 5, 6]);
+    });
+    it.each([
+      [false, 36, "refunded", true],
+      [true, 36, "refunded", false],
+      [true, 37, "refunded", true],
+      [true, 36, "voided", true],
+      [false, 36, "voided", true],
+      [true, 36, "paid", false],
+      [true, null, "refunded", true],
+      [true, null, null, false],
+    ] as const)("keeps physical read/projection gates separate: enabled=%s channel=%s cash=%s", async (enabled, channelId, financialStatus, blocked) => {
+      vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", String(enabled));
+      vi.stubEnv("OMS_CHANNEL_MERCHANDISE_CHANNEL_IDS", "36");
+      const query = new PgDialect().sqlToQuery(sql`SELECT ${omsWarehouseFinancialStopSql(
+        sql`${channelId}::integer`, sql`${financialStatus}::text`,
+      )} AS blocked`);
+      expect((await database.pool.query(query.sql, query.params)).rows).toEqual([{ blocked }]);
     });
     it("leaves historical quantities and payment evidence unchanged and unknown current quantities null", async () => {
       expect(

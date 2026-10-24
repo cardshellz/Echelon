@@ -16,6 +16,7 @@ import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { IntegrityError, ValidationError } from "../../../shared/errors";
 import { parseCountryCode } from "@shared/country-code";
 import { wmsOmsOrderLinkSql } from "../oms/oms-wms-order-link.sql";
+import { omsWarehouseFinancialStopSql } from "../oms/order-merchandise-state.sql";
 import { normalizeShopifyRepairOrderId, normalizeShopifyRepairShopDomain, type ShopifyCustomerRepairScope } from "./shopify-customer-repair";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
 import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.resolver";
@@ -433,7 +434,7 @@ export const orderMethods: IOrderStorage = {
         o.combined_role
       FROM wms.orders o
       -- BELT & SUSPENDERS: Reject any order whose OMS parent is
-      -- cancelled/refunded/shipped even if WMS status didn't get updated.
+      -- commercially cancelled/shipped even if WMS status didn't get updated.
       -- Protects against webhook delivery failures.
       LEFT JOIN oms.oms_orders oms_direct
         ON o.source = 'oms'
@@ -461,10 +462,10 @@ export const orderMethods: IOrderStorage = {
             )
           )
         )
-        AND (
-          COALESCE(oms_direct.financial_status, oms_source.financial_status) IS NULL
-          OR COALESCE(oms_direct.financial_status, oms_source.financial_status) NOT IN ('refunded', 'voided')
-        )
+        AND NOT ${omsWarehouseFinancialStopSql(
+          sql`COALESCE(oms_direct.channel_id, oms_source.channel_id)`,
+          sql`COALESCE(oms_direct.financial_status, oms_source.financial_status)`,
+        )}
         AND (
           -- Ready/in_progress/ready_to_ship orders: show in pick queue
           -- Exclude orders with zero shippable items (nothing to pick).

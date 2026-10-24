@@ -4752,6 +4752,12 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       expect(second.channelCommands).toHaveLength(1);
       expect((await pool.query("SELECT quantity_planned,quantity_cancelled,quantity_shipped FROM wms.fulfillment_plan_lines")).rows)
         .toEqual([{ quantity_planned: 3, quantity_cancelled: 1, quantity_shipped: 2 }]);
+      const projector = createChannelFulfillmentProjector(getTestDb());
+      await projector.projectPhysicalShipment(results[0].physicalShipmentId);
+      await projector.projectPhysicalShipment(second.physicalShipmentId);
+      await projector.projectPhysicalShipment(second.physicalShipmentId);
+      expect((await pool.query("SELECT status,fulfillment_status,financial_status FROM oms.oms_orders WHERE id=$1", [order.id])).rows)
+        .toEqual([{ status: "shipped", fulfillment_status: "fulfilled", financial_status: "refunded" }]);
       expect((await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows).toEqual(inventoryBefore);
     } finally { vi.unstubAllEnvs(); }
   });
