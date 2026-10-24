@@ -73,6 +73,7 @@ export interface OrderData {
   sourceTopic?: string;
   sourceEventId?: string | null;
   sourceInboxId?: number | null;
+  channelUpdatedAt?: Date | string | null;
 }
 
 /** Shopify mappers must explicitly copy an ID or declare a genuine guest order. */
@@ -146,6 +147,8 @@ function sameDateTime(
 function authorityValues(state: OmsLineAuthorityState) {
   return {
     channelObservedQuantity: state.channelObservedQuantity,
+    channelCurrentQuantity: state.channelCurrentQuantity,
+    channelQuantityUpdatedAt: state.channelQuantityUpdatedAt,
     paidQuantity: state.paidQuantity,
     authorityFulfillableQuantity: state.authorityFulfillableQuantity,
     authorizationStatus: state.authorizationStatus,
@@ -160,6 +163,9 @@ function buildLineAuthorityState(
   data: OrderData,
   item: LineItemData,
   previous?: {
+    channelObservedQuantity?: number | null;
+    channelCurrentQuantity?: number | null;
+    channelQuantityUpdatedAt?: Date | string | null;
     paidQuantity?: number | null;
     authorityFulfillableQuantity?: number | null;
     authorizationStatus?: string | null;
@@ -174,6 +180,7 @@ function buildLineAuthorityState(
     financialStatus: data.financialStatus,
     quantity: item.quantity,
     currentQuantity: item.currentQuantity ?? null,
+    channelUpdatedAt: data.channelUpdatedAt,
     fulfillableQuantity: item.fulfillableQuantity ?? null,
     previous,
   });
@@ -486,6 +493,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
             const productVariantId = identity?.id ?? null;
             const variantCompareAtPrice = identity?.compareAtPriceCents ?? null;
             const authority = buildLineAuthorityState(data, item, previousAuthority);
+            if (authority.staleChannelObservation) continue;
 
             await tx
               .update(omsOrderLines)

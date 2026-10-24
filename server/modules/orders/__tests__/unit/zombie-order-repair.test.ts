@@ -107,8 +107,9 @@ describe("live-OMS-demand guard SQL", () => {
   });
 
   it("ignores final OMS orders and lines that need no shipment", () => {
-    expect(rendered).toContain("oo.status NOT IN ('cancelled', 'refunded', 'shipped')");
-    expect(rendered).toContain("NOT IN ('refunded', 'voided')");
+    expect(rendered).toContain('"oo".status=\'cancelled\'');
+    expect(rendered).toContain('"oo".status=\'shipped\'');
+    expect(rendered).toContain('"oo".channel_id=ANY(ARRAY[');
     expect(rendered).toContain("ol.requires_shipping IS DISTINCT FROM false");
   });
 

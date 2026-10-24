@@ -10,6 +10,10 @@ const recoverable = {
 };
 
 describe("read-only refund review recovery admission", () => {
+  it("requires scoped activation before observing a legacy warehouse cutoff", () => {
+    expect(canObserveOrderEditRefundReview({ ...recoverable, errorCode: "ORDER_EDIT_PICKING_CUTOFF" })).toBe(false);
+    expect(canObserveOrderEditRefundReview({ ...recoverable, errorCode: "ORDER_EDIT_PICKING_CUTOFF", stoppedRecoveryEnabled: true })).toBe(true);
+  });
   it("admits incomplete refund readback and its subsequent observation retry", () => {
     expect(canObserveOrderEditRefundReview(recoverable)).toBe(true);
     expect(

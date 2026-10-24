@@ -440,7 +440,7 @@ describe("Migrated writers use C4 functions", () => {
     expect(reconcilerStart).toBeGreaterThanOrEqual(0);
     expect(reconcilerEnd).toBeGreaterThan(reconcilerStart);
     expect(block).toContain('observeRuntimeWork("orders.oms_wms_reconcile", runOmsWmsReconcile)');
-    expect(block).toContain("oms.status IN ('cancelled', 'refunded')");
+    expect(block).toContain('omsWarehouseCancellationSql("oms")');
     expect(block).toContain("cancelWmsOrderAndRelease(");
     expect(block).not.toContain("markOrderShipped(db,");
     expect(block).not.toMatch(/oms\.status\s*=\s*'shipped'/);
@@ -473,7 +473,7 @@ describe("Migrated writers use C4 functions", () => {
 
     expect(block).toContain("cancelOrder(");
     expect(block).not.toContain("markOrderShipped(");
-    expect(block).toContain("oo.financial_status = 'refunded'");
+    expect(block).toContain('omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: false })');
     expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
   });
 

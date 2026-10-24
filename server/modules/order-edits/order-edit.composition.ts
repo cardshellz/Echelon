@@ -71,6 +71,7 @@ export function createOrderEditService(
     services.shipStation,
     (id, snapshot, operationId) =>
       synchronize.synchronize(id, snapshot, operationId),
+    clock,
   );
   return new OrderEditService(
     store,

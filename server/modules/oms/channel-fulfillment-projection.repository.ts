@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 
 import { projectPhysicalShipmentToWms } from "../wms/channel-fulfillment-projection.repository";
 import { FulfillmentAuthorityError } from "./channel-fulfillment-authority.repository";
+import { omsWarehouseFinancialStopSql } from "./order-merchandise-state.sql";
 
 export interface ChannelFulfillmentProjector {
   projectPhysicalShipment(physicalShipmentId: number): Promise<void>;
@@ -123,7 +124,7 @@ export function createChannelFulfillmentProjector(db: any): ChannelFulfillmentPr
             END,
             status = CASE
               WHEN oms_order.status IN ('cancelled', 'refunded')
-                OR oms_order.financial_status IN ('refunded', 'voided')
+                OR ${omsWarehouseFinancialStopSql(sql`oms_order.channel_id`, sql`oms_order.financial_status`)}
                 THEN oms_order.status
               WHEN rollup.required_lines > 0 AND rollup.fulfilled_lines = rollup.required_lines THEN 'shipped'
               ELSE oms_order.status

@@ -1,5 +1,5 @@
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
-import { orderEditHasUnresolvedPayment } from "../application/order-edit-identity";
+import { isOrderCancellationPaymentSettled } from "./order-edit-financials";
 import { orderEditPlanInputSchema } from "@shared/order-edits/order-edit.contract";
 
 /** The existing operation document records the purchased lines being cancelled.
@@ -22,6 +22,7 @@ export function orderCancellationEligibilityReasons(input: {
   activeOperationId: string | null;
   activeOperationStatus?: string;
   enabled: boolean;
+  allowSettledRefundBalance?: boolean;
 }): string[] {
   const { snapshot } = input;
   const reasons: string[] = [];
@@ -43,17 +44,7 @@ export function orderCancellationEligibilityReasons(input: {
       "This order can no longer be cancelled online. Contact us for help.",
     );
   if (
-    !snapshot.fullyPaid ||
-    snapshot.outstandingCents !== 0 ||
-    snapshot.capturableCents !== 0 ||
-    snapshot.netPaidCents !== snapshot.totalCents ||
-    orderEditHasUnresolvedPayment(snapshot) ||
-    snapshot.refunds.some((refund) =>
-      refund.transactions.some(
-        (transaction) =>
-          !["SUCCESS", "FAILURE", "ERROR"].includes(transaction.status),
-      ),
-    )
+    !isOrderCancellationPaymentSettled(snapshot, input.allowSettledRefundBalance)
   )
     reasons.push(
       "A payment or refund needs to finish before this order can be cancelled online.",
