@@ -332,12 +332,12 @@ suite.sequential("canonical picker case conversions with active quantity authori
     await expect(owner.pickClaimLine(remaining)).resolves.toMatchObject({ outcome:"picked",quantity:"1" });
   });
 
-  it("keeps a manual or queued repackaging choice authoritative without falling through to bin rebinding", async () => {
+  // Owner decision 2026-10-21 (#64353): a promised order's repackaging happens
+  // at pick; a manual SKU replenishment choice governs routine refills only.
+  it("repackages at pick even when the SKU's routine replenishment is manual", async () => {
     const remaining = await repackagingScenario();
     await context.pool.query("INSERT INTO inventory.replen_rules(id,pick_product_variant_id,is_active,auto_replen) VALUES(1,101,1,2)");
-    const before = await evidence();
-    await expect(owner.pickClaimLine(remaining)).rejects.toMatchObject({ code:"CLAIM_PICK_REPLENISHMENT_REQUIRED" });
-    expect(await evidence()).toEqual(before);
+    await expect(owner.pickClaimLine(remaining)).resolves.toMatchObject({ outcome:"picked",quantity:"1" });
   });
 
   it.each(["missing_path","component_build"] as const)("does not turn %s into an implicit packaging pick", async fault => {
@@ -456,19 +456,15 @@ suite.sequential("canonical picker case conversions with active quantity authori
     await expect(owner.pickClaimLine(command())).rejects.toMatchObject({ code:"CLAIM_ORDER_NOT_PICKABLE" });
     expect(await evidence()).toEqual(before);
   });
-  it("honors queued replenishment instead of auto-opening cases", async () => {
+  // Owner decision 2026-10-21 (#64353): queued routine replenishment no longer
+  // makes a promised order unpickable; the case opens at pick.
+  it("opens the case at pick even when the warehouse queues routine replenishment", async () => {
     await context.pool.query("UPDATE inventory.warehouse_settings SET replen_mode='queue'");
-    const before = await evidence();
-    await expect(owner.pickClaimLine(command())).rejects.toMatchObject({ code:"CLAIM_PICK_REPLENISHMENT_REQUIRED" });
-    expect(await evidence()).toEqual(before);
+    await expect(owner.pickClaimLine(command())).resolves.toMatchObject({ outcome:"picked" });
   });
-  it("uses warehouse-code and DEFAULT fallback but respects the SKU manual override", async () => {
-    await context.pool.query("UPDATE inventory.warehouse_settings SET warehouse_id=NULL");
+  it("opens the case at pick with a manual SKU override and no warehouse settings row", async () => {
+    await context.pool.query("DELETE FROM inventory.warehouse_settings");
     await context.pool.query("INSERT INTO inventory.replen_rules(id,pick_product_variant_id,is_active,auto_replen) VALUES(1,101,1,2)");
-    const before = await evidence();
-    await expect(owner.pickClaimLine(command())).rejects.toMatchObject({ code:"CLAIM_PICK_REPLENISHMENT_REQUIRED" });
-    expect(await evidence()).toEqual(before);
-    await context.pool.query("UPDATE inventory.replen_rules SET auto_replen=0; UPDATE inventory.warehouse_settings SET warehouse_code='DEFAULT'");
     await expect(owner.pickClaimLine(command())).resolves.toMatchObject({ outcome:"picked" });
   });
   it("recovers an already-confirmed Yes on a shipped order through the real correction and inventory owners", async () => {
@@ -484,9 +480,8 @@ suite.sequential("canonical picker case conversions with active quantity authori
         targetStatus:"completed",targetPickedQuantity:targetQuantity } }));
     }, () => now);
     const accepted = { commandId:"526b2451-c6c1-464f-bf55-d4e144c12c69",expectedRevision:1,answer:"yes" };
+    // #64353: a queued warehouse no longer strands a confirmed Yes.
     await context.pool.query("UPDATE inventory.warehouse_settings SET replen_mode='queue'");
-    await expect(service.answer(id, accepted, "picker")).rejects.toMatchObject({ code:"CLAIM_PICK_REPLENISHMENT_REQUIRED" });
-    await context.pool.query("UPDATE inventory.warehouse_settings SET replen_mode='inline'");
     await expect(service.answer(id, accepted, "picker")).resolves.toMatchObject({ state:"resolved",pickedQuantity:2,answer:"yes" });
     const before = await evidence();
     await service.answer(id, accepted, "picker");

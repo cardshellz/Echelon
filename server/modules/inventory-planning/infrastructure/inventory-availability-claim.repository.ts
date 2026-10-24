@@ -3,7 +3,6 @@ import type { CanonicalClaimTransactionClient } from "../application/canonical-c
 import { commitCanonicalPickingReceipt } from "../../wms/picking-command.repository";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
-import { isClaimPackageConversionInline } from "../../inventory/infrastructure/replenishment-policy.reader";
 import { isClaimPickRepackaging, selectClaimPickPackageConversions } from "../domain/claim-pick-package-conversions";
 import { readClaimPickPackagingPath } from "./claim-pick-packaging-path.reader";
 import { BuildDomainError } from "../../inventory/domain/build.domain";
@@ -6586,11 +6585,11 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
       orderItemId: line.orderItemId, targetVariantId: line.targetVariantId,
       warehouseId, locationId: command.warehouseLocationId, readyQty, pickQty: quantity,
     });
-    // Owner decision (2026-10-18, #64366): an assembled SKU assembles at pick.
-    // A graph that contains a component build has no stocked intermediate to
-    // queue replenishment against, so its package conversions run inline too.
-    // Their recipe authority / same-product proof below is never skipped.
-    const assemblesAtPick = operations.some(operation => operation.operationType === "component_build");
+    // Owner decisions: an assembled SKU assembles at pick (2026-10-18, #64366),
+    // and a promised order's pack breakdown happens at pick (2026-10-21,
+    // #64353). Replenishment mode (queue/hybrid/inline) governs routine bin
+    // refills only; applied here it made a reserved order unpickable with no
+    // task for anyone to do. Recipe authority / same-product proof is kept.
     for (const operation of operations) {
       const pickOperationIdentity = hash({ pick: command.idempotencyKey, operation: operation.operationKey });
       if (operation.operationType === "component_build") {
@@ -6602,15 +6601,6 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         && !isClaimPickRepackaging(operation, await readClaimPickPackagingPath(client, operation.authorityId))) {
         throw new InventoryAvailabilityClaimRepositoryError("CLAIM_PICK_OPERATION_REQUIRES_WORK",
           "This transformation requires explicit warehouse work; it is not same-product package conversion.",
-          { claimId: claim.id.toString(), operationKey: operation.operationKey });
-      }
-      if (!assemblesAtPick && !await isClaimPackageConversionInline(client, {
-        destinationVariantId: operation.destinationVariantId, warehouseId: operation.warehouseId,
-        outputQty: BigInt(operation.outputQty),
-        method: operation.operationType === "break_pack" ? "case_break" : "package_conversion",
-      })) {
-        throw new InventoryAvailabilityClaimRepositoryError("CLAIM_PICK_REPLENISHMENT_REQUIRED",
-          "This package conversion is configured for queued warehouse work, not inline picking.",
           { claimId: claim.id.toString(), operationKey: operation.operationKey });
       }
       await requirePickableLocation(client, operation.outputLocationId!, warehouseId);
