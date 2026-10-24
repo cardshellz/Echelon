@@ -150,6 +150,8 @@ export interface RefundDemandReleaseTarget {
 }
 
 export interface ReconcileRefundOrderDemandCommand {
+  /** Channel-derived cumulative demand requires canonical whole-order reconciliation. */
+  requiredAuthority?: "canonical";
   orderId: number;
   /** Durable Shopify refund identity shared by every affected line. */
   sourceEventId: string;
@@ -1044,6 +1046,8 @@ class ReservationService implements ReservationServiceContract {
   async reconcileRefundOrderDemand(
     command: ReconcileRefundOrderDemandCommand,
   ): Promise<ReconcileRefundOrderDemandResult> {
+    if (command.requiredAuthority !== undefined)
+      throw Object.assign(new Error("Channel merchandise demand requires canonical inventory authority."), { code: "CANONICAL_REFUND_DEMAND_REQUIRED" });
     if (
       !Number.isSafeInteger(command.orderId) ||
       command.orderId <= 0 ||

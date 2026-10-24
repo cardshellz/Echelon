@@ -62,6 +62,8 @@ import {
 import type { ShippingEngine } from "../shipping/engine";
 import { recordShopifyRefundReturnCase } from "../returns/application/shopify-return-case.service";
 import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
+import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
+import { channelMerchandiseAuthorityEnabled } from "./channel-merchandise-rollout";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -73,6 +75,8 @@ const RETURN_CASE_SHOPIFY_RUNTIME_ENABLED = process.env.RETURN_CASE_SHOPIFY_RUNT
 function authorityLinePatch(state: OmsLineAuthorityState) {
   return {
     channelObservedQuantity: state.channelObservedQuantity,
+    channelCurrentQuantity: state.channelCurrentQuantity,
+    channelQuantityUpdatedAt: state.channelQuantityUpdatedAt,
     paidQuantity: state.paidQuantity,
     authorityFulfillableQuantity: state.authorityFulfillableQuantity,
     authorizationStatus: state.authorizationStatus,
@@ -122,6 +126,7 @@ interface WmsServices {
       options?: { disposition?: "release" | "cancel" },
     ) => Promise<any>;
     reconcileRefundOrderDemand: (args: {
+      requiredAuthority?: "canonical";
       orderId: number;
       sourceEventId: string;
       releaseTargets: readonly { orderItemId: number; quantity: number }[];
@@ -518,7 +523,14 @@ export async function cancelOrderCascade(
 export function deriveOmsUpdateFinality(
   payload: { cancelled_at?: unknown; financial_status?: string | null },
   existingStatus: string | null | undefined,
+  channelMerchandise?: { enabled: boolean; verifiedCancelled: boolean | null },
 ): { cancelNow: boolean; isFinal: boolean } {
+  if (channelMerchandise?.enabled) {
+    if (["refunded", "voided"].includes(payload.financial_status ?? "") && channelMerchandise.verifiedCancelled === null)
+      throw new Error("A fresh native merchandise observation is required before changing refunded warehouse work.");
+    const cancelNow = Boolean(payload.cancelled_at) || channelMerchandise.verifiedCancelled === true;
+    return { cancelNow, isFinal: cancelNow || existingStatus === "cancelled" };
+  }
   const cancelNow =
     Boolean(payload.cancelled_at) ||
     payload.financial_status === "refunded" ||
@@ -637,6 +649,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): ShopifyOrderData {
     notes: shopifyOrder.note || undefined,
     tags: shopifyOrder.tags ? shopifyOrder.tags.split(",").map((t: string) => t.trim()) : undefined,
     orderedAt: shopifyOrder.created_at ? new Date(shopifyOrder.created_at) : new Date(),
+    channelUpdatedAt: shopifyOrder.updated_at ?? null,
     lineItems,
   };
 }
@@ -1194,8 +1207,11 @@ export function registerOmsWebhooks(
       // (includes our existing terminal status) drives only the reconcile/
       // address-change skips. See deriveOmsUpdateFinality for why cancelNow must
       // never read existing.status (self-perpetuating re-cancel loop, #57977).
+      const useChannelQuantities = channelMerchandiseAuthorityEnabled(channelId);
+      const nativeMerchandise = useChannelQuantities && ["refunded", "voided"].includes(shopifyOrder.financial_status)
+        ? await readChannelShopifyMerchandise(db, { channelId, orderId: externalOrderId }) : null;
       const { cancelNow: isCancelledByChannel, isFinal: isFinalOmsState } =
-        deriveOmsUpdateFinality(shopifyOrder, existing.status);
+        deriveOmsUpdateFinality(shopifyOrder, existing.status, { enabled: useChannelQuantities, verifiedCancelled: nativeMerchandise?.cancelled ?? null });
 
       // Update OMS order fields
       await db
@@ -1390,8 +1406,10 @@ export function registerOmsWebhooks(
                   ? Number(item.fulfillable_quantity)
                   : previousAuthority.fulfillableQuantity,
                 currentQuantity: readShopifyLineCurrentQuantity(item),
+                channelUpdatedAt: shopifyOrder.updated_at ?? null,
                 previous: previousAuthority,
               });
+              if (authority.staleChannelObservation) return;
 
               await tx
                 .update(omsOrderLines)
@@ -1453,6 +1471,7 @@ export function registerOmsWebhooks(
                 ? Number(item.fulfillable_quantity)
                 : null,
               currentQuantity: readShopifyLineCurrentQuantity(item),
+                channelUpdatedAt: shopifyOrder.updated_at ?? null,
             });
             // Insert new line and authority ledger atomically.
             await db.transaction(async (tx: any) => {
@@ -1513,18 +1532,26 @@ export function registerOmsWebhooks(
         for (const existingLine of existingLines) {
           if (existingLine.externalLineItemId && !shopifyLineIds.has(existingLine.externalLineItemId)) {
             if ((existingLine.quantity || 0) > 0) {
-              const authority = deriveOmsLineAuthority({
-                sourceTopic: "orders/updated",
-                sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
-                sourceInboxId: inbox.receipt.id,
-                financialStatus: shopifyOrder.financial_status,
-                quantity: 0,
-                fulfillableQuantity: 0,
-                currentQuantity: 0,
-                previous: existingLine,
-              });
               await db.transaction(async (tx: any) => {
                 if ((await guardOrderEditShopifyIngress(tx,existing.id,shopifyOrder,new Date())).skipLines) return;
+                // A newer native observation or paid event may have committed
+                // since the header snapshot. Removal uses the same row lock as
+                // matched-line updates and cannot overwrite that newer state.
+                const [lockedLine] = await tx.select().from(omsOrderLines)
+                  .where(eq(omsOrderLines.id, existingLine.id)).for("update").limit(1);
+                if (!lockedLine) throw new Error("The removed OMS line disappeared during channel reconciliation.");
+                const authority = deriveOmsLineAuthority({
+                  sourceTopic: "orders/updated",
+                  sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                  sourceInboxId: inbox.receipt.id,
+                  financialStatus: shopifyOrder.financial_status,
+                  quantity: 0,
+                  fulfillableQuantity: 0,
+                  currentQuantity: 0,
+                  channelUpdatedAt: shopifyOrder.updated_at ?? null,
+                  previous: lockedLine,
+                });
+                if (authority.staleChannelObservation) return;
                 await tx
                   .update(omsOrderLines)
                   .set({
@@ -1540,7 +1567,7 @@ export function registerOmsWebhooks(
                   orderLineId: existingLine.id,
                   eventType: "line_removed",
                   sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
-                  previous: existingLine,
+                  previous: lockedLine,
                   authority,
                 });
               });
@@ -2030,6 +2057,9 @@ export function registerOmsWebhooks(
         {
           // OMS already resolved above — short-circuit the helper.
           resolveOmsOrder: async () => ({ id: existing.id }),
+          readMerchandiseSnapshot: () => readChannelShopifyMerchandise(db, {
+            channelId, orderId: String(shopifyOrderId),
+          }),
           reconcileRefundOrderDemand: wmsServices
             ? async (args) => wmsServices.reservation.reconcileRefundOrderDemand(args)
             : undefined,
@@ -2064,6 +2094,7 @@ export function registerOmsWebhooks(
           sourceInboxId: inbox.receipt.id,
           now,
           logPrefix: LOG_PREFIX,
+          useChannelQuantities: channelMerchandiseAuthorityEnabled(channelId),
         },
       );
       console.log(

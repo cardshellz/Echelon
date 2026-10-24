@@ -70,7 +70,7 @@ export interface ShopifyAdminGraphQLClient {
  * Tests should NOT call this; pass an in-memory mock client to the
  * fulfillment-push service via `setShopifyClient(mock)` instead.
  */
-export function createDefaultShopifyAdminClient(): ShopifyAdminGraphQLClient {
+export function createDefaultShopifyAdminClient(options: import("../subscriptions/infrastructure/shopify.adapter").ShopifyGraphQLRequestOptions = {}): ShopifyAdminGraphQLClient {
   return {
     async request<T = unknown>(
       query: string,
@@ -82,7 +82,7 @@ export function createDefaultShopifyAdminClient(): ShopifyAdminGraphQLClient {
       const { shopifyGraphQL } = await import(
         "../subscriptions/infrastructure/shopify.adapter"
       );
-      return shopifyGraphQL<T>(query, variables);
+      return shopifyGraphQL<T>(query, variables, options);
     },
   };
 }

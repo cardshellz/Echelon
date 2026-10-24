@@ -41,7 +41,8 @@ CREATE TABLE oms.oms_orders(id bigint PRIMARY KEY, channel_id integer, external_
 CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY, order_id bigint, fulfillment_provider text,
  external_line_item_id text, paid_quantity integer, authority_fulfillable_quantity integer,
  cancelled_quantity integer NOT NULL DEFAULT 0, refunded_quantity integer NOT NULL DEFAULT 0,
-      catalog_product_id integer, inventory_tracking boolean
+      catalog_product_id integer, inventory_tracking boolean,
+      channel_current_quantity integer, channel_quantity_updated_at timestamptz
     );
 CREATE TABLE oms.order_line_adjustments(order_id bigint, order_line_id bigint,
  adjustment_type text, restock_policy text, quantity integer);

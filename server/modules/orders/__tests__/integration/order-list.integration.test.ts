@@ -86,6 +86,35 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
   }
 
   it.each([
+    { enabled: false, channelId: 36, cash: "refunded", status: "processing", visible: false },
+    { enabled: true, channelId: 36, cash: "refunded", status: "processing", visible: true },
+    { enabled: true, channelId: 37, cash: "refunded", status: "processing", visible: false },
+    { enabled: true, channelId: 36, cash: "voided", status: "processing", visible: false },
+    { enabled: true, channelId: 36, cash: "paid", status: "cancelled", visible: false },
+    { enabled: true, channelId: 36, cash: "paid", status: "processing", visible: true },
+  ])("reads owed pick work independently of cash: enabled=$enabled channel=$channelId cash=$cash status=$status", async ({ enabled, channelId, cash, status, visible }) => {
+    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", String(enabled));
+    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_CHANNEL_IDS", "36");
+    try {
+      const [parent] = await orm.insert(schema.omsOrders).values({ channelId,
+        externalOrderId: "separate-money-and-merchandise", orderedAt: new Date("2026-10-24T12:00:00Z"),
+        status, financialStatus: cash }).returning();
+      await orm.insert(schema.omsOrderLines).values({ orderId: parent.id, externalLineItemId: "1", quantity: 3,
+        paidQuantity: 3, authorityFulfillableQuantity: 3, channelCurrentQuantity: 3,
+        channelQuantityUpdatedAt: new Date("2026-10-24T12:00:00Z") });
+      const order = await seed("ready", { channelId, omsFulfillmentOrderId: String(parent.id) });
+      await orm.update(schema.wmsOrderItems).set({ barcode: "FIXTURE", imageUrl: "/fixture.png" })
+        .where(eq(schema.wmsOrderItems.orderId, order.id));
+      const before = await Promise.all(["wms.orders", "wms.order_items", "oms.oms_orders", "oms.oms_order_lines"]
+        .map(table => database.pool.query(`SELECT * FROM ${table} ORDER BY id`).then(result => result.rows)));
+      expect((await orderStorage.getPickQueueOrders()).map(row => row.id)).toEqual(visible ? [order.id] : []);
+      const after = await Promise.all(["wms.orders", "wms.order_items", "oms.oms_orders", "oms.oms_order_lines"]
+        .map(table => database.pool.query(`SELECT * FROM ${table} ORDER BY id`).then(result => result.rows)));
+      expect(after).toEqual(before);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it.each([
     { status: "pending", omsShipped: false }, { status: "in_progress", omsShipped: false },
     { status: "pending", omsShipped: true }, { status: "in_progress", omsShipped: true },
   ])("never requeues picked or overpicked lines with a stale $status label (OMS shipped=$omsShipped)", async ({ status, omsShipped }) => {

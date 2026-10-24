@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { omsWarehouseCancellationSql } from "../oms/order-merchandise-state.sql";
 
 import { logger } from "../../platform/observability/logger";
 import { wmsOmsOrderIdSql } from "../oms/oms-wms-order-link.sql";
@@ -46,8 +47,7 @@ export const OMS_STILL_OWES_UNCARRIED_UNITS_FOR_WMS_ORDER_O = sql`
       omsFulfillmentOrderId: sql.raw("o.oms_fulfillment_order_id"),
       legacySourceTableId: sql.raw("o.source_table_id"),
     })}
-      AND oo.status NOT IN ('cancelled', 'refunded', 'shipped')
-      AND COALESCE(oo.financial_status, '') NOT IN ('refunded', 'voided')
+      AND NOT ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded", "voided"], includeShipped: true })}
       AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
       AND ol.requires_shipping IS DISTINCT FROM false
       AND COALESCE(ol.fulfillment_status, '') <> 'fulfilled'

@@ -17,6 +17,7 @@ import type {
   OrderEditQuote,
 } from "../../../order-edits/application/order-edit-provider";
 import { paidRewardFixture } from "../../../order-edits/__tests__/fixtures/order-edit-paid-reward.fixture";
+import { settledRefundEditFixture } from "../../../order-edits/__tests__/fixtures/settled-refund-edit.fixture";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -30,7 +31,8 @@ CREATE TABLE wms.orders(id int PRIMARY KEY,channel_id int,source text,oms_fulfil
  order_edit_operation_id uuid,started_at timestamptz,assigned_picker_id text,picked_count int);
 CREATE TABLE oms.order_edit_operations(id uuid PRIMARY KEY,oms_order_id bigint,connection_id int,status text,document jsonb);
 CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY,order_id bigint,external_line_item_id text,product_variant_id int,quantity int,
- channel_observed_quantity int,paid_quantity int,authority_fulfillable_quantity int,cancelled_quantity int,refunded_quantity int,
+ channel_observed_quantity int,channel_current_quantity int,channel_quantity_updated_at timestamptz,
+ paid_quantity int,authority_fulfillable_quantity int,cancelled_quantity int,refunded_quantity int,
  authorization_status text,authorized_by_event_id text,paid_price_cents bigint,retail_price_cents bigint,total_price_cents bigint,total_discount_cents bigint,
  plan_discount_cents bigint DEFAULT 0,coupon_discount_cents bigint DEFAULT 0,
  fulfillable_quantity int,authority_source_topic text,authority_source_inbox_id int,authorized_at timestamptz,updated_at timestamptz);
@@ -176,6 +178,9 @@ function document(
         disposable,
         fixture,
       );
+      await database.pool.query(`ALTER TABLE oms.oms_order_line_authority_events
+        ADD COLUMN previous_channel_current_quantity integer,ADD COLUMN channel_current_quantity integer,
+        ADD COLUMN channel_quantity_updated_at timestamptz`);
       projector = new OrderEditPaidProjection(database.pool, () => NOW);
     }, 30000);
     afterAll(async () => {
@@ -200,6 +205,23 @@ function document(
         [OP, value.status, JSON.stringify(value)],
       );
     }
+    it("projects a verified replacement while its refunded historical line stays at zero authority", async () => {
+      const operation = settledRefundEditFixture(OP, NOW);
+      await save(operation);
+      await database.pool.query(`UPDATE oms.oms_order_lines SET quantity=1,channel_observed_quantity=1,paid_quantity=1,
+        authority_fulfillable_quantity=0,refunded_quantity=1,authorization_status='refunded' WHERE id=30;
+        INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,product_variant_id,quantity,channel_observed_quantity,
+          paid_quantity,authority_fulfillable_quantity,cancelled_quantity,refunded_quantity,authorization_status,
+          paid_price_cents,retail_price_cents,total_price_cents,total_discount_cents,fulfillable_quantity)
+        VALUES(31,20,'102',100,1,1,0,0,0,0,'seen',900,900,900,0,1);`);
+      const enabled = new OrderEditPaidProjection(database.pool, () => NOW, () => true);
+      await enabled.project(20, OP, operation.lastSnapshot!);
+      await enabled.project(20, OP, operation.lastSnapshot!);
+      expect((await database.pool.query("SELECT external_line_item_id,authority_fulfillable_quantity,refunded_quantity FROM oms.oms_order_lines ORDER BY id")).rows)
+        .toEqual([{ external_line_item_id: "101", authority_fulfillable_quantity: 0, refunded_quantity: 1 },
+          { external_line_item_id: "102", authority_fulfillable_quantity: 1, refunded_quantity: 0 }]);
+      expect((await database.pool.query("SELECT count(*)::int AS n FROM oms.order_edit_events WHERE action='paid_current_projected'")).rows[0].n).toBe(1);
+    });
     it("projects native allocations and a saved reward exactly once across concurrent retries", async () => {
       const operation = paidRewardFixture(OP, NOW);
       const target = operation.lastSnapshot!;

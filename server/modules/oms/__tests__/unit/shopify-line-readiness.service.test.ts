@@ -42,6 +42,27 @@ function createDb(line: Record<string, unknown>) {
 }
 
 describe("reconcileShopifyLineReadiness", () => {
+  it("records a dated channel observation even when paid dispatch quantity has not increased", async () => {
+    const { db, updates } = createDb({ id: 101, orderId: 55, externalLineItemId: "9001", quantity: 2,
+      requiresShipping: true, paidQuantity: 1, authorityFulfillableQuantity: 1, wmsMaterializedQuantity: 1,
+      cancelledQuantity: 0, refundedQuantity: 1, authorizationStatus: "partially_refunded" });
+    const result = await reconcileShopifyLineReadiness({ db, omsOrderId: 55, financialStatus: "partially_refunded",
+      sourceEventId: "native:dated", useChannelQuantities: true, channelUpdatedAt: NOW, now: NOW,
+      lineItems: [{ externalLineItemId: "9001", quantity: 2, currentQuantity: 1, fulfillableQuantity: 1 }] });
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ channelCurrentQuantity: 1, channelQuantityUpdatedAt: NOW, paidQuantity: 1, authorityFulfillableQuantity: 1 });
+    expect(result).toMatchObject({ advancedLines: 0, advancedQuantity: 0, wmsSyncRequired: true });
+  });
+  it("uses a lower current quantity without granting payment authority or subtracting refund history twice", async () => {
+    const { db, updates } = createDb({ id: 101, orderId: 55, externalLineItemId: "9001", quantity: 2,
+      requiresShipping: true, paidQuantity: 2, authorityFulfillableQuantity: 2, wmsMaterializedQuantity: 2,
+      cancelledQuantity: 0, refundedQuantity: 1, authorizationStatus: "partially_refunded" });
+    const result = await reconcileShopifyLineReadiness({ db, omsOrderId: 55, financialStatus: "partially_refunded",
+      sourceEventId: "native:lower", useChannelQuantities: true, channelUpdatedAt: NOW, now: NOW,
+      lineItems: [{ externalLineItemId: "9001", quantity: 2, currentQuantity: 1, fulfillableQuantity: 1 }] });
+    expect(updates[0]).toMatchObject({ channelCurrentQuantity: 1, paidQuantity: 2, authorityFulfillableQuantity: 1 });
+    expect(result).toMatchObject({ advancedQuantity: 0, wmsSyncRequired: true });
+  });
   beforeEach(() => {
     recordAuthorityEvent.mockReset();
     recordAuthorityEvent.mockResolvedValue(undefined);

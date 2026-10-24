@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
 import {
   collectOmsFlowReconciliationIssues,
   getOmsFlowReconciliationSchedulerHeartbeat,
@@ -444,8 +445,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
           AND NOT EXISTS (
@@ -481,8 +481,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
           AND NOT EXISTS (
@@ -619,8 +618,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
           AND NOT EXISTS (
@@ -651,8 +649,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
           AND NOT EXISTS (
@@ -697,8 +694,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
       `,
@@ -733,8 +729,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
         ORDER BY os.created_at ASC
