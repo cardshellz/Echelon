@@ -22,6 +22,7 @@ import { EbayListingSyncService } from "../../ebay-listing-sync.service";
 import { EbayPublicationCompletionExecution, type PreparedEbayPublication } from "../../ebay-publication-completion.service";
 import { resolveEbayPublicationTarget } from "../../ebay-publication-completion.domain";
 import { syncContentIntentHash } from "../../ebay-listing-sync-content";
+import { prepareEbayListingPackages } from "../../adapters/ebay/ebay-listing-package";
 import { EbayMarketplaceListingConnector, type EbayListingConnectorDraft, type EbayListingLifecycleClient, type EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
 import type { EbayInventoryItem, EbayInventoryItemGroup } from "../../adapters/ebay/ebay-types";
 import type { EbayListingInspection } from "../../../marketplace-listings/domain/ebay-listing-inspection";
@@ -992,11 +993,12 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       publication:published?publicationObservation(final):null,unpublishedTarget:published?null:publish.inspectionEvidence.unpublishedTarget,
       skus:source.variants.map(member=>({sku:member.sku,inventoryItemExists:true,issue:null,offers:[{sku:member.sku,offerId:member.offerId!,
         status:published?"PUBLISHED":"UNPUBLISHED",listingId:published?final.variants[0].listingId:null,listingStatus:published?"ACTIVE":null}]}))});
+    const preparedDraft = await prepareEbayListingPackages(client, draft);
     const prepare=async():Promise<PreparedEbayPublication>=>{
       const connection=await database.pool.connect();let snapshot:EbayListingMappingSourceSnapshot;
       try{snapshot=await readSource(connection,source.productId);}finally{connection.release();}
       const inspection=await inspect();
-      return{sourceIdentity:snapshot.identity,identity:resolveEbayPublicationTarget(source,inspection),client,draft:structuredClone(draft),inspection,inspect,assertInventoryReady:async()=>{},
+      return{sourceIdentity:snapshot.identity,identity:resolveEbayPublicationTarget(source,inspection),client,draft:structuredClone(preparedDraft),inspection,inspect,assertInventoryReady:async()=>{},
         resolvePublishedIdentity:async()=>publicationObservation(final),variants:source.variants.map(member=>({variantId:member.variantId,sku:member.sku,
           productName:"Canonical catalog title",priceCents:1249,priceChanged:true}))};
     };
@@ -1030,7 +1032,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     const sync=new PostgresEbayListingSyncRepository(database.pool);const interrupted=await sync.get(saved.job.id);
     expect(interrupted).toMatchObject({state:"recovering",publicationTarget:target,providerIdentity:final,publicationWriteStarted:true,publicationWriteCompleted:true,
       publicationAccepted:{listingId:final.variants[0].listingId,offerIds:Object.fromEntries(final.variants.map(member=>[member.variantId,member.offerId]))},
-      publicationIntentHash:syncContentIntentHash(draft)});
+      publicationIntentHash:syncContentIntentHash(preparedDraft)});
     expect(await mappings()).toEqual(before);
     const evidence=(await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='provider_identity'",[saved.job.id])).rows;
     expect(evidence).toHaveLength(1);expect(evidence[0].evidence.observation).toMatchObject({listingIdentity:publicationObservation(final).listingIdentity,members:publicationObservation(final).members});

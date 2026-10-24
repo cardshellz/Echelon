@@ -18,7 +18,7 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({
   ebayListingPhotoResolver: { resolve: fixture.photos }, getAuthService: () => fixture.auth,
 }));
 vi.mock("../../infrastructure/ebay-listing-client", () => ({
-  createEbayRouteListingClient: () => ({}), createEbayRouteListingLifecycleClient: () => ({getInventoryItemGroup:fixture.liveGroup}), getExistingEbayListingPhotos: vi.fn(),
+  createEbayRouteListingClient: () => ({}), createEbayRouteListingLifecycleClient: () => ({ getInventoryItemGroup: fixture.liveGroup, getInventoryItem: async () => null }), getExistingEbayListingPhotos: vi.fn(),
 }));
 vi.mock("../../infrastructure/ebay-listing-helpers", () => ({ determineVariationAspectName: () => "Pack Size", resolveChannelPriceResolution: fixture.prices }));
 // The full writer, catalog adapter and saved-publication gate are exercised in

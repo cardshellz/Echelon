@@ -24,7 +24,8 @@ export const BROWSER_FEATURES = Object.freeze({
       "shards": 1,
       "tests": [
         "test/browser/bulk-inventory-tracking.spec.ts",
-        "test/browser/catalog-images.spec.ts"
+        "test/browser/catalog-images.spec.ts",
+        "test/browser/channel-package-data.spec.ts"
       ],
       "roots": []
     },

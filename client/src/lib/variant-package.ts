@@ -121,6 +121,18 @@ export function buildVariantPackageDisplay(variant: VariantPackageSource) {
   };
 }
 
+/** Editing an unrelated field must not rewrite measurements through rounded
+ * display units. A cleared field is explicit null; an unchanged field is omitted. */
+export function buildVariantPackagePatch(input: VariantPackageInput, original: VariantPackageSource): VariantPackagePayload {
+  const before = variantPackageInputFromVariant(original);
+  const values = buildVariantPackagePayload(input, "null");
+  const fields = { weightLb: "weightGrams", lengthIn: "lengthMm", widthIn: "widthMm", heightIn: "heightMm" } as const;
+  for (const key of Object.keys(fields) as Array<keyof typeof fields>) {
+    if (input[key].trim() === before[key].trim()) delete values[fields[key]];
+  }
+  return values;
+}
+
 export function escapeCsvCell(value: string | number | null | undefined): string {
   const raw = value === null || value === undefined ? "" : String(value);
   return /[",\r\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;

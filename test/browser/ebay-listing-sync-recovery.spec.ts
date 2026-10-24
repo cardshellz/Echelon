@@ -100,11 +100,11 @@ test("a saved preparation refusal identifies the variant and opens its actual co
   const issue = resolveEbayListingIssue({ code: "CHANNEL_LISTING_VALIDATION_FAILED", productId: 1, jobId: job.id,
     validation: { field: "package_weight", reason: "required", productId: 1, variantId: 101 } });
   state.jobs = [{ ...job, state: "needs_attention", code: issue.code, message: issue.message, issue }];
-  await page.route("**/products/1?tab=variants", route => route.fulfill({ contentType: "text/html", body: "<h1>Catalog variant editor</h1>" }));
+  await page.route("**/products/1?tab=variants&variantId=101", route => route.fulfill({ contentType: "text/html", body: "<h1>Catalog variant editor</h1>" }));
   await page.reload();
   await expect(page.getByRole("status", { name: statusName })).toContainText("Add the variant's package weight");
   const link = page.getByRole("link", { name: "Open product variants", exact: true });
-  await expect(link).toHaveAttribute("href", "/products/1?tab=variants");
+  await expect(link).toHaveAttribute("href", "/products/1?tab=variants&variantId=101");
   await page.clock.install(); await page.clock.fastForward(30_100);
   expect(state.requests).toEqual([]);
   await page.screenshot({ path: info.outputPath("preparation-variant-correction.png"), fullPage: true });

@@ -6,6 +6,7 @@ function repository(price: unknown, compareAtPrice: unknown) {
   const row = { id: 1, sku: "PACK", catalog_sku: "PACK", name: "Pack", option1_name: null,
     option1_value: null, option2_name: null, option2_value: null, price_cents: price,
     compare_at_price_cents: compareAtPrice, weight_grams: 100, ebay_weight_grams: 100, barcode: null,
+    length_mm: null, width_mm: null, height_mm: null, shipping_package_type: null,
     ebay_fulfillment_policy_override: null, ebay_return_policy_override: null, ebay_payment_policy_override: null,
     external_variant_id: null, external_product_id: null, external_sku: null, mapping_exists: false };
   return new PostgresEbayListingPushRepository({ query: async () => ({ rows: [row] }) } as unknown as Pool,

@@ -94,6 +94,7 @@ export class EbayBusinessPolicyProvider {
               id,
               name,
               marketplaceId: scope.marketplaceId,
+              ...(kind === "fulfillment" ? { packageRequirements: fulfillmentPackageRequirements(policy) } : {}),
               ...(typeof policy.description === "string"
                 ? { description: policy.description }
                 : {}),
@@ -120,4 +121,14 @@ export class EbayBusinessPolicyProvider {
       paymentPolicies: result[2],
     };
   }
+}
+
+/** Shipping policy vocabulary stays in the adapter. All scopes consume the
+ * same normalized requirements from the same authoritative policy catalog. */
+function fulfillmentPackageRequirements(policy: Record<string, unknown>) {
+  const shippingOptions = z.array(z.object({ costType: z.enum(["CALCULATED", "FLAT_RATE", "NOT_SPECIFIED"]) }).passthrough())
+    .parse(policy.shippingOptions ?? []);
+  const calculated = shippingOptions.some(option => option.costType === "CALCULATED");
+  // Existing listing policy requires weight, also covering flat-rate surcharges.
+  return { weight: true, dimensions: calculated, packageType: calculated };
 }

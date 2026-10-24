@@ -8,7 +8,7 @@ import { cutoverCompositionBaseSql } from "../../../inventory-planning/__tests__
 import { installEbayPublicationInventoryFixture } from "../../../inventory-planning/__tests__/fixtures/ebay-publication-inventory.fixture";
 import { installPublicationSelectionWorkFixture } from "../../../inventory-planning/__tests__/fixtures/publication-selection-work.fixture";
 import { AutomaticSyncEbayProvider, automaticSyncPhotos } from "../fixtures/ebay-automatic-sync-provider.fixture";
-import { EbayPolicyCatalogHttp } from "../fixtures/ebay-business-policies.fixture";
+import { EbayPolicyCatalogHttp, providerPolicyCatalog } from "../fixtures/ebay-business-policies.fixture";
 
 const runtime = vi.hoisted(() => ({ pool: null as Pool | null, provider: null as AutomaticSyncEbayProvider | null }));
 vi.mock("../../../../db", () => ({ pool: new Proxy({} as Pool, { get(_target, key) {
@@ -127,8 +127,11 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(runtime.provider.writes).toEqual([]);
   });
 
-  it("blocks before all mutations, corrects via the policy owner, and completes the same saved publication with current policies", async () => {
+  it("blocks missing policy and package facts before mutations, then completes the same saved publication after correction", async () => {
     const catalog = new EbayPolicyCatalogHttp(); vi.stubGlobal("fetch", catalog.fetch);
+    catalog.catalog.set("fulfillment", { fulfillmentPolicies: providerPolicyCatalog("fulfillment").fulfillmentPolicies.map(policy => ({
+      ...policy, shippingOptions: [{ costType: "CALCULATED" }],
+    })) });
     let timestamp = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now.getTime() + 1_000;
     const clock = () => new Date(timestamp++);
     runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"]);
@@ -161,10 +164,23 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     const retried = await service.enqueue(source, "user:policy-reviewer", randomUUID(), "sync");
     expect(retried.id).toBe(job.id);
     await service.processDue(1, job.id);
+    expect(await store.get(job.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED" });
+    expect((await service.get(job.id)).issue?.action?.href).toBe("/products/20?tab=variants&variantId=101");
+    expect(runtime.provider.writes).toEqual([]);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_provider_requests")).rows[0].count).toBe(0);
+
+    // Measurements are explicit test facts, never defaults inferred from the SKU.
+    await database.pool.query(`UPDATE catalog.product_variants SET length_mm=254,width_mm=177.8,height_mm=50.8,
+      shipping_package_type='parcel' WHERE id=101`);
+    timestamp += 60_000;
+    expect((await service.enqueue(source, "user:package-reviewer", randomUUID(), "sync")).id).toBe(job.id);
+    await service.processDue(1, job.id);
     const completed = await store.get(job.id);
     expect(completed, `${completed.code}: ${completed.message}`).toMatchObject({ state: "completed", code: null, operation: "publish" });
     expect(runtime.provider.snapshot().offer).toMatchObject({ status: "PUBLISHED", listingId: "listing-20", availableQuantity: 17,
       listingPolicies: { fulfillmentPolicyId: "store-shipping", returnPolicyId: "product-returns", paymentPolicyId: "product-payment" } });
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 100, unit: "GRAM" },
+      dimensions: { length: 25.4, width: 17.78, height: 5.08, unit: "CENTIMETER" }, packageType: "PACKAGE_THICK_ENVELOPE" });
     expect(runtime.provider.writes.filter(write => write.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group")).toHaveLength(1);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_jobs")).rows[0].count).toBe(1);
     expect((await database.pool.query("SELECT actor,changes FROM public.audit_events WHERE action='ebay.business_policies.changed'")).rows)

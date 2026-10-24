@@ -48,6 +48,15 @@ describe("catalog package attributes", () => {
     })).toEqual({});
   });
 
+  it("distinguishes an omitted shipping type from an explicit correction or clear", () => {
+    expect(extractPackageAttributeUpdates({ shippingPackageType: "parcel" })).toEqual({ shippingPackageType: "parcel" });
+    expect(extractPackageAttributeUpdates({ shippingPackageType: null })).toEqual({ shippingPackageType: null });
+    expect(coercePackageAttributesOnVariantPayload({ name: "Unrelated edit" })).toEqual({});
+    for (const shippingPackageType of ["", "case", "PACKAGE_THICK_ENVELOPE", 1]) {
+      expect(() => extractPackageAttributeUpdates({ shippingPackageType })).toThrow(PackageAttributeValidationError);
+    }
+  });
+
   it("rejects bulk rows with no package field updates", () => {
     expect(() => parsePackageAttributeBulkRows([
       { variantId: 10, updates: { sku: "NOT-A-PACKAGE-FIELD" } },

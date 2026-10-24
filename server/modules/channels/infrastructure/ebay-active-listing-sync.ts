@@ -113,6 +113,8 @@ async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers
       variant_name: productVariants.name,
       price_cents: productVariants.priceCents,
       variant_weight_grams: productVariants.weightGrams,
+      length_mm: productVariants.lengthMm, width_mm: productVariants.widthMm, height_mm: productVariants.heightMm,
+      shipping_package_type: productVariants.shippingPackageType,
       variant_is_active: productVariants.isActive,
       variant_sales_eligibility: productVariants.salesEligibility,
       variant_excluded: productVariants.ebayListingExcluded,
@@ -376,6 +378,8 @@ async function prepareActiveEbayListingSync(
     price_cents: variant.price_cents,
     ebay_weight_grams:
       variant.variant_weight_override ?? variant.variant_weight_grams,
+    length_mm: variant.length_mm, width_mm: variant.width_mm, height_mm: variant.height_mm,
+    shipping_package_type: variant.shipping_package_type,
     isListed: boundIdentity.variants.find(member => member.variantId === variant.variant_id)!.contentSyncEnabled !== false,
   }));
   const sellableVariantIds = new Set(
@@ -447,6 +451,7 @@ async function prepareActiveEbayListingSync(
     marketplaceId,
     ebayBrowseCategoryId,
     resolvedPoliciesByVariantId: resolvedPolicies.byVariantId,
+    packageRequirementsByVariantId: resolvedPolicies.packageRequirementsByVariantId,
     storeCategoryNames,
     merchantLocationKey,
     retainUnlistedVariantsInGroup: true,

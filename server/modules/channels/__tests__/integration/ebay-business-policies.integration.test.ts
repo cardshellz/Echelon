@@ -53,6 +53,20 @@ const actor = "user:policy-reviewer";
     return result.rows[0].value;
   }
 
+  it.each(targets)("uses the effective $kind shipping policy's package requirements without inferring them from its name", async target => {
+    for (const candidate of targets.slice(1)) await patch(candidate, { fulfillmentPolicyId: null });
+    const selected = await service.readCatalog();
+    http.catalog.set("fulfillment", { fulfillmentPolicies: selected.fulfillmentPolicies.map(policy => ({
+      fulfillmentPolicyId: policy.id, name: "Same display name", marketplaceId: "EBAY_US",
+      shippingOptions: [{ costType: policy.id === "replacement-shipping" ? "CALCULATED" : "FLAT_RATE", optionType: "DOMESTIC" }],
+    })) });
+    await patch(target, { fulfillmentPolicyId: "replacement-shipping" });
+    const result = await service.resolveProductPolicies({ productId: 20, variantIds: [101, 102] });
+    expect(result.packageRequirementsByVariantId.get(101)).toEqual({ weight: true, dimensions: true, packageType: true });
+    expect(result.packageRequirementsByVariantId.get(102)).toEqual({ weight: true, dimensions: target.kind !== "variant", packageType: target.kind !== "variant" });
+    expect(result.provenanceByVariantId.get(101)?.fulfillment.source.scope).toBe(target.kind === "category" ? "category" : target.kind);
+  });
+
   it.each(targets)("saves all three validated policies at $kind scope, audits once and preserves unrelated settings", async target => {
     const before = await service.readPolicies(target);
     expect(await patch(target, values("replacement"), before)).toEqual(values("replacement"));

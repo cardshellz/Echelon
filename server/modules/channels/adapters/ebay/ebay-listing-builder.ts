@@ -13,6 +13,9 @@
 
 import { centsToDollarString } from "@shared/utils/money";
 import { ChannelListingValidationError } from "@shared/channel-listing-validation";
+import type { ChannelPackageRequirements } from "@shared/catalog/shipping-package";
+import type { ChannelPackagePlan } from "../../../marketplace-listings/domain/channel-package";
+import type { EbayPackageSource } from "./ebay-listing-package";
 import { assertEbayListingPhotoPlan, buildEbayListingPhotoPlan, type EbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
 
 import type {
@@ -56,6 +59,8 @@ export interface EbayListingConfig {
 
 export interface BuiltInventoryItem {
   sku: string;
+  packageSource?: EbayPackageSource;
+  packagePlan?: ChannelPackagePlan;
   payload: Omit<EbayInventoryItem, "sku">;
 }
 
@@ -75,6 +80,8 @@ export interface EbayListingBuildOptions {
   photoPlan?: EbayListingPhotoPlan;
   availableQuantityByVariantId?: ReadonlyMap<number, number>;
   requirePackageWeight?: boolean;
+  /** Set by the authoritative policy owner; package reads finish before intent sealing. */
+  packageRequirementsByVariantId?: ReadonlyMap<number, ChannelPackageRequirements>;
   titleMaxLength?: number;
   descriptionHtmlOverride?: string;
   categoryIdOverride?: string;
@@ -149,15 +156,23 @@ export class EbayListingBuilder {
     const resolvedOptions = { ...options, photoPlan };
     return listing.variants
       .filter((v) => v.isListed && v.sku)
-      .map((variant) => ({
-        sku: variant.sku!,
-        payload: this.buildSingleInventoryItem(
-          variant,
-          listing,
-          productAspects,
-          resolvedOptions,
-        ),
-      }));
+      .map((variant) => {
+        const requirements = options.packageRequirementsByVariantId?.get(variant.variantId);
+        if (options.packageRequirementsByVariantId && !requirements) {
+          throw new ChannelListingValidationError({ field: "policies", reason: "required",
+            productId: listing.productId, variantId: variant.variantId, variantSku: variant.sku ?? undefined });
+        }
+        return {
+          sku: variant.sku!,
+          packageSource: {
+            productId: listing.productId,
+            variantId: variant.variantId,
+            facts: { weightGrams: variant.weightGrams, ...variant.package },
+            requirements: requirements ?? { weight: options.requirePackageWeight === true, dimensions: false, packageType: false },
+          },
+          payload: this.buildSingleInventoryItem(variant, listing, productAspects, resolvedOptions),
+        };
+      });
   }
 
   /**
@@ -329,13 +344,12 @@ export class EbayListingBuilder {
     if (variant.weightGrams) {
       item.packageWeightAndSize = {
         weight: {
-          // weight_grams is numeric(10,2) (migration 185); eBay package
-          // weights are sent in whole grams.
-          value: Math.max(1, Math.round(variant.weightGrams)),
+          // The provider accepts decimal measurements. Preserve the catalog fact.
+          value: variant.weightGrams,
           unit: "GRAM",
         },
       };
-    } else if (options.requirePackageWeight) {
+    } else if (options.requirePackageWeight && !options.packageRequirementsByVariantId) {
       throw new ChannelListingValidationError({ field: "package_weight", reason: "required",
         productId: listing.productId, variantId: variant.variantId, variantSku: variant.sku ?? undefined });
     }
