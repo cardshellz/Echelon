@@ -47,6 +47,10 @@ Seven PO exception lifecycle cases were moved from output-only closeout evidence
 
 Final run reports and exact source fingerprints are recorded under outputs/procurement-po-rfq-recovery-2026-10-24 in the task's primary workspace. On the pinned starting baseline, final local validation passed 4,992 unit cases, 406 CI guards, 226 PostgreSQL cases, 188 distinct desktop/mobile browser cases, application/server-test/client-test/browser-spec typechecks and the build. An additional 80-case focused run includes the writer baseline and final RFQ contracts (overlapping cases are not added to the unit total). Main advanced during this run; its compatibility verification is recorded separately below. No hosted checks or production acceptance are implied by local results.
 
+## Current-main compatibility
+
+Reconciled main commit 9206840bca20537d6f61c7d4c83a4b449421ec1a before handoff. The two merge conflicts were import blocks in the PO list/detail pages; shared status displays and recovery controls are both retained. Post-merge verification passed 192 targeted unit/guard cases, all 78 PO browser cases, all four typechecks and the production build. The 110 RFQ browser cases retain identical product source. The server change extracted the existing physical-status resolver without changing its behavior; it introduced no PO/RFQ fixture dependency, so the 226 database cases were not repeated. Migration policy passes against this pinned main (550 existing migrations); the new audit SQL remains pending PR allocation.
+
 ## Remaining procurement closeout
 
 - C5 (`procurement.storage.ts:generateReceiptNumber/generatePoNumber`, `ap-ledger.service.ts:generatePaymentNumber/generateInvoiceNumber`): replace textual document-number allocation with numeric, transaction-safe allocation, including rollover beyond 999 and concurrent callers. Preserve existing identifiers.
