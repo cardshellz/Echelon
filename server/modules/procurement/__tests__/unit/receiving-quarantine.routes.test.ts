@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { custodyTestResult } from "@shared/procurement/__tests__/receiving-quarantine.fixture";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -81,7 +82,7 @@ describe("receiving quarantine HTTP boundary", () => {
   });
 
   function request(path: string, options: { method?: string; body?: unknown; authenticated?: boolean; headers?: Record<string, string> } = {}) {
-    return fetch(`${base}${path}`, { method: options.method ?? "GET",
+    return requestLocalHttp(`${base}${path}`, { method: options.method ?? "GET",
       headers: { "content-type": "application/json", ...(options.authenticated === false ? {} : { "x-test-user": "custody-operator" }), ...options.headers },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) });
   }

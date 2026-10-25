@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer, type Server } from "node:http";
@@ -47,7 +48,7 @@ describe("inventory history bounded HTTP loading", () => {
     reads.getWarehouseLocationsByIds.mockResolvedValue([{ id: 8, code: "A-1" }, { id: 9, code: "B-1" }]);
     reads.getProductVariantsByIds.mockResolvedValue([{ id: 17, sku: "SLEEVE" }]);
     reads.getOrderById.mockResolvedValue({ id: 42, orderNumber: "TEST-42" });
-    const response = await fetch(url + "?limit=100&offset=200");
+    const response = await requestLocalHttp(url + "?limit=100&offset=200");
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject([{ fromLocation: { id: 8 }, toLocation: { id: 9 }, product: { id: 17 }, order: { id: 42 } }]);
     expect(reads.getInventoryTransactions).toHaveBeenCalledWith(expect.objectContaining({ limit: 100, offset: 200 }));
@@ -58,12 +59,12 @@ describe("inventory history bounded HTTP loading", () => {
   });
 
   it.each(["limit=1000000", "limit=-1", "limit=2.5", "limit=50junk", "limit=50&limit=50", "offset=-1", "offset=2147483648"])("rejects unsafe query %s before database work", async query => {
-    expect((await fetch(url + "?" + query)).status).toBe(400);
+    expect((await requestLocalHttp(url + "?" + query)).status).toBe(400);
     expect(reads.getInventoryTransactions).not.toHaveBeenCalled();
   });
 
   it("does not load reference collections for an empty page", async () => {
-    const response = await fetch(url);
+    const response = await requestLocalHttp(url);
     expect(await response.json()).toEqual([]);
     expect(reads.getWarehouseLocationsByIds).not.toHaveBeenCalled();
     expect(reads.getProductVariantsByIds).not.toHaveBeenCalled();
@@ -71,7 +72,7 @@ describe("inventory history bounded HTTP loading", () => {
 
   it("propagates database failure instead of inventing empty history", async () => {
     reads.getInventoryTransactions.mockRejectedValue(new Error("database unavailable"));
-    const response = await fetch(url);
+    const response = await requestLocalHttp(url);
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "Failed to fetch transactions" });
   });

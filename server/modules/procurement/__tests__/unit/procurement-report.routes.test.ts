@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -48,7 +49,7 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 }
 
 async function requestJson(baseUrl: string, path: string) {
-  const res = await fetch(`${baseUrl}${path}`);
+  const res = await requestLocalHttp(`${baseUrl}${path}`);
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }

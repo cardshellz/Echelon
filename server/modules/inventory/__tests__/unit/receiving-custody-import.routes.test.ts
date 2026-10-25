@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer, type Server } from "node:http";
@@ -63,7 +64,7 @@ describe("CSV counts cannot recognize pending receiving custody", () => {
   afterEach(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
 
   it.each(["upload-csv", "import-csv"])("rejects %s before old/missing balance reads and writes", async path => {
-    const response = await fetch(`${baseUrl}/api/inventory/${path}`, { method: "POST" });
+    const response = await requestLocalHttp(`${baseUrl}/api/inventory/${path}`, { method: "POST" });
     const body = await response.json();
     expect(response.status).toBe(200); // Both legacy batch contracts return per-row failures.
     expect(JSON.stringify(body)).toContain("Resolve receiving quarantine for receipt 77");
@@ -79,7 +80,7 @@ describe("CSV counts cannot recognize pending receiving custody", () => {
 
   it("creates an unheld CSV row and its evidence in the guarded transaction", async () => {
     guard.mockResolvedValue(undefined);
-    const response = await fetch(`${baseUrl}/api/inventory/import-csv`, { method: "POST" });
+    const response = await requestLocalHttp(`${baseUrl}/api/inventory/import-csv`, { method: "POST" });
     expect(await response.json()).toMatchObject({ processed: 1, created: 1, errors: [] });
     expect(state.storage.createInventoryLevel).toHaveBeenCalledWith(expect.objectContaining({ productVariantId: 101, variantQty: 10 }), state.tx);
     expect(state.storage.createInventoryTransaction).toHaveBeenCalledWith(expect.objectContaining({ productVariantId: 101, variantQtyDelta: 10 }), state.tx);

@@ -86,6 +86,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-readback-selection.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-quantity-amendment.integration.test.ts",
       "server/modules/inventory/__tests__/integration/lot-cost-ownership.integration.test.ts",
+      "server/modules/inventory/__tests__/integration/lot-number-allocation.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history-reader.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history.integration.test.ts",
       "server/modules/catalog/__tests__/integration/inventory-tracking-policy.integration.test.ts",
@@ -104,6 +105,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/procurement-rfq-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-payment-controlled-acceptance.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/document-number-prefix-indexes.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-canonical-acceptance-stage.integration.test.ts",
       // eBay adoption account identity: the reader's SQL ownership proof and the loader/reader/CHECK agreement.
       "server/modules/dropship/__tests__/integration/dropship-ebay-push-publication-reader.integration.test.ts",

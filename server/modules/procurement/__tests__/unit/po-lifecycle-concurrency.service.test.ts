@@ -732,13 +732,18 @@ describe("purchase-order number race recovery", () => {
         .mockRejectedValueOnce(conflict)
         .mockImplementationOnce(async (values: any) => ({ id: 22, ...values })),
     });
-    const service = createPurchasingService({} as any, storage);
+    const tx = { execute: costGraphLockExecute() };
+    const db = { transaction: vi.fn(async (work: (executor: typeof tx) => Promise<unknown>) => work(tx)) };
+    const service = createPurchasingService(db as any, storage);
 
     const created = await service.createPO({ vendorId: 9, createdBy: "buyer-5" });
 
     expect(created.poNumber).toBe("PO-20260713-002");
     expect(storage.generatePoNumber).toHaveBeenCalledTimes(2);
     expect(storage.createPurchaseOrder).toHaveBeenCalledTimes(2);
+    expect(db.transaction).toHaveBeenCalledTimes(2);
+    expect(storage.generatePoNumber).toHaveBeenLastCalledWith(tx, expect.any(Date));
+    expect(storage.createPurchaseOrder).toHaveBeenLastCalledWith(expect.any(Object), expect.any(Object), tx);
   });
 
   it("retries the entire inline header/lines/audit transaction with a fresh number", async () => {

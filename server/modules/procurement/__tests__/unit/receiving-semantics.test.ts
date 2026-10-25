@@ -155,7 +155,8 @@ describe("ReceivingService - mutation integrity", () => {
       }),
     };
     const db = { transaction: vi.fn(async (fn) => fn(tx)) };
-    const service = new ReceivingService(db as any, {} as any, {} as any, storage as any);
+    const now = new Date("2026-07-20T12:00:00Z");
+    const service = new ReceivingService(db as any, {} as any, {} as any, storage as any, null, null, null, null, null, null, () => now);
 
     const result = await service.createOrder({
       sourceType: "blind",
@@ -167,7 +168,7 @@ describe("ReceivingService - mutation integrity", () => {
     }, "user-1");
 
     expect(db.transaction).toHaveBeenCalledOnce();
-    expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx);
+    expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx, now);
     expect(storage.createReceivingOrder).toHaveBeenCalledWith({
       receiptNumber: "RCV-20260720-001",
       sourceType: "blind",
@@ -179,6 +180,7 @@ describe("ReceivingService - mutation integrity", () => {
       notes: "Dock 2",
       status: "draft",
       createdBy: "user-1",
+      createdAt: now, updatedAt: now,
     }, tx);
     expect(result).toMatchObject({ id: 50, receiptNumber: "RCV-20260720-001" });
   });

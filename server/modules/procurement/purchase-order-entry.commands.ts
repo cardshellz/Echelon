@@ -1,3 +1,4 @@
+import { DocumentNumberError } from "../../platform/document-numbering/document-number";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { purchaseOrderEntryCommandSchema, purchaseOrderEntryCommandResultSchema, purchaseOrderEntryResultMatchesRequest,
@@ -22,6 +23,9 @@ interface PurchaseOrderEntryOwner {
   executePurchaseEntryInTransaction(tx: PurchaseOrderEntryTransaction, command: PurchaseOrderEntryCommand, actorId: string, key: string): Promise<Record<string, unknown>>;
 }
 export function classifyPurchaseOrderEntryFailure(error: unknown): FinancialCommandFailureDisposition {
+  if (error instanceof DocumentNumberError) {
+    return { kind: "rejected", httpStatus: error.statusCode, body: { code: error.code, error: error.message }, errorCode: error.code, errorMessage: error.message };
+  }
   if (error instanceof PurchasingError || error instanceof PurchaseOrderEntryError) {
     const code = error instanceof PurchaseOrderEntryError ? error.code : String(error.details?.code ?? "PURCHASE_ORDER_ENTRY_REJECTED");
     if (error.statusCode >= 400 && error.statusCode < 500

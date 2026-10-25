@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, {
   type Request,
@@ -66,7 +67,7 @@ describe.each(["receipt", "shipment"] as const)(
         key?: string;
       } = {},
     ) =>
-      fetch(`${base}/api/shipment-lines/${options.id ?? "1"}/${suffix}`, {
+      requestLocalHttp(`${base}/api/shipment-lines/${options.id ?? "1"}/${suffix}`, {
         method: "POST",
         body: JSON.stringify(options.body ?? expectedInput),
         headers: {
@@ -163,7 +164,7 @@ describe.each(["receipt", "shipment"] as const)(
           ]) {
         expect(
           (
-            await fetch(base + path, {
+            await requestLocalHttp(base + path, {
               headers: { "x-actor": "admin", "x-permission": "inventory:view" },
             })
           ).status,
