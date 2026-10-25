@@ -1,3 +1,4 @@
+import { DocumentNumberError } from "../../../platform/document-numbering/document-number";
 import type { RequestHandler, Response } from "express";
 import { readInventoryQuantityCapabilities } from "../infrastructure/quantity-authority.query";
 import { InventoryQuantityError } from "../domain/quantity-ledger";
@@ -16,6 +17,10 @@ export const validateInventoryCommandKey: RequestHandler = (req, res, next) => {
 };
 
 export function sendInventoryQuantityError(res: Response, error: unknown): boolean {
+  if (error instanceof DocumentNumberError) {
+    res.status(error.statusCode).json({ code: error.code, error: error.message });
+    return true;
+  }
   if (!(error instanceof InventoryQuantityError)) return false;
   res.status(inventoryQuantityErrorStatus(error)).json({ code: error.code, error: error.message, context: error.context });
   return true;

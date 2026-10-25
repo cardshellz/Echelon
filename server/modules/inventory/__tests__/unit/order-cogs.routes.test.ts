@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer, type Server } from "node:http";
@@ -59,7 +60,7 @@ describe("order COGS HTTP read contract", () => {
         marginPercent: 76, lineItems: [],
       };
       cogs[method].mockResolvedValue(report);
-      const response = await fetch(`${baseUrl}${path}`);
+      const response = await requestLocalHttp(`${baseUrl}${path}`);
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual(report);
       expect(cogs[method]).toHaveBeenCalledExactlyOnceWith(argument);
@@ -68,7 +69,7 @@ describe("order COGS HTTP read contract", () => {
     it("returns unsupported currency as a distinct 422 with top-level code and currency", async () => {
       const error = new OrderCOGSCurrencyError("CAD");
       cogs[method].mockRejectedValue(error);
-      const response = await fetch(`${baseUrl}${path}`);
+      const response = await requestLocalHttp(`${baseUrl}${path}`);
       expect(response.status).toBe(422);
       expect(await response.json()).toEqual({
         error: error.message, code: "ORDER_COGS_CURRENCY_UNSUPPORTED", currency: "CAD",
@@ -78,7 +79,7 @@ describe("order COGS HTTP read contract", () => {
 
     it("returns 404 only for an absent order", async () => {
       cogs[method].mockResolvedValue(null);
-      const response = await fetch(`${baseUrl}${path}`);
+      const response = await requestLocalHttp(`${baseUrl}${path}`);
       expect(response.status).toBe(404);
       expect(await response.json()).toEqual({ error: "Order not found" });
       expect(cogs[method]).toHaveBeenCalledExactlyOnceWith(argument);
@@ -86,7 +87,7 @@ describe("order COGS HTTP read contract", () => {
 
     it("returns a generic 500 for an unexpected service failure", async () => {
       cogs[method].mockRejectedValue(new Error("private database failure detail"));
-      const response = await fetch(`${baseUrl}${path}`);
+      const response = await requestLocalHttp(`${baseUrl}${path}`);
       expect(response.status).toBe(500);
       expect(await response.json()).toEqual({ error: "Failed to get order COGS" });
       expect(cogs[method]).toHaveBeenCalledExactlyOnceWith(argument);
@@ -96,7 +97,7 @@ describe("order COGS HTTP read contract", () => {
       cogs[method].mockRejectedValue(Object.assign(new Error("unrelated"), {
         code: "ORDER_COGS_CURRENCY_UNSUPPORTED", currency: "CAD",
       }));
-      const response = await fetch(`${baseUrl}${path}`);
+      const response = await requestLocalHttp(`${baseUrl}${path}`);
       expect(response.status).toBe(500);
       expect(await response.json()).toEqual({ error: "Failed to get order COGS" });
     });
@@ -104,7 +105,7 @@ describe("order COGS HTTP read contract", () => {
 
   it.each(["0", "-1", "1.5", "1x", "1e3", "01", "NaN", "9007199254740992"])(
     "rejects malformed ID %s before calling a service", async (orderId) => {
-      const response = await fetch(`${baseUrl}/api/cogs/order/${encodeURIComponent(orderId)}`);
+      const response = await requestLocalHttp(`${baseUrl}/api/cogs/order/${encodeURIComponent(orderId)}`);
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ error: "orderId must be a positive safe integer" });
       expect(cogs.getOrderCOGS).not.toHaveBeenCalled();
@@ -114,7 +115,7 @@ describe("order COGS HTTP read contract", () => {
 
   it.each(["", "?orderNumber=", "?orderNumber=%20%20", `?orderNumber=${"A".repeat(51)}`])(
     "rejects missing, blank, or overlength order numbers (%s) before calling a service", async (query) => {
-      const response = await fetch(`${baseUrl}/api/cogs/order${query}`);
+      const response = await requestLocalHttp(`${baseUrl}/api/cogs/order${query}`);
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ error: "orderNumber must contain 1 to 50 characters" });
       expect(cogs.getOrderCOGSByNumber).not.toHaveBeenCalled();
@@ -125,7 +126,7 @@ describe("order COGS HTTP read contract", () => {
   it("accepts and trims a 50-character order number", async () => {
     const orderNumber = "A".repeat(50);
     cogs.getOrderCOGSByNumber.mockResolvedValue(null);
-    const response = await fetch(`${baseUrl}/api/cogs/order?orderNumber=%20${orderNumber}%20`);
+    const response = await requestLocalHttp(`${baseUrl}/api/cogs/order?orderNumber=%20${orderNumber}%20`);
     expect(response.status).toBe(404);
     expect(cogs.getOrderCOGSByNumber).toHaveBeenCalledExactlyOnceWith(orderNumber);
   });

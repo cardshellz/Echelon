@@ -1,3 +1,4 @@
+import { DocumentNumberError } from "../../platform/document-numbering/document-number";
 import { z } from "zod";
 import { custodyCommandIdentitySchema, verifyCustodyCommandResult, type VerifiedCustodyResult } from "@shared/procurement/receiving-quarantine-command";
 import { hashHttpFinancialCommand } from "../../platform/commands/http-command";
@@ -23,6 +24,10 @@ export function hashCustodyCommandIdentity(input: { command: ReceivingCustodyCom
   return hashHttpFinancialCommand({ ...custodyCommandScope(), body: input });
 }
 function classifyFailure(error: unknown): FinancialCommandFailureDisposition {
+  if (error instanceof DocumentNumberError) {
+    return { kind: "rejected", httpStatus: error.statusCode, body: { error: error.message, code: error.code },
+      errorCode: error.code, errorMessage: error.message };
+  }
   if (error instanceof ReceivingQuarantineError) {
     // Availability failures must not become permanent responses for a command
     // key. The client retains that exact intent until recovery confirms it.

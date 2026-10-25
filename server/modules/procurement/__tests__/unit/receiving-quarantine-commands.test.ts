@@ -1,3 +1,4 @@
+import { DocumentNumberError } from "../../../../platform/document-numbering/document-number";
 import { custodyTestResult } from "@shared/procurement/__tests__/receiving-quarantine.fixture";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createReceivingCustodyCommands, custodyCommandScope, hashCustodyCommandIdentity, CUSTODY_COMMAND_PRINCIPAL } from "../../receiving-quarantine.commands";
@@ -91,6 +92,17 @@ describe("receiving custody command recovery", () => {
     const failure = new ReceivingQuarantineError("RECEIVING_CUSTODY_REJECTED", "Review the custody evidence.", statusCode);
     mocks.execute.mockRejectedValue(failure);
     await expect(execute()).resolves.toMatchObject({ terminalState: "rejected", httpStatus: statusCode,
+      body: { code: failure.code, error: failure.message }, replayed: false });
+    await expect(execute()).resolves.toMatchObject({ terminalState: "rejected", replayed: true });
+    expect(reject).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
+    expect(mocks.execute).toHaveBeenCalledOnce();
+  });
+  it("preserves exhausted document-number evidence as a terminal conflict and replays it", async () => {
+    const { execute, reject, retry } = fixture();
+    const failure = new DocumentNumberError("DOCUMENT_NUMBER_EXHAUSTED", "Automatic receiving numbering is exhausted.");
+    mocks.execute.mockRejectedValue(failure);
+    await expect(execute()).resolves.toMatchObject({ terminalState: "rejected", httpStatus: 409,
       body: { code: failure.code, error: failure.message }, replayed: false });
     await expect(execute()).resolves.toMatchObject({ terminalState: "rejected", replayed: true });
     expect(reject).toHaveBeenCalledOnce();

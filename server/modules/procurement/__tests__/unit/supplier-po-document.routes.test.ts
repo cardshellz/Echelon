@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ServiceRegistry } from "../../../../services";
@@ -60,7 +61,7 @@ describe("supplier document HTTP boundary", () => {
   afterAll(async () => { if (server) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
   it("returns validated escaped draft preview and source identity without private source fields", async () => {
     sourceReader.mockResolvedValue(supplierDocumentSource());
-    const response = await fetch(`${base}/api/purchase-orders/1/document`);
+    const response = await requestLocalHttp(`${base}/api/purchase-orders/1/document`);
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body).toMatchObject({ purpose: "draft_preview", sourceRevision: expect.stringMatching(/^[a-f0-9]{64}$/) });
@@ -69,17 +70,17 @@ describe("supplier document HTTP boundary", () => {
   });
   it("returns an actionable source review error and no printable HTML", async () => {
     sourceReader.mockResolvedValue({ ...supplierDocumentSource(), po: { ...supplierDocumentSource().po, totalCents: null } });
-    const response = await fetch(`${base}/api/purchase-orders/1/document`);
+    const response = await requestLocalHttp(`${base}/api/purchase-orders/1/document`);
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: expect.stringContaining("Review the saved PO"), details: { code: "INVALID_SUPPLIER_DOCUMENT_SOURCE" } });
   });
   it("returns not found from the repository without inventing a document", async () => {
     sourceReader.mockRejectedValue(new SupplierPoDocumentError("PURCHASE_ORDER_NOT_FOUND", "Purchase order not found.", 404));
-    const response = await fetch(`${base}/api/purchase-orders/999/document`);
+    const response = await requestLocalHttp(`${base}/api/purchase-orders/999/document`);
     expect(response.status).toBe(404); expect(await response.json()).not.toHaveProperty("html");
   });
   it.each(["invalid", "-1", "0", "1.5"])("rejects invalid identifier %s before reading", async id => {
-    const response = await fetch(`${base}/api/purchase-orders/${id}/document`);
+    const response = await requestLocalHttp(`${base}/api/purchase-orders/${id}/document`);
     expect(response.status).toBe(400); expect(sourceReader).not.toHaveBeenCalled();
   });
 });

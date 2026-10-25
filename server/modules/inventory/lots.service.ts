@@ -1,3 +1,5 @@
+import { allocateDocumentNumber } from "../../platform/document-numbering/document-number.repository";
+import { captureDocumentNumberTime, documentNumberPrefix } from "../../platform/document-numbering/document-number";
 import { readInventoryValuation } from "./application/read-inventory-valuation";
 import { CostEvidenceError, lockInventoryCostGraph, recordLotCostContribution } from "./infrastructure/cost-evidence.repository";
 import type { OperationalQuantityPosting } from "./infrastructure/operational-quantity-posting";
@@ -81,33 +83,18 @@ type DrizzleDb = {
 };
 
 export class InventoryLotService {
-  constructor(private readonly db: DrizzleDb, private readonly clock: () => Date = () => new Date()) {}
+  constructor(
+    private readonly db: DrizzleDb,
+    private readonly clock: () => Date = () => new Date(),
+    private readonly transactionBound = false,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // LOT NUMBER GENERATION
   // ---------------------------------------------------------------------------
 
-  async generateLotNumber(): Promise<string> {
-    const now = this.clock();
-    const datePart = now.toISOString().slice(0, 10).replace(/-/g, "");
-    const prefix = `LOT-${datePart}-`;
-
-    // Find the highest existing lot number for today
-    const [latest] = await this.db
-      .select({ lotNumber: inventoryLots.lotNumber })
-      .from(inventoryLots)
-      .where(sql`${inventoryLots.lotNumber} LIKE ${prefix + "%"}`)
-      .orderBy(sql`${inventoryLots.lotNumber} DESC`)
-      .limit(1);
-
-    let seq = 1;
-    if (latest) {
-      const parts = latest.lotNumber.split("-");
-      const lastSeq = parseInt(parts[parts.length - 1], 10);
-      if (!isNaN(lastSeq)) seq = lastSeq + 1;
-    }
-
-    return `${prefix}${String(seq).padStart(3, "0")}`;
+  private async generateLotNumber(now: Date): Promise<string> {
+    return allocateDocumentNumber(this.db, { kind: "lot", prefix: documentNumberPrefix("LOT", now, "utc") });
   }
 
   // ---------------------------------------------------------------------------
@@ -138,7 +125,19 @@ export class InventoryLotService {
     quantityPosting?: OperationalQuantityPosting | null;
     exactTotals?: LotCosts;
   }): Promise<InventoryLot> {
-    const lotNumber = await this.generateLotNumber();
+    const now = captureDocumentNumberTime(this.clock());
+    if (this.transactionBound) return this.createLotInsideTransaction(params, now);
+    // A bound owner must retain its caller's executor. Standalone imports and
+    // adjustments hold allocation and every lot write in one transaction.
+    return this.db.transaction((tx) => new InventoryLotService(tx, this.clock, true)
+      .createLotInsideTransaction(params, now));
+  }
+
+  private async createLotInsideTransaction(
+    params: Parameters<InventoryLotService["createLot"]>[0],
+    now: Date,
+  ): Promise<InventoryLot> {
+    const lotNumber = await this.generateLotNumber(now);
 
     // Cost is tracked in MILLS (1/100 cent) as the source of truth: total = product
     // (po) + packaging + landed. Carrying mills means per-unit × qty (FIFO/valuation)
@@ -200,7 +199,7 @@ export class InventoryLotService {
         qtyOnHand: params.quantityPosting ? 0 : params.qty,
         qtyReserved: 0,
         qtyPicked: 0,
-        receivedAt: params.receivedAt ?? this.clock(),
+        receivedAt: params.receivedAt ?? now,
         receivingOrderId: params.receivingOrderId ?? null,
         purchaseOrderId: params.purchaseOrderId ?? null,
         inboundShipmentId: params.inboundShipmentId ?? null,
@@ -1412,7 +1411,7 @@ export class InventoryLotService {
   // ---------------------------------------------------------------------------
 
   withTx(tx: any): InventoryLotService {
-    return new InventoryLotService(tx);
+    return new InventoryLotService(tx, this.clock, true);
   }
 }
 

@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { sql } from "drizzle-orm";
 import express from "express";
 import http from "node:http";
@@ -25,6 +26,7 @@ import type { RfqWorkflowCommand } from "../../rfq-workflow.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 import { RFQ_AUTHORITY_TABLES, seedRfqEditActor, legacyRfqTestCommands } from "./rfq-authority.fixture";
 import { registerRfqCreationRecoveryCases } from "./rfq-create-recovery.cases";
+import { registerRecommendationPoNumberingCases } from "./recommendation-po-numbering.cases";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -54,6 +56,8 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   let durableCommands: typeof commands;
   let commandScope: typeof import("../../rfq-workflow.commands").rfqWorkflowCommandScope;
   let commandPrincipal: string;
+
+  registerRecommendationPoNumberingCases(() => ({ pool, database, purchasingOwner, actorId, now: NOW }));
 
   beforeAll(async () => {
     if (!["127.0.0.1", "localhost"].includes(new URL(url!).hostname) || [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].filter(Boolean).includes(url!)) throw new Error("RFQ workflow tests require a separate explicitly disposable LOCAL database");
@@ -614,7 +618,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
       } };
       const key = `rfq-${suffix}-http`;
       const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/purchasing/rfqs/10/lines/20/quotes`;
-      const send = (receipt: boolean) => fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json",
+      const send = (receipt: boolean) => requestLocalHttp(endpoint, { method: "POST", headers: { "Content-Type": "application/json",
         "Idempotency-Key": key, ...(receipt ? { "X-RFQ-Receipt-Version": "1" } : {}) }, body: JSON.stringify(body) });
       const first = await send(true);
       expect(first.status, await first.clone().text()).toBe(200);
@@ -627,6 +631,21 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
       expect((await pool.query("SELECT response_body FROM public.financial_command_results WHERE idempotency_key=$1", [key])).rows[0].response_body).toEqual(receipt);
       expect((await pool.query("SELECT count(*)::int AS count FROM procurement.rfq_quote_revisions")).rows[0].count).toBe(1);
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it("durably rejects exhausted PO numbering without converting the RFQ or changing historical documents", async () => {
+    await pool.query("INSERT INTO procurement.purchase_orders(po_number,vendor_id,status) VALUES('PO-20260907-999999999999999999',5,'cancelled')");
+    await capture();
+    const before = await service.getDetail(10);
+    const historical = (await pool.query("SELECT to_jsonb(po) AS record FROM procurement.purchase_orders po ORDER BY id")).rows;
+    const attempt = await conversion();
+    const result = await commands.execute(attempt.command, actorId, attempt.identity);
+    expect(result).toMatchObject({ terminalState: "rejected", httpStatus: 409, body: { code: "DOCUMENT_NUMBER_EXHAUSTED" } });
+    expect(await service.getDetail(10)).toEqual(before);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.rfq_purchase_order_line_links")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT to_jsonb(po) AS record FROM procurement.purchase_orders po ORDER BY id")).rows).toEqual(historical);
+    const replay = await commands.execute(attempt.command, actorId, attempt.identity);
+    expect(replay).toMatchObject({ terminalState: "rejected", httpStatus: 409, replayed: true, body: result.body });
   });
 
   it("atomically creates a draft through the real PO owner with exact links and supplier quote basis", async () => {

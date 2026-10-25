@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, {
   type Request,
@@ -63,7 +64,7 @@ describe("historical cost origin HTTP controls", () => {
       preview?: boolean;
     } = {},
   ) =>
-    fetch(
+    requestLocalHttp(
       `${base}/api/inventory-lots/${options.id ?? "23"}/cost-origin-repair${options.preview ? "/preview" : ""}`,
       {
         method: "POST",
@@ -148,7 +149,7 @@ describe("historical cost origin HTTP controls", () => {
   });
   it("requires view permission for evidence and approval permission for a preview", async () => {
     expect(
-      (await fetch(`${base}/api/inventory-lots/23/cost-origin-repair`)).status,
+      (await requestLocalHttp(`${base}/api/inventory-lots/23/cost-origin-repair`)).status,
     ).toBe(403);
     const { previewVersion, ...review } = input;
     expect(

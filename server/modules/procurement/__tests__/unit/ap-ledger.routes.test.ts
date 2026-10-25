@@ -1,3 +1,5 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
+import { DocumentNumberError } from "../../../../platform/document-numbering/document-number";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -114,7 +116,7 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 }
 
 async function requestJson(baseUrl: string, method: string, path: string, body?: any) {
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await requestLocalHttp(`${baseUrl}${path}`, {
     method,
     headers: { "content-type": "application/json", "idempotency-key": "test-key" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -197,7 +199,7 @@ describe("AP ledger routes", () => {
 
   it("requires a retained replacement idempotency key before dispatch", async () => {
     server = await startServer(buildApp());
-    const response = await fetch(`${server.url}/api/vendor-invoices/71/replacement`, {
+    const response = await requestLocalHttp(`${server.url}/api/vendor-invoices/71/replacement`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedVersion: "a".repeat(64), reason: "Correction" }),
     });
     expect(response.status).toBe(400);
@@ -239,6 +241,23 @@ describe("AP ledger routes", () => {
     });
     expect(response).toMatchObject({ status: 400, body: { details: { code: "AP_PAYMENT_STATUS_INVALID" } } });
     expect(mocks.apPaymentCommands.recordPayment.mock.calls[0][0].payment.status).toBe("scheduled");
+  });
+
+  it("returns a read-only invoice suggestion without invoking a writer", async () => {
+    mocks.apLedger.generateInvoiceNumber.mockResolvedValue("INV-20311025-1001");
+    server = await startServer(buildApp());
+    expect(await requestJson(server.url, "GET", "/api/vendor-invoices/next-number"))
+      .toMatchObject({ status: 200, body: { invoiceNumber: "INV-20311025-1001" } });
+    expect(mocks.apLedger.createInvoice).not.toHaveBeenCalled();
+    expect(mocks.idempotencyMiddleware).not.toHaveBeenCalled();
+  });
+
+  it("reports exhausted invoice suggestions as a specific review conflict", async () => {
+    mocks.apLedger.generateInvoiceNumber.mockRejectedValue(new DocumentNumberError("DOCUMENT_NUMBER_EXHAUSTED", "No invoice suggestion remains for this date."));
+    server = await startServer(buildApp());
+    expect(await requestJson(server.url, "GET", "/api/vendor-invoices/next-number"))
+      .toMatchObject({ status: 409, body: { details: { code: "DOCUMENT_NUMBER_EXHAUSTED" } } });
+    expect(mocks.apLedger.createInvoice).not.toHaveBeenCalled();
   });
 
   it("lists vendor invoices with parsed filters", async () => {

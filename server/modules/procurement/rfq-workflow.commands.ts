@@ -17,6 +17,7 @@ import {
   type FinancialCommandResult,
 } from "../../platform/commands/transactional-command.service";
 import { PurchasingError } from "./purchasing.service";
+import { DocumentNumberError } from "../../platform/document-numbering/document-number";
 import { RfqWorkflowError, type RfqWorkflowCommand, type RfqWorkflowService, type RfqWorkflowTransaction } from "./rfq-workflow.service";
 
 export const RFQ_WORKFLOW_COMMAND_PRINCIPAL = "procurement.rfq-workflow";
@@ -99,8 +100,9 @@ export function classifyRfqWorkflowFailure(error: unknown): FinancialCommandFail
     const message = "Invalid RFQ command: " + error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
     return { kind: "rejected", httpStatus: 400, body: { code: "RFQ_INPUT_INVALID", error: message }, errorCode: "RFQ_INPUT_INVALID", errorMessage: message };
   }
-  if ((error instanceof RfqWorkflowError || error instanceof PurchasingError) && error.statusCode >= 400 && error.statusCode < 500) {
-    const code = error instanceof RfqWorkflowError ? error.code : String(error.details?.code ?? "RFQ_PO_CREATE_REJECTED");
+  if ((error instanceof RfqWorkflowError || error instanceof PurchasingError || error instanceof DocumentNumberError)
+    && error.statusCode >= 400 && error.statusCode < 500) {
+    const code = error instanceof PurchasingError ? String(error.details?.code ?? "RFQ_PO_CREATE_REJECTED") : error.code;
     return { kind: "rejected", httpStatus: error.statusCode, body: { code, error: error.message }, errorCode: code, errorMessage: error.message };
   }
   return { kind: "retryable", errorCode: "RFQ_TRANSIENT_FAILURE", errorMessage: "RFQ workflow transaction did not commit; retry with the same command key." };

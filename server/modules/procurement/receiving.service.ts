@@ -1,3 +1,4 @@
+import { captureDocumentNumberTime } from "../../platform/document-numbering/document-number";
 import { readCommandAuthorityActor } from "../identity";
 import { recordReceivingEntryAudit, type ReceivingEntryTransaction } from "./receiving-entry.repository";
 import { assertReceivingEntryAuthority } from "./domain/receiving-entry";
@@ -166,7 +167,7 @@ interface Storage {
   // Receiving orders
   getReceivingOrderById(id: number, tx?: any): Promise<any>;
   getReceivingLines(orderId: number, tx?: any): Promise<any[]>;
-  generateReceiptNumber(tx?: any): Promise<string>;
+  generateReceiptNumber(tx: any, recordedAt?: Date): Promise<string>;
   createReceivingOrder(data: any, tx?: any): Promise<any>;
   getReceivingLineById(lineId: number, tx?: any): Promise<any>;
   createReceivingLine(data: any, tx?: any): Promise<any>;
@@ -979,7 +980,7 @@ export class ReceivingService {
           { receivingOrderIds: active.rows.map((row) => (row as { id: number }).id) });
       }
       target = await this.storage.createReceivingOrder({
-        receiptNumber: await this.storage.generateReceiptNumber(tx), sourceType: source.sourceType,
+        receiptNumber: await this.storage.generateReceiptNumber(tx, recordedAt), sourceType: source.sourceType,
         vendorId: source.vendorId ?? null, warehouseId: source.warehouseId,
         poNumber: source.poNumber ?? null, purchaseOrderId: source.purchaseOrderId ?? null,
         inboundShipmentId: source.inboundShipmentId ?? null, asnNumber: source.asnNumber ?? null,
@@ -1050,11 +1051,12 @@ export class ReceivingService {
    * executeEntryInTransaction so intent, actor, mutation and audit commit together. */
   async createOrder(input: Record<string, unknown>, userId?: string | null) {
     const normalized = this.normalizeOrderCreate(input, userId);
-    return this.db.transaction(tx => this.insertOrderInTransaction(tx, normalized));
+    const recordedAt = captureDocumentNumberTime(this.clock());
+    return this.db.transaction(tx => this.insertOrderInTransaction(tx, normalized, recordedAt));
   }
 
-  private async createOrderInTransaction(tx: ReceivingEntryTransaction, input: Record<string, unknown>, userId?: string | null) {
-    return this.insertOrderInTransaction(tx, this.normalizeOrderCreate(input, userId));
+  private async createOrderInTransaction(tx: ReceivingEntryTransaction, input: Record<string, unknown>, recordedAt: Date, userId?: string | null) {
+    return this.insertOrderInTransaction(tx, this.normalizeOrderCreate(input, userId), recordedAt);
   }
 
   private normalizeOrderCreate(input: Record<string, unknown>, userId?: string | null) {
@@ -1090,11 +1092,11 @@ export class ReceivingService {
     return normalized;
   }
 
-  private async insertOrderInTransaction(tx: ReceivingEntryTransaction, normalized: ReturnType<ReceivingService["normalizeOrderCreate"]>) {
+  private async insertOrderInTransaction(tx: ReceivingEntryTransaction, normalized: ReturnType<ReceivingService["normalizeOrderCreate"]>, recordedAt: Date) {
     let receiptNumber: string | null = null;
     try {
-      receiptNumber = await this.storage.generateReceiptNumber(tx);
-      return await this.storage.createReceivingOrder({ receiptNumber, ...normalized }, tx);
+      receiptNumber = await this.storage.generateReceiptNumber(tx, recordedAt);
+      return await this.storage.createReceivingOrder({ receiptNumber, ...normalized, createdAt: recordedAt, updatedAt: recordedAt }, tx);
     } catch (error: any) {
       if (error?.code === "23505" || error?.cause?.code === "23505") {
         throw new ReceivingError("Receiving order creation conflicted with an existing active receipt", 409, {
@@ -1113,10 +1115,9 @@ export class ReceivingService {
 
   async executeEntryInTransaction(tx: ReceivingEntryTransaction, command: ReceivingEntryCommand, actorId: string, commandKey: string) {
     assertReceivingEntryAuthority(await readCommandAuthorityActor(tx, actorId));
-    const recordedAt = this.clock();
-    if (!Number.isFinite(recordedAt.getTime())) throw new ReceivingError("Receiving entry requires a valid clock", 500);
+    const recordedAt = captureDocumentNumberTime(this.clock());
     if (command.action === "create") {
-      const order = await this.createOrderInTransaction(tx, command.payload, actorId);
+      const order = await this.createOrderInTransaction(tx, command.payload, recordedAt, actorId);
       await recordReceivingEntryAudit(tx, { action: command.action, actorId, commandKey, recordedAt,
         receivingOrderId: order.id, before: null, after: order });
       return { order, receivingLineId: null };

@@ -92,7 +92,7 @@ function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, 
     deleteReceivingOrder: vi.fn().mockResolvedValue(true),
     ...overrides,
   };
-  const svc = createPurchasingService(db, storage as any);
+  const svc = createPurchasingService(db, storage as any, { now: () => new Date("2026-07-20T12:00:00Z") });
   return { svc, storage, captured, db, tx };
 }
 
@@ -119,7 +119,7 @@ describe("createReceiptFromShipment", () => {
       productVariantId: 471, purchaseOrderLineId: 229, inboundShipmentLineId: 2, unitsPerVariantSnapshot: 50, expectedQty: 3, unitCostMills: 7867, unitCost: 79,
     });
     expect(db.transaction).toHaveBeenCalledOnce();
-    expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx);
+    expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx, new Date("2026-07-20T12:00:00Z"));
     expect(storage.createReceivingOrder).toHaveBeenCalledWith(expect.any(Object), tx);
     expect(storage.bulkCreateReceivingLines).toHaveBeenCalledWith(expect.any(Array), tx);
     expect(storage.deleteReceivingOrder).not.toHaveBeenCalled();

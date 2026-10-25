@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -79,7 +80,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   };
   const approveCurrent = async (actorId?: string) => service.approve(1, actorId, undefined, await approvalReview());
   const postApprovalExact = async (body: unknown, key = `approval-${randomUUID()}`) => {
-    const response = await fetch(`${url}/api/purchase-orders/1/approve`, {
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/approve`, {
       method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() as any, replayed: response.headers.get("Idempotency-Replayed") };
@@ -90,7 +91,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     expectedUpdatedAt: (await storage.getPurchaseOrderById(1)).updatedAt.toISOString(),
   });
   const postDispatch = async (body: unknown) => {
-    const response = await fetch(`${url}/api/purchase-orders/1/send`, {
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/send`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() as any };
@@ -212,7 +213,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   });
 
   const postCancellation = async (endpoint: "cancel" | "void") => {
-    const response = await fetch(`${url}/api/purchase-orders/1/${endpoint}`, {
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/${endpoint}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "Supplier order withdrawn" }),
     });
     return { status: response.status, body: await response.json() as any };
@@ -469,7 +470,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     await pool.query("UPDATE procurement.purchase_order_lines SET order_qty=10,received_qty=$1,cancelled_qty=0,status=$2 WHERE id=11", [receivedQty, receivedQty >= 10 ? "received" : "partially_received"]);
   };
   const postClose = async (endpoint: "close" | "close-short", body: unknown = {}) => {
-    const response = await fetch(`${url}/api/purchase-orders/1/${endpoint}`, {
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/${endpoint}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() as any };
@@ -912,7 +913,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     await service.send(1, "admin-user", await dispatchConfirmation());
     await service.returnToDraft(1, "admin-user", "Review the changed policy");
     const before = await evidence();
-    const response = await fetch(`${url}/api/purchase-orders/1`, { method: "DELETE" });
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1`, { method: "DELETE" });
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: expect.stringContaining("Cancel it instead"), details: { code: "PO_HISTORY_DELETE_BLOCKED" } });
     expect(await evidence()).toEqual(before);
