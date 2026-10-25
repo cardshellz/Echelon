@@ -16,6 +16,7 @@ import { forwardDemandBuyingRow, PURCHASE_BUYING_AS_OF } from "../fixtures/purch
 
 const mocks = vi.hoisted(() => ({
   hasPermission: vi.fn(),
+  sessionUser: { id: "admin-user", role: "admin" } as { id: string; role?: string },
   procurement: {
     getReorderAnalysisData: vi.fn(),
     getOpenPoSummaryReport: vi.fn(),
@@ -64,7 +65,7 @@ vi.mock("../../../../routes/middleware", async importOriginal => {
   const actual = await importOriginal<typeof import("../../../../routes/middleware")>();
   const pass = (req: Request, _res: Response, next: NextFunction) => {
     (req as any).user = { id: "admin-user", role: "admin" };
-    (req as any).session = { user: { id: "admin-user", role: "admin" } };
+    (req as any).session = { user: { ...mocks.sessionUser } };
     next();
   };
   return {
@@ -154,6 +155,7 @@ describe("purchasing recommendation routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.sessionUser = { id: "admin-user", role: "admin" };
     mocks.hasPermission.mockResolvedValue(true);
     mocks.db.transaction.mockImplementation(async work => work(mocks.db));
     mocks.db.execute.mockResolvedValue({ rows: [] });
@@ -3048,6 +3050,44 @@ describe("purchasing recommendation routes", () => {
           reason: "stale_accepted_snapshot",
         },
       ],
+    });
+  });
+
+  it.each(["picker", "lead", "Admin", undefined])(
+    "denies both manual auto-draft aliases for a session with role %s before either job is invoked",
+    async role => {
+      // The request-local user deliberately remains an admin. Authority must use
+      // the same session identity as the inventory:adjust permission owner.
+      mocks.sessionUser = { id: "non-admin-user", role };
+      server = await startServer(buildApp());
+
+      for (const path of ["/api/purchasing/auto-draft-run", "/api/purchasing/auto-draft/run"]) {
+        const response = await requestJson(server.url, "POST", path);
+        expect(response).toEqual({
+          status: 403,
+          body: { error: "Admin role required", code: "AUTO_DRAFT_ADMIN_REQUIRED" },
+        });
+      }
+
+      expect(mocks.runAutoDraftJob).not.toHaveBeenCalled();
+      expect(mocks.startAutoDraftJob).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { path: "/api/purchasing/auto-draft-run", status: 200, job: "runAutoDraftJob" as const },
+    { path: "/api/purchasing/auto-draft/run", status: 202, job: "startAutoDraftJob" as const },
+  ])("attributes an authorized manual run at $path to the session actor", async ({ path, status, job }) => {
+    mocks.sessionUser = { id: "session-admin-user", role: "admin" };
+    server = await startServer(buildApp());
+
+    const response = await requestJson(server.url, "POST", path);
+
+    expect(response.status).toBe(status);
+    expect(mocks[job]).toHaveBeenCalledOnce();
+    expect(mocks[job]).toHaveBeenCalledWith({
+      triggeredBy: "manual",
+      triggeredByUser: "session-admin-user",
     });
   });
 

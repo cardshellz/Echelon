@@ -7,7 +7,7 @@ import { RFQ_RECEIPT_VERSION_HEADER } from "@shared/procurement/rfq-command";
 import { financialCommandFromRequest } from "../../platform/commands/http-command";
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { createRfqCreateCommands, hashRfqCreateIdentity, RFQ_CREATE_COMMAND_PRINCIPAL, rfqCreateCommandScope } from "./rfq-create.commands";
-import type { Express } from "express";
+import type { Express, NextFunction, Request, Response } from "express";
 import { registerPurchasePlanningPolicyRoutes } from "./purchase-planning-policy.routes";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
@@ -62,6 +62,16 @@ import {
   type PurchasingForecastPolicy,
 } from "./purchasing-forecast-policy";
 const storage = { ...procurementStorage, ...inventoryStorage };
+
+function requireManualAutoDraftAdmin(req: Request, res: Response, next: NextFunction): void {
+  // Both HTTP aliases start the same job. Use the session principal checked by
+  // requirePermission so the legacy alias cannot bypass the administrator rule.
+  if (req.session?.user?.role !== "admin") {
+    res.status(403).json({ error: "Admin role required", code: "AUTO_DRAFT_ADMIN_REQUIRED" });
+    return;
+  }
+  next();
+}
 
 // Entries in `items` keep forwardDemandBasis.contributions in the response: the
 // cockpit math drawer renders the per-event lines (event name, type, raw pieces,
@@ -1881,9 +1891,9 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
     }
   });
 
-  app.post("/api/purchasing/auto-draft-run", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/purchasing/auto-draft-run", requirePermission("inventory", "adjust"), requireManualAutoDraftAdmin, async (req, res) => {
     try {
-      const userId = (req as any).user?.id ?? req.session?.user?.id ?? "SYSTEM";
+      const userId = req.session.user!.id;
       const { runAutoDraftJob } = await import("../../jobs/auto-draft.job");
       const result = await runAutoDraftJob({ triggeredBy: "manual", triggeredByUser: userId });
       res.json(result);
@@ -2146,15 +2156,10 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
   });
 
   // POST /api/purchasing/auto-draft/run
-  app.post("/api/purchasing/auto-draft/run", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/purchasing/auto-draft/run", requirePermission("inventory", "adjust"), requireManualAutoDraftAdmin, async (req, res) => {
     try {
-      const user = (req as any).user ?? req.session.user;
-      if (user?.role !== "admin") {
-        return res.status(403).json({ error: "Admin role required" });
-      }
-
       const { startAutoDraftJob } = await import("../../jobs/auto-draft.job");
-      const started = await startAutoDraftJob({ triggeredBy: "manual", triggeredByUser: user?.id });
+      const started = await startAutoDraftJob({ triggeredBy: "manual", triggeredByUser: req.session.user!.id });
       void started.completion
         .catch((err: any) => console.error("[Auto-draft] manual run failed:", err));
 

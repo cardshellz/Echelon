@@ -203,7 +203,8 @@ test("a non-lead creator saves a fee-only purchase and keeps existing drafts rea
     }
     await page.goto(backend.url + "/purchase-orders/new");
     await expect(page.getByRole("heading", { name: "New Purchase Order", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Add line of another type", exact: true })).toBeEnabled();
+    // The editor requires a supplier before any line type can be added.
+    await expect(page.getByRole("button", { name: "Add line of another type", exact: true })).toBeDisabled();
     const denied = await page.request.patch(backend.url + "/api/purchase-orders/" + backend.navigation.draftPurchaseOrderId, { data: { internalNotes: "Creator cannot edit an existing purchase" } });
     expect(denied.status(), await denied.text()).toBe(403);
     await page.goto(backend.url + "/purchase-orders/" + backend.navigation.draftPurchaseOrderId + "/edit");
@@ -218,6 +219,7 @@ test("a non-lead creator saves a fee-only purchase and keeps existing drafts rea
   const before = await backend.control<Record<string, unknown>>("navigation-state");
   await page.goto(backend.url + "/purchase-orders/new?vendor_id=5");
   await expect(page.getByRole("heading", { name: "New Purchase Order", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add line of another type", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Add line of another type", exact: true }).click();
   await page.getByRole("menuitem", { name: "Fee", exact: true }).click();
   await page.getByTestId("input-line-description-0").filter({ visible: true }).fill("Connected supplier handling fee");
