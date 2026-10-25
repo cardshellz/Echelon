@@ -1,4 +1,5 @@
 import { ebayIntentAccount, prepareEbayChannelIntent } from "../ebay-prepared-intent";
+import { prepareEbayListingPackages } from "../adapters/ebay/ebay-listing-package";
 import { ebayBusinessPolicies } from "../ebay-business-policies";
 import { z } from "zod";
 import { db, pool, getDatabasePoolSnapshot } from "../../../db";
@@ -95,6 +96,7 @@ async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>
       variationAspectName: isMultiVariant ? determineVariationAspectName(variants) : "",
       variantPrices: prices, atpByVariantId: new Map(quantities.map(row => [row.productVariantId, row.atpUnits])),
       marketplaceId: ctx.metadata.marketplaceId, ebayBrowseCategoryId: browseCategoryId, resolvedPoliciesByVariantId: resolvedPolicies.byVariantId,
+      packageRequirementsByVariantId: resolvedPolicies.packageRequirementsByVariantId,
       storeCategoryNames: category?.ebay_store_category_name ? [category.ebay_store_category_name] : [],
       merchantLocationKey: ctx.metadata.merchantLocationKey,
       ...(existingGroupKey === undefined ? {} : { existingGroupKey }),
@@ -118,6 +120,7 @@ async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>
     // connector rechecks this content contract before any subsequent write.
     draft = alignDraftVariationSchemaToLiveGroup({ draft: { ...draft, itemGroup: draft.itemGroup }, liveGroup });
   }
+  draft = await prepareEbayListingPackages(createEbayRouteListingLifecycleClient(clientInput), draft);
   draft.preparedIntent = prepareEbayChannelIntent({
     account: ebayIntentAccount({ channelId: EBAY_CHANNEL_ID, connectionId: ctx.connectionId, accountId: ctx.account.externalAccountId,
       environment: ctx.auth.getEnvironment(), marketplaceId: ctx.metadata.marketplaceId, merchantLocationKey: ctx.metadata.merchantLocationKey }),

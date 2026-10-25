@@ -192,6 +192,7 @@ class CoordinatedCredentialRepository implements DropshipMarketplaceCredentialRe
 function makeFetch(repo: CoordinatedCredentialRepository) {
   // The order's eBay shipments: tracking reads them before and after it adds one.
   const shipments: Array<Record<string, unknown>> = [];
+  const items = new Map<string, Record<string, unknown>>();
   return vi.fn<typeof fetch>(async (url, init) => {
     const parsed = new URL(String(url));
     expect(parsed.origin).toBe("https://api.ebay.com");
@@ -215,7 +216,14 @@ function makeFetch(repo: CoordinatedCredentialRepository) {
     if (parsed.pathname === "/post-order/v2/cancellation") return jsonResponse({ cancelId: "cancel-1" });
     if (parsed.pathname === "/sell/inventory/v1/offer" && init?.method === "GET") return jsonResponse({ offers: [] });
     if (parsed.pathname === "/sell/inventory/v1/offer" && init?.method === "POST") return jsonResponse({ offerId: "offer-1" }, 201);
-    if (parsed.pathname.startsWith("/sell/inventory/v1/inventory_item/") && init?.method === "PUT") return new Response(null, { status: 204 });
+    if (parsed.pathname.startsWith("/sell/inventory/v1/inventory_item/")) {
+      const sku = decodeURIComponent(parsed.pathname.split("/").at(-1)!);
+      if (init?.method === "GET") return items.has(sku) ? jsonResponse(items.get(sku)) : jsonResponse({ errors: [{ errorId: 25710 }] }, 404);
+      if (init?.method === "PUT") {
+        items.set(sku, { ...JSON.parse(String(init.body)), sku });
+        return new Response(null, { status: 204 });
+      }
+    }
     if (parsed.pathname === "/sell/inventory/v1/offer/offer-1" && init?.method === "PUT") return new Response(null, { status: 204 });
     throw new Error(`Unexpected request: ${init?.method} ${parsed.pathname}`);
   });

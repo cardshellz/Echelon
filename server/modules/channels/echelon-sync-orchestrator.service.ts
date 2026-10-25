@@ -1346,6 +1346,7 @@ class EchelonSyncOrchestrator {
                     gtin: v.gtin,
                     mpn: v.mpn,
                     weightGrams: v.weight,
+                    package: v.package,
                     priceCents: v.price,
                     compareAtPriceCents: v.compareAtPrice,
                     isListed: v.isListed,

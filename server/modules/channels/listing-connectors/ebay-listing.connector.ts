@@ -1,5 +1,6 @@
 import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
 import { assertEbayPreparedIntent } from "../ebay-prepared-intent";
+import { prepareEbayListingPackages, assertEbayPackagePreservation } from "../adapters/ebay/ebay-listing-package";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
@@ -204,6 +205,14 @@ async function runSyncStage(
   if (stage) return stage(key, syncStageHash(payload), work);
   await work();
 }
+async function ensurePreparedPackages<T extends Pick<EbayListingConnectorDraft, "productId" | "inventoryItems" | "offers" | "preparedIntent">>(
+  client: EbayListingConnectorClient, draft: T,
+): Promise<T> {
+  if (draft.inventoryItems.every(item => item.packagePlan)) return draft;
+  if (draft.preparedIntent) throw new EbayListingSyncError("EBAY_SYNC_DRAFT_SCOPE_INVALID",
+    "Package data must be prepared before the listing intent is sealed. Prepare this update again.");
+  return prepareEbayListingPackages(client, draft);
+}
 function readbackPending(resource: string, field: string): EbayListingSyncError {
   return new EbayListingSyncError(
     "EBAY_SYNC_READBACK_PENDING",
@@ -265,6 +274,7 @@ export class EbayMarketplaceListingConnector {
     beforeFirstMutation?: EbayBeforeFirstMutation;
   }): Promise<EbayListingConnectorResult> {
     validateDraft(input.draft);
+    input = { ...input, draft: await ensurePreparedPackages(input.client, input.draft) };
 
     const { resolvedOffers, firstListingId, hasPublishedOffer } = await this.resolvePushOffers(input.client, input.draft);
     const offerIdsByVariantId: Record<number, string> = {};
@@ -300,6 +310,7 @@ export class EbayMarketplaceListingConnector {
     // Every discovery and identity refusal above has already run; nothing below
     // has. An owner that must prepare local state for exactly these offers (the
     // Dropship stock link) does it here, so a refusal leaves eBay untouched.
+    await assertEbayPackagePreservation(input.client, input.draft.inventoryItems);
     if (input.beforeFirstMutation) {
       await input.beforeFirstMutation({
         offers: resolvedOffers.map(({ offer, existingOfferId, observedOffer }) => ({
@@ -350,6 +361,7 @@ export class EbayMarketplaceListingConnector {
       verifiedPublishedListingId,
       stage: input.stage,
     });
+    await this.verifyListingPackages(input.client, input.draft.inventoryItems);
 
     return {
       productId: input.draft.productId,
@@ -424,6 +436,8 @@ export class EbayMarketplaceListingConnector {
   }): Promise<EbayListingRebuildResult> {
     validateRebuildInput(input.draft, input.preview.currentExternalListingId);
     validateConfirmedPreview(input.draft, input.preview);
+    input = { ...input, draft: await ensurePreparedPackages(input.client, input.draft) };
+    await assertEbayPackagePreservation(input.client, input.draft.inventoryItems);
     if (!input.preview.rebuildRequired) {
       throw new EbayListingSyncError("EBAY_LISTING_REVIEW_CHANGED", "The confirmed eBay listing does not require a rebuild. Analyze it again and use the current available update action.");
     }
@@ -528,6 +542,7 @@ export class EbayMarketplaceListingConnector {
     preview: EbayListingRebuildPreview;
   }): Promise<EbayListingConnectorResult & { removedSkus: string[]; previousExternalListingId: string }> {
     validateRebuildInput(input.draft, input.preview.currentExternalListingId);
+    input = { ...input, draft: await ensurePreparedPackages(input.client, input.draft) };
 
     const currentPreview = await this.previewListingRebuild({
       client: input.client,
@@ -615,6 +630,7 @@ export class EbayMarketplaceListingConnector {
     // The reviewed plan covers existing members as well as newly added SKUs.
     // Group image replacement alone does not replace item-level galleries.
     const inventoryItemsToPrepare = input.draft.inventoryItems;
+    await assertEbayPackagePreservation(input.client, inventoryItemsToPrepare);
 
     try {
       for (const item of inventoryItemsToPrepare) {
@@ -877,6 +893,7 @@ export class EbayMarketplaceListingConnector {
         ]) } } } };
     }
     this.validateExistingListingSyncDraft(input);
+    input = { ...input, draft: await prepareEbayListingPackages(input.client, input.draft) };
     const retainedSkus = [...input.identity.variants.filter(member => member.contentSyncEnabled === false).map(member => member.sku),
       ...input.identity.retainedGroupSkus ?? []];
     if (!retainedSkus.length || !input.draft.itemGroup) return input.draft;
@@ -931,6 +948,7 @@ export class EbayMarketplaceListingConnector {
     ) => Promise<void>;
   }): Promise<EbayExistingListingSyncResult> {
     this.validateExistingListingSyncDraft(input);
+    input = { ...input, draft: await ensurePreparedPackages(input.client, input.draft) };
     await this.verifyRetainedSyncMembers(input);
 
     const updatedInventorySkus: string[] = [];
@@ -975,6 +993,7 @@ export class EbayMarketplaceListingConnector {
       resolvedOffers.push({ offerId: existingOffer.offerId, variantId: offer.variantId, payload });
     }
 
+    await assertEbayPackagePreservation(input.client, input.draft.inventoryItems);
     // Resolve every offer identity before the first write. eBay validates the
     // current inventory content when replacing an active offer, so repair item
     // content first. The durable stage owner still fences and journals each
@@ -1092,6 +1111,10 @@ export class EbayMarketplaceListingConnector {
     for (const item of input.draft.inventoryItems) {
       const current = await input.client.getInventoryItem(item.sku);
       if (!current || current.sku !== item.sku) throw readbackPending(`inventory item ${item.sku}`, "sku");
+      if (item.payload.packageWeightAndSize) {
+        const packageMismatch = findEbaySyncContentMismatch(current.packageWeightAndSize, item.payload.packageWeightAndSize, "packageWeightAndSize");
+        if (packageMismatch) throw readbackPending(`package for ${item.sku}`, packageMismatch);
+      }
       const mismatch = findEbaySyncContentMismatch(current.product?.imageUrls, item.payload.product?.imageUrls, "content.product.imageUrls");
       if (mismatch) throw readbackPending(`inventory item ${item.sku}`, mismatch);
     }
@@ -1102,6 +1125,16 @@ export class EbayMarketplaceListingConnector {
         throw readbackPending(`group ${group.groupKey}`, "inventoryItemGroupKey");
       const mismatch = findEbaySyncContentMismatch(current.imageUrls, group.payload.imageUrls, "content.imageUrls");
       if (mismatch) throw readbackPending(`group ${group.groupKey}`, mismatch);
+    }
+  }
+
+  private async verifyListingPackages(client: Pick<EbayListingConnectorClient, "getInventoryItem">, items: readonly BuiltInventoryItem[]): Promise<void> {
+    for (const item of items) {
+      if (!item.payload.packageWeightAndSize) continue;
+      const current = await client.getInventoryItem(item.sku);
+      if (!current || current.sku !== item.sku) throw readbackPending(`package for ${item.sku}`, "sku");
+      const mismatch = findEbaySyncContentMismatch(current.packageWeightAndSize, item.payload.packageWeightAndSize, "packageWeightAndSize");
+      if (mismatch) throw readbackPending(`package for ${item.sku}`, mismatch);
     }
   }
 

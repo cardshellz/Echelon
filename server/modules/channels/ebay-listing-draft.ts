@@ -1,5 +1,6 @@
 import { ebayAvailablePolicyValuesSchema, type EbayAvailablePolicyValues } from "@shared/ebay-business-policies";
 import { ChannelListingValidationError } from "@shared/channel-listing-validation";
+import type { ChannelPackageRequirements, ShippingPackageType } from "@shared/catalog/shipping-package";
 import {
   EbayListingBuilder,
   type BuiltEbayListingDraft,
@@ -33,6 +34,10 @@ interface EbayRouteVariantInput {
   weight_override?: unknown;
   weight_grams?: unknown;
   weightGrams?: unknown;
+  length_mm?: number | string | null;
+  width_mm?: number | string | null;
+  height_mm?: number | string | null;
+  shipping_package_type?: ShippingPackageType | null;
   isListed?: boolean;
 }
 
@@ -50,6 +55,7 @@ interface EbayRouteListingDraftInput {
   ebayBrowseCategoryId: string;
   /** Resolved and catalog-validated by the channel policy owner before transport. */
   resolvedPoliciesByVariantId: ReadonlyMap<number, EbayAvailablePolicyValues>;
+  packageRequirementsByVariantId?: ReadonlyMap<number, ChannelPackageRequirements>;
   storeCategoryNames: string[];
   merchantLocationKey: string;
   retainUnlistedVariantsInGroup?: boolean;
@@ -109,6 +115,9 @@ export function buildEbayRouteListingDraft(
       gtin: null,
       mpn: null,
       weightGrams: normalizePackageWeightGrams(routeVariant),
+      package: { weightGrams: (routeVariant.ebay_weight_grams ?? routeVariant.weight_override ?? routeVariant.weight_grams ?? routeVariant.weightGrams ?? null) as number | string | null,
+        lengthMm: routeVariant.length_mm, widthMm: routeVariant.width_mm, heightMm: routeVariant.height_mm,
+        shippingPackageType: routeVariant.shipping_package_type },
       priceCents,
       compareAtPriceCents: normalizeCents(routeVariant.compare_at_price_cents),
       isListed,
@@ -147,6 +156,7 @@ export function buildEbayRouteListingDraft(
     photoPlan: input.photoPlan,
     availableQuantityByVariantId,
     requirePackageWeight: true,
+    packageRequirementsByVariantId: input.packageRequirementsByVariantId,
     titleMaxLength: EBAY_MAX_TITLE_LENGTH,
     descriptionHtmlOverride: descriptionHtml,
     categoryIdOverride: input.ebayBrowseCategoryId,
@@ -187,9 +197,7 @@ function normalizePackageWeightGrams(variant: EbayRouteVariantInput): number | n
   if (typeof numeric !== "number" || !Number.isFinite(numeric) || numeric <= 0) {
     return null;
   }
-  // catalog.product_variants.weight_grams is numeric(10,2) (migration 185);
-  // eBay package weights are sent in whole grams.
-  return Math.max(1, Math.round(numeric));
+  return numeric;
 }
 
 function escapeHtml(text: string): string {

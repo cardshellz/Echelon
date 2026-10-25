@@ -73,6 +73,7 @@ export interface EbayPolicyOption {
   name: string;
   description?: string;
   marketplaceId?: string;
+  packageRequirements?: import("./catalog/shipping-package").ChannelPackageRequirements;
 }
 export interface EbayPolicyCatalog {
   scope: EbayPolicyScope;

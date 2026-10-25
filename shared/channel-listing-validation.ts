@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const id = z.number().int().positive().max(2_147_483_647);
 export const channelListingValidationSchema = z.object({
-  field: z.enum(["package_weight", "price", "policies", "variant_identity", "listing_identity"]),
+  field: z.enum(["package_weight", "package_dimensions", "package_type", "price", "policies", "variant_identity", "listing_identity"]),
   reason: z.enum(["required", "invalid"]),
   productId: id,
   variantId: id.optional(),
@@ -18,7 +18,8 @@ export class ChannelListingValidationError extends Error {
   constructor(input: ChannelListingValidation) {
     const validation = channelListingValidationSchema.parse(input);
     const label = {
-      package_weight: "Package weight", price: "Listing price", policies: "Business policy selection",
+      package_weight: "Package weight", package_dimensions: "Package length, width and height", package_type: "Shipping package type",
+      price: "Listing price", policies: "Business policy selection",
       variant_identity: "Catalog variant identity", listing_identity: "Channel listing identity",
     }[validation.field];
     const target = validation.variantSku ? ` for ${validation.variantSku}` : validation.variantId ? ` for variant ${validation.variantId}` : "";
