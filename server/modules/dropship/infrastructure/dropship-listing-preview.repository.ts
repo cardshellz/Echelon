@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
@@ -1163,7 +1164,7 @@ function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
     variantUomType: parseCatalogVariantUomType(row.uom_type, { productVariantId: row.product_variant_id }),
     unitsPerVariant: Math.max(1, row.units_per_variant),
     catalogUnitsPerVariant: row.units_per_variant,
-    defaultRetailPriceCents: row.default_retail_price_cents === null ? null : Number(row.default_retail_price_cents),
+    defaultRetailPriceCents: row.default_retail_price_cents === null ? null : readIntegerCents(row.default_retail_price_cents, "default retail price", true),
     sku: row.variant_sku ?? row.product_sku,
     productName: row.product_name,
     variantName: row.variant_name,
@@ -1185,7 +1186,7 @@ function mapExistingListingRow(row: ExistingListingRow): DropshipExistingVendorL
     listingId: row.id,
     productVariantId: row.product_variant_id,
     status: row.status,
-    vendorRetailPriceCents: row.vendor_retail_price_cents === null ? null : Number(row.vendor_retail_price_cents),
+    vendorRetailPriceCents: row.vendor_retail_price_cents === null ? null : readIntegerCents(row.vendor_retail_price_cents, "vendor retail price", true),
     quantityCap: row.quantity_cap,
     externalListingId: row.external_listing_id,
     vendorQuantityLimit: row.vendor_quantity_limit,
@@ -1202,8 +1203,8 @@ function mapPricingPolicyRow(row: PricingPolicyRow): DropshipPricingPolicyRecord
     productVariantId: row.product_variant_id,
     category: row.category,
     mode: row.mode,
-    floorPriceCents: row.floor_price_cents === null ? null : Number(row.floor_price_cents),
-    ceilingPriceCents: row.ceiling_price_cents === null ? null : Number(row.ceiling_price_cents),
+    floorPriceCents: row.floor_price_cents === null ? null : readIntegerCents(row.floor_price_cents, "floor price", true),
+    ceilingPriceCents: row.ceiling_price_cents === null ? null : readIntegerCents(row.ceiling_price_cents, "ceiling price", true),
   };
 }
 

@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { allocateDocumentNumber } from "../../platform/document-numbering/document-number.repository";
 import { documentNumberPrefix } from "../../platform/document-numbering/document-number";
 import { readShipmentList, countShipmentList, type ShipmentListFilters } from "./shipment-work-list.repository";
@@ -541,21 +542,21 @@ export const procurementMethods: IProcurementStorage = {
         variantName: activeReceiveVariant ? r.variant_name : null,
         vendorSku: r.vendor_sku,
         vendorProductName: r.vendor_product_name,
-        unitCostCents: Number(r.unit_cost_cents ?? 0),
+        unitCostCents: readIntegerCents(r.unit_cost_cents ?? 0, "unit cost", true),
         // unit_cost_mills is the 4-decimal source of truth when present.
         // If NULL (legacy row), fall back to cents × 100 so the client
         // still gets a usable mills value.
         unitCostMills:
           r.unit_cost_mills != null
-            ? Number(r.unit_cost_mills)
-            : Number(r.unit_cost_cents ?? 0) * 100,
+            ? readIntegerMills(r.unit_cost_mills, "unit cost", true)
+            : readIntegerCents(r.unit_cost_cents ?? 0, "unit cost", true) * 100,
         pricingBasis:
           r.pricing_basis === "per_piece" || r.pricing_basis === "per_purchase_uom"
             ? r.pricing_basis
             : "legacy_unknown" as const,
         purchaseUom: r.purchase_uom,
         quotedUnitCostMills:
-          r.quoted_unit_cost_mills != null ? Number(r.quoted_unit_cost_mills) : null,
+          r.quoted_unit_cost_mills != null ? readIntegerMills(r.quoted_unit_cost_mills, "quoted unit cost", true) : null,
         piecesPerPurchaseUom:
           r.pieces_per_purchase_uom != null ? Number(r.pieces_per_purchase_uom) : null,
         quoteReference: r.quote_reference,
@@ -2467,9 +2468,9 @@ export const procurementMethods: IProcurementStorage = {
       healthBreakdown,
 
       spend: {
-        totalReceivedCents: Number(spendRow.total_received_cents || 0),
+        totalReceivedCents: readIntegerCents(spendRow.total_received_cents ?? 0, "total received", true),
         openPoValueCents,
-        avgPoCents: Number(spendRow.po_count) > 0 ? Math.round(Number(spendRow.total_received_cents || 0) / Number(spendRow.po_count)) : 0,
+        avgPoCents: Number(spendRow.po_count) > 0 ? Math.round(readIntegerCents(spendRow.total_received_cents ?? 0, "avg po", true) / Number(spendRow.po_count)) : 0,
         topSupplierName: topSupplier.name || null,
         topSupplierCents: Number(topSupplier.total || 0),
         activeSupplierCount: Number(spendRow.supplier_count || 0),

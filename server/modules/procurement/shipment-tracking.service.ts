@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
 import { executeCreateShipmentInTransaction as createShipmentInTransaction, assertShipmentCreateActor } from "./shipment-create.service";
 import { shipmentDefaultAllocation } from "./domain/shipment-create";
@@ -196,7 +197,7 @@ function rawLineBasisForDimension(line: any, method: string): number {
 }
 
 function allocatedCentsPerUnitMills(allocatedCents: unknown, qtyShipped: unknown): number | null {
-  const cents = Number(allocatedCents);
+  const cents = readIntegerCents(allocatedCents, "allocatedCents", true);
   const qty = Number(qtyShipped);
   if (!Number.isInteger(cents) || cents < 0 || !Number.isInteger(qty) || qty <= 0) return null;
   return perUnitMills(cents * 100, qty);
@@ -434,7 +435,7 @@ export function createShipmentTrackingService(
           insuranceAllocatedCents: 0,
           otherAllocatedCents: 0,
         };
-        const cents = Number(allocation.allocatedCents || 0);
+        const cents = readIntegerCents(allocation.allocatedCents ?? 0, "cents", true);
 
         if (category === "freight") current.freightAllocatedCents += cents;
         else if (category === "duty") current.dutyAllocatedCents += cents;
@@ -970,7 +971,7 @@ export function createShipmentTrackingService(
     const allNewAllocations: InsertInboundFreightAllocation[] = [];
 
     for (const cost of costs) {
-      const effectiveAmount = Number(cost.actualCents ?? cost.estimatedCents ?? 0);
+      const effectiveAmount = readIntegerCents(cost.actualCents ?? cost.estimatedCents ?? 0, "effective amount", true);
       if (!Number.isSafeInteger(effectiveAmount) || effectiveAmount < 0) {
         throw new ShipmentTrackingError(
           `Cost ${cost.id} must have a non-negative safe integer cents amount`,
@@ -1113,7 +1114,7 @@ export function createShipmentTrackingService(
       const effectiveCents = cost.actualCents ?? cost.estimatedCents ?? 0;
       const { method, source } = resolveAllocationMethod(cost, shipment);
       const allocations = await storage.getInboundFreightCostAllocations(cost.id, executor);
-      const allocatedCents = allocations.reduce((sum: number, allocation: any) => sum + Number(allocation.allocatedCents || 0), 0);
+      const allocatedCents = allocations.reduce((sum: number, allocation: any) => sum + readIntegerCents(allocation.allocatedCents ?? 0, "allocated", true), 0);
       const staleAllocationCount = allocations.filter((allocation: any) => !currentLineIds.has(allocation.inboundShipmentLineId)).length;
       let basisSummary: ShipmentAllocationBasis | null = null;
       let basisIssue: string | null = null;

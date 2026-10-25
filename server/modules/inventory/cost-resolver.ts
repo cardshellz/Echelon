@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 /**
  * Cost Resolver — COGS Phase 2
  *
@@ -50,8 +51,9 @@ export async function resolveCost(
   variantId: number,
   hintCents?: number | null,
 ): Promise<ResolvedCost> {
-  if (hintCents !== undefined && hintCents !== null && hintCents > 0) {
-    return { costCents: hintCents, source: "explicit", provisional: false };
+  const hint = hintCents == null ? null : readIntegerCents(hintCents, "cost hint", true);
+  if (hint !== null && hint > 0) {
+    return { costCents: hint, source: "explicit", provisional: false };
   }
 
   const [variant] = await db
@@ -68,17 +70,19 @@ export async function resolveCost(
     return { costCents: 0, source: "unresolved", provisional: true };
   }
 
-  const last = Number(variant.lastCostCents) || 0;
+  // Null means no estimate at this tier, so preserve the resolver's fallthrough.
+  // A present malformed amount still fails; it must not become an estimate of zero.
+  const last = readIntegerCents(variant.lastCostCents ?? 0, "last", true);
   if (last > 0) {
     return { costCents: last, source: "last_paid", provisional: true };
   }
 
-  const standard = Number(variant.standardCostCents) || 0;
+  const standard = readIntegerCents(variant.standardCostCents ?? 0, "standard", true);
   if (standard > 0) {
     return { costCents: standard, source: "standard", provisional: true };
   }
 
-  const avg = Number(variant.avgCostCents) || 0;
+  const avg = readIntegerCents(variant.avgCostCents ?? 0, "avg", true);
   if (avg > 0) {
     return { costCents: avg, source: "avg", provisional: true };
   }

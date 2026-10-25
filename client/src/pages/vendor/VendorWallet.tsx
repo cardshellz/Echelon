@@ -1,4 +1,5 @@
 import { dollarsToCents } from "@shared/utils/money";
+import { parseDecimalCents } from "@shared/money-read";
 import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -155,22 +156,34 @@ export default function VendorWallet() {
   const ledgerPagination = ledgerData?.pagination ?? { page: 1, total: 0, total_pages: 1 };
 
   const handleDeposit = () => {
-    const dollars = parseFloat(depositAmount);
-    if (isNaN(dollars) || dollars < 10) {
+    let amountCents: number;
+    try {
+      amountCents = parseDecimalCents(depositAmount, "deposit");
+    } catch {
+      toast({ title: "Enter a valid deposit with at most two decimal places", variant: "destructive" });
+      return;
+    }
+    if (amountCents < 1000) {
       toast({ title: "Minimum deposit is $10.00", variant: "destructive" });
       return;
     }
-    if (dollars > 5000) {
+    if (amountCents > 500000) {
       toast({ title: "Maximum deposit is $5,000.00", variant: "destructive" });
       return;
     }
-    depositMutation.mutate(Math.round(dollars * 100));
+    depositMutation.mutate(amountCents);
   };
 
   const handleAutoReloadSave = () => {
-    const thresholdCents = dollarsToCents(autoReloadThreshold);
-    const amountCents = dollarsToCents(autoReloadAmount);
-    if (isNaN(thresholdCents) || isNaN(amountCents)) return;
+    let thresholdCents: number;
+    let amountCents: number;
+    try {
+      thresholdCents = dollarsToCents(autoReloadThreshold);
+      amountCents = dollarsToCents(autoReloadAmount);
+    } catch {
+      toast({ title: "Enter valid auto-reload amounts", variant: "destructive" });
+      return;
+    }
     autoReloadMutation.mutate({
       enabled: autoReloadEnabled,
       threshold_cents: thresholdCents,

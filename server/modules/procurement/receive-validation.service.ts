@@ -1,3 +1,4 @@
+import { readIntegerMills, readIntegerCents } from "@shared/money-read";
 /**
  * Receive-time validation warnings (Spec D, Part 2, 2026-08-07).
  *
@@ -350,8 +351,8 @@ export class ReceiveValidationService {
           poLine = {
             id: Number(p.id),
             orderQty: Number(p.order_qty) || 0,
-            unitCostMills: p.unit_cost_mills === null ? null : Number(p.unit_cost_mills),
-            unitCostCents: p.unit_cost_cents === null ? null : Number(p.unit_cost_cents),
+            unitCostMills: p.unit_cost_mills === null ? null : readIntegerMills(p.unit_cost_mills, "unit cost", true),
+            unitCostCents: p.unit_cost_cents === null ? null : readIntegerCents(p.unit_cost_cents, "unit cost", true),
             unitsPerUom: p.units_per_uom === null ? null : Number(p.units_per_uom),
             expectedReceiveUnitsPerVariant:
               p.expected_receive_units_per_variant === null
@@ -367,8 +368,8 @@ export class ReceiveValidationService {
             receivingLineId: Number(row.receiving_line_id),
             purchaseOrderLineId: Number.isSafeInteger(poLineId) && poLineId > 0 ? poLineId : null,
             receivedQty: Number(row.received_qty) || 0,
-            unitCostMills: row.unit_cost_mills === null ? null : Number(row.unit_cost_mills),
-            unitCostCents: row.unit_cost === null ? null : Number(row.unit_cost),
+            unitCostMills: row.unit_cost_mills === null ? null : readIntegerMills(row.unit_cost_mills, "unit cost", true),
+            unitCostCents: row.unit_cost === null ? null : readIntegerCents(row.unit_cost, "received unit cost", true),
             variant,
             poLine,
           },

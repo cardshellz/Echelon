@@ -1,3 +1,4 @@
+import { readIntegerMills, readIntegerCents } from "@shared/money-read";
 import { PurchasingError, type CreatePurchaseOrderWithLinesInput, type PurchaseOrderLineInput } from "./purchasing.service";
 import type { PoLinePricingInput } from "@shared/utils/po-line-pricing";
 
@@ -28,7 +29,7 @@ function mapPoLinePricingInput(line: any): PoLinePricingInput | undefined {
     return {
       basis,
       quantityPieces: Number(pricing.quantityPieces ?? pricing.quantity_pieces),
-      unitCostMills: Number(pricing.unitCostMills ?? pricing.unit_cost_mills),
+      unitCostMills: readIntegerMills(pricing.unitCostMills ?? pricing.unit_cost_mills, "unit cost", true),
     };
   }
   if (basis === "per_purchase_uom") {
@@ -37,7 +38,7 @@ function mapPoLinePricingInput(line: any): PoLinePricingInput | undefined {
       purchaseUom: String(pricing.purchaseUom ?? pricing.purchase_uom ?? ""),
       uomQuantity: Number(pricing.uomQuantity ?? pricing.uom_quantity),
       piecesPerUom: Number(pricing.piecesPerUom ?? pricing.pieces_per_uom),
-      quotedCostMillsPerUom: Number(
+      quotedCostMillsPerUom: readIntegerMills(
         pricing.quotedCostMillsPerUom ?? pricing.quoted_cost_mills_per_uom,
       ),
     };
@@ -46,7 +47,7 @@ function mapPoLinePricingInput(line: any): PoLinePricingInput | undefined {
     return {
       basis,
       quantityPieces: Number(pricing.quantityPieces ?? pricing.quantity_pieces),
-      quotedTotalCents: Number(pricing.quotedTotalCents ?? pricing.quoted_total_cents),
+      quotedTotalCents: readIntegerCents(pricing.quotedTotalCents ?? pricing.quoted_total_cents, "quoted total", true),
     };
   }
   return pricing as PoLinePricingInput;
@@ -153,8 +154,8 @@ function mapPurchaseOrderLineInput(line: any, includeLineId: boolean): PurchaseO
     const rawLineId = line?.line_id ?? line?.lineId;
     if (rawLineId !== undefined && rawLineId !== null) mapped.lineId = Number(rawLineId);
   }
-  if (rawCents !== undefined && rawCents !== null) mapped.unitCostCents = Number(rawCents);
-  if (rawMills !== undefined && rawMills !== null) mapped.unitCostMills = Number(rawMills);
+  if (rawCents !== undefined && rawCents !== null) mapped.unitCostCents = readIntegerCents(rawCents, "rawCents", true);
+  if (rawMills !== undefined && rawMills !== null) mapped.unitCostMills = readIntegerMills(rawMills, "rawMills", true);
 
   const rawTotalProduct = line?.total_product_cost_cents ?? line?.totalProductCostCents;
   const rawPackaging = line?.packaging_cost_cents ?? line?.packagingCostCents;

@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import {
   shopifyDiscountEvidenceSchema,
   type ShopifyDiscountEvidence,
@@ -188,7 +189,7 @@ export function extractShopifyDiscountEvidence(
         code: descriptor(group.application.code),
         title: descriptor(group.application.title),
         target,
-        amountCents: Number(group.cents),
+        amountCents: readIntegerCents(group.cents, "amount", true),
       });
     return Number(total);
   };

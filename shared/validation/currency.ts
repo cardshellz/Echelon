@@ -51,6 +51,7 @@ export type CurrencyCode = z.infer<typeof CurrencyCodeSchema>;
 export const CentsSchema = z
   .number({ invalid_type_error: "cents must be a number" })
   .int("cents must be an integer (no fractional cents)")
+  .safe("cents must be a safe integer")
   .nonnegative("cents must be >= 0")
   .finite("cents must be finite");
 
@@ -62,6 +63,7 @@ export const CentsSchema = z
 export const PositiveCentsSchema = z
   .number({ invalid_type_error: "cents must be a number" })
   .int("cents must be an integer (no fractional cents)")
+  .safe("cents must be a safe integer")
   .positive("cents must be > 0")
   .finite("cents must be finite");
 
@@ -78,7 +80,9 @@ export class CurrencyValidationError extends RangeError {
     public readonly value: unknown,
     issue: string,
   ) {
-    super(`${field}: ${issue} (got ${JSON.stringify(value)})`);
+    // Invalid driver values can include bigint; error construction must not
+    // throw a second exception while classifying the original amount.
+    super(`${field}: ${issue}`);
     this.name = "CurrencyValidationError";
   }
 }

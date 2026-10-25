@@ -15,6 +15,8 @@
  * tests never touch the network.
  */
 
+import { parseRoundedDecimalCents, sumCents } from "@shared/money-read";
+
 export const SHIPSTATION_V2_BASE_URL = "https://api.shipstation.com/v2";
 const REQUEST_TIMEOUT_MS = 10_000;
 /** 429 backoff mirrors server/modules/oms/shipstation.service.ts apiRequest. */
@@ -195,12 +197,15 @@ interface V2MoneyPayload {
 }
 
 function toCents(money: V2MoneyPayload | null | undefined): number {
-  const amount = money?.amount;
-  if (typeof amount !== "number" || !Number.isFinite(amount)) return 0;
-  return Math.round(amount * 100);
+  // Absent optional charge components contribute zero. A present component
+  // must contain valid dollar evidence; invalid charges must not underquote.
+  if (money == null) return 0;
+  // Retain this adapter's per-component half-up rounding policy, using exact
+  // decimal conversion rather than binary multiplication by 100.
+  return parseRoundedDecimalCents(money.amount, "ShipStation rate amount");
 }
 
-/** Normalize a /v2/rates response payload. Malformed entries are skipped. */
+/** Skip entries without rate identity; reject malformed monetary evidence. */
 export function normalizeRatesResponse(payload: unknown): V2NormalizedRate[] {
   const rates = (payload as { rate_response?: { rates?: unknown[] } } | null)?.rate_response?.rates;
   if (!Array.isArray(rates)) return [];
@@ -224,11 +229,12 @@ export function normalizeRatesResponse(payload: unknown): V2NormalizedRate[] {
       carrier: mapV2CarrierCode(rate.carrier_code ?? ""),
       serviceCode: rate.service_code,
       serviceName: rate.service_type ?? rate.service_code,
-      amountCents:
-        toCents(rate.shipping_amount)
-        + toCents(rate.other_amount)
-        + toCents(rate.insurance_amount)
-        + toCents(rate.confirmation_amount),
+      amountCents: sumCents([
+        toCents(rate.shipping_amount),
+        toCents(rate.other_amount),
+        toCents(rate.insurance_amount),
+        toCents(rate.confirmation_amount),
+      ], "ShipStation rate total"),
       currency: (rate.shipping_amount.currency ?? "usd").toUpperCase(),
       deliveryDays: typeof rate.delivery_days === "number" ? rate.delivery_days : null,
       estimatedDeliveryDate: typeof rate.estimated_delivery_date === "string"

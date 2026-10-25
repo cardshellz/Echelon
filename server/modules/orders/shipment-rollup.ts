@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 /**
  * Shipment-level state mutations + order-level roll-up.
  *
@@ -250,7 +251,7 @@ export async function markShipmentShipped(
   const current = await loadShipment(db, shipmentId);
   const now = opts.now ?? new Date();
 
-  const currentCarrierCostCents = Number(current.carrier_cost_cents ?? 0);
+  const currentCarrierCostCents = readIntegerCents(current.carrier_cost_cents ?? 0, "current carrier cost", true);
   const serviceMatches = serviceCode === null || current.service_code === serviceCode;
   const carrierCostMatches = !hasCarrierCost || (
     currentCarrierCostCents === meta.carrierCostCents

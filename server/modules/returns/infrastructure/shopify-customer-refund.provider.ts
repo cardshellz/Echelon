@@ -1,4 +1,5 @@
 import { pool } from "../../../db";
+import { parseDecimalCents, MoneyInputError } from "@shared/money-read";
 import {
   CustomerRefundProviderError,
   type CustomerRefundProvider,
@@ -415,15 +416,12 @@ function readMoney(value: MoneyValue, field: string): { cents: number; currency:
 }
 
 function decimalToCents(value: unknown, field: string): number {
-  if (typeof value !== "string" || !/^\d+(?:\.\d{1,2})?$/.test(value)) {
+  try {
+    return parseDecimalCents(value, field);
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
     throw providerError("RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID", `${field} is not a valid money amount.`, false);
   }
-  const [whole, fractional = ""] = value.split(".");
-  const cents = Number(whole) * 100 + Number(fractional.padEnd(2, "0"));
-  if (!Number.isSafeInteger(cents) || cents < 0) {
-    throw providerError("RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID", `${field} exceeds the supported integer-cents range.`, false);
-  }
-  return cents;
 }
 
 function centsToMoney(cents: number): string {

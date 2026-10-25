@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 // subscription.storage.ts — Database operations for subscriptions
 import { db } from "../../../db";
 import { eq, inArray, desc, asc, and, sql } from "drizzle-orm";
@@ -560,7 +561,7 @@ export async function getDashboardStats(): Promise<SubscriptionDashboardStats> {
     const count = Number(row.cnt);
     totalActive += count;
 
-    const price = Number(row.total_price || 0);
+    const price = readIntegerCents(row.total_price ?? 0, "subscription revenue");
     if (row.billing_interval === "year") {
       mrr += Math.round(price / 12);
     } else {

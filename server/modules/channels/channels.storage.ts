@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { assertEbayStorePolicyMetadataWriteOwned, EBAY_BUSINESS_POLICY_CHANNEL_ID } from "@shared/ebay-business-policies";
 import {
   db,
@@ -676,7 +677,7 @@ export const channelMethods: IChannelStorage = {
     const invByProduct = new Map<number, { qty: number; valueCents: number }>();
     for (const r of invRows as any[]) {
       const qty = Number(r.qty ?? 0);
-      const cost = Number(r.avgCostCents ?? 0);
+      const cost = readIntegerCents(r.avgCostCents ?? 0, "cost", true);
       const existing = invByProduct.get(r.productId) ?? { qty: 0, valueCents: 0 };
       existing.qty += qty;
       existing.valueCents += qty * cost;
@@ -760,7 +761,7 @@ export const channelMethods: IChannelStorage = {
       ));
     const variantIds = (variantRows as any[]).map((v) => v.id as number);
     const costById = new Map<number, number>();
-    for (const v of variantRows as any[]) costById.set(v.id, Number(v.avgCostCents ?? 0));
+    for (const v of variantRows as any[]) costById.set(v.id, readIntegerCents(v.avgCostCents ?? 0, "computed amount", true));
 
     if (variantIds.length === 0) {
       return { productCount: productIds.length, variantCount: 0, inventoryQty: 0, inventoryValueCents: 0 };

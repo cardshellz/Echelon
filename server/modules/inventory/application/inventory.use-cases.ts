@@ -1,3 +1,4 @@
+import { readIntegerMills } from "@shared/money-read";
 import type { ReservedInventoryTransferOwner, ReservedTransferPlan } from "../../inventory-planning/application/reserved-inventory-transfer.port";
 import { repointCanonicalTransferPickLines } from "../../wms/order-item-commands";
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
@@ -576,7 +577,7 @@ export class InventoryUseCases {
           }
 
           if (lotUnitCostMills === null && lot.unit_cost_mills !== null) {
-            lotUnitCostMills = Number(lot.unit_cost_mills);
+            lotUnitCostMills = readIntegerMills(lot.unit_cost_mills, "lot unit cost", true);
           }
 
           if (quantityPosting) {

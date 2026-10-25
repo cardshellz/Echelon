@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { z } from "zod";
 import {
   orderEditCodePricingSchema,
@@ -140,7 +141,7 @@ export function referenceOrderEditCodePricing(
   for (const line of pricing.lines) {
     const previous = bySource.get(line.sourceId);
     const grossCents = sumOrderEditCents([
-      Number(BigInt(line.quantity) * BigInt(line.retailCents)),
+      readIntegerCents(BigInt(line.quantity) * BigInt(line.retailCents), "gross", true),
     ]);
     if (
       previous &&

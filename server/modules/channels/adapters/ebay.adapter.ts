@@ -1,3 +1,4 @@
+import { parseDecimalCents } from "@shared/money-read";
 import { ebayBusinessPolicies } from "../ebay-business-policies";
 import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
 /**
@@ -1085,7 +1086,7 @@ export class EbayAdapter implements IChannelAdapter {
     amount?: { value: string; currency: string } | null,
   ): number {
     if (!amount?.value) return 0;
-    return Math.round(parseFloat(amount.value) * 100);
+    return parseDecimalCents(amount.value, "provider amount");
   }
 
   private mapPaymentStatus(

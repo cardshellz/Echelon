@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
@@ -62,7 +63,7 @@ export class CachedRateTableDropshipShippingRateProvider implements DropshipShip
             carrier: row.carrier,
             service: row.service,
             currency: row.currency,
-            rateCents: Number(row.rate_cents),
+            rateCents: readIntegerCents(row.rate_cents, "rate", true),
           });
         }
       }

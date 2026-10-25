@@ -35,6 +35,36 @@ function rawOrder(id: string, orderNumber: string) {
 }
 
 describe("Shopify raw-to-OMS bridge recovery", () => {
+  it.each(["100.25", "100junk", "9007199254740992"])("rejects invalid stored cent evidence %s before OMS writes", async total => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ ...rawOrder("1001", "#1001"), total_price_cents: total }] })
+      .mockResolvedValueOnce({ rows: [{ channel_id: 36 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const ingestOrder = vi.fn();
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(bridgeShopifyOrderToOms({ execute }, { ingestOrder } as any, "1001"))
+        .rejects.toMatchObject({ name: "MoneyInputError" });
+      expect(ingestOrder).not.toHaveBeenCalled();
+    } finally { log.mockRestore(); }
+  });
+  it("reads PostgreSQL bigint money text before adding line discounts or passing totals to OMS", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ ...rawOrder("1001", "#1001"),
+        subtotal_price_cents: "233", total_shipping_cents: "549", total_tax_cents: "47",
+        total_discounts_cents: "46", total_price_cents: "829",
+      }] })
+      .mockResolvedValueOnce({ rows: [{ channel_id: 36 }] })
+      .mockResolvedValueOnce({ rows: [{ id: 1, quantity: 1, title: "Fixture",
+        total_price_cents: "233", plan_discount_cents: "46", coupon_discount_cents: "0",
+      }] });
+    const ingestOrder = vi.fn().mockResolvedValue({ id: 10 });
+    await bridgeShopifyOrderToOms({ execute }, { ingestOrder } as any, "1001");
+    expect(ingestOrder).toHaveBeenCalledWith(36, "1001", expect.objectContaining({
+      subtotalCents: 233, shippingCents: 549, taxCents: 47, discountCents: 46, totalCents: 829,
+      lineItems: [expect.objectContaining({ retailPriceCents: 279, paidPriceCents: 279 })],
+    }));
+  });
   it.each(["3978054467743", "gid://shopify/Customer/3978054467743"])(
     "copies raw customer identity %s into the OMS order", async customerId => {
       const execute = vi.fn()

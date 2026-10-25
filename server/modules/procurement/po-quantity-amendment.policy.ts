@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { z } from "zod";
 import type { purchaseOrders, purchaseOrderLines, vendorInvoices, vendorInvoiceLines } from "@shared/schema/procurement.schema";
 import type { PurchaseApprovalActor } from "../identity/domain/purchase-approval-authority";
@@ -85,13 +86,13 @@ function lineBlockedReason(line: AmendmentLine, lines: AmendmentLine[], allowClo
   return null;
 }
 function unitMills(line: AmendmentLine): number {
-  if (line.lineType !== "product") return z.number().int().safe().parse(line.unitCostMills ?? Number(BigInt(z.number().int().safe().parse(line.unitCostCents)) * BigInt(100)));
+  if (line.lineType !== "product") return z.number().int().safe().parse(line.unitCostMills ?? readIntegerMills(BigInt(z.number().int().safe().parse(line.unitCostCents)) * BigInt(100), "unit cost", true));
   return line.unitCostMills === null ? safeAmount(BigInt(stored(line.unitCostCents, "unit cost")) * BigInt(100)) : stored(line.unitCostMills, "unit cost");
 }
 function componentTotal(line: AmendmentLine): number {
   if (line.lineType !== "product") return z.number().int().safe().parse(line.lineTotalCents);
-  return z.number().int().safe().parse(Number(BigInt(stored(line.totalProductCostCents, "product amount")) + BigInt(stored(line.packagingCostCents, "packaging amount"))
-    - BigInt(stored(line.discountCents, "discount")) + BigInt(stored(line.taxCents, "tax"))));
+  return z.number().int().safe().parse(readIntegerCents(BigInt(stored(line.totalProductCostCents, "product amount")) + BigInt(stored(line.packagingCostCents, "packaging amount"))
+    - BigInt(stored(line.discountCents, "discount")) + BigInt(stored(line.taxCents, "tax")), "computed amount", true));
 }
 function recordedPricing(line: AmendmentLine): PoLinePricingInput | null {
   if (line.lineType !== "product" || line.orderQty === 0) return null;
@@ -211,7 +212,7 @@ export function planQuantityAmendment(facts: AmendmentFacts, request: PoQuantity
       if (amount === line.lineTotalCents) throw new PoQuantityAmendmentError("Change a line value before approving.", "PO_AMENDMENT_NO_CHANGE", 400);
       return { id: line.id, patch: { orderQty: line.orderQty, pricingBasis: "not_applicable", pricingSource: "manual", purchaseUom: null, purchaseUomQuantity: null,
         piecesPerPurchaseUom: null, quotedUnitCostMills: null, quotedTotalCents: null, pricingRemainderMills: 0,
-        unitCostMills: Number(mills), unitCostCents: Number(amount < 0 ? -cents : cents), totalProductCostCents: 0, packagingCostCents: 0, discountCents: 0, taxCents: 0,
+        unitCostMills: readIntegerMills(mills, "mills", true), unitCostCents: readIntegerCents(amount < 0 ? -cents : cents, "unit cost", true), totalProductCostCents: 0, packagingCostCents: 0, discountCents: 0, taxCents: 0,
         lineTotalCents: amount, status: line.status } satisfies AmendmentLinePatch };
     }
     if (line.lineType !== "product") throw new PoQuantityAmendmentError("Use a charge correction for this line.", "PO_AMENDMENT_LINE_BLOCKED");
