@@ -3,6 +3,7 @@
 export const ORDER_EDIT_REFUND_REVIEW_CODES = [
   "REFUND_UNCONFIRMED",
   "ORDER_EDIT_REFUND_REVIEW_READBACK_PENDING",
+  "ORDER_EDIT_PICKING_CUTOFF",
 ] as const;
 
 export function canObserveOrderEditRefundReview(input: {
@@ -11,14 +12,12 @@ export function canObserveOrderEditRefundReview(input: {
   cancellation: boolean;
   submitted: boolean;
   refundRequested: boolean;
-  stoppedRecoveryEnabled?: boolean;
 }): boolean {
   return (
     input.status === "review_required" &&
     !input.cancellation &&
     input.submitted &&
     input.refundRequested &&
-    (ORDER_EDIT_REFUND_REVIEW_CODES.some((code) => code === input.errorCode)
-      || (input.stoppedRecoveryEnabled === true && input.errorCode === "ORDER_EDIT_PICKING_CUTOFF"))
+    ORDER_EDIT_REFUND_REVIEW_CODES.some((code) => code === input.errorCode)
   );
 }

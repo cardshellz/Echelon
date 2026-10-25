@@ -16,7 +16,6 @@ import { retireOrderEditProviderHolds } from "../../oms/order-edit-provider-hold
 import { restoreStoppedRefundEditOrder } from "../../orders/order-status-core";
 import { proveStoppedRefundEditRecovery } from "./order-edit-refund-warehouse-evidence";
 import { appendOrderEditAudit } from "./order-edit-audit.writer";
-import { channelMerchandiseAuthorityEnabled } from "../../oms/channel-merchandise-rollout";
 import { readDeferredRefundShipmentIds } from "./order-edit-deferred-shipment";
 import {
   assertOrderEditWarehouseItemIdentities,
@@ -711,9 +710,6 @@ export class OrderEditWarehouseGateway {
       operationId: string,
     ) => Promise<void>,
     private readonly clock: () => Date = () => new Date(),
-    private readonly stoppedRefundRecoveryEnabled: (
-      channelId: number,
-    ) => boolean = channelMerchandiseAuthorityEnabled,
   ) {}
 
   private async transaction<T>(
@@ -1088,7 +1084,6 @@ export class OrderEditWarehouseGateway {
     operationId: string,
     expected: OrderEditSnapshot,
   ): Promise<void> {
-    if (!this.stoppedRefundRecoveryEnabled(expected.channelId)) return;
     const before = await this.transaction((client) =>
       this.stoppedRefundEvidence(client, omsOrderId, operationId, expected),
     );

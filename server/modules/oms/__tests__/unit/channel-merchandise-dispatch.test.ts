@@ -4,6 +4,7 @@ import type { ShopifyMerchandiseSnapshot } from "../../infrastructure/shopify-me
 
 const version = "2026-10-24T12:00:00.000Z";
 function fixture() {
+  const channel = { provider: "shopify" };
   const source = {
     channel_id: 36,
     external_order_id: "1",
@@ -35,17 +36,18 @@ function fixture() {
   const execute = vi
     .fn()
     .mockResolvedValueOnce({ rows: [source] })
+    .mockResolvedValueOnce({ rows: [channel] })
     .mockResolvedValue({ rows: [line] });
   const readSnapshot = vi.fn(async () => native);
   return {
+    channel,
     source,
     line,
     native,
     execute,
     readSnapshot,
-    run: (purpose: "dispatch" | "observation" = "dispatch", enabled = true) =>
+    run: (purpose: "dispatch" | "observation" = "dispatch") =>
       verifyRefundedChannelMerchandise({ execute }, 20, purpose, {
-        enabled: () => enabled,
         readSnapshot,
       }),
   };
@@ -65,7 +67,7 @@ describe("refunded money and independent channel dispatch proof", () => {
     "refunded",
     "voided",
     "cancelled_at",
-    "disabled",
+    "unsupported_provider",
     "native_cancelled",
   ])("does not bypass %s protection", async (kind) => {
     const f = fixture();
@@ -73,7 +75,8 @@ describe("refunded money and independent channel dispatch proof", () => {
     if (kind === "voided") f.source.financial_status = "voided";
     if (kind === "cancelled_at") f.source.cancelled_at = version;
     if (kind === "native_cancelled") f.native.cancelled = true;
-    await expect(f.run("dispatch", kind !== "disabled")).resolves.toBe(false);
+    if (kind === "unsupported_provider") f.channel.provider = "ebay";
+    await expect(f.run("dispatch")).resolves.toBe(false);
     if (kind !== "native_cancelled")
       expect(f.readSnapshot).not.toHaveBeenCalled();
   });

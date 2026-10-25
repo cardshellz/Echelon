@@ -30,7 +30,6 @@ import { bridgeShopifyOrderToOms } from "../oms/shopify-bridge";
 import { normalizeShopifyCustomerId } from "../oms/shopify-customer-identity";
 import { reconcileShopifyLineReadiness } from "../oms/shopify-line-readiness.service";
 import { readShopifyLineCurrentQuantity } from "../oms/shopify-line-item-normalizer";
-import { channelMerchandiseAuthorityEnabled } from "../oms/channel-merchandise-rollout";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 import { normalizeShopifyOrderGid } from "./shopify-order-id";
 
@@ -286,7 +285,6 @@ async function fetchShopifyOrderById(
 async function loadDelayedReadinessCandidates(
   afterOmsOrderId: number,
 ): Promise<DelayedReadinessCandidate[]> {
-  const useChannelQuantities = channelMerchandiseAuthorityEnabled(SHOPIFY_CHANNEL_ID);
   const candidates = await db.execute<{
     oms_order_id: number;
     shopify_order_id: string;
@@ -299,17 +297,13 @@ async function loadDelayedReadinessCandidates(
     WHERE oo.channel_id = ${SHOPIFY_CHANNEL_ID}
       AND oo.status NOT IN ('cancelled', 'refunded', 'shipped')
       AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
-      AND (COALESCE(oo.financial_status, '') IN ('paid', 'partially_paid')
-        OR (${useChannelQuantities} AND oo.financial_status IN ('partially_refunded','refunded')))
+      AND COALESCE(oo.financial_status, '') IN ('paid', 'partially_paid', 'partially_refunded', 'refunded')
       AND ol.requires_shipping IS DISTINCT FROM false
-      AND (${useChannelQuantities} OR (COALESCE(ol.cancelled_quantity, 0) = 0
-        AND COALESCE(ol.refunded_quantity, 0) = 0
-        AND COALESCE(ol.authorization_status, '') IN ('seen', 'authorized')))
       AND (
         COALESCE(ol.paid_quantity, 0) > COALESCE(ol.authority_fulfillable_quantity, 0)
         OR COALESCE(ol.authority_fulfillable_quantity, 0) >
            COALESCE(ol.wms_materialized_quantity, 0)
-        OR (${useChannelQuantities} AND ol.channel_quantity_updated_at IS NULL)
+        OR ol.channel_quantity_updated_at IS NULL
       )
     GROUP BY oo.id, oo.external_order_id
     ORDER BY
@@ -352,7 +346,6 @@ async function reconcileExistingOmsOrderReadiness(
     financialStatus: order.financial_status,
     sourceEventId: buildReadinessSourceEventId(order),
     channelUpdatedAt: order.updated_at ?? null,
-    useChannelQuantities: channelMerchandiseAuthorityEnabled(SHOPIFY_CHANNEL_ID),
     lineItems: order.line_items.map((line) => ({
       externalLineItemId: line.id,
       quantity: line.quantity,

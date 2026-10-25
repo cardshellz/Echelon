@@ -22,7 +22,6 @@ export function orderCancellationEligibilityReasons(input: {
   activeOperationId: string | null;
   activeOperationStatus?: string;
   enabled: boolean;
-  allowSettledRefundBalance?: boolean;
 }): string[] {
   const { snapshot } = input;
   const reasons: string[] = [];
@@ -44,7 +43,7 @@ export function orderCancellationEligibilityReasons(input: {
       "This order can no longer be cancelled online. Contact us for help.",
     );
   if (
-    !isOrderCancellationPaymentSettled(snapshot, input.allowSettledRefundBalance)
+    !isOrderCancellationPaymentSettled(snapshot)
   )
     reasons.push(
       "A payment or refund needs to finish before this order can be cancelled online.",

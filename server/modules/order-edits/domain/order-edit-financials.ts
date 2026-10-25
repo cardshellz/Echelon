@@ -233,7 +233,6 @@ export function isOrderCancellationPaymentSettled(
     capturableCents: number;
     totalCents: number;
   },
-  allowSettledRefundBalance = false,
 ): boolean {
   const settlement = presentOrderEditSettlement(snapshot);
   if (
@@ -277,7 +276,6 @@ export function isOrderCancellationPaymentSettled(
     refundedByParent.set(parent.id, refunded);
   }
   return (
-    allowSettledRefundBalance &&
     settlement.receivedCents > 0 &&
     // A completed price-reducing edit can make the current total smaller than
     // the original receipt. Require enough captured money to cover that total.

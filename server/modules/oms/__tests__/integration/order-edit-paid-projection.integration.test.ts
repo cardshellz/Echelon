@@ -214,7 +214,7 @@ function document(
           paid_quantity,authority_fulfillable_quantity,cancelled_quantity,refunded_quantity,authorization_status,
           paid_price_cents,retail_price_cents,total_price_cents,total_discount_cents,fulfillable_quantity)
         VALUES(31,20,'102',100,1,1,0,0,0,0,'seen',900,900,900,0,1);`);
-      const enabled = new OrderEditPaidProjection(database.pool, () => NOW, () => true);
+      const enabled = new OrderEditPaidProjection(database.pool, () => NOW);
       await enabled.project(20, OP, operation.lastSnapshot!);
       await enabled.project(20, OP, operation.lastSnapshot!);
       expect((await database.pool.query("SELECT external_line_item_id,authority_fulfillable_quantity,refunded_quantity FROM oms.oms_order_lines ORDER BY id")).rows)

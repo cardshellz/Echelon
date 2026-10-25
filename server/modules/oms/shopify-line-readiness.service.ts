@@ -23,7 +23,6 @@ export interface ReconcileShopifyLineReadinessInput {
   lineItems: ShopifyLineReadinessSnapshot[];
   now?: Date;
   channelUpdatedAt?: Date | string | null;
-  useChannelQuantities?: boolean;
 }
 
 export interface ReconcileShopifyLineReadinessResult {
@@ -89,26 +88,28 @@ export async function reconcileShopifyLineReadiness(
   if (sourceEventId.length === 0) {
     throw new Error("Shopify readiness sourceEventId is required");
   }
-  if (input.useChannelQuantities && input.channelUpdatedAt == null)
+  if (input.channelUpdatedAt == null || !Number.isFinite(new Date(input.channelUpdatedAt).getTime()))
     throw new Error("Channel quantity reconciliation requires the native order version.");
 
-  const snapshots = input.lineItems.map((line, index) => ({
-    externalLineItemId: normalizeExternalLineItemId(line.externalLineItemId),
-    quantity: requireNonNegativeInteger(
-      line.quantity,
-      `lineItems[${index}].quantity`,
-    ),
-    currentQuantity: line.currentQuantity == null
-      ? null
-      : requireNonNegativeInteger(
+  const snapshots = input.lineItems.map((line, index) => {
+    if (line.currentQuantity == null)
+      throw new Error("Shopify readiness requires the native current quantity for every line.");
+    return {
+      externalLineItemId: normalizeExternalLineItemId(line.externalLineItemId),
+      quantity: requireNonNegativeInteger(
+        line.quantity,
+        `lineItems[${index}].quantity`,
+      ),
+      currentQuantity: requireNonNegativeInteger(
         line.currentQuantity,
         `lineItems[${index}].currentQuantity`,
       ),
-    fulfillableQuantity: requireNonNegativeInteger(
-      line.fulfillableQuantity,
-      `lineItems[${index}].fulfillableQuantity`,
-    ),
-  }));
+      fulfillableQuantity: requireNonNegativeInteger(
+        line.fulfillableQuantity,
+        `lineItems[${index}].fulfillableQuantity`,
+      ),
+    };
+  });
   const uniqueLineIds = new Set(
     snapshots.map((line) => line.externalLineItemId),
   );
@@ -178,16 +179,10 @@ export async function reconcileShopifyLineReadiness(
         line.refundedQuantity ?? 0,
         "line.refundedQuantity",
       );
-      const authorizationStatus = String(line.authorizationStatus ?? "");
-      if (
-        !input.useChannelQuantities && (cancelledQuantity > 0 ||
-        refundedQuantity > 0 ||
-        (authorizationStatus !== "seen" && authorizationStatus !== "authorized"))
-      ) {
+      if (line.authorizationStatus === "review") {
         result.protectedLines++;
         continue;
       }
-
       const previousAuthority = requireNonNegativeInteger(
         line.authorityFulfillableQuantity ?? 0,
         "line.authorityFulfillableQuantity",
@@ -214,10 +209,9 @@ export async function reconcileShopifyLineReadiness(
       if (authority.staleChannelObservation) continue;
 
       const quantityChanged = authority.authorityFulfillableQuantity !== previousAuthority;
-      const channelObservationChanged = input.useChannelQuantities && snapshot.currentQuantity !== null
-        && (line.channelCurrentQuantity !== authority.channelCurrentQuantity
-          || new Date(line.channelQuantityUpdatedAt ?? 0).getTime() !== authority.channelQuantityUpdatedAt?.getTime());
-      if (authority.authorityFulfillableQuantity > previousAuthority || (input.useChannelQuantities && quantityChanged) || channelObservationChanged) {
+      const channelObservationChanged = line.channelCurrentQuantity !== authority.channelCurrentQuantity
+          || new Date(line.channelQuantityUpdatedAt ?? 0).getTime() !== authority.channelQuantityUpdatedAt?.getTime();
+      if (quantityChanged || channelObservationChanged) {
         await tx
           .update(omsOrderLines)
           .set({
@@ -243,11 +237,10 @@ export async function reconcileShopifyLineReadiness(
           result.advancedLines++;
           result.advancedQuantity += authority.authorityFulfillableQuantity - previousAuthority;
         }
-        if (input.useChannelQuantities) result.wmsSyncRequired = true;
+        result.wmsSyncRequired = true;
       }
 
-      const effectiveAuthority = input.useChannelQuantities ? authority.authorityFulfillableQuantity
-        : Math.max(previousAuthority, authority.authorityFulfillableQuantity);
+      const effectiveAuthority = authority.authorityFulfillableQuantity;
       const providerReadyQuantity = Math.min(
         paidQuantity,
         snapshot.fulfillableQuantity,

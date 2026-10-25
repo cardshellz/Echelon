@@ -486,7 +486,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     await expectCarrierPackageContentsRejection(mock, shipmentPayload);
   });
 
-  it("records a post-refund package for review without direct OMS or provider writes", async () => {
+  it("records a post-refund package from an unsupported channel for review without direct OMS or provider writes", async () => {
     const shipmentPayload = makeExactShipmentPayload();
     const mock = makeDb([
       // shipstation_order_id lookup
@@ -511,6 +511,9 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       // finality guard
       { rows: [{ status: "shipped", financial_status: "refunded" }] },
+      // Provider capability does not apply Shopify quantity rules to another channel.
+      { rows: [{ channel_id: 37, external_order_id: "1", status: "shipped", financial_status: "refunded", cancelled_at: null }] },
+      { rows: [{ provider: "ebay" }] },
       // mark shipment review
       { rows: [] },
     ]);
@@ -557,6 +560,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       { rows: [{ status: "confirmed", financial_status: "refunded", channel_id: 36 }] },
       { rows: [{ channel_id: 36, external_order_id: "1", status: "confirmed", financial_status: "refunded", cancelled_at: null }] },
+      { rows: [{ provider: "shopify" }] },
       { rows: [{ externalLineItemId: "101", paidQuantity: 1, authorityFulfillableQuantity: 0,
         channelCurrentQuantity: 1, channelQuantityUpdatedAt: version }] },
     ]);
@@ -565,7 +569,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     const service = createShipStationService(mock.db, undefined, {
       fulfillmentAuthority: mock.fulfillmentAuthority as any, providerLabelObserver: mock.providerLabelObserver as any,
       labelCommercialFulfillment: mock.labelCommercialFulfillment as any, relatedLabelReader: { findRelatedActiveLabels: async () => [] },
-      useChannelMerchandise: () => true, readChannelMerchandise: read,
+      readChannelMerchandise: read,
     });
     const result = await service.processManualShipmentNotification(shipment,
       { operator: "synthetic-test", reason: "refund_independent_physical_evidence", contentsAuthority: { source: "provider_exact" } });

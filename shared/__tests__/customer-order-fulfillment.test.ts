@@ -69,7 +69,7 @@ describe("customer warehouse status presentation", () => {
   it("distinguishes stopped warehouse work from an actually cancelled order", () => {
     const warehouse = Object.freeze(presentCustomerOrderFulfillment(["cancelled"]));
     expect(presentCustomerOrderLifecycle(warehouse, false)).toEqual({
-      code: "cancelled", label: "Picking stopped",
+      code: "attention", label: "Order needs attention",
     });
     expect(presentCustomerOrderLifecycle(warehouse, true)).toEqual({
       code: "cancelled", label: "Cancelled",

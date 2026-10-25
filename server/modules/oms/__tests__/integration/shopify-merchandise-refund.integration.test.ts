@@ -141,7 +141,7 @@ function refund(
         >(async () => ({ releasedReservationQuantity: 1 })),
       };
     }
-    const options = { channelId: 36, now: NOW, useChannelQuantities: true };
+    const options = { channelId: 36, now: NOW };
     it("keeps a money-only refund entirely separate from quantities and warehouse cancellation", async () => {
       const before = await state();
       const helpers = ports();
@@ -193,6 +193,22 @@ function refund(
         ).rows,
       ).toEqual([{ merchandise_reduction_quantity: 0 }]);
     });
+    it("retries the saved unconsumed demand reduction while preserving a shortage record's historical quantity", async () => {
+      await database.pool.query("UPDATE wms.order_items SET status='short' WHERE id=40");
+      const helpers = ports();
+      helpers.reconcileRefundOrderDemand.mockRejectedValueOnce(new Error("Synthetic interrupted inventory reconciliation"));
+      await expect(applyShopifyRefundCascade(drizzle(database.pool), refund(), helpers, options))
+        .rejects.toThrow("Synthetic interrupted inventory reconciliation");
+      expect((await state()).items).toEqual([{ quantity: 2, status: "short" }]);
+      expect((await database.pool.query("SELECT merchandise_reduction_quantity FROM oms.order_line_adjustments")).rows)
+        .toEqual([{ merchandise_reduction_quantity: 1 }]);
+      await applyShopifyRefundCascade(drizzle(database.pool), refund(), helpers, options);
+      expect(helpers.reconcileRefundOrderDemand).toHaveBeenCalledTimes(2);
+      for (const [input] of helpers.reconcileRefundOrderDemand.mock.calls)
+        expect(input).toMatchObject({ requiredAuthority: "canonical", releaseTargets: [{ orderItemId: 40, quantity: 1 }] });
+      expect((await state()).items).toEqual([{ quantity: 2, status: "short" }]);
+    });
+
     it("serializes concurrent copies of one refund into one quantity change and one immutable demand delta", async () => {
       const helpers = ports();
       await Promise.all([
