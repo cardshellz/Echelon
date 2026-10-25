@@ -31,6 +31,20 @@ describe("eBay package transport", () => {
     await expect(prepareEbayListingPackages(provider.client, prepared.draft,
       { ...syncIdentity, variants: syncIdentity.variants.map(member => ({ ...member, offerId: null })) })).rejects.toThrow(/length, width and height/);
   });
+  it("does not reuse a maintenance warning when the same draft needs new publication", async () => {
+    const { provider, prepared } = await maintenanceFixture();
+    const draft = await prepareEbayListingPackages(provider.client, prepared.draft, syncIdentity);
+    provider.currentOffer().status = "UNPUBLISHED";
+    provider.currentOffer().listingId = undefined;
+    const beforeFirstMutation = vi.fn(async () => {});
+    await expect(new EbayMarketplaceListingConnector().pushListing({ client: provider.client,
+      draft: { ...draft, publishMode: "publish" }, beforeFirstMutation }))
+      .rejects.toMatchObject({ code: "CHANNEL_LISTING_VALIDATION_FAILED" });
+    expect(beforeFirstMutation).not.toHaveBeenCalled();
+    expect(provider.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(provider.client.updateOffer).not.toHaveBeenCalled();
+    expect(provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+  });
   it("retains required dimensions when the fulfillment policy changes", async () => {
     const { provider, prepared } = await maintenanceFixture();
     prepared.draft.offers[0].payload = { ...prepared.draft.offers[0].payload,

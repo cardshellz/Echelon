@@ -216,9 +216,6 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
         throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The eBay group changed after this listing review. Analyze the listing again before applying a change.");
       const { draft, clientInput, prices, resolvePublishedIdentity } = await preparePushDraft({ ctx, product, category, variants,
         listingIds, groupKey, existingGroupKey: existingIdentity?.groupKey ?? reviewedPreview?.groupKey,
-        maintenanceScope: command.updateExisting && listingIds.length === 1 ? { marketplaceId: ctx.metadata.marketplaceId,
-          variants: variants.map(variant => ({ variantId: variant.id, sku: variant.sku,
-            offerId: variant.external_variant_id, listingId: listingIds[0] })) } : undefined,
         alignExistingVariationSchema: command.updateExisting !== undefined, onRateLimit });
       let result: EbayListingConnectorResult;
       if (listingIds.length !== 1) throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", "A reviewed listing change requires exactly one saved eBay listing. Review the product's listing mapping.");

@@ -516,6 +516,23 @@ const configured =
       expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
     });
 
+    it.each(["reviewed-update", "rebuild"] as const)("does not reuse a Catalog-backed maintenance warning for %s publication", async operation => {
+      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      const current = await f.prepare();
+      expect(current.draft.inventoryItems[0].packagePlan?.warnings).toHaveLength(1);
+      const draft = { ...current.draft, publishMode: "publish" as const,
+        itemGroup: (await f.provider.prepare()).draft.itemGroup };
+      const connector = new EbayMarketplaceListingConnector();
+      const preview = await connector.previewListingRebuild({ client: f.client, draft, currentExternalListingId: "listing-20" });
+      const input = { client: f.client, draft, preview };
+      await expect(operation === "reviewed-update" ? connector.updateExistingListing(input) : connector.executeListingRebuild(input))
+        .rejects.toMatchObject({ code: "CHANNEL_LISTING_VALIDATION_FAILED" });
+      expect(f.mutations).toHaveLength(0);
+      expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+      expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+        .toEqual({ length_mm: null, width_mm: null, height_mm: null });
+    });
+
     it("finishes already-current maintenance read-only while retaining the dimension warning", async () => {
       const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
       // Prepare once to set exact desired content on the provider; the worker

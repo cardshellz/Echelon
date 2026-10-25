@@ -1,6 +1,6 @@
 import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
 import { assertEbayPreparedIntent } from "../ebay-prepared-intent";
-import { prepareEbayListingPackages, assertEbayPackagePreservation, type EbayPackageMaintenanceScope } from "../adapters/ebay/ebay-listing-package";
+import { prepareEbayListingPackages, assertEbayPackagePreservation, assertEbayPublicationPackages, type EbayPackageMaintenanceScope } from "../adapters/ebay/ebay-listing-package";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
@@ -314,6 +314,7 @@ export class EbayMarketplaceListingConnector {
     // Publication discovery is read-only. It must establish the operation before
     // package requirements can distinguish existing maintenance from publication.
     draft = await ensurePreparedPackages(input.client, draft, maintenance);
+    if (!hasPublishedOffer) assertEbayPublicationPackages(draft.inventoryItems);
     input = { ...input, draft };
 
     // Every discovery and identity refusal above has already run; nothing below
@@ -448,6 +449,7 @@ export class EbayMarketplaceListingConnector {
     validateRebuildInput(input.draft, input.preview.currentExternalListingId);
     validateConfirmedPreview(input.draft, input.preview);
     input = { ...input, draft: await ensurePreparedPackages(input.client, input.draft) };
+    assertEbayPublicationPackages(input.draft.inventoryItems);
     await assertEbayPackagePreservation(input.client, input.draft.inventoryItems);
     if (!input.preview.rebuildRequired) {
       throw new EbayListingSyncError("EBAY_LISTING_REVIEW_CHANGED", "The confirmed eBay listing does not require a rebuild. Analyze it again and use the current available update action.");
@@ -554,6 +556,7 @@ export class EbayMarketplaceListingConnector {
   }): Promise<EbayListingConnectorResult & { removedSkus: string[]; previousExternalListingId: string }> {
     validateRebuildInput(input.draft, input.preview.currentExternalListingId);
     input = { ...input, draft: await ensurePreparedPackages(input.client, input.draft) };
+    assertEbayPublicationPackages(input.draft.inventoryItems);
 
     const currentPreview = await this.previewListingRebuild({
       client: input.client,

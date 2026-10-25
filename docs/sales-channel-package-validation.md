@@ -28,6 +28,7 @@ an actionable failed job with its original response evidence.
 | Changing to a calculated-shipping fulfillment policy | Block | Existing policy differs from desired policy |
 | Maintaining an exact published offer with the same shipping policy | Warn and preserve | SKU, marketplace, offer ID, listing ID, published state and policy must agree |
 | Publication with locally optional dimensions | Warn | Required provider refusals still stop completion |
+| Reviewed variation changes and listing rebuilds with calculated shipping | Block | Both paths call publish; an earlier maintenance draft cannot relax this requirement |
 | Incomplete/invalid supplied dimensions | Block | Cannot emit a partial container or combine separate packages |
 | Unknown identity/policy or failed provider read | Stop/recheck | Never reinterpret missing evidence as permission to publish |
 
@@ -49,8 +50,9 @@ provider readback, or archived-member clearing obligations.
 - Generic `EbayAdapter.pushSingleListing` -> connector `pushListing` first
   discovers/validates publication identity, then selects package requirements.
   Discovery consists of reads and cannot run the first-mutation hook early.
-- Reviewed listing updates use the same package adapter. Rebuilds retain
-  publication requirements because they may withdraw and republish a listing.
+- Reviewed variation changes and rebuilds use the same package adapter and retain
+  publication requirements because both call publish. The connector also checks
+  a previously prepared draft against publication requirements before any write.
 
 The actual Inventory API writes remain `PUT inventory_item/{sku}`, `POST offer`,
 `PUT offer/{offerId}`, `POST offer/{offerId}/publish`, and

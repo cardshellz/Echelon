@@ -212,6 +212,17 @@ export async function prepareEbayListingPackages<T extends { productId: number; 
   return { ...draft, inventoryItems };
 }
 
+/** Reviewed variation changes and rebuilds call publish, even when the listing
+ * already exists. Recheck that stronger operation with the shared owner before
+ * any write; a previously prepared maintenance warning is not publication proof. */
+export function assertEbayPublicationPackages(items: readonly BuiltInventoryItem[]): void {
+  for (const item of items) {
+    if (!item.packageSource || !item.packagePlan) continue;
+    prepareChannelPackage({ ...item.packageSource, sku: item.sku, operation: "publication",
+      catalog: item.packageSource.facts, observed: item.packagePlan.values });
+  }
+}
+
 /** Detect channel edits to fields we promised to preserve before the first PUT.
  * Catalog-owned fields are intentionally replaced. Provider writes are still
  * serialized and journaled by the existing publication owner. */
