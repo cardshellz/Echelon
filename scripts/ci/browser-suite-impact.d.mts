@@ -26,6 +26,7 @@ export function dependencyClosure(
   roots: readonly string[],
   files: ReadonlySet<string>,
   readSource: (file: string) => string,
+  edges?: Map<string, string[]>,
 ): Set<string>;
 
 export function selectBrowserSuite(options: {

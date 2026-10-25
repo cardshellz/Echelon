@@ -200,6 +200,9 @@ function rawLineBasisForDimension(line: any, method: string): number {
 }
 
 function allocatedCentsPerUnitMills(allocatedCents: unknown, qtyShipped: unknown): number | null {
+  // An unallocated line has no recorded amount yet. Keep that evidence unknown;
+  // only an explicitly recorded zero can produce a zero per-unit allocation.
+  if (allocatedCents === null || allocatedCents === undefined) return null;
   const cents = readIntegerCents(allocatedCents, "allocatedCents", true);
   const qty = Number(qtyShipped);
   if (!Number.isInteger(cents) || cents < 0 || !Number.isInteger(qty) || qty <= 0) return null;

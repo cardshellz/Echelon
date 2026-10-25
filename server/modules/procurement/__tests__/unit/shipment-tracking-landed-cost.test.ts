@@ -335,6 +335,57 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
 });
 
 describe("ShipmentTrackingService.getEnrichedLines", () => {
+  function unallocatedProductStorage(allocatedCostCents: unknown) {
+    return buildStorage({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{
+        id: 11, purchaseOrderId: 1, purchaseOrderLineId: 21, productVariantId: null,
+        qtyShipped: 5, allocatedCostCents,
+      }]),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({
+        id: 21, purchaseOrderId: 1, lineType: "product", orderQty: 5,
+        totalProductCostCents: 500, unitCostCents: 100, unitCostMills: 10000,
+      }),
+    });
+  }
+
+  it.each([null, undefined])("keeps an unallocated product line readable without inventing zero costs (%s)", async amount => {
+    const storage = unallocatedProductStorage(amount);
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getEnrichedLines(1);
+
+    expect(result[0]).toMatchObject({
+      allocatedCostCents: null,
+      freightAllocatedCents: null, dutyAllocatedCents: null,
+      insuranceAllocatedCents: null, otherAllocatedCents: null,
+      freightAllocatedMillsPerUnit: null, dutyAllocatedMillsPerUnit: null,
+      insuranceAllocatedMillsPerUnit: null, otherAllocatedMillsPerUnit: null,
+      totalAllocatedMillsPerUnit: null, landedUnitCostMills: null,
+      poUnitCostMills: 10000, productValueIssue: null,
+    });
+    expect(storage.updateInboundShipmentLine).not.toHaveBeenCalled();
+    expect(storage.bulkCreateInboundFreightCostAllocations).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicitly recorded zero allocation distinct from missing allocation evidence", async () => {
+    const service = createShipmentTrackingService({} as any, unallocatedProductStorage(0));
+
+    const result = await service.getEnrichedLines(1);
+
+    expect(result[0]).toMatchObject({ allocatedCostCents: 0, totalAllocatedMillsPerUnit: 0,
+      landedUnitCostMills: 10000, freightAllocatedCents: null, freightAllocatedMillsPerUnit: null });
+  });
+
+  it.each(["invalid", "", "1.2", Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects a present malformed or unsafe allocation instead of returning an unknown or zero amount (%s)", async amount => {
+      const service = createShipmentTrackingService({} as any, unallocatedProductStorage(amount));
+
+      await expect(service.getEnrichedLines(1)).rejects.toMatchObject({
+        name: "MoneyInputError", context: { field: "allocatedCents", unit: "cents" },
+      });
+    },
+  );
+
   it("returns PO SKU, mills unit costs, and allocation category breakdowns for the allocation tab", async () => {
     const storage = buildStorage({
       getInboundShipmentLines: vi.fn().mockResolvedValue([
