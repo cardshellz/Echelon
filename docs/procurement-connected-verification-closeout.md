@@ -32,6 +32,19 @@ The schema unit cases cover missing/invalid money and counts, unsafe values, com
 
 The incoming shared monetary reader also exposed pre-submission exceptions in `APInvoices.tsx:handleCreate` and the discount, tax and shipping controls in `PurchaseOrderDetail.tsx`. Their amount conversion happened before the mutation error boundary. The existing `exact-money-input.ts` adapter now delegates to the canonical `dollarsToCents` converter and classifies its known range errors before either form submits. Invalid amounts retain the draft and show validation feedback without an HTTP mutation or uncaught page exception; a corrected amount uses the existing mutation. Signed values, blank-as-zero charge policy, separators and the converter's established sub-cent truncation remain unchanged. Unexpected exceptions are not disguised as invalid money. Unit and desktop/mobile form cases verify both rejection and correction.
 
+## Missing shipment allocations remain unknown
+
+After the monetary-read integration, the real connected navigation check reproduced HTTP 500 from the shipment detail endpoint with `allocatedCents: invalid cents amount`. `shipment-tracking.service.ts:getEnrichedLines` intentionally represents unrecorded allocation categories and totals as null, but `allocatedCentsPerUnitMills` sent those nulls to the strict present-money reader. That helper now returns null for null/undefined before reading an amount. An explicitly recorded zero still produces zero; malformed or unsafe present amounts still throw the canonical money error. The existing `formatMillsOrDash` and allocation cells therefore retain the dash for unknown values without inventing cost evidence or changing any financial record.
+
+Nine public `getEnrichedLines` cases cover absent amounts, explicit zero and malformed/unsafe values, including assertions that no line/allocation writer is called. The final connected viewer/picker navigation cases pass against the actual endpoint in both browser projects. This corrects a display-read integration defect; it does not mark an allocation or posting complete.
+
+## CI graph-registration work
+
+The final guard rerun exposed repeated source parsing inside `dropship-browser-features.test.ts`'s injected-entrypoint registration case: each of twelve feature groups called the same dependency traversal without its existing optional edge cache. That case now shares a single parsed-edge map for its immutable source snapshot while retaining an independent visited set and every per-group assertion. The production API is unchanged; `browser-suite-impact.d.mts` now declares the existing optional fourth argument, matching the runtime implementation and the other declaration file.
+
+A complete-set comparison proved identical closures and injected HTML roots for all twelve groups. Parsed files fell from 1,060 to 472 and read calls from 2,145 to 1,557. A focused diagnostic run passed all 36 cases; the final official guard lane passed all 420. No test assertion or timeout was relaxed. The local diagnostic timings do not establish hosted CI latency.
+
+
 ## Catalog variant validation and recovery
 
 The PostgreSQL-backed `catalog-validation.spec.ts` baseline reproduced three failures through the authenticated receiving endpoint:
@@ -78,40 +91,93 @@ The existing per-shipment supplier-cost review and its evidence bounds remain. T
 
 ## Repeatable performance verification
 
-`test/performance/procurement/run-health-cost.ts` executes the actual health, shipment work-list, purchasing-health and PO cost-summary owners. Baseline and corrected runs use identical helper files, fresh synthetic local databases, the same bounded tiers, and three serial samples per owner. The posted scenario creates and closes real receipts and applies actual cost revisions; every measured line must satisfy the current posting rule.
+`test/performance/procurement/run-health-cost.ts` executes the actual health, shipment work-list, purchasing-health and PO cost-summary owners. The [final measured evidence](evidence/procurement-connected-performance-final-20261025.json) compares starting main `719b60983453a5723f27d224953a536f30502b57` with final code `5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca`. Four fresh local databases were measured serially: baseline/current posted-100, then baseline/current unresolved-500. No other tests, builds or compilers ran in that measurement window. Both versions used identical helper bytes and PostgreSQL configuration. Every measured owner returned exactly the same complete public output across baseline/current and all three repeated samples, with no excluded timestamps, amounts, warnings, statuses or identities. The eleven owner/profile pairs, actual driver-call counts, all sample timings, source/helper hashes and report hashes are retained in the evidence.
 
-Each read phase is read-only and checks complete table digests before and after. `compare-health-cost.ts` compares complete public owner outputs across baseline/current and repeated samples, with no excluded timestamps, monetary values, statuses or identities. Query counts are actual driver calls, including module-global database users. Parameters and live data are not recorded.
+The posted scenario creates/closes actual receipts and applies freight cost revisions; product and packaging estimates remain provisional. Unresolved fixtures retain estimated freight without allocation/application evidence. Each shipment has five lines, and shared-PO fanout is bounded to 100 shipments. Sales/forecast tables remain small; transformed/sold lot volume is covered by separate correctness regressions rather than this experiment.
 
-Synthetic pending tiers contain 10, 100 and 500 shipments with five lines each. Posted tiers contain 10 and 100 shipments. The shared-PO fanout is bounded to 100 shipments. Sales/forecast tables are small, and transformed/sold lot histories are covered by separate financial regression tests rather than this volume experiment. Local timings are diagnostic, not production latency guarantees.
+Each measured read phase is read-only and preserves complete table fingerprints. All four child exits and output closes were confirmed before their exact owned databases were dropped. Baseline/current installations contain the same 114 fixture tables and 235 indexes, with matching profile row counts. Database version/configuration and all measured-source hashes are retained in the final evidence. These selected actual owner migrations are not a full production release migration replay.
 
-The [compact measured evidence](evidence/procurement-connected-performance-20261025.json) preserves the initial baseline/current heads, owner/helper hashes, all three sample timings for all 26 owner/tier comparisons, PostgreSQL configuration and original report hashes. It also retains a separate quiet posted-100 baseline/current rerun, including all five complete-output comparisons and its original report/wrapper hashes. All complete outputs matched exactly, repeated samples were stable, and measured owner/helper files and table fingerprints remained unchanged during reads. The four initial and two additional uniquely owned databases were disposed and dropped; the additional wrappers confirmed child exit and closed output streams before cleanup. Both versions installed the same 235 indexes and had matching row counts across all 114 fixture tables. The quiet window excluded other test/build/typecheck work; unrelated UI/fixture text edits were permitted and are outside the measured-source freeze. No live records were involved.
+The table shows baseline → final. Times are three-sample medians in milliseconds; list requests display at most 50 rows. The PO fanout row reads one PO with 100 linked shipments.
 
-The following table preserves the largest completed tier of each initial profile. Times are median elapsed milliseconds across three serial samples; arrows are baseline to corrected. Shipment list requests return at most 50 rows; the PO cost row reads one PO with 100 linked shipments.
-
-| Read owner | 500 unresolved: SQL calls | 500 unresolved: median ms | 100 posted: SQL calls | 100 posted: median ms |
+| Read owner | 500 unresolved: SQL calls | 500 unresolved: median ms | 100 posted freight: SQL calls | 100 posted freight: median ms |
 | --- | ---: | ---: | ---: | ---: |
-| Landed-cost health | 19,508 → 6,043 | 8,328 → 3,554 | 4,004 → 1,911 | 4,025 → 4,765 |
-| Shipment list | 1,955 → 612 | 770 → 351 | 2,005 → 962 | 1,863 → 2,439 |
-| Filtered shipment list | 19,509 → 6,044 | 7,899 → 3,243 | 4,005 → 1,912 | 3,947 → 4,919 |
-| Purchasing health | 19,530 → 6,065 | 9,746 → 3,113 | 4,025 → 1,932 | 5,165 → 5,344 |
-| PO shipment-cost summary | 619 → 19 | 426 → 28 | 620 → 620 | 672 → 835 |
+| Landed-cost health | 19,508 → 5,152 | 7,286 → 2,232 | 4,004 → 921 | 4,001 → 874 |
+| Shipment list | 1,955 → 612 | 723 → 256 | 2,005 → 472 | 1,986 → 413 |
+| Filtered shipment list | 19,509 → 5,153 | 7,036 → 2,171 | 4,005 → 922 | 3,835 → 764 |
+| Purchasing health | 19,530 → 5,174 | 7,224 → 2,256 | 4,025 → 942 | 3,893 → 846 |
+| PO cost summary (100 linked shipments) | 619 → 19 | 259 → 22 | 620 → 620 | 500 → 476 |
+| PO cost summary (one linked shipment) | 25 → 19 | 11 → 7 | — | — |
 
-Initial posted-100 latency increased despite fewer health/list SQL calls, and the valid posted PO summary retained all 620 calls. A separate quiet posted-100 baseline/current pair reproduced the same query counts and exact public outputs, with these three-sample medians:
+These are local diagnostic measurements, not production latency guarantees. Baseline preceded current within each profile; sample order, PostgreSQL/OS caches and scheduling effects were not isolated. The bounded one-entry supplier reader benefits consecutive shipments with exactly the same normalized source set. Different/interleaved sets can miss. Per-shipment landed revisions, current-source fingerprints and exception/reconciliation checks remain. The posted PO summary's per-shipment freshness preparation is separate and remains visible in its measured query count.
 
-| Read owner | Quiet posted-100 median ms, baseline → corrected |
-| --- | ---: |
-| Landed-cost health | 4,138 → 3,590 |
-| Shipment list | 2,136 → 1,686 |
-| Filtered shipment list | 4,038 → 3,321 |
-| Purchasing health | 4,069 → 3,365 |
-| PO shipment-cost summary | 457 → 490 |
+The [historical measurement evidence](evidence/procurement-connected-performance-20261025.json) is retained unchanged: 26 initial comparisons and a later quiet posted-100 pair predate the final supplier reader and main-310 integration. Initial posted timings included regressions despite fewer round trips; the quiet pair did not reproduce the four health/list median regressions, while the posted PO summary retained 620 calls. Those results are not substituted for the final comparison above. Historical helper equivalence is not assumed: the fresh baseline/current pair uses identical final helpers, including the expanded source fingerprints. The final helper's fingerprint-only difference from the previously committed helper is separately recorded; the older historical working-copy helper hash is not claimed as reconstructed.
 
-The quiet rerun did not reproduce a higher median for the four health/list owners, but the corrected first health sample took 5,849 ms. PO summary still made 620 calls and had a slightly higher median. All runs used PostgreSQL 17.11 with `shared_buffers=400kB` and `work_mem=4MB`. Baseline ran before corrected in the quiet pair; execution order, caches and scheduling effects were not isolated. The evidence establishes fewer round trips and improved unresolved-profile timings, with variable posted timings; it does not establish a blanket latency improvement, its cause, or a production latency target.
-
-The repeated supplier reads remain in `shipment-tracking.service.ts:readShipmentHealthPage` → `shipment-cost-review.repository.ts:readShipmentCostReviewInTransaction` → `purchase-cost-status.repository.ts:readPurchaseCostStatus`. Both the initial experiment and quiet rerun executed 100 product/packaging revision reads returning 1,000 rows, 100 descendant-lot reads returning 50,000 rows, and 100 application-lot reads returning 100,000 rows for posted-100 health. The real migration-222 supplier revision/application indexes were installed; their SQL fingerprints, call counts and row volumes were unchanged between versions. This fixture links all 100 shipments to the same five PO lines, so supplier evidence is repeatedly read within one snapshot. The bounded one-entry supplier reuse described above was added after these measurements; its final measured result is separate from the preserved initial and quiet-pair tables. Broader reuse/batching must preserve canonical validation, complete evidence, per-review limits, immutable caller results and transaction/page lifetime. The PO summary already reads supplier status once; its remaining per-shipment live-source fingerprint preparation is a distinct follow-up and is unchanged by this reuse.
+The long volume experiment is explicitly operator-invoked local verification. It is not registered as an ordinary CI test. The connected CI suite remains four guarded shards; local final test durations were approximately 3.5–3.7 minutes per shard, excluding hosted setup time.
 
 ## Validation and remaining boundaries
 
-Final run results are recorded with commands and source fingerprints under the primary workspace's `outputs/procurement-connected-verification-2026-10-25`. Earlier quantity-ledger and receiving-close fixture regressions passed 47 and 42 PostgreSQL cases respectively; those runs predate the current-main merge and are distinct from final merged-source validation.
+The [final validation manifest](evidence/procurement-connected-validation-20261025.json) binds the following local results to code commit `5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca` and pinned main `31043e158a696fb1506d211be074e8e9bd8cf25b`:
 
-Historical PO 144, PO 149 and shipments 95/97 remain a separate evidence/repair queue. No live records were read or changed. Foreign-currency support and mixed/converted-source returns remain separately scoped capabilities with their existing guards.
+| Verification | Passed | Scope |
+| --- | ---: | --- |
+| Connected desktop/mobile browser cases | 46 | Real built application, login/session store, HTTP owners and active quantity ledger; four shards, no skipped/flaky cases or reporter errors |
+| Mocked desktop/mobile screen cases | 308 | Ten procurement groups, including AP availability and invalid-money recovery; UI/spec/build inputs stayed unchanged |
+| PostgreSQL regression cases | 245 | Receiving/cost application 209, controlled full cost flow 4, reporting 25 and work lists 7 |
+| Unit cases | 5,097 | Procurement/inventory/shared owners and the explicitly recorded additional unit files |
+| Official CI guards | 420 | Eleven guard files, without relaxing assertions or timeouts |
+| Typechecks | 5 | Application, server tests, client tests, connected tests and procurement browser specs |
+| Production build | 1 | Final committed code; completed after browser children had closed |
+| Migration policy | 557 identities | Validated against pinned main; no migration files changed in this batch |
+
+The manifest preserves source boundaries rather than treating every earlier run as final. Runtime units and application/connected types ran against frozen H3; server types and guards ran against H4, which differs only by the optional dependency-cache type declaration. The later four-file commit exactly contains both tested patches, verified with full patch and per-file hashes. The 308 screen cases used unchanged UI/spec/build inputs while backend-only files changed. The final 46 connected cases and build ran at clean committed code. During the PostgreSQL suites, one unrelated, unexecuted guard test changed; every executed backend/schema/fixture input and all 20 recorded cost/money owners remained unchanged and match the committed code. Final documentation/evidence changes do not change those tested runtime inputs.
+
+All 46 connected fixture databases and the four final regression databases were removed after confirmed child exits. The post-run audit found no owned database, client connection or scoped test-server process remaining. Earlier failed discovery runs remain diagnostic evidence: they are not counted as passing acceptance, and the cause of two earlier forced-shutdown failures was not established. The final isolated run required graceful teardown and passed without accepting fallback cleanup.
+
+The final read-only coherence review of the changed runtime and CI owners found no additional actionable regression. This is a review result, not proof of absence of all possible defects. Earlier quantity-ledger and receiving-close fixture runs (47 and 42 PostgreSQL cases) predate the final current-main integration and remain separate evidence.
+
+### Confirmed open system and performance boundaries
+
+1. **AP common-snapshot guarantee remains open.** `ap-ledger.service.ts:getApSummary` captures one aging clock at line 2408, then performs six independent global-database reads at lines 2416, 2495-2502, 2513, 2518 and 2539. There is no common transaction around lines 2407-2583; `ap-ledger.routes.ts` calls it directly at line 550. Outstanding and aging values share the first query result, but the complete dashboard response is not guaranteed to represent one database snapshot. No concurrent mixed-response incident was reproduced. The next corrective work is a shared read-only snapshot plus a deterministic two-connection settlement/credit concurrency test; no business rule needs to be invented.
+2. **Posted PO costing still prepares current sources per linked shipment.** `po-shipment-cost-summary.repository.ts:readPoShipmentCosts` loads all non-cancelled linked shipments and passes them to `readShipmentCostPostingEvidence`; that owner calls `readCurrentShipmentSourceFingerprints` once for each shipment that requires freshness. Its supplier-status read already occurs once per PO. The final performance evidence records the remaining query count for the 100-shipment posted scenario. No production latency target or violation has been established. Further batching must preserve per-shipment identity, full evidence and current-source validation.
+3. **Health header pagination does not bound every child collection.** `shipment-health-evidence.repository.ts:readShipmentHealthEvidence` validates at most 100 shipment headers, then retains all matching lines, charges, allocations, lots, snapshots and PO sources. PostgreSQL array parameters prevent bind-count overflow; they do not cap child-row memory or total read work. Supplier-review bounds apply later. `getLandedCostHealth` scans every eligible page; the requested display limit does not limit that scan. Extreme child-volume and large sales/forecast capacity remain unverified. A safe continuation must preserve complete evidence instead of silently truncating it.
+
+### What remains unproven
+
+Hosted CI, Linux/PostgreSQL-16 execution, deployment, actual production permission assignments and production latency are not established by these local Windows/PostgreSQL-17 results. The connected fixture does not execute a complete release migration/bootstrap sequence or external provider dispatch. AP connected work-list coverage uses empty payment/credit/return lists and real summary/navigation reads; it is not a connected posted-payment, supplier-credit or supplier-return detail journey. Separate financial integration and mocked-screen checks must not be described as that missing connected proof.
+
+The manual legacy auto-draft alias intentionally now denies non-admin callers with HTTP 403. Both known repository UI callers already use the administrator-gated endpoint; external legacy callers were not inspected. Session-derived frontend grants can become stale; each API remains authoritative and the revocation recovery case verifies retained intent and safe replay.
+
+### Historical cleanup remains separate
+
+Historical PO 144, PO 149 and shipments 95/97 remain a separate supplier-evidence and repair queue. No live records were read or changed. Foreign-currency support and mixed/converted-source returns remain separately scoped capabilities with their existing guards.
+
+## Verified source references
+
+These references identify the reviewed owners at the validated code commit. The detailed manifest records file hashes and the acceptance boundaries above.
+
+| Owner or boundary | Source |
+| --- | --- |
+| RECEIVING_READ_PERMISSIONS | [client/src/lib/procurement-access.ts:3](../client/src/lib/procurement-access.ts#L3) |
+| ProtectedRoute | [client/src/App.tsx:147](../client/src/App.tsx#L147) |
+| SidebarContent / visibleChildren | [client/src/components/layout/AppShell.tsx:449](../client/src/components/layout/AppShell.tsx#L449) |
+| updateChargesMutation | [client/src/pages/PurchaseOrderDetail.tsx:2506](../client/src/pages/PurchaseOrderDetail.tsx#L2506) |
+| PATCH incoterms-charges registration | [server/modules/procurement/purchase-order.routes.ts:482](../server/modules/procurement/purchase-order.routes.ts#L482) |
+| createVariantMutation | [client/src/pages/Receiving.tsx:1095](../client/src/pages/Receiving.tsx#L1095) |
+| POST create-variant registration | [server/modules/procurement/receiving.routes.ts:266](../server/modules/procurement/receiving.routes.ts#L266) |
+| ReceivingService.createVariantFromLine | [server/modules/procurement/receiving.service.ts:1902](../server/modules/procurement/receiving.service.ts#L1902) |
+| requireManualAutoDraftAdmin | [server/modules/procurement/purchasing-recommendation.routes.ts:67](../server/modules/procurement/purchasing-recommendation.routes.ts#L67) |
+| canRunAutoDraft / runAutoDraftMutation | [client/src/pages/PurchasingDashboard.tsx:648](../client/src/pages/PurchasingDashboard.tsx#L648) |
+| APDashboard | [client/src/pages/APDashboard.tsx:38](../client/src/pages/APDashboard.tsx#L38) |
+| apSummarySchema | [shared/procurement/ap-summary.ts:11](../shared/procurement/ap-summary.ts#L11) |
+| GET AP summary registration | [server/modules/procurement/ap-ledger.routes.ts:548](../server/modules/procurement/ap-ledger.routes.ts#L548) |
+| formatPaymentAmount | [client/src/lib/ap-payment-command.ts:126](../client/src/lib/ap-payment-command.ts#L126) |
+| evaluateDollarInput | [client/src/lib/exact-money-input.ts:35](../client/src/lib/exact-money-input.ts#L35) |
+| dollarsToCents | [shared/utils/money.ts:30](../shared/utils/money.ts#L30) |
+| handleCreate | [client/src/pages/APInvoices.tsx:132](../client/src/pages/APInvoices.tsx#L132) |
+| readShipmentHealthEvidence | [server/modules/procurement/shipment-health-evidence.repository.ts:61](../server/modules/procurement/shipment-health-evidence.repository.ts#L61) |
+| readShipmentHealthPage | [server/modules/procurement/shipment-tracking.service.ts:1410](../server/modules/procurement/shipment-tracking.service.ts#L1410) |
+| createPurchaseCostStatusSnapshotReader | [server/modules/procurement/purchase-cost-status-snapshot.repository.ts:32](../server/modules/procurement/purchase-cost-status-snapshot.repository.ts#L32) |
+| normalizePurchaseCostStatusLineIds | [server/modules/procurement/purchase-cost-status.repository.ts:36](../server/modules/procurement/purchase-cost-status.repository.ts#L36) |
+| readShipmentCostReviewInTransaction | [server/modules/procurement/shipment-cost-review.repository.ts:19](../server/modules/procurement/shipment-cost-review.repository.ts#L19) |
+| allocatedCentsPerUnitMills | [server/modules/procurement/shipment-tracking.service.ts:202](../server/modules/procurement/shipment-tracking.service.ts#L202) |
+| formatMillsOrDash / AllocationAmountCell | [client/src/pages/InboundShipmentDetail.tsx:297](../client/src/pages/InboundShipmentDetail.tsx#L297) |
