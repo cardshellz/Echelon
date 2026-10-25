@@ -40,7 +40,8 @@ describe("canonical channel fulfillment projector", () => {
     expect(statements[3]).toContain("authority_fulfillable_quantity");
     expect(statements[4]).toContain("oms_order.status IN ('cancelled', 'refunded')");
     expect(statements[4]).toContain("COALESCE(oms_order.financial_status, '') = 'voided'");
-    expect(statements[4]).toContain("COALESCE(oms_order.channel_id, 0) = ANY(");
+    expect(statements[4]).toContain("merchandise_channel.id=oms_order.channel_id");
+    expect(statements[4]).toContain("merchandise_channel.provider=");
     expect(statements[2]).toContain("order_item.requires_shipping = 1");
     expect(statements[2]).toContain("NOT LIKE '%_fulfillment_receipt'");
   });

@@ -19,6 +19,9 @@ import {
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const prerequisites = `CREATE SCHEMA oms;
+CREATE SCHEMA channels;
+CREATE TABLE channels.channels(id integer PRIMARY KEY,provider text NOT NULL);
+INSERT INTO channels.channels VALUES(36,'shopify'),(37,'ebay'),(38,'shopify');
 CREATE TABLE oms.oms_orders(id integer PRIMARY KEY,channel_id integer,status text,financial_status text);
 INSERT INTO oms.oms_orders VALUES(1,36,'confirmed','paid'),(2,36,'confirmed','refunded'),
  (3,36,'refunded','refunded'),(4,36,'cancelled','paid'),(5,37,'confirmed','refunded'),(6,36,'shipped','paid');
@@ -59,26 +62,20 @@ INSERT INTO oms.oms_order_lines VALUES(1,3,3,3);`;
         (row) => row.id,
       );
     }
-    it("preserves disabled channels and limits enabled cleanup to commercial cancellations", async () => {
+    it("uses Shopify merchandise cancellation without rollout configuration and preserves other providers", async () => {
       vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", "false");
-      expect(await cancelled()).toEqual([2, 3, 4, 5]);
-      vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", "true");
-      vi.stubEnv("OMS_CHANNEL_MERCHANDISE_CHANNEL_IDS", "36");
       expect(await cancelled()).toEqual([4, 5]);
       expect(await cancelled(true)).toEqual([4, 5, 6]);
     });
     it.each([
-      [false, 36, "refunded", true],
-      [true, 36, "refunded", false],
-      [true, 37, "refunded", true],
-      [true, 36, "voided", true],
-      [false, 36, "voided", true],
-      [true, 36, "paid", false],
-      [true, null, "refunded", true],
-      [true, null, null, false],
-    ] as const)("keeps physical read/projection gates separate: enabled=%s channel=%s cash=%s", async (enabled, channelId, financialStatus, blocked) => {
-      vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", String(enabled));
-      vi.stubEnv("OMS_CHANNEL_MERCHANDISE_CHANNEL_IDS", "36");
+      [36, "refunded", false],
+      [38, "refunded", false],
+      [37, "refunded", true],
+      [36, "voided", true],
+      [36, "paid", false],
+      [null, "refunded", true],
+      [null, null, false],
+    ] as const)("keeps physical read/projection gates separate: channel=%s cash=%s", async (channelId, financialStatus, blocked) => {
       const query = new PgDialect().sqlToQuery(sql`SELECT ${omsWarehouseFinancialStopSql(
         sql`${channelId}::integer`, sql`${financialStatus}::text`,
       )} AS blocked`);

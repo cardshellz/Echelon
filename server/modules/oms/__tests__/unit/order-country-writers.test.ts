@@ -312,6 +312,7 @@ describe("OMS to WMS country boundary", () => {
       };
       scriptedSelect([[order], [], [line], []]);
       harness.database.execute
+        .mockResolvedValueOnce({ rows: [{ provider: "shopify" }] })
         .mockResolvedValueOnce({ rows: [] })
         .mockResolvedValueOnce({
           rows: [

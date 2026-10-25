@@ -170,8 +170,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_provider_requests")).rows[0].count).toBe(0);
 
     // Measurements are explicit test facts, never defaults inferred from the SKU.
-    await database.pool.query(`UPDATE catalog.product_variants SET length_mm=254,width_mm=177.8,height_mm=50.8,
-      shipping_package_type='parcel' WHERE id=101`);
+    await database.pool.query(`UPDATE catalog.product_variants SET length_mm=254,width_mm=177.8,height_mm=50.8 WHERE id=101`);
     timestamp += 60_000;
     expect((await service.enqueue(source, "user:package-reviewer", randomUUID(), "sync")).id).toBe(job.id);
     await service.processDue(1, job.id);
@@ -180,12 +179,14 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(runtime.provider.snapshot().offer).toMatchObject({ status: "PUBLISHED", listingId: "listing-20", availableQuantity: 17,
       listingPolicies: { fulfillmentPolicyId: "store-shipping", returnPolicyId: "product-returns", paymentPolicyId: "product-payment" } });
     expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 100, unit: "GRAM" },
-      dimensions: { length: 25.4, width: 17.78, height: 5.08, unit: "CENTIMETER" }, packageType: "PACKAGE_THICK_ENVELOPE" });
+      dimensions: { length: 25.4, width: 17.78, height: 5.08, unit: "CENTIMETER" } });
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).not.toHaveProperty("packageType");
     expect(runtime.provider.writes.filter(write => write.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group")).toHaveLength(1);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_jobs")).rows[0].count).toBe(1);
     expect((await database.pool.query("SELECT actor,changes FROM public.audit_events WHERE action='ebay.business_policies.changed'")).rows)
       .toMatchObject([{ actor: "user:policy-reviewer", changes: { before: { fulfillmentPolicyId: "deleted-shipping" }, after: { fulfillmentPolicyId: null } } }]);
     await service.processDue(1, job.id);
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).not.toHaveProperty("packageType");
     expect(runtime.provider.writes.filter(write => write.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group")).toHaveLength(1);
   }, 30_000);
 });

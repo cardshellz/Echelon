@@ -3,6 +3,15 @@ import { resolveEbayListingIssue, safeListingDiagnostic } from "@shared/ebay-lis
 import { ebayListingIssueSchema } from "@shared/types/ebay-listing-issue";
 
 describe("shared eBay issue actions", () => {
+  it("offers normal sync recovery for a historical package-type blocker and retains its original diagnostic", () => {
+    const result = resolveEbayListingIssue({ code: "CHANNEL_LISTING_VALIDATION_FAILED", state: "needs_attention", productId: 20,
+      message: "Shipping package type is required for P5. Correct the saved source before syncing.",
+      validation: { field: "package_type", reason: "required", productId: 20, variantId: 101, variantSku: "P5" } });
+    expect(result).toMatchObject({ retryable: true, action: { kind: "retry_sync", label: "Retry Sync" } });
+    expect(result.action).not.toHaveProperty("href");
+    expect(result.message).toContain("no longer required");
+    expect(result.details).toContainEqual({ label: "Earlier diagnostic", value: "Shipping package type is required for P5. Correct the saved source before syncing." });
+  });
   it("offers the normal checked sync for an invalid prepared draft, without telling the operator to repair a mapping", () => {
     const result = resolveEbayListingIssue({ code: "EBAY_SYNC_DRAFT_SCOPE_INVALID", state: "needs_attention", productId: 1,
       message: "The prepared update contains a different listing, group or SKU identity." });

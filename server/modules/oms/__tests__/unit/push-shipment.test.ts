@@ -819,7 +819,7 @@ describe("pushShipment :: happy path", () => {
     const sent = request.mock.calls.find(([, init]) => init?.method === "POST")!;
     expect(JSON.parse(sent[1].body).orderStatus).toBe(on_hold === 1 ? "on_hold" : "awaiting_shipment");
   });
-  it.each(["verified", "unpaid_units", "native_cancelled", "disabled"])(
+  it.each(["verified", "unpaid_units", "native_cancelled", "unsupported_provider"])(
     "ties refunded-payment shipping to channel quantities: %s", async kind => {
       const version = "2026-10-24T12:00:00.000Z";
       const mock = makeDb([
@@ -827,6 +827,7 @@ describe("pushShipment :: happy path", () => {
         { rows: [okOrder({ channel_id: 36, oms_fulfillment_order_id: "20", financial_status: "refunded", amount_paid_cents: 0 })] },
         { rows: [{ non_shipping_total_cents: 0 }] }, { rows: [okItem()] },
       ], { executeOverride: text => {
+        if (text.includes("SELECT provider FROM channels.channels")) return { rows: [{ provider: kind === "unsupported_provider" ? "ebay" : "shopify" }] };
         if (text.includes("SELECT channel_id,external_order_id,status")) return { rows: [{ channel_id: 36, external_order_id: "1",
           status: "confirmed", financial_status: "refunded", cancelled_at: null }] };
         if (text.includes("FROM oms.oms_order_lines")) return { rows: [{ externalLineItemId: "101", paidQuantity: kind === "unpaid_units" ? 0 : 2,
@@ -840,7 +841,7 @@ describe("pushShipment :: happy path", () => {
         lines: [{ id: "gid://shopify/LineItem/101", quantity: 2, currentQuantity: 2, unfulfilledQuantity: 2 }] }));
       const fetchMock = mockFetchForPush({ orderId: 555000 }); globalThis.fetch = fetchMock as typeof fetch;
       const service = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock,
-        useChannelMerchandise: () => kind !== "disabled", readChannelMerchandise: read });
+        readChannelMerchandise: read });
       if (kind === "verified") {
         await service.pushShipment(9001);
         expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
@@ -848,7 +849,7 @@ describe("pushShipment :: happy path", () => {
       } else {
         await expect(service.pushShipment(9001)).rejects.toThrow();
         expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
-        if (kind === "disabled") expect(read).not.toHaveBeenCalled();
+        if (kind === "unsupported_provider") expect(read).not.toHaveBeenCalled();
       }
     },
   );

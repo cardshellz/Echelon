@@ -20,19 +20,22 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     await database.pool.query(await readFile("migrations/900000030000019110001_catalog_shipping_package_type.sql", "utf8"));
   });
   afterEach(async () => { await database?.close(); });
+  const retire = async () => database.pool.query(await readFile("migrations/900000032000019150001_retire_catalog_shipping_package_type.sql", "utf8"));
   const packageRow = async () => (await database.pool.query("SELECT weight_grams,length_mm,width_mm,height_mm,shipping_package_type FROM catalog.product_variants WHERE id=101")).rows[0];
 
   it("adds no invented facts and preserves every existing decimal measurement", async () => {
+    await retire();
     expect(await packageRow()).toEqual({ weight_grams: "3175.25", length_mm: "152.40", width_mm: "101.60", height_mm: "25.40", shipping_package_type: null });
     expect((await database.pool.query("SELECT * FROM marketplace.listing_intent_changes")).rowCount).toBe(0);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM pg_trigger WHERE tgrelid='catalog.product_variants'::regclass AND tgname='listing_intent_invalidation'")).rows[0].count).toBe(1);
   });
   it("captures a package correction once, fans out through the existing shared owner, and deduplicates re-expansion", async () => {
-    const patch = serializePackageAttributeUpdates(coercePackageAttributesOnVariantPayload({ shippingPackageType: "parcel" }));
-    await database.pool.query("UPDATE catalog.product_variants SET shipping_package_type=$1 WHERE id=101", [patch.shippingPackageType]);
+    await retire();
+    const patch = serializePackageAttributeUpdates(coercePackageAttributesOnVariantPayload({ lengthMm: 200 }));
+    await database.pool.query("UPDATE catalog.product_variants SET length_mm=$1 WHERE id=101", [patch.lengthMm]);
     const changes = (await database.pool.query("SELECT * FROM marketplace.listing_intent_changes")).rows;
     expect(changes).toHaveLength(1);
-    expect(changes[0].changed_fields).toEqual(["shipping_package_type"]);
+    expect(changes[0].changed_fields).toEqual(["length_mm"]);
     const repository = new PostgresListingIntentPropagationRepository(database.pool);
     await Promise.all([repository.expand(20, now), repository.expand(20, now)]);
     const rows = (await database.pool.query("SELECT destination_key,product_id FROM marketplace.listing_intent_deliveries ORDER BY destination_key")).rows;
@@ -41,13 +44,14 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(rows.every(row => row.product_id === 20)).toBe(true);
     await repository.expand(20, now);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM marketplace.listing_intent_deliveries")).rows[0].count).toBe(rows.length);
-    expect(await packageRow()).toMatchObject({ weight_grams: "3175.25", length_mm: "152.40", shipping_package_type: "parcel" });
+    expect(await packageRow()).toMatchObject({ weight_grams: "3175.25", length_mm: "200.00", shipping_package_type: null });
   });
   it("retains measurement propagation, ignores no-op saves, and rolls back source and intent together", async () => {
+    await retire();
     const client = await database.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("UPDATE catalog.product_variants SET length_mm=200,shipping_package_type='letter' WHERE id=101");
+      await client.query("UPDATE catalog.product_variants SET length_mm=200 WHERE id=101");
       await client.query("ROLLBACK");
     } finally { client.release(); }
     expect((await database.pool.query("SELECT * FROM marketplace.listing_intent_changes")).rowCount).toBe(0);
@@ -56,5 +60,27 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     const changes = (await database.pool.query("SELECT changed_fields FROM marketplace.listing_intent_changes")).rows;
     expect(changes).toEqual([{ changed_fields: ["height_mm", "length_mm", "width_mm"] }]);
     await expect(database.pool.query("UPDATE catalog.product_variants SET shipping_package_type='guess' WHERE id=101")).rejects.toMatchObject({ code: "23514" });
+  });
+  it("retires only type invalidation while retaining historical values and intent evidence", async () => {
+    await database.pool.query("UPDATE catalog.product_variants SET shipping_package_type='letter' WHERE id=101");
+    const before = await packageRow();
+    const history = (await database.pool.query("SELECT * FROM marketplace.listing_intent_changes ORDER BY id")).rows;
+    const argumentsBefore = (await database.pool.query("SELECT encode(tgargs,'escape') AS args FROM pg_trigger WHERE tgrelid='catalog.product_variants'::regclass AND tgname='listing_intent_invalidation'")).rows[0].args.split("\\000");
+    await retire();
+    await retire();
+    expect(await packageRow()).toEqual(before);
+    expect((await database.pool.query("SELECT * FROM marketplace.listing_intent_changes ORDER BY id")).rows).toEqual(history);
+    const argumentsAfter = (await database.pool.query("SELECT encode(tgargs,'escape') AS args FROM pg_trigger WHERE tgrelid='catalog.product_variants'::regclass AND tgname='listing_intent_invalidation'")).rows[0].args.split("\\000");
+    expect(argumentsAfter).toEqual(argumentsBefore.map((value: string, index: number) => index === 1
+      ? value.split(",").filter(field => field !== "shipping_package_type").sort().join(",") : value));
+    expect(() => coercePackageAttributesOnVariantPayload({ shippingPackageType: "parcel" })).toThrow(/no longer a catalog field/);
+    expect(await packageRow()).toEqual(before);
+    // Even an old deployment/database writer cannot enqueue work for this retired field.
+    await database.pool.query("UPDATE catalog.product_variants SET shipping_package_type='parcel' WHERE id=101");
+    expect((await database.pool.query("SELECT * FROM marketplace.listing_intent_changes ORDER BY id")).rows).toEqual(history);
+    await database.pool.query("UPDATE catalog.product_variants SET length_mm=200 WHERE id=101");
+    const after = (await database.pool.query("SELECT * FROM marketplace.listing_intent_changes ORDER BY id")).rows;
+    expect(after).toHaveLength(history.length + 1);
+    expect(after.at(-1).changed_fields).toEqual(["length_mm"]);
   });
 });

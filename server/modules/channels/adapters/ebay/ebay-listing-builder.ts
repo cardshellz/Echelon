@@ -168,7 +168,7 @@ export class EbayListingBuilder {
             productId: listing.productId,
             variantId: variant.variantId,
             facts: { weightGrams: variant.weightGrams, ...variant.package },
-            requirements: requirements ?? { weight: options.requirePackageWeight === true, dimensions: false, packageType: false },
+            requirements: requirements ?? { weight: options.requirePackageWeight === true, dimensions: false },
           },
           payload: this.buildSingleInventoryItem(variant, listing, productAspects, resolvedOptions),
         };

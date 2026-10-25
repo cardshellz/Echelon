@@ -77,6 +77,7 @@ suite.sequential("existing shipment inventory demand reconciliation", () => {
   beforeEach(async () => {
     context = await createQuantityLedgerTestContext(databaseUrl, disposable);
     await installWmsReadColumns(context.pool);
+    await context.pool.query("INSERT INTO channels.channels(id,name,provider) VALUES(36,'Synthetic Shopify','shopify')");
     await context.open();
     // Promote the fixture's reviewed definitions through their real owner;
     // never bypass immutable definitions or disable configuration guards.
@@ -298,7 +299,7 @@ suite.sequential("existing shipment inventory demand reconciliation", () => {
     await context.pool.query("INSERT INTO oms.order_edit_operations VALUES($1,2,'synchronizing',$2::jsonb)", [operationId, JSON.stringify(operation)]);
     await context.pool.query(`INSERT INTO oms.order_edit_events(operation_id,action,after_state)
       VALUES($1,'stopped_refund_warehouse_restored','{"restoredOrderIds":[2]}')`, [operationId]);
-    reconciler = new WmsSyncService({ reservation: reservations, useChannelMerchandise: () => true, clock: () => now } as unknown as
+    reconciler = new WmsSyncService({ reservation: reservations, clock: () => now } as unknown as
       ConstructorParameters<typeof WmsSyncService>[0]) as unknown as ReconciliationPort;
     for (const table of [outboundShipments, outboundShipmentItems, webhookRetryQueue, omsOrderEvents]) {
       const definition = getTableConfig(table);

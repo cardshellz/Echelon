@@ -298,7 +298,6 @@ const service = new OrderEditService(
   (event) => {
     report.lastDiagnostic = event.code;
   },
-  undefined, undefined, undefined, undefined, () => true,
 );
 
 try {
@@ -546,7 +545,6 @@ try {
   // remaining settled payment. Rewards here are a zero-points synthetic port.
   const noRewards = { fingerprint: "0".repeat(64), returnedPoints: "0.00", deductedEarnedPoints: "0.00", settled: false };
   const cancellation = new OrderCancellationService({ store, provider, warehouse,
-    allowSettledRefundBalance: () => true,
     rewards: { reviewCancellation: async () => noRewards, settleCancellation: async () => ({ ...noRewards, settled: true }) },
     clock: () => new Date(), uuid: randomUUID, report: event => { report.cancellationDiagnostic = event.code; } });
   const review = await cancellation.review(4, 1);

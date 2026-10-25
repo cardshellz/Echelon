@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
-import { channelMerchandiseAuthorityEnabled } from "./channel-merchandise-rollout";
+import { channelMerchandiseCapabilitySql } from "./infrastructure/channel-merchandise-policy";
 import { cancelOrder } from "../orders/order-status-core";
 import type { OmsOpsIssue } from "./ops-health.service";
 import {
@@ -1837,7 +1837,8 @@ export async function remediateOmsFlowIssue(
     let cancelledByThisRemediation = false;
     const updated = await withOptionalTransaction(db, async (tx) => {
       const omsResult: any = await tx.execute(sql`
-        SELECT oo.status, oo.financial_status, oo.channel_id
+        SELECT oo.status, oo.financial_status, oo.channel_id,
+          ${channelMerchandiseCapabilitySql(sql`oo.channel_id`)} AS uses_channel_quantities
         FROM oms.oms_orders oo
         JOIN wms.orders wo ON (
              (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
@@ -1852,8 +1853,7 @@ export async function remediateOmsFlowIssue(
       if (!omsRow) return false;
 
       const isCancelled = omsRow.status === "cancelled"
-        || (!(Number.isSafeInteger(Number(omsRow.channel_id)) && Number(omsRow.channel_id)>0
-            && channelMerchandiseAuthorityEnabled(Number(omsRow.channel_id)))
+        || (!omsRow.uses_channel_quantities
           && (omsRow.status === "refunded" || omsRow.financial_status === "refunded"));
       if (!isCancelled) {
         return false;

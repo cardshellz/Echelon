@@ -4741,8 +4741,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       UPDATE oms.oms_orders SET financial_status='refunded';
       INSERT INTO oms.order_line_adjustments(order_id,order_line_id,adjustment_type,restock_policy,quantity)
         SELECT order_id,id,'refund','no_restock',1 FROM oms.oms_order_lines;`);
-    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", "true");
-    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_CHANNEL_IDS", String(order.channel_id));
+    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", "false");
     try {
       const inventoryBefore = (await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows;
       const results = await Promise.all([repository.materializePhysicalPackage(firstInput), repository.materializePhysicalPackage(firstInput)]);

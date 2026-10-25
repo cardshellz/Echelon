@@ -1,11 +1,9 @@
-import { shippingPackageTypeSchema, type ShippingPackageType } from "@shared/catalog/shipping-package";
-
 export const PACKAGE_ATTRIBUTE_KEYS = ["weightGrams", "lengthMm", "widthMm", "heightMm"] as const;
 export const MAX_PACKAGE_ATTRIBUTE_VALUE = 1_000_000_000;
 export const MAX_BULK_PACKAGE_ATTRIBUTE_ROWS = 500;
 
 export type PackageAttributeKey = typeof PACKAGE_ATTRIBUTE_KEYS[number];
-export type PackageAttributeUpdates = Partial<Record<PackageAttributeKey, number | null>> & { shippingPackageType?: ShippingPackageType | null };
+export type PackageAttributeUpdates = Partial<Record<PackageAttributeKey, number | null>>;
 
 /**
  * Drizzle expects strings for numeric(10,2) columns. Convert validated
@@ -13,9 +11,8 @@ export type PackageAttributeUpdates = Partial<Record<PackageAttributeKey, number
  */
 export function serializePackageAttributeUpdates(
   updates: PackageAttributeUpdates,
-): Partial<Record<PackageAttributeKey, string | null>> & { shippingPackageType?: ShippingPackageType | null } {
-  const serialized: Partial<Record<PackageAttributeKey, string | null>> & { shippingPackageType?: ShippingPackageType | null } = {};
-  if (Object.prototype.hasOwnProperty.call(updates, "shippingPackageType")) serialized.shippingPackageType = updates.shippingPackageType;
+): Partial<Record<PackageAttributeKey, string | null>> {
+  const serialized: Partial<Record<PackageAttributeKey, string | null>> = {};
   for (const key of PACKAGE_ATTRIBUTE_KEYS) {
     if (Object.prototype.hasOwnProperty.call(updates, key)) {
       const value = updates[key];
@@ -34,11 +31,11 @@ export class PackageAttributeValidationError extends Error {
   readonly statusCode = 400;
 }
 
-function packageTypeUpdate(source: Record<string, unknown>): { shippingPackageType?: ShippingPackageType | null } {
-  if (!Object.prototype.hasOwnProperty.call(source, "shippingPackageType")) return {};
-  const result = shippingPackageTypeSchema.nullable().safeParse(source.shippingPackageType);
-  if (!result.success) throw new PackageAttributeValidationError("Choose a supported shipping package type, or leave it unspecified.");
-  return { shippingPackageType: result.data };
+/** Reject old clients explicitly: a removed control must not remain a hidden writer. */
+function assertNoRetiredPackageType(source: Record<string, unknown>): void {
+  if (["shippingPackageType", "shipping_package_type"].some(key => Object.prototype.hasOwnProperty.call(source, key))) {
+    throw new PackageAttributeValidationError("Shipping package type is no longer a catalog field. Refresh the page and save again; existing channel settings are preserved.");
+  }
 }
 
 /**
@@ -75,7 +72,8 @@ export function extractPackageAttributeUpdates(input: unknown): PackageAttribute
   }
 
   const source = input as Record<string, unknown>;
-  const updates: PackageAttributeUpdates = packageTypeUpdate(source);
+  assertNoRetiredPackageType(source);
+  const updates: PackageAttributeUpdates = {};
   for (const key of PACKAGE_ATTRIBUTE_KEYS) {
     if (Object.prototype.hasOwnProperty.call(source, key)) {
       updates[key] = parsePackageAttributeValue(source[key], key);
@@ -93,7 +91,8 @@ export function coercePackageAttributesOnVariantPayload(input: unknown): Package
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
 
   const source = input as Record<string, unknown>;
-  const updates: PackageAttributeUpdates = packageTypeUpdate(source);
+  assertNoRetiredPackageType(source);
+  const updates: PackageAttributeUpdates = {};
   for (const key of PACKAGE_ATTRIBUTE_KEYS) {
     if (Object.prototype.hasOwnProperty.call(source, key)) {
       updates[key] = parsePackageAttributeValue(source[key], key);
