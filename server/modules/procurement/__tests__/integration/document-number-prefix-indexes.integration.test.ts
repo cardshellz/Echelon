@@ -13,7 +13,7 @@ import { fixtureTable } from "./shipment-line-fixture";
 
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
-const MIGRATION = readFileSync(resolve(process.cwd(), "docs/sql/procurement-document-number-prefix-indexes.sql"), "utf8");
+const MIGRATION = readFileSync(resolve(process.cwd(), "migrations/900000031000019120001_procurement_document_number_prefix_indexes.sql"), "utf8");
 const MIGRATION_HASH = createHash("sha256").update(MIGRATION).digest("hex");
 const SOURCES = [
   { kind: "purchase_order", label: "PO", table: "procurement.purchase_orders", column: "po_number", schema: schema.purchaseOrders,

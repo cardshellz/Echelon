@@ -26,7 +26,7 @@ This does not unify unrelated invoice lifecycle clocks, PO/shipment receipt data
 
 ## Prefix query indexes
 
-`docs/sql/procurement-document-number-prefix-indexes.sql` adds five full, nonunique `varchar_pattern_ops` indexes. The numeric query includes historical cancelled/voided rows, so active-only number indexes cannot supply all its evidence. A disposable local benchmark seeded 100,000 historical and 1,000 same-day rows for each of the five sources. The actual SQL artifact changed all five plans from full table scans to the intended index-only scans of 1,000 same-day rows.
+`migrations/900000031000019120001_procurement_document_number_prefix_indexes.sql` adds five full, nonunique `varchar_pattern_ops` indexes. The numeric query includes historical cancelled/voided rows, so active-only number indexes cannot supply all its evidence. A disposable local benchmark seeded 100,000 historical and 1,000 same-day rows for each of the five sources. The actual SQL artifact changed all five plans from full table scans to the intended index-only scans of 1,000 same-day rows.
 
 | Source | Read p95 before | Read p95 after |
 | --- | ---: | ---: |
@@ -38,9 +38,9 @@ This does not unify unrelated invoice lifecycle clocks, PO/shipment receipt data
 
 These are synthetic local measurements, not production latency or deployment-duration guarantees. The benchmark's recorded helper hash predates restoration of the legacy receipt/payment lock identities; its read query and index SQL are unchanged. End-to-end helper timings from that run must not be attributed to the final lock implementation. Allocation still evaluates the selected day's suffix evidence; this is not constant-time allocation for unlimited daily volume. The benchmark does not measure purchasing health or cost-summary queries.
 
-The pending SQL SHA256 is `79a986cc8ddc633ab4312d30da78ac78e90a34540945d3946cf8051357dbc3c8`. Applying it twice preserves all seeded row counts and ordered-row digests. Its catalog guard rejects incompatible same-name indexes, and the real migration-executor test proves transaction rollback leaves no partial indexes or migration receipt. Matching index definitions are declared in the shared Drizzle schemas.
+The committed SQL allocated to draft PR #1912 is byte-for-byte identical to the approved Git blob: SHA256 `986b9b6511eafe69f934c6d41cabc60e248492d8020c5e04556505e3e24837d7` (3,529 LF bytes). The tested Windows working copy is also preserved byte-for-byte: SHA256 `79a986cc8ddc633ab4312d30da78ac78e90a34540945d3946cf8051357dbc3c8` (3,596 CRLF bytes). Git line-ending normalization accounts for the two recorded hashes. Applying it twice preserves all seeded row counts and ordered-row digests. Its catalog guard rejects incompatible same-name indexes, and the real migration-executor test proves transaction rollback leaves no partial indexes or migration receipt. Matching index definitions are declared in the shared Drizzle schemas.
 
-Release migrations run inside a transaction, so concurrent index creation cannot be used. Ordinary index creation may wait for writers and then blocks writes to the affected tables until the migration commits; reads remain available. The runner's lock timeout and transaction rollback remain applicable. Live table sizes and deployment duration are unknown because no live data was accessed. Only disposable databases execute the SQL during development. PR-generated migration allocation is a separate publication step and must preserve the tested SQL bytes.
+Release migrations run inside a transaction, so concurrent index creation cannot be used. Ordinary index creation may wait for writers and then blocks writes to the affected tables until the migration commits; reads remain available. The runner's lock timeout and transaction rollback remain applicable. Live table sizes and deployment duration are unknown because no live data was accessed. Only disposable databases execute the SQL during development. PR #1912 allocated the SQL under its generated migration ID without changing the tested bytes. Publication and migration allocation do not apply it to a live database.
 
 ## Test transport
 
