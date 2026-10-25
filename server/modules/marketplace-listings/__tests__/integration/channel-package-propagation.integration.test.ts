@@ -28,11 +28,11 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect((await database.pool.query("SELECT count(*)::int AS count FROM pg_trigger WHERE tgrelid='catalog.product_variants'::regclass AND tgname='listing_intent_invalidation'")).rows[0].count).toBe(1);
   });
   it("captures a package correction once, fans out through the existing shared owner, and deduplicates re-expansion", async () => {
-    const patch = serializePackageAttributeUpdates(coercePackageAttributesOnVariantPayload({ shippingPackageType: "parcel" }));
-    await database.pool.query("UPDATE catalog.product_variants SET shipping_package_type=$1 WHERE id=101", [patch.shippingPackageType]);
+    const patch = serializePackageAttributeUpdates(coercePackageAttributesOnVariantPayload({ lengthMm: 200 }));
+    await database.pool.query("UPDATE catalog.product_variants SET length_mm=$1 WHERE id=101", [patch.lengthMm]);
     const changes = (await database.pool.query("SELECT * FROM marketplace.listing_intent_changes")).rows;
     expect(changes).toHaveLength(1);
-    expect(changes[0].changed_fields).toEqual(["shipping_package_type"]);
+    expect(changes[0].changed_fields).toEqual(["length_mm"]);
     const repository = new PostgresListingIntentPropagationRepository(database.pool);
     await Promise.all([repository.expand(20, now), repository.expand(20, now)]);
     const rows = (await database.pool.query("SELECT destination_key,product_id FROM marketplace.listing_intent_deliveries ORDER BY destination_key")).rows;
@@ -41,7 +41,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(rows.every(row => row.product_id === 20)).toBe(true);
     await repository.expand(20, now);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM marketplace.listing_intent_deliveries")).rows[0].count).toBe(rows.length);
-    expect(await packageRow()).toMatchObject({ weight_grams: "3175.25", length_mm: "152.40", shipping_package_type: "parcel" });
+    expect(await packageRow()).toMatchObject({ weight_grams: "3175.25", length_mm: "200.00", shipping_package_type: null });
   });
   it("retains measurement propagation, ignores no-op saves, and rolls back source and intent together", async () => {
     const client = await database.pool.connect();

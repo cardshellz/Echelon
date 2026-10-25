@@ -85,8 +85,17 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
   if (code === "CHANNEL_LISTING_VALIDATION_FAILED") {
     const parsed = channelListingValidationSchema.safeParse(input.validation);
     const validation = parsed.success ? parsed.data : undefined;
-    if (validation && ["package_weight", "package_dimensions", "package_type"].includes(validation.field)) {
-      const field = validation.field === "package_weight" ? "package weight" : validation.field === "package_dimensions" ? "package dimensions" : "shipping package type";
+    // Keep the typed historical failure, but direct recovery through the normal
+    // sync owner instead of a retired Catalog control. No work is marked complete.
+    if (validation?.field === "package_type") {
+      const result = issue("Retry the listing update", "An earlier update stopped on a package-type check that is no longer required.",
+        "Retry Sync to prepare the update using current catalog measurements and verify the result. Existing eBay package settings are preserved.",
+        true, "retry_sync", "Retry Sync");
+      return { ...result, message: "An earlier update stopped on a package-type check that is no longer required.",
+        details: [...result.details ?? [], ...(message ? [{ label: "Earlier diagnostic", value: message }] : [])] };
+    }
+    if (validation && ["package_weight", "package_dimensions"].includes(validation.field)) {
+      const field = validation.field === "package_weight" ? "package weight" : "package dimensions";
       const result = issue(`Add the variant's ${field}`, `The selected shipping policy needs valid ${field}${validation.variantSku ? ` for ${validation.variantSku}` : ""}.`,
         `Edit the affected variant and save its ${field}${validation.field === "package_dimensions" ? " (length, width and height)" : ""}. Then Sync this product again. Existing channel package data is preserved when catalog fields are unspecified.`,
         false, "edit_listing", "Open product variants", `${productPath}?tab=variants${validation.variantId ? `&variantId=${validation.variantId}` : ""}`);

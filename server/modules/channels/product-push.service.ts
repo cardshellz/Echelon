@@ -145,7 +145,7 @@ export function createChannelProductPushService(db: any) {
         mpn: v.mpn || null,
         weight: vo?.weightOverride ?? (v.weightGrams == null ? null : Number(v.weightGrams)),
         package: { weightGrams: vo?.weightOverride ?? v.weightGrams, lengthMm: v.lengthMm,
-          widthMm: v.widthMm, heightMm: v.heightMm, shippingPackageType: v.shippingPackageType },
+          widthMm: v.widthMm, heightMm: v.heightMm },
         price: pr?.price ?? v.priceCents ?? null,
         compareAtPrice: pr?.compareAtPrice ?? v.compareAtPriceCents ?? null,
         shopifyVariantId: v.shopifyVariantId,

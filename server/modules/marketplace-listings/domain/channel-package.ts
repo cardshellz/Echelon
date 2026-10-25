@@ -6,13 +6,11 @@ export interface ListingPackageValues {
   lengthMm?: number | string | null;
   widthMm?: number | string | null;
   heightMm?: number | string | null;
-  /** Opaque to this owner; channel adapters translate their package-type vocabulary. */
-  packageType?: string | null;
 }
 export type PackageFieldSource = "catalog" | "channel" | "absent";
 export interface ChannelPackagePlan {
   values: ListingPackageValues;
-  sources: { weight: PackageFieldSource; dimensions: PackageFieldSource; packageType: PackageFieldSource };
+  sources: { weight: PackageFieldSource; dimensions: PackageFieldSource };
 }
 
 /** One ownership rule for full-replacement channel APIs. Null is an unknown
@@ -23,7 +21,7 @@ export function prepareChannelPackage(input: {
   catalog: ListingPackageValues; observed: ListingPackageValues;
   requirements: ChannelPackageRequirements;
 }): ChannelPackagePlan {
-  const fail = (field: "package_weight" | "package_dimensions" | "package_type", reason: "required" | "invalid"): never => {
+  const fail = (field: "package_weight" | "package_dimensions", reason: "required" | "invalid"): never => {
     throw new ChannelListingValidationError({ field, reason, productId: input.productId,
       variantId: input.variantId, variantSku: input.sku });
   };
@@ -43,10 +41,6 @@ export function prepareChannelPackage(input: {
   const [lengthMm, widthMm, heightMm] = dimensions.map(key => positive(dimensionValues[key], "package_dimensions"));
   if ((dimensionSource !== "absent" || input.requirements.dimensions) && [lengthMm, widthMm, heightMm].some(value => value === null))
     fail("package_dimensions", "required");
-  const typeSource = sourceFor(input.catalog.packageType != null, input.observed.packageType != null);
-  const packageType = (typeSource === "catalog" ? input.catalog : input.observed).packageType ?? null;
-  if (packageType !== null && (!/^[a-zA-Z][a-zA-Z0-9_]{0,99}$/.test(packageType))) fail("package_type", "invalid");
-  if (packageType === null && input.requirements.packageType) fail("package_type", "required");
-  return { values: { weightGrams, lengthMm, widthMm, heightMm, packageType },
-    sources: { weight: weightSource, dimensions: dimensionSource, packageType: typeSource } };
+  return { values: { weightGrams, lengthMm, widthMm, heightMm },
+    sources: { weight: weightSource, dimensions: dimensionSource } };
 }

@@ -2,19 +2,19 @@ import { describe, expect, it } from "vitest";
 import { prepareChannelPackage } from "../../domain/channel-package";
 
 const input = { productId: 20, variantId: 101, sku: "TEST-VARIANT",
-  requirements: { weight: true, dimensions: true, packageType: true },
-  catalog: { weightGrams: "120.25", lengthMm: "152.40", widthMm: "101.60", heightMm: "25.40", packageType: "parcel" },
-  observed: { weightGrams: 1, lengthMm: 1, widthMm: 1, heightMm: 1, packageType: "letter" } };
+  requirements: { weight: true, dimensions: true },
+  catalog: { weightGrams: "120.25", lengthMm: "152.40", widthMm: "101.60", heightMm: "25.40" },
+  observed: { weightGrams: 1, lengthMm: 1, widthMm: 1, heightMm: 1 } };
 describe("shared channel package ownership", () => {
   it("uses validated catalog facts without mutating either source", () => {
     const before = structuredClone(input);
-    expect(prepareChannelPackage(input)).toEqual({ values: { weightGrams: 120.25, lengthMm: 152.4, widthMm: 101.6, heightMm: 25.4, packageType: "parcel" },
-      sources: { weight: "catalog", dimensions: "catalog", packageType: "catalog" } });
+    expect(prepareChannelPackage(input)).toEqual({ values: { weightGrams: 120.25, lengthMm: 152.4, widthMm: 101.6, heightMm: 25.4 },
+      sources: { weight: "catalog", dimensions: "catalog" } });
     expect(input).toEqual(before);
   });
   it("preserves known channel facts when catalog facts are unspecified, including explicit null", () => {
-    expect(prepareChannelPackage({ ...input, catalog: { weightGrams: null, lengthMm: null, packageType: null } })).toEqual({
-      values: input.observed, sources: { weight: "channel", dimensions: "channel", packageType: "channel" } });
+    expect(prepareChannelPackage({ ...input, catalog: { weightGrams: null, lengthMm: null } })).toEqual({
+      values: input.observed, sources: { weight: "channel", dimensions: "channel" } });
   });
   it("never combines measurements from different packages", () => {
     expect(() => prepareChannelPackage({ ...input, catalog: { lengthMm: 100 } })).toThrowError(expect.objectContaining({
@@ -23,12 +23,12 @@ describe("shared channel package ownership", () => {
   it.each([0, -1, Number.NaN, Infinity, "", "oops"])("rejects invalid catalog facts instead of falling back (%s)", value => {
     expect(() => prepareChannelPackage({ ...input, catalog: { ...input.catalog, weightGrams: value } })).toThrow(/weight is invalid/);
   });
-  it.each(["weight", "dimensions", "packageType"] as const)("blocks missing required %s without inventing values", field => {
+  it.each(["weight", "dimensions"] as const)("blocks missing required %s without inventing values", field => {
     expect(() => prepareChannelPackage({ ...input, catalog: {}, observed: {},
-      requirements: { weight: field === "weight", dimensions: field === "dimensions", packageType: field === "packageType" } })).toThrow(/required/);
+      requirements: { weight: field === "weight", dimensions: field === "dimensions" } })).toThrow(/required/);
   });
   it("allows absent optional package data", () => {
-    expect(prepareChannelPackage({ ...input, catalog: {}, observed: {}, requirements: { weight: false, dimensions: false, packageType: false } }).sources)
-      .toEqual({ weight: "absent", dimensions: "absent", packageType: "absent" });
+    expect(prepareChannelPackage({ ...input, catalog: {}, observed: {}, requirements: { weight: false, dimensions: false } }).sources)
+      .toEqual({ weight: "absent", dimensions: "absent" });
   });
 });
