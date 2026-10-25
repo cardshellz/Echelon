@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SettingsProvider } from "@/lib/settings";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { PURCHASING_READ_PERMISSION, RECEIVING_READ_PERMISSIONS } from "@/lib/procurement-access";
 import { VendorAuthProvider, useVendorAuth } from "@/lib/vendor-auth";
 import { DropshipAuthProvider, dropshipPortalPath, isDropshipPortalHost, useDropshipAuth } from "@/lib/dropship-auth";
 import { PWAUpdatePrompt } from "@/components/PWAUpdatePrompt";
@@ -522,13 +523,13 @@ function Router() {
           <ProtectedRoute component={PurchaseOrderEdit} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/purchase-orders/:id">
-          {(params) => <ProtectedRoute key={params.id} component={PurchaseOrderDetail} allowedRoles={["admin", "lead"]} />}
+          {(params) => <ProtectedRoute key={params.id} component={PurchaseOrderDetail} requiredPermission={PURCHASING_READ_PERMISSION} />}
         </Route>
         <Route path="/purchase-orders">
-          <ProtectedRoute component={PurchaseOrders} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PurchaseOrders} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/receiving">
-          <ProtectedRoute component={Receiving} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Receiving} anyOfPermissions={RECEIVING_READ_PERMISSIONS} />
         </Route>
         <Route path="/suppliers">
           <ProtectedRoute component={Suppliers} allowedRoles={["admin", "lead"]} />
@@ -576,10 +577,10 @@ function Router() {
           <ProtectedRoute component={ReturnPolicies} allowedRoles={["admin"]} />
         </Route>
         <Route path="/shipments/:id">
-          {(params) => <ProtectedRoute key={params.id} component={InboundShipmentDetail} allowedRoles={["admin", "lead"]} />}
+          {(params) => <ProtectedRoute key={params.id} component={InboundShipmentDetail} requiredPermission={PURCHASING_READ_PERMISSION} />}
         </Route>
         <Route path="/shipments">
-          <ProtectedRoute component={InboundShipments} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={InboundShipments} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/inventory/costs">
           <ProtectedRoute component={CostDashboard} allowedRoles={["admin"]} />
@@ -591,10 +592,10 @@ function Router() {
           <ProtectedRoute component={APDashboard} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/ap-invoices/:id">
-          {(params) => <ProtectedRoute key={params.id} component={APInvoiceDetail} allowedRoles={["admin", "lead"]} />}
+          {(params) => <ProtectedRoute key={params.id} component={APInvoiceDetail} requiredPermission={PURCHASING_READ_PERMISSION} />}
         </Route>
         <Route path="/ap-invoices">
-          <ProtectedRoute component={APInvoices} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={APInvoices} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/supplier-returns/:id">
           {(params) => <ProtectedRoute key={params.id} component={SupplierReturns} allowedRoles={["admin", "lead"]} />}

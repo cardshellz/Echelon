@@ -119,7 +119,7 @@ describe("fast CI preserves coverage and required checks", () => {
   const workflow = source(".github/workflows/ci.yml");
 
   it.each([
-    ["ci", "preflight"], ["procurement-navigation", "select"],
+    ["ci", "preflight"], ["procurement-navigation", "select"], ["procurement-connected", "select"],
     ["dropship-pricing", "select"], ["order-edits", "select"],
     ["inventory-availability", "preflight"], ["returns-preview", "preflight"],
   ])("validates migrations without installed dependencies in %s", (file, gateName) => {
@@ -140,7 +140,7 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(gate).not.toContain("continue-on-error:");
   });
 
-  it.each(["procurement-navigation", "dropship-pricing", "order-edits"])(
+  it.each(["procurement-navigation", "procurement-connected", "dropship-pricing", "order-edits"])(
     "blocks %s browser setup after invalid migrations while preserving selector uncertainty coverage",
     (file) => {
       const browserWorkflow = source(".github/workflows/" + file + ".yml");

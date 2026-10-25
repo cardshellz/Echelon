@@ -112,3 +112,41 @@ Verify that unfiltered `playwright test --list --reporter=json` IDs equal the
 union of every feature/shard listing's IDs, with no duplicates, when changing
 the partition. All 536 desktop/mobile cases were preserved by the initial split.
 Do not enable shared-database test concurrency as part of browser optimization.
+
+## Connected procurement acceptance
+
+`procurement-connected.yml` runs `playwright.procurement-connected.config.ts`
+separately from the mocked browser suite. Each case starts the built frontend
+and real login/session, procurement HTTP routes and application/database owners
+against its own disposable PostgreSQL database. Desktop and mobile run serially.
+Only external inventory-channel dispatch is inert; losing a response forwards the
+actual request first, waits for the commit response, then aborts browser delivery.
+
+The fixture installs the actual schema columns and selected migrations needed by
+these owners. It does not boot every production scheduler/provider or replay the
+complete release migration history. Connected results are local/CI integration
+acceptance, not production acceptance.
+
+The `procurementConnected` selector includes the frontend and the child server
+entry point explicitly, because process spawning is not a static import. Changed
+procurement server files and migrations always select it. The existing dependency
+and aggregate guards reject missing selection, failures and cancellations. New
+connected specifications are discovered from `test/connected/procurement` and
+checked against Playwright's unfiltered discovery.
+
+For a local run, build with `npx vite build`, set
+`ECHELON_TEST_DATABASE_DISPOSABLE=true` and `ECHELON_TEST_DATABASE_URL` to a
+loopback test PostgreSQL role able to create databases, then run:
+
+```sh
+npx tsc -p tsconfig.tests.connected.json
+npx playwright test --config playwright.procurement-connected.config.ts
+```
+
+Do not supply live connection strings or provider credentials. The parent passes
+only runtime essentials and explicit test configuration into each child. Each
+child reports its unique database identity before importing database owners;
+teardown closes the real session/application pools and removes that database.
+A fallback removal is permitted only after the child's exit event has been
+observed and the exact database ownership has been verified. Forced fallback is
+a test failure, never a silent successful cleanup.

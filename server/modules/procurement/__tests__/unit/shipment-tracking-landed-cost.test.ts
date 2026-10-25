@@ -1,4 +1,6 @@
 import { readShipmentCostReviewInTransaction } from "../../shipment-cost-review.repository";
+import { readShipmentHealthEvidence, type ShipmentHealthReadEvidence } from "../../shipment-health-evidence.repository";
+vi.mock("../../shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn() }));
 import { shipmentCostReviewSchema, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import { landedCostHealthSchema } from "@shared/procurement/landed-cost-health";
 vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn() }));
@@ -43,7 +45,7 @@ function buildTransactionalCogs() {
 }
 
 function buildStorage(overrides: Record<string, any> = {}) {
-  return {
+  const storage = {
     db: { execute: vi.fn().mockResolvedValue({}) },
     getInboundShipments: vi.fn().mockResolvedValue([]),
     getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing" }),
@@ -72,6 +74,23 @@ function buildStorage(overrides: Record<string, any> = {}) {
     getProductVariantById: vi.fn().mockResolvedValue({ id: 10, unitsPerVariant: 1 }),
     ...overrides,
   } as any;
+  // Preserve the existing scenarios at the raw evidence boundary. The real
+  // batched SQL/grouping is covered by repository and PostgreSQL tests.
+  vi.mocked(readShipmentHealthEvidence).mockImplementation(async (tx, ids) => {
+    const result = new Map<number, ShipmentHealthReadEvidence>();
+    for (const id of ids) {
+      const lines = await storage.getInboundShipmentLines(id, tx);
+      const costs = await storage.getInboundFreightCosts(id, tx);
+      result.set(id, { lines, costs, provisionalLots: await storage.getProvisionalLotsByShipment(id, tx),
+        allocationsByCostId: new Map(await Promise.all(costs.map(async (cost: any) => [cost.id, await storage.getInboundFreightCostAllocations(cost.id, tx)]))),
+        snapshotsByLineId: new Map((await Promise.all(lines.map((line: any) => storage.getLandedCostSnapshots(line.id, tx)))).flat().map((snapshot: any) => [snapshot.inboundShipmentLineId, snapshot])),
+        purchaseLinesById: new Map((await Promise.all(lines.filter((line: any) => line.purchaseOrderLineId != null).map((line: any) => storage.getPurchaseOrderLineById(line.purchaseOrderLineId, tx)))).filter(Boolean).map((line: any) => [line.id, line])),
+        purchaseOrdersById: new Map((await Promise.all(lines.filter((line: any) => line.purchaseOrderId != null).map((line: any) => storage.getPurchaseOrderById(line.purchaseOrderId, tx)))).filter(Boolean).map((order: any) => [order.id, order])),
+      });
+    }
+    return result;
+  });
+  return storage;
 }
 
 function productValueEvidence(totalProductCostCents: number, orderQty = 5, qtyShipped = 5) {

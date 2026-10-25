@@ -1,3 +1,4 @@
+import { useAuth } from "@/lib/auth";
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { InvoicePurchaseOrderSelector } from "@/features/purchasing/InvoicePurchaseOrderSelector";
@@ -63,6 +64,8 @@ function createInvoiceIdempotencyKey(prefix: string): string {
 }
 
 export default function APInvoices() {
+  const { hasPermission } = useAuth();
+  const canCreateInvoice = hasPermission("purchasing", "create");
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
@@ -102,6 +105,7 @@ export default function APInvoices() {
 
   const createMutation = useMutation({
     mutationFn: async (body: any) => {
+      if (!canCreateInvoice) throw new Error("Purchasing creation permission is required to create an invoice.");
       const idempotencyKey = createInvoiceIdempotencyKey("ap-invoice-create");
       const res = await fetch("/api/vendor-invoices", {
         method: "POST",
@@ -152,7 +156,7 @@ export default function APInvoices() {
           <h1 className="text-2xl font-bold">Vendor Invoices</h1><SupplierCreditLink />
           <p className="text-muted-foreground text-sm">Track and approve vendor invoices</p>
         </div>
-        <Button size="sm" onClick={async () => {
+        <Button size="sm" disabled={!canCreateInvoice} onClick={async () => {
           try {
             const res = await fetch("/api/vendor-invoices/next-number");
             if (res.ok) {
@@ -355,7 +359,7 @@ export default function APInvoices() {
 
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowNewDialog(false)}>Cancel</Button>
-              <Button onClick={handleCreate} disabled={createMutation.isPending}>
+              <Button onClick={handleCreate} disabled={!canCreateInvoice || createMutation.isPending}>
                 {createMutation.isPending ? "Creating..." : "Create Invoice"}
               </Button>
             </div>

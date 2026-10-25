@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shipmentWorkListQuerySchema, shipmentWorkListPageSchema, matchesShipmentCostFilter, type ShipmentWorkListItem } from "@shared/procurement/shipment-work-list";
 import { createShipmentTrackingService } from "../../shipment-tracking.service";
 import { readShipmentCostReviewInTransaction } from "../../shipment-cost-review.repository";
+import { readShipmentHealthEvidence } from "../../shipment-health-evidence.repository";
+vi.mock("../../shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn() }));
 vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn() }));
 
 const item = (id: number, status = "draft"): ShipmentWorkListItem => ({ id, shipmentNumber: `SHP-${id}`, status,
@@ -23,6 +25,10 @@ function fixture(rows = Array.from({ length: 102 }, (_, index) => item(102 - ind
   return { service: createShipmentTrackingService(db as never, storage as never), db, tx, storage };
 }
 beforeEach(() => {
+  vi.mocked(readShipmentHealthEvidence).mockReset().mockImplementation(async (_tx, ids) => new Map(ids.map(id => [id, {
+    lines: [{ id: id * 10, qtyShipped: 1 }] as never, costs: [], provisionalLots: [],
+    allocationsByCostId: new Map(), snapshotsByLineId: new Map(), purchaseLinesById: new Map(), purchaseOrdersById: new Map(),
+  }])));
   vi.mocked(readShipmentCostReviewInTransaction).mockReset().mockImplementation(async (_tx, id) => ({ shipmentId: id,
     lines: [{ lineId: id * 10, sku: null, sourceIssue: id <= 2 ? { code: "COST_SOURCE_CHANGED", message: "Changed source." } : null,
       application: { id, recordedAt: "2026-10-18T00:00:00Z", status: "applied", lotsUpdated: 1, cogsRowsUpdated: 0, issues: [] } }] }));
@@ -88,5 +94,18 @@ describe("shipment complete work-list projection", () => {
     const {service,db} = fixture();
     await expect(service.getShipmentPage({offset:"NaN"})).rejects.toThrow();
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+  it("bounds raw evidence to 100 headers even when the requested page contains 250 shipments", async () => {
+    const { service, tx } = fixture(Array.from({ length: 250 }, (_, index) => item(index + 1, "closed")));
+    const page = await service.getShipmentPage({ limit: 250 });
+    expect(page.shipments).toHaveLength(250);
+    expect(vi.mocked(readShipmentHealthEvidence).mock.calls.map(call => call[1].length)).toEqual([100, 100, 50]);
+    expect(vi.mocked(readShipmentHealthEvidence).mock.calls.every(call => call[0] === tx)).toBe(true);
+  });
+  it("fails closed when the batch reader omits a selected shipment", async () => {
+    const { service } = fixture();
+    vi.mocked(readShipmentHealthEvidence).mockResolvedValue(new Map());
+    await expect(service.getShipmentPage({ limit: 50 })).rejects.toMatchObject({ statusCode: 503,
+      details: { code: "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE" } });
   });
 });

@@ -63,6 +63,7 @@ import { Separator } from "@/components/ui/separator";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
 import { useAuth } from "@/lib/auth";
+import { PURCHASING_READ_PERMISSION, RECEIVING_READ_PERMISSIONS } from "@/lib/procurement-access";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { NotificationBell } from "@/components/NotificationBell";
 import { PageDataHealth } from "@/components/page-data-health";
@@ -72,6 +73,7 @@ import { CUSTOMER_RETURN_PORTAL_PATH } from "@shared/returns/customer-return-por
 
 type NavPermission = { resource: string; action: string };
 type NavLink = {
+  anyOfPermissions?: NavPermission[];
   label: string;
   icon: LucideIcon;
   href: string;
@@ -155,11 +157,11 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Dashboard", icon: LayoutDashboard, href: "/purchasing" },
-      { label: "Purchase Orders", icon: FileText, href: "/purchase-orders" },
+      { label: "Purchase Orders", icon: FileText, href: "/purchase-orders", requiredPermission: PURCHASING_READ_PERMISSION },
       { label: "Reorder Analysis", icon: BarChart3, href: REORDER_ANALYSIS_HREF },
       { label: "Demand Planner", icon: TrendingUp, href: "/demand-planner" },
-      { label: "Receiving", icon: Truck, href: "/receiving" },
-      { label: "Shipments", icon: Ship, href: "/shipments" },
+      { label: "Receiving", icon: Truck, href: "/receiving", anyOfPermissions: RECEIVING_READ_PERMISSIONS },
+      { label: "Shipments", icon: Ship, href: "/shipments", requiredPermission: PURCHASING_READ_PERMISSION },
       { label: "Suppliers", icon: Building2, href: "/suppliers" },
     ],
   },
@@ -169,7 +171,7 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "AP Dashboard", icon: BarChart3, href: "/ap" },
-      { label: "Invoices", icon: Receipt, href: "/ap-invoices" },
+      { label: "Invoices", icon: Receipt, href: "/ap-invoices", requiredPermission: PURCHASING_READ_PERMISSION },
       { label: "Payments", icon: CreditCard, href: "/ap-payments" },
       { label: "Supplier Credits", icon: Receipt, href: "/supplier-credits" },
       { label: "Supplier Returns", icon: Receipt, href: "/supplier-returns" },
@@ -325,15 +327,15 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
 
   // Reorder Engine flag (see REORDER_ENGINE_NAV_LABEL above). Same query key
   // as ReorderAnalysisRoute in App.tsx so React Query dedupes the request.
-  // Only fetched for roles that can see the Procurement group — the endpoint
+  // Only fetched for roles that can see the Reorder Analysis link — the endpoint
   // is gated by requirePermission("purchasing", "view") and the label is
   // invisible to everyone else anyway. Fail-safe: undefined/error → legacy label.
   type ProcurementSettings = { useNewReorderCockpit?: boolean; [key: string]: unknown };
-  const canSeeProcurementNav = !!user && ["admin", "lead"].includes(user.role);
+  const canSeeReorderLink = !!user && ["admin", "lead"].includes(user.role);
   const { data: procurementSettings } = useQuery<ProcurementSettings>({
     queryKey: ["/api/settings/procurement"],
     retry: false,
-    enabled: canSeeProcurementNav,
+    enabled: canSeeReorderLink,
   });
   const useNewReorderCockpit = procurementSettings?.useNewReorderCockpit === true;
 
@@ -375,7 +377,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
     }
   }, [locationPath]);
 
-  // Role-based filtering
+  // Explicit grant filtering, with legacy roles retained for remaining routes
   const isVisible = (roles?: string[], permission?: NavPermission) => {
     if (permission) return hasPermission(permission.resource, permission.action);
     if (!roles) return true;
@@ -440,14 +442,17 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
               );
             }
 
-            // Group: filter children by role
+            // A child grant can admit an operator independently; other children
+            // retain the parent role restriction.
             const parentVisible = isVisible(entry.roles, entry.requiredPermission);
             const visibleChildren = entry.children.filter((child) =>
-              child.requiredPermission
-                ? isVisible(child.roles, child.requiredPermission)
-                : child.roles
-                  ? isVisible(child.roles)
-                  : parentVisible);
+              child.anyOfPermissions
+                ? child.anyOfPermissions.some(permission => hasPermission(permission.resource, permission.action))
+                : child.requiredPermission
+                  ? isVisible(child.roles, child.requiredPermission)
+                  : child.roles
+                    ? isVisible(child.roles)
+                    : parentVisible);
             if (visibleChildren.length === 0) return null;
 
             const GroupIcon = entry.icon;
@@ -612,7 +617,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         <header className="h-14 border-b bg-card px-4 md:px-6 flex items-center justify-between gap-4 shrink-0 z-10">
           <div className="flex items-center gap-4 flex-1">
             {isMobile && (
-              <Button variant="ghost" size="icon" className="-ml-2 min-h-[44px] min-w-[44px]" onClick={() => setMobileOpen(true)}>
+              <Button variant="ghost" size="icon" aria-label="Open navigation" className="-ml-2 min-h-[44px] min-w-[44px]" onClick={() => setMobileOpen(true)}>
                 <Menu className="h-5 w-5" />
               </Button>
             )}

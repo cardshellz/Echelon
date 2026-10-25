@@ -18,7 +18,7 @@ export interface BrowserSelection {
   reason: string;
 }
 
-export const BROWSER_SUITES: Record<"orderEdits" | "procurement" | "dropship", BrowserSuiteDefinition>;
+export const BROWSER_SUITES: Record<"orderEdits" | "procurement" | "procurementConnected" | "dropship", BrowserSuiteDefinition>;
 
 export function parseChangedFiles(output: string): BrowserFileChange[];
 
