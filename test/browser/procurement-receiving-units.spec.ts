@@ -21,12 +21,12 @@ function receiptWithLines(id: number, lines: ReturnType<typeof makeLine>[], stat
 
 type Command = { path: string; body: Record<string, any> };
 
-async function setup(page: Page, options: { legacy?: boolean; unresolved?: boolean; conflict?: boolean; failRefresh?: boolean; delay?: boolean; exact?: boolean; lost?: boolean; drift?: boolean; manualConflict?: boolean; legacyFactorDrift?: boolean; draft?: boolean; unversionedOpen?: boolean; missingRefreshVersion?: boolean; shipmentCase?: boolean } = {}) {
+async function setup(page: Page, options: { catalogCreate?: boolean; catalogSku?: string; legacy?: boolean; unresolved?: boolean; conflict?: boolean; failRefresh?: boolean; delay?: boolean; exact?: boolean; lost?: boolean; drift?: boolean; manualConflict?: boolean; legacyFactorDrift?: boolean; draft?: boolean; unversionedOpen?: boolean; missingRefreshVersion?: boolean; shipmentCase?: boolean } = {}) {
   const failures = await installFixtures(page);
   const catalog = variants.map((variant) => ({ ...variant }));
   if (options.shipmentCase) { catalog[1].unitsPerVariant = 1000; catalog[1].name = "Case of 1000"; }
   const state = { line: { ...makeLine(), ...(options.exact ? { expectedQty: 500, receivedQty: 400, damagedQty: 50 } : {}),
-    ...(options.legacy ? { unitsPerVariantSnapshot: null } : {}), ...(options.unresolved ? { productVariantId: null } : {}),
+    ...(options.catalogSku ? { sku: options.catalogSku } : {}), ...(options.legacy ? { unitsPerVariantSnapshot: null } : {}), ...(options.unresolved ? { productVariantId: null } : {}),
     ...(options.drift ? { unitsPerVariantSnapshot: 50, expectedQty: 10, receivedQty: 8, damagedQty: 1 } : {}),
     ...(options.shipmentCase ? { sku: "TEST-TOP-STD-SLV-CLR", productName: "Toploader Essentials Clear and Easy Glide Combo Pack", productVariantId: 3, unitsPerVariantSnapshot: 1000, expectedQty: 525, receivedQty: 0, damagedQty: 0, status: "pending" } : {}) },
     commands: [] as Command[], addedLines: [] as ReturnType<typeof makeLine>[], opened: !options.draft, conflictUsed: false, reads: 0, committed: false, manualConflictUsed: false, catalogConflictUsed: false };
@@ -38,7 +38,7 @@ async function setup(page: Page, options: { legacy?: boolean; unresolved?: boole
       [{ ...state.line, ...(id === 32 ? { id: 8, receivingOrderId: 32, sku: "OTHER-RECEIPT", receivedQty: 12 } : {}) }, ...(id === 31 ? state.addedLines : [])],
       options.draft ? (state.opened ? "open" : "draft") : "receiving");
     if (req.method() === "GET") {
-      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" }, roles: ["admin"], permissions: ["inventory:adjust"] } });
+      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" }, roles: ["admin"], permissions: ["inventory:adjust", ...(options.catalogCreate ? ["inventory:create"] : [])] } });
       if (path === "/api/product-variants") return route.fulfill({ json: catalog });
       if (path === "/api/warehouse/locations") return route.fulfill({ json: [{ id: 5, code: "RCV-01", name: "Receiving", warehouseId: 1, isActive: 1, locationType: "receiving" }] });
       if (/^\/api\/receiving\/(31|32)$/.test(path)) {
@@ -432,7 +432,7 @@ test("catalog-factor drift requires an explicit server-owned rebase", async ({ p
 });
 
 test("creating a catalog variant leaves receipt counts untouched until explicit unit confirmation", async ({ page }) => {
-  const { state, failures } = await setup(page, { legacy: true, unresolved: true });
+  const { state, failures } = await setup(page, { legacy: true, unresolved: true, catalogCreate: true });
   await page.getByRole("button", { name: /^(SKU|SKU not linked)$/ }).first().click();
   const dialog = page.getByRole("dialog", { name: "Resolve SKU" });
   await expect(dialog).toBeVisible();
@@ -815,3 +815,17 @@ test("a delayed receipt A reload cannot block receipt B or clear B's newer reloa
   await expect(healthyBCount).toBeEnabled();
   expect(failures).toEqual([]);
 });
+
+for (const sku of ["ZERO-C0", "TOO-LARGE-C2147483648"]) {
+  test(`invalid catalog pack suffix ${sku} blocks creation without changing receipt counts`, async ({ page }) => {
+    const { state, failures } = await setup(page, { unresolved: true, legacy: true, catalogCreate: true, catalogSku: sku });
+    const before = { ...state.line };
+    await page.getByRole("button", { name: /^(SKU|SKU not linked)$/ }).filter({ visible: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Resolve SKU" });
+    await expect(dialog.getByRole("alert")).toContainText("Verify the supplier SKU and pack size");
+    await expect(dialog.getByRole("button", { name: "Create catalog variant", exact: true })).toBeDisabled();
+    expect(state.commands).toEqual([]);
+    expect(state.line).toEqual(before);
+    expect(failures).toEqual([]);
+  });
+}

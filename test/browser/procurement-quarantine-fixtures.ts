@@ -51,7 +51,7 @@ export async function installQuarantineFixtures(page: Page, options: QuarantineF
   await page.route("**/api/**", async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname;
     if (request.method() === "GET") {
-      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actorId, username: state.actorId, role: "admin" }, permissions: [], roles: ["admin"] } });
+      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actorId, username: state.actorId, role: "admin" }, permissions: ["inventory:view", "purchasing:view", ...(options.denied ? [] : ["inventory:adjust", "purchasing:approve"])], roles: ["admin"] } });
       if (path === "/api/receiving/31") { state.reads++; return state.detailFailure ? route.fulfill({ status: state.detailFailure, json: { error: "Receipt detail unavailable" } }) : route.fulfill({ json: state.order }); }
       if (path === "/api/receiving/32") return route.fulfill({ json: { ...state.order, id: 32, receiptNumber: "OTHER-RECEIPT", lines: [] } });
       if (path === "/api/receiving/31/quarantine") return route.fulfill({ json: state.view });

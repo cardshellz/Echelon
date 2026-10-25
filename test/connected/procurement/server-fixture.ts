@@ -9,6 +9,7 @@ import type { InventoryCutoverTestDatabase } from "../../../server/modules/inven
 import { fixtureColumnDefinitions, fixtureForeignKeys, fixtureTable, qualifiedTable } from "../../../server/modules/procurement/__tests__/integration/shipment-line-fixture";
 import { installQuantityAmendmentFixture } from "../../../server/modules/procurement/__tests__/integration/quantity-amendment-fixture";
 import { installConnectedNavigationFixture } from "./navigation-fixture";
+import { acquireInventoryCutoverFenceInsideTransaction } from "../../../server/modules/inventory-planning/infrastructure/inventory-cutover-admission-fence.repository";
 
 export const CONNECTED_TIME = new Date("2026-10-25T12:00:00.000Z");
 export const CONNECTED_PASSWORD = "connected-local-password-v1";
@@ -18,6 +19,7 @@ export const CONNECTED_ACTORS = [
   { id: "connected-viewer", username: "connected-viewer", role: "lead", roleId: 2 },
   { id: "connected-second-receiver", username: "connected-second-receiver", role: "lead", roleId: 5 },
   { id: "connected-admin", username: "connected-admin", role: "admin", roleId: 3 },
+  { id: "connected-catalog-creator", username: "connected-catalog-creator", role: "lead", roleId: 6 },
 ] as const;
 
 /** The ledger fixture intentionally has reduced catalog/warehouse prerequisites.
@@ -35,6 +37,13 @@ async function addOwnerReadColumns(pool: Pool): Promise<void> {
       if (!existing.has(column.name)) await pool.query(`ALTER TABLE ${qualifiedTable(table)} ADD COLUMN ${column.definition}`);
     }
   }
+  // The opening fixture inserts catalog identities explicitly. Real catalog
+  // creation also needs the owners' generated identities and active-SKU guard
+  // (shared/schema/catalog.schema.ts and migration 0251).
+  await pool.query(`ALTER TABLE catalog.products ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (START WITH 1000);
+    ALTER TABLE catalog.product_variants ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (START WITH 1000);
+    CREATE UNIQUE INDEX product_variants_sku_active_unique ON catalog.product_variants (UPPER(sku))
+      WHERE is_active = true AND sku IS NOT NULL`);
 }
 
 function migration(name: string): string {
@@ -83,13 +92,13 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
     for (const statement of fixtureForeignKeys([...identityTables, ...receivingTables])) await pool.query(statement);
     const passwordHash = await bcrypt.hash(CONNECTED_PASSWORD, 10);
     await pool.query(`INSERT INTO identity.auth_roles(id,name) VALUES(1,'connected-receiver'),(2,'connected-viewer'),(3,'connected-admin'),
-      (4,'connected-picker'),(5,'connected-second-receiver');
+      (4,'connected-picker'),(5,'connected-second-receiver'),(6,'connected-catalog-creator');
       INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES
       (1,'inventory','adjust','inventory'),(2,'inventory','view','inventory'),(3,'purchasing','view','purchasing'),
       (4,'roles','edit','identity'),(5,'users','manage_roles','identity'),(6,'users','edit','identity'),
-      (7,'purchasing','create','purchasing');
+      (7,'purchasing','create','purchasing'),(8,'inventory','create','inventory');
       INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES
-      (1,1),(1,2),(1,3),(2,2),(2,3),(3,1),(3,2),(3,3),(3,4),(3,5),(3,6),(3,7),(4,1),(4,2),(4,3),(5,1),(5,2),(5,3)`);
+      (1,1),(1,2),(1,3),(2,2),(2,3),(3,1),(3,2),(3,3),(3,4),(3,5),(3,6),(3,7),(4,1),(4,2),(4,3),(5,1),(5,2),(5,3),(6,2),(6,8)`);
     for (const actor of CONNECTED_ACTORS) {
       await pool.query("INSERT INTO identity.users(id,username,password,role,display_name,active) VALUES($1,$2,$3,$4,$2,1)",
         [actor.id, actor.username, passwordHash, actor.role]);
@@ -115,6 +124,24 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
     await installReceiptCostEvidence(pool);
     await installConnectedNavigationFixture(pool);
     await context.open();
+    // Match quantity-ledger.integration.test.ts's post-cutover catalog fixture:
+    // release its preparation freeze under the actual admission owner and its
+    // persisted activation clock. This is not publication/completion acceptance;
+    // those owners have separate integration suites. No guard is disabled.
+    await context.transaction(async client => {
+      const runs = (await client.query<{ id: string }>(
+        "SELECT activation_run_id::text AS id FROM inventory.availability_activation_freezes WHERE released_at IS NULL")).rows;
+      if (runs.length !== 1) throw new Error("Connected catalog fixture requires exactly one activation freeze");
+      await acquireInventoryCutoverFenceInsideTransaction(client, {
+        expectedAuthority: "canonical", expectedConfigurationRunId: runs[0].id,
+      });
+      const released = await client.query(`UPDATE inventory.availability_activation_freezes activation_freeze
+        SET released_at=activation.activated_at,released_by='operator',release_reason='Connected post-cutover catalog fixture'
+        FROM inventory.availability_activation_runs activation
+        WHERE activation_freeze.activation_run_id=$1 AND activation.id=activation_freeze.activation_run_id
+          AND activation.activated_at >= activation_freeze.acquired_at`, [runs[0].id]);
+      if (released.rowCount !== 1) throw new Error("Connected fixture failed to release its activation freeze on the persisted clock");
+    });
     for (const name of ["0085_idempotency_keys.sql", "136_financial_command_results.sql", "140_financial_command_operations.sql",
       "900000001000017770001_receiving_integrity_audit_guard.sql", "900000010000018200001_receiving_discard_audit_guard.sql",
       "900000027000019030001_receiving_entry_audit_guard.sql"]) await pool.query(migration(name));
@@ -134,7 +161,8 @@ export async function readConnectedReceivingState(pool: Pool) {
     (SELECT authority FROM inventory.availability_runtime_authority WHERE singleton_key=true) AS authority,
     (SELECT status FROM procurement.receiving_orders WHERE id=50) AS "receiptStatus",
     (SELECT notes FROM procurement.receiving_orders WHERE id=50) AS "receiptNotes",
-    (SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'receivedQty',received_qty,'unitsPerVariantSnapshot',units_per_variant_snapshot,
+    (SELECT coalesce(jsonb_agg(jsonb_build_object('id',id,'productId',product_id,'productVariantId',product_variant_id,
+      'expectedQty',expected_qty,'receivedQty',received_qty,'damagedQty',damaged_qty,'unitsPerVariantSnapshot',units_per_variant_snapshot,
       'putawayLocationId',putaway_location_id,'status',status) ORDER BY id),'[]'::jsonb) FROM procurement.receiving_lines WHERE receiving_order_id=50) AS lines,
     (SELECT coalesce(sum(received_qty * units_per_variant_snapshot),0)::int FROM procurement.receiving_lines WHERE receiving_order_id=50) AS "receivedBasePieces",
     (SELECT count(*)::int FROM inventory.inventory_transactions WHERE receiving_order_id=50 AND transaction_type='receipt') AS "receiptTransactions",
@@ -147,6 +175,8 @@ export async function readConnectedReceivingState(pool: Pool) {
     (SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb) FROM public.audit_events e WHERE action LIKE 'procurement.receiving.%') AS "receivingAudits",
     (SELECT count(*)::int FROM inventory.quantity_commands WHERE kind='receive') AS "quantityReceiptCommands",
     (SELECT count(*)::int FROM inventory.quantity_entries e JOIN inventory.quantity_commands c ON c.id=e.command_id WHERE c.kind='receive') AS "quantityReceiptEntries",
+    (SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY id),'[]'::jsonb) FROM catalog.products p) AS "catalogProducts",
+    (SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY id),'[]'::jsonb) FROM catalog.product_variants v) AS "catalogVariants",
     (SELECT count(*)::int FROM public.notifications) AS notifications,
     (SELECT count(*)::int FROM identity.session) AS sessions`);
   return result.rows[0];

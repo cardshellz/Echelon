@@ -290,3 +290,45 @@ test("receiving adjustment does not grant vendor or catalog creation", async ({ 
   expect(businessEvidence(await backend.state())).toEqual(original);
   await attachState(info, "separate-creation-permissions-denied", backend);
 });
+
+test("a catalog creator can create metadata without gaining receipt adjustment authority", async ({ page, backend }, info) => {
+  await login(page, backend, actor(backend, "connected-receiver"));
+  const entered = await page.request.post(backend.url + "/api/receiving/" + backend.receivingOrderId + "/lines", {
+    headers: { "Idempotency-Key": "connected-catalog-only-entry" },
+    data: { sku: "PACK-C7", productName: "Seven-piece catalog case", expectedQty: 1,
+      receivedQty: 0, productVariantId: null, productId: null, putawayLocationId: 100 },
+  });
+  expect(entered.status(), await entered.text()).toBe(201);
+  const before = businessEvidence(await backend.state());
+  const lineId = before.lines[0].id;
+  await switchActor(page, backend, actor(backend, "connected-catalog-creator"));
+  const identity = await page.request.get(backend.url + "/api/auth/me");
+  expect(identity.status(), await identity.text()).toBe(200);
+  const grants = (await identity.json()).permissions;
+  expect(grants).toEqual(expect.arrayContaining(["inventory:create", "inventory:view"]));
+  expect(grants).not.toContain("inventory:adjust");
+  await page.goto(receiptUrl(backend));
+  const resolveSku = page.getByRole("button", { name: /^SKU(?: not linked)?$/, exact: true }).filter({ visible: true });
+  await expect(resolveSku).toBeEnabled();
+  await resolveSku.click();
+  const createButton = page.getByRole("button", { name: "Create catalog variant", exact: true });
+  await expect(createButton).toBeEnabled();
+  const created = page.waitForResponse(response => response.request().method() === "POST"
+    && response.url() === backend.url + "/api/receiving/lines/" + lineId + "/create-variant");
+  await createButton.click();
+  const response = await created;
+  expect(response.status(), await response.text()).toBe(200);
+  const result = await response.json();
+  expect(result).toMatchObject({ requiresUnitConfirmation: true,
+    variant: { sku: "PACK-C7", unitsPerVariant: 7 }, line: { id: lineId, productVariantId: null, expectedQty: 1, receivedQty: 0 } });
+  await expect(page.getByRole("button", { name: /^Confirm these counts are in / })).toBeDisabled();
+  const deniedLink = await page.request.patch(backend.url + "/api/receiving/lines/" + lineId, {
+    data: { productVariantId: result.variant.id, expectedUnitsPerVariant: 7, confirmLegacyUnit: true },
+  });
+  expect(deniedLink.status(), await deniedLink.text()).toBe(403);
+  const variants = await page.request.get(backend.url + "/api/product-variants");
+  expect(variants.status(), await variants.text()).toBe(200);
+  expect(await variants.json()).toEqual(expect.arrayContaining([expect.objectContaining({ id: result.variant.id, sku: "PACK-C7", unitsPerVariant: 7 })]));
+  expect(businessEvidence(await backend.state())).toEqual(before);
+  await attachState(info, "catalog-created-receipt-unchanged", backend);
+});

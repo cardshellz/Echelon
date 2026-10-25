@@ -126,6 +126,26 @@ async function main(): Promise<void> {
       try { res.json({ ...await fixture.readConnectedReceivingState(context.pool), channelRequests }); }
       catch (error) { next(error); }
     });
+    app.post("/__test/catalog-variant-failure", async (req, res, next) => {
+      const parsed = z.object({ enabled: z.boolean() }).strict().safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "Specify a boolean enabled" });
+      try {
+        // A real PostgreSQL failure at the second catalog write proves rollback.
+        // This fixture-only fault is restricted to one synthetic SKU.
+        await context.pool.query(`CREATE OR REPLACE FUNCTION catalog.connected_reject_variant() RETURNS trigger AS $$
+          BEGIN
+            IF NEW.sku = 'ROLLBACK-C7' THEN
+              RAISE EXCEPTION 'Synthetic connected variant insertion failure' USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+          END;
+        $$ LANGUAGE plpgsql;
+        DROP TRIGGER IF EXISTS connected_reject_variant ON catalog.product_variants;`
+          + (parsed.data.enabled ? `CREATE TRIGGER connected_reject_variant BEFORE INSERT ON catalog.product_variants
+            FOR EACH ROW EXECUTE FUNCTION catalog.connected_reject_variant();` : ""));
+        res.json({ enabled: parsed.data.enabled, sku: "ROLLBACK-C7" });
+      } catch (error) { next(error); }
+    });
     app.get("/__test/navigation-state", async (_req, res, next) => {
       try { res.json(await navigation.readConnectedNavigationState(context.pool)); }
       catch (error) { next(error); }

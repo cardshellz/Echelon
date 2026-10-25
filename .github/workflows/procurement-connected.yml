@@ -78,6 +78,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx tsc -p tsconfig.tests.connected.json
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
       - name: Install browser and OS dependencies
         run: npx playwright install --with-deps chromium
       - name: Build actual frontend

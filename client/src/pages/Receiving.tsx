@@ -1,3 +1,4 @@
+import { toBasePieces } from "@shared/procurement/unit-quantity";
 import { DocumentRelationships } from "@/features/purchasing/DocumentRelationships";
 import { receiptReversalSourceCapability } from "@/lib/receipt-reversal-capability";
 import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
@@ -254,6 +255,8 @@ export default function Receiving() {
   // Receipt quantity/settings changes use the same grant as their APIs. Keep
   // this separate from approval-owned reversal and quarantine capabilities.
   const adjustmentBlocked = entryBlocked || !receivingEntry.allowed;
+  // Creating catalog metadata is a separate capability and does not link this receipt.
+  const skuResolutionBlocked = entryBlocked || (!receivingEntry.allowed && !canCreateCatalogVariant);
   
   const [activeTab, setActiveTab] = useState("receipts");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -1093,6 +1096,9 @@ DEF-456,25,,,5.00,,Location TBD`;
     onMutate: captureReceiptNavigation,
     mutationFn: async (lineId: number) => {
       if (!canCreateCatalogVariant) throw new Error("Inventory creation permission is required to create a catalog variant.");
+      if (resolvingLine?.id !== lineId) throw new Error("Reopen the receiving line before creating its catalog variant.");
+      const preview = parseSku(resolvingLine.sku);
+      if (!preview || preview.error) throw new Error(preview?.error ?? "A supplier SKU is required to create the catalog variant.");
       assertReceiptSettingsConfirmed();
       const res = await fetch("/api/receiving/lines/" + lineId + "/create-variant", { method: "POST" });
       const data = await res.json().catch(() => null);
@@ -1207,7 +1213,7 @@ DEF-456,25,,,5.00,,Location TBD`;
 
   // Resolution: open dialog for a specific line + issue type
   const openResolve = (line: ReceivingLine, mode: 'sku' | 'location') => {
-    if (adjustmentBlocked) return;
+    if (mode === "sku" ? skuResolutionBlocked : adjustmentBlocked) return;
     setLegacyResolveVariant(null);
     setResolvingLine(line);
     setResolveMode(mode);
@@ -1236,18 +1242,23 @@ DEF-456,25,,,5.00,,Location TBD`;
     }, 300);
   };
 
-  // Parse a SKU to preview what product/variant will be created
+  // Preview and creation use the same exact pack-factor boundary as receipt units.
   const parseSku = (sku: string | null) => {
     if (!sku) return null;
     const match = sku.match(/^(.+)-(P|B|C)(\d+)$/i);
-    if (match) {
-      const type = match[2].toUpperCase();
-      const typeName = type === "P" ? "Pack" : type === "B" ? "Box" : "Case";
-      return { baseSku: match[1].toUpperCase(), typeName, units: parseInt(match[3], 10) };
+    const type = match?.[2].toUpperCase();
+    const preview = {
+      baseSku: (match?.[1] ?? sku).toUpperCase(),
+      typeName: type === "P" ? "Pack" : type === "B" ? "Box" : type === "C" ? "Case" : "Each",
+      units: match ? Number(match[3]) : 1,
+    };
+    try {
+      toBasePieces(1, preview.units);
+      return { ...preview, error: null };
+    } catch (error) {
+      return { ...preview, error: `${error instanceof Error ? error.message : "The pack size is invalid."} Verify the supplier SKU and pack size before creating this variant.` };
     }
-    return { baseSku: sku.toUpperCase(), typeName: "Each", units: 1 };
   };
-
   const receiptHref = (id: number) => procurementNavigation.childHref(`/receiving?open=${id}`);
 
   const loadReceiptDetail = (receipt: ReceivingOrder) => {
@@ -2329,7 +2340,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                   {!line.productVariantId && (
                                     <button
                                       className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
-                                      disabled={adjustmentBlocked}
+                                      disabled={skuResolutionBlocked}
                                       onClick={() => openResolve(line, 'sku')}
                                     >
                                       <AlertTriangle className="h-3 w-3" /> SKU not linked
@@ -2544,7 +2555,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       {!line.productVariantId && (
                                         <button
                                           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
-                                          disabled={adjustmentBlocked}
+                                          disabled={skuResolutionBlocked}
                                           onClick={() => openResolve(line, 'sku')}
                                           title="SKU not linked to a product variant"
                                         >
@@ -3163,10 +3174,11 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <p className="text-xs text-muted-foreground">
                         Creates the catalog product and variant only. Confirm the receive unit separately before linking this line.
                       </p>
+                      {parsed.error && <p role="alert" className="text-sm text-destructive">{parsed.error}</p>}
                       <Button
                         className="w-full min-h-[44px]"
                         onClick={() => createVariantMutation.mutate(resolvingLine.id)}
-                        disabled={!canCreateCatalogVariant || entryBlocked || entryMutation.isPending || quarantineCommandPending || createVariantMutation.isPending}
+                        disabled={!!parsed.error || !canCreateCatalogVariant || entryBlocked || entryMutation.isPending || quarantineCommandPending || createVariantMutation.isPending}
                       >
                         {createVariantMutation.isPending ? (
                           <><span className="animate-spin mr-2">⏳</span> Creating...</>

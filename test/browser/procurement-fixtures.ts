@@ -1,3 +1,4 @@
+import { SYSTEM_ROLES } from "../../server/modules/identity/domain/identity.domain";
 import { relationshipFixture } from "../fixtures/document-relationships";
 import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import type { Page } from "@playwright/test";
@@ -9,7 +10,10 @@ const shipment = { id: 42, shipmentNumber: "TEST-SHIP-42", status: "booked", mod
 const invoice = { sourceCapabilities: invoiceSourceFixture("shipment"), currency: "USD", invoiceDate: "2026-10-19T00:00:00.000Z", id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test vendor", inboundShipmentId: 42, shipmentNumber: "TEST-SHIP-42", status: "paid", invoicedAmountCents: 10000, balanceCents: 0, hasSupplierCreditHistory: false, paidAmountCents: 10000, creditedAmountCents: 0, settledAmountCents: 10000, lines: [], poLinks: [{ id: 1, purchaseOrderId: 99, poNumber: "TEST-PO-99" }], attachments: [], payments: [] };
 export const receipt = (id: number) => ({ reversalCapability: { allowed: true, code: null, reason: null }, id, receiptNumber: `TEST-RECEIPT-${id}`, createdAt: "2026-09-01T12:00:00Z", status: "closed", purchaseOrderId: 99, inboundShipmentId: 42, lines: [], vendorId: 2, vendorName: "Test vendor" });
 
-export async function installFixtures(page: Page) {
+export async function installFixtures(page: Page, options: { permissions?: readonly string[] } = {}) {
+  // Match the actual seeded administrator grant catalog. Restricted/negative
+  // scenarios explicitly override this actor instead of relying on a role label.
+  const permissions = options.permissions ?? SYSTEM_ROLES.admin.permissions;
   const failures: string[] = [];
   page.on("pageerror", (error) => failures.push(error.message));
   await page.route("**/api/**", async (route) => {
@@ -24,7 +28,7 @@ export async function installFixtures(page: Page) {
       const parts = path.split("/");
       json = relationshipFixture({ kind: parts[4] as "purchase" | "shipment" | "receipt", id: Number(parts[5]) });
     }
-    else if (path === "/api/auth/me") json = { user: { id: "test-user", username: "test", role: "admin" }, permissions: [], roles: ["admin"] };
+    else if (path === "/api/auth/me") json = { user: { id: "test-user", username: "test", role: "admin" }, permissions, roles: ["admin"] };
     else if (path === "/api/settings/procurement") json = { useNewPoEditor: true };
     else if (/^\/api\/purchase-orders\/\d+\/financial-evidence$/.test(path)) json = {
       purchaseOrderId: Number(path.split("/")[3]), currency: "USD", state: "complete",

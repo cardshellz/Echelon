@@ -17,7 +17,7 @@ async function setup(page: Page, options: Options = {}) {
   await page.route("**/api/**", async route => {
     const req = route.request(), path = new URL(req.url()).pathname;
     if (req.method() === "GET") {
-      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actorId, username: "test", role: "admin" }, roles: ["admin"], permissions: options.permitted === false ? [] : ["purchasing:approve"] } });
+      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actorId, username: "test", role: "admin" }, roles: ["admin"], permissions: ["purchasing:view", ...(options.permitted === false ? [] : ["purchasing:approve"])] } });
       if (path === "/api/receiving/31") {
         state.reads++;
         if (state.detailUnavailable) return route.fulfill({ status: 503, json: { error: "Detail unavailable" } });

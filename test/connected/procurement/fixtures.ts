@@ -16,9 +16,11 @@ interface Ready {
 }
 export interface ConnectedState {
   authority: string; receiptStatus: string; receiptNotes: string | null;
-  lines: Array<{ id: number; receivedQty: number; unitsPerVariantSnapshot: number; putawayLocationId: number; status: string }>;
+  lines: Array<{ id: number; productId: number | null; productVariantId: number | null; expectedQty: number; receivedQty: number;
+    damagedQty: number; unitsPerVariantSnapshot: number | null; putawayLocationId: number | null; status: string }>;
   entryAudits: number; receiptTransactions: number; stockReceivedBasePieces: number;
   quantityReceiptCommands: number; quantityReceiptEntries: number; onHandBasePieces: number;
+  catalogProducts: Array<Record<string, unknown>>; catalogVariants: Array<Record<string, unknown>>;
 }
 export interface Backend extends Ready {
   control<T>(path: string, body?: unknown): Promise<T>;

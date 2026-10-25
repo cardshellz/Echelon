@@ -157,11 +157,11 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Dashboard", icon: LayoutDashboard, href: "/purchasing" },
-      { label: "Purchase Orders", icon: FileText, href: "/purchase-orders", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Purchase Orders", icon: FileText, href: "/purchase-orders", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
       { label: "Reorder Analysis", icon: BarChart3, href: REORDER_ANALYSIS_HREF },
       { label: "Demand Planner", icon: TrendingUp, href: "/demand-planner" },
       { label: "Receiving", icon: Truck, href: "/receiving", anyOfPermissions: RECEIVING_READ_PERMISSIONS },
-      { label: "Shipments", icon: Ship, href: "/shipments", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Shipments", icon: Ship, href: "/shipments", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
       { label: "Suppliers", icon: Building2, href: "/suppliers" },
     ],
   },
@@ -171,7 +171,7 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "AP Dashboard", icon: BarChart3, href: "/ap" },
-      { label: "Invoices", icon: Receipt, href: "/ap-invoices", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Invoices", icon: Receipt, href: "/ap-invoices", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
       { label: "Payments", icon: CreditCard, href: "/ap-payments" },
       { label: "Supplier Credits", icon: Receipt, href: "/supplier-credits" },
       { label: "Supplier Returns", icon: Receipt, href: "/supplier-returns" },
@@ -448,11 +448,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
             const visibleChildren = entry.children.filter((child) =>
               child.anyOfPermissions
                 ? child.anyOfPermissions.some(permission => hasPermission(permission.resource, permission.action))
-                : child.requiredPermission
-                  ? isVisible(child.roles, child.requiredPermission)
-                  : child.roles
-                    ? isVisible(child.roles)
-                    : parentVisible);
+                : parentVisible && isVisible(child.roles, child.requiredPermission));
             if (visibleChildren.length === 0) return null;
 
             const GroupIcon = entry.icon;

@@ -30,7 +30,7 @@ async function setup(page: Page, options: Options = {}) {
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
-      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actorId, username: "test", role: "admin" }, roles: ["admin"], permissions: state.permitted ? ["inventory:adjust", "purchasing:approve"] : [] } });
+      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actorId, username: "test", role: "admin" }, roles: ["admin"], permissions: ["inventory:view", "purchasing:view", ...(state.permitted ? ["inventory:adjust", "purchasing:approve"] : [])] } });
       if (path === "/api/receiving") return route.fulfill({ json: [...state.lines.keys()].map(order) });
       if (/^\/api\/receiving\/\d+$/.test(path)) {
         state.reads++;

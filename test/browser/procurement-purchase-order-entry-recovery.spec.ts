@@ -22,7 +22,7 @@ async function setup(page: Page, action: Action, mode: Mode) {
   let release!: () => void; const gate = new Promise<void>(done => { release = done; });
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: { ...purchasingAuthFixture, user: { ...purchasingAuthFixture.user, id: state.actor }, permissions: state.allowed ? purchasingAuthFixture.permissions : [] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: { ...purchasingAuthFixture, user: { ...purchasingAuthFixture.user, id: state.actor }, permissions: state.allowed ? purchasingAuthFixture.permissions : ["purchasing:view"] } });
     if (request.method() === "GET") {
       if (path === "/api/settings/procurement") return route.fulfill({ json: { useNewPoEditor: action !== "prepare" } });
       if (path === "/api/vendors") return route.fulfill({ json: [vendor] });
@@ -179,7 +179,7 @@ for (const action of ["create", "save-draft", "prepare"] as const) test(`${actio
 
 test("tiered next-action submit does not acquire an unrelated create permission requirement", async ({ page }) => {
   const { failures, commands } = await setup(page, "prepare", "success");
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { ...purchasingAuthFixture, permissions: ["purchasing:edit"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: { ...purchasingAuthFixture, permissions: ["purchasing:view", "purchasing:edit"] } }));
   await page.route("**/api/purchasing/approval-tiers", route => route.fulfill({ json: { tiers: [{ id: 1, name: "Approval", minAmountCents: 0, isActive: true }] } }));
   await page.route("**/api/purchase-orders/17", route => route.fulfill({ json: { ...po(17), status: "draft", physicalStatus: "draft", updatedAt: REVIEWED,
     autoDraftActionPlan: { primaryAction: { id: "send_to_vendor", label: "Submit for approval", detail: "Submit reviewed terms.", severity: "info" }, checklist: [], context: { lineCount: 0, openExceptionCount: 0, availableLifecycleActionIds: ["send_to_vendor"] } } } }));
