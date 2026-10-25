@@ -1,7 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 import { invoiceSourceFixture } from "../fixtures/invoice-source";
-import { invoiceListItem, paymentListItem, workListPage } from "./procurement-ap-work-list-fixtures";
+import { apSummaryFixture, invoiceListItem, paymentListItem, workListPage } from "./procurement-ap-work-list-fixtures";
 import { appliedPaymentReply, balance, paymentFixture, recordedPaymentReply } from "./procurement-payment-fixtures";
 
 test.use({ timezoneId: "America/Los_Angeles" });
@@ -103,7 +103,7 @@ for(const screen of ["payments","invoice","dashboard","po"] as const){
    state.payment={...state.payment,...dateFields,allocations:[{id:1,vendorInvoiceId:71,appliedAmountCents:1000,invoiceNumber:"INV-71",notes:null}]};
    const legacy={...state.payment,id:91,paymentNumber:"LEGACY-91",paymentCalendarDate:null,paymentDateSource:"legacy_timestamp"};
    if(screen==="payments")await page.route("**/api/ap-payments/work-list?*",route=>route.fulfill({json:workListPage([paymentListItem(state.payment),paymentListItem(legacy)],route.request().url())}));
-   if(screen==="dashboard")await page.route("**/api/ap/summary",route=>route.fulfill({json:{totalOutstandingCents:0,openInvoiceCount:0,agingBuckets:{},vendorAging:[],recentPayments:[state.payment,legacy],recentlyPaid:[]}}));
+   if(screen==="dashboard")await page.route("**/api/ap/summary",route=>route.fulfill({json:apSummaryFixture({recentPayments:[state.payment,legacy]})}));
    if(screen==="invoice")await page.route("**/api/vendor-invoices/71",route=>route.fulfill({json:{id:71,invoiceNumber:"INV-71",vendorId:2,status:"paid",currency:"USD",invoicedAmountCents:10000,balanceCents:0,paidAmountCents:10000,lines:[],poLinks:[],attachments:[],sourceCapabilities:invoiceSourceFixture(),payments:[{id:1,apPaymentId:90,paymentNumber:"PAY-90",appliedAmountCents:1000,paymentStatus:"completed",paymentMethod:"ach",...dateFields},{id:2,apPaymentId:91,paymentNumber:"LEGACY-91",appliedAmountCents:1000,paymentStatus:"completed",paymentMethod:"ach",paymentDate:dateFields.paymentDate,paymentCalendarDate:null,paymentDateSource:"legacy_timestamp"}]}}));
    if(screen==="po"){await page.route("**/api/purchase-orders/17",route=>route.fulfill({json:po(17)}));await page.route("**/api/purchase-orders/17/payments",route=>route.fulfill({json:{payments:[{allocationId:1,appliedAmountCents:1000,paymentNumber:"PAY-90",...dateFields},{allocationId:2,appliedAmountCents:1000,paymentNumber:"LEGACY-91",paymentDate:dateFields.paymentDate,paymentCalendarDate:null,paymentDateSource:"legacy_timestamp"}]}}));}
    await page.goto(screen==="payments"?"/ap-payments":screen==="invoice"?"/ap-invoices/71":screen==="dashboard"?"/ap":"/purchase-orders/17?tab=payments");

@@ -47,8 +47,8 @@ function workspace(): PurchaseWorkspace {
   };
 }
 
-async function setup(page: Page) {
-  const failures = await installFixtures(page);
+async function setup(page: Page, permissions?: readonly string[]) {
+  const failures = await installFixtures(page, { permissions });
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: workspace() }));
   return failures;
 }
@@ -266,7 +266,7 @@ test("recorded cost history shows exact lot lineage and COGS with a separate rec
 });
 
 test("cost history stays inspectable without exposing a retry to users without approval capability", async ({ page }) => {
-  const failures = await setup(page);
+  const failures = await setup(page, ["purchasing:view", "inventory:view"]);
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: { ...workspace(), costTrace: purchaseCostApplicationsFixture() } }));
   await page.goto("/purchase-orders/17?tab=lifecycle");
   await expect(page.getByTestId("receipt-cost-request-61")).toContainText("Retry required");

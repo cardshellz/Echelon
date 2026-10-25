@@ -55,6 +55,7 @@ import { shipmentWorkListQuerySchema, shipmentWorkListPageSchema, matchesShipmen
 import type { ShipmentListFilters } from "./shipment-work-list.repository";
 import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { readShipmentCostReview, readShipmentCostReviewInTransaction } from "./shipment-cost-review.repository";
+import { createPurchaseCostStatusSnapshotReader, type PurchaseCostStatusSnapshotReader } from "./purchase-cost-status-snapshot.repository";
 import { purchaseLineNeedsCostReview, purchaseCostNextAction } from "@shared/procurement/purchase-cost-status";
 import { shipmentAllocationsEqual } from "./domain/shipment-allocation-equality";
 import { shipmentCancellationBlockers, SHIPMENT_CANCELLATION_REASON_MAX_LENGTH } from "./domain/shipment-cancellation";
@@ -1290,12 +1291,13 @@ export function createShipmentTrackingService(
   }
 
   /** Both list membership and overview consume this current posting/reconciliation evidence. */
-  async function readShipmentHealthIssues(shipment: InboundShipment, tx: any, evidence: ShipmentHealthReadEvidence): Promise<LandedCostHealth["items"]> {
+  async function readShipmentHealthIssues(shipment: InboundShipment, tx: any, evidence: ShipmentHealthReadEvidence,
+    supplierSnapshot: PurchaseCostStatusSnapshotReader): Promise<LandedCostHealth["items"]> {
     const items: LandedCostHealth["items"] = [];
     if (shipment.status !== "costing" && shipment.status !== "closed") return items;
     const { lines, provisionalLots } = evidence;
     const allocation = await evaluateAllocationStatus(shipment, lines, evidence.costs, tx, evidence);
-    const review = await readShipmentCostReviewInTransaction(tx, shipment.id);
+    const review = await readShipmentCostReviewInTransaction(tx, shipment.id, supplierSnapshot);
     const lineIds = new Set(lines.map(line => line.id));
     if (!review || review.shipmentId !== shipment.id || review.lines.length !== lines.length
       || lineIds.size !== lines.length
@@ -1412,11 +1414,12 @@ export function createShipmentTrackingService(
         if (!(error instanceof CostEvidenceError) || error.code !== "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE") throw error;
         throw new ShipmentTrackingError(error.message, 503, { code: error.code });
       }
+      const supplierSnapshot = createPurchaseCostStatusSnapshotReader(tx);
       for (const shipment of page) {
         const current = evidence.get(shipment.id);
         if (!current) throw new ShipmentTrackingError("Current shipment cost evidence is incomplete. Reload cost health.", 503,
           { code: "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE", shipmentId: shipment.id });
-        result.set(shipment.id, await readShipmentHealthIssues(shipment, tx, current));
+        result.set(shipment.id, await readShipmentHealthIssues(shipment, tx, current, supplierSnapshot));
       }
     }
     return result;

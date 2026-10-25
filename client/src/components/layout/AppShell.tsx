@@ -63,7 +63,7 @@ import { Separator } from "@/components/ui/separator";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
 import { useAuth } from "@/lib/auth";
-import { PURCHASING_READ_PERMISSION, RECEIVING_READ_PERMISSIONS } from "@/lib/procurement-access";
+import { PURCHASING_DASHBOARD_READ_PERMISSIONS, PURCHASING_READ_PERMISSION, RECEIVING_READ_PERMISSIONS } from "@/lib/procurement-access";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { NotificationBell } from "@/components/NotificationBell";
 import { PageDataHealth } from "@/components/page-data-health";
@@ -74,6 +74,7 @@ import { CUSTOMER_RETURN_PORTAL_PATH } from "@shared/returns/customer-return-por
 type NavPermission = { resource: string; action: string };
 type NavLink = {
   anyOfPermissions?: NavPermission[];
+  allOfPermissions?: NavPermission[];
   label: string;
   icon: LucideIcon;
   href: string;
@@ -156,7 +157,7 @@ const navStructure: NavEntry[] = [
     icon: ShoppingBag,
     roles: ["admin", "lead"],
     children: [
-      { label: "Dashboard", icon: LayoutDashboard, href: "/purchasing" },
+      { label: "Dashboard", icon: LayoutDashboard, href: "/purchasing", allOfPermissions: PURCHASING_DASHBOARD_READ_PERMISSIONS },
       { label: "Purchase Orders", icon: FileText, href: "/purchase-orders", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
       { label: "Reorder Analysis", icon: BarChart3, href: REORDER_ANALYSIS_HREF },
       { label: "Demand Planner", icon: TrendingUp, href: "/demand-planner" },
@@ -170,11 +171,11 @@ const navStructure: NavEntry[] = [
     icon: DollarSign,
     roles: ["admin", "lead"],
     children: [
-      { label: "AP Dashboard", icon: BarChart3, href: "/ap" },
+      { label: "AP Dashboard", icon: BarChart3, href: "/ap", requiredPermission: PURCHASING_READ_PERMISSION },
       { label: "Invoices", icon: Receipt, href: "/ap-invoices", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
-      { label: "Payments", icon: CreditCard, href: "/ap-payments" },
-      { label: "Supplier Credits", icon: Receipt, href: "/supplier-credits" },
-      { label: "Supplier Returns", icon: Receipt, href: "/supplier-returns" },
+      { label: "Payments", icon: CreditCard, href: "/ap-payments", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Supplier Credits", icon: Receipt, href: "/supplier-credits", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Supplier Returns", icon: Receipt, href: "/supplier-returns", requiredPermission: PURCHASING_READ_PERMISSION },
     ],
   },
   {
@@ -331,7 +332,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
   // is gated by requirePermission("purchasing", "view") and the label is
   // invisible to everyone else anyway. Fail-safe: undefined/error → legacy label.
   type ProcurementSettings = { useNewReorderCockpit?: boolean; [key: string]: unknown };
-  const canSeeReorderLink = !!user && ["admin", "lead"].includes(user.role);
+  const canSeeReorderLink = !!user && ["admin", "lead"].includes(user.role) && hasPermission("purchasing", "view");
   const { data: procurementSettings } = useQuery<ProcurementSettings>({
     queryKey: ["/api/settings/procurement"],
     retry: false,
@@ -442,13 +443,19 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
               );
             }
 
-            // A child grant can admit an operator independently; other children
-            // retain the parent role restriction.
+            // Explicit child access takes precedence; unconfigured children inherit
+            // their parent. Preserve that existing fallback for unrelated modules.
             const parentVisible = isVisible(entry.roles, entry.requiredPermission);
             const visibleChildren = entry.children.filter((child) =>
-              child.anyOfPermissions
-                ? child.anyOfPermissions.some(permission => hasPermission(permission.resource, permission.action))
-                : parentVisible && isVisible(child.roles, child.requiredPermission));
+              child.allOfPermissions
+                ? child.allOfPermissions.every(permission => hasPermission(permission.resource, permission.action))
+                : child.anyOfPermissions
+                  ? child.anyOfPermissions.some(permission => hasPermission(permission.resource, permission.action))
+                  : child.requiredPermission
+                    ? isVisible(child.roles, child.requiredPermission)
+                    : child.roles
+                      ? isVisible(child.roles)
+                      : parentVisible);
             if (visibleChildren.length === 0) return null;
 
             const GroupIcon = entry.icon;

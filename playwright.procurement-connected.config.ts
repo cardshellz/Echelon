@@ -3,8 +3,11 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./test/connected/procurement",
   testMatch: "*.spec.ts",
-  fullyParallel: false,
+  // Each case owns its database and child process. Test-level shards may split a
+  // file, while one worker preserves serial execution within each runner.
+  fullyParallel: true,
   workers: 1,
+  globalTimeout: 12 * 60_000,
   timeout: 180_000,
   expect: { timeout: 15_000 },
   outputDir: "test-results/procurement-connected",

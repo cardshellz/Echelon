@@ -1259,6 +1259,7 @@ export default function PurchaseOrderDetail() {
   useEffect(() => {
     if (
       procurementSettings?.useNewPoEditor === true &&
+      hasPermission("purchasing", "edit") &&
       po?.id &&
       po?.status === "draft" &&
       !immutableRecommendationPo &&
@@ -1267,7 +1268,7 @@ export default function PurchaseOrderDetail() {
     ) {
       navigate(`/purchase-orders/${po.id}/edit`, { replace: true });
     }
-  }, [procurementSettings?.useNewPoEditor, po?.id, po?.status, immutableRecommendationPo, navigate, procurementNavigation.purchaseHref, hasExplicitLifecycleTab]);
+  }, [procurementSettings?.useNewPoEditor, hasPermission, po?.id, po?.status, immutableRecommendationPo, navigate, procurementNavigation.purchaseHref, hasExplicitLifecycleTab]);
 
   // Committed purchases open on their connected lifecycle. Explicit bookmarks
   // and the existing draft editor retain their selected view.
@@ -1381,14 +1382,14 @@ export default function PurchaseOrderDetail() {
   const isDraft = po?.status === "draft";
   // Economics and receiving identity are mutable only while the PO is a draft.
   // Post-draft corrections belong in the audited amendment workflow.
-  const canEditLines = Boolean(isDraft && !immutableRecommendationPo);
+  const canEditLines = Boolean(hasPermission("purchasing", "edit") && isDraft && !immutableRecommendationPo);
   const canEditLine = (line: any) => canEditLines &&
     (line.lineType ?? "product") === "product" &&
     (line.status ?? "open") === "open" &&
     [line.receivedQty, line.damagedQty, line.returnedQty, line.cancelledQty]
       .every((quantity) => Number(quantity ?? 0) === 0);
   const isNotCancelled = po && !["cancelled"].includes(po.status);
-  const canEditHeader = Boolean(isNotCancelled && !immutableRecommendationPo);
+  const canEditHeader = Boolean(hasPermission("purchasing", "edit") && isNotCancelled && !immutableRecommendationPo);
   const canSubmitPo = canLifecycleAction("submit", po?.status === "draft");
   const canReturnPoToDraft = canLifecycleAction("return_to_draft", po?.status === "pending_approval");
   const canApprovePo = canLifecycleAction("approve", po?.status === "pending_approval");
@@ -1989,6 +1990,7 @@ export default function PurchaseOrderDetail() {
   const createInvoiceMutation = useMutation({
     onMutate: captureNavigation,
     mutationFn: async () => {
+      if (!hasPermission("purchasing", "create")) throw new Error("Purchasing create permission is required to create an invoice.");
       const idempotencyKey = (
         typeof crypto !== "undefined" && "randomUUID" in crypto
           ? (crypto as any).randomUUID()
@@ -2574,6 +2576,7 @@ export default function PurchaseOrderDetail() {
   };
 
   const openCreateInvoiceDialogFromPo = async () => {
+    if (!hasPermission("purchasing", "create")) return;
     let invoiceNumber = "";
     try {
       const res = await fetch("/api/vendor-invoices/next-number");
@@ -2967,25 +2970,8 @@ export default function PurchaseOrderDetail() {
               View / Print
             </Button>
           )}
-          {["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
-            <Button variant="outline" onClick={async () => {
-              let invoiceNumber = "";
-              try {
-                const res = await fetch("/api/vendor-invoices/next-number");
-                if (res.ok) {
-                  const data = await res.json();
-                  invoiceNumber = data.invoiceNumber;
-                }
-              } catch {}
-              setInvoiceForm({
-                invoiceNumber,
-                amountDollars: ((Number(po.totalCents) || 0) / 100).toString(),
-                invoiceDate: new Date().toISOString().slice(0, 10),
-                dueDate: "",
-                notes: "",
-              });
-              setShowCreateInvoiceDialog(true);
-            }} className="flex-1 sm:flex-none min-h-[44px]">
+          {hasPermission("purchasing", "create") && ["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
+            <Button variant="outline" onClick={() => void openCreateInvoiceDialogFromPo()} className="flex-1 sm:flex-none min-h-[44px]">
               <FileText className="h-4 w-4 mr-2" />
               Create Invoice
             </Button>
@@ -5271,7 +5257,7 @@ export default function PurchaseOrderDetail() {
               <Button variant="outline" onClick={() => setShowCreateInvoiceDialog(false)}>Cancel</Button>
               <Button
                 onClick={() => createInvoiceMutation.mutate()}
-                disabled={createInvoiceMutation.isPending || !invoiceForm.invoiceNumber.trim()}
+                disabled={!hasPermission("purchasing", "create") || createInvoiceMutation.isPending || !invoiceForm.invoiceNumber.trim()}
               >
                 {createInvoiceMutation.isPending ? "Creating..." : "Create Invoice"}
               </Button>

@@ -6,7 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SettingsProvider } from "@/lib/settings";
 import { AuthProvider, useAuth } from "@/lib/auth";
-import { PURCHASING_READ_PERMISSION, RECEIVING_READ_PERMISSIONS } from "@/lib/procurement-access";
+import { PURCHASING_DASHBOARD_READ_PERMISSIONS, PURCHASING_READ_PERMISSION, RECEIVING_READ_PERMISSIONS } from "@/lib/procurement-access";
 import { VendorAuthProvider, useVendorAuth } from "@/lib/vendor-auth";
 import { DropshipAuthProvider, dropshipPortalPath, isDropshipPortalHost, useDropshipAuth } from "@/lib/dropship-auth";
 import { PWAUpdatePrompt } from "@/components/PWAUpdatePrompt";
@@ -149,11 +149,13 @@ function ProtectedRoute({
   allowedRoles,
   requiredPermission,
   anyOfPermissions,
+  allOfPermissions,
 }: { 
   component: React.ComponentType;
   allowedRoles?: string[];
   requiredPermission?: { resource: string; action: string };
   anyOfPermissions?: { resource: string; action: string }[];
+  allOfPermissions?: { resource: string; action: string }[];
 }) {
   const { user, isLoading, hasPermission } = useAuth();
   
@@ -179,6 +181,9 @@ function ProtectedRoute({
     return <Redirect to="/picking" />;
   }
   if (anyOfPermissions && !anyOfPermissions.some(permission => hasPermission(permission.resource, permission.action))) {
+    return <Redirect to="/picking" />;
+  }
+  if (allOfPermissions && !allOfPermissions.every(permission => hasPermission(permission.resource, permission.action))) {
     return <Redirect to="/picking" />;
   }
   
@@ -517,10 +522,10 @@ function Router() {
         {/* New-PO editor routes (Spec A). MUST be registered before
             /purchase-orders/:id so wouter does not match 'new' as an :id. */}
         <Route path="/purchase-orders/new">
-          <ProtectedRoute component={PurchaseOrderEdit} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PurchaseOrderEdit} requiredPermission={PURCHASING_READ_PERMISSION} allOfPermissions={[{ resource: "purchasing", action: "create" }]} />
         </Route>
         <Route path="/purchase-orders/:id/edit">
-          <ProtectedRoute component={PurchaseOrderEdit} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PurchaseOrderEdit} requiredPermission={PURCHASING_READ_PERMISSION} allOfPermissions={[{ resource: "purchasing", action: "edit" }]} />
         </Route>
         <Route path="/purchase-orders/:id">
           {(params) => <ProtectedRoute key={params.id} component={PurchaseOrderDetail} requiredPermission={PURCHASING_READ_PERMISSION} />}
@@ -589,7 +594,7 @@ function Router() {
           <ProtectedRoute component={InventoryHistory} allowedRoles={["admin"]} />
         </Route>
         <Route path="/ap">
-          <ProtectedRoute component={APDashboard} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={APDashboard} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/ap-invoices/:id">
           {(params) => <ProtectedRoute key={params.id} component={APInvoiceDetail} requiredPermission={PURCHASING_READ_PERMISSION} />}
@@ -598,25 +603,25 @@ function Router() {
           <ProtectedRoute component={APInvoices} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/supplier-returns/:id">
-          {(params) => <ProtectedRoute key={params.id} component={SupplierReturns} allowedRoles={["admin", "lead"]} />}
+          {(params) => <ProtectedRoute key={params.id} component={SupplierReturns} requiredPermission={PURCHASING_READ_PERMISSION} />}
         </Route>
         <Route path="/supplier-returns">
-          <ProtectedRoute component={SupplierReturns} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={SupplierReturns} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/supplier-credits/:id">
-          {(params) => <ProtectedRoute key={params.id} component={SupplierCredits} allowedRoles={["admin", "lead"]} />}
+          {(params) => <ProtectedRoute key={params.id} component={SupplierCredits} requiredPermission={PURCHASING_READ_PERMISSION} />}
         </Route>
         <Route path="/supplier-credits">
-          <ProtectedRoute component={SupplierCredits} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={SupplierCredits} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/ap-payments">
-          <ProtectedRoute component={APPayments} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={APPayments} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         {/* Redirects for old procurement URLs */}
         <Route path="/purchasing/catalog"><Redirect to="/reorder-analysis" /></Route>
         <Route path="/purchasing/:id"><Redirect to="/purchase-orders/:id" /></Route>
         <Route path="/purchasing">
-          <ProtectedRoute component={PurchasingDashboard} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PurchasingDashboard} allOfPermissions={PURCHASING_DASHBOARD_READ_PERMISSIONS} />
         </Route>
         {/* Spec A: procurement settings page. MUST be registered before
             /settings so wouter does not fall through to the general page. */}

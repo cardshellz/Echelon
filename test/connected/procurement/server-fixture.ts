@@ -20,6 +20,8 @@ export const CONNECTED_ACTORS = [
   { id: "connected-second-receiver", username: "connected-second-receiver", role: "lead", roleId: 5 },
   { id: "connected-admin", username: "connected-admin", role: "admin", roleId: 3 },
   { id: "connected-catalog-creator", username: "connected-catalog-creator", role: "lead", roleId: 6 },
+  { id: "connected-creator", username: "connected-creator", role: "picker", roleId: 7 },
+  { id: "connected-editor", username: "connected-editor", role: "picker", roleId: 8 },
 ] as const;
 
 /** The ledger fixture intentionally has reduced catalog/warehouse prerequisites.
@@ -92,13 +94,13 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
     for (const statement of fixtureForeignKeys([...identityTables, ...receivingTables])) await pool.query(statement);
     const passwordHash = await bcrypt.hash(CONNECTED_PASSWORD, 10);
     await pool.query(`INSERT INTO identity.auth_roles(id,name) VALUES(1,'connected-receiver'),(2,'connected-viewer'),(3,'connected-admin'),
-      (4,'connected-picker'),(5,'connected-second-receiver'),(6,'connected-catalog-creator');
+      (4,'connected-picker'),(5,'connected-second-receiver'),(6,'connected-catalog-creator'),(7,'connected-creator'),(8,'connected-editor');
       INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES
       (1,'inventory','adjust','inventory'),(2,'inventory','view','inventory'),(3,'purchasing','view','purchasing'),
       (4,'roles','edit','identity'),(5,'users','manage_roles','identity'),(6,'users','edit','identity'),
-      (7,'purchasing','create','purchasing'),(8,'inventory','create','inventory');
+      (7,'purchasing','create','purchasing'),(8,'inventory','create','inventory'),(9,'purchasing','edit','purchasing');
       INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES
-      (1,1),(1,2),(1,3),(2,2),(2,3),(3,1),(3,2),(3,3),(3,4),(3,5),(3,6),(3,7),(4,1),(4,2),(4,3),(5,1),(5,2),(5,3),(6,2),(6,8)`);
+      (1,1),(1,2),(1,3),(2,2),(2,3),(3,1),(3,2),(3,3),(3,4),(3,5),(3,6),(3,7),(4,1),(4,2),(4,3),(5,1),(5,2),(5,3),(6,2),(6,8),(7,3),(7,7),(8,3),(8,9)`);
     for (const actor of CONNECTED_ACTORS) {
       await pool.query("INSERT INTO identity.users(id,username,password,role,display_name,active) VALUES($1,$2,$3,$4,$2,1)",
         [actor.id, actor.username, passwordHash, actor.role]);
@@ -112,7 +114,7 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
     await pool.query("DROP TABLE procurement.receiving_quarantine_observations, procurement.receiving_custody_fence");
     await pool.query(migration("900000004000017890001_receiving_quarantine.sql"));
     await pool.query(`CREATE UNIQUE INDEX connected_warehouse_settings_code ON inventory.warehouse_settings(warehouse_code);
-      INSERT INTO inventory.warehouse_settings(warehouse_code) VALUES('DEFAULT');
+      INSERT INTO inventory.warehouse_settings(warehouse_code,use_new_po_editor) VALUES('DEFAULT',true);
       CREATE UNIQUE INDEX connected_po_receipt_identity ON procurement.po_receipts(purchase_order_line_id,receiving_line_id);
       CREATE UNIQUE INDEX connected_receipt_reversal_identity ON procurement.receipt_reversals(idempotency_key);
       ALTER TABLE procurement.receiving_lines ADD CHECK(reversed_qty >= 0 AND reversed_qty <= received_qty);

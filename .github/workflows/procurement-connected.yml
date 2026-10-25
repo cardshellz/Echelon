@@ -46,11 +46,16 @@ jobs:
         run: node scripts/ci/browser-suite-impact.mjs
 
   browser:
-    name: Connected procurement database and browser
+    name: Connected procurement database and browser (${{ matrix.shard }}/4)
     needs: select
     if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
     runs-on: ubuntu-latest
+    # Twelve minutes for each test shard, with setup and artifact headroom.
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:16
@@ -85,11 +90,11 @@ jobs:
       - name: Build actual frontend
         run: npx vite build
       - name: Run real login, HTTP, database and browser recovery
-        run: npx playwright test --config playwright.procurement-connected.config.ts
+        run: npx playwright test --config playwright.procurement-connected.config.ts --shard=${{ matrix.shard }}/4 --forbid-only
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: procurement-connected-evidence
+          name: procurement-connected-evidence-${{ matrix.shard }}
           path: test-results/procurement-connected/
           retention-days: 7
 

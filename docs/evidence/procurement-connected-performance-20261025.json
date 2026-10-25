@@ -1353,8 +1353,691 @@
     "Reduced fixture schema with selected real migrations/indexes; each full report contains exact installed table/index catalog.",
     "Unresolved: estimated unallocated freight and no lot lineage. Posted: real receipts, cost applications and untransformed unsold lots; supplier estimates remain provisional.",
     "No broad sales-history/forecast-volume or transformed-lot stress profile; three serial samples per owner share OS/PostgreSQL caches.",
-    "The local PostgreSQL cluster has shared_buffers=400kB and work_mem=4MB. Posted-100 timings increased despite fewer queries; this experiment does not establish blanket latency improvement or the cause of that timing difference.",
+    "The local PostgreSQL cluster has shared_buffers=400kB and work_mem=4MB. Initial posted-100 timings increased despite fewer queries; a subsequent quiet baseline/current pair had lower medians for four health/list owners and a slightly higher PO-summary median. Order, cache and scheduling effects are not isolated, and neither experiment establishes a blanket latency guarantee or production SLO.",
     "Process RSS includes retained diagnostic results and is not an allocation profile.",
     "Per-shipment supplier-cost review and accepted/reconciled freshness reads remain, preserving their original safety bounds; cost health still scales with eligible shipments."
-  ]
+  ],
+  "controlledPosted100Rerun": {
+    "version": 1,
+    "generatedAt": "2026-10-25T21:43:13.976Z",
+    "description": "Controlled local posted-100 rerun; no live records, same PostgreSQL configuration and same helpers.",
+    "executionOrder": [
+      "baseline",
+      "current"
+    ],
+    "quietSerialWindow": true,
+    "measuredScope": "Only explicit measured owner/helper files are checked for source stability; unrelated UI and fixture editing may continue.",
+    "samplesPerOwnerPerRun": 3,
+    "samplesPerOwnerPerVersion": 3,
+    "fullPublicOutputEquality": true,
+    "excludedOutputFields": [],
+    "allRepeatedOutputsIdentical": true,
+    "allTableFingerprintsUnchanged": true,
+    "allMeasuredSourceHashesUnchanged": true,
+    "allHelperHashesIdentical": true,
+    "allOwnedDatabasesDropped": true,
+    "databaseConfiguration": {
+      "version": "PostgreSQL 17.11 on x86_64-windows, compiled by msvc-19.44.35228, 64-bit",
+      "shared_buffers": "400kB",
+      "work_mem": "4MB",
+      "max_connections": "25"
+    },
+    "installedTableCount": 114,
+    "installedIndexCount": 235,
+    "sourceHashes": {
+      "baseline": {
+        "server/modules/procurement/shipment-tracking.service.ts": "c0654a915b45cdbc78173414114a173489cc3e590f193770c0692b916b27adf4",
+        "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+        "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+        "server/modules/procurement/purchase-cost-status.repository.ts": "b23d481aeec34c95b8eba81b2a1c4b3882c289305bbac6990d460cc5211d11c3",
+        "server/modules/procurement/shipment-cost-posting-read.repository.ts": "4339f59234b4619a2e0cc02794118f51491b69db5d8079d9679cdd3d39f620ef",
+        "server/modules/procurement/procurement.storage.ts": "3c3cf5976213df3ab5a06b57fe2bf026c44c786a6bfb5566668c2889e60a9164",
+        "server/modules/procurement/domain/current-shipment-cost-source.ts": "664af0d6bf602c5632c7ddda298b7e3a9a8cd6c27a077869c9115be7ab820479",
+        "server/modules/procurement/shipment-health-evidence.repository.ts": null,
+        "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+        "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+        "test/performance/procurement/run-health-cost.ts": "a46154c4784943aa57ee00500da6a7d5ae13279456718734d15f0d4a91fbba31"
+      },
+      "current": {
+        "server/modules/procurement/shipment-tracking.service.ts": "40ea65c591204489fdefb380c64f138bea17594002c54b0769cae73a9486adf4",
+        "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+        "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+        "server/modules/procurement/purchase-cost-status.repository.ts": "b23d481aeec34c95b8eba81b2a1c4b3882c289305bbac6990d460cc5211d11c3",
+        "server/modules/procurement/shipment-cost-posting-read.repository.ts": "d1a0ce7f77fed2e1f25e15ac12a0ea4dabdd0c8f445fde5973a3497f11915032",
+        "server/modules/procurement/procurement.storage.ts": "3c3cf5976213df3ab5a06b57fe2bf026c44c786a6bfb5566668c2889e60a9164",
+        "server/modules/procurement/domain/current-shipment-cost-source.ts": "b61c1576859e993ee5fca216b7c030c305ded9ff1a166b75e7fec823db9c57dd",
+        "server/modules/procurement/shipment-health-evidence.repository.ts": "62d1f62e2f75bb176d42700e59d9102c97bd25c006b1f4e4ec852315bc36fdfb",
+        "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+        "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+        "test/performance/procurement/run-health-cost.ts": "a46154c4784943aa57ee00500da6a7d5ae13279456718734d15f0d4a91fbba31"
+      }
+    },
+    "helperHashes": {
+      "query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+      "health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+      "run-health-cost.ts": "a46154c4784943aa57ee00500da6a7d5ae13279456718734d15f0d4a91fbba31",
+      "compare-health-cost.ts": "1fc45acd49f5b28f501e3dbdc3c0cce85937c6c29aef95f4ee2edb55222fb904",
+      "tsconfig.json": "e7f6fab018134f654f863543eee81c6db17f5113cb23bbc7e38c826fea2fd142"
+    },
+    "runs": [
+      {
+        "run": 1,
+        "version": "baseline",
+        "head": "719b60983453a5723f27d224953a536f30502b57",
+        "startedAt": "2026-10-25T21:32:25.138Z",
+        "finishedAt": "2026-10-25T21:38:21.744Z",
+        "reportFile": "performance-1792963944284.json",
+        "reportSha256": "49e2e707c3f54be0f752db20a4555013fd2b03bedafcb3f6168b2378c98618c6",
+        "wrapperFile": "performance-wrapper-1792963944284.json",
+        "wrapperSha256": "ff91ea1710f2ae24879371b0bd3de072002e706ef6818cd91a2c679d5fbb2dd9",
+        "childExitConfirmed": true,
+        "childCloseConfirmed": true,
+        "disposed": true,
+        "dropped": true,
+        "otherActiveDatabaseSessionsAtStart": [],
+        "measurements": [
+          {
+            "owner": "landed-health",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 3960,
+                "queries": 4004,
+                "queryElapsedMs": 2857
+              },
+              {
+                "elapsedMs": 4138,
+                "queries": 4004,
+                "queryElapsedMs": 3076
+              },
+              {
+                "elapsedMs": 4683,
+                "queries": 4004,
+                "queryElapsedMs": 3411
+              }
+            ]
+          },
+          {
+            "owner": "unfiltered-shipments",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 2159,
+                "queries": 2005,
+                "queryElapsedMs": 1583
+              },
+              {
+                "elapsedMs": 2136,
+                "queries": 2005,
+                "queryElapsedMs": 1576
+              },
+              {
+                "elapsedMs": 2069,
+                "queries": 2005,
+                "queryElapsedMs": 1519
+              }
+            ]
+          },
+          {
+            "owner": "filtered-shipments",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 4153,
+                "queries": 4005,
+                "queryElapsedMs": 3056
+              },
+              {
+                "elapsedMs": 4038,
+                "queries": 4005,
+                "queryElapsedMs": 2981
+              },
+              {
+                "elapsedMs": 3934,
+                "queries": 4005,
+                "queryElapsedMs": 2907
+              }
+            ]
+          },
+          {
+            "owner": "purchasing-health",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 4069,
+                "queries": 4025,
+                "queryElapsedMs": 3116
+              },
+              {
+                "elapsedMs": 4101,
+                "queries": 4025,
+                "queryElapsedMs": 3059
+              },
+              {
+                "elapsedMs": 4014,
+                "queries": 4025,
+                "queryElapsedMs": 2983
+              }
+            ]
+          },
+          {
+            "owner": "po-cost-fanout",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 476,
+                "queries": 620,
+                "queryElapsedMs": 338
+              },
+              {
+                "elapsedMs": 452,
+                "queries": 620,
+                "queryElapsedMs": 332
+              },
+              {
+                "elapsedMs": 457,
+                "queries": 620,
+                "queryElapsedMs": 329
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "run": 2,
+        "version": "current",
+        "head": "7b4a6e941060c3afeeab6e04e0a951b06e43b9e3",
+        "startedAt": "2026-10-25T21:38:39.849Z",
+        "finishedAt": "2026-10-25T21:43:10.735Z",
+        "reportFile": "performance-1792964319433.json",
+        "reportSha256": "d8554dc6c5f075f78dbffd8ae5272034bf678eaccb068956beeef89035dac338",
+        "wrapperFile": "performance-wrapper-1792964319433.json",
+        "wrapperSha256": "b30860aa82ec4cc8b478619e5bd61c8598e1f027c9b3eb1ae447d0002c5d6815",
+        "childExitConfirmed": true,
+        "childCloseConfirmed": true,
+        "disposed": true,
+        "dropped": true,
+        "otherActiveDatabaseSessionsAtStart": [],
+        "measurements": [
+          {
+            "owner": "landed-health",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 5849,
+                "queries": 1911,
+                "queryElapsedMs": 4179
+              },
+              {
+                "elapsedMs": 3276,
+                "queries": 1911,
+                "queryElapsedMs": 2466
+              },
+              {
+                "elapsedMs": 3590,
+                "queries": 1911,
+                "queryElapsedMs": 2675
+              }
+            ]
+          },
+          {
+            "owner": "unfiltered-shipments",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 1687,
+                "queries": 962,
+                "queryElapsedMs": 1266
+              },
+              {
+                "elapsedMs": 1584,
+                "queries": 962,
+                "queryElapsedMs": 1198
+              },
+              {
+                "elapsedMs": 1686,
+                "queries": 962,
+                "queryElapsedMs": 1267
+              }
+            ]
+          },
+          {
+            "owner": "filtered-shipments",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 3321,
+                "queries": 1912,
+                "queryElapsedMs": 2496
+              },
+              {
+                "elapsedMs": 3351,
+                "queries": 1912,
+                "queryElapsedMs": 2532
+              },
+              {
+                "elapsedMs": 3227,
+                "queries": 1912,
+                "queryElapsedMs": 2433
+              }
+            ]
+          },
+          {
+            "owner": "purchasing-health",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 3361,
+                "queries": 1932,
+                "queryElapsedMs": 2670
+              },
+              {
+                "elapsedMs": 3365,
+                "queries": 1932,
+                "queryElapsedMs": 2556
+              },
+              {
+                "elapsedMs": 3365,
+                "queries": 1932,
+                "queryElapsedMs": 2569
+              }
+            ]
+          },
+          {
+            "owner": "po-cost-fanout",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 486,
+                "queries": 620,
+                "queryElapsedMs": 352
+              },
+              {
+                "elapsedMs": 490,
+                "queries": 620,
+                "queryElapsedMs": 349
+              },
+              {
+                "elapsedMs": 490,
+                "queries": 620,
+                "queryElapsedMs": 354
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "ownerResults": [
+      {
+        "owner": "landed-health",
+        "tier": 100,
+        "completePublicOutputsIdentical": true,
+        "baseline": {
+          "queries": [
+            4004
+          ],
+          "elapsedMs": [
+            3960,
+            4138,
+            4683
+          ],
+          "medianElapsedMs": 4138,
+          "queryElapsedMs": [
+            2857,
+            3076,
+            3411
+          ]
+        },
+        "current": {
+          "queries": [
+            1911
+          ],
+          "elapsedMs": [
+            5849,
+            3276,
+            3590
+          ],
+          "medianElapsedMs": 3590,
+          "queryElapsedMs": [
+            4179,
+            2466,
+            2675
+          ]
+        }
+      },
+      {
+        "owner": "unfiltered-shipments",
+        "tier": 100,
+        "completePublicOutputsIdentical": true,
+        "baseline": {
+          "queries": [
+            2005
+          ],
+          "elapsedMs": [
+            2159,
+            2136,
+            2069
+          ],
+          "medianElapsedMs": 2136,
+          "queryElapsedMs": [
+            1583,
+            1576,
+            1519
+          ]
+        },
+        "current": {
+          "queries": [
+            962
+          ],
+          "elapsedMs": [
+            1687,
+            1584,
+            1686
+          ],
+          "medianElapsedMs": 1686,
+          "queryElapsedMs": [
+            1266,
+            1198,
+            1267
+          ]
+        }
+      },
+      {
+        "owner": "filtered-shipments",
+        "tier": 100,
+        "completePublicOutputsIdentical": true,
+        "baseline": {
+          "queries": [
+            4005
+          ],
+          "elapsedMs": [
+            4153,
+            4038,
+            3934
+          ],
+          "medianElapsedMs": 4038,
+          "queryElapsedMs": [
+            3056,
+            2981,
+            2907
+          ]
+        },
+        "current": {
+          "queries": [
+            1912
+          ],
+          "elapsedMs": [
+            3321,
+            3351,
+            3227
+          ],
+          "medianElapsedMs": 3321,
+          "queryElapsedMs": [
+            2496,
+            2532,
+            2433
+          ]
+        }
+      },
+      {
+        "owner": "purchasing-health",
+        "tier": 100,
+        "completePublicOutputsIdentical": true,
+        "baseline": {
+          "queries": [
+            4025
+          ],
+          "elapsedMs": [
+            4069,
+            4101,
+            4014
+          ],
+          "medianElapsedMs": 4069,
+          "queryElapsedMs": [
+            3116,
+            3059,
+            2983
+          ]
+        },
+        "current": {
+          "queries": [
+            1932
+          ],
+          "elapsedMs": [
+            3361,
+            3365,
+            3365
+          ],
+          "medianElapsedMs": 3365,
+          "queryElapsedMs": [
+            2670,
+            2556,
+            2569
+          ]
+        }
+      },
+      {
+        "owner": "po-cost-fanout",
+        "tier": 100,
+        "completePublicOutputsIdentical": true,
+        "baseline": {
+          "queries": [
+            620
+          ],
+          "elapsedMs": [
+            476,
+            452,
+            457
+          ],
+          "medianElapsedMs": 457,
+          "queryElapsedMs": [
+            338,
+            332,
+            329
+          ]
+        },
+        "current": {
+          "queries": [
+            620
+          ],
+          "elapsedMs": [
+            486,
+            490,
+            490
+          ],
+          "medianElapsedMs": 490,
+          "queryElapsedMs": [
+            352,
+            349,
+            354
+          ]
+        }
+      }
+    ],
+    "supplierHealthQueries": [
+      {
+        "label": "supplier-current-product-packaging",
+        "runs": [
+          {
+            "run": 1,
+            "version": "baseline",
+            "samples": [
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1104,
+                "maxMs": 17
+              },
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1181,
+                "maxMs": 17
+              },
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1390,
+                "maxMs": 18
+              }
+            ]
+          },
+          {
+            "run": 2,
+            "version": "current",
+            "samples": [
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1742,
+                "maxMs": 26
+              },
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1101,
+                "maxMs": 17
+              },
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1264,
+                "maxMs": 17
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "label": "supplier-descendant-lots",
+        "runs": [
+          {
+            "run": 1,
+            "version": "baseline",
+            "samples": [
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 334,
+                "maxMs": 4
+              },
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 362,
+                "maxMs": 5
+              },
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 391,
+                "maxMs": 6
+              }
+            ]
+          },
+          {
+            "run": 2,
+            "version": "current",
+            "samples": [
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 609,
+                "maxMs": 11
+              },
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 343,
+                "maxMs": 7
+              },
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 374,
+                "maxMs": 5
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "label": "supplier-component-application-lots",
+        "runs": [
+          {
+            "run": 1,
+            "version": "baseline",
+            "samples": [
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 180,
+                "maxMs": 3
+              },
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 221,
+                "maxMs": 3
+              },
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 217,
+                "maxMs": 3
+              }
+            ]
+          },
+          {
+            "run": 2,
+            "version": "current",
+            "samples": [
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 309,
+                "maxMs": 7
+              },
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 210,
+                "maxMs": 4
+              },
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 211,
+                "maxMs": 4
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "limitations": [
+      "Synthetic local posted shipments with five lines each and one PO linked to 100 shipments; no production statistics or records.",
+      "Original PostgreSQL 17.11 settings are preserved, including shared_buffers=400kB. The baseline runs before current; execution-order, cache and scheduling effects are not isolated.",
+      "Each run uses a fresh database, actual receipt closing and cost revision application, then read-only measurements. Caches and host scheduling are not experimentally controlled.",
+      "Per-shipment supplier review remains; the unchanged supplier query fingerprints, call counts and row volumes identify repeat work without proving a specific production SLO or CPU cause."
+    ]
+  }
 }

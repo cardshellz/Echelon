@@ -203,6 +203,28 @@ describe("fast CI preserves coverage and required checks", () => {
     }
   });
 
+  it("runs all connected procurement shards with serial database ownership and bounded setup headroom", () => {
+    const connected = source(".github/workflows/procurement-connected.yml");
+    const browser = job(connected, "browser");
+    const indices: number[] = JSON.parse(browser.match(/^        shard: (\[[\d, ]+\])$/m)?.[1] ?? "[]");
+    expect(indices).toEqual([1, 2, 3, 4]);
+    expect(browser).toContain("fail-fast: false");
+    expect(browser).toContain("timeout-minutes: 20");
+    expect(browser).toContain("name: Connected procurement database and browser (${{ matrix.shard }}/4)");
+    expect(browser).toContain("run: npx playwright test --config playwright.procurement-connected.config.ts --shard=${{ matrix.shard }}/4 --forbid-only");
+    expect(browser).not.toMatch(/--grep|--max-failures|--pass-with-no-tests|continue-on-error/);
+    expect(browser).toContain("name: procurement-connected-evidence-${{ matrix.shard }}");
+    expect(browser).toContain("path: test-results/procurement-connected/");
+    expect(browser).toContain('ECHELON_TEST_DATABASE_DISPOSABLE: "true"');
+    const config = source("playwright.procurement-connected.config.ts");
+    expect(config).toContain("workers: 1");
+    expect(config).toContain("fullyParallel: true");
+    expect(config).toContain("globalTimeout: 12 * 60_000");
+    const aggregate = job(connected, "result");
+    expect(aggregate).toContain("needs: [select, browser]");
+    expect(aggregate).toContain("BROWSER_RESULT: ${{ needs.browser.result }}");
+  });
+
   it("runs cheap coverage, test-exclusion, migration and writer-ownership guards before expensive core jobs", () => {
     const preflight = job(workflow, "preflight");
     const manifest = source("scripts/ci/guard-test-manifest.mjs");

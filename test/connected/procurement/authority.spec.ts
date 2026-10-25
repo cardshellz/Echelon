@@ -146,6 +146,9 @@ test("a non-lead receiver with identical grants can reach the same receipt as th
   await attachState(info, "granted-picker-api-proof", backend);
   await expect(page).toHaveURL(receiptUrl(backend));
   await expect(page.getByTestId("btn-add-line")).toBeEnabled();
+  // Close the modal before inspecting the underlying application navigation.
+  await page.getByRole("link", { name: "Back to receiving", exact: true }).click();
+  await expect(page.getByTestId("btn-add-line")).toBeHidden();
   if ((page.viewportSize()?.width ?? 1280) < 768) await page.getByRole("button", { name: "Open navigation", exact: true }).click();
   await expect(page.getByRole("link", { name: "Receiving", exact: true })).toBeVisible();
   // Receiving access must not expose unrelated links inherited from the
@@ -330,5 +333,19 @@ test("a catalog creator can create metadata without gaining receipt adjustment a
   expect(variants.status(), await variants.text()).toBe(200);
   expect(await variants.json()).toEqual(expect.arrayContaining([expect.objectContaining({ id: result.variant.id, sku: "PACK-C7", unitsPerVariant: 7 })]));
   expect(businessEvidence(await backend.state())).toEqual(before);
+  // Inventory catalog authority does not imply the purchasing read grant.
+  // These API boundaries explicitly require purchasing:view; the mixed
+  // inventory dashboard retains its separate existing server contract.
+  const financialBefore = await backend.control("navigation-state");
+  for (const path of ["/api/purchase-orders", "/api/inbound-shipments", "/api/vendor-invoices/work-list",
+    "/api/ap/summary", "/api/ap-payments/work-list", "/api/supplier-credits", "/api/supplier-returns"]) {
+    const denied = await page.request.get(backend.url + path);
+    expect(denied.status(), path + ": " + await denied.text()).toBe(403);
+  }
+  for (const path of ["/ap", "/ap-payments", "/supplier-credits", "/supplier-returns", "/purchasing"]) {
+    await page.goto(backend.url + path);
+    await expect(page).toHaveURL(backend.url + "/picking");
+  }
+  expect(await backend.control("navigation-state")).toEqual(financialBefore);
   await attachState(info, "catalog-created-receipt-unchanged", backend);
 });

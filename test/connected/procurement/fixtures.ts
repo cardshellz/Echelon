@@ -9,7 +9,7 @@ import pg from "pg";
 
 export interface ConnectedActor { id: string; username: string; password: string; role: string; roleId: number }
 interface Ready {
-  navigation: { purchaseOrderIds: readonly [number, number]; shipmentId: number; goodsInvoiceId: number;
+  navigation: { purchaseOrderIds: readonly [number, number]; draftPurchaseOrderId: number; shipmentId: number; goodsInvoiceId: number;
     freightInvoiceId: number; goodsInvoiceCents: number; freightInvoiceCents: number };
   event: "procurement_connected_ready"; url: string; receivingOrderId: number;
   databaseName: string; credentials: { username: string; password: string }; actors: ConnectedActor[];

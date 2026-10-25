@@ -102,6 +102,21 @@ describe("shipment complete work-list projection", () => {
     expect(vi.mocked(readShipmentHealthEvidence).mock.calls.map(call => call[1].length)).toEqual([100, 100, 50]);
     expect(vi.mocked(readShipmentHealthEvidence).mock.calls.every(call => call[0] === tx)).toBe(true);
   });
+  it("shares supplier reuse only inside one 100-header page and never into the next request", async () => {
+    const { service, tx } = fixture(Array.from({ length: 250 }, (_, index) => item(index + 1, "closed")));
+    await service.getShipmentPage({ limit: 250 });
+    const calls = vi.mocked(readShipmentCostReviewInTransaction).mock.calls;
+    expect(calls).toHaveLength(250);
+    expect(calls.every(call => call[0] === tx)).toBe(true);
+    const readers = calls.map(call => call[2]);
+    expect(readers.slice(0, 100).every(reader => reader === readers[0])).toBe(true);
+    expect(readers.slice(100, 200).every(reader => reader === readers[100])).toBe(true);
+    expect(readers.slice(200).every(reader => reader === readers[200])).toBe(true);
+    expect(new Set(readers).size).toBe(3);
+    expect(readers.every(reader => typeof reader?.read === "function")).toBe(true);
+    await service.getShipmentPage({ limit: 1 });
+    expect(vi.mocked(readShipmentCostReviewInTransaction).mock.calls[250][2]).not.toBe(readers[0]);
+  });
   it("fails closed when the batch reader omits a selected shipment", async () => {
     const { service } = fixture();
     vi.mocked(readShipmentHealthEvidence).mockResolvedValue(new Map());

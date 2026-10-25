@@ -119,7 +119,13 @@ Do not enable shared-database test concurrency as part of browser optimization.
 `procurement-connected.yml` runs `playwright.procurement-connected.config.ts`
 separately from the mocked browser suite. Each case starts the built frontend
 and real login/session, procurement HTTP routes and application/database owners
-against its own disposable PostgreSQL database. Desktop and mobile run serially.
+against its own disposable PostgreSQL database. Four test-level shards run on
+separate CI runners; one worker runs cases serially within each runner. The
+configuration enables `fullyParallel` so Playwright can split individual cases
+across shards rather than assigning whole files. The actual-discovery guard
+compares the unfiltered project/case identities with the shard union, rejecting
+missing or duplicate cases and uneven case counts. It does not fix the suite's
+total size, so new desktop/mobile scenarios remain included.
 Only external inventory-channel dispatch is inert; losing a response forwards the
 actual request first, waits for the commit response, then aborts browser delivery.
 
@@ -133,7 +139,11 @@ entry point explicitly, because process spawning is not a static import. Changed
 procurement server files and migrations always select it. The existing dependency
 and aggregate guards reject missing selection, failures and cancellations. New
 connected specifications are discovered from `test/connected/procurement` and
-checked against Playwright's unfiltered discovery.
+checked against Playwright's unfiltered discovery. Every shard has a twelve-minute
+Playwright limit inside a twenty-minute job; dependency/browser setup, frontend
+build and evidence upload use the remaining headroom. Shard failures do not
+cancel siblings, their artifact names are distinct, and the existing aggregate
+requires the complete matrix to succeed unless selection explicitly skips it.
 
 For a local run, build with `npx vite build`, set
 `ECHELON_TEST_DATABASE_DISPOSABLE=true` and `ECHELON_TEST_DATABASE_URL` to a

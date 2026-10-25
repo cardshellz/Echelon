@@ -709,7 +709,7 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
     expect(result.items[0].detail).toContain("1 lot retains a provisional flag");
     expect(result.items[0].detail).toContain("this flag alone does not mean freight is unposted");
     expect(db.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "repeatable read", accessMode: "read only" });
-    expect(readShipmentCostReviewInTransaction).toHaveBeenCalledWith(tx, 1);
+    expect(readShipmentCostReviewInTransaction).toHaveBeenCalledWith(tx, 1, expect.objectContaining({ read: expect.any(Function) }));
     expect(storage.getProvisionalLotsByShipment).toHaveBeenCalledWith(1, tx);
     expect(storage.getLandedCostSnapshots).toHaveBeenCalledWith(11, tx);
   });
