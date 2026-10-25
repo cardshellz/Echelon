@@ -12,6 +12,7 @@ import { refreshPoAmendmentCosts, type PoAmendmentShipmentOwner } from "./po-ame
 import { costFingerprint, CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import type { PoQuantityPreviewRequest } from "@shared/procurement/po-quantity-amendment";
+import { preparePoAdditions } from "./po-line-composition.repository";
 
 function input<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
@@ -23,10 +24,15 @@ function assertVersion(actual: string, expected: string) {
 }
 export function createPoQuantityAmendmentService(database: AmendmentDatabase, now: () => Date, shipments: PoAmendmentShipmentOwner) {
   const repository = createDrizzleFinancialCommandRepository(database);
-  async function execute(tx: AmendmentTransaction, source: Awaited<ReturnType<typeof readQuantityAmendmentSource>>,
-    request: PoQuantityPreviewRequest, actorId: string, commandKey: string) {
-    const plan = planQuantityAmendment(source.facts, request);
+  async function prepare(tx: AmendmentTransaction, source: Awaited<ReturnType<typeof readQuantityAmendmentSource>>, request: PoQuantityPreviewRequest) {
+    const additions = await preparePoAdditions(tx, source.facts.header, Math.max(0, ...source.facts.lines.map(line => line.lineNumber)) + 1, request);
+    const plan = planQuantityAmendment(source.facts, request, additions);
     const approval = buildCurrentPurchaseApprovalSnapshot({ ...source, totalCents: plan.preview.afterTotalCents });
+    return { plan, approval };
+  }
+  async function execute(tx: AmendmentTransaction, source: Awaited<ReturnType<typeof readQuantityAmendmentSource>>,
+    request: PoQuantityPreviewRequest, actorId: string, commandKey: string, prepared?: Awaited<ReturnType<typeof prepare>>) {
+    const { plan, approval } = prepared ?? await prepare(tx, source, request);
     const at = quantityAmendmentTimestamp(source.facts, now());
     const saved = await persistQuantityAmendment(tx, source, plan, actorId, at, approval);
     const impact = await refreshPoAmendmentCosts(tx, source, plan, shipments, actorId, at);
@@ -86,10 +92,11 @@ export function createPoQuantityAmendmentService(database: AmendmentDatabase, no
           const source = await readQuantityAmendmentSource(tx, poId, actorId);
           assertQuantityAmendmentAuthority(source.actor);
           assertVersion(source.sourceVersion, request.sourceVersion);
-          const plan = planQuantityAmendment(source.facts, request);
-          buildCurrentPurchaseApprovalSnapshot({ ...source, totalCents: plan.preview.afterTotalCents });
+          // Preserve specific authority/line failures even for a direct approval
+          // request that never obtained a valid preview. Preparation makes no writes.
+          const prepared = await prepare(tx, source, request);
           if (!request.previewVersion) throw new PoQuantityAmendmentError("Review the current quantities and downstream costs before approving this edit.", "PO_AMENDMENT_PREVIEW_REQUIRED");
-          const result = await execute(tx, source, request, actorId, descriptor.idempotencyKey);
+          const result = await execute(tx, source, request, actorId, descriptor.idempotencyKey, prepared);
           if (result.preview.previewVersion !== request.previewVersion) throw new PoQuantityAmendmentError("The dependent cost impact changed. Reload and review the PO edit again.", "PO_AMENDMENT_STALE");
           return { httpStatus: 200, body: poQuantityAmendmentResultSchema.parse(result), resultType: "po_quantity_amendment", resultId: result.auditEventId };
         },

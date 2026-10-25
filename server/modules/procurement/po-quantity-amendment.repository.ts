@@ -19,9 +19,10 @@ import { readPoAmendmentDependencies } from "./po-amendment-dependencies.reposit
 import { replacePurchaseOrderQuantityExceptions } from "./purchase-order-quantity-exceptions.repository";
 import { poAmendmentHistorySchema } from "@shared/procurement/po-quantity-amendment";
 import { costInteger } from "../inventory/infrastructure/cost-evidence-values";
+import { readPoLineRemovalBlocks } from "./po-line-composition.repository";
 
 // Changes to reviewed behavior invalidate uncommitted previews; committed receipts still replay.
-const PO_LINE_REVIEW_VERSION = 3;
+const PO_LINE_REVIEW_VERSION = 4;
 
 export type AmendmentDatabase = Pick<typeof db, "transaction">;
 export type AmendmentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -65,7 +66,8 @@ export async function readQuantityAmendmentSource(tx: AmendmentTransaction, purc
   const policy = (await readProcurementSettings(tx, "share")).settings;
   const requireApproval = policy.requireApproval;
   const approvalTiers = await tx.select().from(poApprovalTiers).where(eq(poApprovalTiers.active, 1)).orderBy(asc(poApprovalTiers.id)).for("share");
-  const facts = { header, lines, invoices, invoiceLines, recommendationOwned: handoffs.length > 0 };
+  const removalBlocks = await readPoLineRemovalBlocks(tx, lines.map(line => line.id));
+  const facts = { header, lines, invoices, invoiceLines, recommendationOwned: handoffs.length > 0, removalBlocks };
   // Full row versions cover price metadata, counters, invoice void/payment changes,
   // receipt evidence and variance approvals. No client amount is authoritative.
   const sourceVersion = createHash("sha256").update(canonicalJson({ reviewVersion: PO_LINE_REVIEW_VERSION, facts, actor, links, handoffs, receipts, exceptions, dependencies, requireApproval, procurementPolicyRevision: policy.revision, approvalTiers })).digest("hex");
@@ -81,10 +83,24 @@ export async function persistQuantityAmendment(
   approvalEvidence: PurchaseApprovalSnapshot,
 ) {
   const { header, lines } = source.facts;
-  const lineEdit = plan.preview.lines.some(line => ["edit_line", "edit_charge"].includes(line.priceTreatment));
+  const lineEdit = !!(plan.additions?.length || plan.removals?.length) || plan.preview.lines.some(line => ["edit_line", "edit_charge"].includes(line.priceTreatment));
   const actionName = lineEdit ? "PO edit" : "quantity correction";
   const revisionNumber = (header.revisionNumber ?? 0) + 1;
   if (!Number.isSafeInteger(revisionNumber) || revisionNumber > 2_147_483_647) throw new PoQuantityAmendmentError("The revision limit has been reached.", "PO_AMENDMENT_REVISION_LIMIT");
+  for (const addition of plan.additions ?? []) {
+    const [line] = await tx.insert(purchaseOrderLines).values({ ...addition.values, createdAt: approvedAt, updatedAt: approvedAt }).returning();
+    if (!line) throw new PoQuantityAmendmentError("The new PO line could not be saved.", "PO_AMENDMENT_UPDATE_FAILED");
+    await tx.insert(poRevisions).values({ purchaseOrderId: header.id, revisionNumber, changedBy: actorId,
+      changeType: "line_added", fieldChanged: "line", oldValue: null, newValue: JSON.stringify(line), lineId: line.id, notes: plan.preview.reason, createdAt: approvedAt });
+  }
+  for (const id of plan.removals ?? []) {
+    const before = lines.find(line => line.id === id)!;
+    const [line] = await tx.update(purchaseOrderLines).set({ status: "cancelled", cancelledQty: before.orderQty, updatedAt: approvedAt })
+      .where(and(eq(purchaseOrderLines.id, id), eq(purchaseOrderLines.purchaseOrderId, header.id))).returning();
+    if (!line) throw new PoQuantityAmendmentError("The removed PO line could not be recorded.", "PO_AMENDMENT_UPDATE_FAILED");
+    await tx.insert(poRevisions).values({ purchaseOrderId: header.id, revisionNumber, changedBy: actorId,
+      changeType: "line_removed", fieldChanged: "status", oldValue: before.status, newValue: "cancelled", lineId: id, notes: plan.preview.reason, createdAt: approvedAt });
+  }
   for (const change of plan.patches) {
     const before = lines.find((line) => line.id === change.id)!;
     const [updated] = await tx.update(purchaseOrderLines).set({
@@ -112,6 +128,7 @@ export async function persistQuantityAmendment(
     subtotalCents: plan.subtotalCents, totalCents: plan.preview.afterTotalCents, revisionNumber,
     approvalTierId: approvalEvidence.tier?.id ?? null, approvedBy: actorId, approvedAt, approvalNotes: plan.preview.reason,
     receivedLineCount: plan.receivedLineCount,
+    ...(plan.lineCount !== undefined ? { lineCount: plan.lineCount } : {}),
     status: plan.preview.afterStatus,
     physicalStatus: plan.preview.closedPurchaseOrder ? header.physicalStatus : plan.preview.afterStatus === "received" ? "received" : plan.preview.afterStatus === "partially_received" ? "receiving" : header.physicalStatus,
     updatedBy: actorId, updatedAt: sql`GREATEST(${approvedAt}::timestamp, ${header.updatedAt}::timestamp + interval '1 millisecond')`,
@@ -138,7 +155,7 @@ export async function recordQuantityAmendmentResult(tx: AmendmentTransaction,
   approvedAt: Date, approvalEvidence: PurchaseApprovalSnapshot) {
   const { header, lines } = source.facts;
   const { revisionNumber, afterHeader, afterLines } = saved;
-  const lineEdit = plan.preview.lines.some(line => ["edit_line", "edit_charge"].includes(line.priceTreatment));
+  const lineEdit = !!(plan.additions?.length || plan.removals?.length) || plan.preview.lines.some(line => ["edit_line", "edit_charge"].includes(line.priceTreatment));
   const [event] = await tx.insert(poEvents).values({
     poId: header.id, eventType: lineEdit ? "line_amendment_approved" : "quantity_amendment_approved", actorType: "user", actorId, createdAt: approvedAt,
     payloadJson: {

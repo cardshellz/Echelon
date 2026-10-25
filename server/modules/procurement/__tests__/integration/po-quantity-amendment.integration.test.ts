@@ -49,13 +49,13 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   let ownsAudit = false;
   const ownedSchemas: string[] = [];
   let requestActor: string | null = "admin-user";
-  const tables: Parameters<typeof fixtureTable>[0][] = [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
+  const tables: Parameters<typeof fixtureTable>[0][] = [schema.products, schema.productVariants, schema.vendors, schema.vendorProducts, schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
     schema.purchaseOrders, schema.purchaseOrderLines, schema.poApprovalTiers, schema.poStatusHistory, schema.poRevisions, schema.poEvents, schema.poExceptions,
     schema.purchasingRecommendationPoHandoffs, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
   ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poReceipts,
     schema.warehouseSettings, schema.apPayments, schema.apPaymentAllocations, schema.receivingOrders, schema.receivingLines, schema.inventoryLots, schema.auditEvents];
   tables.push(schema.inboundShipments, schema.inboundShipmentLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
-    schema.landedCostSnapshots, schema.receiptReversals, schema.inventoryTransactions, schema.orderItemCosts, schema.orderLineCosts);
+    schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receiptReversals, schema.inventoryTransactions, schema.orderItemCosts, schema.orderLineCosts);
   const migrations = ["136_financial_command_results.sql", "140_financial_command_operations.sql", "227_purchase_order_history_retention.sql"];
   const descriptor = (body: unknown, key = randomUUID(), actorId = "admin-user"): FinancialCommandDescriptor => ({
     actorType: "user", actorId, method: "POST", routeTemplate: "/api/purchase-orders/:id/quantity-amendment", resourceKey: "purchase_order:1",
@@ -108,7 +108,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     validatePostgresTestEnvironment(process.env);
     if ([process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].includes(TEST_URL)) throw new Error("Requires a separate disposable database.");
     pool = new pg.Pool({ connectionString: TEST_URL, max: 8, ssl: false });
-    for (const name of ["identity", "procurement", "inventory", "oms"]) {
+    for (const name of ["identity", "catalog", "procurement", "inventory", "oms"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
@@ -160,10 +160,13 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       DROP TRIGGER IF EXISTS purchase_order_history_retention_rows ON procurement.purchase_orders;
       DROP TRIGGER IF EXISTS purchase_order_history_retention_truncate ON procurement.purchase_orders;
       DROP TRIGGER IF EXISTS amendment_test_failure ON procurement.po_events;
-      TRUNCATE identity.users,identity.auth_roles,identity.auth_permissions,identity.auth_user_roles,identity.auth_role_permissions,
+      TRUNCATE catalog.products,catalog.product_variants,procurement.vendors,procurement.vendor_products,identity.users,identity.auth_roles,identity.auth_permissions,identity.auth_user_roles,identity.auth_role_permissions,
       procurement.purchase_orders,procurement.purchase_order_lines,procurement.po_approval_tiers,procurement.po_status_history,procurement.po_revisions,procurement.po_events,procurement.po_exceptions,
       procurement.purchasing_recommendation_po_handoffs,procurement.vendor_invoices,procurement.vendor_invoice_lines,procurement.vendor_invoice_po_links,procurement.po_receipts,
       inventory.warehouse_settings,procurement.ap_payments,procurement.ap_payment_allocations,procurement.receiving_orders,procurement.receiving_lines,inventory.inventory_lots,public.audit_events,public.financial_command_results RESTART IDENTITY CASCADE;
+      INSERT INTO catalog.products(id,sku,name) VALUES(1,'TEST-ORIGINAL','Original product'),(2,'TEST-NEW','New product');
+      INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit) VALUES(1,1,'TEST-ORIGINAL-PIECE','Piece',1,'piece',true),(2,2,'TEST-NEW-PIECE','Piece',1,'piece',true);
+      INSERT INTO procurement.vendors(id,code,name) VALUES(2,'TEST-SUPPLIER','Test supplier');
       INSERT INTO identity.users(id,username,password,role,active) VALUES ('admin-user','admin','unused','picker',1),('lead-user','lead','unused','admin',1),('custom-user','custom','unused','admin',1),('scoped-user','scoped','unused','admin',1);
       INSERT INTO identity.auth_roles(id,name,is_system) VALUES(1,'Administrator',1),(2,'Team Lead',1),(3,'Administrator',0),(4,'Administrator',1);
       INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(1,'purchasing','approve','purchasing'),(2,'purchasing','view','purchasing');
@@ -199,6 +202,55 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       await pool.end();
     }
   });
+  async function compositionRequest() {
+    await pool.query(`INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,product_id,product_name,order_qty,status,unit_cost_cents,unit_cost_mills,total_product_cost_cents,line_total_cents,pricing_basis,pricing_source,quoted_unit_cost_mills)
+      VALUES(12,1,2,1,'Unused product line',5,'open',100,10000,500,500,'per_piece','manual',10000);
+      UPDATE procurement.purchase_orders SET subtotal_cents=1600,total_cents=1600,line_count=2,status='partially_received',physical_status='receiving' WHERE id=1`);
+    return { sourceVersion: (await service.context(1, "admin-user")).sourceVersion, changes: [], removals: [12],
+      additions: [{ clientKey: randomUUID(), productId: 2, expectedReceiveVariantId: 2, expectedReceiveUnitsPerVariant: 1,
+        pricing: { basis: "per_piece" as const, quantityPieces: 10, unitCostMills: 20000 }, packagingCostCents: 50, discountCents: 25, taxCents: 30 }],
+      reason: "Supplier approved replacing the unused line with a new product" };
+  }
+  it("adds and removes PO lines in one reviewed revision while preserving all received and billed records", async () => {
+    const request = await compositionRequest();
+    const before = await evidence(), protectedBefore = await protectedRecords();
+    const preview = await service.preview(1, request, "admin-user");
+    expect(await evidence()).toEqual(before);
+    expect(preview).toMatchObject({ beforeTotalCents: 1600, afterTotalCents: 3155,
+      addedLines: [{ name: "New product", orderQty: 10, lineTotalCents: 2055 }], removedLines: [{ id: 12, orderQty: 5 }] });
+    const approval = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true as const };
+    const key = randomUUID();
+    const result = await post(approval, key);
+    expect(result).toMatchObject({ status: 200, body: { preview } });
+    const after = await evidence();
+    expect(await post(approval, key)).toMatchObject({ status: 200, replayed: "true", body: result.body });
+    expect(await evidence()).toEqual(after);
+    expect(await protectedRecords()).toEqual(protectedBefore);
+    expect((await pool.query("SELECT status,cancelled_qty FROM procurement.purchase_order_lines WHERE id=12")).rows[0]).toEqual({ status: "cancelled", cancelled_qty: 5 });
+    expect((await pool.query("SELECT line_count,total_cents,revision_number FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual({ line_count: 2, total_cents: "3155", revision_number: 1 });
+    expect((await pool.query("SELECT event_type FROM procurement.po_events")).rows).toEqual([{ event_type: "line_amendment_approved" }]);
+  });
+  it("binds new PO lines to reviewed catalog receiving evidence and rolls back a changed unit", async () => {
+    const request = await compositionRequest();
+    const preview = await service.preview(1, request, "admin-user");
+    await pool.query("UPDATE catalog.product_variants SET units_per_variant=10 WHERE id=2");
+    const before = await evidence();
+    const result = await post({ ...request, previewVersion: preview.previewVersion, approvalConfirmed: true });
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    expect(result.status).toBeLessThan(500);
+    expect(await evidence()).toEqual(before);
+  });
+  it("rejects removing received/invoiced lines and adding new purchases to a closed PO", async () => {
+    const request = await compositionRequest();
+    const before = await evidence();
+    await expect(service.preview(1, { ...request, changes: [], additions: [], removals: [11] }, "admin-user")).rejects.toMatchObject({ code: "PO_AMENDMENT_REMOVAL_BLOCKED" });
+    expect(await evidence()).toEqual(before);
+    await pool.query("UPDATE procurement.purchase_orders SET status='closed',physical_status='closed',closed_at='2026-10-08' WHERE id=1");
+    const context = await service.context(1, "admin-user");
+    expect(context.additionBlockedReason).toContain("closed");
+    await expect(service.preview(1, { ...request, sourceVersion: context.sourceVersion, closedPurchaseOrderConfirmed: true }, "admin-user")).rejects.toMatchObject({ code: "PO_AMENDMENT_CLOSED_RECEIVING_REQUIRED" });
+  });
+
   it("returns the immutable approved dependency review through permission-gated paginated history", async () => {
     const saved = await post(await body());
     expect(saved.status).toBe(200);

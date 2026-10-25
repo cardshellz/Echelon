@@ -27,21 +27,36 @@ export const poQuantityChangeSchema = z.object({
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Explicit amounts require a line correction." });
   }
 });
-export const poQuantityChangesSchema = z.array(poQuantityChangeSchema).min(1).max(100).superRefine((changes, ctx) => {
+export const poQuantityChangesSchema = z.array(poQuantityChangeSchema).max(100).superRefine((changes, ctx) => {
   if (new Set(changes.map((change) => change.lineId)).size !== changes.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Each PO line may appear only once." });
   }
 });
 export const poAmendmentVersionSchema = z.string().regex(/^[a-f0-9]{64}$/);
-export const poQuantityPreviewRequestSchema = z.object({
+export const poLineAdditionSchema = z.object({
+  clientKey: z.string().uuid(), productId: poAmendmentIdSchema,
+  expectedReceiveVariantId: poAmendmentIdSchema, expectedReceiveUnitsPerVariant: poAmendmentIdSchema,
+  pricing: poCorrectionPricingSchema, packagingCostCents: money, discountCents: money, taxCents: money,
+  vendorSku: z.string().trim().max(100).optional(), description: z.string().trim().max(20000).optional(),
+}).strict();
+const requestShape = {
   sourceVersion: poAmendmentVersionSchema,
   changes: poQuantityChangesSchema,
+  additions: z.array(poLineAdditionSchema).max(100).optional(),
+  removals: z.array(poAmendmentIdSchema).max(100).optional(),
   closedPurchaseOrderConfirmed: z.literal(true).optional(),
   reason: z.string().trim().min(10).max(2000),
-}).strict();
+};
+function validateOperations(value: { changes: { lineId: number }[]; additions?: { clientKey: string }[]; removals?: number[] }, ctx: z.RefinementCtx) {
+  const additions = value.additions ?? [], removals = value.removals ?? [];
+  if (value.changes.length + additions.length + removals.length === 0) ctx.addIssue({ code: "custom", message: "Add, remove or edit at least one line." });
+  if (new Set(additions.map(line => line.clientKey)).size !== additions.length || new Set(removals).size !== removals.length
+    || value.changes.some(line => removals.includes(line.lineId))) ctx.addIssue({ code: "custom", message: "Each line can only be added, edited or removed once." });
+}
+export const poQuantityPreviewRequestSchema = z.object(requestShape).strict().superRefine(validateOperations);
 // Optional in stored retry receipts from earlier releases; new approvals require
 // the reviewed downstream fingerprint in the application service.
-export const poQuantityApprovalRequestSchema = poQuantityPreviewRequestSchema.extend({ approvalConfirmed: z.literal(true), previewVersion: poAmendmentVersionSchema.optional() }).strict();
+export const poQuantityApprovalRequestSchema = z.object({ ...requestShape, approvalConfirmed: z.literal(true), previewVersion: poAmendmentVersionSchema.optional() }).strict().superRefine(validateOperations);
 export const poQuantityLineViewSchema = z.object({
   id: poAmendmentIdSchema,
   lineNumber: poAmendmentIdSchema,
@@ -59,6 +74,7 @@ export const poQuantityLineViewSchema = z.object({
   lineTotalCents: signedMoney,
   status: z.string(),
   blockedReason: z.string().nullable(),
+  removalBlockedReason: z.string().nullable().optional(),
 });
 export const poQuantityAmendmentContextSchema = z.object({
   purchaseOrderId: poAmendmentIdSchema,
@@ -67,6 +83,7 @@ export const poQuantityAmendmentContextSchema = z.object({
   canApprove: z.boolean(),
   closedPurchaseOrder: z.boolean().optional(),
   blockedReason: z.string().nullable(),
+  additionBlockedReason: z.string().nullable().optional(),
   lines: z.array(poQuantityLineViewSchema),
   totalCents: money.optional(),
   invoiceIssues: z.array(z.object({
@@ -83,6 +100,14 @@ export const poQuantityAmendmentPreviewSchema = z.object({
   currency: z.string(),
   sourceVersion: poAmendmentVersionSchema,
   reason: z.string(),
+  addedLines: z.array(z.object({
+    clientKey: z.string().uuid(), lineNumber: poAmendmentIdSchema, productId: poAmendmentIdSchema,
+    name: z.string(), sku: z.string().nullable(), expectedReceiveVariantId: poAmendmentIdSchema,
+    expectedReceiveUnitsPerVariant: poAmendmentIdSchema, orderQty: poAmendmentIdSchema,
+    unitCostMills: money, totalProductCostCents: money, packagingCostCents: money,
+    discountCents: money, taxCents: money, lineTotalCents: money, sourceFingerprint: poAmendmentVersionSchema,
+  }).strict()).optional(),
+  removedLines: z.array(poQuantityLineViewSchema).optional(),
   lines: z.array(z.object({
     before: poQuantityLineViewSchema,
     after: poQuantityLineViewSchema,
@@ -108,6 +133,7 @@ export const poQuantityAmendmentResultSchema = z.object({
   preview: poQuantityAmendmentPreviewSchema,
 });
 export type PoQuantityChange = z.infer<typeof poQuantityChangeSchema>;
+export type PoLineAddition = z.infer<typeof poLineAdditionSchema>;
 export type PoQuantityPreviewRequest = z.infer<typeof poQuantityPreviewRequestSchema>;
 export type PoQuantityApprovalRequest = z.infer<typeof poQuantityApprovalRequestSchema>;
 export type PoQuantityAmendmentContext = z.infer<typeof poQuantityAmendmentContextSchema>;

@@ -45,9 +45,10 @@ import { PoShipmentCostReview } from "./PoShipmentCostReview";
 import { CostIssueMessage } from "./CostIssueMessage";
 import { poShipmentCostsSchema } from "@shared/procurement/po-shipment-costs";
 import { CostLinkRepairSummary } from "./CostLinkRepairSummary";
+import { ShipmentLineEditor } from "./ShipmentLineEditor";
 
 type Entry =
-  | { receiptLineId: number; shipmentLines?: never }
+  | { receiptLineId: number; shipmentLines?: never; shipmentId?: never; shipmentStatus?: never }
   | {
       shipmentLines: readonly {
         id: number;
@@ -55,6 +56,8 @@ type Entry =
         productName?: string | null;
       }[];
       receiptLineId?: never;
+      shipmentId?: number;
+      shipmentStatus?: string;
     };
 const get = async (path: string) =>
   financialCommandFetchJson(path, { method: "GET", credentials: "include" });
@@ -66,6 +69,8 @@ export function ReceiptShipmentQuantityCorrection(props: {
   return <QuantityCorrectionDialog {...props} />;
 }
 export function ShipmentQuantityEditor(props: {
+  shipmentId?: number;
+  shipmentStatus?: string;
   shipmentLines: readonly {
     id: number;
     sku: string | null;
@@ -94,6 +99,9 @@ function QuantityCorrectionDialog(
   const purpose = props.receiptLineId === undefined ? "shipment" : "receipt";
   const [open, setOpen] = useState(props.repairLineId !== undefined);
   const [locked, setLocked] = useState(false);
+  const [mode, setMode] = useState<"lines" | "quantities">(
+    props.repairLineId !== undefined || props.shipmentStatus === "closed" || props.shipmentId === undefined ? "quantities" : "lines",
+  );
   return (
     <>
       <Button
@@ -129,11 +137,16 @@ function QuantityCorrectionDialog(
             </DialogTitle>
             <DialogDescription>
               {purpose === "shipment"
-                ? "Edit shipped pieces and, when needed, linked receipt pieces. Review all changes and save with one administrator approval."
+                ? "Edit line items or correct linked receipt quantities. Review the full impact and save with administrator approval."
                 : "Set the recorded pieces, review the cost impact, then approve one correction for the linked records."}
             </DialogDescription>
           </DialogHeader>
-          {open && (
+          {props.shipmentId !== undefined && <div className="flex flex-wrap gap-2" aria-label="Shipment edit options">
+            <Button variant={mode === "lines" ? "default" : "outline"} disabled={locked} onClick={() => setMode("lines")}>Line items</Button>
+            {props.shipmentLines.length > 0 && <Button variant={mode === "quantities" ? "default" : "outline"} disabled={locked} onClick={() => setMode("quantities")}>Receipt and quantity corrections</Button>}
+          </div>}
+          {open && mode === "lines" && props.shipmentId !== undefined ? <ShipmentLineEditor shipmentId={props.shipmentId}
+            onLock={setLocked} onClose={() => setOpen(false)} onSaved={props.onSaved} onCorrect={() => setMode("quantities")} /> : open && (
             <CorrectionEntry
               {...props}
               onClose={() => setOpen(false)}

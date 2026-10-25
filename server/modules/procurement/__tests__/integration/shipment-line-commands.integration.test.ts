@@ -9,6 +9,9 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
+import { createShipmentEditorService, shipmentEditorScope } from "../../shipment-editor.service";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import type { ShipmentEditorRequest } from "@shared/procurement/shipment-editor";
 import { shipmentLineVersion } from "../../shipment-line-version";
 import type { ShipmentLineCommand } from "../../shipment-line-commands";
 import type { ShipmentTrackingService } from "../../shipment-tracking.service";
@@ -22,6 +25,7 @@ const databaseTests = TEST_DB_URL && DISPOSABLE ? describe : describe.skip;
 const NOW = new Date("2026-09-06T16:00:00.000Z");
 
 const TABLES = [
+  schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.products, schema.productVariants, schema.vendors, schema.vendorProducts,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
@@ -146,7 +150,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       throw new Error("Shipment line tests require a separate explicitly disposable database");
     }
     pool = new pg.Pool({ connectionString: TEST_DB_URL, max: 8, ssl: /localhost|127\.0\.0\.1/.test(TEST_DB_URL!) ? false : { rejectUnauthorized: false } });
-    for (const name of ["catalog", "procurement", "inventory"]) {
+    for (const name of ["catalog", "procurement", "inventory", "identity"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
@@ -206,9 +210,14 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   });
 
   beforeEach(async () => {
-    if (ownedSchemas.length !== 3) throw new Error("Fixture schema ownership was not established");
+    if (ownedSchemas.length !== 4) throw new Error("Fixture schema ownership was not established");
     await resetQuantityAmendmentFixture(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(", ")} RESTART IDENTITY CASCADE`);
     await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]]);
+    await pool.query("INSERT INTO identity.users(id,username,password,active) VALUES($1,'test-admin','unused',1)", [actorId]);
+    await pool.query(`INSERT INTO identity.auth_roles(id,name,is_system) VALUES(1,'Administrator',1);
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(1,'purchasing','approve','purchasing');
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,1);`);
+    await pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,1)", [actorId]);
     await pool.query(`
       INSERT INTO catalog.products(id,sku,name) VALUES(100,'TEST-PRODUCT','Fixture product'),(101,'TEST-OTHER','Other product');
       INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit)
@@ -234,7 +243,10 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     try {
       if (pool) {
         const cleanup: Array<() => Promise<unknown>> = [];
-        if (commandTablesReady) cleanup.push(() => pool.query("DELETE FROM public.financial_command_results WHERE actor_id=$1 AND idempotency_key LIKE $2", ["procurement.shipment-line", `${runId}-%`]));
+        if (commandTablesReady) cleanup.push(() => pool.query(
+          "DELETE FROM public.financial_command_results WHERE (actor_id=$1 AND idempotency_key LIKE $2) OR (actor_id=$3 AND idempotency_key LIKE $4)",
+          ["procurement.shipment-line", `${runId}-%`, actorId, `editor-${runId}-%`],
+        ));
         if (ownsAudit) cleanup.push(() => pool.query("DROP TABLE public.audit_events"));
         else if (auditReady) cleanup.push(() => pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]]));
         // Both schemas are created only by this suite; never drop pre-existing schemas.
@@ -247,6 +259,102 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     } finally {
       await pool?.end();
       await defaultModulePool?.end();
+    }
+  });
+
+  function editorDescriptor(body: unknown, key = `editor-${runId}-${randomUUID()}`): FinancialCommandDescriptor {
+    return { actorType: "user", actorId, ...shipmentEditorScope(1), idempotencyKey: key,
+      requestHash: createHash("sha256").update(canonicalJson(body)).digest("hex"), contractVersion: 1 };
+  }
+  async function editorRequest(): Promise<ShipmentEditorRequest> {
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    return { sourceVersion: (await editor.context(1, actorId)).sourceVersion,
+      reason: "Reviewed supplier manifest with the corrected delivery contents", changes: [], removals: [],
+      additions: [{ clientKey: randomUUID(), purchaseOrderId: 19, purchaseOrderLineId: 29, quantityPieces: 20,
+        unitSelection: { productVariantId: 300, unitsPerVariant: 10, quantity: 2 } }] };
+  }
+  it("previews and approves an atomic multi-PO edit with exact shares and durable replay", async () => {
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request = await editorRequest();
+    request.changes = [{ lineId: 11, fields: { qtyShipped: 400, cartonCount: 3, dimensionBasis: "carton", weightKg: "2.500", notes: "Corrected manifest" } }];
+    const before = await state();
+    const preview = await editor.preview(1, request, actorId);
+    expect(await state()).toEqual(before);
+    expect(preview.review.costShares).toEqual([
+      { purchaseOrderId: 10, poNumber: "TEST-PO", beforeCents: 500, afterCents: 250 },
+      { purchaseOrderId: 19, poNumber: "TEST-OTHER-PO", beforeCents: 0, afterCents: 250 },
+    ]);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    const command = editorDescriptor(body);
+    const saved = await editor.approve(1, body, actorId, command);
+    expect(saved).toMatchObject({ httpStatus: 200, replayed: false, body: { preview, actorName: "test-admin" } });
+    const after = await state();
+    expect(await editor.approve(1, body, actorId, command)).toMatchObject({ httpStatus: 200, replayed: true, body: saved.body });
+    expect(await state()).toEqual(after);
+    expect((await readLine()).qtyShipped).toBe(400);
+    expect((await pool.query("SELECT actual_cents FROM procurement.inbound_freight_costs WHERE id=31")).rows[0].actual_cents).toBe("500");
+    expect((await pool.query("SELECT changes FROM public.audit_events WHERE action='procurement.shipment.editor.approved'")).rows).toHaveLength(1);
+  });
+  it("replaces the final shipment line in one approval without an empty intermediate allocation", async () => {
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request = { ...await editorRequest(), removals: [11] };
+    const preview = await editor.preview(1, request, actorId);
+    expect(preview.review.after).toMatchObject([{ purchaseOrderId: 19, allocatedCostCents: 500 }]);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    const outcomes = await Promise.all([editor.approve(1, body, actorId, editorDescriptor(body)), editor.approve(1, body, actorId, editorDescriptor(body))]);
+    expect(outcomes.map(value => value.httpStatus).sort()).toEqual([200, 409]);
+    expect((await pool.query("SELECT purchase_order_id,qty_shipped,allocated_cost_cents FROM procurement.inbound_shipment_lines WHERE inbound_shipment_id=1")).rows).toEqual([{ purchase_order_id: 19, qty_shipped: 20, allocated_cost_cents: "500" }]);
+  });
+  it("uses explicit carton measurements for new volume-allocated lines and preserves the charge", async () => {
+    await pool.query("UPDATE procurement.inbound_freight_costs SET allocation_method='by_volume' WHERE id=31");
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request = { ...await editorRequest(), removals: [11] };
+    request.additions[0].packing = { cartonCount: 2, dimensionBasis: "carton", weightKg: "3.000", lengthCm: "50.00", widthCm: "40.00", heightCm: "30.00" };
+    const preview = await editor.preview(1, request, actorId);
+    expect(preview.review.after).toMatchObject([{ fields: { qtyShipped: 20, cartonCount: 2 }, totalWeightKg: "6.000", totalVolumeCbm: "0.120000", allocatedCostCents: 500 }]);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    expect(await editor.approve(1, body, actorId, editorDescriptor(body))).toMatchObject({ httpStatus: 200 });
+  });
+  it("protects directly linked receipt lines even when their receipt header has no shipment link", async () => {
+    await pool.query(`INSERT INTO procurement.receiving_orders(id,receipt_number,purchase_order_id,status) VALUES(70,'DIRECT-RECEIPT',10,'draft');
+      INSERT INTO procurement.receiving_lines(receiving_order_id,purchase_order_line_id,inbound_shipment_line_id,product_variant_id,expected_qty) VALUES(70,21,11,200,2)`);
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    expect((await editor.context(1, actorId)).blockedReason).toContain("receiving history");
+    const before = await state();
+    await expect(execute(await remove())).rejects.toMatchObject({ details: { code: "SHIPMENT_LINE_HISTORY_PROTECTED" } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("rejects changed charges, revoked approval and protected receiving history without mutations", async () => {
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request = await editorRequest();
+    const preview = await editor.preview(1, request, actorId);
+    await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=600 WHERE id=31");
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    const before = await state();
+    expect(await editor.approve(1, body, actorId, editorDescriptor(body))).toMatchObject({ httpStatus: 409 });
+    expect(await state()).toEqual(before);
+    await pool.query("DELETE FROM identity.auth_role_permissions");
+    await expect(editor.preview(1, await editorRequest(), actorId)).rejects.toMatchObject({ statusCode: 403 });
+    await pool.query("INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,1)");
+    await pool.query("INSERT INTO procurement.receiving_orders(receipt_number,inbound_shipment_id,purchase_order_id,status) VALUES('TEST-RECEIPT',1,10,'draft')");
+    const protectedBefore = await state();
+    await expect(editor.preview(1, await editorRequest(), actorId)).rejects.toMatchObject({ details: { code: "SHIPMENT_EDITOR_HISTORY" } });
+    expect(await state()).toEqual(protectedBefore);
+  });
+  it("rolls back all line changes if the final audit history fails", async () => {
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request = { ...await editorRequest(), removals: [11] };
+    const preview = await editor.preview(1, request, actorId);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    const before = await state();
+    await pool.query(`CREATE FUNCTION procurement.fail_editor_history() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test audit failure'; END $$;
+      CREATE TRIGGER editor_history_failure BEFORE INSERT ON procurement.inbound_shipment_status_history FOR EACH ROW EXECUTE FUNCTION procurement.fail_editor_history()`);
+    try {
+      await expect(editor.approve(1, body, actorId, editorDescriptor(body))).rejects.toBeDefined();
+      expect(await state()).toEqual(before);
+    } finally {
+      await pool.query("DROP TRIGGER editor_history_failure ON procurement.inbound_shipment_status_history; DROP FUNCTION procurement.fail_editor_history()");
     }
   });
 
