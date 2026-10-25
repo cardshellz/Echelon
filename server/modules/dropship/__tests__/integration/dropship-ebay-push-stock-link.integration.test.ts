@@ -279,7 +279,9 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
     expect(result.items[0]).toMatchObject({ status: "completed", errorCode: null });
     expect(await listing()).toEqual({ status: "active", external_listing_id: "fake-listing-1", external_offer_id: "fake-offer-1" });
     expect(h.fake.calls.map(call => `${call.method} ${call.path.split("?")[0]}`)).toEqual([
+      "GET /sell/inventory/v1/inventory_item/P5",
       "GET /sell/inventory/v1/offer",
+      "GET /sell/inventory/v1/inventory_item/P5",
       "PUT /sell/inventory/v1/inventory_item/P5",
       "POST /sell/inventory/v1/offer",
       "PUT /sell/inventory/v1/offer/fake-offer-1",
@@ -288,9 +290,13 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
       "GET /sell/inventory/v1/offer",
       "POST /sell/inventory/v1/bulk_update_price_quantity",
       "POST /sell/inventory/v1/offer/fake-offer-1/publish",
+      "GET /sell/inventory/v1/inventory_item/P5",
     ]);
     // Canonical 17, never the intent's 999, on every quantity-bearing write.
-    const [, putItem, postOffer, putOffer, , , , bulk] = h.fake.calls;
+    const putItem = h.fake.calls.find(call => call.method === "PUT" && call.path === "/sell/inventory/v1/inventory_item/P5");
+    const postOffer = h.fake.calls.find(call => call.method === "POST" && call.path === "/sell/inventory/v1/offer");
+    const putOffer = h.fake.calls.find(call => call.method === "PUT" && call.path === "/sell/inventory/v1/offer/fake-offer-1");
+    const bulk = h.fake.calls.find(call => call.method === "POST" && call.path === "/sell/inventory/v1/bulk_update_price_quantity");
     expect((putItem!.body as { availability: { shipToLocationAvailability: { quantity: number } } }).availability.shipToLocationAvailability.quantity).toBe(17);
     expect((postOffer!.body as { availableQuantity: number }).availableQuantity).toBe(17);
     expect((putOffer!.body as { availableQuantity: number }).availableQuantity).toBe(17);
@@ -366,7 +372,7 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
     expect((await item(1)).result.push).toMatchObject({ retryable: false, context: { inventoryCode: "STOCK_LISTING_TARGET_MISMATCH",
       operatorAction: true, targetCount: 0, classification: "permanent", requiresReview: true } });
     expect(h.fake.inventoryOrOfferMutations()).toEqual([]);
-    expect(h.fake.calls.map(call => call.method)).toEqual(["GET"]);
+    expect(h.fake.calls.map(call => call.method)).toEqual(["GET", "GET", "GET"]);
     expect(await counts(null)).toMatchObject({ mappings: 0, outbox: 0, preparations: 0 });
     expect(h.logs.find(log => log.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toMatchObject({ level: "error",
       context: { errorCode: "DROPSHIP_STOCK_DESTINATION_NOT_READY", inventoryCode: "STOCK_LISTING_TARGET_MISMATCH" } });

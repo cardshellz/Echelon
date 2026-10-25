@@ -31,6 +31,13 @@ export class PackageAttributeValidationError extends Error {
   readonly statusCode = 400;
 }
 
+/** Reject old clients explicitly: a removed control must not remain a hidden writer. */
+function assertNoRetiredPackageType(source: Record<string, unknown>): void {
+  if (["shippingPackageType", "shipping_package_type"].some(key => Object.prototype.hasOwnProperty.call(source, key))) {
+    throw new PackageAttributeValidationError("Shipping package type is no longer a catalog field. Refresh the page and save again; existing channel settings are preserved.");
+  }
+}
+
 /**
  * Package facts are stored as numeric(10,2) (migration 185) so inch/pound
  * inputs round-trip exactly. Accept any positive finite number with at most
@@ -65,6 +72,7 @@ export function extractPackageAttributeUpdates(input: unknown): PackageAttribute
   }
 
   const source = input as Record<string, unknown>;
+  assertNoRetiredPackageType(source);
   const updates: PackageAttributeUpdates = {};
   for (const key of PACKAGE_ATTRIBUTE_KEYS) {
     if (Object.prototype.hasOwnProperty.call(source, key)) {
@@ -83,6 +91,7 @@ export function coercePackageAttributesOnVariantPayload(input: unknown): Package
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
 
   const source = input as Record<string, unknown>;
+  assertNoRetiredPackageType(source);
   const updates: PackageAttributeUpdates = {};
   for (const key of PACKAGE_ATTRIBUTE_KEYS) {
     if (Object.prototype.hasOwnProperty.call(source, key)) {

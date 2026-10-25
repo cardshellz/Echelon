@@ -6,6 +6,8 @@ import { createRfqWorkflowCommands, RFQ_WORKFLOW_COMMAND_PRINCIPAL, rfqWorkflowC
 import { createRfqWorkflowService, RfqWorkflowError, type RfqWorkflowCommand, type RfqWorkflowTransaction } from "../../rfq-workflow.service";
 import type { FinancialCommandRepository, FinancialCommandResult } from "../../../../platform/commands/transactional-command.service";
 
+import { DocumentNumberError } from "../../../../platform/document-numbering/document-number";
+
 const actor = "rfq-editor";
 const key = "rfq-recovery-test-1";
 const beforeVersion = "a".repeat(64);
@@ -124,6 +126,28 @@ describe("RFQ recovery receipts", () => {
     } });
     expect(() => validateRfqWorkflowReceipt({ ...result, httpStatus: 500 }, f.command, actor, key)).toThrow();
     expect(() => validateRfqWorkflowReceipt({ ...result, body: { code: "RFQ_VERSION_CONFLICT" } }, f.command, actor, key)).toThrow();
+  });
+
+  it("records exhausted PO numbering as a definitive conversion rejection and replays its request proof", async () => {
+    const f = fixture("convert"), h = harness();
+    h.service.executeInTransaction.mockRejectedValue(new DocumentNumberError("DOCUMENT_NUMBER_EXHAUSTED", "Automatic numbering is exhausted for this date."));
+    const result = await h.commands.execute(f.command, actor, f.descriptor);
+    expect(result).toMatchObject({ terminalState: "rejected", httpStatus: 409, body: {
+      code: "DOCUMENT_NUMBER_EXHAUSTED", details: { rfqCommandOutcome: "rejected", actorId: actor, idempotencyKey: key, intent: f.intent },
+    } });
+    expect(h.repository.markRetryable).not.toHaveBeenCalled();
+    vi.mocked(h.repository.reserve).mockResolvedValue({ kind: "replay", result: { ...result, replayed: true } });
+    const replay = await h.commands.execute(f.command, actor, f.descriptor);
+    expect(replay).toEqual({ ...result, replayed: true });
+    expect(h.service.executeInTransaction).toHaveBeenCalledOnce();
+  });
+
+  it("keeps invalid stored numbering evidence retryable instead of acknowledging a business rejection", async () => {
+    const f = fixture("convert"), h = harness();
+    const failure = new TypeError("Document numbering evidence is missing or invalid");
+    h.service.executeInTransaction.mockRejectedValue(failure);
+    await expect(h.commands.execute(f.command, actor, f.descriptor)).rejects.toBe(failure);
+    expect(h.repository.markRetryable).toHaveBeenCalledOnce();
   });
 
   it("keeps malformed stored authority evidence retryable instead of labeling it invalid operator input", async () => {

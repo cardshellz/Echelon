@@ -1,3 +1,4 @@
+import { DocumentNumberError } from "../../../../platform/document-numbering/document-number";
 import { SupplierCreditEvidenceError } from "../../supplier-credit-settlement.repository";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -83,6 +84,12 @@ describe("AP payment transactional commands", () => {
     vi.clearAllMocks();
   });
 
+  it("classifies numbering exhaustion as a terminal review rejection rather than a retryable failure", () => {
+    expect(classifyApPaymentCommandFailure(new DocumentNumberError("DOCUMENT_NUMBER_EXHAUSTED", "No identifier remains for this date.")))
+      .toEqual({ kind: "rejected", httpStatus: 409, errorCode: "DOCUMENT_NUMBER_EXHAUSTED",
+        errorMessage: "No identifier remains for this date.", body: { error: "No identifier remains for this date.", details: { code: "DOCUMENT_NUMBER_EXHAUSTED" } } });
+  });
+
   it("records credit evidence conflicts as terminal review rejections", () => {
     const failure = classifyApPaymentCommandFailure(new SupplierCreditEvidenceError(12, "AP_INVOICE_SETTLEMENT_REVIEW"));
     expect(failure).toMatchObject({ kind: "rejected", httpStatus: 409,
@@ -104,7 +111,9 @@ describe("AP payment transactional commands", () => {
       apLedgerOutcome,
     });
 
-    const commands = createApPaymentCommands(repository as any);
+    const now = new Date("2026-10-25T12:00:00.000Z");
+    const clock = vi.fn(() => now);
+    const commands = createApPaymentCommands(repository as any, clock);
     const result = await commands.recordPayment({
       payment: {
         vendorId: 4,
@@ -117,9 +126,10 @@ describe("AP payment transactional commands", () => {
 
     expect(mocks.executeInTransaction).toHaveBeenCalledWith(
       "record_payment",
-      expect.objectContaining({ payment: expect.objectContaining({ vendorId: 4 }) }),
+      expect.objectContaining({ now, payment: expect.objectContaining({ vendorId: 4 }) }),
       tx,
     );
+    expect(clock).toHaveBeenCalledOnce();
     expect(repository.executeClaim).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ replayed: false, httpStatus: 201 });
     expect(mocks.postCommit).toHaveBeenCalledWith(apLedgerOutcome);
@@ -147,7 +157,8 @@ describe("AP payment transactional commands", () => {
       markRetryable: vi.fn(),
     };
 
-    const result = await createApPaymentCommands(repository as any).recordPayment({
+    const clock = vi.fn(() => { throw new Error("Replay must not take a new command time"); });
+    const result = await createApPaymentCommands(repository as any, clock).recordPayment({
       payment: {
         vendorId: 4,
         paymentDate: new Date("2026-07-14T00:00:00.000Z"),
@@ -158,6 +169,7 @@ describe("AP payment transactional commands", () => {
     }, descriptor);
 
     expect(result).toMatchObject({ replayed: true, body: replayedBody });
+    expect(clock).not.toHaveBeenCalled();
     expect(mocks.executeInTransaction).not.toHaveBeenCalled();
     expect(repository.executeClaim).not.toHaveBeenCalled();
     expect(mocks.postCommit).not.toHaveBeenCalled();

@@ -55,11 +55,10 @@ describe("OMS/WMS authority conformance :: Shopify cancel and refund finality", 
     expect(C8_CANCEL_REFUND_GUARDS_TEST_SRC).toContain(
       "reconcileCancellations calls cancelOrderCascade",
     );
-    expect(finalityBlock).toContain("Boolean(payload.cancelled_at)");
-    expect(finalityBlock).toContain('payload.financial_status === "refunded"');
-    expect(finalityBlock).toContain('payload.financial_status === "voided"');
+    expect(finalityBlock).toContain("if (payload.cancelled_at) return { cancelNow: true, isFinal: true }");
+    expect(finalityBlock).toContain("channelMerchandise?.verifiedCancelled === true");
     expect(finalityBlock).toContain('existingStatus === "cancelled"');
-    expect(finalityBlock).toContain('existingStatus === "refunded"');
+    expect(finalityBlock).not.toContain('existingStatus === "refunded"');
   });
 
   it("cancels Shopify orders before pick or before ship without creating hold states", () => {

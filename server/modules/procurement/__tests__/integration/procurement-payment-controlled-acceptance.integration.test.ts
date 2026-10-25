@@ -1,3 +1,4 @@
+import { registerApPaymentClockAndNumberCases } from "./ap-payment-clock.cases";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
@@ -23,6 +24,8 @@ acceptance.sequential("procurement payment controlled acceptance", () => {
   beforeAll(async () => fixture.start(testUrl!));
   beforeEach(async () => fixture.reset());
   afterAll(async () => fixture.stop());
+
+  registerApPaymentClockAndNumberCases(fixture);
 
   const pay = (amount: number, key = randomUUID(), actor: string | null = PAYMENT_ACTORS.owner) =>
     fixture.request("/api/ap-payments", { body: flowPayment(amount), key, actor });

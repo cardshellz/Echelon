@@ -1196,8 +1196,8 @@ export default function InboundShipmentDetail() {
         {/* Action buttons */}
         <div className="flex gap-2 flex-wrap w-full sm:w-auto">
           <ShipmentHistoryCorrection key={`history-${shipment.id}`} shipmentId={shipment.id} />
-          {shipment.status !== "cancelled" && lines.length > 0 && (
-            <ShipmentQuantityEditor key={shipment.id} shipmentLines={lines} />
+          {shipment.status !== "cancelled" && (
+            <ShipmentQuantityEditor key={shipment.id} shipmentId={shipment.id} shipmentStatus={shipment.status} shipmentLines={lines} />
           )}
           {isEditable && (
             <Button

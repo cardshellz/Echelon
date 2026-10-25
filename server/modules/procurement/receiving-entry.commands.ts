@@ -1,3 +1,4 @@
+import { DocumentNumberError } from "../../platform/document-numbering/document-number";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { receivingEntryCommandSchema, receivingEntryCommandResultSchema, receivingEntryResultMatchesRequest, type ReceivingEntryCommand } from "@shared/procurement/receiving-entry-command";
@@ -25,6 +26,9 @@ interface ReceivingEntryOwner {
 }
 
 export function classifyReceivingEntryFailure(error: unknown): FinancialCommandFailureDisposition {
+  if (error instanceof DocumentNumberError) {
+    return { kind: "rejected", httpStatus: error.statusCode, body: { code: error.code, error: error.message }, errorCode: error.code, errorMessage: error.message };
+  }
   if ((error instanceof ReceivingError || error instanceof ReceivingEntryError || error instanceof ReceivingCloseIntegrityError)
     && error.statusCode >= 400 && error.statusCode < 500) {
     const code = error instanceof ReceivingEntryError ? error.code : String(error.details?.code ?? "RECEIVING_ENTRY_REJECTED");

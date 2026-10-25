@@ -17,6 +17,7 @@ const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage,
 import { requirePermission, requireAnyPermission } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
 import { PurchasingError } from "./purchasing.service";
+import { DocumentNumberError } from "../../platform/document-numbering/document-number";
 import * as poExceptionsService from "./po-exceptions.service";
 import { PoExceptionError } from "./po-exceptions.service";
 import * as apLedger from "./ap-ledger.service";
@@ -149,6 +150,9 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       }
       res.json(result);
     } catch (error: any) {
+      if (error instanceof DocumentNumberError) {
+        return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      }
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
       res.status(500).json({ error: error.message });
     }

@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 vi.mock("../../purchase-planning-policy.routes", () => ({
   registerPurchasePlanningPolicyRoutes: vi.fn(),
 }));
@@ -132,7 +133,7 @@ describe("PO shipment costs read endpoint", () => {
   const read = (
     path = "/api/purchase-orders/17/shipment-costs",
     permission = "purchasing:view",
-  ) => fetch(url + path, { headers: { "x-test-permission": permission } });
+  ) => requestLocalHttp(url + path, { headers: { "x-test-permission": permission } });
 
   it.each(["inventory:view", "settings:edit", "purchasing:approve"])(
     "requires purchasing view permission before reading data with %s",
@@ -161,7 +162,7 @@ describe("PO shipment costs read endpoint", () => {
     const legacy = await read();
     expect(legacy.headers.get("vary")).toContain("X-Shipment-Cost-Review-Version");
     expect(await legacy.json()).toEqual({ ...payload, lines: [legacyLine] });
-    const current = await fetch(`${url}/api/purchase-orders/17/shipment-costs`, { headers: {
+    const current = await requestLocalHttp(`${url}/api/purchase-orders/17/shipment-costs`, { headers: {
       "x-test-permission": "purchasing:view", "X-Shipment-Cost-Review-Version": "2",
     } });
     expect(current.headers.get("vary")).toContain("X-Shipment-Cost-Review-Version");
@@ -178,7 +179,7 @@ describe("PO shipment costs read endpoint", () => {
     for (const lineVersion of [undefined, "1"]) {
       const headers: Record<string, string> = { "x-test-permission": "purchasing:view", "X-Shipment-Cost-Review-Version": "3" };
       if (lineVersion) headers["X-Purchase-Order-Line-Cost-Version"] = lineVersion;
-      const response = await fetch(`${url}/api/purchase-orders/17/shipment-costs`, { headers });
+      const response = await requestLocalHttp(`${url}/api/purchase-orders/17/shipment-costs`, { headers });
       expect(response.status).toBe(200);
       expect(response.headers.get("vary")).toContain("X-Purchase-Order-Line-Cost-Version");
       const body = await response.json();

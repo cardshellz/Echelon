@@ -315,6 +315,7 @@ describe("WmsSyncService keeps the dry run on the new WMS order only", () => {
       return query;
     });
     harness.database.execute
+      .mockResolvedValueOnce({ rows: [{ provider: "shopify" }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{

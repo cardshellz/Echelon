@@ -16,16 +16,18 @@ type Props = {
   disabled: boolean; lines: readonly Line[]; drafts: Readonly<Record<number, PoAmendmentLineDraft>>; currency: string;
   onChange: (id: number, patch: Partial<PoAmendmentLineDraft>) => void;
   totalLabel: (line: Line, draft: PoAmendmentLineDraft, currency: string) => string;
+  removals?: readonly number[];
+  onRemove?: (id: number) => void;
 };
 
 /** Product and receiving identities stay fixed on approved documents. Only the
  * amendment owner validates and saves the raw economic drafts from this table. */
-export function PoAmendmentLineTable({ disabled, lines, drafts, currency, onChange, totalLabel }: Props) {
+export function PoAmendmentLineTable({ disabled, lines, drafts, currency, onChange, totalLabel, removals = [], onRemove }: Props) {
   return <CompactPoLineTable aria-label="Edit PO lines" className="min-w-[820px]">
     <TableHeader><TableRow className="bg-slate-50">
       <TableHead className="w-[30%]">Product / line</TableHead><TableHead className="w-28">Pieces</TableHead>
       <TableHead className="w-40">Product price ({currency})</TableHead><TableHead className="w-32">Packaging ({currency})</TableHead>
-      <TableHead className="w-36 text-right">Line total</TableHead><TableHead className="w-24">Details</TableHead>
+      <TableHead className="w-36 text-right">Line total</TableHead><TableHead className="w-24">Details</TableHead>{onRemove && <TableHead>Remove</TableHead>}
     </TableRow></TableHeader>
     <TableBody>{lines.map(line => {
       const draft = drafts[line.id];
@@ -33,6 +35,7 @@ export function PoAmendmentLineTable({ disabled, lines, drafts, currency, onChan
       const priceLabel = draft.basis === "extended_total" ? "Product total" : draft.basis === "per_purchase_uom" && line.pricing?.basis === "per_purchase_uom" ? `Price per ${line.pricing.purchaseUom}` : "Product price per piece";
       const basisLabel = draft.basis === "extended_total" ? "Product total" : draft.basis === "per_purchase_uom" && line.pricing?.basis === "per_purchase_uom" ? `Per ${line.pricing.purchaseUom}` : "Per piece";
       const inconsistent = line.componentTotalCents !== undefined && line.componentTotalCents !== line.lineTotalCents;
+      if (removals.includes(line.id)) return <TableRow key={line.id} className="bg-red-50/40"><TableCell colSpan={6}><span className="line-through">Line {line.lineNumber} · {line.name}</span><p className="text-xs">Will be removed from the active PO. Original line and approval remain in history.</p></TableCell><TableCell><Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onRemove?.(line.id)}>Undo removal</Button></TableCell></TableRow>;
       return <TableRow key={line.id} className={inconsistent ? "bg-amber-50/40" : ""}>
         <TableCell className="py-2 align-top">
           <p className="line-clamp-2 text-sm font-medium" title={line.name}>Line {line.lineNumber} · {line.name}</p>
@@ -63,6 +66,7 @@ export function PoAmendmentLineTable({ disabled, lines, drafts, currency, onChan
             <div><Label htmlFor={`tax-${line.id}`}>Tax ({currency})</Label><Input disabled={disabled} id={`tax-${line.id}`} inputMode="decimal" value={draft.tax} onChange={event => onChange(line.id, { tax: event.target.value })} /></div>
           </PopoverContent></Popover>{(draft.discount !== "0.00" || draft.tax !== "0.00") && <p className="mt-1 text-[11px] text-muted-foreground">Discount {draft.discount} · Tax {draft.tax}</p>}</TableCell>
         </> : <><TableCell>{line.orderQty.toLocaleString()}</TableCell><TableCell colSpan={2}><Label htmlFor={`charge-${line.id}`}>Charge / credit total ({currency})</Label><Input id={`charge-${line.id}`} className="h-8 font-mono" inputMode="decimal" value={draft.charge} onChange={event => onChange(line.id, { charge: event.target.value })} /><p className="text-xs text-muted-foreground">Use a negative amount for a credit or discount.</p></TableCell><TableCell className="text-right font-mono">{totalLabel(line, draft, currency)}</TableCell><TableCell /></>}
+        {onRemove && <TableCell className="max-w-48 align-top"><Button type="button" variant="outline" size="sm" disabled={disabled || !!line.removalBlockedReason || !!line.blockedReason} onClick={() => onRemove(line.id)} aria-label={`Remove line ${line.lineNumber}`}>Remove</Button>{line.removalBlockedReason && <p className="mt-1 text-xs text-muted-foreground">{line.removalBlockedReason}</p>}</TableCell>}
       </TableRow>;
     })}</TableBody>
   </CompactPoLineTable>;

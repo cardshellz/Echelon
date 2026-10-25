@@ -43,6 +43,32 @@ export function registerReceivingEntryRecoveryCases(harness: {
   }
 
   describe("receiving entry durable recovery", () => {
+    it("serializes concurrent receipt entries after 999 and preserves the captured creation time on replay", async () => {
+      const prefix = `RCV-${harness.now.toISOString().slice(0, 10).replaceAll("-", "")}-`;
+      await pool().query(`INSERT INTO procurement.receiving_orders(receipt_number,source_type,status)
+        VALUES($1,'blind','draft'),($2,'blind','cancelled'),($3,'blind','draft')`, [`${prefix}999`, `${prefix}1000`, `${prefix}9999x`]);
+      const command = { action: "create", targetId: null, payload: { sourceType: "blind", warehouseId: 1 } };
+      const results = await Promise.all([execute("number-one", command), execute("number-two", command), execute("number-three", command)]);
+      const receipts = results.map(result => receivingEntryCommandResultSchema.parse(result.body));
+      expect(receipts.map(receipt => receipt.receiptNumber).sort()).toEqual([`${prefix}1001`, `${prefix}1002`, `${prefix}1003`]);
+      expect(await execute("number-one", command)).toMatchObject({ replayed: true, body: results[0].body });
+      const persisted = await pool().query("SELECT created_at,updated_at FROM procurement.receiving_orders WHERE id=ANY($1::integer[])", [receipts.map(receipt => receipt.id)]);
+      expect(persisted.rows).toEqual(Array.from({ length: 3 }, () => ({ created_at: harness.now, updated_at: harness.now })));
+    });
+
+    it("rejects exhausted receipt numbering durably without inserting custody or stock", async () => {
+      const prefix = `RCV-${harness.now.toISOString().slice(0, 10).replaceAll("-", "")}-`;
+      await pool().query("INSERT INTO procurement.receiving_orders(receipt_number,source_type,status) VALUES($1,'blind','draft')", [prefix + "9".repeat(50 - prefix.length)]);
+      const before = await counts();
+      const headerCount = (await pool().query("SELECT count(*)::int AS count FROM procurement.receiving_orders")).rows[0].count;
+      const command = { action: "create", targetId: null, payload: { sourceType: "blind", warehouseId: 1 } };
+      const first = await execute("number-exhausted", command);
+      expect(first).toMatchObject({ terminalState: "rejected", httpStatus: 409, body: { code: "DOCUMENT_NUMBER_EXHAUSTED" } });
+      expect(await execute("number-exhausted", command)).toMatchObject({ replayed: true, body: first.body });
+      expect(await counts()).toEqual(before);
+      expect((await pool().query("SELECT count(*)::int AS count FROM procurement.receiving_orders")).rows[0].count).toBe(headerCount);
+    });
+
     it("recovers a lost Add Line response and closes exactly one five-case batch", async () => {
       await emptyReceipt();
       const first = await execute("lost-line-response"); // Simulate committed response lost before reaching the operator.

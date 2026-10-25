@@ -32,28 +32,12 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
       },
     ];
 
-    const selectChain = {
-      from: vi.fn().mockReturnThis(),
-      where: vi.fn().mockReturnThis(),
-      orderBy: vi.fn().mockReturnThis(),
-      limit: vi.fn().mockResolvedValue([{ lotNumber: "LOT-20240601-001" }]),
-    };
-    // getLotsAtLocation returns sourceLots; generateLotNumber chain
-    let selectCallCount = 0;
     const db = {
-      select: vi.fn(() => {
-        selectCallCount++;
-        if (selectCallCount === 1) {
-          // getLotsAtLocation
-          return {
-            from: vi.fn().mockReturnThis(),
-            where: vi.fn().mockReturnThis(),
-            orderBy: vi.fn().mockResolvedValue(sourceLots),
-          };
-        }
-        // generateLotNumber for each createLot call
-        return selectChain;
-      }),
+      select: vi.fn(() => ({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn().mockResolvedValue(sourceLots),
+      })),
       insert: vi.fn(() => ({
         values: vi.fn((val: any) => {
           createdLots.push(val);
@@ -65,6 +49,7 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
       execute: vi.fn(async (query: any) => {
         const compiled = new PgDialect().sqlToQuery(query);
         const statement = compiled.sql;
+        if (statement.includes("AS suffix")) return { rows: [{ suffix: String(createdLots.length) }] };
         if (statement.includes("source.qty_received AS source_qty")) {
           const source = sourceLots.find((lot) => lot.id === compiled.params[1])!;
           const output = createdLots[Number(compiled.params[0]) - 101];
@@ -75,7 +60,7 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
       }),
       update: vi.fn(),
       delete: vi.fn(),
-      transaction: vi.fn(),
+      transaction: vi.fn(async (work: (tx: any) => Promise<unknown>) => work(db)),
     } as any;
 
     const svc = new InventoryLotService(db);

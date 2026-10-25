@@ -150,7 +150,7 @@ describe("owned, query-only account history", () => {
     ]);
     expect(
       (await h.service.summaries({ orders: [identity] })).orders[0].fulfillment,
-    ).toEqual({ code: "cancelled", label: "Picking stopped" });
+    ).toEqual({ code: "attention", label: "Order needs attention" });
   });
   it.each([
     [],

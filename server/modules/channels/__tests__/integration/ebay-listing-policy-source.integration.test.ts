@@ -108,7 +108,8 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       CREATE TABLE channels.channel_product_overrides(product_id integer,channel_id integer,is_listed integer);
       CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer REFERENCES catalog.products,sku text,name text,
         option1_name text,option1_value text,option2_name text,option2_value text,price_cents integer,compare_at_price_cents integer,shopify_variant_id text,
-        weight_grams numeric,barcode text,ebay_fulfillment_policy_override text,ebay_return_policy_override text,
+        weight_grams numeric,length_mm numeric,width_mm numeric,height_mm numeric,shipping_package_type varchar(30),
+        barcode text,ebay_fulfillment_policy_override text,ebay_return_policy_override text,
         ebay_payment_policy_override text,is_active boolean,sales_eligibility text,ebay_listing_excluded boolean,position integer,updated_at timestamptz DEFAULT now());
       CREATE TABLE channels.channel_variant_overrides(product_variant_id integer,channel_id integer,weight_override numeric,is_listed integer);
       CREATE TABLE channels.channel_listings(channel_id integer,product_variant_id integer REFERENCES catalog.product_variants,

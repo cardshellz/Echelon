@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import express, { type Request, type Response, type NextFunction } from "express";
@@ -29,7 +30,7 @@ describe("shipment history correction HTTP boundary", () => {
     service.approve.mockResolvedValue({ httpStatus: 200, body: { saved: true }, replayed: true, commandId: 1, terminalState: "succeeded" });
   });
   afterAll(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
-  const send = (path: string, permission: string, body?: unknown, key?: string) => fetch(`${address}${path}`, {
+  const send = (path: string, permission: string, body?: unknown, key?: string) => requestLocalHttp(`${address}${path}`, {
     method: body === undefined ? "GET" : "POST", headers: { "x-permission": permission, "Content-Type": "application/json", ...(key ? { "Idempotency-Key": key } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });

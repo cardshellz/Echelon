@@ -6,14 +6,14 @@ import {
   shopifyMerchandiseSnapshotSchema,
   type ShopifyMerchandiseSnapshot,
 } from "./infrastructure/shopify-merchandise-snapshot";
-import { channelMerchandiseAuthorityEnabled } from "./channel-merchandise-rollout";
+import { readChannelMerchandiseCapability, type ChannelMerchandiseCapabilityReader } from "./infrastructure/channel-merchandise-policy";
 
 export async function verifyRefundedChannelMerchandise(
   db: { execute(statement: SQL): Promise<{ rows: unknown[] }> },
   omsOrderId: number,
   purpose: "dispatch" | "observation",
   ports: {
-    enabled?: (channelId: number) => boolean;
+    usesChannelMerchandise?: ChannelMerchandiseCapabilityReader;
     readSnapshot?: (input: {
       channelId: number;
       orderId: string;
@@ -34,12 +34,15 @@ export async function verifyRefundedChannelMerchandise(
     })
     .parse(result.rows[0]);
   if (
-    !(ports.enabled ?? channelMerchandiseAuthorityEnabled)(source.channel_id) ||
     ["cancelled", "refunded"].includes(source.status) ||
     source.cancelled_at !== null ||
     source.financial_status === "voided"
   )
     return false;
+  const usesChannelQuantities = ports.usesChannelMerchandise
+    ? await ports.usesChannelMerchandise(source.channel_id)
+    : await readChannelMerchandiseCapability(db, source.channel_id);
+  if (!usesChannelQuantities) return false;
   const scope = {
     channelId: source.channel_id,
     orderId: source.external_order_id,

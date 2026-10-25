@@ -87,7 +87,7 @@ export function presentCustomerOrderLifecycle(
   // Cancelling warehouse work does not cancel the Shopify order. Keep those
   // facts separate, including legacy orders whose warehouse work was stopped.
   if (warehouse.code === "cancelled" && !cancelled)
-    return { ...warehouse, label: "Picking stopped" };
+    return { code: "attention", label: "Order needs attention" };
   return cancelled &&
     !["cancelled", "shipped", "partially_shipped", "unavailable"].includes(
       warehouse.code,

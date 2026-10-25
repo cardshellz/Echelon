@@ -85,7 +85,7 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
     if (failures.length) throw new AggregateError(failures, "AP safeguards fixture cleanup failed");
   });
   const pay = (amount: number, status = "completed") => db.transaction((tx: any) =>
-    service.executeApPaymentCommandInTransaction("record_payment", { userId: actor, payment: {
+    service.executeApPaymentCommandInTransaction("record_payment", { now: new Date("2026-10-25T12:00:00.000Z"), userId: actor, payment: {
       vendorId: 5, paymentDate: new Date("2026-10-13T12:00:00Z"), paymentMethod: "ach",
       totalAmountCents: amount, status, allocations: [{ vendorInvoiceId: 71, appliedAmountCents: amount }], createdBy: actor,
     } }, tx));
@@ -163,7 +163,7 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
   });
   it("voided payment allocations still lock generic editing even without approval markers", async () => {
     const payment = await pay(8000);
-    await db.transaction((tx: any) => service.executeApPaymentCommandInTransaction("void_payment", { paymentId: payment.id, reason: "Synthetic reversal", userId: actor }, tx));
+    await db.transaction((tx: any) => service.executeApPaymentCommandInTransaction("void_payment", { now: new Date("2026-10-25T13:00:00.000Z"), paymentId: payment.id, reason: "Synthetic reversal", userId: actor }, tx));
     await invoiceCommand("dispute_invoice");
     expect((await invoice()).paid_amount_cents).toBe("0");
     await expect(service.updateInvoice(71, { invoicedAmountCents: 5000 }, actor)).rejects.toMatchObject(historyRejection);

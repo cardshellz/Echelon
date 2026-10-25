@@ -158,7 +158,9 @@ export async function installEbaySyncBackSchema(pool: Pool, options: { applyMigr
  * as production has (0657, 0086).
  */
 export function ebaySyncBackListingColumnsSql(options: { previousIds?: boolean } = {}): string {
-  const sql = ebaySyncBackMigrationSql();
+  // Git may check out migration text with CRLF on Windows. Normalize only the
+  // fixture's in-memory text so statement extraction uses the same SQL on every host.
+  const sql = ebaySyncBackMigrationSql().replaceAll("\r\n", "\n");
   const cut = (start: string, end: string): string => {
     const from = sql.indexOf(start);
     const to = from < 0 ? -1 : sql.indexOf(end, from);

@@ -55,6 +55,7 @@ export interface ResolvedVariant {
   gtin: string | null;
   mpn: string | null;
   weight: number | null;
+  package: import("@shared/catalog/shipping-package").ChannelPackageFacts;
   price: number | null;
   compareAtPrice: number | null;
   shopifyVariantId: string | null;
@@ -142,7 +143,9 @@ export function createChannelProductPushService(db: any) {
         barcode: vo?.barcodeOverride || v.barcode,
         gtin: v.gtin || null,
         mpn: v.mpn || null,
-        weight: vo?.weightOverride || null,
+        weight: vo?.weightOverride ?? (v.weightGrams == null ? null : Number(v.weightGrams)),
+        package: { weightGrams: vo?.weightOverride ?? v.weightGrams, lengthMm: v.lengthMm,
+          widthMm: v.widthMm, heightMm: v.heightMm },
         price: pr?.price ?? v.priceCents ?? null,
         compareAtPrice: pr?.compareAtPrice ?? v.compareAtPriceCents ?? null,
         shopifyVariantId: v.shopifyVariantId,

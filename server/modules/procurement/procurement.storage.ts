@@ -1,3 +1,5 @@
+import { allocateDocumentNumber } from "../../platform/document-numbering/document-number.repository";
+import { documentNumberPrefix } from "../../platform/document-numbering/document-number";
 import { readShipmentList, countShipmentList, type ShipmentListFilters } from "./shipment-work-list.repository";
 import { projectExpectedReceipts } from "./domain/expected-receipts";
 import { attachSupplierSourcingCandidates } from "./supplier-sourcing.repository";
@@ -87,7 +89,7 @@ export interface IProcurementStorage {
   createReceivingOrder(data: InsertReceivingOrder, executor?: any): Promise<ReceivingOrder>;
   updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>, executor?: any): Promise<ReceivingOrder | null>;
   deleteReceivingOrder(id: number, executor?: any): Promise<boolean>;
-  generateReceiptNumber(executor?: any): Promise<string>;
+  generateReceiptNumber(executor: any, recordedAt?: Date): Promise<string>;
   getReceivingLines(receivingOrderId: number, executor?: any): Promise<ReceivingLine[]>;
   getReceivingLineById(id: number, executor?: any): Promise<ReceivingLine | undefined>;
   createReceivingLine(data: InsertReceivingLine, executor?: any): Promise<ReceivingLine>;
@@ -153,11 +155,11 @@ export interface IProcurementStorage {
   getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
   getPurchaseOrderById(id: number, executor?: any): Promise<PurchaseOrder | undefined>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined>;
-  createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder>;
+  createPurchaseOrder(data: InsertPurchaseOrder, historyData?: Omit<InsertPoStatusHistory, "purchaseOrderId">, executor?: any): Promise<PurchaseOrder>;
   updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor?: any): Promise<PurchaseOrder | null>;
   updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>, executor?: any): Promise<PurchaseOrder | null>;
   deletePurchaseOrder(id: number, executor?: any): Promise<boolean>;
-  generatePoNumber(executor?: any, recordedAt?: Date): Promise<string>;
+  generatePoNumber(executor: any, recordedAt?: Date): Promise<string>;
   getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<PurchaseOrderLine[]>;
   getPurchaseOrderLineById(id: number, executor?: any): Promise<PurchaseOrderLine | undefined>;
   createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine>;
@@ -319,29 +321,9 @@ export const procurementMethods: IProcurementStorage = {
     return (result.rowCount ?? 0) > 0;
   },
 
-  async generateReceiptNumber(executor: any = db): Promise<string> {
-    if (executor !== db && typeof executor.execute === "function") {
-      await executor.execute(sql`
-        SELECT pg_advisory_xact_lock(hashtext('procurement.generate_receipt_number'))
-      `);
-    }
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
-    const prefix = `RCV-${dateStr}-`;
-
-    const existing = await executor.select({ receiptNumber: receivingOrders.receiptNumber })
-      .from(receivingOrders)
-      .where(like(receivingOrders.receiptNumber, `${prefix}%`))
-      .orderBy(desc(receivingOrders.receiptNumber))
-      .limit(1);
-
-    let nextNum = 1;
-    if (existing.length > 0 && existing[0].receiptNumber) {
-      const lastNum = parseInt(existing[0].receiptNumber.replace(prefix, ''), 10);
-      if (!isNaN(lastNum)) nextNum = lastNum + 1;
-    }
-
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+  async generateReceiptNumber(executor: any, recordedAt: Date = new Date()): Promise<string> {
+    if (!executor || executor === db) throw new TypeError("Receipt numbering requires the insertion transaction");
+    return allocateDocumentNumber(executor, { kind: "receipt", prefix: documentNumberPrefix("RCV", recordedAt, "utc") });
   },
 
   async getReceivingLines(receivingOrderId: number, executor: any = db): Promise<ReceivingLine[]> {
@@ -807,9 +789,14 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder> {
-    const result = await db.insert(purchaseOrders).values(data).returning();
-    return result[0];
+  async createPurchaseOrder(data: InsertPurchaseOrder, historyData?: Omit<InsertPoStatusHistory, "purchaseOrderId">, executor?: any): Promise<PurchaseOrder> {
+    const create = async (tx: any): Promise<PurchaseOrder> => {
+      const [created] = await tx.insert(purchaseOrders).values(data).returning();
+      if (!created) throw new Error("Purchase order insert returned no record");
+      if (historyData) await tx.insert(poStatusHistory).values({ ...historyData, purchaseOrderId: created.id });
+      return created;
+    };
+    return executor ? create(executor) : db.transaction(create);
   },
 
   async updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor: any = db): Promise<PurchaseOrder | null> {
@@ -868,23 +855,9 @@ export const procurementMethods: IProcurementStorage = {
     return result.length > 0;
   },
 
-  async generatePoNumber(executor: any = db, recordedAt: Date = new Date()): Promise<string> {
-    const dateStr = recordedAt.toISOString().slice(0, 10).replace(/-/g, '');
-    const prefix = `PO-${dateStr}-`;
-
-    const existing = await executor.select({ poNumber: purchaseOrders.poNumber })
-      .from(purchaseOrders)
-      .where(like(purchaseOrders.poNumber, `${prefix}%`))
-      .orderBy(desc(purchaseOrders.poNumber))
-      .limit(1);
-
-    let nextNum = 1;
-    if (existing.length > 0 && existing[0].poNumber) {
-      const lastNum = parseInt(existing[0].poNumber.replace(prefix, ''), 10);
-      if (!isNaN(lastNum)) nextNum = lastNum + 1;
-    }
-
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+  async generatePoNumber(executor: any, recordedAt: Date = new Date()): Promise<string> {
+    if (!executor || executor === db) throw new TypeError("PO numbering requires the insertion transaction");
+    return allocateDocumentNumber(executor, { kind: "purchase_order", prefix: documentNumberPrefix("PO", recordedAt, "utc") });
   },
 
   async getPurchaseOrderLines(purchaseOrderId: number, executor: any = db): Promise<PurchaseOrderLine[]> {

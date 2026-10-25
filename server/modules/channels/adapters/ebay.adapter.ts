@@ -218,7 +218,8 @@ export class EbayAdapter implements IChannelAdapter {
         variants: photoVariants,
       }),
     });
-    const { inventoryItems, offers, itemGroup } = this.listingBuilder.buildListingDraft(listing, config, { photoPlan, variantListingPoliciesByVariantId: selectedPolicies.byVariantId });
+    const { inventoryItems, offers, itemGroup } = this.listingBuilder.buildListingDraft(listing, config, { photoPlan,
+      variantListingPoliciesByVariantId: selectedPolicies.byVariantId, packageRequirementsByVariantId: selectedPolicies.packageRequirementsByVariantId });
     const hasExistingIds = listing.variants.some(
       (v) => v.externalVariantId,
     );

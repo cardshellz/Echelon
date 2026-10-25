@@ -12,6 +12,7 @@ import type { BuiltInventoryItem, BuiltItemGroup, BuiltOffer } from "../../adapt
 import type { EbayInventoryItem, EbayInventoryItemGroup, EbayOffer } from "../../adapters/ebay/ebay-types";
 import { ebayIntentAccount, prepareEbayChannelIntent } from "../../ebay-prepared-intent";
 import { ebayPreparedContentHash } from "../../ebay-listing-sync-content";
+import { prepareEbayListingPackages } from "../../adapters/ebay/ebay-listing-package";
 
 describe("marketplace listing connectors", () => {
   it.each([false, true])("binds the final provider variation axis before sending and rejects later axis drift (%s)", async (axisChanges) => {
@@ -20,7 +21,8 @@ describe("marketplace listing connectors", () => {
     const catalogDraft = makeGroupedDraft(["PACK","CASE"]);
     const original = structuredClone(catalogDraft);
     const liveGroup = (await client.getInventoryItemGroup("CATALOG-GROUP"))!;
-    const draft = alignDraftVariationSchemaToLiveGroup({draft:{...catalogDraft,itemGroup:catalogDraft.itemGroup!},liveGroup});
+    const draft = await prepareEbayListingPackages(client,
+      alignDraftVariationSchemaToLiveGroup({draft:{...catalogDraft,itemGroup:catalogDraft.itemGroup!},liveGroup}));
     draft.preparedIntent = prepareEbayChannelIntent({draft,operation:"maintenance",
       account:ebayIntentAccount({channelId:67,connectionId:34,accountId:"seller",environment:"production",marketplaceId:"EBAY_US",merchantLocationKey:"warehouse"}),
       prices:new Map(draft.offers.map(offer=>[offer.variantId,{priceCents:999,basePriceCents:999,source:"catalog_variant" as const,
@@ -38,7 +40,9 @@ describe("marketplace listing connectors", () => {
       return;
     }
     await expect(connector.updateExistingListing({client,draft,preview})).resolves.toMatchObject({externalProductId:"listing-old"});
-    const sentItems = vi.mocked(client.createOrReplaceInventoryItem).mock.calls.map(([sku,payload])=>({sku,payload}));
+    const sentItems = vi.mocked(client.createOrReplaceInventoryItem).mock.calls.map(([sku,payload])=>({
+      ...draft.inventoryItems.find(item => item.sku === sku)!, sku, payload,
+    }));
     const [groupKey,payload] = vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.at(-1)!;
     expect(sentItems).toHaveLength(2);
     expect(sentItems[0].payload.product.aspects).toEqual({"Number of Sleeves":["PACK"]});
@@ -849,8 +853,10 @@ describe("explicit eBay listing rebuild lifecycle", () => {
   it.each(["sku", "marketplace", "offer", "listing", "inventory_item"])("refuses retained quantity reduction after exact %s identity changes", async changed => {
     const client = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"], currentListingId: "listing-old" });
     vi.mocked(client.createOrReplaceInventoryItemGroup).mockRejectedValueOnce(new Error("eBay errorId:25013 Invalid data in the Inventory Item Group")).mockResolvedValue(undefined);
-    vi.mocked(client.getInventoryItem).mockResolvedValue({ sku: changed === "inventory_item" ? "WRONG" : "CATALOG-OLD", condition: "NEW",
-      product: { title: "Old", imageUrls: [], aspects: {} }, availability: { shipToLocationAvailability: { quantity: 5 } } });
+    const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
+    vi.mocked(client.getInventoryItem).mockImplementation(async sku => sku !== "CATALOG-OLD" ? readInventoryItem(sku) : ({
+      sku: changed === "inventory_item" ? "WRONG" : "CATALOG-OLD", condition: "NEW",
+      product: { title: "Old", imageUrls: [], aspects: {} }, availability: { shipToLocationAvailability: { quantity: 5 } } }));
     const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
     vi.mocked(client.getOffers).mockImplementation(async (sku, marketplace) => ({
       offers: (await readOffers(sku, marketplace)).offers.map(offer => sku === "CATALOG-OLD" && vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.length >= 2

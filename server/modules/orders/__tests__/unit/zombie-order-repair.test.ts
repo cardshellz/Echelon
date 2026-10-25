@@ -109,7 +109,8 @@ describe("live-OMS-demand guard SQL", () => {
   it("ignores final OMS orders and lines that need no shipment", () => {
     expect(rendered).toContain('"oo".status=\'cancelled\'');
     expect(rendered).toContain('"oo".status=\'shipped\'');
-    expect(rendered).toContain('"oo".channel_id=ANY(ARRAY[');
+    expect(rendered).toContain('merchandise_channel.id="oo".channel_id');
+    expect(rendered).toContain("merchandise_channel.provider=");
     expect(rendered).toContain("ol.requires_shipping IS DISTINCT FROM false");
   });
 

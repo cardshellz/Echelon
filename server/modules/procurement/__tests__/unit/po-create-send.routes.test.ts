@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 // Planning endpoints have their own route suite; this fixture registers only the owner under test.
 vi.mock("../../purchase-planning-policy.routes", () => ({ registerPurchasePlanningPolicyRoutes: vi.fn() }));
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -145,7 +146,7 @@ async function jsonRequest(
 ): Promise<{ status: number; body: any; headers: Headers }> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (idempotencyKey !== null) headers["idempotency-key"] = idempotencyKey;
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await requestLocalHttp(`${baseUrl}${path}`, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,

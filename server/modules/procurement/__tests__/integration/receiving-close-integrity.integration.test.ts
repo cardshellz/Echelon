@@ -124,7 +124,7 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     const database = drizzle(pool, { schema });
     connection.database = database;
     const storage = {
-      generateReceiptNumber: (tx = database) => procurementMethods.generateReceiptNumber(tx),
+      generateReceiptNumber: (tx = database, recordedAt?: Date) => procurementMethods.generateReceiptNumber(tx, recordedAt),
       createReceivingOrder: (data: Parameters<typeof procurementMethods.createReceivingOrder>[0], tx = database) => procurementMethods.createReceivingOrder(data, tx),
       createReceivingLine: (data: Parameters<typeof procurementMethods.createReceivingLine>[0], tx = database) => procurementMethods.createReceivingLine(data, tx),
       getReceivingOrderById: (id: number, tx = database) => procurementMethods.getReceivingOrderById(id, tx),

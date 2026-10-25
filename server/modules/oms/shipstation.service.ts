@@ -13,7 +13,7 @@
 import { eq, and, sql } from "drizzle-orm";
 import { z } from "zod";
 import { OrderEditError } from "../order-edits/domain/order-edit-error";
-import { channelMerchandiseAuthorityEnabled } from "./channel-merchandise-rollout";
+import type { ChannelMerchandiseCapabilityReader } from "./infrastructure/channel-merchandise-policy";
 import { verifyRefundedChannelMerchandise } from "./channel-merchandise-dispatch.service";
 import type { ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
 import { CountryCodeValidationError, requireCountryCode } from "@shared/country-code";
@@ -808,7 +808,7 @@ export function createShipStationService(
   db: any,
   inventoryCore?: ShipStationInventoryRecorder,
   dependencies: {
-    useChannelMerchandise?: (channelId: number) => boolean;
+    useChannelMerchandise?: ChannelMerchandiseCapabilityReader;
     readChannelMerchandise?: (input: { channelId: number; orderId: string }) => Promise<ShopifyMerchandiseSnapshot>;
     providerLabelObserver?: ShippingProviderLabelObserver;
     relatedLabelReader?: ShipStationRelatedLabelReader;
@@ -2724,10 +2724,9 @@ export function createShipStationService(
       };
     }
 
-    if (financialStatus === "refunded" && status !== "refunded" && !verifiedRefundMerchandise
-      && (dependencies.useChannelMerchandise ?? channelMerchandiseAuthorityEnabled)(row.channel_id))
+    if (financialStatus === "refunded" && status !== "refunded" && !verifiedRefundMerchandise)
       verifiedRefundMerchandise = await verifyRefundedChannelMerchandise(db, Number(omsFulfillmentOrderId), "dispatch",
-        { enabled: dependencies.useChannelMerchandise, readSnapshot: dependencies.readChannelMerchandise });
+        { usesChannelMerchandise: dependencies.useChannelMerchandise, readSnapshot: dependencies.readChannelMerchandise });
     if (status === "refunded" || (financialStatus === "refunded" && !verifiedRefundMerchandise) || financialStatus === "voided") {
       return {
         blocked: true,
@@ -2785,9 +2784,8 @@ export function createShipStationService(
     }
 
     const verifiedRefundMerchandise = financialStatus === "refunded"
-      && (dependencies.useChannelMerchandise ?? channelMerchandiseAuthorityEnabled)(row.channel_id)
       && await verifyRefundedChannelMerchandise(db, omsOrderId, "observation",
-        { enabled: dependencies.useChannelMerchandise, readSnapshot: dependencies.readChannelMerchandise });
+        { usesChannelMerchandise: dependencies.useChannelMerchandise, readSnapshot: dependencies.readChannelMerchandise });
     if ((financialStatus === "refunded" && !verifiedRefundMerchandise) || financialStatus === "voided") {
       return {
         blocked: true,
@@ -5649,10 +5647,10 @@ export function createShipStationService(
       throw new OrderEditError("ORDER_EDIT_PROVIDER_HELD", "This order is held for an edit; ordinary shipment pushes cannot resume it.");
     }
     const verifiedRefundMerchandise = finalFinancialStatus === "refunded"
-      && orderRow.channel_id !== null && (dependencies.useChannelMerchandise ?? channelMerchandiseAuthorityEnabled)(orderRow.channel_id)
+      && orderRow.channel_id !== null
       && orderRow.oms_fulfillment_order_id !== null && /^[1-9]\d*$/.test(orderRow.oms_fulfillment_order_id)
       && await verifyRefundedChannelMerchandise(db, Number(orderRow.oms_fulfillment_order_id), "dispatch",
-        { enabled: dependencies.useChannelMerchandise, readSnapshot: dependencies.readChannelMerchandise });
+        { usesChannelMerchandise: dependencies.useChannelMerchandise, readSnapshot: dependencies.readChannelMerchandise });
     if (
       orderRow.warehouse_status === "cancelled" ||
       orderRow.cancelled_at != null ||

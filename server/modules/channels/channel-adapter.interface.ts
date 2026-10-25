@@ -12,6 +12,7 @@
 import type {
   ShippingChannelAdapterCapabilities,
 } from "@shared/types/shipping-channel-routing";
+import type { ChannelPackageFacts } from "@shared/catalog/shipping-package";
 
 // ---------------------------------------------------------------------------
 // Canonical Types — channel-agnostic data structures
@@ -41,6 +42,8 @@ export interface ChannelVariantPayload {
   gtin: string | null;
   mpn: string | null;
   weightGrams: number | null;
+  /** Catalog-owned package facts; unset fields preserve verified channel values. */
+  package?: ChannelPackageFacts;
   priceCents: number | null;
   compareAtPriceCents: number | null;
   isListed: boolean;

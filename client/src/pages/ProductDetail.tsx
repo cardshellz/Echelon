@@ -73,6 +73,7 @@ import { ProductConversionCard, ProductConversionSummary } from "@/features/inve
 import { ProductSafetySummary } from "@/features/inventory-builds/ProductSafetySummary";
 import { transformationQueryKey } from "@/features/inventory-builds/package-conversion-draft";
 import { createProductVariant } from "@/features/catalog/create-product-variant";
+import { buildVariantPackagePatch } from "@/lib/variant-package";
 import {
   VARIANT_UOM_DEFINITIONS,
   getVariantUomDefinition,
@@ -2365,7 +2366,7 @@ export default function ProductDetail() {
 
   const updateVariantMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number; data: typeof variantForm }) => {
-      const packageAttributes = buildVariantPackagePayload(data.package, "null");
+      const packageAttributes = buildVariantPackagePatch(data.package, editingVariant ?? {});
       const packingFlags = buildVariantPackingFlagsPayload(data);
       const res = await fetch(`/api/product-variants/${id}`, {
         method: "PUT",
@@ -4148,13 +4149,14 @@ export default function ProductDetail() {
               <div>
                 <Label className="text-sm font-medium">Package Details</Label>
                 <p className="text-xs text-muted-foreground">
-                  Stored on the variant and used for marketplace listing package data.
+                  Stored on the variant and used by connected sales channels. Unspecified fields preserve existing channel package data; they do not erase it.
                 </p>
               </div>
               <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                 <div className="space-y-1.5">
-                  <Label>Weight (lb)</Label>
+                  <Label htmlFor="variant-package-weight">Weight (lb)</Label>
                   <Input
+                    id="variant-package-weight"
                     type="number"
                     min="0"
                     step="0.001"
@@ -4165,8 +4167,9 @@ export default function ProductDetail() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Length (in)</Label>
+                  <Label htmlFor="variant-package-length">Length (in)</Label>
                   <Input
+                    id="variant-package-length"
                     type="number"
                     min="0"
                     step="0.001"
@@ -4177,8 +4180,9 @@ export default function ProductDetail() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Width (in)</Label>
+                  <Label htmlFor="variant-package-width">Width (in)</Label>
                   <Input
+                    id="variant-package-width"
                     type="number"
                     min="0"
                     step="0.001"
@@ -4189,8 +4193,9 @@ export default function ProductDetail() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Height (in)</Label>
+                  <Label htmlFor="variant-package-height">Height (in)</Label>
                   <Input
+                    id="variant-package-height"
                     type="number"
                     min="0"
                     step="0.001"

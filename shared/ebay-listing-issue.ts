@@ -85,10 +85,20 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
   if (code === "CHANNEL_LISTING_VALIDATION_FAILED") {
     const parsed = channelListingValidationSchema.safeParse(input.validation);
     const validation = parsed.success ? parsed.data : undefined;
-    if (validation?.field === "package_weight") {
-      const result = issue("Add the variant's package weight", "A selected variant has no valid shipping weight.",
-        "Open product variants, edit the affected variant and save its package weight. Then Sync this product again.",
-        false, "edit_listing", "Open product variants", `${productPath}?tab=variants`);
+    // Keep the typed historical failure, but direct recovery through the normal
+    // sync owner instead of a retired Catalog control. No work is marked complete.
+    if (validation?.field === "package_type") {
+      const result = issue("Retry the listing update", "An earlier update stopped on a package-type check that is no longer required.",
+        "Retry Sync to prepare the update using current catalog measurements and verify the result. Existing eBay package settings are preserved.",
+        true, "retry_sync", "Retry Sync");
+      return { ...result, message: "An earlier update stopped on a package-type check that is no longer required.",
+        details: [...result.details ?? [], ...(message ? [{ label: "Earlier diagnostic", value: message }] : [])] };
+    }
+    if (validation && ["package_weight", "package_dimensions"].includes(validation.field)) {
+      const field = validation.field === "package_weight" ? "package weight" : "package dimensions";
+      const result = issue(`Add the variant's ${field}`, `The selected shipping policy needs valid ${field}${validation.variantSku ? ` for ${validation.variantSku}` : ""}.`,
+        `Edit the affected variant and save its ${field}${validation.field === "package_dimensions" ? " (length, width and height)" : ""}. Then Sync this product again. Existing channel package data is preserved when catalog fields are unspecified.`,
+        false, "edit_listing", "Open product variants", `${productPath}?tab=variants${validation.variantId ? `&variantId=${validation.variantId}` : ""}`);
       return { ...result, details: [...result.details ?? [],
         ...(validation.variantSku ? [{ label: "Variant SKU", value: validation.variantSku }] : []),
         ...(validation.variantId ? [{ label: "Variant ID", value: String(validation.variantId) }] : [])] };
@@ -103,6 +113,10 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       "An older request has no reliable final receipt. Echelon cannot safely resume this listing without reviewing that unknown outcome.",
       "Open recovery, review the affected listing and authorize a fresh update using current values. The old outcome remains unknown in the audit history.",
       false, "check_recovery", "Review recovery");
+  if (code === "EBAY_PACKAGE_READ_INVALID")
+    return issue("Review the listing's package data", "eBay returned package data that could not be safely preserved. No package replacement was sent.",
+      "Save complete, valid package facts on the affected variant. If a provider-only package setting is invalid, correct it on the eBay listing, then retry Sync.",
+      false, "edit_listing", "Open product variants", `${productPath}?tab=variants`);
   if (readFailure?.kind === "refused") return issue("The channel refused the listing check",
     "Echelon received a refusal when reading this listing. No successful listing check was recorded.",
     readFailure.httpStatus === 401 || readFailure.httpStatus === 403
@@ -406,7 +420,7 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       "eBay could not complete a check before publication. Echelon confirmed that no publication request was sent.",
       "Echelon will retry this saved update automatically, using current inventory and pictures. No mapping review is needed for this failure.",
       false, "check_status", "View publishing status");
-  if (["EBAY_SYNC_READBACK_PENDING", "EBAY_PHOTO_READ_FAILED", "EBAY_SYNC_PERSISTENCE_FAILED", "PUBLICATION_RESPONSE_RECOVERY_FAILED",
+  if (["EBAY_SYNC_READBACK_PENDING", "EBAY_SYNC_PACKAGE_CHANGED", "EBAY_PHOTO_READ_FAILED", "EBAY_SYNC_PERSISTENCE_FAILED", "PUBLICATION_RESPONSE_RECOVERY_FAILED",
     "PUBLICATION_SCOPE_BUSY", "PUBLICATION_ADMISSION_CAPACITY_BUSY", "QUANTITY_PUBLICATION_DRAIN_BUSY", "EBAY_SYNC_ADMISSION_UNSAVED",
     "EBAY_SYNC_ADMISSION_FAILED", "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED", "EBAY_AUTH_UNAVAILABLE", "EBAY_AUTH_REFRESH_SUPERSEDED",
     "EBAY_LISTING_SYNC_FAILED", "DATABASE_POOL_ACQUIRE_TIMEOUT", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED"].includes(code))
