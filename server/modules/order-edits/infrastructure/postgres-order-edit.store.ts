@@ -16,7 +16,6 @@ import type {
 } from "../application/order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
 import { ORDER_EDIT_REFUND_REVIEW_CODES } from "../domain/order-edit-refund-recovery";
-import { channelMerchandiseAuthorityChannels } from "../../oms/channel-merchandise-rollout";
 import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
 import { orderEditHasSubmissionEvidence } from "../application/order-edit-submission";
 import { unchangedFulfilledOrderEdit } from "../application/order-edit-evidence";
@@ -169,8 +168,7 @@ const orderSelect = `SELECT o.id AS "omsOrderId", o.channel_id AS "channelId", c
   JOIN channels.channels c ON c.id=o.channel_id WHERE cc.id=$1 AND c.provider='shopify' AND c.status='active'`;
 
 export class PostgresOrderEditStore implements OrderEditStore {
-  constructor(private readonly pool: Pool,
-    private readonly stoppedRefundRecoveryChannels: () => readonly number[] = channelMerchandiseAuthorityChannels) {}
+  constructor(private readonly pool: Pool) {}
   async connections() {
     return z
       .array(orderEditConnectionSchema)
@@ -485,9 +483,10 @@ export class PostgresOrderEditStore implements OrderEditStore {
         OR (op.status='review_required' AND COALESCE(op.document->>'kind','edit')='edit'
           AND op.document->>'commitStartedAt' IS NOT NULL AND op.document->>'refundIntent' IS NOT NULL
           AND op.document->>'refundStartedAt' IS NOT NULL
-          AND (op.document->'error'->>'code'=ANY($3::text[])
-            OR (op.document->'error'->>'code'='ORDER_EDIT_PICKING_CUTOFF'
-              AND (op.document->'baseline'->>'channelId')::integer=ANY($4::integer[]))))
+          AND op.document->'error'->>'code'=ANY($3::text[])
+          AND EXISTS (SELECT 1 FROM channels.channels channel
+            WHERE channel.id=(op.document->'baseline'->>'channelId')::integer
+              AND channel.provider='shopify'))
         OR (op.document->>'commitStartedAt' IS NULL AND op.document->>'commitKey' IS NULL
           AND op.document->>'refundIntent' IS NULL AND op.document->>'refundStartedAt' IS NULL AND op.document->>'recoveryStartedAt' IS NULL
           AND NOT EXISTS (SELECT 1 FROM oms.order_edit_paid_projections p WHERE p.operation_id=op.id)
@@ -496,7 +495,7 @@ export class PostgresOrderEditStore implements OrderEditStore {
             OR EXISTS (SELECT 1 FROM wms.orders wo WHERE wo.order_edit_operation_id=op.id)
             OR EXISTS (SELECT 1 FROM oms.order_edit_provider_holds h WHERE h.operation_id=op.id AND h.released_at IS NULL))))
       ORDER BY op.updated_at,op.id LIMIT $1`,
-        [limit, now, [...ORDER_EDIT_REFUND_REVIEW_CODES], [...this.stoppedRefundRecoveryChannels()]],
+        [limit, now, [...ORDER_EDIT_REFUND_REVIEW_CODES]],
       )
     ).rows.map((row) => row.id);
   }

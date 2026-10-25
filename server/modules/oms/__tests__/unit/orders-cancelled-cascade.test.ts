@@ -62,20 +62,24 @@ function makeDb(scripted: ScriptedResponse[]) {
 const NOW = new Date("2026-04-26T12:00:00Z");
 
 describe("deriveOmsUpdateFinality — cancel cascade must not self-perpetuate", () => {
-  it.each(["refunded", "voided"])("keeps %s money separate after scoped native merchandise verification", financial_status => {
-    expect(deriveOmsUpdateFinality({ financial_status }, "refunded", { enabled: true, verifiedCancelled: false }))
+  it.each(["refunded", "voided"])("keeps %s money separate after native merchandise verification", financial_status => {
+    expect(deriveOmsUpdateFinality({ financial_status }, "refunded", { verifiedCancelled: false }))
       .toEqual({ cancelNow: false, isFinal: false });
-    expect(deriveOmsUpdateFinality({ financial_status }, "processing", { enabled: true, verifiedCancelled: true }))
+    expect(deriveOmsUpdateFinality({ financial_status }, "processing", { verifiedCancelled: true }))
       .toEqual({ cancelNow: true, isFinal: true });
-    expect(() => deriveOmsUpdateFinality({ financial_status }, "processing", { enabled: true, verifiedCancelled: null })).toThrow();
+    expect(() => deriveOmsUpdateFinality({ financial_status }, "processing", { verifiedCancelled: null })).toThrow();
   });
   it("cancels on a real channel signal (cancelled_at)", () => {
     expect(deriveOmsUpdateFinality({ cancelled_at: "2026-06-01T00:00:00Z", financial_status: "paid" }, "processing"))
       .toEqual({ cancelNow: true, isFinal: true });
   });
-  it("cancels on refunded / voided financial_status", () => {
-    expect(deriveOmsUpdateFinality({ financial_status: "refunded" }, "processing").cancelNow).toBe(true);
-    expect(deriveOmsUpdateFinality({ financial_status: "voided" }, "processing").cancelNow).toBe(true);
+  it("honors explicit channel cancellation even when refund readback is unavailable", () => {
+    expect(deriveOmsUpdateFinality({ cancelled_at: "2026-10-25T12:00:00Z", financial_status: "refunded" }, "processing"))
+      .toEqual({ cancelNow: true, isFinal: true });
+  });
+  it("requires native evidence instead of cancelling on refunded or voided money", () => {
+    expect(() => deriveOmsUpdateFinality({ financial_status: "refunded" }, "processing")).toThrow();
+    expect(() => deriveOmsUpdateFinality({ financial_status: "voided" }, "processing")).toThrow();
   });
   it("THE LOOP FIX: an already-cancelled but paid+not-cancelled order does NOT re-cancel (#57977)", () => {
     const r = deriveOmsUpdateFinality({ cancelled_at: null, financial_status: "paid" }, "cancelled");
@@ -86,9 +90,9 @@ describe("deriveOmsUpdateFinality — cancel cascade must not self-perpetuate", 
     expect(deriveOmsUpdateFinality({ cancelled_at: null, financial_status: "paid" }, "shipped"))
       .toEqual({ cancelNow: false, isFinal: false });
   });
-  it("existing 'refunded' is final but does not re-cancel without a channel signal", () => {
+  it("a historical refund status is not a merchandise cancellation signal", () => {
     expect(deriveOmsUpdateFinality({ financial_status: "paid" }, "refunded"))
-      .toEqual({ cancelNow: false, isFinal: true });
+      .toEqual({ cancelNow: false, isFinal: false });
   });
 });
 

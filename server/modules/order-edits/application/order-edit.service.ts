@@ -61,7 +61,6 @@ import { presentCustomerOrderLifecycle } from "@shared/customer-account/order-fu
 import { customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
 import { orderAddressEligibility } from "../domain/order-address-eligibility";
 import { canObserveOrderEditRefundReview } from "../domain/order-edit-refund-recovery";
-import { channelMerchandiseAuthorityEnabled } from "../../oms/channel-merchandise-rollout";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
 // Bound each scheduler pass so one store cannot monopolize the worker.
@@ -86,7 +85,6 @@ export class OrderEditService {
     private readonly catalog?: OrderEditCatalog,
     private readonly codeRedemptions?: OrderEditCodeRedemptions,
     readonly cancellations?: OrderCancellationService,
-    private readonly stoppedRefundRecoveryEnabled: (channelId: number) => boolean = channelMerchandiseAuthorityEnabled,
   ) {}
 
   async warmPreview(input: OrderEditPreviewScope, actorId: string) {
@@ -768,7 +766,6 @@ export class OrderEditService {
         errorCode: record.error?.code ?? null,
         cancellation: record.kind === "cancel_order",
         submitted: record.commitStartedAt !== null,
-        stoppedRecoveryEnabled: this.stoppedRefundRecoveryEnabled(record.baseline.channelId),
         refundRequested:
           record.refundIntent !== null && record.refundStartedAt !== null,
       })

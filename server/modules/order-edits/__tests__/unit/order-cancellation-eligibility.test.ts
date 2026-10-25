@@ -19,9 +19,7 @@ describe("customer cancellation boundary", () => {
   }
   it.each([200,1000])("permits a separately requested cancellation after a verified settled %s-cent refund", refundCents => {
     expect(orderCancellationEligibilityReasons({ snapshot: refundedSnapshot(refundCents), enabled: true,
-      warehouseReasons: [], activeOperationId: null, allowSettledRefundBalance: true })).toEqual([]);
-    expect(orderCancellationEligibilityReasons({ snapshot: refundedSnapshot(refundCents), enabled: true,
-      warehouseReasons: [], activeOperationId: null })).not.toEqual([]);
+      warehouseReasons: [], activeOperationId: null })).toEqual([]);
   });
   it.each(["pending", "unpaid", "mismatch", "outstanding", "capturable", "picking", "active", "missing_parent", "wrong_gateway", "over_refund"])(
     "keeps %s protection when cancelling a previously refunded order", kind => {
@@ -34,13 +32,13 @@ describe("customer cancellation boundary", () => {
       if (kind === "missing_parent") { snapshot.refunds[0].transactions[0].parentId = null; snapshot.transactions[1].parentId = null; }
       if (kind === "wrong_gateway") { snapshot.refunds[0].transactions[0].gateway = "different"; snapshot.transactions[1].gateway = "different"; }
       if (kind === "over_refund") { snapshot.refunds[0].transactions[0].amountCents = 1001; snapshot.transactions[1].amountCents = 1001; }
-      expect(orderCancellationEligibilityReasons({ snapshot, enabled: true, allowSettledRefundBalance: true,
+      expect(orderCancellationEligibilityReasons({ snapshot, enabled: true,
         warehouseReasons: kind === "picking" ? ["Picking started"] : [], activeOperationId: kind === "active" ? "owned-edit" : null })).not.toEqual([]);
     });
   it("rejects contradictory refund-parent evidence through the existing settlement validator", () => {
     const snapshot = refundedSnapshot(1000);
     snapshot.transactions[1].parentId = "gid://shopify/OrderTransaction/99";
-    expect(() => orderCancellationEligibilityReasons({ snapshot, enabled: true, allowSettledRefundBalance: true,
+    expect(() => orderCancellationEligibilityReasons({ snapshot, enabled: true,
       warehouseReasons: [], activeOperationId: null })).toThrow(expect.objectContaining({ code: "ORDER_EDIT_PAYMENT_EVIDENCE_CONFLICT" }));
   });
   it("permits paid US physical pre-pick orders independently of replacement editability", () => {

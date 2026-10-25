@@ -63,7 +63,6 @@ import type { ShippingEngine } from "../shipping/engine";
 import { recordShopifyRefundReturnCase } from "../returns/application/shopify-return-case.service";
 import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
 import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
-import { channelMerchandiseAuthorityEnabled } from "./channel-merchandise-rollout";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -508,7 +507,7 @@ export async function cancelOrderCascade(
  * cancelled by the channel vs merely already-terminal on our side.
  *
  * `cancelNow` (drives cancelOrderCascade) is derived ONLY from the Shopify
- * payload — cancelled_at, or a refunded/voided financial_status. It must NEVER
+ * payload and verified native merchandise cancellation. It must NEVER
  * depend on our own existing OMS status: doing so created a self-perpetuating
  * loop where an order wrongly cancelled by another path got RE-cancelled by
  * every subsequent orders/updated webhook (#57977 accumulated 8 cascades on a
@@ -523,21 +522,14 @@ export async function cancelOrderCascade(
 export function deriveOmsUpdateFinality(
   payload: { cancelled_at?: unknown; financial_status?: string | null },
   existingStatus: string | null | undefined,
-  channelMerchandise?: { enabled: boolean; verifiedCancelled: boolean | null },
+  channelMerchandise?: { verifiedCancelled: boolean | null },
 ): { cancelNow: boolean; isFinal: boolean } {
-  if (channelMerchandise?.enabled) {
-    if (["refunded", "voided"].includes(payload.financial_status ?? "") && channelMerchandise.verifiedCancelled === null)
-      throw new Error("A fresh native merchandise observation is required before changing refunded warehouse work.");
-    const cancelNow = Boolean(payload.cancelled_at) || channelMerchandise.verifiedCancelled === true;
-    return { cancelNow, isFinal: cancelNow || existingStatus === "cancelled" };
-  }
-  const cancelNow =
-    Boolean(payload.cancelled_at) ||
-    payload.financial_status === "refunded" ||
-    payload.financial_status === "voided";
-  const isFinal =
-    cancelNow || existingStatus === "cancelled" || existingStatus === "refunded";
-  return { cancelNow, isFinal };
+  if (payload.cancelled_at) return { cancelNow: true, isFinal: true };
+  if (["refunded", "voided"].includes(payload.financial_status ?? "")
+    && channelMerchandise?.verifiedCancelled == null)
+    throw new Error("A fresh native merchandise observation is required before changing refunded warehouse work.");
+  const cancelNow = channelMerchandise?.verifiedCancelled === true;
+  return { cancelNow, isFinal: cancelNow || existingStatus === "cancelled" };
 }
 
 export const __test__ = {
@@ -1207,11 +1199,10 @@ export function registerOmsWebhooks(
       // (includes our existing terminal status) drives only the reconcile/
       // address-change skips. See deriveOmsUpdateFinality for why cancelNow must
       // never read existing.status (self-perpetuating re-cancel loop, #57977).
-      const useChannelQuantities = channelMerchandiseAuthorityEnabled(channelId);
-      const nativeMerchandise = useChannelQuantities && ["refunded", "voided"].includes(shopifyOrder.financial_status)
+      const nativeMerchandise = !isCancelledPayload && ["refunded", "voided"].includes(shopifyOrder.financial_status)
         ? await readChannelShopifyMerchandise(db, { channelId, orderId: externalOrderId }) : null;
       const { cancelNow: isCancelledByChannel, isFinal: isFinalOmsState } =
-        deriveOmsUpdateFinality(shopifyOrder, existing.status, { enabled: useChannelQuantities, verifiedCancelled: nativeMerchandise?.cancelled ?? null });
+        deriveOmsUpdateFinality(shopifyOrder, existing.status, { verifiedCancelled: nativeMerchandise?.cancelled ?? null });
 
       // Update OMS order fields
       await db
@@ -2094,7 +2085,6 @@ export function registerOmsWebhooks(
           sourceInboxId: inbox.receipt.id,
           now,
           logPrefix: LOG_PREFIX,
-          useChannelQuantities: channelMerchandiseAuthorityEnabled(channelId),
         },
       );
       console.log(

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 const mocks = vi.hoisted(() => ({
   recordAuthorityEvent: vi.fn(async () => undefined),
@@ -51,13 +52,37 @@ function qtext(query: any): string {
     .trim();
 }
 
-function makeDb(handler: (text: string) => { rows: any[] } | Promise<{ rows: any[] }>) {
+function makeDb(handler: (text: string) => { rows: any[] } | Promise<{ rows: any[] }>, savedDemandReductions: ReadonlyMap<string, number> = new Map()) {
   const calls: string[] = [];
+  const observations = new Map<number, { quantity: number; version: unknown }>();
+  const demandReductions = new Map(savedDemandReductions);
   const db: any = {
     execute: vi.fn(async (query: any) => {
       const text = qtext(query);
       calls.push(text);
-      return handler(text);
+      if (text.includes("SELECT id FROM oms.oms_orders") && text.includes("FOR UPDATE"))
+        return { rows: [{ id: 242960 }] };
+      if (text.includes("UPDATE oms.oms_order_lines SET channel_current_quantity")) {
+        const { params } = new PgDialect().sqlToQuery(query);
+        observations.set(Number(params[2]), { quantity: Number(params[0]), version: params[1] });
+        return { rows: [] };
+      }
+      if (text.includes("UPDATE oms.order_line_adjustments SET merchandise_reduction_quantity")) {
+        const { params } = new PgDialect().sqlToQuery(query);
+        const key = `${params[1]}:${params[2]}`;
+        if (!demandReductions.has(key)) demandReductions.set(key, Number(params[0]));
+        return { rows: [{ merchandise_reduction_quantity: demandReductions.get(key) }] };
+      }
+      const result = await handler(text);
+      // Model the persisted native observation on the next SELECT, while the
+      // previous result remains an immutable before-image for demand deltas.
+      return { rows: result.rows.map(row => {
+        if (row.channel_observed_quantity === undefined) return row;
+        const observation = observations.get(Number(row.id));
+        return { channel_current_quantity: row.channel_observed_quantity,
+          channel_quantity_updated_at: new Date("2026-07-10T15:59:59.000Z"), ...row,
+          ...(observation ? { channel_current_quantity: observation.quantity, channel_quantity_updated_at: observation.version } : {}) };
+      }) };
     }),
     transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(db)),
   };
@@ -100,8 +125,15 @@ function refundPayload(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function nativeMerchandise(lines = [{ id: "441680952", quantity: 25, currentQuantity: 0, unfulfilledQuantity: 0 }]) {
+  return { orderId: "gid://shopify/Order/12153457410207", shopDomain: "synthetic.myshopify.com",
+    updatedAt: NOW.toISOString(), cancelled: false,
+    lines: lines.map(line => ({ ...line, id: `gid://shopify/LineItem/${line.id}` })) };
+}
+
 function helpers(overrides: Record<string, unknown> = {}) {
   return {
+    readMerchandiseSnapshot: vi.fn(async () => nativeMerchandise()),
     resolveOmsOrder: vi.fn(async () => ({ id: 242960 })),
     reconcileRefundOrderDemand: vi.fn(async () => ({ releasedReservationQuantity: 25 })),
     pushShipment: vi.fn(async () => undefined),
@@ -236,7 +268,9 @@ describe("applyShopifyRefundCascade", () => {
       if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) return { rows: [] };
       throw new Error(`Unexpected SQL in non-catalog refund test: ${text}`);
     });
-    const serviceHelpers = helpers();
+    const serviceHelpers = helpers({ readMerchandiseSnapshot: vi.fn(async () => nativeMerchandise([
+      { id: "441680952", quantity: 1, currentQuantity: 0, unfulfilledQuantity: 0 },
+    ])) });
 
     const result = await applyShopifyRefundCascade(
       mock.db,
@@ -325,6 +359,7 @@ describe("applyShopifyRefundCascade", () => {
     });
     expect(serviceHelpers.reconcileRefundOrderDemand).toHaveBeenCalledTimes(1);
     expect(serviceHelpers.reconcileRefundOrderDemand).toHaveBeenCalledWith({
+      requiredAuthority: "canonical",
       orderId: 204464,
       sourceEventId: "1036275548319",
       releaseTargets: [{ orderItemId: 312850, quantity: 25 }],
@@ -356,7 +391,7 @@ describe("applyShopifyRefundCascade", () => {
       refundedQuantity: 25,
       authority: expect.objectContaining({
         authorityFulfillableQuantity: 0,
-        authorizationStatus: "refunded",
+        authorizationStatus: "cancelled",
       }),
     }));
   });
@@ -503,6 +538,10 @@ describe("applyShopifyRefundCascade", () => {
     });
     const serviceHelpers = helpers({
       reconcileRefundOrderDemand: vi.fn(async () => ({ releasedReservationQuantity: 12 })),
+      readMerchandiseSnapshot: vi.fn(async () => nativeMerchandise([
+        { id: "441680952", quantity: 25, currentQuantity: 20, unfulfilledQuantity: 20 },
+        { id: "441680953", quantity: 10, currentQuantity: 3, unfulfilledQuantity: 3 },
+      ])),
     });
 
     const result = await applyShopifyRefundCascade(
@@ -569,6 +608,9 @@ describe("applyShopifyRefundCascade", () => {
     });
     const serviceHelpers = helpers({
       reconcileRefundOrderDemand: vi.fn(async () => ({ releasedReservationQuantity: 0 })),
+      readMerchandiseSnapshot: vi.fn(async () => nativeMerchandise([
+        { id: "12", quantity: 1, currentQuantity: 0, unfulfilledQuantity: 0 },
+      ])),
     });
 
     const result = await applyShopifyRefundCascade(
@@ -591,9 +633,11 @@ describe("applyShopifyRefundCascade", () => {
 
   it("is idempotent when the same no-restock refund is replayed", async () => {
     const finalLine = omsLine({
+      channel_current_quantity: 0,
+      channel_quantity_updated_at: NOW,
       authority_fulfillable_quantity: 0,
       refunded_quantity: 25,
-      authorization_status: "refunded",
+      authorization_status: "cancelled",
       refund_other_quantity: 25,
     });
     const mock = makeDb((text) => {
@@ -621,7 +665,7 @@ describe("applyShopifyRefundCascade", () => {
       if (text.includes("FROM wms.outbound_shipment_items si") && text.includes("FOR UPDATE OF si, os")) return { rows: [] };
       if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) return { rows: [] };
       throw new Error(`Unexpected SQL in replay test: ${text}`);
-    });
+    }, new Map([["110466:1036275548319", 25]]));
     const serviceHelpers = helpers({
       reconcileRefundOrderDemand: vi.fn(async () => ({ releasedReservationQuantity: 0 })),
     });
