@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000012000018360001_inventory_transaction_reference_length.sql",
+  "generation": 12,
+  "pr": 1836,
+  "ordinal": 1,
+  "after": [
+    "900000011000018230001_ebay_publication_preflight_recovery.sql"
+  ]
+}
