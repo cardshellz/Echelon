@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -276,7 +277,7 @@ export class PaymentAcceptanceFixture {
   }
 
   async loginDelegate(): Promise<string> {
-    const response = await fetch(`${this.baseUrl}/api/auth/login`, {
+    const response = await requestLocalHttp(`${this.baseUrl}/api/auth/login`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: "payment-delegate", password: DELEGATE_PASSWORD }),
     });
@@ -294,7 +295,7 @@ export class PaymentAcceptanceFixture {
     if (actor) headers["X-Payment-Fixture-Actor"] = actor;
     if (options.cookie) headers.Cookie = options.cookie;
     if (options.key) headers["Idempotency-Key"] = options.key;
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await requestLocalHttp(`${this.baseUrl}${path}`, {
       method: options.body === undefined ? "GET" : "POST", headers,
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
     });

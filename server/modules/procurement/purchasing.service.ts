@@ -1,3 +1,4 @@
+import { captureDocumentNumberTime } from "../../platform/document-numbering/document-number";
 import { hasPoInvoiceHistory, readPoInvoiceHistory } from "./po-invoice-history.repository";
 import type { PurchaseOrderEntryAction, PurchaseOrderEntryCommand } from "@shared/procurement/purchase-order-entry-command";
 import { executePurchaseOrderEntry } from "./purchase-order-entry.service";
@@ -224,12 +225,12 @@ interface Storage {
   getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
   getPurchaseOrderById(id: number, executor?: any): Promise<any>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<any>;
-  createPurchaseOrder(data: any, historyData?: any): Promise<any>;
+  createPurchaseOrder(data: any, historyData?: any, executor?: any): Promise<any>;
   updatePurchaseOrder(id: number, updates: any, executor?: any): Promise<any>;
   updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData: any, executor?: any): Promise<any>;
   deletePurchaseOrder(id: number, executor?: any): Promise<boolean>;
   getRecommendationPoHandoffForPo(purchaseOrderId: number): Promise<any | undefined>;
-  generatePoNumber(executor?: any, recordedAt?: Date): Promise<string>;
+  generatePoNumber(executor: any, recordedAt?: Date): Promise<string>;
 
   // PO Lines
   getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<any[]>;
@@ -283,7 +284,7 @@ interface Storage {
   getReceivingOrdersForPurchaseOrder?(purchaseOrderId: number, executor?: any): Promise<any[]>;
   getReceivingLines?(receivingOrderId: number, executor?: any): Promise<any[]>;
   deleteReceivingOrder?(id: number, executor?: any): Promise<boolean>;
-  generateReceiptNumber(executor?: any): Promise<string>;
+  generateReceiptNumber(executor: any, recordedAt?: Date): Promise<string>;
   bulkCreateReceivingLines(lines: any[], executor?: any): Promise<any[]>;
   getReceivingLineById(id: number, executor?: any): Promise<any>;
   getReceivingOrderById(id: number, executor?: any): Promise<any>;
@@ -1641,41 +1642,47 @@ export function createPurchasingService(
     source?: "manual" | "auto_draft" | "reorder";
     createdBy?: string;
   }) {
-    // Validate vendor
-    const vendor = await storage.getVendorById(data.vendorId);
-    if (!vendor) throw new PurchasingError("Vendor not found", 404);
-    const currency = requireUsdPurchaseOrderCurrency(vendor.currency);
-
+    const recordedAt = captureDocumentNumberTime(now());
     let lastConflictingPoNumber: string | null = null;
     for (let attempt = 1; attempt <= PO_NUMBER_ALLOCATION_ATTEMPTS; attempt++) {
-      const poNumber = await storage.generatePoNumber();
+      let poNumber: string | null = null;
       try {
-        return await storage.createPurchaseOrder({
-          poNumber,
-          vendorId: data.vendorId,
-          warehouseId: data.warehouseId,
-          status: "draft",
-          poType: data.poType || "standard",
-          priority: data.priority || "normal",
-          expectedDeliveryDate: data.expectedDeliveryDate,
-          shipToAddress: data.shipToAddress,
-          shippingMethod: data.shippingMethod,
-          incoterms: data.incoterms,
-          freightTerms: data.freightTerms,
-          vendorNotes: data.vendorNotes,
-          internalNotes: data.internalNotes,
-          source: data.source ?? "manual",
-          currency,
-          paymentTermsDays: vendor.paymentTermsDays,
-          paymentTermsType: vendor.paymentTermsType,
-          shipFromAddress: vendor.shipFromAddress,
-          createdBy: data.createdBy,
-          updatedBy: data.createdBy,
-        }, {
-          fromStatus: null,
-          toStatus: "draft",
-          changedBy: data.createdBy,
-          notes: "PO created"
+        return await db.transaction(async (tx: any) => {
+          await lockInventoryCostGraph(tx);
+          const vendor = await storage.getVendorById(data.vendorId, tx);
+          if (!vendor) throw new PurchasingError("Vendor not found", 404);
+          const currency = requireUsdPurchaseOrderCurrency(vendor.currency);
+          poNumber = await storage.generatePoNumber(tx, recordedAt);
+          return storage.createPurchaseOrder({
+            poNumber,
+            vendorId: data.vendorId,
+            warehouseId: data.warehouseId,
+            status: "draft",
+            poType: data.poType || "standard",
+            priority: data.priority || "normal",
+            expectedDeliveryDate: data.expectedDeliveryDate,
+            shipToAddress: data.shipToAddress,
+            shippingMethod: data.shippingMethod,
+            incoterms: data.incoterms,
+            freightTerms: data.freightTerms,
+            vendorNotes: data.vendorNotes,
+            internalNotes: data.internalNotes,
+            source: data.source ?? "manual",
+            currency,
+            paymentTermsDays: vendor.paymentTermsDays,
+            paymentTermsType: vendor.paymentTermsType,
+            shipFromAddress: vendor.shipFromAddress,
+            createdBy: data.createdBy,
+            updatedBy: data.createdBy,
+            createdAt: recordedAt,
+            updatedAt: recordedAt,
+          }, {
+            fromStatus: null,
+            toStatus: "draft",
+            changedBy: data.createdBy,
+            notes: "PO created",
+            changedAt: recordedAt,
+          }, tx);
         });
       } catch (error: any) {
         if (!isPoNumberUniqueViolation(error)) throw error;
@@ -3553,7 +3560,7 @@ export function createPurchasingService(
     }
 
     // Create receiving order
-    const receiptNumber = await storage.generateReceiptNumber(executor);
+    const receiptNumber = await storage.generateReceiptNumber(executor, now());
     const receivingOrder = await storage.createReceivingOrder({
       receiptNumber,
       poNumber: po.poNumber,
@@ -4519,7 +4526,7 @@ export function createPurchasingService(
           }
         }
 
-        const receiptNumber = await storage.generateReceiptNumber(tx);
+        const receiptNumber = await storage.generateReceiptNumber(tx, now());
         const receivingOrder = await storage.createReceivingOrder({
           receiptNumber,
           poNumber: po.poNumber,
@@ -5932,11 +5939,14 @@ export function createPurchasingService(
     const subtotalCents = safeIntegerMoney(subtotalCentsBigInt, "subtotal_cents");
 
     // Single transaction: header + lines + status history + po_events['created'].
-    // A concurrent creator can choose the same max+1 number. The unique index
-    // is the arbiter; a conflict rolls back the whole attempt and retries with
-    // a freshly generated number.
-    const createAttempt = async (poNumber: string) => (internalOptions?.transaction ?? db).transaction(async (tx: any) => {
+    // Take the graph lock before the shared number lock, retaining both through
+    // insertion. The bounded retry still handles legacy/manual conflicting writers.
+    const recordedAt = captureDocumentNumberTime(now());
+    let attemptedPoNumber: string | null = null;
+    const createAttempt = async () => (internalOptions?.transaction ?? db).transaction(async (tx: any) => {
       await lockInventoryCostGraph(tx);
+      const poNumber = await storage.generatePoNumber(tx, recordedAt);
+      attemptedPoNumber = poNumber;
       await persistPurchaseOrderCatalogWritesTx(
         tx,
         input.vendorId,
@@ -6024,14 +6034,11 @@ export function createPurchasingService(
 
     let lastConflictingPoNumber: string | null = null;
     for (let attempt = 1; attempt <= PO_NUMBER_ALLOCATION_ATTEMPTS; attempt++) {
-      const poNumber = internalOptions?.transaction
-        ? await storage.generatePoNumber(internalOptions.transaction, now())
-        : await storage.generatePoNumber();
       try {
-        return await createAttempt(poNumber);
+        return await createAttempt();
       } catch (error: any) {
         if (!isPoNumberUniqueViolation(error)) throw error;
-        lastConflictingPoNumber = poNumber;
+        lastConflictingPoNumber = attemptedPoNumber;
         if (attempt < PO_NUMBER_ALLOCATION_ATTEMPTS) continue;
       }
     }

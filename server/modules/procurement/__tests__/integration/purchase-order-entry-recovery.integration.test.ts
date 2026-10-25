@@ -389,4 +389,30 @@ integration.sequential("purchase order entry HTTP and PostgreSQL recovery", () =
       await singlePool.end();
     }
   }, 30_000);
+  it("serializes legacy, inline and recoverable PO creators beyond 999 without reusing cancelled numbers", async () => {
+    await pool.query(`INSERT INTO procurement.purchase_orders(po_number,vendor_id,status)
+      VALUES('PO-20261024-999',2,'draft'),('PO-20261024-1000',2,'cancelled'),('PO-20261024-9999x',2,'draft')`);
+    const service = app.locals.services.purchasing;
+    const [legacy, inline, command] = await Promise.all([
+      service.createPO({ vendorId: 2, createdBy: ACTOR }),
+      service.createPurchaseOrderWithLines({ vendorId: 2, lines: [{ lineType: "fee", description: "Numbering test", orderQty: 1, unitCostCents: 100 }] }, ACTOR),
+      create("number-rollover"),
+    ]);
+    expect([legacy.poNumber, inline.poNumber, command.po.poNumber].sort()).toEqual([
+      "PO-20261024-1001", "PO-20261024-1002", "PO-20261024-1003",
+    ]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.po_status_history WHERE purchase_order_id=$1", [legacy.id])).rows[0].count).toBe(1);
+    expect(await post("/api/purchase-orders", "po-entry:number-rollover", input())).toMatchObject({ status: 201, replayed: "true", body: { po: { id: command.po.id } } });
+  });
+
+  it("stores an actionable numbering capacity rejection without writing a partial PO", async () => {
+    await pool.query("INSERT INTO procurement.purchase_orders(po_number,vendor_id,status) VALUES('PO-20261024-999999999999999999',2,'draft')");
+    const before = await counts();
+    const first = await post("/api/purchase-orders", "po-entry:number-exhausted", input());
+    expect(first).toMatchObject({ status: 409, body: { code: "DOCUMENT_NUMBER_EXHAUSTED" } });
+    expect(await counts()).toEqual(before);
+    expect(await post("/api/purchase-orders", "po-entry:number-exhausted", input())).toEqual({ ...first, replayed: "true" });
+    expect((await ledger("po-entry:number-exhausted")).status).toBe("rejected");
+  });
+
 });

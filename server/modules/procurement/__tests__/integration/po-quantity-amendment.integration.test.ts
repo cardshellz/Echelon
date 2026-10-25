@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -100,7 +101,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   }
   const post = async (request: unknown, key = randomUUID()) => {
     await reviewBeforeApproval(request, requestActor);
-    const response = await fetch(`${url}/api/purchase-orders/1/quantity-amendment`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(request) });
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/quantity-amendment`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(request) });
     return { status: response.status, body: await response.json(), replayed: response.headers.get("Idempotency-Replayed") };
   };
   beforeAll(async () => {
@@ -253,20 +254,20 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   it("returns the immutable approved dependency review through permission-gated paginated history", async () => {
     const saved = await post(await body());
     expect(saved.status).toBe(200);
-    const response = await fetch(`${url}/api/purchase-orders/1/quantity-amendment/history`);
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/quantity-amendment/history`);
     expect(response.status).toBe(200);
     const history = await response.json();
     expect(history).toMatchObject({ entries: [{ actorId: "admin-user", actorName: "admin", revisionNumber: 1, preview: saved.body.preview }], nextCursor: null });
-    const older = await fetch(`${url}/api/purchase-orders/1/quantity-amendment/history?before=${history.entries[0].id}`);
+    const older = await requestLocalHttp(`${url}/api/purchase-orders/1/quantity-amendment/history?before=${history.entries[0].id}`);
     expect(await older.json()).toEqual({ entries: [], nextCursor: null });
     requestActor = null;
-    expect((await fetch(`${url}/api/purchase-orders/1/quantity-amendment/history`)).status).toBe(401);
+    expect((await requestLocalHttp(`${url}/api/purchase-orders/1/quantity-amendment/history`)).status).toBe(401);
   });
   it.each(["0", "-1", "1e2", "01", "2147483648"])("rejects malformed PO history identifier %s", async id => {
-    expect((await fetch(`${url}/api/purchase-orders/${id}/quantity-amendment/history`)).status).toBe(400);
+    expect((await requestLocalHttp(`${url}/api/purchase-orders/${id}/quantity-amendment/history`)).status).toBe(400);
   });
   it.each(["0", "1e2", "01", "9007199254740992"])("rejects invalid approval history cursor %s", async cursor => {
-    expect((await fetch(`${url}/api/purchase-orders/1/quantity-amendment/history?before=${cursor}`)).status).toBe(400);
+    expect((await requestLocalHttp(`${url}/api/purchase-orders/1/quantity-amendment/history?before=${cursor}`)).status).toBe(400);
   });
   it("freezes newly created approval tiers until the reviewed source transaction finishes", async () => {
     await pool.query("UPDATE inventory.warehouse_settings SET require_approval=true");
@@ -367,7 +368,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   });
   it("requires an idempotency key and validated explicit approval fields", async () => {
     const request = await body(); const before = await evidence();
-    const response = await fetch(`${url}/api/purchase-orders/1/quantity-amendment`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }); expect(response.status).toBe(400);
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/quantity-amendment`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }); expect(response.status).toBe(400);
     expect((await post({ ...request, approvalConfirmed: false })).status).toBe(400); expect(await evidence()).toEqual(before);
   });
   it("recomputes matched status when corrected PO, posted receipt and supplier invoice quantities agree", async () => {
@@ -441,7 +442,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       const invoiceContext = await invoiceService.context(81, "admin-user");
       const invoiceRequest = { sourceVersion: invoiceContext.sourceVersion, quantityPieces: 20, unitCostMills: 15000, lineTotalCents: 3100,
         closedPurchaseOrderConfirmed: true, approvalConfirmed: true, reason: "Supplier invoice confirms these manually corrected values" };
-      const invoiceReply = await fetch(url + "/api/vendor-invoice-lines/81/quantity-correction", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: JSON.stringify(invoiceRequest) });
+      const invoiceReply = await requestLocalHttp(url + "/api/vendor-invoice-lines/81/quantity-correction", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: JSON.stringify(invoiceRequest) });
       expect(invoiceReply.status).toBe(200); expect(await invoiceReply.json()).toMatchObject({ preview: { afterMatch: "matched", afterBalanceCents: 2100 } });
       expect((await pool.query("SELECT status,physical_status,closed_at,closed_by FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual(closure);
       expect((await pool.query("SELECT qty_invoiced,unit_cost_mills,line_total_cents,match_status FROM procurement.vendor_invoice_lines WHERE id=81")).rows[0]).toEqual({ qty_invoiced: 20, unit_cost_mills: "15000", line_total_cents: "3100", match_status: "matched" });
@@ -579,7 +580,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       idempotencyKey: key, requestHash: createHash("sha256").update(canonicalJson(request)).digest("hex"), commandName: "ap.invoice.quantity_correction", contractVersion: 1,
     });
     const invoicePost = async (request: unknown, key = randomUUID()) => {
-      const response = await fetch(`${url}/api/vendor-invoice-lines/81/quantity-correction`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(request) });
+      const response = await requestLocalHttp(`${url}/api/vendor-invoice-lines/81/quantity-correction`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(request) });
       return { status: response.status, body: await response.json(), replayed: response.headers.get("Idempotency-Replayed") };
     };
     const invoiceProtected = async () => ({
@@ -754,13 +755,13 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     });
     it("requires a command key, explicit approval and valid whole quantities and rejects mismatched command scope", async () => {
       const request = await invoiceBody(), before = await evidence();
-      const noKey = await fetch(`${url}/api/vendor-invoice-lines/81/quantity-correction`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
+      const noKey = await requestLocalHttp(`${url}/api/vendor-invoice-lines/81/quantity-correction`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
       expect(noKey.status).toBe(400);
       for (const invalid of [{ approvalConfirmed: false }, { quantityPieces: 0 }, { quantityPieces: 1.5 }, { quantityPieces: 2147483648 }, { reason: "short" }]) {
         expect((await invoicePost({ ...request, ...invalid })).status).toBe(400);
       }
       await expect(invoiceService.approve(81, request, "admin-user", { ...invoiceDescriptor(request), resourceKey: "vendor_invoice_line:999" })).rejects.toMatchObject({ code: "INVOICE_QUANTITY_SCOPE_INVALID" });
-      expect((await fetch(`${url}/api/vendor-invoice-lines/1e2/quantity-correction`)).status).toBe(400);
+      expect((await requestLocalHttp(`${url}/api/vendor-invoice-lines/1e2/quantity-correction`)).status).toBe(400);
       expect(await evidence()).toEqual(before);
     });
     it("rolls back the quantity, matches, exceptions and audit together when audit append fails", async () => {
@@ -825,10 +826,10 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     it("requires authentication, a valid path, complete confirmation and an idempotency key at HTTP", async () => {
       const request = await prepare(), before = await evidence();
       const route = `${url}/api/po-exceptions/1/variance-approval`;
-      expect((await fetch(route, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) })).status).toBe(400);
-      expect((await fetch(route, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: JSON.stringify({ ...request, approvalConfirmed: false }) })).status).toBe(400);
-      expect((await fetch(`${url}/api/po-exceptions/1e2/variance-approval`)).status).toBe(400);
-      requestActor = null; expect((await fetch(route)).status).toBe(401);
+      expect((await requestLocalHttp(route, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) })).status).toBe(400);
+      expect((await requestLocalHttp(route, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: JSON.stringify({ ...request, approvalConfirmed: false }) })).status).toBe(400);
+      expect((await requestLocalHttp(`${url}/api/po-exceptions/1e2/variance-approval`)).status).toBe(400);
+      requestActor = null; expect((await requestLocalHttp(route)).status).toBe(401);
       expect(await evidence()).toEqual(before);
       await expect(varianceService.approve(1, request, "admin-user", { ...varianceDescriptor(request), actorId: "lead-user" })).rejects.toMatchObject({ code: "PO_VARIANCE_SCOPE_INVALID" });
     });

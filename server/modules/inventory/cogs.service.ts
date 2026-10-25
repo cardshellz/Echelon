@@ -1,3 +1,5 @@
+import { allocateDocumentNumber } from "../../platform/document-numbering/document-number.repository";
+import { captureDocumentNumberTime, documentNumberPrefix } from "../../platform/document-numbering/document-number";
 import { readLotCostFollowUps } from "./infrastructure/lot-cost-follow-up.repository";
 import { readInventoryValuation } from "./application/read-inventory-valuation";
 import { normalizeLotCosts, recordedUnitCostMills, moneyToSafeNumber, roundedSignedMillsToCents,
@@ -112,7 +114,11 @@ export interface LotCostRevalueResult extends CostAdjustmentLog {
 // ─── Service ────────────────────────────────────────────────────────
 
 export class COGSService {
-  constructor(private readonly db: DrizzleDb, private readonly clock: () => Date = () => new Date()) {}
+  constructor(
+    private readonly db: DrizzleDb,
+    private readonly clock: () => Date = () => new Date(),
+    private readonly transactionBound = false,
+  ) {}
 
   async revalueComponent(lotId: number, component: CostComponent, unitMills: number, reason: string, tx: any) {
     return this.revalueLotCostMills({
@@ -417,6 +423,18 @@ export class COGSService {
     receivedAt?: Date;
     notes?: string;
   }): Promise<InventoryLot> {
+    const now = captureDocumentNumberTime(this.clock());
+    if (this.transactionBound) return this.createLotInsideTransaction(params, now);
+    // A bound owner must retain its caller's executor. Standalone imports and
+    // adjustments hold allocation and every lot write in one transaction.
+    return this.db.transaction((tx) => new COGSService(tx, this.clock, true)
+      .createLotInsideTransaction(params, now));
+  }
+
+  private async createLotInsideTransaction(
+    params: Parameters<COGSService["createLot"]>[0],
+    now: Date,
+  ): Promise<InventoryLot> {
     await assertLegacyQuantityImportAllowed(this.db, "Legacy cost-lot import");
     const poUnitCost = params.poUnitCostCents ?? 0;
     const packagingCost = params.packagingCostCents ?? 0;
@@ -428,7 +446,7 @@ export class COGSService {
     const totalUnitCostMills = poUnitCostMills + packagingCostMills + landedCostMills;
     const costSource = params.costSource ?? 'manual';
 
-    const lotNumber = await this.generateLotNumber();
+    const lotNumber = await this.generateLotNumber(now);
 
     const [lot] = await this.db
       .insert(inventoryLots)
@@ -439,7 +457,7 @@ export class COGSService {
         qtyOnHand: params.qtyPieces,
         qtyReserved: 0,
         qtyPicked: 0,
-        receivedAt: params.receivedAt ?? new Date(),
+        receivedAt: params.receivedAt ?? now,
         receivingOrderId: params.receivingOrderId ?? null,
         purchaseOrderId: params.purchaseOrderId ?? null,
         inboundShipmentId: params.inboundShipmentId ?? null,
@@ -454,7 +472,7 @@ export class COGSService {
 
     // Update COGS-specific columns via raw SQL
     await this.db.execute(sql`
-      UPDATE inventory_lots SET
+      UPDATE inventory.inventory_lots SET
         po_line_id = ${params.poLineId ?? null},
         po_unit_cost_cents = ${poUnitCost},
         packaging_cost_cents = ${packagingCost},
@@ -1034,26 +1052,8 @@ export class COGSService {
   // HELPERS
   // ---------------------------------------------------------------------------
 
-  private async generateLotNumber(): Promise<string> {
-    const now = new Date();
-    const datePart = now.toISOString().slice(0, 10).replace(/-/g, "");
-    const prefix = `LOT-${datePart}-`;
-
-    const result = await this.db.execute(sql`
-      SELECT lot_number FROM inventory_lots
-      WHERE lot_number LIKE ${prefix + '%'}
-      ORDER BY lot_number DESC
-      LIMIT 1
-    `);
-
-    let seq = 1;
-    if (result.rows?.length) {
-      const parts = result.rows[0].lot_number.split("-");
-      const lastSeq = parseInt(parts[parts.length - 1], 10);
-      if (!isNaN(lastSeq)) seq = lastSeq + 1;
-    }
-
-    return `${prefix}${String(seq).padStart(3, "0")}`;
+  private async generateLotNumber(now: Date): Promise<string> {
+    return allocateDocumentNumber(this.db, { kind: "lot", prefix: documentNumberPrefix("LOT", now, "utc") });
   }
 
   // ---------------------------------------------------------------------------
@@ -1151,7 +1151,7 @@ export class COGSService {
   }
 
   withTx(tx: any): COGSService {
-    return new COGSService(tx);
+    return new COGSService(tx, this.clock, true);
   }
 }
 

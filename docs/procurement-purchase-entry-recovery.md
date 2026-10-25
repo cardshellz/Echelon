@@ -53,9 +53,7 @@ Reconciled main commit 9206840bca20537d6f61c7d4c83a4b449421ec1a before handoff. 
 
 ## Remaining procurement closeout
 
-- C5 (`procurement.storage.ts:generateReceiptNumber/generatePoNumber`, `ap-ledger.service.ts:generatePaymentNumber/generateInvoiceNumber`): replace textual document-number allocation with numeric, transaction-safe allocation, including rollover beyond 999 and concurrent callers. Preserve existing identifiers.
-- E1 (`ap-ledger.service.ts:executeApPaymentCommandInTransaction`, `recordPaymentInTransaction`, `voidPaymentInTransaction`): pass the injected AP command clock through payment record/void audit and recalculation paths. Do not rewrite historical timestamps.
-- E2 (`procurement-health.routes.test.ts:listen/fetch`): remove the HTTP fixture's random Fetch-blocked-port failure and inventory related fixtures.
+- C5 (numeric document allocation), E1 (AP cash-command clock propagation) and E2 (local HTTP fixture transport) are implemented and locally validated in the follow-up [numbering/clock closeout batch](procurement-numbering-clock-closeout.md). Publication, hosted CI and deployment remain separate release steps.
 - Complete connected browser-to-real-HTTP acceptance against a disposable active quantity ledger, remaining non-admin authority/navigation cases and representative synthetic-volume health/cost query measurements.
 
 PO 144, PO 149 and shipments 95/97 remain a separate historical evidence/repair queue. Their supplier evidence is not inferred and their records are untouched. Foreign-currency support and mixed/converted-source returns remain separately scoped capabilities with existing guards.

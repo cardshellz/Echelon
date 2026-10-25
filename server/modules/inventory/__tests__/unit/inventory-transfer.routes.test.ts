@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer, type Server } from "node:http";
@@ -48,7 +49,7 @@ describe("inventory transfer HTTP contract", () => {
   });
   afterEach(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); vi.restoreAllMocks(); });
   const body = { commandKey: "transfer:test", fromLocationId: 9, toLocationId: 10, variantId: 174, quantity: 50 };
-  const post = (payload: unknown) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const post = (payload: unknown) => requestLocalHttp(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 
   it("forwards exact locations, actor, arrival confirmation and retry identity to the existing owner", async () => {
     expect((await post({ ...body, crossWarehouseArrivalConfirmed: true })).status).toBe(200);

@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import http from "node:http";
@@ -48,7 +49,7 @@ describe("RFQ workflow HTTP authority and durable command identity", () => {
     vi.restoreAllMocks();
   });
   function request(path: string, options: { actor?: string | null; key?: string; body?: unknown; receiptVersion?: string } = {}) {
-    return fetch(origin + path, {
+    return requestLocalHttp(origin + path, {
       method: options.body === undefined ? "GET" : "POST",
       headers: { "Content-Type": "application/json", ...(options.actor === null ? {} : { "X-Test-Actor": options.actor ?? "reviewer" }), ...(options.key ? { "Idempotency-Key": options.key } : {}), ...(options.receiptVersion ? { [RFQ_RECEIPT_VERSION_HEADER]: options.receiptVersion } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),

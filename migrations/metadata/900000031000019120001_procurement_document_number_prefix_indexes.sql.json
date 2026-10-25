@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000031000019120001_procurement_document_number_prefix_indexes.sql",
+  "generation": 31,
+  "pr": 1912,
+  "ordinal": 1,
+  "after": [
+    "900000030000019110001_catalog_shipping_package_type.sql"
+  ]
+}

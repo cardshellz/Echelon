@@ -1,3 +1,4 @@
+import { DocumentNumberError } from "../../platform/document-numbering/document-number";
 import { registerSupplierReturnRoutes } from "./supplier-return.routes";
 import { SupplierCreditEvidenceError } from "./supplier-credit-settlement.repository";
 import { registerSupplierCreditRoutes } from "./supplier-credit.routes";
@@ -108,8 +109,13 @@ export function registerApLedgerRoutes(app: Express) {
     try {
       const invoiceNumber = await apLedger.generateInvoiceNumber();
       res.json({ invoiceNumber });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    } catch (error) {
+      if (error instanceof DocumentNumberError) {
+        res.status(error.statusCode).json({ error: error.message, details: { code: error.code } });
+        return;
+      }
+      console.error("AP invoice number suggestion failed", { code: "AP_INVOICE_NUMBER_SUGGESTION_FAILED", error });
+      res.status(500).json({ error: "Unable to suggest an invoice number. Retry or enter the supplier invoice reference.", details: { code: "AP_INVOICE_NUMBER_SUGGESTION_FAILED" } });
     }
   });
 

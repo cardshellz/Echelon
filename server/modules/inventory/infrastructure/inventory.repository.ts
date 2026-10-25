@@ -107,7 +107,9 @@ export interface IInventoryStorage {
 }
 
 export function createInventoryMethods(
-  db: typeof defaultDb = defaultDb,
+  // Both pool and caller-owned client executors expose these query methods.
+  // This repository never acquires a connection through the driver $client.
+  db: Omit<typeof defaultDb, "$client"> = defaultDb,
 ): IInventoryStorage {
   return {
   async getAllInventoryLevels(tx?: any): Promise<InventoryLevel[]> {

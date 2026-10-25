@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import express, { type Request, type Response, type NextFunction } from "express";
 import http from "node:http";
@@ -35,7 +36,7 @@ describe("reconciliation HTTP authority", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
   const post = (options: { id?: string; body?: unknown; permission?: string; actor?: string; key?: string } = {}) =>
-    fetch(`${base}/api/shipment-lines/${options.id ?? "23"}/cost-reconciliation`, {
+    requestLocalHttp(`${base}/api/shipment-lines/${options.id ?? "23"}/cost-reconciliation`, {
       method: "POST",
       body: JSON.stringify(options.body ?? input),
       headers: {
@@ -85,10 +86,10 @@ describe("reconciliation HTTP authority", () => {
     );
   });
   it("protects the cost ledger read and does not expose database errors", async () => {
-    expect((await fetch(`${base}/api/cogs/historical-adjustments`)).status).toBe(403);
+    expect((await requestLocalHttp(`${base}/api/cogs/historical-adjustments`)).status).toBe(403);
     expect(service.report).not.toHaveBeenCalled();
     service.report.mockRejectedValue(new Error("private SQL details"));
-    const response = await fetch(`${base}/api/cogs/historical-adjustments`, {
+    const response = await requestLocalHttp(`${base}/api/cogs/historical-adjustments`, {
       headers: { "x-permission": "inventory:view" },
     });
     expect(response.status).toBe(500);

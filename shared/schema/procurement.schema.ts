@@ -351,6 +351,8 @@ export const receivingOrders = procurementSchema.table("receiving_orders", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
+  // Full prefix evidence includes inactive documents; active uniqueness remains separate.
+  index("receiving_orders_receipt_number_prefix_idx").on(table.receiptNumber.op("varchar_pattern_ops")),
   uniqueIndex("receiving_orders_receipt_number_active_uidx").on(table.receiptNumber).where(sql`status <> 'cancelled'`),
   uniqueIndex("receiving_orders_shipment_po_active_uidx")
     .on(table.inboundShipmentId, table.purchaseOrderId)
@@ -544,6 +546,8 @@ export const purchaseOrders = procurementSchema.table("purchase_orders", {
   paidTotalCents: bigint("paid_total_cents", { mode: "number" }).notNull().default(0),
   outstandingCents: bigint("outstanding_cents", { mode: "number" }).notNull().default(0),
 }, (table) => [
+  // Full prefix evidence includes inactive documents; active uniqueness remains separate.
+  index("purchase_orders_po_number_prefix_idx").on(table.poNumber.op("varchar_pattern_ops")),
   uniqueIndex("purchase_orders_po_number_active_uidx").on(table.poNumber).where(sql`status <> 'cancelled'`),
   check("purchase_orders_currency_usd_chk", sql`${table.currency} = 'USD'`),
 ]);
@@ -1641,6 +1645,8 @@ export const vendorInvoices = procurementSchema.table("vendor_invoices", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
+  // Full prefix evidence includes inactive documents; active uniqueness remains separate.
+  index("vendor_invoices_invoice_number_prefix_idx").on(table.invoiceNumber.op("varchar_pattern_ops")),
   uniqueIndex("vendor_invoices_vendor_invoice_idx").on(table.vendorId, table.invoiceNumber).where(sql`${table.status} <> 'voided'`),
   uniqueIndex("vendor_invoices_root_number_idx").on(table.vendorId, table.invoiceNumber).where(sql`${table.replacesInvoiceId} IS NULL`),
   uniqueIndex("vendor_invoices_one_successor_idx").on(table.replacesInvoiceId).where(sql`${table.replacesInvoiceId} IS NOT NULL`),
@@ -1989,6 +1995,8 @@ export const apPayments = procurementSchema.table("ap_payments", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
+  // Full prefix evidence includes inactive documents; active uniqueness remains separate.
+  index("ap_payments_payment_number_prefix_idx").on(table.paymentNumber.op("varchar_pattern_ops")),
   uniqueIndex("ap_payments_payment_number_active_uidx").on(table.paymentNumber).where(sql`voided_at IS NULL`),
   check("ap_payments_currency_usd_chk", sql`${table.currency} = 'USD'`),
   check("ap_payments_recorded_status_check", sql`${table.status} IN ('completed', 'voided')`),

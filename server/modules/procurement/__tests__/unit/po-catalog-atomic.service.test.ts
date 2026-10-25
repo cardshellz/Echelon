@@ -33,7 +33,7 @@ describe("atomic PO and vendor-catalog persistence", () => {
 
   it("runs catalog capture inside both PO create and draft-replacement transactions", () => {
     const createFlow = section(
-      "const createAttempt = async (poNumber: string) => (internalOptions?.transaction ?? db).transaction",
+      "const createAttempt = async () => (internalOptions?.transaction ?? db).transaction",
       "let lastConflictingPoNumber",
     );
     const updateFlow = section(

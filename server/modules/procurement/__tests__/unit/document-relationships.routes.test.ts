@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import type { Server } from "node:http";
@@ -21,29 +22,29 @@ describe("document relationship read boundary", () => {
   afterEach(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); vi.restoreAllMocks(); });
   const permitted = { headers: { "x-permission": "purchasing:view" } };
   it("requires view access before reading any relationships", async () => {
-    expect((await fetch(`${url}/shipment/42`)).status).toBe(403); expect(repository.read).not.toHaveBeenCalled();
+    expect((await requestLocalHttp(`${url}/shipment/42`)).status).toBe(403); expect(repository.read).not.toHaveBeenCalled();
   });
   it.each(["0", "-1", "42x", "42.5", "0042", "2147483648"])("rejects malformed identifier %s", async id => {
-    expect((await fetch(`${url}/shipment/${id}`, permitted)).status).toBe(400); expect(repository.read).not.toHaveBeenCalled();
+    expect((await requestLocalHttp(`${url}/shipment/${id}`, permitted)).status).toBe(400); expect(repository.read).not.toHaveBeenCalled();
   });
   it.each(["purchase", "shipment", "receipt"])("reads and validates the %s projection", async kind => {
-    const response = await fetch(`${url}/${kind}/42`, permitted); expect(response.status).toBe(200);
+    const response = await requestLocalHttp(`${url}/${kind}/42`, permitted); expect(response.status).toBe(200);
     expect((await response.json()).root).toEqual({ kind, id: 42 });
   });
   it("distinguishes missing records from failed reads without leaking internals", async () => {
     repository.read.mockResolvedValueOnce(null);
-    expect((await fetch(`${url}/shipment/42`, permitted)).status).toBe(404);
+    expect((await requestLocalHttp(`${url}/shipment/42`, permitted)).status).toBe(404);
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     repository.read.mockRejectedValueOnce(new Error("secret database details"));
-    const failure = await fetch(`${url}/shipment/42`, permitted);
+    const failure = await requestLocalHttp(`${url}/shipment/42`, permitted);
     expect(failure.status).toBe(500); expect(await failure.text()).not.toContain("secret");
     expect(log).toHaveBeenCalledWith(expect.stringContaining("procurement.relationships.read_failed"));
   });
   it("fails closed on a wrong root or duplicate monetary identity", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     repository.read.mockResolvedValueOnce(relationshipFixture({ kind: "shipment", id: 43 }));
-    expect((await fetch(`${url}/shipment/42`, permitted)).status).toBe(500);
+    expect((await requestLocalHttp(`${url}/shipment/42`, permitted)).status).toBe(500);
     const duplicate = relationshipFixture(); duplicate.allocations.push(duplicate.allocations[0]); repository.read.mockResolvedValueOnce(duplicate);
-    expect((await fetch(`${url}/shipment/42`, permitted)).status).toBe(500);
+    expect((await requestLocalHttp(`${url}/shipment/42`, permitted)).status).toBe(500);
   });
 });
