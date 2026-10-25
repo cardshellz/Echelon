@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { readPostedReceiptUnitEvidence, resolveReceivingUnitSnapshot, ReceivingUnitSnapshotError } from "./receiving-unit-snapshot";
 import { centsToMills, millsToCents } from "@shared/utils/money";
 import { isOpenReceiptProductSource } from "./receiving-close-integrity.domain";
@@ -326,7 +327,7 @@ export async function reconcilePurchaseOrderReceipt(params: {
 function resolveReceiptUnitCosts(receivingLine: ReceivingReconciliationLine, poLine: any) {
   const poUnitCostMills = typeof poLine.unitCostMills === "number"
     ? poLine.unitCostMills
-    : centsToMills(Number(poLine.unitCostCents ?? 0));
+    : centsToMills(readIntegerCents(poLine.unitCostCents ?? 0, "po unit cost", true));
   const poUnitCostCents = typeof poLine.unitCostCents === "number"
     ? poLine.unitCostCents
     : millsToCents(poUnitCostMills);

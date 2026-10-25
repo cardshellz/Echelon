@@ -1,3 +1,4 @@
+import { parseDecimalCents } from "@shared/money-read";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { MAX_LISTING_PRICE_CENTS } from "../../../../shared/dropship/listing-price";
@@ -243,8 +244,8 @@ export function parseEbayListingPriceCents(amount: { value: string; currency: st
   if (amount.currency !== EBAY_LISTING_CURRENCY) return { ok: false, reason: "currency" };
   const match = /^(\d{1,8})(?:\.(\d{1,2}))?$/.exec(amount.value);
   if (!match) return { ok: false, reason: "price" };
-  // At most 99,999,999 × 100 + 99: exact in a double, well inside Number.MAX_SAFE_INTEGER.
-  const cents = Number(match[1]) * 100 + Number((match[2] ?? "").padEnd(2, "0"));
+  // The source grammar and listing-specific range remain stricter than the shared reader.
+  const cents = parseDecimalCents(amount.value, "observed listing price");
   if (!Number.isSafeInteger(cents) || cents < 1 || cents > MAX_LISTING_PRICE_CENTS) return { ok: false, reason: "price" };
   return { ok: true, cents };
 }

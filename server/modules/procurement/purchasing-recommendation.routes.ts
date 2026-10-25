@@ -1,3 +1,4 @@
+import { MoneyInputError, readIntegerMills, readIntegerCents } from "@shared/money-read";
 import { pendingSourcingReviewSchema } from "@shared/procurement/automatic-sourcing-review";
 import { assertRfqSupplySnapshotCurrent, isActiveRfqReservation, rfqPendingSourcingPieces, RfqSourcingSnapshotError } from "./domain/rfq-sourcing-reservation";
 import { purchaseBuyingCounts } from "@shared/procurement/purchase-buying-review";
@@ -977,17 +978,22 @@ function recommendationEconomicBasis(item: any) {
 function hasCompleteExplicitRecommendationQuote(item: any): boolean {
   const basis = recommendationEconomicBasis(item);
   if (!basis.quotedAt) return false;
+  let quotedUnitCostMills: number;
+  try {
+    quotedUnitCostMills = readIntegerMills(basis.quotedUnitCostMills, "recommendation quote");
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
+    return false;
+  }
   if (basis.pricingBasis === "per_piece") {
-    return Number.isSafeInteger(Number(basis.quotedUnitCostMills)) &&
-      Number(basis.quotedUnitCostMills) >= 0 &&
+    return quotedUnitCostMills >= 0 &&
       basis.purchaseUom === null &&
       basis.piecesPerPurchaseUom === null;
   }
   return basis.pricingBasis === "per_purchase_uom" &&
     typeof basis.purchaseUom === "string" &&
     basis.purchaseUom.trim().length > 0 &&
-    Number.isSafeInteger(Number(basis.quotedUnitCostMills)) &&
-    Number(basis.quotedUnitCostMills) >= 0 &&
+    quotedUnitCostMills >= 0 &&
     Number.isSafeInteger(Number(basis.piecesPerPurchaseUom)) &&
     Number(basis.piecesPerPurchaseUom) > 0 &&
     Number.isSafeInteger(Number(basis.suggestedOrderPieces)) &&
@@ -1130,7 +1136,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       let totalOpenLines = 0;
       openPoSummary.forEach((po) => {
         if (['approved', 'sent', 'acknowledged', 'partially_received'].includes(po.status)) {
-          inboundPipelineValueCents += Number(po.total_value_cents) || 0;
+          inboundPipelineValueCents += readIntegerCents(po.total_value_cents, "total value", true);
           totalOpenLines += Number(po.total_lines) || 0;
         }
       });

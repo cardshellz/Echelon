@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { Pool, PoolClient } from "pg";
 import {
   dropshipVendorStandingReasonEnum,
@@ -295,8 +296,8 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
       );
       const row = result.rows[0];
       return {
-        availableBalanceCents: Number(row?.available_balance_cents ?? 0),
-        pendingBalanceCents: Number(row?.pending_balance_cents ?? 0),
+        availableBalanceCents: readIntegerCents(row?.available_balance_cents ?? 0, "available balance", true),
+        pendingBalanceCents: readIntegerCents(row?.pending_balance_cents ?? 0, "pending balance", true),
         activeFundingMethodCount: Number(row?.active_funding_method_count ?? 0),
         activeStripeFundingMethodCount: Number(row?.active_stripe_funding_method_count ?? 0),
         activeStripeCardFundingMethodCount: Number(row?.active_stripe_card_funding_method_count ?? 0),

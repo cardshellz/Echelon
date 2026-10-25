@@ -1,3 +1,4 @@
+import { parseDecimalCents, sumCents } from "@shared/money-read";
 /**
  * Shopify Order Reconciliation Job
  *
@@ -426,11 +427,11 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
       ${shipping?.province || shipping?.province_code || null},
       ${shipping?.zip || null},
       ${shippingCountry},
-      ${Math.round(parseFloat(order.total_price || "0") * 100)},
-      ${Math.round(parseFloat(order.subtotal_price || "0") * 100)},
-      ${Math.round((order.shipping_lines || []).reduce((s, l) => s + parseFloat(l.price || "0"), 0) * 100)},
-      ${Math.round(parseFloat(order.total_tax || "0") * 100)},
-      ${Math.round(parseFloat(order.total_discounts || "0") * 100)},
+      ${parseDecimalCents(order.total_price ?? "0", "ensureShopifyOrderRow")},
+      ${parseDecimalCents(order.subtotal_price ?? "0", "ensureShopifyOrderRow")},
+      ${sumCents((order.shipping_lines || []).map(line => parseDecimalCents(line.price, "Shopify shipping")))},
+      ${parseDecimalCents(order.total_tax ?? "0", "ensureShopifyOrderRow")},
+      ${parseDecimalCents(order.total_discounts ?? "0", "ensureShopifyOrderRow")},
       ${order.currency || "USD"},
       ${order.created_at ? new Date(order.created_at) : new Date()},
       ${order.financial_status || "paid"},
@@ -447,10 +448,8 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
   // Insert line items
   for (const item of order.line_items) {
     const lineItemId = String(item.id);
-    const priceCents = Math.round(parseFloat(item.price || "0") * 100);
-    const discountCents = Math.round(
-      parseFloat(item.total_discount || "0") * 100,
-    );
+    const priceCents = parseDecimalCents(item.price ?? "0", "priceCents");
+    const discountCents = parseDecimalCents(item.total_discount ?? "0", "discountCents");
     const totalCents = priceCents * item.quantity - discountCents;
 
     await db.execute(sql`

@@ -1,3 +1,4 @@
+import { readIntegerMills, readIntegerCents } from "@shared/money-read";
 import { allocateDocumentNumber } from "../../platform/document-numbering/document-number.repository";
 import { captureDocumentNumberTime, documentNumberPrefix } from "../../platform/document-numbering/document-number";
 import { readLotCostFollowUps } from "./infrastructure/lot-cost-follow-up.repository";
@@ -164,7 +165,7 @@ export class COGSService {
       const total = amount.totalMills * sign;
       const prior = Number(row.cost_precision_version)===1 ? BigInt(String(row.total_cost_mills))
         : recordedUnitCostMills(row)*BigInt(qty);
-      if (prior===total && Number(row.unit_cost_mills)===unitMirror
+      if (prior===total && readIntegerMills(row.unit_cost_mills, "unit cost", true)===unitMirror
         && row.product_total_cost_mills!=null && BigInt(String(row.product_total_cost_mills))===amount.poMills*sign
         && row.packaging_total_cost_mills!=null && BigInt(String(row.packaging_total_cost_mills))===amount.packagingMills*sign
         && row.landed_total_cost_mills!=null && BigInt(String(row.landed_total_cost_mills))===amount.landedMills*sign) continue;
@@ -747,9 +748,9 @@ export class COGSService {
       lotNumber: r.lot_number,
       productVariantId: r.product_variant_id,
       sku: r.sku,
-      oldCostCents: Number(r.old_cost_cents),
-      newCostCents: Number(r.new_cost_cents),
-      deltaCents: Number(r.delta_cents),
+      oldCostCents: readIntegerCents(r.old_cost_cents, "old cost", true),
+      newCostCents: readIntegerCents(r.new_cost_cents, "new cost", true),
+      deltaCents: readIntegerCents(r.delta_cents, "delta", true),
       adjustedAt: r.created_at,
       reason: r.reason,
     }));
@@ -953,7 +954,7 @@ export class COGSService {
           qty: Number(lot.qty_on_hand),
           perPieceCents,
           perPieceMills: parsed.costPerPieceMills,
-          oldCostCents: Number(lot.old_cents),
+          oldCostCents: readIntegerCents(lot.old_cents, "old cost", true),
           newCostCents: millsToCents(perVariantMills),
           newCostMills: perVariantMills,
         });

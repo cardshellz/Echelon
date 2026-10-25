@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { ZodError } from "zod";
 import type { Pool, PoolClient } from "pg";
 import { commerceSnapshotSchema } from "../../../shared/archon-commerce-contract";
@@ -54,7 +55,7 @@ export async function loadArchonSnapshot(
       : undefined;
   // Archon receives one reconciled provider financial snapshot. This changes no
   // OMS order, inventory, payment, or fulfillment state. Refunds stay separate.
-  if (financials && Number(o.refund_amount_cents) > financials.orderTotalCents)
+  if (financials && readIntegerCents(o.refund_amount_cents, "refund amount", true) > financials.orderTotalCents)
     throw new Error("ARCHON_REFUND_EXCEEDS_PROVIDER_TOTAL");
   const payload = {
     event: "order.snapshot",
@@ -78,21 +79,21 @@ export async function loadArchonSnapshot(
       marketing_attribution: dropship
         ? []
         : readStorefrontAcquisition(raw).touches,
-      total_cents: financials?.orderTotalCents ?? Number(o.total_cents),
+      total_cents: financials?.orderTotalCents ?? readIntegerCents(o.total_cents, "total", true),
       subtotal_cents:
-        financials?.netMerchandiseCents ?? Number(o.subtotal_cents),
+        financials?.netMerchandiseCents ?? readIntegerCents(o.subtotal_cents, "subtotal", true),
       shipping_cents:
-        financials?.grossShippingCents ?? Number(o.shipping_cents),
+        financials?.grossShippingCents ?? readIntegerCents(o.shipping_cents, "shipping", true),
       tax_cents: financials
         ? financials.taxAddedCents + financials.taxIncludedCents
-        : Number(o.tax_cents),
+        : readIntegerCents(o.tax_cents, "tax", true),
       discount_cents: financials
         ? financials.merchandiseDiscountCents + financials.shippingDiscountCents
-        : Number(o.discount_cents),
+        : readIntegerCents(o.discount_cents, "discount", true),
       discount_evidence: discountEvidence
         ? { ...discountEvidence, ...(financials ? { financials } : {}) }
         : undefined,
-      refund_cents: Number(o.refund_amount_cents),
+      refund_cents: readIntegerCents(o.refund_amount_cents, "refund", true),
       currency: o.currency,
       financial_status:
         o.status === "cancelled" ? "voided" : o.financial_status,
@@ -112,8 +113,8 @@ export async function loadArchonSnapshot(
               sku: l.sku,
               title: l.title,
               quantity: l.quantity,
-              price_cents: Number(l.retail_price_cents),
-              discount_cents: Number(l.total_discount_cents),
+              price_cents: readIntegerCents(l.retail_price_cents, "price", true),
+              discount_cents: readIntegerCents(l.total_discount_cents, "discount", true),
               product_id: l.external_product_id,
               fulfillment_status: l.fulfillment_status,
             })),

@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { MoneyInputError, formatCentsExact, parseDecimalCents, readIntegerCents, sumCents } from "@shared/money-read";
 import { useDebounce } from "@/hooks/use-debounce";
 import { QueryLoadError } from "@/components/query-load-error";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -582,10 +583,18 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
   ].filter(Boolean);
 
   // Calculate order total from items if totalAmount not available
-  const itemsTotal = order.items?.reduce((s, i) => s + (i.totalPriceCents || 0), 0) ?? 0;
-  const displayTotal = order.totalAmount
-    ? `$${parseFloat(order.totalAmount).toFixed(2)}`
-    : itemsTotal > 0 ? `$${(itemsTotal / 100).toFixed(2)}` : null;
+  let displayTotal: string | null = null;
+  try {
+    if (order.totalAmount != null) {
+      displayTotal = `$${formatCentsExact(parseDecimalCents(order.totalAmount, "order total"))}`;
+    } else {
+      const itemsTotal = sumCents(order.items?.map(item => readIntegerCents(item.totalPriceCents ?? 0, "item total")) ?? []);
+      displayTotal = itemsTotal > 0 ? `$${formatCentsExact(itemsTotal)}` : null;
+    }
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
+    // Invalid evidence stays unavailable; it must not display a partial price.
+  }
 
   return (
     <div className="space-y-4 sticky top-6">

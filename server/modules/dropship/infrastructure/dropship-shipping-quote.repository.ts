@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import type {
@@ -158,9 +159,9 @@ export class PgDropshipShippingQuoteRepository implements DropshipShippingQuoteR
         id: row.id,
         source: "config",
         markupBps: row.markup_bps,
-        fixedMarkupCents: Number(row.fixed_markup_cents),
-        minMarkupCents: row.min_markup_cents === null ? null : Number(row.min_markup_cents),
-        maxMarkupCents: row.max_markup_cents === null ? null : Number(row.max_markup_cents),
+        fixedMarkupCents: readIntegerCents(row.fixed_markup_cents, "fixed markup", true),
+        minMarkupCents: row.min_markup_cents === null ? null : readIntegerCents(row.min_markup_cents, "min markup", true),
+        maxMarkupCents: row.max_markup_cents === null ? null : readIntegerCents(row.max_markup_cents, "max markup", true),
       } : null;
     } finally {
       client.release();
@@ -185,8 +186,8 @@ export class PgDropshipShippingQuoteRepository implements DropshipShippingQuoteR
         id: row.id,
         source: "config",
         feeBps: row.fee_bps,
-        minFeeCents: row.min_fee_cents === null ? null : Number(row.min_fee_cents),
-        maxFeeCents: row.max_fee_cents === null ? null : Number(row.max_fee_cents),
+        minFeeCents: row.min_fee_cents === null ? null : readIntegerCents(row.min_fee_cents, "min fee", true),
+        maxFeeCents: row.max_fee_cents === null ? null : readIntegerCents(row.max_fee_cents, "max fee", true),
       } : null;
     } finally {
       client.release();
@@ -349,11 +350,11 @@ function mapQuoteSnapshotRow(row: QuoteSnapshotRow): DropshipShippingQuoteSnapsh
     idempotencyKey: row.idempotency_key,
     requestHash: row.request_hash,
     packageCount: row.package_count,
-    baseRateCents: Number(row.base_rate_cents),
-    markupCents: Number(row.markup_cents),
-    insurancePoolCents: Number(row.insurance_pool_cents),
-    dunnageCents: Number(row.dunnage_cents),
-    totalShippingCents: Number(row.total_shipping_cents),
+    baseRateCents: readIntegerCents(row.base_rate_cents, "base rate", true),
+    markupCents: readIntegerCents(row.markup_cents, "markup", true),
+    insurancePoolCents: readIntegerCents(row.insurance_pool_cents, "insurance pool", true),
+    dunnageCents: readIntegerCents(row.dunnage_cents, "dunnage", true),
+    totalShippingCents: readIntegerCents(row.total_shipping_cents, "total shipping", true),
     quotePayload: row.quote_payload,
     warnings: Array.isArray(row.warnings)
       ? row.warnings as DropshipShippingQuoteSnapshotRecord["warnings"]

@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { captureDocumentNumberTime } from "../../platform/document-numbering/document-number";
 import { readCommandAuthorityActor } from "../identity";
 import { recordReceivingEntryAudit, type ReceivingEntryTransaction } from "./receiving-entry.repository";
@@ -377,10 +378,10 @@ async function resolveReceivingLineCost(
       if (poLine && ((poLine.lineType ?? "product") === "product")) {
         const qty = Number(poLine.orderQty) || 1;
         const productCostCents = qty > 0
-          ? Math.round(Number(poLine.totalProductCostCents || 0) / qty)
+          ? Math.round(readIntegerCents(poLine.totalProductCostCents ?? 0, "product cost", true) / qty)
           : 0;
         const packagingCostCents = qty > 0
-          ? Math.round(Number(poLine.packagingCostCents || 0) / qty)
+          ? Math.round(readIntegerCents(poLine.packagingCostCents ?? 0, "packaging cost", true) / qty)
           : 0;
 
         if (

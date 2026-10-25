@@ -1,3 +1,4 @@
+import { readIntegerCents, centsToJsonDollars } from "@shared/money-read";
 /**
  * ShipStation Integration Service
  *
@@ -4905,7 +4906,7 @@ export function createShipStationService(
             // provider's decimal-number boundary; never calculate money here.
             await apiRequest("POST", "/orders/createorder", { ...live, orderStatus: "on_hold",
               items: rows.map(item => ({ ...live.items.find(existing => existing.lineItemKey === `wms-item-${item.id}`), lineItemKey: `wms-item-${item.id}`, quantity: item.qty,
-                sku: item.sku, name: item.name, unitPrice: Number(`${Math.floor(item.unit_price_cents / 100)}.${String(item.unit_price_cents % 100).padStart(2, "0")}`) })) }, { replaySafe: true });
+                sku: item.sku, name: item.name, unitPrice: centsToJsonDollars(item.unit_price_cents) })) }, { replaySafe: true });
           } else {
             verifyItems(live, expectedItems);
             // Preserve preexisting provider, manual order and shipment holds.
@@ -5430,7 +5431,7 @@ export function createShipStationService(
             sku: String(row.sku ?? ""),
             name: String(row.name ?? ""),
             quantity: Number(row.qty),
-            unitPrice: Number(row.unit_price_cents) / 100,
+            unitPrice: readIntegerCents(row.unit_price_cents, "unit price", true) / 100,
             options: [] as unknown[],
           }));
 
@@ -5693,9 +5694,7 @@ export function createShipStationService(
       WHERE oi.order_id = ${orderRow.id}
         AND COALESCE(oi.requires_shipping, 1) = 0
     `);
-    orderRow.non_shipping_total_cents = Number(
-      nonShippingRows?.rows?.[0]?.non_shipping_total_cents ?? 0,
-    );
+    orderRow.non_shipping_total_cents = readIntegerCents(nonShippingRows?.rows?.[0]?.non_shipping_total_cents ?? 0, "non shipping total", true);
 
     const itemRows = await db.select({
       id: outboundShipmentItems.id,
