@@ -1,3 +1,4 @@
+import { parseDecimalCents, sumCents, readIntegerCents } from "@shared/money-read";
 /**
  * Shopify Channel Adapter
  *
@@ -426,20 +427,17 @@ export class ShopifyAdapter implements IChannelAdapter {
       sku: item.sku || "",
       title: item.title || item.name || "",
       quantity: item.quantity,
-      priceCents: Math.round(parseFloat(item.price || "0") * 100),
-      discountCents: Math.round(
-        (item.discount_allocations || []).reduce(
-          (sum: number, d: any) => sum + parseFloat(d.amount || "0"),
-          0,
-        ) * 100,
+      priceCents: parseDecimalCents(item.price ?? "0", "lineItems"),
+      discountCents: sumCents((item.discount_allocations || []).map(
+        (discount: any) => parseDecimalCents(discount.amount, "Shopify allocation"),
+      )),
+      taxCents: sumCents((item.tax_lines || []).map(
+        (tax: any) => parseDecimalCents(tax.price, "Shopify line tax"),
+      )),
+      totalCents: readIntegerCents(
+        BigInt(parseDecimalCents(item.price, "Shopify line price")) * BigInt(item.quantity),
+        "Shopify line total",
       ),
-      taxCents: Math.round(
-        (item.tax_lines || []).reduce(
-          (sum: number, t: any) => sum + parseFloat(t.price || "0"),
-          0,
-        ) * 100,
-      ),
-      totalCents: Math.round(parseFloat(item.price || "0") * item.quantity * 100),
     }));
 
     const shipping = shopifyOrder.shipping_address || {};
@@ -463,16 +461,13 @@ export class ShopifyAdapter implements IChannelAdapter {
         phone: shipping.phone || null,
       },
       lineItems,
-      subtotalCents: Math.round(parseFloat(shopifyOrder.subtotal_price || "0") * 100),
-      taxCents: Math.round(parseFloat(shopifyOrder.total_tax || "0") * 100),
-      shippingCents: Math.round(
-        (shopifyOrder.shipping_lines || []).reduce(
-          (sum: number, sl: any) => sum + parseFloat(sl.price || "0"),
-          0,
-        ) * 100,
-      ),
-      discountCents: Math.round(parseFloat(shopifyOrder.total_discounts || "0") * 100),
-      totalCents: Math.round(parseFloat(shopifyOrder.total_price || "0") * 100),
+      subtotalCents: parseDecimalCents(shopifyOrder.subtotal_price ?? "0", "provider amount"),
+      taxCents: parseDecimalCents(shopifyOrder.total_tax ?? "0", "provider amount"),
+      shippingCents: sumCents((shopifyOrder.shipping_lines || []).map(
+        (shippingLine: any) => parseDecimalCents(shippingLine.price, "Shopify shipping"),
+      )),
+      discountCents: parseDecimalCents(shopifyOrder.total_discounts ?? "0", "provider amount"),
+      totalCents: parseDecimalCents(shopifyOrder.total_price ?? "0", "provider amount"),
       currency: shopifyOrder.currency || "USD",
       financialStatus: shopifyOrder.financial_status || null,
       fulfillmentStatus: shopifyOrder.fulfillment_status || null,

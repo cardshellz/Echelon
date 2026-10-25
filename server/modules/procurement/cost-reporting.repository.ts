@@ -1,3 +1,4 @@
+import { readIntegerMills } from "@shared/money-read";
 import { supplierReturnCostAdjustmentSchema } from "@shared/procurement/supplier-return";
 import { costIssueSchema, costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import type { Pool, PoolClient } from "pg";
@@ -64,7 +65,7 @@ export class CostReportingRepository {
             ? await tx.query(`SELECT id,approval_id,destination,before_mills,after_mills,delta_mills
               FROM inventory.cost_reconciliation_postings WHERE application_id=$1 ORDER BY id`,[row.applicationId]) : {rows:[]};
           const historical = postings.rows.map(posting=>({id:Number(posting.id),approvalId:Number(posting.approval_id),
-            destination:posting.destination,beforeMills:Number(posting.before_mills),afterMills:Number(posting.after_mills),deltaMills:Number(posting.delta_mills)}));
+            destination:posting.destination,beforeMills:readIntegerMills(posting.before_mills, "before", true),afterMills:readIntegerMills(posting.after_mills, "after", true),deltaMills:readIntegerMills(posting.delta_mills, "delta", true)}));
           const historicalMatches=reportHash(historical)===reportHash(payload.historicalCostAdjustments ?? []);
           const returnAdjustments = payload.supplierReturnAdjustments ?? [];
           const expectedReturnAdjustments = supplierReturnCostAdjustmentSchema.array().max(10_000).parse(row.outcome?.supplierReturnAdjustments ?? []);
@@ -85,8 +86,8 @@ export class CostReportingRepository {
               return supplierReturnCostAdjustmentSchema.parse({ entryId: Number(entry.id), returnId: Number(entry.supplier_return_id),
                 returnLineId: Number(entry.supplier_return_line_id), returnAllocationId: Number(entry.return_allocation_id),
                 inventoryLotId: Number(entry.inventory_lot_id), costQuantityAllocationId: Number(entry.allocation_id),
-                quantity: Number(entry.quantity), component: entry.component, beforeMills: Number(entry.previous_mills),
-                afterMills: Number(entry.next_mills), deltaMills: Number(entry.delta_mills), postingKey: entry.posting_key });
+                quantity: Number(entry.quantity), component: entry.component, beforeMills: readIntegerMills(entry.previous_mills, "before", true),
+                afterMills: readIntegerMills(entry.next_mills, "after", true), deltaMills: readIntegerMills(entry.delta_mills, "delta", true), postingKey: entry.posting_key });
             });
             if (reportHash(retained) !== reportHash([...returnAdjustments].sort((a, b) => a.entryId - b.entryId))) {
               throw new CostReportingError("COST_REPORT_RETURN_CONFLICT", "Returned-value reporting does not match the inventory owner's immutable entries.");

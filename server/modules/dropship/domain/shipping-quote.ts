@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { DropshipError } from "./errors";
 import {
   cartonize,
@@ -341,7 +342,7 @@ export function calculateBasisPointsFeeCents(
   const fixedCents = policy.fixedCents ?? 0;
   assertNonNegativeSafeInteger("fixedCents", fixedCents);
 
-  let feeCents = Number((BigInt(basisCents) * BigInt(policy.bps)) / BigInt(10000)) + fixedCents;
+  let feeCents = readIntegerCents((BigInt(basisCents) * BigInt(policy.bps)) / BigInt(10000), "fee", true) + fixedCents;
   if (policy.minCents !== null && policy.minCents !== undefined) {
     assertNonNegativeSafeInteger("minCents", policy.minCents);
     feeCents = Math.max(feeCents, policy.minCents);

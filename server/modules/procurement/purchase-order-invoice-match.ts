@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { createHash } from "node:crypto";
 import { centsToMills } from "@shared/utils/money";
 import { isPoLineType } from "@shared/procurement/po-line-type";
@@ -59,7 +60,7 @@ function authoritativeUnitCostMills(
   signed = false,
 ): number {
   if (signed) {
-    const amount = Number(value.unitCostMills ?? centsToMills(value.unitCostCents ?? 0));
+    const amount = readIntegerMills(value.unitCostMills ?? centsToMills(value.unitCostCents ?? 0), "amount", true);
     if (!Number.isSafeInteger(amount)) throw new Error(`${field}.unitCostMills must be a safe integer`);
     return amount;
   }

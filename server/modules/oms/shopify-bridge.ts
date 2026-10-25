@@ -1,3 +1,4 @@
+import { parseDecimalCents, sumCents, readIntegerCents } from "@shared/money-read";
 /**
  * Shopify Bridge — writes Shopify orders into OMS for unified view
  *
@@ -125,7 +126,7 @@ export async function bridgeShopifyOrderToOms(
       const discountAllocations = item.discount_allocations || [];
       
       for (const alloc of discountAllocations) {
-        const allocAmount = Math.round(parseFloat(alloc.amount || "0") * 100);
+        const allocAmount = parseDecimalCents(alloc.amount ?? "0", "allocAmount");
         // Detect rewards
         const isRewards = discountCodesArray.some((code: string) => 
           code.toUpperCase().startsWith("SHELLZ-") || code.toUpperCase().includes("REWARDS")
@@ -147,10 +148,12 @@ export async function bridgeShopifyOrderToOms(
       const totalDiscountCents = planDiscountCents + couponDiscountCents;
       
       // Calculate retail price from legacy table's final totals + legacy discounts
-      const oldPlan = item.plan_discount_cents || 0;
-      const oldCoupon = item.coupon_discount_cents || 0;
+      const oldPlan = readIntegerCents(item.plan_discount_cents ?? 0, "plan discount");
+      const oldCoupon = readIntegerCents(item.coupon_discount_cents ?? 0, "coupon discount");
       const qty = item.quantity || 1;
-      const retailPriceCents = Math.round(((item.total_price_cents || 0) + oldPlan + oldCoupon) / qty);
+      const retailPriceCents = Math.round(sumCents([
+        readIntegerCents(item.total_price_cents ?? 0, "line total"), oldPlan, oldCoupon,
+      ]) / qty);
       
       const paidPriceCents = Math.round(retailPriceCents - (totalDiscountCents / qty));
       const totalCents = (retailPriceCents * qty) - totalDiscountCents;
@@ -211,16 +214,16 @@ export async function bridgeShopifyOrderToOms(
       shipToState: raw.shipping_state,
       shipToZip: raw.shipping_postal_code,
       shipToCountry,
-      subtotalCents: raw.subtotal_price_cents || 0,
+      subtotalCents: readIntegerCents(raw.subtotal_price_cents ?? 0, "order subtotal"),
       // Pre-discount merchandise subtotal = sum of line gross (retail × qty).
       grossSubtotalCents: lineItems.reduce(
         (s, li) => s + (li.retailPriceCents || 0) * (li.quantity || 0),
         0,
       ),
-      shippingCents: raw.total_shipping_cents || 0,
-      taxCents: raw.total_tax_cents || 0,
-      discountCents: raw.total_discounts_cents || 0,
-      totalCents: raw.total_price_cents || 0,
+      shippingCents: readIntegerCents(raw.total_shipping_cents ?? 0, "order shipping"),
+      taxCents: readIntegerCents(raw.total_tax_cents ?? 0, "order tax"),
+      discountCents: readIntegerCents(raw.total_discounts_cents ?? 0, "order discount"),
+      totalCents: readIntegerCents(raw.total_price_cents ?? 0, "order total"),
       currency: raw.currency || "USD",
       taxExempt: raw.tax_exempt === true,
       rawPayload: { order: raw, lineItems: orderItems },

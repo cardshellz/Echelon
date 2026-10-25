@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import React, { useState, useMemo } from "react";
 import { HistoricalCostAdjustments } from "@/features/purchasing/HistoricalCostAdjustments";
 import { useInventoryQuantityCapabilities } from "@/hooks/use-inventory-quantity-capabilities";
@@ -1084,8 +1085,8 @@ function ManualEntrySection() {
         productVariantId: parseInt(variantId),
         warehouseLocationId: parseInt(locationId),
         qty: parseInt(qty),
-        unitCostCents: parseFloat(unitCost),
-        landedCostCents: landedCost ? parseFloat(landedCost) : undefined,
+        unitCostCents: readIntegerCents(unitCost, "unit cost"),
+        landedCostCents: landedCost ? readIntegerCents(landedCost, "landed cost") : undefined,
         batchNumber: batchNumber || undefined,
         receivedAt: receivedAt || undefined,
         notes: notes || undefined,
@@ -1451,7 +1452,7 @@ function EditManualLotDialog({ lot, onClose }: { lot: any; onClose: () => void }
   const updateMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("PATCH", `/api/cogs/manual-lots/${lot.id}`, {
-        unitCostCents: parseFloat(unitCost),
+        unitCostCents: readIntegerCents(unitCost, "unit cost"),
         batchNumber: batchNumber || undefined,
         notes: notes || undefined,
       });

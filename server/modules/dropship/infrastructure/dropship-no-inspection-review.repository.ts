@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import type {
@@ -81,7 +82,7 @@ export class PgDropshipNoInspectionReviewRepository implements DropshipNoInspect
     } | null;
     for (const line of snapshot?.wholesale?.lines ?? []) {
       const variantId = Number(line.productVariantId);
-      const unitCost = Number(line.wholesaleUnitCostCents);
+      const unitCost = readIntegerCents(line.wholesaleUnitCostCents, "unit cost", true);
       if (Number.isSafeInteger(variantId) && variantId > 0
         && Number.isSafeInteger(unitCost) && unitCost >= 0) {
         unitCostByVariant.set(variantId, unitCost);

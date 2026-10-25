@@ -1,3 +1,5 @@
+import { parseDecimalCents, readIntegerCents } from "@shared/money-read";
+
 /**
  * OMS Shopify Webhooks — Direct Shopify → OMS order ingestion
  *
@@ -179,7 +181,7 @@ function verifyShopifyHmac(rawBody: Buffer, hmacHeader: string | undefined): boo
 
 function dollarsToCents(value: string | number | undefined | null): number {
   if (value === null || value === undefined) return 0;
-  return Math.round(parseFloat(String(value)) * 100);
+  return parseDecimalCents(String(value), "dollarsToCents");
 }
 
 // ---------------------------------------------------------------------------
@@ -2013,7 +2015,7 @@ export function registerOmsWebhooks(
           RETURNING refund_amount_cents, financial_status
         `);
         cumulative = {
-          refundAmountCents: Number(updated?.rows?.[0]?.refund_amount_cents ?? 0),
+          refundAmountCents: readIntegerCents(updated?.rows?.[0]?.refund_amount_cents ?? 0, "refund amount", true),
           financialStatus: String(updated?.rows?.[0]?.financial_status ?? "partially_refunded"),
         };
 

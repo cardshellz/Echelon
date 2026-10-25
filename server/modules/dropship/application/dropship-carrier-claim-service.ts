@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
@@ -248,7 +249,7 @@ export function allocateVendorShippingCharge(input: {
       "Combined carrier label cost exceeds the supported range.",
     );
   }
-  const totalCarrierCost = Number(totalCarrierCostBig);
+  const totalCarrierCost = readIntegerCents(totalCarrierCostBig, "carrier cost");
   assertPositiveMoney(totalCarrierCost, "totalCarrierCostCents");
 
   const shipping = BigInt(input.orderShippingChargeCents);
@@ -257,7 +258,7 @@ export function allocateVendorShippingCharge(input: {
     const numerator = shipping * BigInt(shipment.carrierCostCents!);
     return {
       shipment,
-      allocated: Number(numerator / costTotal),
+      allocated: readIntegerCents(numerator / costTotal, "allocated carrier cost"),
       remainder: numerator % costTotal,
     };
   });

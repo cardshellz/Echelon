@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { deriveInvoiceFinancialState } from "./domain/invoice-financial-state";
 import { classifyApPaymentState } from "./domain/ap-payment-state";
 import { centsToMills, millsToCents } from "@shared/utils/money";
@@ -121,7 +122,7 @@ export function previewInvoiceQuantity(facts: InvoiceCorrectionFacts, lineId: nu
     beforeQuantity, afterQuantity, orderedQuantity: recorded(poLine.orderQty, "PO quantity"), receivedQuantity: recorded(poLine.receivedQty ?? 0, "received quantity"),
     otherInvoicedQuantity: Number(otherQuantity), invoiceLineAmountCents: amount,
     invoiceAmountCents: recorded(invoice.invoicedAmountCents, "invoice amount"), paidAmountCents: recorded(invoice.paidAmountCents, "paid amount"), balanceCents: recorded(invoice.balanceCents, "balance"),
-    recordedUnitCostMills: line.unitCostMills === null ? Number(BigInt(recorded(line.unitCostCents, "unit price")) * BigInt(100)) : recorded(line.unitCostMills, "unit price"),
+    recordedUnitCostMills: line.unitCostMills === null ? readIntegerMills(BigInt(recorded(line.unitCostCents, "unit price")) * BigInt(100), "recorded unit cost", true) : recorded(line.unitCostMills, "unit price"),
     beforeAmountPerPiece: invoiceAmountPerPiece(amount, beforeQuantity), afterAmountPerPiece: invoiceAmountPerPiece(afterAmount, afterQuantity),
     afterLineAmountCents: afterAmount, afterInvoiceAmountCents: invoiceAmount, afterBalanceCents: afterFinancials.balanceCents,
     beforeAllocatedToPoCents: beforeAllocation, afterAllocatedToPoCents: afterAllocation,

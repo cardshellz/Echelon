@@ -1,3 +1,4 @@
+import { readIntegerMills } from "@shared/money-read";
 import { supplierReturnCostEntrySchema, supplierReturnCostTotalsSchema, type SupplierReturnCostEntry, type SupplierReturnCostTotals } from "@shared/procurement/supplier-return";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
@@ -32,7 +33,7 @@ export function verifySupplierReturnCostHistory(
   }
   const currentCosts = supplierReturnCostTotalsSchema.parse({
     productMills: latest.get("product")!.nextMills, packagingMills: latest.get("packaging")!.nextMills, landedMills: latest.get("landed")!.nextMills,
-    totalMills: Number(supplierReturnCostComponents.reduce((sum, component) => sum + BigInt(latest.get(component)!.nextMills), BigInt(0))),
+    totalMills: readIntegerMills(supplierReturnCostComponents.reduce((sum, component) => sum + BigInt(latest.get(component)!.nextMills), BigInt(0)), "total", true),
   });
   return { entries, latest, initialCostEntryIds, currentCosts };
 }
