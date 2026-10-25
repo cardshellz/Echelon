@@ -7,6 +7,7 @@ import { projectPurchaseLineShipping, type PurchaseLineShipping } from "@shared/
 import { PoLineShipmentLinks, PoLineShippingQuantity } from "@/features/purchasing/PoLineShipping";
 import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
+import { evaluateDollarInput } from "@/lib/exact-money-input";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
 import { ShipmentQuantityControl } from "@/components/purchasing/ShipmentQuantityControl";
@@ -38,7 +39,6 @@ import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateReco
 import { shipmentCreateSchema, type ShipmentCreateInput } from "@shared/procurement/shipment-create-command";
 import type { ShipmentCreateRecovery as ShipmentRecovery } from "@/lib/shipment-create-command";
 import {
-  dollarsToCents,
   formatMills,
   centsToMills,
 } from "@shared/utils/money";
@@ -2505,6 +2505,7 @@ export default function PurchaseOrderDetail() {
 
   const updateChargesMutation = useMutation({
     mutationFn: async (data: { incoterms?: string; discountCents?: number; taxCents?: number; shippingCostCents?: number }) => {
+      if (!hasPermission("purchasing", "edit")) throw new Error("Purchasing edit permission is required to update purchase order charges.");
       const res = await fetch(`/api/purchase-orders/${poId}/incoterms-charges`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -2527,6 +2528,15 @@ export default function PurchaseOrderDetail() {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
+
+  function submitDollarCharge(field: "discountCents" | "taxCents" | "shippingCostCents", raw: string, label: string) {
+    const amount = evaluateDollarInput(raw || "0");
+    if (!amount.valid) {
+      toast({ title: "Invalid " + label.toLowerCase(), description: amount.message, variant: "destructive" });
+      return;
+    }
+    updateChargesMutation.mutate({ [field]: amount.cents });
+  }
 
   type ShipmentCreateSubmission = { body: ShipmentCreateInput; recovery?: ShipmentRecovery; navigation: NavigationSnapshot; visit: ReturnType<typeof shipmentCreation.captureVisit> };
   const createShipmentMutation = useMutation({
@@ -3144,6 +3154,7 @@ export default function PurchaseOrderDetail() {
               <div className="text-xs text-muted-foreground">Discount</div>
               {canEditLines && !editingDiscount && (
                 <Button variant="ghost" size="icon" className="h-5 w-5"
+                  aria-label="Edit discount"
                   onClick={() => { setDiscountDollars(((Number(po.discountCents) || 0) / 100).toFixed(2)); setEditingDiscount(true); }}
                 >
                   <Pencil className="h-3 w-3" />
@@ -3152,13 +3163,14 @@ export default function PurchaseOrderDetail() {
             </div>
             {editingDiscount ? (
               <div className="flex gap-1 mt-1">
-                <Input type="number" min="0" step="0.01" value={discountDollars}
+                <Input aria-label="Discount" type="number" min="0" step="0.01" value={discountDollars}
                   onChange={e => setDiscountDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
-                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ discountCents: dollarsToCents(discountDollars || "0") }); if (e.key === "Escape") setEditingDiscount(false); }}
+                  onKeyDown={e => { if (e.key === "Enter") submitDollarCharge("discountCents", discountDollars, "Discount"); if (e.key === "Escape") setEditingDiscount(false); }}
                 />
                 <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
-                  onClick={() => updateChargesMutation.mutate({ discountCents: dollarsToCents(discountDollars || "0") })}
+                  aria-label="Save discount"
+                  onClick={() => submitDollarCharge("discountCents", discountDollars, "Discount")}
                 >
                   <Check className="h-3 w-3" />
                 </Button>
@@ -3190,10 +3202,11 @@ export default function PurchaseOrderDetail() {
                 <Input aria-label="Supplier tax / duties" type="number" min="0" step="0.01" value={taxDollars}
                   onChange={e => setTaxDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
-                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ taxCents: dollarsToCents(taxDollars || "0") }); if (e.key === "Escape") setEditingTax(false); }}
+                  onKeyDown={e => { if (e.key === "Enter") submitDollarCharge("taxCents", taxDollars, "Supplier tax / duties"); if (e.key === "Escape") setEditingTax(false); }}
                 />
                 <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
-                  onClick={() => updateChargesMutation.mutate({ taxCents: dollarsToCents(taxDollars || "0") })}
+                  aria-label="Save supplier tax / duties"
+                  onClick={() => submitDollarCharge("taxCents", taxDollars, "Supplier tax / duties")}
                 >
                   <Check className="h-3 w-3" />
                 </Button>
@@ -3232,10 +3245,11 @@ export default function PurchaseOrderDetail() {
                 <Input aria-label="Supplier freight" type="number" min="0" step="0.01" value={shippingDollars}
                   onChange={e => setShippingDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
-                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ shippingCostCents: dollarsToCents(shippingDollars || "0") }); if (e.key === "Escape") setEditingShipping(false); }}
+                  onKeyDown={e => { if (e.key === "Enter") submitDollarCharge("shippingCostCents", shippingDollars, "Supplier freight"); if (e.key === "Escape") setEditingShipping(false); }}
                 />
                 <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
-                  onClick={() => updateChargesMutation.mutate({ shippingCostCents: dollarsToCents(shippingDollars || "0") })}
+                  aria-label="Save supplier freight"
+                  onClick={() => submitDollarCharge("shippingCostCents", shippingDollars, "Supplier freight")}
                 >
                   <Check className="h-3 w-3" />
                 </Button>

@@ -175,3 +175,76 @@ test("AP overview keeps failed and malformed reads unavailable until an explicit
   expect(reads).toBe(6);
   expect(failures).toEqual([]);
 });
+
+test("manual invoice amount validation retains the draft without requests and accepts a corrected amount", async ({ page }) => {
+  const failures = await setup(page);
+  const submitted: Array<Record<string, unknown>> = [];
+  await page.route("**/api/vendor-invoices/next-number", route => route.fulfill({ json: { invoiceNumber: "VALIDATED-INVOICE" } }));
+  await page.route("**/api/vendor-invoices", route => {
+    submitted.push(route.request().postDataJSON());
+    return route.fulfill({ status: 201, json: { id: 71 } });
+  });
+  await page.goto("/ap-invoices");
+  await page.getByRole("button", { name: "New Invoice", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("combobox", { name: "Invoice vendor", exact: true }).selectOption("2");
+  const amount = dialog.getByRole("spinbutton", { name: "Invoice amount", exact: true });
+  for (const raw of ["90071992547409.92", "1e3"]) {
+    await amount.fill(raw);
+    await dialog.getByRole("button", { name: "Create Invoice", exact: true }).click();
+    await expect(page.getByText("Invalid invoice amount", { exact: true }).last()).toBeVisible();
+    await expect(dialog).toBeVisible();
+    await expect(amount).toHaveValue(raw);
+    expect(submitted).toEqual([]);
+    expect(failures).toEqual([]);
+  }
+  await amount.fill("12.34");
+  await dialog.getByRole("button", { name: "Create Invoice", exact: true }).click();
+  await expect(page).toHaveURL(/\/ap-invoices\/71$/);
+  expect(submitted).toEqual([expect.objectContaining({ vendorId: 2, invoiceNumber: "VALIDATED-INVOICE", invoicedAmountCents: 1234 })]);
+  expect(failures).toEqual([]);
+});
+
+test("PO charge amount validation prevents unsafe or malformed requests and keeps each charge editable for correction", async ({ page }) => {
+  const failures = await setup(page);
+  const submitted: Array<Record<string, unknown>> = [];
+  const order = { id: 17, poNumber: "TEST-PO-17", vendorId: 2, vendor: { name: "Test vendor" },
+    status: "draft", physicalStatus: "draft", financialStatus: "unpaid", lines: [],
+    subtotalCents: 10000, totalCents: 10000, discountCents: 0, taxCents: 0, shippingCostCents: 0 };
+  await page.route("**/api/purchase-orders/17", route => route.fulfill({ json: order }));
+  await page.route("**/api/purchase-orders/17/incoterms-charges", route => {
+    const body = route.request().postDataJSON();
+    submitted.push(body);
+    Object.assign(order, body);
+    return route.fulfill({ json: order });
+  });
+  // An explicit lifecycle tab intentionally keeps a draft on its supported
+  // detail screen instead of redirecting into the separate full PO editor.
+  await page.goto("/purchase-orders/17?tab=lines");
+  const fields = [
+    { label: "Discount", edit: "Edit discount", save: "Save discount", field: "discountCents", corrected: "0.46", cents: 46 },
+    { label: "Supplier tax / duties", edit: "Edit supplier tax / duties", save: "Save supplier tax / duties", field: "taxCents", corrected: "12.34", cents: 1234 },
+    { label: "Supplier freight", edit: "Edit supplier freight", save: "Save supplier freight", field: "shippingCostCents", corrected: "0.00", cents: 0 },
+  ];
+  for (const [index, field] of fields.entries()) {
+    await page.getByRole("button", { name: field.edit, exact: true }).click();
+    const amount = page.getByRole("spinbutton", { name: field.label, exact: true });
+    await amount.fill("90071992547409.92");
+    await page.getByRole("button", { name: field.save, exact: true }).click();
+    await expect(page.getByText("Invalid " + field.label.toLowerCase(), { exact: true }).last()).toBeVisible();
+    await expect(amount).toHaveValue("90071992547409.92");
+    expect(submitted).toHaveLength(index);
+    await amount.fill("1e3");
+    await amount.press("Enter");
+    await expect(page.getByText("Enter a valid dollar amount.", { exact: true }).last()).toBeVisible();
+    await expect(amount).toHaveValue("1e3");
+    expect(submitted).toHaveLength(index);
+    expect(failures).toEqual([]);
+    await amount.fill(field.corrected);
+    await page.getByRole("button", { name: field.save, exact: true }).click();
+    await expect(amount).toHaveCount(0);
+    expect(submitted[index]).toEqual({ [field.field]: field.cents });
+  }
+  expect(submitted).toHaveLength(3);
+  expect(failures).toEqual([]);
+});

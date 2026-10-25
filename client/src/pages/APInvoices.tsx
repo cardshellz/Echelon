@@ -4,7 +4,7 @@ import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { InvoicePurchaseOrderSelector } from "@/features/purchasing/InvoicePurchaseOrderSelector";
 import { invoiceWorkListQuery, invalidateApInvoiceQueries, apVendorOptionsQuery } from "@/features/purchasing/ap-work-list-query";
 import { WorkListPagination } from "@/features/purchasing/WorkListPagination";
-import { dollarsToCents } from "@shared/utils/money";
+import { evaluateDollarInput } from "@/lib/exact-money-input";
 import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -136,11 +136,20 @@ export default function APInvoices() {
       toast({ title: "Missing fields", description: `Vendor, invoice number${hasLinkedPo ? "" : ", and amount"} are required`, variant: "destructive" });
       return;
     }
+    let invoicedAmountCents: number | undefined;
+    if (!hasLinkedPo) {
+      const amount = evaluateDollarInput(newInvoice.invoicedAmountDollars);
+      if (!amount.valid) {
+        toast({ title: "Invalid invoice amount", description: amount.message, variant: "destructive" });
+        return;
+      }
+      invoicedAmountCents = amount.cents;
+    }
     createMutation.mutate({
       vendorId,
       invoiceNumber: newInvoice.invoiceNumber,
       ourReference: newInvoice.ourReference || undefined,
-      invoicedAmountCents: hasLinkedPo ? undefined : dollarsToCents(newInvoice.invoicedAmountDollars),
+      invoicedAmountCents,
       invoiceDate: newInvoice.invoiceDate || undefined,
       dueDate: newInvoice.dueDate || undefined,
       paymentTermsDays: newInvoice.paymentTermsDays ? parseInt(newInvoice.paymentTermsDays) : undefined,
@@ -323,6 +332,7 @@ export default function APInvoices() {
                   step="0.01"
                   min="0"
                   placeholder="0.00"
+                  aria-label="Invoice amount"
                   value={newInvoice.invoicedAmountDollars}
                   onChange={(e) => setNewInvoice((f) => ({ ...f, invoicedAmountDollars: e.target.value }))}
                 />

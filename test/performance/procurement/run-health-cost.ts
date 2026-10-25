@@ -30,6 +30,7 @@ async function main(): Promise<void> {
     "server/modules/procurement/purchase-cost-status-snapshot.repository.ts", "server/modules/procurement/shipment-cost-review.repository.ts",
     "server/modules/procurement/shipment-cost-posting-read.repository.ts", "server/modules/procurement/procurement.storage.ts",
     "server/modules/procurement/domain/current-shipment-cost-source.ts", "server/modules/procurement/shipment-health-evidence.repository.ts",
+    "shared/money-read.ts", "shared/utils/money.ts",
     "test/performance/procurement/query-measurement.ts", "test/performance/procurement/health-cost.fixture.ts",
     "test/performance/procurement/run-health-cost.ts"];
   const source = () => Object.fromEntries(files.map(file => [file,
