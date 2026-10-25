@@ -42,6 +42,14 @@ function checkReviewedPieces(selection: ShipmentUnitSelection | undefined, piece
 }
 
 export const shipmentLineEditableSchema = z.object(shipmentLineEditableShape).partial().strict();
+export const shipmentLinePackingSchema = shipmentLineEditableSchema.omit({ qtyShipped: true }).superRefine((value, context) => {
+  if (value.dimensionBasis === null) context.addIssue({ code: "custom", path: ["dimensionBasis"], message: "Choose measurements per piece or per carton." });
+  if (value.dimensionBasis === "carton" && value.cartonCount == null) context.addIssue({ code: "custom", path: ["cartonCount"], message: "Enter the physical shipping carton count." });
+  if (value.dimensionBasis == null && [value.weightKg, value.lengthCm, value.widthCm, value.heightCm].some(measurement => measurement != null)) {
+    context.addIssue({ code: "custom", path: ["dimensionBasis"], message: "State whether the measurements describe one piece or one shipping carton." });
+  }
+});
+export type ShipmentLinePacking = z.infer<typeof shipmentLinePackingSchema>;
 export const shipmentLinePatchSchema = shipmentLineEditableSchema.extend({
   expectedVersion: shipmentLineVersionSchema,
   unitSelection: shipmentUnitSelectionSchema.optional(),
@@ -55,7 +63,7 @@ export const shipmentLineDeleteSchema = z.object({ expectedVersion: shipmentLine
 export const shipmentLineFromPoSchema = z.object({
   purchaseOrderId: shipmentLineResourceIdSchema,
   lineIds: z.array(shipmentLineResourceIdSchema).min(1).max(SHIPMENT_LINE_IMPORT_LIMIT).optional(),
-  lineSelections: z.array(z.object({ poLineId: shipmentLineResourceIdSchema, qty: shipmentLineResourceIdSchema, unitSelection: shipmentUnitSelectionSchema.optional() }).strict().superRefine((value, context) => {
+  lineSelections: z.array(z.object({ poLineId: shipmentLineResourceIdSchema, qty: shipmentLineResourceIdSchema, unitSelection: shipmentUnitSelectionSchema.optional(), packing: shipmentLinePackingSchema.optional() }).strict().superRefine((value, context) => {
     checkReviewedPieces(value.unitSelection, value.qty, "qty", context);
   })).min(1).max(SHIPMENT_LINE_IMPORT_LIMIT).optional(),
 }).strict().superRefine((body, context) => {
