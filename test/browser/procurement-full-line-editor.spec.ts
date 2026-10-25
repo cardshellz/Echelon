@@ -84,7 +84,8 @@ async function shipmentSetup(page: Page, options: { lost?: boolean; blocked?: bo
       return route.fulfill({ json: { ...context, sourceVersion: committed ? "c".repeat(64) : version } });
     }
     if (path === "/api/purchase-orders/work-list") return route.fulfill({ json: { items: [{ id: 99, poNumber: "TEST-PO-99", vendorId: 2, status: "sent", totalCents: 5000 }], limit: 20, offset: 0, total: 1, nextOffset: null } });
-    if (path === "/api/purchase-orders/99/shippable-lines") return route.fulfill({ json: { lines: [{ id: 15, sku: "ADDED", productName: "Second PO product", remainingQty: 200,
+    if (path === "/api/purchase-orders/99/shippable-lines") return route.fulfill({ json: { lines: [{ id: 15, purchaseOrderId: 99, sku: "ADDED", productName: "Second PO product", description: null,
+      orderQty: 300, alreadyShippedQty: 100, directReceivedQty: 0, remainingQty: 200,
       shipmentUnits: { productId: 2, selectedVariantId: 20, unitsPerVariantSnapshot: 1, issue: null, variants: [{ id: 20, sku: "NEW-PIECE", name: "Piece", unitsPerVariant: 1 }] } }], reviewRequiredLines: [] } });
     if (path === "/api/inbound-shipments/42/editor/preview") {
       if (options.stale) return route.fulfill({ status: 409, json: { error: "Shipment charges changed. Reload and review again.", code: "SHIPMENT_EDITOR_STALE" } });

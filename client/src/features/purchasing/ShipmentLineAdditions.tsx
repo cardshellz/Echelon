@@ -4,6 +4,7 @@ import { z } from "zod";
 import { purchaseOrderWorkListPageSchema } from "@shared/procurement/purchase-order-work-list";
 import type { ShipmentEditorRequest } from "@shared/procurement/shipment-editor";
 import { shipmentLinePackingSchema } from "@shared/procurement/shipment-line-command";
+import { parseShipmentCreateSources } from "@shared/procurement/shipment-create-source";
 import { ShipmentQuantityControl } from "@/components/purchasing/ShipmentQuantityControl";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,11 +13,6 @@ import { financialCommandFetchJson } from "@/lib/financial-command";
 import { parseShipmentUnits, shipmentQuantityDraft, shipmentQuantityPayload, type ShipmentQuantityDraft } from "@/lib/shipment-unit-entry";
 import { WorkListPagination } from "./WorkListPagination";
 
-const shippableSchema = z.object({
-  lines: z.array(z.object({ id: z.number().int().positive(), sku: z.string().nullable(),
-    productName: z.string().optional(), remainingQty: z.number().int().nonnegative(), shipmentUnits: z.unknown() })),
-  reviewRequiredLines: z.array(z.object({ id: z.number().int().positive(), error: z.string() })).default([]),
-});
 export type AddedShipmentLine = { input: ShipmentEditorRequest["additions"][number]; label: string; poNumber: string };
 
 export function ShipmentLineAdditions({ lines, existingPoLineIds, disabled, onChange, onDraftChange }: {
@@ -39,7 +35,10 @@ export function ShipmentLineAdditions({ lines, existingPoLineIds, disabled, onCh
     queryFn: async () => purchaseOrderWorkListPageSchema.parse(await financialCommandFetchJson(listUrl, { credentials: "include" })) });
   const linesUrl = `/api/purchase-orders/${po?.id}/shippable-lines`;
   const shippable = useQuery({ queryKey: [linesUrl], enabled: adding && po !== null, staleTime: 0,
-    queryFn: async () => shippableSchema.parse(await financialCommandFetchJson(linesUrl, { credentials: "include" })) });
+    queryFn: async () => {
+      if (!po) throw new Error("Choose a purchase order before loading its lines.");
+      return parseShipmentCreateSources(await financialCommandFetchJson(linesUrl, { credentials: "include" }), po.id);
+    } });
   const selected = shippable.data?.lines.find(line => line.id === lineId);
   const units = parseShipmentUnits(selected?.shipmentUnits);
 
