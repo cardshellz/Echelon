@@ -1,10 +1,14 @@
+import { formatPaymentAmount } from "@/lib/ap-payment-command";
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
+import { InvoicePurchaseOrderSelector } from "@/features/purchasing/InvoicePurchaseOrderSelector";
+import { invoiceWorkListQuery, invalidateApInvoiceQueries, apVendorOptionsQuery } from "@/features/purchasing/ap-work-list-query";
+import { WorkListPagination } from "@/features/purchasing/WorkListPagination";
 import { dollarsToCents } from "@shared/utils/money";
 import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link, useLocation } from "wouter";
+import { useLocation } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -64,6 +68,7 @@ export default function APInvoices() {
   const [, navigate] = useLocation();
   const [tab, setTab] = useState("open");
   const [search, setSearch] = useState("");
+  const [offset, setOffset] = useState(0);
   const [showNewDialog, setShowNewDialog] = useState(false);
 
   const [newInvoice, setNewInvoice] = useState({
@@ -87,24 +92,13 @@ export default function APInvoices() {
     all: undefined,
   };
 
-  const queryParams = new URLSearchParams();
-  if (statusFilter[tab]) queryParams.set("status", statusFilter[tab]!.join(","));
-  if (tab === "overdue") queryParams.set("overdue", "true");
+  const { data, isLoading, isFetching, isError, refetch } = useQuery(invoiceWorkListQuery({
+    status: statusFilter[tab]?.join(","), overdue: tab === "overdue" ? "true" : undefined,
+    search, offset, limit: 50,
+  }));
 
-  const { data, isLoading } = useQuery<{ invoices: any[] }>({
-    queryKey: [`/api/vendor-invoices?${queryParams.toString()}`],
-  });
-
-  const { data: vendorsData } = useQuery<any[]>({ queryKey: ["/api/vendors"] });
-  const vendors: any[] = vendorsData ?? [];
-
-  const { data: vendorPosData } = useQuery<any>({
-    queryKey: [`/api/purchase-orders?vendorId=${newInvoice.vendorId}&limit=100`],
-    enabled: !!newInvoice.vendorId && showNewDialog,
-  });
-  const vendorPos: any[] = (vendorPosData?.purchaseOrders ?? []).filter(
-    (p: any) => !["cancelled", "voided", "closed"].includes(p.status)
-  );
+  const { data: vendorsData, isLoading: vendorsLoading, isError: vendorsError, refetch: refetchVendors } = useQuery(apVendorOptionsQuery);
+  const vendors = vendorsData ?? [];
 
   const createMutation = useMutation({
     mutationFn: async (body: any) => {
@@ -121,7 +115,7 @@ export default function APInvoices() {
       return res.json();
     },
     onSuccess: (invoice) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
+      void invalidateApInvoiceQueries(queryClient);
       setShowNewDialog(false);
       toast({ title: "Invoice created" });
       navigate(`/ap-invoices/${invoice.id}`);
@@ -129,16 +123,7 @@ export default function APInvoices() {
     onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
   });
 
-  const invoices: any[] = (data?.invoices ?? []).filter((inv: any) => {
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (
-      inv.invoiceNumber?.toLowerCase().includes(q) ||
-      inv.vendorName?.toLowerCase().includes(q) ||
-      inv.ourReference?.toLowerCase().includes(q) ||
-      inv.poNumbers?.some((p: string) => p.toLowerCase().includes(q))
-    );
-  });
+  const invoices = data?.items ?? [];
 
   function handleCreate() {
     const vendorId = parseInt(newInvoice.vendorId);
@@ -164,7 +149,7 @@ export default function APInvoices() {
     <div className="p-6 max-w-7xl mx-auto space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Vendor Invoices</h1>
+          <h1 className="text-2xl font-bold">Vendor Invoices</h1><SupplierCreditLink />
           <p className="text-muted-foreground text-sm">Track and approve vendor invoices</p>
         </div>
         <Button size="sm" onClick={async () => {
@@ -183,12 +168,12 @@ export default function APInvoices() {
       </div>
 
       <div className="flex items-center gap-3">
-        <Tabs value={tab} onValueChange={setTab}>
+        <Tabs value={tab} onValueChange={value => { setTab(value); setOffset(0); }}>
           <TabsList>
             <TabsTrigger value="open">Open</TabsTrigger>
             <TabsTrigger value="needs_approval">Needs Approval</TabsTrigger>
             <TabsTrigger value="overdue">Overdue</TabsTrigger>
-            <TabsTrigger value="paid">Paid</TabsTrigger>
+            <TabsTrigger value="paid">Settled</TabsTrigger>
             <TabsTrigger value="voided">Voided</TabsTrigger>
             <TabsTrigger value="all">All</TabsTrigger>
           </TabsList>
@@ -199,14 +184,16 @@ export default function APInvoices() {
             placeholder="Search invoices..."
             className="pl-9 h-9"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => { setSearch(e.target.value); setOffset(0); }}
           />
         </div>
       </div>
 
       <Card>
         <CardContent className="p-0">
-          {isLoading ? (
+          {isError ? (
+            <div role="alert" className="p-6 space-y-2"><p>Unable to load invoices. The list is unavailable.</p><Button variant="outline" onClick={() => void refetch()}>Retry invoices</Button></div>
+          ) : isLoading ? (
             <div className="flex items-center justify-center h-48">
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary" />
             </div>
@@ -253,11 +240,11 @@ export default function APInvoices() {
                       </TableCell>
                       <TableCell className="text-right font-mono">{formatCents(inv.invoicedAmountCents)}</TableCell>
                       <TableCell className="text-right font-mono font-medium">
-                        {inv.balanceCents > 0 ? formatCents(inv.balanceCents) : <span className="text-green-600">Paid</span>}
+                        {formatCents(inv.balanceCents)}<div className="text-xs text-muted-foreground">Cash {formatPaymentAmount(inv.paidAmountCents)} · Credits {formatPaymentAmount(inv.creditedAmountCents)}</div>{inv.settlementReviewRequired && <div className="text-xs text-amber-700">{inv.overpaidAmountCents > 0 ? `Review overpayment: ${formatPaymentAmount(inv.overpaidAmountCents)}` : "Historical settlement requires review"}</div>}
                       </TableCell>
                       <TableCell>
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[inv.status] ?? ""}`}>
-                          {inv.status.replace("_", " ")}
+                          {inv.status === "paid" && inv.creditedAmountCents > 0 ? "settled" : inv.status.replace("_", " ")}
                         </span>
                       </TableCell>
                     </TableRow>
@@ -267,6 +254,7 @@ export default function APInvoices() {
             </Table>
           )}
         </CardContent>
+        {!isError && <WorkListPagination page={data} busy={isFetching} onOffset={setOffset} label="invoices" />}
       </Card>
 
       {/* New Invoice Dialog */}
@@ -281,6 +269,8 @@ export default function APInvoices() {
               <select
                 className="w-full border rounded-md h-10 px-3 text-sm bg-background"
                 value={newInvoice.vendorId}
+                disabled={vendorsLoading || vendorsError}
+                aria-label="Invoice vendor"
                 onChange={(e) => setNewInvoice((f) => ({ ...f, vendorId: e.target.value, linkedPoId: "" }))}
               >
                 <option value="">Select vendor...</option>
@@ -288,34 +278,17 @@ export default function APInvoices() {
                   <option key={v.id} value={v.id}>{v.name}</option>
                 ))}
               </select>
+              {vendorsLoading && <p role="status">Loading vendors…</p>}
+              {vendorsError && <div role="alert">Unable to load vendors. <Button variant="link" onClick={() => void refetchVendors()}>Retry vendors</Button></div>}
+              {!vendorsLoading && !vendorsError && vendors.length === 0 && <p>No vendors available.</p>}
             </div>
 
-            {newInvoice.vendorId && vendorPos.length > 0 && (
+            {newInvoice.vendorId && (
               <div className="space-y-2">
-                <Label>Link to Purchase Order</Label>
-                <select
-                  className="w-full border rounded-md h-10 px-3 text-sm bg-background"
-                  value={newInvoice.linkedPoId}
-                  onChange={(e) => {
-                    const poId = e.target.value;
-                    const po = vendorPos.find((p: any) => String(p.id) === poId);
-                    setNewInvoice((f) => ({
-                      ...f,
-                      linkedPoId: poId,
-                      invoicedAmountDollars: "", // Lines become source of truth
-                    }));
-                  }}
-                >
-                  <option value="">None (manual invoice)</option>
-                  {vendorPos.map((p: any) => (
-                    <option key={p.id} value={p.id}>
-                      {p.poNumber} — {formatCents(p.totalCents)} — {p.status}
-                    </option>
-                  ))}
-                </select>
-                {newInvoice.linkedPoId && (
-                  <p className="text-xs text-muted-foreground">PO line items will be auto-imported. Amount calculated from lines.</p>
-                )}
+                <Label>Link to Purchase Order (optional)</Label>
+                <InvoicePurchaseOrderSelector key={newInvoice.vendorId} vendorId={Number(newInvoice.vendorId)} selectedId={newInvoice.linkedPoId}
+                  purpose="invoice-create" onSelect={linkedPoId => setNewInvoice(current => ({ ...current, linkedPoId, invoicedAmountDollars: "" }))} />
+                <p className="text-xs text-muted-foreground">{newInvoice.linkedPoId ? "PO line items will be auto-imported. Amount calculated from lines." : "Leave unselected for a manual invoice."}</p>
               </div>
             )}
 

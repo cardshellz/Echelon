@@ -50,6 +50,46 @@ describe("writer-ratchet (P2.1)", () => {
     expect(baseline[table]).toEqual([owner]);
   });
 
+  it.each([
+    [
+        "catalog.publication_media_references",
+        "modules/catalog"
+    ],
+    [
+        "catalog.publication_media_version_pins",
+        "modules/catalog"
+    ],
+    [
+        "marketplace.channel_sync_batches",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.channel_sync_batch_members",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.listing_intent_changes",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.listing_intent_deliveries",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.listing_intent_delivery_sources",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.listing_intent_delivery_events",
+        "modules/marketplace-listings"
+    ]
+])
+    ("phase 2 %s has only its declared publication owner, including scripts", (table, owner) => {
+      expect(current[table]).toEqual([owner]);
+      expect(currentIncludingScripts[table]).toEqual([owner]);
+      expect(baseline[table]).toEqual([owner]);
+    });
+
   it("wms.order_items has exactly one owning writer across runtime and operational scripts", () => {
     expect(current["wms.order_items"]).toEqual(["modules/wms"]);
     expect(currentIncludingScripts["wms.order_items"]).toEqual(["modules/wms"]);
@@ -64,6 +104,23 @@ describe("writer-ratchet (P2.1)", () => {
 
   it("historical shipment cost decisions have only the Procurement writer, including scripts", () => {
     const table = "procurement.shipment_cost_exception_decisions";
+    expect(current[table]).toEqual(["modules/procurement"]);
+    expect(currentIncludingScripts[table]).toEqual(["modules/procurement"]);
+    expect(baseline[table]).toEqual(["modules/procurement"]);
+  });
+  it.each([
+    "procurement.supplier_credits",
+    "procurement.supplier_credit_lines",
+    "procurement.supplier_credit_applications",
+    "procurement.supplier_credit_application_reversals",
+  ])("%s has only the Procurement credit owner, including operational scripts", (table) => {
+    expect(current[table]).toEqual(["modules/procurement"]);
+    expect(currentIncludingScripts[table]).toEqual(["modules/procurement"]);
+    expect(baseline[table]).toEqual(["modules/procurement"]);
+  });
+
+  it("historical receipt repair audit has only the Procurement command owner, including scripts", () => {
+    const table = "inventory.cost_origin_repairs";
     expect(current[table]).toEqual(["modules/procurement"]);
     expect(currentIncludingScripts[table]).toEqual(["modules/procurement"]);
     expect(baseline[table]).toEqual(["modules/procurement"]);
@@ -202,12 +259,10 @@ describe("writer-ratchet (P2.1)", () => {
       for (const [owner, tables] of Object.entries(publicationOwners)) {
         for (const table of tables) expect(topology[table]).toEqual([owner]);
       }
-      // The existing eBay pricing route is retained for compatibility. New
-      // publication routes delegate pricing writes to the Channels owner.
-      expect(topology["channels.channel_pricing_rules"]).toEqual([
-        "modules/channels",
-        "server/routes/ebay/ebay-pricing.routes.ts",
-      ]);
+      // HTTP and import adapters delegate both pricing tables to Channels.
+      // The legacy eBay route remains an API facade, never a second writer.
+      expect(topology["channels.channel_pricing_rules"]).toEqual(["modules/channels"]);
+      expect(topology["channels.channel_pricing"]).toEqual(["modules/channels"]);
     }
   });
 

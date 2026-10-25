@@ -2,7 +2,13 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./test/browser",
-  testMatch: ["order-edits.spec.ts", "customer-order-edit-resume.spec.ts"],
+  testMatch: [
+    "order-edits.spec.ts",
+    "customer-order-edit-resume.spec.ts",
+    "customer-order-edit-rewards.spec.ts",
+    "customer-order-edit-payment.spec.ts",
+    "customer-order-cancellation.spec.ts",
+  ],
   fullyParallel: true,
   workers: 1,
   timeout: 45_000,

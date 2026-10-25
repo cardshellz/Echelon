@@ -26,7 +26,12 @@ import {
   type DropshipCatalogVariantCandidate,
 } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
+import { LISTING_PUSH_RUN_CODES, isReservedListingPushJobKey } from "../domain/listing-push-run";
+import { LISTING_PUSH_RUN_WORDS } from "../domain/listing-push-run-words";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
+import { hasMarketplaceListing } from "../domain/listing-live-status";
+import { isLivePolicyIncompatibilityTolerated } from "../domain/marketplace-sync-decision";
+import { publishableQuantity } from "../domain/marketplace-sync-sweep";
 import { listingPhotoLeftOutReason } from "../domain/listing-photo-reasons";
 import {
   listingTierForVariantUomType,
@@ -133,6 +138,13 @@ export interface DropshipExistingVendorListing {
   vendorRetailPriceCents: number | null;
   quantityCap: number | null;
   externalListingId: string | null;
+  /**
+   * eBay sync-back (owner rule 1): the vendor's limit on this listing; a push
+   * publishes min(ATP, limit). Absent or null: no limit.
+   */
+  vendorQuantityLimit?: number | null;
+  /** The shipping policy last seen live on this listing on eBay (the live-policy rule, SB10); absent or null when unknown. */
+  observedFulfillmentPolicyId?: string | null;
 }
 
 export interface DropshipPricingPolicyRecord {
@@ -239,7 +251,16 @@ export interface DropshipListingPushJobItemRecord {
   errorMessage: string | null;
 }
 
+export interface ManagedListingIntentScope {
+  accountId: string;
+  environment: string;
+  managedOnly: true;
+}
+
 export interface CreateDropshipListingPushJobRepositoryInput {
+  managedIntentScope?: ManagedListingIntentScope;
+  /** The publish run chunk this job carries out (step 1 plan S2-5, §4.3); only the push sweep passes it. */
+  run?: { runId: number; chunkIndex: number };
   vendorId: number;
   storeConnectionId: number;
   platform: DropshipSourcePlatform;
@@ -926,6 +947,12 @@ export class DropshipListingPreviewService {
     idempotentReplay: boolean;
   }> {
     const parsed = createListingPushJobForMemberInputSchema.parse(input);
+    if (isReservedListingPushJobKey(parsed.idempotencyKey)) {
+      // Publish runs' chunk jobs own this prefix (SAFETY14); a vendor key that
+      // looked like one could otherwise collide with a chunk's job.
+      throw new DropshipError(LISTING_PUSH_RUN_CODES.keyReserved, LISTING_PUSH_RUN_WORDS.keyReserved,
+        { classification: "permanent" });
+    }
     const vendor = (await this.deps.vendorProvisioning.provisionForMember(memberId)).vendor;
     return this.createListingPushJob({
       ...parsed,
@@ -937,13 +964,15 @@ export class DropshipListingPreviewService {
     });
   }
 
-  async createListingPushJob(input: unknown): Promise<{
+  async createListingPushJob(input: unknown, managedIntentScope?: ManagedListingIntentScope): Promise<{
     job: DropshipListingPushJobRecord;
     items: DropshipListingPushJobItemRecord[];
     preview: DropshipListingPreviewResult;
     idempotentReplay: boolean;
   }> {
     const parsed = createListingPushJobInputSchema.parse(input);
+    if (managedIntentScope) managedIntentScope = z.object({ accountId: z.string().min(1).max(255),
+      environment: z.enum(["production", "sandbox"]), managedOnly: z.literal(true) }).strict().parse(managedIntentScope);
     const reviewMode: ListingPushReviewMode = parsed.reviewMode ?? "reviewed_preview";
     if (reviewMode === "current_preview" && carriesReviewedPreviewEvidence(parsed)) {
       // A one-step push queues what the server's own preview shows. Evidence from
@@ -995,6 +1024,8 @@ export class DropshipListingPreviewService {
       ),
     });
     const result = await this.deps.repository.createListingPushJob({
+      ...(managedIntentScope ? { managedIntentScope } : {}),
+      ...(parsed.run ? { run: parsed.run } : {}),
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       platform: preview.platform,
@@ -1027,6 +1058,15 @@ export class DropshipListingPreviewService {
       ...result,
       preview,
     };
+  }
+
+  /**
+   * The store and account checks a push makes, for a caller that queues
+   * pushes later (a publish run, step 1 plan S2-5, §4.2): the same refusals,
+   * codes and words as a push job, before anything is written.
+   */
+  async assertListingPushAccess(vendorId: number, storeConnectionId: number): Promise<DropshipListingStoreContext> {
+    return this.loadStoreContextForAction(vendorId, storeConnectionId, "push");
   }
 
   private async loadStoreContextForAction(
@@ -1284,6 +1324,10 @@ function buildListingPreviewRow(input: {
     blockers.push(`listing_tier:${input.tierStatus.reason}`);
   }
   const marketplaceQuantity = tierOffSale ? 0 : input.selectionDecision.marketplaceQuantity;
+  // eBay sync-back, owner rule 1: the row keeps ATP exactly as today (what the sweep decides against); the push
+  // publishes min(ATP, the vendor's limit on this listing). Without a limit the intent is today's.
+  const vendorQuantityLimit = input.existingListing?.vendorQuantityLimit ?? null;
+  const intentQuantity = vendorQuantityLimit === null ? marketplaceQuantity : publishableQuantity(marketplaceQuantity, vendorQuantityLimit);
   if (!input.config) {
     blockers.push("listing_config_required");
   } else if (input.config.platform !== input.context.platform) {
@@ -1330,7 +1374,7 @@ function buildListingPreviewRow(input: {
         config: input.config,
         content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory, input.listingPhotos),
         priceCents,
-        quantity: marketplaceQuantity,
+        quantity: intentQuantity,
         storeCategoryNames: input.storeCategoryNames,
       })
     : { intent: null, blockers: [], warnings: [] };
@@ -1338,8 +1382,19 @@ function buildListingPreviewRow(input: {
   warnings.push(...marketplaceValidation.warnings);
   warnings.push(...unpublishablePhotoWarnings(input.listingPhotos));
   if (input.ebayFulfillmentPreflight?.compatible === false) {
-    blockers.push(...input.ebayFulfillmentPreflight.issues.map(
-      (issue) => `ebay_fulfillment_policy:${issue.code}`,
+    const issues = input.ebayFulfillmentPreflight.issues;
+    // The live-policy rule (SB10, owner rule 4): the vendor's shipping policy already live on this very listing is kept
+    // (a warning; staff and the vendor hear of it from the sweep's policy check). A policy Card Shellz would introduce,
+    // or one whose check could not be verified, stays a blocker.
+    const tolerated = isLivePolicyIncompatibilityTolerated({
+      effectivePolicyId: input.ebayFulfillmentPreflight.fulfillmentPolicyId,
+      observedPolicyId: input.existingListing?.observedFulfillmentPolicyId ?? null,
+      listingLive: input.existingListing !== null && input.existingListing.status !== "ended"
+        && hasMarketplaceListing(input.existingListing.externalListingId),
+      issueCodes: issues.map((issue) => issue.code),
+    });
+    (tolerated ? warnings : blockers).push(...issues.map(
+      (issue) => `${tolerated ? "ebay_fulfillment_policy_live" : "ebay_fulfillment_policy"}:${issue.code}`,
     ));
   }
   blockers.push(...input.ebayReturnPaymentPolicyBlockers);

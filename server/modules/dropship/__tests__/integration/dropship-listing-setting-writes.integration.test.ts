@@ -687,6 +687,8 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
         product_variant_id integer NOT NULL, platform varchar(30) NOT NULL, external_listing_id varchar(255),
         status varchar(40) NOT NULL DEFAULT 'not_listed', vendor_retail_price_cents bigint, pushed_quantity integer NOT NULL DEFAULT 0,
         quantity_cap integer, last_pushed_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now(),
+        -- What the listing preview reads from the eBay sync-back migration (*_dropship_ebay_sync_back.sql).
+        vendor_quantity_limit integer, observed_fulfillment_policy_id varchar(100),
         UNIQUE (store_connection_id, product_variant_id));
       CREATE TABLE dropship.dropship_cost_change_listing_holds (id bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
         vendor_id integer NOT NULL, store_connection_id integer NOT NULL, product_variant_id integer NOT NULL,

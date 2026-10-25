@@ -6,10 +6,13 @@ import type { PurchasingRecommendationRawRow } from "../../purchasing-recommenda
 import type { RfqQuoteEvidence } from "@shared/procurement/rfq-workflow";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
 import { shipmentCostVersion } from "../../shipment-cost-version";
+import { shipmentLineVersion } from "../../shipment-line-version";
 import type { ShipmentCostCommand } from "../../shipment-cost-commands";
 import type { ShipmentLineCommand } from "../../shipment-line-commands";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_ACTOR, FLOW_AT, FLOW_IDS, type FlowCostHarness } from "./procurement-flow-cost.fixture";
+import { assertFlowReadAgreement } from "./procurement-flow-read-agreement";
+import { verifyFlowSettlementAndReturn } from "./procurement-flow-settlement.cases";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const enabled = !!url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -42,7 +45,9 @@ function descriptor(command: ShipmentCostCommand | ShipmentLineCommand, key: str
     : command.operation === "update" || command.operation === "delete";
   const routeTemplate = isCost
     ? isResource ? "/api/inbound-shipments/costs/:costId" : "/api/inbound-shipments/:id/costs"
-    : isResource ? "/api/inbound-shipments/lines/:lineId" : "/api/inbound-shipments/:id/lines/from-po";
+    : isResource ? "/api/inbound-shipments/lines/:lineId"
+      : command.operation === "import" ? "/api/inbound-shipments/:id/lines/import-packing-list"
+        : "/api/inbound-shipments/:id/lines/from-po";
   return {
     actorType: "service", actorId: `procurement.shipment-${kind}`,
     method: command.operation === "update" ? "PATCH" : command.operation === "delete" ? "DELETE" : "POST",
@@ -164,7 +169,107 @@ controlled.sequential("FLOW persisted RFQ, partial receipts, sale and late freig
     await harness.shipment.finalizeAllocations(shipmentId, FLOW_ACTOR);
   }
 
-  it("conserves $4,610 across $4,370 inventory and $240 sold COGS, preserving source history and exact-once retries", async () => {
+  it("carries selected units from multi-PO add, edit and packing-list import through real receiving and exact-once inventory posting", async () => {
+    const created = await createPurchases();
+    const poA = created.purchases.get(FLOW_IDS.productA)!;
+    const poB = created.purchases.get(FLOW_IDS.productB)!;
+    for (const purchase of [poA, poB]) {
+      await harness.purchasing.sendToVendor(purchase.purchaseOrderId, FLOW_ACTOR);
+      await harness.purchasing.send(purchase.purchaseOrderId, FLOW_ACTOR, {
+        confirmedSentExternally: true,
+        expectedUpdatedAt: (await harness.storage.getPurchaseOrderById(purchase.purchaseOrderId))!.updatedAt!.toISOString(),
+      });
+    }
+    // This configured receive pack intentionally differs from the PO's pack of
+    // 100, proving that the shipment's reviewed unit survives the handoff.
+    const alternatePack = 204;
+    await harness.pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit)
+      VALUES($1,$2,'PROC-UAT-FLOW-A-C50','A case of 50',50,'case',false)`, [alternatePack, FLOW_IDS.productA]);
+    const shipment = await harness.shipment.createShipment({ shipmentNumber: "PROC-UAT-UNIT-CONVERSION", mode: "sea_lcl", warehouseId: FLOW_IDS.warehouse }, FLOW_ACTOR);
+    const add: ShipmentLineCommand = { operation: "add-from-po", resourceId: shipment.id, body: {
+      purchaseOrderId: poA.purchaseOrderId, lineSelections: [{ poLineId: poA.lines[0].purchaseOrderLineId,
+        qty: 200, unitSelection: { productVariantId: FLOW_IDS.caseA, unitsPerVariant: 100, quantity: 2 } }],
+    } };
+    const added = await harness.lineCommands.execute(add, FLOW_ACTOR, descriptor(add, "units-add", "line"));
+    expect(added).toMatchObject({ httpStatus: 201, body: [{ qtyShipped: 200, unitsPerVariantSnapshot: 100 }] });
+    const lineAId = z.array(positiveId).length(1).parse(added.body)[0].id;
+    const lineA = (await harness.storage.getInboundShipmentLines(shipment.id)).find((line) => line.id === lineAId)!;
+    const edit: ShipmentLineCommand = { operation: "update", resourceId: lineA.id, body: {
+      expectedVersion: shipmentLineVersion(lineA), qtyShipped: 250,
+      unitSelection: { productVariantId: alternatePack, unitsPerVariant: 50, quantity: 5 },
+      cartonCount: 7, dimensionBasis: "carton", weightKg: "1",
+    } };
+    expect(await harness.lineCommands.execute(edit, FLOW_ACTOR, descriptor(edit, "units-edit", "line")))
+      .toMatchObject({ httpStatus: 200, body: { qtyShipped: 250, productVariantId: alternatePack,
+        unitsPerVariantSnapshot: 50, cartonCount: 7, totalWeightKg: "7.000" } });
+    const packingList: ShipmentLineCommand = { operation: "import", resourceId: shipment.id, body: { rows: [
+      { purchaseOrderLineId: poB.lines[0].purchaseOrderLineId, qtyShipped: 300,
+        unitSelection: { productVariantId: FLOW_IDS.caseB, unitsPerVariant: 100, quantity: 3 },
+        cartonCount: 8, dimensionBasis: "carton", weightKg: "1" },
+    ] } };
+    const importResponse = await harness.lineCommands.execute(packingList, FLOW_ACTOR, descriptor(packingList, "units-import", "line"));
+    expect(importResponse).toMatchObject({ httpStatus: 200, body: { imported: 1, errors: [],
+      lines: [{ qtyShipped: 300, unitsPerVariantSnapshot: 100, cartonCount: 8, totalWeightKg: "8.000" }] } });
+    const lineBId = z.object({ lines: z.array(positiveId).length(1) }).parse(importResponse.body).lines[0].id;
+    await addFreight(shipment.id, 1_500, "units-freight");
+    await finalizeDeliveredShipment(shipment.id);
+    const options = await harness.purchasing.getShipmentPoReceiveOptions(shipment.id);
+    expect(options.purchaseOrders.map((purchase) => purchase.purchaseOrderId)).toEqual([poA.purchaseOrderId, poB.purchaseOrderId]);
+    const planA = await harness.purchasing.getShipmentReceiptPackResolution(shipment.id, { purchaseOrderId: poA.purchaseOrderId });
+    const planB = await harness.purchasing.getShipmentReceiptPackResolution(shipment.id, { purchaseOrderId: poB.purchaseOrderId });
+    expect(planA).toMatchObject({ canCreateReceipt: true, lines: [{ qtyShipped: 250, cartonCount: 7,
+      receivePlan: { productVariantId: alternatePack, expectedQty: 5, unitsPerVariant: 50 } }] });
+    expect(planB).toMatchObject({ canCreateReceipt: true, lines: [{ qtyShipped: 300, cartonCount: 8,
+      receivePlan: { productVariantId: FLOW_IDS.caseB, expectedQty: 3, unitsPerVariant: 100 } }] });
+
+    await harness.pool.query("UPDATE catalog.product_variants SET units_per_variant=200 WHERE id=$1", [FLOW_IDS.caseB]);
+    expect(await harness.purchasing.getShipmentReceiptPackResolution(shipment.id, { purchaseOrderId: poB.purchaseOrderId }))
+      .toMatchObject({ canCreateReceipt: false, unresolvedCount: 1, lines: [{ status: "unit_mismatch" }] });
+    await expect(harness.purchasing.createReceiptFromShipment(shipment.id, FLOW_ACTOR, { purchaseOrderId: poB.purchaseOrderId })).rejects.toThrow();
+    expect((await harness.pool.query("SELECT COUNT(*)::int AS count FROM procurement.receiving_orders")).rows)
+      .toEqual([{ count: 0 }]);
+    await harness.pool.query("UPDATE catalog.product_variants SET units_per_variant=100 WHERE id=$1", [FLOW_IDS.caseB]);
+
+    const receivingLineIds: number[] = [];
+    for (const [purchase, shipmentLineId, expectedQty, variantId, factor] of [
+      [poA, lineAId, 5, alternatePack, 50], [poB, lineBId, 3, FLOW_IDS.caseB, 100],
+    ] as const) {
+      const receipt = await harness.purchasing.createReceiptFromShipment(shipment.id, FLOW_ACTOR, { purchaseOrderId: purchase.purchaseOrderId });
+      const [line] = await harness.storage.getReceivingLines(receipt.id);
+      expect(line).toMatchObject({ inboundShipmentLineId: shipmentLineId, expectedQty,
+        productVariantId: variantId, unitsPerVariantSnapshot: factor });
+      receivingLineIds.push(line.id);
+      await harness.receiving.open(receipt.id, FLOW_ACTOR);
+      await harness.receiving.updateOrderDetails(receipt.id, { warehouseId: FLOW_IDS.warehouse }, FLOW_ACTOR);
+      if (purchase === poA) {
+        // Receiving's existing exact conversion changes the displayed unit,
+        // never the 250 base pieces recorded by the shipment command.
+        const converted = await harness.receiving.updateLine(line.id, {
+          productVariantId: FLOW_IDS.eachA, expectedUnitVersion: receivingUnitVersion(line),
+        }, FLOW_ACTOR);
+        expect(converted).toMatchObject({ expectedQty: 250, receivedQty: 0, unitsPerVariantSnapshot: 1 });
+        await harness.receiving.updateLine(line.id, { receivedQty: 250, putawayLocationId: FLOW_IDS.locationX,
+          expectedUnitVersion: receivingUnitVersion(converted) }, FLOW_ACTOR);
+      } else {
+        await harness.receiving.updateLine(line.id, { receivedQty: expectedQty, putawayLocationId: FLOW_IDS.locationX,
+          expectedUnitVersion: receivingUnitVersion(line) }, FLOW_ACTOR);
+      }
+      await harness.receiving.close(receipt.id, FLOW_ACTOR);
+      const posted = await financialState();
+      await harness.receiving.close(receipt.id, FLOW_ACTOR);
+      expect(await financialState()).toEqual(posted);
+    }
+    expect((await harness.pool.query(`SELECT receiving_line_id,qty_received FROM procurement.po_receipts ORDER BY receiving_line_id`)).rows)
+      .toEqual([{ receiving_line_id: receivingLineIds[0], qty_received: 250 }, { receiving_line_id: receivingLineIds[1], qty_received: 300 }]);
+    expect((await harness.pool.query(`SELECT product_variant_id,variant_qty_delta FROM inventory.inventory_transactions
+      WHERE transaction_type='receipt' ORDER BY receiving_line_id`)).rows)
+      .toEqual([{ product_variant_id: FLOW_IDS.eachA, variant_qty_delta: 250 }, { product_variant_id: FLOW_IDS.caseB, variant_qty_delta: 3 }]);
+    expect((await harness.pool.query(`SELECT product_id,expected_receive_units_per_variant FROM procurement.purchase_order_lines ORDER BY product_id`)).rows)
+      .toEqual([{ product_id: FLOW_IDS.productA, expected_receive_units_per_variant: 100 },
+        { product_id: FLOW_IDS.productB, expected_receive_units_per_variant: 100 }]);
+  }, 90_000);
+
+  it("conserves $4,610 through inventory, sale, supplier return, payment and replacement credit with exact-once retries", async () => {
     const created = await createPurchases();
     const poA = created.purchases.get(FLOW_IDS.productA)!;
     const poB = created.purchases.get(FLOW_IDS.productB)!;
@@ -299,6 +404,22 @@ controlled.sequential("FLOW persisted RFQ, partial receipts, sale and late freig
     expect(adjustedCogs?.totalCogsCents).toBe(24_000);
     expect(adjustedCogs).toMatchObject({ totalRevenueCents: 30_000, grossMarginCents: 6_000,
       lineItems: [expect.objectContaining({ revenueCents: 30_000, marginCents: 6_000 })] });
+    const readScope = {
+      rfqId: created.proposal.rfqId,
+      purchases: [
+        { id: poA.purchaseOrderId, lineId: poLineA, receivedPieces: 1_000,
+          receiptIds: [receipts[0].receiptId, receipts[2].receiptId, receipts[4].receiptId] },
+        { id: poB.purchaseOrderId, lineId: poLineB, receivedPieces: 500,
+          receiptIds: [receipts[1].receiptId, receipts[3].receiptId] },
+      ],
+      shipmentLines: [
+        { id: xA, shipmentId: x.id, purchaseOrderId: poA.purchaseOrderId, purchaseOrderLineId: poLineA, allocatedCents: 18_000 },
+        { id: xB, shipmentId: x.id, purchaseOrderId: poB.purchaseOrderId, purchaseOrderLineId: poLineB, allocatedCents: 15_000 },
+        { id: yA, shipmentId: y.id, purchaseOrderId: poA.purchaseOrderId, purchaseOrderLineId: poLineA, allocatedCents: 8_000 },
+      ],
+    };
+    await assertFlowReadAgreement(harness, { ...readScope, freightEvidence: "confirmed",
+      expectedInvoiceCount: 2, expectedInvoiceTotalCents: 420_000 });
     const currentSources = (await harness.pool.query("SELECT * FROM procurement.cost_source_revisions ORDER BY id")).rows;
     for (const original of initialSources) expect(currentSources.find((source) => source.id === original.id)).toEqual(original);
     expect((await harness.pool.query("SELECT * FROM procurement.rfq_quote_revisions ORDER BY id")).rows).toEqual(originalQuoteEvidence);
@@ -363,9 +484,13 @@ controlled.sequential("FLOW persisted RFQ, partial receipts, sale and late freig
       { inbound_shipment_line_id: yA, evidence: "confirmed" },
     ]);
     expect(harness.suppressedChannelSyncs.length).toBeGreaterThan(0);
+    await assertFlowReadAgreement(harness, { ...readScope, freightEvidence: "confirmed",
+      expectedInvoiceCount: 4, expectedInvoiceTotalCents: 461_000 });
+    await verifyFlowSettlementAndReturn(harness, { purchaseOrderId: poA.purchaseOrderId,
+      purchaseOrderLineId: poLineA, shipmentId: x.id });
     console.info(JSON.stringify({ event: "procurement.controlled_flow.proven", authority: "pre_opening_legacy",
       rfqId: created.proposal.rfqId, poIds: [poA.purchaseOrderId, poB.purchaseOrderId], shipmentIds: [x.id, y.id],
-      receiptIds: receipts.map((receipt) => receipt.receiptId), final: afterLateCost,
+      receiptIds: receipts.map((receipt) => receipt.receiptId), costCheckpoint: afterLateCost,
       providerSync: "suppressed", retry: "unchanged_command_and_concurrent_cost_pushes" }));
   }, 90_000);
 

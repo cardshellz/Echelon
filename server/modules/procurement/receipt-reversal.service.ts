@@ -7,13 +7,13 @@
  * the additive `reversed_qty` tally (migration 187).
  *
  * One reversal = ONE DB transaction (Rule #7) that:
- *   1. Inserts a procurement.receipt_reversals row (idempotency_key unique —
- *      a retried reversal returns the existing row, Rule #6).
+ *   1. Inserts uniquely identified reversal evidence. The HTTP command owner
+ *      saves its exact response in this transaction; old groups need review.
  *   2. Decrements the lot(s) created by that receiving line at the ORIGINAL
  *      lot cost (exact mills round-trip — never re-costed). Insufficient
  *      on-hand blocks with REVERSAL_INSUFFICIENT_ON_HAND unless the caller
- *      passes allowNegative (elevated-permission override, audited on the
- *      reversal row).
+ *      passes allowNegative where inventory policy permits it (audited;
+ *      unavailable after quantity-ledger activation).
  *   3. Decrements purchase_order_lines.received_qty by qty × units_per_variant
  *      from the frozen receipt or exact original PO posting, and re-evaluates the
  *      PO line status + PO header status (received → partially_received when
@@ -27,11 +27,17 @@
  */
 
 import { sql } from "drizzle-orm";
+import { readReceiptReturnCapabilities } from "./receipt-reversal-return.repository";
+import { readReversalKeyEvidence } from "./receipt-reversal.repository";
+import { RECEIPT_REVERSAL_MAX_QUANTITY, RECEIPT_REVERSAL_MAX_REASON_LENGTH, receiptReversalLineResultSchema } from "@shared/procurement/receipt-reversal-command";
+import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { readPostedReceiptUnitEvidence, resolveReceivingUnitSnapshot, ReceivingUnitSnapshotError } from "./receiving-unit-snapshot";
 
-const MAX_RECEIPT_BASE_QUANTITY = 2_147_483_647;
+const MAX_RECEIPT_BASE_QUANTITY = RECEIPT_REVERSAL_MAX_QUANTITY;
 
 // ── Minimal dependency interfaces (same style as receiving.service.ts) ──────
+
+export type ReceiptReversalTransaction = { execute: (query: any) => Promise<{ rows: any[] }> };
 
 type DrizzleDb = {
   execute: (query: any) => Promise<{ rows: any[] }>;
@@ -70,6 +76,7 @@ export class ReceiptReversalError extends Error {
 
 export type ReversalLineResult = {
   reversalId: number;
+  receivingOrderId: number;
   receivingLineId: number;
   qty: number;
   baseUnitsReversed: number;
@@ -136,9 +143,6 @@ export function reevaluatePoStatusAfterReversal(params: {
   if (activeLines.length === 0) return null;
 
   const allReceived = activeLines.every((line) => line.status === "received");
-  const someReceived = activeLines.some(
-    (line) => line.status === "received" || line.status === "partially_received",
-  );
 
   if (allReceived) {
     if (poStatus !== "received" || physicalStatus !== "received") {
@@ -165,6 +169,24 @@ export const __testing__ = {
 
 // ── Service ─────────────────────────────────────────────────────────────────
 
+export interface ReverseOrderParams {
+  receivingOrderId: number; reason: string; idempotencyKey: string; allowNegative?: boolean; userId?: string | null;
+}
+export interface ReverseLineParams extends Omit<ReverseOrderParams, "receivingOrderId"> { receivingLineId: number; qty: number; }
+
+function validateReversalParams(params: Omit<ReverseOrderParams, "receivingOrderId">, targetId: number, action: "line" | "order", qty?: unknown): void {
+  const line = action === "line";
+  if (!Number.isSafeInteger(targetId) || targetId <= 0 || targetId > MAX_RECEIPT_BASE_QUANTITY) throw new ReceiptReversalError("Receiving identity must be a positive database integer", 400, { code: line ? "INVALID_RECEIVING_LINE_ID" : "INVALID_RECEIVING_ORDER_ID" });
+  if (line && (typeof qty !== "number" || !Number.isSafeInteger(qty) || qty <= 0 || qty > MAX_RECEIPT_BASE_QUANTITY)) throw new ReceiptReversalError("qty must be a positive database integer", 400, { code: "INVALID_REVERSAL_QTY" });
+  if (typeof params.reason !== "string" || !params.reason.trim() || params.reason.trim().length > RECEIPT_REVERSAL_MAX_REASON_LENGTH) throw new ReceiptReversalError(`reason is required (max ${RECEIPT_REVERSAL_MAX_REASON_LENGTH} characters)`, 400, { code: "REVERSAL_REASON_REQUIRED" });
+  if (typeof params.idempotencyKey !== "string" || !params.idempotencyKey.trim() || params.idempotencyKey.length > 100) throw new ReceiptReversalError("idempotencyKey is required (max 100 chars)", 400, { code: "INVALID_IDEMPOTENCY_KEY" });
+  if (params.allowNegative !== undefined && typeof params.allowNegative !== "boolean") throw new ReceiptReversalError("allowNegative must be boolean", 400, { code: "INVALID_REVERSAL_OVERRIDE" });
+}
+
+export function reversalEvidenceReviewRequired(): ReceiptReversalError {
+  return new ReceiptReversalError("This reversal key has historical posting evidence without a matching saved command response. Review reversal history before starting another correction.", 409, { code: "RECEIPT_REVERSAL_EVIDENCE_REVIEW_REQUIRED" });
+}
+
 export class ReceiptReversalService {
   constructor(
     private db: DrizzleDb,
@@ -178,10 +200,11 @@ export class ReceiptReversalService {
    *   receiving_lines.received_qty). Must be a positive safe integer and
    *   <= received_qty - reversed_qty.
    * @param params.idempotencyKey Required. Unique across all reversals; a
-   *   retry with the same key returns the original reversal (no double-apply).
+   *   retry must match the original operator, scope, target and intent.
    * @param params.allowNegative Elevated-permission override: when the lot's
    *   on-hand is insufficient (qty already consumed/sold), post the decrement
-   *   anyway and flag the reversal row. Default: block.
+   *   only before quantity-ledger activation and flag the reversal row. The
+   *   inventory owner rejects negative overrides after activation. Default: block.
    */
   async reverseReceivingLine(params: {
     receivingLineId: number;
@@ -191,74 +214,36 @@ export class ReceiptReversalService {
     allowNegative?: boolean;
     userId?: string | null;
   }): Promise<ReversalLineResult> {
-    const { receivingLineId, qty, reason, idempotencyKey, userId } = params;
-    const allowNegative = params.allowNegative === true;
+    validateReversalParams(params, params.receivingLineId, "line", params.qty);
+    return this.db.transaction((tx) => this.reverseReceivingLineInTransaction(tx, params));
+  }
 
-    // ── Input validation (Rule #3 — validate at boundaries) ──────────────
-    if (!Number.isSafeInteger(receivingLineId) || receivingLineId <= 0) {
-      throw new ReceiptReversalError("receivingLineId must be a positive integer", 400, {
-        code: "INVALID_RECEIVING_LINE_ID",
-        receivingLineId,
+  async reverseReceivingLineInTransaction(tx: ReceiptReversalTransaction, params: ReverseLineParams): Promise<ReversalLineResult> {
+    validateReversalParams(params, params.receivingLineId, "line", params.qty);
+    await lockInventoryCostGraph(tx);
+    const existing = await readReversalKeyEvidence(tx, params.idempotencyKey);
+    if (existing.length > 0) {
+      const row = existing[0];
+      // Replay only complete immutable evidence with exactly the same intent.
+      if (existing.length !== 1 || row.idempotency_key !== params.idempotencyKey || row.reversal_scope !== "line"
+        || Number(row.receiving_line_id) !== params.receivingLineId || Number(row.qty) !== params.qty
+        || row.reason !== params.reason.trim() || row.created_by !== (params.userId ?? null)
+        || row.allow_negative === null || Number(row.allow_negative) !== (params.allowNegative === true ? 1 : 0) || row.order_reversal_id !== null) throw reversalEvidenceReviewRequired();
+      const parsed = receiptReversalLineResultSchema.safeParse({
+        reversalId: Number(row.id), receivingOrderId: Number(row.receiving_order_id), receivingLineId: Number(row.receiving_line_id),
+        qty: Number(row.qty), baseUnitsReversed: Number(row.base_units_reversed), lotUnitCostMills: row.lot_unit_cost_mills === null ? null : Number(row.lot_unit_cost_mills),
+        apReconciliationReopened: Number(row.ap_reconciliation_reopened) === 1, idempotentReplay: true,
       });
+      if (!parsed.success || row.ap_reconciliation_reopened === null || ![0, 1].includes(Number(row.ap_reconciliation_reopened))) throw reversalEvidenceReviewRequired();
+      return parsed.data;
     }
-    if (!Number.isSafeInteger(qty) || qty <= 0) {
-      throw new ReceiptReversalError("qty must be a positive integer", 400, {
-        code: "INVALID_REVERSAL_QTY",
-        qty,
-      });
-    }
-    const normalizedReason = typeof reason === "string" ? reason.trim() : "";
-    if (!normalizedReason) {
-      throw new ReceiptReversalError("reason is required", 400, {
-        code: "REVERSAL_REASON_REQUIRED",
-      });
-    }
-    if (typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0 || idempotencyKey.length > 100) {
-      throw new ReceiptReversalError("idempotencyKey is required (max 100 chars)", 400, {
-        code: "INVALID_IDEMPOTENCY_KEY",
-      });
-    }
-
-    // ── Idempotency pre-check (fast path; the unique index is the real
-    //    guard inside the transaction) ─────────────────────────────────────
-    const existing = await this.db.execute(sql`
-      SELECT id, receiving_line_id, qty, base_units_reversed, lot_unit_cost_mills,
-             ap_reconciliation_reopened
-      FROM procurement.receipt_reversals
-      WHERE idempotency_key = ${idempotencyKey}
-      LIMIT 1
-    `);
-    if (existing.rows?.[0]) {
-      const row = existing.rows[0];
-      return {
-        reversalId: Number(row.id),
-        receivingLineId: Number(row.receiving_line_id),
-        qty: Number(row.qty),
-        baseUnitsReversed: Number(row.base_units_reversed ?? 0),
-        lotUnitCostMills: row.lot_unit_cost_mills === null ? null : Number(row.lot_unit_cost_mills),
-        apReconciliationReopened: Number(row.ap_reconciliation_reopened) === 1,
-        idempotentReplay: true,
-      };
-    }
-
-    return await this.db.transaction(async (tx) => {
-      const result = await this.applyLineReversal(tx, {
-        receivingLineId,
-        qty,
-        reason: normalizedReason,
-        idempotencyKey,
-        allowNegative,
-        userId: userId ?? null,
-        reversalScope: "line",
-        orderReversalId: null,
-      });
-      // Idempotent replays must not re-run PO re-evaluation (nothing changed).
-      if (!result.idempotentReplay && result.purchaseOrderId) {
-        await this.reevaluatePo(tx, result.purchaseOrderId, userId ?? null, normalizedReason);
-      }
-      const { purchaseOrderId: _poId, ...lineResult } = result;
-      return lineResult;
+    const result = await this.applyLineReversal(tx, {
+      ...params, reason: params.reason.trim(), allowNegative: params.allowNegative === true,
+      userId: params.userId ?? null, reversalScope: "line", orderReversalId: null,
     });
+    if (result.purchaseOrderId) await this.reevaluatePo(tx, result.purchaseOrderId, params.userId ?? null, params.reason.trim());
+    const { purchaseOrderId: _poId, ...lineResult } = result;
+    return lineResult;
   }
 
   /**
@@ -273,129 +258,96 @@ export class ReceiptReversalService {
     allowNegative?: boolean;
     userId?: string | null;
   }): Promise<ReversalResult> {
-    const { receivingOrderId, reason, idempotencyKey, userId } = params;
+    validateReversalParams(params, params.receivingOrderId, "order");
+    return this.db.transaction((tx) => this.reverseReceivingOrderInTransaction(tx, params));
+  }
+
+  async reverseReceivingOrderInTransaction(tx: ReceiptReversalTransaction, params: ReverseOrderParams): Promise<ReversalResult> {
+    validateReversalParams(params, params.receivingOrderId, "order");
+    await lockInventoryCostGraph(tx);
+    // Old groups cannot prove their original PO response or complete membership.
+    if ((await readReversalKeyEvidence(tx, params.idempotencyKey)).length > 0) throw reversalEvidenceReviewRequired();
+    const { receivingOrderId, idempotencyKey, userId } = params;
+    const normalizedReason = params.reason.trim();
     const allowNegative = params.allowNegative === true;
-
-    if (!Number.isSafeInteger(receivingOrderId) || receivingOrderId <= 0) {
-      throw new ReceiptReversalError("receivingOrderId must be a positive integer", 400, {
-        code: "INVALID_RECEIVING_ORDER_ID",
-        receivingOrderId,
-      });
-    }
-    const normalizedReason = typeof reason === "string" ? reason.trim() : "";
-    if (!normalizedReason) {
-      throw new ReceiptReversalError("reason is required", 400, {
-        code: "REVERSAL_REASON_REQUIRED",
-      });
-    }
-    if (typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0 || idempotencyKey.length > 100) {
-      throw new ReceiptReversalError("idempotencyKey is required (max 100 chars)", 400, {
-        code: "INVALID_IDEMPOTENCY_KEY",
-      });
-    }
-
-    // Idempotency pre-check: whole-order reversals store per-line rows with
-    // keys `${idempotencyKey}:line:${lineId}`. If the group already exists,
-    // return it.
-    const existing = await this.db.execute(sql`
-      SELECT id, receiving_order_id, receiving_line_id, qty, base_units_reversed,
-             lot_unit_cost_mills, ap_reconciliation_reopened
-      FROM procurement.receipt_reversals
-      WHERE receiving_order_id = ${receivingOrderId}
-        AND idempotency_key LIKE ${idempotencyKey + ":%"}
-      ORDER BY id
+    // Lock the order; must be closed.
+    const orderRows = await tx.execute(sql`
+      SELECT id, status, purchase_order_id
+      FROM procurement.receiving_orders
+      WHERE id = ${receivingOrderId}
+      FOR UPDATE
     `);
-    if (existing.rows?.length > 0) {
-      return {
+    const order = orderRows.rows?.[0];
+    if (!order) throw new ReceiptReversalError("Receiving order not found", 404);
+    if (order.status !== "closed") {
+      throw new ReceiptReversalError("Only closed receiving orders can be reversed", 409, {
+        code: "RECEIPT_NOT_CLOSED",
         receivingOrderId,
-        reversals: existing.rows.map((row: any) => ({
-          reversalId: Number(row.id),
-          receivingLineId: Number(row.receiving_line_id),
-          qty: Number(row.qty),
-          baseUnitsReversed: Number(row.base_units_reversed ?? 0),
-          lotUnitCostMills: row.lot_unit_cost_mills === null ? null : Number(row.lot_unit_cost_mills),
-          apReconciliationReopened: Number(row.ap_reconciliation_reopened) === 1,
-          idempotentReplay: true,
-        })),
-        poStatusUpdate: null,
-      };
+        status: order.status,
+      });
     }
 
-    return await this.db.transaction(async (tx) => {
-      // Lock the order; must be closed.
-      const orderRows = await tx.execute(sql`
-        SELECT id, status, purchase_order_id
-        FROM procurement.receiving_orders
-        WHERE id = ${receivingOrderId}
-        FOR UPDATE
-      `);
-      const order = orderRows.rows?.[0];
-      if (!order) throw new ReceiptReversalError("Receiving order not found", 404);
-      if (order.status !== "closed") {
-        throw new ReceiptReversalError("Only closed receiving orders can be reversed", 409, {
-          code: "RECEIPT_NOT_CLOSED",
-          receivingOrderId,
-          status: order.status,
-        });
+    await this.lockReceiptPurchaseSources(tx, receivingOrderId);
+    const lineRows = await tx.execute(sql`
+      SELECT id, received_qty, reversed_qty
+      FROM procurement.receiving_lines
+      WHERE receiving_order_id = ${receivingOrderId}
+      ORDER BY id
+      FOR UPDATE
+    `);
+    const reversible = lineRows.rows.filter(
+      (row: any) => (Number(row.received_qty) || 0) - (Number(row.reversed_qty) || 0) > 0,
+    );
+    if (reversible.length === 0) {
+      throw new ReceiptReversalError("No lines have remaining reversible quantity", 409, {
+        code: "NOTHING_TO_REVERSE",
+        receivingOrderId,
+      });
+    }
+
+    const capability = (await readReceiptReturnCapabilities(tx, receivingOrderId)).order;
+    if (!capability.allowed) throw new ReceiptReversalError(capability.reason, 409, { code: capability.code, receivingOrderId });
+
+    const reversals: ReversalLineResult[] = [];
+    let orderReversalGroupId: number | null = null;
+    const touchedPoIds = new Set<number>();
+
+    for (const row of reversible) {
+      const lineId = Number(row.id);
+      const remaining = (Number(row.received_qty) || 0) - (Number(row.reversed_qty) || 0);
+      if (`${idempotencyKey}:line:${lineId}`.length > 100) throw new ReceiptReversalError("Reversal audit key is too long", 400, { code: "INVALID_IDEMPOTENCY_KEY" });
+      const result = await this.applyLineReversal(tx, {
+        receivingLineId: lineId,
+        qty: remaining,
+        reason: normalizedReason,
+        idempotencyKey: `${idempotencyKey}:line:${lineId}`,
+        allowNegative,
+        userId: userId ?? null,
+        reversalScope: "order",
+        orderReversalId: orderReversalGroupId,
+      });
+      // The first line's reversal id becomes the group id for the rest.
+      if (orderReversalGroupId === null) {
+        orderReversalGroupId = result.reversalId;
+        await tx.execute(sql`
+          UPDATE procurement.receipt_reversals
+          SET order_reversal_id = ${orderReversalGroupId}
+          WHERE id = ${orderReversalGroupId}
+        `);
       }
+      if (result.purchaseOrderId) touchedPoIds.add(result.purchaseOrderId);
+      const { purchaseOrderId: _poId, ...lineResult } = result;
+      reversals.push(lineResult);
+    }
 
-      await this.lockReceiptPurchaseSources(tx, receivingOrderId);
-      const lineRows = await tx.execute(sql`
-        SELECT id, received_qty, reversed_qty
-        FROM procurement.receiving_lines
-        WHERE receiving_order_id = ${receivingOrderId}
-        ORDER BY id
-        FOR UPDATE
-      `);
-      const reversible = lineRows.rows.filter(
-        (row: any) => (Number(row.received_qty) || 0) - (Number(row.reversed_qty) || 0) > 0,
-      );
-      if (reversible.length === 0) {
-        throw new ReceiptReversalError("No lines have remaining reversible quantity", 409, {
-          code: "NOTHING_TO_REVERSE",
-          receivingOrderId,
-        });
-      }
+    // Re-evaluate PO status for each touched PO (usually one).
+    let poStatusUpdate: ReversalResult["poStatusUpdate"] = null;
+    for (const poId of Array.from(touchedPoIds).sort((a, b) => a - b)) {
+      const update = await this.reevaluatePo(tx, poId, userId ?? null, normalizedReason);
+      if (update) poStatusUpdate = update;
+    }
 
-      const reversals: ReversalLineResult[] = [];
-      let orderReversalGroupId: number | null = null;
-      const touchedPoIds = new Set<number>();
-
-      for (const row of reversible) {
-        const lineId = Number(row.id);
-        const remaining = (Number(row.received_qty) || 0) - (Number(row.reversed_qty) || 0);
-        const result = await this.applyLineReversal(tx, {
-          receivingLineId: lineId,
-          qty: remaining,
-          reason: normalizedReason,
-          idempotencyKey: `${idempotencyKey}:line:${lineId}`,
-          allowNegative,
-          userId: userId ?? null,
-          reversalScope: "order",
-          orderReversalId: orderReversalGroupId,
-        });
-        // The first line's reversal id becomes the group id for the rest.
-        if (orderReversalGroupId === null) {
-          orderReversalGroupId = result.reversalId;
-          await tx.execute(sql`
-            UPDATE procurement.receipt_reversals
-            SET order_reversal_id = ${orderReversalGroupId}
-            WHERE id = ${orderReversalGroupId}
-          `);
-        }
-        if (result.purchaseOrderId) touchedPoIds.add(result.purchaseOrderId);
-        reversals.push(result);
-      }
-
-      // Re-evaluate PO status for each touched PO (usually one).
-      let poStatusUpdate: ReversalResult["poStatusUpdate"] = null;
-      for (const poId of Array.from(touchedPoIds).sort((a, b) => a - b)) {
-        const update = await this.reevaluatePo(tx, poId, userId ?? null, normalizedReason);
-        if (update) poStatusUpdate = update;
-      }
-
-      return { receivingOrderId, reversals, poStatusUpdate };
-    });
+    return { receivingOrderId, reversals, poStatusUpdate };
   }
 
   /** Reversal history for one receiving order (newest first). */
@@ -425,6 +377,10 @@ export class ReceiptReversalService {
       createdBy: row.created_by,
       createdAt: row.created_at,
     }));
+  }
+
+  async getReturnReversalCapabilities(receivingOrderId: number) {
+    return readReceiptReturnCapabilities(this.db, receivingOrderId);
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -510,6 +466,10 @@ export class ReceiptReversalService {
       });
     }
 
+    const capability = (await readReceiptReturnCapabilities(tx, receivingOrderId)).lines.get(receivingLineId);
+    if (!capability) throw new Error("Receipt line disappeared while checking supplier return history");
+    if (!capability.allowed) throw new ReceiptReversalError(capability.reason, 409, { code: capability.code, receivingOrderId, receivingLineId });
+
     const receivedQty = Number(line.received_qty) || 0;
     const reversedQty = Number(line.reversed_qty) || 0;
     const remainingReversible = receivedQty - reversedQty;
@@ -590,54 +550,19 @@ export class ReceiptReversalService {
       WHERE id = ${receivingLineId}
     `);
 
-    // 4. Insert the reversal record first — the inventory ledger row
-    //    references its id. Idempotency: unique key; a concurrent retry that
-    //    passed the pre-check loses the unique race and is re-read below.
-    //    lot_unit_cost_mills / ap flags are backfilled after the inventory +
-    //    AP steps (same transaction, so readers never see a partial state).
-    let reversalId: number;
-    try {
-      const inserted = await tx.execute(sql`
-        INSERT INTO procurement.receipt_reversals
-          (receiving_order_id, receiving_line_id, qty, reason, reversal_scope,
-           order_reversal_id, base_units_reversed, lot_unit_cost_mills,
-           allow_negative, ap_reconciliation_reopened, idempotency_key, created_by)
-        VALUES (
-          ${Number(line.receiving_order_id)}, ${receivingLineId}, ${qty}, ${reason},
-          ${params.reversalScope}, ${params.orderReversalId}, ${baseUnits},
-          ${null}, ${allowNegative ? 1 : 0}, ${0},
-          ${idempotencyKey}, ${userId}
-        )
-        RETURNING id
-      `);
-      reversalId = Number(inserted.rows?.[0]?.id);
-    } catch (error: any) {
-      if (error?.code === "23505" || error?.cause?.code === "23505") {
-        // Lost the idempotency race — read the winner and return it. The
-        // transaction rolls back, so no double-apply.
-        const winner = await this.db.execute(sql`
-          SELECT id, receiving_line_id, qty, base_units_reversed, lot_unit_cost_mills,
-                 ap_reconciliation_reopened
-          FROM procurement.receipt_reversals
-          WHERE idempotency_key = ${idempotencyKey}
-          LIMIT 1
-        `);
-        const row = winner.rows?.[0];
-        if (row) {
-          return {
-            reversalId: Number(row.id),
-            receivingLineId: Number(row.receiving_line_id),
-            qty: Number(row.qty),
-            baseUnitsReversed: Number(row.base_units_reversed ?? 0),
-            lotUnitCostMills: row.lot_unit_cost_mills === null ? null : Number(row.lot_unit_cost_mills),
-            apReconciliationReopened: Number(row.ap_reconciliation_reopened) === 1,
-            idempotentReplay: true,
-            purchaseOrderId: null,
-          };
-        }
-      }
-      throw error;
-    }
+    // An unexpected unique violation aborts the entire transaction. Never read
+    // a winner through another connection after PostgreSQL aborts this one.
+    const inserted = await tx.execute(sql`
+      INSERT INTO procurement.receipt_reversals
+        (receiving_order_id, receiving_line_id, qty, reason, reversal_scope,
+         order_reversal_id, base_units_reversed, lot_unit_cost_mills,
+         allow_negative, ap_reconciliation_reopened, idempotency_key, created_by)
+      VALUES (${Number(line.receiving_order_id)}, ${receivingLineId}, ${qty}, ${reason},
+        ${params.reversalScope}, ${params.orderReversalId}, ${baseUnits},
+        ${null}, ${allowNegative ? 1 : 0}, ${0}, ${idempotencyKey}, ${userId}) RETURNING id
+    `);
+    const reversalId = Number(inserted.rows?.[0]?.id);
+    if (!Number.isSafeInteger(reversalId) || reversalId <= 0) throw new ReceiptReversalError("Reversal audit identity is missing", 500, { code: "REVERSAL_RESULT_INVALID" });
 
     // 5. Inventory: decrement lot(s) at the ORIGINAL cost + location level +
     //    ledger row — via the inventory module's public API (writer-ratchet:
@@ -665,6 +590,9 @@ export class ReceiptReversalService {
         allowNegative,
       }, tx);
     } catch (error: any) {
+      if (error instanceof Error && "code" in error && error.code === "LOCATION_FROZEN") {
+        throw new ReceiptReversalError(error.message, 409, { code: "LOCATION_FROZEN", receivingLineId });
+      }
       if (error?.code === "REVERSAL_INSUFFICIENT_ON_HAND") {
         throw new ReceiptReversalError(error.message, 409, {
           code: "REVERSAL_INSUFFICIENT_ON_HAND",
@@ -724,6 +652,7 @@ export class ReceiptReversalService {
 
     return {
       reversalId,
+      receivingOrderId: Number(line.receiving_order_id),
       receivingLineId,
       qty,
       baseUnitsReversed: baseUnits,

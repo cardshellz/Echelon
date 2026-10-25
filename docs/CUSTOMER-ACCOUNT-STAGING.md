@@ -4,6 +4,34 @@ This adds a storefront transport for the existing order edit engine and customer
 
 The Shopify customer account templates render their own orders immediately. Order numbers open the native order details page. Re-order uses the existing theme cart executor with the selected order's available variants. Edit and address actions appear only after warehouse eligibility is verified. Return intake appears only when the canonical return policy and delivery evidence allow at least one item. Existing return labels remain accessible through the owned return history, independently of new-return eligibility.
 
+## Account access recovery
+
+A rendered Shopify order page can remain visible after its browser sign-in stops
+being active. The page's Liquid customer ID is still only a comparison value;
+it cannot authorize an order request. `storefrontPrincipal` distinguishes a
+valid Shopify-signed request with an empty customer ID from invalid signatures,
+stale proofs, missing shop mappings and other access failures. The account
+interface exposes the verified guest case as `CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED`
+and records that bounded code without logging signed queries or customer data.
+
+The storefront owns the notice and action. That exact code displays “Your sign-in
+is no longer active. Sign in again to make changes.” and a **Sign in again** link.
+The link uses Shopify's `routes.account_login_url` and preserves the current page
+and preview query in `return_url`. Earlier theme configs default to
+`/account/login`. Other bootstrap failures display a neutral order notice with
+**Try again**; the ambiguous legacy `RETURN_CUSTOMER_LOGIN_REQUIRED` code never
+implies sign-out. Backend return-specific copy is not rendered by this notice.
+No authentication checks are bypassed, and the fix does not create, recover or
+submit any order or rewards command.
+
+Unit and HTTP-boundary coverage verifies the specific guest classification,
+invalid/stale/wrong-proxy proofs, old-bundle configuration, local return URLs,
+and generic error presentation. Theme browser coverage renders the real order
+Liquid template and bundle on desktop/mobile, checks the sign-in destination,
+and recovers a failed bootstrap without an order/rewards mutation. These tests
+use intercepted service responses; they do not establish a completed real
+customer sign-in or a live financial transaction.
+
 ## Backend enablement
 
 The exact `/api/returns/shopify/proxy/account` suffix is registered before the existing returns proxy router. It verifies the existing Echelon app's Shopify HMAC, shop, customer, path and timestamp on every request. Shopify forwards POST bodies and strips cookies, so staff cookies and Liquid IDs never authorize it. Inputs use a bounded JSON envelope; no new query parameters or Shopify credentials are exposed in the theme.

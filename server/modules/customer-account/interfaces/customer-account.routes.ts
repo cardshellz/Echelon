@@ -3,6 +3,7 @@ import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
 import {
   CUSTOMER_ACCOUNT_COMMAND_HEADER,
+  CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED,
   CUSTOMER_ACCOUNT_PROXY_API,
   customerAccountBootstrapSchema,
   customerAccountRequestSchema,
@@ -41,8 +42,10 @@ import {
 } from "../domain/customer-account-staging";
 import type { customerAccountServices } from "../infrastructure/customer-account.composition";
 import { orderEditPricingDisplayVersionSchema } from "@shared/order-edits/order-edit-financials";
-import { orderEditResponsePresentation } from "../../order-edits/application/order-edit-response-presentation";
-import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema } from "@shared/customer-account/reward-widget";
+import { orderEditResponsePresentation, orderEditOrderManagementPresentation } from "../../order-edits/application/order-edit-response-presentation";
+import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
+import { customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
+import { customerAccountOrderDetailsSchema, customerAccountOrderSummariesSchema } from "@shared/customer-account/customer-account-orders";
 
 type Services = ReturnType<ReturnType<typeof customerAccountServices>>;
 export interface CustomerAccountRouteDependencies {
@@ -97,6 +100,13 @@ export function registerCustomerAccountRoutes(
     },
   });
   const failed = (res: Response, error: unknown, path: string) => {
+    if (error instanceof CustomerReturnCustomerAccessError && error.code === "RETURN_STOREFRONT_CUSTOMER_MISSING") {
+      dependencies.report({ code: CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED, path });
+      // The theme owns the notice and recovery link. Keep a neutral fallback
+      // for older bundles while preserving the precise machine-readable cause.
+      res.status(401).json({ error: { code: CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED, message: "Sign in again to manage your orders." } });
+      return;
+    }
     // Record a bounded driver/provider code, never SQL, credentials or customer data.
     const cause = z.object({ code: z.string().regex(/^[A-Z0-9_]{1,80}$/) }).safeParse(error);
     const known =
@@ -230,26 +240,48 @@ async function dispatch(
     empty.parse(query);
     return services.edits.resolve(body);
   }
+  if (path === "/account/order-summaries" && !read) {
+    empty.parse(query);
+    return customerAccountOrderSummariesSchema.parse(await services.orders.summaries(body));
+  }
+  if (path === "/account/order-details" && !read) {
+    empty.parse(query);
+    return customerAccountOrderDetailsSchema.parse(await services.orders.details(body));
+  }
   const order = /^\/order-edits\/orders\/([1-9][0-9]*)$/.exec(path);
-  const rewards = /^\/order-edits\/orders\/([1-9][0-9]*)\/rewards(?:\/(issue))?$/.exec(path);
+  const cancellation = /^\/account\/orders\/([1-9][0-9]*)\/cancellation(?:\/(review|status))?$/.exec(path);
+  if (cancellation) {
+    const omsOrderId = id.parse(cancellation[1]);
+    if (read && cancellation[2] === "status") {
+      const params = connectionQuery.extend({ requestKey: z.string().uuid() }).strict().parse(query);
+      return customerOrderCancellationSchema.parse(await services.edits.cancellationStatus(params.connectionId, omsOrderId, params.requestKey));
+    }
+    const params = connectionQuery.parse(query);
+    if (read && cancellation[2] === "review") return customerOrderCancellationReviewSchema.parse(await services.edits.cancellationReview(params.connectionId, omsOrderId));
+    if (!read && !cancellation[2]) return customerOrderCancellationSchema.parse(await services.edits.submitCancellation(params.connectionId, omsOrderId, body, commandKey(input)));
+    throw notFound();
+  }
+  const rewards = /^\/order-edits\/orders\/([1-9][0-9]*)\/rewards(?:\/(issue|manage|cancel))?$/.exec(path);
   if (rewards) {
     const params = connectionQuery.parse(query);
     if (read && !rewards[2]) return rewardWidgetStateSchema.parse(await services.edits.rewardsState(params.connectionId, id.parse(rewards[1])));
+    if (read && rewards[2] === "manage") return rewardWidgetManagementStateSchema.parse(await services.edits.manageRewards(params.connectionId, id.parse(rewards[1])));
     if (!read && rewards[2] === "issue") return rewardWidgetIssueResultSchema.parse(await services.edits.issueReward(params.connectionId, id.parse(rewards[1]), body, commandKey(input)));
+    if (!read && rewards[2] === "cancel") return rewardWidgetCancelResultSchema.parse(await services.edits.cancelReward(params.connectionId, id.parse(rewards[1]), body, commandKey(input)));
     throw new OrderEditError("REWARD_REQUEST_INVALID", "This rewards action is unavailable.", 400);
   }
   if (order && read) {
     const params = connectionQuery
-      .extend({ codeEntryVersion: z.literal("v1").optional() })
+      .extend({ codeEntryVersion: z.literal("v1").optional(), managementVersion: z.enum(["v1", "v2"]).optional() })
       .parse(query);
     return orderEditResponsePresentation(
-      orderEditOrderSchema.parse(
+      orderEditOrderManagementPresentation(orderEditOrderSchema.parse(
         await services.edits.order(
           params.connectionId,
           id.parse(order[1]),
           params.codeEntryVersion,
         ),
-      ),
+      ), params.managementVersion),
       pricingDisplay,
     );
   }

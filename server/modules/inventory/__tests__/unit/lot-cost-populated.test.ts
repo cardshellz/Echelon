@@ -1,3 +1,4 @@
+import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
 
 /**
@@ -8,20 +9,18 @@ import { describe, expect, it, vi } from "vitest";
  * Also locks po_line_id traceability (BUG-4) and cost_source provenance (BUG-5).
  */
 function buildDb(capture: { inserted: any }) {
-  return {
-    select: vi.fn(() => ({
-      from: vi.fn().mockReturnThis(),
-      where: vi.fn().mockReturnThis(),
-      orderBy: vi.fn().mockReturnThis(),
-      limit: vi.fn().mockResolvedValue([{ lotNumber: "LOT-20260607-000" }]),
-    })),
+  const db: any = {
+    execute: vi.fn(async (query: any) => ({ rows: new PgDialect().sqlToQuery(query).sql.includes("AS suffix")
+      ? [{ suffix: null }] : [] })),
+    transaction: vi.fn(async (work: (tx: any) => Promise<unknown>) => work(db)),
     insert: vi.fn(() => ({
       values: vi.fn((val: any) => {
         capture.inserted = val;
         return { returning: vi.fn().mockResolvedValue([{ id: 1, ...val }]) };
       }),
     })),
-  } as any;
+  };
+  return db;
 }
 
 describe("InventoryLotService.createLot — cost-layer population", () => {

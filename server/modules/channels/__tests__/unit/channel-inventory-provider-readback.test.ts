@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ShopifyAdapter } from "../../adapters/shopify.adapter";
 import { EbayAdapter } from "../../adapters/ebay.adapter";
 import { ChannelInventoryPublicationTransportAdapter } from "../../channel-inventory-publication-transport.adapter";
+import { InventoryPublicationConfigurationError } from "../../channel-adapter.interface";
 
 const database = { select: vi.fn(), insert: vi.fn(), update: vi.fn(), delete: vi.fn() };
 const destination = { kind: "channel_connection" as const, channelConnectionId: 22, dropshipStoreConnectionId: null };
@@ -26,6 +27,29 @@ function ebayFixture() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("actual provider adapters through the canonical transport", () => {
+  it.each([
+    { changed: { externalInventoryItemId: "" }, code: "EBAY_INVENTORY_ID_REQUIRED" },
+    { changed: { externalSku: "OTHER" }, code: "EBAY_INVENTORY_IDENTITY_MISMATCH" },
+    { changed: { providerScopeType: "location" as const }, code: "PUBLICATION_SCOPE_UNSUPPORTED" },
+  ])("classifies known local eBay validation as no-send: $code", async ({ changed, code }) => {
+    const { client, transport } = ebayFixture();
+    await expect(transport.publishAbsolute({ ...ebayRequest, ...changed, desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code, retryable: false, effect: "not_sent" });
+    expect(client.getInventoryOffersPage).not.toHaveBeenCalled();
+    expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+  });
+  it("classifies client/account and marketplace preparation before entering the quantity protocol", async () => {
+    const { adapter, client, getApiClient, transport } = ebayFixture();
+    getApiClient.mockRejectedValueOnce(new InventoryPublicationConfigurationError("EXACT_ACCOUNT_REQUIRED", "Exact account missing"));
+    await expect(transport.publishAbsolute({ ...ebayRequest, desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code: "EXACT_ACCOUNT_REQUIRED", retryable: false, effect: "not_sent" });
+    vi.mocked((adapter as unknown as { getConnectionMetadata(): Promise<{ siteId: string }> }).getConnectionMetadata)
+      .mockResolvedValueOnce({ siteId: "INVALID" });
+    await expect(transport.publishAbsolute({ ...ebayRequest, desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code: "EBAY_INVENTORY_MARKETPLACE_INVALID", retryable: false, effect: "not_sent" });
+    expect(client.getInventoryOffersPage).not.toHaveBeenCalled();
+    expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+  });
   it("does not confirm eBay item 50 as listing 50 when its offer remains 38", async () => {
     const { client, getApiClient, transport } = ebayFixture();
     await expect(transport.readAbsolute(ebayRequest)).resolves.toMatchObject({
@@ -82,7 +106,7 @@ describe("actual provider adapters through the canonical transport", () => {
     const { client, transport } = ebayFixture();
     client.getInventoryOffersPage.mockResolvedValue({ total: 2, offers: [offer, { ...offer, offerId: "other" }] });
     await expect(transport.readAbsolute(ebayRequest)).rejects.toMatchObject({ code: "EBAY_INVENTORY_OFFER_AMBIGUOUS", retryable: false });
-    await expect(transport.publishAbsolute({ ...ebayRequest, desiredQuantity: 7 })).rejects.toMatchObject({ code: "EBAY_INVENTORY_OFFER_AMBIGUOUS", retryable: false });
+    await expect(transport.publishAbsolute({ ...ebayRequest, desiredQuantity: 7 })).rejects.toMatchObject({ code: "EBAY_INVENTORY_OFFER_AMBIGUOUS", retryable: false, effect: "not_sent" });
     expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
   });
   it("does not fall back to item-only publication after an incomplete acknowledgement", async () => {
@@ -92,6 +116,14 @@ describe("actual provider adapters through the canonical transport", () => {
     expect(client.bulkUpdatePriceQuantity).toHaveBeenCalledTimes(1);
     expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
     expect(client.updateOffer).not.toHaveBeenCalled();
+  });
+  it("preserves the pre-send phase for a failed offer GET through the real Channel adapter", async () => {
+    const { client, transport } = ebayFixture();
+    client.getInventoryOffersPage.mockRejectedValue(new Error("GET failed before dispatch"));
+    await expect(transport.publishAbsolute({ ...ebayRequest, desiredQuantity: 7 })).rejects.toMatchObject({
+      code: "EBAY_INVENTORY_PREFLIGHT_FAILED", effect: "not_sent", retryable: true,
+    });
+    expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
   });
 
   function shopifyFixture(levels: unknown[]) {

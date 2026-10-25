@@ -85,11 +85,20 @@ dbDescribe.sequential(
           "utf8",
         ),
       );
+      // The Catalog projection is a fixture, but submit still uses the real
+      // transactional media-reference owner and its production migration.
+      await database.pool.query(`CREATE TABLE catalog.product_assets (
+        id integer PRIMARY KEY, product_id integer NOT NULL, product_variant_id integer,
+        asset_type text NOT NULL, url text, position integer NOT NULL DEFAULT 0,
+        is_primary integer NOT NULL DEFAULT 0, storage_type text NOT NULL,
+        mime_type text, file_data bytea
+      );`);
       for (const file of [
         "0707_channel_listing_publication.sql",
         "0724_channel_listing_updates.sql",
         "259_channel_listing_lifecycle.sql",
         "260_channel_listing_recreation.sql",
+        "900000017000018580001_catalog_publication_media_versions.sql",
       ])
         await database.pool.query(
           readFileSync(resolve("migrations", file), "utf8"),
@@ -546,6 +555,26 @@ dbDescribe.sequential(
         expect(
           (await h.buildService().submit(36, command, "operator")).id,
         ).toBe(operation.id);
+        const accepted = await h.store.operation(36, operation.id);
+        const mediaPlan = accepted.snapshot.prepared[0].preparedIntent?.input.mediaPlan;
+        expect(mediaPlan?.variants[0].gallery.selected.map((photo) => photo.url)).toEqual([
+          "https://example.com/current-photo.jpg",
+        ]);
+        // Command replay retains one reference to the exact reviewed plan.
+        expect((await database.pool.query(
+          `SELECT owner, reference_key, source_revision, kind, retired_at
+           FROM catalog.publication_media_references ORDER BY reference_key`,
+        )).rows).toEqual([{
+          owner: "marketplace-listings",
+          reference_key: `publication:${operation.id}:101`,
+          source_revision: mediaPlan?.sourceRevision,
+          kind: "pending",
+          retired_at: null,
+        }]);
+        // This fixture uses an external URL, so there are no uploaded bytes to pin.
+        expect((await database.pool.query(
+          "SELECT * FROM catalog.publication_media_version_pins",
+        )).rows).toEqual([]);
         await Promise.all([h.runListing(), h.runListing()]);
         expect(
           (await h.store.operation(36, operation.id)).progress.error,

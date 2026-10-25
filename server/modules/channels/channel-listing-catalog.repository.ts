@@ -1,17 +1,18 @@
-import type { Pool, PoolClient } from "pg";
+import type { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import {
   listingCatalogItemSchema,
   listingCatalogQuerySchema,
   listingPriceRuleSchema,
+  saveListingPriceRuleSchema,
   type ListingCatalogItem,
   type ListingPriceRule,
 } from "@shared/types/channel-listing-publication";
 import { resolveChannelListingPrice } from "./channel-pricing-resolver";
-import { persistAuditEvent } from "../../infrastructure/auditLogger";
+import { createChannelPricingService } from "./channel-pricing.service";
 import type { CatalogPublicImageUrl } from "../catalog/catalog-public-image";
-import { readCatalogPublicationImages, resolveCatalogPublicationImages } from "../catalog/catalog-publication-images.reader";
+import { PgCatalogVariantPublicationPhotoReader, readCatalogPublicationImageIds } from "../catalog/catalog-publication-images.reader";
 import {
   ListingPublicationError,
   listingHash,
@@ -83,26 +84,28 @@ export class ChannelListingCatalogRepository {
           ],
         )
       ).rows;
-      const images = await readCatalogPublicationImages(client, [...new Set<number>(rows.map(row => row.product_id))]);
-      const overrides = images.length ? (await client.query<{
+      const assetIds = await readCatalogPublicationImageIds(client, [...new Set<number>(rows.map(row => row.product_id))]);
+      const overrides = assetIds.length ? (await client.query<{
         product_asset_id: number; url_override: string | null; position_override: number | null; is_included: number;
       }>(`SELECT product_asset_id, url_override, position_override, is_included
         FROM channels.channel_asset_overrides WHERE channel_id=$1 AND product_asset_id=ANY($2::int[])`,
-      [channelId, images.map(image => image.id)])).rows : [];
-      const overridesByAsset = new Map(overrides.map(override => [override.product_asset_id, override]));
+      [channelId, assetIds])).rows : [];
+      if (overrides.some(override => override.is_included !== 0 && override.is_included !== 1)) {
+        throw new ListingPublicationError("LISTING_IMAGE_OVERRIDE_INVALID", "Correct the image inclusion settings before publishing.", 409);
+      }
+      const mediaPlans = await new PgCatalogVariantPublicationPhotoReader(client, this.publicImageUrl).listPublicationPlansByVariant({
+        productVariantIds: rows.map(row => row.variant_id), maxPhotosPerVariant: 20, maxGroupPhotos: 20,
+        overrides: overrides.map(override => ({ assetId: override.product_asset_id, included: override.is_included === 1,
+          urlOverride: override.url_override, positionOverride: override.position_override })),
+      });
       const items: ListingCatalogItem[] = [];
       const database = drizzle(client, { schema });
       for (const row of rows) {
-        const publicationImages = resolveCatalogPublicationImages(
-          images
-            .filter(image => image.productId === row.product_id
-              && (image.productVariantId === null || image.productVariantId === row.variant_id)
-              && (overridesByAsset.get(image.id)?.is_included ?? 1) === 1)
-            .sort((a, b) => (overridesByAsset.get(a.id)?.position_override ?? a.position)
-              - (overridesByAsset.get(b.id)?.position_override ?? b.position) || a.id - b.id)
-            .map(image => ({ ...image, url: overridesByAsset.get(image.id)?.url_override ?? image.url })),
-          this.publicImageUrl,
-        );
+        const mediaPlan = mediaPlans.get(row.variant_id)!;
+        const publicationImages = { images: mediaPlan.group.selected.map(photo => photo.url),
+          issues: mediaPlan.group.omissions.filter(omission => omission.blocking).map(omission => ({
+            assetId: omission.assetId, code: omission.code!, message: omission.message!,
+          })) };
         if (publicationImages.issues.length) {
           console.warn(JSON.stringify({ event: "channel_listing.catalog_image_unavailable", channelId,
             variantId: row.variant_id, images: publicationImages.issues.map(({ assetId, code }) => ({ assetId, code })) }));
@@ -138,6 +141,7 @@ export class ChannelListingCatalogRepository {
           description: row.description,
           brand: row.brand,
           images: publicationImages.images,
+          mediaPlan,
           // Omit empty issues to preserve hashes of existing healthy catalog snapshots.
           ...(publicationImages.issues.length ? { imageIssues: publicationImages.issues.map(issue => ({
             code: issue.code, message: issue.message, field: "images",
@@ -156,6 +160,7 @@ export class ChannelListingCatalogRepository {
           priceCents: resolved.priceCents,
           basePriceCents: resolved.basePriceCents,
           priceSource: resolved.source,
+          priceProvenance: resolved.provenance,
           appliedRule: resolved.appliedRule
             ? listingPriceRuleSchema.parse({
                 type: resolved.appliedRule.ruleType,
@@ -191,22 +196,16 @@ export class ChannelListingCatalogRepository {
   async pricingRule(channelId: number): Promise<ListingPriceRule | null> {
     const client = await this.pool.connect();
     try {
-      const rows = (
-        await client.query(
-          "SELECT rule_type,value::text FROM channels.channel_pricing_rules WHERE channel_id=$1 AND scope='channel' AND scope_id IS NULL ORDER BY id",
-          [channelId],
-        )
-      ).rows;
-      if (rows.length > 1)
+      const rules = await createChannelPricingService(drizzle(client, { schema })).listRules(channelId);
+      const defaults = rules.filter(rule => rule.scope === "channel" && rule.scopeId === null);
+      if (defaults.length > 1) {
         throw new ListingPublicationError(
           "LISTING_PRICING_CONFLICT",
           "Multiple channel defaults exist; resolve the pricing rules before publishing",
         );
-      return rows[0]
-        ? listingPriceRuleSchema.parse({
-            type: rows[0].rule_type,
-            value: rows[0].value,
-          })
+      }
+      return defaults[0]
+        ? listingPriceRuleSchema.parse({ type: defaults[0].ruleType, value: defaults[0].value })
         : null;
     } finally {
       client.release();
@@ -219,71 +218,26 @@ export class ChannelListingCatalogRepository {
     actor: string,
     now: Date,
   ): Promise<ListingPriceRule> {
-    const rule = listingPriceRuleSchema.parse(input);
-    if (rule.type === "override" && /^0(?:\.0{1,2})?$/.test(rule.value))
-      throw new ListingPublicationError(
-        "LISTING_PRICE_INVALID",
-        "A fixed selling price must be greater than zero",
-        400,
-      );
+    const rule = saveListingPriceRuleSchema.parse(input);
     const client = await this.pool.connect();
     try {
-      await client.query("BEGIN");
-      await lockChannel(client, channelId);
-      const before = (
-        await client.query(
-          "SELECT id,rule_type,value::text FROM channels.channel_pricing_rules WHERE channel_id=$1 AND scope='channel' AND scope_id IS NULL FOR UPDATE",
-          [channelId],
-        )
-      ).rows;
-      if (before.length > 1)
-        throw new ListingPublicationError(
-          "LISTING_PRICING_CONFLICT",
-          "Multiple channel defaults exist; resolve the pricing rules before publishing",
-        );
-      if (before.length)
-        await client.query(
-          "UPDATE channels.channel_pricing_rules SET rule_type=$2,value=$3,updated_at=$4 WHERE id=$1",
-          [before[0].id, rule.type, rule.value, now],
-        );
-      else
-        await client.query(
-          "INSERT INTO channels.channel_pricing_rules(channel_id,scope,scope_id,rule_type,value,created_at,updated_at) VALUES ($1,'channel',NULL,$2,$3,$4,$4)",
-          [channelId, rule.type, rule.value, now],
-        );
-      await persistAuditEvent(
-        drizzle(client),
+      const saved = await createChannelPricingService(drizzle(client, { schema })).saveRule(
+        channelId,
         {
-          actor,
-          action: "channel_listing.pricing_rule_saved",
-          target: `channel:${channelId}`,
-          changes: { before, after: rule },
+          scope: "channel",
+          scopeId: null,
+          ruleType: rule.type,
+          value: rule.value,
+          expected: rule.expected === undefined || rule.expected === null
+            ? rule.expected
+            : { ruleType: rule.expected.type, value: rule.expected.value },
         },
-        { timestamp: now, emitStructuredLog: false },
+        actor,
+        now,
       );
-      await client.query("COMMIT");
-      return rule;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
+      return listingPriceRuleSchema.parse({ type: saved.ruleType, value: saved.value });
     } finally {
       client.release();
     }
-  }
-}
-async function lockChannel(client: PoolClient, id: number): Promise<void> {
-  if (
-    (
-      await client.query(
-        "SELECT id FROM channels.channels WHERE id=$1 FOR UPDATE",
-        [id],
-      )
-    ).rowCount !== 1
-  ) {
-    throw new ListingPublicationError(
-      "LISTING_CHANNEL_MISSING",
-      "Channel not found",
-      404,
-    );
   }
 }

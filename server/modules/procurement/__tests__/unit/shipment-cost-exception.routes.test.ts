@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import express, { type Request, type Response, type NextFunction } from "express";
 import http from "node:http";
@@ -18,7 +19,7 @@ describe("shipment exception HTTP boundary", () => {
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
   afterEach(async () => { await new Promise<void>(resolve => server.close(() => resolve())); });
-  const post = (options: { id?: string; body?: unknown; permission?: string; actor?: string; key?: string } = {}) => fetch(`${base}/api/shipment-lines/${options.id ?? "141"}/cost-exception`, {
+  const post = (options: { id?: string; body?: unknown; permission?: string; actor?: string; key?: string } = {}) => requestLocalHttp(`${base}/api/shipment-lines/${options.id ?? "141"}/cost-exception`, {
     method: "POST", body: JSON.stringify(options.body ?? input), headers: { "content-type": "application/json", "x-actor": options.actor ?? "admin",
       "x-permission": options.permission ?? "purchasing:approve", "idempotency-key": options.key ?? "approval-key" },
   });
@@ -41,7 +42,7 @@ describe("shipment exception HTTP boundary", () => {
   });
   it("reads behind view permission and does not expose database errors", async () => {
     service.context.mockRejectedValue(new Error("private SQL detail"));
-    const response = await fetch(`${base}/api/shipment-lines/141/cost-exception`, { headers: { "x-permission": "purchasing:view", "x-actor": "viewer" } });
+    const response = await requestLocalHttp(`${base}/api/shipment-lines/141/cost-exception`, { headers: { "x-permission": "purchasing:view", "x-actor": "viewer" } });
     expect(response.status).toBe(500); expect(await response.text()).not.toContain("private SQL");
     expect(service.context).toHaveBeenCalledWith(141, "viewer");
   });

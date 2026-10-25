@@ -9,6 +9,7 @@ export function usePoShipmentCosts(purchaseOrderId: number | null) {
     queryFn: async () => {
       const response = await readShipmentCostWorkflow(
         `/api/purchase-orders/${purchaseOrderId}/shipment-costs`,
+        { includePoLineLinks: true },
       );
       return poShipmentCostsSchema.parse(response);
     },

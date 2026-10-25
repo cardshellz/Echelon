@@ -4,14 +4,10 @@ import {
   allDropshipRmaStatuses,
   buildQueryUrl,
   buildListingPreviewRequest,
-  buildListingQueueRequest,
-  describeListingQueueResult,
-  MAX_LISTING_QUEUE_VARIANTS,
   buildAutoReloadConfigInput,
   buildStripeFundingSetupSessionInput,
   buildStripeWalletFundingSessionInput,
   buildScopedSelectionReplacement,
-  buildVariantSelectionReplacement,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
   buildAdminDogfoodLaunchStatusUrl,
@@ -92,7 +88,6 @@ import {
 } from "../dropship-ops-surface";
 import type {
   DropshipCatalogRow,
-  DropshipListingPreviewResult,
   DropshipVendorSelectionRule,
 } from "../dropship-ops-surface";
 
@@ -2091,69 +2086,6 @@ describe("dropship ops surface client helpers", () => {
     expect(normalizeShopifyShopDomainInput(" ")).toBe("");
   });
 
-  it("builds variant include replacements without carrying stale variant overrides", () => {
-    const replacement = buildVariantSelectionReplacement({
-      existingRules: [
-        makeSelectionRule({ id: 1, scopeType: "catalog", action: "include" }),
-        makeSelectionRule({
-          id: 2,
-          scopeType: "variant",
-          action: "exclude",
-          productVariantId: 42,
-        }),
-        makeSelectionRule({
-          id: 3,
-          scopeType: "variant",
-          action: "include",
-          productVariantId: 99,
-        }),
-      ],
-      rows: [makeCatalogRow({ productVariantId: 42 })],
-      action: "include",
-    });
-
-    expect(replacement).toEqual([
-      expect.objectContaining({ scopeType: "catalog", action: "include" }),
-      expect.objectContaining({
-        scopeType: "variant",
-        action: "include",
-        productVariantId: 99,
-      }),
-      expect.objectContaining({
-        scopeType: "variant",
-        action: "include",
-        productVariantId: 42,
-      }),
-    ]);
-    expect(
-      replacement.some(
-        (rule) => rule.action === "exclude" && rule.productVariantId === 42,
-      ),
-    ).toBe(false);
-  });
-
-  it("builds variant exclude replacements for visible deselection", () => {
-    const replacement = buildVariantSelectionReplacement({
-      existingRules: [
-        makeSelectionRule({ id: 1, scopeType: "catalog", action: "include" }),
-      ],
-      rows: [
-        makeCatalogRow({ productVariantId: 42 }),
-        makeCatalogRow({ productVariantId: 42 }),
-      ],
-      action: "exclude",
-    });
-
-    expect(replacement).toEqual([
-      expect.objectContaining({ scopeType: "catalog", action: "include" }),
-      expect.objectContaining({
-        scopeType: "variant",
-        action: "exclude",
-        productVariantId: 42,
-      }),
-    ]);
-  });
-
   it("builds broad catalog selection replacements without stale opposite scope rules", () => {
     const replacement = buildScopedSelectionReplacement({
       existingRules: [
@@ -2267,74 +2199,6 @@ describe("dropship ops surface client helpers", () => {
       requestedRetailPricesByVariantId: {
         "42": 1999,
       },
-    });
-  });
-
-  it("builds a one-step queue request from the selected catalog rows alone", () => {
-    const request = buildListingQueueRequest({
-      storeConnectionId: 12,
-      rows: [
-        makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) }),
-        makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) }),
-        makeCatalogRow({ productVariantId: 99, selectionDecision: makeSelectionDecision(false) }),
-        makeCatalogRow({ productVariantId: 7, selectionDecision: makeSelectionDecision(true) }),
-      ],
-      idempotencyKey: " listing-push:abc123 ",
-    });
-    // No evidence from any preview travels with it: the server previews now.
-    expect(request).toEqual({
-      storeConnectionId: 12,
-      productVariantIds: [42, 7],
-      idempotencyKey: "listing-push:abc123",
-      reviewMode: "current_preview",
-    });
-  });
-
-  it("refuses a queue request the server would refuse", () => {
-    const selected = makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(true) });
-    expect(() => buildListingQueueRequest({ storeConnectionId: 12, rows: [], idempotencyKey: "listing-push:1" }))
-      .toThrow("Select at least one catalog item");
-    expect(() => buildListingQueueRequest({
-      storeConnectionId: 12,
-      rows: [makeCatalogRow({ productVariantId: 42, selectionDecision: makeSelectionDecision(false) })],
-      idempotencyKey: "listing-push:1",
-    })).toThrow("Select at least one catalog item");
-    expect(() => buildListingQueueRequest({ storeConnectionId: 0, rows: [selected], idempotencyKey: "listing-push:1" }))
-      .toThrow("storeConnectionId");
-    expect(() => buildListingQueueRequest({ storeConnectionId: 12, rows: [selected], idempotencyKey: "short" }))
-      .toThrow("Idempotency key");
-    const tooMany = Array.from({ length: MAX_LISTING_QUEUE_VARIANTS + 1 }, (_, index) =>
-      makeCatalogRow({ productVariantId: index + 1, selectionDecision: makeSelectionDecision(true) }));
-    expect(() => buildListingQueueRequest({ storeConnectionId: 12, rows: tooMany, idempotencyKey: "listing-push:1" }))
-      .toThrow(`at most ${MAX_LISTING_QUEUE_VARIANTS}`);
-  });
-
-  it("describes what a one-step push queued from the server's own preview", () => {
-    const response = (rows: ReturnType<typeof makeListingPreviewRow>[]) => ({
-      job: { jobId: 77, vendorId: 1, storeConnectionId: 12, status: "queued", idempotencyKey: "k", requestHash: "h",
-        createdAt: "2026-09-27T10:00:00.000Z", updatedAt: "2026-09-27T10:00:00.000Z" },
-      items: [],
-      preview: makeListingPreview({ rows }),
-      idempotentReplay: false,
-    });
-    expect(describeListingQueueResult(response([makeListingPreviewRow({ productVariantId: 1, previewStatus: "ready" })])))
-      .toEqual({ outcome: "queued", message: "Sending 1 listing to your store now. This usually takes under a minute; the result shows here." });
-    expect(describeListingQueueResult(response([
-      makeListingPreviewRow({ productVariantId: 1, previewStatus: "ready" }),
-      makeListingPreviewRow({ productVariantId: 2, previewStatus: "warning" }),
-      makeListingPreviewRow({ productVariantId: 3, previewStatus: "blocked" }),
-    ]))).toEqual({
-      outcome: "queued",
-      message: "Sending 2 of 3 listings to your store now. 1 not queued: the table below shows why.",
-    });
-    expect(describeListingQueueResult(response([makeListingPreviewRow({ productVariantId: 3, previewStatus: "blocked" })])))
-      .toEqual({ outcome: "nothing_queued", message: "Nothing was queued: the selected listing is not ready. The table below shows why." });
-    expect(describeListingQueueResult(response([
-      makeListingPreviewRow({ productVariantId: 3, previewStatus: "blocked" }),
-      makeListingPreviewRow({ productVariantId: 4, previewStatus: "blocked" }),
-    ]))).toEqual({
-      outcome: "nothing_queued",
-      message: "Nothing was queued: none of the 2 selected listings are ready. The table below shows why.",
     });
   });
 
@@ -2698,46 +2562,6 @@ function makeSelectionDecision(
     quantityCapApplied: false,
     autoConnectNewSkus: selected,
     autoListNewSkus: false,
-  };
-}
-
-function makeListingPreview(
-  overrides: Partial<DropshipListingPreviewResult>,
-): DropshipListingPreviewResult {
-  return {
-    vendorId: 1,
-    storeConnectionId: 12,
-    platform: "ebay",
-    generatedAt: "2026-05-03T12:00:00.000Z",
-    rows: [],
-    summary: {
-      total: 0,
-      ready: 0,
-      blocked: 0,
-      warning: 0,
-    },
-    ...overrides,
-  };
-}
-
-function makeListingPreviewRow(
-  overrides: Partial<DropshipListingPreviewResult["rows"][number]>,
-): DropshipListingPreviewResult["rows"][number] {
-  return {
-    productVariantId: 1,
-    productId: 10,
-    sku: "SKU",
-    title: "Listing",
-    platform: "ebay",
-    listingMode: "live",
-    currentListingStatus: "not_listed",
-    previewStatus: "ready",
-    blockers: [],
-    warnings: [],
-    marketplaceQuantity: 5,
-    priceCents: 1299,
-    previewHash: "hash",
-    ...overrides,
   };
 }
 

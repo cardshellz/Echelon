@@ -1,7 +1,10 @@
+import { readCanonicalQuantityPublicationMember } from "./canonical-quantity-publication-member.reader";
 import { pool } from "../../../db";
+import type { PoolClient } from "pg";
 import { PostgresQuantityPublicationAdmission } from "./quantity-publication-admission.repository";
-import { QuantityPublicationAdmissionError, type QuantityPublicationScope } from "../domain/quantity-publication-admission";
-import { createAuthorityAwareInventoryPublicationService } from "./inventory-availability-runtime-publication.repository";
+import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, type QuantityPublicationScope } from "../domain/quantity-publication-admission";
+import { PostgresInventoryAvailabilityRuntimePublicationExecutor } from "./inventory-availability-runtime-publication.repository";
+import { AuthorityAwareInventoryPublicationService, type InventoryAvailabilityRuntimePublicationContext } from "../application/inventory-availability-runtime-publication.service";
 import { QuantityPublicationCatchupService } from "../application/quantity-publication-admission.port";
 import type { EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
 import { PostgresQuantityProviderResponseRecovery } from "./quantity-provider-response-recovery.repository";
@@ -17,17 +20,19 @@ export const ebayPublicationRejectionReader = new PostgresEbayPublicationRejecti
 export const automaticEbayPublicationRecovery = new EbayAutomaticPublicationRecoveryService(new PostgresEbayAutomaticPublicationRecoveryRepository(pool));
 export const ebayPublicationReconciliationRepository = new PostgresEbayPublicationReconciliationRepository(pool);
 
-function ebayRequestAdmission(base: Omit<QuantityPublicationScope, "externalInventoryItemId">): EbayQuantityRequestAdmission {
+function ebayRequestAdmission(base: Omit<QuantityPublicationScope, "externalInventoryItemId">,
+  environment?: "production" | "sandbox"): EbayQuantityRequestAdmission {
   const scope = (identity: string): QuantityPublicationScope => ({ ...base, externalInventoryItemId: identity });
   return {
     item: (sku, work) => quantityPublicationAdmission.runListing(scope(sku), () => planCurrentCanonicalListingQuantity(scope(sku)), work),
-    group: (groupKey, skus, work) => quantityPublicationAdmission.runListingGroup(scope(`group:${groupKey}`), skus.map(scope), planCurrentCanonicalListingQuantity, work),
+    group: (groupKey, skus, work, maintenance) => quantityPublicationAdmission.runListingGroup(scope(`group:${groupKey}`), skus.map(scope),
+      planCurrentCanonicalListingQuantity, work, maintenance && environment ? { environment, market: maintenance.marketplaceId } : undefined),
     reducing: (identity, work, memberSkus) => quantityPublicationAdmission.runQuantityReducingLifecycle(scope(identity), work, memberSkus?.map(scope)),
   };
 }
 
 export async function createChannelEbayQuantityRequestAdmission(input: {
-  channelId: number; externalAccountId: string; expectedConnectionId?: number;
+  channelId: number; externalAccountId: string; expectedConnectionId?: number; environment?: "production" | "sandbox";
 }): Promise<EbayQuantityRequestAdmission> {
   const connections = (await pool.query<{ id: number }>(
     "SELECT id FROM channels.channel_connections WHERE channel_id=$1 ORDER BY id LIMIT 2", [input.channelId],
@@ -37,35 +42,37 @@ export async function createChannelEbayQuantityRequestAdmission(input: {
   if(input.expectedConnectionId!==undefined && connections[0].id!==input.expectedConnectionId) throw new QuantityPublicationAdmissionError(
     "EBAY_SYNC_IDENTITY_CHANGED","The listing sync credential connection changed before publication.");
   return ebayRequestAdmission({ destinationKind: "channel_connection", connectionId: connections[0].id,
-    providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null });
+    providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null }, input.environment);
 }
 
 export function createDropshipEbayQuantityRequestAdmission(input: {
-  storeConnectionId: number; externalAccountId: string | null; externalAccountVerifiedAt: Date | null;
+  storeConnectionId: number; externalAccountId: string | null; externalAccountVerifiedAt: Date | null; providerEnvironment?: string | null;
 }): EbayQuantityRequestAdmission {
   if (!input.externalAccountId || !input.externalAccountVerifiedAt) throw new QuantityPublicationAdmissionError(
     "PUBLICATION_PROVIDER_ACCOUNT_UNVERIFIED", "Provider-verified eBay store identity is required before publishing quantity.");
   return ebayRequestAdmission({ destinationKind: "dropship_store_connection", connectionId: input.storeConnectionId,
-    providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null });
+    providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null },
+    input.providerEnvironment === "production" || input.providerEnvironment === "sandbox" ? input.providerEnvironment : undefined);
 }
 
-export async function planCurrentCanonicalListingQuantity(scope: QuantityPublicationScope): Promise<{ outboxId: string; quantity: number }> {
-  const mappings = (await pool.query<{ product_id: number; product_variant_id: number; target_id: number }>(
-    `SELECT v.product_id,m.product_variant_id,t.id AS target_id
-     FROM inventory.inventory_publication_targets t
-     JOIN inventory.publication_variant_mapping_heads h ON h.publication_target_id=t.id
-     JOIN inventory.publication_variant_mapping_versions m ON m.id=h.active_mapping_id
-     JOIN catalog.product_variants v ON v.id=m.product_variant_id
-     WHERE t.state='live' AND t.publication_authority='echelon' AND m.lifecycle_status='sealed'
-     AND t.destination_kind=$1 AND COALESCE(t.channel_connection_id,t.dropship_store_connection_id)=$2
-     AND t.provider_scope_type=$3 AND t.external_scope_id=$4 AND m.external_inventory_item_id=$5 LIMIT 2`,
-    [scope.destinationKind,scope.connectionId,scope.providerScopeType,scope.externalScopeId,scope.externalInventoryItemId],
-  )).rows;
-  if (mappings.length !== 1) throw new QuantityPublicationAdmissionError("PUBLICATION_LISTING_TARGET_UNMAPPED",
-    "Listing quantity requires one exact active canonical target/mapping; configure it before publishing.", { scope });
-  const mapping = mappings[0];
-  const result = await createAuthorityAwareInventoryPublicationService(pool).publishProduct({
-    productId: mapping.product_id, dryRun: false, triggeredBy: "canonical_listing_quantity_refresh",
+export async function planCurrentCanonicalListingQuantity(raw: QuantityPublicationScope): Promise<{ outboxId: string; quantity: number }> {
+  const scope = quantityPublicationScopeSchema.parse(raw);
+  // The existing executor owns capacity, SERIALIZABLE isolation and authority
+  // locks. Exact mapping resolution, desired state and handoff commit together;
+  // provider I/O remains outside under admission's retained session scope locks.
+  return new PostgresInventoryAvailabilityRuntimePublicationExecutor(pool).executeWithClient((client, context) =>
+    planCanonicalListingQuantityInsideTransaction(client, context, scope));
+}
+
+async function planCanonicalListingQuantityInsideTransaction(client: PoolClient,
+  context: InventoryAvailabilityRuntimePublicationContext, scope: QuantityPublicationScope): Promise<{ outboxId: string; quantity: number }> {
+  if (context.authority !== "canonical") throw new QuantityPublicationAdmissionError("PUBLICATION_AUTHORITY_CHANGED",
+    "Canonical listing planning cannot fall back to legacy ATP.");
+  const mapping = await readCanonicalQuantityPublicationMember(client, scope);
+  const publisher = new AuthorityAwareInventoryPublicationService({ execute: work => work(context) });
+  const result = await publisher.publishProduct({
+    productId: mapping.product_id, publicationTargetId: mapping.target_id, productVariantIds: [mapping.product_variant_id],
+    dryRun: false, triggeredBy: "canonical_listing_quantity_refresh",
   }, async () => { throw new QuantityPublicationAdmissionError("PUBLICATION_AUTHORITY_CHANGED", "Canonical listing planning cannot fall back to legacy ATP."); });
   if (result.authority !== "canonical") throw new QuantityPublicationAdmissionError("PUBLICATION_AUTHORITY_CHANGED", "Canonical listing authority changed.");
   const currentIntents = result.publication.rows.filter(row => row.publicationTargetId === mapping.target_id
@@ -76,7 +83,7 @@ export async function planCurrentCanonicalListingQuantity(scope: QuantityPublica
   if (currentIntents.length !== 1) throw new QuantityPublicationAdmissionError("PUBLICATION_LISTING_PLAN_OMITTED",
     "The current canonical plan did not authorize this exact listing; an older outbox quantity is not authority.", { scope });
   const intent = currentIntents[0];
-  const row = (await pool.query<{ id: string; desired_quantity: string }>(`SELECT id::text,desired_quantity::text
+  const row = (await client.query<{ id: string; desired_quantity: string }>(`SELECT id::text,desired_quantity::text
     FROM inventory.inventory_publication_outbox o WHERE publication_target_id=$1 AND product_variant_id=$2
     AND activation_run_id=$3 AND publication_phase='full' AND publication_target_revision_snapshot=$4 AND desired_quantity=$5
     AND destination_kind_snapshot=$6 AND COALESCE(channel_connection_id_snapshot,dropship_store_connection_id_snapshot)=$7

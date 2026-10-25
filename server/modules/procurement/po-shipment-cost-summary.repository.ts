@@ -7,6 +7,8 @@ import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence
 import { dateValues } from "./purchase-workspace-read";
 import { readShipmentCostPostingEvidence } from "./shipment-cost-posting-read.repository";
 import { readPurchaseCostStatus } from "./purchase-cost-status.repository";
+import { readSupplierCreditCostRows } from "./supplier-credit-source.repository";
+import { resolveShipmentSupplierCredits } from "./domain/shipment-supplier-credits";
 
 type SummaryReader = {
   execute(query: SQL): Promise<{ rows: Record<string, unknown>[] }>;
@@ -85,7 +87,7 @@ export async function readPoShipmentCosts(
       UNION SELECT invoice_line.vendor_invoice_id FROM procurement.vendor_invoice_lines invoice_line
       JOIN procurement.inbound_freight_costs cost ON cost.id=invoice_line.freight_cost_id
       WHERE cost.inbound_shipment_id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(shipmentIds)}::jsonb))
-    ) SELECT line.id,invoice.id AS invoice_id,line.freight_cost_id,invoice.vendor_id,invoice.inbound_shipment_id,
+    ) SELECT line.id,invoice.id AS invoice_id,line.freight_cost_id,line.purchase_order_line_id,line.product_variant_id,invoice.vendor_id,invoice.inbound_shipment_id,
       invoice.currency,invoice.status,invoice.invoiced_amount_cents,invoice.invoice_number,invoice.replaces_invoice_id,line.qty_invoiced,line.unit_cost_mills,line.unit_cost_cents,line.line_total_cents,
       SUM(line.line_total_cents) OVER (PARTITION BY invoice.id)::text AS document_total
       FROM selected JOIN procurement.vendor_invoices invoice ON invoice.id=selected.id
@@ -96,6 +98,7 @@ export async function readPoShipmentCosts(
         invoiceNumber: row.invoice_number ?? null,
         replacesInvoiceId: row.replaces_invoice_id ?? null,
         freightCostId: row.freight_cost_id,
+        purchaseOrderLineId: row.purchase_order_line_id, productVariantId: row.product_variant_id,
         vendorId: row.vendor_id,
         shipmentId: row.inbound_shipment_id,
         currency: row.currency,
@@ -133,6 +136,9 @@ export async function readPoShipmentCosts(
         if (!linkedLine) throw new Error("Shipment costing review refers to an unlinked line.");
         return { lineId, shipmentId: costInteger(linkedLine.inbound_shipment_id, "shipmentId", 1), contract: row.contract };
       }));
+      const supplierCredits = await readSupplierCreditCostRows(tx, { freightCostIds: charges.rows.map(row => Number(row.id)) });
+      const creditAdjustment = resolveShipmentSupplierCredits({ charges: charges.rows, allocations: allocations.rows,
+        invoices: invoices.rows.map(row => ({ ...row, vendor_invoice_id: row.invoice_id })), credits: supplierCredits });
       const costs = buildPoShipmentCosts(
         {
           poId,
@@ -167,12 +173,12 @@ export async function readPoShipmentCosts(
                   : signed(
                       row.actual_cents ?? row.estimated_cents,
                       "charge.amountCents",
-                    ),
+                    ) - (creditAdjustment.creditedCentsByCharge.get(Number(row.id)) ?? 0),
               confirmed: authority.evidence === "confirmed",
-              issue: authority.issue?.code ?? null,
+              issue: authority.issue?.code ?? creditAdjustment.issues[0]?.code ?? null,
             };
           }),
-          allocations: allocations.rows.map((row) => ({
+          allocations: creditAdjustment.allocations.map((row) => ({
             costId: costInteger(row.shipment_cost_id, "costId", 1),
             poId:
               row.purchase_order_id == null
@@ -216,6 +222,8 @@ export async function readPoShipmentCosts(
           const contract = row.contract as Record<string, unknown> | null;
           return {
             lineId,
+            purchaseOrderLineId: line.purchase_order_line_id == null
+              ? null : costInteger(line.purchase_order_line_id, "purchaseOrderLineId", 1),
             exceptionReview: exceptions.get(lineId) ?? null,
             shipmentId: costInteger(line.inbound_shipment_id, "shipmentId", 1),
             shipmentNumber:

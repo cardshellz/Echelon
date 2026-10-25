@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import pg from "pg";
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -5,28 +6,34 @@ import * as schema from "@shared/schema";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 
 // Regression fixture: actual participating columns/FKs, unique indexes and financial triggers.
-// Unrelated user/WMS tables and the full production migration chain are outside this fixture.
+// Current payment authority uses real Identity rows; unrelated WMS tables and
+// the full production migration chain remain outside this fixture.
 // Actual SQL and application owners; only the module-global DB transport is redirected.
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
-const tables = [schema.vendors, schema.inboundShipments, schema.purchaseOrders, schema.purchaseOrderLines,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.inboundFreightCosts,
+const tables = [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
+  schema.vendors, schema.inboundShipments, schema.purchaseOrders, schema.purchaseOrderLines,
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.inboundFreightCosts,
   schema.apPayments, schema.apPaymentAllocations, schema.poStatusHistory, schema.vendorInvoiceAttachments];
 databaseTests.sequential("AP financial safeguards with actual0620 and status constraint (real PostgreSQL)", () => {
   let pool: pg.Pool; let modulePool: pg.Pool; let db: any;
   let service: typeof import("../../ap-ledger.service");
-  let ownsSchema = false;
+  let ownsSchema = false; let ownsIdentitySchema = false; let ownsAuditTable = false;
   const actor = "review-ap-unhappy-path";
+  let ownsSupplierReturnInventory = false;
   beforeAll(async () => {
     if (!url || !["localhost", "127.0.0.1"].includes(new URL(url).hostname)
       || [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].filter(Boolean).includes(url)) {
       throw new Error("Probe requires a separate explicitly disposable local database");
     }
     pool = new pg.Pool({ connectionString: url, ssl: false, max: 6, statement_timeout: 10000 });
+    await pool.query("CREATE SCHEMA identity"); ownsIdentitySchema = true;
+    await pool.query("CREATE SCHEMA inventory"); ownsSupplierReturnInventory = true;
     await pool.query("CREATE SCHEMA procurement"); ownsSchema = true;
     for (const table of tables) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
-    await pool.query(fixtureTable(schema.auditEvents));
+    await pool.query(fixtureTable(schema.auditEvents)); ownsAuditTable = true;
     // Relevant actual constraints (schema's status columns have no enum/check).
     await pool.query(`
       CREATE UNIQUE INDEX vendor_invoices_vendor_invoice_idx ON procurement.vendor_invoices(vendor_id,invoice_number);
@@ -49,17 +56,36 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
   beforeEach(async () => {
     await pool.query(`TRUNCATE ${tables.map(qualifiedTable).join(",")} RESTART IDENTITY CASCADE`);
     await pool.query("TRUNCATE public.audit_events RESTART IDENTITY");
+    // The real command owner rechecks active account and current grants after
+    // acquiring its transaction lock. A role label alone is not authority.
+    await pool.query(`INSERT INTO identity.users(id,username,password,role,active)
+        VALUES('${actor}','ap-safeguards-operator','unused','picker',1);
+      INSERT INTO identity.auth_roles(id,name) VALUES(1,'AP safeguards approver');
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(1,'purchasing','approve','purchasing');
+      INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES('${actor}',1);
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,1)`);
     await pool.query(`INSERT INTO procurement.vendors(id,code,name) VALUES(5,'AP-PROBE','Synthetic vendor');
       INSERT INTO procurement.inbound_shipments(id,shipment_number,status) VALUES(9,'AP-PROBE-SHIP','costing');
       INSERT INTO procurement.vendor_invoices(id,invoice_number,vendor_id,status,invoiced_amount_cents,balance_cents,due_date)
         VALUES(71,'AP-PROBE-INV',5,'approved',10000,10000,'2026-09-01')`);
   });
   afterAll(async () => {
-    if (ownsSchema) { await pool.query("DROP SCHEMA procurement CASCADE"); await pool.query("DROP TABLE public.audit_events"); }
-    await pool?.end(); await modulePool?.end();
+    if (ownsSupplierReturnInventory) await pool!.query("DROP SCHEMA inventory CASCADE");
+    // Attempt every owned cleanup even when setup stopped partway through.
+    const failures: unknown[] = [];
+    for (const cleanup of [
+      async () => { if (ownsSchema) await pool.query("DROP SCHEMA procurement CASCADE"); },
+      async () => { if (ownsAuditTable) await pool.query("DROP TABLE public.audit_events"); },
+      async () => { if (ownsIdentitySchema) await pool.query("DROP SCHEMA identity CASCADE"); },
+      async () => { await pool?.end(); },
+      async () => { await modulePool?.end(); },
+    ]) {
+      try { await cleanup(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new AggregateError(failures, "AP safeguards fixture cleanup failed");
   });
   const pay = (amount: number, status = "completed") => db.transaction((tx: any) =>
-    service.executeApPaymentCommandInTransaction("record_payment", { userId: actor, payment: {
+    service.executeApPaymentCommandInTransaction("record_payment", { now: new Date("2026-10-25T12:00:00.000Z"), userId: actor, payment: {
       vendorId: 5, paymentDate: new Date("2026-10-13T12:00:00Z"), paymentMethod: "ach",
       totalAmountCents: amount, status, allocations: [{ vendorInvoiceId: 71, appliedAmountCents: amount }], createdBy: actor,
     } }, tx));
@@ -85,6 +111,13 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
 
   it.each(["returned", "scheduled", "arbitrary_status", "voided"])("rejects new %s payment atomically", async status => {
     await expect(pay(10000, status)).rejects.toMatchObject({ statusCode: 400, details: { code: "AP_PAYMENT_STATUS_INVALID" } });
+    expect(await invoice()).toMatchObject({ paid_amount_cents: "0", balance_cents: "10000" });
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.ap_payments")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events")).rows[0].count).toBe(0);
+  });
+  it("rejects a revoked real permission before changing settlement or audit history", async () => {
+    await pool.query("DELETE FROM identity.auth_role_permissions WHERE role_id=1 AND permission_id=1");
+    await expect(pay(8000)).rejects.toMatchObject({ statusCode: 403, details: { code: "AP_PAYMENT_AUTHORITY_REQUIRED" } });
     expect(await invoice()).toMatchObject({ paid_amount_cents: "0", balance_cents: "10000" });
     expect((await pool.query("SELECT count(*)::int AS count FROM procurement.ap_payments")).rows[0].count).toBe(0);
     expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events")).rows[0].count).toBe(0);
@@ -130,7 +163,7 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
   });
   it("voided payment allocations still lock generic editing even without approval markers", async () => {
     const payment = await pay(8000);
-    await db.transaction((tx: any) => service.executeApPaymentCommandInTransaction("void_payment", { paymentId: payment.id, reason: "Synthetic reversal", userId: actor }, tx));
+    await db.transaction((tx: any) => service.executeApPaymentCommandInTransaction("void_payment", { now: new Date("2026-10-25T13:00:00.000Z"), paymentId: payment.id, reason: "Synthetic reversal", userId: actor }, tx));
     await invoiceCommand("dispute_invoice");
     expect((await invoice()).paid_amount_cents).toBe("0");
     await expect(service.updateInvoice(71, { invoicedAmountCents: 5000 }, actor)).rejects.toMatchObject(historyRejection);
@@ -155,6 +188,11 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
   it("serializes payment, dispute and generic edit without erasing the obligation", async () => {
     await unrecognized(); await invoiceCommand("approve_invoice");
     const outcomes = await Promise.allSettled([pay(8000), invoiceCommand("dispute_invoice"), service.updateInvoice(71, { invoicedAmountCents: 5000 }, actor)]);
+    // Losing the payment/dispute race is valid only for the domain rejection;
+    // schema/authority failures must not masquerade as a safe concurrent result.
+    if (outcomes[0].status === "rejected") expect(outcomes[0].reason).toMatchObject({
+      statusCode: 409, details: { code: "AP_PAYMENT_ALLOCATION_INVOICE_NOT_PAYABLE" },
+    });
     expect(outcomes[1].status).toBe("fulfilled");
     expect(outcomes[2].status).toBe("rejected");
     const current = await invoice();

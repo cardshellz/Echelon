@@ -1,3 +1,9 @@
+import { registerPurchaseOrderEntryRoutes } from "./purchase-order-entry.routes";
+import { parseNullableDateInput } from "./purchase-order-entry-input";
+import { getPurchaseOrderWorkList } from "./purchase-order-work-list.service";
+import { purchaseApprovalCommandScope } from "./purchase-approval.commands";
+import { purchaseApprovalLinesFingerprint } from "./purchase-approval-review";
+import { getPurchaseOrderList, PurchaseOrderListQueryError } from "./purchase-order-list.service";
 import { procurementSettingsCommands, PROCUREMENT_SETTINGS_COMMAND_SCOPE } from "./procurement-settings.commands";
 import type { Express, Request, Response } from "express";
 import { registerPoVarianceApprovalRoutes } from './po-variance-approval.routes';
@@ -10,11 +16,8 @@ import { ordersStorage } from "../orders";
 const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage, ...ordersStorage };
 import { requirePermission, requireAnyPermission } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
-import {
-  PurchasingError,
-  type CreatePurchaseOrderWithLinesInput,
-  type PurchaseOrderLineInput,
-} from "./purchasing.service";
+import { PurchasingError } from "./purchasing.service";
+import { DocumentNumberError } from "../../platform/document-numbering/document-number";
 import * as poExceptionsService from "./po-exceptions.service";
 import { PoExceptionError } from "./po-exceptions.service";
 import * as apLedger from "./ap-ledger.service";
@@ -38,7 +41,6 @@ import {
   type PoLifecycleCommand,
 } from "./purchase-order-lifecycle.service";
 import { purchaseOrderDraftHeaderPatchSchema } from "./purchase-order-draft-header";
-import type { PoLinePricingInput } from "@shared/utils/po-line-pricing";
 import { financialCommandFromRequest } from "../../platform/commands/http-command";
 import {
   FinancialCommandError,
@@ -103,202 +105,8 @@ function sendFinancialCommandError(res: any, error: FinancialCommandError): any 
   });
 }
 
-function parseNullableDateInput(value: unknown, fieldLabel: string): Date | null | undefined {
-  if (value === undefined) return undefined;
-  if (value === null || value === "") return null;
-  if (typeof value !== "string" && !(value instanceof Date)) {
-    throw new PurchasingError(`${fieldLabel} must be a valid date`, 400, {
-      code: "INVALID_DATE_INPUT",
-      field: fieldLabel,
-    });
-  }
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    throw new PurchasingError(`${fieldLabel} must be a valid date`, 400, {
-      code: "INVALID_DATE_INPUT",
-      field: fieldLabel,
-    });
-  }
-  return date;
-}
-
-function mapPoLinePricingInput(line: any): PoLinePricingInput | undefined {
-  const pricing = line?.pricing;
-  if (!pricing || typeof pricing !== "object") return undefined;
-  const basis = pricing.basis ?? pricing.pricing_basis;
-  if (basis === "per_piece") {
-    return {
-      basis,
-      quantityPieces: Number(pricing.quantityPieces ?? pricing.quantity_pieces),
-      unitCostMills: Number(pricing.unitCostMills ?? pricing.unit_cost_mills),
-    };
-  }
-  if (basis === "per_purchase_uom") {
-    return {
-      basis,
-      purchaseUom: String(pricing.purchaseUom ?? pricing.purchase_uom ?? ""),
-      uomQuantity: Number(pricing.uomQuantity ?? pricing.uom_quantity),
-      piecesPerUom: Number(pricing.piecesPerUom ?? pricing.pieces_per_uom),
-      quotedCostMillsPerUom: Number(
-        pricing.quotedCostMillsPerUom ?? pricing.quoted_cost_mills_per_uom,
-      ),
-    };
-  }
-  if (basis === "extended_total") {
-    return {
-      basis,
-      quantityPieces: Number(pricing.quantityPieces ?? pricing.quantity_pieces),
-      quotedTotalCents: Number(pricing.quotedTotalCents ?? pricing.quoted_total_cents),
-    };
-  }
-  return pricing as PoLinePricingInput;
-}
-
-function mapCatalogWriteDirective(line: any): PurchaseOrderLineInput["catalogWrite"] {
-  const raw = line?.catalog_write ?? line?.catalogWrite;
-  if (raw === undefined || raw === null) return undefined;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new PurchasingError("catalog_write must be an object", 400, {
-      code: "PO_LINE_CATALOG_WRITE_INVALID",
-    });
-  }
-  const keys = Object.keys(raw);
-  if (keys.some((key) => key !== "mode" && key !== "set_preferred" && key !== "setPreferred")) {
-    throw new PurchasingError("catalog_write contains unsupported fields", 400, {
-      code: "PO_LINE_CATALOG_WRITE_INVALID",
-    });
-  }
-  if (raw.mode !== "upsert") {
-    throw new PurchasingError("catalog_write.mode must be 'upsert'", 400, {
-      code: "PO_LINE_CATALOG_WRITE_INVALID",
-    });
-  }
-  const setPreferred = raw.set_preferred ?? raw.setPreferred;
-  if (
-    raw.set_preferred !== undefined &&
-    raw.setPreferred !== undefined &&
-    raw.set_preferred !== raw.setPreferred
-  ) {
-    throw new PurchasingError("catalog_write preferred flags conflict", 400, {
-      code: "PO_LINE_CATALOG_WRITE_INVALID",
-    });
-  }
-  if (setPreferred !== undefined && typeof setPreferred !== "boolean") {
-    throw new PurchasingError("catalog_write.set_preferred must be a boolean", 400, {
-      code: "PO_LINE_CATALOG_WRITE_INVALID",
-    });
-  }
-  return {
-    mode: "upsert",
-    ...(setPreferred === undefined ? {} : { setPreferred }),
-  };
-}
-
-function mapPurchaseOrderLineInput(line: any, includeLineId: boolean): PurchaseOrderLineInput {
-  const rawCents = line?.unit_cost_cents ?? line?.unitCostCents;
-  const rawMills = line?.unit_cost_mills ?? line?.unitCostMills;
-  const lineType = line?.line_type ?? line?.lineType ?? "product";
-  const variantIdRaw = line?.product_variant_id ?? line?.productVariantId;
-  const productIdRaw = line?.product_id ?? line?.productId;
-  const expectedReceiveVariantIdRaw =
-    line?.expected_receive_variant_id ?? line?.expectedReceiveVariantId ?? variantIdRaw;
-  const expectedReceiveUnitsPerVariantRaw =
-    line?.expected_receive_units_per_variant ?? line?.expectedReceiveUnitsPerVariant;
-  const pricing = mapPoLinePricingInput(line);
-  const pricingSource = line?.pricing_source ?? line?.pricingSource;
-  if (
-    !includeLineId &&
-    pricingSource !== undefined &&
-    pricingSource !== "manual" &&
-    pricingSource !== "vendor_catalog"
-  ) {
-    throw new PurchasingError("New PO lines may only use manual or vendor_catalog pricing", 400, {
-      code: "PO_LINE_PRICING_SOURCE_FORBIDDEN",
-    });
-  }
-  const rawOrderQty = line?.quantity_ordered ?? line?.orderQty;
-  const pricingOrderQty = pricing?.basis === "per_purchase_uom"
-    ? pricing.uomQuantity * pricing.piecesPerUom
-    : pricing?.quantityPieces;
-  const mapped: PurchaseOrderLineInput = {
-    lineType,
-    clientId: line?.client_id ?? line?.clientId ?? undefined,
-    parentClientId: line?.parent_client_id ?? line?.parentClientId ?? null,
-    description: line?.description ?? null,
-    productId: lineType === "product" ? Number(productIdRaw) : null,
-    productVariantId:
-      lineType === "product" && variantIdRaw != null ? Number(variantIdRaw) : null,
-    expectedReceiveVariantId:
-      lineType === "product" && expectedReceiveVariantIdRaw != null
-        ? Number(expectedReceiveVariantIdRaw)
-        : null,
-    expectedReceiveUnitsPerVariant:
-      lineType === "product" && expectedReceiveUnitsPerVariantRaw != null
-        ? Number(expectedReceiveUnitsPerVariantRaw)
-        : null,
-    orderQty: Number(rawOrderQty ?? pricingOrderQty),
-    vendorProductId: line?.vendor_product_id ?? line?.vendorProductId ?? undefined,
-    vendorSku: line?.vendor_sku ?? line?.vendorSku ?? null,
-    notes: line?.notes ?? null,
-    pricing,
-    pricingSource,
-    quoteReference: line?.quote_reference ?? line?.quoteReference ?? null,
-    quotedAt: parseNullableDateInput(
-      line?.quoted_at ?? line?.quotedAt,
-      "quotedAt",
-    ) ?? null,
-    quoteValidUntil: line?.quote_valid_until ?? line?.quoteValidUntil ?? null,
-    catalogWrite: mapCatalogWriteDirective(line),
-  };
-
-  if (includeLineId) {
-    const rawLineId = line?.line_id ?? line?.lineId;
-    if (rawLineId !== undefined && rawLineId !== null) mapped.lineId = Number(rawLineId);
-  }
-  if (rawCents !== undefined && rawCents !== null) mapped.unitCostCents = Number(rawCents);
-  if (rawMills !== undefined && rawMills !== null) mapped.unitCostMills = Number(rawMills);
-
-  const rawTotalProduct = line?.total_product_cost_cents ?? line?.totalProductCostCents;
-  const rawPackaging = line?.packaging_cost_cents ?? line?.packagingCostCents;
-  if (rawTotalProduct !== undefined && rawTotalProduct !== null) {
-    mapped.totalProductCostCents = Number(rawTotalProduct);
-  }
-  if (rawPackaging !== undefined && rawPackaging !== null) {
-    mapped.packagingCostCents = Number(rawPackaging);
-  }
-  return mapped;
-}
-
-function mapPurchaseOrderWithLinesInput(
-  body: any,
-  includeLineIds: boolean,
-): CreatePurchaseOrderWithLinesInput {
-  const expectedDeliveryRaw = body?.expected_delivery_date ?? body?.expectedDeliveryDate;
-  const hasWarehouseId = body?.warehouse_id !== undefined || body?.warehouseId !== undefined;
-  const warehouseIdRaw = body?.warehouse_id !== undefined
-    ? body.warehouse_id
-    : body?.warehouseId;
-  return {
-    vendorId: Number(body?.vendor_id ?? body?.vendorId),
-    warehouseId: !hasWarehouseId
-      ? undefined
-      : warehouseIdRaw === null
-        ? null
-        : Number(warehouseIdRaw),
-    poType: body?.po_type ?? body?.poType,
-    priority: body?.priority,
-    expectedDeliveryDate:
-      parseNullableDateInput(expectedDeliveryRaw, "expectedDeliveryDate") ?? null,
-    incoterms: body?.incoterms ?? null,
-    vendorNotes: body?.vendor_notes ?? body?.vendorNotes ?? null,
-    internalNotes: body?.internal_notes ?? body?.internalNotes ?? null,
-    lines: Array.isArray(body?.lines)
-      ? body.lines.map((line: any) => mapPurchaseOrderLineInput(line, includeLineIds))
-      : [],
-  };
-}
-
 export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pick<ReturnType<typeof createPoFinancialEvidenceService>, "readWorkflow"> = createPoFinancialEvidenceService(db)) {
+  registerPurchaseOrderEntryRoutes(app);
   registerPoQuantityAmendmentRoutes(app);
   registerPoVarianceApprovalRoutes(app);
   const { purchasing, shipmentTracking } = app.locals.services;
@@ -314,6 +122,8 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
     if (req.body?.notes !== undefined) input.notes = req.body.notes;
     if (req.body?.confirmedSentExternally !== undefined) input.confirmedSentExternally = req.body.confirmedSentExternally;
     if (req.body?.expectedUpdatedAt !== undefined) input.expectedUpdatedAt = req.body.expectedUpdatedAt;
+    if (req.body?.expectedTotalCents !== undefined) input.expectedTotalCents = req.body.expectedTotalCents;
+    if (req.body?.expectedLinesFingerprint !== undefined) input.expectedLinesFingerprint = req.body.expectedLinesFingerprint;
     if (req.body?.reason !== undefined) input.reason = req.body.reason;
     if (req.body?.vendorRefNumber !== undefined) input.vendorRefNumber = req.body.vendorRefNumber;
     if (req.body?.confirmedDeliveryDate !== undefined) {
@@ -340,6 +150,9 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       }
       res.json(result);
     } catch (error: any) {
+      if (error instanceof DocumentNumberError) {
+        return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      }
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
       res.status(500).json({ error: error.message });
     }
@@ -349,37 +162,30 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
 
   app.get("/api/purchase-orders", requirePermission("purchasing", "view"), async (req, res) => {
     try {
+      const statusFilter = (value: unknown): string | string[] | undefined => {
+        if (value === undefined) return undefined;
+        const values = typeof value === "string" ? value.split(",")
+          : Array.isArray(value) && value.every(entry => typeof entry === "string") ? value.flatMap(entry => entry.split(","))
+            : null;
+        if (!values || values.length === 0 || values.some(value => value.length === 0)) throw new PurchaseOrderListQueryError();
+        return values.length === 1 ? values[0] : values;
+      };
       // Support ?status=sent&status=acknowledged or ?status=sent,acknowledged
-      let statusFilter: string | string[] | undefined;
-      if (req.query.status) {
-        const raw = Array.isArray(req.query.status) ? req.query.status as string[] : (req.query.status as string).split(",");
-        statusFilter = raw.length === 1 ? raw[0] : raw;
-      }
-      // Phase 2: dual-track physical/financial status filters
-      let physicalStatusFilter: string | string[] | undefined;
-      if (req.query.physical_status) {
-        const raw = Array.isArray(req.query.physical_status) ? req.query.physical_status as string[] : (req.query.physical_status as string).split(",");
-        physicalStatusFilter = raw.length === 1 ? raw[0] : raw;
-      }
-      let financialStatusFilter: string | string[] | undefined;
-      if (req.query.financial_status) {
-        const raw = Array.isArray(req.query.financial_status) ? req.query.financial_status as string[] : (req.query.financial_status as string).split(",");
-        financialStatusFilter = raw.length === 1 ? raw[0] : raw;
-      }
       const filters = {
-        status: statusFilter,
-        physicalStatus: physicalStatusFilter,
-        financialStatus: financialStatusFilter,
+        status: statusFilter(req.query.status),
+        physicalStatus: statusFilter(req.query.physical_status),
+        financialStatus: statusFilter(req.query.financial_status),
+        financialWorkflow: req.query.financial_workflow,
         vendorId: req.query.vendorId ? Number(req.query.vendorId) : undefined,
         search: req.query.search as string | undefined,
         limit: req.query.limit ? Number(req.query.limit) : 50,
         offset: req.query.offset ? Number(req.query.offset) : 0,
       };
-      const [pos, count, allVendors] = await Promise.all([
-        purchasing.getPurchaseOrders(filters),
-        purchasing.getPurchaseOrdersCount(filters),
+      const [page, allVendors] = await Promise.all([
+        getPurchaseOrderList(filters),
         storage.getAllVendors(),
       ]);
+      const { purchaseOrders: pos, total: count } = page;
       const vendorMap = new Map(allVendors.map((v: any) => [v.id, v]));
 
       // Attach open exception counts to each PO (parallel, no N+1).
@@ -395,7 +201,18 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       }));
       res.json({ purchaseOrders: enriched, total: count });
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      if (error instanceof PurchaseOrderListQueryError) return res.status(400).json({ error: "Invalid purchase order list filters or page", code: "PO_LIST_QUERY_INVALID" });
+      logger.error("procurement.purchase_order_list", { error_class: error instanceof Error ? error.name : typeof error });
+      res.status(503).json({ error: "Purchase order financial evidence could not be verified. Retry the list.", code: "PURCHASE_ORDER_LIST_UNAVAILABLE" });
+    }
+  });
+
+  app.get("/api/purchase-orders/work-list", requirePermission("purchasing", "view"), async (req, res) => {
+    try { res.json(await getPurchaseOrderWorkList(req.query)); }
+    catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "PO_WORK_LIST_QUERY_INVALID", error: "Invalid purchase order selection filters or page." });
+      console.error(JSON.stringify({ event: "procurement.po_work_list.failed", errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(500).json({ code: "PO_WORK_LIST_UNAVAILABLE", error: "Purchase order selection could not be verified. Retry the list." });
     }
   });
 
@@ -475,7 +292,8 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       const costs = await purchasing.getPoShipmentCosts(parsed.data);
       if (!costs) return res.status(404).json({ code: "PURCHASE_ORDER_NOT_FOUND", error: "Purchase order not found" });
       res.vary("X-Shipment-Cost-Review-Version");
-      res.json(shipmentCostReviewResponse(costs,req.get("X-Shipment-Cost-Review-Version")));
+      res.vary("X-Purchase-Order-Line-Cost-Version");
+      res.json(shipmentCostReviewResponse(costs,req.get("X-Shipment-Cost-Review-Version"),req.get("X-Purchase-Order-Line-Cost-Version") === "1"));
     } catch (error: unknown) {
       console.error(JSON.stringify({ event: "procurement.po_shipment_costs_failed", poId: parsed.data,
         errorType: error instanceof Error ? error.name : "unknown" }));
@@ -542,8 +360,9 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       }
 
       res.json({
-        ...withLifecycle(po),
+        ...withLifecycle({ ...po, financialWorkflow }),
         lines,
+        approvalLinesFingerprint: purchaseApprovalLinesFingerprint(lines),
         vendor,
         openExceptionCount: exceptionCount.count,
         maxOpenSeverity: exceptionCount.maxSeverity,
@@ -561,217 +380,6 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       res.status(503).json({ code: "PURCHASE_ORDER_DETAIL_UNAVAILABLE", error: "Purchase order details and financial review could not be loaded. Retry to load the current records." });
     }
   });
-
-  // POST /api/purchase-orders
-  //
-  // Dual-mode to preserve the legacy "create empty PO" flow while enabling the
-  // Spec A inline flow:
-  //   - If req.body.lines is a non-empty array:
-  //       Use createPurchaseOrderWithLines. If preparation is requested,
-  //       immediately call sendPurchaseOrder and return the combined result.
-  //       Idempotent: requires an Idempotency-Key header (Rule #6).
-  //   - Else:
-  //       Fall through to the legacy createPO path (empty PO, lines added later).
-  //
-  // Idempotency must be enforced for the mutating path. Because the middleware
-  // short-circuits only when the key is present, and legacy clients don't send
-  // one, we mount idempotency as a conditional guard: present lines => required.
-  app.post(
-    "/api/purchase-orders",
-    requirePermission("purchasing", "create"),
-    (req, res, next) => {
-      // Spec A: only enforce idempotency when the inline-lines flow is invoked.
-      // Legacy empty-create callers continue to work without a key.
-      if (Array.isArray(req.body?.lines) && req.body.lines.length > 0) {
-        return requireIdempotency()(req, res, next);
-      }
-      return next();
-    },
-    async (req, res) => {
-      try {
-        const userId = req.session.user?.id;
-        const hasInlineLines =
-          Array.isArray(req.body?.lines) && req.body.lines.length > 0;
-
-        if (!hasInlineLines) {
-          // Legacy empty-create path - unchanged behavior.
-          const po = await purchasing.createPO({
-            ...req.body,
-            expectedDeliveryDate: req.body.expectedDeliveryDate
-              ? new Date(req.body.expectedDeliveryDate)
-              : undefined,
-            createdBy: userId,
-          });
-          return res.status(201).json(po);
-        }
-
-        const created = await purchasing.createPurchaseOrderWithLines(
-          mapPurchaseOrderWithLinesInput(req.body, false),
-          userId,
-        );
-
-        const prepareForSupplier = req.body.prepare_for_supplier === true || req.body.advance_to_sent === true;
-        if (!prepareForSupplier) {
-          return res.status(201).json({ po: created });
-        }
-
-        let sendResult: Awaited<ReturnType<typeof purchasing.sendPurchaseOrder>>;
-        try {
-          sendResult = await purchasing.sendPurchaseOrder(created.id, userId);
-        } catch (sendError: any) {
-          console.error("[POST /api/purchase-orders] PO created but supplier preparation failed", {
-            purchaseOrderId: created.id,
-            error: sendError?.message,
-          });
-          return res.status(201).json({
-            po: created,
-            status: created.status ?? "draft",
-            dispatch_recorded: false,
-            sendError: sendError?.message || "Failed to prepare purchase order",
-          });
-        }
-        return res.status(201).json({
-          po: sendResult.po,
-          status: sendResult.status,
-          pdf: sendResult.pdf,
-          pending_approval: sendResult.pendingApproval,
-          dispatch_recorded: false,
-          ...(req.body.advance_to_sent === true ? { sendError: "PO saved for review. No supplier dispatch was recorded; review the document and record an external send separately." } : {}),
-        });
-      } catch (error: any) {
-        if (error instanceof PurchasingError) {
-          return res.status(error.statusCode).json({ error: error.message, details: error.details });
-        }
-        console.error("[POST /api/purchase-orders] error:", error);
-        res.status(500).json({ error: error.message });
-      }
-    },
-  );
-
-  app.put(
-    "/api/purchase-orders/:id/draft",
-    requirePermission("purchasing", "edit"),
-    requireIdempotency(),
-    async (req, res) => {
-      try {
-        const id = Number(req.params.id);
-        if (!Number.isInteger(id) || id <= 0) {
-          throw new PurchasingError("Purchase order id must be a positive integer", 400, {
-            code: "INVALID_PURCHASE_ORDER_ID",
-          });
-        }
-        const expectedUpdatedAt = parseNullableDateInput(
-          req.body?.expected_updated_at ?? req.body?.expectedUpdatedAt,
-          "expectedUpdatedAt",
-        );
-        if (!expectedUpdatedAt) {
-          throw new PurchasingError("expected_updated_at is required", 400, {
-            code: "PO_DRAFT_EXPECTED_VERSION_REQUIRED",
-          });
-        }
-
-        const updated = await purchasing.updateDraftPurchaseOrderWithLines(
-          id,
-          {
-            ...mapPurchaseOrderWithLinesInput(req.body, true),
-            expectedUpdatedAt,
-          },
-          req.session.user?.id,
-        );
-
-        if (req.body?.prepare_for_supplier !== true && req.body?.advance_to_sent !== true) {
-          return res.json(updated);
-        }
-
-        let sendResult: Awaited<ReturnType<typeof purchasing.sendPurchaseOrder>>;
-        try {
-          sendResult = await purchasing.sendPurchaseOrder(id, req.session.user?.id);
-        } catch (sendError: any) {
-          console.error("[PUT /api/purchase-orders/:id/draft] draft updated but supplier preparation failed", {
-            purchaseOrderId: id,
-            error: sendError?.message,
-          });
-          return res.json({
-            ...updated,
-            dispatch_recorded: false,
-            sendError: sendError?.message || "Failed to prepare purchase order",
-          });
-        }
-        return res.json({
-          po: sendResult.po,
-          lines: updated.lines,
-          status: sendResult.status,
-          pdf: sendResult.pdf,
-          pending_approval: sendResult.pendingApproval,
-          dispatch_recorded: false,
-          ...(req.body.advance_to_sent === true ? { sendError: "PO saved for review. No supplier dispatch was recorded; review the document and record an external send separately." } : {}),
-        });
-      } catch (error: any) {
-        if (error instanceof PurchasingError) {
-          return res.status(error.statusCode).json({ error: error.message, details: error.details });
-        }
-        console.error("[PUT /api/purchase-orders/:id/draft] error:", error);
-        return res.status(500).json({ error: error.message });
-      }
-    },
-  );
-
-  // Legacy route retained for preparation only; it cannot attest supplier dispatch.
-  // Returns { po, status, pdf, pending_approval } in the same shape the
-  // inline create endpoint uses so the client can handle both uniformly.
-  app.post(
-    "/api/purchase-orders/:id/send-pdf",
-    requirePermission("purchasing", "edit"),
-    requireIdempotency(),
-    async (req, res) => {
-      try {
-        const result = await purchasing.sendPurchaseOrder(
-          Number(req.params.id),
-          req.session.user?.id,
-        );
-        res.json({
-          po: result.po,
-          status: result.status,
-          pdf: result.pdf,
-          pending_approval: result.pendingApproval,
-          dispatch_recorded: false,
-          sendError: "Prepared for supplier review. No PDF was sent; review the document and record an external send separately.",
-        });
-      } catch (error: any) {
-        if (error instanceof PurchasingError) {
-          return res.status(error.statusCode).json({ error: error.message });
-        }
-        res.status(500).json({ error: error.message });
-      }
-    },
-  );
-
-  // Spec A: duplicate an existing PO into a new draft.
-  app.post(
-    "/api/purchase-orders/:id/duplicate",
-    requirePermission("purchasing", "create"),
-    requireIdempotency(),
-    async (req, res) => {
-      try {
-        const overrides: { vendorId?: number; expectedDeliveryDate?: Date | null } = {};
-        if (req.body?.vendor_id !== undefined) overrides.vendorId = Number(req.body.vendor_id);
-        if (req.body?.expected_delivery_date) {
-          overrides.expectedDeliveryDate = new Date(req.body.expected_delivery_date);
-        }
-        const created = await purchasing.duplicatePurchaseOrder(
-          Number(req.params.id),
-          overrides,
-          req.session.user?.id,
-        );
-        res.status(201).json({ id: created.id, po_number: created.poNumber });
-      } catch (error: any) {
-        if (error instanceof PurchasingError) {
-          return res.status(error.statusCode).json({ error: error.message });
-        }
-        res.status(500).json({ error: error.message });
-      }
-    },
-  );
 
   app.get(
     "/api/settings/procurement",
@@ -1026,16 +634,26 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
   });
 
   app.post("/api/purchase-orders/:id/approve", requirePermission("purchasing", "approve"), async (req, res) => {
-    await handleLifecycleCommand(req, res, "approve");
+    try {
+      if (Object.keys(req.query).length) return res.status(400).json({ code: "PO_APPROVAL_QUERY_INVALID", error: "Purchase approval does not accept query parameters." });
+      const id = Number(req.params.id);
+      const descriptor = financialCommandFromRequest(req, purchaseApprovalCommandScope(id));
+      const result = await purchasing.approveCommand(id, req.body, descriptor.actorId, descriptor);
+      res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+      const body = result.terminalState === "rejected"
+        ? { ...(result.body as Record<string, unknown>), details: { ...((result.body as any)?.details ?? {}), purchaseApprovalOutcome: "rejected", idempotencyKey: descriptor.idempotencyKey } }
+        : result.body;
+      return res.status(result.httpStatus).json(body);
+    } catch (error) {
+      if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
+      console.error(JSON.stringify({ event: "procurement.approval.command_failed", purchaseOrderId: req.params.id, errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(500).json({ code: "PO_APPROVAL_TRANSIENT_FAILURE", error: "Purchase approval could not be confirmed. Recover the saved request." });
+    }
   });
 
   app.post("/api/purchase-orders/:id/send", requirePermission("purchasing", "create"), async (req, res) => {
     await handleLifecycleCommand(req, res, "send");
-  });
-
-  // Legacy preparation endpoint: a separate attested command records dispatch.
-  app.post("/api/purchase-orders/:id/send-to-vendor", requirePermission("purchasing", "create"), async (req, res) => {
-    await handleLifecycleCommand(req, res, "send_to_vendor");
   });
 
   // Phase 3 physical-status transitions. Routes delegate through the shared

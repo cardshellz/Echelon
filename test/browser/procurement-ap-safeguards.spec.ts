@@ -1,3 +1,5 @@
+import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
+import { invoiceListItem, paymentListItem, workListPage } from "./procurement-ap-work-list-fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 
@@ -8,7 +10,7 @@ async function setup(page: Page, canEdit = true) {
   await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "ap-reviewer", role: "admin", username: "test" }, permissions: canEdit ? ["purchasing:view", "purchasing:edit", "purchasing:approve"] : ["purchasing:view"], roles: ["admin"] } }));
   return failures;
 }
-const invoice = (edit = locked) => ({ id: 71, invoiceNumber: "AP-SAFE-71", vendorId: 2, vendorName: "Test vendor", status: "disputed", currency: "USD", invoicedAmountCents: 10000, paidAmountCents: 8000, balanceCents: 2000,
+const invoice = (edit = locked) => ({ sourceCapabilities: invoiceSourceFixture(), id: 71, invoiceNumber: "AP-SAFE-71", vendorId: 2, vendorName: "Test vendor", status: "disputed", currency: "USD", invoicedAmountCents: 10000, hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 8000, balanceCents: 2000,
   capabilities: { edit }, paymentReviewRequired: false, lines: [{ id: 72, lineNumber: 1, purchaseOrderLineId: 18, qtyInvoiced: 1, unitCostCents: 10000, unitCostMills: 1000000, lineTotalCents: 10000, productName: "Test item", matchStatus: "qty_discrepancy" }], poLinks: [], attachments: [], payments: [] });
 
 test("recognized disputed bill hides generic edits and retains the reviewed correction and attachments", async ({ page }) => {
@@ -29,7 +31,7 @@ test("stale edit rejection refreshes the server capability and disables resubmis
   const failures = await setup(page); let protectedHistory = false; let attempts = 0;
   await page.route("**/api/vendor-invoices/71", route => {
     if (route.request().method() === "PATCH") { protectedHistory = true; attempts += 1; return route.fulfill({ status: 409, json: { error: locked.reason, details: { code: locked.code } } }); }
-    return route.fulfill({ json: { ...invoice(protectedHistory ? locked : editable), status: "received", paidAmountCents: 0, balanceCents: 10000 } });
+    return route.fulfill({ json: { ...invoice(protectedHistory ? locked : editable), status: "received", hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 0, balanceCents: 10000 } });
   });
   await page.goto("/ap-invoices/71?tab=details");
   await page.getByRole("button", { name: "Details", exact: true }).click();
@@ -43,8 +45,8 @@ test("stale edit rejection refreshes the server capability and disables resubmis
 for (const action of ["add-line", "link-po"] as const) {
   test(`already-open ${action} dialog retains its draft and blocks resubmission after a history rejection`, async ({ page }) => {
     const failures = await setup(page); let protectedHistory = false; let attempts = 0;
-    await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: { ...invoice(protectedHistory ? locked : editable), status: "received", paidAmountCents: 0, balanceCents: 10000 } }));
-    await page.route("**/api/purchase-orders?*", route => route.fulfill({ json: { purchaseOrders: [{ id: 17, poNumber: "TEST-PO-17", totalCents: 10000 }] } }));
+    await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: { ...invoice(protectedHistory ? locked : editable), status: "received", hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 0, balanceCents: 10000 } }));
+    await page.route("**/api/purchase-orders/work-list?*", route => route.fulfill({ json: workListPage([{ id: 17, poNumber: "TEST-PO-17", totalCents: 10000, vendorId: 2, status: "received" }], route.request().url()) }));
     await page.route(`**/api/vendor-invoices/71/${action === "add-line" ? "lines" : "po-links"}`, route => {
       protectedHistory = true; attempts += 1;
       return route.fulfill({ status: 409, json: { error: locked.reason, details: { code: locked.code } } });
@@ -86,7 +88,7 @@ for (const scenario of [
 
 test("unsupported historical payments require review and cannot be voided", async ({ page }) => {
   const failures = await setup(page);
-  await page.route("**/api/ap-payments", route => route.fulfill({ json: { payments: [{ id: 90, paymentNumber: "LEGACY-90", vendorName: "Test vendor", status: "scheduled", totalAmountCents: 2000, paymentDate: "2026-10-13T12:00:00Z", paymentMethod: "ach" }] } }));
+  await page.route("**/api/ap-payments/work-list?*", route => route.fulfill({ json: workListPage([paymentListItem({ id: 90, paymentNumber: "LEGACY-90", vendorName: "Test vendor", status: "scheduled", totalAmountCents: 2000, paymentDate: "2026-10-13T12:00:00Z", paymentMethod: "ach" })], route.request().url()) }));
   await page.goto("/ap-payments");
   await expect(page.getByText("Historical status requires review", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Void", exact: true })).toHaveCount(0);
@@ -96,7 +98,7 @@ test("unsupported historical payments require review and cannot be voided", asyn
 test("dashboard identifies disputed debt and the open list includes disputed invoices", async ({ page }) => {
   const failures = await setup(page); const statuses: string[] = [];
   await page.route("**/api/ap/summary", route => route.fulfill({ json: { totalOutstandingCents: 2000, disputedOutstandingCents: 2000, disputedInvoiceCount: 1, openInvoiceCount: 1, overdueCents: 2000, paidAllTimeCents: 8000, paidThisMonthCents: 8000, dueSoonCents: 2000, agingBuckets: { current: 2000 }, vendorAging: [], recentPayments: [], recentlyPaid: [] } }));
-  await page.route("**/api/vendor-invoices?*", route => { statuses.push(new URL(route.request().url()).searchParams.get("status") ?? ""); return route.fulfill({ json: { invoices: [invoice()] } }); });
+  await page.route("**/api/vendor-invoices/work-list?*", route => { statuses.push(new URL(route.request().url()).searchParams.get("status") ?? ""); return route.fulfill({ json: workListPage([invoiceListItem(invoice())], route.request().url()) }); });
   await page.goto("/ap");
   await expect(page.getByText("Includes $20.00 in 1 disputed invoice, on hold for review.", { exact: true })).toBeVisible();
   await page.goto("/ap-invoices");

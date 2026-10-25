@@ -1,12 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
 import { assertCurrentEbayQuantityRequestOwner, currentEbayQuantityRequestJournal, withEbayQuantityRequestJournal,
   withEbayQuantityRequestJournalContract } from "../../application/quantity-provider-request-evidence";
-import { isCompletedEbayNonPublicationAttempt, legacyEbayPublicationPreflightProofSchema, preflightEvidenceHash,
+import { attributeEbayOutboxStockHistory, isCompletedEbayNonPublicationAttempt, legacyEbayPublicationPreflightProofSchema, preflightEvidenceHash,
   terminalEbayPublicationPreparationEvidence } from "../../domain/ebay-publication-preflight";
 import { journalContractNoRequestProof } from "../../infrastructure/quantity-provider-preflight-recovery.repository";
 import type { TerminalRequestReceipt } from "../../domain/quantity-provider-terminal-response";
 
 describe("eBay preflight evidence contracts", () => {
+  it("attributes superseded stock purpose without claiming its unknown effect was not sent", () => {
+    const historical = { state: "superseded_unknown", journalContract: null, outboxScopeProven: true,
+      replacementReceiptProven: true, resolutionBasis: null, outcomeHash: null, completedAt: null };
+    expect(attributeEbayOutboxStockHistory(historical, [])).toBe("superseded_stock_intent");
+    for (const changed of [{ state: "running" }, { state: "uncertain" }, { replacementReceiptProven: false },
+      { outboxScopeProven: false }, { journalContract: {} }, { journalContract: { version: 1, provider: "ebay", method: "POST",
+        path: "/sell/inventory/v1/offer/offer-1/publish", requestHash: "a".repeat(64) } }]) {
+      expect(attributeEbayOutboxStockHistory({ ...historical, ...changed }, [])).toBeNull();
+    }
+    expect(attributeEbayOutboxStockHistory(historical, [{} as TerminalRequestReceipt])).toBeNull();
+    const stock: TerminalRequestReceipt = { requestId: "1", ordinal: 1, method: "POST", path: "/sell/inventory/v1/bulk_update_price_quantity",
+      requestHash: "a".repeat(64), outcome: null, httpStatus: null, responseHash: null, errorCodes: [], recordedAt: null, requestTerminated: null };
+    expect(attributeEbayOutboxStockHistory(historical, [stock])).toBe("superseded_stock_intent");
+    const stockContract = { version: 1, provider: "ebay", method: "POST", path: stock.path, requestHash: stock.requestHash };
+    expect(attributeEbayOutboxStockHistory({ ...historical, journalContract: stockContract }, [])).toBe("superseded_stock_intent");
+    expect(attributeEbayOutboxStockHistory({ ...historical, journalContract: stockContract }, [stock])).toBe("superseded_stock_intent");
+    expect(attributeEbayOutboxStockHistory({ ...historical, journalContract: { ...stockContract, method: "PUT",
+      path: "/sell/inventory/v1/inventory_item/P5" } }, [])).toBeNull();
+    for (const changed of [{ ordinal: 2 }, { method: "PUT", path: "/sell/inventory/v1/inventory_item/P5" },
+      { path: "/sell/inventory/v1/offer/offer-1/publish" }] satisfies Partial<TerminalRequestReceipt>[])
+      expect(attributeEbayOutboxStockHistory(historical, [{ ...stock, ...changed }])).toBeNull();
+    const notSent = { ...historical, state: "not_sent", replacementReceiptProven: false,
+      resolutionBasis: "owner_preflight_no_request", outcomeHash: "a".repeat(64), completedAt: "2026-10-17T12:00:00.000Z" };
+    expect(attributeEbayOutboxStockHistory(notSent, [])).toBe("owner_preflight_not_sent");
+    expect(attributeEbayOutboxStockHistory(notSent, [stock])).toBeNull();
+    for (const changed of [{ resolutionBasis: null }, { outcomeHash: null }, { completedAt: null }]) {
+      expect(attributeEbayOutboxStockHistory({ ...notSent, ...changed }, [])).toBeNull();
+    }
+  });
   it("binds the original mutation without retaining its body and isolates concurrent protocol owners", async () => {
     const one = { method: "POST", path: "/sell/inventory/v1/offer/publish_by_inventory_item_group",
       body: { inventoryItemGroupKey: "GROUP-1", marketplaceId: "EBAY_US" } };

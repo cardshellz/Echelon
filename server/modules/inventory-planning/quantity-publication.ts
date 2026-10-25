@@ -2,6 +2,7 @@
 // existing inventory owner; they do not write inventory's request journal.
 export {
   createChannelEbayQuantityRequestAdmission,
+  createDropshipEbayQuantityRequestAdmission,
   quantityProviderResponseRecovery,
   ebayPublicationRejectionReader,
   automaticEbayPublicationRecovery,
@@ -18,6 +19,10 @@ export { PostgresEbayAutomaticPublicationRecoveryRepository } from "./infrastruc
 export { EbayPublicationReconciliationService, EbayPublicationContentRefreshRejectedError } from "./application/ebay-publication-reconciliation.service";
 export type { EbayPublicationReconciliationStatus, RefreshRecoveredEbayContent } from "./application/ebay-publication-reconciliation.service";
 export { PostgresEbayPublicationReconciliationRepository } from "./infrastructure/ebay-publication-reconciliation.repository";
+export { PublicationRecoveryService } from "./application/publication-recovery.service";
+export type { PublicationRecoveryCommand, PublicationRecoveryStore } from "./application/publication-recovery.service";
+export { PostgresPublicationRecoveryRepository } from "./infrastructure/publication-recovery.repository";
+// Compatibility names delegate to the same provider-neutral recovery owner.
 export { EbayPublicationRecoveryService } from "./application/ebay-publication-recovery.service";
 export { InventoryPublicationMembershipError } from "./application/inventory-publication-membership.service";
 export { InventoryPublicationSelectionError } from "./infrastructure/inventory-publication-selection.reader";
@@ -26,3 +31,13 @@ export { reviewEbayPublicationReadiness, assertEbayPublicationReady, ensureEbayP
   withEbayPublicationReadinessApplied, findEbayPublicationReadinessReceipt,
   rejectEbayPublicationReadinessCommand,
 } from "./infrastructure/ebay-publication-readiness.repository";
+// Dropship eBay store stock link (exact SKU mapping on the store's one live
+// Card Shellz destination). Dropship calls these only through this file.
+export { ensureDropshipEbayStockReady, reviewDropshipEbayStockReadiness, readDropshipEbayStockAuthority } from "./infrastructure/dropship-ebay-stock-readiness.repository";
+export type { DropshipEbayStockReadinessLogger } from "./infrastructure/dropship-ebay-stock-readiness.repository";
+// What inventory planning last published to a Dropship eBay store, per size (eBay sync-back's quantity baseline; read-only).
+export { readDropshipEbayPublishedQuantities } from "./infrastructure/dropship-ebay-published-quantity.reader";
+export type { DropshipEbayPublishedQuantity } from "./infrastructure/dropship-ebay-published-quantity.reader";
+export { readDropshipEbayStockDestination } from "./infrastructure/dropship-ebay-stock-coverage.reader";
+export { dropshipEbayStockCommandKey, FENCE_HOLD_WARN_MS as DROPSHIP_EBAY_STOCK_FENCE_HOLD_WARN_MS } from "./domain/dropship-ebay-stock-readiness";
+export type { DropshipEbayStockReadinessInput, DropshipEbayStockReadinessResult, DropshipEbayStockDestination, DropshipEbayStockActor } from "@shared/types/dropship-ebay-stock-readiness";

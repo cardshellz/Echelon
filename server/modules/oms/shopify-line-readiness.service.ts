@@ -22,6 +22,7 @@ export interface ReconcileShopifyLineReadinessInput {
   sourceEventId: string;
   lineItems: ShopifyLineReadinessSnapshot[];
   now?: Date;
+  channelUpdatedAt?: Date | string | null;
 }
 
 export interface ReconcileShopifyLineReadinessResult {
@@ -67,6 +68,8 @@ function normalizeExternalLineItemId(value: unknown): string {
 function authorityPatch(state: OmsLineAuthorityState) {
   return {
     channelObservedQuantity: state.channelObservedQuantity,
+    channelCurrentQuantity: state.channelCurrentQuantity,
+    channelQuantityUpdatedAt: state.channelQuantityUpdatedAt,
     paidQuantity: state.paidQuantity,
     authorityFulfillableQuantity: state.authorityFulfillableQuantity,
     authorizationStatus: state.authorizationStatus,
@@ -85,24 +88,28 @@ export async function reconcileShopifyLineReadiness(
   if (sourceEventId.length === 0) {
     throw new Error("Shopify readiness sourceEventId is required");
   }
+  if (input.channelUpdatedAt == null || !Number.isFinite(new Date(input.channelUpdatedAt).getTime()))
+    throw new Error("Channel quantity reconciliation requires the native order version.");
 
-  const snapshots = input.lineItems.map((line, index) => ({
-    externalLineItemId: normalizeExternalLineItemId(line.externalLineItemId),
-    quantity: requireNonNegativeInteger(
-      line.quantity,
-      `lineItems[${index}].quantity`,
-    ),
-    currentQuantity: line.currentQuantity == null
-      ? null
-      : requireNonNegativeInteger(
+  const snapshots = input.lineItems.map((line, index) => {
+    if (line.currentQuantity == null)
+      throw new Error("Shopify readiness requires the native current quantity for every line.");
+    return {
+      externalLineItemId: normalizeExternalLineItemId(line.externalLineItemId),
+      quantity: requireNonNegativeInteger(
+        line.quantity,
+        `lineItems[${index}].quantity`,
+      ),
+      currentQuantity: requireNonNegativeInteger(
         line.currentQuantity,
         `lineItems[${index}].currentQuantity`,
       ),
-    fulfillableQuantity: requireNonNegativeInteger(
-      line.fulfillableQuantity,
-      `lineItems[${index}].fulfillableQuantity`,
-    ),
-  }));
+      fulfillableQuantity: requireNonNegativeInteger(
+        line.fulfillableQuantity,
+        `lineItems[${index}].fulfillableQuantity`,
+      ),
+    };
+  });
   const uniqueLineIds = new Set(
     snapshots.map((line) => line.externalLineItemId),
   );
@@ -172,16 +179,10 @@ export async function reconcileShopifyLineReadiness(
         line.refundedQuantity ?? 0,
         "line.refundedQuantity",
       );
-      const authorizationStatus = String(line.authorizationStatus ?? "");
-      if (
-        cancelledQuantity > 0 ||
-        refundedQuantity > 0 ||
-        (authorizationStatus !== "seen" && authorizationStatus !== "authorized")
-      ) {
+      if (line.authorizationStatus === "review") {
         result.protectedLines++;
         continue;
       }
-
       const previousAuthority = requireNonNegativeInteger(
         line.authorityFulfillableQuantity ?? 0,
         "line.authorityFulfillableQuantity",
@@ -200,12 +201,17 @@ export async function reconcileShopifyLineReadiness(
         financialStatus: input.financialStatus,
         quantity: snapshot.quantity,
         currentQuantity: snapshot.currentQuantity,
+        channelUpdatedAt: input.channelUpdatedAt,
         fulfillableQuantity: snapshot.fulfillableQuantity,
         previous: line,
         now,
       });
+      if (authority.staleChannelObservation) continue;
 
-      if (authority.authorityFulfillableQuantity > previousAuthority) {
+      const quantityChanged = authority.authorityFulfillableQuantity !== previousAuthority;
+      const channelObservationChanged = line.channelCurrentQuantity !== authority.channelCurrentQuantity
+          || new Date(line.channelQuantityUpdatedAt ?? 0).getTime() !== authority.channelQuantityUpdatedAt?.getTime();
+      if (quantityChanged || channelObservationChanged) {
         await tx
           .update(omsOrderLines)
           .set({
@@ -227,15 +233,14 @@ export async function reconcileShopifyLineReadiness(
           refundedQuantity,
         });
 
-        result.advancedLines++;
-        result.advancedQuantity +=
-          authority.authorityFulfillableQuantity - previousAuthority;
+        if (authority.authorityFulfillableQuantity > previousAuthority) {
+          result.advancedLines++;
+          result.advancedQuantity += authority.authorityFulfillableQuantity - previousAuthority;
+        }
+        result.wmsSyncRequired = true;
       }
 
-      const effectiveAuthority = Math.max(
-        previousAuthority,
-        authority.authorityFulfillableQuantity,
-      );
+      const effectiveAuthority = authority.authorityFulfillableQuantity;
       const providerReadyQuantity = Math.min(
         paidQuantity,
         snapshot.fulfillableQuantity,

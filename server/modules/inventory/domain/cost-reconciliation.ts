@@ -29,8 +29,6 @@ export function reconciliationEligibility(
   records: ReconciliationRecordEvidence[] = [],
 ): ReconciliationEligibility | null {
   if (
-    source.scope.kind !== "shipment_line" ||
-    source.component !== "landed" ||
     source.currency !== "USD" ||
     source.issue ||
     source.totalMills === null ||
@@ -39,7 +37,7 @@ export function reconciliationEligibility(
     issues.length === 0
   )
     return null;
-  if (issues.every((issue) => issue.code === "COST_HISTORICAL_LINEAGE_MISSING") && records.length > 0)
+  if (source.component === "landed" && source.scope.kind === "shipment_line" && issues.every((issue) => issue.code === "COST_HISTORICAL_LINEAGE_MISSING") && records.length > 0)
     return {
       amountMills: source.totalMills,
       identity: costFingerprint({
@@ -63,7 +61,7 @@ export function reconciliationEligibility(
     };
   if (
     !issues.every(
-      (issue) => issue.code === "COST_UNRESOLVED_QUANTITY_RETAINED" && issue.unresolvedQuantity?.component === "landed",
+      (issue) => issue.code === "COST_UNRESOLVED_QUANTITY_RETAINED" && issue.unresolvedQuantity?.component === source.component,
     )
   )
     return null;

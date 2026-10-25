@@ -33,7 +33,7 @@ describe("atomic PO and vendor-catalog persistence", () => {
 
   it("runs catalog capture inside both PO create and draft-replacement transactions", () => {
     const createFlow = section(
-      "const createAttempt = async (poNumber: string) => (internalOptions?.transaction ?? db).transaction",
+      "const createAttempt = async () => (internalOptions?.transaction ?? db).transaction",
       "let lastConflictingPoNumber",
     );
     const updateFlow = section(
@@ -52,7 +52,7 @@ describe("atomic PO and vendor-catalog persistence", () => {
     expect(updateWritePosition).toBeGreaterThan(updateCatalogPosition);
     expect(createFlow).toContain("(internalOptions?.transaction ?? db).transaction(async (tx: any)");
     expect(createFlow.indexOf("lockInventoryCostGraph(tx)")).toBeLessThan(createCatalogPosition);
-    expect(updateFlow).toContain("return db.transaction(async (tx: any)");
+    expect(updateFlow).toContain("return (transaction ?? db).transaction(async (tx: any)");
   });
 
   it("keeps the PO quote source unchanged when the same manual quote is captured", () => {

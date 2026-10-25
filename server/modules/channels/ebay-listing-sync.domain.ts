@@ -1,3 +1,7 @@
+import { providerReadDiagnosticFromError, providerReadShouldRetry } from "@shared/channel-provider-read";
+import { providerWriteDiagnosticFromError, providerWriteShouldRetry } from "@shared/channel-provider-write";
+import { channelListingValidationFromError, ChannelListingValidationError } from "@shared/channel-listing-validation";
+import { ChannelPricingResolutionError } from "./channel-pricing-resolver";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { createHash } from "node:crypto";
@@ -16,6 +20,9 @@ export const ebayListingSyncIdentitySchema = z
     accountId: z.string().trim().min(1).max(240),
     marketplaceId: z.string().trim().min(1).max(100),
     groupKey: z.string().trim().min(1).max(255).nullable(),
+    // Archived members still present in the provider's group are topology only.
+    // Maintenance preserves them; the shared lifecycle owns their removal.
+    retainedGroupSkus: z.array(z.string().trim().min(1).max(100)).max(250).optional(),
     variants: z
       .array(
         z
@@ -24,6 +31,7 @@ export const ebayListingSyncIdentitySchema = z
             sku: z.string().trim().min(1).max(100),
             catalogSku: z.string().trim().min(1).max(100).optional(),
             contentSyncEnabled: z.boolean().optional(),
+            catalogArchived: z.boolean().optional(),
             mappingExists: z.boolean().optional(),
             externalSku: z.string().min(1).max(100).nullable(),
             offerId: z.string().min(1).max(255).nullable(),
@@ -40,6 +48,8 @@ export const ebayListingSyncIdentitySchema = z
       new Set(value.variants.map((v) => v.variantId)).size !==
         value.variants.length ||
       new Set(value.variants.map((v) => v.sku)).size !== value.variants.length
+      || new Set(value.retainedGroupSkus).size !== (value.retainedGroupSkus?.length ?? 0)
+      || value.retainedGroupSkus?.some(sku => value.variants.some(member => member.sku === sku))
     )
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -79,6 +89,7 @@ export const storedEbayListingSyncJobSchema = ebayListingSyncJobSchema.extend({
     .nullable(),
   ownerToken: z.string().uuid().nullable(),
   attempts: z.number().int().nonnegative(),
+  readFailureCount: z.number().int().nonnegative().optional(),
   result: ebayProductSyncResultSchema.nullable(),
   verificationIntentHash: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   verificationRevision: z.string().regex(/^[1-9][0-9]*$/).nullable(),
@@ -131,7 +142,6 @@ const RETRY_CODES = new Set([
   "STOCK_MAPPING_CLEANUP_UNCERTAIN",
   "STOCK_MAPPING_REVIEW_STALE",
   "STOCK_MAPPING_TARGET_CHANGED",
-  "EBAY_QUANTITY_REJECTED",
   "EBAY_QUANTITY_DAILY_LIMIT",
 ]);
 export const SYNC_RETRY_LIMIT = 5;
@@ -139,9 +149,10 @@ export const SYNC_RETRY_LIMIT = 5;
 // a counter cannot repair a lost response or an outage; recovery owns those cases.
 // Unclassified failures and business rejections still require a finite budget.
 const AUTOMATIC_RECOVERY_CODES = new Set([
+  "EBAY_POLICY_CATALOG_UNAVAILABLE",
   "EBAY_PUBLICATION_PREFLIGHT_RETRY",
   "EBAY_QUANTITY_RESPONSE_UNCERTAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT",
-  "EBAY_SYNC_READBACK_PENDING", "EBAY_SYNC_PERSISTENCE_FAILED",
+  "EBAY_SYNC_READBACK_PENDING", "EBAY_SYNC_PERSISTENCE_FAILED", "EBAY_SYNC_PACKAGE_CHANGED",
   "PUBLICATION_RESPONSE_RECOVERY_FAILED", "PUBLICATION_AUTOMATIC_RECOVERY_FAILED",
   "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EBAY_AUTH_UNAVAILABLE",
   "EBAY_AUTH_REFRESH_SUPERSEDED", "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED",
@@ -150,7 +161,9 @@ export function syncFailure(
   error: unknown,
   attempts: number,
   now: Date,
+  readFailureCount = 0,
 ): {
+  readRetry?: { failures: number; paused: boolean };
   state: "recovering" | "awaiting_evidence" | "needs_attention";
   code: string;
   message: string;
@@ -159,9 +172,13 @@ export function syncFailure(
 } {
   const { code } = ebayListingFailureDiagnostic(error);
   const waiting = WAIT_CODES.has(code);
-  const retrying =
+  const readFailure = providerReadDiagnosticFromError(error);
+  const writeFailure = providerWriteDiagnosticFromError(error);
+  const validation = channelListingValidationFromError(error);
+  const retrying = validation ? false : writeFailure ? providerWriteShouldRetry(writeFailure)
+    : readFailure ? providerReadShouldRetry(readFailure, readFailureCount + 1) :
     waiting || AUTOMATIC_RECOVERY_CODES.has(code) ||
-    ((RETRY_CODES.has(code) || code === "EBAY_LISTING_SYNC_FAILED") &&
+    ((RETRY_CODES.has(code) || code === "EBAY_LISTING_SYNC_FAILED" || code === "DATABASE_POOL_ACQUIRE_TIMEOUT") &&
       attempts < SYNC_RETRY_LIMIT);
   const retryAfter =
     error instanceof Error &&
@@ -173,16 +190,23 @@ export function syncFailure(
       : NaN;
   const minimum =
     now.getTime() + Math.min(15 * 60_000, 30_000 * 2 ** Math.min(attempts, 5));
-  const message = code === "INVENTORY_PUBLICATION_TARGET_BUSY"
+  const message = code === "DATABASE_POOL_ACQUIRE_TIMEOUT"
+    ? "The database connection queue timed out. The saved update retains its earlier write evidence and can be retried safely."
+    : readFailure
+    ? readFailure.kind === "refused" ? "The channel refused the listing read. Review the saved read diagnostic before retrying."
+      : "Echelon could not read a complete, valid listing response. Existing write evidence remains protected."
+    : code === "INVENTORY_PUBLICATION_TARGET_BUSY"
     ? "An inventory update is using this listing. The saved listing update will retry automatically."
     : code === "CANONICAL_PUBLICATION_MAPPING_MISSING"
       ? "Inventory setup stopped this listing update before its pictures could be confirmed. Retry Sync to prepare this listing's inventory connection."
+    : validation ? new ChannelListingValidationError(validation).message
     : error instanceof Error &&
-    (error instanceof EbayListingSyncError ||
-      /^(EBAY_|PUBLICATION_|QUANTITY_)/.test(code))
+    (error instanceof EbayListingSyncError || error instanceof ChannelPricingResolutionError ||
+      (code !== "EBAY_LISTING_SYNC_FAILED" && /^(EBAY_|PUBLICATION_|QUANTITY_)/.test(code)))
       ? error.message.slice(0, 1000)
       : "The listing update could not finish. Inspect the saved sync job before retrying.";
   return {
+    ...(readFailure ? { readRetry: { failures: readFailureCount + 1, paused: !retrying } } : {}),
     state:
       code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" || code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN" || code === "EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN"
         ? "awaiting_evidence"

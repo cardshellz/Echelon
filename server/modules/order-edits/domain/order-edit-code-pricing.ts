@@ -7,6 +7,7 @@ import {
   type OrderEditCodePricing,
 } from "@shared/order-edits/order-edit-codes";
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
+import type { OrderEditDiscount } from "@shared/order-edits/order-edit-discounts";
 import { priceOrderEditDiscounts } from "./order-edit-discount-engine";
 import { sumOrderEditCents } from "./order-edit-financials";
 import { OrderEditError } from "./order-edit-error";
@@ -17,6 +18,7 @@ export interface OrderEditCodePricingLine {
   quantity: number;
   grossCents: number;
   productNetCents: number;
+  nativeDiscountCents?: number;
 }
 
 /** Reuses the order-wide percentage/fixed-credit engine after member/product pricing. */
@@ -25,6 +27,7 @@ export function priceOrderEditCodes(
   rules: OrderEditCodeRule[],
   newCodes: string[],
   approvedAmounts?: Array<{ code: string; amountCents: number }>,
+  retainedNativeDiscounts?: OrderEditDiscount[],
 ): OrderEditCodePricing {
   const priced = priceOrderEditDiscounts({
     ...(approvedAmounts
@@ -42,12 +45,17 @@ export function priceOrderEditCodes(
     })),
     lines: lines.map((line) => ({
       id: line.id,
-      subtotalCents: line.productNetCents,
+      subtotalCents: line.productNetCents - (line.nativeDiscountCents ?? 0),
     })),
   });
   if (
-    rules.some((rule) => ["single_use_reward", "club_reward"].includes(rule.redemption) &&
-      (rule.value.type !== "fixed" || priced.discounts.find((discount) => discount.label === rule.code)?.amountCents !== rule.value.amountCents)) ||
+    rules.some(
+      (rule) =>
+        ["single_use_reward", "club_reward"].includes(rule.redemption) &&
+        (rule.value.type !== "fixed" ||
+          priced.discounts.find((discount) => discount.label === rule.code)
+            ?.amountCents !== rule.value.amountCents),
+    ) ||
     priced.unusedFixedCredits.some((credit) =>
       rules.some(
         (rule) =>
@@ -73,6 +81,7 @@ export function priceOrderEditCodes(
   return orderEditCodePricingSchema.parse({
     rules,
     newCodes,
+    ...(retainedNativeDiscounts?.length ? { retainedNativeDiscounts } : {}),
     description: `Order discounts (${digest})`,
     applications: priced.discounts.map((discount) => ({
       code: discount.label,
@@ -85,8 +94,12 @@ export function priceOrderEditCodes(
       quantity: line.quantity,
       retailCents: exactUnit(line.grossCents, line.quantity),
       productNetCents: line.productNetCents,
+      ...(line.nativeDiscountCents
+        ? { nativeDiscountCents: line.nativeDiscountCents }
+        : {}),
       netCents:
         line.productNetCents -
+        (line.nativeDiscountCents ?? 0) -
         sumOrderEditCents(
           priced.allocations
             .filter((a) => a.lineId === line.id)
@@ -115,6 +128,23 @@ export function splitOrderEditCodeLine(
   line: OrderEditCodePricing["lines"][number],
 ) {
   const parsed = orderEditCodePricingLineSchema.parse(line);
+  // Shopify refuses a manual discount on an original checkout-discounted row.
+  // Keep that row and its allocation intact, including uneven native pennies.
+  if (parsed.nativeDiscountCents) {
+    if (parsed.netCents !== parsed.productNetCents - parsed.nativeDiscountCents)
+      throw new OrderEditError(
+        "ORDER_EDIT_CODE_NATIVE_ALLOCATION_CHANGED",
+        "The original reward allocation must stay on its original items. Your order has not changed.",
+      );
+    return [
+      {
+        quantity: parsed.quantity,
+        unitCents: parsed.retailCents,
+        productNetCents: parsed.productNetCents,
+        netCents: parsed.netCents,
+      },
+    ];
+  }
   const quantity = BigInt(parsed.quantity);
   const unit = BigInt(parsed.netCents) / quantity;
   const remainder = Number(BigInt(parsed.netCents) % quantity);
@@ -152,6 +182,7 @@ export function presentOrderEditCodeFinancials(
     ),
   );
   const discounts = [
+    ...(pricing.retainedNativeDiscounts ?? []),
     ...pricing.applications.map((application) => ({
       key: `code:${application.code}`,
       label: application.code,

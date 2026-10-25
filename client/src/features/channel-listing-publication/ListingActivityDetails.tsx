@@ -42,6 +42,7 @@ export function ListingActivityDetails({
                 <dd className="mt-1">{itemLabels[item.state]}</dd>
               </div>
             </dl>
+            {item.mediaVerification && <p className="text-sm text-muted-foreground">{item.mediaVerification.message}</p>}
             {item.error && (
               <p className={`text-sm [overflow-wrap:anywhere] ${item.stockState === "queued" ? "text-muted-foreground" : "text-destructive"}`}>
                 {item.error}

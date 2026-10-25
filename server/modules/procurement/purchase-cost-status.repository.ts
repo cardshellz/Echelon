@@ -14,6 +14,10 @@ import {
 import { readPurchaseCostSources } from "./purchase-cost-source.repository";
 import { resolvePurchaseCostSource } from "./domain/purchase-cost-source";
 import { projectPurchaseComponentStatus } from "./domain/purchase-cost-status";
+import { costIssueSchema, costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
+import { originRepairApprovalSchema } from "@shared/procurement/cost-origin-repair";
+import { planCostReconciliation } from "../inventory/application/plan-cost-reconciliation";
+import { readNoInventoryEffectEvidence } from "../inventory/infrastructure/no-inventory-effect.repository";
 
 const MAX_LINES = 500;
 const MAX_LOTS = 10_000;
@@ -48,6 +52,9 @@ export async function readPurchaseCostStatus(
       "Some purchase cost sources could not be read completely.",
     );
   const sources = await readPurchaseCostSources(tx, ids);
+  const resolvedSources = new Map([...sources].map(([id, source]) => [id, resolvePurchaseCostSource(source)]));
+  const noInventoryEffects = await readNoInventoryEffectEvidence(tx, [...resolvedSources]
+    .filter(([, inputs]) => inputs.some(input => input.inventoryEffect)).map(([id]) => id));
   const revisions = (
     await tx.execute(sql`SELECT revision.id,revision.purchase_order_line_id,revision.component,revision.contract,
     application.id AS application_id,application.status,application.evidence,
@@ -113,6 +120,9 @@ export async function readPurchaseCostStatus(
     "receipt evidence",
   );
   const result: PurchaseCostStatus = { lines: [] };
+  const repairs = (await tx.execute(sql`SELECT * FROM inventory.cost_origin_repairs
+    WHERE purchase_order_line_id=ANY(${sql.param(ids)}::int[]) ORDER BY id LIMIT ${MAX_LOTS + 1}`)).rows;
+  bounded(repairs, MAX_LOTS, "origin repairs");
   for (const line of lines) {
     const lineId = costInteger(line.id, "purchaseOrderLineId", 1);
     const source = sources.get(lineId);
@@ -122,7 +132,8 @@ export async function readPurchaseCostStatus(
         "The purchase cost source changed during its read.",
       );
     const lineLots = lots.filter((lot) => Number(lot.line_id) === lineId);
-    const components = resolvePurchaseCostSource(source).map((input) => {
+    const components: PurchaseCostStatus["lines"][number]["components"] = [];
+    for (const input of resolvedSources.get(lineId)!) {
       const matches = revisions.filter(
         (row) =>
           Number(row.purchase_order_line_id) === lineId &&
@@ -138,9 +149,17 @@ export async function readPurchaseCostStatus(
         input,
         sourceEvidence: source,
       });
+      const contract = costSourceRevisionSchema.safeParse(row?.contract);
+      const savedIssues = z.array(costIssueSchema).safeParse(row?.evidence?.result?.issues);
+      const plan = contract.success && savedIssues.success && savedIssues.data.length > 0 && contract.data.fingerprint === currentFingerprint
+        ? await planCostReconciliation(tx, { id: costInteger(row.id, "revisionId", 1), contract: contract.data }, savedIssues.data, false) : null;
+      const historicalPosting = plan?.matches && plan.ledger.approval && savedIssues.success && savedIssues.data.length > 0
+        && savedIssues.data.every(issue => issue.code === "COST_UNRESOLVED_QUANTITY_RETAINED")
+        && BigInt(plan.identity.historicalAmountMills) === savedIssues.data.reduce((sum, issue) => sum + BigInt(issue.unresolvedQuantity?.amountMills ?? 0), BigInt(0))
+        ? { destination: plan.ledger.approval.destination, amountMills: plan.identity.historicalAmountMills } : undefined;
       const event = row?.reporting_payload as Record<string, unknown> | null;
       const recorded = row?.evidence as {
-        result?: { lotsUpdated?: number; totalCogsDeltaCents?: number };
+        result?: { lotsUpdated?: number; totalCogsDeltaCents?: number; inventoryEffectProof?: unknown };
       } | null;
       const snapshotRows = changes.filter(
         (change) =>
@@ -153,6 +172,7 @@ export async function readPurchaseCostStatus(
         event?.component === input.component &&
         event?.currency === input.currency &&
         event?.cogsDeltaCents === recorded?.result?.totalCogsDeltaCents &&
+        (!input.inventoryEffect || canonicalJson(event?.inventoryEffectProof ?? null) === canonicalJson(recorded?.result?.inventoryEffectProof ?? null)) &&
         Array.isArray(event?.changes) &&
         event.changes.length === snapshotRows.length &&
         event.changes.every((change: { lotId?: unknown; after?: unknown }) =>
@@ -163,8 +183,10 @@ export async function readPurchaseCostStatus(
                 canonicalJson(change.after),
           ),
         );
-      return projectPurchaseComponentStatus({
+      components.push(projectPurchaseComponentStatus({
         input,
+        noInventoryEffectEvidence: noInventoryEffects.get(lineId),
+        historicalPosting,
         currentFingerprint,
         revision: row
           ? {
@@ -215,8 +237,8 @@ export async function readPurchaseCostStatus(
               String(lot[total]) === String(after?.allocatedMills),
           };
         }),
-      });
-    });
+      }));
+    }
     result.lines.push({
       purchaseOrderId: costInteger(
         line.purchase_order_id,
@@ -226,6 +248,11 @@ export async function readPurchaseCostStatus(
       purchaseOrderLineId: lineId,
       sku: line.sku == null ? null : String(line.sku),
       components,
+      originRepairs: repairs.filter(repair => Number(repair.purchase_order_line_id) === lineId).map(repair => ({
+        ...originRepairApprovalSchema.parse({ id: costInteger(repair.id, "repairId", 1), actorName: repair.actor_name,
+          reason: repair.reason, recordedAt: new Date(repair.recorded_at).toISOString(), destination: repair.evidence.choices.destination,
+          summary: repair.evidence.summary }), lotId: costInteger(repair.inventory_lot_id, "lotId", 1),
+      })),
       invoices: invoices
         .filter((invoice) => Number(invoice.purchase_order_line_id) === lineId)
         .map((invoice) => ({

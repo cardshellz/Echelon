@@ -1,5 +1,14 @@
 import { z } from "zod";
 import { formatListingPreviewIssue } from "./dropship-listing-preview";
+import {
+  EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE,
+  EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_MESSAGE,
+  EBAY_PUBLICATION_ENVIRONMENT_MISMATCH_MESSAGE,
+} from "@shared/dropship/ebay-publication-account";
+import {
+  DROPSHIP_STOCK_LINK_MANUAL_RETRY_NEXT_STEPS,
+  DROPSHIP_STOCK_LINK_REFUSAL_WORDS,
+} from "@shared/dropship/stock-link-refusals";
 
 /**
  * What became of a push the vendor queued, read from
@@ -38,6 +47,12 @@ const listingPushItemSchema = z.object({
   published: z.boolean().nullable(),
   // Rendered as a link: only an https page is ever accepted.
   listingUrl: z.string().url().regex(/^https:\/\//).nullable(),
+  /**
+   * True only when the push sweep will queue this failed item again by itself
+   * (review V2-2). Optional: a server without it, or a false value, means no
+   * automatic retry is promised, so the words never claim one that is not coming.
+   */
+  automaticRetryPending: z.boolean().optional(),
 }).strict();
 
 const listingPushJobSchema = z.object({
@@ -137,7 +152,7 @@ export function describeListingPushOutcome(job: DropshipListingPushJob, storeNam
       };
     }
     if (FAILED_ITEM_STATUSES.has(item.status)) {
-      const gate = item.errorCode ? STOCK_GATE_REFUSALS[item.errorCode] : undefined;
+      const gate = listingPushRefusalWords(item, storeName);
       const blocked = item.errorCode === PREVIEW_BLOCKED_CODE ? listingPushBlockedReasons(item.errorMessage) : [];
       const reason = gate?.reason ?? (blocked.length > 0 ? blocked.join(" ") : (item.errorMessage?.trim() || "the store did not say why"));
       return { ...base, state: "failed", line: `Could not list: ${reason}`, nextStep: gate?.nextStep ?? listingPushNextStep(item.errorCode, item.retryable) };
@@ -178,12 +193,37 @@ export function describeListingPushOutcome(job: DropshipListingPushJob, storeNam
  * The step to take after a refusal. The reason itself comes from the store
  * (already in the item's line); this says what to do about it.
  */
+interface RefusalWords { reason: string; nextStep: string }
+
+/** Stock work that was running clears by itself. */
+const BUSY_STOCK_WORDS: RefusalWords = Object.freeze({
+  reason: "Card Shellz was busy updating stock for this listing.",
+  nextStep: "Queue the listing again in a few minutes.",
+});
+
+/** Card Shellz paused stock updates for a while. */
+const PAUSED_STOCK_WORDS: RefusalWords = Object.freeze({
+  reason: "Card Shellz has paused stock updates for now.",
+  nextStep: "Queue the listing again later. Contact support with this message if it keeps failing.",
+});
+
+/** A stock-gate refusal raised after eBay was asked to change the quantity: it may already show the new stock. */
+const UNCONFIRMED_STOCK_WORDS: RefusalWords = Object.freeze({
+  reason: "Card Shellz could not confirm the stock update for this listing. eBay may already show the new quantity.",
+  nextStep: "Queue the listing again in a few minutes. Contact support with this message if it keeps failing.",
+});
+
 /**
- * Refusals from Card Shellz's own stock gate, raised before any marketplace
- * call. Their server messages are written for operators; the vendor gets what
- * happened and the step in plain words.
+ * Refusals from Card Shellz's own stock gate. Most come before the quantity
+ * request; the "could not confirm" ones come after eBay answered it
+ * (inventory-planning quantity-publication-request assertBulkSuccess, the
+ * admission's completion and connection cleanup). Their server messages are
+ * written for operators; the vendor gets what happened and the step in plain
+ * words. Whether a code is retried is the server's
+ * (dropship-listing-push-worker-service classifyStockGateRefusal); these words
+ * say the same thing.
  */
-const STOCK_GATE_REFUSALS: Record<string, { reason: string; nextStep: string }> = {
+const STOCK_GATE_REFUSALS: Record<string, RefusalWords> = {
   PUBLICATION_PRIOR_OUTCOME_UNRESOLVED: {
     reason: "an earlier stock update for this listing on eBay still has to be confirmed by Card Shellz.",
     nextStep: "Nothing to fix on your side. Contact support with this message; once they confirm that earlier update, queue the listing again.",
@@ -192,7 +232,136 @@ const STOCK_GATE_REFUSALS: Record<string, { reason: string; nextStep: string }> 
     reason: "eBay asked for a pause after the last attempt.",
     nextStep: "Queue the listing again in a few minutes.",
   },
+  // Permanent: no stock mapping for this listing yet. Card Shellz sets it up; queueing again cannot help until then.
+  // Kept as PR 1b wrote it (review TW-2): only failures from before the automatic stock link
+  // existed are re-sent by themselves (owner Q4), once, and a re-sent item leaves this state;
+  // "queue the listing again" stays true for every item still showing these words.
+  PUBLICATION_LISTING_TARGET_UNMAPPED: {
+    reason: "Card Shellz has not finished setting up stock updates for this listing yet.",
+    nextStep: "Nothing to fix on your side. Contact support with this message; once stock updates are set up, queue the listing again.",
+  },
+  // Permanent: Card Shellz's current stock plan leaves this listing out. Nothing re-runs it, so the vendor queues it again after the fix.
+  PUBLICATION_LISTING_PLAN_OMITTED: {
+    reason: "Card Shellz's stock plan does not include this listing right now.",
+    nextStep: "Nothing to fix on your side. Contact support with this message; once they fix it, queue the listing again.",
+  },
+  // Transient: another stock update or Card Shellz's own stock work was running; it clears by itself.
+  // PUBLICATION_SCOPE_BUSY alone is re-queued by the push sweep by itself (server domain
+  // listing-push-automatic-requeue AUTOMATIC_REQUEUE_POLICY, plan F2 2.10), so its step says
+  // the retry is automatic while the server says one is pending (AUTOMATIC_RETRY_WORDS below);
+  // the other busy codes are not, and keep BUSY_STOCK_WORDS.
+  PUBLICATION_SCOPE_BUSY: BUSY_STOCK_WORDS,
+  QUANTITY_PUBLICATION_DRAIN_BUSY: BUSY_STOCK_WORDS,
+  PUBLICATION_ADMISSION_CAPACITY_BUSY: BUSY_STOCK_WORDS,
+  PUBLICATION_AUTHORITY_CHANGED: BUSY_STOCK_WORDS,
+  PUBLICATION_CANONICAL_LISTING_PLAN_CHANGED: BUSY_STOCK_WORDS,
+  QUANTITY_PUBLICATION_SUPPRESSED: PAUSED_STOCK_WORDS,
+  PUBLICATION_GLOBAL_STOP_ACTIVE: PAUSED_STOCK_WORDS,
+  // Transient, raised after eBay answered the quantity request.
+  PUBLICATION_LISTING_MEMBERSHIP_UNPROVEN: UNCONFIRMED_STOCK_WORDS,
+  PUBLICATION_COMPLETION_CONFLICT: UNCONFIRMED_STOCK_WORDS,
+  PUBLICATION_CONNECTION_CLEANUP_UNCERTAIN: UNCONFIRMED_STOCK_WORDS,
+  // The automatic stock link's refusals (Fix PR 2a-2), raised before any eBay
+  // offer, inventory-item or quantity write. One source with the server's
+  // messages (shared/dropship/stock-link-refusals); the two transient ones say
+  // the retry is automatic only while the server says one is pending for the
+  // item (AUTOMATIC_RETRY_WORDS below, review V2-2).
+  ...DROPSHIP_STOCK_LINK_REFUSAL_WORDS,
 };
+
+/**
+ * Codes the push sweep re-queues by itself: their "Nothing to do: Card Shellz will
+ * try this listing again automatically" step is shown only while the server says an
+ * automatic retry is pending for the item (`automaticRetryPending`, review V2-2).
+ * Otherwise (its automatic re-queues are over, the sweep's guards exclude it, or an
+ * older server did not say) the vendor gets the manual step of STOCK_GATE_REFUSALS.
+ */
+const AUTOMATIC_RETRY_WORDS: Readonly<Record<string, { manual: string; automatic: string }>> = Object.freeze({
+  PUBLICATION_SCOPE_BUSY: {
+    manual: BUSY_STOCK_WORDS.nextStep,
+    automatic: DROPSHIP_STOCK_LINK_REFUSAL_WORDS.DROPSHIP_STOCK_LINK_BUSY.nextStep,
+  },
+  DROPSHIP_STOCK_LINK_BUSY: {
+    manual: DROPSHIP_STOCK_LINK_MANUAL_RETRY_NEXT_STEPS.DROPSHIP_STOCK_LINK_BUSY,
+    automatic: DROPSHIP_STOCK_LINK_REFUSAL_WORDS.DROPSHIP_STOCK_LINK_BUSY.nextStep,
+  },
+  DROPSHIP_STOCK_UPDATES_PAUSED: {
+    manual: DROPSHIP_STOCK_LINK_MANUAL_RETRY_NEXT_STEPS.DROPSHIP_STOCK_UPDATES_PAUSED,
+    automatic: DROPSHIP_STOCK_LINK_REFUSAL_WORDS.DROPSHIP_STOCK_UPDATES_PAUSED.nextStep,
+  },
+});
+
+/**
+ * True for a refusal worded as Card Shellz having paused stock updates (PAUSED_STOCK_WORDS): the vendor tries again
+ * later, not in a few minutes, though the server retries these. The publish run card reads it for its own step.
+ */
+export function isPausedStockRefusal(code: string | null): boolean {
+  return code !== null && STOCK_GATE_REFUSALS[code] === PAUSED_STOCK_WORDS;
+}
+
+/** Stock-gate codes not named above: the server message is operator text, so the vendor gets general words. */
+const STOCK_GATE_CODE_PREFIXES = ["PUBLICATION_", "QUANTITY_PUBLICATION_"] as const;
+
+/**
+ * The account refusal's words, true whether or not the store is verified now:
+ * before part 1 the account check refused every store with this message,
+ * verified or not (items the recovery leaves failed still show it, from
+ * listing-intent receipts too); after it, the message means the store had no
+ * verified eBay identity, which reconnecting fixes. So the vendor queues it
+ * again first and reconnects only if it fails the same way. The Settings
+ * button reads "Reconnect <store name>" (DropshipPortalSettings
+ * reauthorizeButtonLabel, intent refresh_connection); without a store name of
+ * its own it reads a placeholder, so these words then name the button.
+ */
+function unverifiedAccountWords(storeName: string | null): RefusalWords {
+  const name = storeName?.trim();
+  return name
+    ? { reason: `Card Shellz could not confirm ${name}'s eBay account for this listing.`,
+      nextStep: `Queue the listing again. If it fails the same way, choose Reconnect ${name} in Settings first, then queue it again.` }
+    : { reason: "Card Shellz could not confirm this store's eBay account for this listing.",
+      nextStep: "Queue the listing again. If it fails the same way, choose the store's Reconnect button in Settings first, then queue it again." };
+}
+
+/**
+ * Plain words for a refusal whose server message is not written for vendors,
+ * or undefined when the server's own message is the reason to show.
+ */
+export function listingPushRefusalWords(
+  item: Pick<DropshipListingPushItem, "errorCode" | "errorMessage" | "retryable" | "automaticRetryPending">,
+  storeName: string | null,
+): RefusalWords | undefined {
+  const code = item.errorCode;
+  if (!code) return undefined;
+  if (code === EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE || code === "PUBLICATION_PROVIDER_ACCOUNT_UNVERIFIED") {
+    if (code === EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE && item.errorMessage?.trim() === EBAY_PUBLICATION_ENVIRONMENT_MISMATCH_MESSAGE) {
+      return {
+        reason: "the listing already on eBay belongs to a different eBay site (the sandbox test site or the real eBay) than this store's connection.",
+        nextStep: "Queueing it again will not help. Contact support with this message.",
+      };
+    }
+    if (code === "PUBLICATION_PROVIDER_ACCOUNT_UNVERIFIED"
+      || item.errorMessage?.trim() === EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_MESSAGE) {
+      return unverifiedAccountWords(storeName);
+    }
+    return undefined;
+  }
+  const known = STOCK_GATE_REFUSALS[code];
+  const retryWords = AUTOMATIC_RETRY_WORDS[code];
+  if (known && retryWords) {
+    return { reason: known.reason, nextStep: item.automaticRetryPending === true ? retryWords.automatic : retryWords.manual };
+  }
+  if (known) return known;
+  if (STOCK_GATE_CODE_PREFIXES.some((prefix) => code.startsWith(prefix))) {
+    // No claim about when it stopped: some stock-gate codes are raised after eBay was asked to change the quantity.
+    return {
+      reason: "Card Shellz's stock check stopped this listing update.",
+      nextStep: item.retryable === false
+        ? "Nothing to fix on your side. Contact support with this message."
+        : "Queue the listing again in a few minutes. Contact support with this message if it keeps failing.",
+    };
+  }
+  return undefined;
+}
 
 export function listingPushNextStep(errorCode: string | null, retryable: boolean | null): string {
   switch (errorCode) {

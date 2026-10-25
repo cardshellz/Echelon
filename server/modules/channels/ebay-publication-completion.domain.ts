@@ -1,5 +1,12 @@
-import type { EbayListingInspection } from "../marketplace-listings/domain/ebay-listing-inspection";
+import { ChannelProviderReadError } from "@shared/channel-provider-read";
+import { ebayListingInspectionIssueSchema, type EbayListingInspection, type EbayListingInspectionIssue } from "../marketplace-listings/domain/ebay-listing-inspection";
 import { ebayListingSyncIdentitySchema, EbayListingSyncError, type EbayListingSyncIdentity } from "./ebay-listing-sync.domain";
+
+export function publicationInspectionError(input: EbayListingInspectionIssue): EbayListingSyncError {
+  const issue = ebayListingInspectionIssueSchema.parse(input);
+  return new EbayListingSyncError(issue.code, issue.message,
+    issue.providerRead ? { cause: new ChannelProviderReadError(issue.providerRead) } : undefined);
+}
 
 /** Bind exact provider resources without treating an unpublished offer as a listing. */
 export function resolveEbayPublicationTarget(source: EbayListingSyncIdentity, inspection: EbayListingInspection): EbayListingSyncIdentity {
@@ -7,12 +14,14 @@ export function resolveEbayPublicationTarget(source: EbayListingSyncIdentity, in
   if (inspection.providerAccount.provider !== "ebay" || inspection.providerAccount.externalAccountId !== source.accountId)
     throw new EbayListingSyncError("EBAY_SYNC_ACCOUNT_CHANGED", "The current eBay account differs from the account authorized for this publication. Reconnect the intended account and review again.");
   const readFailure = inspection.skus.find(member => member.issue)?.issue;
-  if (readFailure) throw new EbayListingSyncError(readFailure.code, readFailure.message);
+  if (readFailure) throw publicationInspectionError(readFailure);
   const published = inspection.publication;
   const target = published ? { groupKey: published.publicationKeyIdentity?.externalId ?? null,
     skus: published.members.map(member => member.sku) } : inspection.unpublishedTarget;
-  if (!target) throw new EbayListingSyncError(inspection.publicationIssue?.code ?? "EBAY_PUBLICATION_TARGET_UNVERIFIED",
-    inspection.publicationIssue?.message ?? "eBay did not expose one complete unpublished product or published listing. Review the offer and group membership before publishing.");
+  if (!target) throw publicationInspectionError(inspection.publicationIssue ?? {
+    code: "EBAY_PUBLICATION_TARGET_UNVERIFIED",
+    message: "eBay did not expose one complete unpublished product or published listing. Review the offer and group membership before publishing.",
+  });
   // Ordinary Publish sources have no group. A non-null publication source is
   // the exact group accepted in Finish Publishing's fresh operator review.
   if (source.groupKey !== null && target.groupKey !== source.groupKey)

@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { browserFeatureTestMatch } from "./scripts/ci/browser-feature-manifest.mjs";
 
 const port = Number(process.env.INVENTORY_PLAYWRIGHT_PORT ?? 5191);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) {
@@ -8,21 +9,25 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: "./test/browser",
-  testMatch: [
+  testMatch: browserFeatureTestMatch("inventory", process.env.BROWSER_FEATURE) ?? [
     "bulk-inventory-tracking.spec.ts",
     "picking-inventory-policy.spec.ts",
     "picking-hold-controls.spec.ts",
     "pick-corrections.spec.ts",
     "inventory-availability.spec.ts",
     "inventory-transfer.spec.ts",
+    "inventory-reserved-transfer.spec.ts",
     "return-receiving.spec.ts",
     "inventory-authority-gates.spec.ts",
     "inventory-publication-target-resume.spec.ts",
     "channel-inventory-workspace.spec.ts",
     "walmart-channel-workspace.spec.ts",
     "catalog-images.spec.ts",
+    "channel-package-data.spec.ts",
     "ebay-listing-photos.spec.ts",
     "ebay-listing-sync-recovery.spec.ts",
+    "ebay-policy-integrity.spec.ts",
+    "ebay-pricing-integrity.spec.ts",
     "ebay-listing-mapping-repair.spec.ts",
     "ebay-listing-intent.spec.ts",
     "ebay-publication-stock.spec.ts",

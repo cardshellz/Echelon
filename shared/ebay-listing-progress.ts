@@ -30,6 +30,11 @@ export interface EbayListingJobPresentation {
 }
 
 function presentInventoryReconciliation(status: EbayInventoryReconciliation): NonNullable<EbayListingJobPresentation["inventory"]> {
+  if (status.state === "inactive") return {
+    summary: "Stock monitoring is inactive for archived variants.",
+    detail: "These variants are excluded from stock updates. Their removal from the sales channel is tracked separately.",
+    code: null, times: [],
+  };
   const times: Array<{ label: string; at: string }> = [];
   if (status.checkedAt) times.push({ label: "Stock checked", at: status.checkedAt });
   if (status.nextCheckAt) times.push({ label: "Next stock check eligible at", at: status.nextCheckAt });
@@ -90,7 +95,7 @@ export function presentEbayListingJob(job: EbayListingSyncJob): EbayListingJobPr
   }
   // A review-required missing response is not a promise that passing this
   // timestamp will unblock it. Only automatic retry states expose eligibility.
-  if (job.state === "recovering") {
+  if (job.state === "recovering" && !job.readRetryPaused) {
     times.push({ label: "Next automatic check eligible at", at: job.nextAttemptAt });
   }
   return {

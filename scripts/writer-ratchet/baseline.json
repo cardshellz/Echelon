@@ -25,16 +25,20 @@
     "modules/channels",
     "modules/inventory",
     "modules/shipping-engine",
-    "server/routes/ebay/ebay-listing-state.ts",
-    "server/routes/ebay/ebay-policies.routes.ts"
+    "server/routes/ebay/ebay-listing-state.ts"
   ],
   "catalog.products": [
     "modules/catalog",
     "modules/channels",
     "modules/procurement",
     "server/routes/ebay-listing-rules.routes.ts",
-    "server/routes/ebay/ebay-config.routes.ts",
-    "server/routes/ebay/ebay-policies.routes.ts"
+    "server/routes/ebay/ebay-config.routes.ts"
+  ],
+  "catalog.publication_media_references": [
+    "modules/catalog"
+  ],
+  "catalog.publication_media_version_pins": [
+    "modules/catalog"
   ],
   "catalog.shipping_groups": [
     "modules/catalog"
@@ -69,8 +73,7 @@
     "modules/channels"
   ],
   "channels.channel_pricing_rules": [
-    "modules/channels",
-    "server/routes/ebay/ebay-pricing.routes.ts"
+    "modules/channels"
   ],
   "channels.channel_product_allocation": [
     "modules/channels"
@@ -127,6 +130,9 @@
   "channels.ebay_listing_sync_jobs": [
     "modules/channels"
   ],
+  "channels.ebay_listing_sync_settlements": [
+    "modules/channels"
+  ],
   "channels.partner_profiles": [
     "modules/channels"
   ],
@@ -175,6 +181,9 @@
     "modules/dropship"
   ],
   "dropship.dropship_carrier_protection_policies": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_catalog_code_versions": [
     "modules/dropship"
   ],
   "dropship.dropship_catalog_rule_set_revisions": [
@@ -228,6 +237,9 @@
   "dropship.dropship_ebay_category_rule_revisions": [
     "modules/dropship"
   ],
+  "dropship.dropship_ebay_fulfillment_policy_checks": [
+    "modules/dropship"
+  ],
   "dropship.dropship_ebay_listing_policy_override_revisions": [
     "modules/dropship"
   ],
@@ -261,6 +273,12 @@
   "dropship.dropship_listing_content_settings": [
     "modules/dropship"
   ],
+  "dropship.dropship_listing_marketplace_sales": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_listing_previous_marketplace_ids": [
+    "modules/dropship"
+  ],
   "dropship.dropship_listing_price_revisions": [
     "modules/dropship"
   ],
@@ -273,10 +291,19 @@
   "dropship.dropship_listing_push_jobs": [
     "modules/dropship"
   ],
+  "dropship.dropship_listing_push_run_targets": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_listing_push_runs": [
+    "modules/dropship"
+  ],
   "dropship.dropship_listing_rule_conversions": [
     "modules/dropship"
   ],
   "dropship.dropship_listing_sync_events": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_marketplace_sync_notices": [
     "modules/dropship"
   ],
   "dropship.dropship_marketplace_tracking_pushes": [
@@ -316,6 +343,9 @@
     "modules/dropship"
   ],
   "dropship.dropship_pricing_reviews": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_process_heartbeats": [
     "modules/dropship"
   ],
   "dropship.dropship_product_category_seen": [
@@ -387,6 +417,9 @@
   "dropship.dropship_store_setup_checks": [
     "modules/dropship"
   ],
+  "dropship.dropship_unmatched_marketplace_orders": [
+    "modules/dropship"
+  ],
   "dropship.dropship_usdc_deposit_addresses": [
     "modules/dropship"
   ],
@@ -439,6 +472,7 @@
     "server/routes/ebay/ebay-taxonomy.routes.ts"
   ],
   "ebay.ebay_category_mappings": [
+    "modules/channels",
     "server/routes/ebay/ebay-config.routes.ts"
   ],
   "ebay.ebay_listing_rules": [
@@ -586,6 +620,9 @@
   "inventory.cost_component_protections": [
     "modules/inventory"
   ],
+  "inventory.cost_origin_repairs": [
+    "modules/procurement"
+  ],
   "inventory.cost_reconciliation_approvals": [
     "modules/inventory"
   ],
@@ -706,6 +743,9 @@
   "inventory.lot_cost_follow_ups": [
     "modules/inventory"
   ],
+  "inventory.lot_cost_origin_amendments": [
+    "modules/inventory"
+  ],
   "inventory.lot_cost_origins": [
     "modules/inventory"
   ],
@@ -820,6 +860,9 @@
   "inventory.quantity_publication_catchup": [
     "modules/inventory-planning"
   ],
+  "inventory.quantity_publication_catchup_settlements": [
+    "modules/inventory-planning"
+  ],
   "inventory.quantity_publication_cooldowns": [
     "modules/inventory-planning"
   ],
@@ -873,6 +916,15 @@
   ],
   "inventory.safety_definition_applications": [
     "modules/inventory-planning"
+  ],
+  "inventory.supplier_return_allocations": [
+    "modules/inventory"
+  ],
+  "inventory.supplier_return_cost_entries": [
+    "modules/inventory"
+  ],
+  "inventory.supplier_return_followups": [
+    "modules/inventory"
   ],
   "inventory.tracking_stop_history": [
     "modules/inventory"
@@ -939,7 +991,34 @@
   "marketplace.channel_listing_updates": [
     "modules/marketplace-listings"
   ],
+  "marketplace.channel_sync_batch_members": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_sync_batches": [
+    "modules/marketplace-listings"
+  ],
   "marketplace.dropship_listing_scopes": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_changes": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_deliveries": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_delivery_events": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_delivery_sources": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_member_recovery_commands": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_member_retirement_events": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_member_retirements": [
     "modules/marketplace-listings"
   ],
   "marketplace.listing_publication_members": [
@@ -1260,6 +1339,12 @@
   "procurement.receipt_reversals": [
     "modules/procurement"
   ],
+  "procurement.receipt_shipment_quantity_amendments": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_shipment_quantity_results": [
+    "modules/procurement"
+  ],
   "procurement.receiving_custody_fence": [
     "modules/procurement"
   ],
@@ -1291,6 +1376,39 @@
     "modules/procurement"
   ],
   "procurement.shipment_cost_exception_decisions": [
+    "modules/procurement"
+  ],
+  "procurement.shipment_history_corrections": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_credit_application_reversals": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_credit_applications": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_credit_lines": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_credits": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_credit_entitlements": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_credit_links": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_credit_reviews": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_lines": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_return_reporting_events": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_returns": [
     "modules/procurement"
   ],
   "procurement.supplier_sourcing_revisions": [

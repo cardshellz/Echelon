@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { verifyInheritedMigrationFiles } from "./inherited-migration-provenance.mjs";
 import {
   MAX_PR_NUMBER, boundedInteger, fail, readMigrationInventory,
   reportMigrationError, validateLegacyManifest, validateMigrationInventory,
@@ -83,7 +84,7 @@ function pullRequestMigrationBase(repositoryRoot, context, environment) {
   return actualBase;
 }
 
-export function validateMigrationChanges(repositoryRoot, baseRef, ownerPr) {
+function validateMigrationChangesWithInherited(repositoryRoot, baseRef, ownerPr, inheritedFiles = new Set()) {
   if (ownerPr !== undefined) boundedInteger(ownerPr, MAX_PR_NUMBER, "pull request number");
   const inventory = readMigrationInventory(path.join(repositoryRoot, "migrations"));
   const filenames = validateMigrationInventory(inventory);
@@ -106,18 +107,24 @@ export function validateMigrationChanges(repositoryRoot, baseRef, ownerPr) {
   const added = filenames.filter((file) => !basePaths.has(`migrations/${file}`));
   for (const filename of added) {
     const record = inventory.metadata.get(filename);
-    if (!record || (ownerPr !== undefined && record.pr !== ownerPr)) {
+    if (!record || (ownerPr !== undefined && record.pr !== ownerPr && !inheritedFiles.has(filename))) {
       fail("MIGRATION_PR_OWNERSHIP", `New migration ${filename} must be allocated to ${ownerPr === undefined ? "its owning PR" : `PR ${ownerPr}`}.`, { filename, expectedPr: ownerPr ?? null });
     }
   }
   return { filenames, added, base: base.commit };
 }
 
-export function runMigrationCheck(args, repositoryRoot = process.cwd(), environment = process.env) {
+export function validateMigrationChanges(repositoryRoot, baseRef, ownerPr) {
+  return validateMigrationChangesWithInherited(repositoryRoot, baseRef, ownerPr);
+}
+
+function resolveMigrationCheckContext(args, repositoryRoot, environment) {
   let ci = false;
   let base;
   let pr;
   let eventBase;
+  let head;
+  let eventRepository;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--ci" && !ci) ci = true;
     else if (args[i] === "--base" && base === undefined && args[i + 1]) base = args[++i];
@@ -133,13 +140,20 @@ export function runMigrationCheck(args, repositoryRoot = process.cwd(), environm
     ({ base, pr } = context);
     if (environment.GITHUB_EVENT_NAME === "pull_request") {
       eventBase = base;
+      head = context.head;
+      eventRepository = event?.repository?.full_name;
       base = pullRequestMigrationBase(repositoryRoot, context, environment);
     }
   }
   if (pr !== undefined && base === undefined) fail("MISSING_MIGRATION_BASE", "--pr requires --base.");
+  return { base, pr, eventBase, head, eventRepository, isPullRequestCi: ci && environment.GITHUB_EVENT_NAME === "pull_request" };
+}
+
+function completeMigrationCheck(context, repositoryRoot, inheritedFiles = new Set()) {
+  const { base, pr, eventBase } = context;
   const filenames = base === undefined
     ? validateMigrationInventory(readMigrationInventory(path.join(repositoryRoot, "migrations")))
-    : validateMigrationChanges(repositoryRoot, base, pr).filenames;
+    : validateMigrationChangesWithInherited(repositoryRoot, base, pr, inheritedFiles).filenames;
   return {
     event: "migration_policy_validated",
     migrations: filenames.length,
@@ -149,7 +163,33 @@ export function runMigrationCheck(args, repositoryRoot = process.cwd(), environm
   };
 }
 
+export function runMigrationCheck(args, repositoryRoot = process.cwd(), environment = process.env) {
+  return completeMigrationCheck(resolveMigrationCheckContext(args, repositoryRoot, environment), repositoryRoot);
+}
+
+export async function runMigrationCheckCli(args, repositoryRoot = process.cwd(), environment = process.env, dependencies = {}) {
+  const context = resolveMigrationCheckContext(args, repositoryRoot, environment);
+  let result;
+  let ownershipFailure;
+  try { result = completeMigrationCheck(context, repositoryRoot); }
+  catch (error) {
+    if (!context.isPullRequestCi || error?.code !== "MIGRATION_PR_OWNERSHIP") throw error;
+    ownershipFailure = error;
+  }
+  if (!context.isPullRequestCi) return result;
+  // Audit foreign introductions even after a strict success: deleting their last
+  // SQL/sidecar pair, or reallocating it, must not erase merged ownership evidence.
+  // The verifier performs no API call when all introductions belong to this PR
+  // or are already protected by the verified base commit.
+  const inheritedFiles = await verifyInheritedMigrationFiles(repositoryRoot, context, environment, dependencies);
+  if (inheritedFiles.size === 0) {
+    if (ownershipFailure) throw ownershipFailure;
+    return result;
+  }
+  return completeMigrationCheck(context, repositoryRoot, inheritedFiles);
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  try { console.log(JSON.stringify(runMigrationCheck(process.argv.slice(2)))); }
+  try { console.log(JSON.stringify(await runMigrationCheckCli(process.argv.slice(2)))); }
   catch (error) { reportMigrationError(error); process.exitCode = 1; }
 }

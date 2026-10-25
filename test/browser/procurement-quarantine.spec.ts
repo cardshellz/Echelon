@@ -118,10 +118,11 @@ test("an intake response after leaving cannot replace the next receipt", async (
   await expect.poll(() => state.view.observations.length).toBe(1);
   await expect(page.getByRole("heading", { name: /Receipt OTHER-RECEIPT/ })).toBeVisible();
   await expect(page.getByText("Held goods recorded in quarantine and unavailable for sale.", { exact: true })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("receiving-custody-command:31"))).toBeNull();
   await page.evaluate(() => { history.pushState(null, "", "/receiving?open=31"); dispatchEvent(new PopStateEvent("popstate")); });
-  await page.getByRole("button", { name: "Retry saved quarantine command", exact: true }).click();
-  await expect(page.getByText("Held goods recorded in quarantine and unavailable for sale.", { exact: true })).toBeVisible();
-  expect(state.commands[1]).toEqual(state.commands[0]); expect(failures).toEqual([]);
+  await expect(page.getByRole("region", { name: "Quarantine observation 41" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry saved quarantine command", exact: true })).toHaveCount(0);
+  expect(state.commands).toHaveLength(1); expect(failures).toEqual([]);
 });
 
 test("stale source rejection requires readback before another reviewed command", async ({ page }) => {
@@ -238,4 +239,77 @@ test("malformed source options cannot become an acceptance command", async ({ pa
   await expect(page.getByRole("alert").filter({ hasText: "Receipt source options were incomplete" })).toBeVisible();
   await page.getByRole("button", { name: "Prepare receipt acceptance", exact: true }).click();
   expect(state.commands).toEqual([]); expect(failures).toEqual([]);
+});
+
+for (const status of [401, 403, 409]) test(`lost intake followed by HTTP${status} retains the original request through reload`, async ({ page }) => {
+  const { state, failures } = await installQuarantineFixtures(page, { lostOnce: true });
+  await unknownIntake(page); await page.getByRole("button", { name: "Record held goods", exact: true }).click();
+  const retry = page.getByRole("button", { name: "Retry saved quarantine command", exact: true });
+  await expect(retry).toBeVisible(); state.failureStatuses.push(status);
+  await retry.click(); await expect(page.getByText("Session or permission needs recovery", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Load latest receipt and review rejected command", exact: true })).toHaveCount(0);
+  await page.reload(); await retry.click();
+  await expect(page.getByText("Held goods recorded in quarantine and unavailable for sale.", { exact: true })).toBeVisible();
+  expect(state.commands).toHaveLength(3); expect(state.commands[1]).toEqual(state.commands[0]); expect(state.commands[2]).toEqual(state.commands[0]);
+  expect(state.view.observations).toHaveLength(1); expect(failures).toEqual([]);
+});
+
+test("another operator cannot dispatch a saved intake and the original operator can recover", async ({ page }) => {
+  const { state, failures } = await installQuarantineFixtures(page, { lostOnce: true });
+  await unknownIntake(page); await page.getByRole("button", { name: "Record held goods", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Retry saved quarantine command", exact: true })).toBeVisible();
+  state.actorId = "another-operator"; await page.reload();
+  await expect(page.getByText(/saved quarantine request belongs to another operator/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Record quarantine", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Retry saved quarantine command", exact: true })).toHaveCount(0);
+  expect(state.commands).toHaveLength(1);
+  state.actorId = "test-user"; await page.reload();
+  await page.getByRole("button", { name: "Retry saved quarantine command", exact: true }).click();
+  await expect(page.getByText("Held goods recorded in quarantine and unavailable for sale.", { exact: true })).toBeVisible();
+  expect(state.commands).toHaveLength(2); expect(state.commands[1]).toEqual(state.commands[0]); expect(failures).toEqual([]);
+});
+
+test("a legacy saved request is retained without assigning the current operator", async ({ page }) => {
+  const { state, failures } = await installQuarantineFixtures(page);
+  await page.evaluate(() => sessionStorage.setItem("receiving-custody-command:31", JSON.stringify({ receiptId: 31, observationId: null, path: "/api/receiving/31/quarantine", key: "old-key", body: {} })));
+  await page.reload();
+  await expect(page.getByText(/legacy evidence without an operator/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Record quarantine", exact: true })).toBeDisabled();
+  expect(state.commands).toHaveLength(0); expect(await page.evaluate(() => sessionStorage.getItem("receiving-custody-command:31"))).not.toBeNull(); expect(failures).toEqual([]);
+});
+
+test("saved recovery remains available when fresh custody capability is removed", async ({ page }) => {
+  const { state, failures } = await installQuarantineFixtures(page, { lostOnce: true });
+  await unknownIntake(page); await page.getByRole("button", { name: "Record held goods", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Retry saved quarantine command", exact: true })).toBeVisible();
+  state.view.canRecord = { allowed: false, reason: "Permission removed" }; await page.reload();
+  await expect(page.getByRole("button", { name: "Record quarantine", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Retry saved quarantine command", exact: true }).click();
+  await expect(page.getByText("Held goods recorded in quarantine and unavailable for sale.", { exact: true })).toBeVisible();
+  expect(state.commands[1]).toEqual(state.commands[0]); expect(failures).toEqual([]);
+});
+
+for (const status of [403, 503]) test(`saved quarantine recovers when receipt detail returns HTTP${status}`, async ({ page }) => {
+  const { state, failures } = await installQuarantineFixtures(page, { lostOnce: true });
+  await unknownIntake(page); await page.getByRole("button", { name: "Record held goods", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Retry saved quarantine command", exact: true })).toBeVisible();
+  state.detailFailure = status; await page.reload();
+  await expect(page.getByRole("heading", { name: "Receipt unavailable", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Retry saved quarantine command", exact: true }).click();
+  await expect(page.getByText("The saved quarantine command is confirmed. Receipt details can be reloaded when access is restored.", { exact: true })).toBeVisible();
+  expect(state.commands).toHaveLength(2); expect(state.commands[1]).toEqual(state.commands[0]); expect(state.view.observations).toHaveLength(1);
+  expect(await page.evaluate(() => sessionStorage.getItem("receiving-custody-command:31"))).toBeNull(); expect(failures).toEqual([]);
+});
+
+test("confirmed intake with failed receipt readback cannot resubmit its old form", async ({ page }) => {
+  const { state, failures } = await installQuarantineFixtures(page);
+  await unknownIntake(page); state.detailFailure = 503;
+  await page.getByRole("button", { name: "Record held goods", exact: true }).click();
+  await expect(page.getByText(/quarantine command was confirmed, but the latest receipt could not be loaded/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Record held goods", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Record quarantine", exact: true })).toBeDisabled();
+  expect(await page.evaluate(() => sessionStorage.getItem("receiving-custody-command:31"))).toBeNull();
+  state.detailFailure = 0; await page.getByRole("button", { name: "Reload quarantine custody", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Record quarantine", exact: true })).toBeEnabled();
+  expect(state.commands).toHaveLength(1); expect(state.view.observations).toHaveLength(1); expect(failures).toEqual([]);
 });

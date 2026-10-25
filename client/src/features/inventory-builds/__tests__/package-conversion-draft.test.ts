@@ -62,6 +62,63 @@ describe("package conversion draft commands", () => {
     expect(baseline).toEqual(before);
   });
 
+  it.each([1, 2, 3])("can save after archiving variant %i without dropping unrelated authority or rewriting history", archivedId => {
+    const source = model({ lifecycleStatus: "sealed", paths: [
+      model().paths[0]!,
+      { sourceVariantId: 1, destinationVariantId: 2, inputQty: 5, outputQty: 1,
+        sourceUnitsPerVariant: 1, destinationUnitsPerVariant: 5, operationType: "assemble_pack",
+        authorityState: "blocked", transformationRecipeBindingKey: null },
+      { sourceVariantId: 2, destinationVariantId: 3, inputQty: 5, outputQty: 1,
+        sourceUnitsPerVariant: 5, destinationUnitsPerVariant: 25, operationType: "assemble_pack",
+        authorityState: "allowed", transformationRecipeBindingKey: null },
+    ] });
+    const baseline = view({ activeModel: source, head: { revision: "4", activeModelId: 501, draftModelId: null } });
+    baseline.variants.find(variant => variant.id === archivedId)!.isActive = false;
+    const before = structuredClone(baseline);
+    const edit = beginPackageConversionEdit(baseline);
+    const command = buildPackageConversionCommand(edit, "generic-archive");
+    expect(command.request.paths).toEqual(source.paths.filter(path => path.sourceVariantId !== archivedId && path.destinationVariantId !== archivedId)
+      .map(({ sourceUnitsPerVariant: _source, destinationUnitsPerVariant: _destination, ...path }) => path));
+    expect(command.request.expectedHeadRevision).toBe("4");
+    expect(command.request.inventoryBehavior).toBe("package_hierarchy");
+    expect(baseline).toEqual(before);
+  });
+
+  it("accepts a newly chosen direct path after archival but never infers one from the retired middle SKU", () => {
+    const baseline = view({ activeModel: model({ lifecycleStatus: "sealed", paths: [
+      { sourceVariantId: 1, destinationVariantId: 2, inputQty: 5, outputQty: 1,
+        sourceUnitsPerVariant: 1, destinationUnitsPerVariant: 5, operationType: "assemble_pack", authorityState: "allowed", transformationRecipeBindingKey: null },
+      { sourceVariantId: 2, destinationVariantId: 3, inputQty: 5, outputQty: 1,
+        sourceUnitsPerVariant: 5, destinationUnitsPerVariant: 25, operationType: "assemble_pack", authorityState: "allowed", transformationRecipeBindingKey: null },
+    ] }), head: { revision: "4", activeModelId: 501, draftModelId: null } });
+    baseline.variants[1]!.isActive = false;
+    const edit = beginPackageConversionEdit(baseline);
+    expect(edit.paths).toEqual([]);
+    const command = buildPackageConversionCommand({ ...edit, ...updatePackageLadderDirection({
+      variants: edit.baseline.variants, paths: edit.paths, lowerVariantId: 1, upperVariantId: 3,
+      direction: "break_down", nextRowId: edit.nextRowId,
+    }) }, "explicit-after-archive");
+    expect(command.request.paths).toEqual([{ sourceVariantId: 3, destinationVariantId: 1, inputQty: 1, outputQty: 25,
+      operationType: "break_pack", authorityState: "allowed", transformationRecipeBindingKey: null }]);
+  });
+
+  it("keeps active unit drift and missing references as blockers when retired paths are excluded", () => {
+    const baseline = view({ activeModel: model({ lifecycleStatus: "sealed" }), head: { revision: "4", activeModelId: 501, draftModelId: null } });
+    baseline.variants[1]!.isActive = false;
+    baseline.variants[0]!.unitsPerVariant = 2;
+    expect(() => buildPackageConversionCommand({ ...beginPackageConversionEdit(baseline), inventoryBehavior: "package_hierarchy" }, "drift"))
+      .toThrow("Change the inventory behavior");
+    // Force a real edit while leaving the retained baseline snapshot unchanged.
+    const changed = beginPackageConversionEdit(baseline);
+    changed.paths = [];
+    expect(() => buildPackageConversionCommand(changed, "drift" )).toThrow("snapshot drift");
+    const missing = view({ activeModel: model({ lifecycleStatus: "sealed" }), head: { revision: "4", activeModelId: 501, draftModelId: null } });
+    missing.variants = missing.variants.filter(variant => variant.id !== 3);
+    const missingEdit = beginPackageConversionEdit(missing);
+    expect(missingEdit.paths).toHaveLength(1);
+    expect(() => buildPackageConversionCommand({ ...missingEdit, paths: [] }, "missing")).toThrow("active variants");
+  });
+
   it("deep-captures the baseline instead of rebasing edits onto refreshed response objects", () => {
     const response = view({ draftModel: model(), head: { revision: "4", draftModelId: 501, activeModelId: null } });
     const edit = changeDirection(beginPackageConversionEdit(response));
@@ -180,6 +237,17 @@ describe("package conversion draft commands", () => {
       paths: [{ sourceVariantId: 1, destinationVariantId: 2, operationType: "directed_conversion", transformationRecipeBindingKey: "recipe:71:network" }] });
     expect(selectBuildRecipe(selected, 71, false)).toMatchObject({ paths: [], recipeBindings: [] });
     expect(edit).toMatchObject({ paths: [], recipeBindings: [] });
+  });
+
+  it("rejects reselecting an assembly recipe containing an archived component", () => {
+    const baseline = view();
+    baseline.recipes = [{ id: 71, code: "EXTERNAL", name: "External", version: 1, status: "active", recipeType: "assembly",
+      outputProductId: 10, outputVariantId: 2, outputUnitsPerVariant: 5, outputQty: 1,
+      components: [{ componentVariantId: 927, componentProductId: 88, componentUnitsPerVariant: 1, componentQty: 5,
+        sku: "ARCHIVED", name: "Archived component", isActive: false }] }];
+    const edit = changeInventoryBehavior(beginPackageConversionEdit(baseline), "build_managed");
+    expect(() => selectBuildRecipe(edit, 71, true)).toThrow("archived SKU");
+    expect(edit.recipeBindings).toEqual([]);
   });
 
   it("validates command quantity and idempotency fields before transport", () => {

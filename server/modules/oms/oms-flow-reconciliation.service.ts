@@ -1,4 +1,6 @@
 import { sql } from "drizzle-orm";
+import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
+import { channelMerchandiseCapabilitySql } from "./infrastructure/channel-merchandise-policy";
 import { cancelOrder } from "../orders/order-status-core";
 import type { OmsOpsIssue } from "./ops-health.service";
 import {
@@ -286,8 +288,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           OR (wo.source_table_id = oo.id::text)
         )
         WHERE (
-            oo.status IN ('cancelled', 'shipped', 'refunded')
-            OR oo.financial_status = 'refunded'
+            ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
           )
           AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'picking', 'packed')
           AND oo.updated_at < NOW() - INTERVAL '10 minutes'
@@ -302,8 +303,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           OR (wo.source_table_id = oo.id::text)
         )
         WHERE (
-            oo.status IN ('cancelled', 'shipped', 'refunded')
-            OR oo.financial_status = 'refunded'
+            ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
           )
           AND wo.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'picking', 'packed')
           AND oo.updated_at < NOW() - INTERVAL '10 minutes'
@@ -365,8 +365,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
           AND NOT EXISTS (
@@ -397,8 +396,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
           AND NOT EXISTS (
@@ -568,8 +566,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
       `,
@@ -601,8 +598,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
         ORDER BY os.created_at ASC
@@ -1695,8 +1691,7 @@ export async function remediateOmsFlowIssue(
               OR (wo.source_table_id = oo.id::text)
             )
             AND (
-              oo.status IN ('cancelled', 'shipped', 'refunded')
-              OR oo.financial_status = 'refunded'
+              ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
             )
         )
         AND NOT EXISTS (
@@ -1787,8 +1782,7 @@ export async function remediateOmsFlowIssue(
               OR (wo.source_table_id = oo.id::text)
             )
             AND (
-              oo.status IN ('cancelled', 'shipped', 'refunded')
-              OR oo.financial_status = 'refunded'
+              ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
             )
         )
       LIMIT 1
@@ -1843,7 +1837,8 @@ export async function remediateOmsFlowIssue(
     let cancelledByThisRemediation = false;
     const updated = await withOptionalTransaction(db, async (tx) => {
       const omsResult: any = await tx.execute(sql`
-        SELECT oo.status, oo.financial_status
+        SELECT oo.status, oo.financial_status, oo.channel_id,
+          ${channelMerchandiseCapabilitySql(sql`oo.channel_id`)} AS uses_channel_quantities
         FROM oms.oms_orders oo
         JOIN wms.orders wo ON (
              (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
@@ -1851,15 +1846,15 @@ export async function remediateOmsFlowIssue(
         )
         WHERE oo.id = ${omsOrderId}
           AND wo.id = ${wmsOrderId}
-          AND (oo.status IN ('cancelled', 'shipped', 'refunded') OR oo.financial_status = 'refunded')
+          AND (${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: false })})
         LIMIT 1
       `);
       const omsRow = omsResult?.rows?.[0];
       if (!omsRow) return false;
 
       const isCancelled = omsRow.status === "cancelled"
-        || omsRow.status === "refunded"
-        || omsRow.financial_status === "refunded";
+        || (!omsRow.uses_channel_quantities
+          && (omsRow.status === "refunded" || omsRow.financial_status === "refunded"));
       if (!isCancelled) {
         return false;
       }

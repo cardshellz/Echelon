@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { createServer, type Server } from "node:http";
@@ -9,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   repository: { reserve: vi.fn(), executeClaim: vi.fn(), rejectClaim: vi.fn(), markRetryable: vi.fn() },
 }));
 vi.mock("../../../../routes/middleware", () => ({
+  requireAuth: (_req: Request, _res: Response, next: NextFunction) => next(),
   requirePermission: (resource: string, action: string) => (req: Request, _res: Response, next: NextFunction) => {
     mocks.permission(resource, action);
     (req as Request & { user: unknown }).user = mocks.actorId ? { id: mocks.actorId } : undefined;
@@ -33,7 +35,7 @@ const service = { executeCostCommandInTransaction: vi.fn() };
 const KEY = "shipment-cost-http-fixture";
 
 async function send(method: string, path: string, body: unknown, headers: Record<string, string> = {}) {
-  const response = await fetch(`${url}${path}`, { method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const response = await requestLocalHttp(`${url}${path}`, { method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   return { status: response.status, headers: response.headers, body: await response.json() };
 }
 

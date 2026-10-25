@@ -1,9 +1,12 @@
+import { ChannelPricingError } from "../../../channels/channel-pricing.domain";
+import { sendChannelPricingError } from "../../../channels/interfaces/http/channel-pricing.error";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
 import { ListingPublicationError } from "../../domain/listing-publication";
 import type { ListingPublicationService } from "../../application/listing-publication.service";
 import { ChannelProviderError } from "../../../channels/channel-provider.error";
+import { ListingMemberLifecycleError } from "../../domain/listing-member-lifecycle";
 import { ChannelIdentityError } from "../../../channels/channel-identity.domain";
 
 export function registerListingPublicationRoutes(app: Express): void {
@@ -93,8 +96,13 @@ export function registerListingPublicationRoutes(app: Express): void {
 }
 
 export function sendError(response: Response, error: unknown): void {
+  if (error instanceof ChannelPricingError) {
+    sendChannelPricingError(response, error, "listing_publication_pricing");
+    return;
+  }
   const known =
     error instanceof ListingPublicationError ||
+    error instanceof ListingMemberLifecycleError ||
     error instanceof ChannelIdentityError ||
     error instanceof ChannelProviderError;
   const invalid = error instanceof z.ZodError;
@@ -110,7 +118,7 @@ export function sendError(response: Response, error: unknown): void {
     .status(
       error instanceof ListingPublicationError
         ? error.status
-        : error instanceof ChannelIdentityError
+        : error instanceof ChannelIdentityError || error instanceof ListingMemberLifecycleError
           ? 409
           : invalid
             ? 400

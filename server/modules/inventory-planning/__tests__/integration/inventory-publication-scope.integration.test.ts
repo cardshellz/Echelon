@@ -130,9 +130,28 @@ dbDescribe.sequential("publication scope in preview and sealed cutover evidence"
       providerWriteAttempted: false, outboxEnqueued: false });
   });
 
-  it("retains a clearing duty and reports the missing exact mapping when a channel SKU becomes inactive", async () => {
+  it("excludes a Catalog-archived member from stock publication without losing its retained provider identity", async () => {
     await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,105,'FUTURE','FUTURE')");
     await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=105");
+    const result = await preview.preview(2, 20);
+    expect(result.membership).toEqual({ mode: "explicit", includedVariantIds: [101] });
+    expect(result.selection?.variants.find(row => row.productVariantId === 105))
+      .toMatchObject({ action: "none", catalogArchived: true, blockers: [] });
+    expect(result.rows.find(row => row.productVariantId === 105)).toBeUndefined();
+    expect(result.blockers).toEqual([]);
+    expect((await database.pool.query(`SELECT channel_sku,channel_inventory_item_id,is_active
+      FROM channels.channel_feeds WHERE channel_id=36 AND product_variant_id=105`)).rows)
+      .toEqual([{ channel_sku: "FUTURE", channel_inventory_item_id: "FUTURE", is_active: 1 }]);
+    expect((await database.pool.query(`SELECT active_mapping_id FROM inventory.publication_variant_mapping_heads
+      WHERE publication_target_id=2 AND product_variant_id=105`)).rows).toEqual([]);
+    expect((await database.pool.query("SELECT id FROM inventory.inventory_publication_outbox")).rows).toEqual([]);
+  });
+
+  it("retains a clearing duty and requires the exact mapping when only the channel feed is disabled", async () => {
+    await database.pool.query(`INSERT INTO channels.channel_feeds
+      (channel_id,product_variant_id,channel_sku,channel_inventory_item_id,is_active) VALUES(36,105,'FUTURE','FUTURE',0)`);
+    expect((await database.pool.query("SELECT is_active FROM catalog.product_variants WHERE id=105")).rows)
+      .toEqual([{ is_active: true }]);
     const result = await preview.preview(2, 20);
     expect(result.membership).toEqual({ mode: "explicit", includedVariantIds: [101,105] });
     expect(result.selection?.variants.find(row => row.productVariantId === 105)?.action).toBe("zero");

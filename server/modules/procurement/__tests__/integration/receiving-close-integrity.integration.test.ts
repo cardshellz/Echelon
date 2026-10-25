@@ -1,3 +1,5 @@
+import { registerReceivingEntryRecoveryCases } from "./receiving-entry-recovery.cases";
+import { registerReceivingEntryHttpRecoveryCases } from "./receiving-entry-http.cases";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,24 +16,47 @@ import { InventoryLotService } from "../../../inventory/lots.service";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
 import { lockReceivingCustodyFence } from "../../receiving-custody-public";
 import { insertCustodyObservation } from "../../receiving-quarantine.repository";
+import { ReceiptReversalService } from "../../receipt-reversal.service";
+import { createReceiptReversalCommands, hashReceiptReversalCommandIdentity, receiptReversalCommandScope, RECEIPT_REVERSAL_COMMAND_PRINCIPAL } from "../../receipt-reversal.commands";
+import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
+import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
+import { RECEIPT_REVERSAL_MAX_REASON_LENGTH, receiptReversalCommandResultSchema, type ReceiptReversalAction } from "@shared/procurement/receipt-reversal-command";
 
-// Same module-global exclusion as the existing active-ledger integration suite.
-// Every storage operation used below is bound to the dedicated real SQL executor.
-vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
+// Redirect only the connection boundary. HTTP permissions and the default
+// command repository execute against this test's disposable PostgreSQL database.
+const connection = vi.hoisted(() => ({ database: null as ReturnType<typeof drizzle<typeof schema>> | null }));
+vi.mock("../../../../db", () => ({ pool: {}, db: new Proxy({}, {
+  get(_target, property) {
+    if (!connection.database) throw new Error("Receiving test database not initialized");
+    const value = Reflect.get(connection.database, property);
+    return typeof value === "function" ? value.bind(connection.database) : value;
+  },
+}) }));
 const enabled = !!process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const run = enabled ? describe : describe.skip;
 const ACTOR = "receiving-integrity-operator";
 const NOW = new Date("2026-10-13T12:00:00Z");
 const tables = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments,
   schema.inboundShipmentLines, schema.receivingOrders, schema.receivingLines, schema.poReceipts,
-  schema.poStatusHistory, schema.vendorInvoices, schema.vendorInvoiceLines, schema.receiptReversals] as const;
+  schema.poStatusHistory, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.supplierReturnLines, schema.receiptReversals] as const;
 
 run.sequential("Receipt integrity with the activated quantity ledger", () => {
   let context: QuantityLedgerTestContext;
   let service: ReceivingService;
+  let reversal: ReceiptReversalService;
   beforeEach(async () => {
     context = await createQuantityLedgerTestContext(process.env.ECHELON_TEST_DATABASE_URL, true);
     const pool = context.pool;
+    const identityTables = [schema.users, schema.authRoles, schema.authPermissions, schema.authRolePermissions, schema.authUserRoles] as const;
+    await pool.query("CREATE SCHEMA identity");
+    for (const table of identityTables) await pool.query(fixtureTable(table));
+    for (const statement of fixtureForeignKeys(identityTables)) await pool.query(statement);
+    await pool.query("INSERT INTO identity.users(id,username,password,active) VALUES($1,'receiving-entry-operator','unused-test-password',1),('another-receiver','another-receiver','unused-test-password',1)", [ACTOR]);
+    await pool.query(`INSERT INTO identity.auth_roles(id,name) VALUES(1,'receiving-entry-role');
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(1,'inventory','adjust','inventory');
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,1)`);
+    await pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,1),('another-receiver',1)", [ACTOR]);
     await prepareQuantityLotCreationMetadata(pool);
     await pool.query(`ALTER TABLE inventory.inventory_lots ALTER COLUMN received_at TYPE timestamp USING received_at AT TIME ZONE 'UTC'`);
     // The quantity fixture installs an empty custody reader prerequisite. This
@@ -70,6 +95,7 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     expect((await pool.query("SELECT count(*)::int AS count FROM inventory.lot_cost_origins")).rows[0].count).toBe(0);
     await pool.query("DROP TABLE inventory.lot_cost_origins");
     await pool.query(evidence.slice(originStart, originEnd));
+    await installQuantityAmendmentFixture(pool);
     await pool.query(`CREATE TRIGGER aa_cutover_writer_admission BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON inventory.lot_cost_origins
       FOR EACH STATEMENT EXECUTE FUNCTION inventory.pin_cutover_writer_admission();
       CREATE TRIGGER cost_evidence_immutable BEFORE UPDATE OR DELETE ON inventory.lot_cost_origins
@@ -81,8 +107,26 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     expect((await pool.query(`SELECT (SELECT count(*)::int FROM inventory.quantity_ledger_opening) AS openings,
       (SELECT authority FROM inventory.availability_runtime_authority WHERE singleton_key=true) AS authority`)).rows)
       .toEqual([{ openings: 1, authority: "canonical" }]);
+    for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
+      await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
+    }
+    // Command rollback/retry is exercised with the actual immutable audit
+    // triggers enabled; protection must not prevent transaction rollback.
+    for (const migration of [
+      "900000001000017770001_receiving_integrity_audit_guard.sql",
+      "900000010000018200001_receiving_discard_audit_guard.sql",
+      "900000027000019030001_receiving_entry_audit_guard.sql",
+    ]) {
+      await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
+    }
+    await pool.query(`CREATE UNIQUE INDEX review_receipt_reversal_identity ON procurement.receipt_reversals(idempotency_key);
+      ALTER TABLE procurement.receiving_lines ADD CHECK(reversed_qty >= 0 AND reversed_qty <= received_qty)`);
     const database = drizzle(pool, { schema });
+    connection.database = database;
     const storage = {
+      generateReceiptNumber: (tx = database, recordedAt?: Date) => procurementMethods.generateReceiptNumber(tx, recordedAt),
+      createReceivingOrder: (data: Parameters<typeof procurementMethods.createReceivingOrder>[0], tx = database) => procurementMethods.createReceivingOrder(data, tx),
+      createReceivingLine: (data: Parameters<typeof procurementMethods.createReceivingLine>[0], tx = database) => procurementMethods.createReceivingLine(data, tx),
       getReceivingOrderById: (id: number, tx = database) => procurementMethods.getReceivingOrderById(id, tx),
       getReceivingLineById: (id: number, tx = database) => procurementMethods.getReceivingLineById(id, tx),
       getReceivingLines: (id: number, tx = database) => procurementMethods.getReceivingLines(id, tx),
@@ -100,11 +144,14 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     // and storage signatures only. No query results or owner methods are mocked.
     const inventory = new InventoryUseCases(database as unknown as ConstructorParameters<typeof InventoryUseCases>[0],
       createInventoryMethods(database), new InventoryLotService(database));
+    reversal = new ReceiptReversalService(database, inventory);
     const purchasing = createPurchasingService(database, storage as unknown as Parameters<typeof createPurchasingService>[1]);
     service = new ReceivingService(database, inventory, { queueSyncAfterInventoryChange: async () => undefined },
       storage as unknown as ConstructorParameters<typeof ReceivingService>[3], purchasing, null, null, null, null, null, () => NOW);
   }, 60_000);
-  afterEach(async () => { await context?.close(); });
+  afterEach(async () => {
+    try { await context?.close(); } finally { connection.database = null; }
+  });
 
   async function physicalState() {
     return (await context.pool.query(`SELECT ro.status AS receipt_status,ro.warehouse_id AS header_warehouse,
@@ -130,8 +177,31 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
       (SELECT count(*)::int FROM inventory.inventory_transactions) AS inventory_transactions,
       (SELECT count(*)::int FROM inventory.lot_cost_origins) AS cost_origins,
       (SELECT count(*)::int FROM procurement.receipt_cost_requests) AS cost_requests,
+      (SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM procurement.receipt_reversals r) AS reversals,
+      (SELECT jsonb_agg(to_jsonb(r) ORDER BY idempotency_key) FROM inventory.quantity_operation_receipts r) AS quantity_receipts,
       (SELECT count(*)::int FROM public.audit_events WHERE actor=$1) AS audits`, [ACTOR])).rows[0];
     return { inventory, receipt };
+  }
+
+  function executeReversal(name: string, body: unknown, action: ReceiptReversalAction = "line") {
+    const targetId = action === "line" ? 51 : 50;
+    const scope = receiptReversalCommandScope();
+    const descriptor: FinancialCommandDescriptor = { ...scope, actorType: "service", actorId: RECEIPT_REVERSAL_COMMAND_PRINCIPAL,
+      idempotencyKey: `active-receipt-reversal:${name}`, contractVersion: 1,
+      requestHash: hashReceiptReversalCommandIdentity({ action, targetId, body, actorId: ACTOR }) };
+    return createReceiptReversalCommands(reversal, createDrizzleFinancialCommandRepository(drizzle(context.pool, { schema })))
+      .execute(action, targetId, body, ACTOR, descriptor);
+  }
+
+  async function retryDue(name: string) {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const result = await context.pool.query("SELECT next_attempt_at <= clock_timestamp() AS due FROM public.financial_command_results WHERE actor_id=$1 AND idempotency_key=$2",
+        [RECEIPT_REVERSAL_COMMAND_PRINCIPAL, `active-receipt-reversal:${name}`]);
+      if (result.rows[0]?.due === true) return;
+      await new Promise((done) => setTimeout(done, 20));
+    }
+    throw new Error("The active-ledger reversal did not reach its first retry window");
   }
 
   async function linkReceiptToMatchingPO() {
@@ -347,6 +417,90 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
       received_qty: 2, damaged_qty: 0, qty_on_hand: 2, lot_status: "active", kind: "receive", on_hand_delta: 2, journal_warehouse: 1 }]);
   });
 
+  describe("durable receipt reversals through active quantity authority", () => {
+    it("posts one exact reversal with the longest supported reason and replays without new journal or PO effects", async () => {
+      await linkReceiptToMatchingPO();
+      await context.pool.query("UPDATE procurement.purchase_order_lines SET unit_cost_mills=200,unit_cost_cents=2 WHERE id=21");
+      await service.close(50, ACTOR);
+      const body = { qty: 1, reason: "R".repeat(RECEIPT_REVERSAL_MAX_REASON_LENGTH) };
+      const first = await executeReversal("long-reason", body);
+      expect(first).toMatchObject({ httpStatus: 200, terminalState: "succeeded", replayed: false });
+      const response = receiptReversalCommandResultSchema.parse(first.body);
+      expect(response).toMatchObject({ action: "line", actorId: ACTOR, receivingOrderId: 50, receivingLineId: 51,
+        qty: 1, baseUnitsReversed: 5, lotUnitCostMills: 1000 });
+      if (response.action !== "line") throw new Error("Expected line reversal response");
+      const journal = (await context.pool.query(`SELECT q.actor,q.reason,e.on_hand_delta,e.reserved_delta,e.picked_delta,e.packed_delta
+        FROM inventory.quantity_commands q JOIN inventory.quantity_entries e ON e.command_id=q.id
+        WHERE q.kind='receipt_reversal'`)).rows;
+      expect(journal).toEqual([{ actor: ACTOR, reason: `Reversal #${response.reversalId} of receipt REVIEW-RECEIPT: ${body.reason}`,
+        on_hand_delta: -1, reserved_delta: 0, picked_delta: 0, packed_delta: 0 }]);
+      expect(journal[0].reason.length).toBeLessThanOrEqual(1000);
+      expect((await context.pool.query("SELECT received_qty FROM procurement.purchase_order_lines WHERE id=21")).rows).toEqual([{ received_qty: 5 }]);
+      expect((await context.pool.query("SELECT received_qty,reversed_qty FROM procurement.receiving_lines WHERE id=51")).rows).toEqual([{ received_qty: 2, reversed_qty: 1 }]);
+      expect((await context.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_operation_receipts WHERE idempotency_key=$1",
+        [`receipt_reversal:${response.reversalId}`])).rows[0].count).toBe(1);
+      const after = await state();
+      expect(await executeReversal("long-reason", body)).toEqual({ ...first, replayed: true });
+      expect(await state()).toEqual(after);
+    });
+
+    it("records a durable negative-override rejection without changing canonical stock, audit or PO evidence", async () => {
+      await linkReceiptToMatchingPO();
+      await service.close(50, ACTOR);
+      const before = await state();
+      const body = { qty: 1, reason: "Reviewed operator override request", allowNegative: true };
+      const rejected = await executeReversal("negative-override", body);
+      expect(rejected).toMatchObject({ httpStatus: 400, terminalState: "rejected", body: { code: "VALIDATION_ERROR",
+        details: { receiptReversalOutcome: "rejected", idempotencyKey: "active-receipt-reversal:negative-override" } } });
+      expect(await state()).toEqual(before);
+      expect(await executeReversal("negative-override", body)).toEqual({ ...rejected, replayed: true });
+      expect(await state()).toEqual(before);
+      expect((await context.pool.query("SELECT status FROM public.financial_command_results WHERE idempotency_key=$1",
+        ["active-receipt-reversal:negative-override"])).rows).toEqual([{ status: "rejected" }]);
+      await expect(executeReversal("negative-override", { ...body, allowNegative: false }))
+        .rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
+      expect(await executeReversal("reviewed-without-override", { ...body, allowNegative: false }))
+        .toMatchObject({ httpStatus: 200, terminalState: "succeeded" });
+    });
+
+    it("rolls back quantity journal and operation receipts with PO and audit when final response storage fails", async () => {
+      await linkReceiptToMatchingPO();
+      await service.close(50, ACTOR);
+      const before = await state();
+      const body = { qty: 1, reason: "Correct duplicate receiving paperwork" };
+      await context.pool.query("ALTER TABLE public.financial_command_results ADD CONSTRAINT active_reversal_result_failure CHECK(status <> 'succeeded') NOT VALID");
+      try { await expect(executeReversal("result-failure", body)).rejects.toBeDefined(); }
+      finally { await context.pool.query("ALTER TABLE public.financial_command_results DROP CONSTRAINT active_reversal_result_failure"); }
+      expect(await state()).toEqual(before);
+      expect((await context.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_commands WHERE kind='receipt_reversal'")).rows[0].count).toBe(0);
+      expect((await context.pool.query("SELECT status FROM public.financial_command_results WHERE idempotency_key=$1",
+        ["active-receipt-reversal:result-failure"])).rows).toEqual([{ status: "retryable" }]);
+      await retryDue("result-failure");
+      const first = await executeReversal("result-failure", body);
+      expect(first).toMatchObject({ httpStatus: 200, terminalState: "succeeded" });
+      const after = await state();
+      expect(await executeReversal("result-failure", body)).toEqual({ ...first, replayed: true });
+      expect(await state()).toEqual(after);
+      expect((await context.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_commands WHERE kind='receipt_reversal'")).rows[0].count).toBe(1);
+      expect((await context.pool.query("SELECT received_qty FROM procurement.purchase_order_lines WHERE id=21")).rows).toEqual([{ received_qty: 5 }]);
+    });
+
+    it("replays a completed whole receipt while a new all-already-reversed request is rejected without writes", async () => {
+      await service.close(50, ACTOR);
+      const body = { reason: "Void duplicate receipt in full" };
+      const first = await executeReversal("whole-receipt", body, "order");
+      expect(first).toMatchObject({ httpStatus: 200, terminalState: "succeeded", body: { action: "order", receivingOrderId: 50,
+        reversals: [expect.objectContaining({ receivingLineId: 51, qty: 2, baseUnitsReversed: 10 })] } });
+      const after = await state();
+      const rejected = await executeReversal("already-reversed", body, "order");
+      expect(rejected).toMatchObject({ httpStatus: 409, terminalState: "rejected", body: { code: "NOTHING_TO_REVERSE" } });
+      expect(await state()).toEqual(after);
+      expect(await executeReversal("already-reversed", body, "order")).toEqual({ ...rejected, replayed: true });
+      expect(await executeReversal("whole-receipt", body, "order")).toEqual({ ...first, replayed: true });
+      expect(await state()).toEqual(after);
+    });
+  });
+
   it("rejects a header warehouse change that strands assigned lines without writing", async () => {
     const before = await state();
     await expect(service.updateOrderDetails(50, { warehouseId: 2, receivingLocationId: null }, ACTOR))
@@ -405,4 +559,8 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     await expect(service.close(50, ACTOR)).rejects.toThrow(/receipt integrity injected PO history failure/);
     expect(await state()).toEqual(before);
   });
+  registerReceivingEntryRecoveryCases({ context: () => context, service: () => service, actorId: ACTOR, now: NOW });
+  registerReceivingEntryHttpRecoveryCases({ context: () => context, service: () => service, actorId: ACTOR });
+
 });
+import { installQuantityAmendmentFixture } from "./quantity-amendment-fixture";

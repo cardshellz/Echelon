@@ -1,10 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
+import { verifiedCustodyResultSchema } from "@shared/procurement/receiving-quarantine-command";
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import * as schema from "@shared/schema";
-import { canonicalJson } from "@shared/utils/canonical-json";
-import { receivingQuarantineCommandResultSchema, type ReceivingQuarantineCommandResult } from "@shared/procurement/receiving-quarantine";
+import { type ReceivingQuarantineCommandResult } from "@shared/procurement/receiving-quarantine";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
-import { fixtureTable, fixtureForeignKeys } from "./shipment-line-fixture";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_AT, type FlowCostHarness } from "./procurement-flow-cost.fixture";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
 import type { ReceivingCustodyCommand } from "../../receiving-quarantine.service";
@@ -16,39 +14,34 @@ const REFERENCE = "Inspected physical goods, photo evidence 42";
 run.sequential("real receiving custody commands and normal inventory recognition", () => {
   let harness: FlowCostHarness;
   let commands: ReturnType<typeof import("../../receiving-quarantine.commands").createReceivingCustodyCommands>;
+  let identityHash: typeof import("../../receiving-quarantine.commands").hashCustodyCommandIdentity;
   let scope: typeof import("../../receiving-quarantine.commands").custodyCommandScope;
   let options: typeof import("../../receiving-quarantine-options.repository").readQuarantineAcceptanceOptions;
   let readView: typeof import("../../receiving-quarantine.service").readReceivingQuarantineView;
-  let ownsIdentity = false;
   beforeAll(async () => {
     harness = await createFlowCostHarness(url!);
     await seedFlowMasterData(harness);
-    await harness.pool.query("CREATE SCHEMA identity");
-    ownsIdentity = true;
-    const tables = [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions];
-    for (const table of tables) await harness.pool.query(fixtureTable(table));
-    for (const ddl of fixtureForeignKeys(tables)) await harness.pool.query(ddl);
+    // The FLOW harness owns Identity DDL and cleanup. Custody grants use IDs
+    // 10-12 so they remain separate from its RFQ editor role/permission (ID 1).
     await harness.pool.query(`INSERT INTO identity.users(id,username,password,role,active) VALUES
       ('custody-approver','custody-approver','unused','picker',1),('custody-inventory','custody-inventory','unused','admin',1),
       ('custody-inactive','custody-inactive','unused','admin',0),('custody-scoped','custody-scoped','unused','admin',1);
-      INSERT INTO identity.auth_roles(id,name,is_system) VALUES(1,'Approver',0),(2,'Inventory',0),(3,'Scoped',0);
-      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(1,'inventory','adjust','inventory'),(2,'purchasing','approve','purchasing');
-      INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES('custody-approver',1),('custody-inventory',2),('custody-inactive',1),('custody-scoped',3);
-      INSERT INTO identity.auth_role_permissions(role_id,permission_id,constraints) VALUES(1,1,NULL),(1,2,NULL),(2,1,NULL),(3,1,'{"warehouseId":1}'),(3,2,'{"warehouseId":1}')`);
+      INSERT INTO identity.auth_roles(id,name,is_system) VALUES(10,'Approver',0),(11,'Inventory',0),(12,'Scoped',0);
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(10,'inventory','adjust','inventory'),(11,'purchasing','approve','purchasing');
+      INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES('custody-approver',10),('custody-inventory',11),('custody-inactive',10),('custody-scoped',12);
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id,constraints) VALUES(10,10,NULL),(10,11,NULL),(11,10,NULL),(12,10,'{"warehouseId":1}'),(12,11,'{"warehouseId":1}')`);
     const commandModule = await import("../../receiving-quarantine.commands");
     const repository = await import("../../../../platform/commands/command-results.repository");
     commands = commandModule.createReceivingCustodyCommands(harness.receiving, repository.createDrizzleFinancialCommandRepository(harness.database), () => FLOW_AT);
     scope = commandModule.custodyCommandScope;
+    identityHash = commandModule.hashCustodyCommandIdentity;
     options = (await import("../../receiving-quarantine-options.repository")).readQuarantineAcceptanceOptions;
     readView = (await import("../../receiving-quarantine.service")).readReceivingQuarantineView;
   });
-  afterAll(async () => {
-    try { if (ownsIdentity) await harness.pool.query("DROP SCHEMA identity CASCADE"); }
-    finally { await harness?.dispose(); }
-  });
+  afterAll(async () => { await harness?.dispose(); });
   function descriptor(command: ReceivingCustodyCommand, id: number, body: unknown, key: string, actorId: string): FinancialCommandDescriptor {
-    return { ...scope(command, id), actorType: "user", actorId, idempotencyKey: key,
-      requestHash: createHash("sha256").update(canonicalJson(body)).digest("hex"), contractVersion: 1 };
+    return { ...scope(), actorType: "service", actorId: "procurement.receiving-custody", idempotencyKey: key,
+      requestHash: identityHash({ command, resourceId: id, body, actorId }), contractVersion: 1 };
   }
   async function execute(command: ReceivingCustodyCommand, id: number, body: unknown, key: string = randomUUID(), actorId = ACTOR) {
     return commands.execute(command, id, body, actorId, descriptor(command, id, body, key, actorId));
@@ -56,7 +49,7 @@ run.sequential("real receiving custody commands and normal inventory recognition
   async function success(command: ReceivingCustodyCommand, id: number, body: unknown, key?: string): Promise<ReceivingQuarantineCommandResult> {
     const result = await execute(command, id, body, key);
     expect(result, JSON.stringify(result.body)).toMatchObject({ httpStatus: 200, terminalState: "succeeded" });
-    return receivingQuarantineCommandResultSchema.parse(result.body);
+    return verifiedCustodyResultSchema.parse(result.body);
   }
   async function receipt() {
     const created = await harness.receiving.createOrder({ sourceType: "blind", warehouseId: 1 }, ACTOR);
@@ -115,6 +108,23 @@ run.sequential("real receiving custody commands and normal inventory recognition
     const replay = await execute("intake", source.order.id, body, key);
     expect(replay).toMatchObject({ replayed: true, body: first.body });
     await expect(execute("intake", source.order.id, unknownBody(6), key)).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
+    expect((await harness.pool.query("SELECT count(*)::int AS n FROM procurement.receiving_quarantine_observations WHERE receiving_order_id=$1", [source.order.id])).rows[0].n).toBe(1);
+  });
+  it("prevents another authorized actor from executing the same unidentified-intake key", async () => {
+    const source = await receipt(); const key = randomUUID(); const body = unknownBody();
+    const before = await stock();
+    const first = await execute("intake", source.order.id, body, key, ACTOR);
+    await expect(execute("intake", source.order.id, body, key, "custody-inventory")).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
+    expect(await execute("intake", source.order.id, body, key, ACTOR)).toMatchObject({ replayed: true, body: first.body });
+    expect((await harness.pool.query("SELECT count(*)::int AS n FROM procurement.receiving_quarantine_observations WHERE receiving_order_id=$1", [source.order.id])).rows[0].n).toBe(1);
+    expect(await stock()).toEqual(before);
+  });
+  it("rejects legacy observation evidence under a reused key without another intake", async () => {
+    const source = await receipt(); const key = randomUUID(); const body = unknownBody();
+    const { executeReceivingCustodyCommand } = await import("../../receiving-quarantine.service");
+    await harness.database.transaction(tx => executeReceivingCustodyCommand(tx, harness.receiving, { command: "intake", resourceId: source.order.id, body,
+      actorId: ACTOR, at: FLOW_AT, commandKey: key }));
+    await expect(execute("intake", source.order.id, body, key, "custody-inventory")).rejects.toMatchObject({ code: "RECEIVING_CUSTODY_LEGACY_RECOVERY_REQUIRED" });
     expect((await harness.pool.query("SELECT count(*)::int AS n FROM procurement.receiving_quarantine_observations WHERE receiving_order_id=$1", [source.order.id])).rows[0].n).toBe(1);
   });
   it("prepares partial unidentified acceptance without stock, then cancels it without deleting its source", async () => {

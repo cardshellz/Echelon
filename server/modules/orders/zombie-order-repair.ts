@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { omsWarehouseCancellationSql } from "../oms/order-merchandise-state.sql";
 
 import { logger } from "../../platform/observability/logger";
 import { wmsOmsOrderIdSql } from "../oms/oms-wms-order-link.sql";
@@ -46,8 +47,7 @@ export const OMS_STILL_OWES_UNCARRIED_UNITS_FOR_WMS_ORDER_O = sql`
       omsFulfillmentOrderId: sql.raw("o.oms_fulfillment_order_id"),
       legacySourceTableId: sql.raw("o.source_table_id"),
     })}
-      AND oo.status NOT IN ('cancelled', 'refunded', 'shipped')
-      AND COALESCE(oo.financial_status, '') NOT IN ('refunded', 'voided')
+      AND NOT ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded", "voided"], includeShipped: true })}
       AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
       AND ol.requires_shipping IS DISTINCT FROM false
       AND COALESCE(ol.fulfillment_status, '') <> 'fulfilled'
@@ -107,6 +107,7 @@ const ZOMBIE_CANDIDATES_SQL = sql`
     ${OMS_STILL_OWES_UNCARRIED_UNITS_FOR_WMS_ORDER_O} AS oms_still_owes_uncarried_units
   FROM wms.orders o
   WHERE o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+    AND o.order_edit_operation_id IS NULL
     AND NOT EXISTS (
       SELECT 1 FROM wms.order_items oi
       WHERE oi.order_id = o.id
@@ -159,8 +160,8 @@ export async function runStartupZombieOrderRepair(deps: {
     // Terminal transitions must release leftover reservations (P0.1c /
     // 'completed'-status fix) — raw transitions here leaked them.
     const outcome = action === "cancel"
-      ? await cancelWmsOrderAndRelease(deps.db, deps.reservation, candidate.wmsOrderId, ZOMBIE_REPAIR_REASON)
-      : await completeWmsOrderAndRelease(deps.db, deps.reservation, candidate.wmsOrderId, ZOMBIE_REPAIR_REASON);
+      ? await cancelWmsOrderAndRelease(deps.db, deps.reservation, candidate.wmsOrderId, ZOMBIE_REPAIR_REASON, undefined, { requireNoOrderEdit: true })
+      : await completeWmsOrderAndRelease(deps.db, deps.reservation, candidate.wmsOrderId, ZOMBIE_REPAIR_REASON, undefined, { requireNoOrderEdit: true });
     if (outcome.transitioned) {
       summary.transitioned.push(`${candidate.orderNumber}→${candidate.targetStatus}`);
     }

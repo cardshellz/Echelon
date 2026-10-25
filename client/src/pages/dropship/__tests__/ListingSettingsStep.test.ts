@@ -234,13 +234,16 @@ describe("Catalog page wiring of the Listing settings step", () => {
     expect(tag).toContain("summary={listingSettingsSummaryQuery}");
     expect(tag).toContain("shelves={ebayStoreCategoryQuery}");
     expect(tag).toContain("saveCallbacks={listingSettingsSaveCallbacks}");
-    expect(tag).toContain("onSettingsSaved={() => { invalidateListingPreview(true); refreshListingSettings(); }}");
+    // Step 1 plan S2-5 PR A: a save marks step 3's Check out of date (its settings version moves), and never checks again.
+    expect(tag).toContain("onSettingsSaved={() => { setSettingsVersion((version) => version + 1); refreshListingSettings(); }}");
     expect(tag).toContain("goToStep={(target) => leaveGuard(() => navigate(stepHref(target)))}");
     // D9, D10: the counter stays; the step never posts a new preview after a save. One callback object (PR 12, D6).
     const start = source.indexOf("const listingSettingsSaveCallbacks: ListingSettingsStepSaveCallbacks = {");
     expect(start).toBeGreaterThan(-1);
     const callbacks = source.slice(start, source.indexOf("\n  };\n", start));
-    expect(callbacks).toContain("disabled: pendingListingAction !== null && pendingListingAction !== \"preview\",");
+    // Step 1 plan S2-5 PR A: a verification or a publish being sent on step 3 holds the saves, as a push did (a Check never does).
+    expect(callbacks).toContain("disabled: publishBusy,");
+    expect(callbacks).toContain("setSettingsVersion((version) => version + 1);");
     expect(callbacks).toContain("onSaveStarted: () => {");
     expect(callbacks).toContain("onSaveSettled: () => {");
     expect(callbacks).not.toContain("onSaved");
@@ -268,7 +271,11 @@ describe("Catalog page wiring of the Listing settings step", () => {
   it("holds the step's draft at page level, unkeyed, and gives Listing settings its own bar", () => {
     expect(source).toContain("return <ListingSettingsDraftsProvider storeConnectionId={selectedStoreConnectionIdNumber}>{page}</ListingSettingsDraftsProvider>;");
     expect(source).not.toMatch(/<ListingSettingsDraftsProvider\s+key=/);
-    expect(source).toContain('{activeStep === "setup" && storeReady\n          ? <ListingSettingsActionBar next={nextAction} saving={pendingPriceSaves > 0} />\n          : <CatalogActionBar summary={actionBar.summary} next={nextAction} />}');
+    // Step 1 stage 1: step 1 draws its own bar (ChooseStep, with its changes and Save); Listing settings keeps its own,
+    // and Publish keeps the page's.
+    expect(source).toContain('{activeStep === "setup" && storeReady\n          ? <ListingSettingsActionBar next={nextAction} saving={pendingPriceSaves > 0} />\n          : activeStep === "choose" ? null : <CatalogActionBar summary={actionBar.summary} next={nextAction} />}');
+    const choose = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/ChooseStep.tsx"), "utf8");
+    expect(choose).toContain("<CatalogActionBar summary={summary} next={next}>");
     expect(source).toContain("const guardDrafts = useUnsavedDrafts();");
     // No older panel's draft to count any more (D7).
     expect(source).not.toContain("olderUnsaved");

@@ -336,7 +336,8 @@ export default function DropshipPortalNotifications() {
                         )}
                         <Badge variant="outline" className={statusTone(notification.status)}>{formatStatus(notification.status)}</Badge>
                       </div>
-                      {notification.message && <p className="mt-1 text-sm text-zinc-600">{notification.message}</p>}
+                      {/* whitespace-pre-line: a publish run's notice lists its sizes one per line (review round 2 DUX13). */}
+                      {notification.message && <p className="mt-1 whitespace-pre-line text-sm text-zinc-600">{notification.message}</p>}
                       <p className="mt-2 text-xs text-zinc-500">
                         {formatStatus(notification.eventType)} via {formatStatus(notification.channel)}
                         {notification.readAt ? ` | Read ${formatDateTime(notification.readAt)}` : ""}

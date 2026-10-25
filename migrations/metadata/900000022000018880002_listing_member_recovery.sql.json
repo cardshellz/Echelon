@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000022000018880002_listing_member_recovery.sql",
+  "generation": 22,
+  "pr": 1888,
+  "ordinal": 2,
+  "after": [
+    "900000021000018880001_channel_lifecycle_recovery.sql"
+  ]
+}

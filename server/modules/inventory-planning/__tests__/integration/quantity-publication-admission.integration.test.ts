@@ -122,7 +122,7 @@ dbDescribe.sequential("durable external quantity admission with actual migration
     const provider = vi.fn(async () => { throw new Error("Provider response was lost"); });
     const replan = (currentScope: QuantityPublicationScope, currentClaim: typeof claim) =>
       restarted.withLegacyCatchupScope(currentScope, () => restarted.run(currentScope, provider), currentClaim);
-    const service = new QuantityPublicationCatchupService({
+    const service = new QuantityPublicationCatchupService({ settleArchived: restarted.settleArchived.bind(restarted),
       listDue: async limit => (await restarted.listDue(limit)).filter(row => row.catchupId === claim.catchupId),
       complete: restarted.complete.bind(restarted), fail: restarted.fail.bind(restarted),
     }, replan);
@@ -139,7 +139,7 @@ dbDescribe.sequential("durable external quantity admission with actual migration
 
     // A worker may have selected the claim just before the first attempt became
     // uncertain. That stale selection must not rewrite the revision or bypass backoff.
-    const selectedBeforeUncertainty = new QuantityPublicationCatchupService({
+    const selectedBeforeUncertainty = new QuantityPublicationCatchupService({ settleArchived: restarted.settleArchived.bind(restarted),
       listDue: async () => [claim], complete: restarted.complete.bind(restarted), fail: restarted.fail.bind(restarted),
     }, replan);
     expect(await selectedBeforeUncertainty.processDue()).toEqual({ completed: 0, failed: 1 });
@@ -253,7 +253,7 @@ dbDescribe.sequential("durable external quantity admission with actual migration
     const restarted = new PostgresQuantityPublicationAdmission(database.pool, clock);
     const replan = vi.fn(async () => { throw new Error("Unrelated marketplace resolver is broken"); });
     const fail = vi.fn(restarted.fail.bind(restarted));
-    const service = new QuantityPublicationCatchupService({ listDue: async () => [claim], complete: restarted.complete.bind(restarted), fail }, replan);
+    const service = new QuantityPublicationCatchupService({ settleArchived: restarted.settleArchived.bind(restarted), listDue: async () => [claim], complete: restarted.complete.bind(restarted), fail }, replan);
     expect(await service.processDue()).toEqual({ completed: 1, failed: 0 });
     expect(replan).not.toHaveBeenCalled(); expect(fail).not.toHaveBeenCalled();
     expect(await restarted.complete(claim)).toBe(false); // Already completed is not a newly completed revision.

@@ -1,4 +1,4 @@
-import { costGraphLockExecute } from "./cost-graph.fixture";
+import { costGraphAndPoInvoiceHistoryExecute } from "./cost-graph.fixture";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../po-exceptions.service", () => ({
@@ -21,7 +21,7 @@ function buildDb(
   const lockModes: string[] = [];
   let selectIndex = 0;
   const tx: any = {
-    execute: costGraphLockExecute(),
+    execute: costGraphAndPoInvoiceHistoryExecute(),
     select: vi.fn(() => {
       const rows = selectResults[selectIndex++] ?? [];
       const chain: any = {

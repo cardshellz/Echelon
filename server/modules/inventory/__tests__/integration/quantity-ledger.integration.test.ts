@@ -1,3 +1,4 @@
+import { createReservedInventoryTransferOwner } from "../../../inventory-planning/infrastructure/reserved-inventory-transfer.repository";
 import type { Pool, PoolClient } from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { legacyTransformationExecutionAuthority } from "../../application/transformation-execution-authority.port";
@@ -230,6 +231,41 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
       .toEqual([{ qty: 2, total_cost_mills: (originalCost * BigInt(2)).toString() }, { qty: -1, total_cost_mills: (-originalCost).toString() }]);
   });
 
+  it("stores canonical pick and unpick COGS in UTC with a New York database session", async () => {
+    // The reduced cutover fixture declares COGS time as timestamptz. Exercise
+    // this writer against the actual production/schema timestamp-without-zone
+    // contract; preserve the seeded row's UTC wall time before opening custody.
+    const typeQuery = `SELECT data_type FROM information_schema.columns
+      WHERE table_schema='oms' AND table_name='order_item_costs' AND column_name='created_at'`;
+    if ((await pool.query(typeQuery)).rows[0]?.data_type === "timestamp with time zone") {
+      await pool.query(`ALTER TABLE oms.order_item_costs ALTER COLUMN created_at
+        TYPE timestamp without time zone USING created_at AT TIME ZONE 'UTC'`);
+    }
+    expect((await pool.query(typeQuery)).rows).toEqual([{ data_type: "timestamp without time zone" }]);
+    await open();
+    const pickedAt = new Date("2026-09-10T16:00:00.123Z");
+    const unpickedAt = new Date("2026-09-10T16:01:00.456Z");
+    await transaction(async client => {
+      await client.query("SET LOCAL TIME ZONE 'America/New_York'");
+      expect((await client.query("SELECT current_setting('TimeZone') AS zone")).rows)
+        .toEqual([{ zone: "America/New_York" }]);
+      await canonical.pickResources({ ...canonicalAudit, client, occurredAt: pickedAt,
+        commandKey: "canonical:timestamp:pick", claimLineId: BigInt(1), resources: [pickResource(2)] });
+      await canonical.unpickResources({ ...canonicalAudit, client, occurredAt: unpickedAt,
+        commandKey: "canonical:timestamp:unpick", claimLineId: BigInt(1), restoreReservation: true,
+        resources: [{ ...resource, unpickQty: BigInt(1), lotAllocations: [{ claimLotAllocationId: BigInt(1),
+          inventoryLotId: 4, unpickQty: BigInt(1), reversesPickMovementId: BigInt(9), unitCostMills: originalCost }] }] });
+    });
+    // Query PostgreSQL text so neither pg's Date parser nor the test runtime
+    // timezone can conceal an incorrectly stored timestamp-without-time-zone.
+    expect((await pool.query(`SELECT qty,total_cost_mills::text,
+      to_char(created_at,'YYYY-MM-DD"T"HH24:MI:SS.US') AS recorded_wall_time
+      FROM oms.order_item_costs WHERE id<>9 ORDER BY id`)).rows).toEqual([
+      { qty: 2, total_cost_mills: (originalCost * BigInt(2)).toString(), recorded_wall_time: "2026-09-10T16:00:00.123000" },
+      { qty: -1, total_cost_mills: (-originalCost).toString(), recorded_wall_time: "2026-09-10T16:01:00.456000" },
+    ]);
+  });
+
   it("rejects missing canonical command identity and rolls back low-level replay or later receipt failure", async () => {
     await open();
     const before = await state();
@@ -339,7 +375,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
 
   function operationalOwner(client: PoolClient) {
     const db = drizzle(client, { schema: inventorySchema });
-    return new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW)).withTx(db);
+    return new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW), createReservedInventoryTransferOwner()).withTx(db);
   }
 
   async function prepareOperationalMetadata(packageDirection?: "break" | "assemble") {
@@ -406,7 +442,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     await expect(transaction(client => operationalOwner(client).transfer({ ...input, qty: 18 })))
       .rejects.toMatchObject({ code: "TRANSFER_BLOCKED_BY_RESERVATION" });
     await expect(transaction(client => operationalOwner(client).transfer({ ...input, qty: 18, moveReserved: true })))
-      .rejects.toThrow("cannot relocate canonical claim ownership");
+      .rejects.toMatchObject({code:"TRANSFER_RESERVED_WAREHOUSE_MISMATCH"});
     expect(await state()).toEqual(before);
   });
 

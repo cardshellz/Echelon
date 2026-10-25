@@ -44,6 +44,14 @@ export const costIssueSchema = z.object({
   code: z.string().regex(/^[A-Z][A-Z0-9_]{0,99}$/),
   message: z.string().trim().min(1).max(2_000),
   unresolvedQuantity: unresolvedCostQuantitySchema.optional(),
+  costLinksAlreadyReviewed: z.literal(true).optional(),
+  orderCostReview: z.object({
+    orderId: resourceId,
+    orderCostId: resourceId,
+    inventoryLotId: resourceId,
+    quantity: nonnegativeInteger,
+    status: z.string().nullable(),
+  }).strict().optional(),
 }).strict();
 
 export const costSourceScopeSchema = z.discriminatedUnion("kind", [
@@ -62,7 +70,7 @@ export const costSourceScopeSchema = z.discriminatedUnion("kind", [
 ]);
 
 export const costSourceReferenceSchema = z.object({
-  kind: z.enum(["purchase_order_line", "vendor_invoice_line", "shipment_cost", "manual_override"]),
+  kind: z.enum(["purchase_order_line", "vendor_invoice_line", "supplier_credit_line", "shipment_cost", "manual_override"]),
   documentId: resourceId,
   lineId: resourceId,
   // The source owner fingerprints the captured immutable economic inputs. A
@@ -76,6 +84,37 @@ export const costManualOverrideSchema = z.object({
   recordedAt: z.string().datetime({ offset: true }),
 }).strict();
 
+/** An explicit disposition, never a zero denominator passed to a unit allocator.
+ * The inventory owner separately proves that these goods were never recognized. */
+export const costInventoryEffectSchema = z.object({
+  kind: z.literal("none"),
+  reason: z.literal("full_quarantine_return"),
+  returnedBasePieces: positiveInteger,
+  returns: z.array(z.object({
+    supplierCreditLineId: resourceId,
+    returnDispositionId: resourceId,
+    observationId: resourceId,
+    receivingLineId: resourceId,
+    quantity: positiveInteger,
+    unitsPerVariant: positiveInteger,
+  }).strict()).min(1).max(MAX_SOURCE_REFERENCES),
+}).strict().superRefine((effect, context) => {
+  if (!Number.isSafeInteger(effect.returnedBasePieces)
+    || effect.returns.some(row => !Number.isSafeInteger(row.quantity) || !Number.isSafeInteger(row.unitsPerVariant))) return;
+  if (new Set(effect.returns.map(row => row.supplierCreditLineId)).size !== effect.returns.length
+    || effect.returns.reduce((sum, row) => sum + BigInt(row.quantity) * BigInt(row.unitsPerVariant), BigInt(0)) !== BigInt(effect.returnedBasePieces)) {
+    context.addIssue({ code: "custom", message: "Returned source identities and exact base-piece quantity must reconcile" });
+  }
+});
+export const costInventoryEffectProofSchema = z.object({
+  contractVersion: z.literal(1),
+  purchaseOrderLineId: resourceId,
+  inventoryEffect: costInventoryEffectSchema,
+  evidenceFingerprint: costFingerprintSchema,
+}).strict();
+export type CostInventoryEffect = z.infer<typeof costInventoryEffectSchema>;
+export type CostInventoryEffectProof = z.infer<typeof costInventoryEffectProofSchema>;
+
 export const costSourceRevisionSchema = z.object({
   contractVersion: z.literal(1),
   revision: positiveInteger,
@@ -88,12 +127,26 @@ export const costSourceRevisionSchema = z.object({
   totalMills: costMillsSchema.nullable(),
   // The exact extended amount belongs to this many base pieces, not cartons or
   // today's catalog variant factor. Unknown history must retain null.
-  basePieces: positiveInteger.nullable(),
+  basePieces: nonnegativeInteger.nullable(),
+  inventoryEffect: costInventoryEffectSchema.optional(),
   evidence: z.enum(COST_SOURCE_EVIDENCE_STATES),
   packagingTreatment: z.enum(["separate", "included_in_product", "not_applicable", "unknown"]),
   issue: costIssueSchema.nullable(),
   manualOverride: costManualOverrideSchema.nullable(),
 }).strict().superRefine((source, context) => {
+  if (source.inventoryEffect) {
+    const returnSourceIds = new Set(source.sources.filter(row => row.kind === "supplier_credit_line").map(row => row.lineId));
+    if (source.scope.kind !== "purchase_order_line" || source.component === "landed"
+      || source.evidence !== "confirmed" || source.currency !== "USD" || source.totalMills !== 0 || source.basePieces !== 0
+      || source.issue !== null || source.manualOverride !== null
+      || !source.sources.some(row => row.kind === "vendor_invoice_line")
+      || source.sources.some(row => row.kind !== "vendor_invoice_line" && row.kind !== "supplier_credit_line")
+      || source.inventoryEffect.returns.some(row => !returnSourceIds.has(row.supplierCreditLineId))) {
+      context.addIssue({ code: "custom", message: "No-inventory-effect evidence requires exact, fully credited invoice sources and zero amount and quantity" });
+    }
+  } else if (source.basePieces === 0) {
+    context.addIssue({ code: "custom", path: ["basePieces"], message: "An allocatable source requires a positive base-piece denominator" });
+  }
   const knownAmount = source.evidence === "estimated" || source.evidence === "confirmed";
   if (knownAmount && (source.totalMills === null || source.basePieces === null)) {
     context.addIssue({

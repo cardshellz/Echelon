@@ -649,6 +649,11 @@ export const channelPricingRules = channelsSchema.table("channel_pricing_rules",
   value: numeric("value", { precision: 10, scale: 2 }).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("idx_cpr_channel_scope_scopeid").on(table.channelId, table.scope, table.scopeId)
+    .where(sql`${table.scopeId} IS NOT NULL`),
+  uniqueIndex("idx_cpr_channel_scope_null").on(table.channelId, table.scope)
+    .where(sql`${table.scopeId} IS NULL`),
+]);
 
 export type ChannelPricingRule = typeof channelPricingRules.$inferSelect;

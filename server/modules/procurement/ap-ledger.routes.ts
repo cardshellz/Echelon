@@ -1,3 +1,10 @@
+import { DocumentNumberError } from "../../platform/document-numbering/document-number";
+import { registerSupplierReturnRoutes } from "./supplier-return.routes";
+import { SupplierCreditEvidenceError } from "./supplier-credit-settlement.repository";
+import { registerSupplierCreditRoutes } from "./supplier-credit.routes";
+import { paymentCalendarDateSchema, paymentCalendarDateToUtc } from "@shared/procurement/ap-payment-contract";
+import { z } from "zod";
+import { invoiceWorkListQuerySchema, paymentWorkListQuerySchema } from "@shared/procurement/ap-work-list";
 import { registerPoFinancialEvidenceRoutes } from "./po-financial-evidence.routes";
 import { invoiceCostReviewCommands } from "./invoice-cost-review.service";
 import { registerInvoiceQuantityCorrectionRoutes } from "./invoice-quantity-correction.routes";
@@ -16,7 +23,7 @@ import { apInvoiceReplacementCommands } from "./ap-invoice-replacement.commands"
 import { invoiceReplacementInputSchema } from "@shared/procurement/invoice-replacement";
 
 function handleApLedgerError(res: any, err: any, fallbackStatus = 400) {
-  if (err?.name === "ApLedgerError") {
+  if (err?.name === "ApLedgerError" || err instanceof SupplierCreditEvidenceError) {
     return res.status(err.statusCode).json({ error: err.message, details: err.details });
   }
   return res.status(err?.statusCode ?? fallbackStatus).json({ error: err.message });
@@ -42,11 +49,43 @@ function sendFinancialCommandError(res: any, error: FinancialCommandError): any 
 }
 
 export function registerApLedgerRoutes(app: Express) {
+  registerSupplierCreditRoutes(app);
+  registerSupplierReturnRoutes(app);
   registerInvoiceQuantityCorrectionRoutes(app);
   registerPoFinancialEvidenceRoutes(app);
   // ============================================================
   // AP LEDGER - Vendor invoices
   // ============================================================
+
+  // Dedicated paged reads preserve legacy array/envelope consumers.
+  // Register these before /:id so "work-list" is never interpreted as a record ID.
+  app.get("/api/vendor-invoices/work-list", requirePermission("purchasing", "view"), async (req, res) => {
+    const query = invoiceWorkListQuerySchema.safeParse(req.query);
+    if (!query.success) {
+      res.status(400).json({ error: "Invalid invoice list filters", details: { code: "AP_WORK_LIST_QUERY_INVALID", issues: query.error.issues } });
+      return;
+    }
+    try {
+      res.json(await apLedger.listInvoiceWorkList(query.data, new Date()));
+    } catch (error) {
+      console.error("AP invoice work list failed", { code: "AP_WORK_LIST_READ_FAILED", error });
+      res.status(500).json({ error: "Unable to load invoices. Retry the list.", details: { code: "AP_WORK_LIST_READ_FAILED" } });
+    }
+  });
+
+  app.get("/api/ap-payments/work-list", requirePermission("purchasing", "view"), async (req, res) => {
+    const query = paymentWorkListQuerySchema.safeParse(req.query);
+    if (!query.success) {
+      res.status(400).json({ error: "Invalid payment list filters", details: { code: "AP_WORK_LIST_QUERY_INVALID", issues: query.error.issues } });
+      return;
+    }
+    try {
+      res.json(await apLedger.listPaymentWorkList(query.data));
+    } catch (error) {
+      console.error("AP payment work list failed", { code: "AP_WORK_LIST_READ_FAILED", error });
+      res.status(500).json({ error: "Unable to load payments. Retry the list.", details: { code: "AP_WORK_LIST_READ_FAILED" } });
+    }
+  });
 
   app.get("/api/vendor-invoices", requirePermission("purchasing", "view"), async (req, res) => {
     try {
@@ -70,8 +109,13 @@ export function registerApLedgerRoutes(app: Express) {
     try {
       const invoiceNumber = await apLedger.generateInvoiceNumber();
       res.json({ invoiceNumber });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    } catch (error) {
+      if (error instanceof DocumentNumberError) {
+        res.status(error.statusCode).json({ error: error.message, details: { code: error.code } });
+        return;
+      }
+      console.error("AP invoice number suggestion failed", { code: "AP_INVOICE_NUMBER_SUGGESTION_FAILED", error });
+      res.status(500).json({ error: "Unable to suggest an invoice number. Retry or enter the supplier invoice reference.", details: { code: "AP_INVOICE_NUMBER_SUGGESTION_FAILED" } });
     }
   });
 
@@ -425,6 +469,10 @@ export function registerApLedgerRoutes(app: Express) {
       if (!body.vendorId || !body.paymentDate || !body.paymentMethod || body.totalAmountCents == null) {
         return res.status(400).json({ error: "vendorId, paymentDate, paymentMethod, and totalAmountCents are required" });
       }
+      const calendar = paymentCalendarDateSchema.safeParse(body.paymentDate);
+      const legacy = z.string().datetime({ offset: true }).safeParse(body.paymentDate);
+      // Invalid date evidence reaches the durable owner as Invalid Date, so a reviewed
+      // request receives a saved rejection and can be safely corrected with a new key.
       const descriptor = financialCommandFromRequest(req, {
         actorId: getUserId(req),
         routeTemplate: "/api/ap-payments",
@@ -434,7 +482,8 @@ export function registerApLedgerRoutes(app: Express) {
       const result = await apPaymentCommands.recordPayment({
         payment: {
           ...body,
-          paymentDate: new Date(body.paymentDate),
+          paymentDate: calendar.success ? paymentCalendarDateToUtc(calendar.data) : new Date(legacy.success ? legacy.data : ""),
+          paymentCalendarDate: calendar.success ? calendar.data : null,
           allocations: body.allocations ?? [],
           createdBy: getUserId(req),
         },
@@ -453,6 +502,21 @@ export function registerApLedgerRoutes(app: Express) {
       res.json(payment);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/ap-payments/:id/applications", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const paymentId = Number(req.params.id);
+      if (!Number.isInteger(paymentId) || paymentId <= 0 || paymentId > 2_147_483_647)
+        return res.status(400).json({ error: "Invalid payment id.", details: { code: "AP_PAYMENT_ID_INVALID" } });
+      const descriptor = financialCommandFromRequest(req, { actorId: getUserId(req), routeTemplate: "/api/ap-payments/:id/applications",
+        resourceKey: `ap_payment:${paymentId}`, commandName: "ap.payment.apply" });
+      const result = await apPaymentCommands.applyPayment(paymentId, { application: req.body, userId: getUserId(req) }, descriptor);
+      return sendFinancialCommandResult(res, result);
+    } catch (err: any) {
+      if (err instanceof FinancialCommandError) return sendFinancialCommandError(res, err);
+      handleApLedgerError(res, err);
     }
   });
 

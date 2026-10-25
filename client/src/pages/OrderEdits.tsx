@@ -41,6 +41,7 @@ import {
   orderEditMatchesInput,
 } from "@/lib/order-edit-confirmation";
 import { OrderEditCodeEntry } from "@/components/order-edits/OrderEditCodeEntry";
+import { OrderCancellationAdmin } from "@/components/order-edits/OrderCancellationAdmin";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
   nextOrderEditPreviewInput,
@@ -282,8 +283,14 @@ export function OrderDraft({
   onDiscountCodesChange?: (codes: string[]) => void;
   /** Hydrate an existing review from its persisted plan, never from baseline quantities. */
   initialOperation?: OrderEditOperation | null;
-  renderRewards?: (input: { disabled: boolean; maxDiscountCents: number; appliedCodes: string[];
-    onApply(code: string): Promise<void>; onBusy(busy: boolean): void }) => React.ReactNode;
+  renderRewards?: (input: {
+    disabled: boolean;
+    maxDiscountCents: number | null;
+    appliedCodes: string[];
+    onApply(code: string): Promise<void>;
+    onRemove(code: string): void;
+    onBusy(busy: boolean): void;
+  }) => React.ReactNode;
   /** Customer confirmation stays in the editable form; staff retain their existing review. */
   inline?: {
     operation: OrderEditOperation | null;
@@ -629,6 +636,11 @@ export function OrderDraft({
     inline?.onChange();
     changeCodes(next.discountCodes!);
   }
+  function removeCode(code: string) {
+    inline?.onChange();
+    command.current = null;
+    changeCodes(discountCodes.filter((existing) => existing.toUpperCase() !== code.toUpperCase()));
+  }
   if (pending && !inline)
     return (
       <OrderEditPreviewReview
@@ -962,17 +974,20 @@ export function OrderDraft({
               disabled={!mutable || reviewBlocked || rewardBusy}
               onEditing={setCodeEditing}
               onApply={applyCode}
-              onRemove={(code) => {
-                inline?.onChange();
-                command.current = null;
-                changeCodes(
-                  discountCodes.filter((existing) => existing !== code),
-                );
-              }}
+              onRemove={removeCode}
             />
-            {renderRewards?.({ disabled: !mutable || reviewBlocked || codeEditing,
-              maxDiscountCents: (currentPreview?.financials ?? order.financials)?.itemsNetCents ?? 0,
-              appliedCodes: discountCodes, onApply: applyCode, onBusy: setRewardBusy })}
+            {renderRewards?.({
+              disabled: !mutable || reviewBlocked || codeEditing,
+              maxDiscountCents:
+                (verified?.financials?.quoted ?? currentPreview?.financials)?.itemsNetCents ??
+                (changes.length === 0 && additions.length === 0 && discountCodes.length === 0
+                  ? order.financials?.itemsNetCents ?? null
+                  : null),
+              appliedCodes: discountCodes,
+              onApply: applyCode,
+              onRemove: removeCode,
+              onBusy: setRewardBusy,
+            })}
             {audience === "staff" && <p className="text-xs text-muted-foreground">
               Shipping address changes are not supported in this pilot.
             </p>}
@@ -1246,6 +1261,8 @@ export function OrderEditOperationView({
   onAbandon,
   audience = "staff",
   onCodesChange,
+  onPaymentOpen,
+  statusReadBusy = false,
 }: {
   operation: OrderEditOperation;
   now: number;
@@ -1258,6 +1275,8 @@ export function OrderEditOperationView({
   onAbandon(): void;
   audience?: "staff" | "customer";
   onCodesChange?: (codes: string[]) => Promise<void>;
+  onPaymentOpen?: () => void;
+  statusReadBusy?: boolean;
 }) {
   const [codeEditing, setCodeEditing] = useState(false);
   const copy = orderEditStatusCopy[operation.status];
@@ -1265,12 +1284,22 @@ export function OrderEditOperationView({
     audience === "customer" && operation.status === "review_required"
       ? "Review needed"
       : copy.title;
+  const operationError =
+    audience === "customer" && operation.error?.code === "ORDER_EDIT_PAYMENT_PENDING"
+      ? null
+      : operation.error;
   const description =
     audience === "customer" && operation.status === "review_required"
       ? "We need to check these changes. Contact us with the edit reference below."
       : audience === "customer" && operation.status === "synchronizing"
-        ? "Your order is being updated. Check its status again shortly."
-        : copy.description;
+        ? "We’re finishing your order update. This page will update automatically."
+        : audience === "customer" && operation.status === "awaiting_payment"
+          ? operation.error?.code === "ORDER_EDIT_PAYMENT_PENDING"
+            ? "Your payment is processing. This page will update automatically."
+            : "Complete your payment below to finish updating your order."
+          : audience === "customer" && operation.status === "completed"
+            ? "Your order has been updated."
+            : copy.description;
   const payable = operation.balanceDueCents > 0;
   const refundable = operation.refundDueCents > 0;
   const paymentUrl =
@@ -1281,16 +1310,14 @@ export function OrderEditOperationView({
     formatOrderEditMoney(value, operation.currency);
   const expired =
     operation.expiresAt !== null && Date.parse(operation.expiresAt) <= now;
-  // A fresh customer review needs only Apply and Change items. Retain the
-  // existing recovery action when payment, expiry, or an uncertain reply needs
-  // a status check; this action can reconcile the edit, so it is never automated.
+  // Normal submitted progress is observed through read-only requests. Retain
+  // explicit reconciliation only for a failed or uncertain customer command.
   const showStatusCheck =
     audience !== "customer" ||
-    operation.status !== "ready" ||
-    expired ||
     isUncertain ||
     error !== null ||
-    operation.error !== null;
+    (operation.status === "ready" && expired) ||
+    operationError !== null;
   const financials = operation.financials;
   const showCurrent = ["completed", "recovered", "failed", "expired"].includes(
     operation.status,
@@ -1366,7 +1393,7 @@ export function OrderEditOperationView({
         )}
       </CardHeader>
       <CardContent className="oe-order-content">
-        <p className="text-sm text-muted-foreground">
+        <p role="status" aria-live="polite" className="text-sm text-muted-foreground">
           {operation.status === "review_required" && operation.canAbandon
             ? audience === "customer"
               ? "We could not verify these changes. You can cancel this edit and try again, or contact us for help."
@@ -1442,7 +1469,7 @@ export function OrderEditOperationView({
             pendingChanges={operation.status === "ready"}
           />
         )}
-        {operation.paymentDeadline && (
+        {operation.paymentDeadline && (audience === "staff" || operation.status === "awaiting_payment") && (
           <p className="rounded-md bg-muted p-3 text-sm">
             Payment deadline:{" "}
             <time dateTime={operation.paymentDeadline}>
@@ -1463,17 +1490,20 @@ export function OrderEditOperationView({
               ))}
           </ul>
         )}
-        {operation.error && <ErrorMessage text={operation.error.message} />}
+        {operationError && <ErrorMessage text={operationError.message} />}
         <ErrorMessage text={error} />
         {isUncertain && (
           <p role="status" className="text-sm">
-            The last request may have completed. Check this operation’s status
-            before continuing.
+            {audience === "customer"
+              ? "We couldn’t confirm the last request. Try again to check its result."
+              : "The last request may have completed. Check this operation’s status before continuing."}
           </p>
         )}
         {operation.status === "ready" && expired && (
           <p role="status" className="text-sm">
-            This quote has expired. Check status before continuing.
+            {audience === "customer"
+              ? "This total has expired. Try again to refresh it."
+              : "This quote has expired. Check status before continuing."}
           </p>
         )}
         <div className="oe-editor-footer">
@@ -1513,7 +1543,12 @@ export function OrderEditOperationView({
           )}
           {paymentUrl && (
             <Button asChild variant="outline">
-              <a href={paymentUrl} target="_blank" rel="noopener noreferrer">
+              <a
+                href={paymentUrl}
+                target={audience === "customer" ? "_self" : "_blank"}
+                rel="noopener noreferrer"
+                onClick={onPaymentOpen}
+              >
                 {audience === "customer"
                   ? "Pay the difference"
                   : "Open Shopify payment"}
@@ -1524,12 +1559,14 @@ export function OrderEditOperationView({
             <Button
               type="button"
               variant="outline"
-              disabled={busy}
+              disabled={busy || statusReadBusy}
               onClick={onRefresh}
             >
-              {busy && (!busyAction || busyAction === "reconcile")
+              {statusReadBusy || (busy && (!busyAction || busyAction === "reconcile"))
                 ? "Checking…"
-                : "Check status"}
+                : audience === "customer"
+                  ? "Try again"
+                  : "Check status"}
             </Button>
           )}
         </div>
@@ -1784,12 +1821,15 @@ export default function OrderEdits() {
           <Badge variant="outline">Staff only</Badge>
         </div>
         <p className="text-sm text-muted-foreground">
-          Changes apply to the original Shopify order. Customer access is off.
-          This pilot does not request order-update or refund emails.
+          Review order updates and saved customer cancellations. Changes apply to
+          the original Shopify order. Customer cancellations use Shopify’s
+          cancellation notification and original payment refund flow.
         </p>
       </header>
       {invalidLink ? (
         <ErrorMessage text="This operation link is invalid. Use the exact saved operation link." />
+      ) : operationId && operation.error instanceof OrderEditRequestError && operation.error.code === "ORDER_CANCELLATION_SEPARATE_FLOW" ? (
+        <OrderCancellationAdmin operationId={operationId} />
       ) : operationId && !changingItems ? (
         <>
           {operation.isLoading && <p role="status">Loading order edit…</p>}

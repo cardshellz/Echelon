@@ -1,3 +1,7 @@
+import { allocateDocumentNumber } from "../../platform/document-numbering/document-number.repository";
+import { documentNumberPrefix } from "../../platform/document-numbering/document-number";
+import { readShipmentList, countShipmentList, type ShipmentListFilters } from "./shipment-work-list.repository";
+import { projectExpectedReceipts } from "./domain/expected-receipts";
 import { attachSupplierSourcingCandidates } from "./supplier-sourcing.repository";
 import { comparePurchaseBuyingPriority, purchaseBuyingDisposition } from "@shared/procurement/purchase-buying-review";
 import { readShipmentPurchaseOrders } from "./shipment-purchase-orders.repository";
@@ -85,7 +89,7 @@ export interface IProcurementStorage {
   createReceivingOrder(data: InsertReceivingOrder, executor?: any): Promise<ReceivingOrder>;
   updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>, executor?: any): Promise<ReceivingOrder | null>;
   deleteReceivingOrder(id: number, executor?: any): Promise<boolean>;
-  generateReceiptNumber(executor?: any): Promise<string>;
+  generateReceiptNumber(executor: any, recordedAt?: Date): Promise<string>;
   getReceivingLines(receivingOrderId: number, executor?: any): Promise<ReceivingLine[]>;
   getReceivingLineById(id: number, executor?: any): Promise<ReceivingLine | undefined>;
   createReceivingLine(data: InsertReceivingLine, executor?: any): Promise<ReceivingLine>;
@@ -94,7 +98,7 @@ export interface IProcurementStorage {
   bulkCreateReceivingLines(lines: InsertReceivingLine[], executor?: any): Promise<ReceivingLine[]>;
   getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }, executor?: any): Promise<VendorProduct[]>;
   getVendorProductsByProductIds(productIds: number[]): Promise<VendorProduct[]>;
-  getVendorProductById(id: number): Promise<VendorProduct | undefined>;
+  getVendorProductById(id: number, executor?: any): Promise<VendorProduct | undefined>;
   getPreferredVendorProduct(productId: number, productVariantId?: number): Promise<VendorProduct | undefined>;
   createVendorProduct(data: InsertVendorProduct): Promise<VendorProduct>;
   updateVendorProduct(id: number, updates: Partial<InsertVendorProduct>): Promise<VendorProduct | null>;
@@ -151,11 +155,11 @@ export interface IProcurementStorage {
   getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
   getPurchaseOrderById(id: number, executor?: any): Promise<PurchaseOrder | undefined>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined>;
-  createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder>;
+  createPurchaseOrder(data: InsertPurchaseOrder, historyData?: Omit<InsertPoStatusHistory, "purchaseOrderId">, executor?: any): Promise<PurchaseOrder>;
   updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor?: any): Promise<PurchaseOrder | null>;
   updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>, executor?: any): Promise<PurchaseOrder | null>;
   deletePurchaseOrder(id: number, executor?: any): Promise<boolean>;
-  generatePoNumber(): Promise<string>;
+  generatePoNumber(executor: any, recordedAt?: Date): Promise<string>;
   getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<PurchaseOrderLine[]>;
   getPurchaseOrderLineById(id: number, executor?: any): Promise<PurchaseOrderLine | undefined>;
   createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine>;
@@ -176,15 +180,13 @@ export interface IProcurementStorage {
     lineUpdates: Partial<InsertPurchaseOrderLine>;
     receipt: InsertPoReceipt;
   }, executor?: any): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }>;
-  getInboundShipments(filters?: any, executor?: any): Promise<InboundShipment[]>;
-  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[]): Promise<Map<number, ShipmentPurchaseOrderReference[]>>;
-  getInboundShipmentsCount(filters?: any): Promise<number>;
+  getInboundShipments(filters?: ShipmentListFilters, executor?: any): Promise<InboundShipment[]>;
+  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[], executor?: any): Promise<Map<number, ShipmentPurchaseOrderReference[]>>;
+  getInboundShipmentsCount(filters?: ShipmentListFilters, executor?: any): Promise<number>;
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
-  createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment>;
   updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any, recordedAt?: Date): Promise<InboundShipment | null>;
   deleteInboundShipment(id: number, executor?: any): Promise<boolean>;
-  generateShipmentNumber(): Promise<string>;
   getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<InboundShipmentLine[]>;
   getInboundShipmentLineById(id: number, executor?: any): Promise<InboundShipmentLine | undefined>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]>;
@@ -319,29 +321,9 @@ export const procurementMethods: IProcurementStorage = {
     return (result.rowCount ?? 0) > 0;
   },
 
-  async generateReceiptNumber(executor: any = db): Promise<string> {
-    if (executor !== db && typeof executor.execute === "function") {
-      await executor.execute(sql`
-        SELECT pg_advisory_xact_lock(hashtext('procurement.generate_receipt_number'))
-      `);
-    }
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
-    const prefix = `RCV-${dateStr}-`;
-
-    const existing = await executor.select({ receiptNumber: receivingOrders.receiptNumber })
-      .from(receivingOrders)
-      .where(like(receivingOrders.receiptNumber, `${prefix}%`))
-      .orderBy(desc(receivingOrders.receiptNumber))
-      .limit(1);
-
-    let nextNum = 1;
-    if (existing.length > 0 && existing[0].receiptNumber) {
-      const lastNum = parseInt(existing[0].receiptNumber.replace(prefix, ''), 10);
-      if (!isNaN(lastNum)) nextNum = lastNum + 1;
-    }
-
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+  async generateReceiptNumber(executor: any, recordedAt: Date = new Date()): Promise<string> {
+    if (!executor || executor === db) throw new TypeError("Receipt numbering requires the insertion transaction");
+    return allocateDocumentNumber(executor, { kind: "receipt", prefix: documentNumberPrefix("RCV", recordedAt, "utc") });
   },
 
   async getReceivingLines(receivingOrderId: number, executor: any = db): Promise<ReceivingLine[]> {
@@ -404,8 +386,8 @@ export const procurementMethods: IProcurementStorage = {
       .orderBy(vendorProducts.productId, desc(vendorProducts.isPreferred), asc(vendorProducts.vendorId));
   },
 
-  async getVendorProductById(id: number): Promise<VendorProduct | undefined> {
-    const result = await db.select().from(vendorProducts).where(eq(vendorProducts.id, id)).limit(1);
+  async getVendorProductById(id: number, executor: any = db): Promise<VendorProduct | undefined> {
+    const result = await executor.select().from(vendorProducts).where(eq(vendorProducts.id, id)).limit(1);
     return result[0];
   },
 
@@ -807,9 +789,14 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder> {
-    const result = await db.insert(purchaseOrders).values(data).returning();
-    return result[0];
+  async createPurchaseOrder(data: InsertPurchaseOrder, historyData?: Omit<InsertPoStatusHistory, "purchaseOrderId">, executor?: any): Promise<PurchaseOrder> {
+    const create = async (tx: any): Promise<PurchaseOrder> => {
+      const [created] = await tx.insert(purchaseOrders).values(data).returning();
+      if (!created) throw new Error("Purchase order insert returned no record");
+      if (historyData) await tx.insert(poStatusHistory).values({ ...historyData, purchaseOrderId: created.id });
+      return created;
+    };
+    return executor ? create(executor) : db.transaction(create);
   },
 
   async updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor: any = db): Promise<PurchaseOrder | null> {
@@ -868,24 +855,9 @@ export const procurementMethods: IProcurementStorage = {
     return result.length > 0;
   },
 
-  async generatePoNumber(): Promise<string> {
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
-    const prefix = `PO-${dateStr}-`;
-
-    const existing = await db.select({ poNumber: purchaseOrders.poNumber })
-      .from(purchaseOrders)
-      .where(like(purchaseOrders.poNumber, `${prefix}%`))
-      .orderBy(desc(purchaseOrders.poNumber))
-      .limit(1);
-
-    let nextNum = 1;
-    if (existing.length > 0 && existing[0].poNumber) {
-      const lastNum = parseInt(existing[0].poNumber.replace(prefix, ''), 10);
-      if (!isNaN(lastNum)) nextNum = lastNum + 1;
-    }
-
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+  async generatePoNumber(executor: any, recordedAt: Date = new Date()): Promise<string> {
+    if (!executor || executor === db) throw new TypeError("PO numbering requires the insertion transaction");
+    return allocateDocumentNumber(executor, { kind: "purchase_order", prefix: documentNumberPrefix("PO", recordedAt, "utc") });
   },
 
   async getPurchaseOrderLines(purchaseOrderId: number, executor: any = db): Promise<PurchaseOrderLine[]> {
@@ -1044,44 +1016,16 @@ export const procurementMethods: IProcurementStorage = {
     }
   },
 
-  async getInboundShipments(filters?: any, executor: any = db): Promise<InboundShipment[]> {
-    const conditions: any[] = [];
-    if (filters?.status) {
-      if (Array.isArray(filters.status)) conditions.push(inArray(inboundShipments.status, filters.status));
-      else conditions.push(eq(inboundShipments.status, filters.status));
-    }
-    if (filters?.mode) conditions.push(eq(inboundShipments.mode, filters.mode));
-    if (filters?.warehouseId) conditions.push(eq(inboundShipments.warehouseId, filters.warehouseId));
-    if (filters?.search) {
-      conditions.push(or(
-        like(inboundShipments.shipmentNumber, `%${filters.search}%`),
-        like(inboundShipments.carrierName, `%${filters.search}%`),
-        like(inboundShipments.containerNumber, `%${filters.search}%`),
-      ));
-    }
-    let query = executor.select().from(inboundShipments).orderBy(desc(inboundShipments.createdAt)) as any;
-    if (conditions.length > 0) query = query.where(and(...conditions));
-    if (filters?.limit) query = query.limit(filters.limit);
-    if (filters?.offset) query = query.offset(filters.offset);
-    return await query;
+  getInboundShipments(filters?: ShipmentListFilters, executor: any = db): Promise<InboundShipment[]> {
+    return readShipmentList(executor, filters);
   },
 
-  async getInboundShipmentsCount(filters?: any): Promise<number> {
-    const conditions: any[] = [];
-    if (filters?.status) {
-      if (Array.isArray(filters.status)) conditions.push(inArray(inboundShipments.status, filters.status));
-      else conditions.push(eq(inboundShipments.status, filters.status));
-    }
-    if (filters?.mode) conditions.push(eq(inboundShipments.mode, filters.mode));
-    if (filters?.warehouseId) conditions.push(eq(inboundShipments.warehouseId, filters.warehouseId));
-    let query = db.select({ count: sql<number>`count(*)` }).from(inboundShipments) as any;
-    if (conditions.length > 0) query = query.where(and(...conditions));
-    const result = await query;
-    return Number(result[0]?.count || 0);
+  getInboundShipmentsCount(filters?: ShipmentListFilters, executor: any = db): Promise<number> {
+    return countShipmentList(executor, filters);
   },
 
-  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[]): Promise<Map<number, ShipmentPurchaseOrderReference[]>> {
-    return readShipmentPurchaseOrders(db, shipmentIds);
+  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[], executor: any = db): Promise<Map<number, ShipmentPurchaseOrderReference[]>> {
+    return readShipmentPurchaseOrders(executor, shipmentIds);
   },
 
   async getInboundShipmentById(id: number, executor: any = db): Promise<InboundShipment | undefined> {
@@ -1094,11 +1038,6 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment> {
-    const result = await db.insert(inboundShipments).values(data as any).returning();
-    return result[0];
-  },
-
   async updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor: any = db, recordedAt = new Date()): Promise<InboundShipment | null> {
     const result = await executor.update(inboundShipments).set({ ...updates, updatedAt: recordedAt } as any).where(eq(inboundShipments.id, id)).returning();
     return result[0] || null;
@@ -1107,23 +1046,6 @@ export const procurementMethods: IProcurementStorage = {
   async deleteInboundShipment(id: number, executor: any = db): Promise<boolean> {
     const result = await executor.delete(inboundShipments).where(eq(inboundShipments.id, id)).returning();
     return result.length > 0;
-  },
-
-  async generateShipmentNumber(): Promise<string> {
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
-    const prefix = `SHP-${dateStr}-`;
-    const existing = await db.select({ shipmentNumber: inboundShipments.shipmentNumber })
-      .from(inboundShipments)
-      .where(like(inboundShipments.shipmentNumber, `${prefix}%`))
-      .orderBy(desc(inboundShipments.shipmentNumber))
-      .limit(1);
-    let nextNum = 1;
-    if (existing.length > 0 && existing[0].shipmentNumber) {
-      const lastNum = parseInt(existing[0].shipmentNumber.replace(prefix, ''), 10);
-      if (!isNaN(lastNum)) nextNum = lastNum + 1;
-    }
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
   },
 
   async getInboundShipmentLines(inboundShipmentId: number, executor: any = db): Promise<InboundShipmentLine[]> {
@@ -1287,7 +1209,8 @@ export const procurementMethods: IProcurementStorage = {
     const subIds = await db
       .selectDistinct({ id: inboundShipmentLines.inboundShipmentId })
       .from(inboundShipmentLines)
-      .where(eq(inboundShipmentLines.purchaseOrderId, purchaseOrderId));
+      .leftJoin(purchaseOrderLines, eq(purchaseOrderLines.id, inboundShipmentLines.purchaseOrderLineId))
+      .where(or(eq(inboundShipmentLines.purchaseOrderId, purchaseOrderId), eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId)));
     if (subIds.length === 0) return [];
     return await db.select().from(inboundShipments)
       .where(inArray(inboundShipments.id, subIds.map(r => r.id)))
@@ -1960,18 +1883,17 @@ export const procurementMethods: IProcurementStorage = {
         po.expected_delivery_date,
         po.confirmed_delivery_date,
         COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) AS eta,
-        SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS pending_units,
-        COUNT(pol.id) AS pending_lines,
-        SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0) * pol.unit_cost_cents) AS pending_value_cents
+        pol.order_qty, COALESCE(pol.received_qty, 0) AS received_qty,
+        COALESCE(pol.cancelled_qty, 0) AS cancelled_qty, pol.total_product_cost_cents
       FROM procurement.purchase_orders po
       JOIN procurement.vendors v ON v.id = po.vendor_id
       JOIN procurement.purchase_order_lines pol ON pol.purchase_order_id = po.id
         AND pol.status IN ('open', 'partially_received')
+        AND pol.line_type = 'product'
       WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
-      GROUP BY po.id, po.po_number, v.name, po.status, po.expected_delivery_date, po.confirmed_delivery_date
-      ORDER BY COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) ASC NULLS LAST
+      ORDER BY COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) ASC NULLS LAST, po.id, pol.id
     `);
-    return rows.rows as any[];
+    return projectExpectedReceipts(rows.rows);
   },
 
   // ===== PURCHASING DASHBOARD METHODS =====

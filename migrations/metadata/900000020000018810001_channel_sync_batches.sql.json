@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000020000018810001_channel_sync_batches.sql",
+  "generation": 20,
+  "pr": 1881,
+  "ordinal": 1,
+  "after": [
+    "900000019000018700001_listing_intent_lifecycle_disposition.sql"
+  ]
+}

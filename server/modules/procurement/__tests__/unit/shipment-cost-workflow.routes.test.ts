@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import express, { type Request, type Response, type NextFunction } from "express";
 import http from "node:http";
@@ -7,6 +8,7 @@ import type { ServiceRegistry } from "../../../../services";
 const mocks = vi.hoisted(() => ({ execute: vi.fn(), getCostReview: vi.fn(), cancel: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../routes/middleware", () => ({
+  requireAuth: (_req: Request, _res: Response, next: NextFunction) => next(),
   requirePermission: (resource: string, action: string) => (req: Request, res: Response, next: NextFunction) => {
     if (req.headers["x-test-permission"] !== `${resource}:${action}`) return res.status(403).json({ error: "Permission denied" });
     next();
@@ -46,12 +48,12 @@ describe("shipment cost workflow HTTP boundaries", () => {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     vi.restoreAllMocks();
   });
-  const read = (id = "42", permission = "purchasing:view") => fetch(`${base}/api/inbound-shipments/${id}/cost-review`, { headers: { "x-test-permission": permission } });
-  const update = (options: { id?: string; permission?: string; actor?: string; key?: string } = {}) => fetch(`${base}/api/inbound-shipments/${options.id ?? "42"}/update-costs`, {
+  const read = (id = "42", permission = "purchasing:view") => requestLocalHttp(`${base}/api/inbound-shipments/${id}/cost-review`, { headers: { "x-test-permission": permission } });
+  const update = (options: { id?: string; permission?: string; actor?: string; key?: string } = {}) => requestLocalHttp(`${base}/api/inbound-shipments/${options.id ?? "42"}/update-costs`, {
     method: "POST", body: "{}", headers: { "content-type": "application/json", "x-test-permission": options.permission ?? "purchasing:approve",
       "x-test-actor": options.actor ?? "approver", "idempotency-key": options.key ?? "workflow-test-42" },
   });
-  const cancel = (permission = "purchasing:edit", id = "42") => fetch(`${base}/api/inbound-shipments/${id}/cancel`, {
+  const cancel = (permission = "purchasing:edit", id = "42") => requestLocalHttp(`${base}/api/inbound-shipments/${id}/cancel`, {
     method: "POST", body: JSON.stringify({ reason: "Supplier withdrew shipment" }),
     headers: { "content-type": "application/json", "x-test-permission": permission, "x-cancel-actor": "cancelling-operator" },
   });
@@ -104,7 +106,7 @@ describe("shipment cost workflow HTTP boundaries", () => {
   it("preserves the original strict response for older tabs and opts new clients into exceptions", async () => {
     mocks.getCostReview.mockResolvedValue({ shipmentId: 42, lines: [{ lineId: 1, exceptionReview: null }] });
     expect(await (await read()).json()).toEqual({ shipmentId: 42, lines: [{ lineId: 1 }] });
-    const response = await fetch(`${base}/api/inbound-shipments/42/cost-review`, { headers: {
+    const response = await requestLocalHttp(`${base}/api/inbound-shipments/42/cost-review`, { headers: {
       "x-test-permission": "purchasing:view", "X-Shipment-Cost-Review-Version": "2",
     } });
     expect(response.headers.get("vary")).toContain("X-Shipment-Cost-Review-Version");

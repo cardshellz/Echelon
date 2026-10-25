@@ -292,25 +292,28 @@ test("adjustments preserve the direction of increases and credits without multip
   expect(failures).toEqual([]);
 });
 
-test("historical cost postings show exact balances and the approved before and after", async ({ page }) => {
-  const failures = await setup(page);
-  await page.route("**/api/cogs/historical-adjustments", route => route.fulfill({ json: {
-    currency: "USD", balances: { historical_cogs: 41234, inventory_variance: 0 }, truncated: false,
-    entries: [{ id: 1, lineId: 41, shipmentId: 9, purchaseOrderId: 4, poNumber: "PO-TEST-4", sku: "HISTORICAL-COST-A",
-      destination: "historical_cogs", beforeMills: 50000, afterMills: 41234, deltaMills: -8766,
-      actorName: "Synthetic approver", reason: "Confirmed lower freight amount for historical sold goods.",
-      recordedAt: "2026-09-08T12:00:00Z" }],
-  } }));
-  await page.getByRole("tab", { name: "Adjustments", exact: true }).click();
-  await expect(page.getByText("$4.1234", { exact: true })).toBeVisible();
-  await expect(page.getByText(/These postings are separate from costs assigned to individual orders/)).toBeVisible();
-  await page.getByText("Posted activity (1)", { exact: true }).click();
-  await expect(page.getByText("Cost of goods already sold: $5.00 → $4.1234", { exact: true })).toBeVisible();
-  await expect(page.getByText(/HISTORICAL-COST-A · Approved by Synthetic approver/)).toBeVisible();
-  await expect(page.getByText("Confirmed lower freight amount for historical sold goods.", { exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "PO-TEST-4", exact: true })).toHaveAttribute("href", "/purchase-orders/4");
-  expect(failures).toEqual([]);
-});
+for (const component of [undefined, "product", "packaging"] as const) {
+  const label = component === "product" ? "Product" : component === "packaging" ? "Packaging" : "Shipment charges";
+  test(`historical ${component ?? "shipment"} cost postings show exact balances and the approved before and after`, async ({ page }) => {
+    const failures = await setup(page);
+    await page.route("**/api/cogs/historical-adjustments", route => route.fulfill({ json: {
+      currency: "USD", balances: { historical_cogs: 41234, inventory_variance: 0 }, truncated: false,
+      entries: [{ id: 1, lineId: component ? null : 41, shipmentId: component ? null : 9, component, purchaseOrderId: 4, poNumber: "PO-TEST-4", sku: "HISTORICAL-COST-A",
+        destination: "historical_cogs", beforeMills: 50000, afterMills: 41234, deltaMills: -8766,
+        actorName: "Synthetic approver", reason: "Confirmed revised cost for historical sold goods.",
+        recordedAt: "2026-09-08T12:00:00Z" }],
+    } }));
+    await page.getByRole("tab", { name: "Adjustments", exact: true }).click();
+    await expect(page.getByText("$4.1234", { exact: true })).toBeVisible();
+    await expect(page.getByText(/These postings are separate from costs assigned to individual orders/)).toBeVisible();
+    await page.getByText("Posted activity (1)", { exact: true }).click();
+    await expect(page.getByText("Cost of goods already sold: $5.00 → $4.1234", { exact: true })).toBeVisible();
+    await expect(page.getByText(`HISTORICAL-COST-A · ${label} · Approved by Synthetic approver`, { exact: false })).toBeVisible();
+    await expect(page.getByText("Confirmed revised cost for historical sold goods.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "PO-TEST-4", exact: true })).toHaveAttribute("href", "/purchase-orders/4");
+    expect(failures).toEqual([]);
+  });
+}
 
 test("a failed historical cost report is not shown as a zero balance and supports retry", async ({ page }) => {
   const failures = await setup(page);

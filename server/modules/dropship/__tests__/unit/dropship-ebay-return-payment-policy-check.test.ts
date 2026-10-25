@@ -272,7 +272,7 @@ function credential(prefix: string): DropshipMarketplaceStoreCredentials {
   return {
     vendorId: 10, storeConnectionId: 44, platform: "ebay", status: "connected", shopDomain: null,
     externalAccountId: "seller", providerEnvironment: "production",
-    externalAccountIdentityScheme: "ebay_user_id", externalAccountVerifiedAt: null,
+    externalAccountIdentityScheme: "provider_user_id", externalAccountVerifiedAt: new Date("2026-09-01T00:00:00Z"),
     externalDisplayName: "Store", config: {}, accessToken: `${prefix}-access`, accessTokenRef: `${prefix}-access-ref`,
     accessTokenExpiresAt: new Date("2026-10-09T12:00:00Z"), refreshToken: "refresh", refreshTokenRef: "refresh-ref",
     refreshTokenExpiresAt: null,

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { DropshipCostChangePolicySettings } from "../../../../shared/dropship/cost-change-policy";
 import { resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import type { RulePriceBasis } from "../../../../shared/dropship/pricing-rules";
+import { isPushProgressListingOnMarketplace } from "./order-listing-acceptability";
 
 /**
  * What happens to a vendor's listings when a .ops cost increase takes effect
@@ -52,6 +53,25 @@ export type CostChangeHoldReleaseDetail = (typeof costChangeHoldReleaseDetails)[
 /** Only a listing live on the marketplace is repriced, warned about or paused. */
 export const COST_ACTIONABLE_LISTING_STATUSES: readonly string[] = ["active"];
 
+/**
+ * Whether the cost-change actions treat a listing as live: `active`, or a
+ * listing being re-sent that eBay still lists (a push-progress status with a
+ * listing id; step 1 plan S2-5 review MC1). Orders are accepted on the second
+ * kind (order-listing-acceptability.ts, §4.7), so a below-cost hold on one is
+ * kept and a cost increase on one is acted on. Since PR 1b's guards a live
+ * listing keeps its status through a queue, a failure, a Stop and the breaker
+ * (domain/listing-live-status), so the second kind is a row written before
+ * them, or by an older release during a deploy, until the listing-push
+ * recovery repairs it; a listing live today stays `active`, and its hold is
+ * protected by the published-price check (judgeAgainstPublishedPrice,
+ * decideCostChangeHoldRelease). `paused` and `drift_detected` keep their
+ * earlier meaning (publish runs did not change them).
+ */
+export function isCostActionableListing(input: { listingStatus: string; externalListingId: string | null }): boolean {
+  return COST_ACTIONABLE_LISTING_STATUSES.includes(input.listingStatus)
+    || isPushProgressListingOnMarketplace({ status: input.listingStatus, externalListingId: input.externalListingId });
+}
+
 export interface CostChangeListingPriceClassification {
   source: CostChangeListingPriceSource;
   priceCents: number | null;
@@ -90,18 +110,42 @@ export function classifyCostChangeListingPrice(input: {
 }
 
 /**
+ * The price a live listing is judged at: the lower of the price its settings
+ * give now (`price`, as the preview resolves it) and the price its last
+ * completed push published, which is what buyers see on the marketplace. A
+ * queued, blocked or failed update keeps the listing live and orderable
+ * (domain/listing-live-status), so a price that is saved or queued but not
+ * yet published must not count as covering the cost; nor may an older,
+ * higher published price hide a lower one queued to replace it.
+ * A rule-priced listing follows the cost by a reprice, so its price is left
+ * as the rules give it. With no published price on record, the settings
+ * price is judged, as before (ASSUMPTION: every completed push records the
+ * price it sent; dropship-listing-push-worker.repository completeItem).
+ */
+export function judgeAgainstPublishedPrice(
+  price: CostChangeListingPriceClassification,
+  publishedPriceCents: number | null,
+): CostChangeListingPriceClassification {
+  if (price.followsCost || price.priceCents === null || publishedPriceCents === null) return price;
+  assertPositiveCents(publishedPriceCents, "publishedPriceCents");
+  return publishedPriceCents < price.priceCents ? { ...price, priceCents: publishedPriceCents } : price;
+}
+
+/**
  * Decide one listing under the policy once an increase to `unitCostCents` is
  * in force. The listing's price is compared with the cost per variant unit,
  * the same unit an accepted order is charged at.
  */
 export function decideCostChangeListingAction(input: {
   listingStatus: string;
+  /** The listing's eBay listing id as stored: a re-sent listing with one is still live (isCostActionableListing). */
+  externalListingId: string | null;
   price: CostChangeListingPriceClassification;
   unitCostCents: number;
   settings: Pick<DropshipCostChangePolicySettings, "rulePricedListings" | "belowCostFixedListings">;
 }): CostChangeListingAction {
   assertPositiveCents(input.unitCostCents, "unitCostCents");
-  if (!COST_ACTIONABLE_LISTING_STATUSES.includes(input.listingStatus)) return "skipped_inactive_listing";
+  if (!isCostActionableListing(input)) return "skipped_inactive_listing";
   if (input.price.followsCost) {
     return input.settings.rulePricedListings === "reprice_automatically" ? "reprice_queued" : "awaiting_review";
   }
@@ -119,21 +163,43 @@ export function decideCostChangeListingAction(input: {
 }
 
 /**
- * Whether a listing paused for being under water may sell again: its price
- * now covers the cost in force, or it is no longer live and the hold would
- * only linger. An unknown price or cost keeps the hold; nothing is released
- * on a guess.
+ * Whether a listing paused for being under water may sell again: the price
+ * buyers see covers the cost in force, or it is no longer live and the hold
+ * would only linger. "Covers" needs both the price its settings give now and
+ * the price its last completed push published to cover the cost: a raised
+ * price that is saved or queued but not yet on the marketplace keeps the
+ * hold (the listing stays orderable while its update is queued or failed),
+ * and so does a lower price queued to replace a published one that covers
+ * it. An unknown price, published price or cost keeps the hold; nothing is
+ * released on a guess.
+ *
+ * A listing being re-sent that eBay still lists (a push-progress status with a
+ * listing id) keeps its hold whatever its price says (step 1 plan S2-5 review
+ * round 2 MC2): until a push completes (status `active` again, with the price
+ * eBay accepted) its prices are Echelon's intent, not what buyers pay, and
+ * orders are taken on that listing (§4.7). Since PR 1b's guards no queue,
+ * failure, Stop or breaker writes that status over a live listing, so such a
+ * row was written before them (or by an older release during a deploy) and
+ * keeps its hold until a completed push or the listing-push recovery makes it
+ * `active` again; a listing live today stays `active` and is judged by the
+ * published price above. Only a listing that is neither active nor such a
+ * re-sent listing is released as inactive (isCostActionableListing).
  */
 export function decideCostChangeHoldRelease(input: {
   listingStatus: string;
+  externalListingId: string | null;
   priceCents: number | null;
+  /** The price the listing's last completed push published; null when none is on record. */
+  publishedPriceCents: number | null;
   costInForceCents: number | null;
 }): CostChangeHoldReleaseReason | null {
-  if (!COST_ACTIONABLE_LISTING_STATUSES.includes(input.listingStatus)) return "listing_inactive";
-  if (input.priceCents === null || input.costInForceCents === null) return null;
+  if (!isCostActionableListing(input)) return "listing_inactive";
+  if (isPushProgressListingOnMarketplace({ status: input.listingStatus, externalListingId: input.externalListingId })) return null;
+  if (input.priceCents === null || input.publishedPriceCents === null || input.costInForceCents === null) return null;
   assertPositiveCents(input.priceCents, "priceCents");
+  assertPositiveCents(input.publishedPriceCents, "publishedPriceCents");
   assertPositiveCents(input.costInForceCents, "costInForceCents");
-  return input.priceCents >= input.costInForceCents ? "price_covers_cost" : null;
+  return Math.min(input.priceCents, input.publishedPriceCents) >= input.costInForceCents ? "price_covers_cost" : null;
 }
 
 /**
@@ -179,6 +245,28 @@ export function costChangeHoldIdempotencyKey(input: {
   return `dropship-cost-change-hold:${input.storeConnectionId}:${idSetHash(input.entryIds)}:${idSetHash(input.productVariantIds)}`;
 }
 
+/**
+ * A recheck re-judges a listing whose increase was skipped while an earlier
+ * queue or failed push made it read as not live (see the service's recheck
+ * pass). Its push job, hold command and notices are keyed by the skipped
+ * listing actions it re-judges, apart from the first decision's keys, so a
+ * replayed recheck reuses them and never collides with a first decision.
+ */
+export function costChangeRecheckRepriceIdempotencyKey(input: { vendorId: number; storeConnectionId: number; actionIds: readonly number[] }): string {
+  assertPositiveInteger(input.vendorId, "vendorId");
+  assertPositiveInteger(input.storeConnectionId, "storeConnectionId");
+  return `dropship-cost-change-reprice:recheck:${input.vendorId}:${input.storeConnectionId}:${idSetHash(input.actionIds)}`;
+}
+
+export function costChangeRecheckHoldIdempotencyKey(input: {
+  storeConnectionId: number;
+  actionIds: readonly number[];
+  productVariantIds: readonly number[];
+}): string {
+  assertPositiveInteger(input.storeConnectionId, "storeConnectionId");
+  return `dropship-cost-change-hold:recheck:${input.storeConnectionId}:${idSetHash(input.actionIds)}:${idSetHash(input.productVariantIds)}`;
+}
+
 /** One release command per store connection and chunk of holds. */
 export function costChangeReleaseIdempotencyKey(input: { storeConnectionId: number; holdIds: readonly number[] }): string {
   assertPositiveInteger(input.storeConnectionId, "storeConnectionId");
@@ -192,6 +280,22 @@ export type CostChangeListingNoticeKind = (typeof costChangeListingNoticeKinds)[
 export function costChangeListingNoticeIdempotencyKey(input: { vendorId: number; kind: CostChangeListingNoticeKind; ids: readonly number[] }): string {
   assertPositiveInteger(input.vendorId, "vendorId");
   return `dropship-cost-change-listings:${input.vendorId}:${input.kind}:${idSetHash(input.ids)}`;
+}
+
+/**
+ * Notices outside the first decision of an increase, each under its own
+ * namespace so an id set never meets the same set of another kind of id:
+ * a recheck's notices (keyed by the skipped listing actions it re-judged)
+ * and the pause notice for put-back holds the review kept (keyed by hold).
+ */
+export function costChangeListingFollowUpNoticeIdempotencyKey(input: {
+  vendorId: number;
+  kind: CostChangeListingNoticeKind;
+  basis: "recheck" | "restored_hold";
+  ids: readonly number[];
+}): string {
+  assertPositiveInteger(input.vendorId, "vendorId");
+  return `dropship-cost-change-listings:${input.vendorId}:${input.kind}:${input.basis}:${idSetHash(input.ids)}`;
 }
 
 function assertPositiveCents(value: number, name: string): void {

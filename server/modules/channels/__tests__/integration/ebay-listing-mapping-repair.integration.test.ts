@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createEbayInclusionSync } from "../../infrastructure/ebay-inclusion-sync";
+import { EbaySyncSelectionReader } from "../../infrastructure/ebay-sync-selection.reader";
+import { PostgresChannelSyncBatchRepository } from "../../../marketplace-listings/infrastructure/pg-channel-sync-batch.repository";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -19,6 +22,7 @@ import { EbayListingSyncService } from "../../ebay-listing-sync.service";
 import { EbayPublicationCompletionExecution, type PreparedEbayPublication } from "../../ebay-publication-completion.service";
 import { resolveEbayPublicationTarget } from "../../ebay-publication-completion.domain";
 import { syncContentIntentHash } from "../../ebay-listing-sync-content";
+import { prepareEbayListingPackages } from "../../adapters/ebay/ebay-listing-package";
 import { EbayMarketplaceListingConnector, type EbayListingConnectorDraft, type EbayListingLifecycleClient, type EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
 import type { EbayInventoryItem, EbayInventoryItemGroup } from "../../adapters/ebay/ebay-types";
 import type { EbayListingInspection } from "../../../marketplace-listings/domain/ebay-listing-inspection";
@@ -42,22 +46,35 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA ebay; CREATE SCHEMA inventory; CREATE SCHEMA marketplace;
       CREATE FUNCTION inventory.reject_availability_claim_evidence_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
         RAISE EXCEPTION 'immutable evidence' USING ERRCODE='23514'; END $$;
-      -- Read-model fixture for the inventory-owned evidence reader. The separate
-      -- response-recovery integration suite installs all journal constraints.
+      -- Read-model fixture for the inventory-owned evidence reader, including its
+      -- immutable outbox/replacement/watch joins. These proof tables stay empty:
+      -- Inventory's dedicated recovery suites install and exercise their actual
+      -- migrations and constraints; this suite verifies Channels' read composition.
+      CREATE TABLE inventory.inventory_publication_outbox(id bigserial PRIMARY KEY,activation_run_id bigint,
+        publication_target_id integer,publication_target_revision_snapshot bigint,desired_revision bigint,payload_hash text,
+        provider_key_snapshot text,provider_scope_type_snapshot text,destination_kind_snapshot text,
+        channel_connection_id_snapshot integer,dropship_store_connection_id_snapshot integer,external_scope_id_snapshot text,
+        external_inventory_item_id_snapshot text,product_variant_id integer);
       CREATE TABLE inventory.quantity_publication_attempts(id bigserial PRIMARY KEY,scope jsonb NOT NULL,affected_scope_keys text[] NOT NULL,
         started_at timestamptz NOT NULL DEFAULT '2026-10-10T15:00:00Z',state text NOT NULL DEFAULT 'uncertain',
-        owner_kind text NOT NULL DEFAULT 'legacy',affected_scopes jsonb NOT NULL DEFAULT '[]',request_journal_contract jsonb);
+        owner_kind text NOT NULL DEFAULT 'legacy',affected_scopes jsonb NOT NULL DEFAULT '[]',request_journal_contract jsonb,
+        scope_key text,outbox_id bigint REFERENCES inventory.inventory_publication_outbox);
       CREATE TABLE inventory.quantity_provider_requests(id bigserial PRIMARY KEY,attempt_id bigint REFERENCES inventory.quantity_publication_attempts,
         ordinal integer,method text,path text,request_hash text,started_at timestamptz);
       CREATE TABLE inventory.quantity_provider_request_results(request_id bigint PRIMARY KEY REFERENCES inventory.quantity_provider_requests,
         outcome text,http_status integer,response_hash text,error_codes text[],request_terminated boolean,recorded_at timestamptz);
+      CREATE TABLE inventory.ebay_publication_reconciliation_watches(id bigserial PRIMARY KEY,connection_id integer,
+        external_scope_id text,scope_hash text,scopes jsonb);
+      CREATE TABLE inventory.ebay_automatic_publication_recoveries(attempt_id bigint PRIMARY KEY REFERENCES inventory.quantity_publication_attempts,
+        watch_id bigint REFERENCES inventory.ebay_publication_reconciliation_watches,scope_hash text,scope_keys text[],
+        before_record jsonb,request_evidence jsonb);
       CREATE TABLE channels.channels(id integer PRIMARY KEY,provider text NOT NULL);
       CREATE TABLE channels.channel_connections(id integer PRIMARY KEY,channel_id integer REFERENCES channels.channels,metadata jsonb);
       CREATE TABLE ebay.ebay_oauth_tokens(channel_id integer REFERENCES channels.channels,environment text,external_account_id text,
         external_account_identity_scheme text,external_account_verified_at timestamptz,PRIMARY KEY(channel_id,environment));
-      CREATE TABLE catalog.products(id integer PRIMARY KEY,product_type text DEFAULT 'test',ebay_listing_excluded boolean NOT NULL DEFAULT false);
+      CREATE TABLE catalog.products(id integer PRIMARY KEY,name text,sku text,is_active boolean DEFAULT true,product_type text DEFAULT 'test',ebay_listing_excluded boolean NOT NULL DEFAULT false,ebay_browse_category_id text);
       CREATE TABLE channels.channel_product_overrides(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_id integer REFERENCES catalog.products,is_listed integer,created_at timestamptz,updated_at timestamptz,UNIQUE(channel_id,product_id));
-      CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer REFERENCES catalog.products,sku text,is_active boolean);
+      CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer REFERENCES catalog.products,sku text,is_active boolean,sales_eligibility text DEFAULT 'sellable',ebay_listing_excluded boolean DEFAULT false);
       CREATE TABLE channels.channel_variant_overrides(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_variant_id integer REFERENCES catalog.product_variants,is_listed integer);
       CREATE TABLE ebay.ebay_category_mappings(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_type_slug text,listing_enabled boolean);
       CREATE TABLE channels.channel_listings(id integer GENERATED ALWAYS AS IDENTITY,channel_id integer REFERENCES channels.channels,
@@ -90,7 +107,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     const end = syncMigration.indexOf("CREATE TRIGGER publication_response_recoveries_no_truncate", start);
     expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
     await database.pool.query(syncMigration.slice(start,end));
-    for (const migration of ["0731_ebay_listing_sync_verification_checkpoint.sql","0732_ebay_listing_sync_identity_admission.sql","0736_ebay_listing_mapping_repairs.sql","0737_ebay_publication_completion.sql","0741_ebay_durable_withdrawal.sql","900000010000018170001_ebay_saved_publication_continuation.sql"])
+    for (const migration of ["0731_ebay_listing_sync_verification_checkpoint.sql","0732_ebay_listing_sync_identity_admission.sql","0736_ebay_listing_mapping_repairs.sql","0737_ebay_publication_completion.sql","0741_ebay_durable_withdrawal.sql", "900000021000018880001_channel_lifecycle_recovery.sql", "900000023000018880003_listing_work_settlement.sql","900000010000018170001_ebay_saved_publication_continuation.sql","900000020000018810001_channel_sync_batches.sql"])
       await database.pool.query(readFileSync(resolve(process.cwd(),"migrations",migration),"utf8"));
     canonical = new PgMarketplaceListingRegistrationRepository(database.pool);
     repository = new PostgresEbayListingMappingRepairRepository(database.pool, { channelId:67,readSourceInsideTransaction:readSource,canonicalRegistration:canonical });
@@ -102,7 +119,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     await database.pool.query("UPDATE ebay.ebay_category_mappings SET listing_enabled=true");
     const productId = ++sequence;
     await database.pool.query("INSERT INTO catalog.products(id) VALUES($1)",[productId]);
-    await database.pool.query("INSERT INTO catalog.product_variants VALUES($1,$3,$4,true),($2,$3,$5,true)",[productId*10+1,productId*10+2,productId,`NEW-${productId}-P10`,`NEW-${productId}-C500`]);
+    await database.pool.query("INSERT INTO catalog.product_variants(id,product_id,sku,is_active) VALUES($1,$3,$4,true),($2,$3,$5,true)",[productId*10+1,productId*10+2,productId,`NEW-${productId}-P10`,`NEW-${productId}-C500`]);
     await database.pool.query("INSERT INTO channels.channel_product_overrides(channel_id,product_id,is_listed) VALUES(67,$1,1)",[productId]);
     await database.pool.query("INSERT INTO channels.channel_variant_overrides(channel_id,product_variant_id,is_listed) VALUES(67,$1,1),(67,$2,1)",[productId*10+1,productId*10+2]);
     for (const [variantId,suffix] of [[productId*10+1,"P10"],[productId*10+2,"C500"]] as const)
@@ -702,7 +719,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       const response = await recordPublicationResponse(target, new Date(now.getTime() + 1));
       expect(await sync.recoverTerminalPublicationWrite(claim.job, target, next)).toBe("rejected");
       expect(await sync.get(claim.job.id)).toMatchObject({ publicationWriteStarted: false, publicationIntentHash: null,
-        progress: { phase: "recover_prior_requests", phaseState: "completed" } });
+        progress: { phase: "publish", phaseState: "completed" } });
       expect(await sync.recoverTerminalPublicationWrite(claim.job, target, next)).toBe(null);
       const receipts = (await database.pool.query(`SELECT evidence FROM channels.ebay_listing_sync_events
         WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='publication_rejected'`, [claim.job.id])).rows;
@@ -976,11 +993,12 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       publication:published?publicationObservation(final):null,unpublishedTarget:published?null:publish.inspectionEvidence.unpublishedTarget,
       skus:source.variants.map(member=>({sku:member.sku,inventoryItemExists:true,issue:null,offers:[{sku:member.sku,offerId:member.offerId!,
         status:published?"PUBLISHED":"UNPUBLISHED",listingId:published?final.variants[0].listingId:null,listingStatus:published?"ACTIVE":null}]}))});
+    const preparedDraft = await prepareEbayListingPackages(client, draft);
     const prepare=async():Promise<PreparedEbayPublication>=>{
       const connection=await database.pool.connect();let snapshot:EbayListingMappingSourceSnapshot;
       try{snapshot=await readSource(connection,source.productId);}finally{connection.release();}
       const inspection=await inspect();
-      return{sourceIdentity:snapshot.identity,identity:resolveEbayPublicationTarget(source,inspection),client,draft:structuredClone(draft),inspection,inspect,assertInventoryReady:async()=>{},
+      return{sourceIdentity:snapshot.identity,identity:resolveEbayPublicationTarget(source,inspection),client,draft:structuredClone(preparedDraft),inspection,inspect,assertInventoryReady:async()=>{},
         resolvePublishedIdentity:async()=>publicationObservation(final),variants:source.variants.map(member=>({variantId:member.variantId,sku:member.sku,
           productName:"Canonical catalog title",priceCents:1249,priceChanged:true}))};
     };
@@ -1014,7 +1032,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     const sync=new PostgresEbayListingSyncRepository(database.pool);const interrupted=await sync.get(saved.job.id);
     expect(interrupted).toMatchObject({state:"recovering",publicationTarget:target,providerIdentity:final,publicationWriteStarted:true,publicationWriteCompleted:true,
       publicationAccepted:{listingId:final.variants[0].listingId,offerIds:Object.fromEntries(final.variants.map(member=>[member.variantId,member.offerId]))},
-      publicationIntentHash:syncContentIntentHash(draft)});
+      publicationIntentHash:syncContentIntentHash(preparedDraft)});
     expect(await mappings()).toEqual(before);
     const evidence=(await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='provider_identity'",[saved.job.id])).rows;
     expect(evidence).toHaveLength(1);expect(evidence[0].evidence.observation).toMatchObject({listingIdentity:publicationObservation(final).listingIdentity,members:publicationObservation(final).members});
@@ -1031,7 +1049,55 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     expect((await database.pool.query("SELECT count(*)::integer AS count FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='stage_started' AND evidence->>'key'='publish'",[saved.job.id])).rows[0].count).toBe(priorRejection ? 2 : 1);
     expect((await database.pool.query("SELECT count(*)::integer AS count FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='publication_rejected'",[saved.job.id])).rows[0].count).toBe(priorRejection ? 1 : 0);
   });
-  function exclusionOwner(clock=now) { return new PostgresEbayListingExclusionRepository(database.pool,67,async(client,productId)=>(await readSource(client,productId)).identity,()=>clock); }
+
+  it("including an unmapped product atomically saves one shared sync across concurrent retries and lost acknowledgement", async () => {
+    const productId = plan.source.identity.productId;
+    await database.pool.query("DELETE FROM channels.channel_listings WHERE product_variant_id=ANY($1::int[])", [plan.source.identity.variants.map(v => v.variantId)]);
+    const command = { excluded: false, commandKey: randomUUID() };
+    const owner = exclusionOwner();
+    const receipts = await Promise.all(Array.from({ length: 5 }, () => owner.set(productId, command, "operator")));
+    expect(new Set(receipts.map(row => row.syncBatchId))).toEqual(new Set([command.commandKey]));
+    const store = new PostgresChannelSyncBatchRepository(database.pool);
+    const saved = await store.get(command.commandKey);
+    expect(saved).toMatchObject({ actor: "operator", destination: { channelId: 67 }, members: [{ productId }] });
+    expect(saved!.members).toHaveLength(1);
+    expect(saved!.members[0].commandKey).not.toBe(command.commandKey);
+    expect((await owner.get(productId, command.commandKey)).syncBatchId).toBe(command.commandKey);
+    expect(await exclusionIntent()).toEqual({ ebay_listing_excluded: false, is_listed: 1 });
+    expect((await counts()).jobs).toBe(0); // execution is durable and asynchronous
+  });
+  it("rolls back both inclusion mirrors and the batch when the inclusion receipt cannot commit", async () => {
+    const productId = plan.source.identity.productId;
+    await database.pool.query("UPDATE catalog.products SET ebay_listing_excluded=true WHERE id=$1", [productId]);
+    await database.pool.query("UPDATE channels.channel_product_overrides SET is_listed=0 WHERE product_id=$1", [productId]);
+    const command = { excluded: false, commandKey: randomUUID() };
+    await database.pool.query(`CREATE FUNCTION channels.test_include_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'inclusion receipt failure'; END $$;
+      CREATE TRIGGER test_include_receipt_failure BEFORE INSERT ON channels.ebay_listing_exclusion_commands
+      FOR EACH ROW EXECUTE FUNCTION channels.test_include_receipt_failure()`);
+    try { await expect(exclusionOwner().set(productId, command, "operator")).rejects.toThrow("inclusion receipt failure"); }
+    finally { await database.pool.query("DROP TRIGGER test_include_receipt_failure ON channels.ebay_listing_exclusion_commands; DROP FUNCTION channels.test_include_receipt_failure()"); }
+    expect(await exclusionIntent()).toEqual({ ebay_listing_excluded: true, is_listed: 0 });
+    expect(await new PostgresChannelSyncBatchRepository(database.pool).get(command.commandKey)).toBeNull();
+    expect((await exclusionOwner().set(productId, command, "operator")).syncBatchId).toBe(command.commandKey);
+  });
+  it("reads unmapped included products and preserves archived member identities without treating them as sellable", async () => {
+    const productId = plan.source.identity.productId;
+    const reader = new EbaySyncSelectionReader(database.pool, 67);
+    expect((await reader.product(productId)).state).toMatchObject({ included: true, includedVariantCount: 2, hasPublishedIdentity: true });
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=$1", [plan.source.identity.variants[1].variantId]);
+    expect((await reader.product(productId)).state).toMatchObject({ includedVariantCount: 1, hasPublishedIdentity: true });
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=true WHERE id=$1", [plan.source.identity.variants[1].variantId]);
+    expect((await reader.product(productId)).state.includedVariantCount).toBe(2);
+    await database.pool.query("DELETE FROM channels.channel_listings WHERE product_variant_id=ANY($1::int[])", [plan.source.identity.variants.map(v => v.variantId)]);
+    expect((await reader.product(productId)).state).toMatchObject({ included: true, includedVariantCount: 2, hasPublishedIdentity: false });
+    await database.pool.query("UPDATE channels.channel_variant_overrides SET is_listed=0 WHERE product_variant_id=ANY($1::int[])", [plan.source.identity.variants.map(v => v.variantId)]);
+    expect((await reader.product(productId)).state.includedVariantCount).toBe(0);
+  });
+
+  function inclusionSync() { return createEbayInclusionSync({ pool: database.pool, channelId: 67, uuid: randomUUID,
+    destination: async () => ({ channelId: 67, provider: "ebay", connectionId: 7, accountId: "account-67", environment: "production", marketplaceId: "EBAY_US" }) }); }
+  function exclusionOwner(clock=now) { return new PostgresEbayListingExclusionRepository(database.pool,67,async(client,productId)=>(await readSource(client,productId)).identity,()=>clock,inclusionSync()); }
   async function enqueueReviewedTarget(source: typeof plan.source.identity, target: typeof plan.source.identity, commandKey = randomUUID()) {
     const client = await database.pool.connect();
     try {

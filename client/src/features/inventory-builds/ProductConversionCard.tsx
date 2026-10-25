@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/lib/auth";
 import { prefillPathsFromModel, transformationRuntimeLabel } from "@/pages/supply-transformations-model";
+import { archivedTransformationVariantIds, prepareTransformationDraft } from "@shared/inventory/transformation-draft-lifecycle";
+import { ArchivedTransformationNotice } from "./ArchivedTransformationNotice";
 import { ProductRecipeRules } from "./ProductRecipeRules";
 import { INVENTORY_BEHAVIORS } from "@shared/inventory/inventory-behavior";
 import { ProductDefinitionReview } from "./ProductDefinitionReview";
@@ -133,7 +135,7 @@ function AuthorizedConversionCard({ productId, enabled, canEdit }: Props & { can
     onSuccess: async result => {
       pendingCommand.current = null;
       setEdit(null); setError(null); setConflict(false); setUncertain(false);
-      setMessage(`Draft v${result.version} saved. Live conversion rules and inventory are unchanged.`);
+      setMessage(`Draft v${result.version} saved. Live conversion rules and inventory are unchanged. Review and apply the saved draft below to update the active rules.`);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: transformationQueryKey(productId) }),
         queryClient.invalidateQueries({ queryKey: ["/api/inventory-planning/admin/migration-queue"] }),
@@ -159,7 +161,8 @@ function AuthorizedConversionCard({ productId, enabled, canEdit }: Props & { can
   const ladder = buildPackageLadder(view?.variants ?? [], paths);
   const issues = view ? packageConversionEditIssues(view) : [];
   const behavior = edit?.inventoryBehavior ?? (model ? modelInventoryBehavior(model) : null);
-  const busy = mutation.isPending || uncertain || conflict;
+  const hasUnsavedChanges = edit !== null && packageConversionHasChanges(edit);
+  const busy = mutation.isPending || uncertain || conflict || applyBlocked;
   const advancedUrl = `/inventory/supply-transformations?productId=${productId}`;
   const editDirection = (lowerVariantId: number, upperVariantId: number, direction: PackageDirection) => {
     if (!edit || !canEdit || busy) return;
@@ -208,6 +211,8 @@ function AuthorizedConversionCard({ productId, enabled, canEdit }: Props & { can
                 <span className="mt-1 block text-xs text-muted-foreground">{option.description}</span></span>
             </label>)}</div>
           </fieldset>
+          {edit && model && <ArchivedTransformationNotice view={view}
+            lifecycle={prepareTransformationDraft(model, archivedTransformationVariantIds(view))} />}
           {edit && <p className="text-xs text-muted-foreground">Changing behavior clears incompatible directions and recipe selections in this draft. It does not delete recipe definitions or move physical inventory.</p>}
           {!edit && view.draftModel && <div className="rounded-md border bg-muted/30 p-3 text-sm">
             <p className="font-medium">Draft changes available · Draft v{view.draftModel.version}</p>
@@ -268,10 +273,13 @@ function AuthorizedConversionCard({ productId, enabled, canEdit }: Props & { can
               }}>{view.draftModel ? "Continue editing draft" : "Edit inventory behavior"}</Button>}
             {edit && <div className="space-y-3 border-t pt-4">
               <p className="text-xs text-muted-foreground">Save creates a draft only. Automatic audit note: {PACKAGE_CONVERSION_AUDIT_NOTE}</p>
+              {!hasUnsavedChanges && view.draftModel && <p role="status" className="text-sm">
+                These selections are already saved in draft v{view.draftModel.version}. Review and apply the saved draft below to update the active rules.
+              </p>}
               <div className="flex flex-wrap gap-2">
-                <Button onClick={save} disabled={!canEdit || mutation.isPending || conflict || !packageConversionHasChanges(edit)}>
+                <Button onClick={save} disabled={!canEdit || mutation.isPending || conflict || applyBlocked || !hasUnsavedChanges}>
                   {mutation.isPending ? "Saving…" : uncertain ? "Retry same save" : "Save draft"}</Button>
-                <Button variant="outline" disabled={mutation.isPending || uncertain} onClick={async () => {
+                <Button variant="outline" disabled={mutation.isPending || uncertain || applyBlocked} onClick={async () => {
                   setEdit(null); setError(null); setConflict(false); pendingCommand.current = null;
                   await query.refetch();
                 }}>{conflict ? "Reload and review" : "Cancel"}</Button>
@@ -280,7 +288,8 @@ function AuthorizedConversionCard({ productId, enabled, canEdit }: Props & { can
         </>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         {message && <p role="status" className="text-sm text-green-700 dark:text-green-300">{message}</p>}
-        {!edit && view && <ProductDefinitionReview key={productId} view={view} onApplyBlockedChange={setApplyBlocked} />}
+        {view && (!edit || (!hasUnsavedChanges && view.draftModel)) && <ProductDefinitionReview key={productId} view={view}
+          onApplyBlockedChange={setApplyBlocked} onApplied={() => setEdit(null)} />}
       </CardContent>
     </Card>
   </div>;

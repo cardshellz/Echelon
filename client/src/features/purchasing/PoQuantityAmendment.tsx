@@ -23,6 +23,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
+import { PoAmendmentImpact } from "./PoAmendmentImpact";
 
 const savedIntentSchema = z.object({
   key: z.string().uuid(), body: poQuantityApprovalRequestSchema, preview: poQuantityAmendmentPreviewSchema,
@@ -74,7 +76,7 @@ function pendingIntent(key: string): ApprovalIntent | null {
   // possibly committed request and issuing a different idempotency key.
   return savedIntentSchema.parse(JSON.parse(raw));
 }
-function Impact({ preview }: { preview: PoQuantityAmendmentPreview }) {
+export function PoAmendmentSummary({ preview, approved = false }: { preview: PoQuantityAmendmentPreview; approved?: boolean }) {
   const rows = preview.lines.flatMap(({ before, after }) => {
     const fields: [string, string, string][] = [
       ["Quantity", before.orderQty.toLocaleString(), after.orderQty.toLocaleString()],
@@ -91,8 +93,8 @@ function Impact({ preview }: { preview: PoQuantityAmendmentPreview }) {
   const fieldCounts = new Map<number, number>();
   for (const row of rows) fieldCounts.set(row.lineId, (fieldCounts.get(row.lineId) ?? 0) + 1);
   return <div className="space-y-3">
-    <p className="text-sm font-semibold">Review {preview.lines.length} changed line{preview.lines.length === 1 ? "" : "s"}</p>
-    <CompactPoLineTable aria-label="PO change summary" className="min-w-[520px]"><TableHeader><TableRow className="bg-slate-50"><TableHead>Line</TableHead><TableHead>What changes</TableHead><TableHead className="text-right">Current</TableHead><TableHead className="text-right">After editing</TableHead></TableRow></TableHeader>
+    <p className="text-sm font-semibold">{approved ? "Approved" : "Review"} {preview.lines.length} line change{preview.lines.length === 1 ? "" : "s"}</p>
+    <CompactPoLineTable aria-label="PO change summary" className="min-w-[520px]"><TableHeader><TableRow className="bg-slate-50"><TableHead>Line</TableHead><TableHead>{approved ? "What changed" : "What changes"}</TableHead><TableHead className="text-right">Before</TableHead><TableHead className="text-right">After</TableHead></TableRow></TableHeader>
       <TableBody>{rows.map((row, index) => <TableRow key={`${row.lineId}:${row.name}`}>
         {(index === 0 || rows[index - 1].lineId !== row.lineId) && <TableCell rowSpan={fieldCounts.get(row.lineId)} className="max-w-[240px] py-2 align-top"><span className="line-clamp-2" title={row.product}>{row.lineNumber} · {row.product}</span></TableCell>}
         <TableCell className="py-2">{row.name}</TableCell><TableCell className="py-2 text-right font-mono">{row.oldValue}</TableCell><TableCell className="py-2 text-right font-mono font-semibold text-green-800 dark:text-green-300">{row.newValue}</TableCell>
@@ -100,7 +102,8 @@ function Impact({ preview }: { preview: PoQuantityAmendmentPreview }) {
     </CompactPoLineTable>
     <p className="font-semibold">PO total: {exactMoneyAsInput(preview.beforeTotalCents, 2)} → {exactMoneyAsInput(preview.afterTotalCents, 2)} {preview.currency}</p>
     {preview.beforeStatus !== preview.afterStatus && <p className="text-sm">Receiving status: {preview.beforeStatus} → {preview.afterStatus}</p>}
-    <p className="text-sm text-muted-foreground">Saving edits the PO. Invoices, payments and received stock stay unchanged.</p>
+    <p className="text-sm text-muted-foreground">Actual received, shipped and invoiced quantities stay unchanged. The PO determines ordered quantity and remaining balances.</p>
+    {preview.impact && <PoAmendmentImpact impact={preview.impact} currency={preview.currency} purchaseOrderId={preview.purchaseOrderId} approved={approved} />}
     {preview.warnings.filter(warning => warning.startsWith("Line ")).map(warning => <p key={warning} className="text-sm text-amber-800 dark:text-amber-300">{warning}</p>)}
     <details className="rounded border p-3 text-sm"><summary className="cursor-pointer">Invoice and inventory details</summary>
       <ul className="mt-2 list-disc space-y-1 pl-5">{preview.warnings.filter(warning => !warning.startsWith("Line ")).map(warning => <li key={warning}>{warning}</li>)}</ul>
@@ -137,7 +140,7 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
     mutationFn: async (request: PoQuantityPreviewRequest) => {
       const raw = await financialCommandFetchJson<unknown>(`${root}/preview`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
       const result = poQuantityAmendmentPreviewSchema.parse(raw);
-      if (result.purchaseOrderId !== context.purchaseOrderId || result.sourceVersion !== request.sourceVersion) throw new Error("The preview does not match this correction. Reload the PO.");
+      if (result.purchaseOrderId !== context.purchaseOrderId || result.sourceVersion !== request.sourceVersion || !result.previewVersion || !result.impact) throw new Error("The complete quantity and cost preview could not be loaded. Reload the PO before approving.");
       return { request, preview: result };
     },
     onMutate: () => setBusy(true),
@@ -149,7 +152,7 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
     mutationFn: async (intent) => {
       const raw = await financialCommandFetchJson<unknown>(root, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", "Idempotency-Key": intent.key }, body: JSON.stringify(intent.body) });
       const parsed = poQuantityAmendmentResultSchema.safeParse(raw);
-      if (!parsed.success || parsed.data.purchaseOrderId !== context.purchaseOrderId || parsed.data.preview.sourceVersion !== intent.body.sourceVersion) throw new FinancialCommandRequestError("The correction may have completed. Retry the saved approval to confirm its result.", { status: 200, code: "PO_AMENDMENT_RESPONSE_INVALID", retryable: true, ambiguous: true });
+      if (!parsed.success || parsed.data.purchaseOrderId !== context.purchaseOrderId || parsed.data.preview.sourceVersion !== intent.body.sourceVersion || parsed.data.preview.previewVersion !== intent.body.previewVersion) throw new FinancialCommandRequestError("The correction may have completed. Retry the saved approval to confirm its result.", { status: 200, code: "PO_AMENDMENT_RESPONSE_INVALID", retryable: true, ambiguous: true });
       return parsed.data;
     },
     retry: shouldRetryFinancialCommand, retryDelay: financialCommandRetryDelay,
@@ -157,7 +160,6 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
     onSuccess: (result) => {
       activeApproval.current = null; setUnresolved(null); setSaved(result); setBusy(false);
       try { sessionStorage.removeItem(storageKey); } catch { setValidationError("PO saved. The browser could not clear its retry receipt; reopening will safely verify the same approval."); }
-      onSaved();
     },
     onError: (error, intent) => {
       // Middleware may deny a replay before the command ledger is read. Such a
@@ -170,6 +172,9 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
       setUnresolved(ambiguous ? intent : null); setBusy(false);
       if (error instanceof FinancialCommandRequestError && [403, 409].includes(error.status ?? 0)) setStale(true);
     },
+    // A lost response can follow a successful commit. Refresh the same shared
+    // read surfaces on every settled approval while retaining its retry receipt.
+    onSettled: onSaved,
   });
   const locked = previewMutation.isPending || approveMutation.isPending || unresolved !== null || saved !== null || stale || recovery.current.error !== null;
   const missingDetails = context.lines.some(line => line.lineType === undefined || line.pricing === undefined || line.packagingCostCents === undefined || line.discountCents === undefined || line.taxCents === undefined);
@@ -193,7 +198,7 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
   }
   function approve() {
     if (!review || !confirmed || locked || blocked || activeApproval.current) return;
-    const body: PoQuantityApprovalRequest = { ...review.request, approvalConfirmed: true };
+    const body: PoQuantityApprovalRequest = { ...review.request, previewVersion: review.preview.previewVersion, approvalConfirmed: true };
     const intent: ApprovalIntent = { key: crypto.randomUUID(), body, preview: review.preview };
     try {
       sessionStorage.setItem(storageKey, JSON.stringify(intent));
@@ -219,7 +224,7 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
       <p className="text-xs text-muted-foreground">Enter product price and packaging separately.</p>
       <PoAmendmentLineTable disabled={locked} lines={context.lines} drafts={drafts} currency={context.currency} onChange={updateDraft} totalLabel={newTotalLabel} />
     </fieldset>}
-    {impact && <Impact preview={impact} />}
+    {impact && <PoAmendmentSummary preview={impact} approved={saved !== null} />}
     {saved && <p role="status" className="rounded bg-green-50 p-3 font-semibold text-green-800">PO edit approved and saved as revision {saved.revisionNumber}.</p>}
     </div><div className="mt-4 shrink-0 space-y-3 border-t pt-3">
       {(validationError || previewMutation.error || approveMutation.error) && <p role="alert" className="text-sm text-destructive">{validationError ?? approveMutation.error?.message ?? previewMutation.error?.message}</p>}
@@ -267,10 +272,7 @@ export function PoQuantityAmendment({ purchaseOrderId, status }: { purchaseOrder
       return loaded;
     } });
   const refresh = () => {
-    void Promise.all(["", "/history", "/revisions", "/exceptions", "/invoices", "/receive-options", "/quantity-amendment"].map((suffix) => queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}${suffix}`] })));
-    void queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
-    // Detail keys use the invoice ID in their first string segment.
-    void queryClient.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && query.queryKey[0].startsWith("/api/vendor-invoices/") });
+    void invalidatePurchaseCosts(queryClient);
   };
   const editable = ["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(status);
   let hasRecovery: boolean;

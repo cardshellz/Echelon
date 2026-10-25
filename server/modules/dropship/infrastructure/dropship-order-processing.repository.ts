@@ -6,6 +6,15 @@ import {
   type DropshipCatalogExposureRule,
 } from "../domain/catalog-exposure";
 import { listActiveDropshipCatalogRules } from "./dropship-catalog-exposure.repository";
+import { canCancelFlaggedIntakeAtClaim } from "../domain/marketplace-order-cancel";
+import {
+  admittedWhilePushing,
+  decideListingOrderAcceptability,
+  assertNoMarketplaceVariationLines,
+  parseIntakeOrderedAt,
+} from "../domain/order-listing-acceptability";
+import { logger } from "../../../platform/observability/logger";
+import { cancelIntakeOnMarketplaceWithClient } from "./dropship-marketplace-order-cancel.repository";
 import type {
   DropshipOrderProcessingClaim,
   DropshipOrderProcessingConfig,
@@ -28,7 +37,14 @@ interface ProcessingIntakeRow {
   payment_hold_expires_at: Date | null;
   normalized_payload: NormalizedDropshipOrderPayload | null;
   store_config: Record<string, unknown> | null;
+  processing_attempt_count: number;
+  marketplace_cancelled_at?: Date | null;
 }
+
+/** Statuses a flagged intake (eBay cancelled it) is cancelled from at claim time, once nothing is held (plan v4 §7.2). */
+const CANCEL_AT_CLAIM_STATUSES: ReadonlySet<string> = new Set(["received", "retrying", "payment_hold"]);
+/** // PROPOSED (sync-back): the skip reason of an intake cancelled at claim because eBay cancelled the order. */
+const CANCELLED_ON_MARKETPLACE_SKIP_REASON = "The order was cancelled on eBay.";
 
 interface ListingCandidateRow {
   listing_id: number;
@@ -44,9 +60,11 @@ interface ListingCandidateRow {
   product_is_active: boolean;
   variant_is_active: boolean;
   sales_eligibility: "sellable" | "internal_only";
+  marketplace_ended_at: Date | null;
+  /** Item numbers the listing had before a relist (dropship_listing_previous_marketplace_ids, plan v4 §7.3 step 7). */
+  previous_external_listing_ids: string[] | null;
 }
 
-const QUOTABLE_LISTING_STATUSES = new Set(["active", "drift_detected", "paused"]);
 const PAYMENT_HOLD_EXPIRED_REASON = "Payment hold expired before wallet funds were available.";
 
 export class PgDropshipOrderProcessingRepository implements DropshipOrderProcessingRepository {
@@ -69,6 +87,22 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
         );
       }
 
+      if (row.marketplace_cancelled_at && CANCEL_AT_CLAIM_STATUSES.has(row.status)
+        && canCancelFlaggedIntakeAtClaim(await loadAcceptanceStageState(client, input.intakeId))) {
+        // eBay cancelled it and nothing is held for it: cancel instead of processing (plan v4 §7.2, the flagged row).
+        await cancelIntakeOnMarketplaceWithClient(client, {
+          intakeId: input.intakeId, at: input.now, actor: { actorType: "job", actorId: input.workerId },
+        });
+        await client.query("COMMIT");
+        return {
+          claimed: false,
+          skipReason: CANCELLED_ON_MARKETPLACE_SKIP_REASON,
+          intake: mapProcessingIntakeRow({ ...row, status: "cancelled" }),
+          config: mapProcessingConfig(row.store_config),
+          stagedShippingQuoteSnapshotId: null,
+        };
+      }
+
       const skipReason = claimSkipReason(row, input.now);
       if (skipReason) {
         await client.query("COMMIT");
@@ -89,7 +123,7 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
          WHERE oi.id = $1
          RETURNING oi.id, oi.vendor_id, oi.store_connection_id, oi.platform,
                    oi.external_order_id, oi.status, oi.payment_hold_expires_at,
-                   oi.normalized_payload,
+                   oi.normalized_payload, oi.processing_attempt_count,
                    (SELECT sc.config
                     FROM dropship.dropship_store_connections sc
                     WHERE sc.id = oi.store_connection_id) AS store_config`,
@@ -141,6 +175,8 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
     const externalOfferIds = uniqueStrings(rawLines.map((line) => line.externalOfferId));
     const skus = uniqueStrings(rawLines.map((line) => line.sku?.toUpperCase()));
 
+    assertNoMarketplaceVariationLines(rawLines, { intakeId: input.intake.intakeId });
+
     const result = await this.dbPool.query<ListingCandidateRow>(
       `SELECT
          dl.id AS listing_id,
@@ -151,6 +187,9 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
          dl.status AS listing_status,
          dl.external_listing_id,
          dl.external_offer_id,
+         dl.marketplace_ended_at,
+         ARRAY(SELECT prev.external_listing_id FROM dropship.dropship_listing_previous_marketplace_ids prev
+               WHERE prev.listing_id = dl.id ORDER BY prev.id)::text[] AS previous_external_listing_ids,
          p.sku AS product_sku,
          pv.sku AS variant_sku,
          p.is_active AS product_is_active,
@@ -165,6 +204,8 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
          AND (
            dl.product_variant_id = ANY($3::int[])
            OR dl.external_listing_id = ANY($4::text[])
+           OR EXISTS (SELECT 1 FROM dropship.dropship_listing_previous_marketplace_ids prev
+                      WHERE prev.listing_id = dl.id AND prev.external_listing_id = ANY($4::text[]))
            OR dl.external_offer_id = ANY($5::text[])
            OR UPPER(pv.sku) = ANY($6::text[])
            OR UPPER(p.sku) = ANY($6::text[])
@@ -203,6 +244,7 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
         lineIndex,
         catalogRules,
         now: input.now,
+        orderedAt: parseIntakeOrderedAt(input.intake.normalizedPayload.orderedAt),
       });
       return {
         lineIndex,
@@ -221,21 +263,29 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
     errorCode: string;
     errorMessage: string;
     retryable: boolean;
+    attemptCount: number;
+    nextAttemptAt: Date | null;
+    lastErrorCode?: string;
+    lastErrorMessage?: string;
     now: Date;
   }): Promise<void> {
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
+      // The count and the next attempt's time come from decideOrderProcessingFailure (plan v4 §7.1): the queue skips
+      // the intake until then, so a stuck intake never takes every pass.
       const updated = await client.query<ProcessingIntakeRow>(
         `UPDATE dropship.dropship_order_intake AS oi
          SET status = $2,
              rejection_reason = $3,
+             processing_attempt_count = $5,
+             next_processing_attempt_at = $6,
              updated_at = $4
          WHERE oi.id = $1
            AND oi.status = 'processing'
          RETURNING oi.id, oi.vendor_id, oi.store_connection_id, oi.platform,
                    oi.external_order_id, oi.status, oi.payment_hold_expires_at,
-                   oi.normalized_payload,
+                   oi.normalized_payload, oi.processing_attempt_count,
                    (SELECT sc.config
                     FROM dropship.dropship_store_connections sc
                     WHERE sc.id = oi.store_connection_id) AS store_config`,
@@ -244,6 +294,8 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
           input.status,
           `${input.errorCode}: ${input.errorMessage}`,
           input.now,
+          input.attemptCount,
+          input.nextAttemptAt,
         ],
       );
       const row = updated.rows[0];
@@ -259,6 +311,9 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
             errorCode: input.errorCode,
             errorMessage: input.errorMessage,
             retryable: input.retryable,
+            attemptCount: input.attemptCount,
+            nextAttemptAt: input.nextAttemptAt?.toISOString() ?? null,
+            ...(input.lastErrorCode ? { lastErrorCode: input.lastErrorCode, lastErrorMessage: input.lastErrorMessage ?? null } : {}),
           },
           occurredAt: input.now,
         });
@@ -296,7 +351,7 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
            AND oi.payment_hold_expires_at <= $5
          RETURNING oi.id, oi.vendor_id, oi.store_connection_id, oi.platform,
                    oi.external_order_id, oi.status, oi.payment_hold_expires_at,
-                   oi.normalized_payload,
+                   oi.normalized_payload, oi.processing_attempt_count,
                    (SELECT sc.config
                     FROM dropship.dropship_store_connections sc
                     WHERE sc.id = oi.store_connection_id) AS store_config`,
@@ -342,7 +397,8 @@ async function loadIntakeForUpdate(
   const result = await client.query<ProcessingIntakeRow>(
     `SELECT oi.id, oi.vendor_id, oi.store_connection_id, oi.platform,
             oi.external_order_id, oi.status, oi.payment_hold_expires_at,
-            oi.normalized_payload, sc.config AS store_config
+            oi.normalized_payload, oi.processing_attempt_count, oi.marketplace_cancelled_at,
+            sc.config AS store_config
      FROM dropship.dropship_order_intake oi
      INNER JOIN dropship.dropship_store_connections sc ON sc.id = oi.store_connection_id
      WHERE oi.id = $1
@@ -382,6 +438,15 @@ async function loadStagedShippingQuoteSnapshotId(
   return quoteSnapshotId;
 }
 
+/** The canonical acceptance stage's state, or null when the intake has none. */
+async function loadAcceptanceStageState(client: PoolClient, intakeId: number): Promise<string | null> {
+  const result = await client.query<{ state: string }>(
+    `SELECT state FROM dropship.dropship_order_acceptance_stages WHERE intake_id = $1 LIMIT 1`,
+    [intakeId],
+  );
+  return result.rows[0]?.state ?? null;
+}
+
 function claimSkipReason(row: ProcessingIntakeRow, _now: Date): string | null {
   if (row.status === "payment_hold") {
     // Expired holds must still be claimed so order acceptance can classify the
@@ -418,6 +483,7 @@ function mapProcessingIntakeRow(row: ProcessingIntakeRow): DropshipOrderProcessi
     status: row.status,
     paymentHoldExpiresAt: row.payment_hold_expires_at,
     normalizedPayload: row.normalized_payload,
+    processingAttemptCount: row.processing_attempt_count ?? 0,
   };
 }
 
@@ -493,7 +559,10 @@ function findCandidateForOrderLine(
     return candidates.find((candidate) => candidate.external_offer_id === line.externalOfferId) ?? null;
   }
   if (line.externalListingId) {
-    return candidates.find((candidate) => candidate.external_listing_id === line.externalListingId) ?? null;
+    // The current item number first; else one the listing had before a relist (plan v4 §7.3 step 7).
+    return candidates.find((candidate) => candidate.external_listing_id === line.externalListingId)
+      ?? candidates.find((candidate) => (candidate.previous_external_listing_ids ?? []).includes(line.externalListingId as string))
+      ?? null;
   }
   const normalizedSku = line.sku?.trim().toUpperCase();
   if (normalizedSku) {
@@ -512,10 +581,20 @@ function assertCandidateCanQuote(
     lineIndex: number;
     catalogRules: readonly DropshipCatalogExposureRule[];
     now: Date;
+    orderedAt: Date | null;
   },
 ): void {
   const { intakeId, lineIndex } = input;
-  if (!QUOTABLE_LISTING_STATUSES.has(candidate.listing_status)) {
+  // A listing being re-sent is live on the marketplace while its Echelon status
+  // shows push progress (step 1 plan S2-5 §4.7); an ended listing takes an order
+  // placed before its end (plan v4 §7.3 step 8); see decideListingOrderAcceptability.
+  const acceptability = decideListingOrderAcceptability({
+    status: candidate.listing_status,
+    externalListingId: candidate.external_listing_id,
+    marketplaceEndedAt: candidate.marketplace_ended_at,
+    orderedAt: input.orderedAt,
+  });
+  if (!acceptability.acceptable) {
     throw new DropshipError(
       "DROPSHIP_ORDER_PROCESSING_LISTING_NOT_QUOTABLE",
       "Dropship order line listing is not in a quotable status.",
@@ -556,6 +635,28 @@ function assertCandidateCanQuote(
         catalogReason: availability.reason,
       },
     );
+  }
+  if (admittedWhilePushing(acceptability)) {
+    // INFO: the line passed only because of the push-progress rule (CLAUDE.md §10).
+    logger.info("dropship.order.listing_acceptable_while_pushing", {
+      outcome: "listing_check_passed",
+      listing_id: candidate.listing_id,
+      status: candidate.listing_status,
+      intake_id: intakeId,
+      line_index: lineIndex,
+      path: "quote",
+    });
+  }
+  if (acceptability.acceptable && acceptability.reason === "ordered_before_listing_ended") {
+    // INFO: an ended listing took the order only because it was placed before the end (plan v4 §7.3 step 8).
+    logger.info("dropship.order.listing_acceptable_before_end", {
+      outcome: "listing_check_passed",
+      listing_id: candidate.listing_id,
+      intake_id: intakeId,
+      line_index: lineIndex,
+      marketplace_ended_at: candidate.marketplace_ended_at?.toISOString() ?? null,
+      path: "quote",
+    });
   }
 }
 

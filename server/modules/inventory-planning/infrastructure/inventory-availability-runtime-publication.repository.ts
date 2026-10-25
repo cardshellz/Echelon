@@ -16,6 +16,7 @@ import {
   type InventoryAvailabilityRuntimePublicationContext,
   type InventoryAvailabilityRuntimePublicationExecutor,
   type InventoryAvailabilityRuntimePublicationLogger,
+  type BlockedPublicationTargetPolicy,
 } from "../application/inventory-availability-runtime-publication.service";
 import { planInventoryChannelExposureProduct, type ActiveInventoryPublicationTargetSnapshot } from "../application/inventory-channel-exposure-runtime.service";
 import type { ChannelExposurePolicyCandidate } from "../domain/inventory-channel-exposure";
@@ -116,23 +117,36 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
   async execute<T>(
     work: (context: InventoryAvailabilityRuntimePublicationContext) => Promise<T>,
   ): Promise<T> {
+    return this.executeWithClient((_client, context) => work(context));
+  }
+
+  /** Infrastructure composition may resolve exact identities and validate its
+   * durable handoff inside this same pinned, local-only publication transaction. */
+  async executeWithClient<T>(
+    work: (client: PoolClient, context: InventoryAvailabilityRuntimePublicationContext) => Promise<T>,
+  ): Promise<T> {
     const releaseRoutingSlot = await this.routingSlots.acquire();
     let client: PoolClient | null = null;
     let began = false;
+    let committing = false;
+    let discard: Error | undefined;
     try {
       client = await this.connectionPool.connect();
       const connectedClient = client;
       await connectedClient.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
       began = true;
-      const result = await work(await createPublicationContext(connectedClient, this.logger, false));
+      const result = await work(connectedClient, await createPublicationContext(connectedClient, this.logger, false));
+      committing = true;
       await connectedClient.query("COMMIT");
       began = false;
       return result;
     } catch (error) {
+      if (client && (!began || committing)) discard = error instanceof Error ? error : new Error(String(error));
       if (began && client) {
         try {
           await client.query("ROLLBACK");
         } catch (rollbackError) {
+          discard = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
           throw new AggregateError(
             [error, rollbackError],
             "Inventory publication routing and authority-lock rollback both failed.",
@@ -142,7 +156,7 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
       throw error;
     } finally {
       try {
-        client?.release();
+        client?.release(discard);
       } finally {
         releaseRoutingSlot();
       }
@@ -258,6 +272,7 @@ export async function previewProductDefinitionPublicationInsideTransaction(
   productId: number,
   supplySnapshot: SupplySnapshotDto,
   reviewedTargets?: readonly ActiveInventoryPublicationTargetSnapshot[],
+  blockedTargets: BlockedPublicationTargetPolicy = "reject",
 ) {
   if (supplySnapshot.productId !== productId) throw new Error("Review snapshot product mismatch");
   const context = await createPublicationContext(client, undefined, true);
@@ -271,7 +286,7 @@ export async function previewProductDefinitionPublicationInsideTransaction(
       enqueueFullPublications: async () => { throw new Error("A definition review cannot enqueue publication"); },
     }),
   });
-  const result = await preview.publishProduct({ productId, dryRun: true, triggeredBy: "product_definition_review" },
+  const result = await preview.publishProduct({ productId, dryRun: true, triggeredBy: "product_definition_review", blockedTargets },
     async () => { throw new Error("A definition review cannot use legacy publication"); });
   if (result.authority !== "canonical") throw new Error("Canonical definition review required");
   return result.publication;

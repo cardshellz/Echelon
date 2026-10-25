@@ -3,8 +3,9 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { request } from "node:https";
 import { describe,expect,it,vi } from "vitest";
+import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import { inventoryCostReportEventSchema } from "@shared/procurement/cost-report-delivery";
-import { buildCostReportEnvelope,CostReportingError,nextReportFailure,parseReportConfiguration,reportHash,verifyReportAcknowledgement,type ReportTransportConfiguration } from "../../cost-reporting.domain";
+import { buildCostReportEnvelope,costReportInventoryEffectMatches,CostReportingError,nextReportFailure,parseReportConfiguration,reportHash,verifyReportAcknowledgement,type ReportTransportConfiguration } from "../../cost-reporting.domain";
 import { isPublicReportAddress,sendCostReport } from "../../cost-reporting.transport";
 import { CostReportingService } from "../../cost-reporting.service";
 
@@ -77,6 +78,109 @@ describe("exact cost reporting contract",() => {
   });
 });
 
+describe("verified full-quarantine-return cost reporting", () => {
+  const effect = {
+    kind: "none", reason: "full_quarantine_return", returnedBasePieces: 12,
+    returns: [{ supplierCreditLineId: 81, returnDispositionId: 71, observationId: 61,
+      receivingLineId: 51, quantity: 3, unitsPerVariant: 4 }],
+  } as const;
+  const recordedEvidence = {
+    purchaseOrderLineId: 21, recognizedQuantity: false, inventoryHistory: false, costHistory: false,
+    outstandingCustody: false,
+    invoices: [{ documentId: 31, lineId: 41, version: "c".repeat(64) }],
+    returns: [{ ...effect.returns[0], supplierCreditId: 91, creditVersion: "d".repeat(64),
+      purchaseOrderLineId: 21, dispositionQuantity: 3, returnedQuantity: 3, observedQuantity: 3,
+      receivedQuantity: 0, pendingQuantity: 0, sourceMatches: true, receiptClosed: true }],
+  };
+  const proof = { contractVersion: 1, purchaseOrderLineId: 21, inventoryEffect: effect,
+    evidenceFingerprint: reportHash(recordedEvidence) } as const;
+  const source = costSourceRevisionSchema.parse({
+    contractVersion: 1, revision: 2, fingerprint: "a".repeat(64), component: "product",
+    scope: { kind: "purchase_order_line", purchaseOrderId: 10, purchaseOrderLineId: 21 },
+    sources: [{ kind: "vendor_invoice_line", documentId: 31, lineId: 41, version: "c".repeat(64) },
+      { kind: "supplier_credit_line", documentId: 91, lineId: 81, version: "d".repeat(64) }],
+    currency: "USD", totalMills: 0, basePieces: 0, inventoryEffect: effect,
+    evidence: "confirmed", packagingTreatment: "separate", issue: null, manualOverride: null,
+  });
+  const event = inventoryCostReportEventSchema.parse({ ...payload, changes: [], cogsDeltaCents: 0,
+    inventoryEffectProof: proof });
+  const outcome = { status: "applied", lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0,
+    issues: [], inventoryEffectProof: proof };
+  const candidate = () => ({ source, payload: event, applicationStatus: "applied", applicationOutcome: outcome,
+    applicationEvidence: { inventoryEffectProof: proof, noInventoryEffectEvidence: recordedEvidence },
+    actualLotCount: 0, historicalPostingCount: 0, hasReconciliation: false });
+
+  it("retains the complete no-effect proof in the exact hashed event", () => {
+    const report = buildCostReportEnvelope({ destination: configuration,
+      deliveryId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", sourceEventId: "2", applicationId: "2",
+      purchaseOrderId: 10, purchaseOrderLineId: 21, payload: event });
+    expect(report.payload).toEqual(event);
+    expect(report.payload.inventoryEffectProof).toEqual(proof);
+    expect(report.payloadHash).toBe(reportHash(event));
+    expect(costReportInventoryEffectMatches(candidate())).toBe(true);
+    expect(reportHash({ ...event, inventoryEffectProof: { ...proof, evidenceFingerprint: "e".repeat(64) } }))
+      .not.toBe(report.payloadHash);
+  });
+
+  it.each([
+    { currency: "CAD" }, { component: "landed" }, { changes: payload.changes }, { cogsDeltaCents: 1 },
+    { cogsDeltaCents: -1 }, { unresolvedQuantities: [] }, { historicalCostAdjustments: [] },
+    { historicalCostAdjustments: [{ id: 1, approvalId: 2, destination: "inventory_variance",
+      beforeMills: 0, afterMills: 100, deltaMills: 100 }] },
+  ])("rejects no-effect reports with financial effects or unsupported scope: %j", patch => {
+    expect(inventoryCostReportEventSchema.safeParse({ ...event, ...patch }).success).toBe(false);
+  });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects malformed returned quantity %s without throwing", quantity => {
+    const malformed = { ...event, inventoryEffectProof: { ...proof, inventoryEffect: { ...effect,
+      returns: [{ ...effect.returns[0], quantity }] } } };
+    expect(() => inventoryCostReportEventSchema.safeParse(malformed)).not.toThrow();
+    expect(inventoryCostReportEventSchema.safeParse(malformed).success).toBe(false);
+  });
+
+  it("rejects a proof for another purchase order line before building an envelope", () => {
+    expect(() => buildCostReportEnvelope({ destination: configuration,
+      deliveryId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", sourceEventId: "2", applicationId: "2",
+      purchaseOrderId: 10, purchaseOrderLineId: 22, payload: event }))
+      .toThrow(expect.objectContaining({ code: "COST_REPORT_SOURCE_CONFLICT" }));
+  });
+
+  it.each([
+    { applicationStatus: "review_required" }, { actualLotCount: 1 }, { historicalPostingCount: 1 },
+    { hasReconciliation: true },
+    { applicationEvidence: { inventoryEffectProof: proof } },
+    { applicationEvidence: { inventoryEffectProof: proof, noInventoryEffectEvidence: {
+      ...recordedEvidence, recognizedQuantity: true,
+    } } },
+    { applicationEvidence: { inventoryEffectProof: { ...proof, evidenceFingerprint: "e".repeat(64) },
+      noInventoryEffectEvidence: recordedEvidence } },
+    { applicationOutcome: { ...outcome, cogsRowsUpdated: 1 } },
+    { applicationOutcome: { ...outcome, lotsUpdated: 1 } },
+    { applicationOutcome: { ...outcome, issues: [{ code: "COST_ROOT_REVIEW_REQUIRED", message: "Review" }] } },
+    { applicationOutcome: { ...outcome, inventoryEffectProof: undefined } },
+    { applicationOutcome: { ...outcome, inventoryEffectProof: { ...proof, evidenceFingerprint: "e".repeat(64) } } },
+    { applicationOutcome: { ...outcome, inventoryEffectProof: { ...proof, purchaseOrderLineId: 22 } } },
+  ])("does not certify incomplete or conflicting application evidence: %j", patch => {
+    expect(costReportInventoryEffectMatches({ ...candidate(), ...patch })).toBe(false);
+  });
+
+  it("requires the same source disposition and proof in all three records", () => {
+    const { inventoryEffectProof: _proof, ...ordinaryEvent } = event;
+    const { inventoryEffect: _effect, ...ordinarySource } = source;
+    const { inventoryEffectProof: _outcomeProof, ...ordinaryOutcome } = outcome;
+    expect(costReportInventoryEffectMatches({ ...candidate(), payload: ordinaryEvent })).toBe(false);
+    expect(costReportInventoryEffectMatches({ ...candidate(), source: ordinarySource })).toBe(false);
+    expect(costReportInventoryEffectMatches({ ...candidate(), applicationOutcome: ordinaryOutcome })).toBe(false);
+    expect(costReportInventoryEffectMatches({ ...candidate(), source: { ...source, inventoryEffect: {
+      ...source.inventoryEffect!, returns: [{ ...source.inventoryEffect!.returns[0], returnDispositionId: 72 }],
+    } } })).toBe(false);
+    expect(costReportInventoryEffectMatches({ ...candidate(), source: ordinarySource, payload: ordinaryEvent,
+      applicationOutcome: ordinaryOutcome })).toBe(false);
+    expect(costReportInventoryEffectMatches({ ...candidate(), source: ordinarySource, payload: ordinaryEvent,
+      applicationOutcome: ordinaryOutcome, applicationEvidence: {} })).toBe(true);
+  });
+});
+
 describe("bounded authenticated report transport",() => {
   function fakeRequest(status:number,body:unknown,options:{oversize?:boolean;contentType?:string}={}) {
     const capture=vi.fn();
@@ -121,5 +225,24 @@ describe("bounded authenticated report transport",() => {
     const repository={enqueue:vi.fn(async () => 2),claim:vi.fn(async () => [1,2].map((n) => ({id:String(n),attemptCount:1,envelope:envelope()}))),finish:vi.fn(async () => true)};
     const service=new CostReportingService({repository:repository as never,configuration:() => configuration,clock:() => now,newId:() => "unused",log:vi.fn(),send:async () => {started.push(1);if (started.length===2) finish();await barrier;return acknowledgement() as never;}});
     expect(await service.tick()).toMatchObject({claimed:2,acknowledged:2,failed:0});expect(started).toHaveLength(2);
+  });
+});
+
+
+describe("accepted supplier return cost report evidence", () => {
+  const adjustment = { entryId: 11, returnId: 12, returnLineId: 13, returnAllocationId: 14,
+    inventoryLotId: 5, costQuantityAllocationId: 15, quantity: 1, component: "product",
+    beforeMills: 200, afterMills: 100, deltaMills: -100, postingKey: "source_revision:1:prior:9" };
+  it("preserves exact returned-value change separately from sales COGS", () => {
+    const input = { ...payload, supplierReturnAdjustments: [adjustment] };
+    expect(inventoryCostReportEventSchema.parse(input)).toEqual(input);
+    expect(buildCostReportEnvelope({ destination: configuration, deliveryId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", sourceEventId: "1",
+      applicationId: "1", purchaseOrderId: 10, purchaseOrderLineId: 21, payload: input }).payload.supplierReturnAdjustments).toEqual([adjustment]);
+  });
+  it.each([{ deltaMills: -99 }, { beforeMills: 0.5 }, { inventoryLotId: 99 }, { component: "landed" }])("rejects mismatched returned-value evidence %j", patch => {
+    expect(inventoryCostReportEventSchema.safeParse({ ...payload, supplierReturnAdjustments: [{ ...adjustment, ...patch }] }).success).toBe(false);
+  });
+  it("rejects duplicate returned-value entries", () => {
+    expect(inventoryCostReportEventSchema.safeParse({ ...payload, supplierReturnAdjustments: [adjustment, adjustment] }).success).toBe(false);
   });
 });

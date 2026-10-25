@@ -1,11 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 import { createChannelFulfillmentProjector } from "../../channel-fulfillment-projection.repository";
 
 function sqlText(query: any): string {
-  return (query?.queryChunks ?? query?.chunks ?? [])
-    .flatMap((chunk: any) => chunk?.value ?? [String(chunk)])
-    .join(" ");
+  return new PgDialect().sqlToQuery(query).sql;
 }
 
 describe("canonical channel fulfillment projector", () => {
@@ -40,7 +39,9 @@ describe("canonical channel fulfillment projector", () => {
     expect(statements[2]).not.toContain("picked_quantity =");
     expect(statements[3]).toContain("authority_fulfillable_quantity");
     expect(statements[4]).toContain("oms_order.status IN ('cancelled', 'refunded')");
-    expect(statements[4]).toContain("oms_order.financial_status IN ('refunded', 'voided')");
+    expect(statements[4]).toContain("COALESCE(oms_order.financial_status, '') = 'voided'");
+    expect(statements[4]).toContain("merchandise_channel.id=oms_order.channel_id");
+    expect(statements[4]).toContain("merchandise_channel.provider=");
     expect(statements[2]).toContain("order_item.requires_shipping = 1");
     expect(statements[2]).toContain("NOT LIKE '%_fulfillment_receipt'");
   });

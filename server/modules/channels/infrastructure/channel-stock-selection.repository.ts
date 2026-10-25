@@ -27,6 +27,12 @@ export class ChannelStockSelectionError extends Error {
  * independent membership setting. Every query uses the caller's transaction. */
 export async function readChannelStockSelection(client: StockSelectionQueryClient,
   raw: { channelId: number; channelConnectionId: number; productId: number; productVariantIds: readonly number[] }): Promise<StockPublicationSelection> {
+  return resolveChannelStockSelection(await readChannelStockSelectionFacts(client, raw));
+}
+
+/** Channels-internal source facts shared by selection and exact source fencing. */
+export async function readChannelStockSelectionFacts(client: StockSelectionQueryClient,
+  raw: { channelId: number; channelConnectionId: number; productId: number; productVariantIds: readonly number[] }): Promise<ChannelStockSelectionFacts> {
   const input = inputSchema.parse(raw);
   const context = z.array(z.object({ channel_id: id, connection_id: id.nullable(), provider: z.enum(["shopify", "ebay", "walmart"]) })).parse(
     (await client.query(`SELECT c.id AS channel_id,cc.id AS connection_id,lower(c.provider) AS provider
@@ -70,5 +76,28 @@ export async function readChannelStockSelection(client: StockSelectionQueryClien
         listing: listing ? { status: listing.sync_status, externalProductId: listing.external_product_id,
           externalVariantId: listing.external_variant_id, externalSku: listing.external_sku } : null };
     }) };
-  return resolveChannelStockSelection(facts);
+  return facts;
+}
+
+import { hasListingWorkObligation, type ListingWorkPhase } from "../../marketplace-listings/domain/listing-work-obligation";
+
+/** The sync owner explicitly supersedes only idle jobs without a publication
+ * barrier. Those retained historical refusals carry no remaining execution duty. */
+export async function hasOutstandingEbayListingWork(client: StockSelectionQueryClient,
+  input: {channelId:number;connectionId:number;productId:number}):Promise<boolean> {
+  return (await readOutstandingEbayListingWork(client,input)).length>0;
+}
+
+export async function readOutstandingEbayListingWork(client: StockSelectionQueryClient,
+  input: {channelId:number;connectionId:number;productId:number}) {
+  const rows = await client.query<{ id:string; operation:string; state:string; error_code:string|null; settled:boolean }>(
+    `SELECT j.id::text,j.operation,j.state,j.error_code,
+      EXISTS(SELECT 1 FROM channels.ebay_listing_sync_settlements s WHERE s.failed_job_id=j.id) settled
+      FROM channels.ebay_listing_sync_jobs j WHERE channel_id=$1 AND connection_id=$2 AND product_id=$3`,
+    [id.parse(input.channelId),id.parse(input.connectionId),id.parse(input.productId)]);
+  return rows.rows.filter(row => {
+    const phase: ListingWorkPhase = row.settled || row.error_code === "EBAY_SYNC_SOURCE_SUPERSEDED" ? "settled"
+      : row.state === "completed" ? "completed" : row.state === "needs_attention" ? "attention" : "pending";
+    return hasListingWorkObligation(phase);
+  });
 }

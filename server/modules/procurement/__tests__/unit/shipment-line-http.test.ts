@@ -6,17 +6,25 @@ import type { AddressInfo } from "node:net";
 const mocks = vi.hoisted(() => ({
   actorId: "owner-1" as string | undefined,
   permission: vi.fn(),
+  denyPermission: false,
+  unitOptions: vi.fn(),
   repository: { reserve: vi.fn(), executeClaim: vi.fn(), rejectClaim: vi.fn(), markRetryable: vi.fn() },
 }));
 vi.mock("../../../../routes/middleware", () => ({
+  requireAuth: (_req: Request, _res: Response, next: NextFunction) => next(),
   requirePermission: (resource: string, action: string) => (req: Request, _res: Response, next: NextFunction) => {
     mocks.permission(resource, action);
+    if (mocks.denyPermission) return _res.status(403).json({ error: "Permission denied" });
     (req as Request & { user: unknown }).user = mocks.actorId ? { id: mocks.actorId } : undefined;
     next();
   },
 }));
 vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next() }));
 vi.mock("../../../../db", () => ({ db: {} }));
+vi.mock("../../shipment-unit-options.service", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../shipment-unit-options.service")>(),
+  readShipmentPackingUnitOptions: mocks.unitOptions,
+}));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({
   financialCommandRepository: mocks.repository,
   createDrizzleFinancialCommandRepository: () => mocks.repository,
@@ -24,6 +32,10 @@ vi.mock("../../../../platform/commands/command-results.repository", () => ({
 vi.mock("../../ap-ledger.service", () => ({}));
 vi.mock("../../../notifications/notifications.service", () => ({}));
 
+import { ShipmentTrackingError } from "../../shipment-tracking.service";
+import { ShipmentUnitOptionsError } from "../../shipment-unit-options.service";
+import { shipmentUnitOptionsRequestSchema } from "@shared/procurement/shipment-unit-options";
+import { shipmentLinePatchSchema } from "@shared/procurement/shipment-line-command";
 import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 
@@ -53,8 +65,11 @@ async function send(method: string, path: string, body: unknown, headers: Record
 beforeEach(async () => {
   vi.clearAllMocks();
   mocks.actorId = "owner-1";
+  mocks.denyPermission = false;
+  mocks.unitOptions.mockReset();
   mocks.repository.reserve.mockResolvedValue({ kind: "claimed", claim: { commandId: 1, leaseToken: "fixture" } });
   mocks.repository.executeClaim.mockImplementation(async (_claim, _descriptor, work) => ({ commandId: 1, replayed: false, terminalState: "succeeded", ...await work({ name: "fixture-transaction" }) }));
+  mocks.repository.rejectClaim.mockImplementation(async (_claim, _descriptor, rejection) => ({ commandId: 1, replayed: false, terminalState: "rejected", httpStatus: rejection.httpStatus, body: rejection.body }));
   service.executeLineCommandInTransaction.mockResolvedValue({ id: 31, inboundShipmentId: 7, version: "a".repeat(64) });
   const app = express();
   app.use(express.json());
@@ -130,5 +145,111 @@ describe("shipment line HTTP command contract", () => {
     expect(result).toMatchObject({ status: 409, body: { code: "FINANCIAL_COMMAND_IN_PROGRESS", error: "Still running" } });
     expect(result.headers.get("Retry-After")).toBe("3");
     expect(service.executeLineCommandInTransaction).not.toHaveBeenCalled();
+  });
+  it("marks only recorded input rejection with the original request key", async () => {
+    const invalid = shipmentLinePatchSchema.safeParse({ expectedVersion: "a".repeat(64), qtyShipped: 1,
+      unitSelection: { productVariantId: 20, unitsPerVariant: 1000, quantity: 2147483647 } });
+    expect(invalid.success).toBe(false);
+    service.executeLineCommandInTransaction.mockRejectedValue(invalid.error);
+    const result = await send("PATCH", "/api/inbound-shipments/lines/31", {}, { "Idempotency-Key": KEY });
+    expect(result).toMatchObject({ status: 400, body: { code: "SHIPMENT_LINE_INPUT_INVALID",
+      details: { shipmentLineOutcome: "rejected", idempotencyKey: KEY } } });
+    expect(mocks.repository.rejectClaim).toHaveBeenCalledOnce();
+  });
+
+  it("preserves source review details when a durable rejection is replayed", async () => {
+    const body = { code: "SHIPMENT_UNIT_SOURCE_CHANGED", error: "Review pack factor", details: { productVariantId: 20 } };
+    mocks.repository.reserve.mockResolvedValue({ kind: "replay", result: { commandId: 1, replayed: true, terminalState: "rejected", httpStatus: 409, body } });
+    const result = await send("PATCH", "/api/inbound-shipments/lines/31", {}, { "Idempotency-Key": KEY });
+    expect(result).toMatchObject({ status: 409, body: { code: "SHIPMENT_UNIT_SOURCE_CHANGED",
+      details: { productVariantId: 20, shipmentLineOutcome: "rejected", idempotencyKey: KEY } } });
+    expect(result.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(service.executeLineCommandInTransaction).not.toHaveBeenCalled();
+  });
+
+  it.each(["FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED", "FINANCIAL_COMMAND_IN_PROGRESS"])("does not invent a rejection marker for pre-ledger %s", async (code) => {
+    mocks.repository.reserve.mockRejectedValue(new FinancialCommandError("Request not reserved", 409, code));
+    const result = await send("PATCH", "/api/inbound-shipments/lines/31", {}, { "Idempotency-Key": KEY });
+    expect(result.body).not.toHaveProperty("details.shipmentLineOutcome");
+    expect(mocks.repository.rejectClaim).not.toHaveBeenCalled();
+  });
+
+  it("does not mark a failed rejection persistence attempt as safely rejected", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    service.executeLineCommandInTransaction.mockRejectedValue(new ShipmentTrackingError("Pack changed", 409, { code: "SHIPMENT_UNIT_SOURCE_CHANGED" }));
+    mocks.repository.rejectClaim.mockRejectedValue(new Error("connection lost before recording rejection"));
+    const result = await send("PATCH", "/api/inbound-shipments/lines/31", {}, { "Idempotency-Key": KEY });
+    expect(result).toMatchObject({ status: 500, body: { code: "SHIPMENT_LINE_TRANSIENT_FAILURE" } });
+    expect(result.body).not.toHaveProperty("details.shipmentLineOutcome");
+    log.mockRestore();
+  });
+
+});
+
+
+describe("purchasing-scoped shipment unit preview HTTP contract", () => {
+  const path = "/api/inbound-shipments/7/lines/unit-options";
+  const body = { rows: [{ purchaseOrderLineId: 21, selectedVariantId: 201, sku: "PIECE" }] };
+  const result = { shipmentId: 7, rows: [{ row: 1, units: {
+    productId: 10, selectedVariantId: 201, unitsPerVariantSnapshot: null,
+    variants: [{ id: 201, sku: "PIECE", name: "Piece", unitsPerVariant: 1 }], issue: null,
+  } }] };
+
+  it("uses purchasing view permission and returns canonical row evidence without reserving a command", async () => {
+    mocks.unitOptions.mockResolvedValue(result);
+    const response = await send("POST", path, body);
+    expect(response).toMatchObject({ status: 200, body: result });
+    expect(mocks.permission.mock.calls).toEqual([["purchasing", "view"]]);
+    expect(mocks.unitOptions).toHaveBeenCalledWith({}, 7, body);
+    expect(mocks.repository.reserve).not.toHaveBeenCalled();
+    expect(service.executeLineCommandInTransaction).not.toHaveBeenCalled();
+  });
+
+  it("does not read catalog evidence when purchasing permission is denied", async () => {
+    mocks.denyPermission = true;
+    const response = await send("POST", path, body);
+    expect(response.status).toBe(403);
+    expect(mocks.unitOptions).not.toHaveBeenCalled();
+    expect(mocks.repository.reserve).not.toHaveBeenCalled();
+  });
+
+  it.each(["0", "01", "1.5", "7junk", "2147483648"])("rejects malformed shipment ID %s before source reads", async (id) => {
+    const response = await send("POST", `/api/inbound-shipments/${id}/lines/unit-options`, body);
+    expect(response).toMatchObject({ status: 400, body: { code: "SHIPMENT_UNIT_OPTIONS_INPUT_INVALID" } });
+    expect(mocks.unitOptions).not.toHaveBeenCalled();
+  });
+
+  it("rejects unrecognized query options before source reads", async () => {
+    const response = await send("POST", `${path}?all=true`, body);
+    expect(response).toMatchObject({ status: 400, body: { code: "SHIPMENT_UNIT_OPTIONS_INPUT_INVALID" } });
+    expect(mocks.unitOptions).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 501])("classifies the service's bounded request rejection for %i rows", async (count) => {
+    mocks.unitOptions.mockImplementation(async (_db, _shipmentId, input) => shipmentUnitOptionsRequestSchema.parse(input));
+    const response = await send("POST", path, { rows: Array.from({ length: count }, () => ({ sku: "PIECE" })) });
+    expect(response).toMatchObject({ status: 400, body: { code: "SHIPMENT_UNIT_OPTIONS_INPUT_INVALID" } });
+    expect(mocks.repository.reserve).not.toHaveBeenCalled();
+  });
+
+  it.each([[404, "SHIPMENT_LINE_NOT_FOUND"], [409, "SHIPMENT_UNIT_OPTIONS_LIMIT"]])("preserves classified read failure %s", async (status, code) => {
+    mocks.unitOptions.mockRejectedValue(new ShipmentUnitOptionsError("Review source rows", Number(status), String(code)));
+    const response = await send("POST", path, body);
+    expect(response).toMatchObject({ status, body: { code, error: "Review source rows" } });
+    expect(response.body).not.toHaveProperty("details.shipmentLineOutcome");
+  });
+
+  it("sanitizes unexpected read errors and leaves mutation/recovery ownership untouched", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      mocks.unitOptions.mockRejectedValue(new Error("private connection credentials must not escape"));
+      const response = await send("POST", path, body);
+      expect(response).toMatchObject({ status: 503, body: { code: "SHIPMENT_UNIT_OPTIONS_UNAVAILABLE" } });
+      expect(JSON.stringify(response.body)).not.toContain("credentials");
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('"event":"procurement.shipment_unit_options.failed"'));
+      expect(log).not.toHaveBeenCalledWith(expect.stringContaining("credentials"));
+      expect(mocks.repository.reserve).not.toHaveBeenCalled();
+      expect(response.body).not.toHaveProperty("details.shipmentLineOutcome");
+    } finally { log.mockRestore(); }
   });
 });

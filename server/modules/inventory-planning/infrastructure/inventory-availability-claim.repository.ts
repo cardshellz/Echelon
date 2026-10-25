@@ -1,9 +1,12 @@
+import { InventoryQuantityError } from "../../inventory/domain/quantity-ledger";
+import type { CanonicalClaimTransactionClient } from "../application/canonical-claim-inventory.port";
 import { commitCanonicalPickingReceipt } from "../../wms/picking-command.repository";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
 import { isClaimPackageConversionInline } from "../../inventory/infrastructure/replenishment-policy.reader";
 import { isClaimPickRepackaging, selectClaimPickPackageConversions } from "../domain/claim-pick-package-conversions";
 import { readClaimPickPackagingPath } from "./claim-pick-packaging-path.reader";
+import { BuildDomainError } from "../../inventory/domain/build.domain";
 import {
   rejectSupplyRefreshBeforePlanning, rejectSupplyRefreshPlan,
   type ClaimLineBalance, type ClaimSupplyRefreshRejection,
@@ -94,6 +97,8 @@ const LEGACY_RESERVATION_LOCK_NAMESPACE = 918410;
 const MAX_GRAPH_PRODUCTS = 1_000;
 const MAX_CYCLE_COUNT_DISPLACED_CLAIMS = 1_000;
 const MAX_SERIALIZATION_ATTEMPTS = 3;
+/** Matches the `reason` bound of the canonical claim command schemas. */
+const MAX_COMMAND_REASON_LENGTH = 1000;
 
 type OrderLine = {
   orderItemId: number;
@@ -699,12 +704,16 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
              item.short_reason AS short_reason,
              variant.id AS target_variant_id,
              CASE
-               WHEN item.status IN ('cancelled', 'completed') THEN 0
+               WHEN item.status = 'cancelled' THEN 0
                -- A shipped order cannot ship more: it owes only units the provider
                -- shipped that were never recorded as picked (a pick correction).
+               -- The shipment may already have closed the line as completed
+               -- (#64254: completed, 20 shipped, 8 recorded), so completed still
+               -- owes those units here.
                WHEN $2::boolean THEN GREATEST(
                  LEAST(COALESCE(item.quantity, 0), COALESCE(item.fulfilled_quantity, 0))
                  - COALESCE(item.picked_quantity, 0), 0)
+               WHEN item.status = 'completed' THEN 0
                ELSE GREATEST(COALESCE(item.quantity, 0) - COALESCE(item.picked_quantity, 0), 0)
              END AS requested_qty,
             variant.product_id AS root_product_id,
@@ -4295,6 +4304,56 @@ export async function persistReconstructedCutoverClaim(
   return claimId.toString();
 }
 
+// Bound the transaction's locked orders while leaving ordinary free-stock moves unchanged.
+const MAX_TRANSFER_CLAIMS = 500;
+
+/** Inventory's transfer transaction already holds the shared cost graph lock.
+ * Reuse the claim owner's validated model graph and lock hierarchy before any
+ * inventory row is locked. No connection or transaction is opened here. */
+export async function lockCanonicalClaimsForInventoryTransfer(
+  rawClient: CanonicalClaimTransactionClient,
+  input: { productVariantId: number; fromLocationId: number; toLocationId: number },
+): Promise<void> {
+  // The adapter exposes only query; these helpers never use PoolClient lifecycle methods.
+  const client = rawClient as PoolClient;
+  await requireCanonicalAuthority(client);
+  const discover = async () => rows(await client.query(
+    `SELECT DISTINCT claim.id::text, claim.order_id
+     FROM inventory.availability_claims claim
+     JOIN inventory.availability_claim_resources resource ON resource.claim_id=claim.id
+     WHERE claim.status='active' AND resource.source_variant_id=$1 AND resource.warehouse_location_id=$2
+       AND resource.claimed_qty-resource.released_qty-resource.consumed_qty-resource.picked_qty>0
+     ORDER BY claim.order_id,claim.id::text LIMIT $3`, [input.productVariantId, input.fromLocationId, MAX_TRANSFER_CLAIMS + 1]));
+  const preliminary = await discover();
+  if (preliminary.length > MAX_TRANSFER_CLAIMS) throw new InventoryQuantityError("TRANSFER_CLAIM_LIMIT", "This bin has too many reservations for one transfer; review its orders first.");
+  const products = new Set<number>();
+  for (const row of preliminary) {
+    const claim = await loadClaimById(client, BigInt(row.id), false);
+    if (!claim || claim.status !== "active") throw new InventoryQuantityError("TRANSFER_CLAIM_CHANGED", "The bin's reservations changed. Refresh and retry.");
+    for (const productId of await loadClaimProductIds(client, claim)) products.add(productId);
+  }
+  const variant = rows(await client.query("SELECT product_id FROM catalog.product_variants WHERE id=$1", [input.productVariantId]))[0];
+  if (!variant) throw new InventoryQuantityError("TRANSFER_VARIANT_MISSING", "The transfer SKU no longer exists.");
+  products.add(positiveInteger(variant.product_id, "transfer.productId"));
+  if (products.size > MAX_GRAPH_PRODUCTS) {
+    throw new InventoryQuantityError("TRANSFER_CLAIM_GRAPH_LIMIT", "The reservations span too many product models for one transfer; review their orders first.");
+  }
+  await lockGraphProducts(client, [...products].sort((a, b) => a - b));
+  await client.query(`SELECT warehouse_location_id FROM inventory.location_promise_policy_heads
+    WHERE warehouse_location_id=ANY($1::int[]) ORDER BY warehouse_location_id FOR SHARE`, [[input.fromLocationId, input.toLocationId].sort((a, b) => a - b)]);
+  for (const orderId of uniqueSorted(preliminary.map(row => positiveInteger(row.order_id, "transfer.orderId")))) {
+    await client.query("SELECT id FROM wms.orders WHERE id=$1 FOR UPDATE", [orderId]);
+    await client.query("SELECT id FROM wms.order_items WHERE order_id=$1 ORDER BY id FOR UPDATE", [orderId]);
+  }
+  for (const row of preliminary) {
+    const claim = await loadClaimById(client, BigInt(row.id), true);
+    if (!claim || claim.status !== "active") throw new InventoryQuantityError("TRANSFER_CLAIM_CHANGED", "The bin's reservations changed. Refresh and retry.");
+  }
+  if (canonicalJson(preliminary) !== canonicalJson(await discover())) {
+    throw new InventoryQuantityError("TRANSFER_CLAIM_CHANGED", "The bin's reservations changed. Refresh and retry.");
+  }
+}
+
 export class PostgresInventoryAvailabilityClaimRepository implements InventoryAvailabilityClaimStore {
   constructor(
     private readonly inventoryWriter: CanonicalClaimInventoryMutationPort,
@@ -5957,7 +6016,8 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           );
         }
         const movementRows = rows(await client.query(
-          `SELECT movement.id, movement.claim_resource_id, movement.claim_lot_allocation_id,
+          `SELECT movement.id, movement.order_item_cost_id,
+                  movement.claim_resource_id, movement.claim_lot_allocation_id,
                   movement.inventory_lot_id, movement.movement_type, movement.quantity,
                   movement.reverses_pick_movement_id,
                   resource.inventory_level_id, resource.warehouse_location_id,
@@ -6498,8 +6558,10 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
   }
 
   /** Called only after order/correction/claim locks and custody validation.
-   * Conversion receipts, exact lots, surplus, pick and WMS progress share the
-   * caller's transaction. No partial conversion can survive a rejected pick.
+   * Conversion receipts, component builds, exact lots, surplus, pick and WMS
+   * progress share the caller's transaction. No partial conversion or build can
+   * survive a rejected pick: a component shortfall or any failed fence rolls the
+   * whole pick back with zero postings.
    */
   private async materializePickPackageConversions(
     client: PoolClient,
@@ -6524,14 +6586,25 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
       orderItemId: line.orderItemId, targetVariantId: line.targetVariantId,
       warehouseId, locationId: command.warehouseLocationId, readyQty, pickQty: quantity,
     });
+    // Owner decision (2026-10-18, #64366): an assembled SKU assembles at pick.
+    // A graph that contains a component build has no stocked intermediate to
+    // queue replenishment against, so its package conversions run inline too.
+    // Their recipe authority / same-product proof below is never skipped.
+    const assemblesAtPick = operations.some(operation => operation.operationType === "component_build");
     for (const operation of operations) {
+      const pickOperationIdentity = hash({ pick: command.idempotencyKey, operation: operation.operationKey });
+      if (operation.operationType === "component_build") {
+        await requirePickableLocation(client, operation.outputLocationId!, warehouseId);
+        await this.executeLockedPickBuildOperation(client, claim, operation.operationKey, pickOperationIdentity, command, occurredAt);
+        continue;
+      }
       if (operation.operationType !== "break_pack"
         && !isClaimPickRepackaging(operation, await readClaimPickPackagingPath(client, operation.authorityId))) {
         throw new InventoryAvailabilityClaimRepositoryError("CLAIM_PICK_OPERATION_REQUIRES_WORK",
           "This transformation requires explicit warehouse work; it is not same-product package conversion.",
           { claimId: claim.id.toString(), operationKey: operation.operationKey });
       }
-      if (!await isClaimPackageConversionInline(client, {
+      if (!assemblesAtPick && !await isClaimPackageConversionInline(client, {
         destinationVariantId: operation.destinationVariantId, warehouseId: operation.warehouseId,
         outputQty: BigInt(operation.outputQty),
         method: operation.operationType === "break_pack" ? "case_break" : "package_conversion",
@@ -6544,13 +6617,155 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
       const executionCommand = canonicalAvailabilityClaimOperationExecutionCommandSchema.parse({
         claimId: claim.id.toString(), operationKey: operation.operationKey,
         // Preserve existing case-break receipt identities across deployment.
-        idempotencyKey: `${operation.operationType === "break_pack" ? "pick-case-break" : "pick-package-conversion"}:${hash({ pick: command.idempotencyKey, operation: operation.operationKey })}`,
+        idempotencyKey: `${operation.operationType === "break_pack" ? "pick-case-break" : "pick-package-conversion"}:${pickOperationIdentity}`,
         actor: command.actor, reason: command.reason,
       });
       await this.executeLockedPackageOperation(client, claim, executionCommand, occurredAt);
     }
     return operations.length > 0;
   }
+
+  /** Auto-assembly at pick. Runs on the pick's client, after the pick took the
+   * cost-graph, product, order and claim locks, so the build and the pick commit
+   * or roll back together.
+   *
+   * The canonical build writer genuinely requires a build order with adopted lot
+   * reservations (inventory.build_orders / build_component_reservations) and an
+   * availability_claim_build_handoffs row: executeOperation authorizes the build
+   * through that row, and consumption/cost evidence is recorded against the
+   * build order's components. Rather than weakening those integrity fences, the
+   * hand-off is created inline here as a SYSTEM record (the pick command's
+   * actor, no work task, no station, no assignment) and executed immediately in
+   * the same transaction, so it is never visible as open work.
+   *
+   * Idempotency: both receipts derive from the pick idempotency key + operation
+   * key (`pick-build-handoff:` / `pick-build:`). A replayed pick returns its
+   * stored receipt before reaching here; a new pick finds the operation
+   * `completed` and never selects it; and the build writer's deterministic
+   * build-order/run keys (`claim-build:{claim}:{operation}`) make a second
+   * physical build structurally impossible.
+   */
+  private async executeLockedPickBuildOperation(
+    client: PoolClient,
+    claim: PersistedClaim,
+    operationKey: string,
+    pickOperationIdentity: string,
+    pick: CanonicalAvailabilityClaimPickCommand,
+    occurredAt: Date,
+  ): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
+    if (!this.buildWriter) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_BUILD_EXECUTION_NOT_CONFIGURED",
+        "The canonical build execution port is not configured.",
+      );
+    }
+    const audit = {
+      claimId: claim.id.toString(),
+      operationKey,
+      actor: pick.actor,
+      reason: `Auto-assembly at pick: ${pick.reason}`.slice(0, MAX_COMMAND_REASON_LENGTH),
+    };
+    const handoffCommand = canonicalAvailabilityClaimBuildHandoffCommandSchema.parse({
+      ...audit, idempotencyKey: `pick-build-handoff:${pickOperationIdentity}`,
+    });
+    const executionCommand = canonicalAvailabilityClaimOperationExecutionCommandSchema.parse({
+      ...audit, idempotencyKey: `pick-build:${pickOperationIdentity}`,
+    });
+    try {
+      const operation = await lockBuildOperation(client, claim.id, operationKey);
+      const plannedOperation = assertOperationMatchesPlan(claim, operation);
+      const resources = await loadOperationExecutionResources(client, claim.id, operation, plannedOperation);
+      const inputs = plannedOperation.inputs.map((input) => ({
+        sourceVariantId: input.sourceVariantId,
+        requiredQty: positiveBigInt(input.requiredQty, "plannedOperation.input.requiredQty"),
+      }));
+      const handoff = await this.buildWriter.handoffOperation({
+        client,
+        claimId: claim.id,
+        claimOperationId: operation.id,
+        operationKey: operation.operationKey,
+        transformationRecipeBindingId: operation.authorityId,
+        warehouseId: operation.warehouseId,
+        plannedBuilds: operation.plannedExecutions,
+        destinationVariantId: operation.destinationVariantId,
+        outputLocationId: operation.outputLocationId,
+        outputQty: operation.outputQty,
+        inputs,
+        resources,
+        actor: audit.actor,
+        occurredAt,
+      });
+      await recordBuildHandoff(client, {
+        claim,
+        operation,
+        command: handoffCommand,
+        requestHash: hash(handoffCommand),
+        buildOrderId: handoff.buildOrderId,
+        buildSystemNumber: handoff.buildSystemNumber,
+        adoptedReservationQty: handoff.adoptedReservationQty,
+        occurredAt,
+      });
+      const locked = await lockHandedOffBuildOperation(client, claim.id, operationKey);
+      if (locked.handoff.buildOrderId !== handoff.buildOrderId) {
+        throw new InventoryAvailabilityClaimRepositoryError(
+          "CLAIM_PICK_BUILD_HANDOFF_MISMATCH",
+          "The inline build hand-off does not match the build order it created.",
+          { claimId: audit.claimId, operationKey, buildOrderId: handoff.buildOrderId },
+        );
+      }
+      // The hand-off only adopts reservations into build tables; it does not
+      // touch claim resources, so the exact resources loaded above still apply.
+      const execution = await this.buildWriter.executeOperation({
+        client,
+        claimId: claim.id,
+        claimOperationId: locked.operation.id,
+        operationKey: locked.operation.operationKey,
+        buildOrderId: locked.handoff.buildOrderId,
+        warehouseId: locked.operation.warehouseId,
+        plannedBuilds: locked.operation.plannedExecutions,
+        destinationVariantId: locked.operation.destinationVariantId,
+        outputLocationId: locked.operation.outputLocationId,
+        outputQty: locked.operation.outputQty,
+        committedOutputQty: locked.operation.committedOutputQty,
+        inputs,
+        resources,
+        orderId: claim.orderId,
+        orderItemId: locked.operation.orderItemId,
+        actor: audit.actor,
+        reason: audit.reason,
+        occurredAt,
+      });
+      return await recordOperationExecution(client, {
+        claim,
+        operation: locked.operation,
+        resources,
+        command: executionCommand,
+        requestHash: hash(executionCommand),
+        outputInventoryLevelId: execution.outputInventoryLevelId,
+        committedLotAllocations: execution.committedLotAllocations,
+        totalInputCostMills: execution.totalInputCostMills,
+        occurredAt,
+        commandType: "execute_build",
+        eventType: "claim_build_executed",
+        buildHandoffId: locked.handoff.id,
+      });
+    } catch (error) {
+      // Build-owner rejections (component lot/level shortfall, recipe or cost
+      // drift) are permanent for this pick: retrying cannot change them. Give
+      // the picker one clear structured code; the caller's rollback discards
+      // every posting this pick made, including earlier builds in the graph.
+      if (error instanceof BuildDomainError) {
+        throw new InventoryAvailabilityClaimRepositoryError(
+          "CLAIM_PICK_AUTO_ASSEMBLY_FAILED",
+          `Automatic assembly could not run, so nothing was picked: ${error.message}`,
+          { claimId: audit.claimId, operationKey, buildErrorCode: error.code, buildErrorContext: error.context },
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
 
   private async executeLockedPackageOperation(
     client: PoolClient,

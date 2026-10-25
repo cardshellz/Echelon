@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
   client: null as EbayListingLifecycleClient | null, transport: null as EbayRegistrationReadTransport | null,
   project: vi.fn(async () => {}), failure: vi.fn(async () => {}), accountId: "seller", extraMember: false, changedOffer: false,
   ensureStock: vi.fn(async () => {}),
+  persistIntent: vi.fn(async () => {}),
 }));
 vi.mock("../../../../db", () => ({ db: {}, pool: { query: async () => ({ rows: [{ id: 12, metadata: {
   marketplaceId: "EBAY_US", fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns",
@@ -37,8 +38,19 @@ vi.mock("../../infrastructure/ebay-listing-push.repository", () => ({ PostgresEb
 } }));
 vi.mock("../../infrastructure/ebay-listing-client", () => ({ createEbayRouteListingClient: () => state.client,
   createEbayRouteListingLifecycleClient: () => state.client, getExistingEbayListingPhotos: vi.fn() }));
+// This identity-rediscovery suite consumes the policy owner's validated result.
+// Real catalog lookup, persistence and publication gating have PG composition coverage.
+vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: {
+  resolveProductPolicies: async (input: { variantIds: number[]; expectedScope: unknown }) => {
+    const policies = { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" };
+    return { scope: input.expectedScope, product: policies, byVariantId: new Map(input.variantIds.map(id => [id, { ...policies }])) };
+  },
+} }));
 vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
-  ...await importOriginal<typeof import("../../infrastructure/ebay-listing-helpers")>(), resolveChannelPrice: async () => 1000,
+  ...await importOriginal<typeof import("../../infrastructure/ebay-listing-helpers")>(),
+  resolveChannelPriceResolution: async (_database: unknown, _channelId: number, _productId: number, variantId: number) => ({
+    priceCents: 1000, basePriceCents: 1000, source: "catalog_variant", provenance: { kind:"catalog_variant", variantId }, appliedRule:null,
+  }),
 }));
 vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: vi.fn() }));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () => {
@@ -61,6 +73,7 @@ import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 async function runPublication(productId: number): Promise<{ success: boolean; identity: EbayListingSyncIdentity | null; error?: unknown }> {
   const context: EbayListingExecutionContext = { operation: "publish", jobId: "655ca747-20b9-4940-9c61-019baf1c11c1", requestedBy: "operator", publicationTarget: null, publicationAccepted: null,
     publicationWriteStarted: false, publicationWriteCompleted: false, publicationAcceptedRevision: null, claimedRevision: "1", publicationIntentHash: null,
+    persistPreparedIntent: state.persistIntent,
     bindPublicationTarget: async identity => { context.publicationTarget = identity; }, bindPublicationAccepted: async value => { context.publicationAccepted = value; } };
   let identity: EbayListingSyncIdentity | null = null;
   const executor = new EbayPublicationCompletionExecution(prepareEbayPublicationCompletion,
@@ -121,7 +134,7 @@ function provider(example = examples[0], grouped = true) {
   }) };
   return state.client;
 }
-beforeEach(() => { state.project.mockClear(); state.failure.mockClear(); state.ensureStock.mockReset(); state.accountId = "seller"; state.extraMember = false; state.changedOffer = false; });
+beforeEach(() => { state.project.mockClear(); state.failure.mockClear(); state.ensureStock.mockReset(); state.persistIntent.mockClear(); state.accountId = "seller"; state.extraMember = false; state.changedOffer = false; });
 
 describe("production initial-publication replay through the canonical provider observer", () => {
   it("keeps exact connection-selection failures actionable through preparation and the saved worker result", async () => {
@@ -164,6 +177,12 @@ describe("production initial-publication replay through the canonical provider o
     expect(client.createOrReplaceInventoryItemGroup).not.toHaveBeenCalled();
     expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
     expect(client.publishOffer).not.toHaveBeenCalled();
+    expect(state.persistIntent).toHaveBeenCalledWith(expect.objectContaining({
+      intentHash:expect.stringMatching(/^[a-f0-9]{64}$/), input:expect.objectContaining({
+        account:expect.objectContaining({accountId:"seller",connectionId:12,provider:"ebay"}),
+        prices:[expect.objectContaining({variantId:5,cents:1000,provenance:{kind:"catalog_variant",variantId:5}})],
+      }),
+    }));
   });
   it.each(examples)("reuses product $productId's actual published group after local persistence loss and Catalog rename", async example => {
     const client = provider(example);

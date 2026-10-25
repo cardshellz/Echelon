@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import type {
-  RewardWidgetState,
+  RewardWidgetManagementState,
   RewardWidgetIssueResult,
 } from "@shared/customer-account/reward-widget";
 import {
@@ -40,10 +40,11 @@ declare global {
     CardShellz?: WidgetHost;
   }
 }
+const MAX_POINTS_PER_REDEMPTION = 99_999_999;
 const commandSchema = z
   .object({
     requestKey: z.string().uuid(),
-    points: z.number().int().positive().max(99_999_999),
+    points: z.number().int().positive().max(MAX_POINTS_PER_REDEMPTION),
   })
   .strict();
 const issueMessage = (error: unknown) =>
@@ -62,6 +63,7 @@ export function ClubRewardsWidget({
   maxDiscountCents,
   appliedCodes,
   onApply,
+  onRemove,
   onBusy,
 }: {
   api: CustomerAccountTransport;
@@ -69,28 +71,37 @@ export function ClubRewardsWidget({
   omsOrderId: number;
   actorKey: string;
   disabled: boolean;
-  maxDiscountCents: number;
+  maxDiscountCents: number | null;
   appliedCodes: string[];
   onApply(code: string): Promise<void>;
+  onRemove(code: string): void;
   onBusy(busy: boolean): void;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const handle = useRef<WidgetHandle | undefined>(undefined);
   const inFlight = useRef(false);
-  const current = useRef({ onApply, onBusy, disabled });
-  current.current = { onApply, onBusy, disabled };
-  const [data, setData] = useState<RewardWidgetState | null>(null);
+  const current = useRef({ onApply, onRemove, onBusy, disabled });
+  current.current = { onApply, onRemove, onBusy, disabled };
+  const [data, setData] = useState<RewardWidgetManagementState | null>(null);
   const [ready, setReady] = useState(
     Boolean(window.CardShellz?.mountRedemptionWidget),
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [points, setPoints] = useState(0);
   const storageKey = `cardshellz:editor-reward:${actorKey}`;
   const refresh = async (signal?: AbortSignal) => {
-    const result = await api.rewards.state(connectionId, omsOrderId, signal);
-    if (!signal?.aborted) setData(result);
-    return result;
+    try {
+      const result = await api.rewards.manage(connectionId, omsOrderId, signal);
+      if (!signal?.aborted) setData(result);
+      return result;
+    } catch (cause) {
+      // Every refresh may follow a successful balance mutation, including one
+      // whose response was lost. Never leave the previous balance spendable.
+      if (!signal?.aborted) setData(null);
+      throw cause;
+    }
   };
   useEffect(() => {
     const abort = new AbortController();
@@ -120,6 +131,7 @@ export function ClubRewardsWidget({
     setBusy(true);
     current.current.onBusy(true);
     setError(null);
+    setNotice(null);
     try {
       await action();
     } catch (cause) {
@@ -130,12 +142,37 @@ export function ClubRewardsWidget({
       current.current.onBusy(false);
     }
   }
+  async function returnToPoints(rewardId: string) {
+    await run(async () => {
+      let returned;
+      try {
+        returned = await api.rewards.cancel(connectionId, omsOrderId, {
+          rewardId,
+          requestKey: crypto.randomUUID(),
+        });
+      } finally {
+        // Cancellation is keyed by the reward in Club. An uncertain response
+        // may already have returned the points; always reread its durable state.
+        try {
+          await refresh();
+        } catch (cause) {
+          throw new Error(
+            `Your latest rewards balance could not be loaded. ${issueMessage(cause)}`,
+          );
+        }
+      }
+      setNotice(
+        `${returned.points.replace(/\.00$/, "")} points returned to your account.`,
+      );
+    });
+  }
   async function issue(
     selectedPoints: number,
     retry?: z.infer<typeof commandSchema>,
   ) {
     await run(async () => {
       const saved = sessionStorage.getItem(storageKey);
+      const recovering = Boolean(retry || saved);
       const command = commandSchema.parse(
         retry ??
           (saved
@@ -161,11 +198,29 @@ export function ClubRewardsWidget({
           ].includes(cause.code ?? "")
         )
           sessionStorage.removeItem(storageKey);
+        // An error can arrive after Club reserved points. Read the canonical
+        // balance and pending request before showing controls again; never keep
+        // displaying the pre-request balance as spendable after an unknown reply.
+        try {
+          await refresh();
+        } catch (refreshCause) {
+          throw new Error(
+            `${issueMessage(cause)} Your latest rewards balance could not be loaded: ${issueMessage(refreshCause)}`,
+          );
+        }
         throw cause;
       }
       sessionStorage.removeItem(storageKey);
       await refresh();
       setPoints(0);
+      if (recovering) {
+        // Issuance recovery is not an instruction to change this order. The
+        // confirmed code now appears in the existing use/return-points list.
+        setNotice(
+          `Your $${reward.value} reward is ready. You can use it or return it to points below.`,
+        );
+        return;
+      }
       try {
         await current.current.onApply(reward.code);
       } catch (cause) {
@@ -181,8 +236,12 @@ export function ClubRewardsWidget({
   const rateUnits = rate
     ? BigInt(rate[1]) * BigInt(100) + BigInt((rate[2] ?? "").padEnd(2, "0"))
     : BigInt(0);
+  const merchandiseCap =
+    (BigInt(Math.max(0, maxDiscountCents ?? 0)) * rateUnits) / BigInt(10_000);
   const maxPoints = Number(
-    (BigInt(Math.max(0, maxDiscountCents)) * rateUnits) / BigInt(10_000),
+    merchandiseCap < BigInt(MAX_POINTS_PER_REDEMPTION)
+      ? merchandiseCap
+      : BigInt(MAX_POINTS_PER_REDEMPTION),
   );
   const model: WidgetModel | null = data
     ? {
@@ -192,7 +251,7 @@ export function ClubRewardsWidget({
         maxPoints,
         pointsPerDollar: data.pointsPerDollar,
         currencyName: data.currencyName,
-        disabled,
+        disabled: disabled || data.pending.length > 0,
         isLoading: busy,
         error,
       }
@@ -225,6 +284,17 @@ export function ClubRewardsWidget({
   return (
     <section className="oe-rewards" aria-label="Club rewards">
       <div ref={container} />
+      {data && maxDiscountCents === 0 && !busy && data.pending.length === 0 && (
+        <p className="oe-reward-value-note">
+          Your items are fully discounted. Rewards can’t be used for shipping or
+          tax.
+        </p>
+      )}
+      {notice && (
+        <p className="oe-reward-notice" role="status">
+          {notice}
+        </p>
+      )}
       {!data && !error && <p role="status">Loading your rewards…</p>}
       {error && (!data || !ready) && <p role="alert">{error}</p>}
       {!data && error && (
@@ -249,27 +319,83 @@ export function ClubRewardsWidget({
           disabled={disabled || busy}
           onClick={() => void issue(pending.points, pending)}
         >
-          Retry saved {pending.points.toLocaleString()} point reward
+          Finish creating {pending.points.toLocaleString()} point reward
         </button>
       ))}
-      {data?.rewards
-        .filter(
-          (reward) =>
-            !appliedCodes.some(
-              (code) => code.toUpperCase() === reward.code.toUpperCase(),
-            ),
-        )
-        .map((reward) => (
-          <button
-            key={reward.code}
-            className="oe-reward-existing"
-            type="button"
-            disabled={disabled || busy}
-            onClick={() => void run(() => current.current.onApply(reward.code))}
+      {data?.rewards.map((reward) => {
+        const selected = appliedCodes.some(
+          (code) => code.toUpperCase() === reward.code.toUpperCase(),
+        );
+        const [whole, fraction = ""] = reward.value.split(".");
+        const valueCents =
+          BigInt(whole) * BigInt(100) + BigInt(fraction.padEnd(2, "0"));
+        const fits =
+          maxDiscountCents !== null && valueCents <= BigInt(maxDiscountCents);
+        const cancelling = reward.status === "cancelling";
+        return (
+          <div
+            key={reward.id}
+            className="oe-saved-reward"
+            role="group"
+            aria-label={`$${reward.value} saved reward`}
           >
-            Use saved ${reward.value} reward <span>{reward.code}</span>
-          </button>
-        ))}
+            <div className="oe-saved-reward-heading">
+              <strong>${reward.value} reward</strong>
+              <span
+                className={`oe-reward-status${selected ? " is-selected" : ""}`}
+              >
+                {selected
+                  ? "Applied"
+                  : cancelling
+                    ? "Return pending"
+                    : "Unused"}
+              </span>
+            </div>
+            <div className="oe-saved-reward-actions">
+              {selected ? (
+                <button
+                  type="button"
+                  disabled={disabled || busy}
+                  onClick={() => current.current.onRemove(reward.code)}
+                >
+                  Remove
+                </button>
+              ) : (
+                <>
+                  {!cancelling && (
+                    <button
+                      type="button"
+                      className="oe-reward-use"
+                      disabled={disabled || busy || !fits}
+                      onClick={() =>
+                        void run(() => current.current.onApply(reward.code))
+                      }
+                    >
+                      Use reward
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={disabled || busy}
+                    onClick={() => void returnToPoints(reward.id)}
+                  >
+                    {cancelling ? "Retry return to points" : "Return to points"}
+                  </button>
+                </>
+              )}
+            </div>
+            {!selected &&
+              !cancelling &&
+              !fits &&
+              maxDiscountCents !== null &&
+              maxDiscountCents > 0 && (
+                <p className="oe-reward-value-note">
+                  This reward is larger than the remaining items total.
+                </p>
+              )}
+          </div>
+        );
+      })}
     </section>
   );
 }

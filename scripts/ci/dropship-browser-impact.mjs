@@ -1,3 +1,4 @@
+import { hasUncertainImpact } from "./test-impact.mjs";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -6,14 +7,18 @@ import { DROPSHIP_BROWSER_FEATURES, validateDropshipFeatureCoverage } from "./dr
 
 // If coverage registration or diff evidence cannot be trusted, the original
 // unfiltered Playwright configuration still discovers and runs all specs.
+// Two full-suite shards exceeded the workflow's 15-minute job budget. Keep
+// complete coverage and the existing budget while using its four worker slots.
+const FULL_BROWSER_SHARDS = 4;
 export function fullDropshipBrowserPlan(reason) {
-  return { run: true, decisions: [{ feature: "all", run: true, reason }], matrix: { include: [
-    { feature: "all", label: "Full coverage fallback", shard: 1, shards: 2 },
-    { feature: "all", label: "Full coverage fallback", shard: 2, shards: 2 },
-  ] } };
+  return { run: true, decisions: [{ feature: "all", run: true, reason }], matrix: { include:
+    Array.from({ length: FULL_BROWSER_SHARDS }, (_, index) => ({
+      feature: "all", label: "Full coverage fallback", shard: index + 1, shards: FULL_BROWSER_SHARDS,
+    })),
+  } };
 }
 
-export function selectDropshipBrowserFeatures({ changes, files, readSource, force = false }) {
+export function selectDropshipBrowserFeatures({ changes, files, readSource, previous, force = false }) {
   try {
     validateDropshipFeatureCoverage(files);
     const definitions = Object.fromEntries(Object.entries(DROPSHIP_BROWSER_FEATURES).map(([name, group]) => [name, {
@@ -26,9 +31,12 @@ export function selectDropshipBrowserFeatures({ changes, files, readSource, forc
       ownedPrefixes: [],
       isolated: true,
     }]));
+    const dependencyCache = new Map();
     const decisions = Object.keys(definitions).map(feature => ({ feature,
-      ...selectBrowserSuite({ suite: feature, changes, files, readSource, force, definitions }),
+      ...selectBrowserSuite({ suite: feature, changes, files, readSource, previous, force, definitions, dependencyCache }),
     }));
+    if (decisions.some(hasUncertainImpact))
+      return { ...fullDropshipBrowserPlan("Dependency evidence is uncertain"), decisions };
     const include = decisions.filter(result => result.run).flatMap(({ feature }) => {
       const { label, shards } = DROPSHIP_BROWSER_FEATURES[feature];
       return Array.from({ length: shards }, (_, index) => ({ feature, label, shard: index + 1, shards }));

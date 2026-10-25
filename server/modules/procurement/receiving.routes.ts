@@ -1,4 +1,6 @@
+import { registerReceivingEntryRoutes } from "./receiving-entry.routes";
 import { ReceivingError } from "./receiving.service";
+import { registerReceiptReversalRoutes } from "./receipt-reversal.routes";
 import { registerReceivingQuarantineRoutes } from "./receiving-quarantine.routes";
 import { withReceivingUnitVersion } from "./receiving-unit-contract";
 import type { Express } from "express";
@@ -63,7 +65,9 @@ function resolveUnitCostPair(
 }
 
 export function registerReceivingRoutes(app: Express) {
+  registerReceivingEntryRoutes(app);
   registerReceivingQuarantineRoutes(app);
+  registerReceiptReversalRoutes(app);
   // ===== RECEIVING ORDERS API =====
   
   app.get("/api/receiving", requireAuth, async (req, res) => {
@@ -107,34 +111,17 @@ export function registerReceivingRoutes(app: Express) {
       const vendor = order.vendorId ? await storage.getVendorById(order.vendorId) : null;
       console.log("[RECEIVING] Vendor:", vendor ? vendor.name : "none");
       
-      res.json({ ...order, lines: lines.map(withReceivingUnitVersion), vendor });
+      const capabilities = await req.app.locals.services.receiptReversal.getReturnReversalCapabilities(id);
+      const enrichedLines = lines.map(line => {
+        const reversalCapability = capabilities.lines.get(line.id);
+        if (!reversalCapability) throw new Error("Receipt lines changed while loading return history; reload the receipt");
+        return { ...withReceivingUnitVersion(line), reversalCapability };
+      });
+      res.json({ ...order, lines: enrichedLines, vendor, reversalCapability: capabilities.order });
     } catch (error: any) {
       console.error("[RECEIVING] Error fetching receiving order:", error?.message || error);
       console.error("[RECEIVING] Stack:", error?.stack);
       res.status(500).json({ error: "Failed to fetch receiving order", details: error?.message });
-    }
-  });
-  
-  app.post("/api/receiving", requirePermission("inventory", "adjust"), async (req, res) => {
-    try {
-      const { sourceType, vendorId, warehouseId, poNumber, asnNumber, expectedDate, notes } = req.body;
-      const { receiving: rcvService } = req.app.locals.services;
-      const order = await rcvService.createOrder({
-        sourceType,
-        vendorId,
-        warehouseId,
-        poNumber,
-        asnNumber,
-        expectedDate,
-        notes,
-      }, req.session.user?.id || null);
-      
-      res.status(201).json(order);
-    } catch (error: any) {
-      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error creating receiving order:", error?.message || error);
-      if (error?.stack) console.error(error.stack);
-      res.status(500).json({ error: "Failed to create receiving order", details: error?.message });
     }
   });
   
@@ -232,59 +219,6 @@ export function registerReceivingRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching receiving lines:", error);
       res.status(500).json({ error: "Failed to fetch receiving lines" });
-    }
-  });
-  
-  app.post("/api/receiving/:orderId/lines", requirePermission("inventory", "adjust"), async (req, res) => {
-    try {
-      const orderId = parseInt(req.params.orderId);
-      const {
-        sku,
-        productName,
-        expectedQty,
-        receivedQty,
-        productVariantId,
-        expectedUnitsPerVariant,
-        productId,
-        barcode,
-        unitCost,
-        unit_cost_mills,
-        unitCostMills,
-        putawayLocationId,
-      } = req.body;
-
-      // Accept both snake_case (API idiom) and camelCase (internal idiom).
-      // Mills is authoritative when provided; cents is either independently
-      // provided or derived. Disagreeing pairs are rejected to match the PO
-      // contract (purchasing.service.validateCreateWithLinesInput).
-      const resolved = resolveUnitCostPair(
-        unit_cost_mills ?? unitCostMills,
-        unitCost,
-      );
-      if (resolved.error) {
-        return res.status(400).json({ error: resolved.error });
-      }
-
-      const { receiving: rcvService } = req.app.locals.services;
-      const updatedOrder = await rcvService.addLine(orderId, {
-        sku: sku || null,
-        productName: productName || null,
-        expectedQty: expectedQty ?? 0,
-        receivedQty: receivedQty ?? 0,
-        damagedQty: 0,
-        productVariantId: productVariantId || null,
-        expectedUnitsPerVariant,
-        productId: productId || null,
-        barcode: barcode || null,
-        unitCost: resolved.cents,
-        unitCostMills: resolved.mills,
-        putawayLocationId: putawayLocationId || null,
-      });
-      res.status(201).json(updatedOrder);
-    } catch (error: any) {
-      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error creating receiving line:", error);
-      res.status(500).json({ error: "Failed to create receiving line" });
     }
   });
   
@@ -420,62 +354,7 @@ export function registerReceivingRoutes(app: Express) {
     }
   });
 
-  // ===== RECEIPT REVERSALS (Spec D) =====
-  //
-  // Posted (closed) receipts are immutable; corrections happen via reversal.
-  // Elevated gate: purchasing:approve (same as PO void — a financial
-  // correction permission). Idempotency-Key header is required so a retried
-  // reversal cannot double-apply.
-
-  app.post(
-    "/api/procurement/receiving-lines/:id/reverse",
-    requirePermission("purchasing", "approve"),
-    requireIdempotency(),
-    async (req, res) => {
-      try {
-        const { receiptReversal } = req.app.locals.services;
-        const headerKey = req.headers["idempotency-key"] || req.headers["x-idempotency-key"];
-        const result = await receiptReversal.reverseReceivingLine({
-          receivingLineId: Number(req.params.id),
-          qty: Number(req.body?.qty),
-          reason: String(req.body?.reason ?? ""),
-          idempotencyKey: typeof headerKey === "string" ? headerKey : String(req.body?.idempotencyKey ?? ""),
-          allowNegative: req.body?.allowNegative === true,
-          userId: req.session.user?.id ?? null,
-        });
-        res.json(result);
-      } catch (error: any) {
-        if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-        console.error("[Receiving] Error reversing receiving line:", error);
-        res.status(500).json({ error: "Failed to reverse receiving line" });
-      }
-    },
-  );
-
-  app.post(
-    "/api/procurement/receiving-orders/:id/reverse",
-    requirePermission("purchasing", "approve"),
-    requireIdempotency(),
-    async (req, res) => {
-      try {
-        const { receiptReversal } = req.app.locals.services;
-        const headerKey = req.headers["idempotency-key"] || req.headers["x-idempotency-key"];
-        const result = await receiptReversal.reverseReceivingOrder({
-          receivingOrderId: Number(req.params.id),
-          reason: String(req.body?.reason ?? ""),
-          idempotencyKey: typeof headerKey === "string" ? headerKey : String(req.body?.idempotencyKey ?? ""),
-          allowNegative: req.body?.allowNegative === true,
-          userId: req.session.user?.id ?? null,
-        });
-        res.json(result);
-      } catch (error: any) {
-        if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-        console.error("[Receiving] Error reversing receiving order:", error);
-        res.status(500).json({ error: "Failed to reverse receiving order" });
-      }
-    },
-  );
-
+  // Immutable reversal history; writes use the durable reversal command routes.
   app.get(
     "/api/procurement/receiving-orders/:id/reversals",
     requireAuth,

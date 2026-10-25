@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000017000018580001_catalog_publication_media_versions.sql",
+  "generation": 17,
+  "pr": 1858,
+  "ordinal": 1,
+  "after": [
+    "900000016000018560001_quantity_publication_archived_catchup_settlement.sql"
+  ]
+}

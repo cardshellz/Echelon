@@ -137,7 +137,7 @@ class CoordinatedCredentialRepository implements DropshipMarketplaceCredentialRe
   current: DropshipMarketplaceStoreCredentials = {
     ...identity, platform: "ebay", status: "connected", shopDomain: null,
     externalAccountId: "seller", externalDisplayName: "Seller",
-    providerEnvironment: "production", externalAccountIdentityScheme: "ebay_user_id",
+    providerEnvironment: "production", externalAccountIdentityScheme: "provider_user_id",
     externalAccountVerifiedAt: new Date("2026-09-01T00:00:00.000Z"),
     config: { ...policyConfig, cancellation: { cancelReason: "BuyerCancelOrder", buyerPaid: false } },
     accessToken: "expired-token", accessTokenRef: "expired-ref",
@@ -192,6 +192,7 @@ class CoordinatedCredentialRepository implements DropshipMarketplaceCredentialRe
 function makeFetch(repo: CoordinatedCredentialRepository) {
   // The order's eBay shipments: tracking reads them before and after it adds one.
   const shipments: Array<Record<string, unknown>> = [];
+  const items = new Map<string, Record<string, unknown>>();
   return vi.fn<typeof fetch>(async (url, init) => {
     const parsed = new URL(String(url));
     expect(parsed.origin).toBe("https://api.ebay.com");
@@ -215,7 +216,14 @@ function makeFetch(repo: CoordinatedCredentialRepository) {
     if (parsed.pathname === "/post-order/v2/cancellation") return jsonResponse({ cancelId: "cancel-1" });
     if (parsed.pathname === "/sell/inventory/v1/offer" && init?.method === "GET") return jsonResponse({ offers: [] });
     if (parsed.pathname === "/sell/inventory/v1/offer" && init?.method === "POST") return jsonResponse({ offerId: "offer-1" }, 201);
-    if (parsed.pathname.startsWith("/sell/inventory/v1/inventory_item/") && init?.method === "PUT") return new Response(null, { status: 204 });
+    if (parsed.pathname.startsWith("/sell/inventory/v1/inventory_item/")) {
+      const sku = decodeURIComponent(parsed.pathname.split("/").at(-1)!);
+      if (init?.method === "GET") return items.has(sku) ? jsonResponse(items.get(sku)) : jsonResponse({ errors: [{ errorId: 25710 }] }, 404);
+      if (init?.method === "PUT") {
+        items.set(sku, { ...JSON.parse(String(init.body)), sku });
+        return new Response(null, { status: 204 });
+      }
+    }
     if (parsed.pathname === "/sell/inventory/v1/offer/offer-1" && init?.method === "PUT") return new Response(null, { status: 204 });
     throw new Error(`Unexpected request: ${init?.method} ${parsed.pathname}`);
   });
@@ -225,7 +233,8 @@ async function runConsumer(name: ConsumerName, repo: DropshipMarketplaceCredenti
   if (name === "order intake") {
     return new EbayDropshipOrderIntakeProvider(repo, fetchFn, clock).fetchOrders({
       // A store with no dropship listing never calls eBay, so this store has one.
-      connection: { ...identity, platform: "ebay", lastOrderSyncAt: null, dropshipListingIds: ["listing-1"] },
+      connection: { ...identity, platform: "ebay", lastOrderSyncAt: null, dropshipListingIds: ["listing-1"],
+        itemNumbers: [{ listingId: 1, externalListingId: "listing-1" }], listingSkus: [] },
       since: NOW, until: NOW,
     });
   }
@@ -260,7 +269,10 @@ async function runConsumer(name: ConsumerName, repo: DropshipMarketplaceCredenti
   }, {
     ensureForStoreConnection: async () => location,
     ensureWithAccessToken: async () => location,
-  }, () => createAdmittedEbayQuantityTestOwner());
+  }, () => createAdmittedEbayQuantityTestOwner(), undefined, {
+    // Legacy inventory authority: the push links no stock (Fix PR 2a-2 gate).
+    stockReadiness: { begin: async () => ({ authority: "legacy", mustLink: false }), ensureLinked: async () => undefined },
+  });
   if (name === "listing replacement") {
     return provider.createReplacementLifecycleClient({ ...identity, marketplaceConfig: policyConfig });
   }

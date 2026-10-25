@@ -1,3 +1,5 @@
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // These owner units isolate SQL row fixtures from the shared lock boundary.
@@ -39,13 +41,13 @@ function makeHarness(opts: {
     return chain;
   };
 
-  // tx.execute is used for (1) the mid-pick conflict probe, then (2) re-point.
-  const executeQueue = [
-    { rows: [] }, // Pin the SKU unit basis before recording the physical receipt.
-    { rows: opts.conflictRows ?? [] },
-    { rows: opts.repointRows ?? [] },
-  ];
-  const execute = vi.fn(() => Promise.resolve(executeQueue.shift() ?? { rows: [] }));
+  const dialect = new PgDialect();
+  const execute = vi.fn((statement: SQL) => {
+    const query = dialect.sqlToQuery(statement).sql;
+    if (query.includes("FROM wms.order_items oi")) return Promise.resolve({ rows: opts.conflictRows ?? [] });
+    if (query.includes("UPDATE wms.order_items")) return Promise.resolve({ rows: opts.repointRows ?? [] });
+    return Promise.resolve({ rows: [] });
+  });
 
   const tx = { select: makeSelectChain, execute };
 

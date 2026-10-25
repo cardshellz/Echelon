@@ -1,3 +1,4 @@
+import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
 import { z } from "zod";
 import type { MarketplaceObservedListingPublication } from "../marketplace-listings";
 import type {
@@ -36,7 +37,7 @@ export interface PreparedEbayListingSync {
   client: EbayListingLifecycleClient;
   draft: Pick<
     EbayListingConnectorDraft,
-    "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup"
+    "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup" | "preparedIntent"
   >;
   variants: Array<{
     variantId: number;
@@ -80,6 +81,10 @@ export class EbayExistingListingSyncExecution
     // A later retry cannot silently switch this job to another group or offer.
     if (prepared.providerObservation) await bindProviderIdentity?.(resolvedIdentity, prepared.providerObservation, prepared.sourceIdentity);
     else await bindProviderIdentity?.(resolvedIdentity);
+    if (prepared.draft.preparedIntent) {
+      if (!context?.persistPreparedIntent) throw new EbayListingSyncError("EBAY_PUBLICATION_OWNER_REQUIRED", "The prepared listing requires its saved-job evidence owner.");
+      await context.persistPreparedIntent(prepared.draft.preparedIntent);
+    }
     let hasRecurringRecovery = false;
     await stage("recover_prior_requests", syncIdentityHash(resolvedIdentity), async () => {
       ({ hasRecurringRecovery } = await recoverPriorEbayListingRequests({ identity: resolvedIdentity,
@@ -183,6 +188,7 @@ export interface EbayListingSyncClaim {
   release(): Promise<void>;
 }
 export interface EbayListingSyncStore {
+  persistPreparedIntent?(job: StoredEbayListingSyncJob, intent: ChannelPreparedIntent, now: Date): Promise<void>;
   assertPublicationOwner?(job: StoredEbayListingSyncJob): Promise<void>;
   recoverTerminalPublicationWrite?(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<"rejected" | "not_sent" | null>;
   authorizePublicationRetry(input: EbayPublicationRetryAuthorization, now: Date): Promise<{ job: StoredEbayListingSyncJob; replayed: boolean }>;
@@ -227,6 +233,7 @@ export interface EbayListingSyncStore {
       message: string | null;
       nextAttemptAt: Date;
       resetAttempts?: boolean;
+      readRetry?: { failures: number; paused: boolean };
       diagnostic?: EbayListingFailureDiagnostic;
     },
     now: Date,
@@ -247,6 +254,7 @@ export interface EbayListingSyncExecution {
   ): Promise<EbayProductSyncResult>;
 }
 export interface EbayListingExecutionContext {
+  persistPreparedIntent?: (intent: ChannelPreparedIntent) => Promise<void>;
   recoverTerminalPublicationWrite?: (identity: EbayListingSyncIdentity) => Promise<"rejected" | "not_sent" | null>;
   jobId?: string;
   requestedBy?: string;
@@ -377,6 +385,7 @@ export class EbayListingSyncService {
                   if (recovered) publicationProgress.started = false;
                   return recovered;
                 } } : {}),
+                ...(this.store.persistPreparedIntent ? { persistPreparedIntent: (intent: ChannelPreparedIntent) => this.store.persistPreparedIntent!(job, intent, this.now()) } : {}),
                 bindPublicationTarget: target => this.store.bindPublicationTarget(job, target, this.now()),
                 bindPublicationAccepted: async accepted => { await this.store.bindPublicationAccepted(job, accepted, this.now()); publicationProgress.accepted = accepted; } },
             ),
@@ -398,7 +407,7 @@ export class EbayListingSyncService {
           result.processed++;
         } catch (error) {
           result.failed++;
-          const failure = syncFailure(error, job.attempts, this.now());
+          const failure = syncFailure(error, job.attempts, this.now(), job.readFailureCount ?? 0);
           // Never retire a publication's unresolved write barrier. A new command
           // must join this job and retain its acceptance/start evidence.
           if (job.operation === "publish" && (publicationProgress.started || publicationProgress.completed || publicationProgress.accepted)) {
@@ -450,6 +459,9 @@ export class EbayListingSyncService {
     return job ? this.withIssue(job) : null;
   }
   private withIssue<T extends EbayListingSyncJob>(job: T): T {
+    // The repository's revision-fenced diagnostic projection carries source
+    // fields that a code-only fallback cannot reconstruct. Keep that evidence.
+    if (job.issue?.code === job.code) return job;
     return job.code || job.state === "needs_attention" || job.state === "awaiting_evidence"
       ? { ...job, issue: resolveEbayListingIssue({ ...job, jobId: job.id }) }
       : job;

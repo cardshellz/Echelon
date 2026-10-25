@@ -22,3 +22,9 @@ export function isMissingEbayInventoryResource(error: unknown): boolean {
     // https://developer.ebay.com/api-docs/sell/inventory/resources/inventory_item/methods/getInventoryItem
     || (error.statusCode === 400 && error.errorIds.some(id => id === 25702 || id === 25710)));
 }
+
+/** A missing offer collection is an authoritative 404/25713 response. Mixed
+ * error results and unknown 404s remain failures, never permission to create. */
+export function isMissingEbayOfferCollection(status: number | undefined, errorIds: readonly number[]): boolean {
+  return status === 404 && errorIds.length > 0 && errorIds.every(id => id === 25713);
+}

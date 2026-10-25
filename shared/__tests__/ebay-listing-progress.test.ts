@@ -146,6 +146,15 @@ describe("independent stock reconciliation evidence", () => {
       expect(ebayInventoryReconciliationSchema.safeParse({ ...inventoryReconciliation, ...invalid }).success).toBe(false);
     }
   });
+  it("describes archived monitoring as inactive without claiming stock or removal verification", () => {
+    const status = { ...inventoryReconciliation, state: "inactive" as const, nextCheckAt: null };
+    expect(ebayInventoryReconciliationSchema.safeParse(status).success).toBe(true);
+    expect(presentEbayListingJob({ ...job, inventoryReconciliation: status }).inventory).toEqual({
+      summary: "Stock monitoring is inactive for archived variants.",
+      detail: "These variants are excluded from stock updates. Their removal from the sales channel is tracked separately.",
+      code: null, times: [],
+    });
+  });
 });
 
 describe("actionable saved eBay failures", () => {
@@ -183,10 +192,19 @@ describe("actionable saved eBay failures", () => {
     const issue = resolveEbayListingIssue({ code: "EBAY_SHIPPING_POLICY_REJECTED", productId: 1, jobId: job.id,
       state: "needs_attention", message });
     expect(issue).toMatchObject({ title: "eBay rejected the shipping policy", message, retryable: false,
-      action: { kind: "edit_listing", label: "Open business policies", href: "/channels/ebay#business-policies" } });
-    expect(issue.nextStep).toContain("Fulfillment override");
+      action: { kind: "edit_listing", label: "Open policy settings", href: "/channels/ebay#ebay-product-policies-1" } });
+    expect(issue.nextStep).toContain("unavailable saved policy remains active");
     expect(issue.nextStep).toContain("save, then Sync");
     expect(issue.nextStep).not.toMatch(/administrator|automatically|inventory settings/);
+  });
+  it.each([
+    [{ scope: "store" as const }, "/channels/ebay#business-policies"],
+    [{ scope: "category" as const, productTypeSlug: "top/loaders" }, "/channels/ebay#ebay-category-policies-top%2Floaders"],
+    [{ scope: "product" as const, productId: 232 }, "/channels/ebay#ebay-product-policies-232"],
+    [{ scope: "variant" as const, productId: 232, variantId: 463 }, "/channels/ebay#ebay-variant-policies-463"],
+  ])("directs unavailable policy recovery to its supplied source %j", (policySource, href) => {
+    expect(resolveEbayListingIssue({ code: "EBAY_POLICY_UNAVAILABLE", productId: 1, policySource }).action)
+      .toEqual({ kind: "edit_listing", label: "Open policy settings", href });
   });
   it("offers normal sync for the classified canonical mapping preparation failure", () => {
     const issue = resolveEbayListingIssue({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING", jobId: job.id,

@@ -15,7 +15,8 @@ export const channelShipmentRuntimeFixtureSql = `
   CREATE TABLE oms.oms_order_lines (id bigint PRIMARY KEY, order_id bigint, external_line_item_id text,
     paid_quantity integer, authority_fulfillable_quantity integer, product_variant_id integer, sku text,
     requires_shipping boolean,
-      catalog_product_id integer, inventory_tracking boolean
+      catalog_product_id integer, inventory_tracking boolean,
+      channel_current_quantity integer,channel_quantity_updated_at timestamptz
     );
   CREATE TABLE oms.oms_order_line_authority_events (order_line_id bigint, paid_quantity integer);
   CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text);

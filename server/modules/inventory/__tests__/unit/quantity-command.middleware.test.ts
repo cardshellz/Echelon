@@ -1,3 +1,4 @@
+import { DocumentNumberError } from "../../../../platform/document-numbering/document-number";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Request, Response, NextFunction } from "express";
 const query = vi.hoisted(() => vi.fn());
@@ -37,6 +38,13 @@ describe("inventory quantity HTTP boundary", () => {
     const next = vi.fn();
     await requireLegacyQuantityImport({} as Request, response() as unknown as Response, next as NextFunction);
     expect(next).toHaveBeenCalledWith(error);
+  });
+  it("returns lot-number exhaustion as a structured conflict for receiving and legacy import callers", () => {
+    const res = response();
+    const error = new DocumentNumberError("DOCUMENT_NUMBER_EXHAUSTED", "Automatic lot numbering is exhausted.");
+    expect(sendInventoryQuantityError(res as unknown as Response, error)).toBe(true);
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ code: error.code, error: error.message });
   });
   it("returns actionable structured conflicts but does not mask unrelated failures", () => {
     const res = response();

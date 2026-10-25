@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { reconciliationDestinations, reconciliationReportSchema } from "@shared/procurement/cost-reconciliation";
+import { historicalCostComponentLabels, reconciliationDestinations, reconciliationReportSchema } from "@shared/procurement/cost-reconciliation";
 import { formatShipmentExceptionAmount } from "@shared/procurement/shipment-cost-exception";
 import { apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -18,7 +18,7 @@ export function HistoricalCostAdjustments() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Historical shipment cost adjustments</CardTitle>
+        <CardTitle>Historical cost adjustments</CardTitle>
         <CardDescription>
           Approved costs for stock with incomplete movement history. These postings are separate from costs assigned to
           individual orders.
@@ -65,7 +65,7 @@ export function HistoricalCostAdjustments() {
                         </span>
                       </div>
                       <p>
-                        {posting.sku} · Approved by {posting.actorName} ·{" "}
+                        {posting.sku} · {historicalCostComponentLabels[posting.component ?? "landed"]} · Approved by {posting.actorName} ·{" "}
                         {new Date(posting.recordedAt).toLocaleString()}
                       </p>
                       <p>{posting.reason}</p>

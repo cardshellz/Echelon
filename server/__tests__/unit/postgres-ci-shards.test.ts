@@ -58,6 +58,21 @@ function runnerFixture() {
 describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves prior coverage with the explicitly retired duplicate invoice owner, the retired bulk policy writer suite and reviewed additions", () => {
     const addedSuites = [
+      "server/modules/procurement/__tests__/integration/document-relationships.integration.test.ts",
+      "server/modules/customer-account/__tests__/integration/customer-account-order-context.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/channel-sync-batch.integration.test.ts",
+      "server/modules/channels/__tests__/integration/channel-listing-feed.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/rfq-work-list.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/supplier-credit.integration.test.ts",
+      "server/modules/channels/__tests__/integration/channel-pricing-owner.integration.test.ts",
+      "server/modules/channels/__tests__/integration/channel-pricing-routes.integration.test.ts",
+      "server/modules/channels/__tests__/integration/channel-price-provenance.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/prepared-channel-intent.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/listing-intent-propagation.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/listing-intent-lifecycle.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/shipment-create-recovery.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/shipment-work-list.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/ap-work-lists.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-settings.integration.test.ts",
       "server/modules/procurement/__tests__/integration/supplier-evidence-import.integration.test.ts",
       "server/modules/procurement/__tests__/integration/purchase-rfq-requests.integration.test.ts",
@@ -66,10 +81,12 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/channels/__tests__/integration/channel-stock-selection.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-stock-publication-selection.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/publication-selection-work.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/quantity-publication-catchup-archive.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/stock-selection-publication-flow.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-readback-selection.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-quantity-amendment.integration.test.ts",
       "server/modules/inventory/__tests__/integration/lot-cost-ownership.integration.test.ts",
+      "server/modules/inventory/__tests__/integration/lot-number-allocation.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history-reader.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history.integration.test.ts",
       "server/modules/catalog/__tests__/integration/inventory-tracking-policy.integration.test.ts",
@@ -88,7 +105,14 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/procurement-rfq-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-payment-controlled-acceptance.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/document-number-prefix-indexes.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-canonical-acceptance-stage.integration.test.ts",
+      // eBay adoption account identity: the reader's SQL ownership proof and the loader/reader/CHECK agreement.
+      "server/modules/dropship/__tests__/integration/dropship-ebay-push-publication-reader.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-ebay-publication-account-identity.integration.test.ts",
+      // Live listings stay orderable through queued/failed updates; demoted rows, below-cost pauses and account-check refusals recover.
+      "server/modules/dropship/__tests__/integration/dropship-listing-live-status.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-cost-change-hold-restore.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-global-control.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-resume.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-enable.integration.test.ts",
@@ -138,10 +162,15 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-finance.integration.test.ts",
       "server/modules/order-edits/__tests__/integration/order-edit-warehouse.integration.test.ts",
       "server/modules/oms/__tests__/integration/order-edit-paid-projection.integration.test.ts",
+      "server/modules/oms/__tests__/integration/wms-sync-existing-shipment-claim.integration.test.ts",
       "server/modules/catalog/__tests__/integration/catalog-variant-publication-photos.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-listing-photos.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-listing-sync-recovery.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-automatic-sync-recovery.integration.test.ts",
+      "server/modules/channels/__tests__/integration/ebay-listing-policy-source.integration.test.ts",
+  "server/modules/channels/__tests__/integration/ebay-business-policies.integration.test.ts",
+  "server/modules/channels/__tests__/integration/ebay-policy-publication.integration.test.ts",
+  "server/modules/channels/__tests__/integration/ebay-policy-connection-metadata.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-automatic-publication-recovery.integration.test.ts",
       "server/modules/shipping/__tests__/integration/ordinary-split-parcels.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-listing-settings.integration.test.ts",
@@ -152,25 +181,63 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/channels/__tests__/integration/ebay-listing-mapping-repair.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-publication-stock.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-readiness.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/ebay-archived-group-admission.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope-authority.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-preflight.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-rejection.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/ebay-outbox-preflight-recovery.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/quantity-publication-listing-scope.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/quantity-provider-request-evidence.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-product-category-listing-settings.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-ebay-category-rules.integration.test.ts",
       "server/modules/procurement/__tests__/integration/supplier-po-document.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/listing-lifecycle.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/listing-member-lifecycle.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/listing-presence.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
+      // Dropship eBay stock link: mapping-preparation destinations by store platform, the link writer, and row isolation.
+      "server/modules/inventory-planning/__tests__/integration/publication-mapping-preparation-dropship-target.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/dropship-ebay-stock-readiness.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/runtime-publication-row-isolation.integration.test.ts",
+      // Dropship eBay push end to end with its automatic stock link (real admission, planner and reader; fake eBay HTTP).
+      "server/modules/dropship/__tests__/integration/dropship-ebay-push-stock-link.integration.test.ts",
+      // Publish runs (step 1 plan S2-5, PR A): the new runs suite, and the worker repository suite that ran nowhere (TESTS5).
+      "server/modules/dropship/__tests__/integration/dropship-listing-push-runs.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-listing-push-worker.repository.integration.test.ts",
+      // Catalog reads, release readiness and orders during re-sends (step 1 plan S2-5, PR A2; TESTS2, §4.9, §4.7).
+      "server/modules/dropship/__tests__/integration/dropship-vendor-catalog-read.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-release-readiness.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-order-listing-acceptability.integration.test.ts",
+      // Channels PR1: a refused Shopify stock update dead-letters at once and shows on Ops Health (real outbox; fake Shopify HTTP).
+      "server/modules/inventory-planning/__tests__/integration/channel-stock-update-dead-letter.integration.test.ts",
+      // eBay sync-back (plan v4 §11 PG): the migration through the release executor, and its repositories.
+      "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-migration.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-repositories.integration.test.ts",
+      // eBay sync-back's sweep (plan v4 §6): the adoption transaction, the quantity decision, selection, dead letters, ops-health SQL.
+      "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-sweep.integration.test.ts",
+      // eBay sync-back's order fixes (plan v4 §7): stuck orders, eBay cancels with OMS's stop and the refund, parked lines; OMS's stop.
+      "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-orders.integration.test.ts",
+      "server/modules/oms/__tests__/integration/dropship-marketplace-cancel.integration.test.ts",
     ];
     addedSuites.push(
+      "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-financial-evidence.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-financial-followup.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-financial-exceptions.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/po-exception-lifecycle.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/purchase-order-entry-recovery.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-financial-refresh.integration.test.ts",
       "server/modules/procurement/__tests__/integration/invoice-replacement.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/shipment-invoice-ownership-guard.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/shipment-billing-ownership.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-value-allocation.integration.test.ts",
       "server/modules/procurement/__tests__/integration/receiving-quarantine.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/procurement-lifecycle-quarantine.integration.test.ts",
       "server/modules/inventory/__tests__/integration/receiving-custody-count-guard.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/channel-package-propagation.integration.test.ts",
+      "server/modules/oms/__tests__/integration/channel-merchandise-quantity.integration.test.ts",
+      "server/modules/oms/__tests__/integration/shopify-merchandise-refund.integration.test.ts",
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);
@@ -398,6 +465,25 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(new Set(databaseNames).size).toBe(firstShardFileCount);
   });
 
+  it("executes a selected one-file plan in its own database and rejects mismatched or empty plans before connecting", async () => {
+    const fixture = runnerFixture();
+    const selected = POSTGRES_TEST_FILES[0];
+    const environment = { ...disposableEnvironment, POSTGRES_SELECTED_TEST_FILES: JSON.stringify([selected]) };
+    expect(await runPostgresShard(["1/1"], environment, fixture.dependencies)).toBe(0);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledOnce();
+    expect(vi.mocked(fixture.dependencies.runTest).mock.calls[0][0]).toContain(selected);
+    expect(fixture.connections).toHaveLength(1);
+    expect(fixture.connections[0].query.mock.calls.map(call => call[0])).toEqual([
+      'CREATE DATABASE "echelon_ci_s1_00000000000040008000000000000001"',
+      'DROP DATABASE "echelon_ci_s1_00000000000040008000000000000001" WITH (FORCE)',
+    ]);
+    const invalid = runnerFixture();
+    for (const args of [["1/8"], ["2/1"]])
+      await expect(runPostgresShard(args, environment, invalid.dependencies)).rejects.toThrow("Shard index");
+    await expect(runPostgresShard(["1/1"], { ...environment, POSTGRES_SELECTED_TEST_FILES: "[]" }, invalid.dependencies)).rejects.toThrow();
+    expect(invalid.createAdminConnection).not.toHaveBeenCalled();
+  });
+
   it("never drops a database when CREATE fails or collides, and continues the remaining files", async () => {
     const fixture = runnerFixture();
     const ordinaryCreate = fixture.createAdminConnection.getMockImplementation()!;
@@ -481,25 +567,25 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(fixture.dependencies.runTest).not.toHaveBeenCalled();
   });
 
-  it("keeps all shards on every PR/main push and retains both stable check identities", () => {
+  it("uses an explicit selected plan and retains both stable check identities", () => {
     const workflow = readFileSync(resolve(POSTGRES_REPOSITORY_ROOT, ".github/workflows/ci.yml"), "utf8");
     expect(workflow).toMatch(/on:\s*pull_request:\s*push:\s*branches: \[main\]/);
     expect(workflow).not.toMatch(/paths(?:-ignore)?:|continue-on-error:/);
     expect(workflow).toContain("name: Typecheck + unit tests");
     expect(workflow).toContain("run: npm run check");
-    expect(workflow).toContain("run: npm run test:unit");
+    expect(workflow).toContain("run: node scripts/ci/run-test-lane.mjs unit");
     expect(workflow).toContain("fail-fast: false");
     expect(workflow).toContain("timeout-minutes: 20");
-    expect(workflow).toContain("shard: [1, 2, 3, 4, 5, 6, 7, 8]");
-    expect(workflow).toContain("POSTGRES_SHARD: " + "$" + "{{ matrix.shard }}/8");
+    expect(workflow).toContain("matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}");
+    expect(workflow).toContain("POSTGRES_SELECTED_TEST_FILES: ${{ needs.preflight.outputs.files }}");
+    expect(workflow).toContain("POSTGRES_SHARD: ${{ matrix.shard }}/${{ matrix.count }}");
     expect(workflow).toContain('node --import tsx scripts/ci/postgres-tests.ts "$POSTGRES_SHARD"');
     expect(workflow).toContain("image: postgres:16");
     expect(workflow).toContain('ECHELON_TEST_DATABASE_DISPOSABLE: "true"');
     expect(workflow).toContain("path: test-results/postgres-hardening-" + "$" + "{{ matrix.shard }}/");
     expect(workflow).toContain("name: PostgreSQL hardening tests");
-    expect(workflow).toContain("needs: [postgres-hardening-shard]");
+    expect(workflow).toContain("needs: [preflight, postgres-hardening-shard]");
     expect(workflow).toContain("if: " + "$" + "{{ always() }}");
-    expect(workflow).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
-    expect(workflow).toMatch(/exit 1\s+fi/);
+    expect(workflow).toContain("node scripts/ci/require-selected-success.mjs postgres-hardening-shard");
   });
 });

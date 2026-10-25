@@ -1,0 +1,353 @@
+{
+  "fixture": "reward-edit-c609e766-d759-4f58-9",
+  "shop": "cardshellz-staging.myshopify.com",
+  "startedAt": "2026-10-20T20:11:22.019Z",
+  "realOrdersChanged": 0,
+  "realPointsChanged": 0,
+  "sourceRevision": "42992b0be1a3d79bb355207b3af720a6c1650882",
+  "inventoryRecoveryKey": "6819e4c4-5dc8-45a1-8055-8eb36efaa7fb",
+  "inventoryBefore": 50,
+  "deliveryService": "Standard",
+  "order": {
+    "id": "gid://shopify/Order/8148800536774",
+    "name": "#1026"
+  },
+  "results": {
+    "originalAppliedCents": 279,
+    "originalFaceCents": 723,
+    "newRewardCents": 233,
+    "newRewardCode": "SHELLZ-ADCBBBC50072B39BEA7ACB15",
+    "remainingMerchandiseCents": 88362,
+    "previewAgrees": true,
+    "lostReservationResponseRecovered": true,
+    "unpaidRecoveryReconciles": true,
+    "retryUsesSameReward": true,
+    "paidCommitReconciles": true,
+    "ledger": {
+      "balance": "44.00",
+      "rewards": [
+        {
+          "code": "REWARD-EDIT-C609E766-D759-4F58-9",
+          "status": "used",
+          "points": "723.00"
+        },
+        {
+          "code": "SHELLZ-ADCBBBC50072B39BEA7ACB15",
+          "status": "used",
+          "points": "233.00"
+        }
+      ]
+    }
+  },
+  "inventoryRestoredUnits": 1,
+  "cleanup": [
+    {
+      "kind": "code",
+      "id": "gid://shopify/DiscountCodeNode/1917129621702",
+      "deleted": true
+    },
+    {
+      "kind": "order",
+      "id": "gid://shopify/Order/8148800536774",
+      "deleted": true
+    },
+    {
+      "kind": "draft",
+      "id": "gid://shopify/DraftOrder/1082021839046",
+      "deleted": true
+    },
+    {
+      "kind": "code",
+      "id": "gid://shopify/DiscountCodeNode/1917129588934",
+      "deleted": true
+    },
+    {
+      "kind": "customer",
+      "id": "gid://shopify/Customer/10150082773190",
+      "deleted": true
+    }
+  ],
+  "inventoryAfter": 50,
+  "finishedAt": "2026-10-20T20:12:24.849Z",
+  "nativeOrderProof": {
+    "id": "gid://shopify/Order/8148800536774",
+    "name": "#1026",
+    "fullyPaid": true,
+    "currentSubtotalPriceSet": {
+      "presentmentMoney": {
+        "amount": "883.62",
+        "currencyCode": "USD"
+      },
+      "shopMoney": {
+        "amount": "883.62",
+        "currencyCode": "USD"
+      }
+    },
+    "currentShippingPriceSet": {
+      "presentmentMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      },
+      "shopMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      }
+    },
+    "currentTotalTaxSet": {
+      "presentmentMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      },
+      "shopMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      }
+    },
+    "currentTotalPriceSet": {
+      "presentmentMoney": {
+        "amount": "883.62",
+        "currencyCode": "USD"
+      },
+      "shopMoney": {
+        "amount": "883.62",
+        "currencyCode": "USD"
+      }
+    },
+    "totalOutstandingSet": {
+      "presentmentMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      },
+      "shopMoney": {
+        "amount": "0.0",
+        "currencyCode": "USD"
+      }
+    },
+    "netPaymentSet": {
+      "presentmentMoney": {
+        "amount": "883.62",
+        "currencyCode": "USD"
+      },
+      "shopMoney": {
+        "amount": "883.62",
+        "currencyCode": "USD"
+      }
+    },
+    "discountApplications": {
+      "nodes": [
+        {
+          "__typename": "ManualDiscountApplication",
+          "index": 0,
+          "targetType": "LINE_ITEM",
+          "allocationMethod": "EACH",
+          "targetSelection": "EXPLICIT",
+          "value": {
+            "__typename": "MoneyV2",
+            "amount": "2.33",
+            "currencyCode": "USD"
+          },
+          "title": "Order discounts (4e1606e77edbda1d1b176640)"
+        },
+        {
+          "__typename": "ManualDiscountApplication",
+          "index": 1,
+          "targetType": "LINE_ITEM",
+          "allocationMethod": "EACH",
+          "targetSelection": "EXPLICIT",
+          "value": {
+            "__typename": "MoneyV2",
+            "amount": "2.33",
+            "currencyCode": "USD"
+          },
+          "title": "Order discounts (4e1606e77edbda1d1b176640)"
+        },
+        {
+          "__typename": "DiscountCodeApplication",
+          "index": 2,
+          "targetType": "LINE_ITEM",
+          "allocationMethod": "ACROSS",
+          "targetSelection": "ALL",
+          "value": {
+            "__typename": "MoneyV2",
+            "amount": "7.23",
+            "currencyCode": "USD"
+          },
+          "code": "reward-edit-c609e766-d759-4f58-9"
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false
+      }
+    },
+    "lines": [
+      {
+        "id": "gid://shopify/LineItem/17459914834118",
+        "currentQuantity": 1,
+        "originalUnitPriceSet": {
+          "presentmentMoney": {
+            "amount": "2.79",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "2.79",
+            "currencyCode": "USD"
+          }
+        },
+        "discountedUnitPriceSet": {
+          "presentmentMoney": {
+            "amount": "2.79",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "2.79",
+            "currencyCode": "USD"
+          }
+        },
+        "priceAfterAllDiscountsBeforeTaxesSet": {
+          "presentmentMoney": {
+            "amount": "0.0",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "0.0",
+            "currencyCode": "USD"
+          }
+        },
+        "discountAllocations": [
+          {
+            "allocatedAmountSet": {
+              "presentmentMoney": {
+                "amount": "2.79",
+                "currencyCode": "USD"
+              },
+              "shopMoney": {
+                "amount": "2.79",
+                "currencyCode": "USD"
+              }
+            },
+            "discountApplication": {
+              "index": 2
+            }
+          }
+        ]
+      },
+      {
+        "id": "gid://shopify/LineItem/17459916210374",
+        "currentQuantity": 0,
+        "originalUnitPriceSet": {
+          "presentmentMoney": {
+            "amount": "885.95",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "885.95",
+            "currencyCode": "USD"
+          }
+        },
+        "discountedUnitPriceSet": {
+          "presentmentMoney": {
+            "amount": "883.62",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "883.62",
+            "currencyCode": "USD"
+          }
+        },
+        "priceAfterAllDiscountsBeforeTaxesSet": {
+          "presentmentMoney": {
+            "amount": "0.0",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "0.0",
+            "currencyCode": "USD"
+          }
+        },
+        "discountAllocations": [
+          {
+            "allocatedAmountSet": {
+              "presentmentMoney": {
+                "amount": "2.33",
+                "currencyCode": "USD"
+              },
+              "shopMoney": {
+                "amount": "2.33",
+                "currencyCode": "USD"
+              }
+            },
+            "discountApplication": {
+              "index": 0
+            }
+          }
+        ]
+      },
+      {
+        "id": "gid://shopify/LineItem/17459917258950",
+        "currentQuantity": 1,
+        "originalUnitPriceSet": {
+          "presentmentMoney": {
+            "amount": "885.95",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "885.95",
+            "currencyCode": "USD"
+          }
+        },
+        "discountedUnitPriceSet": {
+          "presentmentMoney": {
+            "amount": "883.62",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "883.62",
+            "currencyCode": "USD"
+          }
+        },
+        "priceAfterAllDiscountsBeforeTaxesSet": {
+          "presentmentMoney": {
+            "amount": "883.62",
+            "currencyCode": "USD"
+          },
+          "shopMoney": {
+            "amount": "883.62",
+            "currencyCode": "USD"
+          }
+        },
+        "discountAllocations": [
+          {
+            "allocatedAmountSet": {
+              "presentmentMoney": {
+                "amount": "2.33",
+                "currencyCode": "USD"
+              },
+              "shopMoney": {
+                "amount": "2.33",
+                "currencyCode": "USD"
+              }
+            },
+            "discountApplication": {
+              "index": 1
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "validation": {
+    "echelonUnitTests": 680,
+    "echelonPostgresTests": 90,
+    "editorBrowserTests": 100,
+    "clubTests": 219,
+    "sharedWidgetTests": 6,
+    "themeAccountTests": 57,
+    "applicationAndTestTypechecks": "passed"
+  },
+  "limitations": [
+    "All orders and ledger balances in this report are synthetic.",
+    "The test store returned zero tax; six-percent tax arithmetic is verified in unit and browser fixtures.",
+    "The added real catalog variant costs 885.95 in this test store; the exact 2.79 plus 2.33 Club-price scenario is covered in provider tests.",
+    "The synthetic balance was settled with orderMarkAsPaid; no real card charge or refund was submitted."
+  ]
+}

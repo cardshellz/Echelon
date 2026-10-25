@@ -39,6 +39,7 @@ const listingSchema = z.object({
   status: z.enum(["not_listed", "preview_ready", "queued", "pushing", "active", "paused", "ended", "failed", "blocked", "drift_detected"]),
   externalListingId: z.string().min(1).nullable(), externalOfferId: z.string().min(1).nullable(),
   livePushItemId: id.nullable(),
+  vendorQuantityLimit: z.number().int().min(0).max(2_147_483_647).nullable(),
 });
 
 /** Read the exact destination's current listing intent through Dropship's rules.
@@ -78,7 +79,8 @@ export async function readDropshipListingStockSelection(client: StockSelectionQu
     ORDER BY product_variant_id`, [store.vendorId, productVariantIds])).rows : []);
   const listings = z.array(listingSchema).parse(productVariantIds.length ? (await client.query(`SELECT vl.id,
     vl.product_variant_id AS "productVariantId",vl.status,vl.external_listing_id AS "externalListingId",
-    vl.external_offer_id AS "externalOfferId", intent.id AS "livePushItemId"
+    vl.external_offer_id AS "externalOfferId", intent.id AS "livePushItemId",
+    vl.vendor_quantity_limit AS "vendorQuantityLimit"
     FROM dropship.dropship_vendor_listings vl
     LEFT JOIN LATERAL (SELECT ji.id FROM dropship.dropship_listing_push_job_items ji
       INNER JOIN dropship.dropship_listing_push_jobs j ON j.id=ji.job_id
@@ -103,7 +105,7 @@ export async function readDropshipListingStockSelection(client: StockSelectionQu
       productVariantId,
       candidate: product && variant ? {
         productId: product.id, productVariantId, productLineIds: product.productLineIds,
-        category: product.category, productIsActive: product.isActive, variantIsActive: variant.isActive,
+        category: product.category, productIsActive: product.isActive, productStatus: product.status, variantIsActive: variant.isActive,
         variantUomType: parseCatalogVariantUomType(variant.uomType, { productVariantId }),
         requiresShipping: variant.requiresShipping, trackInventory: variant.trackInventory,
         salesEligibility: variant.salesEligibility,
@@ -116,8 +118,14 @@ export async function readDropshipListingStockSelection(client: StockSelectionQu
   // Fingerprints describe effective intent and exact identity, not the time a
   // preview happened or a changing stock balance. Scheduled rules affect it when
   // their effective decision changes.
+  // The vendor limit (eBay sync-back) joins the fingerprint only when a listing has one, so every fingerprint
+  // without a limit is byte for byte the one main computed.
+  const fingerprintListings = listings.map(({ vendorQuantityLimit, ...listing }) =>
+    vendorQuantityLimit === null ? listing : { ...listing, vendorQuantityLimit });
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    productId: input.productId, store, catalog, listings, variants,
+    productId: input.productId, store, catalog, listings: fingerprintListings,
+    // Additive listing status metadata must not invalidate existing stock proofs.
+    variants: variants.map(({ listingSelected: _listingSelected, ...stockDecision }) => stockDecision),
   })).digest("hex");
   return stockPublicationSelectionSchema.parse({ productId: input.productId, fingerprint, variants });
 }

@@ -107,7 +107,7 @@ describe("invoice quantity correction defaults and exact impact", () => {
 
 function billingFacts(): InvoiceCorrectionFacts {
   const source = facts();
-  return { ...source, billing: { invoiceId: 71, purchaseOrderIds: [17], purchaseAllocations: [{ purchaseOrderId: 17, amountCents: null }], allInvoiceLines: structuredClone(source.invoiceLines),
+  return { ...source, billing: { hasCreditHistory: false, invoiceId: 71, purchaseOrderIds: [17], purchaseAllocations: [{ purchaseOrderId: 17, amountCents: null }], allInvoiceLines: structuredClone(source.invoiceLines),
     allocations: [{ invoiceId: 71, amountCents: 669375, paymentStatus: "completed", currency: "USD" }] } };
 }
 const financialRequest = (fields = {}) => invoiceQuantityPreviewRequestSchema.parse({ sourceVersion: version, quantityPieces: 25000, unitCostMills: 5355, lineTotalCents: 1338750, ...fields });
@@ -193,5 +193,19 @@ describe("reviewed invoice line economics", () => {
     expect(planInvoiceQuantityCorrection(billingFacts(), 72, financialRequest({ lineTotalCents: Number.MAX_SAFE_INTEGER })).afterInvoiceAmountCents).toBe(Number.MAX_SAFE_INTEGER);
     const source = billingFacts(); source.invoiceLines.push({ ...source.invoiceLines[0], id: 73, lineTotalCents: 1 }); source.billing!.allInvoiceLines.push(source.invoiceLines[1]); source.invoices[0].invoicedAmountCents++; source.invoices[0].balanceCents = 1;
     expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest({ lineTotalCents: Number.MAX_SAFE_INTEGER }))).toThrow(expect.objectContaining({ code: "INVOICE_CORRECTION_AMOUNT_INVALID" }));
+  });
+});
+
+
+describe("supplier credit source preservation during invoice correction", () => {
+  it("shows the blocked correction reason and rejects both quantity-only and billing changes", () => {
+    const source: InvoiceCorrectionFacts = { ...facts(), billing: { hasCreditHistory: true, invoiceId: 71,
+      purchaseOrderIds: [17], purchaseAllocations: [{ purchaseOrderId: 17, amountCents: null }],
+      allInvoiceLines: facts().invoiceLines, allocations: [] } };
+    const before = structuredClone(source);
+    expect(invoiceQuantityContext(source, 72, admin, version).blockedReason).toMatch(/supplier credit history/);
+    expect(() => planInvoiceQuantityCorrection(source, 72, request())).toThrow(/supplier credit history/);
+    expect(() => planInvoiceQuantityCorrection(source, 72, { ...request(), lineTotalCents: 600000, unitCostMills: 2400 })).toThrow(/supplier credit history/);
+    expect(source).toEqual(before);
   });
 });

@@ -1,4 +1,8 @@
-import { syncActiveListings, triggerPricingRuleSync } from "../../modules/channels/ebay-listing-sync";
+import { z } from "zod";
+import { ebayPolicyWriteSchema } from "@shared/ebay-business-policies";
+import { ebayBusinessPolicies } from "../../modules/channels/ebay-business-policies";
+import { ebayPolicyActor, sendEbayPolicyError } from "./ebay-business-policy-http";
+import { syncActiveListings } from "../../modules/channels/ebay-listing-sync";
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
 import { db, pool } from "../../db";
@@ -41,137 +45,26 @@ registerEbayListingExclusionRoutes(router, ebayListingExclusionService);
   // PUT /api/ebay/product-policies/:productId — Set policy overrides for a product
 
   // -----------------------------------------------------------------------
-  router.put("/api/ebay/product-policies/:productId", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
+for (const kind of ["product", "variant"] as const) {
+  const parameter = kind === "product" ? "productId" : "variantId";
+  const path = `/api/ebay/${kind}-policies/:${parameter}`;
+  const targetFor = (req: Request) => {
+    const id = z.coerce.number().int().positive().max(2147483647).parse(req.params[parameter]);
+    return kind === "product" ? { kind: "product" as const, productId: id } : { kind: "variant" as const, variantId: id };
+  };
+  router.put(path, requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
-      const productId = parseInt(req.params.productId);
-      if (isNaN(productId)) {
-        res.status(400).json({ error: "Invalid product ID" });
-        return;
-      }
-      const { fulfillmentPolicyId, returnPolicyId, paymentPolicyId } = req.body as {
-        fulfillmentPolicyId?: string | null;
-        returnPolicyId?: string | null;
-        paymentPolicyId?: string | null;
-      };
-      
-      await db.update(products)
-        .set({
-          ebayFulfillmentPolicyOverride: fulfillmentPolicyId || null,
-          ebayReturnPolicyOverride: returnPolicyId || null,
-          ebayPaymentPolicyOverride: paymentPolicyId || null,
-        })
-        .where(eq(products.id, productId));
-        
-      res.json({ success: true, productId });
-    } catch (err: any) {
-      console.error("[eBay Product Policies] Error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
+      const { expectedPolicies, expectedScope, ...patch } = ebayPolicyWriteSchema.parse(req.body);
+      const target = targetFor(req);
+      const policies = await ebayBusinessPolicies.patchPolicies({ target, patch, expectedPolicies, expectedScope, actor: ebayPolicyActor(req) });
+      res.json({ success: true, ...target, ...policies });
+    } catch (error) { sendEbayPolicyError(res, error); }
   });
-
-  // -----------------------------------------------------------------------
-  // PUT /api/ebay/variant-policies/:variantId — Set policy overrides for a variant
-
-  // -----------------------------------------------------------------------
-  router.put("/api/ebay/variant-policies/:variantId", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
-    try {
-      const variantId = parseInt(req.params.variantId);
-      if (isNaN(variantId)) {
-        res.status(400).json({ error: "Invalid variant ID" });
-        return;
-      }
-      const { fulfillmentPolicyId, returnPolicyId, paymentPolicyId } = req.body as {
-        fulfillmentPolicyId?: string | null;
-        returnPolicyId?: string | null;
-        paymentPolicyId?: string | null;
-      };
-      
-      await db.update(productVariants)
-        .set({
-          ebayFulfillmentPolicyOverride: fulfillmentPolicyId || null,
-          ebayReturnPolicyOverride: returnPolicyId || null,
-          ebayPaymentPolicyOverride: paymentPolicyId || null,
-        })
-        .where(eq(productVariants.id, variantId));
-        
-      res.json({ success: true, variantId });
-    } catch (err: any) {
-      console.error("[eBay Variant Policies] Error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
+  router.get(path, requireAuth, async (req: Request, res: Response) => {
+    try { res.json(await ebayBusinessPolicies.readPolicies(targetFor(req))); }
+    catch (error) { sendEbayPolicyError(res, error); }
   });
-
-  // -----------------------------------------------------------------------
-  // GET /api/ebay/product-policies/:productId — Get policy overrides for a product
-
-  // -----------------------------------------------------------------------
-  router.get("/api/ebay/product-policies/:productId", requireAuth, async (req: Request, res: Response) => {
-    try {
-      const productId = parseInt(req.params.productId);
-      if (isNaN(productId)) {
-        res.status(400).json({ error: "Invalid product ID" });
-        return;
-      }
-      
-      const result = await db.select({
-        fulfillmentPolicyId: products.ebayFulfillmentPolicyOverride,
-        returnPolicyId: products.ebayReturnPolicyOverride,
-        paymentPolicyId: products.ebayPaymentPolicyOverride,
-      })
-      .from(products)
-      .where(eq(products.id, productId));
-
-      if (result.length === 0) {
-        res.status(404).json({ error: "Product not found" });
-        return;
-      }
-      const row = result[0];
-      res.json({
-        fulfillmentPolicyId: row.fulfillmentPolicyId || null,
-        returnPolicyId: row.returnPolicyId || null,
-        paymentPolicyId: row.paymentPolicyId || null,
-      });
-    } catch (err: any) {
-      console.error("[eBay Product Policies GET] Error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // -----------------------------------------------------------------------
-  // GET /api/ebay/variant-policies/:variantId — Get policy overrides for a variant
-
-  // -----------------------------------------------------------------------
-  router.get("/api/ebay/variant-policies/:variantId", requireAuth, async (req: Request, res: Response) => {
-    try {
-      const variantId = parseInt(req.params.variantId);
-      if (isNaN(variantId)) {
-        res.status(400).json({ error: "Invalid variant ID" });
-        return;
-      }
-      
-      const result = await db.select({
-        fulfillmentPolicyId: productVariants.ebayFulfillmentPolicyOverride,
-        returnPolicyId: productVariants.ebayReturnPolicyOverride,
-        paymentPolicyId: productVariants.ebayPaymentPolicyOverride,
-      })
-      .from(productVariants)
-      .where(eq(productVariants.id, variantId));
-
-      if (result.length === 0) {
-        res.status(404).json({ error: "Variant not found" });
-        return;
-      }
-      const row = result[0];
-      res.json({
-        fulfillmentPolicyId: row.fulfillmentPolicyId || null,
-        returnPolicyId: row.returnPolicyId || null,
-        paymentPolicyId: row.paymentPolicyId || null,
-      });
-    } catch (err: any) {
-      console.error("[eBay Variant Policies GET] Error:", err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
+}
 
   // -----------------------------------------------------------------------
   // POST /api/ebay/import-images — Import product images from eBay into product_assets

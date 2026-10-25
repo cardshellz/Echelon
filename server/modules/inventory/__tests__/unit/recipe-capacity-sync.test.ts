@@ -23,11 +23,14 @@ describe("recipe-derived ATP invalidation", () => {
 
     expect(source).toContain("inventorySupplyDependencies.getAffectedProductIds(productVariantId)");
     expect(source).not.toContain("recipeCapacity.getAffectedOutputProductIds(productVariantId)");
-    expect(source).toContain('await inventoryPublicationWork.syncProduct(productId, `inventory_change:${triggeredBy}`)');
+    // Every affected output product is recorded on the durable publication work;
+    // warehouse operations never publish inline (#64414).
+    expect(source).toContain("await inventoryPublicationWork.recordInventoryChange(productIds, `inventory_change:${triggeredBy}`)");
+    expect(source).toContain("markPublicationProductsChanged(databasePool, productIds)");
     expect(source).toContain("result.inventory.some(work => work.variantsErrored > 0)");
     expect(source).toContain("channelSync.setInventoryChangePublisher(queueVariantInventorySync)");
     expect(source).toContain("inventoryCore.onInventoryChange(queueVariantInventorySync)");
-    expect(source.match(/inventoryPublicationWork\.syncProduct\(/g)).toHaveLength(1);
+    expect(source.match(/inventoryPublicationWork\.syncProduct\(/g)).toBeNull();
     expect(source).toContain("builds.onInventoryChange((variantId, trigger) => {");
     expect(source).toContain("inventoryCore.triggerNotifyChange(variantId, trigger)");
   });

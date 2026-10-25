@@ -1,3 +1,11 @@
+import { readShipmentPackingUnitOptions, ShipmentUnitOptionsError } from "./shipment-unit-options.service";
+import { registerShipmentHistoryCorrectionRoutes } from "./shipment-history-correction.routes";
+import { createShipmentHistoryCorrectionService } from "./shipment-history-correction.service";
+import { registerReceiptShipmentQuantityCorrectionRoutes } from "./receipt-shipment-quantity-correction.routes";
+import { createReceiptShipmentQuantityCorrectionService } from "./receipt-shipment-quantity-correction.service";
+import { db } from "../../db";
+import { registerShipmentInvoiceRoutes } from "./shipment-invoice.routes";
+import { createShipmentCreateCommands, shipmentCreateCommandScope, SHIPMENT_CREATE_COMMAND_PRINCIPAL } from "./shipment-create.commands";
 import { shipmentLineResourceIdSchema } from "@shared/procurement/shipment-line-command";
 import { createShipmentLineCommands, shipmentLineCommandScope, SHIPMENT_LINE_COMMAND_PRINCIPAL, type ShipmentLineCommand } from "./shipment-line-commands";
 import type { Express, Request, Response } from "express";
@@ -6,7 +14,7 @@ import { financialCommandFromRequest } from "../../platform/commands/http-comman
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { z } from "zod";
 import { shipmentCostResourceIdSchema } from "@shared/procurement/shipment-cost-command";
-import { requirePermission } from "../../routes/middleware";
+import { requireAuth, requirePermission } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import * as apLedger from "./ap-ledger.service";
@@ -20,9 +28,14 @@ function getActorId(req: any): string | undefined {
 }
 
 export function registerInboundShipmentRoutes(app: Express) {
+  registerShipmentHistoryCorrectionRoutes(app, createShipmentHistoryCorrectionService(db, () => new Date()));
   registerShipmentCostExceptionRoutes(app);
+  registerShipmentInvoiceRoutes(app);
   const { shipmentTracking } = app.locals.services;
+  registerReceiptShipmentQuantityCorrectionRoutes(app, createReceiptShipmentQuantityCorrectionService(db, shipmentTracking, () => new Date()));
+  registerReceiptShipmentQuantityCorrectionRoutes(app, createReceiptShipmentQuantityCorrectionService(db, shipmentTracking, () => new Date(), "shipment"), "shipment");
   const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
+  const shipmentCreateCommands = createShipmentCreateCommands(shipmentTracking);
   const shipmentLineCommands = createShipmentLineCommands(shipmentTracking);
   const shipmentCostUpdates = createShipmentCostUpdateCommands(shipmentTracking);
 
@@ -70,7 +83,14 @@ export function registerInboundShipmentRoutes(app: Express) {
       });
       const result = await shipmentLineCommands.execute({ operation, resourceId, body: req.body }, actorId, descriptor);
       res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
-      return res.status(result.httpStatus).json(result.body);
+      // Only the command ledger's terminal rejection proves that an earlier
+      // attempt cannot have applied. Authentication, proxy and key errors do not.
+      const rejected = result.body as { details?: Record<string, unknown> };
+      const body = result.terminalState === "rejected"
+        ? { ...(result.body as Record<string, unknown>), details: { ...rejected.details,
+          shipmentLineOutcome: "rejected", idempotencyKey: descriptor.idempotencyKey } }
+        : result.body;
+      return res.status(result.httpStatus).json(body);
     } catch (error) {
       if (error instanceof FinancialCommandError) {
         for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
@@ -103,29 +123,20 @@ export function registerInboundShipmentRoutes(app: Express) {
         limit: req.query.limit ? Number(req.query.limit) : undefined,
       });
       res.json(result);
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+    } catch (error) {
+      if (error instanceof ShipmentTrackingError && error.statusCode < 500) return res.status(error.statusCode).json({ error: error.message });
+      console.error(JSON.stringify({ event: "procurement.shipment_health.failed", errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(500).json({ code: "SHIPMENT_HEALTH_UNAVAILABLE", error: "Shipment cost health could not be verified. Retry the overview." });
     }
   });
 
   app.get("/api/inbound-shipments", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const filters: any = {};
-      if (req.query.status) filters.status = (req.query.status as string).includes(",") ? (req.query.status as string).split(",") : req.query.status;
-      if (req.query.mode) filters.mode = req.query.mode;
-      if (req.query.search) filters.search = req.query.search;
-      if (req.query.warehouseId) filters.warehouseId = Number(req.query.warehouseId);
-      if (req.query.limit) filters.limit = Number(req.query.limit);
-      if (req.query.offset) filters.offset = Number(req.query.offset);
-
-      const [shipmentsList, total] = await Promise.all([
-        shipmentTracking.getShipments(filters),
-        shipmentTracking.getShipmentsCount(filters),
-      ]);
-      res.json({ shipments: shipmentsList, total });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      res.json(await shipmentTracking.getShipmentPage(req.query));
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_LIST_QUERY_INVALID", error: "Invalid shipment filters or page." });
+      console.error(JSON.stringify({ event: "procurement.shipment_list.failed", errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(500).json({ code: "SHIPMENT_LIST_UNAVAILABLE", error: "Shipments could not be verified. Retry the work list." });
     }
   });
 
@@ -136,7 +147,14 @@ export function registerInboundShipmentRoutes(app: Express) {
         shipmentTracking.getEnrichedLines(shipment.id),
         apLedger.enrichCostsWithInvoiceInfo(shipment.id).then((costs) => shipmentTracking.versionCosts(costs)),
         shipmentTracking.getStatusHistory(shipment.id),
-        apLedger.getShipmentCostPaymentStatus(shipment.id),
+        apLedger.getShipmentCostPaymentStatus(shipment.id).catch(error => {
+          // Keep original charge/invoice evidence inspectable when only the
+          // derived totals require ownership review. Infrastructure errors still
+          // fail the read instead of being presented as empty financial data.
+          if (error instanceof apLedger.ApLedgerError && error.statusCode === 409
+            && error.details?.code === "AP_SHIPMENT_BILLING_REVIEW_REQUIRED") return null;
+          throw error;
+        }),
         shipmentTracking.getShipmentPurchaseOrders(shipment.id),
       ]);
       res.json({ ...shipment, lines, costs, statusHistory: history, paymentStatus, purchaseOrders });
@@ -148,12 +166,28 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   app.post("/api/inbound-shipments", requirePermission("purchasing", "create"), async (req, res) => {
     try {
-      const shipment = await shipmentTracking.createShipment(req.body, req.session.user?.id);
-      res.status(201).json(shipment);
-    } catch (error: any) {
-      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_HEADER_INPUT_INVALID", error: "Invalid shipment fields", details: error.issues });
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+      const actorId = getActorId(req);
+      if (!actorId) throw new FinancialCommandError("An authenticated actor is required", 401, "SHIPMENT_CREATE_ACTOR_REQUIRED");
+      if (Object.keys(req.query).length) return res.status(400).json({ code: "SHIPMENT_CREATE_QUERY_INVALID", error: "Shipment creation does not accept query parameters." });
+      const descriptor = financialCommandFromRequest(req, {
+        actorType: "service", actorId: SHIPMENT_CREATE_COMMAND_PRINCIPAL, ...shipmentCreateCommandScope(),
+      });
+      const result = await shipmentCreateCommands.execute(req.body, actorId, descriptor);
+      res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+      // Only a durable rejection proves that an earlier attempt cannot have
+      // created a shipment. Middleware/auth failures cannot clear recovery.
+      const body = result.terminalState === "rejected"
+        ? { ...(result.body as Record<string, unknown>), details: { shipmentCreateOutcome: "rejected", idempotencyKey: descriptor.idempotencyKey } }
+        : result.body;
+      return res.status(result.httpStatus).json(body);
+    } catch (error) {
+      if (error instanceof FinancialCommandError) {
+        for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, details: error.details });
+      }
+      console.error(JSON.stringify({ event: "procurement.shipment_create.failed", actorId: getActorId(req) ?? null,
+        code: "SHIPMENT_CREATE_TRANSIENT_FAILURE", errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(500).json({ code: "SHIPMENT_CREATE_TRANSIENT_FAILURE", error: "Shipment creation could not be confirmed. Retry the saved request with the same command key." });
     }
   });
 
@@ -278,6 +312,19 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   // Shipment lines
 
+  app.post("/api/inbound-shipments/:id/lines/unit-options", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const id = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentLineResourceIdSchema).parse(req.params.id);
+      if (Object.keys(req.query).length) return res.status(400).json({ code: "SHIPMENT_UNIT_OPTIONS_INPUT_INVALID", error: "Unit preview does not accept query parameters." });
+      return res.json(await readShipmentPackingUnitOptions(db, id, req.body));
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_UNIT_OPTIONS_INPUT_INVALID", error: "Provide a valid shipment ID and between 1 and 500 source rows." });
+      if (error instanceof ShipmentUnitOptionsError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
+      console.error(JSON.stringify({ event: "procurement.shipment_unit_options.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(503).json({ code: "SHIPMENT_UNIT_OPTIONS_UNAVAILABLE", error: "Receive units could not be verified. Retry the preview." });
+    }
+  });
+
   app.post("/api/inbound-shipments/:id/lines/from-po", requirePermission("purchasing", "edit"), (req, res) => handleLineCommand(req, res, "add-from-po"));
   app.post("/api/inbound-shipments/:id/lines/import-packing-list", requirePermission("purchasing", "edit"), (req, res) => handleLineCommand(req, res, "import"));
   app.post("/api/inbound-shipments/:id/lines/resolve-dimensions", requirePermission("purchasing", "edit"), (req, res) => handleLineCommand(req, res, "resolve-dimensions"));
@@ -300,31 +347,6 @@ export function registerInboundShipmentRoutes(app: Express) {
   app.delete("/api/inbound-shipments/costs/:costId", requirePermission("purchasing", "edit"), (req, res) => handleCostCommand(req, res, "delete"));
 
   // Shipment cost to AP bridge
-
-  app.post("/api/inbound-shipments/:id/create-invoice", requirePermission("purchasing", "edit"), requireIdempotency(), async (req, res) => {
-    try {
-      const { vendorId, invoiceNumber, invoiceDate, dueDate, costRowIds, lineOverrides, notes } = req.body;
-      if (!vendorId) return res.status(400).json({ error: "vendorId is required" });
-      if (!invoiceNumber) return res.status(400).json({ error: "invoiceNumber is required" });
-      const invoice = await apLedger.createInvoiceFromShipmentCosts(
-        Number(req.params.id),
-        {
-          vendorId,
-          invoiceNumber,
-          invoiceDate: invoiceDate ? new Date(invoiceDate) : undefined,
-          dueDate: dueDate ? new Date(dueDate) : undefined,
-          costRowIds,
-          lineOverrides,
-          notes,
-        },
-        getActorId(req),
-      );
-      res.json(invoice);
-    } catch (error: any) {
-      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
 
   app.get("/api/inbound-shipments/:id/cost-vendors", requirePermission("purchasing", "view"), async (req, res) => {
     try {
@@ -365,34 +387,31 @@ export function registerInboundShipmentRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inbound-shipments/costs/:costId/link-invoice", requirePermission("purchasing", "edit"), async (req, res) => {
+  const invoiceLinkInput = z.object({ vendorInvoiceId: shipmentCostResourceIdSchema, invoiceLineId: shipmentCostResourceIdSchema.optional() }).strict();
+  const invoiceLinkId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentCostResourceIdSchema);
+  async function handleInvoiceOwnership(req: Request, res: Response, action: "link" | "unlink") {
     try {
-      const { vendorInvoiceId } = req.body;
-      if (!vendorInvoiceId) return res.status(400).json({ error: "vendorInvoiceId required" });
-      const result = await apLedger.linkCostToInvoice(
-        Number(req.params.costId),
-        vendorInvoiceId,
-        getActorId(req),
-      );
-      res.json(result);
-    } catch (error: any) {
-      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+      const costId = invoiceLinkId.parse(req.params.costId);
+      const actorId = req.session?.user?.id;
+      if (!actorId) throw new FinancialCommandError("An authenticated operator is required", 401, "SHIPMENT_INVOICE_ACTOR_REQUIRED");
+      if (Object.keys(req.query).length) throw new FinancialCommandError("Invoice ownership commands do not accept query parameters", 400, "AP_INVOICE_LINK_INPUT_INVALID");
+      if (action === "link") {
+        const input = invoiceLinkInput.parse(req.body);
+        return res.json(await apLedger.linkCostToInvoice(costId, input.vendorInvoiceId, actorId, input.invoiceLineId));
+      }
+      z.object({}).strict().parse(req.body ?? {});
+      return res.json({ success: true, ...await apLedger.unlinkCostFromInvoice(costId, actorId) });
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "AP_INVOICE_LINK_INPUT_INVALID", error: "Choose a valid charge, invoice and explicit invoice line." });
+      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
+      if (error instanceof FinancialCommandError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
+      console.error(JSON.stringify({ event: "procurement.shipment_invoice.ownership_failed", action, costId: req.params.costId,
+        actorId: req.session?.user?.id ?? null, code: "AP_INVOICE_OWNERSHIP_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(503).json({ code: "AP_INVOICE_OWNERSHIP_UNAVAILABLE", error: "Invoice ownership could not be confirmed. Reload the shipment before retrying." });
     }
-  });
-
-  app.post("/api/inbound-shipments/costs/:costId/unlink-invoice", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const result = await apLedger.unlinkCostFromInvoice(
-        Number(req.params.costId),
-        getActorId(req),
-      );
-      res.json({ success: true, ...result });
-    } catch (error: any) {
-      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
+  }
+  app.post("/api/inbound-shipments/costs/:costId/link-invoice", requireAuth, requirePermission("purchasing", "edit"), (req, res) => handleInvoiceOwnership(req, res, "link"));
+  app.post("/api/inbound-shipments/costs/:costId/unlink-invoice", requireAuth, requirePermission("purchasing", "edit"), (req, res) => handleInvoiceOwnership(req, res, "unlink"));
 
   // Allocation
 

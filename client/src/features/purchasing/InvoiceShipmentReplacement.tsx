@@ -1,3 +1,4 @@
+import { invalidateApInvoiceQueries } from "./ap-work-list-query";
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -67,7 +68,7 @@ function ReplacementReview({ invoiceId, invoiceStatus, shipmentId, capability, h
     onSettled: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: [`/api/vendor-invoices/${invoiceId}`] }),
-        queryClient.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && /^\/api\/vendor-invoices(?:\?|$)/.test(query.queryKey[0]) }),
+        invalidateApInvoiceQueries(queryClient),
         queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/ap/command-events?limit=8"] }),
         queryClient.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && query.queryKey[0].startsWith("/api/purchase-orders/") }),

@@ -229,13 +229,17 @@ export function serviceHarness(
       note: "refund",
       contentFingerprint: current.contentFingerprint,
     })),
+    observeRefund: vi.fn<OrderEditProvider["observeRefund"]>(async (_connection, intent) => {
+      const refund = current.refunds.find(refund => refund.note === intent.note);
+      return refund ? { status: "succeeded", refundId: refund.id, evidence: structuredClone(refund) } : null;
+    }),
     refund: vi.fn<OrderEditProvider["refund"]>(async () => {
       current = {
         ...current,
         netPaidCents: current.totalCents,
         outstandingCents: 0,
       };
-      return {
+      const result = {
         status: "succeeded" as const,
         refundId: "gid://shopify/Refund/1",
         evidence: {
@@ -245,6 +249,8 @@ export function serviceHarness(
           transactions: [],
         },
       };
+      current = { ...current, refunds: [result.evidence] };
+      return result;
     }),
     recoverUnpaid: vi.fn(async () => {
       current = baseline();

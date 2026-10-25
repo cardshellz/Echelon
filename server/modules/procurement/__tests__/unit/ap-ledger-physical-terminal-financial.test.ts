@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// These orchestration fixtures contain ordinary product/manual invoices. The real
+// source reader and rejection behavior are covered by shipment-billing-ownership.integration.test.ts.
+vi.mock("../../shipment-billing-ownership.repository", () => ({
+  readInvoiceSourceCapabilities: vi.fn(async () => {
+    const verified = { allowed: true, code: "AP_INVOICE_SOURCE_VERIFIED", reason: "Fixture has ordinary invoice source ownership." };
+    return { purchaseOrderLinks: verified, approval: verified, payment: verified, freightSourceLineIds: [] };
+  }),
+}));
+
 // Keep the COGS dependency without importing unrelated inventory repository owners.
 vi.mock("../../../inventory", async () => ({
   COGSService: (await import("../../../inventory/cogs.service")).COGSService,
@@ -91,6 +100,7 @@ function selectChain(rows: unknown[]) {
 function buildTx(selectResults: unknown[][], writeReached: Error) {
   return {
     select: vi.fn(() => selectChain(selectResults.shift() ?? [])),
+    execute: vi.fn(async () => ({ rows: [{ present: false }] })),
     insert: vi.fn(() => {
       throw writeReached;
     }),

@@ -130,6 +130,9 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(migrationGuard).toBeGreaterThan(checkout);
     expect(gate.slice(checkout, migrationGuard)).toContain("fetch-depth: 0");
     expect(gate.slice(checkout, migrationGuard)).toContain("persist-credentials: false");
+    expect(gate).toContain("    permissions:\n      contents: read\n      pull-requests: read");
+    expect(gate).toContain("run: node scripts/migrations/check-migrations.mjs --ci\n        env:\n          GITHUB_TOKEN: ${{ github.token }}");
+    expect(gate).not.toMatch(/(?:contents|pull-requests): write/);
     for (const setup of ["uses: actions/setup-node@", "run: npm ci", "playwright install", "services:"]) {
       const setupPosition = gate.indexOf(setup);
       if (setupPosition !== -1) expect(setupPosition, setup).toBeGreaterThan(migrationGuard);
@@ -183,29 +186,33 @@ describe("fast CI preserves coverage and required checks", () => {
   it.each(["inventory-availability", "returns-preview"])("gates every %s shard and its aggregate on preflight", (file) => {
     const browserWorkflow = source(".github/workflows/" + file + ".yml");
     const preflight = job(browserWorkflow, "preflight");
-    expect(preflight).not.toMatch(/setup-node|npm ci|playwright install|services:/);
+    expect(preflight).not.toMatch(/playwright install|services:/);
+    expect(preflight).toContain("node scripts/ci/browser-feature-impact.mjs");
     const shards = job(browserWorkflow, "browser-shard");
     expect(shards).toContain("needs: preflight");
-    expect(shards.slice(0, shards.indexOf("    steps:"))).not.toContain("if:");
-    expect(shards).toContain("shard: [1, 2, 3, 4]");
+    expect(shards).toContain("if: ${{ needs.preflight.outputs.run == 'true' }}");
+    expect(shards).toContain("matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}");
     const aggregate = job(browserWorkflow, "browser");
     expect(aggregate).toContain("needs: [preflight, browser-shard]");
     expect(aggregate).toContain("if: ${{ always() }}");
     expect(aggregate).toContain("CI_NEEDS: ${{ toJSON(needs) }}");
-    expect(aggregate).toContain("node scripts/ci/require-success.mjs preflight browser-shard");
+    expect(aggregate).toContain("node scripts/ci/require-selected-success.mjs browser-shard");
     for (const result of ["failure", "cancelled", "skipped", "", undefined]) {
       expect(() => requireSuccessfulJobs({ preflight: { result }, "browser-shard": success() }, ["preflight", "browser-shard"]))
         .toThrow("CI jobs did not all succeed: preflight");
     }
   });
 
-  it("runs cheap coverage, test-exclusion and migration guards before expensive core jobs", () => {
+  it("runs cheap coverage, test-exclusion, migration and writer-ownership guards before expensive core jobs", () => {
     const preflight = job(workflow, "preflight");
+    const manifest = source("scripts/ci/guard-test-manifest.mjs");
     for (const file of [
       "postgres-ci-shards.test.ts", "migration-prefix-collision.test.ts",
+      "migration-allocation.test.ts", "migration-inherited-provenance.test.ts",
       "browser-ci-selection.test.ts", "dropship-browser-features.test.ts", "test-typecheck-ratchet.test.ts", "ci-fast-feedback.test.ts",
-    ]) expect(preflight).toContain(file);
-    expect(preflight).toContain("--allowOnly=false --passWithNoTests=false");
+      "writer-ratchet.test.ts",
+    ]) expect(manifest).toContain(`server/__tests__/unit/${file}`);
+    expect(preflight).toContain("node scripts/ci/run-test-lane.mjs guards");
     for (const name of ["typecheck", "unit-tests", "contracts", "postgres-hardening-shard"]) {
       expect(job(workflow, name)).toContain("needs: preflight");
     }
@@ -220,8 +227,10 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(browser).toContain("max-parallel: 4");
     expect(browser).toContain("fail-fast: false");
     expect(browser).toContain("fromJSON(needs.select.outputs.matrix ||");
-    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":1,"shards":2');
-    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":2,"shards":2');
+    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":1,"shards":4');
+    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":2,"shards":4');
+    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":3,"shards":4');
+    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":4,"shards":4');
     expect(browser).toContain("BROWSER_FEATURE: ${{ matrix.feature }}");
     expect(browser).toContain("--shard=${{ matrix.shard }}/${{ matrix.shards }} --forbid-only");
     expect(browser).toContain("feature-browser-traces-${{ matrix.feature }}-${{ matrix.shard }}");
@@ -250,8 +259,9 @@ describe("fast CI preserves coverage and required checks", () => {
     const unit = job(workflow, "unit-tests");
     expect(unit).toContain("shard: [1, 2, 3, 4]");
     expect(unit).toContain("fail-fast: false");
-    expect(unit).toContain("npm run test:unit -- --shard=${{ matrix.shard }}/4");
-    expect(unit).toContain("--maxWorkers=2 --allowOnly=false --passWithNoTests=false");
+    expect(unit).toContain("node scripts/ci/run-test-lane.mjs unit --shard=${{ matrix.shard }}/4");
+    expect(unit).toContain("--maxWorkers=2");
+    expect(source("scripts/ci/run-test-lane.mjs")).toContain('"--allowOnly=false", "--passWithNoTests=false"');
     expect(unit).toContain("test-results/unit-${{ matrix.shard }}.xml");
     expect(unit).not.toMatch(/--(?:exclude|no-isolate|changed|bail)/);
     expect(JSON.parse(source("package.json")).scripts["test:unit"]).toBe("vitest run unit");
@@ -279,6 +289,17 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/lib/__tests__/dropship-pricing-rules.test.ts",
       "client/src/pages/dropship/__tests__/DropshipListingPreview.test.ts",
       "client/src/lib/__tests__/dropship-catalog-steps.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-choose.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-choose-requests.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-choose-words.test.ts",
+      "client/src/pages/dropship/__tests__/DropshipCatalogChoose.test.ts",
+      // Step 1 plan S2-5 §4.9 item 3: "site updating" for the requests stages 2-5 add.
+      "client/src/lib/__tests__/dropship-api-json.test.ts",
+      // Step 1 plan S2-5 PR A §4.10: Catalog step 3 on publish runs.
+      "client/src/lib/__tests__/dropship-catalog-publish.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-publish-requests.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-publish-words.test.ts",
+      "client/src/pages/dropship/__tests__/DropshipCatalogPublish.test.ts",
       "client/src/lib/__tests__/dropship-listing-settings.test.ts",
       "client/src/pages/dropship/__tests__/DropshipCatalogFrame.test.ts",
       "client/src/lib/__tests__/dropship-ebay-category-rules.test.ts",
@@ -336,6 +357,15 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/__tests__/dropship-finance-panel.test.ts",
     ]) expect(contracts).toContain(file);
     expect(contracts).toContain("--strict --types node scripts/inventory-cutover-records-*.ts");
+    // Step 1 plan S2-5 (TESTS17): the Catalog page's browser stubs and specs are type-checked, every spec they serve named.
+    expect(contracts).toContain("      - name: Dropship catalog browser stub types");
+    for (const file of ["test/browser/dropship-policy-catalog-stubs.ts", "test/browser/dropship-policy-listing-settings-*.ts",
+      "test/browser/dropship-policy-catalog-steps.spec.ts", "test/browser/dropship-policy-catalog-choose.spec.ts",
+      "test/browser/dropship-policy-catalog-publish-runs.spec.ts", "test/browser/dropship-policy-listing-access.spec.ts",
+      // Review round 2 CT12: every file the step names, the cost changes portal spec too.
+      "test/browser/dropship-policy-cost-changes-portal.spec.ts"]) {
+      expect(contracts).toMatch(new RegExp(`--strict --types node --allowImportingTsExtensions --jsx preserve --lib esnext,dom [^\\n]*${file.replace(/[.*]/g, (match) => `\\${match}`)}`));
+    }
   });
 
   // `vitest run` treats each path as a filter and exits 0 when one matches no
@@ -351,11 +381,14 @@ describe("fast CI preserves coverage and required checks", () => {
 
   // test:unit is `vitest run unit`, which matches none of these paths, so they
   // run in CI only because this step names them.
-  it("runs every Listing settings client test in the dropship listing UI step", () => {
+  it("runs every Listing settings and Catalog client test in the dropship listing UI step", () => {
     const registered = new Set(vitestStepFiles(job(workflow, "contracts"), "Dropship listing policy UI contracts"));
     const onDisk = [
       ...testFilesIn("client/src/lib/__tests__/", /^dropship-listing-settings(?:-[a-z]+)*\.test\.ts$/),
       ...testFilesIn("client/src/pages/dropship/__tests__/", /^ListingSettings[A-Za-z]*\.test\.ts$/),
+      // Catalog step 1 stage 1 (review CT9): the Catalog families, so a new step-1 test file can't run nowhere.
+      ...testFilesIn("client/src/lib/__tests__/", /^dropship-catalog(?:-[a-z]+)*\.test\.ts$/),
+      ...testFilesIn("client/src/pages/dropship/__tests__/", /^DropshipCatalog[A-Za-z]*\.test\.ts$/),
     ];
     expect(onDisk.length).toBeGreaterThan(0);
     for (const file of onDisk) expect(registered.has(file), "Not run in CI: " + file).toBe(true);
@@ -371,19 +404,57 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(workflow).not.toMatch(/continue-on-error:|paths(?:-ignore)?:/);
   });
 
+  it.each([
+    ["order-edits", "browser"], ["inventory-availability", "browser-shard"],
+    ["returns-preview", "browser-shard"], ["procurement-navigation", "browser"],
+    ["dropship-pricing", "browser"],
+  ])("uses a pinned compatible browser runtime in %s", (file, jobName) => {
+    const lock = JSON.parse(source("package-lock.json")) as { packages: Record<string, { version: string }> };
+    const version = lock.packages["node_modules/playwright"].version;
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+    const browser = job(source(".github/workflows/" + file + ".yml"), jobName);
+    const image = browser.match(/^      image: (.+)$/m)?.[1] ?? "";
+    expect(image).toMatch(new RegExp("^mcr\\.microsoft\\.com/playwright:v" + version.replaceAll(".", "\\.") + "-noble@sha256:[a-f0-9]{64}$"));
+    expect(browser).toContain("options: --user 1001 --ipc=host");
+    expect(browser).not.toContain("playwright install");
+    expect(browser).not.toContain("continue-on-error:");
+  });
+
+  it("gives procurement eight complete shards and setup headroom without weakening coverage", () => {
+    const procurement = source(".github/workflows/procurement-navigation.yml");
+    const browser = job(procurement, "browser");
+    // Parse the actual matrix: missing/duplicated indices or a mismatched total
+    // would silently repeat or omit cases even when every scheduled job succeeds.
+    const indices: number[] = JSON.parse(browser.match(/^        shard: (\[[\d, ]+\])$/m)?.[1] ?? "[]");
+    const totals: number[] = JSON.parse(browser.match(/^        shards: (\[[\d, ]+\])$/m)?.[1] ?? "[]");
+    expect(totals).toEqual([8]);
+    expect(indices).toEqual(Array.from({ length: totals[0] }, (_, index) => index + 1));
+    expect(browser).toContain("timeout-minutes: 20");
+    expect(browser).toContain("fail-fast: false");
+    expect(browser).toContain("name: Procurement browser journeys (${{ matrix.shard }}/${{ matrix.shards }})");
+    expect(browser).toContain("npx playwright test --config playwright.procurement.config.ts --shard=${{ matrix.shard }}/${{ matrix.shards }}\n");
+    expect(browser).not.toMatch(/--(?:grep|grep-invert|retries|max-failures|pass-with-no-tests)\b|continue-on-error:/);
+    expect(job(procurement, "result")).toContain("name: Procurement browser journeys\n");
+    const config = source("playwright.procurement.config.ts");
+    expect(config).toContain('testMatch: "procurement-*.spec.ts"');
+    expect(config).toContain("timeout: 45_000");
+    expect(config).toContain("expect: { timeout: 15_000 }");
+    expect(config).not.toMatch(/retries:|maxFailures:|testIgnore:|grep:/);
+  });
+
   it("runs all Returns shards and retains its original required check identity", () => {
     const returns = source(".github/workflows/returns-preview.yml");
     const shards = job(returns, "browser-shard");
-    expect(shards).toContain("shard: [1, 2, 3, 4]");
+    expect(shards).toContain("matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}");
     expect(shards).toContain("fail-fast: false");
-    expect(shards).toContain("--config playwright.returns-preview.config.ts --shard=${{ matrix.shard }}/4");
-    expect(shards).toContain("name: returns-preview-browser-results-${{ matrix.shard }}");
+    expect(shards).toContain("--config playwright.returns-preview.config.ts --shard=${{ matrix.shard }}/${{ matrix.shards }}");
+    expect(shards).toContain("name: returns-preview-browser-results-${{ matrix.feature }}-${{ matrix.shard }}");
     const gate = job(returns, "browser");
     expect(gate).toContain("name: Returns preview browser journeys\n");
     expect(gate).toContain("needs: [preflight, browser-shard]");
     expect(gate).toContain("if: ${{ always() }}");
     expect(gate).toContain("CI_NEEDS: ${{ toJSON(needs) }}");
-    expect(gate).toContain("node scripts/ci/require-success.mjs preflight browser-shard");
+    expect(gate).toContain("node scripts/ci/require-selected-success.mjs browser-shard");
     expect(returns).not.toMatch(/continue-on-error:|paths(?:-ignore)?:/);
   });
 

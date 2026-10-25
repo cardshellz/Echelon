@@ -1,3 +1,7 @@
+import { createChannelSyncBatchService } from "./channel-sync-batch.composition";
+import { registerChannelSyncBatchRoutes } from "./modules/marketplace-listings/infrastructure/channel-sync-batch.routes";
+import { createListingIntentPropagationService } from "./listing-intent-propagation.composition";
+import { registerListingIntentPropagationRoutes } from "./modules/marketplace-listings/infrastructure/listing-intent-propagation.routes";
 import { ebayListingSyncService } from './modules/channels/ebay-listing-sync';
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
 import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
@@ -35,10 +39,14 @@ import { startDropshipUsdcWatcherWorker } from "./modules/dropship/infrastructur
 import { startDropshipCostDetectionWorker } from "./modules/dropship/infrastructure/dropship-cost-detection-runner";
 import { startDropshipCategoryMarksWorker } from "./modules/dropship/infrastructure/dropship-category-marks-runner";
 import { startDropshipRulesConversionWorker } from "./modules/dropship/infrastructure/dropship-rules-conversion-runner";
+import { startDropshipMarketplaceSyncBackWorker } from "./modules/dropship/infrastructure/dropship-marketplace-sync-runner";
+import { startDropshipProcessHeartbeatFromEnv } from "./modules/dropship/infrastructure/dropship-process-heartbeat";
 import {
   setDropshipFulfillmentSync,
   setDropshipInventoryRuntimeAuthorityGate,
+  setDropshipMarketplaceCancelStop,
 } from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
+import { createDropshipMarketplaceCancelStop } from "./modules/oms/dropship-marketplace-cancel";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startChannelFulfillmentCommandWorker } from "./modules/oms/channel-fulfillment-command.worker";
 import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
@@ -70,6 +78,7 @@ import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
 import { cancelWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
 import { runStartupZombieOrderRepair } from "./modules/orders/zombie-order-repair";
+import { omsWarehouseCancellationSql } from "./modules/oms/order-merchandise-state.sql";
 import { startPickingFollowupWorker } from "./modules/wms/picking-followup.worker";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
@@ -499,6 +508,22 @@ function startEchelonSyncScheduler(
   });
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
+  // OMS's stop for accepted dropship orders eBay cancelled (eBay sync-back plan v4 §7.2): dropship asks, OMS cancels.
+  setDropshipMarketplaceCancelStop(createDropshipMarketplaceCancelStop({
+    db,
+    reservation: services.reservation,
+    // The engine's own answer (cancelled, already cancelled, already shipped or not found) decides the stop (review MS1).
+    engine: services.shipStation
+      ? { cancelOrder: (engineOrderRef: number) => services.shipStation.cancelOrder(engineOrderRef) }
+      : undefined,
+    clock: () => new Date(),
+  }));
+  const channelSyncBatches = createChannelSyncBatchService();
+  registerChannelSyncBatchRoutes(app, channelSyncBatches);
+  startListingPublicationWorker(channelSyncBatches, "channel_sync_batch_admission_worker");
+  const listingIntentPropagation=createListingIntentPropagationService();
+  registerListingIntentPropagationRoutes(app,listingIntentPropagation);
+  startListingPublicationWorker(listingIntentPropagation, "listing_intent_propagation_worker");
   startListingPublicationWorker(ebayListingSyncService, "ebay_listing_sync_worker");
   startListingPublicationWorker(services.listingPublication);
   startListingPublicationWorker(services.listingUpdates, "listing_update_worker");
@@ -776,7 +801,14 @@ function startEchelonSyncScheduler(
 
   httpServer.listen(
     listenOptions,
-    () => {
+    async () => {
+      // First: this process's catalog code version heartbeat (step 1 plan S2-5
+      // §4.9 item 1). Its first write is awaited, bounded and never throws,
+      // before any worker below starts (the dropship stock planner is the
+      // inventory publication selection-work worker, not only the dropship
+      // block), so a later release's gates count every running worker. It is
+      // not a scheduler: DISABLE_SCHEDULERS does not stop it.
+      await startDropshipProcessHeartbeatFromEnv();
       log(`serving on port ${port}`);
       
       // REMOVED: order-sync-listener deleted (duplicate path)
@@ -835,6 +867,7 @@ function startEchelonSyncScheduler(
           recoverPendingPickingCommands: () => services.picking.recoverPendingPickingCommands(),
           recoverReplenishmentFollowups: () => services.replenishment.recoverReplenishmentFollowups(),
           recoverInventoryTransfers: () => services.inventoryTransfers.recoverPending(),
+          recoverSupplierReturns: () => services.supplierReturnFollowups.recoverPending(),
         });
         httpServer.once("close", () => worker.stop());
       } else {
@@ -993,6 +1026,7 @@ function startEchelonSyncScheduler(
         startDropshipCostDetectionWorker();
         startDropshipCategoryMarksWorker();
         startDropshipRulesConversionWorker();
+        startDropshipMarketplaceSyncBackWorker();
       } else {
         logSchedulerDisabled("scheduler", "Dropship workers");
       }
@@ -1098,7 +1132,7 @@ function startEchelonSyncScheduler(
                   (w.source = 'oms'     AND w.oms_fulfillment_order_id = oms.id::text)
               OR  (w.source = 'shopify' AND w.source_table_id = oms.id::text)
                 )
-          WHERE oms.status IN ('cancelled', 'refunded')
+          WHERE ${omsWarehouseCancellationSql("oms")}
             AND w.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'completed')
         `);
         const corrected: any[] = [];

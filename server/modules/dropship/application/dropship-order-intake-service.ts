@@ -24,6 +24,8 @@ const normalizedOrderLineSchema = z.object({
   externalLineItemId: z.string().trim().min(1).max(255).optional(),
   externalListingId: z.string().trim().min(1).max(255).optional(),
   externalOfferId: z.string().trim().min(1).max(255).optional(),
+  /** The line was sold from a multi-variation listing, as the marketplace's mapper reads its own line (review ARCH-10). */
+  marketplaceVariation: z.literal(true).optional(),
   sku: z.string().trim().min(1).max(120).optional(),
   productVariantId: positiveIdSchema.optional(),
   quantity: z.number().int().positive(),

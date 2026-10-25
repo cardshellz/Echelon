@@ -1,6 +1,6 @@
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
-import { costGraphLockExecute } from "./cost-graph.fixture";
+import { costGraphAndPoInvoiceHistoryExecute } from "./cost-graph.fixture";
 import { describe, expect, it, vi } from "vitest";
 import {
   purchaseOrderLines,
@@ -28,7 +28,7 @@ function recommendationOwnedLineDb(handoffId: number | null = 92) {
     if (table === purchasingRecommendationPoHandoffs) return handoffId === null ? [] : [{ id: handoffId }];
     return [];
   };
-  const graphExecute = costGraphLockExecute();
+  const graphExecute = costGraphAndPoInvoiceHistoryExecute();
   const tx = {
     execute: vi.fn(async (query: SQL) => {
       const statement = new PgDialect().sqlToQuery(query).sql.replace(/\s+/g, " ").trim();

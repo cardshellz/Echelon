@@ -56,7 +56,7 @@ describe("resolveCatalogPublicationPhotos", () => {
 });
 
 describe("readCatalogVariantPublicationImages", () => {
-  it("reads each size's photos in one query, primary first, limited, with the size's own photos", async () => {
+  it("reads complete candidates in one query, primary first, with each size's own photos", async () => {
     const query = queryReturning([
       { forProductVariantId: 70, ...uploaded },
       { forProductVariantId: 70, ...linked },
@@ -70,12 +70,11 @@ describe("readCatalogVariantPublicationImages", () => {
     expect(query).toHaveBeenCalledTimes(1);
     const [sql, params] = query.mock.calls[0];
     expect(params).toEqual([[70, 71, 72], 20, MAX_PRODUCT_IMAGE_BYTES, "[]", null]);
-    expect(sql).toContain("ORDER BY pa.product_id, pa.is_primary DESC, COALESCE(o.position_override, pa.position) ASC, pa.id ASC");
+    expect(sql).toContain("PARTITION BY pa.product_id ORDER BY pa.is_primary DESC, COALESCE(o.position_override, pa.position) ASC, pa.id ASC");
     expect(sql).toContain("candidates.product_variant_id IS NULL OR candidates.product_variant_id = pv.id");
     expect(sql).toContain("pa.asset_type = 'image'");
-    expect(sql).toContain("COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) IS NOT NULL OR pa.storage_type IN ('file', 'both')");
-    expect(sql).toContain("WHERE photo_rank <= $2");
-    // The fingerprint is computed per photo, not per size, and only for kept photos.
+    expect(sql).not.toContain("WHERE photo_rank <= $2");
+    // The complete candidates retain one fingerprint calculation per photo, not per size.
     expect(sql).toMatch(/photos AS MATERIALIZED \([\s\S]*encode\(sha256\(pa\.file_data\), 'hex'\)[\s\S]*WHERE pa\.id IN \(SELECT asset_id FROM kept\)/);
   });
 
@@ -113,8 +112,8 @@ describe("PgCatalogVariantPublicationPhotoReader", () => {
     const photos = await reader.listPublicationPhotos({ productVariantIds: [70, 71, 72], maxPhotosPerVariant: 20 });
     expect(photos.get(70)).toEqual({
       photos: [
-        { assetId: 42, url: `https://catalog.example.com/api/catalog/images/42/${hash}.png`, position: 1, uploaded: true },
         { assetId: 7, url: "https://cdn.example.com/front.jpg", position: 0, uploaded: false },
+        { assetId: 42, url: `https://catalog.example.com/api/catalog/images/42/${hash}.png`, position: 1, uploaded: true },
       ],
       issues: [],
     });

@@ -1,3 +1,4 @@
+import { channelPreparedIntentSchema } from "@shared/types/channel-prepared-intent";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
@@ -59,6 +60,7 @@ export function listingIssue(
   return { code, message, field };
 }
 export const preparedListingItemSchema = z.object({
+  preparedIntent: channelPreparedIntentSchema.optional(),
   variantId: z.number().int().positive(),
   sku: z.string().min(1).max(100),
   feedType: z.string().min(1),

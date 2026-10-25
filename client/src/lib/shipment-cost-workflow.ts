@@ -3,9 +3,9 @@ import { createFinancialCommandIntentStore, financialCommandFetchJson, Financial
 
 /** Opt in to the additive exception fields. Older open browser tabs still use
  * the original strict response shape during a rolling application deployment. */
-export function readShipmentCostWorkflow(url: string): Promise<unknown> {
+export function readShipmentCostWorkflow(url: string, options?: { includePoLineLinks: boolean }): Promise<unknown> {
   return financialCommandFetchJson<unknown>(url, { method: "GET", credentials: "include",
-    headers: { "X-Shipment-Cost-Review-Version": "3" } });
+    headers: { "X-Shipment-Cost-Review-Version": "3", ...(options?.includePoLineLinks ? { "X-Purchase-Order-Line-Cost-Version": "1" } : {}) } });
 }
 
 /** Each shipment keeps its own uncertain command so a retry cannot post twice. */

@@ -6,6 +6,9 @@ import type { ListingLifecycleService } from "../../application/listing-lifecycl
 import { ListingPublicationError } from "../../domain/listing-publication";
 import { sendError } from "./listing-publication.routes";
 
+import { requireDropshipAuth } from "../../../dropship/interfaces/http/dropship-auth.routes";
+import { listingIntentPropagationRepository } from "../../../../listing-intent-propagation.composition";
+
 const lookupSchema = z
   .object({ skus: z.array(listingLifecycleSkuSchema).max(250) })
   .strict();
@@ -47,11 +50,83 @@ export function registerListingLifecycleRoutes(app: Express): void {
       },
     );
   }
+  // The tenant membership owner resolves vendor scope; caller-supplied vendor
+  // IDs cannot authorize another store's removal history or recovery.
+  for (const action of ["history", "review", "resume"] as const) {
+    const suffix =
+      action === "history"
+        ? ""
+        : action === "review"
+          ? "/recovery"
+          : "/recovery/resume";
+    app.post(
+      "/api/dropship/listings/stores/:storeConnectionId/listing-lifecycle/members" +
+        suffix,
+      requireDropshipAuth,
+      async (request, response) => {
+        try {
+          const connectionId = z.coerce
+            .number()
+            .int()
+            .positive()
+            .max(2147483647)
+            .parse(request.params.storeConnectionId);
+          const memberId = request.session.dropship!.memberId;
+          const vendorId =
+            await listingIntentPropagationRepository.vendorForMemberStore(
+              memberId,
+              connectionId,
+            );
+          if (!vendorId)
+            throw new ListingPublicationError(
+              "LISTING_MEMBER_NOT_FOUND",
+              "Store connection not found.",
+              404,
+            );
+          const service: ListingLifecycleService | undefined =
+            app.locals.services?.listingLifecycle;
+          if (!service)
+            throw new ListingPublicationError(
+              "LISTING_LIFECYCLE_UNAVAILABLE",
+              "Listing actions are unavailable.",
+              503,
+            );
+          const scope = { connectionId, vendorId };
+          response.json(
+            action === "history"
+              ? await service.memberHistory(scope, request.body)
+              : action === "review"
+                ? await service.memberRecoveryPreview(scope, request.body)
+                : await service.resumeMemberRecovery(
+                    scope,
+                    request.body,
+                    "dropship-member:" + memberId,
+                  ),
+          );
+        } catch (error) {
+          sendError(response, error);
+        }
+      },
+    );
+  }
   route("/lookup", false, (service, id, request) =>
     service.list(id, lookupSchema.parse(request.body).skus),
   );
   route("/history", false, (service, id, request) =>
     service.history(id, request.body),
+  );
+  route("/members/recovery", false, (service, id, request) =>
+    service.memberRecoveryPreview(id, request.body),
+  );
+  route("/members/recovery/resume", true, (service, id, request) =>
+    service.resumeMemberRecovery(
+      id,
+      request.body,
+      z.string().trim().min(1).max(100).parse(request.session?.user?.id),
+    ),
+  );
+  route("/members", false, (service, id, request) =>
+    service.memberHistory(id, request.body),
   );
   route("/presence", false, (service, id, request) =>
     service.refreshPresence(id, lookupSchema.parse(request.body).skus),

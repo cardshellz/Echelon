@@ -16,6 +16,15 @@ import {
   makeDropshipStoreConnectionLogger,
 } from "../application/dropship-store-connection-service";
 import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
+import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/domain/listing-registration-plan";
+
+/**
+ * The only stored identity scheme. The database CHECK
+ * dropship_store_connections_stable_identity_chk (migration 0609) admits NULL or
+ * 'provider_user_id', so the type admits exactly those: a consumer comparing
+ * against any other literal is a compile error, not a check that refuses every store.
+ */
+export type DropshipStoreAccountIdentityScheme = typeof MARKETPLACE_PROVIDER_IDENTITY_SCHEME;
 
 export interface DropshipMarketplaceStoreCredentials {
   vendorId: number;
@@ -25,7 +34,7 @@ export interface DropshipMarketplaceStoreCredentials {
   shopDomain: string | null;
   externalAccountId: string | null;
   providerEnvironment: string | null;
-  externalAccountIdentityScheme: string | null;
+  externalAccountIdentityScheme: DropshipStoreAccountIdentityScheme | null;
   externalAccountVerifiedAt: Date | null;
   externalDisplayName: string | null;
   config: Record<string, unknown>;
@@ -142,7 +151,7 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
   private readonly ebayRefreshLockTimeoutMs: number;
 
   constructor(
-    private readonly dbPool: Pool = defaultPool,
+    private readonly dbPool: Pick<Pool, "connect"> = defaultPool,
     options: DropshipMarketplaceCredentialRepositoryOptions = {},
   ) {
     this.tokenCipher = options.tokenCipher ?? new LazyEnvDropshipMarketplaceTokenCipher();
@@ -781,6 +790,8 @@ function mapCredentials(input: {
   tokens: TokenRow[];
   tokenCipher: DropshipMarketplaceTokenCipher;
 }): DropshipMarketplaceStoreCredentials {
+  // Checked before any token is decrypted, so a refused row never opens a secret.
+  const externalAccountIdentityScheme = parseStoreConnectionIdentityScheme(input.connection);
   const accessTokenRow = input.tokens.find((row) => {
     return row.token_kind === "access" && row.token_ref === input.connection.access_token_ref;
   });
@@ -822,7 +833,7 @@ function mapCredentials(input: {
     shopDomain: input.connection.shop_domain,
     externalAccountId: input.connection.external_account_id,
     providerEnvironment: input.connection.provider_environment,
-    externalAccountIdentityScheme: input.connection.external_account_identity_scheme,
+    externalAccountIdentityScheme,
     externalAccountVerifiedAt: input.connection.external_account_verified_at,
     externalDisplayName: input.connection.external_display_name,
     config: input.connection.config ?? {},
@@ -833,6 +844,34 @@ function mapCredentials(input: {
     refreshTokenRef: refreshTokenRow?.token_ref ?? null,
     refreshTokenExpiresAt: refreshTokenRow?.expires_at ?? null,
   };
+}
+
+/** Longest scheme text kept in an error context; the column is VARCHAR(40). */
+const MAX_REPORTED_IDENTITY_SCHEME_LENGTH = 40;
+
+/**
+ * A stored scheme other than NULL or provider_user_id means this row and the code
+ * disagree about what account evidence is. Passing it through would let every
+ * consumer compare against an unknown value and silently refuse (or accept) the
+ * store, so it is a permanent refusal: re-reading the same row gives the same answer.
+ */
+function parseStoreConnectionIdentityScheme(
+  connection: StoreConnectionCredentialRow,
+): DropshipStoreAccountIdentityScheme | null {
+  const scheme: unknown = connection.external_account_identity_scheme;
+  if (scheme === null || scheme === MARKETPLACE_PROVIDER_IDENTITY_SCHEME) return scheme;
+  throw new DropshipError(
+    "DROPSHIP_STORE_IDENTITY_SCHEME_UNSUPPORTED",
+    "This store connection records its seller account in an unsupported form. Reconnect the store account.",
+    {
+      vendorId: connection.vendor_id,
+      storeConnectionId: connection.id,
+      platform: connection.platform,
+      identityScheme: typeof scheme === "string" ? scheme.slice(0, MAX_REPORTED_IDENTITY_SCHEME_LENGTH) : null,
+      identitySchemeType: scheme === undefined ? "missing" : typeof scheme,
+      retryable: false,
+    },
+  );
 }
 
 function assertTokenCipherPlatform(platform: DropshipSourcePlatform): DropshipSupportedStorePlatform {

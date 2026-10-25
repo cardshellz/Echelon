@@ -95,9 +95,9 @@ describe("affected feature browser selection", () => {
   });
 
   it.each(['import "./missing";', 'const feature = import(variable);', 'import "#unknown/alias";', 'const invalid = (;'])(
-    "runs the affected group when its dependency graph cannot be trusted: %s", source => {
+    "runs unfiltered coverage when a dependency graph cannot be trusted: %s", source => {
       const plan = select("docs/example.md", { "test/browser/fixtures/dropship-finance-harness.tsx": source });
-      expect(selectedFeatures(plan)).toEqual(["finance"]);
+      expect(plan.matrix).toEqual(fullDropshipBrowserPlan("uncertain").matrix);
       expect(plan.decisions.find(decision => decision.feature === "finance")?.reason).toContain("Dependency analysis was uncertain");
     },
   );
@@ -126,7 +126,8 @@ describe("affected feature browser selection", () => {
       const output = path.join(directory, "outputs");
       const plan = runDropshipBrowserSelection({ BROWSER_EVENT_NAME: "workflow_dispatch", GITHUB_OUTPUT: output });
       expect(readFileSync(output, "utf8")).toBe(`run=true\nmatrix=${JSON.stringify(plan.matrix)}\n`);
-      expect(plan.matrix.include.map(entry => entry.feature)).toEqual(["all", "all"]);
+      expect(plan.matrix.include.map(entry => [entry.feature, entry.shard, entry.shards]))
+        .toEqual([["all", 1, 4], ["all", 2, 4], ["all", 3, 4], ["all", 4, 4]]);
       expect(runDropshipBrowserSelection({ BROWSER_BASE_SHA: "main; echo injected", BROWSER_HEAD_SHA: "0".repeat(40) }).matrix)
         .toEqual(plan.matrix);
     } finally {
@@ -138,7 +139,10 @@ describe("affected feature browser selection", () => {
     ["client/src/pages/dropship/DropshipPortalWallet.tsx", ["wallet"]],
     ["shared/dropship/program-finance-money.ts", ["finance"]],
     // Listing settings PR 12 deleted the pricing rules panel and its own feature group; a step row is the listings group's.
-    ["client/src/pages/dropship/listing-settings/PriceDefaultRow.tsx", ["listings"]],
+    // Step 1 plan S2-5 PR A: the catalog-scale journeys render the same Catalog page (one harness), so it runs them too.
+    ["client/src/pages/dropship/listing-settings/PriceDefaultRow.tsx", ["listings", "catalog-scale"]],
+    ["client/src/pages/dropship/catalog/PublishStep.tsx", ["listings", "catalog-scale"]],
+    ["test/browser/dropship-policy-catalog-publish-runs.spec.ts", ["catalog-scale"]],
     ["test/browser/dropship-policy-listing-settings-helpers.ts", ["listings"]],
     ["shared/ebay-listing-issue.ts", []],
     ["docs/migration-allocation.md", []],

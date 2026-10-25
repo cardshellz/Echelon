@@ -1,3 +1,5 @@
+import React from "react";
+import { noInventoryEffectLabel } from "./cost-inventory-effect-presentation";
 import { Link } from "wouter";
 import type {
   PurchaseCostStatus,
@@ -5,10 +7,13 @@ import type {
 } from "@shared/procurement/purchase-cost-status";
 import {
   purchaseCostNextAction,
+  purchaseLineInventoryEffect,
   purchaseLineNeedsCostReview,
 } from "@shared/procurement/purchase-cost-status";
 import type { ProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { Badge } from "@/components/ui/badge";
+import { CostOriginRepair } from "./CostOriginRepair";
+import { CostIssueMessage } from "./CostIssueMessage";
 
 export function PurchaseSupplierCostLine({
   line,
@@ -18,6 +23,8 @@ export function PurchaseSupplierCostLine({
   navigation: ProcurementNavigation;
 }) {
   const action = purchaseCostNextAction(line);
+  const inventoryEffect = purchaseLineInventoryEffect(line);
+  const missingOrigin = line.lots.some(lot => lot.origin === "unproven");
   const issues = [
     ...new Map(
       line.components
@@ -39,7 +46,7 @@ export function PurchaseSupplierCostLine({
             {component.component === "product" ? "Product" : "Packaging"}:{" "}
             {component.status === "applied"
               ? component.sourceEvidence === "confirmed"
-                ? "Posted"
+                ? component.inventoryEffect ? "No inventory change" : "Posted"
                 : "Estimate posted"
               : component.status === "pending"
                 ? "Not posted"
@@ -47,14 +54,22 @@ export function PurchaseSupplierCostLine({
           </Badge>
         ))}
       </div>
-      {action === "invoice" && (
+      {line.lots.filter(lot => lot.origin === "unproven" || line.originRepairs?.some(repair => repair.lotId === lot.id)).map(lot => {
+        const repair = line.originRepairs?.find(repair => repair.lotId === lot.id);
+        return <div key={lot.id} className="space-y-1 rounded border p-2">
+          <p>{lot.lotNumber}{repair && <> · Origin repaired · Approved by {repair.actorName} · {new Date(repair.recordedAt).toLocaleString()}</>}</p>
+          <CostOriginRepair lotId={lot.id} repaired={!!repair} />
+        </div>;
+      })}
+      {missingOrigin && <p>Use <strong>Repair historical cost origin</strong> to confirm this receipt and its supplier amounts, review the before and after, and request administrator approval.</p>}
+      {action === "invoice" && !missingOrigin && (
         <p>
           Confirm the product and packaging amounts on the supplier invoice.
           Saving that review applies the costs to linked stock and sold items.
           Freight and duty approvals do not supply these amounts.
         </p>
       )}
-      {action === "history" && (
+      {action === "history" && !missingOrigin && (
         <p>
           The supplier amounts are recorded, but some receipt or stock history
           is missing. Review the affected lots and receipts below before
@@ -68,17 +83,22 @@ export function PurchaseSupplierCostLine({
           cost processing section to retry and review its saved result.
         </p>
       )}
+      {action === "review" && (
+        <p>
+          The recorded source needs an accounting review. See the current reasons
+          below; there is no automatic cost retry for this case.
+        </p>
+      )}
       {action === "none" && (
         <p className="text-green-700 dark:text-green-400">
-          Product and packaging costs are posted for the current source and lot
-          history.
+          {inventoryEffect ? noInventoryEffectLabel : "Product and packaging costs are posted for the current source and lot history."}
         </p>
       )}
       <div className="flex flex-wrap gap-3">
         {line.invoices.map((invoice) => {
           const href = navigation.childHref(
             `/ap-invoices/${invoice.invoiceId}?tab=lines`,
-            { invoiceCostLineId: invoice.lineId },
+            action === "review" || action === "none" ? undefined : { invoiceCostLineId: invoice.lineId },
           );
           return (
             <Link
@@ -86,7 +106,7 @@ export function PurchaseSupplierCostLine({
               href={href}
               className="text-primary underline underline-offset-4"
             >
-              {action === "none" ? "View" : "Review"} invoice{" "}
+              {action === "none" || action === "review" ? "View" : "Review"} invoice{" "}
               {invoice.invoiceNumber} · line {invoice.lineNumber}
             </Link>
           );
@@ -113,21 +133,22 @@ export function PurchaseSupplierCostLine({
         )}
       </div>
       {issues.length > 0 && (
-        <details>
+        <details open={action !== "none"}>
           <summary className="cursor-pointer">
             Current reasons ({issues.length})
           </summary>
           <ul className="mt-2 list-disc space-y-1 pl-5">
             {issues.map((issue) => (
-              <li key={issue.message}>{issue.message}</li>
+              <li key={issue.message}><CostIssueMessage issue={issue} /></li>
             ))}
           </ul>
         </details>
       )}
       <details open={action === "history"}>
         <summary className="cursor-pointer">
-          Affected lot history ({line.lots.length})
+          {inventoryEffect ? "Return and receipt evidence" : `Affected lot history (${line.lots.length})`}
         </summary>
+        {inventoryEffect && <p className="mt-2">All {inventoryEffect.returnedBasePieces.toLocaleString()} base pieces were returned before acceptance. Zero remaining source quantity; no inventory lots were created.</p>}
         <ul className="mt-2 space-y-2">
           {line.lots.map((lot) => (
             <li key={lot.id}>

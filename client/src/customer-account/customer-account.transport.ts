@@ -6,14 +6,17 @@ import { PreviewAccessError } from "@/lib/customer-return-preview";
 import { createOrderEditTransport } from "@/lib/order-edits";
 import { createCustomerReturnTransport } from "@/lib/customer-return-customer";
 import { ORDER_EDIT_PRICING_DISPLAY_HEADER, ORDER_EDIT_PRICING_DISPLAY_VERSION } from "@shared/order-edits/order-edit-financials";
-import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema } from "@shared/customer-account/reward-widget";
+import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
+import { customerOrderCancellationInputSchema, customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
+import { customerAccountOrderSummariesInputSchema, customerAccountOrderSummariesSchema, customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
 
 export const customerAccountPageConfigSchema = z.object({
   themeId: z.string().max(30).regex(/^[1-9][0-9]*$/),
   customerId: z.string().max(30).regex(/^[1-9][0-9]*$/),
+  loginPath: z.string().max(100).regex(/^\/(?:[a-z]{2}(?:-[a-z0-9]{2,8})?\/)?account\/login$/i).default("/account/login"),
   proxyPath: z.string().regex(/^\/(apps|a|community|tools)\/[a-z0-9][a-z0-9-]*$/).refine(path => !path.endsWith("/member-portal")),
 }).strict();
-export type CustomerAccountPageConfig = z.infer<typeof customerAccountPageConfigSchema>;
+export type CustomerAccountPageConfig = z.input<typeof customerAccountPageConfigSchema>;
 // Bound storefront waits; a timed-out mutation must still be reconciled.
 export const CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS = 25_000;
 export class CustomerAccountRequestError extends Error {
@@ -83,13 +86,48 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
   return {
     async bootstrap(signal?: AbortSignal) {
       const result = await json(await call({ method: "GET", path: "/account/bootstrap" }, signal), customerAccountBootstrapSchema);
-      if (!result.session.authenticated || !result.session.sessionKey) throw new Error("Sign in to your store account before continuing.");
+      if (!result.session.authenticated || !result.session.sessionKey) throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_SESSION_INVALID", "The account response could not be verified.");
       sessionKey = result.session.sessionKey;
       return result;
     },
     resolve: async (raw: unknown, signal?: AbortSignal) => json(await call({ method: "POST", path: "/account/resolve", body: customerAccountOrderIdentityInputSchema.parse(raw) }, signal), customerAccountOrderIdentitySchema),
+    orderSummaries: async (raw: unknown, signal?: AbortSignal) => {
+      const input = customerAccountOrderSummariesInputSchema.parse(raw);
+      const result = await json(await call({ method: "POST", path: "/account/order-summaries", body: input }, signal), customerAccountOrderSummariesSchema);
+      const expected = input.orders.map(order => order.externalOrderId);
+      const received = [...result.orders.map(order => order.externalOrderId), ...result.unavailableExternalOrderIds];
+      if (received.length !== expected.length || received.some(id => !expected.includes(id)) || result.orders.some(order => !input.orders.some(item => item.externalOrderId === order.externalOrderId && item.orderReference === order.orderReference)))
+        throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_ORDER_MISMATCH", "Order history could not be verified. Please try again.");
+      return result;
+    },
+    orderDetails: async (raw: unknown, signal?: AbortSignal) => {
+      const input = customerAccountOrderIdentityInputSchema.parse(raw);
+      const result = await json(await call({ method: "POST", path: "/account/order-details", body: input }, signal), customerAccountOrderDetailsSchema);
+      if (result.externalOrderId !== input.externalOrderId || result.orderReference !== input.orderReference)
+        throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_ORDER_MISMATCH", "Order details could not be verified. Please try again.");
+      return result;
+    },
     edits: createOrderEditTransport(bridge),
+    cancellation: {
+      review: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({
+        method: "GET", path: `/account/orders/${omsOrderId}/cancellation/review`, query: { connectionId: String(connectionId) },
+      }, signal), customerOrderCancellationReviewSchema),
+      submit: async (raw: unknown, signal?: AbortSignal) => {
+        const { connectionId, omsOrderId, ...body } = customerOrderCancellationInputSchema.parse(raw);
+        return json(await call({ method: "POST", path: `/account/orders/${omsOrderId}/cancellation`, query: { connectionId: String(connectionId) }, body, commandKey: body.requestKey }, signal), customerOrderCancellationSchema);
+      },
+      status: async (connectionId: number, omsOrderId: number, requestKey: string, signal?: AbortSignal) => json(await call({
+        method: "GET", path: `/account/orders/${omsOrderId}/cancellation/status`, query: { connectionId: String(connectionId), requestKey: z.string().uuid().parse(requestKey) },
+      }, signal), customerOrderCancellationSchema),
+    },
     rewards: {
+      manage: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({
+        method: "GET", path: `/order-edits/orders/${omsOrderId}/rewards/manage`, query: { connectionId: String(connectionId) },
+      }, signal), rewardWidgetManagementStateSchema),
+      cancel: async (connectionId: number, omsOrderId: number, input: { rewardId: string; requestKey: string }) => json(await call({
+        method: "POST", path: `/order-edits/orders/${omsOrderId}/rewards/cancel`, query: { connectionId: String(connectionId) },
+        body: input, commandKey: input.requestKey,
+      }), rewardWidgetCancelResultSchema),
       state: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({
         method: "GET", path: `/order-edits/orders/${omsOrderId}/rewards`, query: { connectionId: String(connectionId) },
       }, signal), rewardWidgetStateSchema),

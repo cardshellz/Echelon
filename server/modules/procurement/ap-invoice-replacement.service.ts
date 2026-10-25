@@ -1,3 +1,5 @@
+import { hasInvoiceCreditHistory } from "./supplier-credit-settlement.repository";
+import { readShipmentBillingOwnership } from "./shipment-billing-ownership.repository";
 import { and, asc, eq, inArray, or } from "drizzle-orm";
 import { z } from "zod";
 import { apPaymentAllocations, auditEvents, inboundFreightCosts, inboundShipments, vendorInvoiceLines,
@@ -33,7 +35,8 @@ async function readReplacementSource(client: ApLedgerDbClient, invoiceId: number
   const [shipment] = shipmentQuery === null ? [] : await (lock ? shipmentQuery.for("update") : shipmentQuery);
   const shipmentPoIds = invoice.inboundShipmentId === null || links.length === 0 ? [] :
     ((await readShipmentPurchaseOrders(client, [invoice.inboundShipmentId])).get(invoice.inboundShipmentId) ?? []).map(po => po.id);
-  return { invoice, lines, costs, links, paymentHistory, successorInvoiceId: successor?.id ?? null, shipment: shipment ?? null, shipmentPoIds };
+  const hasCreditHistory = await hasInvoiceCreditHistory(client, invoiceId);
+  return { invoice, lines, costs, links, paymentHistory, hasCreditHistory, successorInvoiceId: successor?.id ?? null, shipment: shipment ?? null, shipmentPoIds };
 }
 
 
@@ -44,7 +47,12 @@ export async function readInvoiceReplacementDetail(client: ApLedgerDbClient, inv
     replacesInvoiceId: vendorInvoices.replacesInvoiceId, createdAt: vendorInvoices.createdAt }).from(vendorInvoices)
     .where(and(eq(vendorInvoices.vendorId, source.invoice.vendorId), eq(vendorInvoices.invoiceNumber, source.invoice.invoiceNumber)))
     .orderBy(asc(vendorInvoices.id));
-  return { replacementCapability: evaluateInvoiceReplacement(source, costFingerprint(source)), replacementHistory: invoiceReplacementHistorySchema.parse(rows) };
+  const capability = evaluateInvoiceReplacement(source, costFingerprint(source));
+  const ownership = await readShipmentBillingOwnership(client, source.costs);
+  const conflictingOwnership = capability.allowed && source.costs.some(cost => ownership.get(cost.id)?.state !== "voided");
+  return { replacementCapability: conflictingOwnership ? { ...capability, allowed: false, code: "AP_INVOICE_BILLING_REVIEW_REQUIRED",
+    message: "The original invoice has conflicting shipment billing evidence. Review all source invoices before replacement." } : capability,
+    replacementHistory: invoiceReplacementHistorySchema.parse(rows) };
 }
 
 export async function replaceVoidedInvoiceInTransaction(client: ApLedgerDbClient, invoiceId: number, input: unknown,
@@ -59,6 +67,11 @@ export async function replaceVoidedInvoiceInTransaction(client: ApLedgerDbClient
   if (command.data.expectedVersion !== capability.expectedVersion) throw new ApLedgerError(
     "The invoice or its charge assignments changed. Reload the invoice and review the replacement again.", 409, { code: "AP_INVOICE_REPLACEMENT_STALE" });
   if (!capability.allowed) throw new ApLedgerError(capability.message, 409, { code: capability.code });
+  const ownership = await readShipmentBillingOwnership(client, source.costs);
+  if (source.costs.some(cost => ownership.get(cost.id)?.state !== "voided")) throw new ApLedgerError(
+    "The original invoice has conflicting shipment billing evidence. Review all source invoices before replacement.", 409,
+    { code: "AP_INVOICE_BILLING_REVIEW_REQUIRED", invoiceId });
+
   const { invoice } = source;
   const [replacement] = await client.insert(vendorInvoices).values({
     replacesInvoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber, vendorId: invoice.vendorId,

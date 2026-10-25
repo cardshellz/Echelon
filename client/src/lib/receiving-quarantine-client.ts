@@ -1,103 +1,79 @@
 import { z } from "zod";
-import {
-  cancelQuarantineAcceptanceSchema, prepareQuarantineAcceptanceSchema,
-  receivingQuarantineCommandResultSchema, receivingQuarantineIntakeSchema,
-  receivingQuarantineViewSchema, returnQuarantineCustodySchema,
-  type ReceivingQuarantineCommandResult, type ReceivingQuarantineView,
-} from "@shared/procurement/receiving-quarantine";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import { receivingQuarantineViewSchema, type ReceivingQuarantineView } from "@shared/procurement/receiving-quarantine";
+import { custodyActionSchema, custodyRequestSchemas, verifyCustodyCommandResult, type VerifiedCustodyResult } from "@shared/procurement/receiving-quarantine-command";
+import { createPersistentFinancialIntentStore } from "./persistent-financial-intent";
+import { FinancialCommandRequestError, financialCommandFetchJson } from "./financial-command";
 
-export interface ReceivingCustodyAttempt {
-  receiptId: number;
-  observationId: number | null;
-  path: string;
-  key: string;
-  body: unknown;
-}
-
+const id = z.number().int().positive().max(2_147_483_647);
+const commandSchema = z.object({ receiptId: id, observationId: id.nullable(), command: custodyActionSchema, payload: z.unknown() }).strict().superRefine((value, context) => {
+  if ((value.command === "intake") !== (value.observationId === null) || !custodyRequestSchemas[value.command].safeParse(value.payload).success)
+    context.addIssue({ code: "custom", message: "The saved quarantine action or input is invalid." });
+});
+const attemptSchema = z.object({ version: z.literal(1), userId: z.string().trim().min(1).max(100), key: z.string().uuid(), body: commandSchema }).strict();
+export type ReceivingCustodyAttempt = z.infer<typeof attemptSchema>;
+type StoragePort = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 export class ReceivingCustodyRequestError extends Error {
   constructor(message: string, readonly outcomeUnknown: boolean) { super(message); }
 }
 
-const attemptSchema = z.object({
-  receiptId: z.number().int().positive(), observationId: z.number().int().positive().nullable(),
-  path: z.string(), key: z.string().uuid(), body: z.unknown(),
-}).strict();
-const storageKey = (receiptId: number) => `receiving-custody-command:${receiptId}`;
-
-function validateAttempt(value: unknown, receiptId: number): ReceivingCustodyAttempt {
-  const attempt = attemptSchema.parse(value);
-  if (attempt.receiptId !== receiptId) throw new Error("The saved quarantine command belongs to another receipt.");
-  const suffix = attempt.path.split("/").at(-1);
-  const schema = attempt.observationId === null && attempt.path === `/api/receiving/${receiptId}/quarantine`
-    ? receivingQuarantineIntakeSchema
-    : attempt.observationId !== null && attempt.path === `/api/receiving/quarantine/${attempt.observationId}/${suffix}`
-      ? suffix === "prepare-acceptance" ? prepareQuarantineAcceptanceSchema
-        : suffix === "return" ? returnQuarantineCustodySchema
-          : suffix === "cancel-acceptance" ? cancelQuarantineAcceptanceSchema : null
-      : null;
-  if (!schema) throw new Error("The saved quarantine command has an unsupported action.");
-  return { ...attempt, body: schema.parse(attempt.body) };
+/** Keep the old receipt storage key so unowned legacy attempts block dispatch.
+ * We never assign the current operator to an older unidentified browser intent. */
+export function createReceivingCustodyStore(receiptId: number, userId: string, storage: () => StoragePort = () => sessionStorage) {
+  id.parse(receiptId);
+  if (!userId.trim()) throw new Error("Sign in before recovering quarantine custody.");
+  return createPersistentFinancialIntentStore<ReceivingCustodyAttempt["body"], ReceivingCustodyAttempt>({ storage,
+    storageKey: `receiving-custody-command:${receiptId}`, userId,
+    parse: raw => { const value = attemptSchema.parse(raw); if (value.body.receiptId !== receiptId) throw new Error("Receipt mismatch"); return value; },
+    messages: {
+      read: "Quarantine recovery cannot be read. Restore browser session storage before another custody change.",
+      corrupt: "The saved quarantine request belongs to another operator or has legacy evidence without an operator. Sign in as the original operator; legacy evidence requires review before another custody change.",
+      unresolved: "A quarantine command is unresolved. Recover its exact saved request before another change.",
+      save: "The quarantine command was not sent because its recovery request could not be saved.",
+      clear: "The quarantine outcome was verified, but recovery could not be cleared. Retry the saved command.",
+    },
+  });
 }
-
-/** Retain the exact reviewed intent across navigation and an ambiguous response.
- * Never replace its key until its result is confirmed or a rejected command has
- * been read back. Storage is validated as untrusted input when restored. */
-export function readReceivingCustodyAttempt(receiptId: number): ReceivingCustodyAttempt | null {
-  const saved = sessionStorage.getItem(storageKey(receiptId));
-  return saved === null ? null : validateAttempt(JSON.parse(saved), receiptId);
+export type ReceivingCustodyStore = ReturnType<typeof createReceivingCustodyStore>;
+export function acquireReceivingCustodyAttempt(store: ReceivingCustodyStore, receiptId: number, observationId: number | null, path: string, payload: unknown): ReceivingCustodyAttempt {
+  const command = observationId === null && path === `/api/receiving/${receiptId}/quarantine` ? "intake" : path.split("/").at(-1);
+  const action = custodyActionSchema.parse(command);
+  if (action !== "intake" && path !== `/api/receiving/quarantine/${observationId}/${action}`) throw new Error("The quarantine action does not match its target.");
+  const body = commandSchema.parse({ receiptId, observationId, command: action, payload: custodyRequestSchemas[action].parse(payload) });
+  return store.acquire(body, () => {
+    if (!globalThis.crypto?.randomUUID) throw new Error("This browser cannot create a safe command identifier.");
+    return crypto.randomUUID();
+  });
 }
-
-export function saveReceivingCustodyAttempt(attempt: ReceivingCustodyAttempt): void {
-  const validated = validateAttempt(attempt, attempt.receiptId);
-  sessionStorage.setItem(storageKey(attempt.receiptId), JSON.stringify(validated));
-}
-
-export function clearReceivingCustodyAttempt(receiptId: number): void {
-  sessionStorage.removeItem(storageKey(receiptId));
-}
-
-export function createReceivingCustodyAttempt(
-  receiptId: number, observationId: number | null, path: string, body: unknown,
-): ReceivingCustodyAttempt {
-  if (!globalThis.crypto?.randomUUID) throw new Error("This browser cannot create a safe command identifier. Reload using a supported secure connection.");
-  return validateAttempt({ receiptId, observationId, path, body, key: crypto.randomUUID() }, receiptId);
-}
-
-async function responseBody(response: Response): Promise<unknown> {
-  const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const error = z.object({ error: z.string().optional(), code: z.string().optional() }).passthrough().safeParse(body);
-    const unresolved = response.status >= 500 || [408, 429].includes(response.status) ||
-      error.success && error.data.code === "FINANCIAL_COMMAND_IN_PROGRESS";
-    throw new ReceivingCustodyRequestError(error.success && error.data.error
-      ? error.data.error : `The quarantine request failed (HTTP ${response.status}).`, unresolved);
-  }
-  return body;
-}
-
 export async function readReceivingQuarantine(receiptId: number, signal?: AbortSignal): Promise<ReceivingQuarantineView> {
-  const response = await fetch(`/api/receiving/${receiptId}/quarantine`, { credentials: "include", signal });
-  const parsed = receivingQuarantineViewSchema.safeParse(await responseBody(response));
-  if (!parsed.success || parsed.data.receivingOrderId !== receiptId) {
-    throw new Error("The quarantine custody response was incomplete or belonged to another receipt. Load it again before continuing.");
-  }
+  const raw = await financialCommandFetchJson<unknown>(`/api/receiving/${receiptId}/quarantine`, { credentials: "include", signal });
+  const parsed = receivingQuarantineViewSchema.safeParse(raw);
+  if (!parsed.success || parsed.data.receivingOrderId !== receiptId) throw new Error("The quarantine custody response was incomplete or belonged to another receipt. Load it again before continuing.");
   return parsed.data;
 }
-
-export async function executeReceivingCustodyAttempt(attempt: ReceivingCustodyAttempt): Promise<ReceivingQuarantineCommandResult> {
-  const reviewed = validateAttempt(attempt, attempt.receiptId);
-  let response: Response;
+export async function executeReceivingCustodyAttempt(store: ReceivingCustodyStore, attempt: ReceivingCustodyAttempt): Promise<VerifiedCustodyResult> {
+  const original = attemptSchema.parse(attempt);
+  if (original.userId !== store.userId) throw new Error("Sign in as the original operator to recover this quarantine request.");
+  const saved = store.read();
+  if (!saved || canonicalJson(saved) !== canonicalJson(original)) throw new Error("The saved quarantine request changed. Reload before retrying.");
+  const body = original.body;
+  const identity = { command: body.command, resourceId: body.observationId ?? body.receiptId, actorId: original.userId, idempotencyKey: original.key };
+  const path = body.command === "intake" ? `/api/receiving/${body.receiptId}/quarantine` : `/api/receiving/quarantine/${body.observationId}/${body.command}`;
   try {
-    response = await fetch(reviewed.path, { method: "POST", credentials: "include",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": reviewed.key }, body: JSON.stringify(reviewed.body) });
-  } catch {
-    throw new ReceivingCustodyRequestError("The quarantine outcome could not be confirmed. Retry this same command to recover its result.", true);
+    const raw = await financialCommandFetchJson<unknown>(path, { method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": original.key }, body: JSON.stringify(body.payload) });
+    let result: VerifiedCustodyResult;
+    try {
+      result = verifyCustodyCommandResult(raw, identity, body.payload);
+      if (result.observation.receivingOrderId !== body.receiptId) throw new Error("Receipt mismatch");
+    } catch { throw new ReceivingCustodyRequestError("The quarantine outcome could not be verified. Retry the same saved command before another change.", true); }
+    store.complete(original.key);
+    return result;
+  } catch (error) {
+    const rejected = error instanceof FinancialCommandRequestError && !error.ambiguous && error.status !== null && error.status >= 400 && error.status < 500
+      && error.details?.custodyCommandOutcome === "rejected"
+      && Object.entries(identity).every(([key, value]) => error.details?.[key] === value);
+    if (rejected) store.complete(original.key);
+    throw error instanceof ReceivingCustodyRequestError ? error : new ReceivingCustodyRequestError(error instanceof Error ? error.message : "The quarantine outcome is unknown.", !rejected);
   }
-  const parsed = receivingQuarantineCommandResultSchema.safeParse(await responseBody(response));
-  if (!parsed.success || parsed.data.observation.receivingOrderId !== attempt.receiptId ||
-      attempt.observationId !== null && parsed.data.observation.id !== attempt.observationId ||
-      attempt.path.endsWith("prepare-acceptance") && parsed.success && parsed.data.acceptance === null) {
-    throw new ReceivingCustodyRequestError("The quarantine outcome could not be verified. Retry this same command before recording another change.", true);
-  }
-  return parsed.data;
 }

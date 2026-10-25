@@ -3,13 +3,17 @@ import {
   COST_ACTIONABLE_LISTING_STATUSES,
   classifyCostChangeListingPrice,
   costChangeHoldIdempotencyKey,
+  costChangeListingFollowUpNoticeIdempotencyKey,
   costChangeListingNoticeIdempotencyKey,
+  costChangeRecheckHoldIdempotencyKey,
+  costChangeRecheckRepriceIdempotencyKey,
   costChangeReleaseIdempotencyKey,
   costChangeRepriceIdempotencyKey,
   decideCostChangeHoldRelease,
   decideCostChangeListingAction,
   decideQueuedRulePricePublication,
   idSetHash,
+  judgeAgainstPublishedPrice,
   type CostChangeListingPriceClassification,
 } from "../../domain/cost-change-listing-action";
 
@@ -79,48 +83,133 @@ describe("decideCostChangeListingAction", () => {
   const settings = { rulePricedListings: "reprice_automatically" as const, belowCostFixedListings: "warn" as const };
 
   it("reprices or holds back a listing that follows the cost, as the policy says", () => {
-    expect(decideCostChangeListingAction({ listingStatus: "active", price: rulesOnCost, unitCostCents: 999, settings })).toBe("reprice_queued");
-    expect(decideCostChangeListingAction({ listingStatus: "active", price: rulesOnCost, unitCostCents: 999,
+    expect(decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: rulesOnCost, unitCostCents: 999, settings })).toBe("reprice_queued");
+    expect(decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: rulesOnCost, unitCostCents: 999,
       settings: { ...settings, rulePricedListings: "wait_for_review" } })).toBe("awaiting_review");
   });
 
   it("judges every other price against the cost per unit, and acts on an under-water one as the policy says", () => {
-    expect(decideCostChangeListingAction({ listingStatus: "active", price: fixed(999), unitCostCents: 999, settings })).toBe("price_covers_cost");
-    expect(decideCostChangeListingAction({ listingStatus: "active", price: fixed(998), unitCostCents: 999, settings })).toBe("below_cost_warned");
-    expect(decideCostChangeListingAction({ listingStatus: "active", price: fixed(998), unitCostCents: 999,
+    expect(decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: fixed(999), unitCostCents: 999, settings })).toBe("price_covers_cost");
+    expect(decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: fixed(998), unitCostCents: 999, settings })).toBe("below_cost_warned");
+    expect(decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: fixed(998), unitCostCents: 999,
       settings: { ...settings, belowCostFixedListings: "no_action" } })).toBe("below_cost_recorded");
-    expect(decideCostChangeListingAction({ listingStatus: "active", price: fixed(998), unitCostCents: 999,
+    expect(decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: fixed(998), unitCostCents: 999,
       settings: { ...settings, belowCostFixedListings: "pause_listing" } })).toBe("below_cost_paused");
-    expect(decideCostChangeListingAction({ listingStatus: "active", price: { source: "rules_retail", priceCents: 500, followsCost: false },
+    expect(decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: { source: "rules_retail", priceCents: 500, followsCost: false },
       unitCostCents: 999, settings })).toBe("below_cost_warned");
   });
 
   it("leaves a listing that is not live, or whose price is unknown, alone", () => {
     expect(COST_ACTIONABLE_LISTING_STATUSES).toEqual(["active"]);
     for (const status of ["preview_ready", "queued", "pushing", "paused", "ended", "failed", "blocked", "drift_detected", "not_listed"]) {
-      expect(decideCostChangeListingAction({ listingStatus: status, price: rulesOnCost, unitCostCents: 999, settings })).toBe("skipped_inactive_listing");
+      expect(decideCostChangeListingAction({ listingStatus: status, externalListingId: null, price: rulesOnCost, unitCostCents: 999, settings })).toBe("skipped_inactive_listing");
     }
-    expect(decideCostChangeListingAction({ listingStatus: "active", price: fixed(null), unitCostCents: 999, settings })).toBe("skipped_price_unavailable");
+    expect(decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: fixed(null), unitCostCents: 999, settings })).toBe("skipped_price_unavailable");
+  });
+
+  it("acts on a listing being re-sent that eBay still lists (review MC1): the push-progress statuses with a listing id", () => {
+    // Orders on these listings are accepted (order-listing-acceptability.ts), so their cost protection must hold too.
+    for (const status of ["queued", "pushing", "failed", "blocked"]) {
+      expect(decideCostChangeListingAction({ listingStatus: status, externalListingId: "v1|1234|0", price: rulesOnCost, unitCostCents: 999,
+        settings })).toBe("reprice_queued");
+      expect(decideCostChangeListingAction({ listingStatus: status, externalListingId: "v1|1234|0", price: fixed(998), unitCostCents: 999,
+        settings: { ...settings, belowCostFixedListings: "pause_listing" } })).toBe("below_cost_paused");
+      // A blank id, or none, is no listing on eBay: left alone as before.
+      for (const externalListingId of [null, "", "   "]) {
+        expect(decideCostChangeListingAction({ listingStatus: status, externalListingId, price: rulesOnCost, unitCostCents: 999, settings }))
+          .toBe("skipped_inactive_listing");
+      }
+    }
+    // Statuses outside push progress keep their earlier meaning, with an id or not (not changed by publish runs).
+    for (const status of ["ended", "not_listed", "preview_ready", "paused", "drift_detected"]) {
+      expect(decideCostChangeListingAction({ listingStatus: status, externalListingId: "v1|1234|0", price: rulesOnCost, unitCostCents: 999,
+        settings })).toBe("skipped_inactive_listing");
+    }
   });
 
   it("refuses a cost or price that is not positive whole cents", () => {
-    expect(() => decideCostChangeListingAction({ listingStatus: "active", price: fixed(999), unitCostCents: 0, settings })).toThrow(RangeError);
-    expect(() => decideCostChangeListingAction({ listingStatus: "active", price: fixed(999), unitCostCents: 9.99, settings })).toThrow(RangeError);
-    expect(() => decideCostChangeListingAction({ listingStatus: "active", price: fixed(-1), unitCostCents: 999, settings })).toThrow(RangeError);
+    expect(() => decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: fixed(999), unitCostCents: 0, settings })).toThrow(RangeError);
+    expect(() => decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: fixed(999), unitCostCents: 9.99, settings })).toThrow(RangeError);
+    expect(() => decideCostChangeListingAction({ listingStatus: "active", externalListingId: null, price: fixed(-1), unitCostCents: 999, settings })).toThrow(RangeError);
   });
 });
 
 describe("decideCostChangeHoldRelease", () => {
-  it("releases a hold once the price covers the cost in force, or the listing is no longer live", () => {
-    expect(decideCostChangeHoldRelease({ listingStatus: "active", priceCents: 999, costInForceCents: 999 })).toBe("price_covers_cost");
-    expect(decideCostChangeHoldRelease({ listingStatus: "active", priceCents: 998, costInForceCents: 999 })).toBeNull();
-    expect(decideCostChangeHoldRelease({ listingStatus: "ended", priceCents: 1, costInForceCents: 999 })).toBe("listing_inactive");
+  it("releases a hold once the price buyers see covers the cost in force, or the listing is no longer live", () => {
+    expect(decideCostChangeHoldRelease({ listingStatus: "active", externalListingId: null, priceCents: 999, publishedPriceCents: 999, costInForceCents: 999 })).toBe("price_covers_cost");
+    expect(decideCostChangeHoldRelease({ listingStatus: "active", externalListingId: null, priceCents: 998, publishedPriceCents: 999, costInForceCents: 999 })).toBeNull();
+    expect(decideCostChangeHoldRelease({ listingStatus: "ended", externalListingId: null, priceCents: 1, publishedPriceCents: null, costInForceCents: 999 })).toBe("listing_inactive");
   });
 
-  it("keeps the hold when the price or the cost is unknown", () => {
-    expect(decideCostChangeHoldRelease({ listingStatus: "active", priceCents: null, costInForceCents: 999 })).toBeNull();
-    expect(decideCostChangeHoldRelease({ listingStatus: "active", priceCents: 999, costInForceCents: null })).toBeNull();
-    expect(() => decideCostChangeHoldRelease({ listingStatus: "active", priceCents: 0, costInForceCents: 999 })).toThrow(RangeError);
+  it("keeps the hold while a covering price is saved or queued but not yet published, or a lower one is queued over it", () => {
+    expect(decideCostChangeHoldRelease({ listingStatus: "active", externalListingId: null, priceCents: 1500, publishedPriceCents: 899, costInForceCents: 999 })).toBeNull();
+    expect(decideCostChangeHoldRelease({ listingStatus: "active", externalListingId: null, priceCents: 899, publishedPriceCents: 1500, costInForceCents: 999 })).toBeNull();
+    expect(decideCostChangeHoldRelease({ listingStatus: "active", externalListingId: null, priceCents: 1500, publishedPriceCents: 1500, costInForceCents: 999 })).toBe("price_covers_cost");
+  });
+
+  it("keeps the hold when the price, the published price or the cost is unknown", () => {
+    expect(decideCostChangeHoldRelease({ listingStatus: "active", externalListingId: null, priceCents: null, publishedPriceCents: 999, costInForceCents: 999 })).toBeNull();
+    expect(decideCostChangeHoldRelease({ listingStatus: "active", externalListingId: null, priceCents: 999, publishedPriceCents: null, costInForceCents: 999 })).toBeNull();
+    expect(decideCostChangeHoldRelease({ listingStatus: "active", externalListingId: null, priceCents: 999, publishedPriceCents: 999, costInForceCents: null })).toBeNull();
+    expect(() => decideCostChangeHoldRelease({ listingStatus: "active", externalListingId: null, priceCents: 0, publishedPriceCents: 999, costInForceCents: 999 })).toThrow(RangeError);
+    expect(() => decideCostChangeHoldRelease({ listingStatus: "active", externalListingId: null, priceCents: 999, publishedPriceCents: -1, costInForceCents: 999 })).toThrow(RangeError);
+  });
+
+  it("keeps a below-cost hold while eBay still lists a listing that is being re-sent (review MC1)", () => {
+    for (const status of ["queued", "pushing", "failed", "blocked"]) {
+      expect(decideCostChangeHoldRelease({ listingStatus: status, externalListingId: "v1|1234|0", priceCents: 998, publishedPriceCents: 998, costInForceCents: 999 }))
+        .toBeNull();
+      // The price that covers the cost is only Echelon's intent until a push completes: eBay may still show the old
+      // one, and orders are taken there (review round 2 MC2). The hold stays until the listing is active again.
+      expect(decideCostChangeHoldRelease({ listingStatus: status, externalListingId: "v1|1234|0", priceCents: 999, publishedPriceCents: 999, costInForceCents: 999 }))
+        .toBeNull();
+      expect(decideCostChangeHoldRelease({ listingStatus: status, externalListingId: "v1|1234|0", priceCents: 5_000, publishedPriceCents: 5_000, costInForceCents: 999 }))
+        .toBeNull();
+      expect(decideCostChangeHoldRelease({ listingStatus: status, externalListingId: null, priceCents: 998, publishedPriceCents: 998, costInForceCents: 999 }))
+        .toBe("listing_inactive");
+    }
+  });
+});
+
+describe("judgeAgainstPublishedPrice", () => {
+  it("judges a live listing at the lower of its settings price and its published price", () => {
+    expect(judgeAgainstPublishedPrice(fixed(1500), 899)).toEqual(fixed(899));
+    expect(judgeAgainstPublishedPrice(fixed(899), 1500)).toEqual(fixed(899));
+    expect(judgeAgainstPublishedPrice(fixed(1500), 1500)).toEqual(fixed(1500));
+  });
+
+  it("leaves the price as it is with no published price on record, no settings price, or a rule price that follows the cost", () => {
+    expect(judgeAgainstPublishedPrice(fixed(1500), null)).toEqual(fixed(1500));
+    expect(judgeAgainstPublishedPrice(fixed(null), 899)).toEqual(fixed(null));
+    expect(judgeAgainstPublishedPrice(rulesOnCost, 899)).toEqual(rulesOnCost);
+    expect(() => judgeAgainstPublishedPrice(fixed(1500), 0)).toThrow(RangeError);
+    expect(() => judgeAgainstPublishedPrice(fixed(1500), 899.5)).toThrow(RangeError);
+  });
+
+  it("never changes the classification it is given", () => {
+    const price = fixed(1500);
+    judgeAgainstPublishedPrice(price, 899);
+    expect(price).toEqual(fixed(1500));
+  });
+});
+
+describe("follow-up idempotency keys", () => {
+  it("keys a recheck's sends by the skipped actions, apart from any first decision's keys", () => {
+    const hash = idSetHash([3, 4]);
+    expect(costChangeRecheckRepriceIdempotencyKey({ vendorId: 5, storeConnectionId: 9, actionIds: [4, 3] })).toBe(`dropship-cost-change-reprice:recheck:5:9:${hash}`);
+    expect(costChangeRecheckHoldIdempotencyKey({ storeConnectionId: 9, actionIds: [3, 4], productVariantIds: [61] }))
+      .toBe(`dropship-cost-change-hold:recheck:9:${hash}:${idSetHash([61])}`);
+    expect(costChangeRecheckRepriceIdempotencyKey({ vendorId: 5, storeConnectionId: 9, actionIds: [3, 4] }))
+      .not.toBe(costChangeRepriceIdempotencyKey({ vendorId: 5, storeConnectionId: 9, entryIds: [3, 4] }));
+  });
+
+  it("keeps a recheck's and a put-back pause's notices apart from the first notices, even for the same ids", () => {
+    const first = costChangeListingNoticeIdempotencyKey({ vendorId: 5, kind: "paused", ids: [7] });
+    const recheck = costChangeListingFollowUpNoticeIdempotencyKey({ vendorId: 5, kind: "paused", basis: "recheck", ids: [7] });
+    const restored = costChangeListingFollowUpNoticeIdempotencyKey({ vendorId: 5, kind: "paused", basis: "restored_hold", ids: [7] });
+    expect(new Set([first, recheck, restored]).size).toBe(3);
+    expect(restored).toBe(`dropship-cost-change-listings:5:paused:restored_hold:${idSetHash([7])}`);
+    expect(() => costChangeListingFollowUpNoticeIdempotencyKey({ vendorId: 0, kind: "paused", basis: "recheck", ids: [7] })).toThrow(RangeError);
   });
 });
 

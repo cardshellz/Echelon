@@ -41,7 +41,8 @@ describeDatabase.sequential("eBay dropship order intake store selection and reco
   let intakeRepository: PgDropshipEbayOrderIntakeRepository;
   let healthRepository: PgDropshipOrderIntakeHealthRepository;
   let cancellationRepository: PgDropshipOrderCancellationRepository;
-  const qualify = (sql: string) => sql.replaceAll("dropship.", `"${schema}".`);
+  // The catalog tables the poll reads custom labels from (eBay sync-back plan v4 §7.3) live in the same isolated schema.
+  const qualify = (sql: string) => sql.replaceAll("dropship.", `"${schema}".`).replaceAll("catalog.", `"${schema}".`);
 
   beforeAll(async () => {
     if (!testUrl || !disposable || [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].includes(testUrl)) {
@@ -68,6 +69,12 @@ describeDatabase.sequential("eBay dropship order intake store selection and reco
         external_listing_id varchar(255), status varchar(40) NOT NULL DEFAULT 'not_listed',
         UNIQUE (store_connection_id, product_variant_id)
       );
+      CREATE TABLE dropship.dropship_listing_previous_marketplace_ids (
+        id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, listing_id integer NOT NULL, vendor_id integer NOT NULL,
+        store_connection_id integer NOT NULL, external_listing_id varchar(255) NOT NULL
+      );
+      CREATE TABLE catalog.products (id integer PRIMARY KEY, sku varchar(100));
+      CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, product_id integer NOT NULL, sku varchar(100));
       CREATE TABLE dropship.dropship_store_setup_checks (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         vendor_id integer NOT NULL, store_connection_id integer, check_key varchar(100) NOT NULL,
@@ -106,7 +113,8 @@ describeDatabase.sequential("eBay dropship order intake store selection and reco
   });
 
   beforeEach(async () => {
-    await pool!.query(qualify(`TRUNCATE dropship.dropship_store_connections, dropship.dropship_vendor_listings,
+    await pool!.query(qualify(`TRUNCATE dropship.dropship_listing_previous_marketplace_ids, catalog.product_variants, catalog.products,
+      dropship.dropship_store_connections, dropship.dropship_vendor_listings,
       dropship.dropship_store_setup_checks, dropship.dropship_store_order_intake_health,
       dropship.dropship_audit_events, dropship.dropship_order_intake RESTART IDENTITY`));
   });
@@ -130,6 +138,13 @@ describeDatabase.sequential("eBay dropship order intake store selection and reco
     await insertStore({ id: 23, vendorId: 11, setupStatus: "attention_required" });
     await insertStore({ id: 25, vendorId: 13, status: "needs_reauth", setupStatus: "ready" });
     await insertStore({ id: 24, vendorId: 12, setupStatus: "ready" });
+    // eBay sync-back (plan v4 §7.3): the ended listing had another item number before a relist, and every
+    // size has a custom label (size 4 has none of its own and uses its product's).
+    await pool!.query(qualify(`INSERT INTO dropship.dropship_listing_previous_marketplace_ids
+      (listing_id, vendor_id, store_connection_id, external_listing_id) VALUES (3, 10, 22, '100000000001'), (6, 99, 22, '900000000009')`));
+    await pool!.query(qualify(`INSERT INTO catalog.products (id, sku) VALUES (1, 'ENV');
+      INSERT INTO catalog.product_variants (id, product_id, sku) VALUES (1, 1, 'SKU-1'), (2, 1, 'SKU-2'), (3, 1, 'SKU-3'), (4, 1, NULL),
+        (5, 1, 'SKU-5'), (6, 1, 'SKU-6')`));
 
     const connections = await intakeRepository.listPollableStoreConnections({ limit: 25 });
 
@@ -140,13 +155,28 @@ describeDatabase.sequential("eBay dropship order intake store selection and reco
         platform: "ebay",
         lastOrderSyncAt: null,
         dropshipListingIds: [],
+        itemNumbers: [],
+        listingSkus: [],
       },
       {
         vendorId: 10,
         storeConnectionId: 22,
         platform: "ebay",
         lastOrderSyncAt: lastSuccess,
-        dropshipListingIds: ["111000111000", "168741367796"],
+        dropshipListingIds: ["100000000001", "111000111000", "168741367796"],
+        // The current numbers first, so a number a listing has now wins over one another listing had.
+        itemNumbers: [
+          { listingId: 3, externalListingId: "111000111000" },
+          { listingId: 1, externalListingId: "168741367796" },
+          { listingId: 2, externalListingId: "168741367796" },
+          { listingId: 3, externalListingId: "100000000001" },
+        ],
+        // Only published listings (a not-listed size and a blank id have no eBay listing to copy).
+        listingSkus: [
+          { listingId: 1, sku: "SKU-1" },
+          { listingId: 2, sku: "SKU-2" },
+          { listingId: 3, sku: "SKU-3" },
+        ],
       },
     ]);
   });

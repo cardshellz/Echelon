@@ -63,6 +63,33 @@ function evidence(
 }
 
 describe("order coupon display evidence", () => {
+  it("shows the original native reward separately without discounting added item prices", () => {
+    const financials = buildOrderEditFinancials({
+      lines: [
+        { id: "original", grossCents: 279, netCents: 0 },
+        { id: "added", grossCents: 449, netCents: 449 },
+      ],
+      itemsNetCents: 449,
+      itemDiscountLabels: ["REWARD"],
+      itemDiscounts: [{ key: "code:REWARD", label: "REWARD", amountCents: 279, value: { type: "allocated" } }],
+      shippingGrossCents: 549, shippingCents: 549, shippingDiscountLabels: [],
+      taxCents: 60, taxesIncluded: false, totalCents: 1058,
+    });
+    const before = structuredClone(financials);
+    const products = [{ id: "original", productNetCents: 279 }, { id: "added", productNetCents: 449 }];
+    const displayed = presentOrderEditCodeBreakdown(financials, undefined, products)!;
+    expect(displayed.orderDiscounts).toEqual(financials.itemDiscounts);
+    expect(displayed.lines.map((line) => line.productNetCents)).toEqual([279, 449]);
+    expect(financials).toEqual(before);
+    for (const invalid of [
+      products.slice(0, 1),
+      [...products, products[0]],
+      [{ id: "original", productNetCents: 0 }, products[1]],
+    ])
+      expect(() => presentOrderEditCodeBreakdown(financials, undefined, invalid))
+        .toThrow("The original item prices and order discount could not be verified.");
+  });
+
   it("negotiates financial display metadata without mutating amounts, saved evidence, or old tabs", () => {
     const { pricing, financials } = evidence();
     const couponDisplay = presentOrderEditCodeBreakdown(financials, pricing)!;

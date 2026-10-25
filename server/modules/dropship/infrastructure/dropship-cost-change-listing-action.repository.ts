@@ -3,6 +3,7 @@ import { pool as defaultPool } from "../../../db";
 import { LISTING_PRICING_MODES } from "../../../../shared/dropship/listing-price";
 import { pricingProfileStateSchema, type PricingProfileState } from "../../../../shared/dropship/pricing-rules";
 import {
+  COST_ACTIONABLE_LISTING_STATUSES,
   costChangeHoldReleaseDetails,
   costChangeHoldReleaseReasons,
   costChangeListingActionValues,
@@ -23,10 +24,15 @@ import type {
   CostActionVendorFacts,
   CostChangeEntryActionRecord,
   CostChangeListingActionRecord,
+  CostChangeListingRecheckRecord,
   DropshipCostChangeListingActionRepository,
   EffectiveCostIncrease,
   NewCostChangeListingHold,
+  RestoredCostChangeListingHold,
+  SkippedListingRecheckCandidate,
 } from "../application/dropship-cost-change-listing-action-service";
+import { DEMOTED_LIVE_LISTING_STATUSES } from "../domain/listing-live-status";
+import { PUSH_PROGRESS_LISTING_STATUSES } from "../domain/order-listing-acceptability";
 import type { DropshipPricingPolicyRecord } from "../application/dropship-listing-preview-service";
 import type { ListingSettingLayers } from "../application/dropship-listing-setting-layers";
 import { mapCostScheduleError } from "./dropship-cost-schedule.repository";
@@ -64,11 +70,14 @@ interface ListingRow {
   store_connection_id: number;
   product_variant_id: number;
   status: string;
+  external_listing_id: string | null;
   vendor_retail_price_cents: string | number | null;
   platform: string;
   variant_sku: string | null;
   variant_name: string;
   product_name: string;
+  /** payload.priceCents of the listing's newest listing_push_completed sync event, as text; null when none records one. */
+  published_price_cents: string | null;
 }
 
 interface SavedPriceRow {
@@ -95,6 +104,20 @@ interface HoldRow {
   listing_price_cents: string | number;
   unit_cost_cents: string | number;
   held_at: Date;
+}
+
+interface RecheckCandidateRow {
+  action_id: string | number;
+  entry_id: string | number;
+  vendor_id: number;
+  store_connection_id: number;
+  product_variant_id: number;
+  listing_id: number;
+  listing_status: string;
+  from_cents: string | number | null;
+  unit_cost_cents: string | number;
+  effective_at: Date;
+  policy_id: number | null;
 }
 
 interface CostInForceRow {
@@ -128,16 +151,60 @@ interface ActionViewRow {
   policy_id: number | null;
 }
 
+/**
+ * The audit row a recheck writes for the skipped listing action it re-judged
+ * (recordListingRechecks). It is the recheck's record: one per skipped action
+ * (the guarded insert and the cost detection lock), append-only, and what the
+ * views show in place of the skip.
+ */
+const RECHECK_AUDIT_ENTITY = "dropship_cost_change_listing_action";
+const RECHECK_AUDIT_EVENT = "cost_change_listing_rechecked";
+
+/**
+ * A listing action as the portal and ops pages show it:
+ * - an increase skipped while an earlier queue or failed push made a
+ *   still-live listing read as not live is shown as its recheck decided it;
+ * - a pause is shown by the hold that carries it now: the newest hold for the
+ *   same store, size and increase from the action's own hold on, because a
+ *   put-back pause is a new hold row (restoreHoldsReleasedWhileListingDemoted)
+ *   and a released hold never changes (migration 0713 guard). One action
+ *   exists per increase and listing, and a listing is one store and size, so
+ *   no other decision's hold shares that store, size and increase.
+ */
 const ACTION_VIEW_SELECT = `SELECT a.id, a.entry_id, a.listing_id, a.store_connection_id, l.platform, a.product_variant_id, pv.product_id,
-                pv.sku AS variant_sku, pv.name AS variant_name, p.name AS product_name, a.action, a.detail, a.listing_price_cents,
-                a.unit_cost_cents, a.push_job_id, a.decided_at, h.released_at AS hold_released_at, h.release_reason AS hold_release_reason,
-                a.vendor_id, v.business_name, a.listing_status, a.price_source, a.policy_id
+                pv.sku AS variant_sku, pv.name AS variant_name, p.name AS product_name,
+                COALESCE(rc.after ->> 'action', a.action) AS action,
+                CASE WHEN rc.after IS NULL THEN a.detail ELSE rc.after ->> 'detail' END AS detail,
+                CASE WHEN rc.after IS NULL THEN a.listing_price_cents ELSE (rc.after ->> 'listingPriceCents')::bigint END AS listing_price_cents,
+                a.unit_cost_cents,
+                CASE WHEN rc.after IS NULL THEN a.push_job_id ELSE (rc.after ->> 'pushJobId')::integer END AS push_job_id,
+                COALESCE(rc.rechecked_at, a.decided_at) AS decided_at,
+                h.released_at AS hold_released_at, h.release_reason AS hold_release_reason,
+                a.vendor_id, v.business_name,
+                COALESCE(rc.after ->> 'listingStatus', a.listing_status) AS listing_status,
+                COALESCE(rc.after ->> 'priceSource', a.price_source) AS price_source, a.policy_id
          FROM dropship.dropship_cost_change_listing_actions a
          JOIN dropship.dropship_vendor_listings l ON l.id = a.listing_id
          JOIN dropship.dropship_vendors v ON v.id = a.vendor_id
          JOIN catalog.product_variants pv ON pv.id = a.product_variant_id
          JOIN catalog.products p ON p.id = pv.product_id
-         LEFT JOIN dropship.dropship_cost_change_listing_holds h ON h.id = a.hold_id`;
+         LEFT JOIN LATERAL (
+           SELECT e.payload -> 'after' AS after, e.created_at AS rechecked_at
+           FROM dropship.dropship_audit_events e
+           WHERE a.action = 'skipped_inactive_listing'
+             AND e.entity_type = '${RECHECK_AUDIT_ENTITY}' AND e.entity_id = a.id::text AND e.event_type = '${RECHECK_AUDIT_EVENT}'
+           ORDER BY e.id DESC
+           LIMIT 1
+         ) rc ON true
+         LEFT JOIN LATERAL (
+           SELECT cur.released_at, cur.release_reason
+           FROM dropship.dropship_cost_change_listing_holds cur
+           WHERE cur.store_connection_id = a.store_connection_id AND cur.product_variant_id = a.product_variant_id
+             AND cur.entry_id = a.entry_id
+             AND cur.id >= CASE WHEN rc.after IS NULL THEN a.hold_id ELSE (rc.after ->> 'holdId')::bigint END
+           ORDER BY cur.id DESC
+           LIMIT 1
+         ) h ON true`;
 
 export class PgDropshipCostChangeListingActionRepository implements DropshipCostChangeListingActionRepository {
   constructor(
@@ -151,7 +218,7 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
     try {
       const result = await this.dbPool.query<ActionViewRow>(
         `${ACTION_VIEW_SELECT}
-         WHERE a.vendor_id = $1 AND a.decided_at >= $2
+         WHERE a.vendor_id = $1 AND COALESCE(rc.rechecked_at, a.decided_at) >= $2
          ORDER BY a.id DESC
          LIMIT $3`,
         [input.vendorId, input.since, input.limit],
@@ -219,11 +286,25 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
     }
     try {
       const listings = await this.dbPool.query<ListingRow>(
-        `SELECT l.id, l.store_connection_id, l.product_variant_id, l.status, l.vendor_retail_price_cents, l.platform,
-                pv.sku AS variant_sku, pv.name AS variant_name, p.name AS product_name
+        // The published price is the one the listing's last completed push
+        // sent (completeItem writes it on the listing_push_completed sync event
+        // in the same transaction). vendor_retail_price_cents is not: the queue
+        // writes the queued price on it before anything is published. The
+        // external listing id says whether a listing being re-sent is still
+        // live (isCostActionableListing).
+        `SELECT l.id, l.store_connection_id, l.product_variant_id, l.status, l.external_listing_id, l.vendor_retail_price_cents, l.platform,
+                pv.sku AS variant_sku, pv.name AS variant_name, p.name AS product_name,
+                published.price_cents AS published_price_cents
          FROM dropship.dropship_vendor_listings l
          JOIN catalog.product_variants pv ON pv.id = l.product_variant_id
          JOIN catalog.products p ON p.id = pv.product_id
+         LEFT JOIN LATERAL (
+           SELECT e.payload ->> 'priceCents' AS price_cents
+           FROM dropship.dropship_listing_sync_events e
+           WHERE e.listing_id = l.id AND e.event_type = 'listing_push_completed'
+           ORDER BY e.id DESC
+           LIMIT 1
+         ) published ON true
          WHERE l.vendor_id = $1 AND l.product_variant_id = ANY($2::int[])
          ORDER BY l.id ASC`,
         [input.vendorId, productVariantIds],
@@ -326,6 +407,272 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
       }));
     } catch (error) {
       throw mapCostScheduleError(error);
+    }
+  }
+
+  /**
+   * A pause the review released as listing_inactive is put back when the
+   * evidence shows the listing never left its marketplace:
+   * - the listing has a marketplace id now and reads active, or a
+   *   push-progress status (queued, failed, blocked, pushing): the statuses
+   *   isCostActionableListing treats as live, as orders take the second kind
+   *   (order-listing-acceptability, §4.7; merge review ADV-3). Such a listing
+   *   can stay in push progress while a push is in flight, which the live
+   *   status repair waits for; the review in the same pass keeps its hold
+   *   (decideCostChangeHoldRelease, MC2) until a push completes;
+   * - the completed push that wrote last before the release published it
+   *   live (result.push.rawResult.listingMode, else the queued intent's mode);
+   * - after that push and by the release, another push item was queued, or
+   *   an unfinished or refused item (a retry of an older job included) last
+   *   wrote: before the live status fix that queue, retry or failure wrote
+   *   queued/failed/blocked over the listing, which is the only way an active
+   *   live listing read as inactive (no code writes 'ended';
+   *   domain/listing-live-status). Pushes are ordered by when they wrote
+   *   (updated_at, then id), not by id: an older job's retry can end after a
+   *   newer job's push completed. A retry queued before the release whose
+   *   item ended after it is not counted (no restore on that guess);
+   * - no hold for the same store and variant is live or newer than the
+   *   released one (so a later decision, or an earlier restore, wins).
+   * The new hold copies the released one (same increase, price and cost) with
+   * held_at now; the review in the same pass then judges it on the facts in
+   * force. The hold rows and their audit rows commit together.
+   */
+  async restoreHoldsReleasedWhileListingDemoted(input: { now: Date; workerId: string; limit: number }): Promise<RestoredCostChangeListingHold[]> {
+    assertPositiveInteger(input.limit, "limit");
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const restored = await client.query<{
+        id: string | number; released_hold_id: string | number; vendor_id: number; store_connection_id: number;
+        product_variant_id: number; listing_id: number; entry_id: string | number; released_at: Date;
+        basis_item_id: number; demoting_item_id: number;
+      }>(
+        `WITH candidates AS (
+           SELECT h.id AS released_hold_id, h.vendor_id, h.store_connection_id, h.product_variant_id, h.listing_id,
+                  h.entry_id, h.listing_price_cents, h.unit_cost_cents, h.released_at,
+                  completed.id AS basis_item_id, demoting.id AS demoting_item_id
+           FROM dropship.dropship_cost_change_listing_holds h
+           JOIN dropship.dropship_vendor_listings l ON l.id = h.listing_id
+           JOIN LATERAL (
+             SELECT i.id, i.updated_at,
+                    COALESCE(i.result -> 'push' -> 'rawResult' ->> 'listingMode', i.result -> 'listingIntent' ->> 'listingMode') AS listing_mode
+             FROM dropship.dropship_listing_push_job_items i
+             WHERE i.listing_id = h.listing_id AND i.status = 'completed' AND i.updated_at <= h.released_at
+             ORDER BY i.updated_at DESC, i.id DESC
+             LIMIT 1
+           ) completed ON completed.listing_mode = 'live'
+           JOIN LATERAL (
+             SELECT i.id
+             FROM dropship.dropship_listing_push_job_items i
+             WHERE i.listing_id = h.listing_id
+               AND (
+                 -- queued after that push and by the release: the old queue wrote queued or blocked
+                 ((i.created_at, i.id) > (completed.updated_at, completed.id) AND i.created_at <= h.released_at)
+                 -- or an unfinished or refused item (an older job's retry included) that last wrote after that push and by the release
+                 OR (i.status <> 'completed' AND (i.updated_at, i.id) > (completed.updated_at, completed.id) AND i.updated_at <= h.released_at)
+               )
+             ORDER BY i.updated_at ASC, i.id ASC
+             LIMIT 1
+           ) demoting ON true
+           WHERE h.released_at IS NOT NULL
+             AND h.release_reason = 'listing_inactive'
+             AND (l.status = ANY($3::text[]) OR l.status = ANY($4::text[]))
+             AND NULLIF(BTRIM(l.external_listing_id), '') IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM dropship.dropship_cost_change_listing_holds other
+               WHERE other.store_connection_id = h.store_connection_id AND other.product_variant_id = h.product_variant_id
+                 AND (other.released_at IS NULL OR other.id > h.id))
+           ORDER BY h.id ASC
+           LIMIT $2
+         ),
+         inserted AS (
+           INSERT INTO dropship.dropship_cost_change_listing_holds
+             (vendor_id, store_connection_id, product_variant_id, listing_id, entry_id, listing_price_cents, unit_cost_cents,
+              hold_idempotency_key, held_at, created_at)
+           SELECT c.vendor_id, c.store_connection_id, c.product_variant_id, c.listing_id, c.entry_id, c.listing_price_cents,
+                  c.unit_cost_cents, 'dropship-cost-change-hold:restore:' || c.released_hold_id::text, $1, $1
+           FROM candidates c
+           ON CONFLICT (store_connection_id, product_variant_id) WHERE released_at IS NULL DO NOTHING
+           RETURNING id, hold_idempotency_key
+         )
+         SELECT inserted.id, c.released_hold_id, c.vendor_id, c.store_connection_id, c.product_variant_id, c.listing_id,
+                c.entry_id, c.released_at, c.basis_item_id, c.demoting_item_id
+         FROM inserted
+         JOIN candidates c ON inserted.hold_idempotency_key = 'dropship-cost-change-hold:restore:' || c.released_hold_id::text
+         ORDER BY inserted.id ASC`,
+        [input.now, input.limit, [...COST_ACTIONABLE_LISTING_STATUSES], [...PUSH_PROGRESS_LISTING_STATUSES]],
+      );
+      const holds = restored.rows.map((row): RestoredCostChangeListingHold => ({
+        holdId: toId(row.id, "hold id"),
+        releasedHoldId: toId(row.released_hold_id, "released hold id"),
+        vendorId: row.vendor_id,
+        storeConnectionId: row.store_connection_id,
+        productVariantId: row.product_variant_id,
+        listingId: row.listing_id,
+        entryId: toId(row.entry_id, "entry id"),
+        releasedAt: row.released_at,
+        basisJobItemId: row.basis_item_id,
+        demotingJobItemId: row.demoting_item_id,
+      }));
+      for (const hold of holds) {
+        await client.query(
+          `INSERT INTO dropship.dropship_audit_events
+            (vendor_id, store_connection_id, entity_type, entity_id, event_type,
+             actor_type, actor_id, severity, payload, created_at)
+           VALUES ($1, $2, 'dropship_cost_change_listing_hold', $3, 'cost_change_hold_restored', 'job', $4, 'warning', $5::jsonb, $6)`,
+          [
+            hold.vendorId,
+            hold.storeConnectionId,
+            String(hold.holdId),
+            input.workerId,
+            JSON.stringify({
+              before: { liveHoldId: null, releasedHoldId: hold.releasedHoldId, releaseReason: "listing_inactive",
+                releasedAt: hold.releasedAt.toISOString() },
+              after: { liveHoldId: hold.holdId },
+              listingId: hold.listingId,
+              productVariantId: hold.productVariantId,
+              entryId: hold.entryId,
+              basisJobItemId: hold.basisJobItemId,
+              demotingJobItemId: hold.demotingJobItemId,
+              reason: "Released as listing_inactive while a queued or failed push had demoted a listing that stayed live.",
+            }),
+            input.now,
+          ],
+        );
+      }
+      await client.query("COMMIT");
+      return holds;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw mapCostScheduleError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Skipped listing actions to judge again: the increase was skipped because
+   * the listing read queued, failed or blocked, which before the live status
+   * fix an earlier queue or failed push wrote over listings that stayed live
+   * (domain/listing-live-status). Selected only when the listing is active
+   * with a marketplace id now, the increase is still the cost in force for
+   * the size (a later increase is decided on its own), and no recheck is on
+   * record for the action yet.
+   */
+  async listSkippedListingRechecks(input: { now: Date; limit: number }): Promise<SkippedListingRecheckCandidate[]> {
+    assertPositiveInteger(input.limit, "limit");
+    try {
+      const result = await this.dbPool.query<RecheckCandidateRow>(
+        `SELECT a.id AS action_id, a.entry_id, a.vendor_id, a.store_connection_id, a.product_variant_id, a.listing_id, a.listing_status,
+                e.from_cents, e.unit_cost_cents, e.effective_at, e.policy_id
+         FROM dropship.dropship_cost_change_listing_actions a
+         JOIN dropship.dropship_cost_schedule_entries e ON e.id = a.entry_id
+         JOIN dropship.dropship_vendor_listings l ON l.id = a.listing_id
+         WHERE a.action = 'skipped_inactive_listing'
+           AND a.listing_status = ANY($2::text[])
+           AND l.status = ANY($3::text[])
+           AND NULLIF(BTRIM(l.external_listing_id), '') IS NOT NULL
+           AND e.kind = 'increase' AND e.withdrawn_at IS NULL
+           AND e.id = (SELECT f.id FROM dropship.dropship_cost_schedule_entries f
+                       WHERE f.vendor_id = e.vendor_id AND f.product_variant_id = e.product_variant_id
+                         AND f.withdrawn_at IS NULL AND f.effective_at <= $1
+                       ORDER BY f.effective_at DESC, f.id DESC LIMIT 1)
+           AND NOT EXISTS (SELECT 1 FROM dropship.dropship_audit_events r
+                           WHERE r.entity_type = $4 AND r.entity_id = a.id::text AND r.event_type = $5)
+         ORDER BY a.vendor_id ASC, a.id ASC
+         LIMIT $6`,
+        [input.now, [...DEMOTED_LIVE_LISTING_STATUSES], [...COST_ACTIONABLE_LISTING_STATUSES], RECHECK_AUDIT_ENTITY, RECHECK_AUDIT_EVENT, input.limit],
+      );
+      return result.rows.map((row) => ({
+        actionId: toId(row.action_id, "action id"),
+        skippedListingStatus: row.listing_status,
+        listingId: row.listing_id,
+        storeConnectionId: row.store_connection_id,
+        increase: {
+          entryId: toId(row.entry_id, "entry id"),
+          vendorId: row.vendor_id,
+          productVariantId: row.product_variant_id,
+          fromCents: toCents(row.from_cents ?? Number.NaN, "from_cents"),
+          unitCostCents: toCents(row.unit_cost_cents, "unit_cost_cents"),
+          effectiveAt: row.effective_at,
+          policyId: row.policy_id,
+          inForceEntryId: toId(row.entry_id, "entry id"),
+        },
+      }));
+    } catch (error) {
+      throw mapCostScheduleError(error);
+    }
+  }
+
+  /**
+   * One vendor's rechecks: the holds they placed, then one audit row per
+   * re-judged action that records the decision (before: the skip; after: the
+   * recheck), all in one transaction. The audit insert is guarded, so a
+   * replayed record writes nothing twice.
+   */
+  async recordListingRechecks(input: {
+    vendorId: number;
+    workerId: string;
+    rechecks: readonly CostChangeListingRecheckRecord[];
+    holds: readonly NewCostChangeListingHold[];
+  }): Promise<{ rechecksRecorded: number; holdsRecorded: number }> {
+    assertPositiveInteger(input.vendorId, "vendorId");
+    if (input.rechecks.length === 0) return { rechecksRecorded: 0, holdsRecorded: 0 };
+    for (const recheck of input.rechecks) {
+      if (!(costChangeListingActionValues as readonly string[]).includes(recheck.action) || recheck.action === "skipped_inactive_listing") {
+        throw invalidInput("action", recheck.action);
+      }
+      if (!(costChangeListingPriceSourceValues as readonly string[]).includes(recheck.priceSource)) throw invalidInput("priceSource", recheck.priceSource);
+    }
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const holds = await insertHolds(client, input.vendorId, input.holds);
+      let rechecksRecorded = 0;
+      for (const recheck of input.rechecks) {
+        const holdId = recheck.holdKey ? holds.idsByListing.get(holdKey(recheck.holdKey.storeConnectionId, recheck.holdKey.productVariantId)) : null;
+        if (holdId === undefined) {
+          throw new DropshipError("DROPSHIP_COST_CHANGE_HOLD_UNRESOLVED", "A re-judged listing's hold row could not be found for its recheck.",
+            { classification: "fatal", vendorId: input.vendorId, actionId: recheck.actionId, ...recheck.holdKey });
+        }
+        const inserted = await client.query(
+          `INSERT INTO dropship.dropship_audit_events
+             (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
+           SELECT $1::int, $2::int, $3::text, $4::text, $5::text, 'job', $6::text, 'warning', $7::jsonb, $8::timestamptz
+           WHERE NOT EXISTS (SELECT 1 FROM dropship.dropship_audit_events e
+                             WHERE e.entity_type = $3::text AND e.entity_id = $4::text AND e.event_type = $5::text)`,
+          [
+            input.vendorId,
+            recheck.storeConnectionId,
+            RECHECK_AUDIT_ENTITY,
+            String(recheck.actionId),
+            RECHECK_AUDIT_EVENT,
+            input.workerId,
+            JSON.stringify({
+              before: { action: "skipped_inactive_listing", listingStatus: recheck.skippedListingStatus },
+              after: {
+                action: recheck.action, listingStatus: recheck.listingStatus, priceSource: recheck.priceSource,
+                listingPriceCents: recheck.listingPriceCents, unitCostCents: recheck.unitCostCents, detail: recheck.detail,
+                pushJobId: recheck.pushJobId, holdId,
+              },
+              entryId: recheck.entryId,
+              listingId: recheck.listingId,
+              productVariantId: recheck.productVariantId,
+              policyId: recheck.policyId,
+              reason: "The increase was skipped while the listing read as not live; it is live now and was judged again.",
+            }),
+            recheck.decidedAt,
+          ],
+        );
+        rechecksRecorded += inserted.rowCount ?? 0;
+      }
+      await client.query("COMMIT");
+      return { rechecksRecorded, holdsRecorded: holds.inserted };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw mapCostScheduleError(error);
+    } finally {
+      client.release();
     }
   }
 
@@ -547,7 +894,9 @@ function mapListingRow(row: ListingRow): CostActionListing {
     storeConnectionId: row.store_connection_id,
     productVariantId: row.product_variant_id,
     status: row.status,
+    externalListingId: row.external_listing_id ?? null,
     vendorRetailPriceCents: row.vendor_retail_price_cents === null ? null : toCents(row.vendor_retail_price_cents, "vendor_retail_price_cents"),
+    publishedPriceCents: row.published_price_cents === null ? null : toId(row.published_price_cents, "published priceCents"),
     platform: row.platform,
     variantSku: row.variant_sku,
     variantName: row.variant_name,

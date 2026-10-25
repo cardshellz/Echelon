@@ -190,6 +190,154 @@ describe("AuthorityAwareInventoryPublicationService", () => {
     );
   });
 
+  it("keeps the full product calculation while emitting only the requested target and members", async () => {
+    const context = runtimeContext("canonical");
+    const plan = runtimePlan([target(), { ...target(), publicationTargetId: 6 }]);
+    const first = plan.targets[0]!.rows[0]!;
+    plan.targets[0]!.rows.push({ ...structuredClone(first), productVariantId: 102, sku: "CASE",
+      publishedUnits: "2", mapping: { ...first.mapping!, mappingId: 2,
+        externalInventoryItemId: "inventory-item-102", externalSku: "CASE" } });
+    const original = structuredClone(plan);
+    context.planProduct = vi.fn(async () => plan);
+    context.listUnmanagedPublicationVariantIds = vi.fn(async () => [103]);
+    const requestedMembers = Object.freeze([101]);
+    const service = new AuthorityAwareInventoryPublicationService(executor(context), 3);
+
+    const result = await service.publishProduct({ productId: 10, publicationTargetId: 5,
+      productVariantIds: requestedMembers, dryRun: false }, vi.fn());
+
+    expect(context.planProduct).toHaveBeenCalledWith(10, 3);
+    expect(result).toMatchObject({ authority: "canonical", publication: { enqueuedRows: 1,
+      rows: [{ publicationTargetId: 5, productVariantId: 101, desiredQuantity: "4" }] } });
+    expect(context.enqueueFullPublications).toHaveBeenCalledWith("44", [expect.objectContaining({
+      publicationTargetId: 5, productVariantId: 101, desiredQuantity: "4" })]);
+    expect(context.loadActivePublicationTargets).not.toHaveBeenCalled();
+    expect(plan).toEqual(original);
+    expect(requestedMembers).toEqual([101]);
+  });
+
+  it("publishes the requested clean member when only an unselected row makes the target unpublishable", async () => {
+    const context = runtimeContext("canonical");
+    const plan = runtimePlan([target()]);
+    const plannedTarget = plan.targets[0]!;
+    plannedTarget.rows.push({ ...structuredClone(plannedTarget.rows[0]!), productVariantId: 102, sku: "CASE",
+      mapping: null, blockers: [{ code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING",
+        message: "The unselected member has no provider mapping.", context: { productVariantId: 102 } }] });
+    plannedTarget.publishable = false;
+    const original = structuredClone(plan);
+    context.planProduct = vi.fn(async () => plan);
+    const service = new AuthorityAwareInventoryPublicationService(executor(context), 3);
+
+    await expect(service.publishProduct({ productId: 10, publicationTargetId: 5,
+      productVariantIds: [101], dryRun: false }, vi.fn())).resolves.toMatchObject({
+      authority: "canonical", publication: { rows: [{ productVariantId: 101, desiredQuantity: "4" }], enqueuedRows: 1 },
+    });
+
+    expect(context.planProduct).toHaveBeenCalledExactlyOnceWith(10, 3);
+    expect(context.enqueueFullPublications).toHaveBeenCalledExactlyOnceWith("44", [expect.objectContaining({
+      publicationTargetId: 5, productVariantId: 101, desiredQuantity: "4" })]);
+    expect(plan).toEqual(original);
+  });
+
+  it.each(["missing mapping", "row blocker"] as const)(
+    "rejects a requested member with a %s before enqueueing any scoped rows", async problem => {
+      const context = runtimeContext("canonical");
+      const plan = runtimePlan([target()]);
+      const plannedTarget = plan.targets[0]!;
+      const requested = { ...structuredClone(plannedTarget.rows[0]!), productVariantId: 102, sku: "CASE" };
+      requested.mapping = problem === "missing mapping" ? null : { ...requested.mapping!, mappingId: 2,
+        externalInventoryItemId: "inventory-item-102", externalSku: "CASE" };
+      requested.blockers = [{ code: problem === "missing mapping"
+        ? "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING" : "CHANNEL_EXPOSURE_POLICY_INCOMPLETE",
+      message: "The requested member is not safe to publish.", context: { productVariantId: 102 } }];
+      plannedTarget.rows.push(requested);
+      plannedTarget.publishable = false;
+      const original = structuredClone(plan);
+      context.planProduct = vi.fn(async () => plan);
+      const service = new AuthorityAwareInventoryPublicationService(executor(context), 3);
+
+      await expect(service.publishProduct({ productId: 10, publicationTargetId: 5,
+        productVariantIds: [101, 102], dryRun: false }, vi.fn())).rejects.toMatchObject({
+        code: "CANONICAL_PUBLICATION_ROW_BLOCKED", context: { productId: 10, publicationTargetId: 5, productVariantId: 102 },
+      });
+
+      expect(context.planProduct).toHaveBeenCalledExactlyOnceWith(10, 3);
+      expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+      expect(plan).toEqual(original);
+    });
+
+  it("rejects a target blocker even when every explicitly requested row is clean", async () => {
+    const context = runtimeContext("canonical");
+    const plan = runtimePlan([target()]);
+    plan.targets[0]!.publishable = false;
+    plan.targets[0]!.blockers = [{ code: "CHANNEL_SOURCE_NODE_NOT_ACTIVE",
+      message: "A source fulfillment node is inactive.", context: { fulfillmentNodeIds: [1] } }];
+    const original = structuredClone(plan);
+    context.planProduct = vi.fn(async () => plan);
+    const service = new AuthorityAwareInventoryPublicationService(executor(context), 3);
+
+    await expect(service.publishProduct({ productId: 10, publicationTargetId: 5,
+      productVariantIds: [101], dryRun: false }, vi.fn())).rejects.toMatchObject({
+      code: "CANONICAL_PUBLICATION_TARGET_BLOCKED", context: { productId: 10, publicationTargetId: 5,
+        blockerCodes: ["CHANNEL_SOURCE_NODE_NOT_ACTIVE"] },
+    });
+
+    expect(context.planProduct).toHaveBeenCalledExactlyOnceWith(10, 3);
+    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+    expect(plan).toEqual(original);
+  });
+
+  it.each([
+    { name: "empty", members: [] },
+    { name: "duplicate", members: [101, 101] },
+    { name: "zero", members: [0] },
+    { name: "negative", members: [-1] },
+    { name: "fractional", members: [101.5] },
+    { name: "not a number", members: [Number.NaN] },
+    { name: "unsafe integer", members: [Number.MAX_SAFE_INTEGER + 1] },
+  ])("rejects a $name scope before planning or writing", async ({ members }) => {
+    const context = runtimeContext("canonical");
+    const legacy = vi.fn();
+    const service = new AuthorityAwareInventoryPublicationService(executor(context), 3);
+    await expect(service.publishProduct({ productId: 10, publicationTargetId: 5,
+      productVariantIds: members, dryRun: false }, legacy)).rejects.toThrow();
+    expect(context.planProduct).not.toHaveBeenCalled();
+    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it("requires an exact target for an explicit member scope", async () => {
+    const context = runtimeContext("canonical");
+    const service = new AuthorityAwareInventoryPublicationService(executor(context), 3);
+    await expect(service.publishProduct({ productId: 10, productVariantIds: [101], dryRun: false }, vi.fn()))
+      .rejects.toThrow();
+    expect(context.planProduct).not.toHaveBeenCalled();
+    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "a variant absent from this product", publicationTargetId: 5, productVariantIds: [101, 999] },
+    { name: "a target absent from this product plan", publicationTargetId: 999, productVariantIds: [101] },
+  ])("rejects $name without partially enqueueing", async input => {
+    const context = runtimeContext("canonical");
+    const service = new AuthorityAwareInventoryPublicationService(executor(context), 3);
+    await expect(service.publishProduct({ productId: 10, publicationTargetId: input.publicationTargetId,
+      productVariantIds: input.productVariantIds, dryRun: false }, vi.fn()))
+      .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_VARIANT_NOT_ELIGIBLE" });
+    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+  });
+
+  it("does not widen an explicit member scope into a legacy whole-product write", async () => {
+    const context = runtimeContext("legacy");
+    const legacy = vi.fn();
+    const service = new AuthorityAwareInventoryPublicationService(executor(context), 3);
+    await expect(service.publishProduct({ productId: 10, publicationTargetId: 5,
+      productVariantIds: [101], dryRun: false }, legacy)).rejects.toThrow();
+    expect(legacy).not.toHaveBeenCalled();
+    expect(context.planProduct).not.toHaveBeenCalled();
+    expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+  });
+
   it("enqueues a Dropship-owned target from the same canonical exposure result", async () => {
     const context = runtimeContext("canonical");
     const plan = runtimePlan([target()]);
@@ -299,6 +447,68 @@ describe("AuthorityAwareInventoryPublicationService", () => {
     await expect(legacyService.listProductIds(legacyReader)).resolves.toEqual([7, 8]);
     expect(legacy.listActivePublicationProductIds).not.toHaveBeenCalled();
   });
+  // #64414: one live destination with no listing mapping made the whole
+  // product unpublishable, which failed the pick and froze every other channel.
+  describe("isolating an unsafe destination during fan-out", () => {
+    const walmart = (): ActiveInventoryPublicationTarget => ({ ...target(), publicationTargetId: 34, channelId: 104,
+      channelName: "Walmart", providerKey: "walmart", channelConnectionId: 44, externalScopeId: "walmart-1", mappings: [] });
+
+    it("publishes every safe destination and reports the unsafe one instead of throwing", async () => {
+      const context = runtimeContext("canonical", [target(), walmart()]);
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const service = new AuthorityAwareInventoryPublicationService(executor(context), undefined, logger);
+
+      const routed = await service.publishProduct({ productId: 10, dryRun: false, triggeredBy: "inventory_change:pick",
+        blockedTargets: "isolate" }, vi.fn());
+
+      expect(routed).toMatchObject({ authority: "canonical", publication: {
+        rows: [{ publicationTargetId: 5, productVariantId: 101, desiredQuantity: "4" }],
+        blockedTargets: [{ publicationTargetId: 34, channelId: 104, channelName: "Walmart",
+          errorCode: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+          blockerCodes: ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"], productVariantIds: [101] }],
+      } });
+      expect(context.enqueueFullPublications).toHaveBeenCalledExactlyOnceWith("44",
+        [expect.objectContaining({ publicationTargetId: 5 })]);
+      expect(logger.error).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        event: "canonical_inventory_publication_target_isolated", error_code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+        publicationTargetId: 34, productId: 10 }));
+    });
+
+    it("sends nothing to an isolated destination, including its retained zero obligations", async () => {
+      const context = runtimeContext("canonical", [target(), walmart()]);
+      context.listUnmanagedPublicationVariantIds = vi.fn(async () => [102]);
+      const service = new AuthorityAwareInventoryPublicationService(executor(context), undefined,
+        { info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+
+      const routed = await service.publishProduct({ productId: 10, dryRun: false, blockedTargets: "isolate" }, vi.fn());
+
+      if (routed.authority !== "canonical") throw new Error("Expected canonical publication");
+      // 102 has no mapping on either target. Walmart (34) links nothing, so it sends
+      // nothing, not even its retained zero. Channels PR1 (PLAN-CH-v3 section 7): the
+      // Shopify destination (5) is row-isolable, so its linked 101 still publishes and
+      // only the unlinked retained 102 is withheld.
+      expect(routed.publication.rows).toEqual([expect.objectContaining({ publicationTargetId: 5, productVariantId: 101, desiredQuantity: "4" })]);
+      expect(routed.publication.blockedTargets?.map(entry => [entry.publicationTargetId, entry.productVariantIds, entry.isolation]))
+        .toEqual([[5, [102], "rows"], [34, [101, 102], "rows"]]);
+    });
+
+    it("keeps rejecting by default so listing setup still gets its exact answer", async () => {
+      const context = runtimeContext("canonical", [target(), walmart()]);
+      const service = new AuthorityAwareInventoryPublicationService(executor(context));
+      await expect(service.publishProduct({ productId: 10, dryRun: false }, vi.fn()))
+        .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING", context: { publicationTargetId: 34 } });
+      expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+    });
+
+    it("refuses isolation for an exact-target request", async () => {
+      const context = runtimeContext("canonical", [target(), walmart()]);
+      const service = new AuthorityAwareInventoryPublicationService(executor(context));
+      await expect(service.publishProduct({ productId: 10, dryRun: false, publicationTargetId: 34,
+        blockedTargets: "isolate" }, vi.fn())).rejects.toMatchObject({ code: "INVALID_INVENTORY_PUBLICATION_SCOPE" });
+      expect(context.planProduct).not.toHaveBeenCalled();
+    });
+  });
+
 });
 
 function executor(

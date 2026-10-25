@@ -10,6 +10,7 @@ import { inventoryCutoverEvidenceHash } from "../domain/inventory-cutover-manife
 import { projectCanonicalAtp } from "../domain/inventory-availability-planner";
 import { captureActiveSupplySnapshotInsideTransaction, captureProductDraftReviewSnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import { createTransactionScopedInventoryPublicationService, previewProductDefinitionPublicationInsideTransaction } from "./inventory-availability-runtime-publication.repository";
+import { markPublicationProductChanged } from "./publication-product-change";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { promoteInventoryCutoverDefinitionsInsideTransaction } from "./inventory-cutover-definitions.repository";
 
@@ -98,7 +99,7 @@ async function captureReview(client: PoolClient, selection: ProductDefinitionSel
      FROM inventory.transformation_model_heads head JOIN inventory.transformation_model_versions model
      ON model.id=head.draft_model_id AND model.product_id=head.product_id
      LEFT JOIN inventory.transformation_model_versions active ON active.id=head.active_model_id AND active.product_id=head.product_id
-     WHERE head.product_id=$1`, [selection.productId],
+     WHERE head.product_id=$1 FOR SHARE OF head, model`, [selection.productId],
   )).rows[0];
   if (!head || head.revision !== selection.expectedHeadRevision || head.draft_model_id !== selection.draftModelId
     || head.definition_hash !== selection.expectedDefinitionHash || head.lifecycle_status !== "draft") {
@@ -115,19 +116,49 @@ async function captureReview(client: PoolClient, selection: ProductDefinitionSel
   )).rows.map(row => row.product_id);
   if (affectedProductIds.length > 1000) throw new ProductDefinitionError("DEFINITION_REVIEW_TOO_LARGE", "The affected build graph exceeds the review limit. No partial apply is allowed.", 422);
   const blockers: string[] = head.validation_state === "valid" ? [] : ["The saved model has validation errors."];
-  const impact = await captureDefinitionImpact(client, affectedProductIds,
-    productId => captureProductDraftReviewSnapshotInsideTransaction(client, productId, selection.productId));
+  const archivedVariantIds = await lockDraftVariantLifecycle(client, selection.draftModelId);
+  const impact = archivedVariantIds.length > 0
+    ? { atp: [], channels: [], fingerprints: [], skippedDestinations: [], blockers: archivedVariantIds.map(id =>
+        `Variant #${id} was archived after this draft was saved. Edit and save the draft to exclude its rules before applying.`) }
+    : await captureDefinitionImpact(client, affectedProductIds,
+        productId => captureProductDraftReviewSnapshotInsideTransaction(client, productId, selection.productId));
   blockers.push(...impact.blockers);
   const content = { selection, ready: blockers.length === 0, authorityRevision: authority.revision,
     previousModel: head.active_model_id === null ? null : { id: head.active_model_id, definitionHash: head.active_definition_hash },
-    activationRunId: authority.activation_run_id, affectedProductIds, blockers: [...new Set(blockers)], atp: impact.atp, channels: impact.channels };
+    activationRunId: authority.activation_run_id, affectedProductIds, blockers: [...new Set(blockers)],
+    skippedDestinations: impact.skippedDestinations, atp: impact.atp, channels: impact.channels };
   return productDefinitionReviewSchema.parse({ ...content, reviewHash: inventoryCutoverEvidenceHash({ content, fingerprints: impact.fingerprints }) });
+}
+
+/** Preserve the master-data writer lock order: model owner -> products ->
+ * variants, stable IDs within each class. The caller already holds the head and
+ * draft model. These SHARE locks fence lifecycle changes through promotion;
+ * archive commands do not need to rewrite immutable model history. */
+async function lockDraftVariantLifecycle(client: PoolClient, modelId: number): Promise<number[]> {
+  const references = (await client.query<{ id: number; product_id: number }>(
+    `WITH refs(id) AS (
+       SELECT source_variant_id FROM inventory.transformation_model_paths WHERE model_id=$1
+       UNION SELECT destination_variant_id FROM inventory.transformation_model_paths WHERE model_id=$1
+       UNION SELECT output_variant_id_snapshot FROM inventory.transformation_recipe_bindings WHERE model_id=$1
+       UNION SELECT component_variant_id FROM inventory.transformation_recipe_component_snapshots WHERE model_id=$1
+     ) SELECT variant.id, variant.product_id FROM refs JOIN catalog.product_variants variant ON variant.id=refs.id ORDER BY variant.id`, [modelId],
+  )).rows;
+  if (references.length === 0) return [];
+  const productIds = [...new Set(references.map(row => row.product_id))].sort((left, right) => left - right);
+  await client.query("SELECT id FROM catalog.products WHERE id=ANY($1::integer[]) ORDER BY id FOR SHARE", [productIds]);
+  const variants = (await client.query<{ id: number; is_active: boolean }>(
+    "SELECT id,is_active FROM catalog.product_variants WHERE id=ANY($1::integer[]) ORDER BY id FOR SHARE", [references.map(row => row.id)],
+  )).rows;
+  return variants.filter(row => !row.is_active).map(row => row.id);
 }
 
 /** Shared routine-definition impact evaluation. It never writes or recomputes
  * ATP outside the canonical planner; caller selects the single proposed draft. */
 export async function captureDefinitionImpact(client: PoolClient, affectedProductIds: number[], proposedSnapshot: (productId: number) => Promise<SupplySnapshotDto>) {
   const blockers: string[] = [];
+  // A broken listing on one destination must not block a product's inventory
+  // rules (#64414-class coupling): it stays frozen and is shown, not enforced.
+  const skippedDestinations: string[] = [];
   const atp: ProductDefinitionReview["atp"] = [];
   const channels: ProductDefinitionReview["channels"] = [];
   const fingerprints: string[] = [];
@@ -145,11 +176,20 @@ export async function captureDefinitionImpact(client: PoolClient, affectedProduc
           warehouseName: warehouse.code, current: before.atpUnits, proposed: after.atpUnits });
       }
     }
-    const before = await previewProductDefinitionPublicationInsideTransaction(client, productId, current);
-    const after = await previewProductDefinitionPublicationInsideTransaction(client, productId, proposed);
+    const before = await previewProductDefinitionPublicationInsideTransaction(client, productId, current, undefined, "isolate");
+    const after = await previewProductDefinitionPublicationInsideTransaction(client, productId, proposed, undefined, "isolate");
     // Includes destination identity, policies' effects and target revisions, not
-    // merely totals. Changed publication scope must invalidate a previous review.
-    fingerprints.push(inventoryCutoverEvidenceHash({ before: before.rows, after: after.rows }));
+    // merely totals. Changed publication scope must invalidate a previous review,
+    // including a destination becoming blocked or unblocked.
+    fingerprints.push(inventoryCutoverEvidenceHash({ before: before.rows, after: after.rows,
+      beforeBlocked: before.blockedTargets ?? [], afterBlocked: after.blockedTargets ?? [] }));
+    for (const target of after.blockedTargets ?? []) {
+      // A row isolation still updates the destination's linked listings: Dropship eBay and
+      // channel Shopify, Walmart and eBay (isRowIsolableDestination in
+      // inventory-availability-runtime-publication.service.ts).
+      const scope = target.isolation === "rows" ? ` for ${target.productVariantIds.length} unlinked item(s)` : "";
+      skippedDestinations.push(`${target.channelName}: stock is not updating${scope} (${target.errorCode}: ${target.blockerCodes.join(", ")}). Fix that listing; this change still applies.`);
+    }
     for (const row of after.rows) {
       blockers.push(...row.blockerCodes.map(code => `${row.channelName} / ${row.sku ?? row.productVariantId}: ${code}`));
       channels.push({ productId, targetId: row.publicationTargetId, channelName: row.channelName,
@@ -158,7 +198,7 @@ export async function captureDefinitionImpact(client: PoolClient, affectedProduc
         proposed: row.desiredQuantity });
     }
   }
-  return { blockers: [...new Set(blockers)], atp, channels, fingerprints };
+  return { blockers: [...new Set(blockers)], skippedDestinations: [...new Set(skippedDestinations)], atp, channels, fingerprints };
 }
 
 export async function enqueueReviewedDefinitionPublication(client: PoolClient,
@@ -167,7 +207,7 @@ export async function enqueueReviewedDefinitionPublication(client: PoolClient,
   const publisher = createTransactionScopedInventoryPublicationService(client);
   const publicationIds: string[] = [];
   for (const productId of review.affectedProductIds) {
-    const result = await publisher.publishProduct({ productId, dryRun: false, triggeredBy: "routine_definition_apply" },
+    const result = await publisher.publishProduct({ productId, dryRun: false, triggeredBy: "routine_definition_apply", blockedTargets: "isolate" },
       async () => { throw new ProductDefinitionError("DEFINITION_LEGACY_FORBIDDEN", "Canonical publication is required."); });
     if (result.authority !== "canonical") throw new ProductDefinitionError("DEFINITION_LEGACY_FORBIDDEN", "Canonical publication is required.");
     for (const row of result.publication.rows) {
@@ -187,6 +227,9 @@ export async function enqueueReviewedDefinitionPublication(client: PoolClient,
     if (result.publication.rows.length !== review.channels.filter(row => row.productId === productId).length) {
       throw new ProductDefinitionError("DEFINITION_PUBLICATION_CHANGED", "The publication target set changed. Nothing was applied.");
     }
+    // Hand skipped destinations to the publication work row so they are
+    // recorded for review and republished once their listing is fixed.
+    if ((result.publication.blockedTargets?.length ?? 0) > 0) await markPublicationProductChanged(client, productId);
   }
   return publicationIds;
 }

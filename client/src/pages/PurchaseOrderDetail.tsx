@@ -1,17 +1,42 @@
+import { usePurchaseOrderEntry } from "@/hooks/use-purchase-order-entry";
+import { PurchaseOrderEntryRecoveryNotice } from "@/features/purchasing/PurchaseOrderEntryRecovery";
+import { PurchaseOrderStatusBadge } from "@/features/purchasing/PurchaseOrderStatusBadge";
+import { resolveCurrentPhysicalStatus } from "@shared/procurement/purchase-order-status";
+import { DocumentRelationships, loadDocumentRelationships, relationshipQueryKey } from "@/features/purchasing/DocumentRelationships";
+import { projectPurchaseLineShipping, type PurchaseLineShipping } from "@shared/procurement/purchase-line-shipping";
+import { PoLineShipmentLinks, PoLineShippingQuantity } from "@/features/purchasing/PoLineShipping";
+import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
+import { formatPaymentAmount } from "@/lib/ap-payment-command";
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
+import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
+import { ShipmentQuantityControl } from "@/components/purchasing/ShipmentQuantityControl";
+import { parseShipmentUnits, shipmentQuantityDraft, shipmentQuantityPayload, shipmentQuantityPreview, type ShipmentQuantityDraft } from "@/lib/shipment-unit-entry";
+import { parseShipmentCreateSources } from "@shared/procurement/shipment-create-source";
 import { parseSupplierDispatchResult, parseSupplierPreparationResult, supplierDispatchReviewedVersion } from "@/lib/supplier-dispatch";
 import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
 import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSummary";
 import { PoFinancialEvidence, usePoFinancialEvidence } from "@/features/purchasing/PoFinancialEvidence";
 import { usePoShipmentCosts } from "@/features/purchasing/use-po-shipment-costs";
+import { PoAmendmentHistory } from "@/features/purchasing/PoAmendmentHistory";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
+import { projectPoLineLandedCosts } from "@shared/procurement/po-line-landed-cost";
+import { PoLineLandedCost } from "@/features/purchasing/PoLineLandedCost";
+import { PurchaseCostOriginHistory } from "@/features/purchasing/PurchaseCostOriginHistory";
 import { poFinancialWorkflowSchema } from "@shared/procurement/po-financial-workflow";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
+import { parsePoDirectReceiveOption, parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
+import { ShipmentCustodyReceiptLinks } from "@/components/purchasing/ShipmentCustodyReceiptLinks";
 import React from "react";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
 import { PoQuantityAmendment } from '@/features/purchasing/PoQuantityAmendment';
 import { useAuth } from "@/lib/auth";
-import { createShipmentLineCommandClient, createShipmentLineRecoveryStore } from "@/lib/shipment-line-command";
+import { useShipmentCreation } from "@/hooks/use-shipment-creation";
+import { usePurchaseApproval } from "@/hooks/use-purchase-approval";
+import type { PurchaseApprovalIntent, PurchaseApprovalRecovery } from "@/lib/purchase-approval-command";
+import { PurchaseApprovalRecovery as PurchaseApprovalRecoveryNotice } from "@/features/purchasing/PurchaseApprovalRecovery";
+import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateRecovery";
+import { shipmentCreateSchema, type ShipmentCreateInput } from "@shared/procurement/shipment-create-command";
+import type { ShipmentCreateRecovery as ShipmentRecovery } from "@/lib/shipment-create-command";
 import {
   dollarsToCents,
   formatMills,
@@ -138,7 +163,7 @@ const FINANCIAL_LABELS: Record<string, string> = {
   unbilled: "Unbilled",
   invoiced: "Invoiced",
   partially_paid: "Partial",
-  paid: "Paid",
+  paid: "Settled",
   disputed: "Disputed",
 };
 
@@ -581,7 +606,7 @@ function DualTrackHeader({
           <div className="flex-1 overflow-x-auto">
             <TrackTimeline
               stages={PHYSICAL_TRACK_STAGES}
-              currentStatus={po.physicalStatus ?? "draft"}
+              currentStatus={resolveCurrentPhysicalStatus(po)}
               timestamps={physTimestamps}
             />
           </div>
@@ -838,7 +863,7 @@ function formatStoredLineQuote(line: {
   purchaseUom?: string | null;
   quotedUnitCostMills?: number | null;
   quotedTotalCents?: number | null;
-}): string {
+}): string | null {
   if (
     line.pricingBasis === "per_piece" &&
     line.quotedUnitCostMills != null
@@ -864,7 +889,7 @@ function formatStoredLineQuote(line: {
   ) {
     return "Stored quote is incomplete";
   }
-  return "Legacy price; quote basis unverified";
+  return null;
 }
 
 function createEmptyNewLine() {
@@ -955,10 +980,10 @@ function parsePositiveInt(value: string | null): number | null {
 
 export default function PurchaseOrderDetail() {
   const { user: shipmentCommandUser, hasPermission } = useAuth();
-  const shipmentLineCommands = React.useMemo(() => shipmentCommandUser?.id ? createShipmentLineCommandClient(
-    () => "shipment-line-" + crypto.randomUUID(),
-    createShipmentLineRecoveryStore(() => window.sessionStorage, shipmentCommandUser.id),
-  ) : null, [shipmentCommandUser?.id]);
+  const shipmentCreation = useShipmentCreation();
+  const purchaseApproval = usePurchaseApproval();
+  const purchaseEntry = usePurchaseOrderEntry();
+  const entryBlocked = !purchaseEntry.ready || purchaseEntry.pending || Boolean(purchaseEntry.recovery || purchaseEntry.error);
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [location, navigate] = useLocation();
@@ -1075,22 +1100,31 @@ export default function PurchaseOrderDetail() {
   const [shipperSearch, setShipperSearch] = useState("");
 
   // Shippable lines state for Create Shipment dialog
-  // Map of poLineId → { checked, qty }. qty = 0 means unchecked.
-  const [lineSelections, setLineSelections] = useState<Record<number, { checked: boolean; qty: number }>>({});
-  const [lineQtyErrors, setLineQtyErrors] = useState<Record<number, string>>({});
+  // Keep the exact reviewed count unit with each selected purchase source.
+  const [lineSelections, setLineSelections] = useState<Record<number, { checked: boolean; quantity: ShipmentQuantityDraft }>>({});
 
-  const { data: shippableLinesData } = useQuery<{ lines: any[]; reviewRequiredLines?: Array<{ id: number; sku: string | null; code: string; error: string }> }>({
-    queryKey: [`/api/purchase-orders/${poId}/shippable-lines`],
-    enabled: !!poId && showCreateShipmentDialog,
+
+  const shippableLinesQuery = useQuery({
+    queryKey: [`/api/purchase-orders/${poId}/shippable-lines`, "shipment-create"],
+    enabled: !!poId && showCreateShipmentDialog, retry: false, staleTime: 0,
+    queryFn: async ({ signal }) => {
+      if (!poId) throw new Error("Select a purchase order before creating a shipment.");
+      const response = await fetch(`/api/purchase-orders/${poId}/shippable-lines`, { credentials: "include", signal });
+      if (!response.ok) throw new Error("Available purchase lines could not be loaded.");
+      try { return parseShipmentCreateSources(await response.json(), poId); }
+      catch { throw new Error("Available purchase line identities or quantities could not be verified."); }
+    },
   });
+  const { isError: shippableLinesError, isPending: shippableLinesLoading, refetch: refetchShippableLines } = shippableLinesQuery;
+  const shippableLinesData = shippableLinesError ? undefined : shippableLinesQuery.data;
 
   // Initialize line selections when shippable lines load
   useEffect(() => {
     if (shippableLinesData?.lines && showCreateShipmentDialog) {
-      const selections: Record<number, { checked: boolean; qty: number }> = {};
+      const selections: Record<number, { checked: boolean; quantity: ShipmentQuantityDraft }> = {};
       for (const line of shippableLinesData.lines) {
         if (!(line.id in lineSelections)) {
-          selections[line.id] = { checked: true, qty: line.remainingQty };
+          selections[line.id] = { checked: true, quantity: shipmentQuantityDraft(line.remainingQty, parseShipmentUnits(line.shipmentUnits)) };
         }
       }
       if (Object.keys(selections).length > 0) {
@@ -1271,11 +1305,18 @@ export default function PurchaseOrderDetail() {
     enabled: showAddLineDialog && !!po?.vendorId,
   });
 
-  const { data: linkedShipmentsRaw = [] } = useQuery<any[]>({
-    queryKey: [`/api/purchase-orders/${poId}/shipments`],
-    enabled: !!poId && activeTab === "shipments",
+  const relationshipsQuery = useQuery({
+    queryKey: relationshipQueryKey({ kind: "purchase", id: poId ?? 0 }),
+    queryFn: ({ signal }) => {
+      if (poId === null) throw new Error("A valid purchase order is required to load document links.");
+      return loadDocumentRelationships({ kind: "purchase", id: poId }, signal);
+    },
+    enabled: !!poId,
   });
-  const linkedShipments = linkedShipmentsRaw.filter((s: any) => s.status !== "cancelled");
+  const relatedDocuments = relationshipsQuery.data;
+  const shippingByLine = React.useMemo(() => relationshipsQuery.isSuccess && relatedDocuments
+    ? projectPurchaseLineShipping(relatedDocuments) : new Map<number, PurchaseLineShipping>(), [relatedDocuments, relationshipsQuery.isSuccess]);
+  const linkedShipments = relatedDocuments?.shipments ?? [];
 
   const { data: receiveOptions, isLoading: receiveOptionsLoading } = useQuery<any>({
     queryKey: [`/api/purchase-orders/${poId}/receive-options`],
@@ -1331,6 +1372,10 @@ export default function PurchaseOrderDetail() {
   }, null);
 
   const lines = po?.lines ?? [];
+  const landedCosts = projectPoLineLandedCosts({ poHeader: po, poLines: lines, costs: shipmentCosts.data });
+  const landedCostByLine = new Map(landedCosts.status === "complete"
+    ? landedCosts.lines.map(line => [line.purchaseOrderLineId, line]) : []);
+  const landedCurrency = shipmentCosts.data?.summary.currency ?? po?.currency ?? "USD";
   const history = historyData?.history ?? [];
   const receipts = receiptsData?.receipts ?? [];
   const isDraft = po?.status === "draft";
@@ -1455,7 +1500,37 @@ export default function PurchaseOrderDetail() {
 
   const submitMutation = createTransitionMutation("submit");
   const returnToDraftMutation = createTransitionMutation("return-to-draft");
-  const approveMutation = createTransitionMutation("approve");
+  const approveMutation = useMutation({
+    networkMode: "always", retry: false,
+    mutationFn: async (request: { body: PurchaseApprovalIntent; recovery?: PurchaseApprovalRecovery; navigation: NavigationSnapshot; visit: ReturnType<typeof purchaseApproval.captureVisit> }) => {
+      if (!request.navigation.isCurrent() || !request.visit.isCurrent()) throw new Error("The purchase review changed. Review the current purchase and operator before approving.");
+      return purchaseApproval.execute(request.body, request.recovery);
+    },
+    onSuccess: (_approved, request) => {
+      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${request.body.purchaseOrderId}`] });
+      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${request.body.purchaseOrderId}/history`] });
+      void queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      if (request.navigation.isCurrent() && request.visit.isCurrent()) toast({ title: "Purchase approval confirmed", description: "The reviewed purchase terms and approval are saved in history." });
+    },
+    onError: (error: Error, request) => {
+      if (!request.navigation.isCurrent() || !request.visit.isCurrent()) return;
+      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${request.body.purchaseOrderId}`] });
+      toast({ title: "Purchase approval was not confirmed", description: error.message, variant: "destructive" });
+    },
+  });
+  const approvalBlocked = approveMutation.isPending || !purchaseApproval.allowed || !purchaseApproval.ready || Boolean(purchaseApproval.recovery || purchaseApproval.error);
+  function approveReviewedPurchase() {
+    if (approvalBlocked || !poId || !po || po.id !== poId) return;
+    try {
+      const expectedUpdatedAt = supplierDispatchReviewedVersion(po.updatedAt);
+      approveMutation.mutate({ body: { purchaseOrderId: poId, expectedUpdatedAt, expectedTotalCents: po.totalCents, expectedLinesFingerprint: po.approvalLinesFingerprint }, navigation: captureNavigation(), visit: purchaseApproval.captureVisit() });
+    } catch (error) {
+      toast({ title: "Purchase review required", description: error instanceof Error ? error.message : "Reload and review the current purchase terms.", variant: "destructive" });
+    }
+  }
+  function recoverPurchaseApproval(recovery: PurchaseApprovalRecovery) {
+    approveMutation.mutate({ body: recovery.body, recovery, navigation: captureNavigation(), visit: purchaseApproval.captureVisit() });
+  }
   const sendMutation = useMutation({
     mutationFn: async (review: ExternalSendReview) => {
       if (!review.isCurrent()) throw new Error("The selected PO changed. Review the current PO before recording an external send.");
@@ -1585,30 +1660,51 @@ export default function PurchaseOrderDetail() {
   });
 
   const sendToVendorMutation = useMutation({
-    onMutate: captureNavigation,
+    // Persist immediately even offline; reconnecting must never auto-submit a saved form.
+    networkMode: "always",
+    onMutate: () => ({ navigation: captureNavigation(), visit: purchaseEntry.captureVisit() }),
     mutationFn: async () => {
       const targetId = poId;
       if (!targetId) throw new Error("Select a PO before preparing supplier review.");
-      const res = await fetch(`/api/purchase-orders/${targetId}/send-to-vendor`, { method: "POST" });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to prepare PO for supplier review"); }
-      return parseSupplierPreparationResult(await res.json(), targetId);
+      if (entryBlocked) throw new Error("Recover the saved purchase request before preparing another purchase.");
+      const result = await purchaseEntry.execute({ action: "prepare", targetId, payload: {} });
+      return parseSupplierPreparationResult(result.po, targetId);
     },
-    onSuccess: (updatedPo, _variables, context) => {
+    onSuccess: async (updatedPo, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${updatedPo.id}`] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
-      if (!context?.isCurrent()) return;
-      toast({ title: updatedPo.status === "pending_approval" ? "Submitted for approval" : "PO ready for supplier review",
-        description: "Supplier dispatch has not been recorded. Review the document before sending it outside Echelon." });
-      if (updatedPo.status === "approved") {
+      if (!context?.navigation.isCurrent() || !context.visit.isCurrent()) return;
+      const current = await refetchPo();
+      if (!context.navigation.isCurrent() || !context.visit.isCurrent()) return;
+      if (!current.error && current.data?.id === updatedPo.id && current.data.status === "approved") {
         setShowDocDialog(true);
         void loadDocumentPreview();
       }
+      toast({ title: updatedPo.status === "pending_approval" ? "Submitted for approval" : "PO ready for supplier review",
+        description: "Supplier dispatch has not been recorded. Review the document before sending it outside Echelon." });
+
     },
     onError: (err: Error, _variables, context) => {
-      if (!context?.isCurrent()) return;
+      if (!context?.navigation.isCurrent() || !context.visit.isCurrent()) return;
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
+
+  async function recoverPurchaseEntry() {
+    const saved = purchaseEntry.recovery;
+    if (!saved) return;
+    const visit = purchaseEntry.captureVisit();
+    const navigation = captureNavigation();
+    try {
+      const result = await purchaseEntry.execute(saved.body, saved);
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${result.po.id}`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      if (!visit.isCurrent() || !navigation.isCurrent()) return;
+      toast({ title: "Purchase request confirmed", description: "Review the current purchase order before continuing." });
+      if (result.po.id !== poId) navigate(`/purchase-orders/${result.po.id}`);
+      else void refetchPo();
+    } catch { /* The recovery notice retains the request and reports the failure. */ }
+  }
 
   const createReceiptMutation = useMutation({
     onMutate: captureNavigation,
@@ -2430,65 +2526,52 @@ export default function PurchaseOrderDetail() {
     },
   });
 
+  type ShipmentCreateSubmission = { body: ShipmentCreateInput; recovery?: ShipmentRecovery; navigation: NavigationSnapshot; visit: ReturnType<typeof shipmentCreation.captureVisit> };
   const createShipmentMutation = useMutation({
     retry: false,
-    onMutate: captureNavigation,
-    mutationFn: async (form: typeof newShipmentForm) => {
-      if (!shipmentLineCommands) throw new Error("Sign in before creating a shipment.");
-      // Chain: add selected lines from PO
-      const selectedLines = (shippableLinesData?.lines ?? [])
-        .filter((line: any) => lineSelections[line.id]?.checked && lineSelections[line.id]?.qty > 0)
-        .map((line: any) => ({ poLineId: line.id, qty: lineSelections[line.id].qty }));
-
-
-      const res = await fetch("/api/inbound-shipments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: form.mode || undefined,
-          shipmentNumber: form.shipmentNumber || undefined,
-          shipperName: form.shipperName || undefined,
-          forwarderName: form.forwarderName || undefined,
-          carrierName: form.carrierName || undefined,
-        }),
-      });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create shipment"); }
-      const shipment = await res.json();
-
-      if (selectedLines.length > 0) {
-        try {
-          const result = await shipmentLineCommands.execute(shipment.id, {
-            operation: "add-from-po", body: { purchaseOrderId: poId!, lineSelections: selectedLines },
-          });
-          return { shipment, lineError: null, lineCount: result.operation === "add-from-po" ? result.lines.length : 0 };
-        } catch (e: any) {
-          return { shipment, lineError: e.message, lineCount: 0 };
-        }
-      }
-      return { shipment, lineError: null, lineCount: 0 };
+    networkMode: "always",
+    mutationFn: (submission: ShipmentCreateSubmission) => {
+      if (!submission.visit.isCurrent() || !submission.navigation.isCurrent()) throw new Error("The shipment creation view changed. Review the saved request before sending.");
+      return shipmentCreation.execute(submission.body, submission.recovery);
     },
-    onSuccess: ({ shipment, lineError, lineCount }, _variables, context) => {
-      if (context?.poId) queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${context.poId}/shipments`] });
-      if (lineError) {
-        toast({
-          title: "Shipment created",
-          description: `${shipment.shipmentNumber} created but failed to add lines: ${lineError}. Open the shipment and review any saved line command before adding more lines.`,
-          variant: "destructive",
-        });
-      } else if (lineCount > 0) {
-        toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created with ${lineCount} line${lineCount === 1 ? "" : "s"}` });
-      } else {
-        toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created` });
+    onSuccess: (shipment, submission) => {
+      const owningPoId = submission.body.purchaseOrder?.purchaseOrderId;
+      if (owningPoId) {
+        void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${owningPoId}/shipments`] });
+        void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${owningPoId}/shippable-lines`] });
       }
-      if (!context?.isCurrent()) return;
+      void queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
+      if (!submission.navigation.isCurrent() || !submission.visit.isCurrent()) return;
+      toast({ title: "Shipment confirmed", description: `${shipment.shipmentNumber} has ${shipment.lineCount} selected lines.` });
       setShowCreateShipmentDialog(false);
       setLineSelections({});
-      navigate(context.childHref(`/shipments/${shipment.id}`));
+      const href = `/shipments/${shipment.id}`;
+      navigate(owningPoId && owningPoId === submission.navigation.poId ? submission.navigation.childHref(href) : href);
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    onError: (error: Error, submission) => {
+      if (submission.navigation.isCurrent() && submission.visit.isCurrent()) toast({ title: "Shipment creation needs attention", description: error.message, variant: "destructive" });
     },
   });
+  const recoverShipmentCreation = (recovery: ShipmentRecovery) => createShipmentMutation.mutate({
+    body: recovery.body, recovery, navigation: captureNavigation(), visit: shipmentCreation.captureVisit(),
+  });
+  const submitShipmentCreation = () => {
+    try {
+      if (!poId || shippableLinesError || !shippableLinesData) throw new Error("Load and review the available purchase lines before creating a shipment.");
+      const lineSelectionsForCreate = shippableLinesData.lines.filter((line: any) => lineSelections[line.id]?.checked)
+        .map((line) => {
+          const { qtyShipped, ...unit } = shipmentQuantityPayload(lineSelections[line.id].quantity, parseShipmentUnits(line.shipmentUnits), line.remainingQty);
+          return { poLineId: line.id, qty: qtyShipped, ...unit };
+        });
+      if (!lineSelectionsForCreate.length) throw new Error("Select at least one purchase line for this shipment.");
+      const body = shipmentCreateSchema.parse({
+        mode: newShipmentForm.mode || undefined, shipmentNumber: newShipmentForm.shipmentNumber || undefined,
+        shipperName: newShipmentForm.shipperName || undefined, forwarderName: newShipmentForm.forwarderName || undefined,
+        carrierName: newShipmentForm.carrierName || undefined, purchaseOrder: { purchaseOrderId: poId, lineSelections: lineSelectionsForCreate },
+      });
+      createShipmentMutation.mutate({ body, navigation: captureNavigation(), visit: shipmentCreation.captureVisit() });
+    } catch (error) { toast({ title: "Review shipment details", description: error instanceof Error ? error.message : "Invalid shipment details", variant: "destructive" }); }
+  };
 
   const openCreateInvoiceDialogFromPo = async () => {
     let invoiceNumber = "";
@@ -2543,7 +2626,7 @@ export default function PurchaseOrderDetail() {
         submitMutation.mutate();
         return;
       case "approve":
-        approveMutation.mutate();
+        approveReviewedPurchase();
         return;
       case "send":
         openExternalSendConfirmation();
@@ -2593,11 +2676,11 @@ export default function PurchaseOrderDetail() {
       case "submit":
         return submitMutation.isPending;
       case "approve":
-        return approveMutation.isPending;
+        return approvalBlocked;
       case "send":
         return sendMutation.isPending;
       case "send_to_vendor":
-        return po?.status === "approved" ? sendMutation.isPending : sendToVendorMutation.isPending || submitMutation.isPending;
+        return po?.status === "approved" ? sendMutation.isPending : entryBlocked || (isSoloMode && !purchaseEntry.allowed("prepare")) || sendToVendorMutation.isPending || submitMutation.isPending;
       case "mark_shipped":
         return markShippedMutation.isPending;
       case "mark_in_transit":
@@ -2645,10 +2728,19 @@ export default function PurchaseOrderDetail() {
     (reviewAutoDraftFinances && financialGuidanceLoading) ||
     (!reviewAutoDraftFinances && ["done", "cancelled"].includes(autoDraftActionPlan.primaryAction.id));
 
+  const entryRecoveryPanel = <PurchaseOrderEntryRecoveryNotice recovery={purchaseEntry.recovery} storageError={purchaseEntry.error}
+    error={purchaseEntry.commandError} pending={purchaseEntry.pending} allowed={purchaseEntry.recovery ? purchaseEntry.allowed(purchaseEntry.recovery.body.action) : false}
+    onRecover={recoverPurchaseEntry} onRead={purchaseEntry.refresh} />;
+
+  const approvalRecoveryPanel = <PurchaseApprovalRecoveryNotice recovery={purchaseApproval.recovery} error={purchaseApproval.error}
+    pending={approveMutation.isPending} allowed={purchaseApproval.allowed} onRecover={recoverPurchaseApproval} onRefresh={purchaseApproval.refresh} />;
+
   if (isLoading) {
     return (
       <div className="p-2 md:p-6 space-y-4">
         <ProcurementContext navigation={procurementNavigation} />
+        {approvalRecoveryPanel}
+        {entryRecoveryPanel}
         <Button variant="ghost" size="sm" asChild>
           <Link href={procurementNavigation.backHref("/purchase-orders")}>
             {procurementNavigation.backLabel ?? "Back to purchase orders"}
@@ -2666,6 +2758,8 @@ export default function PurchaseOrderDetail() {
     return (
       <div className="p-2 md:p-6 space-y-4">
         <ProcurementContext navigation={procurementNavigation} />
+        {approvalRecoveryPanel}
+        {entryRecoveryPanel}
         <div role="alert" className="rounded-lg border p-4 space-y-3">
           <p className="font-medium">{notFound ? "Purchase order not found." : "Unable to load purchase order."}</p>
           {!notFound && (
@@ -2696,6 +2790,8 @@ export default function PurchaseOrderDetail() {
       <div className="p-6 text-center">
         <p className="text-muted-foreground">Purchase order not found.</p>
         <ProcurementContext navigation={procurementNavigation} />
+        {approvalRecoveryPanel}
+        {entryRecoveryPanel}
         <Button variant="link" asChild>
           <Link href={procurementNavigation.backHref("/purchase-orders")}>
             {procurementNavigation.backLabel ?? "Back to purchase orders"}
@@ -2708,6 +2804,8 @@ export default function PurchaseOrderDetail() {
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
       <ProcurementContext navigation={procurementNavigation} />
+      {approvalRecoveryPanel}
+        {entryRecoveryPanel}
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start gap-4">
         <Button variant="ghost" size="sm" asChild className="min-h-[44px]">
@@ -2719,12 +2817,7 @@ export default function PurchaseOrderDetail() {
         <div className="flex-1">
           <div className="flex items-center gap-3 flex-wrap">
             <h1 className="text-xl md:text-2xl font-bold font-mono">{po.poNumber}</h1>
-            <Badge
-              variant={STATUS_BADGES[po.status]?.variant || "secondary"}
-              className={`text-sm ${STATUS_BADGES[po.status]?.color || ""}`}
-            >
-              {STATUS_BADGES[po.status]?.label || po.status}
-            </Badge>
+            <PurchaseOrderStatusBadge purchaseOrder={po} />
             {po.priority === "rush" && <Badge variant="destructive">Rush</Badge>}
             {po.priority === "high" && <Badge variant="outline" className="text-orange-600 border-orange-300">High</Badge>}
             {Number(po.overReceiptTolerancePct) > 0 && <Badge variant="outline" className="border-blue-300 text-blue-700 bg-blue-50">Tol: {Number(po.overReceiptTolerancePct)}%</Badge>}
@@ -2799,7 +2892,7 @@ export default function PurchaseOrderDetail() {
         <div className="flex gap-2 flex-wrap w-full sm:w-auto">
           {/* Prepare approved terms; external dispatch is recorded separately. */}
           {canSendPoToVendor && po.status === "draft" && isSoloMode && (
-            <Button onClick={() => sendToVendorMutation.mutate()} disabled={sendToVendorMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+            <Button onClick={() => sendToVendorMutation.mutate()} disabled={entryBlocked || !purchaseEntry.allowed("prepare") || sendToVendorMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Send className="h-4 w-4 mr-2" />
               {sendToVendorMutation.isPending ? "Submitting..." : "Prepare for supplier"}
             </Button>
@@ -2814,7 +2907,7 @@ export default function PurchaseOrderDetail() {
           {(canApprovePo || canReturnPoToDraft) && po.status === "pending_approval" && (
             <>
               {canApprovePo && (
-                <Button onClick={() => approveMutation.mutate()} disabled={approveMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+                <Button onClick={approveReviewedPurchase} disabled={approvalBlocked} className="flex-1 sm:flex-none min-h-[44px]">
                   <CheckCircle className="h-4 w-4 mr-2" />
                   Approve
                 </Button>
@@ -2900,6 +2993,18 @@ export default function PurchaseOrderDetail() {
         </div>
       </div>
 
+      {po.status === "closed" && (
+        <div className="rounded-md border border-green-600/30 bg-green-50 p-3 dark:bg-green-950/20" data-testid="po-closed-summary">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="font-semibold">This purchase order is closed</p>
+              <p className="text-sm text-muted-foreground">Any remaining invoice or cost reviews are follow-up work. They do not reopen this PO.</p>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => setActiveTab("history")}>View closure history</Button>
+          </div>
+        </div>
+      )}
+
       {/* Exception pill (Phase 1) — only when there are open exceptions.
           Click jumps to the Exceptions tab below. Severity drives color. */}
       {openExceptionCount > 0 && (
@@ -2951,11 +3056,11 @@ export default function PurchaseOrderDetail() {
             // counts (and click-to-tab) but don't try to make value
             // judgments about whether they're 'OK' — user knows context.
             const issuedInvoices = invoicesData?.invoices?.length ?? 0;
-            const recordedPayments = paymentsData?.payments?.length ?? 0;
+            const recordedApplications = paymentsData?.payments?.length ?? 0;
             const physReceipts = receipts.length;
             const items: Array<{ label: string; tab: string }> = [];
             if (issuedInvoices > 0) items.push({ label: `${issuedInvoices} invoice${issuedInvoices > 1 ? "s" : ""} issued before cancellation`, tab: "invoices" });
-            if (recordedPayments > 0) items.push({ label: `${recordedPayments} payment${recordedPayments > 1 ? "s" : ""} recorded`, tab: "payments" });
+            if (recordedApplications > 0) items.push({ label: `${recordedApplications} payment application${recordedApplications > 1 ? "s" : ""} recorded`, tab: "payments" });
             if (physReceipts > 0) items.push({ label: `${physReceipts} receipt${physReceipts > 1 ? "s" : ""} on file`, tab: "receipts" });
             if (items.length === 0) return null;
             return (
@@ -3176,7 +3281,7 @@ export default function PurchaseOrderDetail() {
         {/* Total — always read-only */}
         <Card data-testid="po-total-cost-summary-card">
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Total cost</div>
+            <div className="text-xs text-muted-foreground">Total landed cost</div>
             <div className="font-mono font-bold text-lg">{costCardAmount(shipmentCosts.data?.totals.combinedCostCents)}</div>
             {shipmentCosts.isSuccess && <div className="text-xs text-muted-foreground mt-1">
               Supplier PO: {formatIntegerCents(shipmentCosts.data.summary.poAmountCents, shipmentCosts.data.summary.currency)}<br />
@@ -3281,8 +3386,8 @@ export default function PurchaseOrderDetail() {
       )}
 
       {/* Phase 2: Tabs + Quick Actions side rail */}
-      <div className="flex flex-col md:flex-row gap-4 items-start">
-      <div className="flex-1 min-w-0">
+      <div className={`flex flex-col ${activeTab === "lines" ? "2xl:flex-row" : "md:flex-row"} gap-4 items-start`}>
+      <div className="flex-1 min-w-0 w-full">
       {/* Tabs: Lines, Receipts, History */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex h-auto max-w-full flex-wrap justify-start">
@@ -3303,7 +3408,21 @@ export default function PurchaseOrderDetail() {
         </TabsContent>
 
         {/* ── Lines Tab ── */}
-        <TabsContent value="lines" className="space-y-4">
+        <TabsContent value="lines" className="@container/po-lines space-y-4">
+          {lines.length > 0 && <p className="text-xs text-muted-foreground">
+            Quantities are pieces. Shipped counts departed shipments. Still to ship excludes cancellations and includes planned shipments. Received is the posted receipt count.
+          </p>}
+          {relationshipsQuery.isError && <div role="alert" className="rounded-md border border-destructive p-3 text-sm">
+            <p>Shipment progress could not be loaded. Shipped and still-to-ship quantities are unavailable.</p>
+            <Button variant="outline" size="sm" className="mt-2" onClick={() => void relationshipsQuery.refetch()}>Retry shipment progress</Button>
+          </div>}
+          {lines.length > 0 && <div className="text-xs text-muted-foreground" role="status">
+            {landedCosts.status === "complete"
+              ? <>Landed costs include the supplier line amount and its allocated shipment charges. Per-piece rates are rounded; line totals keep exact cents.
+                {landedCosts.poLevelAdjustmentCents !== 0 && <> PO-level charges or discounts of {formatIntegerCents(landedCosts.poLevelAdjustmentCents, landedCurrency)} are included in the PO total, separately from these lines.</>}</>
+              : shipmentCosts.isPending ? "Loading landed costs…" : landedCosts.reason}
+            {landedCosts.status === "unavailable" && !shipmentCosts.isPending && <Button variant="outline" size="sm" className="ml-2" onClick={() => void Promise.all([refetchPo(), shipmentCosts.refetch()])}>Reload costs</Button>}
+          </div>}
           {canEditLines && (
             <Button variant="outline" onClick={() => setShowAddLineDialog(true)} className="min-h-[44px]">
               <Plus className="h-4 w-4 mr-2" />
@@ -3312,7 +3431,7 @@ export default function PurchaseOrderDetail() {
           )}
 
           {/* Mobile cards */}
-          <div className="md:hidden space-y-3">
+          <div className="@4xl/po-lines:hidden space-y-3">
             {lines.length === 0 ? (
               <Card>
                 <CardContent className="p-4 text-center text-muted-foreground">
@@ -3323,8 +3442,11 @@ export default function PurchaseOrderDetail() {
               lines.map((line: any) => {
                 const canEditThisLine = canEditLine(line);
                 const isEditingSkuMobile = canEditThisLine && editingLineId === line.id && editingLineField === "sku";
+                const shipping = shippingByLine.get(line.id);
+                const orderedPieces = shipping?.line.orderedPieces ?? line.orderQty ?? 0;
+                const receivedPieces = shipping?.line.receivedPieces ?? line.receivedQty ?? 0;
                 return (
-                <Card key={line.id}>
+                <Card key={line.id} data-testid={`po-line-${line.id}`} className={shippingByLine.get(line.id)?.shipments.some(shipment => shipment.shipmentLineId === procurementNavigation.record?.relationship?.line) ? "border-primary" : undefined}>
                   <CardContent className="p-3">
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
@@ -3369,21 +3491,32 @@ export default function PurchaseOrderDetail() {
                             onClick={() => canEditThisLine && startPricingEdit(line)}
                             title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
                           >
-                            {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
-                              ? `${(line.orderQty || 0).toLocaleString()} pcs (${Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)`
-                              : `Qty: ${line.receivedQty || 0}/${line.orderQty}`}
+                            Ordered: {orderedPieces.toLocaleString()} pcs
                           </span>
                           <span
                             className={canEditThisLine ? "cursor-pointer underline decoration-dotted" : ""}
                             onClick={() => canEditThisLine && startPricingEdit(line)}
                             title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
                           >
-                            @ {formatLineUnitCost(line)}/pc
+                            Product {formatLineUnitCost(line)}/pc
                           </span>
-                          <span className="font-medium">{formatCents(line.lineTotalCents)}</span>
+                          <span className="font-medium">Supplier {formatCents(line.lineTotalCents)}</span>
                         </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
+                        {(!line.lineType || line.lineType === "product") && <>
+                          <dl className="grid grid-cols-3 gap-2 my-3 text-sm" aria-label="Shipment progress">
+                            <div><dt className="text-xs text-muted-foreground">Shipped</dt><dd data-testid="shipped-pieces"><PoLineShippingQuantity progress={shippingByLine.get(line.id)} kind="shipped" loading={relationshipsQuery.isPending} /></dd></div>
+                            <div><dt className="text-xs text-muted-foreground">Still to ship</dt><dd data-testid="remaining-pieces"><PoLineShippingQuantity progress={shippingByLine.get(line.id)} kind="remaining" loading={relationshipsQuery.isPending} /></dd></div>
+                            <div><dt className="text-xs text-muted-foreground">Received</dt><dd data-testid="received-pieces" className="tabular-nums">{receivedPieces.toLocaleString()}</dd></div>
+                          </dl>
+                          <PoLineShipmentLinks progress={shippingByLine.get(line.id)} loading={relationshipsQuery.isPending} navigation={procurementNavigation} poNumber={po.poNumber} />
+                        </>}
+                        {formatStoredLineQuote(line) && <div className="mt-1 text-xs text-muted-foreground">
                           Vendor quote: {formatStoredLineQuote(line)}
+                        </div>}
+                        <div className="mt-2 text-sm">
+                          <span className="text-xs text-muted-foreground">Total landed cost</span>
+                          <PoLineLandedCost line={landedCostByLine.get(line.id)} currency={landedCurrency} kind="total" supplierCents={line.lineTotalCents} />
+                          <PoLineLandedCost line={landedCostByLine.get(line.id)} currency={landedCurrency} kind="unit" />
                         </div>
                       </div>
                       {canEditThisLine && (
@@ -3410,19 +3543,19 @@ export default function PurchaseOrderDetail() {
           </div>
 
           {/* Desktop table */}
-          <Card className="hidden md:block">
+          <Card className="hidden @4xl/po-lines:block">
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12">#</TableHead>
-                  <TableHead>SKU</TableHead>
-                  <TableHead>Product</TableHead>
-                  <TableHead>Vendor SKU</TableHead>
+                  <TableHead>Product / SKU</TableHead>
                   <TableHead className="text-right">Ordered</TableHead>
+                  <TableHead className="text-right">Shipped</TableHead>
+                  <TableHead className="text-right">Still to ship</TableHead>
                   <TableHead className="text-right">Received</TableHead>
-                  <TableHead className="text-right">Unit Cost</TableHead>
-                  <TableHead className="text-right">Line Total</TableHead>
-                  <TableHead>Status</TableHead>
+                  <TableHead>Shipments</TableHead>
+                  <TableHead className="text-right">Cost / piece</TableHead>
+                  <TableHead className="text-right">Total landed cost</TableHead>
                   {canEditLines && <TableHead className="w-12"></TableHead>}
                 </TableRow>
               </TableHeader>
@@ -3437,10 +3570,13 @@ export default function PurchaseOrderDetail() {
                   lines.map((line: any) => {
                     const canEditThisLine = canEditLine(line);
                     const isEditingSku = canEditThisLine && editingLineId === line.id && editingLineField === "sku";
+                    const shipping = shippingByLine.get(line.id);
+                    const orderedPieces = shipping?.line.orderedPieces ?? line.orderQty ?? 0;
+                    const receivedPieces = shipping?.line.receivedPieces ?? line.receivedQty ?? 0;
                     return (
-                    <TableRow key={line.id}>
+                    <TableRow key={line.id} data-testid={`po-line-${line.id}`} className={shippingByLine.get(line.id)?.shipments.some(shipment => shipment.shipmentLineId === procurementNavigation.record?.relationship?.line) ? "bg-primary/5" : undefined}>
                       <TableCell className="text-muted-foreground">{line.lineNumber}</TableCell>
-                      <TableCell className="font-mono">
+                      <TableCell className="max-w-[200px]">
                         {isEditingSku ? (
                           <div className="space-y-1">
                             {skuVariants.length === 0 ? (
@@ -3466,15 +3602,16 @@ export default function PurchaseOrderDetail() {
                           </div>
                         ) : (
                           <span
-                            className={canEditThisLine ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
+                            className={`font-mono text-xs ${canEditThisLine ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}`}
                             onClick={() => canEditThisLine && startSkuEdit(line)}
                           >
                             {line.sku || "—"}
                           </span>
                         )}
+                        <p className="truncate" title={line.productName}>{line.productName || "—"}</p>
+                        {line.vendorSku && <p className="text-xs text-muted-foreground truncate" title={line.vendorSku}>Vendor SKU: {line.vendorSku}</p>}
+                        <Badge variant="outline" className="text-xs mt-1">{line.status}</Badge>
                       </TableCell>
-                      <TableCell className="max-w-[200px] truncate">{line.productName || "—"}</TableCell>
-                      <TableCell className="font-mono text-xs">{line.vendorSku || "—"}</TableCell>
                       <TableCell className="text-right">
                         <span
                           className={canEditThisLine ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
@@ -3482,17 +3619,26 @@ export default function PurchaseOrderDetail() {
                           title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
                         >
                           {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
-                            ? <>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></>
-                            : line.orderQty}
+                            ? <>{orderedPieces.toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil(orderedPieces / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></>
+                            : orderedPieces.toLocaleString()}
                         </span>
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className="text-right" data-testid="shipped-pieces">
+                        {(!line.lineType || line.lineType === "product") ? <PoLineShippingQuantity progress={shippingByLine.get(line.id)} kind="shipped" loading={relationshipsQuery.isPending} /> : "—"}
+                      </TableCell>
+                      <TableCell className="text-right" data-testid="remaining-pieces">
+                        {(!line.lineType || line.lineType === "product") ? <PoLineShippingQuantity progress={shippingByLine.get(line.id)} kind="remaining" loading={relationshipsQuery.isPending} /> : "—"}
+                      </TableCell>
+                      <TableCell className="text-right" data-testid="received-pieces">
                         {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
-                          ? <span>{(line.receivedQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.receivedQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></span>
-                          : line.receivedQty || 0}
+                          ? <span>{receivedPieces.toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil(receivedPieces / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></span>
+                          : receivedPieces.toLocaleString()}
                         {(line.damagedQty || 0) > 0 && (
                           <span className="text-red-500 ml-1">({line.damagedQty} dmg)</span>
                         )}
+                      </TableCell>
+                      <TableCell className="min-w-[170px] max-w-[240px]">
+                        {(!line.lineType || line.lineType === "product") ? <PoLineShipmentLinks progress={shippingByLine.get(line.id)} loading={relationshipsQuery.isPending} navigation={procurementNavigation} poNumber={po.poNumber} /> : "—"}
                       </TableCell>
                       <TableCell className="text-right font-mono">
                         <span
@@ -3500,16 +3646,14 @@ export default function PurchaseOrderDetail() {
                           onClick={() => canEditThisLine && startPricingEdit(line)}
                           title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
                         >
-                          {formatLineUnitCost(line)}
+                          <span className="font-sans text-xs text-muted-foreground">Product </span>{formatLineUnitCost(line)}
                         </span>
-                        <div className="text-[11px] font-sans text-muted-foreground">
+                        {formatStoredLineQuote(line) && <div className="text-[11px] font-sans text-muted-foreground">
                           {formatStoredLineQuote(line)}
-                        </div>
+                        </div>}
+                        <PoLineLandedCost line={landedCostByLine.get(line.id)} currency={landedCurrency} kind="unit" />
                       </TableCell>
-                      <TableCell className="text-right font-mono font-medium">{formatCents(line.lineTotalCents)}</TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className="text-xs">{line.status}</Badge>
-                      </TableCell>
+                      <TableCell className="text-right"><PoLineLandedCost line={landedCostByLine.get(line.id)} currency={landedCurrency} kind="total" supplierCents={line.lineTotalCents} /></TableCell>
                       {canEditThisLine && (
                         <TableCell>
                           <Button
@@ -3627,79 +3771,13 @@ export default function PurchaseOrderDetail() {
             )}
           </div>
 
-          {linkedShipments.length === 0 ? (
-            <Card>
-              <CardContent className="p-6 text-center text-muted-foreground">
-                <Ship className="h-8 w-8 mx-auto mb-2 opacity-30" />
-                <p>No shipments linked to this PO yet.</p>
-                {lines.length > 0 && !["closed", "cancelled"].includes(po.status) && (
-                  <p className="text-xs mt-1">Use "Create Shipment" above to start a new inbound shipment.</p>
-                )}
-              </CardContent>
-            </Card>
-          ) : (
-            <Card>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Shipment #</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Mode</TableHead>
-                    <TableHead>Carrier</TableHead>
-                    <TableHead>ETA</TableHead>
-                    <TableHead className="text-right">Est. Cost</TableHead>
-                    <TableHead className="text-right">Actual Cost</TableHead>
-                    <TableHead className="w-10"></TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {linkedShipments.map((s: any) => {
-                    const shipBadge: Record<string, { variant: "default" | "secondary" | "outline" | "destructive"; label: string; color?: string }> = {
-                      draft: { variant: "secondary", label: "Draft" },
-                      booked: { variant: "outline", label: "Booked", color: "text-blue-600 border-blue-300" },
-                      in_transit: { variant: "default", label: "In Transit", color: "bg-blue-500" },
-                      at_port: { variant: "default", label: "At Port", color: "bg-indigo-500" },
-                      customs_clearance: { variant: "outline", label: "Customs", color: "text-amber-600 border-amber-300" },
-                      delivered: { variant: "default", label: "Delivered", color: "bg-green-600" },
-                      costing: { variant: "outline", label: "Costing", color: "text-purple-600 border-purple-300" },
-                      closed: { variant: "secondary", label: "Closed" },
-                      cancelled: { variant: "destructive", label: "Cancelled" },
-                    };
-                    const badge = shipBadge[s.status] || { variant: "secondary" as const, label: s.status };
-                    return (
-                      <TableRow key={s.id}>
-                        <TableCell className="font-mono font-medium">
-                          <Link href={procurementNavigation.childHref(`/shipments/${s.id}`)} className="text-primary hover:underline">
-                            {s.shipmentNumber}
-                          </Link>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={badge.variant} className={badge.color || ""}>{badge.label}</Badge>
-                        </TableCell>
-                        <TableCell className="capitalize">{s.mode?.replace(/_/g, " ") || "—"}</TableCell>
-                        <TableCell>{s.carrierName || s.forwarderName || "—"}</TableCell>
-                        <TableCell className="text-sm">
-                          {s.eta ? format(new Date(s.eta), "MMM d, yyyy") : "—"}
-                        </TableCell>
-                        <TableCell className="text-right font-mono">{formatCents(s.estimatedTotalCostCents)}</TableCell>
-                        <TableCell className="text-right font-mono">{formatCents(s.actualTotalCostCents)}</TableCell>
-                        <TableCell>
-                          <Link href={procurementNavigation.childHref(`/shipments/${s.id}`)} aria-label={`Open shipment ${s.shipmentNumber}`} className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center text-muted-foreground hover:text-primary">
-                            <ExternalLink className="h-3 w-3" />
-                          </Link>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </Card>
-          )}
+          <DocumentRelationships root={{ kind: "purchase", id: po.id }} />
         </TabsContent>
 
         {/* ── History Tab ── */}
         {/* ── Invoices Tab ── */}
         <TabsContent value="invoices" className="space-y-4">
+          <div className="flex flex-wrap gap-4"><SupplierCreditLink purchaseOrderId={po.id} /><SupplierReturnLink vendorId={po.vendorId} purchaseOrderId={po.id} /></div>
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
               Linked vendor invoices. Amounts and balances cover each entire invoice, which may include other purchase orders.
@@ -3755,10 +3833,10 @@ export default function PurchaseOrderDetail() {
                         </TableCell>
                         <TableCell className="text-right font-mono">{formatCents(inv.invoicedAmountCents)}</TableCell>
                         <TableCell className="text-right font-mono font-medium">
-                          {formatCents(inv.balanceCents)}
+                          {formatCents(inv.balanceCents)}<div className="text-xs text-muted-foreground">Cash {formatPaymentAmount(inv.paidAmountCents)} · Credits {formatPaymentAmount(inv.creditedAmountCents)}</div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant="outline" className="text-xs">{inv.status?.replace("_", " ")}</Badge>
+                          <Badge variant="outline" className="text-xs">{inv.status === "paid" && inv.creditedAmountCents > 0 ? "settled" : inv.status?.replace("_", " ")}</Badge>
                         </TableCell>
                         <TableCell>
                           <Link href={procurementNavigation.childHref(`/ap-invoices/${inv.id}`)} className="text-xs text-blue-600 hover:underline">View →</Link>
@@ -3811,9 +3889,7 @@ export default function PurchaseOrderDetail() {
                     {paymentsData.payments.map((p: any) => (
                       <TableRow key={p.allocationId}>
                         <TableCell className="text-sm">
-                          {p.paymentDate
-                            ? format(new Date(p.paymentDate), "MMM d, yyyy")
-                            : "—"}
+                          {formatPaymentCalendarDate(p)}
                         </TableCell>
                         <TableCell className="capitalize">
                           {(p.paymentMethod ?? "").replace(/_/g, " ") || "—"}
@@ -3937,6 +4013,10 @@ export default function PurchaseOrderDetail() {
         </TabsContent>
 
         <TabsContent value="history" className="space-y-4">
+          {poId !== null && <PoAmendmentHistory purchaseOrderId={poId} />}
+          {shipmentCosts.isPending && <p role="status">Loading cost approval history…</p>}
+          {shipmentCosts.isError && <p role="alert">Cost approval history could not be loaded. <Button variant="outline" onClick={() => void shipmentCosts.refetch()}>Reload cost history</Button></p>}
+          {shipmentCosts.data?.supplierCosts && <PurchaseCostOriginHistory status={shipmentCosts.data.supplierCosts} />}
           {history.length === 0 ? (
             <Card>
               <CardContent className="p-4 text-center text-muted-foreground">
@@ -3979,7 +4059,7 @@ export default function PurchaseOrderDetail() {
       </div>{/* end main column */}
 
       {/* ── Quick Actions Side Rail (Phase 2) ── */}
-      <div className={activeTab === "lifecycle" ? "hidden" : "w-full md:w-64 shrink-0 space-y-3"}>
+      <div className={activeTab === "lifecycle" ? "hidden" : `w-full ${activeTab === "lines" ? "2xl:w-64" : "md:w-64"} shrink-0 space-y-3`}>
         <Card role="region" aria-label="Purchase order actions">
           <CardHeader className="pb-2 pt-3 px-4">
             <CardTitle className="text-sm">Quick actions</CardTitle>
@@ -3993,7 +4073,7 @@ export default function PurchaseOrderDetail() {
                 className="w-full justify-start"
                 size="sm"
                 onClick={() => sendToVendorMutation.mutate()}
-                disabled={sendToVendorMutation.isPending}
+                disabled={entryBlocked || !purchaseEntry.allowed("prepare") || sendToVendorMutation.isPending}
               >
                 <Send className="h-3.5 w-3.5 mr-2" />
                 Prepare for supplier
@@ -4088,7 +4168,6 @@ export default function PurchaseOrderDetail() {
 
             {/* Cancel PO */}
             {canCancelPo &&
-              po.financialStatus === "unbilled" &&
               !["closed", "cancelled"].includes(po.status) && (
               <Button
                 className="w-full justify-start text-red-600 hover:text-red-700"
@@ -4110,9 +4189,11 @@ export default function PurchaseOrderDetail() {
             )}
 
             {/* Fallback: no actions available */}
-            {po.physicalStatus === "received" && financialCompletionSupported && (
+            {po.status === "closed" ? (
+              <p className="text-xs text-muted-foreground py-2">PO closed. Any remaining cost follow-ups are listed in the cost summary.</p>
+            ) : po.physicalStatus === "received" && financialCompletionSupported && (
               <p className="text-xs text-muted-foreground text-center py-2">
-                All done — PO fully received and paid.
+                PO fully received and paid. Review the cost summary for any remaining cost follow-ups.
               </p>
             )}
           </CardContent>
@@ -4144,7 +4225,7 @@ export default function PurchaseOrderDetail() {
                   {editingPricingLine.productName ? ` — ${editingPricingLine.productName}` : ""}
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  Stored vendor quote: {formatStoredLineQuote(editingPricingLine)}
+                  Stored vendor quote: {formatStoredLineQuote(editingPricingLine) ?? "Not recorded"}
                 </div>
               </div>
 
@@ -5214,7 +5295,7 @@ export default function PurchaseOrderDetail() {
             const shipmentOptions = receiveOptions?.shipmentOptions ?? [];
             const receivableShipments = shipmentOptions.filter((s: any) => s.receivable);
             const blockedShipments = shipmentOptions.filter((s: any) => !s.receivable);
-            const poDirect = receiveOptions?.poDirect ?? { allowed: true, warning: "No receive options loaded." };
+            const poDirect = parsePoDirectReceiveOption(receiveOptions?.poDirect);
             const busy =
               createReceiptMutation.isPending ||
               createReceiptFromShipmentMutation.isPending ||
@@ -5229,7 +5310,7 @@ export default function PurchaseOrderDetail() {
                 voidZeroPostShipmentReceiptMutation.isPending &&
                 voidZeroPostShipmentReceiptMutation.variables?.receiptId === s.existingReceiptId;
               return (
-                <div key={s.shipmentId} className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                <div key={s.shipmentId} data-testid={`po-receive-option-${s.shipmentId}`} className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0">
                       <div className="font-mono text-sm font-medium flex items-center gap-1.5">
@@ -5238,6 +5319,8 @@ export default function PurchaseOrderDetail() {
                       <div className="mt-1 text-xs text-amber-800">
                         {s.reason || "This shipment is blocked from receiving."}
                       </div>
+                      <div className="mt-1 text-xs text-muted-foreground">{shipmentReceiveCoverageLabel(s).text}</div>
+                      <ShipmentCustodyReceiptLinks coverage={s} />
                     </div>
                     {s.action === "repair_empty_receipt" && s.existingReceiptId ? (
                       <Button
@@ -5278,7 +5361,7 @@ export default function PurchaseOrderDetail() {
                       This PO has {receivableShipments.length} shipment{receivableShipments.length > 1 ? "s" : ""} ready to receive:
                     </p>
                     {receivableShipments.map((s: any) => (
-                      <div key={s.shipmentId} className="flex items-center justify-between gap-3 rounded-lg border-2 border-blue-200 bg-blue-50/50 p-3">
+                      <div key={s.shipmentId} data-testid={`po-receive-option-${s.shipmentId}`} className="flex flex-col items-start justify-between gap-3 rounded-lg border-2 border-blue-200 bg-blue-50/50 p-3 sm:flex-row sm:items-center">
                         <div className="min-w-0">
                           <div className="font-mono text-sm font-medium flex items-center gap-1.5">
                             <Ship className="h-4 w-4 text-blue-600" /> {s.shipmentNumber || `Shipment #${s.shipmentId}`}
@@ -5288,6 +5371,8 @@ export default function PurchaseOrderDetail() {
                             {s.actualTotalCostCents ? ` - freight $${(s.actualTotalCostCents / 100).toFixed(2)}` : ""}
                             {s.lineCount ? ` - ${s.lineCount} line${s.lineCount === 1 ? "" : "s"}` : ""}
                           </div>
+                          <div className="mt-1 text-xs text-muted-foreground">{shipmentReceiveCoverageLabel(s).text}</div>
+                          <ShipmentCustodyReceiptLinks coverage={s} />
                         </div>
                         <Button
                           size="sm"
@@ -5311,15 +5396,16 @@ export default function PurchaseOrderDetail() {
                       </div>
                     ))}
                     {blockedShipments.map(renderBlockedShipment)}
-                    <div className="rounded-lg border p-3">
+                    <div data-testid="po-direct-receive-option" className="rounded-lg border p-3">
                       <div className="font-medium text-sm flex items-center gap-1.5">
                         <FileText className="h-4 w-4 text-muted-foreground" /> Receive against the PO directly
                       </div>
                       <div className="mt-1 flex items-start gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
                         <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" /> {poDirect.warning}
                       </div>
+                      <ShipmentCustodyReceiptLinks coverage={poDirect} />
                       <Button size="sm" variant="outline" className="mt-2" disabled={busy || !poDirect.allowed} onClick={() => createReceiptMutation.mutate()}>
-                        Receive against PO anyway
+                        {poDirect.allowed && poDirect.blockedPurchaseOrderLineIds?.length ? "Receive eligible PO lines" : "Receive against PO anyway"}
                       </Button>
                       {!poDirect.allowed && poDirect.reason && (
                         <div className="mt-1 text-xs text-muted-foreground">{poDirect.reason}</div>
@@ -5329,15 +5415,14 @@ export default function PurchaseOrderDetail() {
                 ) : (
                   <>
                     {blockedShipments.map(renderBlockedShipment)}
-                    <div className="rounded-lg border p-3">
+                    <div data-testid="po-direct-receive-option" className="rounded-lg border p-3">
                       <div className="font-medium text-sm">Receive against the PO directly</div>
                       <div className="text-xs text-muted-foreground mt-1">
-                        {blockedShipments.length > 0
-                          ? blockedShipments[0].reason
-                          : poDirect.warning}
+                        {poDirect.warning}
                       </div>
+                      <ShipmentCustodyReceiptLinks coverage={poDirect} />
                       <Button size="sm" className="mt-2" disabled={busy || !poDirect.allowed} onClick={() => createReceiptMutation.mutate()}>
-                        Receive against PO
+                        {poDirect.allowed && poDirect.blockedPurchaseOrderLineIds?.length ? "Receive eligible PO lines" : "Receive against PO"}
                       </Button>
                       {!poDirect.allowed && poDirect.reason && (
                         <div className="mt-1 text-xs text-muted-foreground">{poDirect.reason}</div>
@@ -5358,14 +5443,17 @@ export default function PurchaseOrderDetail() {
       {/* ═══════ Create Shipment Dialog ═══════ */}
       <Dialog open={showCreateShipmentDialog} onOpenChange={(open) => {
         setShowCreateShipmentDialog(open);
-        if (!open) { setLineSelections({}); setLineQtyErrors({}); }
+        if (!open) { setLineSelections({}); }
       }}>
-        <DialogContent className="max-w-2xl relative">
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto min-w-0 max-w-2xl relative">
           <DialogHeader>
             <DialogTitle>Create Inbound Shipment</DialogTitle>
             <DialogDescription>Set up shipment details and select PO lines to include in this shipment.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
+          <ShipmentCreateRecovery recovery={shipmentCreation.recovery} error={shipmentCreation.error} pending={createShipmentMutation.isPending} onRetry={recoverShipmentCreation} onRefresh={shipmentCreation.refresh} />
+          <fieldset disabled={createShipmentMutation.isPending || !shipmentCreation.ready || !!shipmentCreation.recovery || !!shipmentCreation.error} className="space-y-4 min-w-0">
+            {shippableLinesLoading && <p role="status">Loading available purchase lines...</p>}
+            {shippableLinesError && <div role="alert">Available purchase lines could not be loaded. <Button type="button" variant="outline" onClick={() => void refetchShippableLines()}>Retry purchase lines</Button></div>}
             <div className="space-y-2">
               <Label>Shipment # (optional — auto-generated if blank)</Label>
               <Input
@@ -5504,12 +5592,12 @@ export default function PurchaseOrderDetail() {
                     className="text-xs h-7"
                     onClick={() => {
                       const allChecked = shippableLinesData.lines.every((l: any) => lineSelections[l.id]?.checked);
-                      const next: Record<number, { checked: boolean; qty: number }> = {};
+                      const next: Record<number, { checked: boolean; quantity: ShipmentQuantityDraft }> = {};
                       for (const line of shippableLinesData.lines) {
                         const prev = lineSelections[line.id];
                         next[line.id] = {
                           checked: !allChecked,
-                          qty: prev?.qty ?? line.remainingQty,
+                          quantity: prev?.quantity ?? shipmentQuantityDraft(line.remainingQty, parseShipmentUnits(line.shipmentUnits)),
                         };
                       }
                       setLineSelections(next);
@@ -5527,73 +5615,22 @@ export default function PurchaseOrderDetail() {
                 </div>
               )}
               {shippableLinesData?.lines && shippableLinesData.lines.length > 0 ? (
-                <div className="max-h-[300px] overflow-y-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="w-[40px]"></TableHead>
-                        <TableHead>SKU</TableHead>
-                        <TableHead>Description</TableHead>
-                        <TableHead className="text-right">Ordered</TableHead>
-                        <TableHead className="text-right">Shipped</TableHead>
-                        <TableHead className="text-right">Remaining</TableHead>
-                        <TableHead className="text-right w-[100px]">Qty to ship</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {shippableLinesData.lines.map((line: any) => {
-                        const sel = lineSelections[line.id] ?? { checked: true, qty: line.remainingQty };
-                        const error = lineQtyErrors[line.id];
-                        return (
-                          <TableRow key={line.id}>
-                            <TableCell>
-                              <Checkbox
-                                checked={sel.checked}
-                                onCheckedChange={(checked) => {
-                                  setLineSelections(prev => ({
-                                    ...prev,
-                                    [line.id]: { ...prev[line.id], checked: !!checked },
-                                  }));
-                                }}
-                              />
-                            </TableCell>
-                            <TableCell className="font-mono text-xs">{line.sku || "—"}</TableCell>
-                            <TableCell className="text-xs text-muted-foreground truncate max-w-[150px]">
-                              {line.productName || line.description || "—"}
-                            </TableCell>
-                            <TableCell className="text-right text-xs">{line.orderQty}</TableCell>
-                            <TableCell className="text-right text-xs">{line.alreadyShippedQty}</TableCell>
-                            <TableCell className="text-right text-xs">{line.remainingQty}</TableCell>
-                            <TableCell>
-                              <Input
-                                type="number"
-                                min={1}
-                                max={line.remainingQty}
-                                value={sel.qty}
-                                disabled={!sel.checked}
-                                className={`h-8 text-xs text-right ${error ? "border-destructive" : ""}`}
-                                onChange={(e) => {
-                                  const val = /^\d+$/.test(e.target.value) ? Number(e.target.value) : 0;
-                                  setLineSelections(prev => ({
-                                    ...prev,
-                                    [line.id]: { ...prev[line.id], qty: val },
-                                  }));
-                                  if (val <= 0) {
-                                    setLineQtyErrors(prev => ({ ...prev, [line.id]: "Must be > 0" }));
-                                  } else if (val > line.remainingQty) {
-                                    setLineQtyErrors(prev => ({ ...prev, [line.id]: `Max ${line.remainingQty}` }));
-                                  } else {
-                                    setLineQtyErrors(prev => { const next = { ...prev }; delete next[line.id]; return next; });
-                                  }
-                                }}
-                              />
-                              {error && <p className="text-[10px] text-destructive mt-0.5">{error}</p>}
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
+                <div className="max-h-[50dvh] min-w-0 overflow-y-auto space-y-3">
+                  {shippableLinesData.lines.map((line) => {
+                    const selected = lineSelections[line.id] ?? { checked: true, quantity: shipmentQuantityDraft(line.remainingQty, parseShipmentUnits(line.shipmentUnits)) };
+                    return <div key={line.id} className="min-w-0 rounded border p-3 space-y-3">
+                      <label className="flex gap-2 items-center text-sm font-medium">
+                        <Checkbox checked={selected.checked} onCheckedChange={(checked) => setLineSelections((previous) => ({
+                          ...previous, [line.id]: { ...selected, checked: !!checked },
+                        }))} />
+                        <span className="break-all">{line.sku ?? `PO line ${line.id}`}</span>
+                      </label>
+                      <p className="text-xs text-muted-foreground">{line.productName || line.description || "Product"} · Ordered {line.orderQty.toLocaleString("en-US")} pieces · Shipped {line.alreadyShippedQty.toLocaleString("en-US")} pieces</p>
+                      <ShipmentQuantityControl id={`create-shipment-line-${line.id}`} value={selected.quantity}
+                        units={parseShipmentUnits(line.shipmentUnits)} maximumPieces={line.remainingQty} disabled={!selected.checked}
+                        onChange={(quantity) => setLineSelections((previous) => ({ ...previous, [line.id]: { ...selected, quantity } }))} />
+                    </div>;
+                  })}
                 </div>
               ) : showCreateShipmentDialog && shippableLinesData ? (
                 <p className="text-sm text-muted-foreground py-4 text-center">
@@ -5603,14 +5640,15 @@ export default function PurchaseOrderDetail() {
             </div>
 
             <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => { setShowCreateShipmentDialog(false); setLineSelections({}); setLineQtyErrors({}); }}>Cancel</Button>
+              <Button variant="outline" onClick={() => { setShowCreateShipmentDialog(false); setLineSelections({}); }}>Cancel</Button>
               <Button
-                onClick={() => createShipmentMutation.mutate(newShipmentForm)}
+                onClick={submitShipmentCreation}
                 disabled={
-                  createShipmentMutation.isPending ||
+                  createShipmentMutation.isPending || shippableLinesLoading || shippableLinesError || !shippableLinesData ||
+                  !Object.values(lineSelections).some(selection => selection.checked) ||
                   !newShipmentForm.shipperName.trim() ||
                   (shippableLinesData !== undefined && shippableLinesData.lines.length === 0) ||
-                  Object.keys(lineQtyErrors).length > 0
+                  shippableLinesData?.lines.some((line) => lineSelections[line.id]?.checked && shipmentQuantityPreview(lineSelections[line.id].quantity, parseShipmentUnits(line.shipmentUnits), line.remainingQty).error !== null)
                 }
               >
                 {createShipmentMutation.isPending ? "Creating..." : "Create Shipment"}
@@ -5619,7 +5657,7 @@ export default function PurchaseOrderDetail() {
                 <p className="text-xs text-muted-foreground absolute -bottom-5 right-0">No eligible lines available to add.</p>
               )}
             </div>
-          </div>
+          </fieldset>
         </DialogContent>
       </Dialog>
 

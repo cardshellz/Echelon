@@ -96,7 +96,7 @@ const configured = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_
 
 function credential(): DropshipMarketplaceStoreCredentials {
   return { vendorId:10,storeConnectionId:22,platform:"ebay",status:"connected",shopDomain:null,externalAccountId:"seller-1",
-    providerEnvironment:"production",externalAccountIdentityScheme:"ebay_user_id",externalAccountVerifiedAt:new Date("2026-10-01T00:00:00Z"),
+    providerEnvironment:"production",externalAccountIdentityScheme:"provider_user_id",externalAccountVerifiedAt:new Date("2026-10-01T00:00:00Z"),
     externalDisplayName:null,config:{},accessToken:"test-token-not-sent",accessTokenRef:"access-ref",accessTokenExpiresAt:null,
     refreshToken:null,refreshTokenRef:null,refreshTokenExpiresAt:null };
 }

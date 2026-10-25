@@ -1,3 +1,5 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
+import { rfqListHeader, rfqListLine } from "../fixtures/rfq-work-list.fixture";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -13,6 +15,7 @@ import type { ServiceRegistry } from "../../../../services";
 import { forwardDemandBuyingRow, PURCHASE_BUYING_AS_OF } from "../fixtures/purchase-buying-review.fixture";
 
 const mocks = vi.hoisted(() => ({
+  hasPermission: vi.fn(),
   procurement: {
     getReorderAnalysisData: vi.fn(),
     getOpenPoSummaryReport: vi.fn(),
@@ -56,7 +59,9 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../../../../routes/middleware", () => {
+vi.mock("../../../../modules/identity", () => ({ hasPermission: mocks.hasPermission }));
+vi.mock("../../../../routes/middleware", async importOriginal => {
+  const actual = await importOriginal<typeof import("../../../../routes/middleware")>();
   const pass = (req: Request, _res: Response, next: NextFunction) => {
     (req as any).user = { id: "admin-user", role: "admin" };
     (req as any).session = { user: { id: "admin-user", role: "admin" } };
@@ -64,6 +69,10 @@ vi.mock("../../../../routes/middleware", () => {
   };
   return {
     requirePermission: () => pass,
+    requireAnyPermission: (...grants: Parameters<typeof actual.requireAnyPermission>) => {
+      const authorize = actual.requireAnyPermission(...grants);
+      return (req: Request, res: Response, next: NextFunction) => pass(req, res, () => { void authorize(req, res, next); });
+    },
   };
 });
 
@@ -117,7 +126,7 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 }
 
 async function requestJson(baseUrl: string, method: string, path: string, body?: any) {
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await requestLocalHttp(`${baseUrl}${path}`, {
     method,
     headers: { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -145,6 +154,7 @@ describe("purchasing recommendation routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.hasPermission.mockResolvedValue(true);
     mocks.db.transaction.mockImplementation(async work => work(mocks.db));
     mocks.db.execute.mockResolvedValue({ rows: [] });
     mocks.db.select.mockImplementation(() => {
@@ -1189,50 +1199,9 @@ describe("purchasing recommendation routes", () => {
   });
 
   it("lists created RFQs newest-first with joined lines and vendor names", async () => {
-    const createdAt = new Date("2026-07-21T10:00:00.000Z");
-    mocks.db.select
-      .mockReturnValueOnce(selectChain([{
-        id: 42,
-        rfqNumber: "RFQ-2026-0042",
-        vendorId: 77,
-        status: "draft",
-        requestNote: "Quote delivered pricing",
-        currency: "USD",
-        responseDueDate: "2026-07-30",
-        createdBy: "buyer-17",
-        createdAt,
-        updatedAt: createdAt,
-        sentAt: null,
-        respondedAt: null,
-        cancelledAt: null,
-      }]))
-      .mockReturnValueOnce(selectChain([{
-        id: 501,
-        rfqId: 42,
-        recommendationLineId: 11,
-        recommendationRunId: 3,
-        vendorProductId: 44,
-        vendorSku: "SUP-302",
-        sku: "SKU-RED",
-        productName: "Red Card Shell",
-        status: "draft",
-        requestedPieces: 96,
-        recommendedPieces: 96,
-        purchaseUom: null,
-        piecesPerPurchaseUom: null,
-        quantityOverrideReason: null,
-        allocationOverrideReason: null,
-        allocationOverrideApprovedBy: null,
-        allocationOverrideApprovedAt: null,
-        allocationOverrideBaselinePieces: null,
-        allocationOverrideExcessPieces: null,
-        quotedPieces: null,
-        quotedUnitCostMills: null,
-        quoteReference: null,
-        quoteValidUntil: null,
-        quotedAt: null,
-      }]))
-      .mockReturnValueOnce(selectChain([{ id: 77, name: "Supplier 77" }]));
+    mocks.db.execute.mockResolvedValueOnce({ rows: [{ total: "1" }] })
+      .mockResolvedValueOnce({ rows: [rfqListHeader({ vendorId: 77, vendorName: "Supplier 77", requestNote: "Quote delivered pricing" })] })
+      .mockResolvedValueOnce({ rows: [rfqListLine()] }).mockResolvedValueOnce({ rows: [] });
     server = await startServer(buildApp());
 
     const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/rfqs?limit=10");
@@ -1256,17 +1225,35 @@ describe("purchasing recommendation routes", () => {
     });
   });
 
-  it("caps the RFQ list limit and returns an empty page without extra queries", async () => {
-    const headerChain = selectChain([]);
-    mocks.db.select.mockReturnValueOnce(headerChain);
+  it("rejects oversized or malformed RFQ list parameters before querying", async () => {
     server = await startServer(buildApp());
-
-    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/rfqs?limit=99999");
-
-    expect(status).toBe(200);
-    expect(headerChain.limit).toHaveBeenCalledWith(100);
-    expect(body).toMatchObject({ limit: 100, count: 0, statusCounts: {}, rfqs: [] });
-    expect(mocks.db.select).toHaveBeenCalledTimes(1);
+    for (const query of ["limit=99999", "limit=10abc", "offset=-1", "status=unknown", "search=a&search=b"]) {
+      const result = await requestJson(server.url, "GET", `/api/purchasing/rfqs?${query}`);
+      expect(result).toMatchObject({ status: 400, body: { code: "RFQ_LIST_QUERY_INVALID" } });
+    }
+    expect(mocks.db.execute).not.toHaveBeenCalled();
+    expect(mocks.db.transaction).not.toHaveBeenCalled();
+  });
+  it("returns an empty requested page without losing matching total", async () => {
+    mocks.db.execute.mockResolvedValueOnce({ rows: [{ total: "105" }] }).mockResolvedValueOnce({ rows: [] });
+    server = await startServer(buildApp());
+    const result = await requestJson(server.url, "GET", "/api/purchasing/rfqs?limit=100&offset=200");
+    expect(result).toMatchObject({ status: 200, body: { limit: 100, count: 0, statusCounts: {}, rfqs: [], page: { total: 105, limit: 100, offset: 200, nextOffset: null } } });
+    expect(mocks.db.execute).toHaveBeenCalledTimes(2);
+  });
+  it.each(["purchasing", "inventory"])("permits %s-only read access to RFQ list and sourcing queue", async resource => {
+    mocks.hasPermission.mockImplementation(async (_actor, requested, action) => requested === resource && action === "view");
+    mocks.db.execute.mockResolvedValueOnce({ rows: [{ total: "0" }] }).mockResolvedValueOnce({ rows: [] });
+    server = await startServer(buildApp());
+    expect((await requestJson(server.url, "GET", "/api/purchasing/rfqs")).status).toBe(200);
+    expect((await requestJson(server.url, "GET", "/api/purchasing/rfq-queue")).status).toBe(200);
+  });
+  it("denies RFQ list and queue reads when neither read grant is current", async () => {
+    mocks.hasPermission.mockResolvedValue(false);
+    server = await startServer(buildApp());
+    expect((await requestJson(server.url, "GET", "/api/purchasing/rfqs")).status).toBe(403);
+    expect((await requestJson(server.url, "GET", "/api/purchasing/rfq-queue")).status).toBe(403);
+    expect(mocks.db.execute).not.toHaveBeenCalled(); expect(mocks.db.select).not.toHaveBeenCalled();
   });
 
   it("returns live forecast input gap diagnostics with actionable samples", async () => {

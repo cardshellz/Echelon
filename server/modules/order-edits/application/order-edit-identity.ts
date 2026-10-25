@@ -1,6 +1,7 @@
 import type { OrderEditSnapshot } from "./order-edit-provider";
 import type { OrderEditOrderReference } from "./order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
+import { unchangedOrderEditRefundPayments } from "./order-edit-evidence";
 export const orderEditHasUnresolvedPayment = (
   snapshot: OrderEditSnapshot,
 ): boolean =>
@@ -22,7 +23,7 @@ export function orderEditEligibilityReasons(
       "This pilot supports US physical-product orders with supported item pricing.",
     );
   }
-  if (snapshot.refunds.length > 0)
+  if (!unchangedOrderEditRefundPayments(snapshot.refunds, []))
     reasons.push(
       "Orders with previous refunds require staff review before editing.",
     );

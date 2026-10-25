@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -5,6 +6,7 @@ import pg from "pg";
 import * as schema from "@shared/schema";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
+import { RFQ_AUTHORITY_TABLES, seedRfqEditActor } from "./rfq-authority.fixture";
 
 export const FLOW_ACTOR = "controlled-procurement-flow";
 export const FLOW_AT = new Date("2026-09-10T12:00:00.000Z");
@@ -15,12 +17,14 @@ export const FLOW_IDS = {
 } as const;
 
 const TABLES = [
+  ...RFQ_AUTHORITY_TABLES,
   schema.products, schema.productVariants, schema.vendors, schema.vendorProducts,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.poStatusHistory, schema.poEvents,
   schema.poApprovalTiers, schema.poExceptions, schema.purchasingRecommendationDecisions,
   schema.purchasingRecommendationPoHandoffs, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
   schema.apPayments, schema.apPaymentAllocations,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
@@ -74,7 +78,7 @@ export async function createFlowCostHarness(url: string) {
     lease = await pool.connect();
     const lock = await lease.query("SELECT pg_try_advisory_lock(hashtext('echelon.procurement.controlled-flow')) AS acquired");
     if (!lock.rows[0]?.acquired) throw new Error("Another FLOW test owns this database");
-    for (const name of ["catalog", "procurement", "warehouse", "inventory", "wms", "oms"]) {
+    for (const name of ["identity", "catalog", "procurement", "warehouse", "inventory", "wms", "oms"]) {
       // An existing schema is a hard failure. Cleanup drops only owned objects.
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
@@ -91,6 +95,7 @@ export async function createFlowCostHarness(url: string) {
       CREATE UNIQUE INDEX purchase_order_lines_po_id_line_id_uidx
         ON procurement.purchase_order_lines(purchase_order_id,id)`);
     for (const foreignKey of fixtureForeignKeys(TABLES)) await pool.query(foreignKey);
+    await seedRfqEditActor(pool, FLOW_ACTOR);
     await installPreOpeningQuantityAuthorityFixture(pool);
     await pool.query(`
       CREATE TABLE inventory.availability_runtime_authority (
@@ -122,9 +127,10 @@ export async function createFlowCostHarness(url: string) {
 
     const rfqHelper = await import("./rfq-controlled-acceptance-helper");
     for (const migration of [...rfqHelper.RFQ_CONTROLLED_MIGRATIONS,
-      "221_receiving_unit_snapshots.sql", "222_procurement_cost_evidence.sql", "0751_exact_inventory_cost_totals.sql", "0725_inventory_cost_admission_evidence.sql", "231_receipt_cost_recovery.sql",
+      "221_receiving_unit_snapshots.sql", "222_procurement_cost_evidence.sql", "900000017000018590001_receipt_shipment_quantity_amendments.sql", "0751_exact_inventory_cost_totals.sql", "0725_inventory_cost_admission_evidence.sql", "231_receipt_cost_recovery.sql",
       "900000007000018030001_shipment_cost_exception_decisions.sql",
       "900000008000018110001_shipment_cost_reconciliation.sql",
+      "900000009000018290001_historical_cost_origin_repairs.sql",
       "0703_corrective_picking.sql", "900000004000017890001_receiving_quarantine.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
       if (migration === "136_financial_command_results.sql") {

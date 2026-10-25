@@ -1,11 +1,13 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { lockVendorSelection } from "./dropship-vendor-selection-lock";
 import { parseCatalogVariantUomType } from "../domain/listing-tiers";
 import type {
   DropshipSelectionAtpRepository,
   DropshipVendorCatalogCandidate,
   DropshipVendorProfile,
+  DropshipVendorSelectionCountRecord,
   DropshipVendorSelectionRuleRecord,
   DropshipVendorVariantOverrideRecord,
   NormalizedDropshipVendorSelectionRule,
@@ -13,10 +15,26 @@ import type {
   ReplaceDropshipVendorSelectionRulesRepositoryResult,
 } from "../application/dropship-selection-atp-service";
 import type {
+  DropshipVendorCatalogCandidateFilter,
   ListDropshipVendorSelectionRulesInput,
-  PreviewDropshipVendorCatalogInput,
 } from "../application/dropship-selection-dtos";
+import { countSelectedVariants } from "../application/dropship-selected-catalog";
 import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
+import { CATALOG_READ_WORDS } from "../domain/catalog-read-words";
+import { DROPSHIP_CATALOG_READ_ERROR_CODES } from "../../../../shared/dropship/vendor-catalog-reads";
+import { listLiveVariantIds, readHeadSelectionRevisionId } from "./dropship-listing-push-run.repository";
+import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
+
+/**
+ * PR B's freeze trigger on the rules tables raises exactly this message with
+ * SQLSTATE P0001 (step 1 plan S2-5 §5.2 step 8). A fixes the contract one
+ * release early (§4.9 item 2, D39), so an A dyno still serving a stage 1 or A
+ * page during B's release answers "this page was updated, reload" (410)
+ * instead of a 500.
+ */
+export const SELECTION_RULES_RETIRED_DB_MESSAGE = "DROPSHIP_SELECTION_RULES_RETIRED";
+/** SQLSTATE raise_exception: what `RAISE EXCEPTION … USING ERRCODE = 'P0001'` reports. */
+const RAISE_EXCEPTION_SQLSTATE = "P0001";
 
 interface VendorRow {
   id: number;
@@ -61,6 +79,8 @@ interface VendorCatalogCandidateRow {
   product_sku: string | null;
   product_name: string;
   product_category: string | null;
+  product_category_id: number | null;
+  product_category_name: string | null;
   product_is_active: boolean;
   product_variant_id: number;
   variant_sku: string | null;
@@ -144,9 +164,7 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext('dropship_vendor_selection_rules'), $1::integer)", [
-        input.vendorId,
-      ]);
+      await lockVendorSelection(client, input.vendorId);
 
       const existingRevision = await client.query<{
         id: number;
@@ -237,6 +255,53 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
       };
     } catch (error) {
       await rollbackQuietly(client);
+      throw selectionRulesRetiredOr(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  async readSelectionCounts(input: {
+    vendorId: number;
+    storeConnectionId: number | null;
+    now: Date;
+  }): Promise<DropshipVendorSelectionCountRecord> {
+    const client = await this.dbPool.connect();
+    try {
+      // One snapshot for the revision and the counts, so the page's expected
+      // revision always belongs to the count it shows. Read only: nothing here writes.
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const selectionRevisionId = await readHeadSelectionRevisionId(client, input.vendorId);
+      let liveIds: ReadonlySet<number> = new Set();
+      if (input.storeConnectionId !== null) {
+        const store = await client.query<{ id: number }>(
+          `SELECT id FROM dropship.dropship_store_connections WHERE id = $1 AND vendor_id = $2`,
+          [input.storeConnectionId, input.vendorId],
+        );
+        if (!store.rows[0]) {
+          throw new DropshipError(DROPSHIP_CATALOG_READ_ERROR_CODES.storeRequired, CATALOG_READ_WORDS.storeRequired, {
+            storeConnectionId: input.storeConnectionId,
+            retryable: false,
+          });
+        }
+        liveIds = await listLiveVariantIds(client, {
+          vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId,
+        });
+      }
+      const counts = await countSelectedVariants(
+        { vendorId: input.vendorId, ...selectedCatalogReaderForTransaction(client) },
+        input.now,
+        liveIds,
+      );
+      await client.query("COMMIT");
+      return {
+        selectionRevisionId,
+        selectedTotal: counts.selected,
+        storeLive: input.storeConnectionId === null ? null : counts.selectedAmong,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
       throw error;
     } finally {
       client.release();
@@ -244,7 +309,7 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
   }
 
   async listVendorCatalogCandidates(
-    input: PreviewDropshipVendorCatalogInput,
+    input: DropshipVendorCatalogCandidateFilter,
   ): Promise<DropshipVendorCatalogCandidate[]> {
     const client = await this.dbPool.connect();
     try {
@@ -270,6 +335,11 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
       if (input.category) {
         params.push(input.category);
         where.push(`LOWER(p.category) = LOWER($${params.length})`);
+      }
+
+      if (input.categoryId) {
+        params.push(input.categoryId);
+        where.push(`p.category_id = $${params.length}`);
       }
 
       const productLineIds = input.productLineIds?.length
@@ -298,6 +368,8 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
            p.sku AS product_sku,
            p.name AS product_name,
            p.category AS product_category,
+           p.category_id AS product_category_id,
+           pc.name AS product_category_name,
            p.is_active AS product_is_active,
            pv.id AS product_variant_id,
            pv.sku AS variant_sku,
@@ -309,6 +381,7 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
            COALESCE(line_data.product_line_names, ARRAY[]::text[]) AS product_line_names
          FROM catalog.product_variants pv
          INNER JOIN catalog.products p ON p.id = pv.product_id
+         LEFT JOIN catalog.product_categories pc ON pc.id = p.category_id
          LEFT JOIN LATERAL (
            SELECT
              ARRAY_AGG(line_rows.product_line_id ORDER BY line_rows.product_line_name, line_rows.product_line_id) AS product_line_ids,
@@ -321,7 +394,8 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
            ) line_rows
          ) line_data ON true
          WHERE ${where.join(" AND ")}
-         ORDER BY p.name ASC, pv.position ASC, pv.name ASC`,
+         -- Stable: two products or sizes with one name keep their order across pages (CRIT C12).
+         ORDER BY p.name ASC, pv.position ASC, pv.name ASC, p.id ASC, pv.id ASC`,
         params,
       );
 
@@ -480,6 +554,8 @@ function mapVendorCatalogCandidateRow(row: VendorCatalogCandidateRow): DropshipV
     variantName: row.variant_name,
     unitsPerVariant: Math.max(1, Number(row.units_per_variant)),
     category: row.product_category,
+    categoryId: row.product_category_id,
+    categoryName: row.product_category_name,
     productLineIds: row.product_line_ids ?? [],
     productLineNames: row.product_line_names ?? [],
     productIsActive: row.product_is_active,
@@ -517,6 +593,25 @@ function serializeSelectionRuleForAudit(rule: DropshipVendorSelectionRuleRecord)
     priority: rule.priority,
     metadata: rule.metadata,
   };
+}
+
+/**
+ * B's freeze answered as the refusal it is (§4.9 item 2): exactly SQLSTATE
+ * P0001 with exactly B's message. Any other error, another P0001 included,
+ * is returned unchanged and keeps today's answer.
+ */
+export function selectionRulesRetiredOr(error: unknown): unknown {
+  if (!isSelectionRulesRetiredDbError(error)) return error;
+  return new DropshipError(DROPSHIP_CATALOG_READ_ERROR_CODES.rulesRetired, CATALOG_READ_WORDS.retired, {
+    retryable: false,
+    classification: "permanent",
+  });
+}
+
+function isSelectionRulesRetiredDbError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  return code === RAISE_EXCEPTION_SQLSTATE && message === SELECTION_RULES_RETIRED_DB_MESSAGE;
 }
 
 async function rollbackQuietly(client: PoolClient): Promise<void> {

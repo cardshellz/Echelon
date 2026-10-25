@@ -297,15 +297,13 @@ async function loadDelayedReadinessCandidates(
     WHERE oo.channel_id = ${SHOPIFY_CHANNEL_ID}
       AND oo.status NOT IN ('cancelled', 'refunded', 'shipped')
       AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
-      AND COALESCE(oo.financial_status, '') IN ('paid', 'partially_paid')
+      AND COALESCE(oo.financial_status, '') IN ('paid', 'partially_paid', 'partially_refunded', 'refunded')
       AND ol.requires_shipping IS DISTINCT FROM false
-      AND COALESCE(ol.cancelled_quantity, 0) = 0
-      AND COALESCE(ol.refunded_quantity, 0) = 0
-      AND COALESCE(ol.authorization_status, '') IN ('seen', 'authorized')
       AND (
         COALESCE(ol.paid_quantity, 0) > COALESCE(ol.authority_fulfillable_quantity, 0)
         OR COALESCE(ol.authority_fulfillable_quantity, 0) >
            COALESCE(ol.wms_materialized_quantity, 0)
+        OR ol.channel_quantity_updated_at IS NULL
       )
     GROUP BY oo.id, oo.external_order_id
     ORDER BY
@@ -347,6 +345,7 @@ async function reconcileExistingOmsOrderReadiness(
     omsOrderId,
     financialStatus: order.financial_status,
     sourceEventId: buildReadinessSourceEventId(order),
+    channelUpdatedAt: order.updated_at ?? null,
     lineItems: order.line_items.map((line) => ({
       externalLineItemId: line.id,
       quantity: line.quantity,

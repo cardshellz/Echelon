@@ -44,8 +44,8 @@ describe("startup zombie-order repair", () => {
 
     const summary = await runStartupZombieOrderRepair({ db, reservation });
 
-    expect(cancelWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 1, ZOMBIE_REPAIR_REASON);
-    expect(completeWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 2, ZOMBIE_REPAIR_REASON);
+    expect(cancelWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 1, ZOMBIE_REPAIR_REASON, undefined, { requireNoOrderEdit: true });
+    expect(completeWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 2, ZOMBIE_REPAIR_REASON, undefined, { requireNoOrderEdit: true });
     expect(summary.transitioned).toEqual(["#1→cancelled", "#2→completed"]);
     expect(summary.skipped).toEqual([]);
   });
@@ -79,7 +79,7 @@ describe("startup zombie-order repair", () => {
 
     const summary = await runStartupZombieOrderRepair({ db, reservation });
 
-    expect(cancelWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 5, ZOMBIE_REPAIR_REASON);
+    expect(cancelWmsOrderAndRelease).toHaveBeenCalledWith(db, reservation, 5, ZOMBIE_REPAIR_REASON, undefined, { requireNoOrderEdit: true });
     expect(summary.transitioned).toEqual(["#5→cancelled"]);
   });
 
@@ -107,8 +107,10 @@ describe("live-OMS-demand guard SQL", () => {
   });
 
   it("ignores final OMS orders and lines that need no shipment", () => {
-    expect(rendered).toContain("oo.status NOT IN ('cancelled', 'refunded', 'shipped')");
-    expect(rendered).toContain("NOT IN ('refunded', 'voided')");
+    expect(rendered).toContain('"oo".status=\'cancelled\'');
+    expect(rendered).toContain('"oo".status=\'shipped\'');
+    expect(rendered).toContain('merchandise_channel.id="oo".channel_id');
+    expect(rendered).toContain("merchandise_channel.provider=");
     expect(rendered).toContain("ol.requires_shipping IS DISTINCT FROM false");
   });
 

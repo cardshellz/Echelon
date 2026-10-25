@@ -3,6 +3,7 @@ import pkg from "pg";
 const { Pool } = pkg;
 import * as schema from "@shared/schema";
 import { createDatabasePoolConfig } from "./database-pool-config";
+import { CHANNEL_PRICING_RULES_DDL } from "./modules/channels/infrastructure/channel-pricing-schema";
 import {
   getPostgresPoolSnapshot,
   type PostgresPoolSnapshot,
@@ -49,6 +50,35 @@ export function getDatabasePoolSnapshot(): PostgresPoolSnapshot {
 pool.on("error", (error) => {
   console.error("[DatabasePool] Unexpected idle client error:", error);
 });
+
+/**
+ * A small pool of its own, on the same database with the same SSL rule and
+ * search path, for a side channel that must never wait behind the shared
+ * pool's queue: the dropship process heartbeat (step 1 PR A, verify V5), whose
+ * row other releases read to tell whether this process is alive. Every
+ * statement and query is bounded, and TCP keepalive finds a dead connection.
+ * The caller owns the pool and must listen for its "error" event.
+ */
+export function createSideChannelPool(config: {
+  max: number;
+  statementTimeoutMs: number;
+  queryTimeoutMs: number;
+  connectionTimeoutMs: number;
+  idleTimeoutMs: number;
+}): InstanceType<typeof Pool> {
+  return new Pool({
+    ...createDatabasePoolConfig({
+      connectionString: connectionString || "postgresql://stub:stub@localhost:5432/stub",
+      ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+      max: connectionString ? config.max : 0,
+      idleTimeoutMillis: config.idleTimeoutMs,
+      connectionTimeoutMillis: config.connectionTimeoutMs,
+      keepAlive: true,
+    }),
+    statement_timeout: config.statementTimeoutMs,
+    query_timeout: config.queryTimeoutMs,
+  });
+}
 
 export const db = drizzle(pool, { schema });
 
@@ -872,28 +902,7 @@ export async function runStartupMigrations(): Promise<void> {
     console.log("Checked eBay Item Specifics (aspects) tables");
 
     // Migration: channel_pricing_rules table for hierarchical pricing
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS channels.channel_pricing_rules (
-        id SERIAL PRIMARY KEY,
-        channel_id INTEGER NOT NULL,
-        scope VARCHAR(20) NOT NULL,
-        scope_id VARCHAR(100),
-        rule_type VARCHAR(20) NOT NULL,
-        value NUMERIC(10,2) NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-      )
-    `);
-    // Unique constraint for non-null scope_id
-    await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_cpr_channel_scope_scopeid
-      ON channel_pricing_rules(channel_id, scope, scope_id) WHERE scope_id IS NOT NULL
-    `);
-    // Unique constraint for null scope_id (channel-level rules)
-    await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_cpr_channel_scope_null
-      ON channel_pricing_rules(channel_id, scope) WHERE scope_id IS NULL
-    `);
+    await client.query(CHANNEL_PRICING_RULES_DDL);
     console.log("Checked channel_pricing_rules table");
 
     // Migration: per-product and per-variant eBay policy overrides

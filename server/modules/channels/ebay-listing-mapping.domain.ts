@@ -1,13 +1,11 @@
 import { z } from "zod";
 import { ebayListingMappingReviewSchema, ebayListingMappingOfferSchema,
   type EbayListingMappingReview, type EbayListingMappingRow } from "@shared/types/ebay-listing-mapping";
-import { marketplaceObservedListingPublicationSchema, type EbayListingInspection, type EbayListingInspectionIssue,
+import { ebayListingInspectionIssueSchema as issueSchema, marketplaceObservedListingPublicationSchema, type EbayListingInspection, type EbayListingInspectionIssue,
   type EbayListingInspectedSku, type MarketplaceObservedListingPublication } from "../marketplace-listings";
 import { ebayListingSyncIdentitySchema, syncStageHash, type EbayListingSyncIdentity } from "./ebay-listing-sync.domain";
 import type { EbayListingMappingSource } from "./ebay-listing-mapping.service";
 
-const issueSchema = z.object({ code: z.string().min(1).max(150), message: z.string().min(1).max(1000), status: z.number().int().min(100).max(599).optional(),
-  sku: z.string().max(255).optional(), listingId: z.string().max(255).optional(), groupKey: z.string().max(255).optional(), listingStatus: z.string().max(255).optional(), groupVariantSkus: z.array(z.string().max(255)).max(10000).optional() }).strict();
 export const ebayListingInspectionSchema: z.ZodType<EbayListingInspection> = z.object({
   providerAccount: z.object({ provider: z.string(), accountNamespace: z.string(), externalAccountId: z.string().min(1),
     identityScheme: z.literal("provider_user_id"), externalDisplayNameSnapshot: z.string().nullable(), evidenceHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),

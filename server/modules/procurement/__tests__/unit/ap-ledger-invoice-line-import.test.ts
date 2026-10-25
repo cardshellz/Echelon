@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// These orchestration fixtures contain ordinary product/manual invoices. The real
+// source reader and rejection behavior are covered by shipment-billing-ownership.integration.test.ts.
+vi.mock("../../shipment-billing-ownership.repository", () => ({
+  readInvoiceSourceCapabilities: vi.fn(async () => {
+    const verified = { allowed: true, code: "AP_INVOICE_SOURCE_VERIFIED", reason: "Fixture has ordinary invoice source ownership." };
+    return { purchaseOrderLinks: verified, approval: verified, payment: verified, freightSourceLineIds: [] };
+  }),
+}));
+
 const tables = vi.hoisted(() => ({
   purchaseOrderLines: {
     id: "purchase_order_lines.id",
@@ -58,8 +67,17 @@ const mocks = vi.hoisted(() => ({
   },
   detectFinancialExceptions: vi.fn(),
   insertedLine: null as any,
+  invoiceTotalCents: 0,
 }));
 
+vi.mock("../../po-financial-evidence.repository", () => ({
+  readPoFinancialEvidenceSourcesWithClient: vi.fn(async () => new Map([[7, {
+    purchaseOrderId: 7, vendorId: 4, currency: "USD", invoices: [{ id: 55, vendorId: 4, currency: "USD", status: "received",
+      invoicedAmountCents: mocks.invoiceTotalCents, paidAmountCents: 0, balanceCents: mocks.invoiceTotalCents,
+      links: [{ purchaseOrderId: 7, purchaseOrderVendorId: 4, purchaseOrderCurrency: "USD" }],
+      lines: [{ id: 201, purchaseOrderId: 7, purchaseOrderLineId: 101, freightCostId: null, lineTotalCents: mocks.invoiceTotalCents }], payments: [] }],
+  }]])),
+}));
 vi.mock("../../../../db", () => ({ db: mocks.db }));
 vi.mock("@shared/schema", () => ({
   ...tables,
@@ -115,6 +133,7 @@ function configureImport(selectResults: unknown[][], insertedLine: any) {
 }
 
 function importSelectResults(poLines: any[], existingLines: any[], totalCents: number) {
+  mocks.invoiceTotalCents = totalCents;
   return [
     [{ id: 55, vendorId: 4, status: "received", paidAmountCents: 0, approvedAt: null, approvedBy: null }],
     [],
@@ -124,7 +143,7 @@ function importSelectResults(poLines: any[], existingLines: any[], totalCents: n
     existingLines,
     [{ maxLine: 3 }],
     [{ total: totalCents }],
-    [{ id: 55, paidAmountCents: 0 }],
+    [{ id: 55, paidAmountCents: 0, creditedAmountCents: 0 }],
     [{ purchaseOrderId: 7 }],
     [{
       status: "sent",
@@ -133,13 +152,14 @@ function importSelectResults(poLines: any[], existingLines: any[], totalCents: n
       firstPaidAt: null,
       fullyPaidAt: null,
     }],
-    [{ invoicedAmountCents: totalCents, paidAmountCents: 0 }],
+    [{ invoicedAmountCents: totalCents, paidAmountCents: 0, creditedAmountCents: 0 }],
   ];
 }
 
 describe("AP ledger invoice line imports", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.db.execute.mockResolvedValue({ rows: [{ present: false }] });
     mocks.detectFinancialExceptions.mockResolvedValue(undefined);
   });
 

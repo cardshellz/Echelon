@@ -14,6 +14,36 @@ vi.mock("../../infrastructure/inventory-publication-selection.reader", () => ({
 }));
 
 describe("PostgresInventoryAvailabilityRuntimePublicationExecutor", () => {
+  it("exposes the same transaction client and pinned context to infrastructure composition", async () => {
+    const client = fakeClient({ authority: "canonical", authority_revision: "9", activation_run_id: "44" }, { activationState: "active" });
+    const executor = new PostgresInventoryAvailabilityRuntimePublicationExecutor(
+      { connect: vi.fn(async () => client), options: { max: 2 } } as never);
+    await expect(executor.executeWithClient(async (connected, context) => {
+      expect(connected).toBe(client);
+      expect(context).toMatchObject({ authority: "canonical", activationRunId: "44" });
+      expect(transactionCommands(client)).not.toContain("COMMIT");
+      return "exact handoff";
+    })).resolves.toBe("exact handoff");
+    expect(client.query.mock.calls.filter(([sql]) => String(sql).includes("FROM inventory.availability_runtime_authority"))).toHaveLength(1);
+    expect(transactionCommands(client).at(-1)).toBe("COMMIT");
+  });
+
+  it.each(["BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE", "COMMIT", "ROLLBACK"])("discards the connection after failed %s", async command => {
+    const client = fakeClient({ authority: "legacy", authority_revision: "1", activation_run_id: null });
+    const original = client.query.getMockImplementation()!, boundaryError = new Error(`${command} failed`);
+    client.query.mockImplementation(async (sql, values) => {
+      if (String(sql).trim() === command) throw boundaryError;
+      return original(sql, values);
+    });
+    const executor = new PostgresInventoryAvailabilityRuntimePublicationExecutor(
+      { connect: vi.fn(async () => client), options: { max: 2 } } as never);
+    const workError = new Error("handoff validation failed");
+    const result = executor.executeWithClient(async () => { if (command === "ROLLBACK") throw workError; return "planned"; });
+    if (command === "ROLLBACK") await expect(result).rejects.toMatchObject({ errors: [workError, boundaryError] });
+    else await expect(result).rejects.toBe(boundaryError);
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(boundaryError);
+  });
+
   it("pins legacy authority through the selected publisher and commits afterward", async () => {
     const client = fakeClient({ authority: "legacy", authority_revision: "1", activation_run_id: null });
     const executor = new PostgresInventoryAvailabilityRuntimePublicationExecutor(

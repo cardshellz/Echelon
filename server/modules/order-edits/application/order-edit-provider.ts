@@ -1,3 +1,5 @@
+export type NativeCustomerOrderSummary = Omit<import("@shared/customer-account/customer-account-orders").CustomerAccountOrderSummary, "omsOrderId" | "fulfillment"> & { customerId: string | null; channelId: number; shopDomain: string };
+
 export interface OrderEditCredentials {
   connectionId: number;
   channelId: number;
@@ -43,6 +45,12 @@ export interface OrderEditRefund {
 
 /** JSON-safe persisted evidence. Amounts are exact USD integer cents. */
 export interface OrderEditSnapshot {
+  /** Native checkout allocations; face value is not reusable order-edit credit. */
+  nativeDiscountAllocations?: Array<{
+    lineId: string;
+    ruleKey: string;
+    amountCents: number;
+  }>;
   codePricing?: import("@shared/order-edits/order-edit-codes").OrderEditCodePricing;
   /** Optional read-only pricing evidence for provisional previews; excluded from legacy fingerprints. */
   previewProductDiscounts?: Array<{
@@ -183,9 +191,13 @@ export class OrderEditCommitNotSentError extends OrderEditProviderError {
 }
 
 export interface OrderEditProvider {
+  /** Account history is a bounded native read, independent of edit eligibility. */
+  readOrderSummaries?(connectionId: number, externalOrderIds: readonly string[]): Promise<NativeCustomerOrderSummary[]>;
   readOrder(
     connectionId: number,
     externalOrderId: string,
+    expectedCustomerId?: string,
+    expectedShopDomain?: string,
   ): Promise<OrderEditSnapshot>;
   searchVariants(
     connectionId: number,
@@ -224,6 +236,11 @@ export interface OrderEditProvider {
     intent: OrderEditRefundIntent,
     firstAttemptAt: string,
   ): Promise<OrderEditRefundResult>;
+  /** Observe only: this method must never create or retry a refund command. */
+  observeRefund(
+    connectionId: number,
+    intent: OrderEditRefundIntent,
+  ): Promise<OrderEditRefundResult | null>;
   recoverUnpaid(
     connectionId: number,
     baseline: OrderEditSnapshot,

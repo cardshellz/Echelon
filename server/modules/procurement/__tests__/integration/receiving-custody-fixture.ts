@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { quantityAmendmentResetGuard } from "./quantity-amendment-fixture";
 
 const EMPTY_HISTORY_TABLES = [
   ["receiving_quarantine_observations", "receiving_quarantine_observation_no_truncate"],
@@ -14,6 +15,7 @@ export async function resetFixtureWithEmptyReceivingCustody(pool: pg.Pool, reset
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await quantityAmendmentResetGuard(client,false);
     for (const [table] of EMPTY_HISTORY_TABLES) {
       await client.query(`LOCK TABLE procurement.${table} IN ACCESS EXCLUSIVE MODE`);
       if ((await client.query(`SELECT 1 FROM procurement.${table} LIMIT 1`)).rowCount !== 0) {
@@ -27,6 +29,7 @@ export async function resetFixtureWithEmptyReceivingCustody(pool: pg.Pool, reset
     for (const [table, trigger] of EMPTY_HISTORY_TABLES) {
       await client.query(`ALTER TABLE procurement.${table} ENABLE TRIGGER ${trigger}`);
     }
+    await quantityAmendmentResetGuard(client,true);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");

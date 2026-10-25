@@ -289,8 +289,10 @@ class EchelonSyncOrchestrator {
     triggeredBy?: string,
     channelId?: number,
   ): Promise<InventorySyncResult[]> {
+    // Fan-out isolates an unsafe destination: one broken listing must not stop
+    // this product's other channels. Blocked targets are reported as errors.
     const routed = await this.inventoryPublication.publishProduct(
-      { productId, dryRun: config.dryRun, channelId, triggeredBy },
+      { productId, dryRun: config.dryRun, channelId, triggeredBy, blockedTargets: "isolate" },
       () => this.syncInventoryForProductLegacy(productId, config, triggeredBy, channelId),
     );
     return routed.authority === "legacy"
@@ -1344,6 +1346,7 @@ class EchelonSyncOrchestrator {
                     gtin: v.gtin,
                     mpn: v.mpn,
                     weightGrams: v.weight,
+                    package: v.package,
                     priceCents: v.price,
                     compareAtPriceCents: v.compareAtPrice,
                     isListed: v.isListed,
@@ -1964,12 +1967,12 @@ function canonicalInventorySyncResults(
   const byChannel = new Map<number, InventorySyncResult>();
   const enqueuedKeys = new Set(publication.enqueuedPublicationKeys);
   const coalescedKeys = new Set(publication.coalescedPublicationKeys);
-  for (const row of publication.rows) {
-    let result = byChannel.get(row.channelId);
+  const channelResult = (channelId: number, channelName: string): InventorySyncResult => {
+    let result = byChannel.get(channelId);
     if (!result) {
       result = {
-        channelId: row.channelId,
-        channelName: row.channelName,
+        channelId,
+        channelName,
         dryRun: publication.dryRun,
         products: 1,
         variantsPushed: 0,
@@ -1980,8 +1983,12 @@ function canonicalInventorySyncResults(
         publicationAuthority: "canonical_outbox",
         details: [],
       };
-      byChannel.set(row.channelId, result);
+      byChannel.set(channelId, result);
     }
+    return result;
+  };
+  for (const row of publication.rows) {
+    const result = channelResult(row.channelId, row.channelName);
     const key = `${row.publicationTargetId}:${row.productVariantId}`;
     if (enqueuedKeys.has(key)) result.variantsQueued = (result.variantsQueued ?? 0) + 1;
     if (coalescedKeys.has(key)) result.variantsCoalesced = (result.variantsCoalesced ?? 0) + 1;
@@ -1997,6 +2004,23 @@ function canonicalInventorySyncResults(
           ? "canonical_publication_queued"
           : "canonical_publication_coalesced",
     });
+  }
+  for (const blocked of publication.blockedTargets ?? []) {
+    const result = channelResult(blocked.channelId, blocked.channelName);
+    // A target-level blocker with no planned rows still counts once.
+    if (blocked.productVariantIds.length === 0) result.variantsErrored += 1;
+    for (const variantId of blocked.productVariantIds) {
+      result.variantsErrored += 1;
+      result.details.push({
+        productId: publication.productId,
+        variantId,
+        sku: null,
+        allocatedQty: 0,
+        previousQty: null,
+        status: "error",
+        error: `${blocked.errorCode}: publication target ${blocked.publicationTargetId} is not safe to publish (${blocked.blockerCodes.join(", ")})`,
+      });
+    }
   }
   return [...byChannel.values()].sort((left, right) => left.channelId - right.channelId);
 }

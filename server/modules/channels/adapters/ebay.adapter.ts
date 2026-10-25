@@ -1,3 +1,5 @@
+import { ebayBusinessPolicies } from "../ebay-business-policies";
+import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
 /**
  * eBay Channel Adapter
  *
@@ -43,7 +45,7 @@ import { QuantityPublicationAdmissionError } from "../../inventory-planning/doma
 
 import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service";
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
-import { EbayInventoryQuantityError, ebayInventoryMarketplace, publishEbayInventoryQuantity, readEbayInventoryQuantity } from "./ebay/ebay-inventory-quantity";
+import { EbayInventoryQuantityError, EbayInventoryQuantityPreflightError, ebayInventoryMarketplace, publishEbayInventoryQuantity, readEbayInventoryQuantity } from "./ebay/ebay-inventory-quantity";
 import { EBAY_QUANTITY_BATCH_LIMIT, EbayQuantityUpdateInputError, sendEbayQuantityUpdates } from "./ebay/ebay-quantity-update";
 import { EbayListingBuilder, createEbayListingBuilder } from "./ebay/ebay-listing-builder";
 import { mapCarrierToEbay } from "./ebay/ebay-category-map";
@@ -80,11 +82,6 @@ interface EbayConnectionMetadata {
   ruName?: string;
   environment?: "sandbox" | "production";
   siteId?: string;
-  businessPolicies?: {
-    paymentPolicyId: string;
-    returnPolicyId: string;
-    fulfillmentPolicyId: string;
-  };
   merchantLocationKey?: string;
   notificationVerificationToken?: string;
 }
@@ -125,7 +122,8 @@ export class EbayAdapter implements IChannelAdapter {
   private readonly listingBuilder: EbayListingBuilder;
   private readonly listingConnector: EbayMarketplaceListingConnector;
 
-  constructor(private readonly db: DrizzleDb, private readonly photos: EbayListingPhotoResolver) {
+  constructor(private readonly db: DrizzleDb, private readonly photos: EbayListingPhotoResolver,
+    private readonly policies: Pick<typeof ebayBusinessPolicies, "resolveProductPolicies"> = ebayBusinessPolicies) {
     this.listingBuilder = createEbayListingBuilder();
     this.listingConnector = new EbayMarketplaceListingConnector({
       delay: (ms) => this.delay(ms),
@@ -179,14 +177,6 @@ export class EbayAdapter implements IChannelAdapter {
     channelId: number,
     metadata: EbayConnectionMetadata,
   ): Promise<ListingPushResult> {
-    if (!metadata.businessPolicies) {
-      return {
-        productId: listing.productId,
-        status: "error",
-        error: "No eBay business policies configured. Set paymentPolicyId, returnPolicyId, and fulfillmentPolicyId in channel connection metadata.",
-      };
-    }
-
     if (!metadata.merchantLocationKey) {
       return {
         productId: listing.productId,
@@ -195,23 +185,31 @@ export class EbayAdapter implements IChannelAdapter {
       };
     }
 
-    // Load channel-level overrides
-    const overrides = await this.getChannelOverrides(channelId, listing.productId);
-
-    const config = {
-      merchantLocationKey: metadata.merchantLocationKey,
-      listingPolicies: {
-        paymentPolicyId: metadata.businessPolicies.paymentPolicyId,
-        returnPolicyId: metadata.businessPolicies.returnPolicyId,
-        fulfillmentPolicyId: metadata.businessPolicies.fulfillmentPolicyId,
-      },
-      marketplaceId: metadata.siteId || DEFAULT_MARKETPLACE,
-      channelOverrides: overrides || undefined,
-    };
-
     const photoVariants = listing.variants.filter(variant => variant.isListed && variant.sku)
       .map(variant => ({ variantId: variant.variantId, sku: variant.sku! }));
     if (photoVariants.length === 0) return { productId: listing.productId, status: "skipped" };
+    const selectedPolicies = await this.policies.resolveProductPolicies({ productId: listing.productId,
+      variantIds: photoVariants.map(variant => variant.variantId) });
+    // The generic adapter consumes the same validated selections as durable
+    // publication. Legacy metadata.businessPolicies is no longer an authority.
+    if (selectedPolicies.scope.channelId !== channelId) {
+      throw new EbayBusinessPolicyError("EBAY_POLICY_SCOPE_CHANGED", "The resolved business policies belong to another eBay channel.", 409);
+    }
+    await this.getConnectionMetadata(channelId, selectedPolicies.scope.connectionId);
+    const auth = await this.getAuthService(channelId, selectedPolicies.scope.connectionId);
+    const account = await auth.getVerifiedProviderAccount(channelId);
+    if (auth.getEnvironment() !== selectedPolicies.scope.environment || account?.externalAccountId !== selectedPolicies.scope.accountId) {
+      throw new EbayBusinessPolicyError("EBAY_POLICY_SCOPE_CHANGED", "The eBay account changed while preparing listing policies. Refresh the connection before retrying.", 409);
+    }
+    const listingPolicies = selectedPolicies.byVariantId.values().next().value;
+    if (!listingPolicies) throw new EbayBusinessPolicyError("EBAY_POLICY_REQUIRED", "No validated business policies were returned for this listing.", 422);
+    const overrides = await this.getChannelOverrides(channelId, listing.productId);
+    const config = {
+      merchantLocationKey: metadata.merchantLocationKey,
+      listingPolicies,
+      marketplaceId: selectedPolicies.scope.marketplaceId,
+      channelOverrides: overrides || undefined,
+    };
     const photoPlan = await this.photos.resolve({
       productId: listing.productId, channelId, variants: photoVariants,
       mode: listing.imageSyncMode === "preserve" ? "preserve" : "catalog",
@@ -220,7 +218,8 @@ export class EbayAdapter implements IChannelAdapter {
         variants: photoVariants,
       }),
     });
-    const { inventoryItems, offers, itemGroup } = this.listingBuilder.buildListingDraft(listing, config, { photoPlan });
+    const { inventoryItems, offers, itemGroup } = this.listingBuilder.buildListingDraft(listing, config, { photoPlan,
+      variantListingPoliciesByVariantId: selectedPolicies.byVariantId, packageRequirementsByVariantId: selectedPolicies.packageRequirementsByVariantId });
     const hasExistingIds = listing.variants.some(
       (v) => v.externalVariantId,
     );
@@ -274,6 +273,7 @@ export class EbayAdapter implements IChannelAdapter {
         error: "eBay canonical inventory publication requires an exact account scope",
         errorCode: "EBAY_INVENTORY_SCOPE_UNSUPPORTED",
         retryable: false,
+        effect: "not_sent" as const,
       }));
     }
     // Canonical targets identify the inventory SKU, not an offer ID. Resolve the
@@ -481,20 +481,23 @@ export class EbayAdapter implements IChannelAdapter {
   private async pushCanonicalInventory(
     channelId: number, items: InventoryPushItem[], context: InventoryPublicationContext,
   ): Promise<InventoryPushResult[]> {
-    const client = await this.getApiClient(channelId, context.channelConnectionId, context.externalScopeId);
-    const metadata = await this.getConnectionMetadata(channelId, context.channelConnectionId);
+    let client: EbayApiClient;
+    let marketplace: string;
+    try {
+      client = await this.getApiClient(channelId, context.channelConnectionId, context.externalScopeId);
+      const metadata = await this.getConnectionMetadata(channelId, context.channelConnectionId);
+      marketplace = ebayInventoryMarketplace(metadata.siteId);
+    } catch (error) { return items.map(item => canonicalEbayInventoryFailure(item, error, true)); }
     const results: InventoryPushResult[] = [];
     for (const item of items) {
+      let sku: string;
+      try { sku = exactEbayInventoryItemKey(item); }
+      catch (error) { results.push(canonicalEbayInventoryFailure(item, error, true)); continue; }
       try {
-        const providerResponse = await publishEbayInventoryQuantity(client, exactEbayInventoryItemKey(item), ebayInventoryMarketplace(metadata.siteId), item.allocatedQty);
+        const providerResponse = await publishEbayInventoryQuantity(client, sku, marketplace, item.allocatedQty);
         results.push({ variantId: item.variantId, pushedQty: item.allocatedQty, status: "success", providerResponse });
       } catch (error) {
-        results.push({
-          variantId: item.variantId, pushedQty: 0, status: "error",
-          error: error instanceof Error ? error.message : String(error),
-          ...(error instanceof EbayInventoryQuantityError ? { errorCode: error.code, retryable: error.retryable }
-            : error instanceof InventoryPublicationConfigurationError ? { errorCode: error.code, retryable: false } : {}),
-        });
+        results.push(canonicalEbayInventoryFailure(item, error, error instanceof EbayInventoryQuantityPreflightError));
       }
     }
     return results;
@@ -1114,6 +1117,16 @@ export class EbayAdapter implements IChannelAdapter {
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+}
+
+function canonicalEbayInventoryFailure(item: InventoryPushItem, error: unknown, preflight: boolean): InventoryPushResult {
+  return { variantId: item.variantId, pushedQty: 0, status: "error",
+    error: error instanceof Error ? error.message : String(error),
+    ...(preflight ? { effect: "not_sent" as const } : {}),
+    ...(error instanceof EbayInventoryQuantityError ? { errorCode: error.code, retryable: error.retryable }
+      : error instanceof InventoryPublicationConfigurationError ? { errorCode: error.code, retryable: false }
+      : preflight ? { errorCode: "EBAY_INVENTORY_PREFLIGHT_FAILED", retryable: true } : {}),
+  };
 }
 
 function exactEbayInventoryItemKey(

@@ -351,6 +351,8 @@ export const receivingOrders = procurementSchema.table("receiving_orders", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
+  // Full prefix evidence includes inactive documents; active uniqueness remains separate.
+  index("receiving_orders_receipt_number_prefix_idx").on(table.receiptNumber.op("varchar_pattern_ops")),
   uniqueIndex("receiving_orders_receipt_number_active_uidx").on(table.receiptNumber).where(sql`status <> 'cancelled'`),
   uniqueIndex("receiving_orders_shipment_po_active_uidx")
     .on(table.inboundShipmentId, table.purchaseOrderId)
@@ -544,6 +546,8 @@ export const purchaseOrders = procurementSchema.table("purchase_orders", {
   paidTotalCents: bigint("paid_total_cents", { mode: "number" }).notNull().default(0),
   outstandingCents: bigint("outstanding_cents", { mode: "number" }).notNull().default(0),
 }, (table) => [
+  // Full prefix evidence includes inactive documents; active uniqueness remains separate.
+  index("purchase_orders_po_number_prefix_idx").on(table.poNumber.op("varchar_pattern_ops")),
   uniqueIndex("purchase_orders_po_number_active_uidx").on(table.poNumber).where(sql`status <> 'cancelled'`),
   check("purchase_orders_currency_usd_chk", sql`${table.currency} = 'USD'`),
 ]);
@@ -1557,6 +1561,9 @@ export const inboundShipmentLines = procurementSchema.table("inbound_shipment_li
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
   sku: varchar("sku", { length: 100 }),
   qtyShipped: integer("qty_shipped").notNull(),
+  // Frozen only after an explicit reviewed catalog-unit selection. Legacy rows stay null.
+  unitsPerVariantSnapshot: integer("units_per_variant_snapshot"),
+  dimensionBasis: varchar("dimension_basis", { length: 10 }),
   // Per-unit dimensions
   weightKg: numeric("weight_kg", { precision: 10, scale: 3 }),
   lengthCm: numeric("length_cm", { precision: 8, scale: 2 }),
@@ -1576,7 +1583,12 @@ export const inboundShipmentLines = procurementSchema.table("inbound_shipment_li
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  check("inbound_shipment_line_unit_snapshot_positive", sql`${table.unitsPerVariantSnapshot} IS NULL OR ${table.unitsPerVariantSnapshot} > 0`),
+  check("inbound_shipment_line_unit_snapshot_identity", sql`${table.unitsPerVariantSnapshot} IS NULL OR ${table.productVariantId} IS NOT NULL`),
+  check("inbound_shipment_line_carton_basis_count", sql`${table.dimensionBasis} IS DISTINCT FROM 'carton' OR (${table.cartonCount} IS NOT NULL AND ${table.cartonCount} > 0)`),
+  check("inbound_shipment_line_dimension_basis_valid", sql`${table.dimensionBasis} IS NULL OR ${table.dimensionBasis} IN ('piece', 'carton')`),
+]);
 
 export const insertInboundShipmentLineSchema = createInsertSchema(inboundShipmentLines).omit({
   id: true,
@@ -1614,7 +1626,8 @@ export const vendorInvoices = procurementSchema.table("vendor_invoices", {
 
   // Amounts (bigint for totals; exact dollar amounts)
   invoicedAmountCents: bigint("invoiced_amount_cents", { mode: "number" }).notNull().default(0),
-  paidAmountCents: bigint("paid_amount_cents", { mode: "number" }).notNull().default(0), // Denorm — updated on payment
+  paidAmountCents: bigint("paid_amount_cents", { mode: "number" }).notNull().default(0), // Cash only; supplier credits have separate evidence.
+  creditedAmountCents: bigint("credited_amount_cents", { mode: "number" }).notNull().default(0),
   balanceCents: bigint("balance_cents", { mode: "number" }).notNull().default(0), // invoicedAmount - paidAmount
 
   currency: varchar("currency", { length: 3 }).notNull().default("USD"),
@@ -1632,6 +1645,8 @@ export const vendorInvoices = procurementSchema.table("vendor_invoices", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
+  // Full prefix evidence includes inactive documents; active uniqueness remains separate.
+  index("vendor_invoices_invoice_number_prefix_idx").on(table.invoiceNumber.op("varchar_pattern_ops")),
   uniqueIndex("vendor_invoices_vendor_invoice_idx").on(table.vendorId, table.invoiceNumber).where(sql`${table.status} <> 'voided'`),
   uniqueIndex("vendor_invoices_root_number_idx").on(table.vendorId, table.invoiceNumber).where(sql`${table.replacesInvoiceId} IS NULL`),
   uniqueIndex("vendor_invoices_one_successor_idx").on(table.replacesInvoiceId).where(sql`${table.replacesInvoiceId} IS NOT NULL`),
@@ -1957,6 +1972,8 @@ export const apPayments = procurementSchema.table("ap_payments", {
   vendorId: integer("vendor_id").notNull().references(() => vendors.id),
 
   paymentDate: timestamp("payment_date").notNull(),
+  // New date-only input is authoritative; historical timestamps are not reinterpreted.
+  paymentCalendarDate: date("payment_calendar_date"),
   paymentMethod: varchar("payment_method", { length: 20 }).notNull(), // ach, check, wire, credit_card, other
   referenceNumber: varchar("reference_number", { length: 100 }), // ACH trace, wire ref, etc.
   checkNumber: varchar("check_number", { length: 50 }),
@@ -1978,9 +1995,12 @@ export const apPayments = procurementSchema.table("ap_payments", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
+  // Full prefix evidence includes inactive documents; active uniqueness remains separate.
+  index("ap_payments_payment_number_prefix_idx").on(table.paymentNumber.op("varchar_pattern_ops")),
   uniqueIndex("ap_payments_payment_number_active_uidx").on(table.paymentNumber).where(sql`voided_at IS NULL`),
   check("ap_payments_currency_usd_chk", sql`${table.currency} = 'USD'`),
   check("ap_payments_recorded_status_check", sql`${table.status} IN ('completed', 'voided')`),
+  check("ap_payment_calendar_date_matches_timestamp", sql`${table.paymentCalendarDate} IS NULL OR ${table.paymentDate} = ${table.paymentCalendarDate}::timestamp`),
 ]);
 
 export const insertApPaymentSchema = createInsertSchema(apPayments).omit({
@@ -2006,7 +2026,7 @@ export const apPaymentAllocations = procurementSchema.table("ap_payment_allocati
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("ap_payment_allocations_pay_inv_idx").on(table.apPaymentId, table.vendorInvoiceId),
+  index("ap_payment_allocations_pay_inv_lookup_idx").on(table.apPaymentId, table.vendorInvoiceId),
 ]);
 
 export const insertApPaymentAllocationSchema = createInsertSchema(apPaymentAllocations).omit({
@@ -2411,3 +2431,53 @@ export const insertDemandEventLineSchema = createInsertSchema(demandEventLines).
 });
 export type InsertDemandEventLine = z.infer<typeof insertDemandEventLineSchema>;
 export type DemandEventLine = typeof demandEventLines.$inferSelect;
+
+
+// Explicit supplier documents; cash payments and gross invoices remain unchanged.
+export const supplierCredits = procurementSchema.table("supplier_credits", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  sourceInvoiceId: integer("source_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "restrict" }),
+  vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: "restrict" }),
+  sourceSnapshot: jsonb("source_snapshot").notNull(),
+  replacesCreditId: integer("replaces_credit_id").references((): AnyPgColumn => supplierCredits.id, { onDelete: "restrict" }),
+  supplierReference: varchar("supplier_reference", { length: 100 }).notNull(),
+  creditCalendarDate: date("credit_calendar_date").notNull(),
+  totalAmountCents: bigint("total_amount_cents", { mode: "number" }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  status: varchar("status", { length: 20 }).notNull().default("draft"),
+  version: integer("version").notNull().default(1), reason: text("reason").notNull(),
+  createdBy: varchar("created_by").notNull().references(() => users.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  approvedBy: varchar("approved_by").references(() => users.id, { onDelete: "restrict" }),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  voidedBy: varchar("voided_by").references(() => users.id, { onDelete: "restrict" }),
+  voidedAt: timestamp("voided_at", { withTimezone: true }), voidReason: text("void_reason"),
+}, table => [uniqueIndex("supplier_credits_vendor_reference_idx").on(table.vendorId, table.supplierReference).where(sql`${table.status} <> 'voided'`),
+  uniqueIndex("supplier_credits_replacement_idx").on(table.replacesCreditId),
+  index("supplier_credits_source_idx").on(table.sourceInvoiceId)]);
+export const supplierCreditLines = procurementSchema.table("supplier_credit_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  supplierCreditId: integer("supplier_credit_id").notNull().references(() => supplierCredits.id, { onDelete: "restrict" }),
+  invoiceLineId: integer("invoice_line_id").notNull().references(() => vendorInvoiceLines.id, { onDelete: "restrict" }),
+  amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+  sourceKey: text("source_key").notNull(),
+  disposition: jsonb("disposition").notNull(), sourceEvidence: jsonb("source_evidence").notNull().default({}),
+  costState: varchar("cost_state", { length: 30 }).notNull().default("pending"),
+  costIssues: jsonb("cost_issues").notNull().default([]),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, table => [uniqueIndex("supplier_credit_lines_source_idx").on(table.supplierCreditId, table.invoiceLineId, table.sourceKey)]);
+export const supplierCreditApplications = procurementSchema.table("supplier_credit_applications", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  supplierCreditId: integer("supplier_credit_id").notNull().references(() => supplierCredits.id, { onDelete: "restrict" }),
+  vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "restrict" }),
+  appliedAmountCents: bigint("applied_amount_cents", { mode: "number" }).notNull(),
+  actorId: varchar("actor_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(), reason: text("reason").notNull(),
+}, table => [index("supplier_credit_applications_invoice_idx").on(table.vendorInvoiceId),
+  index("supplier_credit_applications_credit_idx").on(table.supplierCreditId)]);
+export const supplierCreditApplicationReversals = procurementSchema.table("supplier_credit_application_reversals", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  applicationId: integer("application_id").notNull().references(() => supplierCreditApplications.id, { onDelete: "restrict" }),
+  actorId: varchar("actor_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(), reason: text("reason").notNull(),
+}, table => [uniqueIndex("supplier_credit_reversals_application_idx").on(table.applicationId)]);

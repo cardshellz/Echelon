@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { providerReadDiagnosticFromError } from "@shared/channel-provider-read";
+import { ebayReadDiagnostic, ebayReadFailureKind } from "./ebay-read-diagnostic";
+import { isMissingEbayOfferCollection } from "../../../../channels/adapters/ebay/ebay-api-error";
 
 import { listingRegistrationOwnerSnapshotSchema } from "../../../application/registration-dtos";
 import type {
@@ -38,6 +41,14 @@ const EBAY_PROVIDER = "ebay" as const;
 const DEFAULT_PAGE_SIZE = 200;
 const DEFAULT_MAX_PAGES = 1_000;
 const LIVE_LISTING_STATUSES = new Set(["ACTIVE", "OUT_OF_STOCK"]);
+
+const missingOffersSchema = z.object({
+  errors: z.array(z.object({ errorId: z.number().int() })).min(1),
+});
+function isMissingOfferCollection(response: EbayRegistrationReadResponse): boolean {
+  const parsed = missingOffersSchema.safeParse(response.body);
+  return parsed.success && isMissingEbayOfferCollection(response.status, parsed.data.errors.map(error => error.errorId));
+}
 
 const identityResponseSchema = z
   .object({
@@ -176,6 +187,10 @@ export class EbayMarketplaceRegistrationObserver
       memberCandidates: input.memberCandidates,
     });
     const owner = assertEbayOwner(snapshot.owner);
+    const topologyOnlySkus = z.array(z.string().trim().min(1).max(100)).max(250).parse(input.topologyOnlySkus ?? []);
+    if (new Set(topologyOnlySkus).size !== topologyOnlySkus.length
+      || snapshot.memberCandidates.some(member => topologyOnlySkus.includes(member.sku)))
+      throw observationError("EBAY_REGISTRATION_OBSERVATION_INPUT_INVALID", "Topology-only SKUs must be distinct from active observation candidates.");
     // Complete local member validation must precede access to any credential.
     const credential = parseReadCredential(
       await this.credentials.loadFreshCredential(owner),
@@ -188,12 +203,15 @@ export class EbayMarketplaceRegistrationObserver
           owner.marketplaceId,
           input.locator.providerPublicationKey,
           input.locator.externalListingId,
+          topologyOnlySkus,
         )
       : await this.discoverPublicationByListing(
           credential,
           owner.marketplaceId,
           requireListingLocator(input.locator.externalListingId),
           snapshot.memberCandidates,
+          undefined,
+          topologyOnlySkus,
         );
     assertDistinctMemberIdentities(selected.members);
 
@@ -364,7 +382,7 @@ export class EbayMarketplaceRegistrationObserver
     const parsed = parseProviderResponse(
       identityResponseSchema,
       response.body,
-      "identity",
+      "identity", response,
     );
     return {
       provider: EBAY_PROVIDER,
@@ -384,6 +402,7 @@ export class EbayMarketplaceRegistrationObserver
     marketplaceId: string,
     groupKey: string,
     expectedListingId: string | null,
+    topologyOnlySkus: readonly string[] = [],
   ): Promise<SelectedPublication> {
     const normalizedGroupKey = normalizeProviderText(
       groupKey,
@@ -413,7 +432,7 @@ export class EbayMarketplaceRegistrationObserver
     );
     try {
     const observedSkus: ObservedSku[] = [];
-    for (const sku of variantSkus) {
+    for (const sku of variantSkus.filter(sku => !topologyOnlySkus.includes(sku))) {
       const observed = await this.observeSku(
         credential,
         marketplaceId,
@@ -467,6 +486,7 @@ export class EbayMarketplaceRegistrationObserver
     listingId: string,
     candidates: readonly ListingRegistrationVariantCandidate[],
     inspectedSkus?: ReadonlyMap<string, ObservedSku>,
+    topologyOnlySkus: readonly string[] = [],
   ): Promise<SelectedPublication> {
     const matched: Array<{ observed: ObservedSku; member: SelectedMember }> = [];
     const observedCandidates: ObservedSku[] = [];
@@ -529,6 +549,7 @@ export class EbayMarketplaceRegistrationObserver
         marketplaceId,
         groupKeys[0],
         listingId,
+        topologyOnlySkus,
       );
       const publishedSkus = new Set(publication.members.map(member => member.sku));
       return { ...publication, nonMemberCandidates: observedCandidates.filter(candidate => !publishedSkus.has(candidate.sku)) };
@@ -578,7 +599,7 @@ export class EbayMarketplaceRegistrationObserver
     const parsed = parseProviderResponse(
       inventoryItemResponseSchema,
       response.body,
-      "inventory_item",
+      "inventory_item", response,
     );
     if (parsed.sku !== undefined && parsed.sku !== sku) {
       throw observationError(
@@ -618,7 +639,7 @@ export class EbayMarketplaceRegistrationObserver
     return parseProviderResponse(
       inventoryItemGroupResponseSchema,
       response.body,
-      "inventory_item_group",
+      "inventory_item_group", response,
     );
   }
 
@@ -645,11 +666,15 @@ export class EbayMarketplaceRegistrationObserver
         accessToken: credential.accessToken,
         marketplaceId,
       });
+      // getOffers reports an absent SKU with 404/25713, not only a 200 empty
+      // collection. Only an authoritative first-page absence is an empty read;
+      // disappearance during pagination is inconsistent evidence, never create authority.
+      if (offset === 0 && isMissingOfferCollection(response)) return [];
       assertSuccessfulRead(response, "offers", { sku });
       const page = parseProviderResponse(
         offersPageSchema,
         response.body,
-        "offers",
+        "offers", response,
       );
       if (page.total !== undefined) {
         if (expectedTotal !== null && expectedTotal !== page.total) {
@@ -924,7 +949,8 @@ function assertSuccessfulRead(
     throw observationError(
       "EBAY_REGISTRATION_PROVIDER_READ_FAILED",
       "An eBay read required for registration failed.",
-      { resource, status: response.status, ...context },
+      { resource, status: response.status, ...context,
+        providerRead: ebayReadDiagnostic(resource, ebayReadFailureKind(response.status), response) },
     );
   }
 }
@@ -933,6 +959,7 @@ function parseProviderResponse<T>(
   schema: z.ZodType<T>,
   value: unknown,
   resource: string,
+  response: EbayRegistrationReadResponse,
 ): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
@@ -941,6 +968,7 @@ function parseProviderResponse<T>(
       "eBay returned an invalid registration observation response.",
       {
         resource,
+        providerRead: ebayReadDiagnostic(resource, "invalid_response", response, parsed.error.issues),
         issues: parsed.error.issues.map((issue) => ({
           path: issue.path.join("."),
           code: issue.code,
@@ -1047,6 +1075,7 @@ function inspectionIssue(error: unknown): EbayListingInspectionIssue {
   const context = error.context;
   const safeText = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 255;
   return { code: error.code, message: error.message,
+    ...(providerReadDiagnosticFromError(error) ? { providerRead: providerReadDiagnosticFromError(error) } : {}),
     ...(typeof context.status === "number" ? { status: context.status } : {}),
     ...(safeText(context.sku) ? { sku: context.sku } : {}),
     ...(safeText(context.listingId) ? { listingId: context.listingId } : {}),

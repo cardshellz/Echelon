@@ -2,6 +2,11 @@ import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
 import {
+  HISTORICAL_COST_EVIDENCE_ORDER_POLICY,
+  HistoricalCostEvidenceOrderError,
+  orderHistoricalCostEvidence,
+} from "../domain/historical-cost-evidence-order";
+import {
   historicalCostQuantityGap,
   historicalCostQuantitySnapshotSchema,
   type HistoricalCostQuantitySnapshot,
@@ -35,6 +40,7 @@ import {
 } from "../domain/cost-quantity-intervals";
 
 const MAX_COST_ALLOCATION_RECORDS = 50_000;
+const MICROSECONDS_PER_SECOND = 1_000_000;
 const intervalsSchema = z.array(
   z
     .object({
@@ -251,10 +257,18 @@ export async function ensureLotCostQuantityBasis(
   auditIdentity(actor, now);
   const operations =
     await tx.execute(sql`SELECT operation_key,operation_kind,MIN(id)::text AS first_id,
-    MIN(recorded_at) AS recorded_at,MIN(source_qty) AS minimum_qty,MAX(source_qty) AS quantity
+    CASE WHEN bool_and(recorded_at IS NOT NULL AND isfinite(recorded_at))
+      THEN trunc(EXTRACT(EPOCH FROM MIN(recorded_at)) * ${MICROSECONDS_PER_SECOND})::text
+      ELSE NULL END AS recorded_at_micros,
+    MIN(source_qty) AS minimum_qty,MAX(source_qty) AS quantity
     FROM inventory.lot_cost_contributions WHERE source_lot_id=${lotId} AND operation_kind<>'return'
     GROUP BY operation_key,operation_kind ORDER BY MIN(recorded_at),MIN(id)`);
-  const cogs = await tx.execute(sql`SELECT * FROM oms.order_item_costs
+  // EXTRACT on timestamp without time zone uses the stored nominal coordinate;
+  // on timestamptz it uses the absolute instant. Neither depends on Node's TZ or
+  // PostgreSQL's session timezone. Keep microseconds instead of parsing through
+  // JavaScript Date, which both interprets naive dates locally and truncates them.
+  const cogs = await tx.execute(sql`SELECT *,
+    trunc(EXTRACT(EPOCH FROM created_at) * ${MICROSECONDS_PER_SECOND})::text AS created_at_micros FROM oms.order_item_costs
     WHERE inventory_lot_id=${lotId} ORDER BY created_at,id FOR UPDATE`);
   const missingReversals = cogs.rows.filter(
     (row) => Number(row.qty) < 0 && row.cost_quantity_allocation_id == null,
@@ -339,7 +353,7 @@ export async function ensureLotCostQuantityBasis(
         { lotId, operationKey: operation.operation_key },
       );
   }
-  const candidates = [
+  const unorderedCandidates = [
     ...operations.rows
       .filter((row) => !mappedOperations.has(String(row.operation_key)))
       .map((row) => {
@@ -350,10 +364,10 @@ export async function ensureLotCostQuantityBasis(
             { lotId, operationKey: row.operation_key },
           );
         return {
-          kind: "operation",
+          kind: "operation" as const,
           key: `operation:${lotId}:${row.operation_key}`,
           quantity: costInteger(row.quantity, "operation.quantity", 1),
-          timestamp: new Date(row.recorded_at).getTime(),
+          timestampMicros: row.recorded_at_micros,
           id: costInteger(row.first_id, "operation.id", 1),
           operationKey: row.operation_key,
         };
@@ -361,21 +375,27 @@ export async function ensureLotCostQuantityBasis(
     ...cogs.rows
       .filter((row) => row.cost_quantity_allocation_id == null)
       .map((row) => ({
-        kind: Number(row.qty) < 0 ? "reversal" : "cogs",
+        kind: Number(row.qty) < 0 ? "reversal" as const : "cogs" as const,
         key: `historical_cogs:${row.id}`,
         quantity: Math.abs(
           costInteger(row.qty, "cogs.quantity", -2_147_483_647),
         ),
-        timestamp: new Date(row.created_at).getTime(),
+        timestampMicros: row.created_at_micros,
         id: costInteger(row.id, "cogs.id", 1),
         operationKey: null,
       })),
-  ].sort(
-    (left, right) =>
-      left.timestamp - right.timestamp ||
-      (left.kind < right.kind ? -1 : left.kind > right.kind ? 1 : 0) ||
-      left.id - right.id,
-  );
+  ];
+  let candidates: Array<(typeof unorderedCandidates)[number] & { timestampMicros: string }>;
+  try {
+    candidates = orderHistoricalCostEvidence(unorderedCandidates);
+  } catch (error) {
+    if (error instanceof HistoricalCostEvidenceOrderError) {
+      throw new CostEvidenceError(error.code, error.message, {
+        lotId, sourceKind: error.sourceKind, sourceId: error.sourceId,
+      });
+    }
+    throw error;
+  }
   // During an owning stock transaction quantity projections may be buffered.
   // Existing immutable custody remains the authority; only a newly observed
   // legacy operation requires a complete historical reconciliation.
@@ -460,7 +480,7 @@ export async function ensureLotCostQuantityBasis(
       quantity: candidate.quantity,
       intervals,
       evidence: {
-        policy: "stable_recorded_evidence_order_v1",
+        policy: HISTORICAL_COST_EVIDENCE_ORDER_POLICY,
         sourceKind: candidate.kind,
         sourceId: candidate.id,
         operationKey: candidate.operationKey,
@@ -494,7 +514,7 @@ export async function ensureLotCostQuantityBasis(
   if (prior.rows.length === 0)
     await tx.execute(sql`INSERT INTO inventory.lot_cost_quantity_bases(inventory_lot_id,quantity,source_evidence,recorded_by,recorded_at)
     VALUES (${lotId},${basis},${canonicalJson({
-      policy: "stable_recorded_evidence_order_v1",
+      policy: HISTORICAL_COST_EVIDENCE_ORDER_POLICY,
       sources: candidates,
       unallocatedQuantity: onHandQuantity,
       ...(unresolved === null ? {} : { unresolvedQuantity: unresolved.unresolvedQuantity }),
@@ -507,14 +527,62 @@ export async function readUnresolvedCostQuantities(
   tx: CostEvidenceTransaction, lotId: number,
 ): Promise<Array<{ allocationId: number; intervals: CostQuantityInterval[]; snapshot: HistoricalCostQuantitySnapshot }>> {
   const rows = await readAllocations(tx, lotId);
-  return rows.filter(row => row.source_evidence.sourceKind === "unresolved_historical_quantity").map(row => {
+  return rows.filter(row => row.source_evidence.sourceKind === "unresolved_historical_quantity").flatMap(row => {
     const snapshot = historicalCostQuantitySnapshotSchema.safeParse(row.source_evidence.snapshot);
     if (!snapshot.success || row.source_evidence.policy !== "retain_unresolved_quantity_v1"
       || row.direction !== 1 || snapshot.data.unresolvedQuantity !== row.quantity) {
       throw new CostEvidenceError("COST_UNRESOLVED_QUANTITY_INVALID", "Unresolved cost quantity has invalid retained evidence.", { lotId });
     }
-    return { allocationId: row.id, intervals: row.intervals, snapshot: snapshot.data };
+    const reversed = rows.filter(other => other.direction === -1 && other.reverses_allocation_id === row.id).flatMap(other => other.intervals);
+    const intervals = subtractCostQuantityIntervals(row.intervals, reversed, snapshot.data.originalQuantity);
+    const remaining = intervals.reduce((sum, interval) => sum + interval.quantity, 0);
+    return remaining === 0 ? [] : [{ allocationId: row.id, intervals, snapshot: {
+      ...snapshot.data,
+      recordedOutflowQuantity: snapshot.data.recordedOutflowQuantity + snapshot.data.unresolvedQuantity - remaining,
+      unresolvedQuantity: remaining,
+    } }];
   });
+}
+
+/** Move only previously unassigned FINANCIAL custody into an approved historical
+ * operation. Append reversals and replacement allocations; never alter a stock
+ * balance, existing order allocation, or the original unresolved evidence. The
+ * procurement approval owns the operation's physical evidence and audit. */
+export async function restoreHistoricalCostAllocation(
+  tx: CostEvidenceTransaction, lotId: number, quantity: number,
+  operationKey: string, evidence: Record<string, unknown>, actor: string, now: Date,
+): Promise<number> {
+  costInteger(quantity, "historical operation quantity", 1);
+  auditIdentity(actor, now);
+  await lockInventoryCostGraph(tx);
+  const selected = await tx.execute(sql`SELECT * FROM inventory.inventory_lots WHERE id=${lotId} FOR UPDATE`);
+  const lot = selected.rows[0];
+  if (!lot) throw new CostEvidenceError("COST_LOT_MISSING", "The historical source lot no longer exists.");
+  const key = `historical_link_allocation:${lotId}:${operationKey}`;
+  const replay = await tx.execute(sql`SELECT * FROM inventory.lot_cost_quantity_allocations WHERE allocation_key=${key}`);
+  if (replay.rows[0]) {
+    const row = parseAllocationRows(replay.rows, lotId)[0];
+    if (row.inventory_lot_id !== lotId || Number(replay.rows[0].inventory_lot_id) !== lotId || row.quantity !== quantity
+      || row.direction !== 1 || canonicalJson(row.source_evidence) !== canonicalJson(evidence)) {
+      throw new CostEvidenceError("COST_ALLOCATION_REPLAY_CONFLICT", "This historical operation already owns different cost evidence.");
+    }
+    return row.id;
+  }
+  await ensureLotCostQuantityBasis(tx, lot, actor, now, { retainUnresolvedQuantity: true, verifyOnHand: true });
+  const unresolved = await readUnresolvedCostQuantities(tx, lotId);
+  const available = unresolved.reduce((sum, row) => sum + BigInt(row.snapshot.unresolvedQuantity), BigInt(0));
+  if (available < BigInt(quantity)) throw new CostEvidenceError("COST_LINK_ALREADY_ASSIGNED", "The proposed operation would reuse costs already assigned to stock or orders.", { lotId });
+  let needed = quantity;
+  const intervals: CostQuantityInterval[] = [];
+  for (const row of unresolved) {
+    const amount = Math.min(needed, row.snapshot.unresolvedQuantity);
+    if (amount === 0) continue;
+    // Retain the same exact financial intervals, including sub-cent remainders.
+    const restored = await reverseLotQuantityCost(tx, row.allocationId, amount, actor, now, `${key}:release:${row.allocationId}`);
+    intervals.push(...restored.intervals);
+    needed -= amount;
+  }
+  return insertAllocation(tx, { lotId, key, direction: 1, quantity, intervals, evidence, actor, now });
 }
 
 /** Historical returns retain their recorded sold-row identity and quantity.
@@ -1011,6 +1079,47 @@ export async function unallocatedLotCostIntervals(
   return basis === occupiedCount
     ? []
     : takeCostQuantityIntervals(basis, occupied, basis - occupiedCount);
+}
+
+/** Read-only preview evidence for an exact physical command. Unlike
+ * ensureLotCostQuantityBasis this never imports historical custody. */
+export async function readLotCostQuantityState(
+  tx: CostEvidenceTransaction,
+  lot: LotCostRecord & { id: unknown; qty_picked?: unknown; qty_packed?: unknown },
+) {
+  const lotId = costInteger(lot.id, "lotId", 1);
+  const basisRows = (await tx.execute(sql`SELECT quantity,source_evidence FROM inventory.lot_cost_quantity_bases
+    WHERE inventory_lot_id=${lotId}`)).rows;
+  if (basisRows.length > 1) throw new CostEvidenceError("COST_QUANTITY_BASIS_CONFLICT", "A lot has ambiguous original cost quantity.");
+  let basisQuantity = basisRows[0] ? costInteger(basisRows[0].quantity, "basisQuantity", 1) : null;
+  const allocations = await readAllocations(tx, lotId);
+  const basis = lotCostTotals(lot).basisQuantity;
+  const occupied = occupiedCostQuantityIntervals(allocations, basis);
+  const occupiedQuantity = occupied.reduce((sum, interval) => sum + interval.quantity, 0);
+  // A newly created exact transfer lot has not needed a consumption basis yet.
+  // Its entire original quantity can be previewed without importing history
+  // only when no physical or financial outflow has ever been recorded.
+  let freshUnconsumed = false;
+  if (basisQuantity === null && allocations.length === 0 && hasExactLotCostTotals(lot)
+    && costInteger(lot.qty_on_hand, "lot.onHand") === basis
+    && costInteger(lot.qty_picked ?? 0, "lot.picked") === 0
+    && costInteger(lot.qty_packed ?? 0, "lot.packed") === 0) {
+    const history = (await tx.execute(sql`SELECT
+      EXISTS(SELECT 1 FROM oms.order_item_costs WHERE inventory_lot_id=${lotId}) AS has_cogs,
+      EXISTS(SELECT 1 FROM inventory.lot_cost_contributions WHERE source_lot_id=${lotId}) AS has_outflow,
+      EXISTS(SELECT 1 FROM inventory.inventory_transactions WHERE inventory_lot_id=${lotId}
+        AND variant_qty_delta<0 AND voided_at IS NULL) AS has_physical_outflow`)).rows[0];
+    freshUnconsumed = history?.has_cogs === false && history?.has_outflow === false && history?.has_physical_outflow === false;
+    if (freshUnconsumed) basisQuantity = basis;
+  }
+  return {
+    basisQuantity,
+    freshUnconsumed,
+    basisEvidence: basisRows[0]?.source_evidence ?? null,
+    allocations,
+    freeIntervals: occupiedQuantity === basis ? [] : takeCostQuantityIntervals(basis, occupied, basis - occupiedQuantity),
+    hasUnresolvedQuantity: (await readUnresolvedCostQuantities(tx, lotId)).length > 0,
+  };
 }
 
 /** Batch counterpart for valuation. The caller supplies one coherent snapshot;

@@ -337,6 +337,7 @@ const OWED_WALK_MOVEMENTS: readonly { key: FinanceSectionLineKey<"owed">; usual:
   { key: "owed.walk.return_credits_cs", usual: "plus" },
   { key: "owed.walk.return_credits_pool", usual: "plus" },
   { key: "owed.walk.disputes_won", usual: "plus" },
+  { key: "owed.walk.order_refunds", usual: "plus" },
   { key: "owed.walk.orders", usual: "minus" },
   { key: "owed.walk.advance_fees", usual: "minus" },
   { key: "owed.walk.return_fees", usual: "minus" },

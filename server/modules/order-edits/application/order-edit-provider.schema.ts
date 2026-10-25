@@ -13,6 +13,7 @@ import { orderEditShippingRepricingSchema } from "@shared/order-edits/order-edit
 import type {
   OrderEditSnapshot,
   OrderEditQuote,
+  OrderEditExpectedLine,
   OrderEditRefundIntent,
 } from "./order-edit-provider";
 
@@ -100,6 +101,18 @@ const line = z
 export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
   .object({
     codePricing: orderEditCodePricingSchema.optional(),
+    nativeDiscountAllocations: z
+      .array(
+        z
+          .object({
+            lineId: gid("LineItem"),
+            ruleKey: text,
+            amountCents: money,
+          })
+          .strict(),
+      )
+      .max(62500)
+      .optional(),
     previewProductDiscounts: z
       .array(
         z
@@ -338,6 +351,99 @@ const plan = z
       .max(250),
   })
   .strict();
+function preservesOriginalDiscountQuotePrice(
+  baseline: OrderEditSnapshot,
+  priced: NonNullable<OrderEditQuote["codePricing"]>["lines"][number],
+  native: OrderEditExpectedLine,
+): boolean {
+  const original = baseline.lines.find(
+    (line) => line.id === native.originalLineId,
+  );
+  const allocation = baseline.previewProductDiscounts?.find(
+    (line) => line.lineId === original?.id,
+  );
+  const financial = baseline.financials?.lines.find(
+    (line) => line.id === original?.id,
+  );
+  if (
+    !original ||
+    original.quantity < 1 ||
+    (priced.preserveAutomaticDiscount &&
+      (!allocation || allocation.automaticCents <= 0)) ||
+    !financial
+  )
+    return false;
+  const nativeCents = (baseline.nativeDiscountAllocations ?? [])
+    .filter((entry) => entry.lineId === original.id)
+    .reduce((sum, entry) => sum + BigInt(entry.amountCents), BigInt(0));
+  return (
+    (!priced.nativeDiscountCents ||
+      (nativeCents > BigInt(0) &&
+        BigInt(priced.nativeDiscountCents) * BigInt(original.quantity) ===
+          nativeCents * BigInt(native.quantity))) &&
+    priced.sourceId === original.id &&
+    native.variantId === original.variantId &&
+    native.discountedUnitPriceCents === original.discountedUnitPriceCents &&
+    BigInt(native.totalCents) * BigInt(original.quantity) ===
+      BigInt(original.totalCents) * BigInt(native.quantity) &&
+    BigInt(priced.netCents) * BigInt(original.quantity) ===
+      BigInt(financial.netCents) * BigInt(native.quantity)
+  );
+}
+
+function retainedNativeQuoteDiscountsMatch(quote: OrderEditQuote): boolean {
+  const pricing = quote.codePricing!;
+  const rules = (quote.baseline.discountRules ?? []).filter(
+    (rule) =>
+      rule.type === "DiscountCodeApplication" &&
+      rule.targetType === "LINE_ITEM",
+  );
+  const retained = pricing.retainedNativeDiscounts ?? [];
+  if (retained.length !== rules.length) return false;
+  return retained.every((discount) => {
+    const rule = rules.find(
+      (entry) =>
+        `code:${entry.label}` === discount.key &&
+        entry.label === discount.label,
+    );
+    if (!rule || rule.value.type !== "fixed") return false;
+    const expectedValue =
+      rule.value.amountCents === discount.amountCents
+        ? rule.value
+        : { type: "allocated" as const };
+    if (JSON.stringify(discount.value) !== JSON.stringify(expectedValue))
+      return false;
+    let amount = BigInt(0);
+    for (const allocation of quote.baseline.nativeDiscountAllocations ?? []) {
+      if (allocation.ruleKey !== discount.key) continue;
+      const original = quote.baseline.lines.find(
+        (line) => line.id === allocation.lineId,
+      );
+      if (
+        !original ||
+        original.quantity <= 0 ||
+        !Number.isSafeInteger(original.quantity) ||
+        !Number.isSafeInteger(allocation.amountCents)
+      )
+        return false;
+      const quantity = pricing.lines
+        .filter((line) => line.sourceId === original.id)
+        .reduce((sum, line) => sum + BigInt(line.quantity), BigInt(0));
+      const numerator = BigInt(allocation.amountCents) * quantity;
+      if (numerator % BigInt(original.quantity) !== BigInt(0)) return false;
+      amount += numerator / BigInt(original.quantity);
+    }
+    return (
+      amount === BigInt(discount.amountCents) &&
+      Boolean(
+        quote.financials?.itemDiscounts?.some(
+          (entry) => JSON.stringify(entry) === JSON.stringify(discount),
+        ),
+      )
+    );
+  });
+}
+
 export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
   .object({
     codePricing: orderEditCodePricingSchema.optional(),
@@ -491,6 +597,7 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
       );
       let valid = Boolean(
         value.financials &&
+          retainedNativeQuoteDiscountsMatch(value) &&
           proof.lines.length === positive.length &&
           JSON.stringify(proof.newCodes.map((code) => code.toUpperCase())) ===
             JSON.stringify(
@@ -512,7 +619,25 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
                 native.variantId === line.variantId &&
                 native.quantity === line.quantity &&
                 native.originalUnitPriceCents === line.retailCents &&
-                native.totalCents === line.netCents &&
+                (!line.replacesAutomaticDiscount ||
+                  (native.originalLineId === null &&
+                    value.baseline.previewProductDiscounts?.some(
+                      (entry) =>
+                        entry.lineId === line.sourceId &&
+                        entry.automaticCents > 0,
+                    ) &&
+                    value.lines.some(
+                      (entry) =>
+                        entry.originalLineId === line.sourceId &&
+                        entry.quantity === 0,
+                    ))) &&
+                (line.preserveAutomaticDiscount || line.nativeDiscountCents
+                  ? preservesOriginalDiscountQuotePrice(
+                      value.baseline,
+                      line,
+                      native,
+                    )
+                  : native.totalCents === line.netCents) &&
                 value.financials!.lines.some(
                   (amount) =>
                     amount.id === line.id && amount.netCents === line.netCents,
@@ -535,9 +660,19 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
             ...line,
             variantId: canonical("ProductVariant", line.variantId),
           })),
-          protectedLineIds: (value.baseline.previewProductDiscounts ?? [])
-            .filter((line) => line.automaticCents > 0)
-            .map((line) => line.lineId),
+          protectedLineIds: originals
+            .filter(
+              (line) =>
+                value.baseline.previewProductDiscounts?.some(
+                  (discount) =>
+                    discount.lineId === line.id && discount.automaticCents > 0,
+                ) ||
+                value.baseline.nativeDiscountAllocations?.some(
+                  (allocation) =>
+                    allocation.lineId === line.id && allocation.amountCents > 0,
+                ),
+            )
+            .map((line) => line.id),
         });
         const sources = new Map<
           string,
@@ -592,7 +727,13 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
                   line.originalUnitPriceCents ===
                     original.originalUnitPriceCents &&
                   (line.quantity === 0
-                    ? sources.get(original.id)?.quantity === 0
+                    ? sources.get(original.id)?.quantity === 0 ||
+                      (proof.lines.some(
+                        (priced) => priced.sourceId === original.id,
+                      ) &&
+                        proof.lines
+                          .filter((priced) => priced.sourceId === original.id)
+                          .every((priced) => priced.replacesAutomaticDiscount))
                     : proof.lines.some(
                         (priced) =>
                           priced.id === line.calculatedLineId &&

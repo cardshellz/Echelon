@@ -1,5 +1,10 @@
+import { channelProviderReadDiagnosticSchema, providerReadDetails, type ChannelProviderReadDiagnostic } from "./channel-provider-read";
 import { ebayListingIssueSchema, type EbayListingIssue } from "./types/ebay-listing-issue";
+import type { EbayPolicySource } from "./ebay-business-policies";
 import type { EbayListingSyncJob } from "./types/ebay-listing-sync";
+import { channelListingValidationSchema, type ChannelListingValidation } from "./channel-listing-validation";
+import { channelOperationFailureSchema } from "./channel-operation-failure";
+import type { z } from "zod";
 
 function isAutomaticResponseRecovery(code: string | null | undefined, state: string | undefined): boolean {
   return state === "recovering" && (code === "EBAY_QUANTITY_RESPONSE_UNCERTAIN" || code === "QUANTITY_PROVIDER_REQUEST_TIMEOUT");
@@ -24,8 +29,10 @@ export function resolveEbayListingJobIssue(job: EbayListingSyncJob): EbayListing
   // Replace older cached quantity-only copy without changing the saved outcome.
   if (isUnresolvedListingRequest(code)) return resolveEbayListingIssue({ code,
     message: job.message, productId: job.productId, jobId: job.id, state: job.state, operation: job.operation });
+  if (job.providerRead || code === "PUBLICATION_RECOVERY_REVIEW_REQUIRED" || code?.startsWith("EBAY_REGISTRATION_"))
+    return resolveEbayListingIssue({ code, productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead, readRetryPaused: job.readRetryPaused });
   return job.issue ?? resolveEbayListingIssue({ code: job.code, message: job.message,
-    productId: job.productId, jobId: job.id, state: job.state });
+    productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead, readRetryPaused: job.readRetryPaused });
 }
 
 export interface EbayListingIssueInput {
@@ -36,6 +43,11 @@ export interface EbayListingIssueInput {
   state?: string;
   operation?: EbayListingSyncJob["operation"];
   quantityBlockerCodes?: readonly string[];
+  policySource?: EbayPolicySource;
+  providerRead?: ChannelProviderReadDiagnostic | null;
+  readRetryPaused?: boolean;
+  validation?: ChannelListingValidation;
+  failure?: z.infer<typeof channelOperationFailureSchema>;
 }
 
 /** One presentation contract for API results, saved work, and older server responses.
@@ -43,6 +55,12 @@ export interface EbayListingIssueInput {
 export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListingIssue {
   const code = input.code && /^[A-Z0-9_]{1,100}$/.test(input.code) ? input.code : "EBAY_LISTING_OPERATION_FAILED";
   const automaticResponseRecovery = isAutomaticResponseRecovery(code, input.state);
+  const parsedRead = channelProviderReadDiagnosticSchema.safeParse(input.providerRead);
+  const readFailure = parsedRead.success ? parsedRead.data : null;
+  const isObservationReadFailure = readFailure?.kind !== "refused" && (readFailure !== null
+    || ["EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID", "EBAY_REGISTRATION_PROVIDER_RESPONSE_TOO_LARGE",
+      "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED", "EBAY_REGISTRATION_PROVIDER_READ_TIMEOUT",
+      "EBAY_REGISTRATION_PROVIDER_READ_UNAVAILABLE", "EBAY_REGISTRATION_PROVIDER_READ_FAILED"].includes(code));
   const productPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/products/${input.productId}` : "/channels/ebay";
   const inventoryPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/channels/inventory?product=${input.productId}` : "/channels/inventory";
   const reference = input.jobId && /^[a-f0-9-]{36}$/i.test(input.jobId) ? input.jobId : undefined;
@@ -52,15 +70,70 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     || input.code?.startsWith("CANONICAL_CHANNEL_QUANTITY_");
   // Older jobs saved generic contention prose and described invalid prepared
   // drafts as mapping faults. Present the classified cause and current action.
-  const message = isFeedReadIssue || automaticResponseRecovery || (input.state === "recovering" && isUnresolvedListingRequest(code))
+  const message = isFeedReadIssue || automaticResponseRecovery || isObservationReadFailure || (input.state === "recovering" && isUnresolvedListingRequest(code))
     || ["INVENTORY_PUBLICATION_TARGET_BUSY", "EBAY_SYNC_DRAFT_SCOPE_INVALID", "CANONICAL_PUBLICATION_MAPPING_MISSING", "PUBLICATION_AUTOMATIC_RECOVERY_FAILED"].includes(code)
     ? undefined : safeListingDiagnostic(input.message);
   const issue = (title: string, fallback: string, nextStep: string, retryable: boolean,
     kind: EbayListingIssue["action"]["kind"], label: string, href?: string): EbayListingIssue =>
     ebayListingIssueSchema.parse({ code, title, message: message || fallback, nextStep, retryable,
       action: { kind, label, ...(href ? { href } : {}) }, ...(reference ? { reference } : {}),
-      ...(input.productId ? { details: [{ label: "Product ID", value: String(input.productId) }] } : {}) });
+      details: [...(input.productId ? [{ label: "Product ID", value: String(input.productId) }] : []),
+        ...(readFailure ? providerReadDetails(readFailure) : []),
+        ...(input.failure ? [{ label: "Failure reference", value: input.failure.fingerprint },
+          ...(input.failure.locations ?? []).map(value => ({ label: "Code location", value }))] : [])] });
 
+  if (code === "CHANNEL_LISTING_VALIDATION_FAILED") {
+    const parsed = channelListingValidationSchema.safeParse(input.validation);
+    const validation = parsed.success ? parsed.data : undefined;
+    if (validation && ["package_weight", "package_dimensions", "package_type"].includes(validation.field)) {
+      const field = validation.field === "package_weight" ? "package weight" : validation.field === "package_dimensions" ? "package dimensions" : "shipping package type";
+      const result = issue(`Add the variant's ${field}`, `The selected shipping policy needs valid ${field}${validation.variantSku ? ` for ${validation.variantSku}` : ""}.`,
+        `Edit the affected variant and save its ${field}${validation.field === "package_dimensions" ? " (length, width and height)" : ""}. Then Sync this product again. Existing channel package data is preserved when catalog fields are unspecified.`,
+        false, "edit_listing", "Open product variants", `${productPath}?tab=variants${validation.variantId ? `&variantId=${validation.variantId}` : ""}`);
+      return { ...result, details: [...result.details ?? [],
+        ...(validation.variantSku ? [{ label: "Variant SKU", value: validation.variantSku }] : []),
+        ...(validation.variantId ? [{ label: "Variant ID", value: String(validation.variantId) }] : [])] };
+    }
+    return issue("Correct the listing source", "The saved listing input is missing or invalid.",
+      "Correct the reported price, policy or identity in the product's channel settings, then Sync this product again.",
+      false, "edit_listing", "Open product settings", validation?.field === "variant_identity" ? `${productPath}?tab=variants` : `${productPath}?tab=channels`);
+  }
+
+  if (code === "PUBLICATION_RECOVERY_REVIEW_REQUIRED")
+    return issue("An earlier update needs a recovery decision",
+      "An older request has no reliable final receipt. Echelon cannot safely resume this listing without reviewing that unknown outcome.",
+      "Open recovery, review the affected listing and authorize a fresh update using current values. The old outcome remains unknown in the audit history.",
+      false, "check_recovery", "Review recovery");
+  if (code === "EBAY_PACKAGE_READ_INVALID")
+    return issue("Review the listing's package data", "eBay returned package data that could not be safely preserved. No package replacement was sent.",
+      "Save complete, valid package facts on the affected variant. If a provider-only package setting is invalid, correct it on the eBay listing, then retry Sync.",
+      false, "edit_listing", "Open product variants", `${productPath}?tab=variants`);
+  if (readFailure?.kind === "refused") return issue("The channel refused the listing check",
+    "Echelon received a refusal when reading this listing. No successful listing check was recorded.",
+    readFailure.httpStatus === 401 || readFailure.httpStatus === 403
+      ? "Open connection settings and check the seller authorization, then retry Sync."
+      : "Review the saved read details before retrying. The endpoint and HTTP status identify the refused request.",
+    readFailure.httpStatus !== 401 && readFailure.httpStatus !== 403, readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "reconnect" : "retry_sync",
+    readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "Open connection settings" : "Retry Sync",
+    readFailure.httpStatus === 401 || readFailure.httpStatus === 403 ? "/channels/ebay#connection" : undefined);
+  if (isObservationReadFailure) {
+    const retrying = !input.readRetryPaused && (input.state === "recovering" || (input.state === "awaiting_evidence" && input.readRetryPaused === false));
+    const result = issue(input.readRetryPaused ? "Listing check paused" : retrying ? "Retrying the listing check" : "The listing check could not finish",
+      "Echelon could not read a complete, valid listing response. This does not establish that the product or its settings are wrong.",
+      retrying ? "The saved update will check again automatically before making another change. Its existing request history stays protected."
+        : "Retry Sync to check the listing again. If it still cannot be read, copy the technical details for investigation. Recovery details also show any earlier unresolved requests.",
+      !retrying, retrying ? "check_status" : "retry_sync", retrying ? "View update status" : "Retry Sync");
+    return ebayListingIssueSchema.parse({ ...result, diagnosticAction: { kind: "check_recovery", label: "Review earlier requests" } });
+  }
+
+  if (code === "RETAIL_PRICE_SOURCE_REQUIRED" || code === "RETAIL_PRICE_IDENTITY_MISSING")
+    return issue("Choose the retail price source", "More than one retail variant matches this SKU, so Echelon cannot safely choose its price.",
+      "Open Catalog variants, find this SKU and use Link Shopify variant to select the exact retail variant. Then retry Sync.",
+      false, "edit_listing", "Open Catalog variants", "/catalog/variants");
+  if (["CHANNEL_PRICE_AMBIGUOUS", "CHANNEL_PRICE_INVALID", "CHANNEL_PRICING_RULE_AMBIGUOUS", "CHANNEL_PRICING_RULE_INVALID", "RETAIL_PRICE_INVALID", "CATALOG_PRICE_INVALID"].includes(code))
+    return issue("Correct the listing price source", "The selected channel, retail or Catalog price is invalid or has conflicting rules.",
+      "Correct the price source named in this message or remove the conflicting channel pricing rule. Then retry Sync; no price was guessed.",
+      false, "edit_listing", "Review product pricing", productPath);
   if (code === "EBAY_LISTING_FEED_UNAVAILABLE")
     return issue("Listings could not be loaded", "Echelon could not read the listing feed. Listing status and quantities are unavailable.",
       "Use Reload listings to try the read again. If it still fails, copy the diagnostic reference for an administrator to investigate the failed read.",
@@ -69,6 +142,10 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Inventory could not be loaded", "Echelon could not read this product's current eBay quantity. Other products can still be viewed.",
       "Use Reload inventory to try this read again. If it still fails, copy the diagnostic reference for an administrator. Publishing checks current stock separately.",
       false, "contact_support", "Copy diagnostic details");
+  if (code === "CHANNEL_LISTING_INVENTORY_SCOPE_CHANGED")
+    return issue("Reload the listing variants", "The inventory response does not match the variants currently displayed for this product.",
+      "Use Reload listings to read the current variants and their inventory together. No listing update is sent.",
+      false, "edit_listing", "Open listing feed", "/channels/ebay");
   if (code === "EBAY_FEED_QUANTITY_MISSING")
     return issue("A variant has no stock destination quantity", "The inventory reader did not return a quantity for one or more selected, inventory-managed variants in this product.",
       "Open inventory settings for this product and check the eBay destination and variant eligibility. After correcting the reported setup, use Reload inventory. An unavailable quantity is not zero stock.",
@@ -334,24 +411,48 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       "eBay could not complete a check before publication. Echelon confirmed that no publication request was sent.",
       "Echelon will retry this saved update automatically, using current inventory and pictures. No mapping review is needed for this failure.",
       false, "check_status", "View publishing status");
-  if (["EBAY_SYNC_READBACK_PENDING", "EBAY_PHOTO_READ_FAILED", "EBAY_SYNC_PERSISTENCE_FAILED", "PUBLICATION_RESPONSE_RECOVERY_FAILED",
+  if (["EBAY_SYNC_READBACK_PENDING", "EBAY_SYNC_PACKAGE_CHANGED", "EBAY_PHOTO_READ_FAILED", "EBAY_SYNC_PERSISTENCE_FAILED", "PUBLICATION_RESPONSE_RECOVERY_FAILED",
     "PUBLICATION_SCOPE_BUSY", "PUBLICATION_ADMISSION_CAPACITY_BUSY", "QUANTITY_PUBLICATION_DRAIN_BUSY", "EBAY_SYNC_ADMISSION_UNSAVED",
     "EBAY_SYNC_ADMISSION_FAILED", "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED", "EBAY_AUTH_UNAVAILABLE", "EBAY_AUTH_REFRESH_SUPERSEDED",
-    "EBAY_LISTING_SYNC_FAILED", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED"].includes(code))
+    "EBAY_LISTING_SYNC_FAILED", "DATABASE_POOL_ACQUIRE_TIMEOUT", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED"].includes(code))
     return issue(input.state === "recovering" ? "Echelon is recovering this update" : "The update could not finish",
-      "A temporary provider or local persistence failure interrupted the update.",
+      code === "EBAY_LISTING_SYNC_FAILED" ? "An unexpected failure interrupted the update. Its saved diagnostic reference identifies the failure for investigation."
+        : "A provider or local persistence failure interrupted the update.",
       input.state === "recovering" ? "The saved update will retry automatically. Open its status to see the latest result."
         : "Retry this product. Echelon checks the saved request and existing listing before sending another update.",
       input.state !== "recovering", input.state === "recovering" ? "check_status" : "retry_sync",
       input.state === "recovering" ? "View update status" : "Retry this product");
+  if (code === "CHANNEL_SYNC_PRODUCT_INACTIVE")
+    return issue("Activate this product", "The catalog product is archived or inactive.",
+      "Open the product, activate it, then return here and Sync.", false, "edit_listing", "Open product", productPath);
+  if (code === "CHANNEL_SYNC_PRODUCT_EXCLUDED")
+    return issue("Include this product", "This product or its product type is excluded from the channel.",
+      "Enable the product and its type in this listing feed. Including the product saves a sync request automatically.",
+      false, "edit_listing", "Review inclusion", "/channels/ebay");
+  if (code === "CHANNEL_SYNC_VARIANTS_REQUIRED")
+    return issue("Include a sellable variant", "No active, sellable variants are included for this product.",
+      "Open the catalog product to add or activate a sellable variant. Then review its channel inclusion and Sync.",
+      false, "edit_listing", "Review variants", `${productPath}?tab=variants`);
   if (["EBAY_SYNC_PRODUCT_NOT_ELIGIBLE", "EBAY_SYNC_CONTENT_SCOPE_EMPTY"].includes(code))
     return issue("Review which variants are included", "This product has no eligible existing listing update.",
-      "Check the product and variant inclusion switches in the eBay listing feed. Enable the intended sellable variants; use Publish for a product without an existing eBay listing.",
+      "Check the product and variant inclusion switches in the eBay listing feed. Enable the intended sellable variants, then Sync. Sync creates a missing listing after checking the channel and updates an existing listing.",
       false, "edit_listing", "Open listing feed", "/channels/ebay");
-  if (code === "EBAY_SHIPPING_POLICY_REJECTED")
-    return issue("eBay rejected the shipping policy", "eBay rejected this listing's selected shipping policy. This update did not complete.",
-      "Open business policies and check Shipping. A product type, product or variant Fulfillment override may supply a different policy. Correct the rejected policy, save, then Sync this product to continue with its current inventory and pictures.",
-      false, "edit_listing", "Open business policies", "/channels/ebay#business-policies");
+  if (["EBAY_SHIPPING_POLICY_REJECTED", "EBAY_POLICY_UNAVAILABLE", "EBAY_POLICY_REQUIRED"].includes(code)) {
+    const source = input.policySource;
+    const productId = source?.productId ?? input.productId;
+    const href = source?.scope === "store" ? "/channels/ebay#business-policies"
+      : source?.scope === "category" && source.productTypeSlug ? `/channels/ebay#ebay-category-policies-${encodeURIComponent(source.productTypeSlug)}`
+      : source?.scope === "variant" && source.variantId ? `/channels/ebay#ebay-variant-policies-${source.variantId}`
+      : productId ? `/channels/ebay#ebay-product-policies-${productId}` : "/channels/ebay#business-policies";
+    return issue(code === "EBAY_SHIPPING_POLICY_REJECTED" ? "eBay rejected the shipping policy" : "Review the saved eBay policy",
+      "The selected business policy is unavailable or was rejected by eBay. This update did not complete.",
+      "Open policy settings and review the saved selection. An unavailable saved policy remains active until you change it. Choose an available policy or inherit the default, save, then Sync this product.",
+      false, "edit_listing", "Open policy settings", href);
+  }
+  if (["EBAY_POLICY_CATALOG_UNAVAILABLE", "EBAY_POLICY_SCOPE_CHANGED", "EBAY_POLICY_STALE_EDIT"].includes(code))
+    return issue("Policy settings need a fresh check", "Echelon could not verify the current policy settings.",
+      "Refresh the available policies and saved settings, review your changes, then save again. Your saved policies have not been replaced.",
+      false, "edit_listing", "Open policy settings", "/channels/ebay#business-policies");
   if (["EBAY_QUANTITY_REJECTED", "EBAY_LISTING_VALIDATION_FAILED", "EBAY_LISTING_PREFLIGHT_FAILED"].includes(code))
     return issue("Listing details need attention", "The listing does not meet a required eBay or inventory condition.",
       "Review the specific requirement above. Open this product's listing settings to correct its category, item specifics, policies or availability, then retry.",

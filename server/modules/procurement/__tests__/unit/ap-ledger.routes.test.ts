@@ -1,3 +1,5 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
+import { DocumentNumberError } from "../../../../platform/document-numbering/document-number";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -12,6 +14,8 @@ const mocks = vi.hoisted(() => {
     requireIdempotency: vi.fn(() => idempotencyMiddleware),
     apLedger: {
       listInvoices: vi.fn(),
+      listInvoiceWorkList: vi.fn(),
+      listPaymentWorkList: vi.fn(),
       generateInvoiceNumber: vi.fn(),
       createInvoice: vi.fn(),
       getInvoiceById: vi.fn(),
@@ -41,6 +45,7 @@ const mocks = vi.hoisted(() => {
     apPaymentCommands: {
       recordPayment: vi.fn(),
       voidPayment: vi.fn(),
+      applyPayment: vi.fn(),
     },
     apInvoiceCommands: {
       approveInvoice: vi.fn(),
@@ -111,7 +116,7 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 }
 
 async function requestJson(baseUrl: string, method: string, path: string, body?: any) {
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await requestLocalHttp(`${baseUrl}${path}`, {
     method,
     headers: { "content-type": "application/json", "idempotency-key": "test-key" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -135,6 +140,35 @@ describe("AP ledger routes", () => {
   afterEach(async () => {
     if (server) await server.close();
     server = undefined;
+  });
+
+  it.each([
+    ["vendor-invoices", "listInvoiceWorkList"], ["ap-payments", "listPaymentWorkList"],
+  ] as const)("serves the %s work list before the record route with validated paging", async (path, method) => {
+    const page = { items: [], total: 0, limit: 20, offset: 200, nextOffset: null };
+    mocks.apLedger[method].mockResolvedValue(page);
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "GET", `/api/${path}/work-list?vendorId=6&limit=20&offset=200&search=older`);
+    expect(response).toMatchObject({ status: 200, body: page });
+    expect(mocks.apLedger[method].mock.calls[0][0]).toMatchObject({ vendorId: 6, limit: 20, offset: 200, search: "older" });
+    expect(mocks.apLedger.getInvoiceById).not.toHaveBeenCalled(); expect(mocks.apLedger.getPaymentById).not.toHaveBeenCalled();
+  });
+  it.each(["vendor-invoices", "ap-payments"])("rejects invalid or unauthorized %s work-list reads without invoking a read owner", async path => {
+    server = await startServer(buildApp());
+    expect((await requestJson(server.url, "GET", `/api/${path}/work-list?limit=-1`)).status).toBe(400);
+    mocks.deniedPermission = "purchasing:view";
+    expect((await requestJson(server.url, "GET", `/api/${path}/work-list`)).status).toBe(403);
+    expect(mocks.apLedger.listInvoiceWorkList).not.toHaveBeenCalled(); expect(mocks.apLedger.listPaymentWorkList).not.toHaveBeenCalled();
+  });
+  it("reports failed work-list reads as unavailable without exposing database messages", async () => {
+    mocks.apLedger.listInvoiceWorkList.mockRejectedValue(new Error("Internal connection detail"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      server = await startServer(buildApp());
+      const response = await requestJson(server.url, "GET", "/api/vendor-invoices/work-list");
+      expect(response).toMatchObject({ status: 500, body: { details: { code: "AP_WORK_LIST_READ_FAILED" } } });
+      expect(JSON.stringify(response.body)).not.toContain("Internal connection detail"); expect(log).toHaveBeenCalled();
+    } finally { log.mockRestore(); }
   });
 
   it("keeps legacy idempotency only on AP writes not yet using the transactional ledger", () => {
@@ -165,7 +199,7 @@ describe("AP ledger routes", () => {
 
   it("requires a retained replacement idempotency key before dispatch", async () => {
     server = await startServer(buildApp());
-    const response = await fetch(`${server.url}/api/vendor-invoices/71/replacement`, {
+    const response = await requestLocalHttp(`${server.url}/api/vendor-invoices/71/replacement`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedVersion: "a".repeat(64), reason: "Correction" }),
     });
     expect(response.status).toBe(400);
@@ -207,6 +241,23 @@ describe("AP ledger routes", () => {
     });
     expect(response).toMatchObject({ status: 400, body: { details: { code: "AP_PAYMENT_STATUS_INVALID" } } });
     expect(mocks.apPaymentCommands.recordPayment.mock.calls[0][0].payment.status).toBe("scheduled");
+  });
+
+  it("returns a read-only invoice suggestion without invoking a writer", async () => {
+    mocks.apLedger.generateInvoiceNumber.mockResolvedValue("INV-20311025-1001");
+    server = await startServer(buildApp());
+    expect(await requestJson(server.url, "GET", "/api/vendor-invoices/next-number"))
+      .toMatchObject({ status: 200, body: { invoiceNumber: "INV-20311025-1001" } });
+    expect(mocks.apLedger.createInvoice).not.toHaveBeenCalled();
+    expect(mocks.idempotencyMiddleware).not.toHaveBeenCalled();
+  });
+
+  it("reports exhausted invoice suggestions as a specific review conflict", async () => {
+    mocks.apLedger.generateInvoiceNumber.mockRejectedValue(new DocumentNumberError("DOCUMENT_NUMBER_EXHAUSTED", "No invoice suggestion remains for this date."));
+    server = await startServer(buildApp());
+    expect(await requestJson(server.url, "GET", "/api/vendor-invoices/next-number"))
+      .toMatchObject({ status: 409, body: { details: { code: "DOCUMENT_NUMBER_EXHAUSTED" } } });
+    expect(mocks.apLedger.createInvoice).not.toHaveBeenCalled();
   });
 
   it("lists vendor invoices with parsed filters", async () => {
@@ -417,6 +468,7 @@ describe("AP ledger routes", () => {
       payment: {
         vendorId: 4,
         paymentDate: new Date("2026-05-16T12:00:00.000Z"),
+        paymentCalendarDate: null,
         paymentMethod: "ach",
         totalAmountCents: 2500,
         allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
@@ -429,6 +481,41 @@ describe("AP ledger routes", () => {
       routeTemplate: "/api/ap-payments",
     }));
     expect(body).toEqual({ id: 21, paymentNumber: "PAY-21" });
+  });
+
+  it("stores a selected payment calendar date separately from its compatibility timestamp", async () => {
+    mocks.apPaymentCommands.recordPayment.mockResolvedValue({ commandId: 91, replayed: false, httpStatus: 201, body: { id: 21 }, terminalState: "succeeded" });
+    server = await startServer(buildApp());
+    expect((await requestJson(server.url, "POST", "/api/ap-payments", { vendorId: 4, paymentDate: "2026-10-01", paymentMethod: "ach", totalAmountCents: 2500 })).status).toBe(201);
+    expect(mocks.apPaymentCommands.recordPayment.mock.calls[0][0].payment).toMatchObject({ paymentCalendarDate: "2026-10-01", paymentDate: new Date("2026-10-01T00:00:00.000Z") });
+  });
+  it.each(["2026-02-30", "2026-13-01", "not a date", "10/1/2026"])("passes invalid payment date %s to the durable rejection owner", async paymentDate => {
+    mocks.apPaymentCommands.recordPayment.mockResolvedValue({ commandId: 91, replayed: false, terminalState: "rejected", httpStatus: 400,
+      body: { error: "Invalid payment date", details: { code: "AP_PAYMENT_DATE_INVALID", paymentCommandOutcome: "rejected", idempotencyKey: "test-key" } } });
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "POST", "/api/ap-payments", { vendorId: 4, paymentDate, paymentMethod: "ach", totalAmountCents: 2500 });
+    expect(response).toMatchObject({ status: 400, body: { details: { code: "AP_PAYMENT_DATE_INVALID" } } });
+    expect(mocks.apPaymentCommands.recordPayment).toHaveBeenCalledOnce();
+    expect(Number.isNaN(mocks.apPaymentCommands.recordPayment.mock.calls[0][0].payment.paymentDate.getTime())).toBe(true);
+    expect(response.body.details.paymentCommandOutcome).toBe("rejected");
+  });
+  it("dispatches reviewed existing-payment application through the same durable owner", async () => {
+    const body = { expectedVersion: "a".repeat(64), allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 500 }], reason: "Supplier billed deposit" };
+    mocks.apPaymentCommands.applyPayment.mockResolvedValue({ commandId: 93, replayed: true, httpStatus: 200, body: { command: "apply_payment", paymentId: 21 }, terminalState: "succeeded" });
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "POST", "/api/ap-payments/21/applications", body);
+    expect(response).toMatchObject({ status: 200, idempotencyReplayed: "true", body: { command: "apply_payment", paymentId: 21 } });
+    expect(mocks.apPaymentCommands.applyPayment).toHaveBeenCalledWith(21, { application: body, userId: "test-user" }, expect.objectContaining({ actorId: "test-user", resourceKey: "ap_payment:21", commandName: "ap.payment.apply" }));
+  });
+  it("does not submit applications without purchasing approval", async () => {
+    mocks.deniedPermission = "purchasing:approve"; server = await startServer(buildApp());
+    expect((await requestJson(server.url, "POST", "/api/ap-payments/21/applications", {})).status).toBe(403);
+    expect(mocks.apPaymentCommands.applyPayment).not.toHaveBeenCalled();
+  });
+  it.each(["0", "-1", "1.5", "2147483648", "invalid"])("rejects invalid application payment identity %s", async id => {
+    server = await startServer(buildApp());
+    expect((await requestJson(server.url, "POST", `/api/ap-payments/${id}/applications`, {})).status).toBe(400);
+    expect(mocks.apPaymentCommands.applyPayment).not.toHaveBeenCalled();
   });
 
   it("dispatches payment voids through the AP command boundary", async () => {

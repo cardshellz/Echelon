@@ -215,6 +215,7 @@ export const productVariants = catalogSchema.table("product_variants", {
   // string; readers coerce via shared/utils/measurements.numericToNumber.
   weightGrams: numeric("weight_grams", { precision: 10, scale: 2 }),
   lengthMm: numeric("length_mm", { precision: 10, scale: 2 }),
+  shippingPackageType: varchar("shipping_package_type", { length: 30 }).$type<import("../catalog/shipping-package").ShippingPackageType>(),
   widthMm: numeric("width_mm", { precision: 10, scale: 2 }),
   heightMm: numeric("height_mm", { precision: 10, scale: 2 }),
   // SIOC: parcel = the item's own packaging (no outer box). Canonical home

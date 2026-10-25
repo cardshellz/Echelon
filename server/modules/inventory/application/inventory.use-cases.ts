@@ -1,3 +1,5 @@
+import type { ReservedInventoryTransferOwner, ReservedTransferPlan } from "../../inventory-planning/application/reserved-inventory-transfer.port";
+import { repointCanonicalTransferPickLines } from "../../wms/order-item-commands";
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
 import { assertShipmentNotRetired } from "../../inventory-planning/infrastructure/inventory-cutover-retired-work";
 import { assertNoOpenPickCorrection } from "../../wms/pick-correction.repository";
@@ -26,10 +28,9 @@ import {
 } from "../domain/replenishment-execution.domain";
 import { InventoryQuantityError } from "../domain/quantity-ledger";
 
-export class FreezeViolationError extends Error {
-  code = "LOCATION_FROZEN";
+export class FreezeViolationError extends AppError {
   constructor(locationId: number) {
-    super(`Location ${locationId} is frozen for cycle counting — mutation blocked`);
+    super(`Location ${locationId} is frozen for cycle counting — mutation blocked`, "LOCATION_FROZEN",409,{locationId});
   }
 }
 
@@ -248,6 +249,7 @@ export class InventoryUseCases {
     private readonly lotService: InventoryLotService | null = null,
     private readonly cogsService: COGSService | null = null,
     private readonly clock: () => Date = () => new Date(),
+    private readonly reservedTransferOwner: ReservedInventoryTransferOwner | null = null,
   ) {}
 
   private async assertNotFrozen(locationId: number, dbh?: any): Promise<void> {
@@ -1995,6 +1997,7 @@ export class InventoryUseCases {
     }
     if (params.fromLocationId === params.toLocationId) throw new Error("Source and destination must differ");
 
+    const occurredAt = z.date().parse(this.clock());
     let reservedMoved = 0;
     let orderItemsRepointed = 0;
     let replayed = false;
@@ -2010,10 +2013,15 @@ export class InventoryUseCases {
         transferReceiptId = result.transferReceiptId ?? null; reservedMoved = result.reservedMoved; orderItemsRepointed = result.orderItemsRepointed; replayed = true; return;
       }
       await lockInventoryCostGraph(tx);
+      let reservedPlan: ReservedTransferPlan | null = null;
+      if (quantityPosting && params.moveReserved) {
+        if (!this.reservedTransferOwner) throw new AppError("The canonical reserved-transfer owner is unavailable", "TRANSFER_OWNER_UNAVAILABLE", 503);
+        await this.reservedTransferOwner.lockSource(quantityTransactionFromDrizzle(tx), params);
+      }
       await tx.execute(sql`SELECT id FROM catalog.product_variants WHERE id=${params.productVariantId} FOR SHARE`);
       const [transferVariant] = await tx.select().from(productVariants).where(eq(productVariants.id, params.productVariantId)).limit(1);
       if (!transferVariant || !Number.isSafeInteger(transferVariant.unitsPerVariant) || transferVariant.unitsPerVariant <= 0) throw new IntegrityError("Transfer variant has no valid unit basis", { productVariantId: params.productVariantId });
-      if (params.crossWarehouseArrivalConfirmed) {
+      {
         // Pin location identity/freeze state until both sides of the move commit.
         await tx.execute(sql`SELECT id FROM warehouse.warehouse_locations
           WHERE id IN (${params.fromLocationId}, ${params.toLocationId}) ORDER BY id FOR SHARE`);
@@ -2064,7 +2072,7 @@ export class InventoryUseCases {
       );
 
       if (!sourceLevel || sourceLevel.variantQty < params.qty) {
-        throw new Error(`Insufficient on-hand at source: need ${params.qty}, have ${sourceLevel?.variantQty || 0}`);
+        throw new AppError(`Insufficient on-hand at source: need ${params.qty}, have ${sourceLevel?.variantQty || 0}`, "TRANSFER_SOURCE_QUANTITY_SHORTFALL", 409);
       }
 
       // Available = on-hand minus reserved. Moving more than `available` would
@@ -2078,10 +2086,10 @@ export class InventoryUseCases {
       let reservedToMove = 0;
       if (available < params.qty) {
         if (!params.moveReserved) {
-          const err: any = new Error(
+          const err = new AppError(
             `Insufficient available at source: need ${params.qty}, have ${available} available (${reserved} reserved)`,
+            "TRANSFER_BLOCKED_BY_RESERVATION", 409,
           );
-          err.code = "TRANSFER_BLOCKED_BY_RESERVATION";
           err.context = {
             needed: params.qty,
             onHandAtSource: sourceLevel.variantQty,
@@ -2102,7 +2110,19 @@ export class InventoryUseCases {
       // already picked at the source bin, refuse and ask the user to finish or
       // cancel that pick first.
       if (reservedToMove > 0) {
-        if (quantityPosting) throw new IntegrityError("A transfer cannot relocate canonical claim ownership; release and replan the claim first");
+        if (quantityPosting) {
+          if (fromLoc.warehouseId !== toLoc.warehouseId) throw new AppError("Reserved order stock must remain in its order's warehouse.", "TRANSFER_RESERVED_WAREHOUSE_MISMATCH", 409);
+          if (toLoc.isPickable !== 1) {
+            throw new AppError("Reserved order stock must move to a pickable destination bin.", "TRANSFER_RESERVED_DESTINATION_UNAVAILABLE", 409);
+          }
+          reservedPlan = await this.reservedTransferOwner!.plan(quantityTransactionFromDrizzle(tx), {
+            productVariantId: params.productVariantId, fromLocationId: params.fromLocationId, toLocationId: params.toLocationId, sourceLevelId: sourceLevel.id, warehouseId: fromLoc.warehouseId,
+            quantity: params.qty, onHand: sourceLevel.variantQty, reserved,
+          });
+          reservedToMove = reservedPlan.reservedQuantity;
+        }
+      }
+      if (reservedToMove > 0 && !quantityPosting) {
         // order_items has no variant FK; it links to a variant by SKU
         // (catalog.product_variants.sku). Match through that.
         const conflict = await tx.execute(sql`
@@ -2158,7 +2178,7 @@ export class InventoryUseCases {
       // Re-point eligible pending order lines so the picker is sent to the new
       // bin. Only fully un-started lines (picked_quantity = 0, status 'pending')
       // on live orders are moved; mid-pick lines were rejected above.
-      if (reservedToMove > 0) {
+      if (reservedToMove > 0 && !quantityPosting) {
         orderItemsRepointed = await repointPendingWmsOrderItemsForInventoryTransfer(tx, {
           productVariantId: params.productVariantId,
           fromLocationCode: fromLoc.code,
@@ -2168,18 +2188,32 @@ export class InventoryUseCases {
       }
 
       if (this.lotService) {
+        const reservedByLot = new Map<number, number>();
+        for (const allocation of reservedPlan?.allocations ?? []) {
+          reservedByLot.set(allocation.sourceLotId, (reservedByLot.get(allocation.sourceLotId) ?? 0) + allocation.quantity);
+        }
         const lotSvc = this.lotService.withTx(tx);
-        await lotSvc.transferLots({
+        const lotMovements = await lotSvc.transferLots({
           productVariantId: params.productVariantId,
           fromLocationId: params.fromLocationId,
           toLocationId: params.toLocationId,
           qty: params.qty,
           notes: params.notes,
           actorId: params.userId || "system:inventory_transfer",
-          occurredAt: this.clock(),
+          occurredAt,
           operationKey: params.referenceId ? `${params.referenceType ?? "internal"}:${params.referenceId}` : undefined,
           quantityPosting,
+          reservedLots: [...reservedByLot].map(([inventoryLotId, quantity]) => ({ inventoryLotId, quantity })),
         });
+        if (reservedPlan) {
+          await this.reservedTransferOwner!.relocate(quantityTransactionFromDrizzle(tx), {
+            plan: reservedPlan, lots: lotMovements, destinationLevelId: targetLevel.id, warehouseId: toLoc.warehouseId,
+            commandKey: quantityKey!, actor: params.userId || "system:inventory_transfer", occurredAt,
+          });
+          orderItemsRepointed = await repointCanonicalTransferPickLines(tx, {
+            orderItemIds: reservedPlan.orderItemIds, destinationCode: toLoc.code, destinationZone: toLoc.zone ?? "U",
+          });
+        }
       }
 
       const transferReceipt = await this.storage.createInventoryTransaction({
@@ -2202,7 +2236,7 @@ export class InventoryUseCases {
       if (quantityPosting) await quantityPosting.post({
         idempotencyKey: quantityKey!, kind: "transfer",
         actor: params.userId || "system:inventory_transfer", reason: params.notes || "Warehouse stock transfer",
-        reference: { type: "inventory_transaction", id: String(transferReceipt.id) }, occurredAt: this.clock().toISOString(),
+        reference: { type: "inventory_transaction", id: String(transferReceipt.id) }, occurredAt: occurredAt.toISOString(),
       });
 
       // Separate ledger row for the reserved movement so a single order's audit
@@ -2617,7 +2651,8 @@ export class InventoryUseCases {
       this.storage,
       this.lotService,
       this.cogsService,
-      this.clock
+      this.clock,
+      this.reservedTransferOwner,
     );
     // Transaction-scoped clones must publish through the same dispatcher as
     // the root service. In particular, deferred post-commit adjustment effects

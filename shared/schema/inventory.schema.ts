@@ -1012,7 +1012,10 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   batchNumber: varchar("batch_number", { length: 100 }),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  // Number allocation includes depleted and expired lot history.
+  index("inventory_lots_lot_number_prefix_idx").on(table.lotNumber.op("varchar_pattern_ops")),
+]);
 
 export const insertInventoryLotSchema = createInsertSchema(inventoryLots).omit({
   id: true,

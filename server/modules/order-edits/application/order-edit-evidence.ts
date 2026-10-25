@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
+  orderEditFinancialsSchema,
+  type OrderEditFinancials,
+} from "@shared/order-edits/order-edit-financials";
+import { OrderEditError } from "../domain/order-edit-error";
+import {
   matchesOrderEditFinancials,
   equivalentOrderEditFinancialEvidence,
 } from "../domain/order-edit-financials";
@@ -8,9 +13,50 @@ import type {
   OrderEditSnapshot,
   OrderEditQuote,
   OrderEditTransaction,
+  OrderEditRefund,
 } from "./order-edit-provider";
 function hash(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+/** Shopify renumbers application indexes after an edit. The index binds an
+ * allocation within one response; it is not a promotion's durable identity. */
+function discountRuleIdentity(
+  rule: NonNullable<OrderEditSnapshot["discountRules"]>[number],
+): string {
+  const { index: _index, ...terms } = rule;
+  return canonicalJson(terms);
+}
+/** A previous edit's removed rows remain in Shopify. They are not part of a
+ * new quote; omit only rows proven to carry no gross, discount or net amount.
+ * The provider separately verifies that every active native row is expected. */
+export function financialsForQuotedLines(
+  financials: OrderEditFinancials | undefined,
+  lines: OrderEditQuote["lines"],
+): OrderEditFinancials | undefined {
+  if (!financials) return undefined;
+  const expected = new Set(lines.map((line) => line.calculatedLineId));
+  if (
+    expected.size !== lines.length ||
+    financials.lines.some(
+      (line) =>
+        !expected.has(line.id) &&
+        (line.grossCents !== 0 ||
+          line.discountCents !== 0 ||
+          line.netCents !== 0),
+    ) ||
+    lines.some(
+      (line) =>
+        !financials.lines.some((entry) => entry.id === line.calculatedLineId),
+    )
+  )
+    throw new OrderEditError(
+      "QUOTE_FINANCIAL_LINE_MISMATCH",
+      "The quote contains unexpected item amounts.",
+    );
+  return orderEditFinancialsSchema.parse({
+    ...financials,
+    lines: financials.lines.filter((line) => expected.has(line.id)),
+  });
 }
 function matchesShippingService(
   snapshot: OrderEditSnapshot,
@@ -54,6 +100,34 @@ function unresolved(transactions: OrderEditTransaction[]): boolean {
     ["PENDING", "AWAITING_RESPONSE", "UNKNOWN"].includes(entry.status),
   );
 }
+/** Shopify creates zero-value, transaction-free refund records for an order
+ * edit's bookkeeping (observed with shipping replacement). Keep those records
+ * in the snapshot/audit, but do not mistake them for payment movement.
+ * Existing records must remain identical. New refund intents, any amount, or
+ * any transaction (including zero/pending) still prevent unpaid recovery. */
+export function unchangedOrderEditRefundPayments(
+  actual: OrderEditRefund[],
+  baseline: OrderEditRefund[],
+): boolean {
+  const before = new Map(baseline.map((refund) => [refund.id, refund]));
+  const after = new Map(actual.map((refund) => [refund.id, refund]));
+  if (before.size !== baseline.length || after.size !== actual.length)
+    return false;
+  return (
+    baseline.every(
+      (refund) =>
+        after.has(refund.id) &&
+        canonicalJson(after.get(refund.id)) === canonicalJson(refund),
+    ) &&
+    actual.every(
+      (refund) =>
+        before.has(refund.id) ||
+        (refund.note === null &&
+          refund.amountCents === 0 &&
+          refund.transactions.length === 0),
+    )
+  );
+}
 /** Extra pricing evidence stays outside the legacy identity hash, but new operations must still compare it. */
 export function unchangedOrderEditSnapshot(
   actual: OrderEditSnapshot,
@@ -90,17 +164,16 @@ function preservesRecoveryDiscountRules(
           !(
             codeRecovery?.codePricing &&
             rule.targetType === "LINE_ITEM" &&
-            [
-              "AutomaticDiscountApplication",
-              "ManualDiscountApplication",
-            ].includes(rule.type)
+            (rule.type === "ManualDiscountApplication" ||
+              (rule.type === "AutomaticDiscountApplication" &&
+                !codeRecovery.codePricing.lines.some(
+                  (line) => line.preserveAutomaticDiscount,
+                )))
           ),
       )
-      .map((rule) => canonicalJson(rule)),
+      .map(discountRuleIdentity),
   );
-  const actual = new Set(
-    observed.discountRules.map((rule) => canonicalJson(rule)),
-  );
+  const actual = new Set(observed.discountRules.map(discountRuleIdentity));
   if ([...wanted].some((rule) => !actual.has(rule))) return false;
   const originalIds = new Set(baseline.lines.map((line) => line.id));
   const historicalAddedLine = observed.lines.some(
@@ -110,11 +183,12 @@ function preservesRecoveryDiscountRules(
   // Exact active-line amounts and quantities are verified separately before restoration is accepted.
   return observed.discountRules.every(
     (rule) =>
-      wanted.has(canonicalJson(rule)) ||
+      wanted.has(discountRuleIdentity(rule)) ||
       (shippingReplaced &&
         rule.targetType === "SHIPPING_LINE" &&
         baseline.discountRules?.some(
-          (original) => canonicalJson(original) === canonicalJson(rule),
+          (original) =>
+            discountRuleIdentity(original) === discountRuleIdentity(rule),
         )) ||
       (historicalAddedLine &&
         rule.type === "ManualDiscountApplication" &&
@@ -124,7 +198,8 @@ function preservesRecoveryDiscountRules(
         rule.targetType === "LINE_ITEM" &&
         ((rule.type === "AutomaticDiscountApplication" &&
           baseline.discountRules?.some(
-            (original) => canonicalJson(original) === canonicalJson(rule),
+            (original) =>
+              discountRuleIdentity(original) === discountRuleIdentity(rule),
           )) ||
           (rule.type === "ManualDiscountApplication" &&
             [
@@ -219,14 +294,18 @@ export function matchesOrderEditQuote(
                 !(
                   rule.targetType === "LINE_ITEM" &&
                   (quote.codePricing ||
-                    quote.evidence.codeDiscountRecovery === true)
+                    quote.evidence.codeDiscountRecovery === true) &&
+                  !quote.codePricing?.lines.some(
+                    (line) => line.preserveAutomaticDiscount,
+                  )
                 )) ||
               rule.targetType === "SHIPPING_LINE"),
         )
         .some(
           (rule) =>
             !snapshot.discountRules?.some(
-              (observed) => canonicalJson(observed) === canonicalJson(rule),
+              (observed) =>
+                discountRuleIdentity(observed) === discountRuleIdentity(rule),
             ),
         )) ||
     snapshot.shippingCents !== quote.shippingCents ||
@@ -257,7 +336,29 @@ export function matchesOrderEditQuote(
       return false;
     const line = candidates.sort((a, b) => a.id.localeCompare(b.id))[0];
     used.add(line.id);
+    const preservedAutomatic = quote.codePricing?.lines.find(
+      (entry) => entry.id === expected.calculatedLineId,
+    )?.preserveAutomaticDiscount;
+    const preservedNative = quote.codePricing?.lines.find(
+      (entry) => entry.id === expected.calculatedLineId,
+    )?.nativeDiscountCents;
     if (
+      (preservedNative &&
+        (!expected.originalLineId ||
+          !preservesNativeOrderEditLine(
+            snapshot,
+            quote.baseline,
+            expected.originalLineId,
+            expected.quantity,
+          ))) ||
+      (preservedAutomatic &&
+        (!expected.originalLineId ||
+          !preservesAutomaticOrderEditLine(
+            snapshot,
+            quote.baseline,
+            expected.originalLineId,
+            expected.quantity,
+          ))) ||
       line.variantId !== expected.variantId ||
       line.title !== expected.title ||
       line.variantTitle !== expected.variantTitle ||
@@ -280,6 +381,153 @@ export function matchesOrderEditQuote(
     (line) => line.quantity > 0 && !used.has(line.id),
   );
 }
+
+/** Bind preserved automatic pricing to the original native line, rule identities and exact allocation. */
+export function preservesAutomaticOrderEditLine(
+  current: OrderEditSnapshot,
+  baseline: OrderEditSnapshot,
+  originalId: string,
+  quantity: number,
+): boolean {
+  const original = baseline.lines.find((line) => line.id === originalId);
+  const observed = current.lines.find((line) => line.id === originalId);
+  const before = baseline.previewProductDiscounts?.find(
+    (line) => line.lineId === originalId,
+  );
+  const after = current.previewProductDiscounts?.find(
+    (line) => line.lineId === originalId,
+  );
+  const rules = baseline.discountRules?.filter(
+    (rule) =>
+      rule.type === "AutomaticDiscountApplication" &&
+      rule.targetType === "LINE_ITEM",
+  );
+  if (
+    !original ||
+    !observed ||
+    !before ||
+    !after ||
+    !rules?.length ||
+    original.quantity < 1 ||
+    before.automaticCents <= 0 ||
+    observed.quantity !== quantity
+  )
+    return false;
+  return (
+    observed.variantId === original.variantId &&
+    observed.originalUnitPriceCents === original.originalUnitPriceCents &&
+    BigInt(after.automaticCents) * BigInt(original.quantity) ===
+      BigInt(before.automaticCents) * BigInt(quantity) &&
+    BigInt(after.amountCents) * BigInt(original.quantity) ===
+      BigInt(before.amountCents) * BigInt(quantity) &&
+    rules.every((rule) =>
+      current.discountRules?.some(
+        (entry) => discountRuleIdentity(entry) === discountRuleIdentity(rule),
+      ),
+    )
+  );
+}
+/** A used checkout reward stays on the same original row at its original allocation. */
+export function preservesNativeOrderEditLine(
+  current: OrderEditSnapshot,
+  baseline: OrderEditSnapshot,
+  lineId: string,
+  quantity: number,
+): boolean {
+  const original = baseline.lines.find((line) => line.id === lineId);
+  const observed = current.lines.find((line) => line.id === lineId);
+  const before =
+    baseline.nativeDiscountAllocations?.filter(
+      (allocation) => allocation.lineId === lineId,
+    ) ?? [];
+  const after =
+    current.nativeDiscountAllocations?.filter(
+      (allocation) => allocation.lineId === lineId,
+    ) ?? [];
+  if (
+    !original ||
+    !observed ||
+    original.quantity <= 0 ||
+    observed.quantity !== quantity ||
+    observed.variantId !== original.variantId ||
+    observed.originalUnitPriceCents !== original.originalUnitPriceCents ||
+    !before.some((allocation) => allocation.amountCents > 0) ||
+    new Set(before.map((allocation) => allocation.ruleKey)).size !==
+      before.length ||
+    new Set(after.map((allocation) => allocation.ruleKey)).size !==
+      after.length ||
+    before.length !== after.length
+  )
+    return false;
+  return (
+    before.every((allocation) =>
+      after.some(
+        (retained) =>
+          retained.ruleKey === allocation.ruleKey &&
+          BigInt(retained.amountCents) * BigInt(original.quantity) ===
+            BigInt(allocation.amountCents) * BigInt(quantity),
+      ),
+    ) &&
+    (baseline.discountRules ?? [])
+      .filter(
+        (rule) =>
+          rule.type === "DiscountCodeApplication" &&
+          rule.targetType === "LINE_ITEM",
+      )
+      .every((rule) =>
+        current.discountRules?.some(
+          (entry) => discountRuleIdentity(entry) === discountRuleIdentity(rule),
+        ),
+      )
+  );
+}
+
+function recoveredLinePriceMatches(
+  current: OrderEditSnapshot,
+  baseline: OrderEditSnapshot,
+  original: OrderEditSnapshot["lines"][number],
+  observed: OrderEditSnapshot["lines"][number],
+  quote?: OrderEditQuote,
+): boolean {
+  const preservedAutomatic = quote?.codePricing?.lines.some(
+    (line) => line.sourceId === original.id && line.preserveAutomaticDiscount,
+  );
+  const preservedNative = quote?.codePricing?.lines.some(
+    (line) => line.sourceId === original.id && line.nativeDiscountCents,
+  );
+  if (!quote?.codePricing || preservedAutomatic || preservedNative)
+    return (
+      observed.discountedUnitPriceCents === original.discountedUnitPriceCents &&
+      observed.totalCents === original.totalCents &&
+      (!preservedNative ||
+        preservesNativeOrderEditLine(
+          current,
+          baseline,
+          original.id,
+          original.quantity,
+        )) &&
+      (!preservedAutomatic ||
+        preservesAutomaticOrderEditLine(
+          current,
+          baseline,
+          original.id,
+          original.quantity,
+        ))
+    );
+
+  // Legacy/manual code edits restore the original net price using a manual
+  // adjustment. Preserved automatic lines retain their native raw fields.
+  const financial = baseline.financials?.lines.find(
+    (line) => line.id === original.id,
+  );
+  return Boolean(
+    financial &&
+      BigInt(observed.discountedUnitPriceCents) * BigInt(original.quantity) ===
+        BigInt(financial.netCents) &&
+      observed.totalCents === financial.netCents,
+  );
+}
+
 /** A removed added line remains in Shopify at quantity zero. It must not prevent proving the original order was restored. */
 export function isUnpaidRecoveryRestored(
   observed: OrderEditSnapshot,
@@ -327,7 +575,7 @@ export function isUnpaidRecoveryRestored(
     observed.closed ||
     unresolved(observed.transactions) ||
     hash(observed.transactions) !== hash(baseline.transactions) ||
-    hash(observed.refunds) !== hash(baseline.refunds) ||
+    !unchangedOrderEditRefundPayments(observed.refunds, baseline.refunds) ||
     observed.evidence.shippingAddressFingerprint !==
       baseline.evidence.shippingAddressFingerprint
   )
@@ -347,18 +595,13 @@ export function isUnpaidRecoveryRestored(
             entry.quantity === line.quantity &&
             entry.unfulfilledQuantity === line.unfulfilledQuantity &&
             entry.originalUnitPriceCents === line.originalUnitPriceCents &&
-            (originalQuote?.codePricing
-              ? baseline.financials?.lines.some(
-                  (financial) =>
-                    financial.id === line.id &&
-                    BigInt(entry.discountedUnitPriceCents) *
-                      BigInt(line.quantity) ===
-                      BigInt(financial.netCents) &&
-                    entry.totalCents === financial.netCents,
-                )
-              : entry.discountedUnitPriceCents ===
-                  line.discountedUnitPriceCents &&
-                entry.totalCents === line.totalCents),
+            recoveredLinePriceMatches(
+              observed,
+              baseline,
+              line,
+              entry,
+              originalQuote,
+            ),
         ) &&
         (!baseline.financials ||
           observed.financials?.lines.find((entry) => entry.id === line.id)

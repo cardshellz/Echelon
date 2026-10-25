@@ -51,6 +51,11 @@ const detail = (): PoShipmentCostLineDetail => ({
 });
 const supplier = { freightCents: 300, dutyCents: 200 };
 
+it("retains the PO line identity for allocated costs, independently of SKU", () => {
+  const result = buildPoShipmentCosts(source(), supplier, [{ ...detail(), purchaseOrderLineId: 44 }]);
+  expect(result.lines[0]).toMatchObject({ lineId: 30, purchaseOrderLineId: 44, allocatedCents: 600 });
+});
+
 function postedReview(): ShipmentCostException {
   return {
     state: "open", fingerprint: "a".repeat(64), kind: "missing_receipt_history", currency: "USD",

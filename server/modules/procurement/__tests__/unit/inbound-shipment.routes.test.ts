@@ -1,3 +1,5 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
+import { shipmentWorkListQuerySchema } from "@shared/procurement/shipment-work-list";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -32,6 +34,7 @@ vi.mock("../../../../routes/middleware", () => {
   };
   return {
     requirePermission: () => pass,
+    requireAuth: pass,
   };
 });
 
@@ -55,7 +58,7 @@ vi.mock("../../ap-ledger.service", () => ({
   ApLedgerError: class ApLedgerError extends Error {
     statusCode: number;
 
-    constructor(message: string, statusCode = 400) {
+    constructor(message: string, statusCode = 400, public details?: Record<string, unknown>) {
       super(message);
       this.statusCode = statusCode;
     }
@@ -64,10 +67,12 @@ vi.mock("../../ap-ledger.service", () => ({
 
 vi.mock("../../../notifications/notifications.service", () => mocks.notifications);
 
+import { ApLedgerError } from "../../ap-ledger.service";
 import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
 
 function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
   return {
+    getShipmentPage: vi.fn(),
     getShipments: vi.fn(),
     getShipmentsCount: vi.fn(),
     getShipment: vi.fn(),
@@ -120,7 +125,7 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 }
 
 async function requestJson(baseUrl: string, method: string, path: string, body?: any) {
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await requestLocalHttp(`${baseUrl}${path}`, {
     method,
     headers: { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -143,41 +148,38 @@ describe("inbound shipment routes", () => {
     server = undefined;
   });
 
-  it("requires idempotency for shipment cost invoice creation", () => {
+  it("does not wrap durable shipment invoice creation in legacy idempotency", () => {
     buildApp(buildShipmentTrackingMock());
 
-    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(1);
+    expect(mocks.requireIdempotency).not.toHaveBeenCalled();
   });
 
-  it("lists inbound shipments with parsed filters", async () => {
-    const shipmentTracking = buildShipmentTrackingMock({
-      getShipments: vi.fn().mockResolvedValue([{ id: 11, shipmentNumber: "S-11" }]),
-      getShipmentsCount: vi.fn().mockResolvedValue(1),
-    });
+  it("routes every list filter to one snapshot-owned page projection", async () => {
+    const page = { shipments: [{ id: 11, shipmentNumber: "S-11" }], total: 6, limit: 25, offset: 5, hasMore: false, costHealthItems: [] };
+    const shipmentTracking = buildShipmentTrackingMock({ getShipmentPage: vi.fn().mockResolvedValue(page) });
     server = await startServer(buildApp(shipmentTracking));
-
-    const { status, body } = await requestJson(
-      server.url,
-      "GET",
-      "/api/inbound-shipments?status=booked,in_transit&mode=ocean&warehouseId=1&limit=25&offset=5",
-    );
-
+    const { status, body } = await requestJson(server.url, "GET",
+      "/api/inbound-shipments?status=booked,in_transit&mode=ocean&warehouseId=1&limit=25&offset=5&search=carrier&costFilter=critical");
     expect(status).toBe(200);
-    expect(shipmentTracking.getShipments).toHaveBeenCalledWith({
-      status: ["booked", "in_transit"],
-      mode: "ocean",
-      warehouseId: 1,
-      limit: 25,
-      offset: 5,
-    });
-    expect(shipmentTracking.getShipmentsCount).toHaveBeenCalledWith({
-      status: ["booked", "in_transit"],
-      mode: "ocean",
-      warehouseId: 1,
-      limit: 25,
-      offset: 5,
-    });
-    expect(body).toEqual({ shipments: [{ id: 11, shipmentNumber: "S-11" }], total: 1 });
+    expect(shipmentTracking.getShipmentPage).toHaveBeenCalledWith({ status: "booked,in_transit", mode: "ocean",
+      warehouseId: "1", limit: "25", offset: "5", search: "carrier", costFilter: "critical" });
+    expect(shipmentTracking.getShipments).not.toHaveBeenCalled();
+    expect(shipmentTracking.getShipmentsCount).not.toHaveBeenCalled();
+    expect(body).toEqual(page);
+  });
+
+  it("classifies malformed page input as400 without exposing diagnostics", async () => {
+    const shipmentTracking = buildShipmentTrackingMock({getShipmentPage:vi.fn(async query=>shipmentWorkListQuerySchema.parse(query))});
+    server=await startServer(buildApp(shipmentTracking));
+    expect(await requestJson(server.url,"GET","/api/inbound-shipments?offset=-1")).toEqual({status:400,
+      body:{code:"SHIPMENT_LIST_QUERY_INVALID",error:"Invalid shipment filters or page."}});
+  });
+
+  it("classifies unavailable page evidence as500 rather than returning an empty list", async () => {
+    const shipmentTracking = buildShipmentTrackingMock({getShipmentPage:vi.fn().mockRejectedValue(new Error("private database details"))});
+    server=await startServer(buildApp(shipmentTracking));
+    expect(await requestJson(server.url,"GET","/api/inbound-shipments")).toEqual({status:500,
+      body:{code:"SHIPMENT_LIST_UNAVAILABLE",error:"Shipments could not be verified. Retry the work list."}});
   });
 
   it("returns actual PO references alongside shipment detail without changing line associations", async () => {
@@ -227,6 +229,16 @@ describe("inbound shipment routes", () => {
     expect(mocks.apLedger.enrichCostsWithInvoiceInfo).toHaveBeenCalledExactlyOnceWith(42);
     expect(shipmentTracking.versionCosts).toHaveBeenCalledExactlyOnceWith(costs);
     expect(shipmentTracking.getCosts).not.toHaveBeenCalled();
+  });
+
+  it("keeps original charge ownership visible when its payment totals need review", async () => {
+    const costs = [{ id: 9, vendorInvoiceId: 71, billingOwnership: { state: "review_required", referencedInvoiceIds: [71,72] } }];
+    mocks.apLedger.enrichCostsWithInvoiceInfo.mockResolvedValue(costs);
+    mocks.apLedger.getShipmentCostPaymentStatus.mockRejectedValue(new ApLedgerError("Review ownership",409,{code:"AP_SHIPMENT_BILLING_REVIEW_REQUIRED"}));
+    const shipmentTracking = buildShipmentTrackingMock({ getShipment: vi.fn().mockResolvedValue({id:42}), getEnrichedLines:vi.fn().mockResolvedValue([]), getStatusHistory:vi.fn().mockResolvedValue([]) });
+    server = await startServer(buildApp(shipmentTracking));
+    const response = await requestJson(server.url,"GET","/api/inbound-shipments/42");
+    expect(response.status).toBe(200); expect(response.body).toMatchObject({ paymentStatus:null, costs });
   });
 
   it("does not report unbilled costs when invoice enrichment fails", async () => {

@@ -1,3 +1,4 @@
+import type { ImpactSnapshot, DependencyCache } from "./test-impact.mjs";
 export interface BrowserSuiteDefinition {
   config: string;
   workflow: string;
@@ -34,6 +35,8 @@ export function selectBrowserSuite(options: {
   readSource: (file: string) => string;
   force?: boolean;
   definitions?: Readonly<Record<string, BrowserSuiteDefinition>>;
+  previous?: ImpactSnapshot;
+  dependencyCache?: DependencyCache;
 }): BrowserSelection;
 
 export function runSelection(
@@ -41,8 +44,4 @@ export function runSelection(
   root?: string,
 ): BrowserSelection;
 
-export function readBrowserChangeEvidence(environment: Record<string, string | undefined>, root: string): {
-  changes: BrowserFileChange[];
-  files: Set<string>;
-  readSource: (file: string) => string;
-};
+export { readTestChangeEvidence as readBrowserChangeEvidence } from "./test-impact.mjs";

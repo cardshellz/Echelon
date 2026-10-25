@@ -5,7 +5,7 @@ import { assertEbayListingSourceIdentityUnchanged } from "./ebay-existing-listin
 import { EbayListingSyncError, syncStageHash, type EbayListingSyncIdentity } from "./ebay-listing-sync.domain";
 import { completedEbayListingSyncResult, EbayExistingListingSyncExecution, type EbayListingSyncExecution, type PreparedEbayListingSync } from "./ebay-listing-sync.service";
 import { syncContentIntentHash } from "./ebay-listing-sync-content";
-import { assertEbayPublicationTargetUnchanged, resolveEbayPublicationTarget } from "./ebay-publication-completion.domain";
+import { assertEbayPublicationTargetUnchanged, resolveEbayPublicationTarget, publicationInspectionError } from "./ebay-publication-completion.domain";
 import type { EbayListingConnectorDraft, EbayMarketplaceListingConnector, EbayPublishedListingIdentityResolver } from "./listing-connectors/ebay-listing.connector";
 import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
 import { EbayApiRequestError } from "./adapters/ebay/ebay-api-error";
@@ -43,6 +43,10 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     assertEbayPublicationTargetUnchanged(target, observed);
     await context.bindPublicationTarget(target);
     await this.assertCompatible(source, prepared.inspection, target);
+    if (prepared.draft.preparedIntent) {
+      if (!context.persistPreparedIntent) throw new EbayListingSyncError("EBAY_PUBLICATION_OWNER_REQUIRED", "The prepared listing requires its saved-job evidence owner.");
+      await context.persistPreparedIntent(prepared.draft.preparedIntent);
+    }
 
     // A retained start is a delivery barrier, not proof that eBay accepted it.
     // Inventory can prove rejection or that publication was never sent, even
@@ -110,8 +114,9 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     await stage("publication_readback", syncStageHash(target), async () => {
       const inspection = await prepared.inspect();
       if (!inspection.publication) {
-        const issue = inspection.skus.find(member => member.issue)?.issue;
-        if (issue) throw new EbayListingSyncError(issue.code, issue.message);
+        const issue = inspection.skus.find(member => member.issue)?.issue
+          ?? (inspection.publicationIssue?.providerRead ? inspection.publicationIssue : null);
+        if (issue) throw publicationInspectionError(issue);
         throw new EbayListingSyncError(accepted || context.publicationWriteCompleted ? "EBAY_PUBLICATION_READBACK_PENDING" : "EBAY_PUBLICATION_RESPONSE_UNCERTAIN", accepted || context.publicationWriteCompleted
           ? "eBay accepted the publication request, but its complete published listing is not visible yet. This saved job will check again."
           : "The saved publication attempt has no confirmed completion and eBay still reports unpublished offers. No second publish request was sent. Review this job's recovery details before authorizing another attempt.");

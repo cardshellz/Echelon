@@ -33,7 +33,7 @@ const lineSchema = z.object({
   warehouse_id: nullableId, vendor_product_id: dbId, sku: z.string(), product_name: z.string(), requested_pieces: dbId,
 });
 
-function isoTimestamp(value: unknown): string {
+export function isoTimestamp(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   // Echelon's PostgreSQL parser preserves timestamptz as text. Require an
   // explicit zone, then normalize its space separator to the API ISO contract.

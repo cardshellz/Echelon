@@ -53,21 +53,36 @@ describe("PgDropshipCostChangeListingActionRepository", () => {
     expect(entries).toEqual([{ entryId: 11, vendorId: 5, productVariantId: 61, fromCents: 809, unitCostCents: 999, effectiveAt: EFFECTIVE, policyId: 3, inForceEntryId: 15 }]);
   });
 
+  it("refuses a published price that is not a positive whole number of cents, never coercing it", async () => {
+    for (const published of ["0", "8.99", "-899", "abc"]) {
+      const { pool } = fakePool([
+        result([{ id: 1, store_connection_id: 9, product_variant_id: 61, status: "active", vendor_retail_price_cents: "1099", platform: "ebay",
+          variant_sku: "SKU-61", variant_name: "Single", product_name: "Armor Envelope", published_price_cents: published }]),
+      ]);
+      await expect(repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [61] }))
+        .rejects.toMatchObject({ code: "DROPSHIP_COST_SCHEDULE_INVALID_STORED_VALUE", context: { classification: "fatal", column: "published priceCents" } });
+    }
+  });
+
   it("loads a vendor's listings with their labels, saved prices, store pricing rules and catalog candidates", async () => {
     const profile = { defaultRecipe: { basis: "product_cost", markupBps: 4000, flatCents: 0, rounding: "cent" }, groups: [] };
     const { pool, calls } = fakePool([
-      result([{ id: 1, store_connection_id: 9, product_variant_id: 61, status: "active", vendor_retail_price_cents: "1099", platform: "shopify", variant_sku: "SKU-61", variant_name: "Single", product_name: "Armor Envelope" }]),
+      result([{ id: 1, store_connection_id: 9, product_variant_id: 61, status: "active", external_listing_id: "v1|61|0", vendor_retail_price_cents: "1099", platform: "shopify", variant_sku: "SKU-61", variant_name: "Single", product_name: "Armor Envelope", published_price_cents: "999" }]),
       result([{ store_connection_id: 9, product_variant_id: 61, override_price_cents: null, pricing_mode: "rules" }]),
       result([{ store_connection_id: 9, revision_id: 7, profile, created_at: EFFECTIVE }]),
     ]);
     const facts = await repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [61, 61, 62] });
-    expect(calls[0]?.sql).toContain("FROM dropship.dropship_vendor_listings l JOIN catalog.product_variants pv ON pv.id = l.product_variant_id JOIN catalog.products p ON p.id = pv.product_id WHERE l.vendor_id = $1 AND l.product_variant_id = ANY($2::int[])");
+    expect(calls[0]?.sql).toContain("l.status, l.external_listing_id, l.vendor_retail_price_cents");
+    expect(calls[0]?.sql).toContain("FROM dropship.dropship_vendor_listings l JOIN catalog.product_variants pv ON pv.id = l.product_variant_id JOIN catalog.products p ON p.id = pv.product_id");
+    expect(calls[0]?.sql).toContain("WHERE l.vendor_id = $1 AND l.product_variant_id = ANY($2::int[])");
+    // The published price is the one the newest completed push sent (its listing_push_completed sync event).
+    expect(calls[0]?.sql).toContain("LEFT JOIN LATERAL ( SELECT e.payload ->> 'priceCents' AS price_cents FROM dropship.dropship_listing_sync_events e WHERE e.listing_id = l.id AND e.event_type = 'listing_push_completed' ORDER BY e.id DESC LIMIT 1 ) published ON true");
     expect(calls[0]?.values).toEqual([5, [61, 62]]);
     expect(calls[1]?.sql).toContain("FROM dropship.dropship_listing_price_settings WHERE vendor_id = $1 AND product_variant_id = ANY($2::int[])");
     expect(calls[2]?.sql).toContain("FROM dropship.dropship_pricing_profiles p JOIN dropship.dropship_pricing_profile_revisions r");
     expect(calls[2]?.values).toEqual([5, [9]]);
     expect(catalog.listCatalogCandidates).toHaveBeenCalledWith([61, 62]);
-    expect(facts.listings).toEqual([{ listingId: 1, storeConnectionId: 9, productVariantId: 61, status: "active", vendorRetailPriceCents: 1099, platform: "shopify", variantSku: "SKU-61", variantName: "Single", productName: "Armor Envelope" }]);
+    expect(facts.listings).toEqual([{ listingId: 1, storeConnectionId: 9, productVariantId: 61, status: "active", externalListingId: "v1|61|0", vendorRetailPriceCents: 1099, publishedPriceCents: 999, platform: "shopify", variantSku: "SKU-61", variantName: "Single", productName: "Armor Envelope" }]);
     expect(facts.savedPrices).toEqual([{ storeConnectionId: 9, productVariantId: 61, overridePriceCents: null, pricingMode: "rules" }]);
     expect(facts.profiles.get(9)).toEqual({ revisionId: 7, profile, updatedAt: EFFECTIVE.toISOString() });
     expect(facts.candidates.get(62)).toEqual({ productVariantId: 62, productId: 1, category: "Envelopes", categoryId: 4, productLineIds: [3], defaultRetailPriceCents: 899 });
@@ -91,8 +106,8 @@ describe("PgDropshipCostChangeListingActionRepository", () => {
       .map((column) => [column, null]));
     const { pool, calls } = fakePool([
       result([
-        { id: 1, store_connection_id: 9, product_variant_id: 61, status: "active", vendor_retail_price_cents: null, platform: "ebay", variant_sku: null, variant_name: "Single", product_name: "Armor Envelope" },
-        { id: 2, store_connection_id: 12, product_variant_id: 62, status: "active", vendor_retail_price_cents: null, platform: "ebay", variant_sku: null, variant_name: "Case", product_name: "Armor Envelope" },
+        { id: 1, store_connection_id: 9, product_variant_id: 61, status: "active", vendor_retail_price_cents: null, platform: "ebay", variant_sku: null, variant_name: "Single", product_name: "Armor Envelope", published_price_cents: null },
+        { id: 2, store_connection_id: 12, product_variant_id: 62, status: "active", vendor_retail_price_cents: null, platform: "ebay", variant_sku: null, variant_name: "Case", product_name: "Armor Envelope", published_price_cents: null },
       ]),
       result([]), result([]),
       // Store 9: product 1 sets its own price; the category read finds nothing.
@@ -121,7 +136,8 @@ describe("PgDropshipCostChangeListingActionRepository", () => {
     const profilesHeld = new Promise<void>((resolve) => { answerProfiles = resolve; });
     const reads: string[] = [];
     const listingsRow = (id: number, store: number, variant: number) => ({ id, store_connection_id: store, product_variant_id: variant,
-      status: "active", vendor_retail_price_cents: null, platform: "ebay", variant_sku: null, variant_name: "Single", product_name: "Armor Envelope" });
+      status: "active", vendor_retail_price_cents: null, platform: "ebay", variant_sku: null, variant_name: "Single", product_name: "Armor Envelope",
+      published_price_cents: null });
     const pool = {
       query: vi.fn(async (sql: string) => {
         if (sql.includes("FROM dropship.dropship_vendor_listings l")) { reads.push("listings"); return result([listingsRow(1, 9, 61), listingsRow(2, 12, 62)]); }
@@ -287,7 +303,10 @@ describe("PgDropshipCostChangeListingActionRepository", () => {
     const vendorRows = await repo.listVendorListingActions({ vendorId: 5, since, limit: 200 });
     // The size's product id rides along for the portal's link to its price (PR 10h, D13b), from the variant row the query already joins.
     expect(calls[0]?.sql).toContain("a.product_variant_id, pv.product_id, pv.sku AS variant_sku");
-    expect(calls[0]?.sql).toContain("LEFT JOIN dropship.dropship_cost_change_listing_holds h ON h.id = a.hold_id WHERE a.vendor_id = $1 AND a.decided_at >= $2 ORDER BY a.id DESC LIMIT $3");
+    // A pause is shown by the hold carrying it now (a put-back pause is a new hold row), a re-judged skip by its recheck.
+    expect(calls[0]?.sql).toContain("FROM dropship.dropship_cost_change_listing_holds cur WHERE cur.store_connection_id = a.store_connection_id AND cur.product_variant_id = a.product_variant_id AND cur.entry_id = a.entry_id AND cur.id >= CASE WHEN rc.after IS NULL THEN a.hold_id ELSE (rc.after ->> 'holdId')::bigint END ORDER BY cur.id DESC LIMIT 1 ) h ON true");
+    expect(calls[0]?.sql).toContain("WHERE a.action = 'skipped_inactive_listing' AND e.entity_type = 'dropship_cost_change_listing_action' AND e.entity_id = a.id::text AND e.event_type = 'cost_change_listing_rechecked'");
+    expect(calls[0]?.sql).toContain("WHERE a.vendor_id = $1 AND COALESCE(rc.rechecked_at, a.decided_at) >= $2 ORDER BY a.id DESC LIMIT $3");
     expect(calls[0]?.values).toEqual([5, since, 200]);
     expect(vendorRows).toEqual([{
       actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 62, productId: 7, variantSku: "SKU-62", variantName: "Single",

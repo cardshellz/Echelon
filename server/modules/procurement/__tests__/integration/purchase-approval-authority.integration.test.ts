@@ -1,4 +1,7 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
@@ -24,6 +27,9 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, {
 import { procurementMethods } from "../../procurement.storage";
 import { isPurchaseOrderHistoryConstraintViolation } from "../../purchase-order-history.repository";
 import { createPurchasingService } from "../../purchasing.service";
+import { purchaseApprovalLinesFingerprint } from "../../purchase-approval-review";
+import { synchronizeProcurementSkuReferences } from "../../procurement-sku-reference.service";
+import { createPurchaseOrderLineCommands } from "../../purchase-order-line-commands";
 import { registerPurchaseOrderRoutes } from "../../purchase-order.routes";
 import { readPurchaseApprovalActor } from "../../../identity/infrastructure/purchase-approval-access.repository";
 import { readCommandAuthorityActor } from "../../../identity/infrastructure/command-authority.repository";
@@ -42,7 +48,8 @@ function fixtureTable(table: Parameters<typeof getTableConfig>[0]): string {
     const defaultNow = ["created_at", "changed_at"].includes(column.name) ? " DEFAULT now()" : "";
     return `"${column.name}" ${column.getSQLType()}${identity}${defaultNow}${column.primary ? " PRIMARY KEY" : ""}`;
   });
-  return `CREATE TABLE "${definition.schema}"."${definition.name}" (${columns.join(", ")})`;
+  // Drizzle's unqualified pgTable (audit_events) uses PostgreSQL public.
+  return `CREATE TABLE "${definition.schema ?? "public"}"."${definition.name}" (${columns.join(", ")})`;
 }
 
 function deferred() {
@@ -59,23 +66,32 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   let url: string;
   let requestActor: string | null = "admin-user";
   let retentionMigration: string;
+  let ownsCommandLedger = false;
+  let ownsAuditTable = false;
 
   const storage = { ...procurementMethods, getPurchaseOrderById: async (id: number) => (await database.select().from(schema.purchaseOrders).where(eq(schema.purchaseOrders.id, id)))[0] };
   const makeService = (options: Parameters<typeof createPurchasingService>[2] = {}) => createPurchasingService(database, storage as any, {
     now: () => new Date("2026-09-07T12:00:00Z"), ...options,
   });
-  const postApproval = async (body: unknown = {}) => {
-    const response = await fetch(`${url}/api/purchase-orders/1/approve`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
-    return { status: response.status, body: await response.json() as any };
+  const approvalReview = async () => {
+    const po = await storage.getPurchaseOrderById(1);
+    const lines = await database.select().from(schema.purchaseOrderLines).where(eq(schema.purchaseOrderLines.purchaseOrderId, 1));
+    return { expectedUpdatedAt: po.updatedAt.toISOString(), expectedTotalCents: Number(po.totalCents), expectedLinesFingerprint: purchaseApprovalLinesFingerprint(lines) };
   };
+  const approveCurrent = async (actorId?: string) => service.approve(1, actorId, undefined, await approvalReview());
+  const postApprovalExact = async (body: unknown, key = `approval-${randomUUID()}`) => {
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/approve`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() as any, replayed: response.headers.get("Idempotency-Replayed") };
+  };
+  const postApproval = async (body: Record<string, unknown> = {}) => postApprovalExact({ ...await approvalReview(), ...body });
   const dispatchConfirmation = async () => ({
     confirmedSentExternally: true as const,
     expectedUpdatedAt: (await storage.getPurchaseOrderById(1)).updatedAt.toISOString(),
   });
   const postDispatch = async (body: unknown) => {
-    const response = await fetch(`${url}/api/purchase-orders/1/send`, {
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/send`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() as any };
@@ -94,12 +110,21 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       throw new Error("Approval tests require a separate explicitly disposable database");
     }
     pool = new pg.Pool({ connectionString: testUrl, ssl: /localhost|127\.0\.0\.1/.test(testUrl!) ? false : { rejectUnauthorized: false } });
+    const existingPublic = (await pool.query("SELECT to_regclass('public.financial_command_results') AS commands, to_regclass('public.financial_command_recoveries') AS recoveries, to_regclass('public.audit_events') AS audit")).rows[0];
+    if (Object.values(existingPublic).some(Boolean)) throw new Error("Approval tests require empty disposable command and audit tables");
+    for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
+      await pool.query(await readFile(resolve(process.cwd(), "migrations", migration), "utf8"));
+      ownsCommandLedger = true;
+    }
+    await pool.query(fixtureTable(schema.auditEvents));
+    ownsAuditTable = true;
     for (const name of ["identity", "procurement", "inventory"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
     for (const table of [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
-      schema.purchaseOrders, schema.purchaseOrderLines, schema.vendorInvoicePoLinks, schema.poApprovalTiers, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings]) {
+      schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipmentLines, schema.receivingLines, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poApprovalTiers, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings]) {
       await pool.query(fixtureTable(table));
     }
     await pool.query(`
@@ -138,6 +163,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
 
   beforeEach(async () => {
     requestActor = "admin-user";
+    await pool.query("TRUNCATE public.financial_command_results, public.audit_events RESTART IDENTITY CASCADE");
     // Reset only this suite's explicitly disposable schemas between cases.
     // Every owner action below runs with migration227 reinstalled after seed.
     await pool.query(`
@@ -147,7 +173,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       DROP TRIGGER IF EXISTS purchase_order_history_retention_truncate ON procurement.purchase_orders;
       TRUNCATE identity.auth_user_roles, identity.auth_role_permissions, identity.auth_permissions, identity.auth_roles, identity.users RESTART IDENTITY CASCADE;
       TRUNCATE procurement.purchase_orders, procurement.purchase_order_lines, procurement.po_approval_tiers,
-        procurement.po_events, procurement.po_status_history, procurement.po_revisions, procurement.vendor_invoice_po_links, procurement.purchasing_recommendation_po_handoffs, inventory.warehouse_settings RESTART IDENTITY CASCADE;
+        procurement.po_events, procurement.po_status_history, procurement.po_revisions, procurement.vendor_invoice_po_links, procurement.vendor_invoice_lines, procurement.vendor_invoices, procurement.purchasing_recommendation_po_handoffs, inventory.warehouse_settings RESTART IDENTITY CASCADE;
       INSERT INTO identity.users(id,username,password,role,active) VALUES
         ('admin-user','admin','unused','admin',1), ('lead-user','lead','unused','picker',1),
         ('wrong-user','wrong','unused','admin',1), ('inactive-user','inactive','unused','admin',0),
@@ -180,16 +206,193 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     if (server) await new Promise<void>((resolveValue, reject) => server.close((error) => error ? reject(error) : resolveValue()));
     if (pool) {
       for (const name of [...ownedSchemas].reverse()) await pool.query(`DROP SCHEMA ${name} CASCADE`);
+      if (ownsCommandLedger) await pool.query("DROP TABLE IF EXISTS public.financial_command_recoveries, public.financial_command_results; DROP FUNCTION IF EXISTS public.guard_financial_command_result_update()");
+      if (ownsAuditTable) await pool.query("DROP TABLE public.audit_events");
       await pool.end();
     }
   });
 
   const postCancellation = async (endpoint: "cancel" | "void") => {
-    const response = await fetch(`${url}/api/purchase-orders/1/${endpoint}`, {
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/${endpoint}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "Supplier order withdrawn" }),
     });
     return { status: response.status, body: await response.json() as any };
   };
+
+  it("rejects a stale $100 review after actual owners revise and resubmit $1,000 in the same tier", async () => {
+    const reviewed = await approvalReview();
+    await service.returnToDraft(1, "admin-user", "Supplier revised shipping quote");
+    await service.updateIncotermsAndCharges(1, { shippingCostCents: 90000 }, "admin-user");
+    await service.submit(1, "admin-user");
+    const before = await evidence();
+    expect(before.header[0].total_cents).toBe("100000");
+    const key = "stale-reviewed-purchase";
+    const rejected = await postApprovalExact(reviewed, key);
+    expect(rejected).toMatchObject({ status: 409, body: { details: { code: "PO_APPROVAL_REVIEW_STALE", purchaseApprovalOutcome: "rejected", idempotencyKey: key } } });
+    expect(await evidence()).toEqual(before);
+    expect(await postApprovalExact(reviewed, key)).toMatchObject({ ...rejected, replayed: "true" });
+    const current = await approvalReview();
+    expect((await postApprovalExact(current)).status).toBe(200);
+    expect((await evidence()).events.filter(row => row.event_type === "approved")[0].payload_json).toMatchObject({ reviewed_updated_at: current.expectedUpdatedAt, total_cents: 100000 });
+  });
+
+  it.each([{}, { expectedUpdatedAt: "invalid", expectedTotalCents: 10000 }, { expectedUpdatedAt: "2026-09-01T12:00:00.000Z" }, { expectedUpdatedAt: "2026-09-01T12:00:00.000Z", expectedTotalCents: 10000, approvedBy: "forged" }])("rejects missing or forged review evidence at HTTP and lifecycle boundaries: %j", async body => {
+    const before = await evidence();
+    expect((await postApprovalExact(body)).status).toBe(400);
+    await expect(service.executeLifecycleCommand(1, "approve", {}, "admin-user")).rejects.toMatchObject({ details: { code: "PO_APPROVAL_REVIEW_REQUIRED" } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("recovers a lost committed response with the exact original result and one approval audit", async () => {
+    const reviewed = await approvalReview();
+    const key = "lost-approval-response";
+    const first = await postApprovalExact(reviewed, key);
+    expect(first.status).toBe(200);
+    const committed = await evidence();
+    expect(first.body.updatedAt).not.toBe(reviewed.expectedUpdatedAt);
+    expect(await postApprovalExact(reviewed, key)).toEqual({ ...first, replayed: "true" });
+    expect(await evidence()).toEqual(committed);
+    expect(committed.events.filter(row => row.event_type === "approved")).toHaveLength(1);
+    expect((await postApprovalExact({ ...reviewed, expectedTotalCents: 10001 }, key)).status).toBe(422);
+    expect((await postApprovalExact({ ...reviewed, expectedUpdatedAt: first.body.updatedAt }, key)).status).toBe(422);
+    expect(await evidence()).toEqual(committed);
+  });
+
+  it("serializes concurrent same-command approval retries into one committed approval", async () => {
+    const reviewed = await approvalReview();
+    const key = "concurrent-approval-key";
+    const responses = await Promise.all([postApprovalExact(reviewed, key), postApprovalExact(reviewed, key)]);
+    expect(responses.some(response => response.status === 200)).toBe(true);
+    expect(responses.every(response => [200, 409].includes(response.status))).toBe(true);
+    const replay = await postApprovalExact(reviewed, key);
+    expect(replay).toMatchObject({ status: 200, replayed: "true" });
+    const after = await evidence();
+    expect(after.events.filter(row => row.event_type === "approved")).toHaveLength(1);
+    expect(after.history).toHaveLength(1);
+  });
+
+  it("only one of two independent approval commands for the same review can commit", async () => {
+    const reviewed = await approvalReview();
+    const responses = await Promise.all([postApprovalExact(reviewed, "independent-approval-a"), postApprovalExact(reviewed, "independent-approval-b")]);
+    expect(responses.map(response => response.status).sort()).toEqual([200, 409]);
+    expect((await evidence()).events.filter(row => row.event_type === "approved")).toHaveLength(1);
+  });
+
+  it("rejects the old line review after the actual SKU synchronization owner changes a same-total PO without touching its header", async () => {
+    await pool.query("UPDATE procurement.purchase_order_lines SET product_variant_id=202 WHERE id=11");
+    const reviewed = await approvalReview();
+    const changed = await synchronizeProcurementSkuReferences({ productVariantId: 202, oldSku: "A", newSku: "A-RENAMED", actor: "admin-user" }, {
+      database, now: () => new Date(reviewed.expectedUpdatedAt),
+    });
+    expect(changed.purchaseOrderLines).toBe(1);
+    const current = await approvalReview();
+    expect(current.expectedUpdatedAt).toBe(reviewed.expectedUpdatedAt);
+    expect(current.expectedTotalCents).toBe(reviewed.expectedTotalCents);
+    expect(current.expectedLinesFingerprint).not.toBe(reviewed.expectedLinesFingerprint);
+    const before = await evidence();
+    expect(await postApprovalExact(reviewed)).toMatchObject({ status: 409, body: { details: { code: "PO_APPROVAL_LINES_REVIEW_STALE" } } });
+    expect(await evidence()).toEqual(before);
+    expect((await postApprovalExact(current)).status).toBe(200);
+  });
+
+  it.each([
+    { entrypoint: "prepare", renameTimestamp: "older" },
+    { entrypoint: "prepare", renameTimestamp: "equal" },
+    { entrypoint: "send", renameTimestamp: "older" },
+    { entrypoint: "send", renameTimestamp: "equal" },
+  ] as const)("invalidates approval at $entrypoint after a real SKU rename with an $renameTimestamp timestamp, then recovers through fresh review", async ({ entrypoint, renameTimestamp }) => {
+    await pool.query("UPDATE procurement.purchase_order_lines SET product_variant_id=202 WHERE id=11");
+    const reviewed = await approvalReview();
+    await approveCurrent("admin-user");
+    const approved = await evidence();
+    expect(approved.events.find(row => row.event_type === "approved").payload_json.reviewed_lines_fingerprint).toBe(reviewed.expectedLinesFingerprint);
+    const approvedAt = approved.header[0].approved_at as Date;
+    const changedAt = renameTimestamp === "equal" ? approvedAt : new Date(reviewed.expectedUpdatedAt);
+    const changed = await synchronizeProcurementSkuReferences({ productVariantId: 202, oldSku: "A", newSku: "A-AFTER-APPROVAL", actor: "admin-user" }, {
+      database, now: () => changedAt,
+    });
+    expect(changed.purchaseOrderLines).toBe(1);
+    const renamed = await evidence();
+    expect(renamed.header).toEqual(approved.header);
+    expect(renamed.lines[0].updated_at.getTime()).toBeLessThanOrEqual(approvedAt.getTime());
+
+    const result = entrypoint === "prepare"
+      ? await service.sendPurchaseOrder(1, "admin-user")
+      : await service.send(1, "admin-user", await dispatchConfirmation());
+    expect(result.status).toBe("pending_approval");
+    const blocked = await evidence();
+    expect(blocked.header[0]).toMatchObject({ status: "pending_approval", physical_status: "draft", approved_by: null, approved_at: null, sent_to_vendor_at: null });
+    expect(blocked.events.filter(row => row.event_type === "sent_to_vendor")).toHaveLength(0);
+
+    await service.returnToDraft(1, "admin-user", "Review renamed supplier SKU");
+    await service.submit(1, "admin-user");
+    const freshReview = await approvalReview();
+    expect(freshReview.expectedLinesFingerprint).not.toBe(reviewed.expectedLinesFingerprint);
+    await approveCurrent("admin-user");
+    expect((await service.sendPurchaseOrder(1, "admin-user")).status).toBe("approved");
+    expect((await service.send(1, "admin-user", await dispatchConfirmation())).status).toBe("sent");
+    const recovered = await evidence();
+    expect(recovered.events.filter(row => row.event_type === "approved")).toHaveLength(2);
+    expect(recovered.events.filter(row => row.event_type === "sent_to_vendor")).toHaveLength(1);
+  });
+
+  it("prepares and dispatches unchanged explicitly reviewed lines without requiring another approval", async () => {
+    const reviewed = await approvalReview();
+    await approveCurrent("admin-user");
+    const approved = await evidence();
+    expect((await service.sendPurchaseOrder(1, "admin-user")).status).toBe("approved");
+    expect(await evidence()).toEqual(approved);
+    expect((await service.send(1, "admin-user", await dispatchConfirmation())).status).toBe("sent");
+    const sent = await evidence();
+    expect(sent.events.filter(row => row.event_type === "approved")).toHaveLength(1);
+    expect(sent.events.find(row => row.event_type === "approved").payload_json.reviewed_lines_fingerprint).toBe(reviewed.expectedLinesFingerprint);
+    expect(sent.events.filter(row => row.event_type === "sent_to_vendor")).toHaveLength(1);
+  });
+
+  it("does not replay another actor's result or bypass a revoked current approval grant", async () => {
+    const reviewed = await approvalReview(), key = "permission-replay-key";
+    expect((await postApprovalExact(reviewed, key)).status).toBe(200);
+    const before = await evidence();
+    requestActor = "lead-user";
+    expect((await postApprovalExact(reviewed, key)).status).toBe(409);
+    requestActor = "admin-user";
+    await pool.query("DELETE FROM identity.auth_role_permissions WHERE id=1");
+    expect((await postApprovalExact(reviewed, key)).status).toBe(403);
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("does not approve a different derived amount or repair legacy amounts during approval", async () => {
+    const reviewed = await approvalReview();
+    expect((await postApprovalExact({ ...reviewed, expectedTotalCents: 9999 })).body.details.code).toBe("PO_APPROVAL_ECONOMICS_REVIEW_REQUIRED");
+    // Legacy fee rows may advance without a product quote-basis review, so this
+    // reaches the economic repair guard rather than the earlier product gate.
+    await pool.query("UPDATE procurement.purchase_order_lines SET line_type='fee', product_id=NULL, pricing_basis='legacy_unknown', line_total_cents=1 WHERE id=11");
+    const before = await evidence();
+    expect((await postApprovalExact(await approvalReview())).body.details.code).toBe("PO_APPROVAL_ECONOMICS_REVIEW_REQUIRED");
+    expect(await evidence()).toEqual(before);
+  });
+
+  it.each(["audit", "result"])("rolls back every approval write on %s failure and safely retries the original command", async failure => {
+    const reviewed = await approvalReview(), key = `rollback-${failure}-approval`;
+    const before = await evidence();
+    const table = failure === "audit" ? "procurement.po_events" : "public.financial_command_results";
+    const timing = failure === "audit" ? "BEFORE INSERT" : "BEFORE UPDATE";
+    const condition = failure === "audit" ? "" : "WHEN (NEW.status = 'succeeded')";
+    await pool.query(`CREATE FUNCTION procurement.fail_recovery_approval() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected approval ${failure} failure'; END $$;
+      CREATE TRIGGER fail_recovery_approval ${timing} ON ${table} FOR EACH ROW ${condition} EXECUTE FUNCTION procurement.fail_recovery_approval()`);
+    try {
+      expect((await postApprovalExact(reviewed, key)).status).toBe(500);
+      expect(await evidence()).toEqual(before);
+    } finally {
+      await pool.query(`DROP TRIGGER fail_recovery_approval ON ${table}; DROP FUNCTION procurement.fail_recovery_approval()`);
+    }
+    // Honor the actual ledger retry policy; never rewrite protected evidence
+    // merely to accelerate the test.
+    await pool.query("SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM (next_attempt_at - clock_timestamp()))::double precision)) FROM public.financial_command_results WHERE idempotency_key=$1 AND status='retryable'", [key]);
+    expect((await postApprovalExact(reviewed, key)).status).toBe(200);
+    expect((await postApprovalExact(reviewed, key)).replayed).toBe("true");
+    expect((await evidence()).events.filter(row => row.event_type === "approved")).toHaveLength(1);
+  });
 
   it("prepares an approved supplier document without recording dispatch and repeats without new audit", async () => {
     await pool.query("UPDATE procurement.purchase_orders SET status='draft' WHERE id=1; UPDATE inventory.warehouse_settings SET require_approval=false; DELETE FROM procurement.po_approval_tiers");
@@ -211,14 +414,14 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   });
 
   it.each([{}, { confirmedSentExternally: false }, { confirmedSentExternally: true, expectedUpdatedAt: "bad" }])("rejects missing or malformed dispatch attestation without writing %j", async body => {
-    await service.approve(1, "admin-user");
+    await approveCurrent("admin-user");
     const before = await evidence();
     expect(await postDispatch(body)).toMatchObject({ status: 400, body: { details: { code: "PO_EXTERNAL_DISPATCH_CONFIRMATION_REQUIRED" } } });
     expect(await evidence()).toEqual(before);
   });
 
   it("rejects a changed reviewed PO version before recording dispatch", async () => {
-    await service.approve(1, "admin-user");
+    await approveCurrent("admin-user");
     const reviewed = await dispatchConfirmation();
     await pool.query("UPDATE procurement.purchase_orders SET updated_at=updated_at + interval '1 second' WHERE id=1");
     const before = await evidence();
@@ -227,7 +430,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   });
 
   it("returns approval-required without dispatch when authority changes after document review", async () => {
-    await service.approve(1, "admin-user");
+    await approveCurrent("admin-user");
     const reviewed = await dispatchConfirmation();
     await pool.query("UPDATE procurement.po_approval_tiers SET approver_role='lead' WHERE id=1");
     expect(await postDispatch(reviewed)).toMatchObject({ status: 200, body: { status: "pending_approval", physicalStatus: "draft", sentToVendorAt: null } });
@@ -237,7 +440,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   });
 
   it("records only one dispatch when two operators confirm the same reviewed version concurrently", async () => {
-    await service.approve(1, "admin-user");
+    await approveCurrent("admin-user");
     const reviewed = await dispatchConfirmation();
     const attempts = await Promise.allSettled([service.send(1, "admin-user", reviewed), service.send(1, "admin-user", reviewed)]);
     expect(attempts.filter(attempt => attempt.status === "fulfilled")).toHaveLength(1);
@@ -249,7 +452,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   });
 
   it("rolls back dispatch and history when its audit persistence fails", async () => {
-    await service.approve(1, "admin-user");
+    await approveCurrent("admin-user");
     const reviewed = await dispatchConfirmation();
     const before = await evidence();
     await pool.query(`CREATE FUNCTION procurement.fail_dispatch_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected dispatch audit failure'; END $$;
@@ -267,7 +470,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     await pool.query("UPDATE procurement.purchase_order_lines SET order_qty=10,received_qty=$1,cancelled_qty=0,status=$2 WHERE id=11", [receivedQty, receivedQty >= 10 ? "received" : "partially_received"]);
   };
   const postClose = async (endpoint: "close" | "close-short", body: unknown = {}) => {
-    const response = await fetch(`${url}/api/purchase-orders/1/${endpoint}`, {
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1/${endpoint}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() as any };
@@ -545,7 +748,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   });
 
   it.each(["quantity_amendment_approved", "line_amendment_approved"])("sending recognizes the latest admin amendment approval: %s", async (eventType) => {
-    await service.approve(1, "admin-user");
+    await approveCurrent("admin-user");
     const snapshot = (await evidence()).events[0].payload_json.approval_authority;
     await pool.query(`BEGIN;
       UPDATE procurement.purchase_orders SET subtotal_cents=20000,total_cents=20000,revision_number=1,approved_at=now(),updated_at=now() WHERE id=1;
@@ -559,7 +762,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   it("rejects a forged HTTP/session role and preserves every purchase, line, history and audit field", async () => {
     requestActor = "wrong-user";
     const before = await evidence();
-    const response = await postApproval({ userId: "admin-user", role: "admin", approverRole: "admin", notes: "forged role" });
+    const response = await postApproval({ notes: "The session role must not replace the current Identity role" });
     expect(response).toMatchObject({ status: 403, body: { details: { code: "PO_APPROVAL_ROLE_REQUIRED", requiredRole: "admin", actorId: "wrong-user", assignedRoles: [{ id: 3, name: "Other Buyer" }] } } });
     expect(await evidence()).toEqual(before);
   });
@@ -568,7 +771,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     requestActor = "inactive-user";
     const before = await evidence();
     expect(await postApproval()).toMatchObject({ status: 403, body: { error: "Permission denied: purchasing:approve" } });
-    await expect(service.approve(1, "inactive-user")).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_ACTOR_INACTIVE" } });
+    await expect(approveCurrent("inactive-user")).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_ACTOR_INACTIVE" } });
     expect(await evidence()).toEqual(before);
   });
 
@@ -585,9 +788,9 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     expect((await postApproval()).status).toBe(401);
     requestActor = "no-grant-user";
     expect((await postApproval()).status).toBe(403);
-    await expect(service.approve(1, "no-grant-user")).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_PERMISSION_REQUIRED" } });
-    await expect(service.approve(1)).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_ACTOR_REQUIRED" } });
-    await expect(service.approve(1, "missing-user")).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_ACTOR_INACTIVE" } });
+    await expect(approveCurrent("no-grant-user")).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_PERMISSION_REQUIRED" } });
+    await expect(approveCurrent()).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_ACTOR_REQUIRED" } });
+    await expect(approveCurrent("missing-user")).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_ACTOR_INACTIVE" } });
     expect(await evidence()).toEqual(before);
   });
 
@@ -603,15 +806,15 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     } });
     expect(result.history).toHaveLength(1);
     expect(result.events[0].created_at).toBeInstanceOf(Date);
-    await expect(service.approve(1, "admin-user")).rejects.toMatchObject({ statusCode: 400 });
+    await expect(approveCurrent("admin-user")).rejects.toMatchObject({ statusCode: 409 });
     expect((await evidence()).events).toEqual(result.events);
     expect((await service.send(1, "admin-user", await dispatchConfirmation())).status).toBe("sent");
   });
 
   it("requires Team Lead membership exactly and accepts its explicit grant despite a stale legacy picker role", async () => {
     await pool.query("UPDATE procurement.po_approval_tiers SET approver_role='lead' WHERE id=1");
-    await expect(service.approve(1, "admin-user")).rejects.toMatchObject({ details: { code: "PO_APPROVAL_ROLE_REQUIRED" } });
-    expect((await service.approve(1, "lead-user")).status).toBe("approved");
+    await expect(approveCurrent("admin-user")).rejects.toMatchObject({ details: { code: "PO_APPROVAL_ROLE_REQUIRED" } });
+    expect((await approveCurrent("lead-user")).status).toBe("approved");
   });
 
   it.each(["role", "threshold", "total", "missing history"])("requires reapproval when %s changes before sending", async (change) => {
@@ -619,7 +822,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       await pool.query(`UPDATE procurement.purchase_orders SET status='approved',approved_by='admin-user',approved_at=now();
         INSERT INTO procurement.po_events(po_id,event_type,actor_type,actor_id,payload_json) VALUES (1,'approved','user','admin-user','{}')`);
     } else {
-      await service.approve(1, "admin-user");
+      await approveCurrent("admin-user");
     }
     const approvedEvents = (await evidence()).events;
     if (change === "role") await pool.query("UPDATE procurement.po_approval_tiers SET approver_role='lead' WHERE id=1");
@@ -649,7 +852,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   it("ignores inactive tier controls during an optional solo approval while still checking the actor permission", async () => {
     await pool.query(`UPDATE inventory.warehouse_settings SET require_approval=false;
       INSERT INTO procurement.po_approval_tiers(id,tier_name,threshold_cents,approver_role,active) VALUES (2,'Duplicate dormant rule',1000,'lead',1)`);
-    expect((await service.approve(1, "wrong-user")).status).toBe("approved");
+    expect((await approveCurrent("wrong-user")).status).toBe("approved");
     expect((await evidence()).events[0].payload_json.approval_authority).toMatchObject({ requireApproval: false, tier: null, matchedRoleId: null });
     expect((await service.send(1, "wrong-user", await dispatchConfirmation())).status).toBe("sent");
   });
@@ -658,7 +861,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       line_total_cents,pricing_basis,pricing_source,discount_cents,tax_cents,updated_at)
       VALUES (12,1,2,'fee','open',1,500,1,'legacy_unknown','manual',0,0,'2026-09-01T12:00:00')`);
     const before = await evidence();
-    await expect(service.approve(1, "wrong-user")).rejects.toMatchObject({ details: { code: "PO_APPROVAL_ROLE_REQUIRED" } });
+    await expect(approveCurrent("wrong-user")).rejects.toMatchObject({ details: { code: "PO_APPROVAL_ROLE_REQUIRED" } });
     expect(await evidence()).toEqual(before);
   });
 
@@ -667,7 +870,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     await pool.query(`CREATE FUNCTION procurement.fail_approval_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected audit failure'; END $$;
       CREATE TRIGGER fail_approval_audit BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.fail_approval_audit()`);
     try {
-      await expect(service.approve(1, "admin-user")).rejects.toThrow();
+      await expect(approveCurrent("admin-user")).rejects.toThrow();
       expect(await evidence()).toEqual(before);
     } finally {
       await pool.query("DROP TRIGGER fail_approval_audit ON procurement.po_events; DROP FUNCTION procurement.fail_approval_audit()");
@@ -679,7 +882,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     "DELETE FROM procurement.po_events WHERE po_id=1",
     "TRUNCATE procurement.po_events",
   ])("rejects direct event history mutation: %s", async (statement) => {
-    await service.approve(1, "admin-user");
+    await approveCurrent("admin-user");
     const before = await evidence();
     await expect(pool.query(statement)).rejects.toMatchObject({ code: "23514", constraint: "po_event_history_immutable" });
     expect(await evidence()).toEqual(before);
@@ -687,7 +890,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
 
   it.each(["DELETE FROM procurement.purchase_orders WHERE id=1", "TRUNCATE procurement.purchase_orders CASCADE"])(
     "rejects parent removal including cascaded history: %s", async (statement) => {
-      await service.approve(1, "admin-user");
+      await approveCurrent("admin-user");
       const before = await evidence();
       await expect(pool.query(statement)).rejects.toSatisfy(isPurchaseOrderHistoryConstraintViolation);
       expect(await evidence()).toEqual(before);
@@ -704,13 +907,13 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   });
 
   it("returns an actionable HTTP error for the reachable stale-approval-to-draft delete path and allows cancellation", async () => {
-    await service.approve(1, "admin-user");
+    await approveCurrent("admin-user");
     const originalApproval = (await evidence()).events[0];
     await pool.query("UPDATE procurement.po_approval_tiers SET approver_role='lead'");
     await service.send(1, "admin-user", await dispatchConfirmation());
     await service.returnToDraft(1, "admin-user", "Review the changed policy");
     const before = await evidence();
-    const response = await fetch(`${url}/api/purchase-orders/1`, { method: "DELETE" });
+    const response = await requestLocalHttp(`${url}/api/purchase-orders/1`, { method: "DELETE" });
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: expect.stringContaining("Cancel it instead"), details: { code: "PO_HISTORY_DELETE_BLOCKED" } });
     expect(await evidence()).toEqual(before);
@@ -719,11 +922,11 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   });
 
   it("retains both approval decisions through reapproval and send", async () => {
-    await service.approve(1, "admin-user");
+    await approveCurrent("admin-user");
     const originalApproval = (await evidence()).events[0];
     await pool.query("UPDATE procurement.po_approval_tiers SET approver_role='lead'");
     await service.send(1, "admin-user", await dispatchConfirmation());
-    await service.approve(1, "lead-user");
+    await approveCurrent("lead-user");
     expect((await service.send(1, "lead-user", await dispatchConfirmation())).status).toBe("sent");
     const approvals = (await evidence()).events.filter((row) => row.event_type === "approved");
     expect(approvals).toHaveLength(2);
@@ -732,7 +935,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   });
 
   it("preserves existing rows when the additive retention migration runs again", async () => {
-    await service.approve(1, "admin-user");
+    await approveCurrent("admin-user");
     const before = await evidence();
     await pool.query(retentionMigration);
     expect(await evidence()).toEqual(before);
@@ -796,7 +999,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       await continueApproval.promise;
       return actor;
     } });
-    const approval = controlled.approve(1, "admin-user");
+    const approval = controlled.approve(1, "admin-user", undefined, await approvalReview());
     await captured.promise;
     const revoker = await pool.connect();
     let deletion: Promise<pg.QueryResult> | undefined;
@@ -819,7 +1022,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       expect(event.payload_json.approval_authority.actor.approvalGrantIds).toEqual([1]);
       await pool.query("UPDATE procurement.purchase_orders SET status='pending_approval'");
       const before = await evidence();
-      await expect(service.approve(1, "admin-user")).rejects.toMatchObject({ details: { code: denialCode } });
+      await expect(approveCurrent("admin-user")).rejects.toMatchObject({ details: { code: denialCode } });
       expect(await evidence()).toEqual(before);
     } finally {
       continueApproval.resolve();
@@ -829,4 +1032,107 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       revoker.release();
     }
   });
+
+  describe("PO financial authority from retained invoice sources", () => {
+    const makeDraft = () => pool.query("UPDATE procurement.purchase_orders SET status='draft',physical_status='draft',financial_status='unbilled',invoiced_total_cents=0,paid_total_cents=0 WHERE id=1");
+    const addInvoice = (status: string) => pool.query("INSERT INTO procurement.vendor_invoices(id,vendor_id,invoice_number,status,invoiced_amount_cents,paid_amount_cents,balance_cents,currency) VALUES(80,1,'OWNERSHIP-80',$1,0,0,0,'USD')", [status]);
+
+    it.each(["received", "voided"])("blocks a zero-value %s invoice's header association despite zero PO caches", async status => {
+      await makeDraft(); await addInvoice(status);
+      await pool.query("INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id) VALUES(80,1)");
+      const before = await evidence();
+      await expect(service.updatePO(1, { priority: "high" }, "admin-user")).rejects.toMatchObject({
+        statusCode: 409, details: { code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY" },
+      });
+      expect(await evidence()).toEqual(before);
+    });
+
+    it("preserves line-owned history even when its invoice header link is missing", async () => {
+      await makeDraft(); await addInvoice("voided");
+      await pool.query("INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,purchase_order_line_id,line_total_cents) VALUES(90,80,11,0)");
+      const before = await evidence();
+      await expect(service.updatePO(1, { priority: "high" }, "admin-user")).rejects.toMatchObject({ details: { code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY" } });
+      expect(await evidence()).toEqual(before);
+    });
+
+    it.each(["add", "bulk", "update", "cancel"] as const)("blocks direct %s line mutation from retained header-only financial history", async operation => {
+      await makeDraft(); await addInvoice("voided");
+      await pool.query("INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id) VALUES(80,1)");
+      const before = await evidence();
+      const po = await storage.getPurchaseOrderById(1);
+      const [line] = await database.select().from(schema.purchaseOrderLines).where(eq(schema.purchaseOrderLines.id, 11));
+      const commands = createPurchaseOrderLineCommands(database);
+      const version = { expectedPoUpdatedAt: po.updatedAt.toISOString(), expectedLineUpdatedAt: line.updatedAt.toISOString() };
+      const newLine = { productId: 1, pricing: { basis: "per_piece", quantityPieces: 1, unitCostMills: 100 } };
+      const attempt = operation === "add" ? commands.addLine(1, { expectedPoUpdatedAt: version.expectedPoUpdatedAt, ...newLine }, "admin-user")
+        : operation === "bulk" ? commands.addBulkLines(1, { expectedPoUpdatedAt: version.expectedPoUpdatedAt, lines: [newLine] }, "admin-user")
+          : operation === "update" ? commands.updateLine(11, { ...version, notes: "Changed" }, "admin-user")
+            : commands.cancelLine(11, { ...version, reason: "Changed" }, "admin-user");
+      await expect(attempt).rejects.toMatchObject({ statusCode: 409, details: { code: "PO_LINE_COMMAND_FINANCIAL_ACTIVITY" } });
+      expect(await evidence()).toEqual(before);
+    });
+
+    it("does not treat stale paid caches as source authority on a clean draft", async () => {
+      await makeDraft();
+      await pool.query("UPDATE procurement.purchase_orders SET financial_status='paid',invoiced_total_cents=500,paid_total_cents=500 WHERE id=1");
+      await expect(service.updatePO(1, { priority: "high" }, "admin-user")).resolves.toMatchObject({ priority: "high", financialStatus: "paid" });
+      expect((await evidence()).events).toHaveLength(1);
+    });
+
+    it.each(["unbilled", "invoiced", "partially_paid", "paid", "disputed"] as const)("cannot manually stamp %s or its milestones", async target => {
+      const before = await evidence();
+      await expect(service.transitionFinancial(1, target, "admin-user")).rejects.toMatchObject({
+        statusCode: 409, details: { code: "PO_FINANCIAL_LEDGER_OWNED" },
+      });
+      expect(await evidence()).toEqual(before);
+    });
+
+    it.each(["commit", "rollback"] as const)("reads invoice linkage after waiting for the actual graph lock (%s)", async disposition => {
+      await makeDraft();
+      const blocker = await pool.connect();
+      let released = false;
+      const before = await evidence();
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query("SELECT pg_advisory_xact_lock(hashtext('inventory.cost_graph'), hashtext('version_1'))");
+        const pid = (await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+        await blocker.query("INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id) VALUES(80,1)");
+        const attempt = service.updatePO(1, { priority: "high" }, "admin-user").then(value => ({ value, error: null }), error => ({ value: null, error }));
+        const deadline = Date.now() + 5000;
+        let waiting = false;
+        while (Date.now() < deadline) {
+          const waiters = await pool.query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock' AND wait_event='advisory') AS waiting", [pid]);
+          if (waiters.rows[0].waiting) { waiting = true; break; }
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        expect(waiting, "draft owner must wait on the held production inventory graph lock").toBe(true);
+        expect(await evidence()).toEqual(before);
+        await blocker.query(disposition === "commit" ? "COMMIT" : "ROLLBACK"); released = true;
+        const result = await attempt;
+        if (disposition === "commit") {
+          expect(result.error).toMatchObject({ statusCode: 409, details: { code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY" } });
+          expect(await evidence()).toEqual(before);
+        } else {
+          expect(result.error).toBeNull(); expect(result.value).toMatchObject({ priority: "high" });
+        }
+      } finally {
+        if (!released) await blocker.query("ROLLBACK");
+        blocker.release();
+      }
+    });
+
+    it("rolls back a source-verified draft edit when its immutable audit cannot be written", async () => {
+      await makeDraft();
+      const before = await evidence();
+      await pool.query(`CREATE FUNCTION procurement.fail_draft_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected draft audit failure'; END $$;
+        CREATE TRIGGER fail_draft_audit BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.fail_draft_audit()`);
+      try {
+        await expect(service.updatePO(1, { priority: "high" }, "admin-user")).rejects.toThrow();
+        expect(await evidence()).toEqual(before);
+      } finally {
+        await pool.query("DROP TRIGGER fail_draft_audit ON procurement.po_events; DROP FUNCTION procurement.fail_draft_audit()");
+      }
+    });
+  });
+
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decideDropshipStockPublicationSelection } from "../../domain/stock-publication-selection";
+import { stockPublicationSelectionSchema } from "../../../../../shared/types/stock-publication-selection";
 
 type Input = Parameters<typeof decideDropshipStockPublicationSelection>[0];
 const now = new Date("2026-10-12T12:00:00Z");
@@ -42,7 +43,13 @@ describe("Dropship listing intent owns stock selection", () => {
       .toBe("read_only");
   });
 
-  it.each(["vendor_rule", "vendor_override", "admin_rule", "inactive_variant", "internal_variant", "untracked_variant"])(
+  it("excludes archived members immediately while the shared listing lifecycle owns removal", () => {
+    const value = input();
+    value.candidate!.variantIsActive = false;
+    expect(decideDropshipStockPublicationSelection(value)).toMatchObject({ action: "none", blockers: [] });
+  });
+
+  it.each(["vendor_rule", "vendor_override", "admin_rule", "internal_variant", "untracked_variant"])(
     "retains zero duty for %s deselection", reason => {
       const value = input();
       if (reason === "vendor_rule") value.vendorRules = [...value.vendorRules,
@@ -50,7 +57,6 @@ describe("Dropship listing intent owns stock selection", () => {
       if (reason === "vendor_override") value.override = { productVariantId: 101, enabledOverride: false };
       if (reason === "admin_rule") value.rules = [...value.rules,
         { id: 4, scopeType: "product", action: "exclude", productId: 20 }];
-      if (reason === "inactive_variant") value.candidate!.variantIsActive = false;
       if (reason === "internal_variant") value.candidate!.salesEligibility = "internal_only";
       if (reason === "untracked_variant") value.candidate!.trackInventory = false;
       expect(decideDropshipStockPublicationSelection(value).action).toBe("zero");
@@ -100,5 +106,39 @@ describe("Dropship listing intent owns stock selection", () => {
   it("reports missing catalog identity without silently dropping a retained listing", () => {
     expect(decide({ candidate: null })).toMatchObject({ action: "zero", blockers: [{ code: "DROPSHIP_STOCK_CATALOG_IDENTITY_MISSING" }] });
     expect(decide({ candidate: null, listing: null }).action).toBe("none");
+  });
+});
+
+// eBay sync-back owner rule 1 (plan v4 SB29): the listing's vendor limit travels on a publish decision only.
+describe("the vendor's quantity limit on a publish decision", () => {
+  const withLimit = (vendorQuantityLimit: number | null | undefined, patch: Partial<NonNullable<Input["listing"]>> = {}) =>
+    decide({ listing: { ...input().listing!, vendorQuantityLimit, ...patch } });
+
+  it("carries the limit on a publish, 0 included", () => {
+    expect(withLimit(5)).toMatchObject({ action: "publish", publishLimitUnits: 5 });
+    expect(withLimit(0)).toMatchObject({ action: "publish", publishLimitUnits: 0 });
+  });
+
+  it("is exactly today's decision without a limit", () => {
+    expect(withLimit(null)).toEqual(decide());
+    expect(withLimit(undefined)).toEqual(decide());
+    expect(decide()).not.toHaveProperty("publishLimitUnits");
+  });
+
+  it("never carries a limit on a zero, read-only or ended decision", () => {
+    expect(withLimit(5, { status: "paused" })).toMatchObject({ action: "zero" });
+    expect(withLimit(5, { status: "paused" })).not.toHaveProperty("publishLimitUnits");
+    expect(withLimit(5, { status: "ended" })).not.toHaveProperty("publishLimitUnits");
+    expect(withLimit(5, { status: "preview_ready", externalListingId: null, externalOfferId: null })).not.toHaveProperty("publishLimitUnits");
+  });
+
+  it("the shared contract refuses a limit on anything but a publish, and a limit that is not a whole number of units", () => {
+    const selection = (variant: Record<string, unknown>) => stockPublicationSelectionSchema.safeParse({ productId: 20, fingerprint: "a".repeat(64),
+      variants: [{ productVariantId: 101, action: "publish", reason: "selected_existing_listing", blockers: [], ...variant }] });
+    expect(selection({ publishLimitUnits: 5 }).success).toBe(true);
+    expect(selection({}).success).toBe(true);
+    expect(selection({ action: "zero", publishLimitUnits: 5 }).success).toBe(false);
+    expect(selection({ publishLimitUnits: -1 }).success).toBe(false);
+    expect(selection({ publishLimitUnits: 2.5 }).success).toBe(false);
   });
 });

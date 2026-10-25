@@ -17,18 +17,18 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       return { rows: [] };
     });
     const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
-    const work = vi.fn(async () => "published");
+    const work = vi.fn(async () => {
+      expect(client.queries[0].sql).toContain("pg_advisory_lock");
+      expect(client.queries.some(({ sql }) => sql.includes("pg_advisory_unlock"))).toBe(false);
+      return "published";
+    });
 
     await expect(repository.runIfCurrent(claim(), work)).resolves.toEqual({
       status: "current",
       value: "published",
     });
     expect(work).toHaveBeenCalledOnce();
-    expect(client.queries.map(({ sql }) => sql)).toEqual([
-      expect.stringContaining("pg_advisory_lock"),
-      expect.stringContaining("AS newer_exists"),
-      expect.stringContaining("pg_advisory_unlock"),
-    ]);
+    expect(client.queries.at(-1)?.sql).toContain("pg_advisory_unlock");
   });
 
   it("records and skips a stale claim before any provider operation", async () => {
@@ -123,7 +123,8 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       }
       return { rows: [], rowCount: 1 };
     });
-    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
+    const log = { error: vi.fn() };
+    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client), log);
 
     await expect(repository.recordFailure(claim(), {
       errorClass: "PUBLICATION_GLOBAL_STOP_ACTIVE",
@@ -143,6 +144,7 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
     ]);
     expect(client.queries.some(({ sql }) =>
       sql.includes("INSERT INTO inventory.inventory_publication_attempts"))).toBe(false);
+    expect(log.error).not.toHaveBeenCalled();
   });
 
   it("retries a failed full publication while its activation run remains active", async () => {
@@ -159,7 +161,8 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       if (sql.includes("SELECT TRUE AS valid")) return { rows: [{ valid: true }] };
       return { rows: [] };
     });
-    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
+    const log = { error: vi.fn() };
+    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client), log);
 
     await expect(repository.recordFailure(claim(), {
       errorClass: "PROVIDER_TEMPORARY_FAILURE",
@@ -173,6 +176,7 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
     expect(client.queries.some(({ sql }) => sql.includes("state = 'failed'"))).toBe(false);
     expect(client.queries.some(({ sql }) => sql.includes("state = 'dead_letter'")
       && sql.includes("SELECT EXISTS"))).toBe(false);
+    expect(log.error).not.toHaveBeenCalled();
   });
 
   it("preserves the conservative activation stop rule when any row is dead-lettered", async () => {
@@ -197,7 +201,8 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       }
       return { rows: [] };
     });
-    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
+    const log = { error: vi.fn() };
+    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client), log);
 
     await expect(repository.recordFailure({ ...claim(), publicationPhase: "conservative" }, {
       errorClass: "PROVIDER_TEMPORARY_FAILURE",
@@ -209,6 +214,8 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
     const failureUpdate = client.queries.find(({ sql }) =>
       sql.includes("last_error_class = $4") && sql.includes("last_error_message = $5"));
     expect(failureUpdate?.values?.[2]).toBe("cancelled");
+    // A cancelled row is not a dead letter: nothing is logged for a person.
+    expect(log.error).not.toHaveBeenCalled();
     // Failure/result persistence no longer closes the run under a provider lock.
     expect(client.queries.some(({ sql }) => sql.includes("SET state = 'failed'"))).toBe(false);
     expect(client.queries.some(({ sql }) => sql.includes("availability_activation_freezes"))).toBe(false);
@@ -228,7 +235,8 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       if (sql.includes("SELECT TRUE AS valid")) return { rows: [{ valid: true }] };
       return { rows: [] };
     });
-    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
+    const log = { error: vi.fn() };
+    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client), log);
 
     await expect(repository.recordFailure(claim(), {
       errorClass: "PUBLICATION_IDENTITY_INVALID",
@@ -241,6 +249,68 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       sql.includes("last_error_class = $4") && sql.includes("last_error_message = $5"));
     expect(failureUpdate?.values?.[2]).toBe("dead_letter");
     expect(client.queries.some(({ sql }) => sql.includes("SET state = 'failed'"))).toBe(false);
+    expect(log.error).toHaveBeenCalledExactlyOnceWith("inventory_publication.outbox.dead_lettered",
+      expect.objectContaining({ error_code: "PUBLICATION_IDENTITY_INVALID", error_class: "permanent" }));
+  });
+
+  // Channels PR1: a dead letter needs a person, so it is logged once at ERROR with
+  // its correlation ids, and only after its transaction committed.
+  describe("dead-letter log line", () => {
+    const activeRun = (sql: string): QueryResponse => {
+      if (sql.includes("SELECT * FROM inventory.inventory_publication_outbox")) return { rows: [{ id: "41" }] };
+      if (sql.includes("SELECT state FROM inventory.availability_activation_runs")) return { rows: [{ state: "active" }] };
+      if (sql.includes("SELECT state, reason FROM inventory.availability_activation_runs")) {
+        return { rows: [{ state: "active", reason: "Activated after verification" }] };
+      }
+      if (sql.includes("SELECT TRUE AS valid")) return { rows: [{ valid: true }] };
+      return { rows: [] };
+    };
+    const refused = { errorClass: "SHOPIFY_INVENTORY_ITEM_NOT_FOUND", errorMessage: "Shopify API POST /inventory_levels/set.json failed (404)",
+      retryable: false, completedAt: NOW };
+
+    it("logs a permanent refusal once, after commit, with every correlation id", async () => {
+      const client = fakeClient(activeRun);
+      const log = { error: vi.fn(() => {
+        // The line describes durable state: COMMIT has already run.
+        expect(client.queries.at(-1)?.sql).toBe("COMMIT");
+      }) };
+      const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client), log);
+      await expect(repository.recordFailure(claim(), refused)).resolves.toBe(true);
+      expect(log.error).toHaveBeenCalledExactlyOnceWith("inventory_publication.outbox.dead_lettered", {
+        outcome: "dead_letter", error_code: "SHOPIFY_INVENTORY_ITEM_NOT_FOUND", error_class: "permanent",
+        dead_letter_reason: "non_retryable", error_message: "Shopify API POST /inventory_levels/set.json failed (404)",
+        before: { state: "leased", attempt_number: 1 }, after: { state: "dead_letter" },
+        outbox_id: "41", activation_run_id: "12", publication_phase: "full", publication_target_id: 9, product_variant_id: 101,
+        desired_revision: "2", desired_quantity: "7", channel_id: 3, destination_kind: "channel_connection",
+        channel_connection_id: 33, dropship_store_connection_id: null, provider_key: "shopify", provider_scope_type: "location",
+        external_scope_id: "location-9", external_inventory_item_id: "inventory-item-101", external_sku: "SKU-101",
+      });
+    });
+
+    it("logs a retryable failure that reached the attempt cap as permanent, with the exhausted reason", async () => {
+      const log = { error: vi.fn() };
+      const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(fakeClient(activeRun)), log);
+      await repository.recordFailure({ ...claim(), attemptNumber: 10 }, { ...refused, errorClass: "PROVIDER_PUBLICATION_REJECTED", retryable: true });
+      // A dead letter is never retried: error_class stays in the platform's transient | permanent | fatal vocabulary.
+      expect(log.error).toHaveBeenCalledExactlyOnceWith("inventory_publication.outbox.dead_lettered", expect.objectContaining({
+        error_code: "PROVIDER_PUBLICATION_REJECTED", error_class: "permanent", dead_letter_reason: "attempts_exhausted",
+        before: { state: "leased", attempt_number: 10 } }));
+    });
+
+    it("does not log a retry, a lost lease or a failure that rolled back", async () => {
+      const log = { error: vi.fn() };
+      await new PostgresInventoryPublicationOutboxRepository(fakePool(fakeClient(activeRun)), log)
+        .recordFailure(claim(), { ...refused, retryable: true });
+      const lostLease = fakeClient(sql => sql.includes("SELECT * FROM inventory.inventory_publication_outbox") ? { rows: [] } : activeRun(sql));
+      await expect(new PostgresInventoryPublicationOutboxRepository(fakePool(lostLease), log).recordFailure(claim(), refused)).resolves.toBe(false);
+      const brokenCommit = fakeClient(sql => {
+        if (sql === "COMMIT") throw new Error("commit failed");
+        return activeRun(sql);
+      });
+      await expect(new PostgresInventoryPublicationOutboxRepository(fakePool(brokenCommit), log).recordFailure(claim(), refused))
+        .rejects.toThrow("commit failed");
+      expect(log.error).not.toHaveBeenCalled();
+    });
   });
 
   it("requeues a full publication after readback drift while the run remains active", async () => {

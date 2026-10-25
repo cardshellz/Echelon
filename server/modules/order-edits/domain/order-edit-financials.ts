@@ -13,6 +13,8 @@ interface SettlementTransaction {
   kind: string;
   status: string;
   amountCents: number;
+  parentId?: string | null;
+  gateway?: string;
 }
 interface SettlementEvidence {
   transactions: SettlementTransaction[];
@@ -196,4 +198,91 @@ export function presentOrderEditSettlement(
       "The payment history contains an invalid amount, identity, status, or date.",
     );
   return result.data;
+}
+
+/** One presentation owner for account rows and their management panel. A
+ * settled refund must not be labelled "payment outstanding" just because the
+ * provider no longer reports the cancelled order as fullyPaid. */
+export function presentOrderEditFinancialStatus(snapshot: SettlementEvidence & { cancelled: boolean; fullyPaid: boolean }): string {
+  const settled = presentOrderEditSettlement(snapshot);
+  const pending = settled.activity.filter(entry => !["SUCCESS", "FAILURE", "ERROR"].includes(entry.status));
+  if (pending.some(entry => entry.kind === "refund")) return "Refund processing";
+  if (settled.outstandingCents > 0) return "Payment due";
+  if (settled.refundedCents > 0) return settled.netPaidCents === 0 ? "Refunded" : "Partially refunded";
+  if (snapshot.cancelled) return settled.netPaidCents > 0 ? "Refund pending" : "Cancelled";
+  if (pending.length) return "Payment processing";
+  return snapshot.fullyPaid ? "Paid" : "Payment pending";
+}
+
+/** Full cancellation must refund the approved remaining payment, without an
+ * extra capture or a changed refund amount being hidden by a zero net balance. */
+export function matchesOrderCancellationSettlement(before: SettlementEvidence, after: SettlementEvidence, refundCents: number): boolean {
+  if (!Number.isSafeInteger(refundCents) || refundCents < 0) return false;
+  const original = presentOrderEditSettlement(before), current = presentOrderEditSettlement(after);
+  return original.netPaidCents === refundCents && current.netPaidCents === 0 && current.outstandingCents === 0
+    && original.receivedCents === current.receivedCents
+    && BigInt(current.refundedCents) - BigInt(original.refundedCents) === BigInt(refundCents);
+}
+
+/** Confirmed receipts and completed refunds can leave less than the order
+ * total (including zero) available to return. A status or net balance alone
+ * cannot prove this. Merchandise cancellation remains a separate command. */
+export function isOrderCancellationPaymentSettled(
+  snapshot: SettlementEvidence & {
+    fullyPaid: boolean;
+    capturableCents: number;
+    totalCents: number;
+  },
+): boolean {
+  const settlement = presentOrderEditSettlement(snapshot);
+  if (
+    !Number.isSafeInteger(snapshot.totalCents) ||
+    snapshot.totalCents < 0 ||
+    snapshot.capturableCents !== 0 ||
+    snapshot.outstandingCents !== 0 ||
+    settlement.activity.some(
+      (entry) => !["SUCCESS", "FAILURE", "ERROR"].includes(entry.status),
+    )
+  )
+    return false;
+  if (snapshot.fullyPaid && snapshot.netPaidCents === snapshot.totalCents)
+    return true;
+  const transactions = new Map<string, SettlementTransaction>();
+  for (const transaction of [
+    ...snapshot.transactions,
+    ...snapshot.refunds.flatMap((refund) => refund.transactions),
+  ]) {
+    // presentOrderEditSettlement already rejects contradictory duplicates.
+    transactions.set(transaction.id, transaction);
+  }
+  const refundedByParent = new Map<string, bigint>();
+  for (const refund of transactions.values()) {
+    if (refund.kind !== "REFUND" || refund.status !== "SUCCESS") continue;
+    const parent = refund.parentId
+      ? transactions.get(refund.parentId)
+      : undefined;
+    if (
+      !parent ||
+      !["SALE", "CAPTURE"].includes(parent.kind) ||
+      parent.status !== "SUCCESS" ||
+      !refund.gateway ||
+      refund.gateway !== parent.gateway
+    )
+      return false;
+    const refunded =
+      (refundedByParent.get(parent.id) ?? BigInt(0)) +
+      BigInt(refund.amountCents);
+    if (refunded > BigInt(parent.amountCents)) return false;
+    refundedByParent.set(parent.id, refunded);
+  }
+  return (
+    settlement.receivedCents > 0 &&
+    // A completed price-reducing edit can make the current total smaller than
+    // the original receipt. Require enough captured money to cover that total.
+    settlement.receivedCents >= snapshot.totalCents &&
+    settlement.refundedCents > 0 &&
+    settlement.refundedCents <= settlement.receivedCents &&
+    BigInt(settlement.receivedCents) - BigInt(settlement.refundedCents) ===
+      BigInt(snapshot.netPaidCents)
+  );
 }

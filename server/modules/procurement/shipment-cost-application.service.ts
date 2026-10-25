@@ -2,13 +2,16 @@ import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipment
   allocateShipmentCents, shipmentAllocationEvidenceMatches, type ShipmentAllocationBasis } from "./domain/shipment-allocation-basis";
 import { recordCostRevision } from "./cost-source-revision.repository";
 import { sql } from "drizzle-orm";
-import type { CostIssue } from "@shared/procurement/cost-source-contracts";
-import { costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision, type CostRevisionInput } from "../inventory/infrastructure/cost-evidence.repository";
-import { applyCostRevision, type CostComponentWriter } from "../inventory/application/apply-cost-revision";
+import type { CostIssue, CostSourceReference } from "@shared/procurement/cost-source-contracts";
+import { costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../inventory/infrastructure/cost-evidence.repository";
+import { applyCostRevision, type CostApplicationOptions, type CostComponentWriter } from "../inventory/application/apply-cost-revision";
 import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence";
+import { retainEquivalentShipmentCostSource, type ShipmentCostProposal } from "./shipment-cost-source-identity";
+import { readSupplierCreditCostRows } from "./supplier-credit-source.repository";
+import { resolveShipmentSupplierCredits } from "./domain/shipment-supplier-credits";
 
 type ShipmentRevisionOptions = { allocationJustFinalized?: boolean; inboundShipmentLineId?: number };
-type ShipmentRevisionProposal = { input: CostRevisionInput; sourceEvidence: unknown };
+type ShipmentRevisionProposal = ShipmentCostProposal;
 
 /** Shared read-only preparation for posting and admin review. A preview must
  * compare the current economic inputs using the same source authority. */
@@ -45,7 +48,7 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
       JOIN procurement.inbound_freight_costs charge ON charge.id=invoice_line.freight_cost_id
       WHERE charge.inbound_shipment_id=${shipmentId}
     )
-    SELECT invoice_line.id,invoice.id AS vendor_invoice_id,invoice_line.freight_cost_id,
+    SELECT invoice_line.id,invoice.id AS vendor_invoice_id,invoice_line.freight_cost_id,invoice_line.purchase_order_line_id,invoice_line.product_variant_id,
       invoice_line.qty_invoiced,invoice_line.unit_cost_mills,invoice_line.unit_cost_cents,invoice_line.line_total_cents,
       invoice.vendor_id,invoice.inbound_shipment_id,invoice.currency,invoice.status,invoice.invoiced_amount_cents,
       invoice.invoice_number,invoice.replaces_invoice_id,
@@ -56,6 +59,7 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
   `);
   const invoiceEvidence = invoiceRows.rows.map((line) => ({
     id: line.id, invoiceId: line.vendor_invoice_id, freightCostId: line.freight_cost_id,
+    purchaseOrderLineId: line.purchase_order_line_id, productVariantId: line.product_variant_id,
     vendorId: line.vendor_id, shipmentId: line.inbound_shipment_id, currency: line.currency, status: line.status,
     invoiceNumber: line.invoice_number ?? null, replacesInvoiceId: line.replaces_invoice_id ?? null,
     invoiceTotalCents: line.invoiced_amount_cents, documentLinesTotalCents: line.document_lines_total_cents,
@@ -72,13 +76,25 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
     JOIN procurement.inbound_freight_costs charge ON charge.id=allocation.shipment_cost_id
     WHERE charge.inbound_shipment_id=${shipmentId} ORDER BY allocation.id
   `);
+  const supplierCredits = await readSupplierCreditCostRows(tx, { freightCostIds: charges.rows.map(charge => Number(charge.id)) });
+  const creditAdjustment = resolveShipmentSupplierCredits({ charges: charges.rows, allocations: allocationRows.rows,
+    invoices: invoiceRows.rows, credits: supplierCredits });
   const previous = await tx.execute(sql`
-    SELECT DISTINCT ON (revision.inbound_shipment_line_id) revision.inbound_shipment_line_id,revision.source_evidence
-    FROM procurement.cost_source_revisions revision
-    JOIN procurement.inbound_shipment_lines line ON line.id=revision.inbound_shipment_line_id
-    WHERE line.inbound_shipment_id=${shipmentId} AND revision.component='landed'
-      AND revision.contract->>'issue' IS NULL AND revision.source_evidence IS NOT NULL
-    ORDER BY revision.inbound_shipment_line_id,revision.id DESC
+    WITH latest AS (
+      SELECT DISTINCT ON (revision.inbound_shipment_line_id)
+        revision.inbound_shipment_line_id,revision.contract,revision.fingerprint,revision.source_evidence
+      FROM procurement.cost_source_revisions revision
+      JOIN procurement.inbound_shipment_lines line ON line.id=revision.inbound_shipment_line_id
+      WHERE line.inbound_shipment_id=${shipmentId} AND revision.component='landed'
+      ORDER BY revision.inbound_shipment_line_id,revision.id DESC
+    )
+    SELECT latest.*,confirmed.source_evidence AS confirmed_source_evidence FROM latest
+    LEFT JOIN LATERAL (
+      SELECT revision.source_evidence FROM procurement.cost_source_revisions revision
+      WHERE revision.inbound_shipment_line_id=latest.inbound_shipment_line_id AND revision.component='landed'
+        AND revision.contract->>'issue' IS NULL AND revision.source_evidence IS NOT NULL
+      ORDER BY revision.id DESC LIMIT 1
+    ) confirmed ON true
   `);
   const validLineIds = new Set(lines.rows.map((line) => costInteger(line.id, "shipmentLineId", 1)));
   const allocationsComplete = charges.rows.every((charge) => {
@@ -135,14 +151,15 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
       issues.push({ code: "LANDED_PURCHASE_SOURCE_MISSING", message: `Shipment line ${line.id} has no complete purchase source; review its inventory cost allocation.` });
       continue;
     }
-    const prior = previous.rows.find((revision) => Number(revision.inbound_shipment_line_id) === Number(line.id))?.source_evidence;
+    const saved = previous.rows.find((revision) => Number(revision.inbound_shipment_line_id) === Number(line.id));
+    const prior = saved?.confirmed_source_evidence;
     const chargeAuthorities = charges.rows.map((charge) => {
       const saved = prior?.chargeAuthorities?.find((authority: { chargeId: number }) => authority.chargeId === Number(charge.id));
       const previousCharge = prior?.charges?.find((entry: { id: number }) => Number(entry.id) === Number(charge.id));
       return { chargeId: Number(charge.id), ...resolveShipmentChargeEvidence({ charge: chargeEvidence(charge), invoices: invoiceEvidence,
         priorConfirmedCharge: saved?.confirmedCharge ?? (previousCharge ? chargeEvidence(previousCharge) : null) }) };
     });
-    const sources = charges.rows.map((charge) => ({ kind: "shipment_cost" as "shipment_cost" | "vendor_invoice_line", documentId: shipmentId,
+    const sources: CostSourceReference[] = charges.rows.map((charge) => ({ kind: "shipment_cost", documentId: shipmentId,
       lineId: costInteger(charge.id, "charge.id", 1), version: costFingerprint({ charge, allocationBasis: currentBasis,
         allocations: allocationRows.rows.filter((allocation) => Number(allocation.shipment_cost_id) === Number(charge.id) && Number(allocation.inbound_shipment_line_id) === Number(line.id)), snapshot: line }) }));
     const approvedInvoiceLineIds = new Set(chargeAuthorities.flatMap((authority) => authority.approvedInvoiceLineIds));
@@ -151,6 +168,7 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
         documentId: costInteger(invoiceLine.vendor_invoice_id, "invoiceId", 1), lineId: costInteger(invoiceLine.id, "invoiceLineId", 1),
         version: costFingerprint(invoiceLine) });
     }
+    sources.push(...creditAdjustment.sources);
     const amount = line.qty == null ? null : costInteger((["freight_allocated_cents","duty_allocated_cents","insurance_allocated_cents","other_allocated_cents"]
       .reduce((sum, field) => sum + BigInt(costInteger(line[field], field, -Number.MAX_SAFE_INTEGER)), BigInt(0)) * BigInt(100)).toString(), "allocatedMills", -Number.MAX_SAFE_INTEGER);
     const actual = chargeAuthorities.length > 0 && chargeAuthorities.every((authority) => authority.evidence === "confirmed");
@@ -167,20 +185,23 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
     }));
     const allocationStale = basisStale || !allocationsComplete || (amount !== null && lineAllocatedMills !== BigInt(amount))
       || (line.qty != null && Number(line.qty) !== Number(line.qty_shipped)) || ((allocationPolicyChanged || effectiveMethodChanged) && !options.allocationJustFinalized);
+    const netAmount = amount === null ? null : costInteger((BigInt(amount) - BigInt(creditAdjustment.creditedCentsByLine.get(Number(line.id)) ?? 0) * BigInt(100)).toString(), "netAllocatedMills", -Number.MAX_SAFE_INTEGER);
     const issue = amount === null ? { code: "LANDED_ALLOCATION_MISSING", message: `Shipment line ${line.id} has no saved allocation.` }
       : amount < 0 ? { code: "SIGNED_LANDED_CREDIT_REVIEW", message: "Preserved signed freight credits need an explicit supported inventory disposition." }
       : sources.length === 0 ? { code: "LANDED_SOURCE_MISSING", message: "A zero allocation without charge evidence does not establish a confirmed zero freight cost." }
       : allocationStale ? { code: "LANDED_ALLOCATION_STALE", message: "The saved allocation no longer reconciles to the current charge, allocation basis, method or shipment quantity. Finalize allocation again before applying it." }
-      : chargeAuthorities.find((authority) => authority.issue !== null)?.issue ?? null;
-    proposals.push({ input: {
+      : creditAdjustment.issues[0] ?? (netAmount !== null && netAmount < 0 ? { code: "CREDIT_LANDED_ALLOCATION_REVIEW", message: "Supplier credits exceed the original allocated shipment cost." } : null)
+        ?? chargeAuthorities.find((authority) => authority.issue !== null)?.issue ?? null;
+    proposals.push(retainEquivalentShipmentCostSource({ input: {
       contractVersion: 1, component: "landed",
       scope: { kind: "shipment_line", purchaseOrderId: costInteger(line.purchase_order_id, "purchaseOrderId", 1), purchaseOrderLineId: costInteger(line.purchase_order_line_id, "purchaseOrderLineId", 1), inboundShipmentId: shipmentId, inboundShipmentLineId: costInteger(line.id, "shipmentLineId", 1) },
       sources: sources.length > 0 ? sources : [{ kind: "purchase_order_line", documentId: Number(line.purchase_order_id), lineId: Number(line.purchase_order_line_id), version: costFingerprint(line) }],
       currency: charges.rows.length > 0 && charges.rows.every((charge) => charge.currency === "USD") ? "USD" : null,
-      totalMills: amount === null ? null : costInteger(amount, "totalMills", -Number.MAX_SAFE_INTEGER), basePieces: line.qty == null ? null : costInteger(line.qty, "snapshot.qty", 1),
+      totalMills: netAmount, basePieces: line.qty == null ? null : costInteger(line.qty, "snapshot.qty", 1),
       evidence: issue ? "review_required" : actual ? "confirmed" : "estimated", packagingTreatment: "not_applicable", issue, manualOverride: null,
     }, sourceEvidence: { shipmentLineSnapshot: line, allocationBasis: currentBasis, charges: charges.rows, chargeAuthorities,
-      invoices: invoiceRows.rows, allocations: allocationRows.rows.filter((allocation) => Number(allocation.inbound_shipment_line_id) === Number(line.id)) } });
+      invoices: invoiceRows.rows, allocations: allocationRows.rows.filter((allocation) => Number(allocation.inbound_shipment_line_id) === Number(line.id)),
+      ...(supplierCredits.length ? { supplierCredits, creditedCents: creditAdjustment.creditedCentsByLine.get(Number(line.id)) ?? 0 } : {}) } }, saved));
   }
   return { proposals, issues };
 }
@@ -193,10 +214,10 @@ export async function recordShipmentCostRevisions(tx: CostEvidenceTransaction, s
   return { revisions, issues };
 }
 
-export async function applyShipmentCostRevisions(tx: CostEvidenceTransaction, shipmentId: number, writer: CostComponentWriter, actorId: string, now: Date) {
+export async function applyShipmentCostRevisions(tx: CostEvidenceTransaction, shipmentId: number, writer: CostComponentWriter, actorId: string, now: Date, options: CostApplicationOptions = {}) {
   const { revisions, issues } = await recordShipmentCostRevisions(tx, shipmentId, actorId, now);
   const applications = [];
-  for (const revision of revisions) applications.push(await applyCostRevision(tx, revision, writer, actorId, now));
+  for (const revision of revisions) applications.push(await applyCostRevision(tx, revision, writer, actorId, now, options));
   return {
     updated: applications.filter((application) => !application.replayed).reduce((sum, application) => sum + application.lotsUpdated, 0),
     total: applications.reduce((sum, application) => sum + application.lotsUpdated, 0),

@@ -3,6 +3,7 @@ import { readReconciliationLedger } from "../inventory/infrastructure/cost-recon
 import { isCostReconciliationPosted } from "@shared/procurement/cost-posting-status";
 import { costIssueSchema } from "@shared/procurement/cost-source-contracts";
 import { sql } from "drizzle-orm";
+import { readPurchaseCostStatus } from "./purchase-cost-status.repository";
 import { purchaseCostApplicationReadSchema, type PurchaseCostApplicationRead } from "./purchase-cost-application-read.service";
 import { dateValues, moneyValues, readRows, PURCHASE_WORKSPACE_LINE_LIMIT, type Transaction } from "./purchase-workspace-read";
 
@@ -23,7 +24,7 @@ export async function readPurchaseCostApplications(tx: Transaction, purchaseOrde
     `, "cost source revision history", COST_REVISION_HISTORY_LIMIT),
     await readRows(tx, sql`
       SELECT application.id, application.source_revision_id AS "sourceRevisionId", application.status,
-        application.evidence->'result' AS result, application.recorded_by AS "recordedBy", application.recorded_at AS "recordedAt"
+        application.evidence->'result' AS result, application.evidence->'noInventoryEffectEvidence' AS "noInventoryEffectEvidence", application.recorded_by AS "recordedBy", application.recorded_at AS "recordedAt"
       FROM inventory.cost_applications application
       JOIN procurement.cost_source_revisions revision ON revision.id=application.source_revision_id
       JOIN procurement.purchase_order_lines line ON line.id=revision.purchase_order_line_id
@@ -60,6 +61,7 @@ export async function readPurchaseCostApplications(tx: Transaction, purchaseOrde
         event.payload->'contractVersion' AS "payloadContractVersion",
         event.payload->'historicalCostAdjustments' AS "historicalCostAdjustments",
         event.payload->'unresolvedQuantities' AS "unresolvedQuantities",
+        event.payload->'inventoryEffectProof' AS "inventoryEffectProof",
         CASE WHEN jsonb_typeof(event.payload->'changes')='array' THEN jsonb_array_length(event.payload->'changes') ELSE NULL END AS "changeCount"
       FROM inventory.cost_reporting_events event
       JOIN inventory.cost_applications application ON application.id=event.application_id
@@ -69,7 +71,7 @@ export async function readPurchaseCostApplications(tx: Transaction, purchaseOrde
     `, "internal cost reporting events", COST_REVISION_HISTORY_LIMIT),
   ] as const;
   const shipmentLineIds = [...new Set(revisions.flatMap((revision) => revision.component === "landed" && typeof revision.shipmentLineId === "number" ? [revision.shipmentLineId] : []))];
-  const postings = shipmentLineIds.length === 0 ? [] : await readRows(tx, sql`
+  const postings = revisions.length === 0 ? [] : await readRows(tx, sql`
     SELECT posting.id, posting.approval_id AS "approvalId", posting.application_id AS "applicationId",
       posting.source_revision_id AS "sourceRevisionId", posting.destination, posting.before_mills AS "beforeMills",
       posting.after_mills AS "afterMills", posting.delta_mills AS "deltaMills", approval.actor_name AS "actorName",
@@ -94,6 +96,18 @@ export async function readPurchaseCostApplications(tx: Transaction, purchaseOrde
   // exception reader checks the live source fingerprint before trusting approval.
   const reviews = await readShipmentCostExceptions(tx, shipmentLineIds);
   data.currentResolutions = [];
+  const supplierLineIds = [...new Set(data.revisions.filter(row => row.component !== "landed").map(row => row.purchaseOrderLineId))];
+  const supplier = await readPurchaseCostStatus(tx, supplierLineIds);
+  for (const line of supplier.lines) for (const component of line.components) {
+    if (component.status !== "applied" || !component.historicalPosting || !component.sourceRevisionId || !component.applicationId) continue;
+    const revision = data.revisions.find(row => row.id === component.sourceRevisionId);
+    if (!revision) continue;
+    const ledger = await readReconciliationLedger(tx, { purchaseOrderLineId: line.purchaseOrderLineId, component: component.component });
+    const currentPostings = (data.reconciliationPostings ?? []).filter(posting => Object.values(ledger.lastIds).includes(posting.id));
+    if (!currentPostings.length) continue;
+    data.currentResolutions.push({ sourceRevisionId: revision.id, sourceFingerprint: revision.fingerprint, applicationId: component.applicationId,
+      currency: "USD", destination: component.historicalPosting.destination, postedMills: component.historicalPosting.amountMills, postings: currentPostings });
+  }
   for (const lineId of shipmentLineIds) {
     const revision = data.revisions.filter((row) => row.shipmentLineId === lineId && row.component === "landed")
       .sort((left, right) => right.revision - left.revision || right.id - left.id)[0];

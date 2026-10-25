@@ -1,5 +1,6 @@
 import { useEffect, useId, type MouseEvent, type ReactNode } from "react";
 import { useQueries, useQuery, type UseQueryResult } from "@tanstack/react-query";
+import { TickBox } from "@/components/dropship/TickBox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -617,33 +618,6 @@ export function SelectionBar({ bar, compact, onSetForSelected, onClear, onSelect
       )}
       {bar.status && <p className="text-sm text-emerald-800" data-testid="listing-settings-selection-saved">{bar.status}</p>}
     </div>
-  );
-}
-
-/**
- * A native checkbox (Space ticks it, a screen reader reads it as one),
- * "mixed" when some of what it stands for is ticked.
- */
-function TickBox({ label, checked, indeterminate = false, disabled = false, onChange }: {
-  /** Read out; left out when a visible label names it. */
-  label?: string;
-  checked: boolean;
-  indeterminate?: boolean;
-  /** The rows are an older list's, kept on screen while the new one loads: ticking them would tick products it may not hold. */
-  disabled?: boolean;
-  onChange: () => void;
-}) {
-  return (
-    <input
-      type="checkbox"
-      aria-label={label}
-      checked={checked}
-      disabled={disabled}
-      // `indeterminate` is a property only, never an attribute.
-      ref={(element) => { if (element) element.indeterminate = indeterminate; }}
-      onChange={onChange}
-      className="h-4 w-4 shrink-0 cursor-pointer accent-[#C060E0]"
-    />
   );
 }
 

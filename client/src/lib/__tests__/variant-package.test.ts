@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildVariantPackagePayload,
+  buildVariantPackagePatch,
   formatMeasurementInput,
   GRAMS_PER_POUND,
   MILLIMETERS_PER_INCH,
@@ -10,6 +11,17 @@ import {
 } from "../variant-package";
 
 describe("variant package helpers", () => {
+  it("omits unchanged rounded display values and records explicit clearing without changing other facts", () => {
+    const original = { weightGrams: 3175.25, lengthMm: 152.41, widthMm: 101.61, heightMm: 25.41 };
+    const input = variantPackageInputFromVariant(original);
+    expect(buildVariantPackagePatch(input, original)).toEqual({});
+    expect(buildVariantPackagePatch({ ...input, heightIn: "" }, original)).toEqual({ heightMm: null });
+    expect(buildVariantPackagePatch({ ...input, lengthIn: "8" }, original)).toEqual({ lengthMm: 203.2 });
+  });
+  it("does not reject or rewrite an unchanged stored fact smaller than the display precision", () => {
+    const original = { weightGrams: 0.01, lengthMm: 0.01 };
+    expect(buildVariantPackagePatch(variantPackageInputFromVariant(original), original)).toEqual({});
+  });
   it("converts stored grams and millimeters to editable pound and inch inputs", () => {
     expect(variantPackageInputFromVariant({
       weightGrams: 226.8,

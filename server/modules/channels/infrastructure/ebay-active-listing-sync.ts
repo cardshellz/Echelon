@@ -1,3 +1,5 @@
+import { ebayIntentAccount, prepareEbayChannelIntent } from "../ebay-prepared-intent";
+import { ebayBusinessPolicies } from "../ebay-business-policies";
 import { db } from "../../../db";
 import {
   EBAY_CHANNEL_ID,
@@ -39,7 +41,7 @@ import {
   type EbayListingSyncIdentity,
 } from "../ebay-listing-sync.domain";
 import {
-  captureExistingEbayListingIdentity,
+  captureEbayListingSourceIdentity,
   assertEbayListingSourceIdentityUnchanged,
   resolveExistingEbayListingIdentity,
 } from "../ebay-existing-listing-identity";
@@ -52,7 +54,7 @@ import {
 } from "@shared/types/ebay-listing-sync";
 import {
   determineVariationAspectName,
-  resolveChannelPrice,
+  resolveChannelPriceResolution,
   delay,
 } from "./ebay-listing-helpers";
 import type { EbayListingMappingSource } from "../ebay-listing-mapping.service";
@@ -67,7 +69,7 @@ export interface SyncFilter {
   productTypeSlugs?: string[];
   variantIds?: number[];
 }
-const filterSchema = z
+export const syncFilterSchema = z
   .object({
     productIds: z.array(z.number().int().positive().max(2147483647)).max(500).optional(),
     productTypeSlugs: z.array(z.string().min(1).max(200)).max(500).optional(),
@@ -111,6 +113,8 @@ async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers
       variant_name: productVariants.name,
       price_cents: productVariants.priceCents,
       variant_weight_grams: productVariants.weightGrams,
+      length_mm: productVariants.lengthMm, width_mm: productVariants.widthMm, height_mm: productVariants.heightMm,
+      shipping_package_type: productVariants.shippingPackageType,
       variant_is_active: productVariants.isActive,
       variant_sales_eligibility: productVariants.salesEligibility,
       variant_excluded: productVariants.ebayListingExcluded,
@@ -128,6 +132,7 @@ async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers
       product_description: products.description,
       product_brand: products.brand,
       product_is_active: products.isActive,
+      product_status: products.status,
       product_excluded: products.ebayListingExcluded,
       product_override_is_listed: channelProductOverrides.isListed,
       type_listing_enabled: ebayCategoryMappings.listingEnabled,
@@ -213,16 +218,7 @@ function identityFromRows(
   rows: Awaited<ReturnType<typeof readActiveEbaySyncRows>>,
   ctx: Awaited<ReturnType<typeof context>>,
 ): EbayListingSyncIdentity {
-  return captureExistingEbayListingIdentity(rows.map(row => ({ ...row, mapping_exists: true, content_sync_enabled: isVariantSellable({
-    productActive: row.product_is_active,
-    variantActive: row.variant_is_active,
-    salesEligibility: row.variant_sales_eligibility,
-    productExcluded: row.product_excluded === true,
-    productOverrideIsListed: row.product_override_is_listed,
-    typeListingEnabled: row.type_listing_enabled,
-    variantExcluded: row.variant_excluded === true,
-    variantOverrideIsListed: row.variant_override_is_listed,
-  }) })), {
+  return captureEbayListingSourceIdentity(rows, {
     channelId: EBAY_CHANNEL_ID,
     connectionId: ctx.conn.id,
     accountId: ctx.account.externalAccountId,
@@ -289,11 +285,6 @@ async function prepareActiveEbayListingSync(
     await readExistingEbayIdentitySnapshot(identity.productId, identity);
   const { metadata, marketplaceId } = ctx,
     accessToken = await ctx.authService.getAccessToken(EBAY_CHANNEL_ID);
-  const defaultPolicies = {
-    fulfillmentPolicyId: metadata.fulfillmentPolicyId || null,
-    returnPolicyId: metadata.returnPolicyId || null,
-    paymentPolicyId: metadata.paymentPolicyId || null,
-  };
   const merchantLocationKey = metadata.merchantLocationKey || "card-shellz-hq";
   const ebayClient = createEbayRouteListingLifecycleClient({
     accessToken,
@@ -314,7 +305,6 @@ async function prepareActiveEbayListingSync(
   const product = variants[0];
   // Get effective eBay category
   let ebayBrowseCategoryId = product.ebay_browse_category_id;
-  let effectivePolicies = { ...defaultPolicies };
   let storeCategoryNames: string[] = [];
 
   // Category-level overrides
@@ -339,26 +329,10 @@ async function prepareActiveEbayListingSync(
       const catRow = catResult[0];
       if (!ebayBrowseCategoryId)
         ebayBrowseCategoryId = catRow.ebayBrowseCategoryId;
-      if (catRow.fulfillmentPolicyOverride)
-        effectivePolicies.fulfillmentPolicyId =
-          catRow.fulfillmentPolicyOverride;
-      if (catRow.returnPolicyOverride)
-        effectivePolicies.returnPolicyId = catRow.returnPolicyOverride;
-      if (catRow.paymentPolicyOverride)
-        effectivePolicies.paymentPolicyId = catRow.paymentPolicyOverride;
       if (catRow.ebayStoreCategoryName)
         storeCategoryNames = [catRow.ebayStoreCategoryName];
     }
   }
-
-  // Product-level policy overrides
-  if (product.product_fulfillment_override)
-    effectivePolicies.fulfillmentPolicyId =
-      product.product_fulfillment_override;
-  if (product.product_return_override)
-    effectivePolicies.returnPolicyId = product.product_return_override;
-  if (product.product_payment_override)
-    effectivePolicies.paymentPolicyId = product.product_payment_override;
 
   // Build product-level aspects
   const aspects: Record<string, string[]> = {};
@@ -384,7 +358,9 @@ async function prepareActiveEbayListingSync(
     .where(eq(ebayProductAspectOverrides.productId, productId));
   for (const po of prodOverrides) aspects[po.aspectName] = [po.aspectValue];
 
-  const isMultiVariant = variants.length > 1;
+  // A verified group keeps its variation schema even when only one member is
+  // still maintained; archived siblings remain topology until lifecycle removal.
+  const isMultiVariant = boundIdentity.groupKey !== null || variants.length > 1;
   const variationAspectName = isMultiVariant
     ? determineVariationAspectName(variants)
     : "";
@@ -402,9 +378,8 @@ async function prepareActiveEbayListingSync(
     price_cents: variant.price_cents,
     ebay_weight_grams:
       variant.variant_weight_override ?? variant.variant_weight_grams,
-    ebay_fulfillment_policy_override: variant.variant_fulfillment_override,
-    ebay_return_policy_override: variant.variant_return_override,
-    ebay_payment_policy_override: variant.variant_payment_override,
+    length_mm: variant.length_mm, width_mm: variant.width_mm, height_mm: variant.height_mm,
+    shipping_package_type: variant.shipping_package_type,
     isListed: boundIdentity.variants.find(member => member.variantId === variant.variant_id)!.contentSyncEnabled !== false,
   }));
   const sellableVariantIds = new Set(
@@ -415,6 +390,11 @@ async function prepareActiveEbayListingSync(
   if (sellableVariantIds.size === 0) {
     throw new EbayListingSyncError("EBAY_SYNC_CONTENT_SCOPE_EMPTY", "This existing listing has no included variants to update. Its retained eBay variations are unchanged.");
   }
+
+  const resolvedPolicies = await ebayBusinessPolicies.resolveProductPolicies({ productId,
+    variantIds: [...sellableVariantIds], expectedScope: { channelId: EBAY_CHANNEL_ID,
+      connectionId: identity.connectionId, accountId: identity.accountId,
+      environment: ctx.authService.getEnvironment(), marketplaceId } });
 
   // Catalog photo ownership remains keyed by local variant identity. The final
   // byVariantId plan is then addressed to the separately verified provider SKU.
@@ -434,16 +414,19 @@ async function prepareActiveEbayListingSync(
   });
 
   const variantPrices: Map<number, number> = new Map();
+  const priceResolutions = new Map<number, Awaited<ReturnType<typeof resolveChannelPriceResolution>>>();
   const variantChangeState = new Map<number, { priceChanged: boolean }>();
   for (const variant of variants) {
     if (!sellableVariantIds.has(variant.variant_id)) continue;
-    const newPriceCents = await resolveChannelPrice(
+    const resolution = await resolveChannelPriceResolution(
       db,
       EBAY_CHANNEL_ID,
       productId,
       variant.variant_id,
       variant.price_cents,
     );
+    const newPriceCents = resolution.priceCents ?? 0;
+    priceResolutions.set(variant.variant_id, resolution);
     variantPrices.set(variant.variant_id, newPriceCents);
     variantChangeState.set(variant.variant_id, {
       priceChanged: newPriceCents !== (variant.last_synced_price || 0),
@@ -467,7 +450,8 @@ async function prepareActiveEbayListingSync(
     atpByVariantId: syncAtpByVariantId,
     marketplaceId,
     ebayBrowseCategoryId,
-    effectivePolicies,
+    resolvedPoliciesByVariantId: resolvedPolicies.byVariantId,
+    packageRequirementsByVariantId: resolvedPolicies.packageRequirementsByVariantId,
     storeCategoryNames,
     merchantLocationKey,
     retainUnlistedVariantsInGroup: true,
@@ -483,13 +467,21 @@ async function prepareActiveEbayListingSync(
     sourceIdentity,
     providerObservation,
     client: ebayClient,
-    draft: preparedDraft,
+    draft: { ...preparedDraft, preparedIntent: prepareEbayChannelIntent({
+      account: ebayIntentAccount({ channelId: EBAY_CHANNEL_ID, connectionId: identity.connectionId, accountId: identity.accountId,
+        environment: ctx.authService.getEnvironment(), marketplaceId, merchantLocationKey }),
+      draft: preparedDraft, operation: "maintenance", mediaPlan: photoPlan.mediaPlan, prices: priceResolutions,
+      settings: { policyScope: resolvedPolicies.scope, policies: [...resolvedPolicies.byVariantId].sort(([a], [b]) => a-b),
+      policySources: [...resolvedPolicies.provenanceByVariantId ?? []].sort(([a], [b]) => a-b),
+        ebayBrowseCategoryId, storeCategoryNames },
+    }) },
     assertInventoryReady: execution => ensureEbayListingInventoryReady({
       channelId: boundIdentity.channelId, connectionId: boundIdentity.connectionId,
       accountId: boundIdentity.accountId, environment: ctx.authService.getEnvironment(),
       productId, purpose: "sync",
-      variants: boundIdentity.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku })),
-    }, execution, new Date()),
+      variants: boundIdentity.variants.filter(member => !member.catalogArchived)
+        .map(member => ({ productVariantId: member.variantId, sku: member.sku })),
+    }, execution, new Date(), { sourceIdentity, observation: providerObservation }),
     variants: variants
       .filter((variant) =>
         routeDraft.offers.some(
@@ -513,8 +505,9 @@ const existingListingConnector = new EbayMarketplaceListingConnector({
   inventoryDelayMs: 200,
   offerDelayMs: 200,
 });
+export const ebayListingSyncRepository = new PostgresEbayListingSyncRepository(pool, ebayPublicationRejectionReader);
 export const ebayListingSyncService = new EbayListingSyncService(
-  new PostgresEbayListingSyncRepository(pool, ebayPublicationRejectionReader),
+  ebayListingSyncRepository,
   new EbayWithdrawalOperationExecution(new EbayListingOperationExecution(new EbayExistingListingSyncExecution(
     prepareActiveEbayListingSync,
     quantityProviderResponseRecovery,
@@ -526,23 +519,43 @@ export const ebayListingSyncService = new EbayListingSyncService(
   randomUUID,
   ebayPublicationReconciliationRepository,
 );
+export async function readEbaySyncDestination(options: MappingSourceReadOptions = {}) {
+  const ctx = await context(options.database, options.authService);
+  return { channelId: EBAY_CHANNEL_ID, provider: "ebay", connectionId: ctx.conn.id,
+    accountId: ctx.account.externalAccountId, environment: ctx.authService.getEnvironment(), marketplaceId: ctx.marketplaceId };
+}
 export async function syncActiveListings(
   filter: SyncFilter | null,
   actor = "ebay-listing-sync",
   commandKey?: string,
-  expectedDestination?: { connectionId: number; accountId: string },
+  expectedDestination?: { connectionId: number; accountId: string; environment?: "production" | "sandbox"; marketplaceId?: string },
+  commandKeys?: ReadonlyMap<number, string>,
+  options: { inspectRetainedIdentity?: boolean } = {},
 ): Promise<EbayProductSyncResult> {
-  filter = filterSchema.parse(filter);
+  filter = syncFilterSchema.parse(filter);
   const validatedActor = z.string().trim().min(1).max(200).parse(actor);
   if (commandKey !== undefined) z.string().uuid().parse(commandKey);
+  if (commandKeys) {
+    const ids = filter?.productIds ?? [];
+    if (commandKey || ids.length !== commandKeys.size || ids.some(id => !commandKeys.has(id)))
+      throw new EbayListingSyncError("EBAY_SYNC_COMMAND_SCOPE_INVALID", "Saved commands must match the requested products.");
+    for (const key of commandKeys.values()) z.string().uuid().parse(key);
+  }
   const ctx = await context();
   if (expectedDestination) {
     const expected = z.object({ connectionId: z.number().int().positive().max(2147483647),
-      accountId: z.string().trim().min(1).max(240) }).strict().parse(expectedDestination);
-    if (ctx.conn.id !== expected.connectionId || ctx.account.externalAccountId !== expected.accountId)
+      accountId: z.string().trim().min(1).max(240), environment: z.enum(["production","sandbox"]).optional(),
+      marketplaceId: z.string().trim().min(1).optional() }).strict().parse(expectedDestination);
+    if (ctx.conn.id !== expected.connectionId || ctx.account.externalAccountId !== expected.accountId
+      || (expected.environment !== undefined && ctx.authService.getEnvironment() !== expected.environment)
+      || (expected.marketplaceId !== undefined && ctx.marketplaceId !== expected.marketplaceId))
       throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The eBay connection changed. The earlier recovery cannot update a different account.");
   }
-  const selected = await readActiveEbaySyncRows(filter);
+  // Explicit shared Sync requests inspect retained identities even if the saved
+  // projection says ended/deleted. The worker observes the provider before any
+  // update or reviewed replacement. Recurring stock maintenance keeps its
+  // existing candidate predicate and cannot request new publication.
+  const selected = await readActiveEbaySyncRows(filter, options.inspectRetainedIdentity === true);
   const selectedProductIds = [...new Set(selected.map(row => row.product_id))];
   const requestedProductIds = [...new Set(filter?.productIds ?? [])];
   const absentProductIds = requestedProductIds.filter(id => !selectedProductIds.includes(id));
@@ -572,7 +585,7 @@ export async function syncActiveListings(
         return identity;
       },
     };
-  }), { channelId: EBAY_CHANNEL_ID, actor: validatedActor, commandKey: productIds.length ? commandKey : undefined }, {
+  }), { channelId: EBAY_CHANNEL_ID, actor: validatedActor, commandKey: productIds.length ? commandKey : undefined, commandKeys }, {
     findAcceptedCommand: async (key, productId, requestedBy) => {
       const saved = await ebayListingSyncService.getByCommand(key, EBAY_CHANNEL_ID, requestedBy, "sync");
       if (saved && (saved.productId !== productId || saved.identity.connectionId !== ctx.conn.id
@@ -630,43 +643,4 @@ export async function refreshRecoveredEbayListing(input: {
     job.code ?? "EBAY_SYNC_PRODUCT_NOT_ELIGIBLE", job.message ?? "This listing needs its saved selection or catalog issue corrected.");
   if (!job) throw new EbayListingSyncError("EBAY_SYNC_PERSISTENCE_FAILED", "The current listing refresh has not been durably queued.");
   return { jobId: job.id };
-}
-
-export async function triggerPricingRuleSync(
-  scope: string,
-  scopeId: string | null,
-): Promise<void> {
-  console.log(
-    `[eBay Pricing Rule Sync] Triggered: scope=${scope} scopeId=${scopeId}`,
-  );
-
-  let filter: SyncFilter | null = null;
-
-  switch (scope) {
-    case "channel":
-      // Sync ALL active listings
-      filter = null;
-      break;
-    case "category":
-      if (scopeId) {
-        // Sync all listings in this product type
-        filter = { productTypeSlugs: [scopeId] };
-      }
-      break;
-    case "product":
-      if (scopeId) {
-        filter = { productIds: [parseInt(scopeId)] };
-      }
-      break;
-    case "variant":
-      if (scopeId) {
-        filter = { variantIds: [parseInt(scopeId)] };
-      }
-      break;
-  }
-
-  const result = await syncActiveListings(filter, "ebay-pricing-rule");
-  console.log(
-    `[eBay Pricing Rule Sync] Saved: pending=${result.pending} errors=${result.errors}`,
-  );
 }

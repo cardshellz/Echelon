@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
+import { orderCancellationDocumentSchema } from "@shared/customer-account/order-cancellation";
 import {
   orderEditConnectionSchema,
   orderEditQuoteInputSchema,
@@ -14,6 +15,7 @@ import type {
   OrderEditReleaseProof,
 } from "../application/order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
+import { ORDER_EDIT_REFUND_REVIEW_CODES } from "../domain/order-edit-refund-recovery";
 import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
 import { orderEditHasSubmissionEvidence } from "../application/order-edit-submission";
 import { unchangedFulfilledOrderEdit } from "../application/order-edit-evidence";
@@ -42,6 +44,8 @@ const referenceSchema = z.object({
 });
 const documentSchema = z
   .object({
+    kind: z.literal("cancel_order").optional(),
+    cancellation: orderCancellationDocumentSchema.optional(),
     id: z.string().uuid(),
     omsOrderId: z.number().int().positive().safe(),
     connectionId: z.number().int().positive(),
@@ -68,6 +72,19 @@ const documentSchema = z
   })
   .strict()
   .superRefine((record, context) => {
+    if ((record.kind === "cancel_order") !== (record.cancellation !== undefined))
+      context.addIssue({ code: "custom", message: "Cancellation kind and durable intent must agree." });
+    if (record.kind === "cancel_order" && (record.quote !== null || record.refundIntent !== null || record.recoveryStartedAt !== null))
+      context.addIssue({ code: "custom", message: "A cancellation cannot submit an order edit, a separate refund or unpaid-edit recovery." });
+    if (record.kind === "cancel_order" && record.cancellation) {
+      const cancellation = record.cancellation;
+      if (!["committing", "refunding", "synchronizing", "completed", "review_required", "expired"].includes(record.status)
+        || record.paymentDeadline !== null || cancellation.refundCents !== record.baseline.netPaidCents
+        || (cancellation.stage === "acquiring") !== (record.commitStartedAt === null)
+        || (record.status === "expired" && cancellation.stage !== "acquiring")
+        || (record.status === "completed" && (cancellation.stage !== "settling" || !cancellation.rewards.settled)))
+        context.addIssue({ code: "custom", message: "The cancellation lifecycle and financial approval are inconsistent." });
+    }
     const customerActor = readCustomerOrderEditActor(record.actorId);
     if (
       customerActor &&
@@ -126,11 +143,10 @@ const documentSchema = z
     if (
       (record.commitStartedAt === null) !== (record.commitKey === null) ||
       (record.refundIntent === null) !== (record.refundStartedAt === null) ||
-      (record.commitStartedAt !== null &&
+      (record.kind !== "cancel_order" && record.commitStartedAt !== null &&
         (record.quote === null || record.paymentDeadline === null)) ||
-      ((record.refundIntent !== null || record.recoveryStartedAt !== null) &&
-        record.commitStartedAt === null) ||
-      (record.status === "ready" && record.quote === null)
+      ((record.refundIntent !== null || record.recoveryStartedAt !== null) && record.commitStartedAt === null) ||
+      (record.kind !== "cancel_order" && record.status === "ready" && record.quote === null)
     ) {
       context.addIssue({
         code: "custom",
@@ -413,18 +429,21 @@ export class PostgresOrderEditStore implements OrderEditStore {
           );
         }
         if (
-          ["completed", "recovered"].includes(record.status) &&
+          ["completed", "recovered"].includes(record.status) && record.kind !== "cancel_order" &&
           releaseProof.allocationRequired !== true
         )
           throw new OrderEditError(
             "ORDER_EDIT_ALLOCATION_PROOF_REQUIRED",
             "Revised inventory allocation must be verified before this edit can finish.",
           );
+        if (record.kind === "cancel_order" && record.status === "completed" && !releaseProof.cancelledOrder)
+          throw new OrderEditError("ORDER_CANCELLATION_RELEASE_PROOF_REQUIRED", "Cancellation requires proof of settled payments and released warehouse work.");
         await finalizeOrderEditWarehouseRelease(
           client,
           record.omsOrderId,
           record.id,
           releaseProof,
+          record.updatedAt,
         );
       } else if (releaseProof)
         throw new OrderEditError(
@@ -461,6 +480,13 @@ export class PostgresOrderEditStore implements OrderEditStore {
         `SELECT op.id FROM oms.order_edit_operations op
       WHERE op.status NOT IN ('completed','recovered','failed','expired') AND (
         (op.status <> 'review_required' AND op.document->>'commitStartedAt' IS NOT NULL)
+        OR (op.status='review_required' AND COALESCE(op.document->>'kind','edit')='edit'
+          AND op.document->>'commitStartedAt' IS NOT NULL AND op.document->>'refundIntent' IS NOT NULL
+          AND op.document->>'refundStartedAt' IS NOT NULL
+          AND op.document->'error'->>'code'=ANY($3::text[])
+          AND EXISTS (SELECT 1 FROM channels.channels channel
+            WHERE channel.id=(op.document->'baseline'->>'channelId')::integer
+              AND channel.provider='shopify'))
         OR (op.document->>'commitStartedAt' IS NULL AND op.document->>'commitKey' IS NULL
           AND op.document->>'refundIntent' IS NULL AND op.document->>'refundStartedAt' IS NULL AND op.document->>'recoveryStartedAt' IS NULL
           AND NOT EXISTS (SELECT 1 FROM oms.order_edit_paid_projections p WHERE p.operation_id=op.id)
@@ -469,7 +495,7 @@ export class PostgresOrderEditStore implements OrderEditStore {
             OR EXISTS (SELECT 1 FROM wms.orders wo WHERE wo.order_edit_operation_id=op.id)
             OR EXISTS (SELECT 1 FROM oms.order_edit_provider_holds h WHERE h.operation_id=op.id AND h.released_at IS NULL))))
       ORDER BY op.updated_at,op.id LIMIT $1`,
-        [limit, now],
+        [limit, now, [...ORDER_EDIT_REFUND_REVIEW_CODES]],
       )
     ).rows.map((row) => row.id);
   }

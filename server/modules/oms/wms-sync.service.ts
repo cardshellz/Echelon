@@ -26,6 +26,13 @@ import {
   wmsOrderItems,
 } from "@shared/schema";
 import { logger } from "../../platform/observability/logger";
+import { readChannelMerchandiseCapability, type ChannelMerchandiseCapabilityReader } from "./infrastructure/channel-merchandise-policy";
+import { isMerchandiseOrderCancelled } from "./domain/order-merchandise-state";
+import { assertChannelMerchandiseDispatchQuantities } from "./domain/channel-merchandise-dispatch";
+import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
+import { registerStoppedRefundDeferredShipment } from "../order-edits/infrastructure/order-edit-deferred-shipment";
+import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
+import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
 import {
   decideDropshipOrderWarehouse,
   hasDropshipAcceptanceStamp,
@@ -187,16 +194,27 @@ export function requireRoutedWarehouseId(input: {
   );
 }
 
+/** The stable code of a refused whole-order claim, published with `shortfall` for callers outside OMS (review ARCH-6). */
+export const WMS_REQUIRED_INVENTORY_CLAIM_FAILED_CODE = "WMS_REQUIRED_INVENTORY_CLAIM_FAILED";
+
 export class WmsRequiredInventoryClaimError extends Error {
-  readonly code = "WMS_REQUIRED_INVENTORY_CLAIM_FAILED";
+  readonly code = WMS_REQUIRED_INVENTORY_CLAIM_FAILED_CODE;
+  /**
+   * Published classification: true only when the reservation could not
+   * reserve every line (a stock shortfall a later attempt can clear); false
+   * for every other refusal (warehouse mismatch, no WMS order, unproven
+   * claim). Callers branch on this and the code, never on the context shape.
+   */
+  readonly shortfall: boolean;
 
   constructor(
     message: string,
     readonly context: Readonly<Record<string, unknown>>,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { shortfall?: boolean },
   ) {
     super(message, options);
     this.name = "WmsRequiredInventoryClaimError";
+    this.shortfall = options?.shortfall === true;
   }
 }
 
@@ -485,6 +503,9 @@ export async function buildWmsLineItemFromOmsLine(
 }
 
 interface WmsSyncServices {
+  clock?: () => Date;
+  useChannelMerchandise?: ChannelMerchandiseCapabilityReader;
+  readChannelMerchandise?: (input: { channelId: number; orderId: string }) => Promise<ShopifyMerchandiseSnapshot>;
   /** Exact channel-owned warehouse assignments, such as a Walmart ship node. */
   resolveChannelWarehouse?: (channelId: number) => Promise<{ warehouseId: number; warehouseType: string } | null>;
   inventoryCore: any;
@@ -827,7 +848,7 @@ export class WmsSyncService {
       }
       const fulfillmentPartitionKey = resolveOmsFulfillmentPartitionKey(mode);
 
-      if (this.isFinalOrCancelledOmsOrder(omsOrder)) {
+      if (await this.isFinalOrCancelledOmsOrder(omsOrder)) {
         await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
         console.log(
           `[WMS Sync] OMS order ${omsOrderId} is ${omsOrder.status}/${omsOrder.financialStatus}; skipped WMS sync`,
@@ -1042,7 +1063,7 @@ export class WmsSyncService {
           ? "awaiting_3pl" // 3PL fulfills externally — no internal pick/pack
           : isTerminalResidualRecovery
             ? this.determineResidualRecoveryWarehouseStatus(omsOrder)
-            : this.determineWarehouseStatus(omsOrder);
+            : await this.resolveWarehouseStatus(omsOrder);
       const { priority, memberPlanName, memberPlanColor, legacyMember } = await this.determinePriority(omsOrder);
       // Changes nothing about the order; kept on it so the owner can compare
       // the shared resolver with today's lookup (member-resolver-dry-run.ts).
@@ -1353,13 +1374,13 @@ export class WmsSyncService {
       // between step 5 (WMS order creation) and now.
       const engine = this.services.shippingEngine ?? this.services.shipStation;
       if (engine?.isConfigured?.() && shipmentIdForPush !== null) {
-          const [recheckOms] = await db.select().from(omsOrders).where(eq(omsOrders.id, omsOrderId)).limit(1);
-          if (recheckOms && this.isFinalOrCancelledOmsOrder(recheckOms)) {
+        const [recheckOms] = await db.select().from(omsOrders).where(eq(omsOrders.id, omsOrderId)).limit(1);
+        if (recheckOms && (await this.isFinalOrCancelledOmsOrder(recheckOms))) {
             console.warn(`[WMS Sync] OMS order ${omsOrderId} cancelled/refunded after WMS creation — skipping engine push, cancelling WMS`);
             await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
             return newWmsOrder.id;
           }
-          try {
+        try {
             if (this.services.shippingEngine) {
               await this.services.shippingEngine.upsertShipment({ shipmentId: shipmentIdForPush } as any);
             } else {
@@ -1501,6 +1522,29 @@ export class WmsSyncService {
     return "pending";
   }
 
+  private async usesChannelMerchandise(channelId: number): Promise<boolean> {
+    return this.services.useChannelMerchandise
+      ? this.services.useChannelMerchandise(channelId)
+      : readChannelMerchandiseCapability(db, channelId);
+  }
+
+  private async resolveWarehouseStatus(omsOrder: typeof omsOrders.$inferSelect): Promise<string> {
+    const legacy = this.determineWarehouseStatus(omsOrder);
+    if (legacy !== "pending" || !["partially_refunded", "refunded"].includes(omsOrder.financialStatus ?? "")
+      || !(await this.usesChannelMerchandise(omsOrder.channelId))
+      || isMerchandiseOrderCancelled(omsOrder) || omsOrder.status === "refunded") return legacy;
+    // New work after a completed refund needs positive channel/readiness and
+    // prior payment proof. A financial status alone never promotes an order.
+    const scope = { channelId: omsOrder.channelId, orderId: omsOrder.externalOrderId };
+    const native = shopifyMerchandiseSnapshotSchema.parse(await (this.services.readChannelMerchandise
+      ? this.services.readChannelMerchandise(scope) : readChannelShopifyMerchandise(db, scope)));
+    if (native.cancelled) throw Object.assign(new Error("The channel order was cancelled before warehouse admission."),
+      { code: "CHANNEL_MERCHANDISE_CANCELLED" });
+    const lines = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, omsOrder.id));
+    assertChannelMerchandiseDispatchQuantities({ orderId: omsOrder.externalOrderId, snapshot: native, lines, requireDispatchPermission: true });
+    return "ready";
+  }
+
   private determineResidualRecoveryWarehouseStatus(
     omsOrder: typeof omsOrders.$inferSelect,
   ): string {
@@ -1566,9 +1610,67 @@ export class WmsSyncService {
     }
   }
 
-  private isFinalOrCancelledOmsOrder(omsOrder: typeof omsOrders.$inferSelect): boolean {
+  private async isFinalOrCancelledOmsOrder(
+    omsOrder: typeof omsOrders.$inferSelect,
+  ): Promise<boolean> {
     const status = String(omsOrder.status ?? "").toLowerCase();
-    const financialStatus = String(omsOrder.financialStatus ?? "").toLowerCase();
+    const financialStatus = String(
+      omsOrder.financialStatus ?? "",
+    ).toLowerCase();
+    if (
+      await this.usesChannelMerchandise(omsOrder.channelId)
+    ) {
+      if (isMerchandiseOrderCancelled(omsOrder)) return true;
+      if (
+        status !== "refunded" &&
+        !["refunded", "voided"].includes(financialStatus)
+      )
+        return false;
+      // Provider capability never reactivates historical refunded work from a
+      // status string alone. Read the originating channel and require its
+      // complete quantities to agree with dated OMS facts and prior payment.
+      const input = {
+        channelId: omsOrder.channelId,
+        orderId: omsOrder.externalOrderId,
+      };
+      const native = shopifyMerchandiseSnapshotSchema.parse(
+        await (this.services.readChannelMerchandise
+          ? this.services.readChannelMerchandise(input)
+          : readChannelShopifyMerchandise(db, input)),
+      );
+      if (
+        native.orderId.replace(/^gid:\/\/shopify\/Order\//, "") !==
+        omsOrder.externalOrderId.replace(/^gid:\/\/shopify\/Order\//, "")
+      )
+        throw new Error(
+          "The native merchandise order does not match this source order.",
+        );
+      if (native.cancelled) return true;
+      if (status === "refunded")
+        throw Object.assign(
+          new Error(
+            "A historical terminal merchandise status requires commercial review.",
+          ),
+          { code: "CHANNEL_MERCHANDISE_REVIEW_REQUIRED" },
+        );
+      if (financialStatus === "voided")
+        throw Object.assign(
+          new Error(
+            "Open merchandise with voided payment requires payment review, not warehouse cancellation.",
+          ),
+          { code: "CHANNEL_PAYMENT_REVIEW_REQUIRED" },
+        );
+      const lines = await db
+        .select()
+        .from(omsOrderLines)
+        .where(eq(omsOrderLines.orderId, omsOrder.id));
+      assertChannelMerchandiseDispatchQuantities({
+        orderId: omsOrder.externalOrderId,
+        snapshot: native,
+        lines,
+      });
+      return false;
+    }
     return (
       status === "cancelled" ||
       status === "refunded" ||
@@ -1605,8 +1707,16 @@ export class WmsSyncService {
     wmsOrderId: number;
     expectedWarehouseId: number | null;
     recordReconciliationAudit: boolean;
+    channelId?: number;
   }): Promise<{ shipmentIdForPush: number | null; changedItems: number }> {
+    const scoped =
+      input.channelId !== undefined &&
+      await this.usesChannelMerchandise(input.channelId);
     return db.transaction(async (tx: any) => {
+      if (scoped)
+        await tx.execute(
+          sql`SELECT id FROM oms.oms_orders WHERE id=${input.omsOrderId} FOR UPDATE`,
+        );
       // Serialize all OMS->WMS materialization for this source order before
       // locking the WMS order. Shipment helpers take their narrower order-id
       // advisory lock after this lock.
@@ -1617,19 +1727,23 @@ export class WmsSyncService {
           warehouse_status,
           warehouse_id,
           channel_id,
+          order_edit_operation_id,
           combined_role,
           combined_group_id
         FROM wms.orders
         WHERE id = ${input.wmsOrderId}
         FOR UPDATE
       `);
-      const orderState = orderStateResult.rows?.[0] as {
-        warehouse_status: string;
-        warehouse_id: number | null;
-        channel_id: number | null;
-        combined_role: string | null;
-        combined_group_id: number | null;
-      } | undefined;
+      const orderState = orderStateResult.rows?.[0] as
+        | {
+            warehouse_status: string;
+            warehouse_id: number | null;
+            channel_id: number | null;
+            order_edit_operation_id: string | null;
+            combined_role: string | null;
+            combined_group_id: number | null;
+          }
+        | undefined;
       if (!orderState) {
         throw new WmsShipmentPrerequisiteError(
           "The WMS order disappeared before provider shipment admission.",
@@ -1806,11 +1920,25 @@ export class WmsSyncService {
           useXactLock: true,
         },
       );
-      await enqueueShipStationShipmentPushRetry(
+      const deferred =
+        scoped &&
+        shipment.created &&
+        orderState.order_edit_operation_id !== null;
+      if (deferred && orderState.order_edit_operation_id !== null) {
+        await registerStoppedRefundDeferredShipment(tx, {
+          omsOrderId: input.omsOrderId,
+          wmsOrderId: input.wmsOrderId,
+          shipmentId: shipment.shipmentId,
+          operationId: orderState.order_edit_operation_id,
+          now: this.services.clock?.() ?? new Date(),
+        });
+      } else {
+        await enqueueShipStationShipmentPushRetry(
         tx,
         shipment.shipmentId,
         "initial shipping-engine handoff after inventory authority",
       );
+      }
 
       const changedItems = shipment.created
         ? shippableItems.length
@@ -1831,7 +1959,10 @@ export class WmsSyncService {
       console.log(
         `[WMS Sync] ${shipment.created ? "Created" : "Reused"} shipment ${shipment.shipmentId} for WMS order ${input.wmsOrderId} after inventory authority resolved`,
       );
-      return { shipmentIdForPush: shipment.shipmentId, changedItems };
+      return {
+        shipmentIdForPush: deferred ? null : shipment.shipmentId,
+        changedItems,
+      };
     });
   }
 
@@ -1852,40 +1983,56 @@ export class WmsSyncService {
   /**
    * Lines materialized after the order's first reservation (late payment
    * authority, restored lines) make the order's demand differ from its active
-   * claim. reserveOrder deliberately refuses to change an existing claim, so
-   * that difference is replaced through reconcileOrderDemand, the same
-   * primitive order-edit propagation uses. Before 2026-10-08 the refusal
-   * aborted every retry of the sync before the ShipStation amend, so late
-   * lines never reached ShipStation (#63964).
+   * claim. A successful reserveOrder can replay a receipt from before demand
+   * changed, so canonical results must also cross the current-demand owner.
+   * reconcileOrderDemand validates and replaces through the existing atomic
+   * claim lifecycle; unchanged demand does not move inventory. Legacy results
+   * retain their existing reservation path.
    */
   private async reserveOrReplaceChangedClaim(
     wmsOrderId: number,
     omsOrderId: number | null,
     context: string,
   ): Promise<ReservationResult> {
+    let currentClaimId: string;
     try {
-      return await this.services.reservation.reserveOrder(wmsOrderId);
-    } catch (err: any) {
-      if (err?.code !== ACTIVE_CLAIM_REPLACEMENT_REQUIRED_CODE) throw err;
-      const replacedClaimId = String(err?.context?.claimId ?? "unknown");
-      const replacement = await this.services.reservation.reconcileOrderDemand({
-        orderId: wmsOrderId,
-        // One replacement per superseded claim: a retry replays it.
-        sourceEventId: `wms_sync_claim_replacement:${wmsOrderId}:${replacedClaimId}`,
-        demandChanged: true,
-        reason: `Order demand changed after its claim (${context}) — replacing inventory claim`,
-      });
+      const reservation = await this.services.reservation.reserveOrder(wmsOrderId);
+      if (reservation.canonicalClaimId == null) return reservation;
+      currentClaimId = reservation.canonicalClaimId;
+    } catch (error: unknown) {
+      if (reservationErrorCode(error) !== ACTIVE_CLAIM_REPLACEMENT_REQUIRED_CODE) throw error;
+      const details = typeof error === "object" && error !== null && "context" in error
+        ? error.context : null;
+      if (typeof details !== "object" || details === null || !("claimId" in details)
+        || typeof details.claimId !== "string") throw error;
+      currentClaimId = details.claimId;
+    }
+    if (!/^[1-9]\d*$/.test(currentClaimId)) {
+      throw new WmsShipmentPrerequisiteError(
+        "Canonical reservation returned an invalid claim identity.",
+        { wmsOrderId, omsOrderId, context },
+      );
+    }
+    const replacement = await this.services.reservation.reconcileOrderDemand({
+      orderId: wmsOrderId,
+      // The owner also fences by its latest claim. Context belongs in this
+      // identity because initial materialization and later sync use distinct reasons.
+      sourceEventId: `wms_sync_claim_reconciliation:${wmsOrderId}:${currentClaimId}:${context}`,
+      demandChanged: true,
+      reason: `Reconcile current order demand with its inventory claim (${context})`,
+    });
+    if (replacement.reconciled) {
       logger.info("wms_sync_claim_replaced", {
         outcome: "claim_replaced",
         oms_order_id: omsOrderId,
         wms_order_id: wmsOrderId,
-        replaced_claim_id: replacedClaimId,
+        replaced_claim_id: currentClaimId,
         context,
         reserved: replacement?.reservation?.reserved ?? 0,
         failed: replacement?.reservation?.failed?.length ?? 0,
       });
-      return replacement.reservation;
     }
+    return replacement.reservation;
   }
 
   private async reserveBeforeShipmentProcessing(
@@ -2006,6 +2153,7 @@ export class WmsSyncService {
         reserved: reserveResult.reserved,
         promised: reserveResult.promised,
       },
+      { shortfall: true },
     );
     await this.compensateFailedRequiredReservation(
       wmsOrderId,
@@ -2134,7 +2282,7 @@ export class WmsSyncService {
     }
 
     // Promote pending → ready when OMS order is now paid
-    const nextWarehouseStatus = this.determineWarehouseStatus(omsOrder);
+    const nextWarehouseStatus = await this.resolveWarehouseStatus(omsOrder);
     const promoted =
       wmsOrder.warehouseStatus === "pending" && nextWarehouseStatus === "ready";
 
@@ -2371,7 +2519,7 @@ export class WmsSyncService {
       .where(eq(omsOrders.id, omsOrderId))
       .limit(1);
 
-    if (!omsOrder || this.isFinalOrCancelledOmsOrder(omsOrder)) {
+    if (!omsOrder || (await this.isFinalOrCancelledOmsOrder(omsOrder))) {
       await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
       return { insertedItems: 0, updatedShipments: 0 };
     }
@@ -2657,9 +2805,6 @@ export class WmsSyncService {
     if (freshWmsState?.warehouseStatus === "cancelled") {
       return { insertedItems: insertedItems.length, updatedShipments: 0 };
     }
-    if (shippableShipmentItems.length === 0) {
-      return { insertedItems: insertedItems.length, updatedShipments: 0 };
-    }
     // Unpaid pending work and external 3PL custody do not enter the local
     // claim/provider path. A paid sync promotes pending -> ready before this
     // point. All provider mutation below therefore has an explicit warehouse
@@ -2669,14 +2814,19 @@ export class WmsSyncService {
     }
     const reconciledWarehouseId = requireRoutedWarehouseId({
       omsOrderId,
-      hasShippableItems: true,
+      hasShippableItems: shippableShipmentItems.length > 0,
       routedWarehouseId: freshWmsState.warehouseId,
     });
+    // Shipment membership can already be current after a failed sync. Always
+    // reconcile the canonical claim before returning, including on retries.
     await this.reserveBeforeShipmentProcessing(
       wmsOrderId,
       omsOrderId,
       "existing_order_reconciliation",
     );
+    if (shippableShipmentItems.length === 0) {
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
 
     // Shipment reconciliation is driven by provider editability, not by an
     // assumption that every late order edit needs a second package.
@@ -2725,12 +2875,14 @@ export class WmsSyncService {
     };
 
     if (activeShipments.length === 0) {
-      const created = await this.persistInitialProviderShipmentAfterInventoryAuthority({
-        omsOrderId,
-        wmsOrderId,
-        expectedWarehouseId: reconciledWarehouseId,
-        recordReconciliationAudit: true,
-      });
+      const created =
+        await this.persistInitialProviderShipmentAfterInventoryAuthority({
+          omsOrderId,
+          wmsOrderId,
+          channelId: omsOrder.channelId,
+          expectedWarehouseId: reconciledWarehouseId,
+          recordReconciliationAudit: true,
+        });
       updatedShipments += created.changedItems;
       return { insertedItems: insertedItems.length, updatedShipments };
     }
@@ -3620,7 +3772,7 @@ export class WmsSyncService {
       )
       AND oo.status            NOT IN ('cancelled', 'refunded', 'shipped')
       AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
-      AND COALESCE(oo.financial_status, '')   NOT IN ('refunded', 'voided')
+      AND NOT ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded", "voided"] })}
       ORDER BY oo.ordered_at ASC
       LIMIT ${limit}
     `);
@@ -3795,7 +3947,9 @@ export class WmsSyncService {
    * Use when a WMS order has 0 items or stale/wrong items.
    * WARNING: deletes all existing order_items for the WMS order, re-creates from OMS.
    */
-  async resyncOrderItems(wmsOrderId: number): Promise<{ success: boolean; message: string; itemCount?: number }> {
+  async resyncOrderItems(
+    wmsOrderId: number,
+  ): Promise<{ success: boolean; message: string; itemCount?: number }> {
     try {
       // 1. Find the WMS order
       const [wmsOrder] = await db.select().from(wmsOrders).where(eq(wmsOrders.id, wmsOrderId)).limit(1);
@@ -3845,7 +3999,7 @@ export class WmsSyncService {
       });
 
       // 5. Recalculate order counts
-      const { ordersStorage } = await import('../orders');
+      const { ordersStorage } = await import("../orders");
       await ordersStorage.updateOrderProgress(wmsOrderId);
 
       console.log(`[WMS Resync] Resynced ${newItems.length} items for WMS order ${wmsOrderId} (OMS ${omsOrderId})`);
@@ -3859,7 +4013,9 @@ export class WmsSyncService {
   /**
    * Find and repair WMS orders with broken items (0 items, or mismatch with OMS)
    */
-  async repairBrokenOrders(dryRun = true): Promise<{ ordersFixed: number; ordersFailed: number; details: any[] }> {
+  async repairBrokenOrders(
+    dryRun = true,
+  ): Promise<{ ordersFixed: number; ordersFailed: number; details: any[] }> {
     // Find WMS orders linked to OMS where item counts don't match
     const broken = await db.execute<{ wms_id: number; wms_order_number: string; wms_item_count: number; oms_line_count: number; oms_order_id: number }>(sql`
       SELECT 
@@ -3893,12 +4049,12 @@ export class WmsSyncService {
         orderNumber: row.wms_order_number,
         wmsItemCount: Number(row.wms_item_count),
         omsLineCount: Number(row.oms_line_count),
-        action: dryRun ? 'dry_run' : 'pending',
+        action: dryRun ? "dry_run" : "pending",
       };
 
       if (!dryRun) {
         const result = await this.resyncOrderItems(row.wms_id);
-        detail.action = result.success ? 'fixed' : 'failed';
+        detail.action = result.success ? "fixed" : "failed";
         detail.message = result.message;
         if (result.success) ordersFixed++; else ordersFailed++;
       }
@@ -3907,5 +4063,4 @@ export class WmsSyncService {
 
     return { ordersFixed, ordersFailed, details };
   }
-
 }

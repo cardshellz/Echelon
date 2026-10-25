@@ -47,6 +47,8 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(response.headers.get("cache-control")).toContain("no-store");
     const anonymous = await request({}, proof({ logged_in_customer_id: "" }), { Cookie: "staff-session=fake" });
     expect(anonymous.status).toBe(401);
+    expect(await anonymous.json()).toEqual({ error: { code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", message: "Sign in again to manage your orders." } });
+    expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", path: "/account/bootstrap" });
     expect(services).toHaveBeenCalledTimes(1);
   });
   it("records a database failure code without exposing SQL or connection details", async () => {
@@ -56,6 +58,23 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_REQUEST_FAILED", path: "/account/bootstrap", causeCode: "55P03" });
     expect(JSON.stringify(await response.json())).not.toContain("private database");
   });
+  it("keeps batched history and inline details behind the same signed, staging-only boundary without a financial command", async () => {
+    const summary = { externalOrderId: "99", orderReference: "#49180", omsOrderId: null, currency: "USD", totalCents: 0, cancelled: true, financialStatus: "Refunded" };
+    const orders = { summaries: vi.fn(async () => ({ orders: [summary], unavailableExternalOrderIds: [], statusUnavailable: false })),
+      details: vi.fn(async () => ({ externalOrderId: "99", orderReference: "#49180", currency: "USD", totalCents: 0, lines: [] })) };
+    services.mockImplementation(() => ({ edits: { connection }, orders, returns: vi.fn() }));
+    const input = { externalOrderId: "99", orderReference: "#49180" };
+    const sessionKey = (await (await request()).json()).session.sessionKey;
+    const history = await request({ method: "POST", path: "/account/order-summaries", sessionKey, body: { orders: [input] } });
+    expect(history.status).toBe(200); expect((await history.json()).orders).toEqual([summary]);
+    const details = await request({ method: "POST", path: "/account/order-details", sessionKey, body: input });
+    expect(details.status).toBe(200); expect((await details.json()).totalCents).toBe(0);
+    expect(orders.summaries).toHaveBeenCalledExactlyOnceWith({ orders: [input] });
+    expect(orders.details).toHaveBeenCalledExactlyOnceWith(input);
+    enabled = false;
+    expect((await request({ method: "POST", path: "/account/order-details", sessionKey, body: input })).status).toBe(403);
+    expect(orders.details).toHaveBeenCalledTimes(1);
+  });
   it.each([
     { signed: () => `${proof()}&signature=duplicate` },
     { signed: () => proof({ timestamp: String(Math.floor(now.getTime() / 1000) - 301) }) },
@@ -63,7 +82,17 @@ describe("customer account signed storefront HTTP boundary", () => {
     { signed: () => proof({ extra: "unrecognized" }) },
     { signed: () => proof().replace(/signature=[a-f0-9]+/, "signature=" + "0".repeat(64)) },
   ])("rejects malformed, stale or wrong-proxy proof", async ({ signed }) => {
-    expect((await request({}, signed())).status).toBe(401); expect(services).not.toHaveBeenCalled();
+    const response = await request({}, signed());
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).not.toBe("CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED");
+    expect(services).not.toHaveBeenCalled();
+  });
+  it("never treats an invalid anonymous signature as proof that sign-in is needed", async () => {
+    const signed = proof({ logged_in_customer_id: "" }).replace(/signature=[a-f0-9]+/, "signature=" + "0".repeat(64));
+    const response = await request({}, signed);
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).not.toBe("CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED");
+    expect(services).not.toHaveBeenCalled();
   });
   it("keeps the staging surface off by default and checks origin and account switch", async () => {
     enabled = false; expect((await request()).status).toBe(403); enabled = true;
@@ -112,6 +141,25 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request(body)).status).toBe(200);
     expect(progress).toHaveBeenCalledWith(operationId, "resume", operationId);
   });
+  it("keeps cancellation review/status inside signed ownership and requires approval identity for submission", async () => {
+    const bootstrap = await (await request()).json(), requestKey = "22222222-2222-4222-8222-222222222222";
+    const rewards = { fingerprint: "a".repeat(64), returnedPoints: "100.00", deductedEarnedPoints: "5.00", settled: false };
+    const cancellationReview = vi.fn(async () => ({ connectionId: 4, omsOrderId: 9, orderNumber: "#1", currency: "USD", revision: "a".repeat(64), orderRevision: "b".repeat(64), refundCents: 829, rewards, eligibility: { allowed: true, reasons: [] } }));
+    const value = { operationId: requestKey, requestKey, omsOrderId: 9, orderNumber: "#1", currency: "USD", status: "pending", refundCents: 829, refundStatus: "pending", rewards, error: null };
+    const submitCancellation = vi.fn(async () => value), cancellationStatus = vi.fn(async () => value);
+    services.mockImplementation(() => ({ edits: { connection, cancellationReview, submitCancellation, cancellationStatus }, returns: vi.fn() }));
+    const scope = { path: "/account/orders/9/cancellation/review", query: { connectionId: "4" }, sessionKey: bootstrap.session.sessionKey };
+    expect((await request(scope)).status).toBe(200); expect(cancellationReview).toHaveBeenCalledWith(4, 9);
+    expect((await request({ ...scope, path: "/account/orders/9/cancellation/status", query: { connectionId: "4", requestKey } })).status).toBe(200);
+    expect(cancellationStatus).toHaveBeenCalledWith(4, 9, requestKey);
+    const command = { ...scope, path: "/account/orders/9/cancellation", method: "POST", body: { requestKey, expectedRevision: "a".repeat(64) } };
+    expect((await request(command)).status).toBe(400);
+    expect((await request({ ...command, commandKey: requestKey, sessionKey: undefined })).status).toBe(401);
+    expect(submitCancellation).not.toHaveBeenCalled();
+    expect((await request({ ...command, commandKey: requestKey })).status).toBe(200);
+    expect(submitCancellation).toHaveBeenCalledWith(4, 9, command.body, requestKey);
+    expect((await request({ ...scope, path: "/account/orders/9/cancellation/reconcile", method: "POST", commandKey: requestKey, body: {} })).status).toBe(404);
+  });
   it("dispatches rewards only inside the signed account boundary with a command key", async () => {
     const bootstrap = await (await request()).json();
     const rewardsState = vi.fn(async () => ({ version: "v1", balance: "1000.00", minimumPoints: 100,
@@ -129,6 +177,23 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(issueReward).toHaveBeenCalledWith(4, 9, command.body, requestKey);
     expect((await request({ ...command, commandKey: requestKey, sessionKey: undefined })).status).toBe(401);
     expect(issueReward).toHaveBeenCalledTimes(1);
+  });
+  it("authenticates saved reward management and cancellation without accepting another customer's scope", async () => {
+    const bootstrap = await (await request()).json();
+    const manageRewards = vi.fn(async () => ({ version: "v2", balance: "590.00", minimumPoints: 100,
+      pointsPerDollar: "100.00", currencyName: "points", rewards: [], pending: [] }));
+    const cancelReward = vi.fn(async () => ({ points: "366.00", balance: "956.00", ledgerEntryId: "refund-1" }));
+    services.mockImplementation(() => ({ edits: { connection, manageRewards, cancelReward }, returns: vi.fn() }));
+    const scope = { path: "/order-edits/orders/9/rewards/manage", query: { connectionId: "4" }, sessionKey: bootstrap.session.sessionKey };
+    expect((await request(scope)).status).toBe(200);
+    expect(manageRewards).toHaveBeenCalledWith(4, 9);
+    const requestKey = "22222222-2222-4222-8222-222222222222";
+    const command = { ...scope, path: "/order-edits/orders/9/rewards/cancel", method: "POST", body: { requestKey, rewardId: requestKey } };
+    expect((await request(command)).status).toBe(400);
+    expect((await request({ ...command, commandKey: requestKey, sessionKey: undefined })).status).toBe(401);
+    expect(cancelReward).not.toHaveBeenCalled();
+    expect((await request({ ...command, commandKey: requestKey })).status).toBe(200);
+    expect(cancelReward).toHaveBeenCalledWith(4, 9, command.body, requestKey);
   });
   it.each([undefined, "v1", "v2"])("negotiates pricing display through the signed customer bridge, opt-in=%s", async (optIn) => {
     const bootstrap = await (await request()).json();

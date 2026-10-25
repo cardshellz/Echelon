@@ -1,6 +1,11 @@
+import { ebayPolicyScopeSchema } from "@shared/ebay-business-policies";
+import { z } from "zod";
+import { ebayBusinessPolicies } from "../../modules/channels/ebay-business-policies";
+import { ebayCategoryMappingPatchSchema } from "../../modules/channels/ebay-business-policies.service";
+import { ebayPolicyActor, sendEbayPolicyError } from "./ebay-business-policy-http";
 import { readEbayConnectionHealth } from "../../modules/channels/ebay-connection-health";
 import { publicationSelectionBusyIssue } from "../../modules/inventory-planning/publication-selection-work";
-import { syncActiveListings, triggerPricingRuleSync } from "../../modules/channels/ebay-listing-sync";
+import { syncActiveListings } from "../../modules/channels/ebay-listing-sync";
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
 import { db, pool } from "../../db";
@@ -133,9 +138,9 @@ export const router = express.Router();
               ? metadata.marketplaceId.trim()
               : "EBAY_US",
             merchantLocationKey: metadata.merchantLocationKey || null,
-            fulfillmentPolicyId: metadata.fulfillmentPolicyId || null,
-            returnPolicyId: metadata.returnPolicyId || null,
-            paymentPolicyId: metadata.paymentPolicyId || null,
+            fulfillmentPolicyId: metadata.fulfillmentPolicyId ?? null,
+            returnPolicyId: metadata.returnPolicyId ?? null,
+            paymentPolicyId: metadata.paymentPolicyId ?? null,
             merchantLocation: metadata.merchantLocation || null,
           },
           categoryMappings: mappings.map((m: any) => {
@@ -148,9 +153,9 @@ export const router = express.Router();
               ebayBrowseCategoryName: m.ebayBrowseCategoryName || m.ebay_browse_category_name,
               ebayStoreCategoryId: m.ebayStoreCategoryId || m.ebay_store_category_id,
               ebayStoreCategoryName: m.ebayStoreCategoryName || m.ebay_store_category_name,
-              fulfillmentPolicyOverride: m.fulfillmentPolicyOverride || m.fulfillment_policy_override,
-              returnPolicyOverride: m.returnPolicyOverride || m.return_policy_override,
-              paymentPolicyOverride: m.paymentPolicyOverride || m.payment_policy_override,
+              fulfillmentPolicyOverride: m.fulfillmentPolicyOverride ?? m.fulfillment_policy_override ?? null,
+              returnPolicyOverride: m.returnPolicyOverride ?? m.return_policy_override ?? null,
+              paymentPolicyOverride: m.paymentPolicyOverride ?? m.payment_policy_override ?? null,
               listingEnabled: m.listingEnabled ?? m.listing_enabled ?? true,
               aspectsReady: readiness?.aspectsReady ?? null,
               missingRequiredCount: readiness?.missingRequiredCount ?? null,
@@ -175,80 +180,11 @@ export const router = express.Router();
   // -----------------------------------------------------------------------
   router.put("/api/ebay/category-mapping", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
-      const { mappings } = req.body as {
-        mappings: Array<{
-          productTypeSlug: string;
-          ebayBrowseCategoryId?: string;
-          ebayBrowseCategoryName?: string;
-          ebayStoreCategoryId?: string;
-          ebayStoreCategoryName?: string;
-          fulfillmentPolicyOverride?: string;
-          returnPolicyOverride?: string;
-          paymentPolicyOverride?: string;
-          listingEnabled?: boolean;
-        }>;
-      };
-
-      if (!mappings || !Array.isArray(mappings)) {
-        res.status(400).json({ error: "mappings array is required" });
-        return;
-      }
-
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-
-        for (const m of mappings) {
-          await client.query(`
-            INSERT INTO ebay_category_mappings (
-              channel_id, product_type_slug,
-              ebay_browse_category_id, ebay_browse_category_name,
-              ebay_store_category_id, ebay_store_category_name,
-              fulfillment_policy_override, return_policy_override, payment_policy_override,
-              listing_enabled,
-              created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-            ON CONFLICT (channel_id, product_type_slug)
-            DO UPDATE SET
-              ebay_browse_category_id = EXCLUDED.ebay_browse_category_id,
-              ebay_browse_category_name = EXCLUDED.ebay_browse_category_name,
-              ebay_store_category_id = EXCLUDED.ebay_store_category_id,
-              ebay_store_category_name = EXCLUDED.ebay_store_category_name,
-              fulfillment_policy_override = EXCLUDED.fulfillment_policy_override,
-              return_policy_override = EXCLUDED.return_policy_override,
-              payment_policy_override = EXCLUDED.payment_policy_override,
-              listing_enabled = EXCLUDED.listing_enabled,
-              updated_at = NOW()
-          `, [
-            EBAY_CHANNEL_ID,
-            m.productTypeSlug,
-            m.ebayBrowseCategoryId || null,
-            m.ebayBrowseCategoryName || null,
-            m.ebayStoreCategoryId || null,
-            m.ebayStoreCategoryName || null,
-            m.fulfillmentPolicyOverride || null,
-            m.returnPolicyOverride || null,
-            m.paymentPolicyOverride || null,
-            m.listingEnabled !== false,
-          ]);
-        }
-
-        await client.query("COMMIT");
-        res.json({ success: true, message: `Saved ${mappings.length} category mapping(s)` });
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-      } finally {
-        client.release();
-      }
-    } catch (err: any) {
-      console.error("[eBay Category Mapping] Error:", err.message);
-      const busy = publicationSelectionBusyIssue(err);
-      if (busy) return res.status(409).json({ ...busy, error: busy.message });
-      res.status(500).json({ error: err.message });
-    }
+      const { mappings, expectedScope } = z.object({ mappings: z.array(ebayCategoryMappingPatchSchema).max(500), expectedScope: ebayPolicyScopeSchema.optional() }).strict().parse(req.body);
+      await ebayBusinessPolicies.saveCategoryMappings({ mappings, expectedScope, actor: ebayPolicyActor(req) });
+      res.json({ success: true, message: `Saved ${mappings.length} category mapping(s)` });
+    } catch (error) { sendEbayPolicyError(res, error); }
   });
-
 
   // -----------------------------------------------------------------------
   // POST /api/ebay/sync-store-categories — Create eBay store categories

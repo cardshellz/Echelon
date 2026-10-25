@@ -1,3 +1,4 @@
+import { voidedOwnershipFixture } from "../fixtures/invoice-source";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 import type { ReplacementInvoiceInput } from "../../shared/procurement/invoice-replacement";
@@ -123,7 +124,7 @@ test("shipment costs show voided invoice recovery and retain the original invoic
   await page.route("**/api/inbound-shipments/42", (route) => route.fulfill({ json: {
     id: 42, shipmentNumber: "TEST-SHIP-42", status: "closed", mode: "sea_fcl", lines: [], statusHistory: [], costs: [{
       id: 9, costType: "freight", description: "Carrier charge", estimatedCents: 10000, actualCents: 10000, vendorId: 2, vendorName: "Test carrier", vendorInvoiceId: 71,
-      derivedStatus: "voided", linkedInvoice: { id: 71, invoiceNumber: "TEST-FREIGHT-71", status: "voided" },
+      billingOwnership: voidedOwnershipFixture(), derivedStatus: "voided", linkedInvoice: { id: 71, invoiceNumber: "TEST-FREIGHT-71", status: "voided" },
     }],
   } }));
   await page.goto("/shipments/42?tab=costs");

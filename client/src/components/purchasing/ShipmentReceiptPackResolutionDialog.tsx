@@ -1,4 +1,6 @@
 import { AlertTriangle, CheckCircle2, ExternalLink, RefreshCw } from "lucide-react";
+import { ShipmentCustodyReceiptLinks } from "./ShipmentCustodyReceiptLinks";
+import { shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -93,6 +95,12 @@ export function ShipmentReceiptPackResolutionDialog({
         {resolution?.issue && (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
             {resolution.issue}
+          </div>
+        )}
+        {resolution && ((resolution.custodyBaseQty ?? 0) > 0 || (resolution.excessBaseQty ?? 0) > 0) && (
+          <div className="rounded-md border p-3 text-sm">
+            <p>{shipmentReceiveCoverageLabel(resolution).text}</p>
+            <ShipmentCustodyReceiptLinks coverage={resolution} />
           </div>
         )}
 
@@ -194,10 +202,10 @@ export function ShipmentReceiptPackResolutionDialog({
         </div>
 
         <DialogFooter className="gap-2 sm:space-x-0">
-          <Button variant="outline" onClick={() => onOpenCatalog(primaryBlockingLine)}>
+          {(resolution?.lines.length ?? 0) > 0 && <Button variant="outline" onClick={() => onOpenCatalog(primaryBlockingLine)}>
             <ExternalLink className="mr-2 h-4 w-4" />
             {primaryBlockingLine?.productId ? "Open product variants" : "Open variants"}
-          </Button>
+          </Button>}
           <Button variant="outline" onClick={onRefresh} disabled={refreshing}>
             <RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
             Refresh

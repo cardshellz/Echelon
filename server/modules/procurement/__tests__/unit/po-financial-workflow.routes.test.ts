@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ServiceRegistry } from "../../../../services";
@@ -25,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   count: vi.fn(),
   list: vi.fn(),
   log: vi.fn(),
+  readList: vi.fn(),
 }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../catalog", () => ({ catalogStorage: {} }));
@@ -32,8 +34,9 @@ vi.mock("../../../warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../orders", () => ({ ordersStorage: {} }));
 vi.mock("../..", () => ({
-  procurementStorage: { getVendorById: mocks.vendor },
+  procurementStorage: { getVendorById: mocks.vendor, getAllVendors: async () => [] },
 }));
+vi.mock("../../purchase-order-list.service", async original => ({ ...await original<typeof import("../../purchase-order-list.service")>(), getPurchaseOrderList: mocks.readList }));
 vi.mock("../../ap-ledger.service", () => ({}));
 vi.mock("../../po-exceptions.service", () => ({
   countOpenExceptions: mocks.count,
@@ -59,7 +62,8 @@ vi.mock("../../../../routes/middleware", () => {
       } as typeof req.session;
       next();
     };
-  return { requirePermission: permission, requireAnyPermission: permission };
+  return { requirePermission: permission, requireAnyPermission: permission,
+    requireAuth: (_req: Request, _res: Response, next: NextFunction) => next() };
 });
 vi.mock("../../../../middleware/idempotency", () => ({
   requireIdempotency:
@@ -176,7 +180,7 @@ describe("PO detail financial workflow HTTP boundary", () => {
     "publishes current %s evidence and derived action despite cached paid",
     async (status, action) => {
       mocks.readWorkflow.mockResolvedValue(workflow(status));
-      const response = await fetch(`${base}/api/purchase-orders/10`);
+      const response = await requestLocalHttp(`${base}/api/purchase-orders/10`);
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body.financialWorkflow).toEqual(workflow(status));
@@ -187,20 +191,20 @@ describe("PO detail financial workflow HTTP boundary", () => {
   );
   it("rejects permission before reading financial evidence", async () => {
     mocks.permission = false;
-    expect((await fetch(`${base}/api/purchase-orders/10`)).status).toBe(403);
+    expect((await requestLocalHttp(`${base}/api/purchase-orders/10`)).status).toBe(403);
     expect(mocks.getPo).not.toHaveBeenCalled();
     expect(mocks.readWorkflow).not.toHaveBeenCalled();
   });
   it("returns not found without reading evidence for an absent PO", async () => {
     mocks.getPo.mockResolvedValue(null);
-    expect((await fetch(`${base}/api/purchase-orders/10`)).status).toBe(404);
+    expect((await requestLocalHttp(`${base}/api/purchase-orders/10`)).status).toBe(404);
     expect(mocks.readWorkflow).not.toHaveBeenCalled();
   });
   it("fails unavailable without leaking source errors or returning cached completion", async () => {
     mocks.readWorkflow.mockRejectedValue(
       new Error("private_connection_secret"),
     );
-    const response = await fetch(`${base}/api/purchase-orders/10`);
+    const response = await requestLocalHttp(`${base}/api/purchase-orders/10`);
     expect(response.status).toBe(503);
     const text = await response.text();
     expect(text).toContain("PURCHASE_ORDER_DETAIL_UNAVAILABLE");
@@ -218,6 +222,27 @@ describe("PO detail financial workflow HTTP boundary", () => {
       purchaseOrderId: 20,
       evidence: { ...wrong.evidence, purchaseOrderId: 20 },
     });
-    expect((await fetch(`${base}/api/purchase-orders/10`)).status).toBe(503);
+    expect((await requestLocalHttp(`${base}/api/purchase-orders/10`)).status).toBe(503);
+  });
+  it("returns canonical list evidence and forwards its separate workflow filter", async () => {
+    mocks.readList.mockResolvedValue({ purchaseOrders: [{ id: 10, status: "closed", physicalStatus: "received", financialStatus: "paid", financialWorkflow: workflow("disputed") }], total: 1 });
+    const response = await requestLocalHttp(`${base}/api/purchase-orders?financial_workflow=review_required&limit=10&offset=0`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ total: 1, purchaseOrders: [{ id: 10, financialWorkflow: { state: "review_required" }, lifecycle: { isTerminal: false, allowedFinancialTransitions: [] } }] });
+    expect(mocks.readList).toHaveBeenCalledWith(expect.objectContaining({ financialWorkflow: "review_required", financialStatus: undefined, limit: 10, offset: 0 }));
+  });
+  it("denies list permission before financial reads", async () => {
+    mocks.permission = false;
+    expect((await requestLocalHttp(`${base}/api/purchase-orders`)).status).toBe(403);
+    expect(mocks.readList).not.toHaveBeenCalled();
+  });
+  it("does not expose failed list evidence or return a cached completion substitute", async () => {
+    mocks.readList.mockRejectedValue(new Error("private_list_secret"));
+    const response = await requestLocalHttp(`${base}/api/purchase-orders`);
+    expect(response.status).toBe(503);
+    const body = await response.text();
+    expect(body).toContain("PURCHASE_ORDER_LIST_UNAVAILABLE");
+    expect(body).not.toContain("private_list_secret");
+    expect(body).not.toContain("purchaseOrders");
   });
 });

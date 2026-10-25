@@ -18,15 +18,15 @@ describe("shipment line piece authority", () => {
   it("preserves 501 pieces and 11 cartons during a dimension-only correction", () => {
     const editor = shipmentLineEditorFromRecord(record, 42);
     editor.form.lengthCm = "12.50";
-    expect(updateShipmentLinePayload(editor)).toEqual({ expectedVersion: version, lengthCm: "12.50" });
+    expect(updateShipmentLinePayload(editor)).toEqual({ expectedVersion: version, lengthCm: "12.50", dimensionBasis: "carton" });
     expect(editor.form.qtyShipped).toBe("501");
     expect(editor.form.cartonCount).toBe("11");
     expect(record.lengthCm).toBe("10.00");
   });
   it("changes pieces and cartons independently and can clear dimensions", () => {
     const editor = shipmentLineEditorFromRecord(record, 42);
-    editor.form.qtyShipped = "499"; editor.form.cartonCount = ""; editor.form.weightKg = "";
-    expect(updateShipmentLinePayload(editor)).toEqual({ expectedVersion: version, qtyShipped: 499, cartonCount: null, weightKg: null });
+    editor.form.qtyShipped = "499"; editor.form.cartonCount = ""; editor.form.weightKg = ""; editor.form.dimensionBasis = "piece";
+    expect(updateShipmentLinePayload(editor)).toEqual({ expectedVersion: version, qtyShipped: 499, cartonCount: null, weightKg: null, dimensionBasis: "piece" });
   });
   it.each(["0", "-1", "1.5", "1e3", "2147483648", ""]) ("rejects invalid pieces %s instead of falling back", (qty) => {
     const editor = shipmentLineEditorFromRecord(record, 42); editor.form.qtyShipped = qty;
@@ -62,7 +62,7 @@ describe("shipment line durable commands", () => {
     await expect(client.execute(42, { operation: "import", body: { rows: [{ sku: "B", qtyShipped: 1 }] } })).rejects.toThrow(/unresolved/);
     expect(fetcher).toHaveBeenCalledTimes(1);
     const reloaded = createShipmentLineCommandClient(() => "different-key", createShipmentLineRecoveryStore(() => storage, "operator-a"));
-    fetcher.mockResolvedValueOnce(reply({ imported: 1, errors: [], lines: [record] }));
+    fetcher.mockResolvedValueOnce(reply({ imported: 1, errors: [], lines: [{ ...record, sku: "A" }] }));
     await expect(reloaded.execute(42, saved.command)).resolves.toMatchObject({ operation: "import", result: { imported: 1 } });
     const first = fetcher.mock.calls[0][1]; const second = fetcher.mock.calls[1][1];
     expect(second.body).toBe(first.body); expect(second.headers["Idempotency-Key"]).toBe(first.headers["Idempotency-Key"]);
@@ -77,8 +77,8 @@ describe("shipment line durable commands", () => {
   });
   it("retains the entire batch on definitive capacity conflict and rotates after review", async () => {
     const { client, recovery } = setup();
-    const fetcher = vi.fn().mockResolvedValueOnce(reply({ code: "SHIPMENT_LINE_SOURCE_CAPACITY_CHANGED", error: "Review remaining quantities" }, 409))
-      .mockResolvedValueOnce(reply({ imported: 1, errors: [], lines: [record] })); vi.stubGlobal("fetch", fetcher);
+    const fetcher = vi.fn().mockResolvedValueOnce(reply({ code: "SHIPMENT_LINE_SOURCE_CAPACITY_CHANGED", error: "Review remaining quantities", details: { shipmentLineOutcome: "rejected", idempotencyKey: "line-key-1" } }, 409))
+      .mockResolvedValueOnce(reply({ imported: 1, errors: [], lines: [{ ...record, sku: "A" }] })); vi.stubGlobal("fetch", fetcher);
     const command = { operation: "import" as const, body: { rows: [{ sku: "A", qtyShipped: 501 }] } };
     await expect(client.execute(42, command)).rejects.toMatchObject({ status: 409, ambiguous: false });
     expect(recovery.read(42)).toBeNull();
@@ -87,7 +87,7 @@ describe("shipment line durable commands", () => {
   });
   it("validates partial row accounting and returns each rejected row without hiding it", async () => {
     const { client } = setup();
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reply({ imported: 1, errors: [{ row: 2, error: "Quantity invalid", code: "INVALID_ROW" }], lines: [record] })));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reply({ imported: 1, errors: [{ row: 2, error: "Quantity invalid", code: "INVALID_ROW" }], lines: [{ ...record, sku: "A" }] })));
     const result = await client.execute(42, { operation: "import", body: { rows: [{ sku: "A", qtyShipped: 501 }, { sku: "B", qtyShipped: 0 }] } });
     expect(result).toMatchObject({ operation: "import", result: { imported: 1, errors: [{ row: 2, error: "Quantity invalid" }] } });
   });
@@ -103,11 +103,11 @@ describe("shipment line durable commands", () => {
   });
   it("sends an explicit empty resolve body and validates the updated count", async () => {
     const { client } = setup(); const fetcher = vi.fn().mockResolvedValue(reply({ updated: 2, total: 3 })); vi.stubGlobal("fetch", fetcher);
-    expect(await client.execute(42, { operation: "resolve-dimensions", body: {} })).toEqual({ operation: "resolve-dimensions", updated: 2, total: 3 });
+    expect(await client.execute(42, { operation: "resolve-dimensions", body: {} })).toEqual({ operation: "resolve-dimensions", updated: 2, total: 3, reviewRequiredLines: [] });
     expect(fetcher.mock.calls[0][1].body).toBe("{}");
   });
   it("rotates a PATCH key only after definitive conflict and explicit new version", async () => {
-    const { client } = setup(); const fetcher = vi.fn().mockResolvedValueOnce(reply({ error: "Line changed" }, 409)).mockResolvedValueOnce(reply({ ...record, version: nextVersion })); vi.stubGlobal("fetch", fetcher);
+    const { client } = setup(); const fetcher = vi.fn().mockResolvedValueOnce(reply({ error: "Line changed", details: { shipmentLineOutcome: "rejected", idempotencyKey: "line-key-1" } }, 409)).mockResolvedValueOnce(reply({ ...record, version: nextVersion })); vi.stubGlobal("fetch", fetcher);
     await expect(client.execute(42, { operation: "update", lineId: 7, body: { expectedVersion: version, notes: "review" } })).rejects.toMatchObject({ ambiguous: false });
     await client.execute(42, { operation: "update", lineId: 7, body: { expectedVersion: nextVersion, notes: "reviewed" } });
     expect(fetcher.mock.calls.map((call) => call[1].headers["Idempotency-Key"])).toEqual(["line-key-1", "line-key-2"]);
@@ -127,7 +127,7 @@ describe("reviewed recovery and sibling-allocation edge cases", () => {
     const command = { operation: "import" as const, body: { rows: [{ sku: "A", qtyShipped: 1 }] } };
     const staleCard = recovery.acquire(42, command, () => "original-key");
     recovery.complete(42, staleCard.key);
-    const fetcher = vi.fn().mockResolvedValue(reply({ imported: 1, errors: [], lines: [record] }));
+    const fetcher = vi.fn().mockResolvedValue(reply({ imported: 1, errors: [], lines: [{ ...record, sku: "A", qtyShipped: 1 }] }));
     vi.stubGlobal("fetch", fetcher);
     await client.execute(42, staleCard.command, staleCard);
     expect(fetcher.mock.calls[0][1].headers["Idempotency-Key"]).toBe("original-key");
@@ -181,4 +181,57 @@ it("accepts and replays confirmed notes-only responses that preserve legacy phys
   await expect(client.execute(42, command, saved)).resolves.toMatchObject({ operation: "update", line: { qtyShipped: -1, cartonCount: 0 } });
   await expect(client.execute(42, command, saved)).resolves.toMatchObject({ operation: "update" });
   expect(fetcher.mock.calls.map((call) => call[1].headers["Idempotency-Key"])).toEqual(["legacy-notes-key", "legacy-notes-key"]);
+});
+
+describe("reviewed shipment response evidence", () => {
+  const unitSelection = { productVariantId: 9, unitsPerVariant: 1000, quantity: 2 };
+  const saved = { ...record, sku: "CASE", qtyShipped: 2000, productVariantId: 9, unitsPerVariantSnapshot: 1000, dimensionBasis: "carton" };
+  it.each([{ qtyShipped: 1999 }, { productVariantId: 10 }, { unitsPerVariantSnapshot: 500 }, { dimensionBasis: "piece" }])("keeps PATCH intent if saved evidence disagrees: %j", async (changed) => {
+    const { client, recovery } = setup(); vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reply({ ...saved, ...changed })));
+    const command = { operation: "update" as const, lineId: 7, body: { expectedVersion: version, qtyShipped: 2000, unitSelection, dimensionBasis: "carton" as const } };
+    await expect(client.execute(42, command)).rejects.toMatchObject({ ambiguous: true, code: "SHIPMENT_LINE_RESPONSE_INVALID" });
+    expect(recovery.read(42)?.command).toEqual(command);
+  });
+  it("keeps explicit PO unit intent when saved source line differs", async () => {
+    const { client, recovery } = setup(); vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reply([{ ...saved, purchaseOrderId: 17, purchaseOrderLineId: 99 }])));
+    await expect(client.execute(42, { operation: "add-from-po", body: { purchaseOrderId: 17, lineSelections: [{ poLineId: 15, qty: 2000, unitSelection }] } })).rejects.toMatchObject({ ambiguous: true });
+    expect(recovery.read(42)).not.toBeNull();
+  });
+  it("verifies successful import rows around rejected rows and duplicate multiplicity", async () => {
+    const { client, recovery } = setup();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reply({ imported: 2, errors: [{ row: 2, error: "invalid" }], lines: [saved, { ...saved, id: 8 }] })));
+    await expect(client.execute(42, { operation: "import", body: { rows: [{ sku: " CASE ", qtyShipped: 2000, unitSelection }, { sku: "BAD", qtyShipped: 0 }, { sku: "CASE", qtyShipped: 2000, unitSelection }] } })).resolves.toMatchObject({ result: { imported: 2 } });
+    expect(recovery.read(42)).toBeNull();
+  });
+  it.each([
+    [{ ...saved, sku: "OTHER" }],
+    [{ ...saved, unitsPerVariantSnapshot: null }],
+  ])("retains import evidence if saved SKU or factor differs", async (lines) => {
+    const { client, recovery } = setup(); vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reply({ imported: 1, errors: [], lines })));
+    await expect(client.execute(42, { operation: "import", body: { rows: [{ sku: "CASE", qtyShipped: 2000, unitSelection }] } })).rejects.toMatchObject({ ambiguous: true });
+    expect(recovery.read(42)).not.toBeNull();
+  });
+  it("does not match two requested identities to two copies of one source", async () => {
+    const { client } = setup(); vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reply({ imported: 2, errors: [], lines: [saved, { ...saved, id: 8 }] })));
+    await expect(client.execute(42, { operation: "import", body: { rows: [{ sku: "CASE", qtyShipped: 2000 }, { sku: "OTHER", qtyShipped: 2000 }] } })).rejects.toMatchObject({ ambiguous: true });
+  });
+  it.each([401, 403, 409])("preserves exact intent after a lost response then unrecorded rejection %i", async (status) => {
+    const { client, recovery, storage } = setup();
+    const command = { operation: "import" as const, body: { rows: [{ sku: "CASE", qtyShipped: 2000, unitSelection }] } };
+    const fetcher = vi.fn().mockRejectedValueOnce(new Error("lost")).mockResolvedValueOnce(reply({ error: "Cannot authorize this retry" }, status))
+      .mockResolvedValueOnce(reply({ imported: 1, errors: [], lines: [saved] })); vi.stubGlobal("fetch", fetcher);
+    await expect(client.execute(42, command)).rejects.toMatchObject({ ambiguous: true });
+    await expect(client.execute(42, command)).rejects.toMatchObject({ status, ambiguous: true });
+    expect(recovery.read(42)?.key).toBe("line-key-1");
+    const reloaded = createShipmentLineCommandClient(() => "must-not-rotate", createShipmentLineRecoveryStore(() => storage, "operator-a"));
+    await reloaded.execute(42, command);
+    expect(fetcher.mock.calls.map((call) => call[1].headers["Idempotency-Key"])).toEqual(["line-key-1", "line-key-1", "line-key-1"]);
+    expect(new Set(fetcher.mock.calls.map((call) => call[1].body)).size).toBe(1);
+    expect(recovery.read(42)).toBeNull();
+  });
+  it("rejects a durable-rejection marker for another command key", async () => {
+    const { client, recovery } = setup(); vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reply({ error: "rejected", details: { shipmentLineOutcome: "rejected", idempotencyKey: "another-key" } }, 409)));
+    await expect(client.execute(42, { operation: "resolve-dimensions", body: {} })).rejects.toMatchObject({ ambiguous: true });
+    expect(recovery.read(42)?.key).toBe("line-key-1");
+  });
 });

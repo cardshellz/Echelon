@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   EbayMarketplaceListingConnector,
+  alignDraftVariationSchemaToLiveGroup,
   type EbayListingConnectorClient,
   type EbayListingConnectorDraft,
   type EbayListingLifecycleClient,
@@ -8,9 +9,46 @@ import {
 import { ebayListingPushFailure } from "../../ebay-listing-push.service";
 import { ShopifyMarketplaceListingConnector } from "../../listing-connectors/shopify-listing.connector";
 import type { BuiltInventoryItem, BuiltItemGroup, BuiltOffer } from "../../adapters/ebay/ebay-listing-builder";
-import type { EbayInventoryItem, EbayOffer } from "../../adapters/ebay/ebay-types";
+import type { EbayInventoryItem, EbayInventoryItemGroup, EbayOffer } from "../../adapters/ebay/ebay-types";
+import { ebayIntentAccount, prepareEbayChannelIntent } from "../../ebay-prepared-intent";
+import { ebayPreparedContentHash } from "../../ebay-listing-sync-content";
+import { prepareEbayListingPackages } from "../../adapters/ebay/ebay-listing-package";
 
 describe("marketplace listing connectors", () => {
+  it.each([false, true])("binds the final provider variation axis before sending and rejects later axis drift (%s)", async (axisChanges) => {
+    const client = makeLifecycleClient({ currentSkus:["PACK","CASE"], currentListingId:"listing-old", currentVariationAspectName:"Number of Sleeves" });
+    vi.mocked(client.publishOfferByInventoryItemGroup).mockResolvedValue({listingId:"listing-old"});
+    const catalogDraft = makeGroupedDraft(["PACK","CASE"]);
+    const original = structuredClone(catalogDraft);
+    const liveGroup = (await client.getInventoryItemGroup("CATALOG-GROUP"))!;
+    const draft = await prepareEbayListingPackages(client,
+      alignDraftVariationSchemaToLiveGroup({draft:{...catalogDraft,itemGroup:catalogDraft.itemGroup!},liveGroup}));
+    draft.preparedIntent = prepareEbayChannelIntent({draft,operation:"maintenance",
+      account:ebayIntentAccount({channelId:67,connectionId:34,accountId:"seller",environment:"production",marketplaceId:"EBAY_US",merchantLocationKey:"warehouse"}),
+      prices:new Map(draft.offers.map(offer=>[offer.variantId,{priceCents:999,basePriceCents:999,source:"catalog_variant" as const,
+        provenance:{kind:"catalog_variant" as const,variantId:offer.variantId},appliedRule:null}])),settings:{}});
+    expect(catalogDraft).toEqual(original);
+    const connector = new EbayMarketplaceListingConnector();
+    const preview = await connector.previewListingRebuild({client,draft,currentExternalListingId:"listing-old"});
+    if(axisChanges) {
+      vi.mocked(client.getInventoryItemGroup).mockResolvedValue({...liveGroup,variesBy:{specifications:[{name:"Changed Axis",values:["PACK","CASE"]}]}});
+      await expect(connector.updateExistingListing({client,draft,preview})).rejects.toMatchObject({code:"EBAY_SYNC_DRAFT_SCOPE_INVALID"});
+      expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+      expect(client.updateOffer).not.toHaveBeenCalled();
+      expect(client.createOrReplaceInventoryItemGroup).not.toHaveBeenCalled();
+      expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+      return;
+    }
+    await expect(connector.updateExistingListing({client,draft,preview})).resolves.toMatchObject({externalProductId:"listing-old"});
+    const sentItems = vi.mocked(client.createOrReplaceInventoryItem).mock.calls.map(([sku,payload])=>({
+      ...draft.inventoryItems.find(item => item.sku === sku)!, sku, payload,
+    }));
+    const [groupKey,payload] = vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.at(-1)!;
+    expect(sentItems).toHaveLength(2);
+    expect(sentItems[0].payload.product.aspects).toEqual({"Number of Sleeves":["PACK"]});
+    expect(ebayPreparedContentHash({...draft,inventoryItems:sentItems,itemGroup:{groupKey,payload}})).toBe(draft.preparedIntent.input.contentHash);
+  });
+
   it("publishes eBay listings through one connector client", async () => {
     const calls: string[] = [];
     const client: EbayListingConnectorClient = {
@@ -266,7 +304,7 @@ describe("marketplace listing connectors", () => {
     expect(client.createOffer).not.toHaveBeenCalled();
     expect(client.publishOffer).not.toHaveBeenCalled();
     expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
-    expect(calls).toEqual(["get_offers", "update_offer", "put_inventory", "put_group"]);
+    expect(calls).toEqual(["get_offers", "put_inventory", "put_group", "update_offer"]);
     expect(client.updateOffer).toHaveBeenCalledWith(
       "offer-1",
       expect.objectContaining({ offerId: "offer-1" }),
@@ -545,7 +583,7 @@ describe("explicit eBay listing rebuild lifecycle", () => {
         removedSkus: ["CATALOG-OLD"],
         previousExternalListingId: "listing-old",
       });
-    expect(client.getInventoryItemGroup).toHaveBeenCalledTimes(3);
+    expect(client.getInventoryItemGroup).toHaveBeenCalledTimes(4);
     expect(client.createOrReplaceInventoryItemGroup).toHaveBeenCalledWith(
       "CATALOG-GROUP",
       expect.objectContaining({ variantSKUs: ["CATALOG-KEEP", "CATALOG-NEW"] }),
@@ -683,11 +721,13 @@ describe("explicit eBay listing rebuild lifecycle", () => {
       }],
     }));
     let newItemAttempts = 0;
-    vi.mocked(client.createOrReplaceInventoryItem).mockImplementation(async (sku: string) => {
+    const storeInventoryItem = vi.mocked(client.createOrReplaceInventoryItem).getMockImplementation()!;
+    vi.mocked(client.createOrReplaceInventoryItem).mockImplementation(async (sku: string, payload) => {
       calls.push(`put_inventory:${sku}`);
       if (sku === "CATALOG-NEW" && newItemAttempts++ === 0) {
         throw new Error("eBay API failed: errorId:25013 Variation Specifics provided does not match with the variation specifics of the variations on the item.");
       }
+      await storeInventoryItem(sku,payload);
     });
     vi.mocked(client.publishOfferByInventoryItemGroup)
       .mockResolvedValue({ listingId: "listing-old" });
@@ -754,7 +794,7 @@ describe("explicit eBay listing rebuild lifecycle", () => {
       }),
     ]);
 
-    expect(calls).not.toContain("put_inventory:CATALOG-KEEP");
+    expect(calls).toContain("put_inventory:CATALOG-KEEP");
     expect(calls.filter((call) => call === "put_inventory:CATALOG-NEW")).toHaveLength(2);
   });
 
@@ -766,7 +806,8 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     vi.mocked(client.createOrReplaceInventoryItemGroup)
       .mockRejectedValueOnce(new Error("eBay API failed: errorId:25013 Invalid data in the Inventory Item Group"))
       .mockResolvedValueOnce(undefined);
-    vi.mocked(client.getInventoryItem).mockResolvedValue({
+    const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
+    vi.mocked(client.getInventoryItem).mockImplementation(async sku => sku !== "CATALOG-OLD" ? readInventoryItem(sku) : ({
       sku: "CATALOG-OLD",
       condition: "NEW",
       product: {
@@ -775,7 +816,7 @@ describe("explicit eBay listing rebuild lifecycle", () => {
         aspects: { Size: ["CATALOG-OLD"] },
       },
       availability: { shipToLocationAvailability: { quantity: 5 } },
-    });
+    }));
     vi.mocked(client.publishOfferByInventoryItemGroup)
       .mockResolvedValue({ listingId: "listing-old" });
     const connector = new EbayMarketplaceListingConnector();
@@ -812,8 +853,10 @@ describe("explicit eBay listing rebuild lifecycle", () => {
   it.each(["sku", "marketplace", "offer", "listing", "inventory_item"])("refuses retained quantity reduction after exact %s identity changes", async changed => {
     const client = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"], currentListingId: "listing-old" });
     vi.mocked(client.createOrReplaceInventoryItemGroup).mockRejectedValueOnce(new Error("eBay errorId:25013 Invalid data in the Inventory Item Group")).mockResolvedValue(undefined);
-    vi.mocked(client.getInventoryItem).mockResolvedValue({ sku: changed === "inventory_item" ? "WRONG" : "CATALOG-OLD", condition: "NEW",
-      product: { title: "Old", imageUrls: [], aspects: {} }, availability: { shipToLocationAvailability: { quantity: 5 } } });
+    const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
+    vi.mocked(client.getInventoryItem).mockImplementation(async sku => sku !== "CATALOG-OLD" ? readInventoryItem(sku) : ({
+      sku: changed === "inventory_item" ? "WRONG" : "CATALOG-OLD", condition: "NEW",
+      product: { title: "Old", imageUrls: [], aspects: {} }, availability: { shipToLocationAvailability: { quantity: 5 } } }));
     const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
     vi.mocked(client.getOffers).mockImplementation(async (sku, marketplace) => ({
       offers: (await readOffers(sku, marketplace)).offers.map(offer => sku === "CATALOG-OLD" && vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.length >= 2
@@ -1167,18 +1210,17 @@ function makeLifecycleClient(input: {
 }): EbayListingLifecycleClient & Record<string, ReturnType<typeof vi.fn>> {
   const calls = input.calls ?? [];
   let sourceWithdrawn = false;
+  const items = new Map<string,EbayInventoryItem>();
+  let currentGroup: EbayInventoryItemGroup = {
+    inventoryItemGroupKey:"CATALOG-GROUP",aspects:{},description:"Current group",imageUrls:[],title:"Current group",
+    variesBy:{specifications:[{name:input.currentVariationAspectName ?? "Size",values:input.currentSkus}]},variantSKUs:input.currentSkus,
+  };
   return {
-    getInventoryItemGroup: vi.fn(async () => ({
-      inventoryItemGroupKey: "CATALOG-GROUP",
-      aspects: {},
-      description: "Current group",
-      imageUrls: [],
-      title: "Current group",
-      variesBy: { specifications: [{ name: input.currentVariationAspectName ?? "Size", values: input.currentSkus }] },
-      variantSKUs: input.currentSkus,
-    })),
-    getInventoryItem: vi.fn(async () => null),
-    createOrReplaceInventoryItem: vi.fn(async () => { calls.push("put_inventory"); }),
+    getInventoryItemGroup: vi.fn(async () => structuredClone(currentGroup)),
+    getInventoryItem: vi.fn(async (sku:string) => items.get(sku) ?? null),
+    createOrReplaceInventoryItem: vi.fn(async (sku:string,payload:Omit<EbayInventoryItem,"sku">) => {
+      calls.push("put_inventory"); items.set(sku,{sku,...structuredClone(payload)});
+    }),
     getOffers: vi.fn(async (sku: string) => ({
       offers: [{
         offerId: `offer-${sku}`,
@@ -1202,7 +1244,9 @@ function makeLifecycleClient(input: {
     })),
     createOffer: vi.fn(async (offer: EbayOffer) => `offer-${offer.sku}`),
     updateOffer: vi.fn(async () => { calls.push("update_offer"); }),
-    createOrReplaceInventoryItemGroup: vi.fn(async () => { calls.push("put_group"); }),
+    createOrReplaceInventoryItemGroup: vi.fn(async (key:string,payload:EbayInventoryItemGroup) => {
+      calls.push("put_group"); currentGroup={...structuredClone(payload),inventoryItemGroupKey:key};
+    }),
     publishOffer: vi.fn(async () => ({ listingId: "listing-new" })),
     publishOfferByInventoryItemGroup: vi.fn(async () => {
       calls.push("publish_group");

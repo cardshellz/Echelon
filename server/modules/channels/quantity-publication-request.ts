@@ -8,7 +8,8 @@ export interface EbayQuantityHttpRequest {
 }
 export interface EbayQuantityRequestAdmission {
   item<T>(sku: string, work: (quantity: number | null) => Promise<T>): Promise<T>;
-  group<T>(groupKey: string, skus: readonly string[], work: (quantities: ReadonlyMap<string, number> | null) => Promise<T>): Promise<T>;
+  group<T>(groupKey: string, skus: readonly string[], work: (quantities: ReadonlyMap<string, number> | null, retainedSkus?: readonly string[]) => Promise<T>,
+    maintenance?: { kind: "existing_group_update"; marketplaceId: string }): Promise<T>;
   reducing<T>(identity: string, work: () => Promise<T>, memberSkus?: readonly string[]): Promise<T>;
 }
 
@@ -116,14 +117,25 @@ async function executeAdmittedEbayQuantityRequestInsideJournal<T>(input: EbayQua
     }));
     const skus = exactSkus(group.variantSKUs);
     if (hasQuantity(input.body)) throw invalid("A group lifecycle request cannot carry unowned quantity fields.");
-    return admission.group(groupKey, skus, async quantities => {
-      if (!Array.isArray(body.variantSKUs)) {
-        const current = record(await request({ method: "GET", path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}` }));
-        if (JSON.stringify(exactSkus(current.variantSKUs)) !== JSON.stringify(skus)) throw invalid("Provider group membership changed before publication.");
+    const maintenance = input.method === "PUT" && /^\/sell\/inventory\/v1\/inventory_item_group\/[^/?]+$/.test(input.path)
+      ? { kind: "existing_group_update" as const, marketplaceId: marketplace(body) } : undefined;
+    return admission.group(groupKey, skus, async (quantities, retainedSkus = []) => {
+      if (retainedSkus.length && (!maintenance || !quantities || new Set(retainedSkus).size !== retainedSkus.length
+        || retainedSkus.some(sku => !skus.includes(sku) || quantities.has(sku)))) {
+        throw invalid("Only exact archived members of an unchanged existing group can be preserved without stock publication.");
       }
-      if (quantities) for (const sku of skus) await refreshCanonicalEbayQuantity(sku, quantityFor(quantities, sku), marketplace(body), request);
+      const assertCurrentGroup = async () => {
+        const current = record(await request({ method: "GET", path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}` }));
+        if ((current.inventoryItemGroupKey !== undefined && current.inventoryItemGroupKey !== groupKey)
+          || JSON.stringify(exactSkus(current.variantSKUs)) !== JSON.stringify(skus))
+          throw invalid("Provider group membership changed before publication.");
+      };
+      if (!Array.isArray(body.variantSKUs) || retainedSkus.length) await assertCurrentGroup();
+      if (quantities) for (const sku of skus.filter(sku => !retainedSkus.includes(sku)))
+        await refreshCanonicalEbayQuantity(sku, quantityFor(quantities, sku), marketplace(body), request);
+      if (retainedSkus.length) await assertCurrentGroup();
       return request<T>(input);
-    });
+    }, maintenance);
   }
   if (identity.startsWith("offer:")) {
     const match = input.path.match(/^\/sell\/inventory\/v1\/offer\/([^/]+)(?:\/publish)?$/);

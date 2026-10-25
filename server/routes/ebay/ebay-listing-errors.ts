@@ -1,4 +1,6 @@
+import { EbayBusinessPolicyError, ebayPolicySourceSchema } from "@shared/ebay-business-policies";
 import { z } from 'zod';
+import { providerReadDiagnosticFromError } from "@shared/channel-provider-read";
 import { resolveEbayListingIssue, safeListingDiagnostic } from '@shared/ebay-listing-issue';
 import { publicationSelectionBusyIssue } from '../../modules/inventory-planning/publication-selection-work';
 
@@ -10,13 +12,17 @@ export function listingFailure(error: unknown, productId?: number, jobId?: strin
   const code = error instanceof z.ZodError ? 'EBAY_LISTING_INPUT_INVALID'
     : error instanceof Error && 'code' in error && typeof error.code === 'string' && /^(EBAY_|PUBLICATION_|QUANTITY_)/.test(error.code)
       ? error.code : 'EBAY_LISTING_SYNC_FAILED';
-  const message = error instanceof z.ZodError ? 'The request is invalid. Refresh this page and select the product again.'
+  const providerRead = providerReadDiagnosticFromError(error);
+  const message = providerRead ? "Echelon could not finish the listing read. Review the saved diagnostic details."
+    : error instanceof z.ZodError ? 'The request is invalid. Refresh this page and select the product again.'
     : error instanceof Error && code !== 'EBAY_LISTING_SYNC_FAILED' ? safeListingDiagnostic(error.message)
       : 'The listing operation could not finish. Refresh its saved status before retrying.';
-  console.error(JSON.stringify({ event: 'ebay_listing_request_failed', code, productId }));
-  return { code, error: message, issue: resolveEbayListingIssue({ code, message, productId, jobId: savedJob.success ? savedJob.data : undefined }) };
+  const policySource = error instanceof EbayBusinessPolicyError ? ebayPolicySourceSchema.safeParse(error.context.policySource) : undefined;
+  console.error(JSON.stringify({ event: 'ebay_listing_request_failed', code, productId, ...(providerRead ? { providerRead } : {}) }));
+  return { code, error: message, issue: resolveEbayListingIssue({ code, message, productId, providerRead, jobId: savedJob.success ? savedJob.data : undefined, ...(policySource?.success ? { policySource: policySource.data } : {}) }) };
 }
 export function listingFailureStatus(error: unknown): number {
+  if (error instanceof EbayBusinessPolicyError) return error.statusCode;
   if (publicationSelectionBusyIssue(error)) return 409;
   if (error instanceof z.ZodError) return 400;
   const code = error instanceof Error && 'code' in error ? error.code : null;

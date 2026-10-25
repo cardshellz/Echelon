@@ -1,10 +1,16 @@
+import { shipmentListState } from "@/lib/shipment-list-navigation";
+import { shipmentWarehouseOptionsSchema } from "@shared/procurement/shipment-create-source";
+import { useShipmentCreation } from "@/hooks/use-shipment-creation";
+import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateRecovery";
+import { shipmentCreateSchema, type ShipmentCreateInput } from "@shared/procurement/shipment-create-command";
+import type { ShipmentCreateRecovery as ShipmentRecovery } from "@/lib/shipment-create-command";
+import { shipmentWorkListPageSchema, SHIPMENT_LIST_PAGE_SIZE, type ShipmentWorkListItem, type ShipmentCostFilter } from "@shared/procurement/shipment-work-list";
 import { landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { ShipmentPurchaseOrderLinks } from "@/features/purchasing/ShipmentPurchaseOrderLinks";
 import { procurementChildHref } from "@/lib/procurement-navigation";
-import type { ShipmentPurchaseOrderReference } from "@shared/procurement/shipment-purchase-orders";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -54,12 +60,11 @@ const MODE_CONFIG: Record<string, { label: string; icon: typeof Ship }> = {
   courier: { label: "Courier", icon: Truck },
 };
 
-function formatCents(cents: number | null | undefined): string {
-  if (!cents) return "$0.00";
-  return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+function formatCents(cents: number | bigint | null | undefined): string {
+  const value = BigInt(cents ?? 0);
+  const absolute = value < BigInt(0) ? -value : value;
+  return `${value < BigInt(0) ? "-" : ""}$${(absolute / BigInt(100)).toLocaleString("en-US")}.${(absolute % BigInt(100)).toString().padStart(2, "0")}`;
 }
-
-type Warehouse = { id: number; code: string; name: string };
 
 type LandedCostPushResult = {
   updated: number;
@@ -72,52 +77,36 @@ type LandedCostPushResult = {
   }>;
 };
 
-type LandedCostFollowupFilter =
-  | "all"
-  | "any"
-  | "critical"
-  | "warning"
-  | "allocation"
-  | "needs_finalize"
-  | "ready_to_push"
-  | "stale_provisional";
-
-type InboundShipment = {
-  id: number;
-  shipmentNumber: string;
-  mode: string;
-  status: string;
-  carrierName: string | null;
-  forwarderName: string | null;
-  containerNumber: string | null;
-  originPort: string | null;
-  destinationPort: string | null;
-  originCountry: string | null;
-  destinationCountry: string | null;
-  warehouseId: number | null;
-  eta: string | null;
-  estimatedTotalCostCents: number | null;
-  actualTotalCostCents: number | null;
-  lineCount: number;
-  notes: string | null;
-  createdAt: string;
-  purchaseOrders?: ShipmentPurchaseOrderReference[];
-};
+type LandedCostFollowupFilter = ShipmentCostFilter;
+type InboundShipment = ShipmentWorkListItem;
 
 export default function InboundShipments() {
+  const shipmentCreation = useShipmentCreation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
 
-  // Filters
-  const [statusFilter, setStatusFilter] = useState("active");
-  const [modeFilter, setModeFilter] = useState("all");
-  const [landedCostFilter, setLandedCostFilter] = useState<LandedCostFollowupFilter>("all");
-  const [searchQuery, setSearchQuery] = useState("");
+  const listSearch = useSearch();
+  const listState = shipmentListState(listSearch);
+  const { status: statusFilter, mode: modeFilter, costFilter: landedCostFilter, search: searchQuery, offset } = listState;
+  function updateFilters(changes: Record<string, string | number>) {
+    const params = new URLSearchParams(listSearch);
+    for (const [key, value] of Object.entries(changes)) params.set(key, String(value));
+    if (params.get("mode") === "all") params.delete("mode");
+    navigate(`/shipments?${params}`, { replace: true });
+  }
+  const setOffset = (value: number) => updateFilters({ offset: value });
+  const setStatusFilter = (value: string) => updateFilters({ status: value, offset: 0 });
+  const setModeFilter = (value: string) => updateFilters({ mode: value, offset: 0 });
+  const setLandedCostFilter = (value: LandedCostFollowupFilter) => updateFilters({ costFilter: value, offset: 0 });
+  const setSearchQuery = (value: string) => updateFilters({ search: value, offset: 0 });
+  const shipmentHref = (shipment: InboundShipment) => procurementChildHref("/shipments", listSearch,
+    `/shipments/${shipment.id}?document=${encodeURIComponent(shipment.shipmentNumber)}`);
 
   // Create dialog
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [newShipment, setNewShipment] = useState({
+    shipmentNumber: "",
     mode: "sea_fcl",
     carrierName: "",
     forwarderName: "",
@@ -129,28 +118,33 @@ export default function InboundShipments() {
   });
 
   // Queries
-  const { data: shipmentData } = useQuery<{ shipments: InboundShipment[]; total: number }>({
-    queryKey: ["/api/inbound-shipments", statusFilter, modeFilter, searchQuery],
-    queryFn: async () => {
-      const params = new URLSearchParams();
-      if (statusFilter !== "all" && statusFilter !== "active") params.set("status", statusFilter);
+  const shipmentQuery = useQuery({
+    queryKey: ["/api/inbound-shipments", statusFilter, modeFilter, searchQuery, landedCostFilter, offset],
+    retry: false,
+    staleTime: 0,
+    queryFn: async ({ signal }) => {
+      const params = new URLSearchParams({ status: statusFilter, costFilter: landedCostFilter,
+        limit: String(SHIPMENT_LIST_PAGE_SIZE), offset: String(offset) });
       if (modeFilter !== "all") params.set("mode", modeFilter);
       if (searchQuery) params.set("search", searchQuery);
-      params.set("limit", "100");
-      const res = await fetch(`/api/inbound-shipments?${params}`);
-      if (!res.ok) throw new Error("Failed to fetch shipments");
-      return res.json();
+      const res = await fetch(`/api/inbound-shipments?${params}`, { credentials: "include", signal });
+      if (!res.ok) throw new Error(`Shipments could not be loaded (HTTP ${res.status}).`);
+      try { return shipmentWorkListPageSchema.parse(await res.json()); }
+      catch { throw new Error("Shipment response is incomplete or invalid. Retry to verify the current work list."); }
     },
   });
+  const shipmentData = shipmentQuery.isError ? undefined : shipmentQuery.data;
 
-  const { data: warehouses = [] } = useQuery<Warehouse[]>({
-    queryKey: ["/api/warehouses"],
-    queryFn: async () => {
-      const res = await fetch("/api/warehouses", { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to fetch warehouses");
-      return res.json();
+  const warehousesQuery = useQuery({
+    queryKey: ["/api/warehouses", "shipment-create"], enabled: showCreateDialog, retry: false, staleTime: 0,
+    queryFn: async ({ signal }) => {
+      const res = await fetch("/api/warehouses", { credentials: "include", signal });
+      if (!res.ok) throw new Error("Warehouses could not be loaded.");
+      try { return shipmentWarehouseOptionsSchema.parse(await res.json()); }
+      catch { throw new Error("Warehouse options could not be verified."); }
     },
   });
+  const warehouses = warehousesQuery.isError ? [] : warehousesQuery.data ?? [];
 
   const landedCostHealthQuery = useQuery<LandedCostHealth>({
     queryKey: ["/api/procurement/landed-cost-health"],
@@ -162,28 +156,13 @@ export default function InboundShipments() {
   });
   const landedCostHealth = landedCostHealthQuery.isError ? undefined : landedCostHealthQuery.data;
 
-  const baseShipments = statusFilter === "active"
-    ? (shipmentData?.shipments ?? []).filter(s => !["cancelled"].includes(s.status))
-    : (shipmentData?.shipments ?? []);
+  const shipments = shipmentData?.shipments ?? [];
   const landedCostIssuesByShipment = new Map<number, LandedCostHealth["items"]>();
-  for (const item of landedCostHealth?.items ?? []) {
+  for (const item of shipmentData?.costHealthItems ?? []) {
     const existing = landedCostIssuesByShipment.get(item.shipmentId) ?? [];
     existing.push(item);
     landedCostIssuesByShipment.set(item.shipmentId, existing);
   }
-  const matchesLandedCostFilter = (shipment: InboundShipment, filter: LandedCostFollowupFilter = landedCostFilter) => {
-    if (filter === "all") return true;
-    const issues = landedCostIssuesByShipment.get(shipment.id) ?? [];
-    if (filter === "any") return issues.length > 0;
-    if (filter === "critical") return issues.some((issue) => issue.severity === "critical");
-    if (filter === "warning") return issues.some((issue) => issue.severity === "warning");
-    if (filter === "allocation") return issues.some((issue) => issue.type === "allocation_blocked" || issue.type === "allocation_warning");
-    if (filter === "needs_finalize") return issues.some((issue) => issue.type === "pending_finalization");
-    if (filter === "ready_to_push") return issues.some((issue) => issue.type === "finalized_not_pushed");
-    if (filter === "stale_provisional") return issues.some((issue) => issue.type === "stale_provisional_lots");
-    return true;
-  };
-  const shipments = baseShipments.filter((shipment) => matchesLandedCostFilter(shipment));
 
   // Stats
   const stats = {
@@ -193,46 +172,49 @@ export default function InboundShipments() {
     deliveredCosting: shipments.filter(s => ["delivered", "costing"].includes(s.status)).length,
     estimatedTotal: shipments
       .filter(s => !["closed", "cancelled"].includes(s.status))
-      .reduce((sum, s) => sum + (Number(s.estimatedTotalCostCents) || 0), 0),
+      .reduce((sum, s) => sum + BigInt(s.estimatedTotalCostCents ?? 0), BigInt(0)),
     actualTotal: shipments
       .filter(s => !["closed", "cancelled"].includes(s.status))
-      .reduce((sum, s) => sum + (Number(s.actualTotalCostCents) || 0), 0),
+      .reduce((sum, s) => sum + BigInt(s.actualTotalCostCents ?? 0), BigInt(0)),
   };
 
-  // Create mutation
+  type ShipmentCreateSubmission = { body: ShipmentCreateInput; recovery?: ShipmentRecovery; visit: ReturnType<typeof shipmentCreation.captureVisit> };
   const createMutation = useMutation({
-    mutationFn: async (data: typeof newShipment) => {
-      const res = await fetch("/api/inbound-shipments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: data.mode,
-          carrierName: data.carrierName || undefined,
-          forwarderName: data.forwarderName || undefined,
-          originPort: data.originPort || undefined,
-          destinationPort: data.destinationPort || undefined,
-          warehouseId: data.warehouseId || undefined,
-          eta: data.eta || undefined,
-          notes: data.notes || undefined,
-        }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Failed to create shipment");
-      }
-      return res.json();
+    retry: false,
+    networkMode: "always",
+    mutationFn: (submission: ShipmentCreateSubmission) => {
+      if (!submission.visit.isCurrent()) throw new Error("The shipment creation view changed. Review the saved request before sending.");
+      return shipmentCreation.execute(submission.body, submission.recovery);
     },
-    onSuccess: (shipment) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
+    onSuccess: (shipment, submission) => {
+      void queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
+      const purchaseOrderId = submission.body.purchaseOrder?.purchaseOrderId;
+      if (purchaseOrderId) {
+        void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}/shipments`] });
+        void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}/shippable-lines`] });
+      }
+      if (!submission.visit.isCurrent()) return;
       setShowCreateDialog(false);
-      setNewShipment({ mode: "sea_fcl", carrierName: "", forwarderName: "", originPort: "", destinationPort: "", warehouseId: 0, eta: "", notes: "" });
-      toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created as draft` });
+      setNewShipment({ shipmentNumber: "", mode: "sea_fcl", carrierName: "", forwarderName: "", originPort: "", destinationPort: "", warehouseId: 0, eta: "", notes: "" });
+      toast({ title: "Shipment confirmed", description: `${shipment.shipmentNumber} is ready to open.` });
       navigate(`/shipments/${shipment.id}`);
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    onError: (error: Error, submission) => {
+      if (submission.visit.isCurrent()) toast({ title: "Shipment creation needs attention", description: error.message, variant: "destructive" });
     },
   });
+  const recoverShipmentCreation = (recovery: ShipmentRecovery) => createMutation.mutate({ body: recovery.body, recovery, visit: shipmentCreation.captureVisit() });
+  const submitShipmentCreation = () => {
+    try {
+      if (warehousesQuery.isPending || warehousesQuery.isError) throw new Error("Load the available warehouses before creating a shipment.");
+      const data = newShipment;
+      const body = shipmentCreateSchema.parse({ shipmentNumber: data.shipmentNumber || undefined, mode: data.mode, carrierName: data.carrierName || undefined,
+        forwarderName: data.forwarderName || undefined, originPort: data.originPort || undefined,
+        destinationPort: data.destinationPort || undefined, warehouseId: data.warehouseId || undefined,
+        eta: data.eta || undefined, notes: data.notes || undefined });
+      createMutation.mutate({ body, visit: shipmentCreation.captureVisit() });
+    } catch (error) { toast({ title: "Review shipment details", description: error instanceof Error ? error.message : "Invalid shipment details", variant: "destructive" }); }
+  };
 
   const pushCostsToLotsMutation = useMutation({
     mutationFn: async (shipmentId: number): Promise<LandedCostPushResult> => {
@@ -264,7 +246,8 @@ export default function InboundShipments() {
     },
   });
 
-  function renderModeBadge(mode: string) {
+  function renderModeBadge(mode: string | null) {
+    if (!mode) return <span className="text-muted-foreground">Not recorded</span>;
     const config = MODE_CONFIG[mode];
     if (!config) return <Badge variant="secondary">{mode}</Badge>;
     const Icon = config.icon;
@@ -291,7 +274,7 @@ export default function InboundShipments() {
 
   // Status filter buttons
   const statusOptions = [
-    { value: "active", label: "Active" },
+    { value: "active", label: "Not cancelled" },
     { value: "all", label: "All" },
     { value: "draft", label: "Draft" },
     { value: "booked", label: "Booked" },
@@ -303,15 +286,11 @@ export default function InboundShipments() {
     { value: "closed", label: "Closed" },
     { value: "cancelled", label: "Cancelled" },
   ];
-  const landedCostFilterOptions: Array<{ value: LandedCostFollowupFilter; label: string; count: number }> = [
-    { value: "all", label: "All", count: baseShipments.length },
-    { value: "any", label: "Any Follow-Up", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "any")).length },
-    { value: "critical", label: "Critical", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "critical")).length },
-    { value: "warning", label: "Warnings", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "warning")).length },
-    { value: "allocation", label: "Allocation", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "allocation")).length },
-    { value: "needs_finalize", label: "Needs Finalize", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "needs_finalize")).length },
-    { value: "ready_to_push", label: "Ready To Push", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "ready_to_push")).length },
-    { value: "stale_provisional", label: "Stale Provisional", count: baseShipments.filter((shipment) => matchesLandedCostFilter(shipment, "stale_provisional")).length },
+  const landedCostFilterOptions: Array<{ value: LandedCostFollowupFilter; label: string }> = [
+    { value: "all", label: "All costs" }, { value: "any", label: "Any Follow-Up" },
+    { value: "critical", label: "Critical" }, { value: "warning", label: "Warnings" },
+    { value: "allocation", label: "Allocation" }, { value: "needs_finalize", label: "Needs Finalize" },
+    { value: "ready_to_push", label: "Ready To Push" }, { value: "stale_provisional", label: "Stale Provisional" },
   ];
 
   function renderLandedCostFollowupBadges(shipmentId: number) {
@@ -351,12 +330,20 @@ export default function InboundShipments() {
         </Button>
       </div>
 
-      {/* Summary Bar */}
+      {shipmentQuery.isError && <div role="alert" className="rounded-md border border-destructive p-4 space-y-2">
+        <p>{shipmentQuery.error.message}</p>
+        <Button variant="outline" disabled={shipmentQuery.isFetching} onClick={() => void shipmentQuery.refetch()}>Retry shipments</Button>
+      </div>}
+      {shipmentQuery.isPending && <p role="status">Loading shipments…</p>}
+      {shipmentQuery.isFetching && !shipmentQuery.isPending && !shipmentQuery.isError && <p role="status">Refreshing shipments…</p>}
+      {/* The matching total is complete. Other summaries deliberately describe only this page. */}
+      {shipmentData && <>
+      <p className="text-sm text-muted-foreground">Shipment total matches all filters. Status counts and open-shipment costs below cover this page only.</p>
       <div className="grid grid-cols-2 md:grid-cols-6 gap-2 md:gap-4">
         <Card>
           <CardContent className="p-3 md:p-4">
             <div className="text-xl md:text-2xl font-bold">{stats.total}</div>
-            <div className="text-xs md:text-sm text-muted-foreground">Total Shipments</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Matching Shipments</div>
           </CardContent>
         </Card>
         <Card>
@@ -380,16 +367,18 @@ export default function InboundShipments() {
         <Card>
           <CardContent className="p-3 md:p-4">
             <div className="text-xl md:text-2xl font-bold text-blue-600">{formatCents(stats.estimatedTotal)}</div>
-            <div className="text-xs md:text-sm text-muted-foreground">Est. Total</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Est. Cost · This Page</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 md:p-4">
             <div className="text-xl md:text-2xl font-bold text-green-600">{formatCents(stats.actualTotal)}</div>
-            <div className="text-xs md:text-sm text-muted-foreground">Actual Total</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Actual Cost · This Page</div>
           </CardContent>
         </Card>
       </div>
+
+      </>}
 
       {(landedCostHealthQuery.isPending || landedCostHealthQuery.isError) && (
         <Card role="region" aria-label="Landed Cost Health">
@@ -517,7 +506,7 @@ export default function InboundShipments() {
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Search shipment #, carrier, container #..."
+              placeholder="Search shipment, PO, SKU, carrier or container..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               className="pl-9 h-10"
@@ -554,8 +543,8 @@ export default function InboundShipments() {
             </Button>
           ))}
         </div>
-        {landedCostHealth && landedCostHealth.items.length > 0 && (
-          <div className="flex gap-1 flex-wrap">
+        {(
+          <div className="flex gap-1 flex-wrap" aria-label="Shipment cost filters">
             {landedCostFilterOptions.map((opt) => (
               <Button
                 key={opt.value}
@@ -565,19 +554,30 @@ export default function InboundShipments() {
                 className="h-8 text-xs"
               >
                 {opt.label}
-                <span className="ml-1 font-mono text-[10px] opacity-70">{opt.count}</span>
               </Button>
             ))}
           </div>
         )}
       </div>
 
+      {shipmentData && <section aria-label="Shipment results" className="space-y-3">
+      <nav aria-label="Shipment pages" className="flex flex-wrap items-center justify-between gap-2">
+        <p role="status" className="text-sm">{shipments.length > 0
+          ? `Showing ${offset + 1}–${offset + shipments.length} of ${shipmentData.total} matching shipments`
+          : `${shipmentData.total} matching shipments${offset > 0 ? "; this page is now empty" : ""}`}</p>
+        <div className="flex gap-2">
+          <Button variant="outline" disabled={offset === 0 || shipmentQuery.isFetching}
+            onClick={() => setOffset(Math.max(0, offset - SHIPMENT_LIST_PAGE_SIZE))}>Previous shipments</Button>
+          <Button variant="outline" disabled={!shipmentData.hasMore || shipmentQuery.isFetching}
+            onClick={() => setOffset(offset + SHIPMENT_LIST_PAGE_SIZE)}>Next shipments</Button>
+        </div>
+      </nav>
       {/* Mobile Card View */}
       <div className="md:hidden space-y-3">
         {shipments.length === 0 ? (
           <Card>
             <CardContent className="p-4 text-center text-muted-foreground">
-              No inbound shipments found.
+              No inbound shipments match these filters.
             </CardContent>
           </Card>
         ) : (
@@ -585,13 +585,13 @@ export default function InboundShipments() {
             <Card
               key={shipment.id}
               className="cursor-pointer active:bg-accent/50"
-              onClick={() => navigate(`/shipments/${shipment.id}`)}
+              onClick={() => navigate(shipmentHref(shipment))}
             >
               <CardContent className="p-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-mono font-medium text-sm">{shipment.shipmentNumber}</span>
+                      <Link href={shipmentHref(shipment)} onClick={event => event.stopPropagation()} className="font-mono font-medium text-sm text-primary hover:underline">{shipment.shipmentNumber}</Link>
                       <Badge
                         variant={STATUS_BADGES[shipment.status]?.variant || "secondary"}
                         className={`text-xs ${STATUS_BADGES[shipment.status]?.color || ""}`}
@@ -605,7 +605,7 @@ export default function InboundShipments() {
                     <div className="mt-1 text-sm" data-testid={`shipment-purchases-${shipment.id}`}>
                       <ShipmentPurchaseOrderLinks
                         purchaseOrders={shipment.purchaseOrders}
-                        hrefFor={(id) => procurementChildHref(`/shipments/${shipment.id}`, "", `/purchase-orders/${id}?tab=shipments`)}
+                        hrefFor={(id, poNumber) => procurementChildHref("/shipments", listSearch, `/purchase-orders/${id}?tab=shipments&poScope=${id}&document=${encodeURIComponent(poNumber)}`)}
                       />
                     </div>
                     <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
@@ -647,7 +647,7 @@ export default function InboundShipments() {
             {shipments.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
-                  No inbound shipments found. Click "New Shipment" to create one.
+                  No inbound shipments match these filters.
                 </TableCell>
               </TableRow>
             ) : (
@@ -655,16 +655,16 @@ export default function InboundShipments() {
                 <TableRow
                   key={shipment.id}
                   className="cursor-pointer"
-                  onClick={() => navigate(`/shipments/${shipment.id}`)}
+                  onClick={() => navigate(shipmentHref(shipment))}
                 >
-                  <TableCell className="font-mono font-medium">{shipment.shipmentNumber}</TableCell>
+                  <TableCell className="font-mono font-medium"><Link href={shipmentHref(shipment)} onClick={event => event.stopPropagation()} className="text-primary hover:underline">{shipment.shipmentNumber}</Link></TableCell>
                   <TableCell>{renderModeBadge(shipment.mode)}</TableCell>
                   <TableCell>{shipment.carrierName || "—"}</TableCell>
                   <TableCell className="font-mono text-sm">{shipment.containerNumber || "—"}</TableCell>
                   <TableCell className="min-w-[10rem]" data-testid={`shipment-purchases-${shipment.id}`}>
                     <ShipmentPurchaseOrderLinks
                       purchaseOrders={shipment.purchaseOrders}
-                      hrefFor={(id) => procurementChildHref(`/shipments/${shipment.id}`, "", `/purchase-orders/${id}?tab=shipments`)}
+                      hrefFor={(id, poNumber) => procurementChildHref("/shipments", listSearch, `/purchase-orders/${id}?tab=shipments&poScope=${id}&document=${encodeURIComponent(poNumber)}`)}
                     />
                   </TableCell>
                   <TableCell className="text-sm">{renderRoute(shipment)}</TableCell>
@@ -689,14 +689,25 @@ export default function InboundShipments() {
         </Table>
       </Card>
 
+      </section>}
+
       {/* Create Shipment Dialog */}
       <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto min-w-0 max-w-md">
           <DialogHeader>
             <DialogTitle>New Inbound Shipment</DialogTitle>
             <DialogDescription>Create a draft shipment. You can add PO lines after creation.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
+          <ShipmentCreateRecovery recovery={shipmentCreation.recovery} error={shipmentCreation.error} pending={createMutation.isPending} onRetry={recoverShipmentCreation} onRefresh={shipmentCreation.refresh} />
+          <fieldset disabled={createMutation.isPending || !shipmentCreation.ready || !!shipmentCreation.recovery || !!shipmentCreation.error} className="space-y-4 min-w-0">
+            {warehousesQuery.isPending && <p role="status">Loading available warehouses...</p>}
+            {warehousesQuery.isError && <div role="alert">Warehouse options could not be loaded or verified. <Button type="button" variant="outline" onClick={() => void warehousesQuery.refetch()}>Retry warehouses</Button></div>}
+            <div className="space-y-2">
+              <Label htmlFor="create-shipment-number">Shipment number (optional)</Label>
+              <Input id="create-shipment-number" value={newShipment.shipmentNumber} maxLength={30}
+                onChange={event => setNewShipment(previous => ({ ...previous, shipmentNumber: event.target.value }))}
+                placeholder="Generated automatically if blank" />
+            </div>
             <div className="space-y-2">
               <Label>Mode *</Label>
               <Select value={newShipment.mode} onValueChange={v => setNewShipment(prev => ({ ...prev, mode: v }))}>
@@ -800,13 +811,13 @@ export default function InboundShipments() {
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowCreateDialog(false)}>Cancel</Button>
               <Button
-                onClick={() => createMutation.mutate(newShipment)}
-                disabled={createMutation.isPending}
+                onClick={submitShipmentCreation}
+                disabled={createMutation.isPending || warehousesQuery.isPending || warehousesQuery.isError}
               >
                 {createMutation.isPending ? "Creating..." : "Create Draft"}
               </Button>
             </div>
-          </div>
+          </fieldset>
         </DialogContent>
       </Dialog>
     </div>

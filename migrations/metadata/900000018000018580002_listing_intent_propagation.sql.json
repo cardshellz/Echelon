@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000018000018580002_listing_intent_propagation.sql",
+  "generation": 18,
+  "pr": 1858,
+  "ordinal": 2,
+  "after": [
+    "900000017000018580001_catalog_publication_media_versions.sql"
+  ]
+}

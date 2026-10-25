@@ -4,6 +4,7 @@ import {
   listingDraftSchema,
   listingOperationSchema,
   listingReviewSchema,
+  saveListingPriceRuleSchema,
   reviewListingDraftSchema,
   type ListingDraft,
   type ListingCatalogItem,
@@ -202,8 +203,9 @@ export async function handlePublicationRequest(
     return reply(state.draft);
   }
   if (method === "PUT" && path.endsWith("/pricing")) {
-    state.pricingRule = input as ListingPriceRule;
-    return reply(input);
+    const command = saveListingPriceRuleSchema.parse(input);
+    state.pricingRule = { type: command.type, value: command.value };
+    return reply(state.pricingRule);
   }
   if (method === "POST" && path.endsWith("/review")) {
     const command = reviewListingDraftSchema.safeParse(input);

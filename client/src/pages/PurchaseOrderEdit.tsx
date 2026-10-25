@@ -1,3 +1,5 @@
+import { usePurchaseOrderEntry } from "@/hooks/use-purchase-order-entry";
+import { PurchaseOrderEntryRecoveryNotice } from "@/features/purchasing/PurchaseOrderEntryRecovery";
 import { parseSupplierSaveResult } from "@/lib/supplier-dispatch";
 import { CompactPoLineTable } from "@/features/po-edit/CompactPoLineTable";
 // PurchaseOrderEdit.tsx
@@ -1000,18 +1002,10 @@ function buildEditorSnapshot(input: EditorSnapshotInput): string {
   return JSON.stringify(input);
 }
 
-// Idempotency-Key header value. Retained for retries of the same reviewed intent.
-function genIdempotencyKey(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return (crypto as any).randomUUID();
-  }
-  return `po-edit-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-// ─── Component ─────────────────────────────────────────────────────────────
-
 export default function PurchaseOrderEdit() {
   const { toast } = useToast();
+  const purchaseEntry = usePurchaseOrderEntry();
+  const [readbackRequired, setReadbackRequired] = useState(false);
   const [location, navigate] = useLocation();
   const params = useParams<{ id?: string }>();
   const isEditMode = Boolean(params?.id);
@@ -1048,12 +1042,26 @@ export default function PurchaseOrderEdit() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const saving = purchaseEntry.pending;
+  const entryBlocked = !purchaseEntry.ready || Boolean(purchaseEntry.error || purchaseEntry.recovery) || saving || readbackRequired
+    || !purchaseEntry.allowed(isEditMode ? "save-draft" : "create");
+
+  const previousOperator = useRef(purchaseEntry.operatorId);
+  useEffect(() => {
+    if (previousOperator.current === purchaseEntry.operatorId) return;
+    previousOperator.current = purchaseEntry.operatorId;
+    setSelectedVendor(null); setLines([]); setVendorOpen(false);
+    setPoType("standard"); setPriority("normal"); setExpectedDeliveryDate("");
+    setIncoterms(""); setVendorNotes(""); setInternalNotes("");
+    setReadbackRequired(false); loadedVersionRef.current = null;
+    snapshotRef.current = "";
+  }, [purchaseEntry.operatorId]);
+  useEffect(() => { if (entryBlocked) setVendorOpen(false); }, [entryBlocked]);
 
   // Remember the initial snapshot so we only flip dirty on real changes.
   const snapshotRef = useRef<string>("");
   const loadedVersionRef = useRef<string | null>(null);
-  const saveIntent = useRef<{ endpoint: string; body: string; key: string } | null>(null);
+
   useEffect(() => {
     // Capture baseline after the first render completes.
     snapshotRef.current = buildEditorSnapshot({
@@ -1262,8 +1270,8 @@ export default function PurchaseOrderEdit() {
   }, [preload]);
 
   // ── Load existing draft (edit mode) ───────────────────────────────────
-  const { data: existingPo } = useQuery<any>({
-    queryKey: ["/api/purchase-orders", editId, "full"],
+  const { data: existingPo, error: existingPoError, refetch: refetchExistingPo } = useQuery<any>({
+    queryKey: ["/api/purchase-orders", editId, "full", purchaseEntry.operatorId],
     queryFn: async () => {
       const res = await fetch(`/api/purchase-orders/${editId}`);
       if (!res.ok) throw new Error("Failed to load PO");
@@ -1271,6 +1279,7 @@ export default function PurchaseOrderEdit() {
     },
     enabled: isEditMode && Boolean(editId),
   });
+  const editorBlocked = entryBlocked || (isEditMode && (!existingPo || Boolean(existingPoError)));
   const immutableExistingPo = isEditMode &&
     isImmutableRecommendationPurchaseOrder(existingPo);
 
@@ -1616,7 +1625,7 @@ export default function PurchaseOrderEdit() {
   const hasLineErrors = Object.keys(lineErrors).length > 0;
   const hasNoLines = lines.length === 0;
   const noVendor = !selectedVendor;
-  const canSave = !immutableExistingPo && !saving && !hasLineErrors && !hasNoLines && !noVendor;
+  const canSave = !editorBlocked && !immutableExistingPo && !saving && !hasLineErrors && !hasNoLines && !noVendor;
   const canSaveDraft = canSave && (!isEditMode || dirty);
 
   // ── Dirty nav prompt ──────────────────────────────────────────────────
@@ -1705,6 +1714,8 @@ export default function PurchaseOrderEdit() {
 
   // ── Save ──────────────────────────────────────────────────────────────
   const saveMutation = useMutation({
+    // Persist immediately even offline; reconnecting must never auto-submit a saved form.
+    networkMode: "always",
     mutationFn: async ({
       prepareForSupplier,
       linesToSave,
@@ -1806,149 +1817,77 @@ export default function PurchaseOrderEdit() {
         prepare_for_supplier: prepareForSupplier,
         ...(isEditMode ? { expected_updated_at: loadedVersionRef.current } : {}),
       };
-      const endpoint = isEditMode ? `/api/purchase-orders/${editId}/draft` : "/api/purchase-orders";
-      const serializedBody = JSON.stringify(body);
-      if (saveIntent.current?.endpoint !== endpoint || saveIntent.current?.body !== serializedBody) {
-        saveIntent.current = { endpoint, body: serializedBody, key: genIdempotencyKey() };
-      }
-      const res = await fetch(endpoint, {
-        method: isEditMode ? "PUT" : "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": saveIntent.current.key,
-        },
-        body: serializedBody,
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to save PO");
-      const verified = parseSupplierSaveResult(data, prepareForSupplier, isEditMode ? Number(editId) : undefined);
-      if (!prepareForSupplier && isEditMode && !verified.po.updatedAt) {
-        throw new Error("The saved draft version could not be verified. Reload this PO before continuing.");
-      }
-      saveIntent.current = null;
-      return { ...data, ...verified };
+      return purchaseEntry.execute(isEditMode
+        ? { action: "save-draft", targetId: Number(editId), payload: body }
+        : { action: "create", targetId: null, payload: body });
     },
   });
 
-  async function handleSaveDraft() {
+  async function refreshConfirmedDraft() {
+    const visit = purchaseEntry.captureVisit();
+    setReadbackRequired(true);
+    loadedVersionRef.current = null;
+    const latest = await refetchExistingPo();
+    if (!visit.isCurrent()) return;
+    if (latest.error || !latest.data?.updatedAt || Number(latest.data.id) !== editId) return;
+    loadedVersionRef.current = String(latest.data.updatedAt);
+    setReadbackRequired(false);
+  }
+
+  async function handleSave(prepareForSupplier: boolean) {
+    if (editorBlocked || (isEditMode && !prepareForSupplier && !dirty)) return;
     if (immutableExistingPo) {
       if (existingPo?.id) navigate(`/purchase-orders/${existingPo.id}`);
       return;
     }
-    if (isEditMode && !dirty) return;
     const err = validateForSubmit();
     if (err) {
       toast({ title: "Cannot save", description: err, variant: "destructive" });
       return;
     }
-    setSaving(true);
+    const visit = purchaseEntry.captureVisit();
     try {
-      const linesToSave = lines;
-      const result = await saveMutation.mutateAsync({
-        prepareForSupplier: false,
-        linesToSave,
-      });
-      const po = result?.po ?? result;
-      let savedLines = linesToSave;
-      if (isEditMode) {
-        const serverLineIdByClientId = new Map<string, number>();
-        for (const savedLine of Array.isArray(result?.lines) ? result.lines : []) {
-          const lineId = Number(savedLine?.id);
-          if (
-            typeof savedLine?.clientId === "string" &&
-            Number.isSafeInteger(lineId) &&
-            lineId > 0
-          ) {
-            serverLineIdByClientId.set(savedLine.clientId, lineId);
-          }
-        }
-        const savedLineByClientId = new Map<string, any>();
-        for (const savedLine of Array.isArray(result?.lines) ? result.lines : []) {
-          if (typeof savedLine?.clientId === "string") {
-            savedLineByClientId.set(savedLine.clientId, savedLine);
-          }
-        }
-        savedLines = linesToSave.map((line) => {
-          const savedLine = savedLineByClientId.get(line.clientId);
-          return {
-            ...line,
-            serverLineId: serverLineIdByClientId.get(line.clientId) ?? line.serverLineId,
-            vendorProductId: savedLine?.vendorProductId ?? line.vendorProductId,
-            catalogWrite: undefined,
-          };
-        });
-        loadedVersionRef.current = po?.updatedAt ? String(po.updatedAt) : null;
-        setLines(savedLines);
-      }
-      toast({
-        title: isEditMode ? "PO updated" : "PO saved as draft",
-        description: po?.poNumber ?? "",
-      });
-      snapshotRef.current = buildEditorSnapshot({
-        vendorId: selectedVendor?.id ?? null,
-        lines: savedLines,
-        poType,
-        priority,
-        expectedDeliveryDate,
-        incoterms,
-        vendorNotes,
-        internalNotes,
-      });
+      const result = await saveMutation.mutateAsync({ prepareForSupplier, linesToSave: lines });
+      if (!visit.isCurrent()) return;
+      const { po, preparationError } = parseSupplierSaveResult(result, prepareForSupplier, isEditMode ? Number(editId) : undefined);
       setDirty(false);
-      if (!isEditMode && po?.id) navigate(`/purchase-orders/${po.id}/edit`);
-    } catch (e: any) {
-      toast({ title: "Save failed", description: e.message, variant: "destructive" });
-    } finally {
-      setSaving(false);
+      toast({ title: preparationError ? "PO saved; supplier review needs attention"
+        : po.status === "pending_approval" ? "Submitted for approval"
+        : prepareForSupplier ? "PO ready for supplier review" : "PO saved as draft",
+        description: preparationError ?? `${po.poNumber} is saved. Supplier dispatch has not been recorded.`,
+        ...(preparationError ? { variant: "destructive" as const } : {}),
+      });
+      if (prepareForSupplier) navigate(`/purchase-orders/${po.id}`);
+      else if (!isEditMode) navigate(`/purchase-orders/${po.id}/edit`);
+      else await refreshConfirmedDraft();
+    } catch (error) {
+      if (visit.isCurrent()) toast({ title: "Purchase request needs attention", description: error instanceof Error ? error.message : "Unable to confirm the purchase request.", variant: "destructive" });
     }
   }
 
-  async function handleSaveAndReview() {
-    if (immutableExistingPo) {
-      if (existingPo?.id) navigate(`/purchase-orders/${existingPo.id}`);
-      return;
-    }
-    const err = validateForSubmit();
-    if (err) {
-      toast({ title: "Cannot prepare PO", description: err, variant: "destructive" });
-      return;
-    }
-    setSaving(true);
+  const handleSaveDraft = () => handleSave(false);
+  const handleSaveAndReview = () => handleSave(true);
+
+  async function recoverPurchaseEntry() {
+    const recovery = purchaseEntry.recovery;
+    if (!recovery) return;
+    const visit = purchaseEntry.captureVisit();
     try {
-      const linesToSave = lines;
-      const result = await saveMutation.mutateAsync({
-        prepareForSupplier: true,
-        linesToSave,
-      });
-      const { po, preparationError } = result;
-      if (preparationError) {
-        toast({
-          title: "PO saved; supplier review needs attention",
-          description: preparationError,
-          variant: "destructive",
-        });
-      } else if (po.status === "pending_approval") {
-        toast({
-          title: "Submitted for approval",
-          description: `${po?.poNumber ?? ""} is awaiting approval.`,
-        });
-      } else {
-        toast({
-          title: "PO ready for supplier review",
-          description: `${po?.poNumber ?? ""} is saved. Review the document and record supplier dispatch separately.`,
-        });
-      }
+      const result = await purchaseEntry.execute(recovery.body, recovery);
+      if (!visit.isCurrent()) return;
       setDirty(false);
-      if (po?.id) navigate(`/purchase-orders/${po.id}`);
-    } catch (e: any) {
-      toast({ title: "Preparation failed", description: e.message, variant: "destructive" });
-    } finally {
-      setSaving(false);
-    }
+      toast({ title: "Purchase request confirmed", description: "Opening the current purchase order. The saved response is not a new change." });
+      navigate(`/purchase-orders/${result.po.id}`);
+    } catch { /* The persistent recovery notice owns the actionable error. */ }
   }
+
+  const recoveryPanel = <PurchaseOrderEntryRecoveryNotice recovery={purchaseEntry.recovery} storageError={purchaseEntry.error}
+    error={purchaseEntry.commandError} pending={purchaseEntry.pending} allowed={purchaseEntry.recovery ? purchaseEntry.allowed(purchaseEntry.recovery.body.action) : false}
+    onRecover={recoverPurchaseEntry} onRead={purchaseEntry.refresh} />;
 
   function handleCancel() {
-    if (dirty) {
+    if (saving) return;
+    if (dirty && !purchaseEntry.recovery) {
       const ok = window.confirm("Discard this PO? Unsaved changes will be lost.");
       if (!ok) return;
     }
@@ -1976,16 +1915,19 @@ export default function PurchaseOrderEdit() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dirty, selectedVendor, lines, poType, priority, expectedDeliveryDate, incoterms, vendorNotes, internalNotes]);
+  }, [dirty, selectedVendor, lines, poType, priority, expectedDeliveryDate, incoterms, vendorNotes, internalNotes, editorBlocked, purchaseEntry.operatorId]);
 
   // ── Lines helpers ─────────────────────────────────────────────────────
   function updateLine(clientId: string, patch: Partial<LineDraft>) {
+    if (editorBlocked) return;
     setLines((prev) => prev.map((l) => (l.clientId === clientId ? { ...l, ...patch } : l)));
   }
   function removeLine(clientId: string) {
+    if (editorBlocked) return;
     setLines((prev) => prev.filter((l) => l.clientId !== clientId));
   }
   function addLine(lineType: PoLineType = "product") {
+    if (editorBlocked) return;
     setLines((prev) => [...prev, emptyLine(lineType)]);
   }
 
@@ -1993,6 +1935,7 @@ export default function PurchaseOrderEdit() {
   if (immutableExistingPo) {
     return (
       <div className="p-6 text-center text-muted-foreground">
+        {recoveryPanel}
         Opening the preserved recommendation purchase order...
       </div>
     );
@@ -2000,6 +1943,9 @@ export default function PurchaseOrderEdit() {
 
   return (
     <div className="p-4 md:p-6 space-y-4 max-w-5xl mx-auto">
+      {recoveryPanel}
+      {existingPoError && !readbackRequired && <div role="alert" className="rounded-lg border p-4 space-y-2"><p>The current purchase order could not be loaded. Reload it before making a change.</p><Button variant="outline" onClick={() => void refetchExistingPo()}>Retry purchase load</Button></div>}
+      {readbackRequired && <div role="alert" className="rounded-lg border p-4 space-y-2"><p>The purchase request was confirmed. Load the current draft before making another change.</p><Button variant="outline" onClick={() => void refreshConfirmedDraft()}>Reload confirmed purchase</Button></div>}
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
         <div>
@@ -2051,6 +1997,7 @@ export default function PurchaseOrderEdit() {
         </div>
       </div>
 
+      <fieldset disabled={editorBlocked} className="contents">
       {/* Vendor card */}
       <Card>
         <CardContent className="p-4 space-y-3">
@@ -2512,6 +2459,7 @@ export default function PurchaseOrderEdit() {
         </Card>
       </Collapsible>
 
+      </fieldset>
       {/* Sticky action bar on mobile */}
       <div className="md:hidden sticky bottom-0 bg-background border-t pt-2 flex gap-2">
         <Button variant="ghost" onClick={handleCancel} disabled={saving} className="flex-1">

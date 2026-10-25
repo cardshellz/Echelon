@@ -1,3 +1,5 @@
+import { allocateDocumentNumber } from "../../platform/document-numbering/document-number.repository";
+import { captureDocumentNumberTime, documentNumberPrefix } from "../../platform/document-numbering/document-number";
 import { readLotCostFollowUps } from "./infrastructure/lot-cost-follow-up.repository";
 import { readInventoryValuation } from "./application/read-inventory-valuation";
 import { normalizeLotCosts, recordedUnitCostMills, moneyToSafeNumber, roundedSignedMillsToCents,
@@ -30,6 +32,8 @@ import {
 import type { InventoryLot } from "@shared/schema";
 import { assertLegacyQuantityImportAllowed } from "./application/legacy-quantity-import";
 import { parseCostLotsReport, parseInventoryValuationReport } from "@shared/inventory/cost-report-read";
+import { revalueSupplierReturnAllocations } from "./infrastructure/supplier-return-cost.repository";
+import type { SupplierReturnCostAdjustment } from "@shared/procurement/supplier-return";
 import { buildOrderCOGSReport, type OrderCOGSResult } from "./domain/order-cogs-read";
 export type { OrderCOGSResult, OrderLineCOGS } from "./domain/order-cogs-read";
 
@@ -104,12 +108,17 @@ export interface CostAdjustmentLog {
 export interface LotCostRevalueResult extends CostAdjustmentLog {
   cogsRowsUpdated: number;
   totalCogsDeltaCents: number;
+  supplierReturnAdjustments?: SupplierReturnCostAdjustment[];
 }
 
 // ─── Service ────────────────────────────────────────────────────────
 
 export class COGSService {
-  constructor(private readonly db: DrizzleDb, private readonly clock: () => Date = () => new Date()) {}
+  constructor(
+    private readonly db: DrizzleDb,
+    private readonly clock: () => Date = () => new Date(),
+    private readonly transactionBound = false,
+  ) {}
 
   async revalueComponent(lotId: number, component: CostComponent, unitMills: number, reason: string, tx: any) {
     return this.revalueLotCostMills({
@@ -121,7 +130,7 @@ export class COGSService {
   }
 
   async revalueExactComponent(lotId: number, component: CostComponent, totalMills: number, basisQuantity: number,
-    reason: string, actorId: string, tx: any, recordedAt?: Date) {
+    reason: string, actorId: string, tx: any, recordedAt?: Date, sourceRevisionId?: number, options?: { excludedOrderCostIds: readonly number[] }) {
     const amount = BigInt(costInteger(totalMills,"component.totalMills"));
     const quantity = BigInt(costInteger(basisQuantity,"component.basisQuantity",1));
     const unitMills = moneyToSafeNumber((amount * BigInt(2) + quantity) / (quantity * BigInt(2)),"component.unitMirror");
@@ -129,18 +138,20 @@ export class COGSService {
       productCostMills:component==="product"?unitMills:undefined,
       packagingCostMills:component==="packaging"?unitMills:undefined,
       landedCostMills:component==="landed"?unitMills:undefined,
-      exactComponent:{component,totalMills,basisQuantity},
+      exactComponent:{component,totalMills,basisQuantity}, sourceRevisionId, excludedOrderCostIds:options?.excludedOrderCostIds,
     },tx);
   }
 
-  private async cascadeRecostExactQuantities(lotId: number, lot: LotCostRecord, tx: any): Promise<{rowsUpdated:number;totalDeltaCents:number}> {
+  private async cascadeRecostExactQuantities(lotId: number, lot: LotCostRecord, tx: any, excludedIds: readonly number[] = []): Promise<{rowsUpdated:number;totalDeltaCents:number}> {
     const rows = await tx.execute(sql`SELECT id,qty,unit_cost_mills,unit_cost_cents,total_cost_mills,total_cost_cents,
       cost_precision_version,cost_quantity_allocation_id,product_total_cost_mills,packaging_total_cost_mills,landed_total_cost_mills
       FROM oms.order_item_costs WHERE inventory_lot_id=${lotId} ORDER BY id FOR UPDATE`);
     const unitMirror = moneyToSafeNumber(normalizeLotCosts(lot).totalMills,"cogs.unitMirror");
     let rowsUpdated = 0;
     let deltaCents = BigInt(0);
+    const excluded = new Set(excludedIds.map(id=>costInteger(id,"excluded cost record",1)));
     for (const row of rows.rows) {
+      if (excluded.has(costInteger(row.id,"order cost",1))) continue;
       if (row.cost_quantity_allocation_id == null) throw new CostEvidenceError("COST_COGS_ALLOCATION_MISSING", "Exact COGS revaluation requires a recorded quantity allocation.", {lotId, costId:row.id});
       const allocation = await readLotCostAllocation(tx,costInteger(row.cost_quantity_allocation_id,"allocationId",1));
       const qty = costInteger(row.qty,"cogs.quantity",-2_147_483_647);
@@ -241,7 +252,9 @@ export class COGSService {
     clearProvisional?: boolean;
     requiredCostSource?: string;
     exactComponent?: {component:CostComponent;totalMills:number;basisQuantity:number};
+    excludedOrderCostIds?: readonly number[];
     recordedAt?: Date;
+    sourceRevisionId?: number;
   }, client?: any): Promise<LotCostRevalueResult | null> {
     const revalue = async (tx: any): Promise<LotCostRevalueResult | null> => {
       await lockInventoryCostGraph(tx);
@@ -349,8 +362,12 @@ export class COGSService {
         landed_total_cost_mills:extended.totals.landedMills.toString(),po_unit_cost_mills:productCostMills,
         packaging_cost_mills:packagingCostMills,landed_cost_mills:landedCostMills,
         total_unit_cost_mills:totalUnitCostMills,unit_cost_mills:totalUnitCostMills,cost_precision_version:1} : null;
-      const cascade = exactLot ? await this.cascadeRecostExactQuantities(params.lotId,exactLot,tx)
+      const cascade = exactLot ? await this.cascadeRecostExactQuantities(params.lotId,exactLot,tx,params.excludedOrderCostIds)
         : await this.cascadeRecostForLotMills(params.lotId, totalUnitCostMills, tx);
+      const supplierReturnAdjustments = exactLot ? await revalueSupplierReturnAllocations(tx, {
+        previousLot: { ...lot, id: params.lotId }, nextLot: { ...exactLot, id: params.lotId },
+        actorId: params.actorId ?? "system:inventory-cost", at: now, reason: params.reason, sourceRevisionId: params.sourceRevisionId,
+      }) : [];
 
       await tx.execute(sql`
         INSERT INTO inventory.cost_adjustment_log
@@ -380,6 +397,7 @@ export class COGSService {
         reason: params.reason,
         cogsRowsUpdated: cascade.rowsUpdated,
         totalCogsDeltaCents: cascade.totalDeltaCents,
+        ...(supplierReturnAdjustments.length ? { supplierReturnAdjustments } : {}),
       };
     };
     return client ? revalue(client) : this.runInTransaction(revalue);
@@ -405,6 +423,18 @@ export class COGSService {
     receivedAt?: Date;
     notes?: string;
   }): Promise<InventoryLot> {
+    const now = captureDocumentNumberTime(this.clock());
+    if (this.transactionBound) return this.createLotInsideTransaction(params, now);
+    // A bound owner must retain its caller's executor. Standalone imports and
+    // adjustments hold allocation and every lot write in one transaction.
+    return this.db.transaction((tx) => new COGSService(tx, this.clock, true)
+      .createLotInsideTransaction(params, now));
+  }
+
+  private async createLotInsideTransaction(
+    params: Parameters<COGSService["createLot"]>[0],
+    now: Date,
+  ): Promise<InventoryLot> {
     await assertLegacyQuantityImportAllowed(this.db, "Legacy cost-lot import");
     const poUnitCost = params.poUnitCostCents ?? 0;
     const packagingCost = params.packagingCostCents ?? 0;
@@ -416,7 +446,7 @@ export class COGSService {
     const totalUnitCostMills = poUnitCostMills + packagingCostMills + landedCostMills;
     const costSource = params.costSource ?? 'manual';
 
-    const lotNumber = await this.generateLotNumber();
+    const lotNumber = await this.generateLotNumber(now);
 
     const [lot] = await this.db
       .insert(inventoryLots)
@@ -427,7 +457,7 @@ export class COGSService {
         qtyOnHand: params.qtyPieces,
         qtyReserved: 0,
         qtyPicked: 0,
-        receivedAt: params.receivedAt ?? new Date(),
+        receivedAt: params.receivedAt ?? now,
         receivingOrderId: params.receivingOrderId ?? null,
         purchaseOrderId: params.purchaseOrderId ?? null,
         inboundShipmentId: params.inboundShipmentId ?? null,
@@ -442,7 +472,7 @@ export class COGSService {
 
     // Update COGS-specific columns via raw SQL
     await this.db.execute(sql`
-      UPDATE inventory_lots SET
+      UPDATE inventory.inventory_lots SET
         po_line_id = ${params.poLineId ?? null},
         po_unit_cost_cents = ${poUnitCost},
         packaging_cost_cents = ${packagingCost},
@@ -871,7 +901,7 @@ export class COGSService {
       const result = await tx.execute(sql`
         SELECT COALESCE(origin.units_per_variant_snapshot,pv.units_per_variant) AS upv
         FROM inventory.inventory_lots lot JOIN catalog.product_variants pv ON pv.id=lot.product_variant_id
-        LEFT JOIN inventory.lot_cost_origins origin ON origin.inventory_lot_id=lot.id
+        LEFT JOIN inventory.effective_lot_cost_origins origin ON origin.inventory_lot_id=lot.id
         WHERE lot.id=${lotId} FOR SHARE OF pv
       `);
       if (!result.rows[0]) return null;
@@ -1022,26 +1052,8 @@ export class COGSService {
   // HELPERS
   // ---------------------------------------------------------------------------
 
-  private async generateLotNumber(): Promise<string> {
-    const now = new Date();
-    const datePart = now.toISOString().slice(0, 10).replace(/-/g, "");
-    const prefix = `LOT-${datePart}-`;
-
-    const result = await this.db.execute(sql`
-      SELECT lot_number FROM inventory_lots
-      WHERE lot_number LIKE ${prefix + '%'}
-      ORDER BY lot_number DESC
-      LIMIT 1
-    `);
-
-    let seq = 1;
-    if (result.rows?.length) {
-      const parts = result.rows[0].lot_number.split("-");
-      const lastSeq = parseInt(parts[parts.length - 1], 10);
-      if (!isNaN(lastSeq)) seq = lastSeq + 1;
-    }
-
-    return `${prefix}${String(seq).padStart(3, "0")}`;
+  private async generateLotNumber(now: Date): Promise<string> {
+    return allocateDocumentNumber(this.db, { kind: "lot", prefix: documentNumberPrefix("LOT", now, "utc") });
   }
 
   // ---------------------------------------------------------------------------
@@ -1139,7 +1151,7 @@ export class COGSService {
   }
 
   withTx(tx: any): COGSService {
-    return new COGSService(tx);
+    return new COGSService(tx, this.clock, true);
   }
 }
 

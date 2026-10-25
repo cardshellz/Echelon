@@ -4,6 +4,8 @@ import { WalmartClient, WalmartApiError } from "../../adapters/walmart/walmart-c
 import { WalmartListingApi } from "../../adapters/walmart/walmart-listing-api";
 import { WalmartChannelService, walmartListingAccount } from "../../adapters/walmart/walmart-channel.service";
 import { WalmartListingLifecycleProvider } from "../../adapters/walmart/walmart-listing-lifecycle.provider";
+import { WalmartListingMemberAdapter } from "../../adapters/walmart/walmart-listing-member.adapter";
+import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
 import { ListingPublicationError } from "../../../marketplace-listings/domain/listing-publication";
 
 const correlationId = "00000000-0000-4000-8000-000000000001";
@@ -63,6 +65,34 @@ function setup() {
   return { api, channels, stock, provider, row, account: walmartListingAccount(row as never) };
 }
 describe("Walmart retirement adapter", () => {
+  it.each([
+    [new WalmartApiError("WALMART_RETIRE_SKU_MISMATCH", "Different receipt", false), "unknown"],
+    [new WalmartApiError("WALMART_BAD_RESPONSE", "Malformed receipt", false, 200), "unknown"],
+    [new WalmartApiError("WALMART_REJECTED", "Rejected", false, 400), "not_submitted"],
+  ])("classifies retirement by dispatch evidence, not retryability: %s", async (error, outcome) => {
+    const f = setup();
+    const identity: ListingMemberIdentity = { destinationKind: "channel_connection", connectionId: 67, channelId: 104, vendorId: null,
+      provider: "walmart", accountId: "seller", environment: "production", market: f.account.market,
+      productId: 2, productVariantId: 3, externalSku: "SKU", externalProductId: null, externalVariantId: null,
+      externalInventoryItemId: "SKU", identityConflict: false };
+    f.api.retire.mockRejectedValue(error);
+    await expect(new WalmartListingMemberAdapter(f.provider).retire(identity,correlationId)).rejects.toMatchObject({ outcome });
+  });
+  it("adapts archived members through the same Walmart provider without allocating stock or retiring siblings", async () => {
+    const f = setup();
+    const identity: ListingMemberIdentity = { destinationKind: "channel_connection", connectionId: 67, channelId: 104, vendorId: null,
+      provider: "walmart", accountId: "seller", environment: "production", market: f.account.market,
+      productId: 2, productVariantId: 3, externalSku: "SKU", externalProductId: null, externalVariantId: null,
+      externalInventoryItemId: "SKU", identityConflict: false };
+    const adapter = new WalmartListingMemberAdapter(f.provider);
+    await adapter.retire(identity, correlationId);
+    expect(f.api.retire).toHaveBeenCalledExactlyOnceWith("SKU",correlationId);
+    expect(f.stock.holdVariants).not.toHaveBeenCalled();
+    f.api.observe.mockResolvedValue({ sku: "SKU",productName: "Sleeves",lifecycleStatus: "RETIRED",publishedStatus: "UNPUBLISHED" });
+    expect(await adapter.observe(identity)).toEqual({ identity,retired:true });
+    await expect(adapter.retire({ ...identity,accountId:"other" },correlationId)).rejects.toMatchObject({ code:"LISTING_MEMBER_ACCOUNT_CHANGED" });
+    expect(f.api.retire).toHaveBeenCalledTimes(1);
+  });
   it.each([
     ["ACTIVE", "PUBLISHED", false], ["ACTIVE", "SYSTEM_PROBLEM", false], ["ACTIVE", "UNPUBLISHED", false],
     ["RETIRED", "PUBLISHED", false], ["RETIRED", "UNPUBLISHED", true],

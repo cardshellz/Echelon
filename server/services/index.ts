@@ -1,3 +1,4 @@
+import { createReservedInventoryTransferOwner } from "../modules/inventory-planning/infrastructure/reserved-inventory-transfer.repository";
 /**
  * Service wiring module for Echelon WMS.
  *
@@ -52,6 +53,7 @@ import { createReturnsService } from "../modules/orders/returns.service";
 import { createFulfillmentRouterService } from "../modules/orders/fulfillment-router.service";
 import { createSLAMonitorService } from "../modules/orders/sla-monitor.service";
 import { ManualInventoryTransferService } from "../modules/inventory/application/manual-inventory-transfer.service";
+import { SupplierReturnFollowupService } from "../modules/inventory/application/supplier-return-followup.service";
 import { createPickingService } from "../modules/orders/picking.use-cases";
 import { createPickCorrectionService } from "../modules/orders/pick-correction.service";
 import { AssemblyExecutionService } from "../modules/warehouse/work/application/assembly-execution.service";
@@ -142,6 +144,7 @@ import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapt
 import { WalmartChannelService } from "../modules/channels/adapters/walmart/walmart-channel.service";
 import { PostgresListingLifecycleRepository } from "../modules/marketplace-listings/infrastructure/pg-listing-lifecycle.repository";
 import { createListingLifecycleService } from "../listing-lifecycle.composition";
+import { assertArchivedMemberPublicationAllowed } from "../modules/marketplace-listings/infrastructure/pg-listing-member-lifecycle.repository";
 import { WalmartCatalogAdapter } from "../modules/channels/adapters/walmart/walmart-catalog.adapter";
 import { ChannelCatalogService } from "../modules/channels/channel-catalog.service";
 import { PostgresChannelCatalogRepository } from "../modules/channels/channel-catalog.repository";
@@ -168,6 +171,7 @@ import { createVariantAvailabilitySyncService } from "../modules/channels/varian
 import { InventoryPublicationOutboxService } from "../modules/inventory-planning/application/inventory-publication-outbox.service";
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import { PostgresPublicationSelectionWork } from "../modules/inventory-planning/infrastructure/publication-selection-work.repository";
+import { markPublicationProductsChanged } from "../modules/inventory-planning/infrastructure/publication-product-change";
 import { quantityPublicationAdmission, createQuantityPublicationCatchupService } from "../modules/inventory-planning/infrastructure/quantity-publication-runtime";
 import { EbayPublicationReconciliationService, ebayPublicationReconciliationRepository } from "../modules/inventory-planning/quantity-publication";
 import { refreshRecoveredEbayListing } from "../modules/channels/ebay-listing-sync";
@@ -209,7 +213,7 @@ export function createServices(
   // Foundation
   const inventoryLots = createInventoryLotService(db);
   const cogs = createCOGSService(db);
-  const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs); // Temporary mapping
+  const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs,systemCanonicalClaimClock,createReservedInventoryTransferOwner());
   const inventoryUseCases = inventoryCore;
   const recipeCapacity = createRecipeCapacityService(db);
   const transformationExecutionAuthority = createTransformationExecutionAuthorityRepository(db);
@@ -402,7 +406,7 @@ export function createServices(
   const sourceLockService = createSourceLockService(db);
   const shopifyAdapter = createShopifyAdapter(db, quantityPublicationAdmission);
   const ebayAdapter = createEbayAdapter(db, new ChannelEbayListingPhotoResolver(databasePool, createCatalogPublicImageUrl(process.env)));
-  const listingLifecycleStore = new PostgresListingLifecycleRepository(databasePool);
+  const listingLifecycleStore = new PostgresListingLifecycleRepository(databasePool, assertArchivedMemberPublicationAllowed);
   const walmart = new WalmartChannelService(new WalmartConnectionRepository(databasePool),
     AesGcmFulfillmentProviderCredentialCipher.fromEnvOrNull({
       SHIPPING_PROVIDER_CREDENTIAL_ENCRYPTION_KEY: process.env.WALMART_CREDENTIAL_ENCRYPTION_KEY,
@@ -423,7 +427,7 @@ export function createServices(
   const walmartVerifiedStock = new VerifiedListingStockService(new PostgresVerifiedListingStockStore(databasePool));
   const listingPublication = createListingPublicationService({pool: databasePool, walmart, channelCatalog, quantityAdmission: quantityPublicationAdmission, verifiedStock: walmartVerifiedStock});
   const listingUpdates = createListingUpdateService(databasePool, walmart);
-  const listingLifecycle = createListingLifecycleService(databasePool, walmart, listingLifecycleStore);
+  const listingLifecycle = createListingLifecycleService(databasePool, walmart, listingLifecycleStore, db);
   const walmartStockConnection = new WalmartStockConnectionService(walmart,
     walmartVerifiedStock);
   const inventoryPublicationInitialScope = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(databasePool));
@@ -463,6 +467,7 @@ export function createServices(
     inventoryPublicationRuntime,
     syncSettings,
     echelonOrchestrator,
+    { markProductsChanged: productIds => markPublicationProductsChanged(databasePool, productIds) },
   );
   const variantAvailabilitySync = createVariantAvailabilitySyncService({
     allocationEngine,
@@ -495,13 +500,18 @@ export function createServices(
   // methods. Inventory-change work uses inventoryPublicationWork below.
   channelSync.setOrchestrator(echelonOrchestrator);
 
-  // Await publication work creation. The warehouse command outboxes retain failures.
+  // Warehouse operations only mark affected products changed (canonical); the
+  // publication worker publishes. A failed mark still throws so the warehouse
+  // command outboxes retain it; the scheduled sweep is the final backstop.
   const pendingReplenChecks = new Set<number>();
   const queueVariantInventorySync = async (productVariantId: number, triggeredBy: string): Promise<void> => {
     const productIds = await inventorySupplyDependencies.getAffectedProductIds(productVariantId);
+    const recorded = await inventoryPublicationWork.recordInventoryChange(productIds, `inventory_change:${triggeredBy}`);
+    if (recorded.mode === "published") {
+      const failed = recorded.results.findIndex(result => result.inventory.some(work => work.variantsErrored > 0));
+      if (failed >= 0) throw new Error(`Inventory publication work failed for product ${recorded.productIds[failed]}`);
+    }
     for (const productId of productIds) {
-      const result = await inventoryPublicationWork.syncProduct(productId, `inventory_change:${triggeredBy}`);
-      if (result.inventory.some(work => work.variantsErrored > 0)) throw new Error(`Inventory publication work failed for product ${productId}`);
       // Preserve the existing debounce for general product re-evaluation. Exact
       // transfer source checks and task dependencies have durable owners below.
       if (pendingReplenChecks.has(productId)) continue;
@@ -517,6 +527,8 @@ export function createServices(
   };
   channelSync.setInventoryChangePublisher(queueVariantInventorySync);
   inventoryCore.onInventoryChange(queueVariantInventorySync);
+  const supplierReturnFollowups = new SupplierReturnFollowupService(db,
+    (variantId, trigger) => inventoryCore.publishInventoryChange(variantId, trigger), () => new Date());
   const inventoryTransfers = new ManualInventoryTransferService(db, inventoryCore, {
     deliver: async transfer => {
       await replenishment.completeMatchingTransferTask(transfer.transferId, transfer.actor);
@@ -703,6 +715,7 @@ export function createServices(
     dropshipInventoryRuntimeAuthority,
     replenishment,
     inventoryTransfers,
+    supplierReturnFollowups,
     picking,
     pickCorrections,
     channelSync,

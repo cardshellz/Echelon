@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 vi.mock("../../purchase-planning-policy.routes", () => ({
   registerPurchasePlanningPolicyRoutes: vi.fn(),
 }));
@@ -132,7 +133,7 @@ describe("PO shipment costs read endpoint", () => {
   const read = (
     path = "/api/purchase-orders/17/shipment-costs",
     permission = "purchasing:view",
-  ) => fetch(url + path, { headers: { "x-test-permission": permission } });
+  ) => requestLocalHttp(url + path, { headers: { "x-test-permission": permission } });
 
   it.each(["inventory:view", "settings:edit", "purchasing:approve"])(
     "requires purchasing view permission before reading data with %s",
@@ -161,11 +162,31 @@ describe("PO shipment costs read endpoint", () => {
     const legacy = await read();
     expect(legacy.headers.get("vary")).toContain("X-Shipment-Cost-Review-Version");
     expect(await legacy.json()).toEqual({ ...payload, lines: [legacyLine] });
-    const current = await fetch(`${url}/api/purchase-orders/17/shipment-costs`, { headers: {
+    const current = await requestLocalHttp(`${url}/api/purchase-orders/17/shipment-costs`, { headers: {
       "x-test-permission": "purchasing:view", "X-Shipment-Cost-Review-Version": "2",
     } });
     expect(current.headers.get("vary")).toContain("X-Shipment-Cost-Review-Version");
     expect(await current.json()).toEqual(payload);
+  });
+  it("negotiates PO line links independently from reconciliation fields for already-open tabs", async () => {
+    const payload: PoShipmentCosts = { ...emptyCosts(), lines: [{
+      lineId: 1, purchaseOrderLineId: 21, shipmentId: 42, shipmentNumber: "TEST-SHIP",
+      shipmentStatus: "closed", sku: "TEST", allocatedCents: 100, status: "applied",
+      applicationId: 1, recordedAt: "2026-01-01T00:00:00Z", issues: [], exceptionReview: null,
+    }] };
+    const copy = structuredClone(payload);
+    getCosts.mockResolvedValue(payload);
+    for (const lineVersion of [undefined, "1"]) {
+      const headers: Record<string, string> = { "x-test-permission": "purchasing:view", "X-Shipment-Cost-Review-Version": "3" };
+      if (lineVersion) headers["X-Purchase-Order-Line-Cost-Version"] = lineVersion;
+      const response = await requestLocalHttp(`${url}/api/purchase-orders/17/shipment-costs`, { headers });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("vary")).toContain("X-Purchase-Order-Line-Cost-Version");
+      const body = await response.json();
+      expect(body.lines[0].exceptionReview).toBeNull();
+      expect(body.lines[0].purchaseOrderLineId).toBe(lineVersion ? 21 : undefined);
+    }
+    expect(payload).toEqual(copy);
   });
   it.each(["0", "-1", "17.5", "17x", "2147483648", "00017"])(
     "rejects invalid identifier %s",

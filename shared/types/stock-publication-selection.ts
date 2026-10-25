@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { listingRetirementEvidenceSchema } from "./listing-member-lifecycle";
 
 const id = z.number().int().positive().max(2_147_483_647);
 
@@ -8,27 +9,34 @@ export const stockPublicationSelectionSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   variants: z.array(z.object({
     productVariantId: id,
+    // Upstream listing intent is independent of inventory tracking and stock mode.
+    // Older/custom readers may omit it; consumers must not infer exclusion then.
+    listingSelected: z.boolean().optional(),
     action: z.enum(["publish", "zero", "read_only", "none"]),
+    // eBay sync-back (owner rule 1): the vendor's limit on this listing. Only on `publish`, only when the listing
+    // has one; inventory planning then publishes min(its quantity, this). Absent: no limit, exactly as before.
+    publishLimitUnits: z.number().int().min(0).max(2_147_483_647).optional(),
     reason: z.string().trim().min(1).max(1_000),
     blockers: z.array(z.object({
       code: z.string().regex(/^[A-Z][A-Z0-9_]*$/).max(100),
       message: z.string().trim().min(1).max(1_000),
     }).strict()),
+    // Catalog archival cancels obsolete stock intent immediately. This flag
+    // makes no claim about the independent remote listing removal.
+    catalogArchived: z.literal(true).optional(),
     // Emitted only by the listing owner after it verifies removal of the exact
     // retained provider identity. Inventory may retire old work, never ACK it.
-    retirementEvidence: z.object({
-      operationId: z.string().uuid(),
-      externalAccountId: z.string().trim().min(1),
-      externalSku: z.string().trim().min(1),
-      externalOfferId: z.string().trim().min(1),
-      externalListingId: z.string().trim().min(1),
-    }).strict().optional(),
+    retirementEvidence: listingRetirementEvidenceSchema.optional(),
   }).strict()),
 }).strict().superRefine((value, context) => {
   if (new Set(value.variants.map(variant => variant.productVariantId)).size !== value.variants.length)
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["variants"], message: "Each stock selection variant must appear exactly once." });
   if (value.variants.some(variant => variant.retirementEvidence && (variant.action !== "none" || variant.blockers.length > 0)))
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["variants"], message: "Retirement evidence requires a verified end to publication duty." });
+  if (value.variants.some(variant => variant.catalogArchived && variant.action !== "none"))
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["variants"], message: "Archived catalog members cannot request stock publication." });
+  if (value.variants.some(variant => variant.publishLimitUnits !== undefined && variant.action !== "publish"))
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["variants"], message: "A publish limit belongs to a publish decision only." });
 });
 
 export type StockPublicationSelection = z.infer<typeof stockPublicationSelectionSchema>;

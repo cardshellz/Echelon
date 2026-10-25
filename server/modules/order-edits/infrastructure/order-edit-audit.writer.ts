@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { z } from "zod";
+import { sql, type SQL } from "drizzle-orm";
 import { orderEditAuditActor } from "../domain/order-edit-actor";
 
 const auditSchema = z
@@ -54,4 +55,17 @@ export async function appendOrderEditAudit(
       value.occurredAt,
     ],
   );
+}
+
+/** Same immutable owner for an existing Drizzle transaction. */
+export async function appendOrderEditAuditSql(
+  tx: { execute(statement: SQL): Promise<unknown> }, input: OrderEditAuditInput,
+): Promise<void> {
+  const value = auditSchema.parse(input);
+  const actor = orderEditAuditActor(value.actorId);
+  await tx.execute(sql`INSERT INTO oms.order_edit_events
+    (operation_id,connection_id,actor_id,action,before_state,after_state,occurred_at,customer_actor_channel_id,customer_actor_external_id)
+    VALUES(${value.operationId}::uuid,${value.connectionId},${actor.customerChannelId === null ? value.actorId : null},
+      ${value.action},${JSON.stringify(value.before)}::jsonb,${JSON.stringify(value.after)}::jsonb,${value.occurredAt},
+      ${actor.customerChannelId},${actor.externalCustomerId})`);
 }

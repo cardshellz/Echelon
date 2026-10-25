@@ -1,5 +1,12 @@
+import { DocumentRelationships } from "@/features/purchasing/DocumentRelationships";
+import { ShipmentHistoryCorrection } from "@/features/purchasing/ShipmentHistoryCorrection";
+import { formatPaymentAmount } from "@/lib/ap-payment-command";
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
+import { shipmentRecordedUnitSummary, shipmentDimensionBasisLabel } from "@/lib/shipment-unit-entry";
+import { ShipmentQuantityEditor } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
+import { ShipmentCustodyReceiptLinks } from "@/components/purchasing/ShipmentCustodyReceiptLinks";
 import { formatMills } from "@shared/utils/money";
 import { useEffect, useMemo, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -44,6 +51,8 @@ import {
   type ShipmentCostEditor,
   type ShipmentCostForm,
 } from "@/lib/shipment-cost-command";
+import { parseShipmentInvoices } from "@/lib/shipment-invoice-reads";
+import { shipmentCostBillingOwnershipSchema } from "@shared/procurement/shipment-billing-ownership";
 import { AddInvoiceFromCostsModal } from "@/components/shipment/AddInvoiceFromCostsModal";
 import { ShipmentCostVendorSelect } from "@/components/shipment/ShipmentCostVendorSelect";
 import { shipmentCostVendorListSchema, type ShipmentCostVendorOption } from "@/lib/shipment-cost-vendors";
@@ -470,6 +479,7 @@ export default function InboundShipmentDetail() {
   const {
     data: shipment,
     isLoading,
+    isFetching: shipmentRefreshing,
     error: shipmentError,
     refetch: refetchShipment,
   } = useQuery<any>({
@@ -496,9 +506,13 @@ export default function InboundShipmentDetail() {
     },
     enabled: showAddCostDialog || !!editingCost,
   });
-  const { data: invoicesData } = useQuery<any>({
+  const { data: invoicesData, isPending: invoicesLoading, isFetching: invoicesRefreshing, isError: invoicesError, refetch: refetchInvoices } = useQuery({
     queryKey: [`/api/inbound-shipments/${shipmentId}/invoices`],
     enabled: !!shipmentId,
+    queryFn: async () => {
+      const response = await apiRequest("GET", `/api/inbound-shipments/${shipmentId}/invoices`);
+      return parseShipmentInvoices(await response.json(), Number(shipmentId));
+    },
   });
 
   const lines = useMemo(
@@ -513,21 +527,32 @@ export default function InboundShipmentDetail() {
     [shipment?.purchaseOrderId, lines],
   );
   const costs = shipment?.costs ?? [];
+  const shipmentBillingReadVerified = !shipmentRefreshing && !shipmentError && shipment?.id === shipmentId;
   const canReplaceShipmentInvoice = hasPermission("purchasing", "create") && hasPermission("purchasing", "edit");
-  function costInvoiceStatus(cost: { derivedStatus?: string; vendorInvoiceId?: number | null; linkedInvoice?: { status?: string } | null }) {
-    if (cost.linkedInvoice?.status === "voided" || cost.derivedStatus === "voided") return "Voided invoice — replacement required";
-    if (cost.derivedStatus === "paid") return "Paid";
-    if (cost.derivedStatus === "invoiced") return "Invoiced";
-    if (cost.derivedStatus === "unbilled" && cost.vendorInvoiceId == null) return "Unbilled";
-    return "Invoice status unavailable";
+  function costInvoiceStatus(cost: { billingOwnership?: unknown; derivedStatus?: string }) {
+    if (!shipmentBillingReadVerified) return "Invoice ownership unavailable";
+    const parsed = shipmentCostBillingOwnershipSchema.safeParse(cost.billingOwnership);
+    if (!parsed.success) return "Invoice ownership unavailable";
+    if (parsed.data.state === "review_required") return "Invoice ownership needs review";
+    if (parsed.data.state === "voided") return "Voided invoice — replacement required";
+    if (parsed.data.state === "unbilled") return "Unbilled";
+    return cost.derivedStatus === "paid" ? "Settled" : "Invoiced";
   }
-  function invoiceRecoveryLink(cost: { linkedInvoice?: { id: number; status?: string } | null }) {
-    if (cost.linkedInvoice?.status !== "voided") return null;
+  function invoiceRecoveryLink(cost: { billingOwnership?: unknown; linkedInvoice?: { id: number; status?: string } | null }) {
+    if (!shipmentBillingReadVerified) return null;
+    const parsed = shipmentCostBillingOwnershipSchema.safeParse(cost.billingOwnership);
+    if (!parsed.success) return <p className="text-xs text-amber-700 mt-1">Reload the shipment to verify invoice ownership.</p>;
+    if (parsed.data.state === "review_required") return <div className="text-xs text-amber-700 mt-1"><p>{parsed.data.message}</p>{parsed.data.referencedInvoiceIds.map(id => <Link key={id} href={procurementNavigation.childHref(`/ap-invoices/${id}`)} className="text-primary underline mr-2">Review invoice #{id}</Link>)}</div>;
+    if (parsed.data.state !== "voided" || !cost.linkedInvoice || !parsed.data.referencedInvoiceIds.includes(cost.linkedInvoice.id)) return null;
     return <p className="text-xs mt-1">{canReplaceShipmentInvoice
       ? <Link href={procurementNavigation.childHref(`/ap-invoices/${cost.linkedInvoice.id}`)} className="text-primary underline">Review invoice replacement</Link>
       : "A user with purchasing create and edit permissions can review replacement of this voided invoice."}</p>;
   }
-  const paymentStatus = shipment?.paymentStatus ?? null;
+  const costBillingVerified = shipmentBillingReadVerified && costs.every((cost: { billingOwnership?: unknown }) => {
+    const parsed = shipmentCostBillingOwnershipSchema.safeParse(cost.billingOwnership);
+    return parsed.success && parsed.data.state !== "review_required";
+  });
+  const paymentStatus = costBillingVerified ? shipment?.paymentStatus ?? null : null;
   const statusHistory = shipment?.statusHistory ?? [];
 
 
@@ -1105,7 +1130,7 @@ export default function InboundShipmentDetail() {
               <ShipmentPurchaseOrderLinks
                 purchaseOrders={shipment.purchaseOrders}
                 legacyPurchaseOrderIds={linkedPurchaseOrderIds}
-                hrefFor={(id) => procurementNavigation.childHref(`/purchase-orders/${id}?tab=shipments`)}
+                hrefFor={(id, poNumber) => procurementNavigation.childHref(`/purchase-orders/${id}?tab=shipments&poScope=${id}&document=${encodeURIComponent(poNumber)}`, { currentLabel: shipment.shipmentNumber })}
               />
             </div>
           )}
@@ -1170,6 +1195,10 @@ export default function InboundShipmentDetail() {
 
         {/* Action buttons */}
         <div className="flex gap-2 flex-wrap w-full sm:w-auto">
+          <ShipmentHistoryCorrection key={`history-${shipment.id}`} shipmentId={shipment.id} />
+          {shipment.status !== "cancelled" && lines.length > 0 && (
+            <ShipmentQuantityEditor key={shipment.id} shipmentLines={lines} />
+          )}
           {isEditable && (
             <Button
               variant="outline"
@@ -1205,7 +1234,7 @@ export default function InboundShipmentDetail() {
               className="flex-1 sm:flex-none min-h-[44px]"
             >
               <Pencil className="h-4 w-4 mr-2" />
-              Edit
+              Shipment details
             </Button>
           )}
 
@@ -1428,6 +1457,15 @@ export default function InboundShipmentDetail() {
             </div>
           )}
 
+          <DocumentRelationships root={{ kind: "shipment", id: shipment.id }} lineActions={isEditable ? (relationshipLine) => {
+            const source = lines.find((line: { id: number }) => line.id === relationshipLine.id);
+            return source ? <div className="flex gap-1">
+              <Button variant="outline" size="sm" aria-label="Edit shipment line" onClick={() => lineActions.openEditor(source)}>Edit line</Button>
+              <Button variant="ghost" size="sm" aria-label="Remove shipment line" disabled={lineActions.busy} onClick={() => lineActions.remove(source)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+            </div> : null;
+          } : undefined} />
+          <details className="rounded-lg border p-3">
+            <summary className="cursor-pointer text-sm font-medium">Packing and measurements</summary>
           {/* Mobile cards */}
           <div className="md:hidden space-y-3">
             {lines.length === 0 ? (
@@ -1438,7 +1476,6 @@ export default function InboundShipmentDetail() {
               </Card>
             ) : (
               lines.map((line: any) => {
-                const upc = line.unitsPerVariant ?? 1;
                 return (
                   <Card key={line.id} className={isEditable ? "cursor-pointer hover:border-primary/50 transition-colors" : ""} onClick={() => isEditable && lineActions.openEditor(line)}>
                     <CardContent className="p-3">
@@ -1447,11 +1484,13 @@ export default function InboundShipmentDetail() {
                           <div className="font-mono text-sm">{line.sku || "—"}</div>
                           {line.productName && <div className="text-xs text-muted-foreground truncate">{line.productName}</div>}
                           <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
-                            {upc > 1 && <span>{line.cartonCount ?? "—"} cases</span>}
-                            <span>{line.qtyShipped} pcs</span>
+                            <span>{line.cartonCount ?? "—"} shipping cartons</span>
+                            <span>{Number(line.qtyShipped).toLocaleString()} pieces</span>
                             <span>{formatNumber(line.totalWeightKg, 1)} kg</span>
                             <span>{formatNumber(line.totalVolumeCbm, 4)} CBM</span>
                           </div>
+                          <p className="mt-1 text-xs text-muted-foreground">{shipmentRecordedUnitSummary(line)}</p>
+                          <p className="text-xs text-muted-foreground">Measurements per {shipmentDimensionBasisLabel(line) === "carton" ? "shipping carton" : "piece"}</p>
                           {line.allocatedCostCents != null && (
                             <div className="text-xs mt-1">
                               Allocated: {formatCents(line.allocatedCostCents)} ({formatMillsPerUnit(line.totalAllocatedMillsPerUnit)}) | Landed: {formatMillsOrDash(line.landedUnitCostMills)}
@@ -1484,9 +1523,9 @@ export default function InboundShipmentDetail() {
                 <TableRow>
                   <TableHead>SKU</TableHead>
                   <TableHead>Product</TableHead>
-                  <TableHead className="text-right">Cases</TableHead>
+                  <TableHead className="text-right">Shipping cartons</TableHead>
                   <TableHead className="text-right">Pieces</TableHead>
-                  <TableHead className="text-right">Wt/Carton</TableHead>
+                  <TableHead className="text-right">Weight / measurement unit</TableHead>
                   <TableHead className="text-right">Net Weight</TableHead>
                   <TableHead className="text-right">Net CBM</TableHead>
                   <TableHead className="text-right">Alloc. Cost</TableHead>
@@ -1503,14 +1542,13 @@ export default function InboundShipmentDetail() {
                   </TableRow>
                 ) : (
                   lines.map((line: any) => {
-                    const upc = line.unitsPerVariant ?? 1;
                     return (
                       <TableRow key={line.id}>
                         <TableCell className="font-mono">{line.sku || "—"}</TableCell>
                         <TableCell className="max-w-[180px] truncate">{line.productName || line.sku || "—"}</TableCell>
                         <TableCell className="text-right">{line.cartonCount ? line.cartonCount : "—"}</TableCell>
-                        <TableCell className="text-right">{line.qtyShipped}</TableCell>
-                        <TableCell className="text-right">{formatNumber(line.weightKg, 2)}</TableCell>
+                        <TableCell className="text-right">{Number(line.qtyShipped).toLocaleString()}<div className="max-w-56 text-xs text-muted-foreground">{shipmentRecordedUnitSummary(line)}</div></TableCell>
+                        <TableCell className="text-right">{formatNumber(line.weightKg, 2)}<div className="text-xs text-muted-foreground">per {shipmentDimensionBasisLabel(line) === "carton" ? "shipping carton" : "piece"}</div></TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalWeightKg, 1)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalVolumeCbm, 4)}</TableCell>
                         <TableCell className="text-right">
@@ -1565,10 +1603,12 @@ export default function InboundShipmentDetail() {
               </div>
             </div>
           )}
+          </details>
         </TabsContent>
 
         {/* ══ Tab 2: Costs ══ */}
         <TabsContent value="costs" className="space-y-4">
+          <SupplierCreditLink inboundShipmentId={shipment.id} />
           <div className="flex flex-wrap items-center gap-2">
             {isEditable && (
               <Button variant="outline" onClick={() => setShowAddCostDialog(true)} disabled={!!costCreateRecoveryError} className="min-h-[44px]">
@@ -1576,7 +1616,11 @@ export default function InboundShipmentDetail() {
                 Add Cost
               </Button>
             )}
-            {costs.length > 0 && costs.some((c: any) => !c.vendorInvoiceId && c.vendorId) && (
+            {shipmentBillingReadVerified && hasPermission("purchasing", "edit") && shipment.status !== "cancelled" && costs.some((cost: any) => {
+              const ownership = shipmentCostBillingOwnershipSchema.safeParse(cost.billingOwnership);
+              const amount = effectiveShipmentCostCents(cost);
+              return ownership.success && ownership.data.canCreateInvoice && amount !== null && amount >= 0 && Number.isInteger(cost.vendorId) && cost.vendorId > 0 && cost.vendorId <= 2_147_483_647;
+            }) && (
               <Button variant="outline" onClick={() => setShowAddInvoiceModal(true)} className="min-h-[44px]">
                 <FileText className="h-4 w-4 mr-2" />
                 Add Invoice
@@ -1599,12 +1643,18 @@ export default function InboundShipmentDetail() {
             </div>
           )}
 
+          {!shipmentBillingReadVerified && <div role="alert" className="rounded-md border p-3 text-sm space-y-2">
+            <p>{shipmentRefreshing ? "Refreshing shipment ownership. Billing actions and totals are unavailable until verification completes." : "Shipment ownership could not be refreshed. Displayed charge records may be stale; billing actions and totals are unavailable."}</p>
+            <Button variant="outline" disabled={shipmentRefreshing} onClick={() => void refetchShipment()}>Reload shipment ownership</Button>
+          </div>}
           {/* Payment summary bar */}
+          {!costBillingVerified && costs.length > 0 && <p role="alert" className="text-sm text-amber-700">Shipment billing totals are unavailable until charge ownership is verified.</p>}
           {paymentStatus?.summary && costs.length > 0 && (
             <div className="flex flex-wrap gap-4 text-sm px-1">
               <span>Total: <strong className="font-mono">{formatCents(paymentStatus.summary.totalCents)}</strong></span>
               <span>Linked: <strong className="font-mono">{formatCents(paymentStatus.summary.linkedCents)}</strong></span>
-              <span className="text-green-600">Paid: <strong className="font-mono">{formatCents(paymentStatus.summary.paidCents)}</strong></span>
+              <span className="text-green-600">Cash paid: <strong className="font-mono">{formatCents(paymentStatus.summary.paidCents)}</strong></span>
+              <span>Credits applied: <strong className="font-mono">{formatPaymentAmount(paymentStatus.summary.creditedCents)}</strong></span>
               <span className="text-amber-600">Outstanding: <strong className="font-mono">{formatCents(paymentStatus.summary.outstandingCents)}</strong></span>
             </div>
           )}
@@ -1732,13 +1782,7 @@ export default function InboundShipmentDetail() {
                             >
                               {cost.linkedInvoice.invoiceNumber}
                             </Link>
-                          ) : cost.vendorInvoiceId ? (
-                            <span className="text-xs text-muted-foreground">Invoice link unavailable</span>
-                          ) : cost.vendorId ? (
-                            <span className="text-xs text-muted-foreground">Unbilled</span>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">Set vendor first</span>
-                          )}
+                          ) : <span className="text-xs text-muted-foreground">{costInvoiceStatus(cost)}</span>}
                           {invoiceRecoveryLink(cost)}
                         </TableCell>
                         <TableCell className="text-xs">
@@ -1955,21 +1999,30 @@ export default function InboundShipmentDetail() {
 
         {/* ══ Tab 4: Invoices ══ */}
         <TabsContent value="invoices" className="space-y-4">
+          <SupplierCreditLink inboundShipmentId={shipment.id} />
           {/* Summary bar */}
-          {invoicesData?.summary && (
+          {!invoicesLoading && !invoicesRefreshing && !invoicesError && invoicesData?.summary && (
             <div className="flex flex-wrap gap-6 text-sm px-1">
               <span>Total Invoiced: <strong className="font-mono">{formatCents(invoicesData.summary.totalInvoicedCents)}</strong></span>
-              <span>Total Paid: <strong className="font-mono">{formatCents(invoicesData.summary.totalPaidCents)}</strong></span>
+              <span>Cash paid: <strong className="font-mono">{formatCents(invoicesData.summary.totalPaidCents)}</strong></span>
+              <span>Credits applied: <strong className="font-mono">{formatPaymentAmount(invoicesData.summary.totalCreditedCents)}</strong></span>
               <span className={invoicesData.summary.outstandingCents > 0 ? "text-amber-600" : "text-green-600"}>Outstanding: <strong className="font-mono">{formatCents(invoicesData.summary.outstandingCents)}</strong></span>
             </div>
           )}
 
-          {!invoicesData?.invoices?.length ? (
+          {invoicesLoading || invoicesRefreshing ? (
+            <p role="status" className="text-sm text-muted-foreground">{invoicesData ? "Refreshing shipment invoices…" : "Loading shipment invoices…"}</p>
+          ) : invoicesError || !invoicesData ? (
+            <div role="alert" className="rounded-md border p-4 space-y-2">
+              <p>Shipment invoices could not be loaded. Their amounts and payment status are unavailable.</p>
+              <Button variant="outline" onClick={() => void refetchInvoices()}>Reload shipment invoices</Button>
+            </div>
+          ) : invoicesData.invoices.length === 0 ? (
             <Card>
               <CardContent className="p-8 text-center text-muted-foreground">
                 <FileText className="h-8 w-8 mx-auto mb-2 opacity-30" />
                 <p className="text-sm">No invoices linked to this shipment yet.</p>
-                <p className="text-xs mt-1">Add invoices from the AP Invoices page and link them to this shipment.</p>
+                <p className="text-xs mt-1">Create an invoice from verified unbilled charges in the Costs tab.</p>
               </CardContent>
             </Card>
           ) : (
@@ -1982,7 +2035,7 @@ export default function InboundShipmentDetail() {
                       <TableHead>Invoice #</TableHead>
                       <TableHead>Vendor</TableHead>
                       <TableHead className="text-right">Total</TableHead>
-                      <TableHead className="text-right">Paid</TableHead>
+                      <TableHead className="text-right">Cash paid / credits</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead></TableHead>
                     </TableRow>
@@ -1997,10 +2050,10 @@ export default function InboundShipmentDetail() {
                         <TableCell className="text-sm">{inv.vendorName || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(inv.invoicedAmountCents)}</TableCell>
                         <TableCell className="text-right font-mono">
-                          {inv.paidAmountCents > 0 ? formatCents(inv.paidAmountCents) : "—"}
+                          {formatPaymentAmount(inv.paidAmountCents)}<div className="text-xs">Credits {formatPaymentAmount(inv.creditedAmountCents)}</div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant="outline" className="text-xs">{inv.status?.replace(/_/g, " ")}</Badge>
+                          <Badge variant="outline" className="text-xs">{inv.status === "paid" && inv.creditedAmountCents > 0 ? "settled" : inv.status?.replace(/_/g, " ")}</Badge>
                         </TableCell>
                         <TableCell>
                           <Button
@@ -2027,6 +2080,7 @@ export default function InboundShipmentDetail() {
 
         {/* ══ Tab 5: Timeline ══ */}
         <TabsContent value="timeline" className="space-y-4">
+          <ShipmentHistoryCorrection shipmentId={shipment.id} buttonLabel="View history corrections and approvals" />
           {statusHistory.length === 0 ? (
             <Card>
               <CardContent className="p-4 text-center text-muted-foreground">
@@ -2626,9 +2680,12 @@ export default function InboundShipmentDetail() {
 
       {/* ═══════ Add Invoice Modal (vendor picker → invoice preview) ═══════ */}
       <AddInvoiceFromCostsModal
+        key={`${user?.id ?? "signed-out"}:${shipmentId}`}
         open={showAddInvoiceModal}
         onOpenChange={setShowAddInvoiceModal}
         shipmentId={shipmentId!}
+        sourceVerified={shipmentBillingReadVerified}
+        invoiceHref={invoiceId => procurementNavigation.childHref(`/ap-invoices/${invoiceId}`)}
       />
 
       {/* ═══════ Quick Add Vendor Dialog ═══════ */}
@@ -2748,7 +2805,7 @@ export default function InboundShipmentDetail() {
               {(shipmentPoReceiveOptions?.purchaseOrders ?? []).map((option: any) => {
                 const { fullyReceived, text: coverageLabel } = shipmentReceiveCoverageLabel(option);
                 return (
-                  <div key={option.purchaseOrderId} className="flex items-center justify-between gap-3 rounded-md border p-3">
+                  <div key={option.purchaseOrderId} data-testid={`shipment-receive-option-${option.purchaseOrderId}`} className="flex flex-col items-start justify-between gap-3 rounded-md border p-3 sm:flex-row sm:items-center">
                     <div className="min-w-0">
                       <div className="font-medium truncate">{option.poNumber ?? `PO #${option.purchaseOrderId}`}</div>
                       <div className="text-sm text-muted-foreground">
@@ -2758,6 +2815,7 @@ export default function InboundShipmentDetail() {
                       {!fullyReceived && option.reason && (
                         <div className="text-xs text-muted-foreground mt-1">{option.reason}</div>
                       )}
+                      <ShipmentCustodyReceiptLinks coverage={option} />
                     </div>
                     {fullyReceived ? (
                       <Badge variant="outline" className="text-green-600 border-green-300 shrink-0">

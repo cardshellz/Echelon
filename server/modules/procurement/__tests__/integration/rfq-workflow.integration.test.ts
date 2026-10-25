@@ -1,4 +1,8 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { sql } from "drizzle-orm";
+import express from "express";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { SupplierSourcingService } from "../../supplier-sourcing.service";
 import { SupplierSourcingRepository, attachSupplierSourcingCandidates } from "../../supplier-sourcing.repository";
 import { DEFAULT_SUPPLIER_SOURCING_POLICY } from "@shared/procurement/supplier-sourcing";
@@ -14,17 +18,21 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
 import { rfqConversionResultSchema, rfqWorkflowDetailSchema } from "@shared/procurement/rfq-workflow";
+import { rfqCommandReceiptSchema } from "@shared/procurement/rfq-command";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
-import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
+import { FinancialCommandError, type FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import type { AutomaticRecommendationPoHandoffCommand } from "../../recommendation-po-handoff.service";
 import type { RfqWorkflowCommand } from "../../rfq-workflow.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
+import { RFQ_AUTHORITY_TABLES, seedRfqEditActor, legacyRfqTestCommands } from "./rfq-authority.fixture";
+import { registerRfqCreationRecoveryCases } from "./rfq-create-recovery.cases";
+import { registerRecommendationPoNumberingCases } from "./recommendation-po-numbering.cases";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const integration = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const NOW = new Date("2026-09-07T12:00:00Z");
-const TABLES = [schema.products, schema.productVariants, schema.warehouses, schema.vendors, schema.vendorProducts,
+const TABLES = [...RFQ_AUTHORITY_TABLES, schema.products, schema.productVariants, schema.warehouses, schema.vendors, schema.vendorProducts,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.poStatusHistory, schema.poEvents, schema.purchasingRecommendationDecisions, schema.purchasingRecommendationPoHandoffs];
 
 integration.sequential("RFQ quote revisions and real purchase-owner transaction", () => {
@@ -35,6 +43,8 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   let ownsCommands = false;
   let ownsRecoveries = false;
   let ownsAutoDraftRuns = false;
+  let ownsCreationAuditGuard = false;
+  let auditUpgradePreserved = false;
   let pool: pg.Pool;
   let lease: pg.PoolClient | undefined;
   let modulePool: pg.Pool | undefined;
@@ -43,8 +53,11 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   let purchasingOwner: ReturnType<typeof import("../../purchasing.service").createPurchasingService>;
   let recommendationHandoff: ReturnType<typeof import("../../recommendation-po-handoff.service").createRecommendationPoHandoffService>;
   let commands: ReturnType<typeof import("../../rfq-workflow.commands").createRfqWorkflowCommands>;
+  let durableCommands: typeof commands;
   let commandScope: typeof import("../../rfq-workflow.commands").rfqWorkflowCommandScope;
   let commandPrincipal: string;
+
+  registerRecommendationPoNumberingCases(() => ({ pool, database, purchasingOwner, actorId, now: NOW }));
 
   beforeAll(async () => {
     if (!["127.0.0.1", "localhost"].includes(new URL(url!).hostname) || [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].filter(Boolean).includes(url!)) throw new Error("RFQ workflow tests require a separate explicitly disposable LOCAL database");
@@ -52,7 +65,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     lease = await pool.connect();
     const lock = await lease.query("SELECT pg_try_advisory_lock(hashtext('echelon.procurement.cost-audit-fixture')) AS acquired");
     if (!lock.rows[0].acquired) throw new Error("Another procurement fixture owns the schema lease");
-    for (const name of ["catalog", "procurement", "warehouse"]) { await pool.query(`CREATE SCHEMA ${name}`); ownedSchemas.push(name); }
+    for (const name of ["identity", "catalog", "procurement", "warehouse"]) { await pool.query(`CREATE SCHEMA ${name}`); ownedSchemas.push(name); }
     for (const table of TABLES) await pool.query(fixtureTable(table));
     await pool.query(fixtureTable(schema.autoDraftRuns)); ownsAutoDraftRuns = true;
     await pool.query("CREATE UNIQUE INDEX purch_rec_decisions_id_rec_kind_uidx ON procurement.purchasing_recommendation_decisions(id,recommendation_id,kind)");
@@ -62,6 +75,11 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     await pool.query("CREATE UNIQUE INDEX vendor_products_vendor_product_variant_key_uidx ON procurement.vendor_products(vendor_id,product_id,COALESCE(product_variant_id,0))");
     for (const migration of ["130_atomic_recommendation_po_handoffs.sql", "148_purchase_rfq_requests.sql", "158_rfq_allocation_override_evidence.sql", "224_rfq_quote_revisions_and_purchase_links.sql", "228_supplier_sourcing_policies.sql", "232_rfq_product_reservation_scope.sql"]) await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) { await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true; }
+    if (!ownsAudit || (await pool.query("SELECT to_regprocedure('public.guard_rfq_creation_audit_history()') AS guard")).rows[0].guard) throw new Error("RFQ audit fixture requires its own audit table and guard");
+    const historical = (await pool.query("INSERT INTO public.audit_events(level,actor,action,target,changes,context) VALUES('AUDIT',$1,'purchase_rfq.batch_created','legacy:fixture','{\"after\":{\"legacy\":true}}','{\"original\":true}') RETURNING *", [`user:${actorId}`])).rows[0];
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000029000019070001_rfq_creation_audit_guard.sql"), "utf8")); ownsCreationAuditGuard = true;
+    expect((await pool.query("SELECT * FROM public.audit_events WHERE id=$1", [historical.id])).rows[0]).toEqual(historical);
+    auditUpgradePreserved = true;
     ownsCommands = !(await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation;
     ownsRecoveries = !(await pool.query("SELECT to_regclass('public.financial_command_recoveries') AS relation")).rows[0].relation;
     for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
@@ -87,7 +105,8 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
       recommendationHandoff = handoffService.createRecommendationPoHandoffService(handoffRepository.createDrizzleRecommendationPoHandoffRepository(database));
       purchasingOwner = owner;
       service = workflow.createRfqWorkflowService(database, owner);
-      commands = commandModule.createRfqWorkflowCommands(service, repository.createDrizzleFinancialCommandRepository(database), () => NOW);
+      durableCommands = commandModule.createRfqWorkflowCommands(service, repository.createDrizzleFinancialCommandRepository(database), () => NOW);
+      commands = legacyRfqTestCommands(durableCommands);
       commandScope = commandModule.rfqWorkflowCommandScope;
       commandPrincipal = commandModule.RFQ_WORKFLOW_COMMAND_PRINCIPAL;
     } finally {
@@ -97,12 +116,19 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   });
 
   beforeEach(async () => {
-    if (ownedSchemas.length !== 3) throw new Error("RFQ fixture schema ownership missing");
+    if (ownedSchemas.length !== 4) throw new Error("RFQ fixture schema ownership missing");
     // Disable only the fixture's immutable TRUNCATE guard for isolated reset.
     await pool.query(`BEGIN; ALTER TABLE procurement.supplier_sourcing_revisions DISABLE TRIGGER supplier_sourcing_history_truncate_immutable; TRUNCATE ${TABLES.map(qualifiedTable).join(",")}, procurement.purchase_recommendation_runs RESTART IDENTITY CASCADE; ALTER TABLE procurement.supplier_sourcing_revisions ENABLE TRIGGER supplier_sourcing_history_truncate_immutable; COMMIT`);
     await pool.query("TRUNCATE public.auto_draft_runs RESTART IDENTITY CASCADE");
-    await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, `user:${actorId}`]]);
+    if (!ownsAudit || !ownsCreationAuditGuard) throw new Error("RFQ fixture cannot reset unowned audit evidence");
+    const resetAudit = await pool.connect();
+    try {
+      await resetAudit.query("BEGIN; ALTER TABLE public.audit_events DISABLE TRIGGER rfq_creation_audit_history_immutable");
+      await resetAudit.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, `user:${actorId}`]]);
+      await resetAudit.query("ALTER TABLE public.audit_events ENABLE TRIGGER rfq_creation_audit_history_immutable; COMMIT");
+    } catch (error) { await resetAudit.query("ROLLBACK"); throw error; } finally { resetAudit.release(); }
     await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
+    await seedRfqEditActor(pool, actorId);
     await pool.query(`
       INSERT INTO catalog.products(id,sku,name) VALUES(100,'RFQ-SKU-A','RFQ product A'),(101,'RFQ-SKU-B','RFQ product B');
       INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit) VALUES(200,100,'RFQ-CASE-A','Case of 50',50,'case',false),(201,101,'RFQ-CASE-B','Case of 50',50,'case',false);
@@ -120,6 +146,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     try {
       if (pool) {
         if (ownsAudit) await pool.query("DROP TABLE public.audit_events"); else if ((await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, `user:${actorId}`]]);
+        if (ownsCreationAuditGuard) await pool.query("DROP FUNCTION public.guard_rfq_creation_audit_history()");
         if (ownsRecoveries) await pool.query("DROP TABLE public.financial_command_recoveries");
         if (ownsCommands) await pool.query("DROP TABLE public.financial_command_results"); else if ((await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
         if (ownsAutoDraftRuns) await pool.query("DROP TABLE public.auto_draft_runs CASCADE");
@@ -135,6 +162,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const scope = commandScope(command);
     return { actorType: "service", actorId: commandPrincipal, ...scope, idempotencyKey: `rfq-${suffix}-${key}`, requestHash: hashHttpFinancialCommand({ ...scope, body: command.body }), contractVersion: 1 };
   }
+  registerRfqCreationRecoveryCases({ pool: () => pool, database: () => database, owner: () => purchasingOwner, actorId, suffix, now: NOW, auditUpgradePreserved: () => auditUpgradePreserved });
   async function capture(lineId = 20, patch: Record<string, unknown> = {}) {
     const before = await service.getDetail(10);
     const command: RfqWorkflowCommand = { operation: "capture_quote", rfqId: 10, lineId, body: { expectedVersion: before.version, quote: {
@@ -213,8 +241,22 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const workflow = await service.getDetail(10);
     const command: RfqWorkflowCommand = { operation: "release", rfqId: 10, body: { expectedVersion: workflow.version, reason: "Same operator request retried" } };
     const identity = descriptor(command);
-    const results = await Promise.all([commands.execute(command, actorId, identity), commands.execute(command, actorId, identity)]);
+    const attempts = await Promise.allSettled([
+      commands.execute(command, actorId, identity),
+      commands.execute(command, actorId, identity),
+    ]);
+    expect(attempts.some((attempt) => attempt.status === "fulfilled")).toBe(true);
+    // The duplicate may observe the durable reservation before its owner commits.
+    // That is an explicit retry response, not a second release or a failed replay.
+    // Wait for both attempts to settle before retrying the same completed intent.
+    const results = await Promise.all(attempts.map(async (attempt) => {
+      if (attempt.status === "fulfilled") return attempt.value;
+      expect(attempt.reason).toBeInstanceOf(FinancialCommandError);
+      expect(attempt.reason).toMatchObject({ code: "FINANCIAL_COMMAND_IN_PROGRESS", statusCode: 409 });
+      return commands.execute(command, actorId, identity);
+    }));
     expect(results.map((result) => result.httpStatus)).toEqual([200, 200]);
+    expect(results[0].commandId).toBe(results[1].commandId);
     expect(results[0].body).toEqual(results[1].body);
     expect(results.filter((result) => result.replayed)).toHaveLength(1);
     expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1 AND action='purchase_rfq.reservation_released'", [actorId])).rows[0].count).toBe(1);
@@ -474,6 +516,138 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     expect((await pool.query("SELECT count(*)::int AS count FROM procurement.rfq_quote_revisions")).rows[0].count).toBe(1);
   });
 
+  it("stores the exact actor-bound receipt, rejects changed actor/payload, and never recaptures the quote", async () => {
+    const attempt = await capture();
+    const replay = await durableCommands.execute(attempt.command, actorId, attempt.identity);
+    const receipt = rfqCommandReceiptSchema.parse(replay.body);
+    expect(receipt).toMatchObject({ version: 1, actorId, idempotencyKey: attempt.identity.idempotencyKey,
+      intent: { operation: "capture_quote", rfqId: 10, lineId: 20, payload: attempt.command.body } });
+    expect((await pool.query("SELECT response_body FROM public.financial_command_results WHERE id=$1", [replay.commandId])).rows[0].response_body).toEqual(receipt);
+    await expect(durableCommands.execute(attempt.command, `${actorId}-another`, attempt.identity))
+      .rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
+    const changed = { ...attempt.command, body: { ...(attempt.command.body as Record<string, unknown>), expectedVersion: "f".repeat(64) } };
+    await expect(durableCommands.execute(changed, actorId, attempt.identity))
+      .rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.rfq_quote_revisions")).rows[0].count).toBe(1);
+    expect((await durableCommands.execute(attempt.command, actorId, attempt.identity)).body).toEqual(receipt);
+  });
+
+  it("keeps a legacy command key in its original ledger scope and refuses to invent a receipt", async () => {
+    const before = await service.getDetail(10);
+    const command: RfqWorkflowCommand = { operation: "release", rfqId: 10,
+      body: { expectedVersion: before.version, reason: "Original legacy request" } };
+    const identity = descriptor(command);
+    const { createDrizzleFinancialCommandRepository } = await import("../../../../platform/commands/command-results.repository");
+    const repository = createDrizzleFinancialCommandRepository(database);
+    const reservation = await repository.reserve(identity);
+    if (reservation.kind !== "claimed") throw new Error("Expected a fresh historical fixture key");
+    await repository.executeClaim(reservation.claim, identity, async () => ({ httpStatus: 200, body: before }));
+    await expect(durableCommands.execute(command, actorId, identity))
+      .rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
+    expect((await service.getDetail(10)).version).toBe(before.version);
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.financial_command_results WHERE idempotency_key=$1", [identity.idempotencyKey])).rows[0].count).toBe(1);
+  });
+
+  it.each(["capture_quote", "release", "convert"] as const)("rechecks current edit authority after graph wait for %s and preserves durable refusal", async operation => {
+    if (operation === "convert") await capture();
+    const before = await service.getDetail(10);
+    const command: RfqWorkflowCommand = operation === "capture_quote"
+      ? { operation, rfqId: 10, lineId: 20, body: { expectedVersion: before.version, quote: {
+        pricing: { basis: "per_piece", quantityPieces: 150, unitCostMills: 10000 }, packagingTreatment: "separate",
+        packagingCostCents: 0, quoteReference: "WAITING-QUOTE", quoteValidUntil: null, quotedAt: NOW.toISOString(), leadTimeDays: null, reason: "Supplier confirmed",
+      } } }
+      : operation === "release" ? { operation, rfqId: 10, body: { expectedVersion: before.version, reason: "Supplier declined" } }
+        : { operation, rfqId: 10, body: { expectedVersion: before.version, lines: [{ rfqLineId: 20, quoteRevisionId: before.lines[0].latestQuote!.id }], quantityOverrideReason: null } };
+    const identity = descriptor(command);
+    const blocker = await pool.connect();
+    let pending: ReturnType<typeof durableCommands.execute> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtext('inventory.cost_graph'), hashtext('version_1'))");
+      const blockerPid = (await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      pending = durableCommands.execute(command, actorId, identity);
+      let waiting = false;
+      for (let attempt = 0; attempt < 200; attempt++) {
+        waiting = (await pool.query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS waiting", [blockerPid])).rows[0].waiting;
+        if (waiting) break;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+      await pool.query("DELETE FROM identity.auth_role_permissions WHERE role_id=1");
+      await blocker.query("COMMIT");
+      const rejected = await pending;
+      expect(rejected).toMatchObject({ terminalState: "rejected", httpStatus: 403,
+        body: { code: "RFQ_EDIT_AUTHORITY_REQUIRED", details: { rfqCommandOutcome: "rejected", actorId, idempotencyKey: identity.idempotencyKey } } });
+      expect((await durableCommands.execute(command, actorId, identity)).body).toEqual(rejected.body);
+      expect((await service.getDetail(10)).version).toBe(before.version);
+      expect((await pool.query("SELECT count(*)::int AS count FROM procurement.purchase_orders")).rows[0].count).toBe(0);
+    } finally {
+      await blocker.query("ROLLBACK");
+      await pending?.catch(() => undefined);
+      blocker.release();
+    }
+  });
+
+  it.each(["inactive", "scoped"] as const)("rejects %s authority without recording supplier or purchase effects", async condition => {
+    const before = await service.getDetail(10);
+    if (condition === "inactive") await pool.query("UPDATE identity.users SET active=0 WHERE id=$1", [actorId]);
+    else await pool.query("UPDATE identity.auth_role_permissions SET constraints='{\"warehouseId\":1}'::jsonb WHERE role_id=1");
+    const command: RfqWorkflowCommand = { operation: "release", rfqId: 10, body: { expectedVersion: before.version, reason: "Denied authority" } };
+    expect(await durableCommands.execute(command, actorId, descriptor(command))).toMatchObject({ httpStatus: 403, terminalState: "rejected" });
+    expect((await service.getDetail(10)).version).toBe(before.version);
+    expect((await pool.query("SELECT sent_at FROM procurement.request_for_quotes WHERE id=10")).rows[0].sent_at).toBeNull();
+  });
+
+  it("negotiates verified HTTP receipts and legacy raw replay over the same durable saved result", async () => {
+    const { registerRfqWorkflowRoutes } = await import("../../rfq-workflow.routes");
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { req.session = { user: { id: actorId } } as never; next(); });
+    // This isolated app registers only RFQ routes, whose sole service dependency
+    // is the real purchasing owner. Do not invent the unrelated app services.
+    const services: Pick<Express.Locals["services"], "purchasing"> = { purchasing: purchasingOwner };
+    Object.assign(app.locals, { services });
+    registerRfqWorkflowRoutes(app);
+    const server = http.createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const before = await service.getDetail(10);
+      const body = { expectedVersion: before.version, quote: {
+        pricing: { basis: "per_piece", quantityPieces: 150, unitCostMills: 10000 }, packagingTreatment: "separate",
+        packagingCostCents: 0, quoteReference: "HTTP-QUOTE", quoteValidUntil: null, quotedAt: NOW.toISOString(), leadTimeDays: null, reason: "Supplier evidence",
+      } };
+      const key = `rfq-${suffix}-http`;
+      const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/purchasing/rfqs/10/lines/20/quotes`;
+      const send = (receipt: boolean) => requestLocalHttp(endpoint, { method: "POST", headers: { "Content-Type": "application/json",
+        "Idempotency-Key": key, ...(receipt ? { "X-RFQ-Receipt-Version": "1" } : {}) }, body: JSON.stringify(body) });
+      const first = await send(true);
+      expect(first.status, await first.clone().text()).toBe(200);
+      const receipt = rfqCommandReceiptSchema.parse(await first.json());
+      const retry = await send(true);
+      expect(retry.headers.get("Idempotency-Replayed")).toBe("true");
+      expect(await retry.json()).toEqual(receipt);
+      const legacy = await send(false);
+      expect(await legacy.json()).toEqual(receipt.result);
+      expect((await pool.query("SELECT response_body FROM public.financial_command_results WHERE idempotency_key=$1", [key])).rows[0].response_body).toEqual(receipt);
+      expect((await pool.query("SELECT count(*)::int AS count FROM procurement.rfq_quote_revisions")).rows[0].count).toBe(1);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+  });
+
+  it("durably rejects exhausted PO numbering without converting the RFQ or changing historical documents", async () => {
+    await pool.query("INSERT INTO procurement.purchase_orders(po_number,vendor_id,status) VALUES('PO-20260907-999999999999999999',5,'cancelled')");
+    await capture();
+    const before = await service.getDetail(10);
+    const historical = (await pool.query("SELECT to_jsonb(po) AS record FROM procurement.purchase_orders po ORDER BY id")).rows;
+    const attempt = await conversion();
+    const result = await commands.execute(attempt.command, actorId, attempt.identity);
+    expect(result).toMatchObject({ terminalState: "rejected", httpStatus: 409, body: { code: "DOCUMENT_NUMBER_EXHAUSTED" } });
+    expect(await service.getDetail(10)).toEqual(before);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.rfq_purchase_order_line_links")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT to_jsonb(po) AS record FROM procurement.purchase_orders po ORDER BY id")).rows).toEqual(historical);
+    const replay = await commands.execute(attempt.command, actorId, attempt.identity);
+    expect(replay).toMatchObject({ terminalState: "rejected", httpStatus: 409, replayed: true, body: result.body });
+  });
+
   it("atomically creates a draft through the real PO owner with exact links and supplier quote basis", async () => {
     await capture();
     const attempt = await conversion();
@@ -592,7 +766,13 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
           const activity = (await pool.query<{ blocked: boolean; wait_event: string | null }>(
             "SELECT cardinality(pg_blocking_pids(pid))>0 AS blocked,wait_event FROM pg_stat_activity WHERE pid=$1", [importerPid],
           )).rows[0];
-          if (activity?.blocked) { waitEvent = activity.wait_event; break; }
+          // A blocker without a named wait does not yet identify the lock.
+          // Keep polling within the same deadline; any other named lock still
+          // fails the advisory assertion and supplier NOWAIT proof below.
+          if (activity?.blocked && typeof activity.wait_event === "string") {
+            waitEvent = activity.wait_event;
+            break;
+          }
           await new Promise(resolve => setTimeout(resolve, 10));
         }
         // Without the common graph lock the importer holds this supplier row

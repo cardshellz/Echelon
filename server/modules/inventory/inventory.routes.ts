@@ -1,3 +1,4 @@
+import { protectEbayPolicyWriteBoundary } from "../channels/interfaces/ebay-policy-write-boundary";
 import { lotCostFollowUpQuerySchema } from "@shared/inventory/lot-cost-follow-up";
 import { returnCommandRequestSchema, returnCommandResultFor } from "@shared/inventory/return-command";
 import { isLevelDeleteForbiddenError, isRetiredEmptyLevel } from "./domain/retired-inventory-level";
@@ -1726,7 +1727,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/catalog/products", requirePermission("inventory", "create"), async (req, res) => {
+  app.post("/api/catalog/products", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
     try {
       const validatedData = insertProductSchema.parse(req.body);
       const createProduct = (executor: InventoryRouteTransaction = db) => storage.createProduct(validatedData, executor);
@@ -1747,7 +1748,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.patch("/api/catalog/products/:id", requirePermission("inventory", "edit"), async (req, res) => {
+  app.patch("/api/catalog/products/:id", requirePermission("inventory", "edit"), protectEbayPolicyWriteBoundary("update"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const validatedData = insertProductSchema.partial().parse(req.body);
@@ -1847,7 +1848,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/items", requireAuth, async (req, res) => {
+  app.post("/api/inventory/items", requireAuth, protectEbayPolicyWriteBoundary("create"), async (req, res) => {
     try {
       const parsed = insertProductSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1878,7 +1879,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.patch("/api/inventory/variants/:variantId", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.patch("/api/inventory/variants/:variantId", requirePermission("inventory", "adjust"), protectEbayPolicyWriteBoundary("update"), async (req, res) => {
     try {
       const variantId = parseInt(req.params.variantId);
       const { unitsPerVariant } = req.body;
@@ -1910,7 +1911,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/variants", requirePermission("inventory", "create"), async (req, res) => {
+  app.post("/api/inventory/variants", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
     try {
       const parsed = insertProductVariantSchema.safeParse(req.body);
       if (!parsed.success) {

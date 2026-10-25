@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { shippingPackageTypeSchema } from "@shared/catalog/shipping-package";
 import type { Pool, PoolClient } from "pg";
 import { EbayListingSyncError } from "../ebay-listing-sync.domain";
 import { EbayListingPushSkipped } from "../ebay-listing-push.service";
@@ -6,6 +7,19 @@ import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from
 import type { EbayListingConnectorResult, EbayListingRebuildResult } from "../listing-connectors/ebay-listing.connector";
 
 const nullableText = z.string().nullable();
+// node-postgres intentionally returns bigint columns as strings. Convert cents
+// only after proving the integer is exactly representable by the pricing API.
+const storedCents = z.union([
+  z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  z.string().regex(/^(0|[1-9][0-9]*)$/).max(20).transform((value, context) => {
+    const integer = BigInt(value);
+    if (integer > BigInt(Number.MAX_SAFE_INTEGER)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Stored cents exceed the supported exact integer range" });
+      return z.NEVER;
+    }
+    return Number(integer);
+  }),
+]).nullable();
 const MAX_CONCURRENT_PUSH_WORKFLOWS = 4;
 const RESERVED_DATABASE_CONNECTIONS = 2;
 const CONNECTIONS_PER_PUSH_WORKFLOW = 3;
@@ -19,8 +33,10 @@ const productSchema = z.object({
 const variantSchema = z.object({
   id: z.number().int().positive(), sku: z.string().trim().min(1).max(100), catalog_sku: z.string().min(1), name: nullableText,
   option1_name: nullableText, option1_value: nullableText, option2_name: nullableText, option2_value: nullableText,
-  price_cents: z.number().int().nullable(), compare_at_price_cents: z.number().int().nullable(),
+  price_cents: storedCents, compare_at_price_cents: storedCents,
   weight_grams: z.number().nullable(), ebay_weight_grams: z.number().nullable(), barcode: nullableText,
+  length_mm: z.number().nullable(), width_mm: z.number().nullable(), height_mm: z.number().nullable(),
+  shipping_package_type: shippingPackageTypeSchema.nullable(),
   ebay_fulfillment_policy_override: nullableText, ebay_return_policy_override: nullableText,
   ebay_payment_policy_override: nullableText, external_variant_id: nullableText, external_product_id: nullableText,
   external_sku: nullableText, mapping_exists: z.boolean(),
@@ -86,6 +102,7 @@ export class PostgresEbayListingPushRepository {
     const rows = await database.query(`SELECT pv.id, COALESCE(cl.external_sku, pv.sku) AS sku, pv.sku AS catalog_sku,
       pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
       pv.price_cents, pv.compare_at_price_cents, pv.weight_grams::float8 AS weight_grams, pv.barcode,
+      pv.length_mm::float8 AS length_mm, pv.width_mm::float8 AS width_mm, pv.height_mm::float8 AS height_mm, pv.shipping_package_type,
       COALESCE(cvo.weight_override, pv.weight_grams)::float8 AS ebay_weight_grams,
       pv.ebay_fulfillment_policy_override, pv.ebay_return_policy_override, pv.ebay_payment_policy_override,
       cl.external_variant_id, cl.external_product_id, cl.external_sku, (cl.product_variant_id IS NOT NULL) AS mapping_exists

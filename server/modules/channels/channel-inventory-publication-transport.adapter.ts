@@ -27,7 +27,14 @@ export class ChannelInventoryPublicationTransportAdapter
   async publishAbsolute(
     request: AbsoluteInventoryPublicationRequest,
   ): Promise<AbsoluteInventoryPublicationResult> {
-    const channelConnectionId = this.channelConnectionId(request);
+    let channelConnectionId: number;
+    try { channelConnectionId = this.channelConnectionId(request); }
+    catch (error) {
+      if (error instanceof InventoryPublicationTransportConfigurationError) {
+        throw new InventoryPublicationNotSentError(error.code, error.message, error.retryable, error.context, { cause: error });
+      }
+      throw error;
+    }
     try {
       const results = await this.adapter.pushInventory(request.channelId, [{
         variantId: request.productVariantId,

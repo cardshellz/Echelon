@@ -3,7 +3,7 @@ import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import type { EbayListingSyncIdentity, StoredEbayListingSyncJob } from "./ebay-listing-sync.domain";
 import { EbayListingSyncError } from "./ebay-listing-sync.domain";
 import type { EbayListingSyncService } from "./ebay-listing-sync.service";
-import { ebayListingPushFailure, type EbayListingPushResult } from "./ebay-listing-push.service";
+import { EbayListingPushSkipped, ebayListingPushFailure, type EbayListingPushResult } from "./ebay-listing-push.service";
 
 export interface EbayPublicationAdmissionDependencies {
   channelId: number;
@@ -57,6 +57,12 @@ export async function admitEbayPublication(
       "EBAY_SYNC_IDENTITY_CHANGED", "EBAY_SYNC_OPERATION_INVALID"].includes(error.code)) return failure;
     if (admissionAttempted) return ebayListingPushFailure(command.productId, new EbayListingSyncError("EBAY_SYNC_ADMISSION_UNSAVED",
       "The publication request's result could not be confirmed. Retry this same saved request to retrieve its result."));
+    if (!(error instanceof EbayListingSyncError) && !(error instanceof EbayListingPushSkipped)) {
+      console.error(JSON.stringify({ event: "ebay_publication_admission_read_unconfirmed", productId: command.productId,
+        commandKey: command.commandKey, errorName: error instanceof Error ? error.name : "UnknownError" }));
+      return ebayListingPushFailure(command.productId, new EbayListingSyncError("EBAY_SYNC_ADMISSION_UNSAVED",
+        "The publication inputs could not be read reliably. Retry the same saved request; no refusal has been recorded."));
+    }
     try {
       const job = await dependencies.jobs.recordAdmissionFailure({ channelId: dependencies.channelId, productId: command.productId,
         operation: "publish",

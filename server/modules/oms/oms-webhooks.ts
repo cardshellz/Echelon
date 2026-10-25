@@ -61,6 +61,8 @@ import {
 } from "./webhook-retry.worker";
 import type { ShippingEngine } from "../shipping/engine";
 import { recordShopifyRefundReturnCase } from "../returns/application/shopify-return-case.service";
+import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
+import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -72,6 +74,8 @@ const RETURN_CASE_SHOPIFY_RUNTIME_ENABLED = process.env.RETURN_CASE_SHOPIFY_RUNT
 function authorityLinePatch(state: OmsLineAuthorityState) {
   return {
     channelObservedQuantity: state.channelObservedQuantity,
+    channelCurrentQuantity: state.channelCurrentQuantity,
+    channelQuantityUpdatedAt: state.channelQuantityUpdatedAt,
     paidQuantity: state.paidQuantity,
     authorityFulfillableQuantity: state.authorityFulfillableQuantity,
     authorizationStatus: state.authorizationStatus,
@@ -121,6 +125,7 @@ interface WmsServices {
       options?: { disposition?: "release" | "cancel" },
     ) => Promise<any>;
     reconcileRefundOrderDemand: (args: {
+      requiredAuthority?: "canonical";
       orderId: number;
       sourceEventId: string;
       releaseTargets: readonly { orderItemId: number; quantity: number }[];
@@ -502,7 +507,7 @@ export async function cancelOrderCascade(
  * cancelled by the channel vs merely already-terminal on our side.
  *
  * `cancelNow` (drives cancelOrderCascade) is derived ONLY from the Shopify
- * payload — cancelled_at, or a refunded/voided financial_status. It must NEVER
+ * payload and verified native merchandise cancellation. It must NEVER
  * depend on our own existing OMS status: doing so created a self-perpetuating
  * loop where an order wrongly cancelled by another path got RE-cancelled by
  * every subsequent orders/updated webhook (#57977 accumulated 8 cascades on a
@@ -517,14 +522,14 @@ export async function cancelOrderCascade(
 export function deriveOmsUpdateFinality(
   payload: { cancelled_at?: unknown; financial_status?: string | null },
   existingStatus: string | null | undefined,
+  channelMerchandise?: { verifiedCancelled: boolean | null },
 ): { cancelNow: boolean; isFinal: boolean } {
-  const cancelNow =
-    Boolean(payload.cancelled_at) ||
-    payload.financial_status === "refunded" ||
-    payload.financial_status === "voided";
-  const isFinal =
-    cancelNow || existingStatus === "cancelled" || existingStatus === "refunded";
-  return { cancelNow, isFinal };
+  if (payload.cancelled_at) return { cancelNow: true, isFinal: true };
+  if (["refunded", "voided"].includes(payload.financial_status ?? "")
+    && channelMerchandise?.verifiedCancelled == null)
+    throw new Error("A fresh native merchandise observation is required before changing refunded warehouse work.");
+  const cancelNow = channelMerchandise?.verifiedCancelled === true;
+  return { cancelNow, isFinal: cancelNow || existingStatus === "cancelled" };
 }
 
 export const __test__ = {
@@ -636,6 +641,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): ShopifyOrderData {
     notes: shopifyOrder.note || undefined,
     tags: shopifyOrder.tags ? shopifyOrder.tags.split(",").map((t: string) => t.trim()) : undefined,
     orderedAt: shopifyOrder.created_at ? new Date(shopifyOrder.created_at) : new Date(),
+    channelUpdatedAt: shopifyOrder.updated_at ?? null,
     lineItems,
   };
 }
@@ -1193,8 +1199,10 @@ export function registerOmsWebhooks(
       // (includes our existing terminal status) drives only the reconcile/
       // address-change skips. See deriveOmsUpdateFinality for why cancelNow must
       // never read existing.status (self-perpetuating re-cancel loop, #57977).
+      const nativeMerchandise = !isCancelledPayload && ["refunded", "voided"].includes(shopifyOrder.financial_status)
+        ? await readChannelShopifyMerchandise(db, { channelId, orderId: externalOrderId }) : null;
       const { cancelNow: isCancelledByChannel, isFinal: isFinalOmsState } =
-        deriveOmsUpdateFinality(shopifyOrder, existing.status);
+        deriveOmsUpdateFinality(shopifyOrder, existing.status, { verifiedCancelled: nativeMerchandise?.cancelled ?? null });
 
       // Update OMS order fields
       await db
@@ -1389,8 +1397,10 @@ export function registerOmsWebhooks(
                   ? Number(item.fulfillable_quantity)
                   : previousAuthority.fulfillableQuantity,
                 currentQuantity: readShopifyLineCurrentQuantity(item),
+                channelUpdatedAt: shopifyOrder.updated_at ?? null,
                 previous: previousAuthority,
               });
+              if (authority.staleChannelObservation) return;
 
               await tx
                 .update(omsOrderLines)
@@ -1452,6 +1462,7 @@ export function registerOmsWebhooks(
                 ? Number(item.fulfillable_quantity)
                 : null,
               currentQuantity: readShopifyLineCurrentQuantity(item),
+                channelUpdatedAt: shopifyOrder.updated_at ?? null,
             });
             // Insert new line and authority ledger atomically.
             await db.transaction(async (tx: any) => {
@@ -1512,18 +1523,26 @@ export function registerOmsWebhooks(
         for (const existingLine of existingLines) {
           if (existingLine.externalLineItemId && !shopifyLineIds.has(existingLine.externalLineItemId)) {
             if ((existingLine.quantity || 0) > 0) {
-              const authority = deriveOmsLineAuthority({
-                sourceTopic: "orders/updated",
-                sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
-                sourceInboxId: inbox.receipt.id,
-                financialStatus: shopifyOrder.financial_status,
-                quantity: 0,
-                fulfillableQuantity: 0,
-                currentQuantity: 0,
-                previous: existingLine,
-              });
               await db.transaction(async (tx: any) => {
                 if ((await guardOrderEditShopifyIngress(tx,existing.id,shopifyOrder,new Date())).skipLines) return;
+                // A newer native observation or paid event may have committed
+                // since the header snapshot. Removal uses the same row lock as
+                // matched-line updates and cannot overwrite that newer state.
+                const [lockedLine] = await tx.select().from(omsOrderLines)
+                  .where(eq(omsOrderLines.id, existingLine.id)).for("update").limit(1);
+                if (!lockedLine) throw new Error("The removed OMS line disappeared during channel reconciliation.");
+                const authority = deriveOmsLineAuthority({
+                  sourceTopic: "orders/updated",
+                  sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                  sourceInboxId: inbox.receipt.id,
+                  financialStatus: shopifyOrder.financial_status,
+                  quantity: 0,
+                  fulfillableQuantity: 0,
+                  currentQuantity: 0,
+                  channelUpdatedAt: shopifyOrder.updated_at ?? null,
+                  previous: lockedLine,
+                });
+                if (authority.staleChannelObservation) return;
                 await tx
                   .update(omsOrderLines)
                   .set({
@@ -1539,7 +1558,7 @@ export function registerOmsWebhooks(
                   orderLineId: existingLine.id,
                   eventType: "line_removed",
                   sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
-                  previous: existingLine,
+                  previous: lockedLine,
                   authority,
                 });
               });
@@ -1925,16 +1944,9 @@ export function registerOmsWebhooks(
 
       // Determine financial status
       const refundLineItems = refundPayload.refund_line_items || [];
-      const omsLines = await db
-        .select()
-        .from(omsOrderLines)
-        .where(eq(omsOrderLines.orderId, existing.id));
-
-      // This-payload full-line-refund signal (kept as a secondary trigger for
-      // 'refunded'; the primary trigger is CUMULATIVE money — see the UPDATE).
-      const totalOrderQty = omsLines.reduce((s: number, l: any) => s + l.quantity, 0);
-      const refundedQty = refundLineItems.reduce((s: number, l: any) => s + (l.quantity || 0), 0);
-      const fullQtyRefundedThisPayload = totalOrderQty > 0 && refundedQty >= totalOrderQty;
+      // Replacing an order-edit line can create a transaction-free bookkeeping
+      // refund for its entire old quantity. Physical disposition is owned by the
+      // cascade; quantities are never evidence that money was fully refunded.
 
       // Compute refund amount from Shopify transactions (authoritative source)
       const transactions: any[] = Array.isArray(refundPayload.transactions) ? refundPayload.transactions : [];
@@ -1973,16 +1985,29 @@ export function registerOmsWebhooks(
           return;
         }
 
+        const financialEvidence: {
+          rows: Array<{
+            total_cents: number | string | null;
+            refund_amount_cents: number | string | null;
+            financial_status: string | null;
+          }>;
+        } = await tx.execute(sql`
+          SELECT total_cents,refund_amount_cents,financial_status
+          FROM oms.oms_orders WHERE id=${existing.id} FOR UPDATE
+        `);
+        const financialRow = financialEvidence?.rows?.[0];
+        if (!financialRow) throw new Error("The refunded order no longer exists.");
+        const financialStatus = deriveShopifyRefundFinancialStatus({
+          totalCents: financialRow.total_cents,
+          previousRefundCents: financialRow.refund_amount_cents,
+          refundCents: thisRefundCents,
+          previousFinancialStatus: financialRow.financial_status,
+        });
         const updated: any = await tx.execute(sql`
           UPDATE oms.oms_orders SET
             refund_amount_cents = COALESCE(refund_amount_cents, 0) + ${thisRefundCents},
-            financial_status = CASE
-              WHEN COALESCE(refund_amount_cents, 0) + ${thisRefundCents} >= COALESCE(NULLIF(total_cents, 0), 2147483647)
-                THEN 'refunded'
-              WHEN ${fullQtyRefundedThisPayload} THEN 'refunded'
-              ELSE 'partially_refunded'
-            END,
-            refunded_at = ${now},
+            financial_status = ${financialStatus},
+            refunded_at = CASE WHEN ${thisRefundCents} > 0 THEN ${now} ELSE refunded_at END,
             updated_at = ${now}
           WHERE id = ${existing.id}
           RETURNING refund_amount_cents, financial_status
@@ -2023,6 +2048,9 @@ export function registerOmsWebhooks(
         {
           // OMS already resolved above — short-circuit the helper.
           resolveOmsOrder: async () => ({ id: existing.id }),
+          readMerchandiseSnapshot: () => readChannelShopifyMerchandise(db, {
+            channelId, orderId: String(shopifyOrderId),
+          }),
           reconcileRefundOrderDemand: wmsServices
             ? async (args) => wmsServices.reservation.reconcileRefundOrderDemand(args)
             : undefined,

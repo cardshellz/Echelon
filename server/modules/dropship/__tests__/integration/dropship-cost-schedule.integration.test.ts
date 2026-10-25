@@ -79,7 +79,19 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
       CREATE TABLE dropship.dropship_vendor_listings (
         id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY, vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id),
         store_connection_id integer NOT NULL, product_variant_id integer NOT NULL REFERENCES catalog.product_variants(id),
-        status varchar(40) NOT NULL DEFAULT 'not_listed', vendor_retail_price_cents bigint, platform varchar(30) NOT NULL DEFAULT 'shopify');
+        status varchar(40) NOT NULL DEFAULT 'not_listed', vendor_retail_price_cents bigint, platform varchar(30) NOT NULL DEFAULT 'shopify',
+        -- Production's column (the cost-change actions read it since step 1 plan S2-5 review MC1: a re-sent listing with
+        -- an eBay id is still live).
+        external_listing_id varchar(255));
+      -- The audit trail (0086): the listing action views read a recheck's record from it.
+      CREATE TABLE dropship.dropship_audit_events (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        vendor_id integer, store_connection_id integer, entity_type varchar(80) NOT NULL, entity_id varchar(255),
+        event_type varchar(120) NOT NULL, actor_type varchar(40) NOT NULL DEFAULT 'system', actor_id varchar(255),
+        severity varchar(20) NOT NULL DEFAULT 'info', payload jsonb, created_at timestamptz NOT NULL DEFAULT now());
+      -- The completed push's sync event names the price it published (dropship-listing-push-worker.repository completeItem).
+      CREATE TABLE dropship.dropship_listing_sync_events (id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+        listing_id integer NOT NULL REFERENCES dropship.dropship_vendor_listings(id), event_type varchar(80) NOT NULL,
+        source varchar(40) NOT NULL, payload jsonb, created_at timestamptz NOT NULL DEFAULT now());
       INSERT INTO dropship.dropship_vendors (business_name, status)
         VALUES ('Shellz Vendor', 'active'), ('Paused Vendor', 'paused'), ('Closed Vendor', 'closed');
       -- A first product nobody lists, so the listed product's id (2) differs from every size's id (1-3): a read that
@@ -95,6 +107,10 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
       INSERT INTO dropship.dropship_pricing_profile_revisions (vendor_id, store_connection_id, profile, created_at) VALUES
         (1, 2, '{"defaultRecipe":{"basis":"product_cost","markupBps":4000,"flatCents":0,"rounding":"cent"},"groups":[]}', '2026-09-01T00:00:00Z');
       INSERT INTO dropship.dropship_pricing_profiles (store_connection_id, vendor_id, revision_id) VALUES (2, 1, 1);
+      -- Listing 1 was pushed at $8.50 and then at $8.99; a later failed push names a price nothing published.
+      INSERT INTO dropship.dropship_listing_sync_events (listing_id, event_type, source, payload) VALUES
+        (1, 'listing_push_completed', 'dropship_worker', '{"priceCents":850}'), (1, 'listing_push_completed', 'dropship_worker', '{"priceCents":899}'),
+        (1, 'listing_push_failed', 'dropship_worker', '{"priceCents":1500}');
     `));
     // 0738 and 0739 hold the product and category listing settings loadVendorFacts reads (PR 8b); their owner
     // FKs reference the store connections' (id, vendor_id) key above.
@@ -361,8 +377,10 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
     expect(await actions.costInForce({ vendorId: 1, productVariantIds: [1, 2, 3], now: AFTER })).toEqual(new Map([[1, 999], [2, 7_999]]));
 
     const facts = await actions.loadVendorFacts({ vendorId: 1, productVariantIds: [1] });
-    expect(facts.listings.map((listing) => [listing.listingId, listing.storeConnectionId, listing.status, listing.vendorRetailPriceCents, listing.variantSku])).toEqual([
-      [1, 1, "active", 899, "ARM-ENV-SGL-P50"], [3, 2, "queued", null, "ARM-ENV-SGL-P50"],
+    expect(facts.listings.map((listing) => [listing.listingId, listing.storeConnectionId, listing.status, listing.vendorRetailPriceCents, listing.variantSku,
+      listing.publishedPriceCents])).toEqual([
+      // The newest completed push's price; a listing with none on record has none.
+      [1, 1, "active", 899, "ARM-ENV-SGL-P50", 899], [3, 2, "queued", null, "ARM-ENV-SGL-P50", null],
     ]);
     expect(facts.savedPrices).toEqual([{ storeConnectionId: 2, productVariantId: 1, overridePriceCents: null, pricingMode: "rules" }]);
     expect(facts.profiles.get(2)?.profile?.defaultRecipe.basis).toBe("product_cost");

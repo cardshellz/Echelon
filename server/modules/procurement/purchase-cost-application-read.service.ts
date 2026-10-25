@@ -1,10 +1,11 @@
+import { proveNoInventoryEffect } from "../inventory/domain/no-inventory-effect";
 import { isHistoricalCostIssue } from "@shared/procurement/cost-posting-status";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { reconciliationPostingSchema } from "@shared/procurement/cost-reconciliation";
 import { unresolvedCostQuantitySchema } from "@shared/procurement/cost-source-contracts";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { costComponentSchema, costIssueSchema, costSourceRevisionSchema, type CostIssue } from "@shared/procurement/cost-source-contracts";
+import { costComponentSchema, costInventoryEffectProofSchema, costIssueSchema, costSourceRevisionSchema, type CostIssue } from "@shared/procurement/cost-source-contracts";
 import { appliedCostBalanceSnapshotSchema, costBalanceSnapshotSchema, purchaseCostApplicationHistorySchema, isPurchaseCostResolutionVerified, purchaseCostCurrentResolutionSchema, purchaseCostResolutionPostingSchema, type PurchaseCostApplicationHistory } from "@shared/procurement/purchase-cost-applications";
 
 const id = z.number().int().positive().safe();
@@ -19,7 +20,7 @@ export const purchaseCostApplicationReadSchema = z.object({
     contract: z.unknown(), sourceEvidence: z.unknown().optional(), recordedBy: z.string(), recordedAt: date,
   })),
   applications: z.array(z.object({
-    id, sourceRevisionId: id, status: state, result: z.unknown(), recordedBy: z.string(), recordedAt: date,
+    id, sourceRevisionId: id, status: state, result: z.unknown(), noInventoryEffectEvidence: z.unknown().optional(), recordedBy: z.string(), recordedAt: date,
   })),
   lotChanges: z.array(z.object({
     applicationId: id, lotId: id, before: z.unknown(), after: z.unknown(),
@@ -35,6 +36,7 @@ export const purchaseCostApplicationReadSchema = z.object({
   reportingEvents: z.array(z.object({
     id, applicationId: id, contractVersion: integer.positive(), recordedAt: date,
     historicalCostAdjustments: z.unknown().optional(), unresolvedQuantities: z.unknown().optional(),
+    inventoryEffectProof: z.unknown().optional(),
     sourceRevisionId: z.unknown(), sourceFingerprint: z.unknown(), component: z.unknown(), currency: z.unknown(), cogsDeltaCents: z.unknown(), payloadContractVersion: z.unknown(), changeCount: integer.nonnegative().nullable(),
   })),
 });
@@ -43,6 +45,7 @@ export type PurchaseCostApplicationRead = z.infer<typeof purchaseCostApplication
 const recordedResultSchema = z.object({
   status: state,
   lotsUpdated: integer.nonnegative(), cogsRowsUpdated: integer.nonnegative(), totalCogsDeltaCents: integer,
+  inventoryEffectProof: z.unknown().optional(),
   issues: z.array(costIssueSchema),
 });
 
@@ -155,20 +158,37 @@ export function projectPurchaseCostApplications(input: PurchaseCostApplicationRe
         id: posting.id, approvalId: posting.approvalId, destination: posting.destination,
         beforeMills: posting.beforeMills, afterMills: posting.afterMills, deltaMills: posting.deltaMills,
       }))) && postings.every((posting) => posting.sourceRevisionId === row.id)
-        && (postings.length === 0 || (row.component === "landed" && source?.currency === "USD"));
+        && (postings.length === 0 || source?.currency === "USD");
       const unresolved = unresolvedCostQuantitySchema.array().safeParse(event?.unresolvedQuantities ?? []);
       const unresolvedMatch = unresolved.success && canonicalJson(unresolved.data) === canonicalJson(retainedQuantityReview && result.success
         ? result.data.issues.map((problem) => problem.unresolvedQuantity) : []);
+      const proof = costInventoryEffectProofSchema.safeParse(result.success ? result.data.inventoryEffectProof : undefined);
+      const eventProof = costInventoryEffectProofSchema.safeParse(event?.inventoryEffectProof);
+      const hasInventoryEffect = source?.inventoryEffect !== undefined;
+      const retainedProof = source?.inventoryEffect ? proveNoInventoryEffect(source, application.noInventoryEffectEvidence).proof : null;
+      const inventoryEffectVerified = hasInventoryEffect && retainedProof !== null && proof.success && eventProof.success && result.success
+        && proof.data.purchaseOrderLineId === row.purchaseOrderLineId
+        && canonicalJson(proof.data.inventoryEffect) === canonicalJson(source!.inventoryEffect)
+        && canonicalJson(proof.data) === canonicalJson(eventProof.data)
+        && canonicalJson(proof.data) === canonicalJson(retainedProof)
+        && application.status === "applied" && result.data.status === "applied" && result.data.issues.length === 0
+        && result.data.lotsUpdated === 0 && result.data.cogsRowsUpdated === 0 && result.data.totalCogsDeltaCents === 0
+        && changes.length === 0 && postings.length === 0 && unresolved.success && unresolved.data.length === 0;
+      const inventoryEffectConsistent = hasInventoryEffect ? inventoryEffectVerified
+        : (!result.success || result.data.inventoryEffectProof == null) && event?.inventoryEffectProof == null;
+      if (!inventoryEffectConsistent) problems.push(issue("COST_INVENTORY_EFFECT_UNVERIFIED",
+        "The recorded return has no matching proof of zero inventory and sold-cost effect. Review its preserved source and application evidence."));
       const eventOutcomeAllowed = application.status === "applied" || retainedQuantityReview || (historicalLineageReview && postings.length > 0);
       const validEvent = event !== undefined && events.length === 1 && eventOutcomeAllowed && result.success && source !== null
         && result.data.status === application.status
         && event.contractVersion === 1 && event.payloadContractVersion === 1 && event.changeCount === changes.length && event.sourceRevisionId === row.id && event.sourceFingerprint === row.fingerprint
         && event.component === row.component && event.currency === source.currency && event.cogsDeltaCents === result.data.totalCogsDeltaCents
-        && postingsMatch && unresolvedMatch;
+        && postingsMatch && unresolvedMatch && inventoryEffectConsistent;
       if ((application.status === "applied" || retainedQuantityReview || postings.length > 0 || events.length > 0) && !validEvent) problems.push(issue("COST_REPORTING_EVENT_UNVERIFIED", "The internal reporting event is missing, unsupported or inconsistent with this application."));
       return {
         id: application.id, status: application.status, latestRecordedApplication: application.id === latestApplicationId,
         recordedBy: application.recordedBy, recordedAt: application.recordedAt,
+        ...(inventoryEffectVerified && validEvent && problems.length === 0 ? { inventoryEffect: source!.inventoryEffect } : {}),
         evidenceState: problems.length === 0 ? "verified_record" as const : "review_required" as const,
         issues: problems,
         outcome: result.success ? { lotsUpdated: result.data.lotsUpdated, cogsRowsUpdated: result.data.cogsRowsUpdated, totalCogsDeltaCents: result.data.totalCogsDeltaCents } : null,
@@ -182,7 +202,7 @@ export function projectPurchaseCostApplications(input: PurchaseCostApplicationRe
     const latestApplication = applications.find((application) => application.id === latestApplicationId);
     // An approval resolves the current source, never rewrites an older source or
     // claims that an earlier failed attempt performed the later posting.
-    const currentResolution = candidate && source?.component === "landed" && source.scope.kind === "shipment_line"
+    const currentResolution = candidate && source
       && source.currency === "USD" && source.issue === null && ["estimated", "confirmed"].includes(source.evidence)
       && source.totalMills !== null && candidate.postedMills <= source.totalMills
       && row.revision === latestRevision.get(revisionKey(row)) && candidate.sourceFingerprint === row.fingerprint

@@ -13,12 +13,17 @@ function feature(label, tests, harnesses, shards = 1) {
 
 export const DROPSHIP_BROWSER_FEATURES = Object.freeze({
   listings: feature("Catalog and listing settings", [
-    "dropship-policy-catalog-steps", "dropship-policy-listing-access",
+    "dropship-policy-catalog-steps", "dropship-policy-catalog-choose", "dropship-policy-listing-access",
     "dropship-policy-listing-settings-bulk", "dropship-policy-listing-settings-categories",
     "dropship-policy-listing-settings-convert",
     "dropship-policy-listing-settings-drawer", "dropship-policy-listing-settings-prices",
     "dropship-policy-listing-settings-step", "dropship-policy-listing-settings-updated",
   ], ["dropship-catalog"], 3),
+  // Step 1 plan S2-5 (TESTS18): the journeys of choosing, publishing and ending at scale, so `listings` keeps its size.
+  // PR A adds the first spec; B and C add theirs. One harness (the Catalog page's), one shard until there are more specs.
+  "catalog-scale": feature("Catalog choose, publish and end at scale", [
+    "dropship-policy-catalog-publish-runs",
+  ], ["dropship-catalog"]),
   "cost-changes": feature("Cost change notices", [
     "dropship-policy-cost-changes", "dropship-policy-cost-changes-portal",
   ], ["dropship-cost-change-policy", "dropship-cost-changes"]),

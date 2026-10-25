@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { createPurchasingService } from "../../purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -10,10 +11,7 @@ import { createPurchasingService } from "../../purchasing.service";
 
 function sqlToStr(query: any): string {
   if (Array.isArray(query?.queryChunks)) {
-    return query.queryChunks
-      .map((chunk: any) => (Array.isArray(chunk.value) ? chunk.value.join("") : ""))
-      .join(" ")
-      .toLowerCase();
+    return new PgDialect().sqlToQuery(query).sql.toLowerCase();
   }
   return String(query?.sql ?? query ?? "").toLowerCase();
 }
@@ -26,6 +24,9 @@ function shipmentReceiptDbRows(input: {
 } = {}) {
   return vi.fn(async (query: any) => {
     const text = sqlToStr(query);
+    if (text.includes("with purchase_lines as materialized")) return { rows: [{ observations: [], acceptances: [], unidentifiedAcceptances: [] }] };
+    if (text.includes("custody_rows as materialized")) return { rows: [{ receivingLines: input.coverage ?? [],
+      postedReceipts: input.poPostings ?? [], reversals: input.reversals ?? [], custodyObservations: [], custodyAcceptances: [] }] };
     if (text.includes("rl.units_per_variant_snapshot")) return { rows: input.coverage ?? [] };
     if (text.includes("from procurement.po_receipts") && !text.includes("as line_count")) return { rows: input.poPostings ?? [] };
     if (text.includes("from procurement.receipt_reversals")) return { rows: input.reversals ?? [] };
@@ -91,7 +92,7 @@ function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, 
     deleteReceivingOrder: vi.fn().mockResolvedValue(true),
     ...overrides,
   };
-  const svc = createPurchasingService(db, storage as any);
+  const svc = createPurchasingService(db, storage as any, { now: () => new Date("2026-07-20T12:00:00Z") });
   return { svc, storage, captured, db, tx };
 }
 
@@ -118,7 +119,7 @@ describe("createReceiptFromShipment", () => {
       productVariantId: 471, purchaseOrderLineId: 229, inboundShipmentLineId: 2, unitsPerVariantSnapshot: 50, expectedQty: 3, unitCostMills: 7867, unitCost: 79,
     });
     expect(db.transaction).toHaveBeenCalledOnce();
-    expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx);
+    expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx, new Date("2026-07-20T12:00:00Z"));
     expect(storage.createReceivingOrder).toHaveBeenCalledWith(expect.any(Object), tx);
     expect(storage.bulkCreateReceivingLines).toHaveBeenCalledWith(expect.any(Array), tx);
     expect(storage.deleteReceivingOrder).not.toHaveBeenCalled();
@@ -635,8 +636,9 @@ describe("createReceiptFromShipment source serialization", () => {
     const originalExecute = tx.execute.getMockImplementation()!;
     tx.execute.mockImplementation(async (query: any) => {
       if (sqlToStr(query).includes("rl.units_per_variant_snapshot")) {
-        return { rows: [{ id: 600, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed",
-          purchaseOrderLineId: 228, inboundShipmentLineId: 1, unitsPerVariantSnapshot: 10, receivedQty: 1, reversedQty: 0 }] };
+        return { rows: [{ receivingLines: [{ id: 600, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed",
+          purchaseOrderLineId: 228, inboundShipmentLineId: 1, unitsPerVariantSnapshot: 10, receivedQty: 1, reversedQty: 0 }],
+          postedReceipts: [], reversals: [], custodyObservations: [], custodyAcceptances: [] }] };
       }
       return originalExecute(query);
     });

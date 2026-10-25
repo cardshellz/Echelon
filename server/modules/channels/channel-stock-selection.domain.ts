@@ -4,6 +4,8 @@ import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eli
 import { stockPublicationSelectionSchema, type StockPublicationSelection } from "@shared/types/stock-publication-selection";
 import type { CatalogStockSelectionFacts } from "../catalog/catalog-stock-selection.reader";
 import { isVariantSellable } from "./ebay-listing-eligibility";
+import { archivedListingMemberSelection, isArchivedCatalogMember } from "../marketplace-listings/listing-member-lifecycle";
+import type { ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 
 export interface ChannelStockSelectionFacts {
   channelId: number;
@@ -16,6 +18,7 @@ export interface ChannelStockSelectionFacts {
   typeListingEnabled: boolean | null;
   variants: readonly {
     productVariantId: number;
+    retirement?: ListingMemberRetirement | null;
     variantIsListed: number | null;
     feed: { active: boolean; quarantined: boolean; externalVariantId: string | null; externalInventoryItemId: string | null; externalSku: string | null } | null;
     listing: { status: string | null; externalProductId: string | null; externalVariantId: string | null; externalSku: string | null } | null;
@@ -37,25 +40,30 @@ export function resolveChannelStockSelection(facts: ChannelStockSelectionFacts):
     const product = facts.catalog.product;
     const known = facts.variants.find(variant => variant.productVariantId === productVariantId);
     const jobMember = facts.latestJob?.members.find(member => member.variantId === productVariantId);
+    let listingSelected: boolean | undefined;
     const blockers: StockPublicationSelection["variants"][number]["blockers"] = [];
-    const result = (action: StockPublicationSelection["variants"][number]["action"], reason: string) => ({ productVariantId, action, reason, blockers });
+    const result = (action: StockPublicationSelection["variants"][number]["action"], reason: string) => ({ productVariantId, action, reason, blockers, listingSelected });
     if (!catalog || !product) {
       blockers.push({ code: "CHANNEL_SELECTION_CATALOG_IDENTITY_MISSING", message: "This requested variant no longer belongs to the selected catalog product. Review its saved mapping before publishing stock." });
       return result("none", "The exact catalog identity could not be established.");
     }
     const feed = known?.feed;
     const listing = known?.listing;
+    const archived = archivedListingMemberSelection({ productVariantId,
+      archived: isArchivedCatalogMember({ productActive: product.isActive, variantActive: catalog.isActive, productStatus: product.status }), retirement: known?.retirement });
+    if (archived) return archived;
     if (feed?.quarantined) blockers.push({ code: "CHANNEL_SELECTION_MAPPING_QUARANTINED", message: "This channel mapping is quarantined. Review or repair its provider identity before publishing stock." });
     const hasSavedIdentity = Boolean(feed && (feed.externalInventoryItemId || feed.externalVariantId || feed.externalSku))
       || Boolean(listing && (listing.externalProductId || listing.externalVariantId || listing.externalSku))
       || Boolean(jobMember && (jobMember.offerId || jobMember.listingId));
     const isEbay = facts.provider === "ebay";
-    const selected = isInventoryManagedVariant(catalog) && isVariantSellable({
+    listingSelected = isVariantSellable({
       productActive: product.isActive, variantActive: catalog.isActive, salesEligibility: catalog.salesEligibility,
       productOverrideIsListed: facts.productIsListed, variantOverrideIsListed: known?.variantIsListed,
       ...(isEbay ? { productExcluded: product.ebayListingExcluded, variantExcluded: catalog.ebayListingExcluded,
         typeListingEnabled: facts.typeListingEnabled } : {}),
     }) && (isEbay || product.status === "active");
+    const selected = isInventoryManagedVariant(catalog) && listingSelected;
     const withdrawing = isEbay && jobMember && facts.latestJob?.operation === "withdraw"
       && facts.latestJob.state !== "completed";
     const withdrawn = facts.latestJob?.verifiedMembers.find(member => member.variantId === productVariantId);

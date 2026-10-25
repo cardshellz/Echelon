@@ -281,9 +281,9 @@ describe("oms-flow-reconciliation.service", () => {
     warn.mockRestore();
   });
 
-  it("treats refunded OMS financial status as final for WMS reconciliation", () => {
+  it("uses the scoped commercial cancellation owner for financial-finality reconciliation", () => {
     const refundedFinancialStatusGuards = OMS_FLOW_RECONCILIATION_SRC.match(
-      /oo\.financial_status = 'refunded'/g,
+      /omsWarehouseCancellationSql\("oo"/g,
     ) ?? [];
 
     expect(refundedFinancialStatusGuards.length).toBeGreaterThanOrEqual(5);

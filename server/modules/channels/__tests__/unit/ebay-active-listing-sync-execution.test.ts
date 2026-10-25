@@ -6,6 +6,8 @@ import type { EbayRegistrationReadTransport } from "../../../marketplace-listing
 import { captureExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
 import { syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
 
+type BindProviderIdentity = NonNullable<Parameters<EbayListingSyncExecution["execute"]>[3]>;
+
 const fixture = vi.hoisted(() => ({
   execution: null as EbayListingSyncExecution | null,
   rows: [] as Array<Record<string, unknown>>,
@@ -40,9 +42,17 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
   } },
 }));
 vi.mock("../../infrastructure/ebay-listing-client", () => ({ createEbayRouteListingLifecycleClient: () => fixture.client, getExistingEbayListingPhotos: vi.fn() }));
+// Policy persistence/catalog validation has real PostgreSQL/provider coverage in
+// ebay-business-policies.integration and ebay-policy-publication.integration.
+vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: {
+  resolveProductPolicies: async (input: { variantIds: number[]; expectedScope: unknown }) => {
+    const policies = { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" };
+    return { scope: input.expectedScope, product: policies, byVariantId: new Map(input.variantIds.map(id => [id, { ...policies }])) };
+  },
+} }));
 vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
   ...await importOriginal<typeof import("../../infrastructure/ebay-listing-helpers")>(),
-  resolveChannelPrice: async () => 1000, delay: async () => {},
+  resolveChannelPriceResolution: async (_db: unknown, _channelId: number, _productId: number, variantId: number) => ({ priceCents: 1000, basePriceCents: 1000, source: "catalog_variant", provenance: { kind: "catalog_variant", variantId }, appliedRule: null }), delay: async () => {},
 }));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () => {
   const { EbayMarketplaceRegistrationObserver } = await import("../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer");
@@ -114,13 +124,42 @@ beforeEach(() => {
   fixture.inventoryReady.mockClear();
 });
 function executionContext(): EbayListingExecutionContext {
-  return { jobId: "a949682e-6690-4749-a6f7-c0bba463cd20", requestedBy: "operator", operation: "sync",
+  return { persistPreparedIntent: async () => {}, jobId: "a949682e-6690-4749-a6f7-c0bba463cd20", requestedBy: "operator", operation: "sync",
     publicationTarget: null, bindPublicationTarget: async () => {}, publicationAccepted: null,
     publicationWriteCompleted: false, publicationWriteStarted: false, publicationAcceptedRevision: null,
     publicationIntentHash: null, claimedRevision: "1", bindPublicationAccepted: async () => {} };
 }
 
 describe("production existing-listing prepare through verified completion", () => {
+  it("preserves an archived unpublished SKU still present in the remote group without preparing its stock or writing its content", async () => {
+    const example = cases[0];
+    const f = provider(example);
+    const archivedSku = "SAVED-ARCHIVED-SKU";
+    fixture.rows.push({ ...fixture.rows[0], variant_id: 900, variant_sku: "RENAMED-ARCHIVED",
+      variant_is_active: false, external_sku: archivedSku, external_variant_id: "archived-offer", external_product_id: null });
+    const group = (await f.client.getInventoryItemGroup(example.group))!;
+    f.setGroup({ ...group, variantSKUs: [...group.variantSKUs!, archivedSku],
+      variesBy: { specifications: [{ name: "Pack Size", values: [...example.suffixes, "Archived size"] }] } });
+    const get = fixture.transport!.get;
+    fixture.transport!.get = vi.fn(async request => {
+      const url = new URL(request.path, "https://api.ebay.com");
+      if (url.pathname.endsWith(`/inventory_item/${archivedSku}`)) return { status: 200, body: { sku: archivedSku, groupIds: [example.group] } };
+      if (url.pathname.endsWith("/offer") && url.searchParams.get("sku") === archivedSku)
+        return { status: 200, body: { offers: [{ sku: archivedSku, marketplaceId: "EBAY_US", offerId: "archived-offer", status: "UNPUBLISHED" }], total: 1 } };
+      return get(request);
+    });
+    const { identity: source } = await readExistingEbayListingMappingIdentity(example.productId);
+    const binding = vi.fn<BindProviderIdentity>(async () => {});
+    const result = await fixture.execution!.execute(source, async (_key, _hash, work) => work(), null, binding, executionContext());
+    expect(result).toMatchObject({ synced: 2, errors: 0 });
+    expect(binding.mock.calls[0][0].retainedGroupSkus).toEqual([archivedSku]);
+    expect(f.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledWith(example.group,
+      expect.objectContaining({ variantSKUs: expect.arrayContaining([archivedSku, ...f.source.variants.map(member => member.sku)]) }));
+    expect(vi.mocked(f.client.createOrReplaceInventoryItem).mock.calls.map(([sku]) => sku)).toEqual(f.source.variants.map(member => member.sku));
+    expect(fixture.inventoryReady).toHaveBeenCalledWith({}, expect.objectContaining({
+      variants: f.source.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku })),
+    }), expect.any(Object));
+  });
   it("updates the 260PT pictures without reintroducing its retired unpublished C200 and replays after completion loss", async () => {
     const example = { productId: 4, catalog: "SHLZ-TOP-260PT", group: "SHLZ-TOP-260PT", suffixes: ["P10", "C500"],
       ids: [7, 8], listing: "298148234050", offers: ["136406522011", "136406525011"] };
@@ -138,13 +177,20 @@ describe("production existing-listing prepare through verified completion", () =
     });
     const { identity: source } = await readExistingEbayListingMappingIdentity(4);
     const beforeRows = structuredClone(fixture.rows);
-    const binding = vi.fn(async () => {});
+    const binding = vi.fn<BindProviderIdentity>(async () => {});
     const result = await fixture.execution!.execute(source, async (_stage, _hash, work) => work(), null, binding, executionContext());
     expect(result).toMatchObject({ synced: 2, errors: 0 });
     expect(result.details.map(detail => detail.variantId)).toEqual([7, 8]);
     expect(binding).toHaveBeenCalledWith(expect.objectContaining({ variants: [expect.objectContaining({ variantId: 7 }), expect.objectContaining({ variantId: 8 })] }),
-      expect.objectContaining({ evidence: expect.objectContaining({ nonMemberCandidates: [expect.objectContaining({ sku: retiredSku })] }) }),
+      expect.objectContaining({ members: [expect.objectContaining({ sku: "SHLZ-TOP-260PT-C500" }), expect.objectContaining({ sku: "SHLZ-TOP-260PT-P10" })] }),
       expect.objectContaining({ variants: expect.arrayContaining([expect.objectContaining({ variantId: 208, contentSyncEnabled: false })]) }));
+    const [, observation, sourceIdentity] = binding.mock.calls[0];
+    expect(sourceIdentity).toEqual(source);
+    expect(fixture.inventoryReady).toHaveBeenCalledExactlyOnceWith({}, {
+      channelId: 67, connectionId: 12, accountId: "seller", environment: "production", productId: 4, purpose: "sync",
+      variants: [{ productVariantId: 7, sku: "SHLZ-TOP-260PT-P10" }, { productVariantId: 8, sku: "SHLZ-TOP-260PT-C500" }],
+    }, { commandKey: executionContext().jobId, actor: "operator", now: expect.any(Date),
+      verifiedListing: { sourceIdentity, observation } });
     expect(f.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledExactlyOnceWith(example.group,
       expect.objectContaining({ variantSKUs: ["SHLZ-TOP-260PT-P10", "SHLZ-TOP-260PT-C500"] }));
     expect(vi.mocked(f.client.createOrReplaceInventoryItem).mock.calls.map(([sku]) => sku)).toEqual(["SHLZ-TOP-260PT-P10", "SHLZ-TOP-260PT-C500"]);
@@ -176,17 +222,29 @@ describe("production existing-listing prepare through verified completion", () =
       imageUrls: ["https://example.com/deleted-old-photo.png"], variesBy: { specifications: [{ name: "Style", values: styles }] } });
     const retainedBefore = structuredClone(f.items.get("SHLZ-TOP-TOB-C1000"));
     const stages: string[] = [];
-    const binding = vi.fn(async () => {});
+    const binding = vi.fn<BindProviderIdentity>(async () => {});
     const result = await fixture.execution!.execute(legacyIdentity, async (stage, _hash, work) => { stages.push(stage); return work(); }, null, binding, executionContext());
     expect(result).toMatchObject({ synced: 1, errors: 0 });
     expect(binding).toHaveBeenCalledWith(expect.objectContaining({ variants: [
       expect.objectContaining({ sku: "SHLZ-TOP-TOB-P25", contentSyncEnabled: true }),
-      expect.objectContaining({ sku: "SHLZ-TOP-TOB-C1000", contentSyncEnabled: false }),
-    ] }), expect.any(Object), expect.any(Object));
+    ], retainedGroupSkus: ["SHLZ-TOP-TOB-C1000"] }), expect.any(Object), expect.any(Object));
+    const [, observation, sourceIdentity] = binding.mock.calls[0];
+    expect(sourceIdentity).toEqual({ ...f.source, variants: f.source.variants.map((member, index) => ({
+      ...member, contentSyncEnabled: index === 0, catalogArchived: index !== 0, mappingExists: true,
+    })) });
+    expect(observation).toMatchObject({
+      providerAccount: { provider: "ebay", accountNamespace: "production", externalAccountId: "seller" },
+      marketplaceId: "EBAY_US", isPublished: true, observedAt: new Date("2026-10-09T20:00:00Z"),
+      listingIdentity: { externalId: example.listing }, publicationKeyIdentity: { externalId: example.group },
+      members: [0].map(index => ({ sku: f.source.variants[index].sku,
+        inventoryItemIdentity: { externalId: f.source.variants[index].sku },
+        offerIdentity: { externalId: example.offers[index] } })),
+    });
     expect(fixture.inventoryReady).toHaveBeenCalledExactlyOnceWith({}, {
       channelId: 67, connectionId: 12, accountId: "seller", environment: "production", productId: 1, purpose: "sync",
-      variants: [{ productVariantId: 1, sku: "SHLZ-TOP-TOB-P25" }, { productVariantId: 2, sku: "SHLZ-TOP-TOB-C1000" }],
-    }, { commandKey: executionContext().jobId, actor: "operator", now: expect.any(Date) });
+      variants: [{ productVariantId: 1, sku: "SHLZ-TOP-TOB-P25" }],
+    }, { commandKey: executionContext().jobId, actor: "operator", now: expect.any(Date),
+      verifiedListing: { sourceIdentity, observation } });
     expect(binding.mock.invocationCallOrder[0]).toBeLessThan(fixture.inventoryReady.mock.invocationCallOrder[0]);
     expect(fixture.inventoryReady.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(f.client.createOrReplaceInventoryItem).mock.invocationCallOrder[0]);
     expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledExactlyOnceWith("SHLZ-TOP-TOB-P25", expect.objectContaining({
@@ -197,6 +255,8 @@ describe("production existing-listing prepare through verified completion", () =
       variesBy: expect.objectContaining({ specifications: [{ name: "Style", values: styles }] }),
     }));
     expect(f.items.get("SHLZ-TOP-TOB-C1000")).toEqual(retainedBefore);
+    expect(f.client.getInventoryItem).not.toHaveBeenCalledWith("SHLZ-TOP-TOB-C1000");
+    expect(f.client.getOffers).not.toHaveBeenCalledWith("SHLZ-TOP-TOB-C1000", "EBAY_US");
     expect(stages).toContain("verification");
     expect(f.client.createOffer).not.toHaveBeenCalled();
     expect(f.client.publishOffer).not.toHaveBeenCalled();
@@ -225,14 +285,13 @@ describe("production existing-listing prepare through verified completion", () =
     expect(fixture.transport!.get).not.toHaveBeenCalled();
     expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
   });
-  it.each(cases)("uses the same provider identity reader for product $productId preview, including disabled members", async example => {
+  it.each(cases)("uses the same provider identity reader for product $productId preview, retaining archived group topology", async example => {
     const { source, client } = provider(example);
     fixture.rows[1].variant_is_active = false;
     const identity = await readExistingEbayListingIdentityForProduct(example.productId);
     expect(identity).toMatchObject({ groupKey: example.group, variants: [
       expect.objectContaining({ variantId: example.ids[0], sku: source.variants[0].sku }),
-      expect.objectContaining({ variantId: example.ids[1], sku: source.variants[1].sku, contentSyncEnabled: false }),
-    ] });
+    ], retainedGroupSkus: [source.variants[1].sku] });
     expect(fixture.photoRequests).toEqual([]);
     expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
     expect(client.updateOffer).not.toHaveBeenCalled();

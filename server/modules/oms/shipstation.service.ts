@@ -13,6 +13,9 @@
 import { eq, and, sql } from "drizzle-orm";
 import { z } from "zod";
 import { OrderEditError } from "../order-edits/domain/order-edit-error";
+import type { ChannelMerchandiseCapabilityReader } from "./infrastructure/channel-merchandise-policy";
+import { verifyRefundedChannelMerchandise } from "./channel-merchandise-dispatch.service";
+import type { ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
 import { CountryCodeValidationError, requireCountryCode } from "@shared/country-code";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 // Preserve existing callers while sharing the pure normalizer with returns.
@@ -301,6 +304,7 @@ export interface WmsOrderRow {
   financial_status?: string | null;
   cancelled_at?: Date | string | null;
   order_edit_operation_id?: string | null;
+  on_hold?: number;
   sort_rank: string | null;
   customer_name: string | null;
   customer_email: string | null;
@@ -804,6 +808,8 @@ export function createShipStationService(
   db: any,
   inventoryCore?: ShipStationInventoryRecorder,
   dependencies: {
+    useChannelMerchandise?: ChannelMerchandiseCapabilityReader;
+    readChannelMerchandise?: (input: { channelId: number; orderId: string }) => Promise<ShopifyMerchandiseSnapshot>;
     providerLabelObserver?: ShippingProviderLabelObserver;
     relatedLabelReader?: ShipStationRelatedLabelReader;
     fulfillmentAuthority?: ChannelFulfillmentAuthorityService;
@@ -2685,6 +2691,7 @@ export function createShipStationService(
 
   async function getOmsFinalOrderBlockerForShipmentPush(
     omsFulfillmentOrderId: string | null | undefined,
+    verifiedRefundMerchandise = false,
   ): Promise<ShipmentPushOmsBlocker> {
     if (!omsFulfillmentOrderId || !/^[1-9][0-9]*$/.test(omsFulfillmentOrderId)) {
       return {
@@ -2697,7 +2704,7 @@ export function createShipStationService(
     }
 
     const result: any = await db.execute(sql`
-      SELECT status, fulfillment_status, financial_status
+      SELECT status, fulfillment_status, financial_status, channel_id
       FROM oms.oms_orders
       WHERE id = ${Number(omsFulfillmentOrderId)}
       LIMIT 1
@@ -2717,7 +2724,10 @@ export function createShipStationService(
       };
     }
 
-    if (status === "refunded" || financialStatus === "refunded" || financialStatus === "voided") {
+    if (financialStatus === "refunded" && status !== "refunded" && !verifiedRefundMerchandise)
+      verifiedRefundMerchandise = await verifyRefundedChannelMerchandise(db, Number(omsFulfillmentOrderId), "dispatch",
+        { usesChannelMerchandise: dependencies.useChannelMerchandise, readSnapshot: dependencies.readChannelMerchandise });
+    if (status === "refunded" || (financialStatus === "refunded" && !verifiedRefundMerchandise) || financialStatus === "voided") {
       return {
         blocked: true,
         reason: "oms_refunded",
@@ -2755,7 +2765,7 @@ export function createShipStationService(
     financialStatus: string | null;
   }> {
     const result: any = await db.execute(sql`
-      SELECT status, financial_status
+      SELECT status, financial_status, channel_id
       FROM oms.oms_orders
       WHERE id = ${omsOrderId}
       LIMIT 1
@@ -2773,7 +2783,10 @@ export function createShipStationService(
       };
     }
 
-    if (financialStatus === "refunded" || financialStatus === "voided") {
+    const verifiedRefundMerchandise = financialStatus === "refunded"
+      && await verifyRefundedChannelMerchandise(db, omsOrderId, "observation",
+        { usesChannelMerchandise: dependencies.useChannelMerchandise, readSnapshot: dependencies.readChannelMerchandise });
+    if ((financialStatus === "refunded" && !verifiedRefundMerchandise) || financialStatus === "voided") {
       return {
         blocked: true,
         reason: "shipstation_shipped_after_refund",
@@ -4695,10 +4708,10 @@ export function createShipStationService(
    * the original provider hold before mutation, and never creates a new label.
    */
   async function synchronizeOrderEditShipment(input: {
-    shipmentId: number; operationId: string; mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped" | "release_unsubmitted";
+    shipmentId: number; operationId: string; mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped" | "verify_cancelled" | "verify_retired" | "release_unsubmitted";
   }): Promise<void> {
     z.object({ shipmentId: z.number().int().positive(), operationId: z.string().uuid(),
-      mode: z.enum(["hold", "verify", "synchronize", "release", "verify_shipped", "release_unsubmitted"]) }).strict().parse(input);
+      mode: z.enum(["hold", "verify", "synchronize", "release", "verify_shipped", "verify_cancelled", "verify_retired", "release_unsubmitted"]) }).strict().parse(input);
     const providerSchema = z.object({ orderId: z.number().int().positive(), orderNumber: z.string().min(1), orderStatus: z.string(),
       items: z.array(z.object({ lineItemKey: z.string(), quantity: z.number().int().nonnegative() }).passthrough()) }).passthrough();
     const itemSchema = z.object({ id: z.number().int().positive(), qty: z.number().int().positive(),
@@ -4734,7 +4747,7 @@ export function createShipStationService(
         WHERE os.id=${input.shipmentId} FOR UPDATE OF os`);
       const row = headerSchema.parse(result.rows?.[0]);
       if (row.order_edit_operation_id !== input.operationId || (input.mode !== "release_unsubmitted" && (row.requires_review ||
-        (input.mode === "verify_shipped" ? row.warehouse_status !== "shipped" : !["planned", "queued", "on_hold"].includes(row.status))))) {
+        (input.mode === "verify_shipped" ? row.warehouse_status !== "shipped" : input.mode === "verify_cancelled" ? row.warehouse_status !== "cancelled" || !["cancelled", "voided"].includes(row.status) : input.mode === "verify_retired" ? !["cancelled", "voided"].includes(row.status) || !["ready", "cancelled"].includes(row.warehouse_status) : !["planned", "queued", "on_hold"].includes(row.status))))) {
         throw new OrderEditError("ORDER_EDIT_SHIPMENT_CHANGED", "The shipment is no longer held by this editable operation.");
       }
       // A timed-out push may have created a remote order before its identity
@@ -4742,9 +4755,10 @@ export function createShipStationService(
       if (row.provider_order_id === null) throw new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_UNVERIFIED", "Wait for the warehouse shipment to finish linking to ShipStation before editing this order.");
       return { ...row, provider_order_id: row.provider_order_id };
     }
-    async function readProvider(providerOrderId: number, fulfilled = false) {
+    async function readProvider(providerOrderId: number, terminal?: "shipped" | "cancelled") {
+      const fulfilled = terminal === "shipped";
       const live = providerSchema.parse(await apiRequest<unknown>("GET", `/orders/${providerOrderId}`));
-      if (live.orderId !== providerOrderId || (fulfilled ? live.orderStatus !== "shipped" : !["awaiting_shipment", "on_hold"].includes(live.orderStatus))) {
+      if (live.orderId !== providerOrderId || (terminal ? live.orderStatus !== terminal : !["awaiting_shipment", "on_hold"].includes(live.orderStatus))) {
         throw new OrderEditError("ORDER_EDIT_PROVIDER_NOT_EDITABLE", "ShipStation no longer reports an editable shipment.");
       }
       // Provider splits can acquire a different orderId while keeping the
@@ -4756,6 +4770,12 @@ export function createShipStationService(
       }
       const related = z.object({ orders: z.array(z.object({ orderId: z.number().int().positive(), orderNumber: z.string(), orderStatus: z.string() }).passthrough()),
         pages: z.number().int().nonnegative() }).passthrough().parse(await apiRequest<unknown>("GET", `/orders?orderNumber=${encodeURIComponent(live.orderNumber)}&page=1&pageSize=100`));
+      if (terminal === "cancelled" && input.mode !== "verify_retired") {
+        if (related.pages > 1 || !related.orders.some(order => order.orderId === live.orderId && order.orderNumber === live.orderNumber)
+          || related.orders.some(order => order.orderNumber === live.orderNumber && order.orderStatus !== "cancelled"))
+          throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_PENDING", "Every related provider shipment must be cancelled before this request can finish.");
+        return live;
+      }
       if (fulfilled) {
         // A shipped split may no longer be mapped to this old edit. All number-scoped
         // provider work must be terminal; this path never sends a hold/release mutation.
@@ -4852,7 +4872,18 @@ export function createShipStationService(
           return;
         }
         if (input.mode === "verify_shipped") {
-          await readProvider(row.provider_order_id, true);
+          await readProvider(row.provider_order_id, "shipped");
+          return;
+        }
+        if (input.mode === "verify_cancelled") {
+          await readProvider(row.provider_order_id, "cancelled");
+          return;
+        }
+        if (input.mode === "verify_retired") {
+          // A retired shipment can belong to a resumed warehouse header. Verify
+          // its remote cancellation without reopening it. Active replacements
+          // must still belong to this edit; unknown provider splits block.
+          await readProvider(row.provider_order_id, "cancelled");
           return;
         }
         const live = await readProvider(row.provider_order_id);
@@ -5577,6 +5608,7 @@ export function createShipStationService(
       financial_status: wmsOrders.financialStatus,
       cancelled_at: wmsOrders.cancelledAt,
       order_edit_operation_id: wmsOrders.orderEditOperationId,
+      on_hold: wmsOrders.onHold,
       sort_rank: wmsOrders.sortRank,
       external_order_id: wmsOrders.externalOrderId,
       customer_name: wmsOrders.customerName,
@@ -5614,10 +5646,15 @@ export function createShipStationService(
     if (orderRow.order_edit_operation_id != null) {
       throw new OrderEditError("ORDER_EDIT_PROVIDER_HELD", "This order is held for an edit; ordinary shipment pushes cannot resume it.");
     }
+    const verifiedRefundMerchandise = finalFinancialStatus === "refunded"
+      && orderRow.channel_id !== null
+      && orderRow.oms_fulfillment_order_id !== null && /^[1-9]\d*$/.test(orderRow.oms_fulfillment_order_id)
+      && await verifyRefundedChannelMerchandise(db, Number(orderRow.oms_fulfillment_order_id), "dispatch",
+        { usesChannelMerchandise: dependencies.useChannelMerchandise, readSnapshot: dependencies.readChannelMerchandise });
     if (
       orderRow.warehouse_status === "cancelled" ||
       orderRow.cancelled_at != null ||
-      finalFinancialStatus === "refunded" ||
+      (finalFinancialStatus === "refunded" && !verifiedRefundMerchandise) ||
       finalFinancialStatus === "voided"
     ) {
       throw new ShipStationPushError(
@@ -5633,6 +5670,7 @@ export function createShipStationService(
 
     const omsBlocker = await getOmsFinalOrderBlockerForShipmentPush(
       orderRow.oms_fulfillment_order_id,
+      verifiedRefundMerchandise,
     );
     if (
       omsBlocker.blocked &&
@@ -5770,7 +5808,9 @@ export function createShipStationService(
       orderKey,
       orderDate: orderDateIso,
       paymentDate: orderDateIso,
-      orderStatus: "awaiting_shipment",
+      // Completion releases only the edit hold. A manual warehouse hold still
+      // applies to a newly rebuilt provider job on its very first write.
+      orderStatus: orderRow.on_hold === 1 ? "on_hold" : "awaiting_shipment",
       customerUsername: orderRow.customer_name || "",
       customerEmail: orderRow.customer_email || `no-email+wms-${orderRow.id}@cardshellz.local`,
       billTo: {

@@ -3,7 +3,9 @@ import { isActiveRfqReservation, rfqPendingSourcingPieces } from "./domain/rfq-s
 import { z } from "zod";
 import { loadPendingPurchaseSourcingReservations } from "./rfq-sourcing-reservation.repository";
 import { loadSupplierSourcingRecords } from "./supplier-sourcing.repository";
-import { and, desc, eq, inArray, like, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { allocateDocumentNumber } from "../../platform/document-numbering/document-number.repository";
+import { documentNumberPrefix } from "../../platform/document-numbering/document-number";
 import {
   autoDraftRuns,
   poEvents,
@@ -41,7 +43,6 @@ import type {
 type Database = Pick<typeof defaultDatabase, "transaction">;
 type Transaction = Parameters<Parameters<typeof defaultDatabase.transaction>[0]>[0];
 
-const MAX_PO_NUMBER_ATTEMPTS = 10_000;
 const RECOMMENDATION_LOCK_PREFIX = "procurement:purchasing-recommendation:";
 
 function uniquePositiveIds(ids: readonly number[]): number[] {
@@ -52,22 +53,6 @@ function uniquePositiveIds(ids: readonly number[]): number[] {
 
 function uniqueNonEmptyStrings(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
-}
-
-function poNumberPrefix(numberDate: Date): string {
-  return `PO-${numberDate.toISOString().slice(0, 10).replace(/-/g, "")}-`;
-}
-
-function nextPoNumberSequence(existingPoNumbers: readonly string[], prefix: string): number {
-  let maximum = 0;
-  for (const poNumber of existingPoNumbers) {
-    if (!poNumber.startsWith(prefix)) continue;
-    const suffix = poNumber.slice(prefix.length);
-    if (!/^\d+$/.test(suffix)) continue;
-    const value = Number.parseInt(suffix, 10);
-    if (Number.isSafeInteger(value) && value > maximum) maximum = value;
-  }
-  return maximum + 1;
 }
 
 function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
@@ -295,29 +280,16 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
     },
 
     async createPurchaseOrder(values, numberDate) {
-      const prefix = poNumberPrefix(numberDate);
-      const existingRows = await tx
-        .select({ poNumber: purchaseOrders.poNumber })
-        .from(purchaseOrders)
-        .where(like(purchaseOrders.poNumber, `${prefix}%`));
-      const firstSequence = nextPoNumberSequence(
-        existingRows.map((row) => row.poNumber),
-        prefix,
-      );
-
-      for (let attempt = 0; attempt < MAX_PO_NUMBER_ATTEMPTS; attempt += 1) {
-        const sequence = firstSequence + attempt;
-        if (!Number.isSafeInteger(sequence)) break;
-        const poNumber = `${prefix}${String(sequence).padStart(3, "0")}`;
-        const [created] = await tx
-          .insert(purchaseOrders)
-          .values({ ...values, poNumber })
-          .onConflictDoNothing()
-          .returning();
-        if (created) return created as CreatedRecommendationPurchaseOrder;
-      }
-
-      throw new Error(`Unable to reserve a purchase order number for ${prefix}`);
+      // The repository transaction already holds the cost graph lock. Allocate
+      // through the same authority as manual/RFQ POs and retain its lock until
+      // this header and the rest of the handoff commit together.
+      const poNumber = await allocateDocumentNumber(tx, {
+        kind: "purchase_order",
+        prefix: documentNumberPrefix("PO", numberDate, "utc"),
+      });
+      const [created] = await tx.insert(purchaseOrders).values({ ...values, poNumber }).returning();
+      if (!created) throw new Error("Purchase order insert returned no row");
+      return created as CreatedRecommendationPurchaseOrder;
     },
 
     async createPurchaseOrderLine(values) {

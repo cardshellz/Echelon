@@ -116,7 +116,11 @@ export async function duplicateProduct(
   }
 
   // ── Create the new product: copy source fields, reset identity + sync keys ──
-  const { id: _pid, createdAt: _pc, updatedAt: _pu, ...productFields } = source as any;
+  // A new draft inherits its category/store policies. Channel-specific selections
+  // must be explicitly saved through the channel policy owner for the new identity.
+  const { id: _pid, createdAt: _pc, updatedAt: _pu,
+    ebayFulfillmentPolicyOverride: _productShipping, ebayReturnPolicyOverride: _productReturns,
+    ebayPaymentPolicyOverride: _productPayment, ...productFields } = source as any;
   const newProduct = await storage.createProduct({
     ...productFields,
     name,
@@ -134,7 +138,9 @@ export async function duplicateProduct(
   // Copy physical SKU definitions. Parent links are retired conversion controls.
   const newIdBySourceVariant = new Map<number, number>();
   for (const v of sourceVariants) {
-    const { id: _vid, createdAt: _vc, updatedAt: _vu, trackInventory: _effectiveTracking, ...variantFields } = v as any;
+    const { id: _vid, createdAt: _vc, updatedAt: _vu, trackInventory: _effectiveTracking,
+      ebayFulfillmentPolicyOverride: _variantShipping, ebayReturnPolicyOverride: _variantReturns,
+      ebayPaymentPolicyOverride: _variantPayment, ...variantFields } = v as any;
     const created = await storage.createProductVariant({
       ...variantFields,
       productId: newProduct.id,

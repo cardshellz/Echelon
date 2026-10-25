@@ -40,7 +40,8 @@ test("a bare Catalog address opens Choose, and moving between steps keeps the ve
   await expect(step(page, "choose")).toHaveAttribute("aria-current", "step");
   await expect(step(page, "choose")).toContainText("1 selected");
   await expect(page.getByRole("heading", { name: "Available catalog" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Listing preview and push" })).toHaveCount(0);
+  // Step 3's card (step 1 plan S2-5 PR A: publish runs) is only on Publish.
+  await expect(page.getByRole("heading", { name: "Check and publish" })).toHaveCount(0);
   await expect(page.getByTestId("portal-nav").getByRole("button", { name: "Catalog" })).toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("catalog-action-summary")).toHaveText("1 selected");
   // The rail's line comes from saved settings: eBay is not asked off Listing settings.
@@ -68,12 +69,14 @@ test("a bare Catalog address opens Choose, and moving between steps keeps the ve
 
   await page.getByRole("link", { name: "Next: Publish" }).click();
   await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
-  const card = page.locator("section").filter({ has: page.getByRole("heading", { name: "Listing preview and push" }) });
-  await card.getByRole("button", { name: "Preview selected" }).click();
+  const card = page.locator("section").filter({ has: page.getByRole("heading", { name: "Check and publish" }) });
+  // Step 1 plan S2-5 PR A: the optional Check previews the selection 200 sizes at a time.
+  await card.getByRole("button", { name: "Check listings" }).click();
+  await expect(card.getByTestId("publish-check-summary")).toHaveText("Checked 1: 1 ready · 0 with warnings · 0 not ready");
   await expect(card.getByText("Envelope Single Pocket, Pack of 50").first()).toBeVisible();
   await shot(page, testInfo, "catalog-step-publish");
 
-  // Leaving the step and coming back keeps the preview: nothing is asked again.
+  // Leaving the step and coming back keeps the check: nothing is asked again.
   await step(page, "choose").click();
   await expect(page.getByRole("heading", { name: "Available catalog" })).toBeVisible();
   await step(page, "publish").click();
@@ -97,7 +100,7 @@ test("Next stays off until something is selected", async ({ page }) => {
   await expect(page.getByRole("link", { name: "Next: Listing settings" })).toHaveCount(0);
   // The rail still opens any step.
   await step(page, "publish").click();
-  await expect(page.getByText("Choose items in step 1, Choose what to sell.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Choose what to sell in step 1 first.", { exact: true })).toBeVisible();
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });

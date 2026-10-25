@@ -58,7 +58,7 @@ export class PostgresEbayAutomaticPublicationRecoveryRepository implements EbayA
         if (attempt.affected_scope_keys.length === 0 || attempt.affected_scope_keys.some(key => !requested.has(key))
           || !supportsAutomaticEbayReplacement({ owner: attempt.owner_kind, outboxScopeProven: attempt.outbox_scope_proven,
             requests: receipts as SavedEbayRequestOperation[] })) {
-          return { superseded: [], unresolved: attempts.map(row => row.id), busy: false, watchId: existing?.id ?? null };
+          return { superseded: [], unresolved: attempts.map(row => row.id), busy: false, watchId: existing?.id ?? null, reviewRequired: true };
         }
         // Preserve bigint identifiers and all missing result records verbatim.
         evidence.set(attempt.id, `[${receipts.map(row => `{"request_record":${row.request_record},"result_record":${row.result_record ?? "null"}}`).join(",")}]`);

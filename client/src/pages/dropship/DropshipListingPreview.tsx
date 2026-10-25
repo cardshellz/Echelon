@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ImageOff, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import { LISTING_SETTINGS_GUARD_ID_PREFIX } from "@/lib/dropship-listing-setting
 import type { PolicySetupFacts } from "@/lib/dropship-listing-settings-words";
 import { scopeWithoutPrefix } from "@/lib/dropship-unsaved-changes";
 import { ebayCategorySourceLabel } from "@/lib/dropship-ebay-category-rules";
+import { PUBLISH_WORDS } from "@/lib/dropship-catalog-publish-words";
 import { GuardedLink, useUnsavedDrafts } from "./catalog/UnsavedChangesGuard";
 import { DropshipListingShippingEstimate } from "./DropshipListingShippingEstimate";
 
@@ -39,17 +40,36 @@ type PortalHref = (path: string) => string;
 
 const LINK_CLASS = "text-xs font-medium text-violet-700 underline-offset-2 hover:underline";
 
-export function DropshipListingPreview({ preview, stale = false, portalHref = dropshipPortalPath }: {
+/**
+ * Reads one size's full preview (its presentation) when the sheet opens on a row that came without it: step 3's Check
+ * keeps light rows (§4.10), so the sheet reads that one size again, read only (review round 2 DUX2).
+ */
+export type ListingPreviewRowDetailLoader = (productVariantId: number, signal: AbortSignal) =>
+  Promise<{ presentation?: DropshipListingPreviewRow["presentation"] } | null>;
+
+export function DropshipListingPreview({ preview, stale = false, portalHref = dropshipPortalPath, loadRowDetail }: {
   preview: DropshipListingPreviewResult;
   stale?: boolean;
   portalHref?: PortalHref;
+  loadRowDetail?: ListingPreviewRowDetailLoader;
 }) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [openVariantId, setOpenVariantId] = useState<number | null>(null);
   const current = pageListingPreviews(preview.rows, search, page);
-  const activeRow = preview.rows.find((row) => row.productVariantId === openVariantId);
+  const lightRow = preview.rows.find((row) => row.productVariantId === openVariantId);
+  const needsDetail = Boolean(lightRow && !lightRow.presentation && loadRowDetail);
+  const detail = useQuery({
+    queryKey: ["dropship-listing-preview-row-detail", preview.storeConnectionId, preview.generatedAt, openVariantId] as const,
+    queryFn: ({ signal }) => loadRowDetail!(openVariantId!, signal),
+    enabled: needsDetail,
+    retry: false,
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
+  });
+  // The full row replaces the light one once read; its status and price stay the Check's (what the table showed).
+  const activeRow = lightRow && needsDetail && detail.data ? { ...lightRow, presentation: detail.data.presentation } : lightRow;
   // Policy names come from the setup read step 2 made this visit, if it ran (D14): the cache is read,
   // never fetched, and only names the exact ids in the preview, which stays the authority.
   const setup = queryClient.getQueryData<DropshipEbayListingSetupResponse>(ebayListingSetupQueryKey(preview.storeConnectionId));
@@ -79,9 +99,17 @@ export function DropshipListingPreview({ preview, stale = false, portalHref = dr
           <SheetDescription>Review what will be sent and your Card Shellz costs. This does not publish a listing.</SheetDescription>
         </SheetHeader>
         {stale && <div role="status" className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-          This preview needs refreshing. Queueing is disabled until a fresh preview is generated.
+          {PUBLISH_WORDS.checkStale}
+        </div>}
+        {needsDetail && detail.isPending && <p role="status" className="mb-4 text-sm text-zinc-600" data-testid="preview-detail-loading">
+          {PUBLISH_WORDS.detailsLoading}
+        </p>}
+        {needsDetail && (detail.isError || (detail.isSuccess && detail.data === null)) && <div role="alert" className="mb-4 flex flex-wrap items-center gap-3 text-sm text-red-800" data-testid="preview-detail-failed">
+          <span>{PUBLISH_WORDS.detailsFailed}</span>
+          <Button type="button" variant="outline" size="sm" className="h-11 sm:h-9" onClick={() => { void detail.refetch(); }}>{PUBLISH_WORDS.tryAgain}</Button>
         </div>}
         <ListingPreviewDetailsContent row={activeRow} generatedAt={preview.generatedAt} setup={setup} portalHref={portalHref}
+          detailPending={needsDetail && !detail.data}
           shippingEstimate={<DropshipListingShippingEstimate key={`${preview.storeConnectionId}:${activeRow.productVariantId}:${preview.generatedAt}`}
             storeConnectionId={preview.storeConnectionId} productVariantId={activeRow.productVariantId}
             variantName={activeRow.presentation?.variantName ?? activeRow.sku ?? "sellable pack"} />} />
@@ -103,7 +131,10 @@ export function ListingPreviewTable({ rows, onOpen, portalHref }: {
         const image = row.presentation?.images.find((item) => item.publicationStatus === "included" && safeListingImageUrl(item.url));
         return <TableRow key={row.productVariantId}>
           <TableCell><div className="flex min-w-52 items-center gap-3">
-            <PreviewImage key={image?.url ?? "missing"} url={image?.url} alt={image?.altText ?? row.title} className="h-12 w-12 shrink-0 rounded border object-contain" />
+            {/* A checked row carries no content (step 3's Check keeps light rows): no empty image box, its sheet reads it. */}
+            {row.presentation !== undefined && (
+              <PreviewImage key={image?.url ?? "missing"} url={image?.url} alt={image?.altText ?? row.title} className="h-12 w-12 shrink-0 rounded border object-contain" />
+            )}
             <div><div className="line-clamp-2 font-medium">{row.presentation?.title ?? row.title}</div>
               <div className="text-xs text-zinc-500">{row.presentation?.variantName}{row.presentation?.variantName && " · "}{row.sku || LISTING_PREVIEW_WORDS.skuUnavailable}</div>
             </div>
@@ -123,11 +154,13 @@ export function ListingPreviewTable({ rows, onOpen, portalHref }: {
   </Table>;
 }
 
-export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimate, setup, portalHref }: {
+export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimate, setup, portalHref, detailPending = false }: {
   row: DropshipListingPreviewRow; generatedAt: string; shippingEstimate?: ReactNode;
   /** Step 2's setup read from this visit, when it ran (D14); policy names come from it, never from a read here. */
   setup?: PolicySetupFacts;
   portalHref: PortalHref;
+  /** The row's full content is being read (or could not be): no "not returned" notice in the meantime. */
+  detailPending?: boolean;
 }) {
   const content = row.presentation;
   const economics = row.economics;
@@ -138,7 +171,7 @@ export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimat
         {content?.unitsPerVariant != null && <p className="mt-1 text-xs text-zinc-500">{content.unitsPerVariant} product unit(s) per sellable pack</p>}
       </div><PreviewStatus row={row} />
     </div>
-    {!content && <Notice>Detailed content was not returned. Generate a new listing preview.</Notice>}
+    {!content && !detailPending && <Notice>Detailed content was not returned. Generate a new listing preview.</Notice>}
     {content?.source === "catalog_fallback" && <Notice>Catalog content only: resolve the listing blockers and generate a new preview to review the publishable content.</Notice>}
     <ListingImageGallery key={row.previewHash} images={content?.images ?? []} title={content?.title ?? row.title} />
     <section className="rounded-lg border border-violet-200 bg-violet-50/40 p-4" aria-label="Your product costs">
@@ -182,7 +215,7 @@ export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimat
         : <IssueList issues={[...row.blockers, ...row.warnings]} />}
       <IssueList issues={content?.issues ?? []} />
     </section>
-    <p className="border-t pt-3 text-xs text-zinc-500">Preview generated {new Date(generatedAt).toLocaleString()}. Viewing this preview or estimating shipping does not queue listings.</p>
+    <p className="border-t pt-3 text-xs text-zinc-500">{PUBLISH_WORDS.sheetFooter(new Date(generatedAt).toLocaleString())}</p>
   </div>;
 }
 

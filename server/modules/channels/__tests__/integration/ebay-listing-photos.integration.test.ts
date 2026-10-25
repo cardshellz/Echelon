@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +7,9 @@ import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-ima
 import { PgCatalogVariantPublicationPhotoReader, readPublicCatalogImage } from "../../../catalog/catalog-publication-images.reader";
 import { ChannelEbayListingPhotoResolver } from "../../ebay-listing-photos.service";
 import { buildEbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
+import { readEbayListingPhotoReadiness } from "../../ebay-listing-photo-readiness";
+import { EbayMarketplaceListingConnector, type EbayListingConnectorDraft, type EbayListingLifecycleClient } from "../../listing-connectors/ebay-listing.connector";
+import type { EbayInventoryItem, EbayInventoryItemGroup } from "../../adapters/ebay/ebay-types";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -44,7 +48,7 @@ const request = { productId: 1, channelId: 67, variants };
 (url && disposable ? describe : describe.skip)("one eBay photo owner (PostgreSQL)", () => {
   let database: InventoryCutoverTestDatabase;
   let resolver: ChannelEbayListingPhotoResolver;
-  beforeAll(async () => { database = await createInventoryCutoverTestDatabase(url, disposable, fixture); });
+  beforeAll(async () => { database = await createInventoryCutoverTestDatabase(url, disposable, fixture); await database.pool.query(await readFile("migrations/900000017000018580001_catalog_publication_media_versions.sql", "utf8")); });
   afterAll(async () => { await database?.close(); });
   afterEach(() => vi.restoreAllMocks());
   beforeEach(async () => {
@@ -76,11 +80,63 @@ const request = { productId: 1, channelId: 67, variants };
     expect(plan.byVariantId.get(11)).toEqual([imageUrl(4,jpeg,"jpg"),imageUrl(2),"https://cdn.example.com/common.jpg"]);
     expect(plan.groupImageUrls).toEqual([imageUrl(4,jpeg,"jpg"),imageUrl(2),"https://cdn.example.com/pack.jpg","https://cdn.example.com/common.jpg"]);
   });
+  it("uses the publication plan for readiness and never counts documents or excluded photos", async () => {
+    const client = await database.pool.connect();
+    try {
+      const readiness = await readEbayListingPhotoReadiness(client,{productId:1,channelId:67,variantIds:[10,11]},publicUrl);
+      expect(readiness.ready).toBe(true);
+      expect(readiness.mediaPlan).toEqual((await resolver.resolve(request)).mediaPlan);
+      await database.pool.query("UPDATE catalog.product_assets SET asset_type='document' WHERE product_id=1");
+      const documents = await readEbayListingPhotoReadiness(client,{productId:1,channelId:67,variantIds:[10,11]},publicUrl);
+      expect(documents.ready).toBe(false);
+      expect(documents.mediaPlan.group.selected).toEqual([]);
+    } finally { client.release(); }
+  });
+
+  it.each(["none","existing_member","group"] as const)("applies the real Catalog plan to every current/new member and refuses %s readback drift", async fault => {
+    const plan = await resolver.resolve(request);
+    const items = new Map<string,EbayInventoryItem>();
+    let group:EbayInventoryItemGroup = {inventoryItemGroupKey:"GROUP",title:"Current",description:"Current",aspects:{},
+      imageUrls:["https://cdn.example.com/old.jpg"],variantSKUs:["PACK"],variesBy:{specifications:[{name:"Size",values:["PACK"]}]}};
+    let published = false;
+    const written:string[] = [];
+    const draft:EbayListingConnectorDraft = {
+      productId:1,marketplaceId:"EBAY_US",publishMode:"publish",hasExistingExternalIds:true,existingExternalProductId:"listing-1",
+      inventoryItems:variants.map(v=>({sku:v.sku,payload:{condition:"NEW",product:{title:"Current",aspects:{Size:[v.sku]},
+        imageUrls:[...plan.byVariantId.get(v.variantId)!]},availability:{shipToLocationAvailability:{quantity:0}}}})),
+      offers:variants.map(v=>({sku:v.sku,variantId:v.variantId,payload:{sku:v.sku,marketplaceId:"EBAY_US",format:"FIXED_PRICE",availableQuantity:0,
+        categoryId:"123",listingPolicies:{fulfillmentPolicyId:"f",returnPolicyId:"r",paymentPolicyId:"p"},merchantLocationKey:"main",
+        pricingSummary:{price:{value:"9.99",currency:"USD"}}}})),
+      itemGroup:{groupKey:"GROUP",payload:{title:"Current",description:"Current",aspects:{},imageUrls:[...plan.groupImageUrls],
+        variantSKUs:variants.map(v=>v.sku),variesBy:{specifications:[{name:"Size",values:variants.map(v=>v.sku)}]}}},
+    };
+    const client:EbayListingLifecycleClient = {
+      getInventoryItem:async sku=>items.get(sku)??null,
+      createOrReplaceInventoryItem:async(sku,payload)=>{written.push(sku);items.set(sku,{sku,...structuredClone(payload),
+        ...(fault==="existing_member"&&sku==="PACK"?{product:{...payload.product,imageUrls:["https://cdn.example.com/stale.jpg"]}}:{})});},
+      getInventoryItemGroup:async()=>structuredClone(group),
+      createOrReplaceInventoryItemGroup:async(key,payload)=>{group={...structuredClone(payload),inventoryItemGroupKey:key,
+        ...(fault==="group"?{imageUrls:payload.imageUrls.slice(0,1)}:{})};},
+      getOffers:async sku=>({offers:[{...draft.offers.find(o=>o.sku===sku)!.payload,offerId:`offer-${sku}`,
+        status:sku==="PACK"||published?"PUBLISHED":"UNPUBLISHED",...(sku==="PACK"||published?{listingId:"listing-1"}:{})}]}),
+      createOffer:async offer=>`offer-${offer.sku}`,updateOffer:async()=>{},publishOffer:async()=>({listingId:"listing-1"}),
+      publishOfferByInventoryItemGroup:async()=>{published=true;return{listingId:"listing-1"};},
+      withdrawOfferByInventoryItemGroup:async()=>{},deleteInventoryItemGroup:async()=>{},bulkUpdatePriceQuantity:async()=>({responses:[]}),
+    };
+    const connector=new EbayMarketplaceListingConnector();
+    const preview=await connector.previewListingRebuild({client,draft,currentExternalListingId:"listing-1"});
+    const operation=connector.updateExistingListing({client,draft,preview});
+    if(fault==="none") await expect(operation).resolves.toMatchObject({published:true,externalProductId:"listing-1"});
+    else await expect(operation).rejects.toMatchObject({code:"EBAY_SYNC_READBACK_PENDING"});
+    expect(written).toEqual(["PACK","CASE"]);
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY variant_id")).rows)
+      .toEqual([{variant_id:10,quantity:31},{variant_id:11,quantity:9}]);
+  });
   it("uses the same Catalog selection for Dropship and direct eBay; overlays apply only to their exact channel", async () => {
     const reader = new PgCatalogVariantPublicationPhotoReader(database.pool, publicUrl);
     const photos = await reader.listPublicationPhotos({ productVariantIds:[10,11], maxPhotosPerVariant:12 });
     const images = variants.flatMap(variant => photos.get(variant.variantId)!.photos.map((photo,position) => ({ url:photo.url,position:photo.position,variantSku:variant.sku,altText:null })));
-    expect(await resolver.resolve(request)).toEqual(buildEbayListingPhotoPlan(images,variants));
+    expect(await resolver.resolve(request)).toMatchObject(buildEbayListingPhotoPlan(images,variants));
     await database.pool.query(`INSERT INTO channels.channel_asset_overrides VALUES
       (67,2,0,NULL,NULL), (67,3,1,'https://cdn.example.com/channel-pack.jpg',0), (67,1,1,NULL,7),
       (99,1,0,NULL,NULL), (67,5,1,'https://cdn.example.com/wrong-product.jpg',0)`);
@@ -145,8 +201,8 @@ const request = { productId: 1, channelId: 67, variants };
     expect(inFlight.byVariantId.get(10)).toEqual([imageUrl(2),"https://cdn.example.com/pack.jpg","https://cdn.example.com/common.jpg"]);
     const next = await resolver.resolve(request);
     expect(next.byVariantId.get(10)).toEqual([imageUrl(2,jpeg,"jpg"),"https://cdn.example.com/common.jpg"]);
-    // A stale URL must never serve the replacement's different bytes.
-    await expect(readPublicCatalogImage(database.pool,2,hash(png))).resolves.toBeNull();
+    // A saved URL keeps its original immutable bytes after replacement.
+    await expect(readPublicCatalogImage(database.pool,2,hash(png))).resolves.toEqual({data:png,mimeType:"image/png"});
   });
   it("resolves concurrent requests with one available connection and releases it before provider fallback", async () => {
     const oneSlot = new Pool({ connectionString:database.connectionString,max:1,connectionTimeoutMillis:2000 });

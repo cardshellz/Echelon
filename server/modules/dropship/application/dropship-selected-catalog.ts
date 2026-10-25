@@ -3,6 +3,7 @@ import type { DropshipListingCatalogCandidate } from "./dropship-listing-preview
 import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { evaluateDropshipVendorCatalogSelection } from "../domain/vendor-selection";
 import { DropshipError } from "../domain/errors";
+import { LISTING_PUSH_RUN_WORDS } from "../domain/listing-push-run-words";
 import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "../../../../shared/dropship/catalog-scope";
 
 export interface SelectedCatalogReader {
@@ -10,7 +11,9 @@ export interface SelectedCatalogReader {
   listVariantIds(afterId: number, limit: number): Promise<number[]>;
   listProductLines(ids: number[]): Promise<Array<{ id: number; name: string }>>;
 }
-export type SelectedCatalogPurpose = "pricing_review" | "category_review" | "listing_settings";
+export type SelectedCatalogPurpose = "pricing_review" | "category_review" | "listing_settings" | "listing_push_run";
+/** Stage 2 (step 1 plan S2-5): the page's runTooLarge words (PROPOSED, §4.11), also the server's refusal. */
+export const LISTING_PUSH_RUN_TOO_LARGE_MESSAGE = LISTING_PUSH_RUN_WORDS.runTooLarge;
 /** The keyset scan's batch: this many sellable sizes are read, and their candidates held, at a time. */
 const SELECTED_CATALOG_BATCH_SIZE = 250;
 
@@ -54,16 +57,58 @@ export async function loadSelectedCandidates(tx: SelectedCatalogReader, now: Dat
   const selected: DropshipListingCatalogCandidate[] = [];
   for await (const batch of selectedCandidateBatches(tx, now)) {
     selected.push(...batch);
-    if (selected.length > MAX_NAMED_CATALOG_GROUP_ITEMS) {
-      if (purpose === "category_review") throw new DropshipError("DROPSHIP_EBAY_CATEGORY_REVIEW_TOO_LARGE",
-        "This store exceeds the 10,000-listing eBay category review limit. No category rules were changed.");
-      if (purpose === "listing_settings") throw new DropshipError("DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
-        "More than 10,000 sizes are chosen for this store. Choose 10,000 or fewer to check their settings.");
-      throw new DropshipError("DROPSHIP_PRICING_REVIEW_TOO_LARGE",
-        "This store exceeds the 10,000-listing pricing review limit. No rules were changed.");
-    }
+    if (selected.length > MAX_NAMED_CATALOG_GROUP_ITEMS) throw selectedCatalogTooLarge(purpose);
   }
   return selected.sort((a, b) => a.productVariantId - b.productVariantId);
+}
+
+/**
+ * Every selected size id, ascending, by the same scan and evaluation as
+ * loadSelectedCandidates and refused above 10,000 the same way. Ids only: it
+ * holds one batch of candidates at a time, so a publish run's snapshot of
+ * 10,000 sizes never holds 10,000 descriptions (step 1 plan S2-5, §4.2).
+ */
+export async function loadSelectedVariantIds(tx: SelectedCatalogReader, now: Date, purpose: SelectedCatalogPurpose): Promise<number[]> {
+  const selected: number[] = [];
+  for await (const batch of selectedCandidateBatches(tx, now)) {
+    for (const candidate of batch) selected.push(candidate.productVariantId);
+    if (selected.length > MAX_NAMED_CATALOG_GROUP_ITEMS) throw selectedCatalogTooLarge(purpose);
+  }
+  return selected.sort((left, right) => left - right);
+}
+
+/**
+ * How many sizes the vendor's selection chooses, by the same scan and
+ * evaluation as loadSelectedVariantIds, with no cap and no refusal: the
+ * selection summary counts an over-cap selection too, so the page can say so
+ * (step 1 plan S2-5 §4.8). `among` counts how many selected sizes are also in
+ * that set (the store's live sizes). Only counters are kept: one batch of
+ * candidates at a time.
+ */
+export async function countSelectedVariants(
+  tx: SelectedCatalogReader,
+  now: Date,
+  among: ReadonlySet<number> = new Set(),
+): Promise<{ selected: number; selectedAmong: number }> {
+  let selected = 0;
+  let selectedAmong = 0;
+  for await (const batch of selectedCandidateBatches(tx, now)) {
+    selected += batch.length;
+    for (const candidate of batch) if (among.has(candidate.productVariantId)) selectedAmong += 1;
+  }
+  return { selected, selectedAmong };
+}
+
+/** The purpose's own refusal of a selection above 10,000 sizes. */
+function selectedCatalogTooLarge(purpose: SelectedCatalogPurpose): DropshipError {
+  if (purpose === "category_review") return new DropshipError("DROPSHIP_EBAY_CATEGORY_REVIEW_TOO_LARGE",
+    "This store exceeds the 10,000-listing eBay category review limit. No category rules were changed.");
+  if (purpose === "listing_settings") return new DropshipError("DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
+    "More than 10,000 sizes are chosen for this store. Choose 10,000 or fewer to check their settings.");
+  if (purpose === "listing_push_run") return new DropshipError("DROPSHIP_LISTING_PUSH_RUN_TOO_LARGE",
+    LISTING_PUSH_RUN_TOO_LARGE_MESSAGE, { limit: MAX_NAMED_CATALOG_GROUP_ITEMS, classification: "permanent" });
+  return new DropshipError("DROPSHIP_PRICING_REVIEW_TOO_LARGE",
+    "This store exceeds the 10,000-listing pricing review limit. No rules were changed.");
 }
 
 /**
@@ -78,4 +123,29 @@ export async function loadSelectedProductIds(tx: SelectedCatalogReader, now: Dat
     for (const candidate of batch) productIds.add(candidate.productId);
   }
   return [...productIds].sort((left, right) => left - right);
+}
+
+/**
+ * Which of the given sizes the vendor's selection chooses now, by the same
+ * evaluation as the scans above but reading only those sizes (a publish run
+ * chunk's pre-filter, step 1 plan S2-5, §4.3 step 2; TESTS10): a size that is
+ * not sellable, not exposed or not selected is left out.
+ */
+export async function selectedVariantIdsAmong(tx: SelectedCatalogReader, productVariantIds: readonly number[], now: Date): Promise<Set<number>> {
+  const ids = [...new Set(productVariantIds)].sort((left, right) => left - right);
+  if (ids.length === 0) return new Set();
+  // One after another: the reader is one transaction's client, which runs one query at a time.
+  const exposureRules = await tx.catalog.listCatalogExposureRules();
+  const selectionRules = await tx.catalog.listSelectionRules(tx.vendorId);
+  const candidates = await tx.catalog.listCatalogCandidates(ids);
+  const overrides = await tx.catalog.listVariantOverrides({ vendorId: tx.vendorId, productVariantIds: ids });
+  const overrideById = new Map(overrides.map((row) => [row.productVariantId, row]));
+  const selected = new Set<number>();
+  for (const candidate of candidates) {
+    const exposure = evaluateDropshipCatalogExposure(candidate, exposureRules, now);
+    const selection = evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
+      rules: selectionRules, rawAtpUnits: 0, override: overrideById.get(candidate.productVariantId) ?? null });
+    if (exposure.exposed && selection.selected) selected.add(candidate.productVariantId);
+  }
+  return selected;
 }

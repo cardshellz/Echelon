@@ -5,6 +5,10 @@ import {
   PositiveCentsSchema,
 } from "../../../../shared/validation/currency";
 import { EBAY_CATEGORY_ID_PATTERN, MAX_EBAY_CATEGORY_NAME_LENGTH } from "../../../../shared/dropship/ebay-category-rules";
+import {
+  MAX_LISTING_PUSH_RUN_TARGETS,
+  createListingPushRunRequestSchema,
+} from "../../../../shared/dropship/listing-push-runs";
 
 const positiveIdSchema = z.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
@@ -68,6 +72,30 @@ export const createListingPushJobInputSchema = z.object({
   requestedRetailPricesByVariantId: requestedRetailPricesByVariantIdSchema,
   idempotencyKey: idempotencyKeySchema,
   requestedBy: actorSchema,
+  /**
+   * Publish runs only (step 1 plan S2-5, §4.3): the run chunk this job carries
+   * out, written to the job's run columns in the job's own transaction. Vendors
+   * cannot send it: the member schema omits it, as it omits the worker's
+   * queued categories.
+   */
+  run: z.object({
+    runId: z.number().int().positive().safe(),
+    chunkIndex: z.number().int().nonnegative().max(MAX_LISTING_PUSH_RUN_TARGETS),
+  }).strict().optional(),
+}).strict();
+
+/**
+ * A run create as the service receives it (step 1 plan S2-5, §4.2): the
+ * member's body plus the vendor and actor the server resolved. The body
+ * schema is the shared route contract.
+ */
+export const createListingPushRunInputSchema = createListingPushRunRequestSchema.extend({
+  vendorId: positiveIdSchema,
+  // The runs table's actor types: a run is pressed by a person or started by the system, never by a job.
+  actor: z.object({
+    actorType: z.enum(["vendor", "admin", "system"]),
+    actorId: z.string().trim().min(1).max(255).optional(),
+  }).strict(),
 }).strict();
 
 export const processListingPushJobInputSchema = z.object({
@@ -197,6 +225,7 @@ export const sendDropshipNotificationInputSchema = z.object({
 
 export type GenerateVendorListingPreviewInput = z.infer<typeof generateVendorListingPreviewInputSchema>;
 export type CreateListingPushJobInput = z.infer<typeof createListingPushJobInputSchema>;
+export type CreateListingPushRunInput = z.infer<typeof createListingPushRunInputSchema>;
 export type ProcessListingPushJobInput = z.infer<typeof processListingPushJobInputSchema>;
 export type RecordMarketplaceOrderIntakeInput = z.infer<typeof recordMarketplaceOrderIntakeInputSchema>;
 export type AcceptDropshipOrderInput = z.infer<typeof acceptDropshipOrderInputSchema>;

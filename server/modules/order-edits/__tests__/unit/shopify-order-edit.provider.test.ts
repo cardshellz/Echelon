@@ -355,6 +355,883 @@ const emptyCombinationMetadata = () => ({
   shopifyFunctions: { nodes: [], pageInfo: { hasNextPage: false } },
   discountNodes: { nodes: [], pageInfo: { hasNextPage: false } },
 });
+describe("Club automatic price plus a saved reward on an added item", () => {
+  const rewardCode = "SAVED-REWARD";
+  const allow = {
+    productDiscounts: true,
+    orderDiscounts: true,
+    shippingDiscounts: true,
+  };
+  const automatic = {
+    __typename: "AutomaticDiscountApplication",
+    index: 0,
+    targetType: "LINE_ITEM",
+    allocationMethod: "ACROSS",
+    targetSelection: "ENTITLED",
+    title: "Member discount",
+    value: {
+      __typename: "MoneyV2" as const,
+      amount: "0.46",
+      currencyCode: "USD",
+    },
+  };
+  function originalCalculated() {
+    // Native raw unit/subtotal fields exclude the order-allocated automatic saving.
+    const result = calcLine(1, 10, 1, "2.79");
+    result.calculatedDiscountAllocations = [
+      {
+        allocatedAmountSet: bag("0.46"),
+        discountApplication: {
+          ...memberCreditCalculated().lineItems.nodes[0]
+            .calculatedDiscountAllocations[0].discountApplication,
+          value: automatic.value,
+        },
+      },
+    ];
+    return result;
+  }
+  function nativeOrder(description?: string, restored = false) {
+    const committed = Boolean(description) && !restored;
+    const original = {
+      ...line(1, 10, 1, "2.79"),
+      priceAfterAllDiscountsBeforeTaxesSet: bag("2.33"),
+      discountAllocations: [
+        { allocatedAmountSet: bag("0.46"), discountApplication: { index: 0 } },
+      ],
+    };
+    const extra = {
+      ...line(2, 20, restored ? 0 : 1, "4.99"),
+      discountedUnitPriceSet: bag("3.49"),
+      unfulfilledDiscountedTotalSet: bag(restored ? "0.00" : "3.49"),
+      priceAfterAllDiscountsBeforeTaxesSet: bag(restored ? "0.00" : "3.49"),
+      discountAllocations: [
+        { allocatedAmountSet: bag("1.50"), discountApplication: { index: 1 } },
+      ],
+    };
+    const base = shippingOrder(
+      committed ? "13.05" : "8.29",
+      committed ? "6.49" : "5.49",
+      committed ? "0.74" : "0.47",
+      committed ? "5.82" : "2.33",
+      committed ? "4.76" : "0.00",
+    );
+    return {
+      ...base,
+      order: {
+        ...base.order,
+        netPaymentSet: bag("8.29"),
+        transactions: [tx(1, "8.29")],
+        customer: {
+          id: id("Customer", 1),
+          tags: [],
+          membershipPlan: { value: "test-plan" },
+        },
+        lineItems: {
+          nodes: [original, ...(description ? [extra] : [])],
+          pageInfo: { hasNextPage: false },
+        },
+        discountApplications: {
+          nodes: [
+            structuredClone(automatic),
+            ...(description
+              ? [
+                  {
+                    __typename: "ManualDiscountApplication",
+                    index: 1,
+                    targetType: "LINE_ITEM",
+                    allocationMethod: "EACH",
+                    targetSelection: "EXPLICIT",
+                    title: description,
+                    value: {
+                      __typename: "MoneyV2",
+                      amount: "1.50",
+                      currencyCode: "USD",
+                    },
+                  },
+                ]
+              : []),
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+      },
+    };
+  }
+  function nativeCalculation(
+    addedPrice: string | null = null,
+    shipping = "5.49",
+    description = "",
+    recovery = false,
+    removedExtra = false,
+  ) {
+    const subtotal =
+      cents("2.33") + (removedExtra ? BigInt(0) : cents(addedPrice ?? "0.00"));
+    const tax =
+      ((subtotal + cents(shipping)) * BigInt(6) + BigInt(50)) / BigInt(100);
+    const total = subtotal + cents(shipping) + tax;
+    const extra = calcLine(
+      2,
+      20,
+      removedExtra ? 0 : 1,
+      "4.99",
+      addedPrice ?? "4.99",
+    );
+    for (const allocation of extra.calculatedDiscountAllocations)
+      allocation.discountApplication.description = description;
+    return shippingCalculated(
+      decimal(total),
+      shipping,
+      decimal(tax),
+      decimal(subtotal),
+      decimal(total - BigInt(829)),
+      [originalCalculated(), ...(recovery ? [extra] : [])],
+      !recovery && addedPrice ? [extra] : [],
+    );
+  }
+  function lookup() {
+    const base = newCodeLookup();
+    return {
+      codeDiscountNodeByCode: {
+        ...base.codeDiscountNodeByCode,
+        codeDiscount: {
+          ...base.codeDiscountNodeByCode.codeDiscount,
+          title: rewardCode,
+          usageLimit: 1,
+          appliesOncePerCustomer: true,
+          codes: {
+            nodes: [{ code: rewardCode }],
+            pageInfo: { hasNextPage: false },
+          },
+          customerGets: {
+            items: { __typename: "AllDiscountItems", allItems: true },
+            value: {
+              __typename: "DiscountAmount",
+              amount: { amount: "1.00", currencyCode: "USD" },
+              appliesOnEachItem: false,
+            },
+          },
+        },
+      },
+    };
+  }
+  function approvedCalculation() {
+    return {
+      draftOrderCalculate: {
+        userErrors: [],
+        calculatedDraftOrder: {
+          subtotalPriceSet: bag("5.82"),
+          lineItemsSubtotalPrice: bag("6.82"),
+          lineItems: [
+            {
+              variant: { id: id("ProductVariant", 10) },
+              quantity: 1,
+              discountedTotalSet: bag("2.33"),
+            },
+            {
+              variant: { id: id("ProductVariant", 20) },
+              quantity: 1,
+              discountedTotalSet: bag("4.49"),
+            },
+          ],
+          platformDiscounts: [
+            {
+              code: rewardCode,
+              discountClasses: ["ORDER"],
+              totalAmountPriceSet: bag("1.00"),
+            },
+          ],
+        },
+      },
+    };
+  }
+  function combinations() {
+    const result = memberProvenance();
+    return {
+      ...result,
+      discountNodes: {
+        ...result.discountNodes,
+        nodes: result.discountNodes.nodes.map((node) => ({
+          ...node,
+          discount: { ...node.discount, combinesWith: allow },
+        })),
+      },
+    };
+  }
+  const variants = () => ({
+    nodes: [
+      variant(10, "2.79", '{"test-plan":{"cents":233}}'),
+      variant(20, "4.99", '{"test-plan":{"cents":449}}'),
+    ],
+  });
+  const shipping = {
+    title: "Standard Shipping",
+    code: "standard",
+    source: "Echelon Shipping",
+    grossCents: 649,
+    netCents: 649,
+    discountCents: 0,
+    discountLabels: [],
+  };
+  function setup(taxChanged = false) {
+    let saved: OrderEditQuote | null = null;
+    let description = "";
+    const calculator: OrderEditShippingCalculator = {
+      calculate: async () => shipping,
+      calculatePreview: vi.fn(async (_snapshot, items) => ({
+        shippingRepricing: shipping,
+        taxCents: taxChanged && items[0].netCents === 233 ? 75 : 74,
+        totalCents: taxChanged && items[0].netCents === 233 ? 1306 : 1305,
+        taxLines: [
+          {
+            title: "State tax",
+            ratePercentage: 6,
+            amountCents: taxChanged && items[0].netCents === 233 ? 75 : 74,
+          },
+        ],
+      })),
+    };
+    const responses: unknown[] = [
+      nativeOrder(),
+      nativeOrder(),
+      memberProvenance(),
+      { nodes: [variants().nodes[1]] },
+      variants(),
+      lookup(),
+      approvedCalculation(),
+      begin(nativeCalculation()),
+      (request: { query: string }) => {
+        // Reject the real unsupported operation rather than silently overwriting an automatic price.
+        if (request.query.includes("orderEditAddLineItemDiscount"))
+          return {
+            orderEditAddLineItemDiscount: {
+              userErrors: [
+                {
+                  message:
+                    "The order has a discount which prevents applying additional discounts to this line item.",
+                },
+              ],
+            },
+          };
+        return {
+          orderEditAddVariant: {
+            userErrors: [],
+            calculatedLineItem: { id: id("CalculatedLineItem", 2) },
+            calculatedOrder: nativeCalculation("4.99"),
+          },
+        };
+      },
+      (request: {
+        variables: {
+          lineItemId: string;
+          discount: { description: string; fixedValue: { amount: string } };
+        };
+      }) => {
+        expect(request.variables.lineItemId).toBe(id("CalculatedLineItem", 2));
+        expect(request.variables.discount.fixedValue.amount).toBe("1.50");
+        description = request.variables.discount.description;
+        return {
+          orderEditAddLineItemDiscount: {
+            userErrors: [],
+            calculatedOrder: nativeCalculation("3.49", "5.49", description),
+          },
+        };
+      },
+      combinations(),
+      () => ({
+        orderEditRemoveShippingLine: {
+          userErrors: [],
+          calculatedOrder: nativeCalculation("3.49", "0.00", description),
+        },
+      }),
+      () => ({
+        orderEditAddShippingLine: {
+          userErrors: [],
+          calculatedOrder: nativeCalculation("3.49", "6.49", description),
+        },
+      }),
+    ];
+    const history = new PostgresOrderEditCodeHistory({
+      query: async () => ({ rows: saved ? [{ quote: saved }] : [] }),
+    } as unknown as import("pg").Pool);
+    const rewards = {
+      available: () => true,
+      identify: vi.fn(async () => [rewardCode]),
+      verify: vi.fn(async () => {}),
+    };
+    const h = harness(responses, {}, calculator, {
+      codeHistory: history,
+      rewards,
+    });
+    return {
+      ...h,
+      responses,
+      calculator,
+      rewards,
+      save: (quote: OrderEditQuote) => {
+        saved = quote;
+      },
+      description: () => description,
+    };
+  }
+  function replacementSetup(
+    options: {
+      attributes?: Array<{ key: string; value: string }>;
+      totalCents?: number;
+    } = {},
+  ) {
+    const approved = approvedCalculation();
+    approved.draftOrderCalculate.calculatedDraftOrder.lineItems.pop();
+    approved.draftOrderCalculate.calculatedDraftOrder.lineItemsSubtotalPrice =
+      bag("2.33");
+    approved.draftOrderCalculate.calculatedDraftOrder.subtotalPriceSet =
+      bag("1.33");
+    const metadata = {
+      order: {
+        id: id("Order", 100),
+        lineItems: {
+          nodes: [
+            {
+              id: id("LineItem", 1),
+              currentQuantity: 1,
+              unfulfilledQuantity: 1,
+              customAttributes: options.attributes ?? [],
+              sellingPlan: null,
+              lineItemGroup: null,
+              variant: { id: id("ProductVariant", 10) },
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+      },
+    };
+    const calculate = (price?: string, description = "") => {
+      const original = originalCalculated();
+      original.quantity = 0;
+      original.editableSubtotalSet = bag("0.00");
+      original.calculatedDiscountAllocations[0].allocatedAmountSet =
+        bag("0.00");
+      const extra = calcLine(2, 10, 1, "2.79", price);
+      extra.calculatedDiscountAllocations.forEach((entry) => {
+        entry.discountApplication.description = description;
+      });
+      const subtotal = cents(price ?? "0.00");
+      const tax =
+        ((subtotal + BigInt(549)) * BigInt(6) + BigInt(50)) / BigInt(100);
+      const total = subtotal + BigInt(549) + tax;
+      return shippingCalculated(
+        decimal(total),
+        "5.49",
+        decimal(tax),
+        decimal(subtotal),
+        decimal(total - BigInt(829)),
+        [original],
+        price ? [extra] : [],
+      );
+    };
+    const delivery = { ...shipping, grossCents: 549, netCents: 549 };
+    let description = "";
+    let saved: OrderEditQuote | null = null;
+    const responses: unknown[] = [
+      nativeOrder(),
+      nativeOrder(),
+      memberProvenance(),
+      { nodes: [variants().nodes[0]] },
+      lookup(),
+      approved,
+      metadata,
+      begin(nativeCalculation()),
+      quantity(calculate()),
+      {
+        orderEditAddVariant: {
+          userErrors: [],
+          calculatedLineItem: { id: id("CalculatedLineItem", 2) },
+          calculatedOrder: calculate("2.79"),
+        },
+      },
+      (request: {
+        variables: {
+          lineItemId: string;
+          discount: { description: string; fixedValue: { amount: string } };
+        };
+      }) => {
+        expect(request.variables.lineItemId).toBe(id("CalculatedLineItem", 2));
+        expect(request.variables.discount.fixedValue.amount).toBe("1.46");
+        description = request.variables.discount.description;
+        return {
+          orderEditAddLineItemDiscount: {
+            userErrors: [],
+            calculatedOrder: calculate("1.33", description),
+          },
+        };
+      },
+      combinations(),
+      refundCapacity("8.29"),
+    ];
+    const rewards = {
+      available: () => true,
+      identify: vi.fn(async () => [rewardCode]),
+      verify: vi.fn(async () => {}),
+    };
+    const history = new PostgresOrderEditCodeHistory({
+      query: async () => ({ rows: saved ? [{ quote: saved }] : [] }),
+    } as unknown as import("pg").Pool);
+    const h = harness(
+      responses,
+      {},
+      {
+        calculate: async () => delivery,
+        calculatePreview: async () => ({
+          shippingRepricing: delivery,
+          taxCents: 41,
+          totalCents: options.totalCents ?? 723,
+          taxLines: [
+            { title: "State tax", ratePercentage: 6, amountCents: 41 },
+          ],
+        }),
+      },
+      { rewards, codeHistory: history },
+    );
+    const finalOrder = () => {
+      const result = nativeOrder();
+      const removed = {
+        ...result.order.lineItems.nodes[0],
+        currentQuantity: 0,
+        unfulfilledQuantity: 0,
+        unfulfilledDiscountedTotalSet: bag("0.00"),
+        priceAfterAllDiscountsBeforeTaxesSet: bag("0.00"),
+        discountAllocations: [],
+      };
+      return {
+        ...result,
+        order: {
+          ...result.order,
+          currentTotalPriceSet: bag("7.23"),
+          currentSubtotalPriceSet: bag("1.33"),
+          currentTotalTaxSet: bag("0.41"),
+          totalOutstandingSet: bag("-1.06"),
+          lineItems: {
+            nodes: [
+              removed,
+              {
+                ...line(3, 10, 1, "2.79"),
+                discountedUnitPriceSet: bag("1.33"),
+                unfulfilledDiscountedTotalSet: bag("1.33"),
+                priceAfterAllDiscountsBeforeTaxesSet: bag("1.33"),
+                discountAllocations: [
+                  {
+                    allocatedAmountSet: bag("1.46"),
+                    discountApplication: { index: 1 },
+                  },
+                ],
+              },
+            ],
+            pageInfo: { hasNextPage: false },
+          },
+          discountApplications: {
+            nodes: [
+              automatic,
+              {
+                __typename: "ManualDiscountApplication",
+                index: 1,
+                targetType: "LINE_ITEM",
+                allocationMethod: "EACH",
+                targetSelection: "EXPLICIT",
+                title: description,
+                value: {
+                  __typename: "MoneyV2",
+                  amount: "1.46",
+                  currencyCode: "USD",
+                },
+              },
+            ],
+            pageInfo: { hasNextPage: false },
+          },
+        },
+      };
+    };
+    return {
+      ...h,
+      responses,
+      metadata,
+      approved,
+      finalOrder,
+      save: (value: OrderEditQuote) => {
+        saved = value;
+      },
+    };
+  }
+  async function replacementQuote(h: ReturnType<typeof replacementSetup>) {
+    const before = await h.provider.readOrder(4, "100");
+    const result = await h.provider.quote(
+      4,
+      before,
+      { changes: [], additions: [], discountCodes: [rewardCode] },
+      "original-reward",
+    );
+    h.save(result);
+    return result;
+  }
+  it("applies the entire $1 to original $2.33 merchandise with native tax and same real variant", async () => {
+    const h = replacementSetup();
+    const result = await replacementQuote(h);
+    expect(result).toMatchObject({
+      totalCents: 723,
+      deltaCents: -106,
+      financials: { itemsNetCents: 133, taxCents: 41 },
+      codePricing: {
+        applications: [{ code: rewardCode, amountCents: 100 }],
+        lines: [
+          {
+            sourceId: id("LineItem", 1),
+            variantId: id("ProductVariant", 10),
+            productNetCents: 233,
+            netCents: 133,
+            replacesAutomaticDiscount: true,
+          },
+        ],
+      },
+    });
+    expect(
+      result.lines.map((entry) => [entry.originalLineId, entry.quantity]),
+    ).toEqual([
+      [id("LineItem", 1), 0],
+      [null, 1],
+    ]);
+    expect(
+      h.requests.some((request) =>
+        /orderEditCommit|refundCreate/.test(request.query),
+      ),
+    ).toBe(false);
+    const forged = structuredClone(result);
+    delete forged.codePricing!.lines[0].replacesAutomaticDiscount;
+    expect(orderEditQuoteSchema.safeParse(forged).success).toBe(false);
+    h.responses.push(
+      nativeOrder(),
+      h.metadata,
+      lookup(),
+      h.approved,
+      combinations(),
+      refundCapacity("8.29"),
+      { orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } } },
+      h.finalOrder,
+    );
+    const reserve = vi.fn(async () => {});
+    const committed = await h.provider.commit(
+      4,
+      result,
+      "original-reward",
+      reserve,
+    );
+    expect(reserve).toHaveBeenCalledOnce();
+    expect(committed.totalCents).toBe(723);
+    expect(committed.codePricing?.lines).toMatchObject([
+      { id: id("LineItem", 3), productNetCents: 233, netCents: 133 },
+    ]);
+    expect(
+      committed.codePricing?.lines[0].replacesAutomaticDiscount,
+    ).toBeUndefined();
+  });
+  it("rechecks item customization before reserving a reward or committing a replacement", async () => {
+    const h = replacementSetup();
+    const result = await replacementQuote(h);
+    const changed = structuredClone(h.metadata);
+    changed.order.lineItems.nodes[0].customAttributes = [
+      { key: "engraving", value: "new choice" },
+    ];
+    h.responses.push(nativeOrder(), changed);
+    const reserve = vi.fn(async () => {});
+    await expect(
+      h.provider.commit(4, result, "original-reward", reserve),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_REPLACEMENT_UNSUPPORTED" });
+    expect(reserve).not.toHaveBeenCalled();
+    expect(
+      h.requests.some((request) =>
+        /orderEditCommit|refundCreate/.test(request.query),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    { attributes: [{ key: "engraving", value: "keep me" }] },
+    { totalCents: 830 },
+  ])(
+    "rejects unsafe replacement before starting an edit: %j",
+    async (options) => {
+      const h = replacementSetup(options);
+      await expect(replacementQuote(h)).rejects.toThrow();
+      expect(
+        h.requests.some((request) =>
+          /orderEditBegin|orderEditCommit|refundCreate/.test(request.query),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  async function quote(h: ReturnType<typeof setup>) {
+    const baseline = await h.provider.readOrder(4, "100");
+    const result = await h.provider.quote(
+      4,
+      baseline,
+      {
+        changes: [],
+        additions: [{ variantId: id("ProductVariant", 20), quantity: 1 }],
+        discountCodes: [rewardCode],
+      },
+      "protected-reward",
+    );
+    h.save(result);
+    return result;
+  }
+
+  it("quotes $13.05 while preserving Club pricing and the entire $1 reward", async () => {
+    const h = setup();
+    const result = await quote(h);
+    expect(result).toMatchObject({
+      totalCents: 1305,
+      deltaCents: 476,
+      shippingCents: 649,
+      financials: { itemsNetCents: 582, taxCents: 74 },
+      codePricing: {
+        applications: [{ code: rewardCode, amountCents: 100 }],
+        lines: [
+          {
+            netCents: 233,
+            productNetCents: 233,
+            preserveAutomaticDiscount: true,
+          },
+          { netCents: 349, productNetCents: 449 },
+        ],
+      },
+    });
+    expect(
+      h.requests.filter((request) =>
+        request.query.includes("orderEditAddLineItemDiscount"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      h.requests.some((request) =>
+        /orderEditCommit|refundCreate|orderEditSetQuantity/.test(request.query),
+      ),
+    ).toBe(false);
+    expect(h.rewards.verify).toHaveBeenCalledOnce();
+    expect(orderEditQuoteSchema.safeParse(result).success).toBe(true);
+    const forged = structuredClone(result);
+    forged.lines[0].totalCents = 233;
+    expect(orderEditQuoteSchema.safeParse(forged).success).toBe(false);
+  });
+
+  it("rejects a changed tax allocation before opening a Shopify edit", async () => {
+    const h = setup(true);
+    await expect(quote(h)).rejects.toMatchObject({
+      code: "ORDER_EDIT_CODE_ALLOCATION_TAX_CHANGED",
+    });
+    expect(
+      h.requests.some((request) =>
+        /orderEditBegin|orderEditCommit/.test(request.query),
+      ),
+    ).toBe(false);
+  });
+
+  it.each(["missing", "changed-jurisdiction"])(
+    "rejects %s tax evidence even when the total matches",
+    async (change) => {
+      const h = setup();
+      vi.mocked(h.calculator.calculatePreview!).mockImplementation(
+        async (_snapshot, items) => ({
+          shippingRepricing: shipping,
+          taxCents: 74,
+          totalCents: 1305,
+          ...(change === "missing"
+            ? {}
+            : {
+                taxLines: [
+                  {
+                    title:
+                      items[0].netCents === 233 ? "Other tax" : "State tax",
+                    ratePercentage: 6,
+                    amountCents: 74,
+                  },
+                ],
+              }),
+        }),
+      );
+      await expect(quote(h)).rejects.toMatchObject({
+        code:
+          change === "missing"
+            ? "ORDER_EDIT_CODE_ALLOCATION_UNVERIFIED"
+            : "ORDER_EDIT_CODE_ALLOCATION_TAX_CHANGED",
+      });
+      expect(
+        h.requests.some((request) =>
+          /orderEditBegin|orderEditCommit/.test(request.query),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("does not accept a different automatic rule after submission, even at the same price", async () => {
+    const h = setup();
+    await quote(h);
+    const changed = nativeOrder(h.description());
+    changed.order.discountApplications.nodes[0].title = "Unrelated discount";
+    h.responses.push(changed);
+    await expect(h.provider.readOrder(4, "100")).rejects.toMatchObject({
+      code: "ORDER_EDIT_CODE_HISTORY_UNPROVEN",
+    });
+  });
+
+  it("reads back the automatic line and retains its protection for the next edit", async () => {
+    const h = setup();
+    const result = await quote(h);
+    h.responses.push(nativeOrder(h.description()));
+    const observed = await h.provider.readOrder(4, "100");
+    expect(observed.codePricing?.lines[0]).toMatchObject({
+      id: id("LineItem", 1),
+      preserveAutomaticDiscount: true,
+      netCents: 233,
+    });
+    expect(
+      observed.previewProductDiscounts?.find(
+        (line) => line.lineId === id("LineItem", 1),
+      )?.automaticCents,
+    ).toBe(46);
+    expect(observed.codePricing?.applications).toEqual(
+      result.codePricing?.applications,
+    );
+  });
+
+  it("restores an unpaid edit without manually replacing the original automatic discount", async () => {
+    const h = setup();
+    const result = await quote(h);
+    const description = h.description();
+    h.responses.push(
+      nativeOrder(description),
+      begin(nativeCalculation("3.49", "6.49", description, true)),
+      quantity(nativeCalculation("3.49", "6.49", description, true, true)),
+      {
+        orderEditRemoveShippingLine: {
+          userErrors: [],
+          calculatedOrder: nativeCalculation(
+            "3.49",
+            "0.00",
+            description,
+            true,
+            true,
+          ),
+        },
+      },
+      {
+        orderEditAddShippingLine: {
+          userErrors: [],
+          calculatedOrder: nativeCalculation(
+            "3.49",
+            "5.49",
+            description,
+            true,
+            true,
+          ),
+        },
+      },
+      nativeOrder(description),
+      { orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } } },
+      nativeOrder(description, true),
+    );
+    const observed = await h.provider.recoverUnpaid(
+      4,
+      result.baseline,
+      result,
+      "recover-protected-reward",
+    );
+    expect(isUnpaidRecoveryRestored(observed, result.baseline, result)).toBe(
+      true,
+    );
+    expect(observed.totalCents).toBe(829);
+    expect(
+      h.requests.filter((request) =>
+        request.query.includes("orderEditAddLineItemDiscount"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      h.requests.filter((request) => request.query.includes("orderEditCommit")),
+    ).toHaveLength(1);
+  });
+
+  it("submits only after reward reservation and verifies the committed Club price and order saving", async () => {
+    const h = setup();
+    const result = await quote(h);
+    const reserve = vi.fn(async () => {
+      expect(
+        h.requests.some((request) => request.query.includes("orderEditCommit")),
+      ).toBe(false);
+    });
+    h.responses.push(
+      nativeOrder(),
+      lookup(),
+      approvedCalculation(),
+      combinations(),
+      { nodes: [variants().nodes[1]] },
+      { orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } } },
+      nativeOrder(h.description()),
+    );
+    const observed = await h.provider.commit(
+      4,
+      result,
+      "protected-reward",
+      reserve,
+    );
+    expect(reserve).toHaveBeenCalledOnce();
+    expect(observed).toMatchObject({
+      totalCents: 1305,
+      outstandingCents: 476,
+      codePricing: {
+        newCodes: [],
+        applications: [{ code: rewardCode, amountCents: 100 }],
+      },
+    });
+    expect(
+      h.requests.filter((request) => request.query.includes("orderEditCommit")),
+    ).toHaveLength(1);
+  });
+
+  it("does not submit or reserve a reward when tax changes after the quote", async () => {
+    const h = setup();
+    const result = await quote(h);
+    vi.mocked(h.calculator.calculatePreview!).mockResolvedValue({
+      shippingRepricing: shipping,
+      taxCents: 75,
+      totalCents: 1306,
+      taxLines: [{ title: "State tax", ratePercentage: 6, amountCents: 75 }],
+    });
+    h.responses.push(
+      nativeOrder(),
+      lookup(),
+      approvedCalculation(),
+      combinations(),
+    );
+    const reserve = vi.fn(async () => {});
+    await expect(
+      h.provider.commit(4, result, "protected-reward", reserve),
+    ).rejects.toMatchObject({
+      code: "ORDER_EDIT_CODE_ALLOCATION_CHANGED",
+      name: "OrderEditCommitNotSentError",
+    });
+    expect(reserve).not.toHaveBeenCalled();
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+  });
+
+  it("requires a reward reservation even when native totals are verified", async () => {
+    const h = setup();
+    const result = await quote(h);
+    await expect(
+      h.provider.commit(4, result, "protected-reward"),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_CODE_RESERVATION_REQUIRED" });
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+  });
+});
+
 describe("new coupon native edit path", () => {
   function codeHarness() {
     let quote: OrderEditQuote | null = null;
@@ -658,7 +1535,7 @@ function harness(
   },
   codeOptions: Pick<
     ConstructorParameters<typeof ShopifyOrderEditProvider>[0],
-    "codeHistory"
+    "codeHistory" | "rewards"
   > = {},
 ) {
   const requests: Array<{ query: string; variables: Record<string, unknown> }> =
@@ -717,6 +1594,14 @@ async function reduction() {
 }
 
 describe("native tax rate display evidence", () => {
+  it("rejects a foreign signed-in customer before reading any saved reward/code history", async () => {
+    const history = { enrich: vi.fn() };
+    const h = harness([rawOrder()], {}, undefined, { codeHistory: history });
+    await expect(h.provider.readOrder(4, "100", "gid://shopify/Customer/999")).rejects.toMatchObject({ code: "CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE" });
+    expect(history.enrich).not.toHaveBeenCalled();
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0].query).not.toContain("mutation");
+  });
   it("reads current tax rates without changing the existing order identity or amounts", async () => {
     const original = rawOrder({ currentTotalPriceSet: bag("21.20"), currentTotalTaxSet: bag("1.20"), netPaymentSet: bag("21.20"), transactions: [tx(1, "21.20")] });
     const enriched = { ...original, order: { ...original.order, currentTaxLines: [{ title: "State tax", ratePercentage: 6, priceSet: bag("1.20") }] } };
@@ -934,9 +1819,9 @@ function fixedOrder(
       lineItems: {
         nodes: [
           {
-            ...line(1, 10, firstQuantity, "50.00"),
+            ...line(1, 10, Math.min(firstQuantity, 1), "50.00"),
             priceAfterAllDiscountsBeforeTaxesSet: bag(
-              decimal(firstGross - cents(firstDiscount)),
+              decimal(cents("50.00") * BigInt(Math.min(firstQuantity, 1)) - cents(firstDiscount)),
             ),
             discountAllocations: [
               {
@@ -957,6 +1842,7 @@ function fixedOrder(
               },
             ],
           },
+          ...(firstQuantity > 1 ? [line(3, 10, firstQuantity - 1, "50.00")] : []),
         ],
         pageInfo: { hasNextPage: false },
       },
@@ -984,9 +1870,9 @@ function fixedCalculated(
       cents(firstDiscount) -
       cents(secondDiscount),
   );
-  return calculated(total, decimal(cents(total) - cents("80.00")), [
+  const result = calculated(total, decimal(cents(total) - cents("80.00")), [
     {
-      ...calcLine(1, 10, firstQuantity, "50.00"),
+      ...calcLine(1, 10, Math.min(firstQuantity, 1), "50.00"),
       calculatedDiscountAllocations: [
         {
           allocatedAmountSet: bag(firstDiscount),
@@ -1004,6 +1890,20 @@ function fixedCalculated(
       ],
     },
   ]);
+  if (firstQuantity > 1)
+    result.addedLineItems.nodes.push(calcLine(3, 10, firstQuantity - 1, "50.00"));
+  return result;
+}
+function fixedAddition(result = fixedCalculated(2)) {
+  return { orderEditAddVariant: {
+    userErrors: [], calculatedLineItem: { id: id("CalculatedLineItem", 3) }, calculatedOrder: result,
+  } };
+}
+function fixedCommittedCalculated() {
+  const result = fixedCalculated(2);
+  result.lineItems.nodes.push(...result.addedLineItems.nodes);
+  result.addedLineItems.nodes = [];
+  return result;
 }
 async function fixedIncrease() {
   const h = harness([
@@ -1011,7 +1911,7 @@ async function fixedIncrease() {
     fixedOrder(),
     { nodes: [variant(10, "50.00")] },
     begin(fixedCalculated()),
-    quantity(fixedCalculated(2)),
+    fixedAddition(),
   ]);
   const snapshot = await h.provider.readOrder(4, "100");
   const quote = await h.provider.quote(
@@ -1752,12 +2652,12 @@ describe("ShopifyOrderEditProvider", () => {
     expect(snapshot.financials?.itemDiscountLabels).toEqual(["REWARD20"]);
   });
 
-  it("allows removal when Shopify preserves the full fixed credit on the remaining eligible item", async () => {
+  it("removes only the original item's fixed allocation without transferring it to remaining merchandise", async () => {
     const h = harness([
       fixedOrder(),
       fixedOrder(),
       begin(fixedCalculated()),
-      quantity(fixedCalculated(0, "0.00", "20.00")),
+      quantity(fixedCalculated(0, "0.00", "10.00")),
       refundCapacity("80.00"),
     ]);
     const snapshot = await h.provider.readOrder(4, "100");
@@ -1771,15 +2671,15 @@ describe("ShopifyOrderEditProvider", () => {
       "fixed-edit",
     );
     expect(quote).toMatchObject({
-      totalCents: 3000,
-      deltaCents: -5000,
-      outstandingCents: -5000,
+      totalCents: 4000,
+      deltaCents: -4000,
+      outstandingCents: -4000,
       financials: {
         itemsGrossCents: 5000,
-        itemsDiscountCents: 2000,
-        itemsNetCents: 3000,
+        itemsDiscountCents: 1000,
+        itemsNetCents: 4000,
       },
-      evidence: { refundPreflight: { amountCents: 5000 } },
+      evidence: { refundPreflight: { amountCents: 4000 } },
     });
     expect(
       h.requests.some((request) =>
@@ -1861,7 +2761,7 @@ describe("ShopifyOrderEditProvider", () => {
           entry.calculatedDiscountAllocations[0].discountApplication;
         entry.calculatedDiscountAllocations.push({
           allocatedAmountSet: bag(
-            index === 0 && firstQuantity === 2 ? "10.00" : "5.00",
+            "5.00",
           ),
           discountApplication: {
             ...fixedApplication,
@@ -1872,6 +2772,12 @@ describe("ShopifyOrderEditProvider", () => {
           },
         });
       });
+      for (const added of result.addedLineItems.nodes) {
+        added.calculatedDiscountAllocations.push({
+          allocatedAmountSet: bag("5.00"),
+          discountApplication: result.lineItems.nodes[0].calculatedDiscountAllocations[1].discountApplication,
+        });
+      }
       const total = firstQuantity === 1 ? "70.00" : "115.00";
       Object.assign(result, {
         subtotalPriceSet: bag(total),
@@ -1885,7 +2791,7 @@ describe("ShopifyOrderEditProvider", () => {
       order,
       { nodes: [variant(10, "50.00")] },
       begin(calculatedOrder(1)),
-      quantity(calculatedOrder(2)),
+      fixedAddition(calculatedOrder(2)),
     ]);
     const snapshot = await h.provider.readOrder(4, "100");
     const quote = await h.provider.quote(
@@ -1915,12 +2821,11 @@ describe("ShopifyOrderEditProvider", () => {
       },
     });
     const after = structuredClone(order);
-    const first = after.order.lineItems.nodes[0];
-    first.currentQuantity = 2;
-    first.unfulfilledQuantity = 2;
-    first.unfulfilledDiscountedTotalSet = bag("100.00");
-    first.priceAfterAllDiscountsBeforeTaxesSet = bag("80.00");
-    first.discountAllocations[1].allocatedAmountSet = bag("10.00");
+    after.order.lineItems.nodes.push({
+      ...line(3, 10, 1, "50.00"),
+      priceAfterAllDiscountsBeforeTaxesSet: bag("45.00"),
+      discountAllocations: [{ allocatedAmountSet: bag("5.00"), discountApplication: { index: 1 } }],
+    });
     Object.assign(after.order, {
       fullyPaid: false,
       currentSubtotalPriceSet: bag("115.00"),
@@ -1943,7 +2848,7 @@ describe("ShopifyOrderEditProvider", () => {
     shifted.order.lineItems.nodes[0].discountAllocations[0].allocatedAmountSet =
       bag("15.00");
     shifted.order.lineItems.nodes[0].discountAllocations[1].allocatedAmountSet =
-      bag("5.00");
+      bag("0.00");
     const bad = harness([
       order,
       { nodes: [variant(10, "50.00")] },
@@ -1960,20 +2865,17 @@ describe("ShopifyOrderEditProvider", () => {
     ).toHaveLength(1);
   });
 
-  it.each(["lost on removal", "multiplied on growth"])(
+  it.each(["transferred on removal", "multiplied on growth"])(
     "blocks a fixed credit %s before commit or financial settlement",
     async (change) => {
-      const removal = change === "lost on removal";
+      const removal = change === "transferred on removal";
       const h = harness([
         fixedOrder(),
         fixedOrder(),
         ...(!removal ? [{ nodes: [variant(10, "50.00")] }] : []),
         begin(fixedCalculated()),
-        quantity(
-          removal
-            ? fixedCalculated(0, "0.00", "10.00")
-            : fixedCalculated(2, "30.00", "10.00"),
-        ),
+        removal ? quantity(fixedCalculated(0, "0.00", "20.00"))
+          : fixedAddition(fixedCalculated(2, "30.00", "10.00")),
       ]);
       const snapshot = await h.provider.readOrder(4, "100");
       await expect(
@@ -1986,7 +2888,7 @@ describe("ShopifyOrderEditProvider", () => {
           },
           "fixed-edit",
         ),
-      ).rejects.toMatchObject({ code: "ORDER_EDIT_FIXED_DISCOUNT_MISMATCH" });
+      ).rejects.toMatchObject({ code: "ORDER_EDIT_PRESERVED_DISCOUNT_MISMATCH" });
       expect(
         h.requests.some((request) =>
           /orderEditCommit|refundCreate|orderEditAddLineItemDiscount|suggestedRefund/.test(
@@ -2012,7 +2914,7 @@ describe("ShopifyOrderEditProvider", () => {
         fixedOrder(),
         { nodes: [variant(10, "50.00")] },
         begin(fixedCalculated()),
-        quantity(result),
+        fixedAddition(result),
       ]);
       const snapshot = await h.provider.readOrder(4, "100");
       await expect(
@@ -2029,13 +2931,17 @@ describe("ShopifyOrderEditProvider", () => {
   it("restores the original fixed credit and quantities after wholly unpaid payment expiry", async () => {
     const { snapshot, quote } = await fixedIncrease();
     const pending = fixedOrder(2);
+    const restoredCalculation = fixedCalculated();
+    restoredCalculation.lineItems.nodes.push(calcLine(3, 10, 0, "50.00"));
+    const restoredOrder = fixedOrder();
+    restoredOrder.order.lineItems.nodes.push(line(3, 10, 0, "50.00"));
     const h = harness([
       pending,
-      begin(fixedCalculated(2)),
-      quantity(fixedCalculated()),
+      begin(fixedCommittedCalculated()),
+      quantity(restoredCalculation),
       pending,
       { orderEditCommit: { order: { id: id("Order", 100) }, userErrors: [] } },
-      fixedOrder(),
+      restoredOrder,
     ]);
     const restored = await h.provider.recoverUnpaid(
       4,
@@ -2043,7 +2949,9 @@ describe("ShopifyOrderEditProvider", () => {
       quote,
       "fixed-expire",
     );
-    expect(restored.financials).toEqual(snapshot.financials);
+    expect(restored.financials?.itemsNetCents).toBe(snapshot.financials?.itemsNetCents);
+    expect(restored.financials?.itemDiscounts).toEqual(snapshot.financials?.itemDiscounts);
+    expect(isUnpaidRecoveryRestored(restored, snapshot, quote)).toBe(true);
     expect(restored.outstandingCents).toBe(0);
     expect(
       h.requests.some((request) =>
@@ -2054,7 +2962,7 @@ describe("ShopifyOrderEditProvider", () => {
     ).toBe(false);
   });
 
-  it("blocks unused fixed credit before applying an edit instead of silently forfeiting or redeeming it again", async () => {
+  it("rejects redistribution of a fixed reward from removed merchandise", async () => {
     const order = fixedOrder();
     const initial = fixedCalculated();
     // Original credit exceeds the remaining $50 item after removal.
@@ -2105,7 +3013,7 @@ describe("ShopifyOrderEditProvider", () => {
         "fixed-edit",
       ),
     ).rejects.toMatchObject({
-      code: "ORDER_EDIT_FIXED_CREDIT_SETTLEMENT_REQUIRED",
+      code: "ORDER_EDIT_PRESERVED_DISCOUNT_MISMATCH",
     });
     expect(
       h.requests.some((request) =>
@@ -3454,9 +4362,17 @@ describe("ShopifyOrderEditProvider", () => {
     });
   });
 
-  it.each(["SUCCESS", "PENDING", "FAILURE"])(
-    "proves refund transaction outcome %s without treating record creation as payment",
-    async (status) => {
+  it.each([
+    ["SUCCESS", "10.00"],
+    ["PENDING", "10.00"],
+    ["PENDING", "0.00"],
+    ["AWAITING_RESPONSE", "0.00"],
+    ["UNKNOWN", "0.00"],
+    ["FAILURE", "0.00"],
+    ["ERROR", "0.00"],
+  ])(
+    "proves refund transaction outcome %s with settled amount %s without treating record creation as payment",
+    async (status, settledAmount) => {
       const raw = rawOrder({
         lineItems: {
           nodes: [line(1, 10, 1)],
@@ -3469,7 +4385,7 @@ describe("ShopifyOrderEditProvider", () => {
       const result = {
         id: id("Refund", 9),
         note: "Echelon order edit edit-1",
-        totalRefundedSet: bag("10.00"),
+        totalRefundedSet: bag(settledAmount),
         transactions: {
           nodes: [tx(2, "10.00", "REFUND", status, 1)],
           pageInfo: { hasNextPage: false },
@@ -3483,7 +4399,7 @@ describe("ShopifyOrderEditProvider", () => {
       const snapshot = await h.provider.readOrder(4, "100");
       const intent = refundIntent(snapshot);
       const execution = h.provider.refund(4, intent, NOW.toISOString());
-      if (status === "FAILURE")
+      if (["FAILURE", "ERROR"].includes(status))
         await expect(execution).rejects.toMatchObject({
           code: "REFUND_FAILED",
           outcome: "unknown",
@@ -3499,6 +4415,222 @@ describe("ShopifyOrderEditProvider", () => {
       expect(input).toMatchObject({ notify: false, allowOverRefunding: false });
       expect(input).not.toHaveProperty("refundLineItems");
       expect(h.requests.at(-1)?.variables.idempotencyKey).toBe("refund-key");
+    },
+  );
+
+  it("treats incomplete creation readback as retryable and finds the same refund on the next observation", async () => {
+    const raw = rawOrder({
+      lineItems: { nodes: [line(1, 10, 1)], pageInfo: { hasNextPage: false } },
+      currentSubtotalPriceSet: bag("10.00"),
+      currentTotalPriceSet: bag("10.00"),
+      totalOutstandingSet: bag("-10.00"),
+    });
+    const completed = {
+      id: id("Refund", 9),
+      note: "Echelon order edit edit-1",
+      totalRefundedSet: bag("10.00"),
+      transactions: {
+        nodes: [tx(2, "10.00", "REFUND", "SUCCESS", 1)],
+        pageInfo: { hasNextPage: false },
+      },
+    };
+    const h = harness([
+      raw,
+      raw,
+      {
+        refundCreate: {
+          refund: {
+            ...completed,
+            note: null,
+            totalRefundedSet: bag("0.00"),
+            transactions: { nodes: [], pageInfo: { hasNextPage: false } },
+          },
+          userErrors: [],
+        },
+      },
+      {
+        ...raw,
+        order: {
+          ...raw.order,
+          refunds: [
+            {
+              ...completed,
+              id: id("Refund", 8),
+              note: null,
+              totalRefundedSet: bag("0.00"),
+              transactions: { nodes: [], pageInfo: { hasNextPage: false } },
+            },
+            completed,
+          ],
+        },
+      },
+    ]);
+    const intent = refundIntent(await h.provider.readOrder(4, "100"));
+    await expect(
+      h.provider.refund(4, intent, NOW.toISOString()),
+    ).rejects.toMatchObject({ code: "REFUND_READBACK_PENDING" });
+    expect(await h.provider.observeRefund(4, intent)).toMatchObject({
+      status: "succeeded",
+      refundId: id("Refund", 9),
+    });
+    expect(
+      h.requests.filter((request) => request.query.includes("refundCreate")),
+    ).toHaveLength(1);
+  });
+
+  it("observes an absent refund without submitting a command even inside the idempotency window", async () => {
+    const h = harness([rawOrder(), rawOrder()]);
+    const intent = refundIntent(await h.provider.readOrder(4, "100"));
+    expect(await h.provider.observeRefund(4, intent)).toBeNull();
+    expect(
+      h.requests.every((request) => !request.query.includes("refundCreate")),
+    ).toBe(true);
+  });
+
+  it("leaves conflicting refund evidence for staff review without resubmitting", async () => {
+    const h = harness([
+      rawOrder(),
+      rawOrder({
+        refunds: [
+          {
+            id: id("Refund", 9),
+            note: "Echelon order edit edit-1",
+            totalRefundedSet: bag("10.00"),
+            transactions: {
+              nodes: [tx(2, "9.00", "REFUND", "SUCCESS", 1)],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        ],
+      }),
+    ]);
+    const intent = refundIntent(await h.provider.readOrder(4, "100"));
+    await expect(h.provider.observeRefund(4, intent)).rejects.toMatchObject({
+      code: "REFUND_REVIEW_EVIDENCE_MISMATCH",
+    });
+    expect(
+      h.requests.every((request) => !request.query.includes("refundCreate")),
+    ).toBe(true);
+  });
+
+  it.each(["PENDING", "AWAITING_RESPONSE", "UNKNOWN"])(
+    "reads an existing %s refund with no settled money without sending it again",
+    async (status) => {
+      const h = harness([
+        rawOrder(),
+        rawOrder({
+          refunds: [
+            {
+              id: id("Refund", 9),
+              note: "Echelon order edit edit-1",
+              totalRefundedSet: bag("0.00"),
+              transactions: {
+                nodes: [tx(2, "10.00", "REFUND", status, 1)],
+                pageInfo: { hasNextPage: false },
+              },
+            },
+          ],
+        }),
+      ]);
+      const snapshot = await h.provider.readOrder(4, "100");
+      expect(
+        await h.provider.refund(
+          4,
+          refundIntent(snapshot),
+          "2026-10-01T00:00:00.000Z",
+        ),
+      ).toMatchObject({ status: "pending", refundId: id("Refund", 9) });
+      expect(h.requests).toHaveLength(2);
+      expect(
+        h.requests.every((request) => !request.query.includes("refundCreate")),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    {
+      status: "SUCCESS",
+      settled: "0.00",
+      requested: "10.00",
+      parent: 1,
+      gateway: "shopify_payments",
+    },
+    {
+      status: "PENDING",
+      settled: "1.00",
+      requested: "10.00",
+      parent: 1,
+      gateway: "shopify_payments",
+    },
+    {
+      status: "PENDING",
+      settled: "0.00",
+      requested: "9.00",
+      parent: 1,
+      gateway: "shopify_payments",
+    },
+    {
+      status: "PENDING",
+      settled: "0.00",
+      requested: "10.00",
+      parent: 3,
+      gateway: "shopify_payments",
+    },
+    {
+      status: "PENDING",
+      settled: "0.00",
+      requested: "10.00",
+      parent: 1,
+      gateway: "manual",
+    },
+    {
+      status: "UNRECOGNIZED",
+      settled: "0.00",
+      requested: "10.00",
+      parent: 1,
+      gateway: "shopify_payments",
+    },
+  ])(
+    "rejects inconsistent pending or settled refund evidence: %j",
+    async (fixture) => {
+      const h = harness([
+        rawOrder(),
+        rawOrder({
+          refunds: [
+            {
+              id: id("Refund", 9),
+              note: "Echelon order edit edit-1",
+              totalRefundedSet: bag(fixture.settled),
+              transactions: {
+                nodes: [
+                  {
+                    ...tx(
+                      2,
+                      fixture.requested,
+                      "REFUND",
+                      fixture.status,
+                      fixture.parent,
+                    ),
+                    gateway: fixture.gateway,
+                  },
+                ],
+                pageInfo: { hasNextPage: false },
+              },
+            },
+          ],
+        }),
+      ]);
+      const snapshot = await h.provider.readOrder(4, "100");
+      await expect(
+        h.provider.refund(4, refundIntent(snapshot), NOW.toISOString()),
+      ).rejects.toMatchObject(
+        fixture.status === "UNRECOGNIZED"
+          ? { code: "SHOPIFY_RESPONSE_INVALID", outcome: "rejected" }
+          : { code: "REFUND_UNCONFIRMED", outcome: "unknown" },
+      );
+      expect(
+        h.requests.every((request) => !request.query.includes("refundCreate")),
+      ).toBe(true);
     },
   );
 
@@ -4684,5 +5816,481 @@ describe("calculation-only background order previews", () => {
         /orderEditBegin|orderEditCommit|refundCreate/.test(r.query),
       ),
     ).toBe(false);
+  });
+});
+
+describe("saved Club reward on an order with a used checkout reward", () => {
+  const oldCode = "USED-CLUB-REWARD";
+  const savedCode = "SAVED-233";
+  const allow = {
+    productDiscounts: true,
+    orderDiscounts: true,
+    shippingDiscounts: true,
+  };
+  function setup(rewardCents = 233) {
+    let savedQuote: OrderEditQuote | null = null;
+    let description = "";
+    let extra = false;
+    let extraNet = 279;
+    let committed = false;
+    let publishedExtra = false;
+    let publishedNet = 279;
+    const nativeAllocation: DiscountAllocationFixture = {
+      allocatedAmountSet: bag("2.79"),
+      discountApplication: {
+        __typename: "CalculatedDiscountCodeApplication",
+        id: id("CalculatedDiscountApplication", 50),
+        code: oldCode,
+        allocationMethod: "ACROSS",
+        appliedTo: "ORDER",
+        targetType: "LINE_ITEM",
+        targetSelection: "ALL",
+        description: oldCode,
+        value: { __typename: "MoneyV2", amount: "7.23", currencyCode: "USD" },
+      },
+    };
+    const originalRule = {
+      __typename: "DiscountCodeApplication",
+      index: 0,
+      code: oldCode,
+      targetType: "LINE_ITEM",
+      targetSelection: "ALL",
+      allocationMethod: "ACROSS",
+      value: nativeAllocation.discountApplication.value,
+    };
+    const nativeLine = () => ({
+      ...calcLine(1, 10, 1, "2.79"),
+      calculatedDiscountAllocations: [structuredClone(nativeAllocation)],
+    });
+    function nativeCalculation() {
+      const subtotal = extra ? BigInt(extraNet) : BigInt(0);
+      const tax =
+        ((subtotal + BigInt(549)) * BigInt(6) + BigInt(50)) / BigInt(100);
+      const added = calcLine(
+        2,
+        10,
+        extra ? 1 : 0,
+        "2.79",
+        decimal(BigInt(extraNet)),
+      );
+      for (const allocation of added.calculatedDiscountAllocations)
+        allocation.discountApplication.description = description;
+      return shippingCalculated(
+        decimal(subtotal + BigInt(549) + tax),
+        "5.49",
+        decimal(tax),
+        decimal(subtotal),
+        decimal(subtotal + tax - BigInt(33)),
+        [nativeLine(), ...(committed ? [added] : [])],
+        committed ? [] : extra ? [added] : [],
+      );
+    }
+    function nativeOrder() {
+      const net =
+        committed && publishedExtra ? BigInt(publishedNet) : BigInt(0);
+      const tax = ((net + BigInt(549)) * BigInt(6) + BigInt(50)) / BigInt(100);
+      const total = decimal(net + BigInt(549) + tax);
+      const base = shippingOrder(
+        total,
+        "5.49",
+        decimal(tax),
+        decimal(net),
+        decimal(net + tax - BigInt(33)),
+      );
+      const added = {
+        ...line(2, 10, publishedExtra ? 1 : 0, "2.79"),
+        discountedUnitPriceSet: bag(decimal(BigInt(publishedNet))),
+        unfulfilledDiscountedTotalSet: bag(
+          publishedExtra ? decimal(BigInt(publishedNet)) : "0.00",
+        ),
+        priceAfterAllDiscountsBeforeTaxesSet: bag(
+          publishedExtra ? decimal(BigInt(publishedNet)) : "0.00",
+        ),
+        discountAllocations: [
+          {
+            allocatedAmountSet: bag(
+              decimal(BigInt(279) - BigInt(publishedNet)),
+            ),
+            discountApplication: { index: 0 },
+          },
+        ],
+      };
+      return {
+        ...base,
+        order: {
+          ...base.order,
+          netPaymentSet: bag("5.82"),
+          transactions: [tx(1, "5.82")],
+          customer: {
+            id: id("Customer", 1),
+            tags: [],
+            membershipPlan: { value: "test-plan" },
+          },
+          lineItems: {
+            nodes: [
+              {
+                ...line(1, 10, 1, "2.79"),
+                priceAfterAllDiscountsBeforeTaxesSet: bag("0.00"),
+                discountAllocations: [
+                  {
+                    allocatedAmountSet: bag("2.79"),
+                    discountApplication: { index: committed ? 1 : 0 },
+                  },
+                ],
+              },
+              ...(committed ? [added] : []),
+            ],
+            pageInfo: { hasNextPage: false },
+          },
+          discountApplications: {
+            nodes: [
+              { ...originalRule, index: committed ? 1 : 0 },
+              ...(committed
+                ? [
+                    {
+                      __typename: "ManualDiscountApplication",
+                      index: 0,
+                      targetType: "LINE_ITEM",
+                      allocationMethod: "EACH",
+                      targetSelection: "EXPLICIT",
+                      title: description,
+                      value: {
+                        __typename: "MoneyV2",
+                        amount: decimal(BigInt(279) - BigInt(publishedNet)),
+                        currencyCode: "USD",
+                      },
+                    },
+                  ]
+                : []),
+            ],
+            pageInfo: { hasNextPage: false },
+          },
+        },
+      };
+    }
+    const lookup = (code: string) => {
+      const value = newCodeLookup();
+      const prior = code === oldCode;
+      value.codeDiscountNodeByCode.id = id("DiscountCodeNode", prior ? 1 : 2);
+      return {
+        codeDiscountNodeByCode: {
+          ...value.codeDiscountNodeByCode,
+          codeDiscount: {
+            ...value.codeDiscountNodeByCode.codeDiscount,
+            title: code,
+            usageLimit: 1,
+            appliesOncePerCustomer: true,
+            codes: { nodes: [{ code }], pageInfo: { hasNextPage: false } },
+            customerGets: {
+              items: { __typename: "AllDiscountItems", allItems: true },
+              value: {
+                __typename: "DiscountAmount",
+                amount: {
+                  amount: prior ? "7.23" : decimal(BigInt(rewardCents)),
+                  currencyCode: "USD",
+                },
+                appliesOnEachItem: false,
+              },
+            },
+          },
+        },
+      };
+    };
+    const rewards = {
+      available: () => true,
+      identify: vi.fn(async ({ codes }: { codes: string[] }) => codes),
+      verify: vi.fn(async () => {}),
+    };
+    const shipping = {
+      title: "Standard Shipping",
+      code: "standard",
+      source: "Echelon Shipping",
+      grossCents: 549,
+      netCents: 549,
+      discountCents: 0,
+      discountLabels: [],
+    };
+    const calculator: OrderEditShippingCalculator = {
+      calculate: async () => shipping,
+      calculatePreview: async (_snapshot, items) => {
+        const subtotal = items.reduce(
+          (sum, item) => sum + BigInt(item.netCents),
+          BigInt(0),
+        );
+        const tax =
+          ((subtotal + BigInt(549)) * BigInt(6) + BigInt(50)) / BigInt(100);
+        return {
+          shippingRepricing: shipping,
+          taxCents: Number(tax),
+          taxLines: [
+            { title: "State tax", ratePercentage: 6, amountCents: Number(tax) },
+          ],
+          totalCents: Number(subtotal + BigInt(549) + tax),
+        };
+      },
+    };
+    function respond({
+      query,
+      variables,
+    }: {
+      query: string;
+      variables: Record<string, unknown>;
+    }): unknown {
+      if (query.includes("query EchelonEditOrder(")) return nativeOrder();
+      if (query.includes("EchelonEditVariantPrices"))
+        return {
+          nodes: (variables.ids as string[]).map(() =>
+            variant(10, "2.79", '{"test-plan":{"cents":233}}'),
+          ),
+        };
+      if (query.includes("query EchelonEditCode("))
+        return lookup(String(variables.code));
+      if (query.includes("EchelonEditCodeCalculate"))
+        return {
+          draftOrderCalculate: {
+            userErrors: [],
+            calculatedDraftOrder: {
+              subtotalPriceSet: bag(decimal(BigInt(233) - BigInt(rewardCents))),
+              lineItemsSubtotalPrice: bag("2.33"),
+              lineItems: [
+                {
+                  variant: { id: id("ProductVariant", 10) },
+                  quantity: 1,
+                  discountedTotalSet: bag("2.33"),
+                },
+              ],
+              platformDiscounts: [
+                {
+                  code: savedCode,
+                  discountClasses: ["ORDER"],
+                  totalAmountPriceSet: bag(decimal(BigInt(rewardCents))),
+                },
+              ],
+            },
+          },
+        };
+      if (query.includes("EchelonEditCombinationRules")) {
+        const result = memberProvenance();
+        return {
+          ...result,
+          discountNodes: {
+            ...result.discountNodes,
+            nodes: result.discountNodes.nodes.map((node) => ({
+              ...node,
+              discount: { ...node.discount, combinesWith: allow },
+            })),
+          },
+        };
+      }
+      if (query.includes("orderEditBegin")) return begin(nativeCalculation());
+      if (query.includes("orderEditAddVariant")) {
+        extra = true;
+        return {
+          orderEditAddVariant: {
+            userErrors: [],
+            calculatedLineItem: { id: id("CalculatedLineItem", 2) },
+            calculatedOrder: nativeCalculation(),
+          },
+        };
+      }
+      if (query.includes("orderEditAddLineItemDiscount")) {
+        const discount = variables.discount as {
+          fixedValue: { amount: string };
+          description: string;
+        };
+        expect(variables.lineItemId).toBe(id("CalculatedLineItem", 2));
+        extraNet = Number(BigInt(279) - cents(discount.fixedValue.amount));
+        description = discount.description;
+        return {
+          orderEditAddLineItemDiscount: {
+            userErrors: [],
+            calculatedOrder: nativeCalculation(),
+          },
+        };
+      }
+      if (query.includes("orderEditSetQuantity")) {
+        expect(variables.lineItemId).toBe(id("CalculatedLineItem", 2));
+        expect(variables.quantity).toBe(0);
+        extra = false;
+        return quantity(nativeCalculation());
+      }
+      if (query.includes("orderEditCommit")) {
+        committed = true;
+        publishedExtra = extra;
+        publishedNet = extraNet;
+        return {
+          orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } },
+        };
+      }
+      throw new Error(`Unexpected test request: ${query.slice(0, 100)}`);
+    }
+    const history = new PostgresOrderEditCodeHistory({
+      query: async () => ({ rows: savedQuote ? [{ quote: savedQuote }] : [] }),
+    } as unknown as import("pg").Pool);
+    const h = harness(
+      Array.from({ length: 100 }, () => respond),
+      {},
+      calculator,
+      { rewards, codeHistory: history },
+    );
+    return {
+      ...h,
+      rewards,
+      save: (quote: OrderEditQuote) => {
+        savedQuote = quote;
+      },
+    };
+  }
+  const plan = {
+    changes: [{ lineItemId: id("LineItem", 1), quantity: 2 }],
+    additions: [],
+    discountCodes: [savedCode],
+  };
+
+  it("previews, submits and reconciles the saved $2.33 without touching the original $2.79", async () => {
+    const h = setup();
+    const baseline = await h.provider.readOrder(4, "100");
+    const preview = await h.provider.preview(
+      await h.provider.preparePreview(baseline),
+      plan,
+    );
+    expect(preview.financials).toMatchObject({
+      itemsNetCents: 0,
+      totalCents: 582,
+      orderDiscounts: [
+        { label: oldCode, amountCents: 279 },
+        { label: savedCode, amountCents: 233 },
+      ],
+    });
+    const quote = await h.provider.quote(4, baseline, plan, "stacked-reward");
+    h.save(quote);
+    expect(quote.lines[0]).toMatchObject({
+      originalLineId: id("LineItem", 1),
+      quantity: 1,
+      totalCents: 279,
+    });
+    expect(quote.lines[1]).toMatchObject({
+      originalLineId: null,
+      quantityIncreaseOfLineId: id("LineItem", 1),
+      quantity: 1,
+      totalCents: 0,
+    });
+    const reserve = vi.fn(async () => {});
+    const observed = await h.provider.commit(
+      4,
+      quote,
+      "stacked-reward",
+      reserve,
+    );
+    expect(reserve).toHaveBeenCalledOnce();
+    expect(observed.codePricing?.applications).toEqual([
+      { code: savedCode, amountCents: 233 },
+    ]);
+    expect(observed.nativeDiscountAllocations).toEqual(
+      baseline.nativeDiscountAllocations,
+    );
+    expect(
+      (await h.provider.reconcileCommit(4, baseline, quote, "stacked-reward"))
+        .status,
+    ).toBe("applied");
+    expect(
+      h.requests.filter((request) => request.query.includes("orderEditCommit")),
+    ).toHaveLength(1);
+  });
+
+  it("does not submit if the canonical reward reservation fails", async () => {
+    const h = setup();
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(4, baseline, plan, "reserve-failure");
+    h.save(quote);
+    await expect(
+      h.provider.commit(4, quote, "reserve-failure", async () => {
+        throw new Error("Reward claim rejected");
+      }),
+    ).rejects.toThrow();
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+    expect((await h.provider.readOrder(4, "100")).fingerprint).toBe(
+      baseline.fingerprint,
+    );
+  });
+
+  it("rejects a forged retained-code label even when all money still adds up", async () => {
+    const h = setup();
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      baseline,
+      plan,
+      "native-label-proof",
+    );
+    const retained = quote.codePricing!.retainedNativeDiscounts![0];
+    const amount = quote.financials!.itemDiscounts!.find(
+      (discount) => discount.key === retained.key,
+    )!;
+    retained.key = amount.key = "code:UNRELATED";
+    retained.label = amount.label = "UNRELATED";
+    expect(orderEditQuoteSchema.safeParse(quote).success).toBe(false);
+  });
+
+  it("keeps readback uncertainty and its cause, then reconciles without submitting twice", async () => {
+    const h = setup();
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(4, baseline, plan, "lost-readback");
+    h.save(quote);
+    const originalFetch = h.fetchImpl.getMockImplementation()!;
+    let sent = false;
+    h.fetchImpl.mockImplementation(async (url, init) => {
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("orderEditCommit")) sent = true;
+      if (sent && query.includes("query EchelonEditOrder("))
+        throw new Error("Synthetic readback outage");
+      return originalFetch(url, init);
+    });
+    await expect(
+      h.provider.commit(4, quote, "lost-readback", async () => {}),
+    ).rejects.toMatchObject({
+      code: "COMMIT_READBACK_UNAVAILABLE",
+      outcome: "unknown",
+      cause: expect.objectContaining({ code: "SHOPIFY_UNAVAILABLE" }),
+    });
+    h.fetchImpl.mockImplementation(originalFetch);
+    expect(
+      (await h.provider.reconcileCommit(4, baseline, quote, "lost-readback"))
+        .status,
+    ).toBe("applied");
+    expect(
+      h.requests.filter((request) => request.query.includes("orderEditCommit")),
+    ).toHaveLength(1);
+  });
+
+  it("restores an unpaid change without replacing or redeeming the original reward again", async () => {
+    const h = setup(100);
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(4, baseline, plan, "unpaid-stack");
+    h.save(quote);
+    const observed = await h.provider.commit(
+      4,
+      quote,
+      "unpaid-stack",
+      async () => {},
+    );
+    expect(observed.outstandingCents).toBe(141);
+    const restored = await h.provider.recoverUnpaid(
+      4,
+      baseline,
+      quote,
+      "recover-stack",
+    );
+    expect(isUnpaidRecoveryRestored(restored, baseline, quote)).toBe(true);
+    expect(restored.nativeDiscountAllocations).toEqual(
+      baseline.nativeDiscountAllocations,
+    );
+    expect(
+      h.requests.filter((request) =>
+        request.query.includes("orderEditAddLineItemDiscount"),
+      ),
+    ).toHaveLength(1);
   });
 });

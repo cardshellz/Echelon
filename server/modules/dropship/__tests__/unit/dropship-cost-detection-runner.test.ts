@@ -79,7 +79,9 @@ describe("runDropshipCostNoticePass", () => {
 describe("runDropshipCostListingActionPass", () => {
   const pass: DropshipCostListingActionPassResult = {
     vendorsProcessed: 1, vendorsFailed: 0, entriesDecided: 2, entriesSuperseded: 0, listingsDecided: 3, actions: { ...emptyActionCounts(), reprice_queued: 3 },
-    repriceJobsQueued: 1, holdsPlaced: 0, noticesSent: 1, holds: { reviewed: 0, released: 0, reasserted: 0, deferred: 0, vendorsFailed: 0, noticesSent: 0 },
+    repriceJobsQueued: 1, holdsPlaced: 0, noticesSent: 1,
+    rechecks: { rechecked: 0, vendorsFailed: 0, repriceJobsQueued: 0, holdsPlaced: 0, noticesSent: 0 },
+    holds: { restored: 0, reviewed: 0, released: 0, reasserted: 0, deferred: 0, vendorsFailed: 0, noticesSent: 0 },
   };
 
   it("runs one listing action pass with the worker id and batches it was given", async () => {

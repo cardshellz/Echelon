@@ -92,6 +92,7 @@ CREATE TABLE catalog.product_variants (
   barcode varchar(100),
   weight_grams numeric(10,2),
   length_mm numeric(10,2),
+  shipping_package_type varchar(30),
   width_mm numeric(10,2),
   height_mm numeric(10,2),
   ships_in_own_container boolean NOT NULL DEFAULT false,

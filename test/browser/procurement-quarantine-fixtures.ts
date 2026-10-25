@@ -1,3 +1,4 @@
+import type { VerifiedCustodyResult, CustodyAction } from "../../shared/procurement/receiving-quarantine-command";
 import type { Page } from "@playwright/test";
 import type { ReceivingQuarantineCommandResult, ReceivingQuarantineObservation, ReceivingQuarantineView } from "../../shared/procurement/receiving-quarantine";
 import { installFixtures, receipt } from "./procurement-fixtures";
@@ -35,7 +36,7 @@ export async function installQuarantineFixtures(page: Page, options: QuarantineF
     view: { receivingOrderId: 31, warehouseId: 1, canRecord: allowed, canAcceptAll: allowed,
       observations: options.existing ? [custodyObservation()] : [] } as ReceivingQuarantineView,
     commands: [] as Array<{ path: string; key: string | undefined; body: Record<string, unknown> }>,
-    reads: 0, optionReads: [] as string[],
+    reads: 0, optionReads: [] as string[], actorId: "test-user", detailFailure: 0, failureStatuses: [] as number[],
   };
   if (options.denied && state.view.observations[0]) {
     state.view.canRecord = denied;
@@ -44,13 +45,14 @@ export async function installQuarantineFixtures(page: Page, options: QuarantineF
   }
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
-  const saved = new Map<string, ReceivingQuarantineCommandResult>();
+  const saved = new Map<string, VerifiedCustodyResult>();
   let responseLost = false, invalidSent = false;
 
   await page.route("**/api/**", async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname;
     if (request.method() === "GET") {
-      if (path === "/api/receiving/31") { state.reads++; return route.fulfill({ json: state.order }); }
+      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actorId, username: state.actorId, role: "admin" }, permissions: [], roles: ["admin"] } });
+      if (path === "/api/receiving/31") { state.reads++; return state.detailFailure ? route.fulfill({ status: state.detailFailure, json: { error: "Receipt detail unavailable" } }) : route.fulfill({ json: state.order }); }
       if (path === "/api/receiving/32") return route.fulfill({ json: { ...state.order, id: 32, receiptNumber: "OTHER-RECEIPT", lines: [] } });
       if (path === "/api/receiving/31/quarantine") return route.fulfill({ json: state.view });
       if (path === "/api/receiving/32/quarantine") return route.fulfill({ json: { ...state.view, receivingOrderId: 32,
@@ -70,12 +72,17 @@ export async function installQuarantineFixtures(page: Page, options: QuarantineF
     if (request.method() !== "POST" || !path.includes("quarantine")) return route.fallback();
     const body = request.postDataJSON() as Record<string, unknown>, key = request.headers()["idempotency-key"];
     state.commands.push({ path, body, key });
+    const command = (path === "/api/receiving/31/quarantine" ? "intake" : path.split("/").at(-1)) as CustodyAction;
+    const identity = { command, resourceId: command === "intake" ? 31 : 41, actorId: state.actorId, idempotencyKey: key! };
+    const failureStatus = state.failureStatuses.shift();
+    if (failureStatus) return route.fulfill({ status: failureStatus, json: { error: "Session or permission needs recovery", code: failureStatus === 409 ? "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" : "AUTH_REQUIRED" } });
     if (options.delayed) await gate;
-    if (options.rejected) return route.fulfill({ status: 409, json: { error: "Receipt counts changed. Load the latest receipt before recording custody.", code: "RECEIVING_UNIT_VERSION_CONFLICT" } });
+    if (options.rejected) return route.fulfill({ status: 409, json: { error: "Receipt counts changed. Load the latest receipt before recording custody.", code: "RECEIVING_UNIT_VERSION_CONFLICT", details: { custodyCommandOutcome: "rejected", ...identity } } });
     let result = key ? saved.get(key) : undefined;
     if (!result) {
       if (path === "/api/receiving/31/quarantine") {
         const observation = custodyObservation();
+        Object.assign(observation, { actorId: state.actorId, reason: body.reason, evidenceReference: body.evidenceReference, holdingLocationId: body.holdingLocationId, condition: body.condition });
         if (body.kind === "receipt_line") {
           Object.assign(observation, { receivingLineId: 7, productId: 10, productVariantId: 2, unitsPerVariant: 10, purchaseOrderLineId: 9,
             description: "Test product", observedSku: "TEST-CASE", unitLabel: "receive units", condition: body.condition,
@@ -102,7 +109,11 @@ export async function installQuarantineFixtures(page: Page, options: QuarantineF
         const qty = Number(body.observationQty);
         observation.unallocatedQty -= qty; observation.physicalHeldQty -= qty; observation.returnedQty += qty; observation.version++;
       }
-      result = structuredClone({ observation, acceptance });
+      if (command !== "intake") observation.dispositions.push({ id: observation.dispositions.length + 1,
+        kind: command === "prepare-acceptance" ? "prepare_acceptance" : command === "cancel-acceptance" ? "cancel_acceptance" : "return",
+        observationQty: Number(body.observationQty ?? acceptance?.observationQty), actorId: state.actorId, recordedAt: timestamp,
+        reason: String(body.reason), evidenceReference: command === "return" ? String(body.evidenceReference) : null, acceptanceId: acceptance?.id ?? null });
+      result = structuredClone({ observation, acceptance, ...identity, request: body });
       if (key) saved.set(key, result);
     }
     if (options.lostOnce && !responseLost) { responseLost = true; return route.abort("connectionreset"); }

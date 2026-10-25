@@ -1,10 +1,34 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { PoFinancialEvidenceInput } from "../../domain/po-financial-evidence";
+
+// These orchestration fixtures contain ordinary goods invoices. PostgreSQL
+// shipment-billing-ownership tests exercise the real capability read and rejection.
+vi.mock("../../shipment-billing-ownership.repository", () => ({
+  readInvoiceSourceCapabilities: vi.fn(async () => {
+    const verified = { allowed: true, code: "AP_INVOICE_SOURCE_VERIFIED", reason: "Fixture has ordinary invoice source ownership." };
+    return { purchaseOrderLinks: verified, approval: verified, payment: verified, freightSourceLineIds: [] };
+  }),
+}));
 
 // These owner fixtures isolate financial state changes. The real PostgreSQL
 // cost suites verify the shared graph lock and its transaction ordering.
 vi.mock("../../../inventory/infrastructure/cost-evidence.repository", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../../inventory/infrastructure/cost-evidence.repository")>(),
   lockInventoryCostGraph: vi.fn(async () => undefined),
+}));
+
+// These financial orchestration fixtures supply current approval evidence. The
+// real PostgreSQL command suite covers inactive actors and revocation while queued.
+vi.mock("../../../identity/infrastructure/command-authority.repository", () => ({
+  readCommandAuthorityActor: vi.fn(async (_tx, userId: string) => ({ userId, active: true,
+    permissions: ["purchasing:approve"], scopedPermissions: [] })),
+}));
+
+// Number allocation is exercised with real PostgreSQL in the payment acceptance suite.
+// This orchestration fixture keeps allocation independent of balance-read ordering.
+vi.mock("../../../../platform/document-numbering/document-number.repository", () => ({
+  allocateDocumentNumber: vi.fn(async () => "PAY-20260518-001"),
+  readSuggestedInvoiceNumber: vi.fn(),
 }));
 
 const tables = vi.hoisted(() => ({
@@ -42,6 +66,7 @@ const tables = vi.hoisted(() => ({
     invoiceDate: "vendor_invoices.invoice_date",
     invoicedAmountCents: "vendor_invoices.invoiced_amount_cents",
     paidAmountCents: "vendor_invoices.paid_amount_cents",
+    creditedAmountCents: "vendor_invoices.credited_amount_cents",
     balanceCents: "vendor_invoices.balance_cents",
     status: "vendor_invoices.status",
     updatedAt: "vendor_invoices.updated_at",
@@ -82,11 +107,17 @@ const mocks = vi.hoisted(() => ({
     insert: vi.fn(),
     transaction: vi.fn(),
   },
+  readPoFinancialEvidenceSourcesWithClient: vi.fn(),
   detectFinancialExceptions: vi.fn(),
   reconcilePurchaseCostEvidence: vi.fn(),
 }));
 
 vi.mock("../../../../db", () => ({ db: mocks.db }));
+// Supply source evidence while retaining the actual financial workflow and
+// milestone evaluators. The adapter is exercised against PostgreSQL separately.
+vi.mock("../../po-financial-evidence.repository", () => ({
+  readPoFinancialEvidenceSourcesWithClient: mocks.readPoFinancialEvidenceSourcesWithClient,
+}));
 vi.mock("@shared/schema", () => tables);
 vi.mock("../../po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
@@ -96,6 +127,24 @@ vi.mock("../../../inventory/cogs.service", () => ({ COGSService: class {} }));
 vi.mock("../../purchase-cost-application.service", () => ({
   reconcilePurchaseCostEvidence: mocks.reconcilePurchaseCostEvidence,
 }));
+
+function financialSource(paid = 0, status = paid === 2500 ? "paid" : "approved", paymentStatus = "completed"): PoFinancialEvidenceInput {
+  return {
+    purchaseOrderId: 7, vendorId: 4, currency: "USD",
+    invoices: [{
+      id: 12, vendorId: 4, currency: "USD", status,
+      invoicedAmountCents: 2500, paidAmountCents: paid, balanceCents: 2500 - paid,
+      links: [{ purchaseOrderId: 7, purchaseOrderVendorId: 4, purchaseOrderCurrency: "USD" }],
+      lines: [{ id: 70, purchaseOrderLineId: 50, purchaseOrderId: 7, freightCostId: null, lineTotalCents: 2500 }],
+      payments: paid > 0 || paymentStatus === "voided" ? [{ allocationId: 31, paymentId: 21,
+        paymentVendorId: 4, paymentCurrency: "USD", paymentStatus, appliedAmountCents: 2500 }] : [],
+    }],
+  };
+}
+
+function useFinancialSource(source: PoFinancialEvidenceInput) {
+  mocks.readPoFinancialEvidenceSourcesWithClient.mockResolvedValue(new Map([[source.purchaseOrderId, source]]));
+}
 
 function makeSelectChain(result: unknown[]) {
   const chain: any = {};
@@ -119,15 +168,30 @@ function makeUpdateChain() {
   };
 }
 
-function buildTx(selectResults: unknown[][]) {
+function buildTx(selectResults: unknown[][], returnedPayment = { id: 21, paymentNumber: "PAY-20260518-001" } as Record<string, unknown>) {
   const tx: any = {
-    select: vi.fn(() => makeSelectChain(selectResults.shift() ?? [])),
-    execute: vi.fn(() => Promise.resolve()),
+    select: vi.fn((projection) => {
+      // This suite's ordinary invoice fixtures have no previous cash allocations.
+      // The real PostgreSQL credit/payment suite verifies the settlement reader.
+      if (projection?.payment === tables.apPayments && projection?.amount === tables.apPaymentAllocations.appliedAmountCents) {
+        return makeSelectChain([]);
+      }
+      const rows = (selectResults.shift() ?? []).map((value) => {
+        if (!value || typeof value !== "object") return value;
+        const row = value as Record<string, unknown>;
+        const isInvoiceProjection = "invoicedAmountCents" in row || "paidAmountCents" in row || "balanceCents" in row;
+        return isInvoiceProjection ? { id: 12, vendorId: 4, currency: "USD", status: "approved",
+          invoicedAmountCents: 2500, paidAmountCents: 0, creditedAmountCents: 0, balanceCents: 2500, ...row } : row;
+      });
+      return makeSelectChain(rows);
+    }),
+    // No credit documents or applications exist in these orchestration fixtures.
+    execute: vi.fn(async () => ({ rows: [] })),
     insert: vi.fn((table) => ({
       values: vi.fn(() => {
         if (table === tables.apPayments) {
           return {
-            returning: vi.fn(() => Promise.resolve([{ id: 21, paymentNumber: "PAY-20260518-001" }])),
+            returning: vi.fn(() => Promise.resolve([returnedPayment])),
           };
         }
         return Promise.resolve([]);
@@ -141,6 +205,7 @@ function buildTx(selectResults: unknown[][]) {
 describe("AP ledger atomic side effects", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useFinancialSource(financialSource());
     mocks.detectFinancialExceptions.mockResolvedValue(undefined);
     mocks.reconcilePurchaseCostEvidence.mockResolvedValue({
       lotsUpdated: 0,
@@ -151,11 +216,26 @@ describe("AP ledger atomic side effects", () => {
     mocks.db.insert.mockReturnValue({ values: vi.fn(() => Promise.resolve([])) });
   });
 
+  it.each(["record_payment", "apply_payment", "void_payment"] as const)("rejects a missing/invalid %s clock before any database operation", async (command) => {
+    const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
+    const { lockInventoryCostGraph } = await import("../../../inventory/infrastructure/cost-evidence.repository");
+    const tx = buildTx([]);
+    for (const now of [undefined, null, new Date("invalid"), "2026-10-25"]) {
+      await expect(executeApPaymentCommandInTransaction(command, { now: now as Date, userId: "ops-user" }, tx))
+        .rejects.toMatchObject({ statusCode: 500, details: { code: "AP_PAYMENT_CLOCK_INVALID" } });
+    }
+    expect(lockInventoryCostGraph).not.toHaveBeenCalled();
+    expect(tx.execute).not.toHaveBeenCalled();
+    expect(tx.select).not.toHaveBeenCalled();
+    expect(tx.insert).not.toHaveBeenCalled();
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
   it("records payment, allocations, invoice balance, and PO aggregate inside one transaction", async () => {
+    useFinancialSource(financialSource(2500));
     const { recordPayment } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
-      [],
       [{ invoicedAmountCents: 2500, status: "approved" }],
       [{ total: 2500 }],
       [{ purchaseOrderId: 7 }],
@@ -171,13 +251,21 @@ describe("AP ledger atomic side effects", () => {
       totalAmountCents: 2500,
       allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
       createdBy: "ops-user",
-    });
+    }, { now: new Date("2026-10-25T12:00:00.000Z") });
 
     expect(payment).toEqual({ id: 21, paymentNumber: "PAY-20260518-001" });
     expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
     expect(tx.insert).toHaveBeenCalledWith(tables.apPayments);
-    expect(tx.execute).toHaveBeenCalledOnce();
+    // Allocation is isolated above; both credit-evidence reads still use this transaction.
+    expect(tx.execute).toHaveBeenCalledTimes(2);
     expect(tx.insert).toHaveBeenCalledWith(tables.apPaymentAllocations);
+    const paymentWrite = tx.insert.mock.results[tx.insert.mock.calls.findIndex(([table]: [unknown]) => table === tables.apPayments)].value;
+    const allocationWrite = tx.insert.mock.results[tx.insert.mock.calls.findIndex(([table]: [unknown]) => table === tables.apPaymentAllocations)].value;
+    expect(paymentWrite.values).toHaveBeenCalledWith(expect.objectContaining({ createdAt: new Date("2026-10-25T12:00:00.000Z"), updatedAt: new Date("2026-10-25T12:00:00.000Z") }));
+    expect(allocationWrite.values).toHaveBeenCalledWith([expect.objectContaining({ createdAt: new Date("2026-10-25T12:00:00.000Z") })]);
+    for (const result of tx.update.mock.results) expect(result.value.set).toHaveBeenCalledWith(expect.objectContaining({ updatedAt: new Date("2026-10-25T12:00:00.000Z") }));
+    const historyWrite = tx.insert.mock.results[tx.insert.mock.calls.findIndex(([table]: [unknown]) => table === tables.poStatusHistory)].value;
+    expect(historyWrite.values).toHaveBeenCalledWith(expect.objectContaining({ changedAt: new Date("2026-10-25T12:00:00.000Z") }));
     expect(tx.update).toHaveBeenCalledWith(tables.vendorInvoices);
     expect(tx.update).toHaveBeenCalledWith(tables.purchaseOrders);
     expect(mocks.detectFinancialExceptions).toHaveBeenCalledWith(7);
@@ -205,6 +293,7 @@ describe("AP ledger atomic side effects", () => {
     } as any);
 
     expect(tx.update).toHaveBeenCalledWith(tables.purchaseOrders);
+    expect(mocks.readPoFinancialEvidenceSourcesWithClient).toHaveBeenCalledWith(tx, [7]);
     expect(tx.insert).toHaveBeenCalledWith(tables.poStatusHistory);
     const historyInsert = tx.insert.mock.results.find(
       (result: any, index: number) => tx.insert.mock.calls[index][0] === tables.poStatusHistory,
@@ -239,6 +328,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("derives disputed PO state from an active disputed invoice", async () => {
+    useFinancialSource(financialSource(0, "disputed"));
     const { recomputePoFinancialAggregates } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{
@@ -407,10 +497,10 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("requires AP command audit persistence inside the caller-owned payment transaction", async () => {
+    useFinancialSource(financialSource(2500));
     const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
-      [],
       [{ invoicedAmountCents: 2500, status: "approved" }],
       [{ total: 2500 }],
       [{ purchaseOrderId: 7 }],
@@ -425,7 +515,7 @@ describe("AP ledger atomic side effects", () => {
       return originalInsert(table);
     });
 
-    await expect(executeApPaymentCommandInTransaction("record_payment", {
+    await expect(executeApPaymentCommandInTransaction("record_payment", { now: new Date("2026-10-25T12:00:00.000Z"),
       payment: {
         vendorId: 4,
         paymentDate: new Date("2026-05-18T12:00:00Z"),
@@ -437,7 +527,8 @@ describe("AP ledger atomic side effects", () => {
     }, tx)).rejects.toThrow("audit unavailable");
 
     expect(tx.insert).toHaveBeenCalledWith(tables.apPayments);
-    expect(tx.execute).toHaveBeenCalledOnce();
+    // Allocation is isolated above; both credit-evidence reads still use this transaction.
+    expect(tx.execute).toHaveBeenCalledTimes(2);
     expect(tx.insert).toHaveBeenCalledWith(tables.auditEvents);
   });
 
@@ -446,8 +537,8 @@ describe("AP ledger atomic side effects", () => {
     const tx = buildTx([
       [{ id: 12, status: "received", paidAmountCents: 0 }],
       [{ purchaseOrderId: 7 }],
-      [{ invoicedAmountCents: 2500, paidAmountCents: 0 }],
-      [{ financialStatus: "unbilled", firstInvoicedAt: null, firstPaidAt: null, fullyPaidAt: null }],
+      [{ status: "received", financialStatus: "unbilled", firstInvoicedAt: null, firstPaidAt: null, fullyPaidAt: null }],
+      [{ invoicedAmountCents: 2500, paidAmountCents: 0, status: "approved" }],
     ]);
     tx.update = vi.fn((table) => {
       if (table === tables.vendorInvoices) {
@@ -580,17 +671,19 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("returns operator-visible AP command outcome metadata", async () => {
+    useFinancialSource(financialSource(2500));
     const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
-      [],
       [{ invoicedAmountCents: 2500, status: "approved" }],
       [{ total: 2500 }],
       [{ purchaseOrderId: 7 }],
       [{ status: "received", financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null }],
       [{ invoicedAmountCents: 2500, paidAmountCents: 2500, status: "paid" }],
-    ]);
-    const result = await executeApPaymentCommandInTransaction("record_payment", {
+      [{ allocationId: 31, vendorInvoiceId: 12, appliedAmountCents: 2500 }],
+      [{ id: 31, apPaymentId: 21, vendorInvoiceId: 12, appliedAmountCents: 2500, invoiceVendorId: 4, invoiceCurrency: "USD", invoiceStatus: "paid" }],
+    ], { id: 21, paymentNumber: "PAY-20260518-001", vendorId: 4, currency: "USD", status: "completed", totalAmountCents: 2500, paymentCalendarDate: null });
+    const result = await executeApPaymentCommandInTransaction("record_payment", { now: new Date("2026-10-25T12:00:00.000Z"),
       payment: {
         vendorId: 4,
         paymentDate: new Date("2026-05-18T12:00:00Z"),
@@ -609,10 +702,13 @@ describe("AP ledger atomic side effects", () => {
       affectedPaymentIds: [21],
       affectedPurchaseOrderIds: [7],
     });
+    expect(result).toMatchObject({ applications: [{ allocationId: 31, vendorInvoiceId: 12, appliedAmountCents: 2500 }],
+      paymentBalance: { state: "fully_applied", appliedAmountCents: 2500, unappliedAmountCents: 0 } });
     expect(tx.insert).toHaveBeenCalledWith(tables.auditEvents);
   });
 
   it("voids payment, reverses invoice balance, and recomputes PO aggregate inside one transaction", async () => {
+    useFinancialSource(financialSource(0, "approved", "voided"));
     const { voidPayment } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 21, status: "completed" }],
@@ -625,7 +721,9 @@ describe("AP ledger atomic side effects", () => {
     ]);
     mocks.db.transaction.mockImplementation(async (callback) => callback(tx));
 
-    await voidPayment(21, "duplicate", "ops-user");
+    await voidPayment(21, "duplicate", "ops-user", { now: new Date("2026-10-25T12:00:00.000Z") });
+    for (const result of tx.update.mock.results) expect(result.value.set).toHaveBeenCalledWith(expect.objectContaining({ updatedAt: new Date("2026-10-25T12:00:00.000Z") }));
+    expect(tx.update.mock.results[0].value.set).toHaveBeenCalledWith(expect.objectContaining({ voidedAt: new Date("2026-10-25T12:00:00.000Z") }));
 
     expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
     expect(tx.update).toHaveBeenCalledWith(tables.apPayments);

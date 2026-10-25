@@ -16,21 +16,27 @@ const workflowRoutes = readSource("server/modules/procurement/rfq-workflow.route
 const app = readSource("client/src/App.tsx");
 const routes = readSource("server/modules/procurement/purchasing-recommendation.routes.ts");
 const rfqService = readSource("server/modules/procurement/purchasing-rfq.service.ts");
+const commandClient = readSource("client/src/lib/rfq-command.ts");
+const commandHook = readSource("client/src/features/purchasing/use-rfq-commands.ts");
+const listContract = readSource("shared/procurement/rfq-work-list.ts");
+const listRepository = readSource("server/modules/procurement/rfq-work-list.repository.ts");
 const reorderEnginePage = readSource("client/src/pages/ReorderEngine.tsx");
 const automationPage = readSource("client/src/pages/ProcurementAutomation.tsx");
 const runsPage = readSource("client/src/pages/ProcurementRuns.tsx");
 
 describe("procurement RFQs UI contract", () => {
-  it("is registered at /procurement/rfqs for admin/lead", () => {
+  it("is registered at /procurement/rfqs with purchasing or legacy inventory read access", () => {
     expect(app).toContain('path="/procurement/rfqs"');
     expect(app).toMatch(
-      /procurement\/rfqs"[\s\S]{0,300}component=\{ProcurementRfqs\}[\s\S]{0,100}allowedRoles=\{\["admin", "lead"\]\}/,
+      /procurement\/rfqs"[\s\S]{0,300}component=\{ProcurementRfqs\}[\s\S]{0,200}purchasing[\s\S]{0,200}inventory/,
     );
   });
 
   it("consumes exactly the two RFQ read endpoints", () => {
     // The tracking list added with this page…
-    expect(page).toContain("/api/purchasing/rfqs?limit=");
+    expect(page).toContain("/api/purchasing/rfqs?");
+    expect(page).toContain("rfqWorkListResponseSchema.safeParse");
+    expect(page).toContain("WorkListPagination");
     // …and the existing requirement queue the Order Builder also reads.
     expect(page).toContain('"/api/purchasing/rfq-queue"');
     expect(routes).toContain('app.get("/api/purchasing/rfq-queue"');
@@ -38,31 +44,29 @@ describe("procurement RFQs UI contract", () => {
 
   it("delegates quote capture and draft conversion to the permission-aware workflow panel", () => {
     expect(page).toContain("<RfqWorkflowPanel");
-    expect(panel).toContain('hasPermission("purchasing", "edit")');
-    expect(panel).toContain("financialCommandFetchJson");
-    expect(panel).toContain("Idempotency-Key");
-    expect(panel).toContain("/lines/${line.id}/quotes");
-    expect(panel).toContain("/rfqs/${rfqId}/convert");
+    expect(panel).toContain("useRfqCommands(rfqId)");
+    expect(commandHook).toContain('hasPermission("purchasing", "edit")');
+    expect(commandClient).toContain("financialCommandFetchJson");
+    expect(commandClient).toContain("Idempotency-Key");
+    expect(commandClient).toContain("createPersistentFinancialIntentStore");
+    expect(commandClient).toContain("matchesRfqCommandReceipt");
+    expect(panel).toContain('operation: "capture_quote"');
+    expect(panel).toContain('operation: "convert"');
     expect(panel).toContain("quoteRevisionId: line.latestQuote!.id");
     expect(page).toContain("RFQs start in the Order Builder");
     expect(workflowRoutes).toContain('requirePermission("purchasing", "edit")');
   });
   it("registers the new server endpoint read-only through the service seam", () => {
-    // GET /api/purchasing/rfqs: permission consistent with the sibling
-    // procurement read (GET /api/purchasing/rfq-queue is "inventory"/"view").
-    expect(routes).toContain(
-      'app.get("/api/purchasing/rfqs", requirePermission("inventory", "view")',
-    );
+    expect(routes).toMatch(/app\.get\("\/api\/purchasing\/rfqs",\s*requireAnyPermission\(\["purchasing", "view"\], \["inventory", "view"\]\)/);
     // No mutation verb is ever registered on the /api/purchasing/rfqs path.
     expect(routes).not.toMatch(/app\.(post|put|patch|delete)\("\/api\/purchasing\/rfqs/);
     // The route delegates to the service seam instead of inlining SQL…
-    expect(routes).toContain("listRequestForQuotes(db, { limit: req.query.limit })");
+    expect(routes).toContain("listRequestForQuotes(db, query.data)");
     expect(rfqService).toContain("export async function listRequestForQuotes");
-    // …the list is bounded (untrusted limit clamped server-side)…
-    expect(rfqService).toContain("RFQ_LIST_MAX_LIMIT = 100");
-    expect(rfqService).toContain("parseRfqListLimit");
-    // …and the whole service stays read-only: selects only, no writes.
-    expect(rfqService).not.toMatch(/\.(insert|update|delete|execute)\(/);
+    // Untrusted filters are validated and the snapshot is explicitly read-only.
+    expect(listContract).toContain("RFQ_LIST_MAX_LIMIT = 100");
+    expect(rfqService).toContain("rfqWorkListQuerySchema.parse");
+    expect(listRepository).toContain('isolationLevel: "repeatable read", accessMode: "read only"');
   });
 
   it("connects requests to quote review and their exact purchase orders", () => {

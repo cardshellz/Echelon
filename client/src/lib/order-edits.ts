@@ -432,7 +432,7 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
       signal?: AbortSignal,
     ) => {
       const result = await read(
-        `/orders/${positiveId.parse(omsOrderId)}?connectionId=${positiveId.parse(connectionId)}&codeEntryVersion=v1`,
+        `/orders/${positiveId.parse(omsOrderId)}?connectionId=${positiveId.parse(connectionId)}&codeEntryVersion=v1&managementVersion=v2`,
         orderEditOrderSchema,
         signal,
       );

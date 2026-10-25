@@ -1,5 +1,56 @@
 import type { OrderEditOperation } from "@shared/order-edits/order-edit.contract";
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
+import type { OrderEditDiscount } from "@shared/order-edits/order-edit-discounts";
+
+type OrderEditDiscountBreakdown =
+  | { kind: "aggregate"; discounts: OrderEditDiscount[] }
+  | {
+      kind: "separate";
+      productDiscounts: OrderEditDiscount[];
+      orderDiscounts: OrderEditDiscount[];
+      subtotalBeforeOrderDiscountsCents: number;
+    };
+
+/** Arrange the API's reconciled allocations; never classify a code by its name
+ * or recalculate its saving from a current catalog price. Legacy evidence that
+ * cannot prove the stages retains its exact original breakdown. */
+export function orderEditDiscountBreakdown(
+  financials: OrderEditFinancials,
+): OrderEditDiscountBreakdown {
+  const discounts: OrderEditDiscount[] =
+    financials.itemDiscounts ??
+    (financials.itemsDiscountCents > 0
+      ? [
+          {
+            key: "aggregate",
+            label:
+              financials.itemDiscountLabels.join(", ") || "Product savings",
+            amountCents: financials.itemsDiscountCents,
+            value: { type: "allocated" },
+          },
+        ]
+      : []);
+  if (financials.orderDiscounts === undefined)
+    return { kind: "aggregate", discounts };
+
+  const orderKeys = new Set(
+    financials.orderDiscounts.map((discount) => discount.key),
+  );
+  return {
+    kind: "separate",
+    productDiscounts: discounts.filter(
+      (discount) => !orderKeys.has(discount.key),
+    ),
+    orderDiscounts: financials.orderDiscounts,
+    subtotalBeforeOrderDiscountsCents: Number(
+      BigInt(financials.itemsNetCents) +
+        financials.orderDiscounts.reduce(
+          (sum, discount) => sum + BigInt(discount.amountCents),
+          BigInt(0),
+        ),
+    ),
+  };
+}
 
 export function orderEditTaxDisplay(
   financials: Pick<OrderEditFinancials, "taxLines" | "taxesIncluded">,
@@ -16,11 +67,14 @@ export function orderEditTaxDisplay(
   return {
     label: qualifiers.length ? `Tax (${qualifiers.join(", ")})` : "Tax",
     // Jurisdictions may tax different bases. Never add their rates or derive a rate from dollars.
-    details: lines.length > 1
-      ? lines.map(line => line.ratePercentage === null
-        ? line.title
-        : `${line.title} ${line.ratePercentage}%`)
-      : [],
+    details:
+      lines.length > 1
+        ? lines.map((line) =>
+            line.ratePercentage === null
+              ? line.title
+              : `${line.title} ${line.ratePercentage}%`,
+          )
+        : [],
   };
 }
 

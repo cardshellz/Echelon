@@ -30,6 +30,7 @@ function setup() {
   let labels: unknown[] = [];
   let split = false;
   let splitStatus = "awaiting_shipment";
+  const knownProviderIds = new Set([55]);
   const header = {
     id: 9,
     order_id: 10,
@@ -51,7 +52,7 @@ function setup() {
     if (query.sql.includes("SELECT id FROM oms.order_edit_operations"))
       return { rows: submitted ? [] : [{ id: OPERATION }] };
     if (query.sql.includes("SELECT COALESCE(os.shipstation_order_id"))
-      return { rows: [{ provider_order_id: 55 }] };
+      return { rows: [...knownProviderIds].map(provider_order_id => ({ provider_order_id })) };
     if (query.sql.includes("SELECT wo.id FROM wms.orders"))
       return { rows: [{ id: 10 }] };
     if (query.sql.includes("SELECT os.id,os.order_id"))
@@ -152,6 +153,8 @@ function setup() {
       | "synchronize"
       | "release"
       | "verify_shipped"
+      | "verify_cancelled"
+      | "verify_retired"
       | "release_unsubmitted",
   ) =>
     service.synchronizeOrderEditShipment({
@@ -189,6 +192,7 @@ function setup() {
       split = true;
       splitStatus = status;
     },
+    knowReplacement: () => { knownProviderIds.add(99); },
     ship: () => {
       live.orderStatus = "shipped";
       header.warehouse_status = "shipped";
@@ -206,6 +210,61 @@ afterEach(() => {
 });
 
 describe("ShipStation order-edit ownership and readback", () => {
+  it("verifies a retired provider job after the owned warehouse header resumes without writing to ShipStation", async () => {
+    const f = setup();
+    await f.run("hold");
+    f.header.status = "cancelled";
+    f.live.orderStatus = "cancelled";
+    const before = f.calls.length;
+    await f.run("verify_retired");
+    await f.run("verify_retired");
+    expect(f.calls.slice(before).every(call => call.body === null)).toBe(true);
+    expect(f.header.warehouse_status).toBe("ready");
+    expect(f.live.orderStatus).toBe("cancelled");
+    // Whole-order cancellation still requires the warehouse to be cancelled.
+    await expect(f.run("verify_cancelled")).rejects.toThrow();
+  });
+  it.each(["active_remote", "unknown_sibling", "active_label", "missing_receipt", "active_local"])(
+    "refuses retired-provider verification with %s", async failure => {
+      const f = setup();
+      if (failure !== "missing_receipt") await f.run("hold");
+      f.header.status = failure === "active_local" ? "queued" : "cancelled";
+      f.live.orderStatus = failure === "active_remote" ? "on_hold" : "cancelled";
+      if (failure === "unknown_sibling") f.split();
+      if (failure === "active_label") f.setLabels([{ orderId: 55, orderNumber: "#100", voided: false }]);
+      const before = f.calls.length;
+      await expect(f.run("verify_retired")).rejects.toThrow();
+      expect(f.calls.slice(before).every(call => call.body === null)).toBe(true);
+    },
+  );
+  it("allows the current edit's known replacement while still verifying the old provider job as cancelled", async () => {
+    const f = setup(); await f.run("hold");
+    f.header.status = "cancelled"; f.live.orderStatus = "cancelled";
+    f.split("on_hold"); f.knowReplacement();
+    const before = f.calls.length;
+    await f.run("verify_retired");
+    expect(f.calls.slice(before).every(call => call.body === null)).toBe(true);
+    // Cancelling the entire order still refuses an active replacement.
+    f.header.warehouse_status = "cancelled";
+    await expect(f.run("verify_cancelled")).rejects.toThrow();
+  });
+  it("verifies a cancelled provider shipment without restoring a hold or sending any write", async () => {
+    const f = setup(); await f.run("hold");
+    f.header.warehouse_status = "cancelled"; f.header.status = "cancelled"; f.live.orderStatus = "cancelled";
+    const before = f.calls.length;
+    await f.run("verify_cancelled"); await f.run("verify_cancelled");
+    expect(f.calls.slice(before).every(call => call.body === null)).toBe(true);
+    expect(f.live.orderStatus).toBe("cancelled");
+  });
+  it.each(["active_sibling", "active_label", "uncancelled_provider"])("keeps cancellation ownership for %s", async failure => {
+    const f = setup(); await f.run("hold"); f.header.warehouse_status = "cancelled"; f.header.status = "cancelled"; f.live.orderStatus = "cancelled";
+    if (failure === "active_sibling") f.split("awaiting_shipment");
+    if (failure === "active_label") f.setLabels([{ shipmentId: 12, orderId: 55, voided: false }]);
+    if (failure === "uncancelled_provider") f.live.orderStatus = "on_hold";
+    const before = f.calls.length;
+    await expect(f.run("verify_cancelled")).rejects.toThrow();
+    expect(f.calls.slice(before).every(call => call.body === null)).toBe(true);
+  });
   it("releases a timed-out pre-submit hold without changing quantities, linking splits, or placing another hold", async () => {
     const f = setup();
     f.loseHoldResponse();

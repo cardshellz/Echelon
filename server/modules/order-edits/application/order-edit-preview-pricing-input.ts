@@ -32,6 +32,7 @@ export function toOrderEditPreviewPricingInput(
           unsupported: line.unsupported,
         })),
       previewProductDiscounts: snapshot.previewProductDiscounts,
+      nativeDiscountAllocations: snapshot.nativeDiscountAllocations,
       discountRules: (snapshot.discountRules ?? [])
         .filter((rule) => rule.label !== snapshot.codePricing?.description)
         .map((rule) => ({

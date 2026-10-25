@@ -12,6 +12,10 @@
  */
 
 import { centsToDollarString } from "@shared/utils/money";
+import { ChannelListingValidationError } from "@shared/channel-listing-validation";
+import type { ChannelPackageRequirements } from "@shared/catalog/shipping-package";
+import type { ChannelPackagePlan } from "../../../marketplace-listings/domain/channel-package";
+import type { EbayPackageSource } from "./ebay-listing-package";
 import { assertEbayListingPhotoPlan, buildEbayListingPhotoPlan, type EbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
 
 import type {
@@ -55,6 +59,8 @@ export interface EbayListingConfig {
 
 export interface BuiltInventoryItem {
   sku: string;
+  packageSource?: EbayPackageSource;
+  packagePlan?: ChannelPackagePlan;
   payload: Omit<EbayInventoryItem, "sku">;
 }
 
@@ -74,6 +80,8 @@ export interface EbayListingBuildOptions {
   photoPlan?: EbayListingPhotoPlan;
   availableQuantityByVariantId?: ReadonlyMap<number, number>;
   requirePackageWeight?: boolean;
+  /** Set by the authoritative policy owner; package reads finish before intent sealing. */
+  packageRequirementsByVariantId?: ReadonlyMap<number, ChannelPackageRequirements>;
   titleMaxLength?: number;
   descriptionHtmlOverride?: string;
   categoryIdOverride?: string;
@@ -148,15 +156,23 @@ export class EbayListingBuilder {
     const resolvedOptions = { ...options, photoPlan };
     return listing.variants
       .filter((v) => v.isListed && v.sku)
-      .map((variant) => ({
-        sku: variant.sku!,
-        payload: this.buildSingleInventoryItem(
-          variant,
-          listing,
-          productAspects,
-          resolvedOptions,
-        ),
-      }));
+      .map((variant) => {
+        const requirements = options.packageRequirementsByVariantId?.get(variant.variantId);
+        if (options.packageRequirementsByVariantId && !requirements) {
+          throw new ChannelListingValidationError({ field: "policies", reason: "required",
+            productId: listing.productId, variantId: variant.variantId, variantSku: variant.sku ?? undefined });
+        }
+        return {
+          sku: variant.sku!,
+          packageSource: {
+            productId: listing.productId,
+            variantId: variant.variantId,
+            facts: { weightGrams: variant.weightGrams, ...variant.package },
+            requirements: requirements ?? { weight: options.requirePackageWeight === true, dimensions: false, packageType: false },
+          },
+          payload: this.buildSingleInventoryItem(variant, listing, productAspects, resolvedOptions),
+        };
+      });
   }
 
   /**
@@ -320,19 +336,22 @@ export class EbayListingBuilder {
       this.resolveAvailableQuantity(variant, options);
 
     // Add weight if available
+    if (variant.weightGrams !== null && variant.weightGrams !== undefined &&
+      (!Number.isFinite(variant.weightGrams) || variant.weightGrams <= 0)) {
+      throw new ChannelListingValidationError({ field: "package_weight", reason: "invalid",
+        productId: listing.productId, variantId: variant.variantId, variantSku: variant.sku ?? undefined });
+    }
     if (variant.weightGrams) {
       item.packageWeightAndSize = {
         weight: {
-          // weight_grams is numeric(10,2) (migration 185); eBay package
-          // weights are sent in whole grams.
-          value: Math.max(1, Math.round(variant.weightGrams)),
+          // The provider accepts decimal measurements. Preserve the catalog fact.
+          value: variant.weightGrams,
           unit: "GRAM",
         },
       };
-    } else if (options.requirePackageWeight) {
-      throw new Error(
-        `eBay package weight is required for SKU ${variant.sku}. Set catalog.product_variants.weight_grams or channels.channel_variant_overrides.weight_override before pushing this listing.`,
-      );
+    } else if (options.requirePackageWeight && !options.packageRequirementsByVariantId) {
+      throw new ChannelListingValidationError({ field: "package_weight", reason: "required",
+        productId: listing.productId, variantId: variant.variantId, variantSku: variant.sku ?? undefined });
     }
 
     return item;
@@ -346,7 +365,7 @@ export class EbayListingBuilder {
     options: EbayListingBuildOptions,
   ): EbayOffer {
     // A missing price is sent as "0.00", as before; every other value must be whole cents.
-    const price = this.formatOfferAmount(variant, "priceCents", variant.priceCents ?? 0);
+    const price = this.formatOfferAmount(listing.productId, variant, variant.priceCents ?? 0);
     const listingPolicies = this.resolveListingPolicies(variant, config, options);
 
     const offer: EbayOffer = {
@@ -379,7 +398,7 @@ export class EbayListingBuilder {
     // Add compare-at price as original retail price
     if (variant.compareAtPriceCents) {
       offer.pricingSummary.originalRetailPrice = {
-        value: this.formatOfferAmount(variant, "compareAtPriceCents", variant.compareAtPriceCents),
+        value: this.formatOfferAmount(listing.productId, variant, variant.compareAtPriceCents),
         currency: "USD",
       };
     }
@@ -394,14 +413,12 @@ export class EbayListingBuilder {
    * never sent to eBay as a price.
    */
   private formatOfferAmount(
+    productId: number,
     variant: ChannelVariantPayload,
-    field: "priceCents" | "compareAtPriceCents",
     cents: number,
   ): string {
     if (!Number.isSafeInteger(cents) || cents < 0) {
-      throw new Error(
-        `eBay offer ${field} must be whole, non-negative cents for SKU ${variant.sku}; got ${cents}.`,
-      );
+      throw new ChannelListingValidationError({ productId, variantId: variant.variantId, variantSku: variant.sku ?? undefined, field: "price", reason: "invalid" });
     }
     return centsToDollarString(cents);
   }

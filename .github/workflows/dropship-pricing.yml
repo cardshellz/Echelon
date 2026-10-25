@@ -12,6 +12,9 @@ concurrency:
 
 jobs:
   select:
+    permissions:
+      contents: read
+      pull-requests: read
     name: Select affected browser features
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -27,6 +30,8 @@ jobs:
       - id: migrations
         name: Validate migration identities before dependency setup
         run: node scripts/migrations/check-migrations.mjs --ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -46,13 +51,17 @@ jobs:
     # Invalid migrations stop setup; later selector uncertainty still runs coverage.
     if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
     runs-on: ubuntu-latest
+    # Match package-lock.json; browsers and OS libraries are already installed.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      options: --user 1001 --ipc=host
     timeout-minutes: 15
     strategy:
       fail-fast: false
       max-parallel: 4
       # Job-level if runs before matrix expansion: an explicit safe skip starts
       # no browsers. If selection crashes without output, run the full suite.
-      matrix: ${{ fromJSON(needs.select.outputs.matrix || '{"include":[{"feature":"all","label":"Full coverage fallback","shard":1,"shards":2},{"feature":"all","label":"Full coverage fallback","shard":2,"shards":2}]}') }}
+      matrix: ${{ fromJSON(needs.select.outputs.matrix || '{"include":[{"feature":"all","label":"Full coverage fallback","shard":1,"shards":4},{"feature":"all","label":"Full coverage fallback","shard":2,"shards":4},{"feature":"all","label":"Full coverage fallback","shard":3,"shards":4},{"feature":"all","label":"Full coverage fallback","shard":4,"shards":4}]}') }}
     env:
       BROWSER_FEATURE: ${{ matrix.feature }}
     steps:
@@ -64,7 +73,6 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
       - run: npx playwright test --config playwright.dropship-pricing.config.ts --shard=${{ matrix.shard }}/${{ matrix.shards }} --forbid-only
       - uses: actions/upload-artifact@v4
         if: failure()

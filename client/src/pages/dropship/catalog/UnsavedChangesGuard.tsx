@@ -11,7 +11,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
+  anyDraftSaving,
   describeLeavePrompt,
+  LEAVE_WHILE_SAVING_WORDS,
   scopeUnsavedDrafts,
   updateUnsavedDrafts,
   type UnsavedDraft,
@@ -43,11 +45,10 @@ const UnsavedDraftsContext = createContext<readonly UnsavedDraft[]>([]);
 /**
  * One leave guard for every editor on the page. Editors report unsaved
  * changes with `useUnsavedDraft`; ways off the step (the Next button, the step
- * links, the store picker) go through `useLeaveGuard`, which asks first while
- * anything is unsaved. Closing or reloading the tab gets the browser's own
- * prompt (and, from an editor whose save is in flight, `useBrowserLeavePrompt`).
- * Leaving through the portal's menu or the browser's Back button is not
- * caught here.
+ * links, the store picker, the portal's menu) go through `useLeaveGuard`,
+ * which asks first while anything is unsaved. Closing or reloading the tab
+ * gets the browser's own prompt (and, from an editor whose save is in flight,
+ * `useBrowserLeavePrompt`). The browser's Back button is not caught here.
  */
 export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
   const [drafts, setDrafts] = useState<readonly UnsavedDraft[]>([]);
@@ -58,7 +59,7 @@ export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
 
   const setDraft = useCallback((id: string, label: string, dirty: boolean, extra?: UnsavedDraftExtra) => {
     const entry: UnsavedDraft | null = !dirty ? null
-      : extra ? { id, label, changes: extra.changes, discard: extra.discard } : { id, label };
+      : extra ? { id, label, changes: extra.changes, discard: extra.discard, ...(extra.saving ? { saving: true } : {}) } : { id, label };
     setDrafts((current) => updateUnsavedDrafts(current, id, entry));
   }, []);
   const guard = useCallback<LeaveGuard>((leave, scope) => {
@@ -83,6 +84,13 @@ export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
   const askedScope = useRef<readonly string[] | null>(null);
   if (pendingLeave) askedScope.current = pendingLeave.scope;
   const asking = scopeUnsavedDrafts(drafts, askedScope.current);
+  // A save that is running can't be stopped by leaving, so the question offers no discard: wait, then leave (review MC6).
+  const saving = anyDraftSaving(asking);
+  // Everything it asked about was saved meanwhile (the vendor waited): nothing is left to discard, so the question closes.
+  const nothingLeft = pendingLeave !== null && asking.length === 0;
+  useEffect(() => {
+    if (nothingLeft) setPendingLeave(null);
+  }, [nothingLeft]);
 
   return (
     <UnsavedChangesContext.Provider value={value}>
@@ -91,14 +99,28 @@ export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
       </UnsavedDraftsContext.Provider>
       <AlertDialog open={pendingLeave !== null} onOpenChange={(open) => { if (!open) setPendingLeave(null); }}>
         <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
-            <AlertDialogDescription>{describeLeavePrompt(asking) ?? "Your changes aren't saved."}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Keep editing</AlertDialogCancel>
-            <AlertDialogAction onClick={leaveNow}>Discard and leave</AlertDialogAction>
-          </AlertDialogFooter>
+          {saving ? (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>{LEAVE_WHILE_SAVING_WORDS.title}</AlertDialogTitle>
+                <AlertDialogDescription>{LEAVE_WHILE_SAVING_WORDS.text}</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>{LEAVE_WHILE_SAVING_WORDS.stay}</AlertDialogCancel>
+              </AlertDialogFooter>
+            </>
+          ) : (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
+                <AlertDialogDescription>{describeLeavePrompt(asking) ?? "Your changes aren't saved."}</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Keep editing</AlertDialogCancel>
+                <AlertDialogAction onClick={leaveNow}>Discard and leave</AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          )}
         </AlertDialogContent>
       </AlertDialog>
     </UnsavedChangesContext.Provider>
@@ -111,14 +133,16 @@ export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
  * An editor that counts its changes passes `extra`: the count words the leave
  * prompt ("You have 2 changes that aren't saved."), and `discard`, which must
  * keep one identity across renders, drops them on "Discard and leave".
+ * `saving` while its save runs: the question then asks the vendor to wait.
  */
 export function useUnsavedDraft(id: string, label: string, dirty: boolean, extra?: UnsavedDraftExtra): void {
   const context = useContext(UnsavedChangesContext);
   const changes = extra?.changes;
   const discard = extra?.discard;
+  const saving = extra?.saving === true;
   useEffect(() => {
-    context?.setDraft(id, label, dirty, changes !== undefined && discard !== undefined ? { changes, discard } : undefined);
-  }, [context, id, label, dirty, changes, discard]);
+    context?.setDraft(id, label, dirty, changes !== undefined && discard !== undefined ? { changes, discard, ...(saving ? { saving } : {}) } : undefined);
+  }, [context, id, label, dirty, changes, discard, saving]);
   useEffect(() => () => context?.setDraft(id, label, false), [context, id, label]);
 }
 
@@ -132,6 +156,7 @@ export function useBrowserLeavePrompt(asking: boolean): void {
   useEffect(() => {
     if (!asking) return undefined;
     const askBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (reloadingOnPurpose) return;
       event.preventDefault();
       // Older browsers show the prompt only when returnValue is set.
       event.returnValue = "";
@@ -139,6 +164,22 @@ export function useBrowserLeavePrompt(asking: boolean): void {
     window.addEventListener("beforeunload", askBeforeUnload);
     return () => window.removeEventListener("beforeunload", askBeforeUnload);
   }, [asking]);
+}
+
+/**
+ * Set by reloadPageWithoutLeavePrompt for the one reload the page itself asks for: the leave prompts stand aside.
+ * Deliberate page-wide state: the reload ends the page, and nothing else sets it.
+ */
+let reloadingOnPurpose = false;
+
+/**
+ * Reloads the page without the browser's leave prompt, for a reload whose words already told the vendor what is lost:
+ * step 1's "This page was updated, so your last changes weren't saved. Reload it…", whose marks can never be saved
+ * (verify VC10: the prompt asked a second time).
+ */
+export function reloadPageWithoutLeavePrompt(reload: () => void = () => window.location.reload()): void {
+  reloadingOnPurpose = true;
+  reload();
 }
 
 /** Every editor's unsaved draft on the page (the leave-guard scopes read them). Empty outside an UnsavedChangesProvider. */

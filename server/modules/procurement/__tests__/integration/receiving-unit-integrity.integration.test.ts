@@ -8,6 +8,8 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
+import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
+import { receiptReversalCommandResultSchema, type ReceiptReversalAction } from "@shared/procurement/receipt-reversal-command";
 import { readClosedShipmentReceivedBaseQtyByLine } from "../../receiving-shipment-coverage";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 import { resetFixtureWithEmptyReceivingCustody } from "./receiving-custody-fixture";
@@ -20,8 +22,9 @@ const databaseTests = DATABASE_URL && DISPOSABLE ? describe : describe.skip;
 const NOW = new Date("2026-09-06T12:00:00.000Z");
 const TABLES = [schema.products, schema.productVariants, schema.vendors,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
-  schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.poStatusHistory,
+  schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.supplierReturnLines, schema.receiptReversals,
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.poStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.inventoryLevels, schema.inventoryLots, schema.inventoryTransactions] as const;
 type ReceivingService = import("../../receiving.service").ReceivingService;
 type Outcome = { ok: true; value: unknown } | { ok: false; error: unknown };
@@ -42,7 +45,85 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
   const ownedSchemas: string[] = [];
   let ownsAudit = false;
   let auditReady = false;
+  let commandsReady = false;
+  let reversalCommands: typeof import("../../receipt-reversal.commands");
+  let commandRepository: typeof import("../../../../platform/commands/command-results.repository").createDrizzleFinancialCommandRepository;
+  const commandKeys = new Set<string>();
   let migrationEvidence: { before: unknown; after: unknown; replay: unknown };
+
+  function executeReversal(name: string, input: {
+    action?: ReceiptReversalAction;
+    targetId?: number;
+    body?: unknown;
+    actorId?: string;
+    key?: string;
+  } = {}) {
+    const action = input.action ?? "line";
+    const targetId = input.targetId ?? (action === "line" ? 51 : 50);
+    const body = input.body ?? (action === "line"
+      ? { qty: 1, reason: "Correct duplicate receipt paperwork" }
+      : { reason: "Correct duplicate receipt paperwork" });
+    const operator = input.actorId ?? actorId;
+    const idempotencyKey = input.key ?? `${actorId}:${name}`;
+    commandKeys.add(idempotencyKey);
+    const scope = reversalCommands.receiptReversalCommandScope();
+    const descriptor: FinancialCommandDescriptor = {
+      ...scope, actorType: "service", actorId: reversalCommands.RECEIPT_REVERSAL_COMMAND_PRINCIPAL,
+      idempotencyKey, requestHash: reversalCommands.hashReceiptReversalCommandIdentity({ action, targetId, body, actorId: operator }),
+      contractVersion: 1,
+    };
+    return reversalCommands.createReceiptReversalCommands(reversal, commandRepository(database))
+      .execute(action, targetId, body, operator, descriptor);
+  }
+
+  async function clearCommands() {
+    if (!commandsReady || commandKeys.size === 0) return;
+    await pool.query("DELETE FROM public.financial_command_results WHERE actor_id=$1 AND idempotency_key=ANY($2::text[])",
+      [reversalCommands.RECEIPT_REVERSAL_COMMAND_PRINCIPAL, [...commandKeys]]);
+    commandKeys.clear();
+  }
+
+  async function retryDue(name: string) {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const result = await pool.query("SELECT next_attempt_at <= clock_timestamp() AS due FROM public.financial_command_results WHERE actor_id=$1 AND idempotency_key=$2",
+        [reversalCommands.RECEIPT_REVERSAL_COMMAND_PRINCIPAL, `${actorId}:${name}`]);
+      if (result.rows[0]?.due === true) return;
+      await new Promise((done) => setTimeout(done, 20));
+    }
+    throw new Error("The failed receipt reversal did not reach its first retry window");
+  }
+
+  async function waitForGraphBlockedBy(holderPid: number) {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const blocked = await pool.query(`SELECT pid FROM pg_stat_activity
+        WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))
+          AND query LIKE '%inventory.cost_graph%'`, [holderPid]);
+      if (blocked.rows.length === 1) return;
+      await new Promise((done) => setTimeout(done, 20));
+    }
+    throw new Error("Receipt reversal did not reach its inventory graph lock");
+  }
+
+  async function seedSecondReceiptLine() {
+    await pool.query(`INSERT INTO procurement.receiving_lines(id,receiving_order_id,product_id,product_variant_id,sku,
+      expected_qty,received_qty,damaged_qty,units_per_variant_snapshot,putaway_location_id,unit_cost,unit_cost_mills,status)
+      VALUES(52,50,100,200,'TEST-CASE-SECOND',1,1,0,250,99,4,375,'received')`);
+  }
+
+  async function linkClosedReceiptToMatchedPo() {
+    await pool.query(`UPDATE procurement.receiving_orders SET purchase_order_id=10 WHERE id=50;
+      UPDATE procurement.receiving_lines SET purchase_order_line_id=21 WHERE id=51;
+      UPDATE procurement.purchase_orders SET status='received',physical_status='received' WHERE id=10;
+      UPDATE procurement.purchase_order_lines SET order_qty=500,received_qty=500,status='received' WHERE id=21;
+      INSERT INTO procurement.po_receipts(purchase_order_id,purchase_order_line_id,receiving_order_id,receiving_line_id,qty_received)
+        VALUES(10,21,50,51,500);
+      INSERT INTO procurement.vendor_invoices(id,invoice_number,vendor_id,invoiced_amount_cents,balance_cents)
+        VALUES(70,'REVERSAL-FIXTURE',5,2000,2000);
+      INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,purchase_order_line_id,line_number,qty_invoiced,unit_cost_cents,line_total_cents,match_status)
+        VALUES(71,70,21,1,500,4,2000,'matched')`);
+  }
 
   function createService(db: any = database, ownerStorage = storage) {
     return new Receiving(db, inventory as any, { queueSyncAfterInventoryChange: async () => undefined } as any,
@@ -129,6 +210,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
     const replay = (await pool.query("SELECT id,receiving_order_id,sku,expected_qty,received_qty,units_per_variant_snapshot,inbound_shipment_line_id FROM procurement.receiving_lines WHERE id=901")).rows[0];
     migrationEvidence = { before, after, replay };
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000017000018590001_receipt_shipment_quantity_amendments.sql"), "utf8"));
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000004000017890001_receiving_quarantine.sql"), "utf8"));
     await pool.query(`
@@ -141,6 +223,10 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       ownsAudit = true;
     }
     auditReady = true;
+    for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
+      await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
+    }
+    commandsReady = true;
     database = drizzle(pool, { schema });
     const oldDatabase = process.env.DATABASE_URL;
     const oldExternal = process.env.EXTERNAL_DATABASE_URL;
@@ -175,6 +261,8 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       inventory = new inventoryModule.InventoryUseCases(inventoryDatabase, repositoryModule.createInventoryMethods(database), new lotsModule.InventoryLotService(database));
       service = createService();
       reversal = new Reversal(database, inventory);
+      reversalCommands = await import("../../receipt-reversal.commands");
+      commandRepository = (await import("../../../../platform/commands/command-results.repository")).createDrizzleFinancialCommandRepository;
     } finally {
       if (oldDatabase === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = oldDatabase;
       if (oldExternal === undefined) delete process.env.EXTERNAL_DATABASE_URL; else process.env.EXTERNAL_DATABASE_URL = oldExternal;
@@ -185,6 +273,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
     if (ownedSchemas.length !== 4) throw new Error("Receiving fixture schema ownership not established");
     await resetFixtureWithEmptyReceivingCustody(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(",")} RESTART IDENTITY CASCADE`);
     await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
+    await clearCommands();
     await pool.query(`
       INSERT INTO catalog.products(id,sku,name) VALUES(100,'TEST-PRODUCT','Receiving test product');
       INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit)
@@ -207,6 +296,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
   afterAll(async () => {
     try {
       if (pool) {
+        await clearCommands();
         if (ownsAudit) await pool.query("DROP TABLE public.audit_events");
         else if (auditReady) await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
         for (const name of [...ownedSchemas].reverse()) await pool.query(`DROP SCHEMA ${name} CASCADE`);
@@ -478,6 +568,212 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       await expect(reverse("rollback")).rejects.toThrow(/receiving fixture injected write failure/);
     });
     expect(await state()).toEqual(before);
+  });
+
+  describe("durable reversal retry identity", () => {
+    it("replays the exact committed line response after later changes without repeating compensation", async () => {
+      await service.close(50, actorId);
+      await linkClosedReceiptToMatchedPo();
+      await pool.query("UPDATE catalog.product_variants SET units_per_variant=500 WHERE id=200");
+      const first = await executeReversal("lost-response");
+      const response = receiptReversalCommandResultSchema.parse(first.body);
+      expect(first).toMatchObject({ httpStatus: 200, terminalState: "succeeded", replayed: false });
+      expect(response).toMatchObject({ action: "line", targetId: 51, receivingOrderId: 50, receivingLineId: 51,
+        actorId, qty: 1, baseUnitsReversed: 250, lotUnitCostMills: 93750, apReconciliationReopened: true });
+      expect((await pool.query("SELECT received_qty,status FROM procurement.purchase_order_lines WHERE id=21")).rows)
+        .toEqual([{ received_qty: 250, status: "partially_received" }]);
+      expect((await pool.query("SELECT match_status FROM procurement.vendor_invoice_lines WHERE id=71")).rows)
+        .toEqual([{ match_status: "pending" }]);
+      expect((await pool.query("SELECT qty_on_hand,unit_cost_mills FROM inventory.inventory_lots")).rows)
+        .toEqual([{ qty_on_hand: 1, unit_cost_mills: "93750" }]);
+      await executeReversal("later-reversal");
+      await pool.query("UPDATE procurement.vendor_invoice_lines SET match_status='matched' WHERE id=71");
+      const beforeReplay = await state();
+      expect(await executeReversal("lost-response")).toEqual({ ...first, replayed: true });
+      expect(await state()).toEqual(beforeReplay);
+      expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE transaction_type='receipt_reversal'")).rows[0].count).toBe(2);
+    });
+
+    it.each([
+      ["operator", { actorId: "different-receiving-operator" }],
+      ["action", { action: "order" as const, targetId: 50, body: { reason: "Correct duplicate receipt paperwork" } }],
+      ["target", { targetId: 999 }],
+      ["quantity", { body: { qty: 2, reason: "Correct duplicate receipt paperwork" } }],
+      ["reason", { body: { qty: 1, reason: "A different correction" } }],
+      ["override", { body: { qty: 1, reason: "Correct duplicate receipt paperwork", allowNegative: true } }],
+      ["raw whitespace", { body: { qty: 1, reason: " Correct duplicate receipt paperwork " } }],
+    ] as const)("rejects changed %s under a completed key without any business writes", async (_label, changed) => {
+      await service.close(50, actorId);
+      await executeReversal("identity");
+      const before = await state();
+      await expect(executeReversal("identity", changed)).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
+      expect(await state()).toEqual(before);
+    });
+
+    it("preserves whole-order group and PO transition in the durable response", async () => {
+      await seedSecondReceiptLine();
+      await service.close(50, actorId);
+      await linkClosedReceiptToMatchedPo();
+      const first = await executeReversal("whole-order", { action: "order" });
+      const response = receiptReversalCommandResultSchema.parse(first.body);
+      expect(response).toMatchObject({ action: "order", receivingOrderId: 50, targetId: 50, actorId,
+        poStatusUpdate: { purchaseOrderId: 10, legacyStatus: "partially_received", physicalStatus: "receiving" } });
+      if (response.action !== "order") throw new Error("Expected whole-order reversal response");
+      expect(response.reversals.map(({ receivingLineId, qty, baseUnitsReversed }) => ({ receivingLineId, qty, baseUnitsReversed })))
+        .toEqual([{ receivingLineId: 51, qty: 2, baseUnitsReversed: 500 }, { receivingLineId: 52, qty: 1, baseUnitsReversed: 250 }]);
+      const rows = (await pool.query("SELECT id,order_reversal_id,reversal_scope FROM procurement.receipt_reversals ORDER BY id")).rows;
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => row.order_reversal_id === rows[0].id && row.reversal_scope === "order")).toBe(true);
+      const beforeReplay = await state();
+      expect(await executeReversal("whole-order", { action: "order" })).toEqual({ ...first, replayed: true });
+      expect(await state()).toEqual(beforeReplay);
+    });
+
+    it("rolls back every order line when a later line has insufficient original stock", async () => {
+      await seedSecondReceiptLine();
+      await service.close(50, actorId);
+      await pool.query(`UPDATE inventory.inventory_lots SET qty_on_hand=0 WHERE id IN (
+        SELECT inventory_lot_id FROM inventory.inventory_transactions WHERE receiving_line_id=52 AND transaction_type='receipt')`);
+      const before = await state();
+      const rejected = await executeReversal("whole-rollback", { action: "order" });
+      expect(rejected).toMatchObject({ httpStatus: 409, terminalState: "rejected", body: { code: "REVERSAL_INSUFFICIENT_ON_HAND" } });
+      expect(await state()).toEqual(before);
+      expect(await executeReversal("whole-rollback", { action: "order" })).toEqual({ ...rejected, replayed: true });
+      expect(await state()).toEqual(before);
+    });
+
+    it("rolls back inventory, PO, AP and reversal records when final response persistence fails, then retries once", async () => {
+      await service.close(50, actorId);
+      await linkClosedReceiptToMatchedPo();
+      const before = await state();
+      await pool.query("ALTER TABLE public.financial_command_results ADD CONSTRAINT fixture_reversal_result_failure CHECK(status <> 'succeeded') NOT VALID");
+      try { await expect(executeReversal("result-failure")).rejects.toBeDefined(); }
+      finally { await pool.query("ALTER TABLE public.financial_command_results DROP CONSTRAINT fixture_reversal_result_failure"); }
+      expect(await state()).toEqual(before);
+      await retryDue("result-failure");
+      const first = await executeReversal("result-failure");
+      expect(first).toMatchObject({ httpStatus: 200, terminalState: "succeeded", body: { qty: 1, apReconciliationReopened: true } });
+      expect(await executeReversal("result-failure")).toEqual({ ...first, replayed: true });
+      expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receipt_reversals")).rows[0].count).toBe(1);
+      expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE transaction_type='receipt_reversal'")).rows[0].count).toBe(1);
+    });
+
+    it("rolls back physical compensation after a final reversal-row failure and recovers the same command", async () => {
+      await service.close(50, actorId);
+      const before = await state();
+      await failingWrite("procurement.receipt_reversals", "UPDATE", async () => {
+        await expect(executeReversal("backfill-failure")).rejects.toThrow(/receiving fixture injected write failure/);
+      });
+      expect(await state()).toEqual(before);
+      await retryDue("backfill-failure");
+      expect(await executeReversal("backfill-failure")).toMatchObject({ httpStatus: 200, body: { qty: 1 } });
+      expect((await pool.query("SELECT variant_qty FROM inventory.inventory_levels")).rows).toEqual([{ variant_qty: 1 }]);
+    });
+
+    it("retains definitive rejection after stock changes and requires a newly reviewed key", async () => {
+      await service.close(50, actorId);
+      await pool.query("UPDATE inventory.inventory_lots SET qty_on_hand=0");
+      const rejected = await executeReversal("insufficient");
+      expect(rejected).toMatchObject({ httpStatus: 409, terminalState: "rejected", body: { code: "REVERSAL_INSUFFICIENT_ON_HAND" } });
+      await pool.query("UPDATE inventory.inventory_lots SET qty_on_hand=2");
+      const beforeReplay = await state();
+      expect(await executeReversal("insufficient")).toEqual({ ...rejected, replayed: true });
+      expect(await state()).toEqual(beforeReplay);
+      expect(await executeReversal("stock-reviewed")).toMatchObject({ httpStatus: 200, terminalState: "succeeded" });
+    });
+
+    it("accepts a 200-character order command key without overflowing the legacy per-line key column", async () => {
+      await seedSecondReceiptLine();
+      await service.close(50, actorId);
+      const key = `${actorId}:long-key:`.padEnd(200, "x");
+      const first = await executeReversal("long-key", { action: "order", key });
+      expect(first).toMatchObject({ httpStatus: 200, body: { action: "order", idempotencyKey: key } });
+      expect((await pool.query("SELECT length(idempotency_key) AS length FROM procurement.receipt_reversals")).rows)
+        .toEqual([expect.objectContaining({ length: expect.any(Number) }), expect.objectContaining({ length: expect.any(Number) })]);
+      const lengths = (await pool.query("SELECT max(length(idempotency_key))::int AS length FROM procurement.receipt_reversals")).rows;
+      expect(lengths[0].length).toBeLessThanOrEqual(100);
+      expect(await executeReversal("long-key", { action: "order", key })).toEqual({ ...first, replayed: true });
+    });
+
+    it("takes the graph lock before receipt and PO rows, exposes in-flight recovery, then replays the winner", async () => {
+      await service.close(50, actorId);
+      await linkClosedReceiptToMatchedPo();
+      const holder = await pool.connect();
+      let open = false;
+      let pending: ReturnType<typeof executeReversal> | undefined;
+      try {
+        await holder.query("BEGIN"); open = true;
+        const holderPid = Number((await holder.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
+        await holder.query("SELECT pg_advisory_xact_lock(hashtext('inventory.cost_graph'),hashtext('version_1'))");
+        pending = executeReversal("held-graph");
+        await waitForGraphBlockedBy(holderPid);
+        // If reversal takes source rows before graph, this NOWAIT fails and
+        // demonstrates the deadlock cycle with existing graph-first owners.
+        await holder.query("SELECT id FROM procurement.receiving_orders WHERE id=50 FOR UPDATE NOWAIT");
+        await holder.query("SELECT id FROM procurement.purchase_orders WHERE id=10 FOR UPDATE NOWAIT");
+        await holder.query("SELECT id FROM procurement.purchase_order_lines WHERE id=21 FOR UPDATE NOWAIT");
+        await expect(executeReversal("held-graph")).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IN_PROGRESS" });
+        await holder.query("COMMIT"); open = false;
+        const first = await pending;
+        expect(first).toMatchObject({ httpStatus: 200 });
+        expect(await executeReversal("held-graph")).toEqual({ ...first, replayed: true });
+        expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receipt_reversals")).rows[0].count).toBe(1);
+      } finally { if (open) await holder.query("ROLLBACK"); holder.release(); if (pending) await pending; }
+    });
+
+    it("serializes distinct keys without reversing more than the original receipt", async () => {
+      await service.close(50, actorId);
+      const body = { qty: 2, reason: "Full correction after review" };
+      const results = await Promise.all([executeReversal("race-a", { body }), executeReversal("race-b", { body })]);
+      expect(results.map((result) => result.terminalState).sort()).toEqual(["rejected", "succeeded"]);
+      expect(results.find((result) => result.terminalState === "rejected"))
+        .toMatchObject({ httpStatus: 409, body: { code: "REVERSAL_QTY_EXCEEDS_REMAINING" } });
+      expect((await pool.query("SELECT reversed_qty FROM procurement.receiving_lines WHERE id=51")).rows).toEqual([{ reversed_qty: 2 }]);
+      expect((await pool.query("SELECT variant_qty FROM inventory.inventory_levels")).rows).toEqual([{ variant_qty: 0 }]);
+      expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receipt_reversals")).rows[0].count).toBe(1);
+    });
+
+    it.each(["line", "order"] as const)("blocks historical %s evidence without inventing an original command response", async (action) => {
+      await service.close(50, actorId);
+      const key = `${actorId}:legacy-${action}`;
+      if (action === "line") await reversal.reverseReceivingLine({ receivingLineId: 51, qty: 1, reason: "Historical correction", idempotencyKey: key, userId: actorId });
+      else await reversal.reverseReceivingOrder({ receivingOrderId: 50, reason: "Historical correction", idempotencyKey: key, userId: actorId });
+      const before = await state();
+      const rejected = await executeReversal("legacy", { action, key, body: action === "line" ? { qty: 1, reason: "Historical correction" } : { reason: "Historical correction" } });
+      expect(rejected).toMatchObject({ httpStatus: 409, terminalState: "rejected", body: { code: "RECEIPT_REVERSAL_EVIDENCE_REVIEW_REQUIRED" } });
+      expect(await state()).toEqual(before);
+    });
+
+    it("treats underscores literally in a command key when checking historical evidence", async () => {
+      await service.close(50, actorId);
+      const prefix = `${actorId}:literal`;
+      await reversal.reverseReceivingLine({ receivingLineId: 51, qty: 1, reason: "Different historical request",
+        idempotencyKey: `${prefix}x:line:51`, userId: actorId });
+      const first = await executeReversal("literal", { key: `${prefix}_` });
+      expect(first).toMatchObject({ httpStatus: 200, terminalState: "succeeded", body: { qty: 1 } });
+      expect((await pool.query("SELECT reversed_qty FROM procurement.receiving_lines WHERE id=51")).rows).toEqual([{ reversed_qty: 2 }]);
+    });
+
+    it("does not interpret historical percent keys as SQL wildcards", async () => {
+      await service.close(50, actorId);
+      const prefix = `${actorId}:percent`;
+      await reversal.reverseReceivingLine({ receivingLineId: 51, qty: 1, reason: "Different historical request",
+        idempotencyKey: `${prefix}x:line:51`, userId: actorId });
+      const { readReversalKeyEvidence } = await import("../../receipt-reversal.repository");
+      expect(await database.transaction((tx) => readReversalKeyEvidence(tx, `${prefix}%`))).toEqual([]);
+      expect(await database.transaction((tx) => readReversalKeyEvidence(tx, `${prefix}x`))).toHaveLength(1);
+    });
+
+    it("blocks reapplication when retained reversal evidence outlives its command result", async () => {
+      await service.close(50, actorId);
+      await executeReversal("retained-evidence");
+      const before = await state();
+      await pool.query("DELETE FROM public.financial_command_results WHERE actor_id=$1 AND idempotency_key=$2",
+        [reversalCommands.RECEIPT_REVERSAL_COMMAND_PRINCIPAL, `${actorId}:retained-evidence`]);
+      const rejected = await executeReversal("retained-evidence");
+      expect(rejected).toMatchObject({ httpStatus: 409, terminalState: "rejected", body: { code: "RECEIPT_REVERSAL_EVIDENCE_REVIEW_REQUIRED" } });
+      expect(await state()).toEqual(before);
+    });
   });
 
   async function coverageSources() {
