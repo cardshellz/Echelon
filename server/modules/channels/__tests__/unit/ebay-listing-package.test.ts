@@ -38,7 +38,7 @@ describe("eBay package transport", () => {
     provider.currentOffer().listingId = undefined;
     const beforeFirstMutation = vi.fn(async () => {});
     await expect(new EbayMarketplaceListingConnector().pushListing({ client: provider.client,
-      draft: { ...draft, publishMode: "publish" }, beforeFirstMutation }))
+      draft: { ...draft, publishMode: "publish", hasExistingExternalIds: true }, beforeFirstMutation }))
       .rejects.toMatchObject({ code: "CHANNEL_LISTING_VALIDATION_FAILED" });
     expect(beforeFirstMutation).not.toHaveBeenCalled();
     expect(provider.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();

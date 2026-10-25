@@ -520,7 +520,7 @@ const configured =
       const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
       const current = await f.prepare();
       expect(current.draft.inventoryItems[0].packagePlan?.warnings).toHaveLength(1);
-      const draft = { ...current.draft, publishMode: "publish" as const,
+      const draft = { ...current.draft, publishMode: "publish" as const, hasExistingExternalIds: true,
         itemGroup: (await f.provider.prepare()).draft.itemGroup };
       const connector = new EbayMarketplaceListingConnector();
       const preview = await connector.previewListingRebuild({ client: f.client, draft, currentExternalListingId: "listing-20" });
