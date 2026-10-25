@@ -1831,6 +1831,7 @@ export function createShipmentTrackingService(
 
     // Lines
     executeLineCommandInTransaction: lineMutationOwner.executeLineCommandInTransaction,
+    executeLineBatchInTransaction: lineMutationOwner.executeLineBatchInTransaction,
     getLines: (shipmentId: number) => storage.getInboundShipmentLines(shipmentId),
     getEnrichedLines: getEnrichedLines,
     getLinesByPo: (poId: number) => storage.getInboundShipmentLinesByPo(poId),

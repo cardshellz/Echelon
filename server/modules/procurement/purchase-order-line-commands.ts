@@ -875,6 +875,19 @@ function lineValues(
   };
 }
 
+/** Shared creation rules for draft commands and reviewed commercial amendments.
+ * This prepares values only; the caller owns approval, totals and persistence. */
+export async function preparePurchaseOrderLine(
+  tx: import("./po-quantity-amendment.repository").AmendmentTransaction,
+  header: typeof purchaseOrders.$inferSelect, lineNumber: number,
+  input: AddLineValue,
+) {
+  const parsed = addLineValueSchema.parse(input);
+  const context = await resolveLineContext(tx, header, parsed);
+  const normalized = normalizePricing(parsed.pricing);
+  return { values: lineValues(header.id, lineNumber, parsed, normalized, context), context };
+}
+
 async function lockHeader(tx: any, purchaseOrderId: number) {
   const rows = await tx
     .select()
