@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { readIntegerCents, MoneyInputError } from "@shared/money-read";
 import { pool as defaultPool } from "../../../db";
 import {
   costScheduleEventType,
@@ -627,9 +628,12 @@ function toEventType(value: string): CostScheduleEventType {
 
 /** bigint columns arrive as strings; anything that is not a whole number of cents is refused, never coerced. */
 function toCents(value: string | number, column: string): number {
-  const cents = typeof value === "number" ? value : /^-?\d+$/.test(value) ? Number(value) : Number.NaN;
-  if (!Number.isSafeInteger(cents) || cents < 0) throw invalidStoredValue(column, value);
-  return cents;
+  try {
+    return readIntegerCents(value, column);
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
+    throw invalidStoredValue(column, value);
+  }
 }
 
 function toId(value: string | number, name: string): number {

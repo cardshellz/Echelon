@@ -1,5 +1,6 @@
 /** These guards run once in CI preflight. Local test:unit still includes them. */
 export const CI_GUARD_TEST_FILES = Object.freeze([
+  "server/__tests__/unit/money-read-boundaries.test.ts",
   "server/__tests__/unit/postgres-ci-shards.test.ts",
   "server/__tests__/unit/migration-prefix-collision.test.ts",
   "server/__tests__/unit/migration-allocation.test.ts",

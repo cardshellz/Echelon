@@ -7,6 +7,7 @@ describe("money read boundaries", () => {
       .toHaveLength(3);
     expect(unsafeMoneyReads("readIntegerCents(row.total_cents); parseDecimalCents(item.price); Number(item.quantity); parseFloat(discountPercent);", "fixture.ts"))
       .toEqual([]);
+    expect(unsafeMoneyReads("Number . parseFloat(item.price); Number\n(row.total_cents);", "fixture.ts")).toHaveLength(2);
   });
 
   it("has no unreviewed monetary coercions at server, shared or operational-script boundaries", async () => {
