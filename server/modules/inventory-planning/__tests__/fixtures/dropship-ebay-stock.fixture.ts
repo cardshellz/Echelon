@@ -7,8 +7,11 @@ import { calculatePublicationVariantMappingDefinitionHash } from "../../domain/i
 
 /** Synthetic Dropship eBay store over the real inventory migrations used by the
  * channel readiness suites: vendor 10, store 22 (eBay, connected, provider-verified
- * account "dropship-seller" in production), a live/managed listing config, catalog and
- * vendor include rules, and the internal "Dropship OMS" policy channel 40 (provider
+ * account "dropship-seller" in production), a live/managed listing config, a catalog
+ * include rule, the vendors' one-time picks of every catalog size present at install
+ * (PLAN-B v4.1 §15.3: at main a vendor `catalog` include rule chose them; a size a test
+ * adds later is picked by that test, seedDropshipVendorPicks), and the internal
+ * "Dropship OMS" policy channel 40 (provider
  * 'manual', as seeded by migrations/0106_dropship_internal_channel_seed.sql) with a
  * sealed full-exposure channel policy. No stock destination or mapping is created
  * here; tests add exactly the destination they describe. Product 20 / variant 101
@@ -73,8 +76,8 @@ export async function installDropshipEbayStockFixture(pool: Pool): Promise<void>
     INSERT INTO dropship.dropship_store_listing_configs(id,store_connection_id,platform,listing_mode,inventory_mode,is_active)
       VALUES(1,22,'ebay','live','managed_quantity_sync',true),(2,23,'ebay','live','managed_quantity_sync',true);
     INSERT INTO dropship.dropship_catalog_rules(id,scope_type,action,is_active,priority) VALUES(1,'catalog','include',true,0);
-    INSERT INTO dropship.dropship_vendor_selection_rules(id,vendor_id,scope_type,action,auto_connect_new_skus,auto_list_new_skus,is_active,priority)
-      VALUES(1,10,'catalog','include',true,true,true,0),(2,11,'catalog','include',true,true,true,0);`);
+    INSERT INTO dropship.dropship_vendor_selected_variants(vendor_id,product_variant_id,source)
+      SELECT vendor.id, pv.id, 'legacy_broad_rule' FROM (VALUES (10),(11)) vendor(id) CROSS JOIN catalog.product_variants pv;`);
 }
 
 async function inTransaction<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {

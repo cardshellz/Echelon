@@ -3,13 +3,16 @@ import {
   CATALOG_PATH,
   MARZ,
   OUTLET,
+  READ_FAILURES_UNTIL_GIVE_UP,
   ROW,
   ROW_FACT,
-  SLOW_SELECTION_PUT_MS,
+  SLOW_SELECTION_SAVE_MS,
+  TOPLOADERS_CATEGORY_ID,
+  catalogReadFailuresFor,
   chooseRowsFixture,
   openCatalog,
+  pageNewerThanServerAnswer,
   saveFromAnotherTab,
-  selectionRule,
   step,
   serveAppQueryClient,
   type ChooseRowFact,
@@ -22,38 +25,38 @@ import {
 test.use({ serviceWorkers: "allow" });
 
 /**
- * Catalog step 1, stage 1 ("The checkbox is the choice"): checking marks a change, one "Save changes" sends every add
- * and remove in one PUT after the eBay question, and nothing is sent before. The stub evaluates every row with the
- * server's own selection rules and answers the save as the route does (dropship-policy-catalog-stubs.ts).
+ * Catalog step 1, "The checkbox is the choice", on one-time picks (stage 1's journeys, moved to PR B's save; PLAN-B
+ * v4.1 §12, §15.4, V28): checking marks a change, one "Save changes" previews every add and remove, asks with the
+ * server's counts, then sends them in one `POST …/selection/changes`, and nothing is sent before. The stub evaluates
+ * every row from the vendor's picks with the server's own evaluator and answers the preview and the save as the
+ * routes do, parsing every body with the server's schemas (dropship-policy-catalog-stubs.ts). Stage 1's journeys
+ * whose subject PR B deleted (J3, J10, J25, J26) are gone; BUILD-NOTES "## B2c" names each one's replacement. J17's
+ * and J22's subject (an unsure save, then Undo, shows the truth) is back as J28-J31 (review round 1 TST-2).
  */
 
 const CHOOSE_PATH = `${CATALOG_PATH}/choose`;
+const CHANGES_PATH = "/api/dropship/catalog/selection/changes";
 
 /** A second size of ROW's product, not chosen. */
 const SECOND: ChooseRowFact = { ...ROW_FACT, productVariantId: 102, variantName: "Pack of 100", variantSku: "ENV-SGL-P100", stock: 40 };
 /** Another product, in another category, not chosen. */
 const TOPLOADER: ChooseRowFact = { ...ROW_FACT, productId: 12, productVariantId: 103, productName: "Toploader 35pt", productSku: "TL-35",
-  variantName: "Pack of 25", variantSku: "TL-35-25", category: "Toploaders", stock: 9 };
+  variantName: "Pack of 25", variantSku: "TL-35-25", category: "Toploaders", categoryId: TOPLOADERS_CATEGORY_ID, stock: 9 };
 
-const ADD_WORDS = "Items you add that still have an eBay listing can start selling again soon after you save. Items that were never listed stay off eBay until you publish them in step 3.";
-const REMOVE_WORDS = "Sizes you remove that are listed on eBay are set to quantity 0 there the next time Card Shellz updates that listing's stock, so buyers can't buy them. Card Shellz changes only their quantity. Sizes you keep checked don't change.";
-const UNKNOWN_WORDS = "This page can't tell yet which of these items are on eBay. Your choice applies to all your stores.";
+const CONFIRM_NONE = "Nothing changes on your eBay listings now.";
+const CONFIRM_NOT_ENDED = "Removed items are set to quantity 0 on eBay. Their listings aren't ended.";
+const CONFIRM_SCOPE = "Your choice applies to all your stores.";
+const STALE = "Your saved choices changed after this page loaded. Review them and save again.";
+const SAVING_STILL = "Still saving… eBay updates are in progress. Your changes are kept.";
 const UNCONFIRMED = "We couldn't confirm your save. Press Save changes again to check whether it went through.";
-const UNDONE_BUT_SAVED = "Your last save went through after all. The list now shows what is saved.";
-const PENDING_MOVED = "Your saved choices changed: your last save may have gone through, or another tab saved. The list now shows what is saved.";
-const STALE_NOTHING_LEFT = "Your choices were saved in another tab, and they already match your changes. Nothing is left to save.";
 const LIST_BEHIND = "The list couldn't be refreshed after the last save, so it may not show what is saved. Press Try again.";
+const UNDONE_SAVE_MOVED = "Your saved choices changed: your last save may have gone through, or another tab saved.";
+const SITE_UPDATING = "Card Shellz is updating the site. This page will try again in a moment; nothing you did is lost.";
+/** Two older-dyno answers, each retried 3 s later (retryPublishRead), then the read lands: room to see the line and its end. */
+const OLDER_SERVER_TIMEOUT_MS = 20_000;
 const TURNED_OFF_PICK_HINT = "You picked it, but it can't be sold now. Uncheck it to remove your pick.";
-/** The page-level words of a failed rules read (the server's), which step 1 shows only in its own card (verify V4). */
-const SERVER_READ_FAILED = "Dropship vendor catalog request failed.";
-
-/** The rules exactly as the page sends them (compact: no null targets, no ids). */
-function sentPick(productVariantId: number) {
-  return { scopeType: "variant", action: "include", productVariantId, autoConnectNewSkus: true, autoListNewSkus: false, priority: 100, metadata: { source: "portal_catalog" } };
-}
-function sentKeepOut(productVariantId: number) {
-  return { scopeType: "variant", action: "exclude", productVariantId, autoConnectNewSkus: false, autoListNewSkus: false, priority: 200, metadata: { source: "portal_catalog" } };
-}
+/** A read that gives up after step 1's retries of a 500 (three, 3 s apart: retryPublishRead), with room to draw. */
+const GIVE_UP_TIMEOUT_MS = 25_000;
 
 function row(page: Page, productVariantId: number) {
   return page.getByTestId(`catalog-choose-row-${productVariantId}`);
@@ -71,6 +74,11 @@ function saveButton(page: Page) {
   return page.getByTestId("catalog-choose-bar").getByRole("button", { name: "Save changes" });
 }
 
+/** The save question's lines, in order (describeChooseConfirm). */
+function confirmLines(page: Page) {
+  return page.getByTestId("catalog-choose-confirm").locator("p");
+}
+
 /** Save changes, then the question's own Save changes. */
 async function saveAndConfirm(page: Page) {
   await saveButton(page).click();
@@ -80,9 +88,16 @@ async function saveAndConfirm(page: Page) {
   await expect(dialog).toHaveCount(0);
 }
 
+/** The body the page sends for a change: ids ascending, the revision it counted from, this page's version (§12.4, §12.6). */
+function changeBody(expectedRevisionId: number | null, add: number[], remove: number[]) {
+  return { clientVersion: 2, expectedRevisionId, add: { productVariantIds: add }, remove: { productVariantIds: remove } };
+}
+
 function expectClean(state: StubState) {
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
+  // PR B's page never reads or writes the frozen rules (V25).
+  expect(state.reads.filter((read) => read.path === "/api/dropship/catalog/selection-rules")).toEqual([]);
 }
 
 /** Picks a Show option. */
@@ -91,12 +106,13 @@ async function showOption(page: Page, name: "All" | "Saved as selected") {
   await page.getByRole("option", { name, exact: true }).click();
 }
 
-/** The requests to the rules route, in order, as "GET" / "PUT". */
-function rulesCalls(state: StubState): string[] {
-  return state.reads.filter((read) => read.path === "/api/dropship/catalog/selection-rules").map((read) => read.method);
+/** The step's list reads (not step 3's selected list, not an id read), as their query strings. */
+function listReads(state: StubState): string[] {
+  return state.reads.filter((read) => read.path === "/api/dropship/catalog" && !read.search.includes("selectedOnly")
+    && !read.search.includes("idsOnly")).map((read) => read.search);
 }
 
-test("J1 checking a size marks it, sends nothing, and one save after the eBay question picks it", async ({ page }) => {
+test("J1 checking a size marks it, sends nothing, and one save after the question picks it", async ({ page }) => {
   const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND] });
   await expect(row(page, 102)).toContainText("Not selected");
   await expect(row(page, 101)).toContainText("Picked by you");
@@ -105,25 +121,26 @@ test("J1 checking a size marks it, sends nothing, and one save after the eBay qu
   await expect(row(page, 102)).toHaveAttribute("data-changed", "add");
   await expect(row(page, 102)).toContainText("Will be added");
   await expect(status(page)).toHaveText("Not saved: 1 to add · 0 to remove");
-  expect(state.selectionPuts).toEqual([]);
+  expect(state.changePreviews).toEqual([]);
+  expect(state.changeCalls).toEqual([]);
 
   await saveButton(page).click();
   const dialog = page.getByRole("alertdialog");
-  await expect(dialog).toContainText(ADD_WORDS);
-  await expect(dialog).toContainText(UNKNOWN_WORDS);
-  await expect(dialog).not.toContainText(REMOVE_WORDS);
-  const before = rulesCalls(state).length;
+  // The server's counts, and only what Echelon does: nothing of this size is on eBay (§13).
+  await expect(confirmLines(page)).toHaveText(["1 added · 0 removed", CONFIRM_NONE, CONFIRM_SCOPE]);
+  expect(state.changePreviews.map((preview) => preview.body)).toEqual([changeBody(1, [102], [])]);
+  expect(state.changeCalls).toEqual([]);
   await dialog.getByRole("button", { name: "Save changes" }).click();
-  await expect(status(page)).toHaveText("Saved. 1 added.");
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.");
   // Save went with the marks: keyboard focus is on the line that says what happened, not lost to the page (review DUX8).
   await expect(status(page)).toBeFocused();
 
-  // One fresh read of the rules, then one PUT of today's rules plus the new pick.
-  expect(rulesCalls(state).slice(before, before + 2)).toEqual(["GET", "PUT"]);
-  expect(state.selectionPuts).toHaveLength(1);
-  expect(state.selectionPuts[0].status).toBe(201);
-  expect(state.selectionPuts[0].body.rules).toEqual([sentPick(101), sentPick(102)]);
-  expect(state.selectionPuts[0].key).toMatch(/^catalog-selection:/);
+  // One save: the preview's body, a request key and the effects the vendor confirmed.
+  expect(state.changeCalls).toHaveLength(1);
+  expect(state.changeCalls[0].status).toBe(201);
+  expect(state.changeCalls[0].body).toEqual({ ...changeBody(1, [102], []), idempotencyKey: expect.stringMatching(/^catalog-selection:/),
+    expectedEffectsHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  expect([...state.picks].sort()).toEqual([101, 102]);
   await expect(row(page, 102)).toContainText("Picked by you");
   await expect(row(page, 102)).not.toHaveAttribute("data-changed", /.+/);
   await expect(step(page, "choose")).toContainText("2 selected");
@@ -131,22 +148,22 @@ test("J1 checking a size marks it, sends nothing, and one save after the eBay qu
   expectClean(state);
 });
 
-test("J2 unchecking a lone pick deletes it: no keep-out is written, and the size reads Not selected", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND] });
+test("J2 unchecking a pick removes it, says removed listings are only set to quantity 0, and the size reads Not selected", async ({ page }) => {
+  // The pick is listed on Marz Cards, so the save sets that listing to quantity 0 (J2b: a removal with no listing).
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], liveVariantIds: { [MARZ.storeConnectionId]: [101] } });
   await box(page, "Select Envelope Single Pocket, Pack of 50").uncheck();
   await expect(row(page, 101)).toHaveAttribute("data-changed", "remove");
   await expect(row(page, 101)).toContainText("Will be removed");
   await expect(status(page)).toHaveText("Not saved: 0 to add · 1 to remove");
 
   await saveButton(page).click();
-  const dialog = page.getByRole("alertdialog");
-  await expect(dialog).toContainText(REMOVE_WORDS);
-  await expect(dialog).toContainText(UNKNOWN_WORDS);
-  await expect(dialog).not.toContainText(ADD_WORDS);
-  await dialog.getByRole("button", { name: "Save changes" }).click();
-  await expect(status(page)).toHaveText("Saved. 1 removed.");
+  await expect(confirmLines(page)).toHaveText(["0 added · 1 removed", "On Marz Cards: 1 listing is set to quantity 0, so buyers can't buy it.",
+    CONFIRM_NOT_ENDED, CONFIRM_SCOPE]);
+  await page.getByRole("alertdialog").getByRole("button", { name: "Save changes" }).click();
+  await expect(status(page)).toHaveText("Saved. 0 added, 1 removed.");
 
-  expect(state.selectionPuts.map((put) => put.body.rules)).toEqual([[]]);
+  expect(state.changeCalls.map((call) => call.body.remove)).toEqual([{ productVariantIds: [101] }]);
+  expect(state.picks.size).toBe(0);
   await expect(row(page, 101)).toContainText("Not selected");
   await expect(row(page, 101)).toContainText("No quantity: not selected");
   await expect(row(page, 101)).toContainText("—");
@@ -154,27 +171,15 @@ test("J2 unchecking a lone pick deletes it: no keep-out is written, and the size
   expectClean(state);
 });
 
-test("J3 under an older category setting, a remove keeps the size out and checking it again takes the keep-out away", async ({ page }) => {
-  const mailers = selectionRule(1, "category", "include", { category: "Mailers" }, { priority: 50, metadata: { source: "portal_catalog_scope" } });
-  const state = await openCatalog(page, CHOOSE_PATH, { selectionRules: [mailers] });
-  const sentMailers = { scopeType: "category", action: "include", category: "Mailers", autoConnectNewSkus: true, autoListNewSkus: false,
-    priority: 50, metadata: { source: "portal_catalog_scope" } };
-  await expect(row(page, 101)).toContainText("Selected by an older setting");
-
+test("J2b (review round 1 CLI-6) removing a pick no store lists: the question says nothing changes on eBay, and never that it is set to quantity 0", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND] });
   await box(page, "Select Envelope Single Pocket, Pack of 50").uncheck();
-  await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 removed.");
-  expect(state.selectionPuts[0].body.rules).toEqual([sentMailers, sentKeepOut(101)]);
-  await expect(row(page, 101)).toContainText("Removed by you");
-  await expect(row(page, 101)).toContainText("Check it to sell it again.");
-
-  await box(page, "Select Envelope Single Pocket, Pack of 50").check();
-  await expect(status(page)).toHaveText("Not saved: 1 to add · 0 to remove");
-  await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 added.");
-  expect(state.selectionPuts[1].body.rules).toEqual([sentMailers]);
-  expect(state.selectionPuts[1].key).not.toBe(state.selectionPuts[0].key);
-  await expect(row(page, 101)).toContainText("Selected by an older setting");
+  await saveButton(page).click();
+  // Only what Echelon does (FIDELITY2): no listing, so no quantity 0 and no "aren't ended" line beside "Nothing changes".
+  await expect(confirmLines(page)).toHaveText(["0 added · 1 removed", CONFIRM_NONE, CONFIRM_SCOPE]);
+  await page.getByRole("alertdialog").getByRole("button", { name: "Save changes" }).click();
+  await expect(status(page)).toHaveText("Saved. 0 added, 1 removed.");
+  expect(state.picks.size).toBe(0);
   expectClean(state);
 });
 
@@ -183,14 +188,14 @@ test("J4 Cancel in the question sends nothing, and Undo changes clears every cha
   await box(page, "Select Envelope Single Pocket, Pack of 50").uncheck();
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
   await expect(status(page)).toHaveText("Not saved: 1 to add · 1 to remove");
-  const reads = rulesCalls(state).length;
 
   await saveButton(page).click();
   await page.getByRole("alertdialog").getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
   await expect(status(page)).toHaveText("Not saved: 1 to add · 1 to remove");
-  expect(rulesCalls(state).length).toBe(reads);
-  expect(state.selectionPuts).toEqual([]);
+  // The preview writes nothing; Cancel sends no save.
+  expect(state.changePreviews.map((preview) => preview.body)).toEqual([changeBody(1, [102], [101])]);
+  expect(state.changeCalls).toEqual([]);
 
   await page.getByRole("button", { name: "Undo changes" }).click();
   await expect(status(page)).toHaveText("");
@@ -198,7 +203,7 @@ test("J4 Cancel in the question sends nothing, and Undo changes clears every cha
   await expect(box(page, "Select Envelope Single Pocket, Pack of 50")).toBeChecked();
   await expect(box(page, "Select Envelope Single Pocket, Pack of 100")).not.toBeChecked();
   await expect(row(page, 101)).toContainText("Picked by you");
-  expect(state.selectionPuts).toEqual([]);
+  expect(state.changeCalls).toEqual([]);
   expectClean(state);
 });
 
@@ -219,14 +224,16 @@ test("J5 200 rows a page: the header box checks those shown, Load more keeps the
   await expect(row(page, 2_001)).toContainText("Will be added");
   expect(await header.evaluate((element) => (element as HTMLInputElement).indeterminate)).toBe(true);
   await expect(page.getByRole("button", { name: "Load more" })).toHaveCount(0);
-  // Every catalog page asked for 200 rows.
-  const listReads = state.reads.filter((read) => read.path === "/api/dropship/catalog" && !read.search.includes("selectedOnly"));
-  expect(listReads.map((read) => read.search)).toEqual(["?page=1&limit=200", "?page=2&limit=200"]);
+  // Every catalog page asked for 200 rows, with no facets and this page's version (§12.2).
+  expect(listReads(state)).toEqual([
+    "?selection=all&includeFacets=false&clientVersion=2&page=1&limit=200",
+    "?selection=all&includeFacets=false&clientVersion=2&page=2&limit=200",
+  ]);
 
   await page.getByRole("button", { name: "Undo changes" }).click();
   await expect(status(page)).toHaveText("");
   expect(await header.evaluate((element) => (element as HTMLInputElement).indeterminate)).toBe(false);
-  expect(state.selectionPuts).toEqual([]);
+  expect(state.changeCalls).toEqual([]);
   expectClean(state);
 });
 
@@ -277,93 +284,75 @@ test("J6 changes survive a search, the Show filter and a store switch; leaving s
   await expect(page).toHaveURL(CHOOSE_PATH);
   await expect(row(page, 102)).toContainText("Not selected");
   await expect(status(page)).toHaveText("");
-  expect(state.selectionPuts).toEqual([]);
+  expect(state.changeCalls).toEqual([]);
+  expect(state.changePreviews).toEqual([]);
   // No catalog read ever asked for a product line or a product.
   for (const read of state.reads.filter((entry) => entry.path === "/api/dropship/catalog")) expect(read.search).not.toMatch(/productLine|productId/);
   expectClean(state);
 });
 
-test("J7 another tab saved first: nothing is sent, the rows read again with the changes kept, and the next save builds on the new rules", async ({ page }) => {
+test("J7 another tab saved first: the preview finds a newer revision, nothing is saved, the rows read again with the changes kept, and the next save goes on the new revision", async ({ page }) => {
   const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND, TOPLOADER] });
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
-  saveFromAnotherTab(state, [selectionRule(0, "variant", "include", { productVariantId: 101 }), selectionRule(0, "variant", "include", { productVariantId: 103 })]);
-  const catalogReads = state.reads.filter((read) => read.path === "/api/dropship/catalog").length;
-
+  saveFromAnotherTab(state, { add: [103] });
   await expect(step(page, "choose")).toContainText("1 selected");
-  await saveAndConfirm(page);
-  await expect(page.getByTestId("catalog-choose-error")).toHaveText("Your choices were changed in another tab. Review them and save again.");
-  expect(state.selectionPuts).toEqual([]);
+
+  // The preview says the head moved before any question (§12.4 step 1): nothing is asked, nothing is saved.
+  await saveButton(page).click();
+  await expect(page.getByTestId("catalog-choose-error")).toHaveText(STALE);
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  expect(state.changePreviews.map((preview) => preview.body.expectedRevisionId)).toEqual([1]);
+  expect(state.changeCalls).toEqual([]);
   await expect(row(page, 103)).toContainText("Picked by you");
   // The other tab's save is the saved selection now: the page's count and step 3's rows read it again (review MC7).
   await expect(step(page, "choose")).toContainText("2 selected");
   await expect(page.getByTestId("catalog-action-summary")).toHaveText("2 selected");
-  expect(state.reads.filter((read) => read.path === "/api/dropship/catalog").length).toBeGreaterThan(catalogReads);
   await expect(row(page, 102)).toContainText("Will be added");
   await expect(status(page)).toHaveText("Not saved: 1 to add · 0 to remove");
 
   await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 added.");
-  expect(state.selectionPuts).toHaveLength(1);
-  expect(state.selectionPuts[0].body.rules).toEqual([sentPick(101), sentPick(103), sentPick(102)]);
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.");
+  expect(state.changeCalls.map((call) => call.status)).toEqual([201]);
+  expect(state.changeCalls[0].body).toMatchObject(changeBody(2, [102], []));
+  expect([...state.picks].sort()).toEqual([101, 102, 103]);
   expectClean(state);
 });
 
-test("J8 a busy answer is sent again with the same key and the same body, and saves", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionPutAnswers: ["busy"] });
+test("J8 a busy answer is sent again with the same key and the same body, saying it is still saving, and saves", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], changeAnswers: ["busy"] });
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
   await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 added.");
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([409, 201]);
-  expect(state.selectionPuts[1].key).toBe(state.selectionPuts[0].key);
-  expect(state.selectionPuts[1].body).toEqual(state.selectionPuts[0].body);
+  await expect(page.getByTestId("catalog-choose-progress")).toHaveText(SAVING_STILL);
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.");
+  expect(state.changeCalls.map((call) => call.status)).toEqual([409, 201]);
+  expect(state.changeCalls[1].key).toBe(state.changeCalls[0].key);
+  expect(state.changeCalls[1].body).toEqual(state.changeCalls[0].body);
+  // One question for the press: the resend is the same confirmed save.
+  expect(state.changePreviews).toHaveLength(1);
   await expect(row(page, 102)).toContainText("Picked by you");
   expectClean(state);
 });
 
-test("J9 a save whose answer is lost is found saved by the next look at the rules: never sent again, never saved twice", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionPutAnswers: ["drop-after-commit"] });
+test("J9 a save whose answer is lost is sent again with the same key, which replays it: saved once, never twice", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], changeAnswers: ["drop-after-commit"] });
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
   await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 added.");
-  // Review MC2: before a resend the rules are read again; they hold what was sent, so nothing is sent again (the same
-  // key would only have replayed; unit S3 and S6 cover the resend).
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([0]);
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.");
+  // The first send committed with its answer cut off; the same key's resend gets the stored answer (200).
+  expect(state.changeCalls.map((call) => call.status)).toEqual([0, 200]);
+  expect(state.changeCalls[1].key).toBe(state.changeCalls[0].key);
+  expect(state.changeCalls[1].body).toEqual(state.changeCalls[0].body);
   // One committed save: one new revision.
   expect(state.selectionRevision).toBe(2);
   await expect(row(page, 102)).toContainText("Picked by you");
   expectClean(state);
 });
 
-test("J10 a save that would pass 500 saved choices is stopped before sending, with the count", async ({ page }) => {
-  const older = Array.from({ length: 499 }, (_, index) => selectionRule(1_000 + index, "variant", "include", { productVariantId: 50_000 + index }));
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionRules: older });
-  await box(page, "Select Envelope Single Pocket, Pack of 50").check();
-  await box(page, "Select Envelope Single Pocket, Pack of 100").check();
-  await expect(status(page)).toContainText("Not saved: 2 to add · 0 to remove");
-  const reason = page.getByTestId("catalog-choose-save-off");
-  await expect(reason).toContainText("You can keep up to 500 saved choices");
-  await expect(reason).toContainText("This save would make 501, which is 1 over. Change some marked items back, then save.");
-  await expect(saveButton(page)).toBeDisabled();
-  await expect(saveButton(page)).toHaveAttribute("aria-describedby", (await reason.getAttribute("id")) ?? "missing");
-  // A disabled Save leaves the Tab order, so the status region says why too (review DUX3).
-  await expect(status(page)).toContainText("Not saved: 2 to add · 0 to remove. You can keep up to 500 saved choices");
-  // On a phone the bar with the stop stays under 30% of the screen (review DUX12; measured 27.5% at 390×844 before the words changed).
-  const bar = await page.getByTestId("catalog-action-bar").boundingBox();
-  const viewport = page.viewportSize();
-  expect((bar?.height ?? Number.POSITIVE_INFINITY) / (viewport?.height ?? 1)).toBeLessThanOrEqual(0.3);
-
-  await box(page, "Select Envelope Single Pocket, Pack of 100").uncheck();
-  await expect(reason).toHaveCount(0);
-  await expect(saveButton(page)).toBeEnabled();
-  expect(state.selectionPuts).toEqual([]);
-  expectClean(state);
-});
-
-test("J11 no product line shows anywhere on step 1, and no Product, Product line or Apply filters control", async ({ page }) => {
+test("J11 no product line shows anywhere on step 1, and no Product, Product line or Apply filters control; the Category filter sends an id", async ({ page }) => {
   const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: chooseRowsFixture(3) });
   await expect(row(page, 2_001)).toBeVisible();
   await expect(page.getByText("Trading Card Supplies")).toHaveCount(0);
-  for (const part of [page.getByTestId("catalog-choose-filters"), page.getByTestId("catalog-choose-card")]) {
+  for (const part of [page.getByTestId("catalog-choose-filters"), page.getByTestId("catalog-choose-card"), page.getByTestId("catalog-choose-categories")]) {
     await expect(part.getByText("Product line", { exact: false })).toHaveCount(0);
     await expect(part.getByText("All products")).toHaveCount(0);
     for (const name of ["Apply filters", "Reset", "Select visible", "Remove visible", "Select", "Remove"]) {
@@ -374,14 +363,16 @@ test("J11 no product line shows anywhere on step 1, and no Product, Product line
   await expect(page.getByRole("option")).toHaveText(["All categories", "Sleeves (2)", "Toploaders (1)"]);
   await page.getByRole("option", { name: "Toploaders (1)" }).click();
   await expect(page.getByTestId("catalog-choose-shown")).toHaveText("Showing 1 item");
-  for (const read of state.reads.filter((entry) => entry.path === "/api/dropship/catalog")) expect(read.search).not.toMatch(/productLine|productId/);
-  expect(state.reads.some((read) => read.path === "/api/dropship/catalog" && read.search.includes("category=Toploaders"))).toBe(true);
+  for (const read of state.reads.filter((entry) => entry.path === "/api/dropship/catalog")) {
+    expect(read.search).not.toMatch(/productLine|productId|[?&]category=/);
+  }
+  expect(listReads(state)).toContain(`?categoryId=${TOPLOADERS_CATEGORY_ID}&selection=all&includeFacets=false&clientVersion=2&page=1&limit=200`);
   expectClean(state);
 });
 
 test("J12 on a phone each box is a 44 px target, the item says how it is chosen, and the page never scrolls sideways", async ({ page }, testInfo: TestInfo) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND, TOPLOADER],
-    selectionRules: [selectionRule(1, "variant", "include", { productVariantId: 101 }), selectionRule(2, "variant", "exclude", { productVariantId: 103 })] });
+  const turnedOffPick: ChooseRowFact = { ...TOPLOADER, enabledOverride: false };
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND, turnedOffPick], picks: new Set([101, 103]) });
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
   const phone = testInfo.project.name === "mobile";
   const howLine = page.getByTestId("catalog-choose-how-line-102");
@@ -398,18 +389,18 @@ test("J12 on a phone each box is a 44 px target, the item says how it is chosen,
     await expect(howLine).toBeInViewport();
     await expect(howLine).toContainText("Will be added");
     await expect(howLine).toContainText("Available");
-    // "Removed by you" says what to do on a phone too (review DUX9).
-    await expect(page.getByTestId("catalog-choose-how-line-103")).toContainText("Removed by you");
-    await expect(page.getByTestId("catalog-choose-how-line-103")).toContainText("Check it to sell it again.");
+    // A turned-off pick says what to do on a phone too (review DUX9; verify V6).
+    await expect(page.getByTestId("catalog-choose-how-line-103")).toContainText("Turned off for you");
+    await expect(page.getByTestId("catalog-choose-how-line-103")).toContainText(TURNED_OFF_PICK_HINT);
     await expect(page.getByTestId("catalog-choose-table").getByRole("columnheader", { name: "How", exact: true })).toBeHidden();
   } else {
     await expect(howLine).toBeHidden();
     await expect(page.getByTestId("catalog-choose-table").getByRole("columnheader", { name: "How", exact: true })).toBeVisible();
     await expect(page.getByTestId("catalog-choose-table").getByRole("columnheader", { name: "Available", exact: true })).toBeVisible();
-    await expect(row(page, 103)).toContainText("Check it to sell it again.");
+    await expect(row(page, 103)).toContainText(TURNED_OFF_PICK_HINT);
   }
   // The box is described by its How words and the hint, on every screen (review DUX9).
-  await expect(box(page, "Select Toploader 35pt, Pack of 25")).toHaveAccessibleDescription("Removed by you Check it to sell it again.");
+  await expect(box(page, "Select Toploader 35pt, Pack of 25")).toHaveAccessibleDescription(`Turned off for you ${TURNED_OFF_PICK_HINT}`);
   const width = page.viewportSize()?.width ?? 1280;
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
   expect(ROW.productVariantId).toBe(101);
@@ -417,58 +408,57 @@ test("J12 on a phone each box is a 44 px target, the item says how it is chosen,
 });
 
 // ---------------------------------------------------------------------------
-// Review round (step 1 stage 1)
+// Review round (step 1 stage 1), on PR B's save
 // ---------------------------------------------------------------------------
 
 test("J13 (review CT2, MC1) three 500s: the bar says the save couldn't be confirmed; the next press sends the same key and body and saves", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionPutAnswers: ["server-error", "server-error", "server-error"] });
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], changeAnswers: ["server-error", "server-error", "server-error"] });
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
   await saveAndConfirm(page);
-  await expect(page.getByTestId("catalog-choose-error")).toHaveText("We couldn't confirm your save. Press Save changes again to check whether it went through.");
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([500, 500, 500]);
+  await expect(page.getByTestId("catalog-choose-error")).toHaveText(UNCONFIRMED);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([500, 500, 500]);
   await expect(status(page)).toHaveText("Not saved: 1 to add · 0 to remove");
 
-  await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 added.");
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([500, 500, 500, 201]);
-  expect(new Set(state.selectionPuts.map((put) => put.key)).size).toBe(1);
-  expect(state.selectionPuts[3].body).toEqual(state.selectionPuts[0].body);
+  // The kept save goes again as it was: no new preview, no second question (B2a deviation 3).
+  await saveButton(page).click();
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.");
+  expect(state.changeCalls.map((call) => call.status)).toEqual([500, 500, 500, 201]);
+  expect(new Set(state.changeCalls.map((call) => call.key)).size).toBe(1);
+  expect(state.changeCalls[3].body).toEqual(state.changeCalls[0].body);
+  expect(state.changePreviews).toHaveLength(1);
   expectClean(state);
 });
 
 test("J14 (review CT2, DUX10) a refusal is sent once, says the server's words, and keeps every change", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionPutAnswers: ["forbidden"] });
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], changeAnswers: [
+    { status: 403, code: "DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED", message: "Dropship vendor status does not allow catalog access." }] });
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
   await saveAndConfirm(page);
   await expect(page.getByTestId("catalog-choose-error")).toHaveText("Dropship vendor status does not allow catalog access.");
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([403]);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([403]);
   await expect(status(page)).toHaveText("Not saved: 1 to add · 0 to remove");
   await expect(row(page, 102)).toContainText("Will be added");
   expectClean(state);
 });
 
-test("J15 (review CT2) the saved choices can't be read: the boxes and Save stay off, and Try again recovers", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], rulesReadAnswers: ["server-error"] });
-  const failed = page.getByTestId("catalog-choose-rules-failed");
-  await expect(failed).toContainText("Your saved choices couldn't be loaded, so changes can't be saved yet.");
-  // One cause, one message: the page's own alert for the same read stays off step 1 (verify V4).
-  await expect(page.getByText(SERVER_READ_FAILED)).toHaveCount(0);
-  await expect(box(page, "Select Envelope Single Pocket, Pack of 100")).toBeDisabled();
-  await expect(box(page, "Select all shown")).toBeDisabled();
-  await failed.getByRole("button", { name: "Try again" }).click();
-  await expect(failed).toHaveCount(0);
-  await expect(box(page, "Select Envelope Single Pocket, Pack of 100")).toBeEnabled();
+test("J15 (review CT2) the categories can't be read: the card says so with Try again, the table and Save still work, and Try again recovers", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], categoriesReadFailures: READ_FAILURES_UNTIL_GIVE_UP });
+  const failed = page.getByTestId("catalog-choose-categories-failed");
+  await expect(failed).toContainText("The catalog couldn't be loaded.", { timeout: GIVE_UP_TIMEOUT_MS });
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
   await expect(saveButton(page)).toBeEnabled();
-  expect(state.selectionPuts).toEqual([]);
+  await failed.getByRole("button", { name: "Try again" }).click();
+  await expect(failed).toHaveCount(0);
+  await expect(page.getByTestId("catalog-choose-category-30")).toContainText("Mailers · 1 of 2 selected");
+  expect(state.reads.filter((read) => read.path === "/api/dropship/catalog/categories").length).toBe(READ_FAILURES_UNTIL_GIVE_UP + 1);
+  expect(state.changeCalls).toEqual([]);
   expectClean(state);
 });
 
-test("J16 (review CT2, CT3, MC4; verify V6) a size turned off for the vendor: their own pick stays checked and can be removed; with none it can be checked, and the save says it didn't take", async ({ page }) => {
+test("J16 (review CT2, CT3, MC4; verify V6) a size turned off for the vendor: their own pick stays checked and can be removed; with none it can be checked, and the save says it was skipped", async ({ page }) => {
   const turnedOff: ChooseRowFact = { ...SECOND, enabledOverride: false };
   const offNoPick: ChooseRowFact = { ...TOPLOADER, enabledOverride: false };
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, turnedOff, offNoPick],
-    selectionRules: [selectionRule(1, "variant", "include", { productVariantId: 101 }), selectionRule(2, "variant", "include", { productVariantId: 102 })] });
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, turnedOff, offNoPick], picks: new Set([101, 102]) });
   const offPicked = box(page, "Select Envelope Single Pocket, Pack of 100");
   await expect(row(page, 102)).toContainText("Turned off for you");
   await expect(row(page, 102)).toContainText(TURNED_OFF_PICK_HINT);
@@ -476,49 +466,30 @@ test("J16 (review CT2, CT3, MC4; verify V6) a size turned off for the vendor: th
   // The vendor's own pick is their choice: checked, and the box can take it back (verify V6).
   await expect(offPicked).toBeChecked();
   await expect(offPicked).toBeEnabled();
-  // The server says "Not selected" when no pick matches, before it looks at the override, so the box can be checked.
+  // The server says "Not selected" when there is no pick, before it looks at the override, so the box can be checked.
   await expect(row(page, 103)).toContainText("Not selected");
   await box(page, "Select Toploader 35pt, Pack of 25").check();
   await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 change didn't take effect: its row says why.");
-  await expect(row(page, 103)).toContainText("Turned off for you");
-  await expect(box(page, "Select Toploader 35pt, Pack of 25")).toBeChecked();
-  await expect(box(page, "Select Toploader 35pt, Pack of 25")).toBeEnabled();
+  // Card Shellz does not offer it to this vendor now: the save skips it and says so (§13 skipped).
+  await expect(status(page)).toHaveText("Saved. 0 added, 0 removed. 1 is no longer offered by Card Shellz and was skipped.");
+  await expect(row(page, 103)).toContainText("Not selected");
+  await expect(box(page, "Select Toploader 35pt, Pack of 25")).not.toBeChecked();
 
   await offPicked.uncheck();
   await expect(row(page, 102)).toContainText("Will be removed");
   await expect(status(page)).toHaveText("Not saved: 0 to add · 1 to remove");
   await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 removed.");
-  // The lone pick is deleted with no keep-out, so the size reads Not selected.
-  expect(state.selectionPuts[1].body.rules).toEqual([sentPick(101), sentPick(103)]);
+  await expect(status(page)).toHaveText("Saved. 0 added, 1 removed.");
+  expect(state.changeCalls.map((call) => call.body.remove)).toEqual([{ productVariantIds: [] }, { productVariantIds: [102] }]);
   await expect(row(page, 102)).toContainText("Not selected");
   await expect(offPicked).not.toBeChecked();
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([201, 201]);
-  expectClean(state);
-});
-
-test("J17 (review MC1) a save with no sure answer, then Undo: the rules are read first, and a save that went through is shown and said", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionPutAnswers: ["drop-after-commit"] });
-  await box(page, "Select Envelope Single Pocket, Pack of 100").check();
-  // The save's first read answers; every later read fails, so the runner can't see that its cut-off save committed.
-  state.rulesReadAnswers.push("ok", "server-error", "server-error", "server-error");
-  await saveAndConfirm(page);
-  await expect(page.getByTestId("catalog-choose-error")).toHaveText("We couldn't confirm your save. Press Save changes again to check whether it went through.");
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([0]);
-  await expect(step(page, "choose")).toContainText("1 selected");
-
-  await page.getByRole("button", { name: "Undo changes" }).click();
-  await expect(page.getByTestId("catalog-choose-error")).toHaveText("Your last save went through after all. The list now shows what is saved.");
-  await expect(row(page, 102)).toContainText("Picked by you");
-  await expect(box(page, "Select Envelope Single Pocket, Pack of 100")).toBeChecked();
-  await expect(step(page, "choose")).toContainText("2 selected");
-  expect(state.selectionPuts).toHaveLength(1);
+  expect([...state.picks]).toEqual([101]);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([201, 201]);
   expectClean(state);
 });
 
 test("J18 (review MC6) leaving while a save runs asks the vendor to wait, offers no discard, and the save finishes", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionPutAnswers: ["slow"] });
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], changeAnswers: ["slow"] });
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
   await saveAndConfirm(page);
   await expect(page.getByTestId("catalog-choose-bar").getByRole("button", { name: "Saving…" })).toBeVisible();
@@ -529,8 +500,8 @@ test("J18 (review MC6) leaving while a save runs asks the vendor to wait, offers
   await expect(dialog.getByRole("button", { name: "Discard and leave" })).toHaveCount(0);
   await dialog.getByRole("button", { name: "OK" }).click();
   await expect(page).toHaveURL(CHOOSE_PATH);
-  await expect(status(page)).toHaveText("Saved. 1 added.", { timeout: SLOW_SELECTION_PUT_MS + 10_000 });
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([201]);
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.", { timeout: SLOW_SELECTION_SAVE_MS + 10_000 });
+  expect(state.changeCalls.map((call) => call.status)).toEqual([201]);
   expectClean(state);
 });
 
@@ -548,65 +519,56 @@ test("J19 (review DUX2) the portal menu asks before it drops step 1's changes", 
   await page.getByTestId("portal-nav").getByRole("button", { name: "Catalog" }).click();
   await expect(dialog).toHaveCount(0);
   await expect(status(page)).toHaveText("Not saved: 1 to add · 0 to remove");
-  expect(state.selectionPuts).toEqual([]);
+  expect(state.changeCalls).toEqual([]);
   expectClean(state);
 });
 
 // ---------------------------------------------------------------------------
-// Verify round (step 1 stage 1)
+// Verify round (step 1 stage 1), on PR B's save
 // ---------------------------------------------------------------------------
 
-test("J20 (verify V1, V4) a save with no sure answer, then Save again: the rules show it went through, and the bar says saved, not an error", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionPutAnswers: ["drop-after-commit"] });
+test("J20 (verify V1, V4) a save with no sure answer, then Save again: the same key replays the save that went through, and the bar says saved, not an error", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND],
+    changeAnswers: ["drop-after-commit", "server-error", "server-error"] });
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
-  // The save's first read answers; every later read fails, so the runner can't see that its cut-off save committed.
-  state.rulesReadAnswers.push("ok", "server-error", "server-error", "server-error");
   await saveAndConfirm(page);
+  // It committed with its answer cut off, then two 500s: the page cannot know (review MC1).
   await expect(page.getByTestId("catalog-choose-error")).toHaveText(UNCONFIRMED);
-  // The failed reads leave an error on the shared rules read; step 1 says one thing about it, in its bar (verify V4).
-  await expect(page.getByText(SERVER_READ_FAILED)).toHaveCount(0);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([0, 500, 500]);
+  expect(state.selectionRevision).toBe(2);
 
-  await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 added.");
+  await saveButton(page).click();
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.");
   await expect(page.getByTestId("catalog-choose-error")).toHaveCount(0);
   await expect(saveButton(page)).toHaveCount(0);
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([0]);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([0, 500, 500, 200]);
+  expect(new Set(state.changeCalls.map((call) => call.key)).size).toBe(1);
+  // Saved once: one revision, one question.
+  expect(state.selectionRevision).toBe(2);
+  expect(state.changePreviews).toHaveLength(1);
   await expect(row(page, 102)).toContainText("Picked by you");
   await expect(step(page, "choose")).toContainText("2 selected");
   expectClean(state);
 });
 
-test("J21 (verify V1) another tab already saved the same change: nothing is sent, and the bar says nothing is left to save", async ({ page }) => {
+test("J21 (verify V1) another tab already saved the same change: the preview says the choices changed, and the next save finds it already as chosen", async ({ page }) => {
   const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND] });
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
-  saveFromAnotherTab(state, [selectionRule(0, "variant", "include", { productVariantId: 101 }), selectionRule(0, "variant", "include", { productVariantId: 102 })]);
-  await saveAndConfirm(page);
-  await expect(status(page)).toHaveText(STALE_NOTHING_LEFT);
-  await expect(page.getByTestId("catalog-choose-error")).toHaveCount(0);
-  await expect(saveButton(page)).toHaveCount(0);
-  expect(state.selectionPuts).toEqual([]);
+  saveFromAnotherTab(state, { add: [102] });
+  await saveButton(page).click();
+  await expect(page.getByTestId("catalog-choose-error")).toHaveText(STALE);
+  expect(state.changeCalls).toEqual([]);
   await expect(row(page, 102)).toContainText("Picked by you");
   await expect(step(page, "choose")).toContainText("2 selected");
-  expectClean(state);
-});
 
-test("J22 (verify V2) a save with no sure answer, another tab saves on top, then Undo: the page reads everything again and says the saved choices changed", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND, TOPLOADER], selectionPutAnswers: ["drop-after-commit"] });
-  await box(page, "Select Envelope Single Pocket, Pack of 100").check();
-  state.rulesReadAnswers.push("ok", "server-error", "server-error", "server-error");
-  await saveAndConfirm(page);
-  await expect(page.getByTestId("catalog-choose-error")).toHaveText(UNCONFIRMED);
-  // The other tab read the committed rules (101 and 102) and adds 103.
-  saveFromAnotherTab(state, [selectionRule(0, "variant", "include", { productVariantId: 101 }), selectionRule(0, "variant", "include", { productVariantId: 102 }),
-    selectionRule(0, "variant", "include", { productVariantId: 103 })]);
-
-  await page.getByRole("button", { name: "Undo changes" }).click();
-  await expect(page.getByTestId("catalog-choose-error")).toHaveText(PENDING_MOVED);
-  await expect(row(page, 102)).toContainText("Picked by you");
-  await expect(row(page, 103)).toContainText("Picked by you");
-  await expect(step(page, "choose")).toContainText("3 selected");
-  await expect(page.getByTestId("catalog-action-summary")).toHaveText("3 selected");
-  expect(state.selectionPuts).toHaveLength(1);
+  // The kept change is what is saved already: the question says so, and the save writes no pick twice.
+  await saveButton(page).click();
+  await expect(confirmLines(page)).toHaveText(["0 added · 0 removed · 1 was already as you chose", CONFIRM_NONE, CONFIRM_SCOPE]);
+  await page.getByRole("alertdialog").getByRole("button", { name: "Save changes" }).click();
+  await expect(status(page)).toHaveText("Saved. 0 added, 0 removed.");
+  expect(state.changeCalls.map((call) => call.status)).toEqual([201]);
+  expect(state.changeCalls[0].body).toMatchObject(changeBody(2, [102], []));
+  expect([...state.picks].sort()).toEqual([101, 102]);
   expectClean(state);
 });
 
@@ -614,9 +576,9 @@ test("J23 (verify V5) a save goes through but the list can't be read again: the 
   const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND] });
   const added = box(page, "Select Envelope Single Pocket, Pack of 100");
   await added.check();
-  state.catalogReadFailures.push({ selectedOnly: false, page: 1 });
+  state.catalogReadFailures.push(...catalogReadFailuresFor("all", 1));
   await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 added.");
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.", { timeout: GIVE_UP_TIMEOUT_MS });
   const behind = page.getByTestId("catalog-choose-refetch-failed");
   await expect(behind).toContainText(LIST_BEHIND);
   // The rows on screen were read before the save: their boxes stay off until a read succeeds.
@@ -629,16 +591,16 @@ test("J23 (verify V5) a save goes through but the list can't be read again: the 
   await expect(row(page, 102)).toContainText("Picked by you");
   await expect(added).toBeChecked();
   await expect(added).toBeEnabled();
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([201]);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([201]);
   expectClean(state);
 });
 
 test("J24 (verify V8) Load more fails: the page says so beside the button, the marks stay, and Try again loads the rest", async ({ page }) => {
   const state = await openCatalog(page, CHOOSE_PATH, { selected: false, chooseRows: chooseRowsFixture(230) });
   await box(page, "Select Penny Sleeves 001, Pack of 25").check();
-  state.catalogReadFailures.push({ selectedOnly: false, page: 2 });
+  state.catalogReadFailures.push(...catalogReadFailuresFor("all", 2));
   await page.getByRole("button", { name: "Load more" }).click();
-  await expect(page.getByText("Couldn't load more items.")).toBeVisible();
+  await expect(page.getByText("Couldn't load more items.")).toBeVisible({ timeout: GIVE_UP_TIMEOUT_MS });
   await expect(page.getByTestId("catalog-choose-shown")).toHaveText("Showing 200 of 230");
   await expect(status(page)).toHaveText("Not saved: 1 to add · 0 to remove");
 
@@ -647,41 +609,7 @@ test("J24 (verify V8) Load more fails: the page says so beside the button, the m
   await expect(page.getByText("Couldn't load more items.")).toHaveCount(0);
   await expect(row(page, 2_230)).toContainText("Not selected");
   await expect(status(page)).toHaveText("Not saved: 1 to add · 0 to remove");
-  expect(state.selectionPuts).toEqual([]);
-  expectClean(state);
-});
-
-test("J25 (verify V8) busy, then the look at the rules before the resend fails: nothing is sent that try, and the next one saves with the same key and body", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionPutAnswers: ["busy"] });
-  await box(page, "Select Envelope Single Pocket, Pack of 100").check();
-  state.rulesReadAnswers.push("ok", "server-error");
-  const before = rulesCalls(state).length;
-  await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 added.");
-  // Read, PUT (busy), pause, read (fails: nothing sent), pause, read, PUT (saved).
-  expect(rulesCalls(state).slice(before, before + 5)).toEqual(["GET", "PUT", "GET", "GET", "PUT"]);
-  expect(state.selectionPuts.map((put) => put.status)).toEqual([409, 201]);
-  expect(state.selectionPuts[1].key).toBe(state.selectionPuts[0].key);
-  expect(state.selectionPuts[1].body).toEqual(state.selectionPuts[0].body);
-  await expect(row(page, 102)).toContainText("Picked by you");
-  expectClean(state);
-});
-
-test("J26 (verify V8) a save with no sure answer, then a search that shows it saved: the page reads the rules before forgetting it and says it went through", async ({ page }) => {
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionPutAnswers: ["drop-after-commit"] });
-  await box(page, "Select Envelope Single Pocket, Pack of 100").check();
-  state.rulesReadAnswers.push("ok", "server-error", "server-error", "server-error");
-  await saveAndConfirm(page);
-  await expect(page.getByTestId("catalog-choose-error")).toHaveText(UNCONFIRMED);
-
-  // A new read shows the size saved, so its mark goes; the page checks the rules first, and says what it found.
-  await page.getByTestId("catalog-choose-filters").getByLabel("Search").fill("Pack of 100");
-  await expect(page.getByTestId("catalog-choose-shown")).toHaveText("Showing 1 item");
-  await expect(page.getByTestId("catalog-choose-error")).toHaveText(UNDONE_BUT_SAVED);
-  await expect(status(page)).toHaveText("");
-  await expect(row(page, 102)).toContainText("Picked by you");
-  await expect(step(page, "choose")).toContainText("2 selected");
-  expect(state.selectionPuts).toHaveLength(1);
+  expect(state.changeCalls).toEqual([]);
   expectClean(state);
 });
 
@@ -695,10 +623,196 @@ test("J27 (verify round) with the app's own cache: after a save, a filter read b
   await showOption(page, "All");
   await box(page, "Select Envelope Single Pocket, Pack of 100").check();
   await saveAndConfirm(page);
-  await expect(status(page)).toHaveText("Saved. 1 added.");
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.");
 
   await showOption(page, "Saved as selected");
   await expect(row(page, 102)).toContainText("Picked by you");
   await expect(page.getByTestId("catalog-choose-shown")).toHaveText("Showing all 2");
+  expect(state.reads.filter((read) => read.path === CHANGES_PATH)).toHaveLength(1);
+  expectClean(state);
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1 (B1+B2 findings)
+// ---------------------------------------------------------------------------
+
+/** The step's catalog-card badge ("2 selected"), the bar's summary and the rail: the three places the count shows. */
+async function expectSelectedCount(page: Page, count: number) {
+  await expect(page.getByTestId("catalog-choose-card").getByText(`${count} selected`, { exact: true })).toBeVisible();
+  await expect(page.getByTestId("catalog-action-summary")).toHaveText(`${count} selected`);
+  await expect(step(page, "choose")).toContainText(`${count} selected`);
+}
+
+/** A save that went through with its answer cut off, then two 500s: the bar can only say it couldn't confirm (J20). */
+async function unsureSaveThatWentThrough(page: Page, state: StubState) {
+  await box(page, "Select Envelope Single Pocket, Pack of 100").check();
+  await saveAndConfirm(page);
+  await expect(page.getByTestId("catalog-choose-error")).toHaveText(UNCONFIRMED);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([0, 500, 500]);
+  expect(state.selectionRevision).toBe(2);
+  await expectSelectedCount(page, 1);
+}
+
+test("J28 (review round 1 CLI-1, TST-2; stage 1's J17) a save with no sure answer, then Undo: the page reads the saved choices again and shows the save that went through", async ({ page }) => {
+  // Production's cache (staleTime Infinity): nothing is read again by itself.
+  await serveAppQueryClient(page);
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND],
+    changeAnswers: ["drop-after-commit", "server-error", "server-error"] });
+  await unsureSaveThatWentThrough(page, state);
+
+  await page.getByRole("button", { name: "Undo changes" }).click();
+  await expect(row(page, 102)).toContainText("Picked by you");
+  await expect(box(page, "Select Envelope Single Pocket, Pack of 100")).toBeChecked();
+  await expectSelectedCount(page, 2);
+  await expect(status(page)).toHaveText(UNDONE_SAVE_MOVED);
+  await expect(page.getByTestId("catalog-choose-error")).toHaveCount(0);
+  await expect(saveButton(page)).toHaveCount(0);
+  // Nothing was sent again: the same three sends of one save, one revision, one question.
+  expect(state.changeCalls.map((call) => call.status)).toEqual([0, 500, 500]);
+  expect(state.selectionRevision).toBe(2);
+  expect(state.changePreviews).toHaveLength(1);
+  expectClean(state);
+});
+
+test("J29 (review round 1 CLI-1, TST-2) a save with no sure answer, then the box unticked back: the same read again and the same truth", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND],
+    changeAnswers: ["drop-after-commit", "server-error", "server-error"] });
+  await unsureSaveThatWentThrough(page, state);
+
+  // A plain click, not uncheck(): the page reads the saved choices again and ticks the box back (the save went
+  // through), so uncheck()'s own "did the state change" check races that re-read and fails when it is fast.
+  await box(page, "Select Envelope Single Pocket, Pack of 100").click();
+  await expect(row(page, 102)).toContainText("Picked by you");
+  await expect(box(page, "Select Envelope Single Pocket, Pack of 100")).toBeChecked();
+  await expectSelectedCount(page, 2);
+  await expect(status(page)).toHaveText(UNDONE_SAVE_MOVED);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([0, 500, 500]);
+  expectClean(state);
+});
+
+test("J30 (review round 1 TST-2; stage 1's J22) a save with no sure answer, another tab saves on top, then Undo: both saves show", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND, TOPLOADER],
+    changeAnswers: ["drop-after-commit", "server-error", "server-error"] });
+  await unsureSaveThatWentThrough(page, state);
+  saveFromAnotherTab(state, { add: [103] });
+
+  await page.getByRole("button", { name: "Undo changes" }).click();
+  await expect(row(page, 102)).toContainText("Picked by you");
+  await expect(row(page, 103)).toContainText("Picked by you");
+  await expectSelectedCount(page, 3);
+  await expect(status(page)).toHaveText(UNDONE_SAVE_MOVED);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([0, 500, 500]);
+  expect(state.selectionRevision).toBe(3);
+  expectClean(state);
+});
+
+test("J31 (review round 1 CLI-1) a save with no sure answer, then Discard and leave: the count reads again at once, and step 1 shows the save when the vendor comes back", async ({ page }) => {
+  await serveAppQueryClient(page);
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND],
+    changeAnswers: ["drop-after-commit", "server-error", "server-error"] });
+  await unsureSaveThatWentThrough(page, state);
+
+  await page.getByRole("link", { name: "Next: Listing settings" }).click();
+  const dialog = page.getByRole("alertdialog");
+  await dialog.getByRole("button", { name: "Discard and leave" }).click();
+  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
+  await expect(step(page, "choose")).toContainText("2 selected");
+  await step(page, "choose").click();
+  await expect(page).toHaveURL(CHOOSE_PATH);
+  await expect(row(page, 102)).toContainText("Picked by you");
+  await expectSelectedCount(page, 2);
+  await expect(status(page)).toHaveText("");
+  expect(state.changeCalls.map((call) => call.status)).toEqual([0, 500, 500]);
+  expectClean(state);
+});
+
+test("J32 (review round 1 CLI-1) a save with no sure answer that did not go through, then Undo: read again, nothing moved, nothing said", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND],
+    changeAnswers: ["server-error", "server-error", "server-error"] });
+  await box(page, "Select Envelope Single Pocket, Pack of 100").check();
+  await saveAndConfirm(page);
+  await expect(page.getByTestId("catalog-choose-error")).toHaveText(UNCONFIRMED);
+  const summaryReads = () => state.reads.filter((read) => read.path === "/api/dropship/catalog/selection").length;
+  const before = summaryReads();
+
+  await page.getByRole("button", { name: "Undo changes" }).click();
+  await expect.poll(summaryReads).toBeGreaterThan(before);
+  await expect(row(page, 102)).toContainText("Not selected");
+  await expectSelectedCount(page, 1);
+  await expect(status(page)).toHaveText("");
+  expect(state.selectionRevision).toBe(1);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([500, 500, 500]);
+  expectClean(state);
+});
+
+test("J33 (review round 1 CLI-2) an older (A) dyno refuses the list for this newer page: the site-updating line while it is read again, then the rows", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], olderServerReads: ["list", "list"] });
+  await expect(page.getByTestId("catalog-choose-updating")).toHaveText(SITE_UPDATING);
+  await expect(row(page, 102)).toContainText("Not selected", { timeout: OLDER_SERVER_TIMEOUT_MS });
+  await expect(page.getByTestId("catalog-choose-updating")).toHaveCount(0);
+  expect(state.olderServerReads).toEqual([]);
+  expectClean(state);
+});
+
+test("J34 (review round 1 CLI-2) an older (A) dyno refuses a category's id read: the line says why everything waits, then the press applies", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND, TOPLOADER] });
+  await expect(row(page, 103)).toContainText("Not selected");
+  state.olderServerReads.push("ids", "ids");
+  await box(page, "Select all in Toploaders").click();
+  await expect(page.getByTestId("catalog-choose-updating")).toHaveText(SITE_UPDATING);
+  await expect(box(page, "Select Toploader 35pt, Pack of 25")).toBeDisabled();
+  await expect(row(page, 103)).toContainText("Will be added", { timeout: OLDER_SERVER_TIMEOUT_MS });
+  await expect(page.getByTestId("catalog-choose-updating")).toHaveCount(0);
+  await expect(status(page)).toHaveText("Not saved: 1 to add · 0 to remove");
+  expect(state.olderServerReads).toEqual([]);
+  expectClean(state);
+});
+
+test("J35 (review round 1 CLI-2) an older (A) dyno refuses the count for this newer page: the site-updating line, not the retrying one, then the count", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND],
+    selectionSummaryAnswers: [pageNewerThanServerAnswer(), pageNewerThanServerAnswer()] });
+  await expect(page.getByTestId("catalog-count-updating")).toHaveText(SITE_UPDATING);
+  await expect(page.getByTestId("catalog-count-retrying")).toHaveCount(0);
+  await expect(page.getByTestId("catalog-action-summary")).toHaveText("1 selected", { timeout: OLDER_SERVER_TIMEOUT_MS });
+  await expect(page.getByTestId("catalog-count-updating")).toHaveCount(0);
+  expect(state.selectionSummaryAnswers).toEqual([]);
+  expectClean(state);
+});
+
+test("J36 (review round 1 CLI-4) a change made right after a save, while the count is still read again, goes on the save's own revision: no false stale", async ({ page }) => {
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND] });
+  await expectSelectedCount(page, 1);
+  // The count's next two reads fail (each retried 3 s later): after the save it still says revision 1 for ~6 s.
+  const internal = { status: 500, code: "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR", message: "Dropship vendor catalog request failed." };
+  state.selectionSummaryAnswers.push(internal, internal);
+  await box(page, "Select Envelope Single Pocket, Pack of 100").check();
+  await saveAndConfirm(page);
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.");
+  await box(page, "Select Envelope Single Pocket, Pack of 50").uncheck();
+  await saveButton(page).click();
+  await expect(confirmLines(page).first()).toHaveText("0 added · 1 removed");
+  await page.getByRole("alertdialog").getByRole("button", { name: "Save changes" }).click();
+  await expect(status(page)).toHaveText("Saved. 0 added, 1 removed.");
+  await expect(page.getByTestId("catalog-choose-error")).toHaveCount(0);
+  // The second change was made on the first save's revision (2), not the count's cached 1.
+  expect(state.changePreviews.map((preview) => preview.body)).toEqual([changeBody(1, [102], []), changeBody(2, [], [101])]);
+  expect(state.changeCalls.map((call) => call.status)).toEqual([201, 201]);
+  expect([...state.picks]).toEqual([102]);
+  expectClean(state);
+});
+
+test("J37 (review round 1 CLI-4) no box changes before the count names the head the change is made on", async ({ page }) => {
+  const internal = { status: 500, code: "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR", message: "Dropship vendor catalog request failed." };
+  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], selectionSummaryAnswers: [internal] });
+  await expect(row(page, 102)).toContainText("Not selected");
+  await expect(page.getByTestId("catalog-choose-card").getByText("Loading selection", { exact: true })).toBeVisible();
+  await expect(box(page, "Select Envelope Single Pocket, Pack of 100")).toBeDisabled();
+  await expect(box(page, "Select all shown")).toBeDisabled();
+  // Once the count lands (3 s later) the boxes work, and the change counts from its head.
+  await expect(box(page, "Select Envelope Single Pocket, Pack of 100")).toBeEnabled({ timeout: OLDER_SERVER_TIMEOUT_MS });
+  await box(page, "Select Envelope Single Pocket, Pack of 100").check();
+  await saveAndConfirm(page);
+  await expect(status(page)).toHaveText("Saved. 1 added, 0 removed.");
+  expect(state.changePreviews.map((preview) => preview.body)).toEqual([changeBody(1, [102], [])]);
   expectClean(state);
 });

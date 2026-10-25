@@ -13,11 +13,19 @@ import {
 } from "../../application/dropship-listing-push-run-sweep";
 import {
   hashListingPushJobRequest,
+  type DropshipListingPreviewResult,
   type DropshipListingPreviewRow,
 } from "../../application/dropship-listing-preview-service";
+import { refreshQueuedListingIntent } from "../../application/dropship-listing-intent-refresh";
 import { DropshipListingPushWorkerService } from "../../application/dropship-listing-push-worker-service";
 import type { DropshipLogEvent, DropshipNotificationSenderInput } from "../../application/dropship-ports";
-import { createListingPushJobInputSchema, type CreateListingPushJobInput } from "../../application/dropship-use-case-dtos";
+import {
+  createListingPushJobInputSchema,
+  type CreateListingPushJobInput,
+  type GenerateVendorListingPreviewInput,
+} from "../../application/dropship-use-case-dtos";
+import { evaluateDropshipCatalogExposure } from "../../domain/catalog-exposure";
+import { evaluateDropshipVendorCatalogSelection } from "../../domain/vendor-selection";
 import { DropshipError } from "../../domain/errors";
 import { QuantityPublicationAdmissionError } from "../../../inventory-planning/domain/quantity-publication-admission";
 import { runTargetOutcomeForItem } from "../../domain/listing-push-run";
@@ -35,7 +43,7 @@ import {
   targetOutcomeFromItemSql,
 } from "../../infrastructure/dropship-listing-push-run-sweep.repository";
 import { PgDropshipListingPushWorkerRepository } from "../../infrastructure/dropship-listing-push-worker.repository";
-import { PgDropshipSelectionAtpRepository } from "../../infrastructure/dropship-selection-atp.repository";
+import { lockVendorSelection } from "../../infrastructure/dropship-vendor-selection-lock";
 import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
@@ -44,6 +52,7 @@ import {
   LISTING_PUSH_RUNS_MIGRATION_FILE,
   listingPushRunsBaseFixtureSql,
   listingPushRunsMigrationSql,
+  removePicks,
 } from "../fixtures/listing-push-runs.fixture";
 import { ebaySyncBackListingColumnsSql } from "../fixtures/ebay-sync-back.fixture";
 
@@ -100,6 +109,14 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
   function services(options: {
     afterChunkJob?: (input: CreateListingPushJobInput) => Promise<void>;
     beforeChunkJob?: (input: CreateListingPushJobInput) => Promise<void>;
+    /**
+     * The worker rebuilds each queued intent at push time (refreshQueuedListingIntent, as the worker factory wires it),
+     * from a preview whose selection is decided as the preview service decides it (PS generatePreviewForContext: the
+     * real catalog, exposure, picks and override readers, the real evaluator, the `selection:<reason>` blocker of
+     * buildListingPreviewRow); every other preview fact is the queued row's. Off by default: the other cases push the
+     * queued intent as before.
+     */
+    pushTimeSelection?: boolean;
   } = {}) {
     const runRepository = new PgDropshipListingPushRunRepository(pool);
     const runService = new DropshipListingPushRunService({
@@ -147,8 +164,36 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
       timer: () => (tick += 1),
       logger,
     });
+    const pushTimePreview = async (input: GenerateVendorListingPreviewInput): Promise<DropshipListingPreviewResult> => {
+      const ids = [...input.productVariantIds];
+      // One after another, as the preview repository's pool allows.
+      const candidates = await previewRepository.listCatalogCandidates(ids);
+      const adminRules = await previewRepository.listCatalogExposureRules();
+      const pickedIds = await previewRepository.listPickedVariantIds(input.vendorId, ids);
+      const overrides = await previewRepository.listVariantOverrides({ vendorId: input.vendorId, productVariantIds: ids });
+      const rows = candidates.map((candidate): DropshipListingPreviewRow => {
+        const row = previewRow(candidate.productVariantId, candidate.productId, candidate.sku ?? `S-${candidate.productVariantId}`);
+        const selection = evaluateDropshipVendorCatalogSelection({
+          candidate, adminExposureDecision: evaluateDropshipCatalogExposure(candidate, adminRules, clock.now()),
+          picked: pickedIds.has(candidate.productVariantId), rawAtpUnits: 3,
+          override: overrides.find((override) => override.productVariantId === candidate.productVariantId) ?? null,
+        });
+        return selection.selected ? row
+          : { ...row, previewStatus: "blocked", blockers: [`selection:${selection.reason}`], listingIntent: null } as DropshipListingPreviewRow;
+      });
+      const blocked = rows.filter((row) => row.previewStatus === "blocked").length;
+      return { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, platform: "ebay", generatedAt: clock.now(), rows,
+        summary: { total: rows.length, ready: rows.length - blocked, blocked, warning: 0 } };
+    };
     const worker = new DropshipListingPushWorkerService({
       repository: new PgDropshipListingPushWorkerRepository(pool),
+      ...(options.pushTimeSelection ? {
+        refreshListingIntent: (input) => refreshQueuedListingIntent({
+          generatePreview: pushTimePreview,
+          resolveCostChangePolicy: async () => ({ policyId: 1, settings: { rulePricedListings: policy } as DropshipCostChangePolicyInForce["settings"] }),
+          logger,
+        }, input),
+      } : {}),
       marketplacePush: {
         pushListing: async (input) => {
           providerCalls.push(input.productVariantId);
@@ -191,7 +236,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
   beforeAll(async () => {
     // Plus the eBay sync-back listing columns a completed push writes (plan v4 §5 step 7), from the real migration.
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable,
-      `${listingPushRunsBaseFixtureSql}\n${ebaySyncBackListingColumnsSql()}`);
+      `${listingPushRunsBaseFixtureSql()}\n${ebaySyncBackListingColumnsSql()}`);
     pool = database.pool;
     wide = new pg.Pool({ connectionString: database.connectionString, max: 8 });
 
@@ -243,8 +288,8 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
     providerDrafts = false;
     await pool.query(`TRUNCATE dropship.dropship_listing_push_run_targets, dropship.dropship_listing_push_runs,
       dropship.dropship_listing_sync_events, dropship.dropship_listing_push_job_items, dropship.dropship_listing_push_jobs,
-      dropship.dropship_vendor_listings, dropship.dropship_audit_events, dropship.dropship_vendor_selection_rules,
-      dropship.dropship_vendor_selection_rule_set_revisions, dropship.dropship_catalog_rules,
+      dropship.dropship_vendor_listings, dropship.dropship_audit_events, dropship.dropship_vendor_selected_variants,
+      dropship.dropship_vendor_selection_rules, dropship.dropship_vendor_selection_rule_set_revisions, dropship.dropship_catalog_rules,
       dropship.dropship_vendor_variant_overrides, dropship.dropship_cost_schedule_entries,
       dropship.dropship_listing_price_revisions, dropship.dropship_pricing_profile_revisions,
       dropship.dropship_product_listing_setting_revisions, dropship.dropship_category_listing_setting_revisions,
@@ -269,18 +314,33 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
     return Array.from({ length: count }, (_, index) => FIRST_SIZE + index);
   }
 
-  /** The vendor's selection, saved through the real rules writer: a revision and its rules, under the vendor lock. */
-  async function saveSelection(rules: Array<{ scopeType: string; action: string; productVariantId?: number }>, key: string): Promise<number> {
-    const saved = await new PgDropshipSelectionAtpRepository(pool).replaceSelectionRules({
-      vendorId: VENDOR, idempotencyKey: key, requestHash: createHash("sha256").update(key).digest("hex"),
-      actor: { actorType: "vendor", actorId: MEMBER }, now: clock.now(),
-      rules: rules.map((rule, index) => ({
-        scopeType: rule.scopeType, action: rule.action, productLineId: null, productId: null,
-        productVariantId: rule.productVariantId ?? null, category: null, autoConnectNewSkus: true, autoListNewSkus: false,
-        priority: 100 - index, metadata: {},
-      })) as never,
-    });
-    return saved.revisionId;
+  /**
+   * The vendor's selection, saved as a step 1 save does (PLAN-B v4.1 §8.3): under the vendor lock, one revision
+   * with the key and the picks replaced by `picks` ("every size": every catalog size now; at main a `catalog` include).
+   */
+  async function saveSelection(picks: "every size" | readonly number[], key: string): Promise<number> {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await lockVendorSelection(client, VENDOR);
+      const revision = await client.query<{ id: number }>(`INSERT INTO dropship.dropship_vendor_selection_rule_set_revisions
+        (vendor_id, idempotency_key, request_hash, actor_type, actor_id, rule_count) VALUES ($1, $2, $3, 'vendor', $4, 0) RETURNING id`,
+      [VENDOR, key, createHash("sha256").update(key).digest("hex"), MEMBER]);
+      const ids = picks === "every size"
+        ? (await client.query<{ id: number }>("SELECT id FROM catalog.product_variants ORDER BY id")).rows.map((row) => row.id)
+        : [...picks];
+      await client.query("DELETE FROM dropship.dropship_vendor_selected_variants WHERE vendor_id = $1 AND NOT product_variant_id = ANY($2::int[])",
+        [VENDOR, ids]);
+      await client.query(`INSERT INTO dropship.dropship_vendor_selected_variants (vendor_id, product_variant_id, revision_id, source, selected_at)
+        SELECT $1, id, $2, 'vendor', $3 FROM unnest($4::int[]) id ON CONFLICT DO NOTHING`, [VENDOR, revision.rows[0].id, clock.now(), ids]);
+      await client.query("COMMIT");
+      return revision.rows[0].id;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async function createRun(input: { key: string; scope?: "not_live" | "all"; expected: number | null }) {
@@ -420,7 +480,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
   describe("run creation", () => {
     it("snapshots 10,000 selected sizes into 20 chunks in one transaction, in id order", async () => {
       await seedSizes(10_000);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0001");
+      const revision = await saveSelection("every size", "save-all-0001");
       const started = performance.now();
       const created = await createRun({ key: "run-10k-0001", expected: revision });
       const elapsedMs = Math.round(performance.now() - started);
@@ -444,14 +504,14 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("refuses 10,001 selected sizes and writes nothing", async () => {
       await seedSizes(10_001);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0002");
+      const revision = await saveSelection("every size", "save-all-0002");
       await expect(createRun({ key: "run-big-0001", expected: revision })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PUSH_RUN_TOO_LARGE" });
       expect((await pool.query("SELECT count(*)::int AS count FROM dropship.dropship_listing_push_runs")).rows[0].count).toBe(0);
     }, REPLAY_TIMEOUT_MS);
 
     it("replays the same key and request; two concurrent presses make one run", async () => {
       await seedSizes(30);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0003");
+      const revision = await saveSelection("every size", "save-all-0003");
       const [first, second] = await Promise.all([
         createRun({ key: "run-same-0001", expected: revision }),
         createRun({ key: "run-same-0001", expected: revision }),
@@ -468,7 +528,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("waits for a selection save on the vendor lock, refuses a moved revision, and snapshots the saved selection", async () => {
       await seedSizes(20);
-      const firstRevision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0004");
+      const firstRevision = await saveSelection("every size", "save-all-0004");
       const saver = await wide.connect();
       let secondRevision = 0;
       try {
@@ -483,13 +543,12 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
           if (waitingCount === 0) await new Promise((resolve) => setTimeout(resolve, 50));
         }
         expect(waitingCount).toBe(1);
-        // The save in progress: the include narrows to two sizes, under the same lock, then commits.
-        await saver.query("UPDATE dropship.dropship_vendor_selection_rules SET is_active = false WHERE vendor_id = $1", [VENDOR]);
+        // The save in progress: the picks narrow to two sizes, under the same lock, then commit.
         const revision = await saver.query<{ id: number }>(`INSERT INTO dropship.dropship_vendor_selection_rule_set_revisions
-          (vendor_id, idempotency_key, request_hash, actor_type, rule_count) VALUES ($1, 'save-two-0001', 'h', 'vendor', 2) RETURNING id`, [VENDOR]);
+          (vendor_id, idempotency_key, request_hash, actor_type, rule_count) VALUES ($1, 'save-two-0001', 'h', 'vendor', 0) RETURNING id`, [VENDOR]);
         secondRevision = revision.rows[0].id;
-        await saver.query(`INSERT INTO dropship.dropship_vendor_selection_rules (revision_id, vendor_id, scope_type, action, product_variant_id)
-          VALUES ($1, $2, 'variant', 'include', ${FIRST_SIZE}), ($1, $2, 'variant', 'include', ${FIRST_SIZE + 5})`, [secondRevision, VENDOR]);
+        await saver.query(`DELETE FROM dropship.dropship_vendor_selected_variants WHERE vendor_id = $1
+          AND product_variant_id NOT IN (${FIRST_SIZE}, ${FIRST_SIZE + 5})`, [VENDOR]);
         await saver.query("COMMIT");
         await expect(pending).rejects.toMatchObject({ code: "DROPSHIP_SELECTION_REVISION_CONFLICT",
           context: { expectedSelectionRevisionId: firstRevision, currentSelectionRevisionId: secondRevision } });
@@ -504,7 +563,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("answers busy, retryable, when a selection save holds the vendor lock past the timeout", async () => {
       await seedSizes(3);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0005");
+      const revision = await saveSelection("every size", "save-all-0005");
       const saver = await wide.connect();
       try {
         await saver.query("BEGIN");
@@ -520,7 +579,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("'not_live' leaves out only sizes live on this store; an empty result names the live count", async () => {
       await seedSizes(10);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0006");
+      const revision = await saveSelection("every size", "save-all-0006");
       const listings: Array<[number, string, string | null]> = [
         [FIRST_SIZE, "active", "EBAY-1"], [FIRST_SIZE + 1, "paused", "EBAY-2"], [FIRST_SIZE + 2, "drift_detected", "EBAY-3"],
         [FIRST_SIZE + 3, "active", null], [FIRST_SIZE + 4, "queued", "EBAY-5"], [FIRST_SIZE + 5, "failed", "EBAY-6"],
@@ -548,7 +607,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
   describe("expansion, the worker and reconcile", () => {
     it("publishes 3,000 sizes as six child jobs, one at a time, and finishes completed", async () => {
       await seedSizes(3_000);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0007");
+      const revision = await saveSelection("every size", "save-all-0007");
       const created = await createRun({ key: "run-3000-0001", expected: revision });
       const { sweep } = services();
       const jobCounts: number[] = [];
@@ -586,7 +645,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("adopts a chunk job a crash left unrecorded, by (run, chunk) and never by key", async () => {
       await seedSizes(5);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0008");
+      const revision = await saveSelection("every size", "save-all-0008");
       const created = await createRun({ key: "run-crash-001", expected: revision });
       const { createChunkJob, sweepService } = services();
       const ids = [FIRST_SIZE, FIRST_SIZE + 1, FIRST_SIZE + 2, FIRST_SIZE + 3, FIRST_SIZE + 4];
@@ -608,7 +667,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("a second expansion of a chunk another sweep already queued adopts that job, failing nothing (review MC5, CT2)", async () => {
       await seedSizes(5);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0019");
+      const revision = await saveSelection("every size", "save-all-0019");
       const created = await createRun({ key: "run-twice-001", expected: revision });
       const competitor = services();
       // Between this sweep's pre-filter and its queue, another sweep pre-filtered the chunk (the fifth size had become
@@ -638,7 +697,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("refuses, for good, a chunk whose key another job already holds", async () => {
       await seedSizes(2);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0009");
+      const revision = await saveSelection("every size", "save-all-0009");
       const created = await createRun({ key: "run-forge-001", expected: revision });
       const { createChunkJob, sweepService } = services();
       // A forged job with the chunk's key but no run (written before the vendor route refused the prefix).
@@ -654,7 +713,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("counts the sizes a draft-first store saved unpublished, apart from those live (review DUX7)", async () => {
       await seedSizes(3);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0020");
+      const revision = await saveSelection("every size", "save-all-0020");
       const created = await createRun({ key: "run-drafts-001", expected: revision });
       const { sweep, runService } = services();
       providerDrafts = true;
@@ -668,7 +727,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("reconciles from real items, finishes partial, and copies a later staff retry into the finished run", async () => {
       await seedSizes(4);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0010");
+      const revision = await saveSelection("every size", "save-all-0010");
       const created = await createRun({ key: "run-retry-001", expected: revision });
       const { sweep } = services();
       providerError = (productVariantId) => productVariantId === FIRST_SIZE + 2
@@ -705,7 +764,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("logs one WARN at the finish counting sizes a passing stock link condition failed, which the run never re-queues (merge review ADV-RB2-1)", async () => {
       await seedSizes(6);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0011");
+      const revision = await saveSelection("every size", "save-all-0011");
       const created = await createRun({ key: "run-stock-link-01", expected: revision });
       const { sweep, sweepService } = services();
       // The stock link's refusals as the gate and the admission raise them: no HTTP status, so no pause (PR A's pause
@@ -751,7 +810,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("refuses a staff retry of a job whose run the vendor stopped, requeueing nothing (review round 2 MC5)", async () => {
       await seedSizes(3);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0020");
+      const revision = await saveSelection("every size", "save-all-0020");
       const created = await createRun({ key: "run-retry-stop", expected: revision });
       const { sweep, runService } = services();
       // The vendor stops while the first size is sent, and eBay refuses that send (retryable).
@@ -777,7 +836,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("pauses on a 429, writes the backoff, and the sweep skips the job until it is due", async () => {
       await seedSizes(3);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0011");
+      const revision = await saveSelection("every size", "save-all-0011");
       const created = await createRun({ key: "run-pause-001", expected: revision });
       const { sweep, queueRepository } = services();
       providerError = (_id, call) => call === 2
@@ -813,7 +872,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("a size eBay refuses with a definite answer ends the job's run of pauses, in the same write (review round 2 MC4)", async () => {
       await seedSizes(2);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0019");
+      const revision = await saveSelection("every size", "save-all-0019");
       const created = await createRun({ key: "run-pause-400", expected: revision });
       const { sweep } = services();
       const http = (status: number) => new DropshipError("DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", `eBay listing push failed with HTTP ${status}.`,
@@ -833,7 +892,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("stops: pending sizes and queued items are cancelled, the item being sent finishes, and nothing else is sent", async () => {
       await seedSizes(1_200);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0012");
+      const revision = await saveSelection("every size", "save-all-0012");
       const created = await createRun({ key: "run-stop-0001", expected: revision });
       const { sweep, runService } = services();
       let stoppedCounts: unknown = null;
@@ -865,7 +924,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("an item eBay answers 429 for after a Stop is cancelled, never sent again (review MC4)", async () => {
       await seedSizes(5);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0017");
+      const revision = await saveSelection("every size", "save-all-0017");
       const created = await createRun({ key: "run-stop-pause1", expected: revision });
       const { sweep, runService } = services();
       providerHook = async (_id, call) => {
@@ -901,7 +960,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("an item a dead worker left processing when the vendor stopped is sent once more on recovery, so eBay's outcome is known; nothing else starts (review MC1)", async () => {
       await seedSizes(3);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0018");
+      const revision = await saveSelection("every size", "save-all-0018");
       const created = await createRun({ key: "run-stop-stale1", expected: revision });
       const { sweep, sweepService, runService } = services();
       await sweepService.expandRuns();
@@ -935,7 +994,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("a stop that lands between the chunk's queue and its record cancels the new job's items before any is sent", async () => {
       await seedSizes(4);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0016");
+      const revision = await saveSelection("every size", "save-all-0016");
       const created = await createRun({ key: "run-race-stop1", expected: revision });
       const { runService } = services();
       const { sweep } = services({ afterChunkJob: async () => { await runService.stopRunForMember(MEMBER, created.run.runId); } });
@@ -953,7 +1012,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("trips the job breaker after six pauses: queued items fail retryable and the run stops for eBay", async () => {
       await seedSizes(600);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0013");
+      const revision = await saveSelection("every size", "save-all-0013");
       const created = await createRun({ key: "run-down-0001", expected: revision });
       const { sweep } = services();
       providerError = () => new DropshipError("DROPSHIP_EBAY_LISTING_PUSH_NETWORK_ERROR", "eBay did not answer.",
@@ -990,7 +1049,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
   describe("the price review pre-filter", () => {
     it("holds live rule-priced sizes whose cost took effect after the press under 'wait for review'", async () => {
       await seedSizes(7);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0014");
+      const revision = await saveSelection("every size", "save-all-0014");
       for (let index = 0; index < 6; index += 1) {
         await pool.query(`INSERT INTO dropship.dropship_vendor_listings (vendor_id, store_connection_id, product_variant_id, platform, status, external_listing_id)
           VALUES ($1, $2, $3, 'ebay', 'active', $4)`, [VENDOR, STORE, FIRST_SIZE + index, `EBAY-${index}`]);
@@ -1029,7 +1088,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
       // One product per size here, so a product's recipe moves one size only.
       await pool.query("INSERT INTO catalog.products (id, sku, name) SELECT p, 'P' || p, 'Product ' || p FROM generate_series(2, 7) AS p");
       await pool.query(`UPDATE catalog.product_variants SET product_id = id - ${FIRST_SIZE} + 1`);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0016");
+      const revision = await saveSelection("every size", "save-all-0016");
       const minutes = (value: number) => new Date(PRESS.getTime() + value * 60_000);
       const listed = [
         [FIRST_SIZE, "active"], [FIRST_SIZE + 1, "active"], [FIRST_SIZE + 2, "active"], [FIRST_SIZE + 3, "active"],
@@ -1080,14 +1139,14 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("sends everything when the policy reprices by itself, and leaves out a size no longer selected", async () => {
       await seedSizes(3);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-0015");
+      const revision = await saveSelection("every size", "save-all-0015");
       await pool.query(`INSERT INTO dropship.dropship_vendor_listings (vendor_id, store_connection_id, product_variant_id, platform, status, external_listing_id)
         VALUES ($1, $2, $3, 'ebay', 'active', 'EBAY-0')`, [VENDOR, STORE, FIRST_SIZE]);
       const created = await createRun({ key: "run-price-002", expected: revision });
       await pool.query(`INSERT INTO dropship.dropship_pricing_profile_revisions (vendor_id, store_connection_id, created_at) VALUES ($1, $2, $3)`,
         [VENDOR, STORE, new Date(PRESS.getTime() + 60_000)]);
-      await pool.query(`INSERT INTO dropship.dropship_vendor_selection_rules (vendor_id, scope_type, action, product_variant_id, priority)
-        VALUES ($1, 'variant', 'exclude', ${FIRST_SIZE + 2}, 1000)`, [VENDOR]);
+      // The vendor removes size 3 after the press (at main a variant exclude rule).
+      await removePicks(pool, VENDOR, [FIRST_SIZE + 2]);
       rulePricedIds = new Set([FIRST_SIZE]);
       now = new Date(PRESS.getTime() + 120_000);
       await services().sweepService.expandRuns();
@@ -1104,7 +1163,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("counts each size as it is decided while its chunk's job runs, and finishes the run right after the job (verify V1)", async () => {
       await seedSizes(6);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-v1-001");
+      const revision = await saveSelection("every size", "save-all-v1-001");
       const created = await createRun({ key: "run-progress-v1", expected: revision });
       const { sweep, runService, sweepService } = services();
       const seen: string[] = [];
@@ -1126,7 +1185,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("a size stale recovery queued again before a Stop, and that then paused, is sent once more after the Stop, never cancelled blind (verify V2)", async () => {
       await seedSizes(3);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-v2-001");
+      const revision = await saveSelection("every size", "save-all-v2-001");
       const created = await createRun({ key: "run-recovered-v2", expected: revision });
       const { sweep, sweepService, runService } = services();
       await sweepService.expandRuns();
@@ -1160,7 +1219,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("records a fully decided pre-filter and a concurrent Stop one after the other, never deadlocking (verify V3)", async () => {
       await seedSizes(3);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-v3-001");
+      const revision = await saveSelection("every size", "save-all-v3-001");
       const created = await createRun({ key: "run-deadlock-v3", expected: revision });
       const runId = created.run.runId;
       const stopClient = await wide.connect();
@@ -1234,7 +1293,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("one product whose stock cannot be read fails only its own sizes; the rest of the chunk is published (verify V6)", async () => {
       await seedSizes(12);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-v6-001");
+      const revision = await saveSelection("every size", "save-all-v6-001");
       const created = await createRun({ key: "run-product-v6", expected: revision });
       let attempts = 0;
       // Product 2 (sizes 1011 and 1012) cannot have its channel quantity read: the preview refuses the whole chunk.
@@ -1262,7 +1321,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
       await seedSizes(3);
       await pool.query(`INSERT INTO dropship.dropship_vendor_listings (vendor_id, store_connection_id, product_variant_id, platform, status, external_listing_id)
         VALUES ($1, $2, $3, 'ebay', 'active', 'EBAY-0'), ($1, $2, $4, 'ebay', 'failed', NULL)`, [VENDOR, STORE, FIRST_SIZE, FIRST_SIZE + 1]);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-v7-001");
+      const revision = await saveSelection("every size", "save-all-v7-001");
       const created = await createRun({ key: "run-restore-v7", expected: revision });
       const { sweepService, runService, createChunkJob } = services();
       await sweepService.expandRuns();
@@ -1293,7 +1352,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
     it("a run finished by a process that died before its email gets the email at a later sweep, under the same key, once (verify V9)", async () => {
       await seedSizes(2);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-v9-001");
+      const revision = await saveSelection("every size", "save-all-v9-001");
       const created = await createRun({ key: "run-notice-v9", expected: revision });
       const { sweep, sweepService } = services();
       providerError = (productVariantId) => (productVariantId === FIRST_SIZE ? http(400) : null);
@@ -1321,12 +1380,35 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
         notified_at = $2 WHERE id = $1`, [created.run.runId, now]), "23514", "dropship_push_run_notified_chk");
     }, REPLAY_TIMEOUT_MS);
 
+    // V15 (FIDELITY-12): the push worker's `selection:` blocker reads the picks at push time, through the preview.
+    it("blocks a size whose pick is removed after its chunk job was queued: the worker answers DROPSHIP_LISTING_NOT_SELECTED (PLAN-B v4.1 V15)", async () => {
+      await seedSizes(3);
+      const revision = await saveSelection("every size", "save-all-v15-01");
+      const created = await createRun({ key: "run-unpicked-v15", expected: revision });
+      const { sweep, sweepService } = services({ pushTimeSelection: true });
+      await sweepService.expandRuns();
+      const queued = await pool.query<{ product_variant_id: number; status: string }>(`SELECT i.product_variant_id, i.status
+        FROM dropship.dropship_listing_push_job_items i JOIN dropship.dropship_listing_push_jobs j ON j.id = i.job_id
+        WHERE j.run_id = $1 ORDER BY i.product_variant_id`, [created.run.runId]);
+      expect(queued.rows.map((row) => [row.product_variant_id, row.status])).toEqual([
+        [FIRST_SIZE, "queued"], [FIRST_SIZE + 1, "queued"], [FIRST_SIZE + 2, "queued"]]);
+      // The vendor removes size 2 while the job waits: the worker's push-time preview reads the picks and no longer selects it.
+      await removePicks(pool, VENDOR, [FIRST_SIZE + 1]);
+      await sweep();
+      const items = await pool.query<{ product_variant_id: number; status: string; error_code: string | null }>(`SELECT i.product_variant_id,
+        i.status, i.error_code FROM dropship.dropship_listing_push_job_items i JOIN dropship.dropship_listing_push_jobs j ON j.id = i.job_id
+        WHERE j.run_id = $1 ORDER BY i.product_variant_id`, [created.run.runId]);
+      expect(items.rows.map((row) => [row.product_variant_id, row.status, row.error_code])).toEqual([
+        [FIRST_SIZE, "completed", null], [FIRST_SIZE + 1, "blocked", "DROPSHIP_LISTING_NOT_SELECTED"], [FIRST_SIZE + 2, "completed", null]]);
+      expect([...providerCalls].sort((left, right) => left - right)).toEqual([FIRST_SIZE, FIRST_SIZE + 2]);
+    }, REPLAY_TIMEOUT_MS);
+
     it("a run whose only sizes left out were deselected finishes completed, with no email (verify V10)", async () => {
       await seedSizes(3);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-v10-01");
+      const revision = await saveSelection("every size", "save-all-v10-01");
       const created = await createRun({ key: "run-skipped-v10", expected: revision });
-      await pool.query(`INSERT INTO dropship.dropship_vendor_selection_rules (vendor_id, scope_type, action, product_variant_id, priority)
-        VALUES ($1, 'variant', 'exclude', ${FIRST_SIZE + 2}, 1000)`, [VENDOR]);
+      // The vendor removes size 3 after the press (at main a variant exclude rule).
+      await removePicks(pool, VENDOR, [FIRST_SIZE + 2]);
       await services().sweep();
       expect(await outcomeCounts(created.run.runId)).toEqual({ completed: 2, skipped: 1 });
       expect(await runRow(created.run.runId)).toMatchObject({ status: "completed" });
@@ -1388,7 +1470,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
     it("restores a listing an earlier release demoted before the run's pre-filter reads it, so 'not_live' skips it as already live", async () => {
       await seedSizes(2);
       const listingId = await seedDemotedLiveListing(FIRST_SIZE);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-1b-0001");
+      const revision = await saveSelection("every size", "save-all-1b-0001");
       // At the press the listing reads 'failed', so the 'not_live' snapshot takes it.
       const created = await createRun({ key: "run-1b-order-0001", scope: "not_live", expected: revision });
       expect((await targetsOf(created.run.runId)).map((row) => row.product_variant_id)).toEqual([FIRST_SIZE, FIRST_SIZE + 1]);
@@ -1410,7 +1492,7 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
     it("without the recovery (the staff sweep), the same listing is sent again: the order is what skips it", async () => {
       await seedSizes(2);
       const listingId = await seedDemotedLiveListing(FIRST_SIZE);
-      const revision = await saveSelection([{ scopeType: "catalog", action: "include" }], "save-all-1b-0002");
+      const revision = await saveSelection("every size", "save-all-1b-0002");
       const created = await createRun({ key: "run-1b-order-0002", scope: "not_live", expected: revision });
 
       await sweepWith(undefined);

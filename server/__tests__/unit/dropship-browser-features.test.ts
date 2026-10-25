@@ -143,6 +143,8 @@ describe("affected feature browser selection", () => {
     ["client/src/pages/dropship/listing-settings/PriceDefaultRow.tsx", ["listings", "catalog-scale"]],
     ["client/src/pages/dropship/catalog/PublishStep.tsx", ["listings", "catalog-scale"]],
     ["test/browser/dropship-policy-catalog-publish-runs.spec.ts", ["catalog-scale"]],
+    // PLAN-B v4.1 V29: step 1 at scale is the catalog-scale group's second spec.
+    ["test/browser/dropship-policy-catalog-choose-scale.spec.ts", ["catalog-scale"]],
     ["test/browser/dropship-policy-listing-settings-helpers.ts", ["listings"]],
     ["shared/ebay-listing-issue.ts", []],
     ["docs/migration-allocation.md", []],

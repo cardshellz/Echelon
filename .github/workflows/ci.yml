@@ -82,11 +82,12 @@ jobs:
         run: npm run check
       - name: Server test types
         if: matrix.project == 'server-tests'
-        # This program needs ~4.1 GB of heap (tsc --extendedDiagnostics,
-        # Oct 2026), past Node's ~4 GB default, so tsc would die out of memory.
-        # 6 GB leaves headroom on the 16 GB runner; tsc is its only process.
+        # This program needs ~6.4 GB (tsc --extendedDiagnostics --incremental
+        # false, 24 Oct 2026: main 6,288,443K, main + the dropship picks PR
+        # 6,422,960K), past a 6 GB heap, so tsc dies out of memory at 6144.
+        # 8 GB leaves headroom on the 16 GB runner; tsc is its only process.
         env:
-          NODE_OPTIONS: --max-old-space-size=6144
+          NODE_OPTIONS: --max-old-space-size=8192
         run: npx tsc -p tsconfig.tests.server.json
       - name: Client test types
         if: matrix.project == 'client-tests'
@@ -176,6 +177,11 @@ jobs:
           client/src/lib/__tests__/dropship-catalog-choose-requests.test.ts
           client/src/lib/__tests__/dropship-catalog-choose-words.test.ts
           client/src/pages/dropship/__tests__/DropshipCatalogChoose.test.ts
+          client/src/lib/__tests__/dropship-catalog-new-items.test.ts
+          client/src/lib/__tests__/dropship-catalog-new-items-requests.test.ts
+          client/src/lib/__tests__/dropship-catalog-new-items-words.test.ts
+          client/src/lib/__tests__/dropship-onboarding.test.ts
+          client/src/pages/dropship/__tests__/DropshipPortalDashboard.test.ts
           client/src/lib/__tests__/dropship-api-json.test.ts
           client/src/lib/__tests__/dropship-catalog-publish.test.ts
           client/src/lib/__tests__/dropship-catalog-publish-requests.test.ts
@@ -231,12 +237,13 @@ jobs:
           client/src/lib/__tests__/dropship-listing-push-status.test.ts
           client/src/lib/__tests__/dropship-cost-changes.test.ts
           client/src/pages/__tests__/dropship-portal-cost-changes-page.test.ts
+          client/src/pages/__tests__/dropship-launch-readiness-panels.test.ts
       # test/browser is in no tsconfig, so nothing else type-checks the Catalog page's browser stubs and specs. The publish
       # run answers are typed against the shared contracts (contractAnswer), so a field a run contract adds or renames
       # fails here; other answers are parsed with the server's schemas when a journey runs (step 1 plan S2-5, TESTS17;
       # review round 2 CT11).
       - name: Dropship catalog browser stub types
-        run: npx tsc --noEmit --incremental false --target ES2022 --module ESNext --moduleResolution Bundler --esModuleInterop --skipLibCheck --strict --types node --allowImportingTsExtensions --jsx preserve --lib esnext,dom test/browser/dropship-policy-catalog-stubs.ts test/browser/dropship-policy-listing-settings-*.ts test/browser/dropship-policy-catalog-steps.spec.ts test/browser/dropship-policy-catalog-choose.spec.ts test/browser/dropship-policy-catalog-publish-runs.spec.ts test/browser/dropship-policy-listing-access.spec.ts test/browser/dropship-policy-cost-changes-portal.spec.ts
+        run: npx tsc --noEmit --incremental false --target ES2022 --module ESNext --moduleResolution Bundler --esModuleInterop --skipLibCheck --strict --types node --allowImportingTsExtensions --jsx preserve --lib esnext,dom test/browser/dropship-policy-catalog-stubs.ts test/browser/dropship-policy-listing-settings-*.ts test/browser/dropship-policy-catalog-steps.spec.ts test/browser/dropship-policy-catalog-choose.spec.ts test/browser/dropship-policy-catalog-choose-scale.spec.ts test/browser/dropship-policy-catalog-publish-runs.spec.ts test/browser/dropship-policy-listing-access.spec.ts test/browser/dropship-policy-cost-changes-portal.spec.ts
       # These paths have no "unit" in them, so test:unit never selects them.
       - name: Dropship program finance contracts
         run: >-

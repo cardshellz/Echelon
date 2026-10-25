@@ -26,7 +26,7 @@ describe("listing price local draft authority", () => {
         loadStoreContext: vi.fn(async () => context),
         listCatalogCandidates: vi.fn(async () => [candidate]),
         listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
-        listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
+        listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)),
         listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
         listPricingPolicies: vi.fn(async () => []),
       },
@@ -72,10 +72,12 @@ describe("listing price local draft authority", () => {
   it.each(["missing", "unexposed", "unselected", "disabled"])("rejects %s variant", async (mode) => {
     if (mode === "missing") vi.mocked(tx.catalog.listCatalogCandidates).mockResolvedValue([]);
     if (mode === "unexposed") vi.mocked(tx.catalog.listCatalogExposureRules).mockResolvedValue([]);
-    if (mode === "unselected") vi.mocked(tx.catalog.listSelectionRules).mockResolvedValue([]);
+    if (mode === "unselected") vi.mocked(tx.catalog.listPickedVariantIds).mockResolvedValue(new Set());
     if (mode === "disabled") vi.mocked(tx.catalog.listVariantOverrides).mockResolvedValue([{ productVariantId: 101, enabledOverride: false }]);
     await expect(service.saveForMember("member-1", target, input)).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE" });
     expect(tx.save).not.toHaveBeenCalled();
+    // The vendor's picks are read for this one size only (PLAN-B v4.1 §9 row 2).
+    if (mode !== "missing") expect(tx.catalog.listPickedVariantIds).toHaveBeenCalledWith(tx.vendorId, [target.productVariantId]);
   });
   it("reset ignores an old applied listing price and remains revisioned", async () => {
     vi.mocked(tx.catalog.listExistingListings).mockResolvedValue([{ productVariantId: 101, listingId: 1,
@@ -154,7 +156,7 @@ describe("a price save never leaves a size without a price it can be listed at",
         loadStoreContext: vi.fn(async () => context),
         listCatalogCandidates: vi.fn(async () => [candidate]),
         listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
-        listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
+        listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)),
         listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
         listPricingPolicies: vi.fn(async () => []),
       },
@@ -287,7 +289,7 @@ describe("inherit: a size with no price of its own (A3, L1)", () => {
         loadStoreContext: vi.fn(async () => context),
         listCatalogCandidates: vi.fn(async () => [candidate]),
         listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
-        listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
+        listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)),
         listVariantOverrides: vi.fn(async () => []),
         // An earlier push saved $9.99 on the listing; inherit never falls back to it.
         listExistingListings: vi.fn(async () => [{ productVariantId: 101, listingId: 1,

@@ -104,7 +104,7 @@ interface DogfoodReadinessRow {
   listing_config_platform: string | null;
   listing_config_active: boolean | null;
   admin_catalog_include_rule_count: string | number;
-  vendor_selection_include_rule_count: string | number;
+  vendor_selected_item_count: string | number;
   active_shipping_box_count: string | number;
   active_shipping_zone_rule_count: string | number;
   active_shipping_rate_table_count: string | number;
@@ -554,7 +554,7 @@ function dogfoodReadinessSql(): string {
       slc.platform AS listing_config_platform,
       slc.is_active AS listing_config_active,
       COALESCE(admin_catalog.include_rule_count, 0) AS admin_catalog_include_rule_count,
-      COALESCE(selection_rules.include_rule_count, 0) AS vendor_selection_include_rule_count,
+      COALESCE(vendor_picks.selected_item_count, 0) AS vendor_selected_item_count,
       COALESCE(shipping_boxes.active_box_count, 0) AS active_shipping_box_count,
       COALESCE(shipping_zones.active_zone_rule_count, 0) AS active_shipping_zone_rule_count,
       COALESCE(shipping_rates.active_rate_table_count, 0) AS active_shipping_rate_table_count,
@@ -610,12 +610,11 @@ function dogfoodReadinessSql(): string {
         AND (cr.ends_at IS NULL OR cr.ends_at > now())
     ) admin_catalog ON true
     LEFT JOIN LATERAL (
-      SELECT COUNT(*) AS include_rule_count
-      FROM dropship.dropship_vendor_selection_rules vsr
-      WHERE vsr.vendor_id = v.id
-        AND vsr.action = 'include'
-        AND vsr.is_active = true
-    ) selection_rules ON true
+      -- The vendor's one-time picks (PLAN-B v4.1 §9 row 6): its rules are frozen and no longer its selection.
+      SELECT COUNT(*) AS selected_item_count
+      FROM dropship.dropship_vendor_selected_variants vsv
+      WHERE vsv.vendor_id = v.id
+    ) vendor_picks ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(*) AS active_box_count
       FROM dropship.dropship_box_catalog bc
@@ -684,19 +683,9 @@ function dogfoodReadinessSql(): string {
           )
           AND EXISTS (
             SELECT 1
-            FROM dropship.dropship_vendor_selection_rules vsr
-            WHERE vsr.vendor_id = v.id
-              AND vsr.action = 'include'
-              AND vsr.is_active = true
-              AND ${catalogVariantRuleMatchSql("vsr")}
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM dropship.dropship_vendor_selection_rules vsr
-            WHERE vsr.vendor_id = v.id
-              AND vsr.action = 'exclude'
-              AND vsr.is_active = true
-              AND ${catalogVariantRuleMatchSql("vsr")}
+            FROM dropship.dropship_vendor_selected_variants vsv
+            WHERE vsv.vendor_id = v.id
+              AND vsv.product_variant_id = pv.id
           )
       ) selected_variants
     ) package_readiness ON true
@@ -1077,7 +1066,9 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
   const dropshipOmsChannelId = parsePositiveIntegerOrNull(row.dropship_oms_channel_id_text);
   const dropshipOmsChannelCount = toNumber(row.dropship_oms_channel_count);
   const adminCatalogIncludeRuleCount = toNumber(row.admin_catalog_include_rule_count);
-  const vendorSelectionIncludeRuleCount = toNumber(row.vendor_selection_include_rule_count);
+  const vendorSelectedItemCount = toNumber(row.vendor_selected_item_count);
+  // The pre-picks field, kept one release with the pick count so an older admin page keeps reading (V17).
+  const vendorSelectionIncludeRuleCount = vendorSelectedItemCount;
   const activeShippingBoxCount = toNumber(row.active_shipping_box_count);
   const activeShippingZoneRuleCount = toNumber(row.active_shipping_zone_rule_count);
   const activeShippingRateTableCount = toNumber(row.active_shipping_rate_table_count);
@@ -1105,7 +1096,7 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
     dropshipOmsChannelCount,
     defaultWarehouseId,
     adminCatalogIncludeRuleCount,
-    vendorSelectionIncludeRuleCount,
+    vendorSelectedItemCount,
     activeShippingBoxCount,
     activeShippingZoneRuleCount,
     activeShippingRateTableCount,
@@ -1154,6 +1145,7 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
       dropshipOmsChannelCount,
       defaultWarehouseId,
       adminCatalogIncludeRuleCount,
+      vendorSelectedItemCount,
       vendorSelectionIncludeRuleCount,
       activeShippingBoxCount,
       activeShippingZoneRuleCount,
@@ -1498,13 +1490,19 @@ function formatStoreCount(count: number): string {
   return `${count} store${count === 1 ? "" : "s"}`;
 }
 
+/** The vendor selection check's words (PLAN-B v4.1 §13 `opsSelectionCount`, V17): the vendor's picked items. */
+function vendorSelectedItemsMessage(count: number): string {
+  // PROPOSED (Stage 3/5, step 1 plan S2-5)
+  return count === 1 ? "1 item chosen by the vendor." : `${count} items chosen by the vendor.`;
+}
+
 function buildDogfoodChecks(input: {
   row: DogfoodReadinessRow;
   dropshipOmsChannelId: number | null;
   dropshipOmsChannelCount: number;
   defaultWarehouseId: number | null;
   adminCatalogIncludeRuleCount: number;
-  vendorSelectionIncludeRuleCount: number;
+  vendorSelectedItemCount: number;
   activeShippingBoxCount: number;
   activeShippingZoneRuleCount: number;
   activeShippingRateTableCount: number;
@@ -1647,9 +1645,9 @@ function buildDogfoodChecks(input: {
     {
       key: "vendor_selection",
       label: "Vendor selection",
-      status: input.vendorSelectionIncludeRuleCount > 0 ? "ready" : "blocked",
-      message: input.vendorSelectionIncludeRuleCount > 0
-        ? `${input.vendorSelectionIncludeRuleCount} active vendor include rule(s) exist.`
+      status: input.vendorSelectedItemCount > 0 ? "ready" : "blocked",
+      message: input.vendorSelectedItemCount > 0
+        ? vendorSelectedItemsMessage(input.vendorSelectedItemCount)
         : "Vendor has not selected any catalog.",
     },
     {

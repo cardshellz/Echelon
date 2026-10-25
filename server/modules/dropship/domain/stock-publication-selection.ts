@@ -9,7 +9,6 @@ import {
 } from "./catalog-exposure";
 import {
   evaluateDropshipVendorCatalogSelection,
-  type DropshipVendorSelectionRule,
   type DropshipVendorVariantOverride,
 } from "./vendor-selection";
 
@@ -33,18 +32,22 @@ export interface DropshipStockSelectionConfig {
 
 type VariantSelection = StockPublicationSelection["variants"][number];
 
+/** The catalog facts of one size a stock decision reads. */
+export type DropshipStockSelectionCandidate = DropshipCatalogVariantCandidate & {
+  requiresShipping: boolean | null;
+  trackInventory: boolean | null;
+  salesEligibility: VariantSalesEligibility | null;
+  productStatus?: string | null;
+};
+
 /** Listing intent only. ATP, destination mapping, standing/tier holds and provider
  * readiness retain their existing owners and are deliberately not computed here. */
 export function decideDropshipStockPublicationSelection(input: {
   productVariantId: number;
-  candidate: (DropshipCatalogVariantCandidate & {
-    requiresShipping: boolean | null;
-    trackInventory: boolean | null;
-    salesEligibility: VariantSalesEligibility | null;
-    productStatus?: string | null;
-  }) | null;
+  candidate: DropshipStockSelectionCandidate | null;
   rules: readonly DropshipCatalogExposureRule[];
-  vendorRules: readonly DropshipVendorSelectionRule[];
+  /** Whether the vendor picked this size (one-time picks, PR B); unread without a candidate. */
+  picked: boolean;
   override: DropshipVendorVariantOverride | null;
   listing: DropshipStockListingState | null;
   config: DropshipStockSelectionConfig | null;
@@ -75,7 +78,7 @@ export function decideDropshipStockPublicationSelection(input: {
 
   const exposure = evaluateDropshipCatalogExposure(input.candidate, input.rules, input.now);
   const selection = evaluateDropshipVendorCatalogSelection({
-    candidate: input.candidate, adminExposureDecision: exposure, rules: input.vendorRules,
+    candidate: input.candidate, adminExposureDecision: exposure, picked: input.picked,
     override: input.override,
     // The selection resolver's quantity output is intentionally unused. This is
     // the same selection-only invocation used by catalog preview before ATP.

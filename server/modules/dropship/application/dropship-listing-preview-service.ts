@@ -41,7 +41,6 @@ import {
 import {
   evaluateDropshipVendorCatalogSelection,
   type DropshipVendorCatalogSelectionDecision,
-  type DropshipVendorSelectionRule,
   type DropshipVendorVariantOverride,
 } from "../domain/vendor-selection";
 import type {
@@ -354,7 +353,8 @@ export interface DropshipListingPreviewRepository {
   }): Promise<DropshipListingStoreContext | null>;
   getStoreListingConfig(storeConnectionId: number): Promise<DropshipStoreListingConfig | null>;
   listCatalogExposureRules(): Promise<DropshipCatalogExposureRule[]>;
-  listSelectionRules(vendorId: number): Promise<DropshipVendorSelectionRule[]>;
+  /** Which of these sizes the vendor picked (PLAN-B v4.1 §9 row 2); bounded by the ids, never the whole selection. */
+  listPickedVariantIds(vendorId: number, productVariantIds: readonly number[]): Promise<Set<number>>;
   listCatalogCandidates(productVariantIds: readonly number[]): Promise<DropshipListingCatalogCandidate[]>;
   listVariantOverrides(input: {
     vendorId: number;
@@ -424,17 +424,17 @@ export class DropshipListingPreviewService {
       throw new DropshipError("DROPSHIP_LISTING_IMAGE_NOT_FOUND", "Listing image is unavailable.");
     }
     await this.loadStoreContextForAction(vendorId, parsed.storeConnectionId, "preview");
-    const [candidates, adminRules, selectionRules, overrides] = await Promise.all([
+    const [candidates, adminRules, pickedIds, overrides] = await Promise.all([
       this.deps.repository.listCatalogCandidates([parsed.productVariantId]),
       this.deps.repository.listCatalogExposureRules(),
-      this.deps.repository.listSelectionRules(vendorId),
+      this.deps.repository.listPickedVariantIds(vendorId, [parsed.productVariantId]),
       this.deps.repository.listVariantOverrides({ vendorId, productVariantIds: [parsed.productVariantId] }),
     ]);
     const candidate = candidates.find((row) => row.productVariantId === parsed.productVariantId);
     if (!candidate) throw new DropshipError("DROPSHIP_LISTING_IMAGE_NOT_FOUND", "Listing image is unavailable.");
     const exposure = evaluateDropshipCatalogExposure(candidate, adminRules, this.deps.clock.now());
     const selection = evaluateDropshipVendorCatalogSelection({
-      candidate, adminExposureDecision: exposure, rules: selectionRules, rawAtpUnits: 0,
+      candidate, adminExposureDecision: exposure, picked: pickedIds.has(candidate.productVariantId), rawAtpUnits: 0,
       override: overrides.find((row) => row.productVariantId === parsed.productVariantId) ?? null,
     });
     if (!exposure.exposed || !selection.selected) {
@@ -483,7 +483,7 @@ export class DropshipListingPreviewService {
 
     const [
       adminRules,
-      selectionRules,
+      pickedIds,
       candidates,
       overrides,
       existingListings,
@@ -494,7 +494,7 @@ export class DropshipListingPreviewService {
       savedListingPrices,
     ] = await Promise.all([
       this.deps.repository.listCatalogExposureRules(),
-      this.deps.repository.listSelectionRules(parsed.vendorId),
+      this.deps.repository.listPickedVariantIds(parsed.vendorId, uniqueVariantIds),
       this.deps.repository.listCatalogCandidates(uniqueVariantIds),
       this.deps.repository.listVariantOverrides({
         vendorId: parsed.vendorId,
@@ -529,7 +529,7 @@ export class DropshipListingPreviewService {
     const ruleEligibleCandidates = candidates.filter((candidate) => {
       const exposure = evaluateDropshipCatalogExposure(candidate, adminRules, generatedAt);
       return exposure.exposed && evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
-        rules: selectionRules, rawAtpUnits: 0, override: overrides.find((row) => row.productVariantId === candidate.productVariantId) ?? null }).selected;
+        picked: pickedIds.has(candidate.productVariantId), rawAtpUnits: 0, override: overrides.find((row) => row.productVariantId === candidate.productVariantId) ?? null }).selected;
     });
     // One read of the product and category listing settings per preview (plan
     // PR 8b, D26), for every platform: price and description apply to every
@@ -626,7 +626,7 @@ export class DropshipListingPreviewService {
       const selectionDecision = evaluateDropshipVendorCatalogSelection({
         candidate,
         adminExposureDecision,
-        rules: selectionRules,
+        picked: pickedIds.has(productVariantId),
         rawAtpUnits,
         override: overridesByVariantId.get(productVariantId) ?? null,
         applyMarketplaceQuantityCap: atp.authority === "legacy",
@@ -1549,6 +1549,7 @@ function missingCatalogPreviewRow(input: {
       selected: false,
       reason: "not_exposed_by_admin",
       adminExposureReason: "inactive_product_or_variant",
+      picked: false,
       includeRuleIds: [],
       excludeRuleIds: [],
       autoConnectNewSkus: false,

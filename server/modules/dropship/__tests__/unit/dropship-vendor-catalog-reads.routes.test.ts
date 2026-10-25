@@ -28,7 +28,6 @@ class FakeCatalogReadService {
   idsInputs: unknown[] = [];
   summaryInputs: unknown[] = [];
   categoriesInputs: unknown[] = [];
-  replaceError: unknown = null;
 
   async requireVendorForMember(memberId: string) {
     return { vendorId: 10, memberId, status: "active", entitlementStatus: "active" };
@@ -48,10 +47,6 @@ class FakeCatalogReadService {
   async readSelectionSummary(input: unknown) {
     this.summaryInputs.push(input);
     return { selectionRevisionId: 41, selectedTotal: 3, cap: 10_000, overCap: false, store: { storeConnectionId: 22, live: 1, notLive: 2 } };
-  }
-  async replaceSelectionRules() {
-    if (this.replaceError) throw this.replaceError;
-    return { revisionId: 1, idempotentReplay: false, rules: [] };
   }
 }
 
@@ -188,10 +183,9 @@ describe("dropship vendor catalog reads (S2-5 §4.8, §4.9 item 2)", () => {
     expect(response).toMatchObject({ status, body: { error: { code } } });
   });
 
-  it("answers the rules save that B's freeze refused with 410 and the reload words, logged at INFO (§4.9 item 2)", async () => {
+  it("answers the retired rules save with 410 and the reload words before any service call, logged at INFO (PLAN-B v4.1 §8.4)", async () => {
     const service = new FakeCatalogReadService();
-    service.replaceError = new DropshipError("DROPSHIP_SELECTION_RULES_RETIRED",
-      "This page was updated, so your last changes weren't saved. Reload it and make them again.", { retryable: false });
+    const vendorRead = vi.spyOn(service, "requireVendorForMember");
     const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
     const url = await start(service);
 
@@ -205,8 +199,10 @@ describe("dropship vendor catalog reads (S2-5 §4.8, §4.9 item 2)", () => {
       message: "This page was updated, so your last changes weren't saved. Reload it and make them again.",
     });
     expect(info).toHaveBeenCalledWith("dropship.selection.rules_retired_refused", expect.objectContaining({
-      outcome: "refused", status: 410, actor_id: "member-1",
+      outcome: "refused", status: 410, actor_id: "member-1", error_class: "permanent",
     }));
+    // B froze the rules: the PUT never reads the vendor (a database call) or calls a service.
+    expect(vendorRead).not.toHaveBeenCalled();
   });
 
   it(`spends the id budget (${CATALOG_IDS_RATE_LIMIT}/min) only on id lists, and the categories budget (${CATALOG_CATEGORIES_RATE_LIMIT}/min) per member`, async () => {

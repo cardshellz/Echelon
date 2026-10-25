@@ -11,7 +11,7 @@ function input(overrides: Partial<Input> = {}): Input {
       productIsActive: true, variantIsActive: true, variantUomType: "pack",
       requiresShipping: true, trackInventory: true, salesEligibility: "sellable" },
     rules: [{ id: 1, scopeType: "catalog", action: "include" }],
-    vendorRules: [{ id: 2, scopeType: "catalog", action: "include" }],
+    picked: true,
     override: null,
     listing: { id: 50, productVariantId: 101, status: "active", externalListingId: "listing-1",
       externalOfferId: "offer-1", livePushItemId: null },
@@ -38,9 +38,15 @@ describe("Dropship listing intent owns stock selection", () => {
       expect(decide({ listing })).toMatchObject({ action: "read_only", reason: "selected_catalog_preview" });
     });
 
-  it("does not make autolist selection alone into a saved publish command", () => {
-    expect(decide({ listing: null, vendorRules: [{ id: 2, scopeType: "catalog", action: "include", autoListNewSkus: true }] }).action)
-      .toBe("read_only");
+  it("does not make a pick alone into a saved publish command", () => {
+    expect(decide({ listing: null, picked: true }).action).toBe("read_only");
+  });
+
+  // PLAN-B v4.1 §7.2: between PR B and PR C a removed (unpicked) size keeps today's zero duty and reason.
+  it("zeroes a retained listing the vendor no longer picks, with the retained not-picked reason", () => {
+    expect(decide({ picked: false })).toMatchObject({ action: "zero", reason: "missing_vendor_include_rule", listingSelected: false });
+    expect(decide({ picked: false, listing: null })).toMatchObject({ action: "none", reason: "missing_vendor_include_rule" });
+    expect(decide({ picked: true })).toMatchObject({ action: "publish", reason: "selected_existing_listing", listingSelected: true });
   });
 
   it("excludes archived members immediately while the shared listing lifecycle owns removal", () => {
@@ -49,11 +55,10 @@ describe("Dropship listing intent owns stock selection", () => {
     expect(decideDropshipStockPublicationSelection(value)).toMatchObject({ action: "none", blockers: [] });
   });
 
-  it.each(["vendor_rule", "vendor_override", "admin_rule", "internal_variant", "untracked_variant"])(
+  it.each(["vendor_unpick", "vendor_override", "admin_rule", "internal_variant", "untracked_variant"])(
     "retains zero duty for %s deselection", reason => {
       const value = input();
-      if (reason === "vendor_rule") value.vendorRules = [...value.vendorRules,
-        { id: 3, scopeType: "variant", action: "exclude", productVariantId: 101 }];
+      if (reason === "vendor_unpick") value.picked = false;
       if (reason === "vendor_override") value.override = { productVariantId: 101, enabledOverride: false };
       if (reason === "admin_rule") value.rules = [...value.rules,
         { id: 4, scopeType: "product", action: "exclude", productId: 20 }];
@@ -63,8 +68,8 @@ describe("Dropship listing intent owns stock selection", () => {
     });
 
   it("keeps deselection zero duty after managed sync is disabled", () => {
-    expect(decide({ vendorRules: [], config: { ...input().config!, inventoryMode: "disabled" } }).action).toBe("zero");
-    expect(decide({ vendorRules: [], listing: null }).action).toBe("none");
+    expect(decide({ picked: false, config: { ...input().config!, inventoryMode: "disabled" } }).action).toBe("zero");
+    expect(decide({ picked: false, listing: null }).action).toBe("none");
   });
 
   it.each(["listing", "store", "config"])("zeroes a retained %s pause", source => {

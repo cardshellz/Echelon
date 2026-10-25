@@ -68,6 +68,11 @@ import {
 } from "./listing-preview-golden.fixture";
 
 export const VARIANT_IDS = GOLDEN_PREVIEW_CANDIDATES.map((row) => row.productVariantId);
+/**
+ * The golden vendor's one-time picks: every golden size (at main the vendor's
+ * one `catalog` include rule chose them all, PLAN-B v4.1 §9 rows 2-3).
+ */
+export const GOLDEN_PICKED_VARIANT_IDS: readonly number[] = Object.freeze([...VARIANT_IDS]);
 
 /** The golden previews' member, as the preview's actor names it. */
 const GOLDEN_MEMBER_ID = "member-golden";
@@ -205,9 +210,9 @@ export class GoldenPreviewRepository implements DropshipListingPreviewRepository
   async listCatalogExposureRules() {
     return [{ id: 1, scopeType: "catalog" as const, action: "include" as const }];
   }
-  async listSelectionRules(vendorId: number) {
-    return [{ id: 2, vendorId, scopeType: "catalog" as const, action: "include" as const, autoConnectNewSkus: false,
-      autoListNewSkus: false, isActive: true }];
+  async listPickedVariantIds(vendorId: number, productVariantIds: readonly number[]) {
+    if (vendorId !== GOLDEN_PREVIEW_VENDOR_ID) return new Set<number>();
+    return new Set(productVariantIds.filter((id) => GOLDEN_PICKED_VARIANT_IDS.includes(id)));
   }
   async listCatalogCandidates(productVariantIds: readonly number[]) {
     return inVariantIds(GOLDEN_PREVIEW_CANDIDATES, productVariantIds);
@@ -379,7 +384,8 @@ export function goldenSelectedCatalog(store: GoldenPreviewStore, client: GoldenS
   return {
     vendorId: GOLDEN_PREVIEW_VENDOR_ID,
     catalog: new GoldenPreviewRepository(store, client),
-    listVariantIds: async (afterId: number, limit: number) => VARIANT_IDS.filter((id) => id > afterId)
+    // The keyset over the vendor's picks (SELR's listVariantIds): picked sizes only.
+    listVariantIds: async (afterId: number, limit: number) => GOLDEN_PICKED_VARIANT_IDS.filter((id) => id > afterId)
       .sort((left, right) => left - right).slice(0, limit),
     listProductLines: async () => [],
   };

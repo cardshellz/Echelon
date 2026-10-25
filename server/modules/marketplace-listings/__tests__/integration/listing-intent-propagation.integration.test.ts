@@ -129,6 +129,7 @@ import { listingIntentBase } from "../fixtures/listing-intent.fixture";
             selected: true,
             reason: "selected",
             adminExposureReason: "exposed",
+            picked: true,
             includeRuleIds: [],
             excludeRuleIds: [],
             autoConnectNewSkus: false,

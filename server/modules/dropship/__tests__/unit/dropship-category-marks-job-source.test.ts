@@ -6,6 +6,11 @@ import { DropshipError } from "../../domain/errors";
 import { PgDropshipCategoryMarksJobSource } from "../../infrastructure/dropship-category-marks-job.source";
 
 const NOW = new Date("2026-10-13T09:15:00.000Z");
+/**
+ * The selected-catalog keyset over the vendor's own picks (PLAN-B v4.1 §9 row 3, FIDELITY-3), not over every
+ * sellable size: the scan reads O(selected) rows of that one vendor.
+ */
+const VENDOR_PICKS_KEYSET = /FROM dropship\.dropship_vendor_selected_variants s[\s\S]*WHERE s\.vendor_id = \$1 AND s\.product_variant_id > \$2/;
 /** Statements a read may send: never a write, a row lock or an advisory lock. */
 const WRITE_OR_LOCK = /\b(INSERT|UPDATE|DELETE|LOCK\s+TABLE|FOR\s+(UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)|pg_advisory)/i;
 
@@ -80,20 +85,20 @@ describe("PgDropshipCategoryMarksJobSource (plan PR 9, P28, 10.5)", () => {
     expect(raw.connect).toHaveBeenCalledOnce();
     expect(statements[0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     expect(statements.at(-1)).toBe("COMMIT");
-    expect(statements.some((sql) => /FROM catalog\.product_variants WHERE id > \$1/.test(sql))).toBe(true);
+    expect(statements.some((sql) => VENDOR_PICKS_KEYSET.test(sql))).toBe(true);
     expect(statements.filter((sql) => WRITE_OR_LOCK.test(sql))).toEqual([]);
     expect(released).toEqual([undefined]);
   });
 
   it("rolls back and releases the connection when the scan fails, and destroys it when the rollback fails too", async () => {
     const lost = Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
-    const kept = fakePool({ failOn: /FROM catalog\.product_variants WHERE id > \$1/, failure: lost });
+    const kept = fakePool({ failOn: VENDOR_PICKS_KEYSET, failure: lost });
     await expect(new PgDropshipCategoryMarksJobSource(kept.pool).listSelectedProductIds(10, NOW))
       .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_BUSY", context: { failure: "ECONNRESET" } });
     expect(kept.statements.at(-1)).toBe("ROLLBACK");
     expect(kept.released).toEqual([undefined]);
 
-    const broken = fakePool({ failOn: /FROM catalog\.product_variants WHERE id > \$1/, failure: lost, rollbackFails: true });
+    const broken = fakePool({ failOn: VENDOR_PICKS_KEYSET, failure: lost, rollbackFails: true });
     await expect(new PgDropshipCategoryMarksJobSource(broken.pool).listSelectedProductIds(10, NOW))
       .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_BUSY" });
     expect(broken.released).toHaveLength(1);

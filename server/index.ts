@@ -37,6 +37,7 @@ import { startDropshipReturnsMaintenanceWorker } from "./modules/dropship/infras
 import { startDropshipReturnIntakeWorker } from "./modules/dropship/infrastructure/dropship-return-intake-runner";
 import { startDropshipUsdcWatcherWorker } from "./modules/dropship/infrastructure/dropship-usdc-watcher-runner";
 import { startDropshipCostDetectionWorker } from "./modules/dropship/infrastructure/dropship-cost-detection-runner";
+import { startDropshipCatalogArrivalsWorker } from "./modules/dropship/infrastructure/dropship-catalog-arrivals-runner";
 import { startDropshipCategoryMarksWorker } from "./modules/dropship/infrastructure/dropship-category-marks-runner";
 import { startDropshipRulesConversionWorker } from "./modules/dropship/infrastructure/dropship-rules-conversion-runner";
 import { startDropshipMarketplaceSyncBackWorker } from "./modules/dropship/infrastructure/dropship-marketplace-sync-runner";
@@ -1024,6 +1025,7 @@ function startEchelonSyncScheduler(
         startDropshipReturnIntakeWorker();
         startDropshipUsdcWatcherWorker();
         startDropshipCostDetectionWorker();
+        startDropshipCatalogArrivalsWorker();
         startDropshipCategoryMarksWorker();
         startDropshipRulesConversionWorker();
         startDropshipMarketplaceSyncBackWorker();

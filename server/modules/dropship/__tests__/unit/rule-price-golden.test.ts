@@ -121,7 +121,7 @@ function allowedCatalog(candidates: readonly DropshipListingCatalogCandidate[], 
   return {
     loadStoreContext: vi.fn(async () => ({ vendorId: VENDOR_ID, vendorStatus: "active", entitlementStatus: "active", storeStatus: "connected" })),
     listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
-    listSelectionRules: vi.fn(async () => [{ id: 2, scopeType: "catalog", action: "include", isActive: true }]),
+    listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)),
     listCatalogCandidates: vi.fn(async (ids: number[]) => candidates.filter((row) => ids.includes(row.productVariantId))),
     listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
     listSavedListingPrices: vi.fn(async () => [...saved]), listPricingPolicies: vi.fn(async () => []),

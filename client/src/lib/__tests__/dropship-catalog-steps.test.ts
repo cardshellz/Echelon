@@ -63,12 +63,11 @@ describe("catalog step locations", () => {
 });
 
 describe("catalog step ticks", () => {
-  it("ticks Choose once any active include rule exists, and claims nothing while rules load", () => {
+  it("ticks Choose once anything is selected (the summary's count, PLAN-B v4.1 V25), and claims nothing while it loads", () => {
     expect(chooseStepTick(undefined)).toBe("unknown");
-    expect(chooseStepTick([])).toBe("todo");
-    expect(chooseStepTick([{ action: "exclude", isActive: true }])).toBe("todo");
-    expect(chooseStepTick([{ action: "include", isActive: false }])).toBe("todo");
-    expect(chooseStepTick([{ action: "exclude" }, { action: "include" }])).toBe("done");
+    expect(chooseStepTick(0)).toBe("todo");
+    expect(chooseStepTick(1)).toBe("done");
+    expect(chooseStepTick(10_050)).toBe("done");
   });
 
 });

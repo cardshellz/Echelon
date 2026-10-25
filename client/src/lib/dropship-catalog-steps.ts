@@ -5,7 +5,7 @@
  * which only touch the browser storage they are handed.
  */
 import type { ListingSettingsPolicyKind, ListingSettingsSummary } from "@shared/dropship/listing-settings";
-import { formatStatus, type DropshipStoreConnectionSummary, type DropshipVendorSelectionRule } from "./dropship-ops-surface";
+import { formatStatus, type DropshipStoreConnectionSummary } from "./dropship-ops-surface";
 
 export const CATALOG_STEPS = ["choose", "setup", "publish"] as const;
 export type CatalogStep = (typeof CATALOG_STEPS)[number];
@@ -79,14 +79,13 @@ function isCatalogStep(value: string | undefined): value is CatalogStep {
 export type CatalogStepTick = "done" | "todo" | "unknown";
 
 /**
- * Step 1 is done once any active include rule exists. The catalog summary's
- * selected count replaces this when it ships (design PR 4).
+ * Step 1 is done once anything is selected: the selection summary's
+ * `selectedTotal` (PLAN-B v4.1 V25; one-time picks have no rules to read).
+ * `unknown` while the count loads or failed to load.
  */
-export function chooseStepTick(
-  rules: readonly Pick<DropshipVendorSelectionRule, "action" | "isActive">[] | undefined,
-): CatalogStepTick {
-  if (!rules) return "unknown";
-  return rules.some((rule) => rule.action === "include" && rule.isActive !== false) ? "done" : "todo";
+export function chooseStepTick(selectedTotal: number | undefined): CatalogStepTick {
+  if (selectedTotal === undefined) return "unknown";
+  return selectedTotal > 0 ? "done" : "todo";
 }
 
 export interface ListingSettingsRailInput {

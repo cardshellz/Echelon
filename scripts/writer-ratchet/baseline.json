@@ -183,6 +183,9 @@
   "dropship.dropship_carrier_protection_policies": [
     "modules/dropship"
   ],
+  "dropship.dropship_catalog_arrivals": [
+    "modules/dropship"
+  ],
   "dropship.dropship_catalog_code_versions": [
     "modules/dropship"
   ],
@@ -390,6 +393,12 @@
   "dropship.dropship_rmas": [
     "modules/dropship"
   ],
+  "dropship.dropship_selection_conversion_sizes": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_selection_conversions": [
+    "modules/dropship"
+  ],
   "dropship.dropship_sensitive_action_challenges": [
     "modules/dropship"
   ],
@@ -429,6 +438,9 @@
   "dropship.dropship_usdc_watcher_cursors": [
     "modules/dropship"
   ],
+  "dropship.dropship_vendor_category_notice_marks": [
+    "modules/dropship"
+  ],
   "dropship.dropship_vendor_credit_profiles": [
     "modules/dropship"
   ],
@@ -438,10 +450,10 @@
   "dropship.dropship_vendor_listings": [
     "modules/dropship"
   ],
-  "dropship.dropship_vendor_selection_rule_set_revisions": [
+  "dropship.dropship_vendor_selected_variants": [
     "modules/dropship"
   ],
-  "dropship.dropship_vendor_selection_rules": [
+  "dropship.dropship_vendor_selection_rule_set_revisions": [
     "modules/dropship"
   ],
   "dropship.dropship_vendors": [

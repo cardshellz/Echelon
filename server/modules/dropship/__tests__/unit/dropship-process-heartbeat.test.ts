@@ -102,17 +102,17 @@ function harness(beat: DropshipProcessHeartbeatStore["beat"]) {
 const flush = () => new Promise((resolveFlush) => setImmediate(resolveFlush));
 
 describe("startDropshipProcessHeartbeat (S2-5 §4.9 item 1)", () => {
-  it("resolves only after its first beat is written, with this process's key and catalog code version 1", async () => {
+  it("resolves only after its first beat is written, with this process's key and catalog code version 2 (PR B)", async () => {
     const write = deferred();
     const { store, start, logs } = harness(() => write.promise);
     let started = false;
     const handle = start().then((value) => { started = true; return value; });
 
     await flush();
-    expect(store.beat).toHaveBeenCalledWith({ processKey: "web.1:boot-a", catalogCodeVersion: 1 });
+    expect(store.beat).toHaveBeenCalledWith({ processKey: "web.1:boot-a", catalogCodeVersion: 2 });
     expect(started).toBe(false);
     write.resolve();
-    expect(await handle).toMatchObject({ firstBeat: "written", catalogCodeVersion: 1, processKey: "web.1:boot-a" });
+    expect(await handle).toMatchObject({ firstBeat: "written", catalogCodeVersion: 2, processKey: "web.1:boot-a" });
     expect(logs).toEqual([expect.objectContaining({ level: "info", action: "dropship.process_heartbeat.started" })]);
   });
 
@@ -269,11 +269,12 @@ describe("startDropshipProcessHeartbeat (S2-5 §4.9 item 1)", () => {
     hourly.callback();
     await flush();
     expect(store.deleteStale).toHaveBeenCalledWith({ olderThanMs: PROCESS_HEARTBEAT_RETENTION_MS });
-    expect(store.listOlderStillRunning).toHaveBeenCalledWith({ version: 1, graceMs: 120_000, alertAfterMs: 1_800_000 });
+    // PR B's processes (version 2) alert on a PR A process (version 1) still reporting.
+    expect(store.listOlderStillRunning).toHaveBeenCalledWith({ version: 2, graceMs: 120_000, alertAfterMs: 1_800_000 });
     expect(logs.some((entry) => entry.level === "error")).toBe(false);
 
     store.listOlderStillRunning.mockResolvedValueOnce([{
-      processKey: "web.2:boot-old", catalogCodeVersion: 0, startedAt: new Date("2026-10-20T10:00:00.000Z"),
+      processKey: "web.2:boot-old", catalogCodeVersion: 1, startedAt: new Date("2026-10-20T10:00:00.000Z"),
       lastSeenAt: new Date("2026-10-20T11:59:30.000Z"),
     }]);
     hourly.callback();
@@ -282,7 +283,7 @@ describe("startDropshipProcessHeartbeat (S2-5 §4.9 item 1)", () => {
       level: "error", action: "dropship.release.older_process_still_running",
       data: expect.objectContaining({
         error_code: "DROPSHIP_RELEASE_OLDER_PROCESS_STILL_RUNNING",
-        older_processes: [{ process_key: "web.2:boot-old", catalog_code_version: 0,
+        older_processes: [{ process_key: "web.2:boot-old", catalog_code_version: 1,
           started_at: "2026-10-20T10:00:00.000Z", last_seen_at: "2026-10-20T11:59:30.000Z" }],
       }),
     });

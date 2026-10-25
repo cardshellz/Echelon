@@ -232,7 +232,7 @@ describe("dropship private listing image authorization", () => {
         storeConnectionId: 9, storeStatus: "connected", setupStatus: "ready", platform: "ebay", storeLaunchReady: true }),
       listCatalogCandidates: vi.fn(async () => [candidate]),
       listCatalogExposureRules: vi.fn(async () => [{ scopeType: "catalog", action: overrides.excluded ? "exclude" : "include" }]),
-      listSelectionRules: vi.fn(async () => [{ id: 2, scopeType: "catalog", action: "include", autoConnectNewSkus: false, autoListNewSkus: false, isActive: true }]),
+      listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)),
       listVariantOverrides: vi.fn(async () => []),
       // Required on the port (plan PR 8b, D26); an image is authorized by exposure and selection only.
       loadListingSettingLayers: vi.fn(async () => EMPTY_LISTING_SETTING_LAYERS),

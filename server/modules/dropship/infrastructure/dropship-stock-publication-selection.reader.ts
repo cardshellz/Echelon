@@ -5,10 +5,15 @@ import {
   type StockPublicationSelection,
   type StockSelectionQueryClient,
 } from "@shared/types/stock-publication-selection";
-import { readCatalogStockSelectionFacts } from "../../catalog/catalog-stock-selection.reader";
+import { readCatalogStockSelectionFacts, type CatalogStockSelectionFacts } from "../../catalog/catalog-stock-selection.reader";
 import { parseCatalogVariantUomType } from "../domain/listing-tiers";
 import { DropshipError } from "../domain/errors";
-import { decideDropshipStockPublicationSelection } from "../domain/stock-publication-selection";
+import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
+import {
+  decideDropshipStockPublicationSelection,
+  type DropshipStockSelectionCandidate,
+} from "../domain/stock-publication-selection";
+import type { DropshipVendorVariantOverride } from "../domain/vendor-selection";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const inputSchema = z.object({
@@ -32,8 +37,15 @@ const targetSchema = z.object({
   productVariantId: id.nullable(), category: z.string().nullable(),
 });
 const exposureRuleSchema = targetSchema.extend({ startsAt: z.date().nullable(), endsAt: z.date().nullable() });
-const vendorRuleSchema = targetSchema.extend({ autoConnectNewSkus: z.boolean(), autoListNewSkus: z.boolean() });
+const pickSchema = z.object({ productVariantId: id });
 const overrideSchema = z.object({ productVariantId: id, enabledOverride: z.boolean().nullable() });
+/**
+ * The listing as this reader decides and fingerprints it. Not strict: the
+ * shared listing SQL also returns the store id and #1900's end facts for the
+ * selection effects reader, and they are dropped here, so this reader's
+ * fingerprint is byte for byte what it was before the SQL was shared
+ * (PLAN-B v4.1 V21, R6). Zod builds the parsed object in this key order.
+ */
 const listingSchema = z.object({
   id, productVariantId: id,
   status: z.enum(["not_listed", "preview_ready", "queued", "pushing", "active", "paused", "ended", "failed", "blocked", "drift_detected"]),
@@ -41,6 +53,44 @@ const listingSchema = z.object({
   livePushItemId: id.nullable(),
   vendorQuantityLimit: z.number().int().min(0).max(2_147_483_647).nullable(),
 });
+/** A row of DROPSHIP_STOCK_LISTING_ROWS_SQL with every column it returns (the selection effects reader's parse). */
+export const dropshipStockListingRowSchema = listingSchema.extend({
+  storeConnectionId: id,
+  marketplaceEndedAt: z.date().nullable(),
+  marketplaceIssueCodes: z.array(z.string()),
+});
+export type DropshipStockListingRow = z.infer<typeof dropshipStockListingRowSchema>;
+
+/**
+ * The vendor's listing rows of these sizes on these stores, each with its
+ * newest saved live push for that exact destination: ONE text for this
+ * reader (one store) and the selection effects reader (every store of the
+ * vendor), so the two can never decide a listing from different facts
+ * (PLAN-B v4.1 §7.7, V21; R5). $1 vendor id, $2 store ids, $3 size ids. A
+ * listing counts only on its own store's platform. Ordered by store, then
+ * size; one store's rows are therefore in size order, as before.
+ */
+export const DROPSHIP_STOCK_LISTING_ROWS_SQL = `SELECT vl.id, vl.store_connection_id AS "storeConnectionId",
+    vl.product_variant_id AS "productVariantId",vl.status,vl.external_listing_id AS "externalListingId",
+    vl.external_offer_id AS "externalOfferId", intent.id AS "livePushItemId",
+    vl.vendor_quantity_limit AS "vendorQuantityLimit",
+    vl.marketplace_ended_at AS "marketplaceEndedAt", vl.marketplace_issue_codes AS "marketplaceIssueCodes"
+    FROM dropship.dropship_vendor_listings vl
+    INNER JOIN dropship.dropship_store_connections listing_store
+      ON listing_store.id=vl.store_connection_id AND listing_store.platform=vl.platform
+    LEFT JOIN LATERAL (SELECT ji.id FROM dropship.dropship_listing_push_job_items ji
+      INNER JOIN dropship.dropship_listing_push_jobs j ON j.id=ji.job_id
+      WHERE j.vendor_id=vl.vendor_id AND j.store_connection_id=vl.store_connection_id
+        AND ji.product_variant_id=vl.product_variant_id AND ji.listing_id=vl.id
+        AND j.job_type='push' AND ji.action='push' AND j.status<>'cancelled' AND ji.status<>'cancelled'
+        AND ji.result->'listingIntent'->>'listingMode'='live'
+        AND ji.result->'listingIntent'->>'inventoryMode'='managed_quantity_sync'
+        AND ji.result->'listingIntent'->>'productVariantId'=vl.product_variant_id::text
+        AND ji.result->'listingIntent'->>'platform'=vl.platform
+        AND (vl.status<>'ended' OR ji.created_at>vl.updated_at)
+      ORDER BY ji.id DESC LIMIT 1) intent ON true
+    WHERE vl.vendor_id=$1 AND vl.store_connection_id=ANY($2::integer[]) AND vl.product_variant_id=ANY($3::integer[])
+    ORDER BY vl.store_connection_id, vl.product_variant_id`;
 
 /** Read the exact destination's current listing intent through Dropship's rules.
  * No ATP, credentials, photos, provider requests, locks or writes. The caller can
@@ -64,53 +114,21 @@ export async function readDropshipListingStockSelection(client: StockSelectionQu
     "The selected Dropship store connection no longer exists.", { storeConnectionId: input.storeConnectionId });
   const store = storeSchema.parse(rawStore);
   const catalog = await readCatalogStockSelectionFacts(client, { productId: input.productId, productVariantIds });
-  const rules = z.array(exposureRuleSchema).parse((await client.query(`SELECT id,scope_type AS "scopeType",action,
-    product_line_id AS "productLineId",product_id AS "productId",product_variant_id AS "productVariantId",category,
-    starts_at AS "startsAt",ends_at AS "endsAt" FROM dropship.dropship_catalog_rules
-    WHERE is_active=true ORDER BY priority ASC,id ASC`)).rows);
-  const vendorRules = z.array(vendorRuleSchema).parse((await client.query(`SELECT id,scope_type AS "scopeType",action,
-    product_line_id AS "productLineId",product_id AS "productId",product_variant_id AS "productVariantId",category,
-    auto_connect_new_skus AS "autoConnectNewSkus",auto_list_new_skus AS "autoListNewSkus"
-    FROM dropship.dropship_vendor_selection_rules WHERE vendor_id=$1 AND is_active=true ORDER BY priority DESC,id ASC`,
-  [store.vendorId])).rows);
-  const overrides = z.array(overrideSchema).parse(productVariantIds.length ? (await client.query(`SELECT
-    product_variant_id AS "productVariantId",enabled_override AS "enabledOverride"
-    FROM dropship.dropship_vendor_variant_overrides WHERE vendor_id=$1 AND product_variant_id=ANY($2::integer[])
-    ORDER BY product_variant_id`, [store.vendorId, productVariantIds])).rows : []);
-  const listings = z.array(listingSchema).parse(productVariantIds.length ? (await client.query(`SELECT vl.id,
-    vl.product_variant_id AS "productVariantId",vl.status,vl.external_listing_id AS "externalListingId",
-    vl.external_offer_id AS "externalOfferId", intent.id AS "livePushItemId",
-    vl.vendor_quantity_limit AS "vendorQuantityLimit"
-    FROM dropship.dropship_vendor_listings vl
-    LEFT JOIN LATERAL (SELECT ji.id FROM dropship.dropship_listing_push_job_items ji
-      INNER JOIN dropship.dropship_listing_push_jobs j ON j.id=ji.job_id
-      WHERE j.vendor_id=vl.vendor_id AND j.store_connection_id=vl.store_connection_id
-        AND ji.product_variant_id=vl.product_variant_id AND ji.listing_id=vl.id
-        AND j.job_type='push' AND ji.action='push' AND j.status<>'cancelled' AND ji.status<>'cancelled'
-        AND ji.result->'listingIntent'->>'listingMode'='live'
-        AND ji.result->'listingIntent'->>'inventoryMode'='managed_quantity_sync'
-        AND ji.result->'listingIntent'->>'productVariantId'=vl.product_variant_id::text
-        AND ji.result->'listingIntent'->>'platform'=vl.platform
-        AND (vl.status<>'ended' OR ji.created_at>vl.updated_at)
-      ORDER BY ji.id DESC LIMIT 1) intent ON true
-    WHERE vl.vendor_id=$1 AND vl.store_connection_id=$2 AND vl.product_variant_id=ANY($3::integer[])
-      AND vl.platform=$4 ORDER BY vl.product_variant_id`,
-  [store.vendorId, store.id, productVariantIds, store.platform])).rows : []);
+  const rules = await readDropshipStockExposureRules(client);
+  const pickedIds = await readDropshipStockPickedVariantIds(client, store.vendorId, productVariantIds);
+  const overrides = await readDropshipStockOverrides(client, store.vendorId, productVariantIds);
+  const listings = z.array(listingSchema).parse(productVariantIds.length ? (await client.query(DROPSHIP_STOCK_LISTING_ROWS_SQL,
+    [store.vendorId, [store.id], productVariantIds])).rows : []);
   if ([listings, overrides].some(rows => new Set(rows.map(row => row.productVariantId)).size !== rows.length))
     throw new DropshipError("DROPSHIP_STOCK_SELECTION_AMBIGUOUS", "Multiple saved selections or listings describe this store variant.");
   const variants = productVariantIds.map(productVariantId => {
-    const variant = catalog.variants.find(row => row.id === productVariantId);
-    const product = catalog.product;
+    const candidate = dropshipStockSelectionCandidate(catalog.product, catalog.variants.find(row => row.id === productVariantId) ?? null,
+      productVariantId);
     return decideDropshipStockPublicationSelection({
       productVariantId,
-      candidate: product && variant ? {
-        productId: product.id, productVariantId, productLineIds: product.productLineIds,
-        category: product.category, productIsActive: product.isActive, productStatus: product.status, variantIsActive: variant.isActive,
-        variantUomType: parseCatalogVariantUomType(variant.uomType, { productVariantId }),
-        requiresShipping: variant.requiresShipping, trackInventory: variant.trackInventory,
-        salesEligibility: variant.salesEligibility,
-      } : null,
-      rules, vendorRules, override: overrides.find(row => row.productVariantId === productVariantId) ?? null,
+      candidate,
+      rules, picked: pickedIds.has(productVariantId),
+      override: overrides.find(row => row.productVariantId === productVariantId) ?? null,
       listing: listings.find(row => row.productVariantId === productVariantId) ?? null,
       config: store.config, storePaused: store.status === "paused", now: input.now,
     });
@@ -128,4 +146,43 @@ export async function readDropshipListingStockSelection(client: StockSelectionQu
     variants: variants.map(({ listingSelected: _listingSelected, ...stockDecision }) => stockDecision),
   })).digest("hex");
   return stockPublicationSelectionSchema.parse({ productId: input.productId, fingerprint, variants });
+}
+
+/** Card Shellz's active catalog exposure rules, in the order every stock decision applies them. */
+export async function readDropshipStockExposureRules(client: StockSelectionQueryClient): Promise<DropshipCatalogExposureRule[]> {
+  return z.array(exposureRuleSchema).parse((await client.query(`SELECT id,scope_type AS "scopeType",action,
+    product_line_id AS "productLineId",product_id AS "productId",product_variant_id AS "productVariantId",category,
+    starts_at AS "startsAt",ends_at AS "endsAt" FROM dropship.dropship_catalog_rules
+    WHERE is_active=true ORDER BY priority ASC,id ASC`)).rows);
+}
+
+/** The vendor's one-time picks among these sizes (PLAN-B v4.1 §9 row 4): bounded by the ids, like the overrides. */
+export async function readDropshipStockPickedVariantIds(client: StockSelectionQueryClient, vendorId: number,
+  productVariantIds: readonly number[]): Promise<Set<number>> {
+  const picks = z.array(pickSchema).parse(productVariantIds.length ? (await client.query(`SELECT
+    product_variant_id AS "productVariantId" FROM dropship.dropship_vendor_selected_variants
+    WHERE vendor_id=$1 AND product_variant_id=ANY($2::integer[]) ORDER BY product_variant_id`,
+  [vendorId, productVariantIds])).rows : []);
+  return new Set(picks.map(row => row.productVariantId));
+}
+
+/** The vendor's overrides of these sizes, in size order (at most one per size: the caller refuses duplicates). */
+export async function readDropshipStockOverrides(client: StockSelectionQueryClient, vendorId: number,
+  productVariantIds: readonly number[]): Promise<DropshipVendorVariantOverride[]> {
+  return z.array(overrideSchema).parse(productVariantIds.length ? (await client.query(`SELECT
+    product_variant_id AS "productVariantId",enabled_override AS "enabledOverride"
+    FROM dropship.dropship_vendor_variant_overrides WHERE vendor_id=$1 AND product_variant_id=ANY($2::integer[])
+    ORDER BY product_variant_id`, [vendorId, productVariantIds])).rows : []);
+}
+
+/** The stock decision's catalog candidate of one size from the catalog's facts; null unless both exist. */
+export function dropshipStockSelectionCandidate(product: CatalogStockSelectionFacts["product"],
+  variant: CatalogStockSelectionFacts["variants"][number] | null, productVariantId: number): DropshipStockSelectionCandidate | null {
+  return product && variant ? {
+    productId: product.id, productVariantId, productLineIds: product.productLineIds,
+    category: product.category, productIsActive: product.isActive, productStatus: product.status, variantIsActive: variant.isActive,
+    variantUomType: parseCatalogVariantUomType(variant.uomType, { productVariantId }),
+    requiresShipping: variant.requiresShipping, trackInventory: variant.trackInventory,
+    salesEligibility: variant.salesEligibility,
+  } : null;
 }

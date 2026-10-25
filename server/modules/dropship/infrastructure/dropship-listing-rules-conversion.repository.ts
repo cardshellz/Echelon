@@ -631,7 +631,7 @@ async function listChosenIds(client: QueryClient, target: { vendorId: number; st
   ruleProfiles: Parameters<typeof conversionCategoryNamesToRead>[0], now: Date) {
   let candidates: DropshipListingCatalogCandidate[];
   try {
-    candidates = await loadSelectedCandidates({ vendorId: target.vendorId, ...selectedCatalogReaderForTransaction(client) }, now,
+    candidates = await loadSelectedCandidates(selectedCatalogReaderForTransaction(client, target.vendorId), now,
       "listing_settings");
   } catch (error) {
     if (error instanceof DropshipError && error.code === "DROPSHIP_LISTING_SETTINGS_TOO_LARGE") return { state: "too_large" as const };

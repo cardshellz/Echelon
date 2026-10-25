@@ -1,8 +1,5 @@
-import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { DropshipSelectionAtpService } from "../../application/dropship-selection-atp-service";
-import { DropshipError } from "../../domain/errors";
 import {
   DROPSHIP_CATALOG_CODE_VERSION,
   NEW_VERSION_SETTLE_MS,
@@ -18,11 +15,6 @@ import {
 } from "../../infrastructure/dropship-process-heartbeat.repository";
 import { PROCESS_HEARTBEAT_RETENTION_MS } from "../../infrastructure/dropship-process-heartbeat";
 import {
-  PgDropshipSelectionAtpRepository,
-  SELECTION_RULES_RETIRED_DB_MESSAGE,
-} from "../../infrastructure/dropship-selection-atp.repository";
-import { statusForDropshipVendorCatalogError } from "../../interfaces/http/dropship-vendor-catalog.routes";
-import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
@@ -30,9 +22,11 @@ import { listingPushRunsBaseFixtureSql, listingPushRunsMigrationSql } from "../f
 
 /**
  * Release readiness against a real PostgreSQL (step 1 plan S2-5 §4.9, §4.13):
- * the heartbeat tables as A's migration creates them, the gates' reads at the
- * grace and settle edges on the database clock, and the rules save answering
- * B's freeze contract through a fixture trigger that raises it.
+ * the heartbeat tables as A's migration creates them and the gates' reads at
+ * the grace and settle edges on the database clock. PR B deleted the rules
+ * save (PLAN-B v4.1 V10), so its answer to the freeze is gone from here; the
+ * freeze is tested on the real B file (dropship-selection-picks-migration) and
+ * B's writes gate on these reads in dropship-selection-change.
  */
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 vi.mock("../../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository", () => ({
@@ -44,7 +38,6 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeDatabase = databaseUrl && disposable ? describe : describe.skip;
 
 const VENDOR = 10;
-const NOW = new Date("2026-10-20T12:00:00.000Z");
 /** A second either side of an edge: far from the statement's own run time, close to the edge. */
 const EDGE_MARGIN_SECONDS = 2;
 
@@ -53,7 +46,7 @@ describeDatabase.sequential("release readiness (PostgreSQL)", () => {
   let pool: Pool;
 
   beforeAll(async () => {
-    database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, listingPushRunsBaseFixtureSql);
+    database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, listingPushRunsBaseFixtureSql());
     pool = database.pool;
     await pool.query(listingPushRunsMigrationSql());
   }, 60_000);
@@ -63,7 +56,6 @@ describeDatabase.sequential("release readiness (PostgreSQL)", () => {
   });
 
   beforeEach(async () => {
-    await pool.query(`DROP TRIGGER IF EXISTS aa_selection_rules_retired ON dropship.dropship_vendor_selection_rules`);
     await pool.query(`TRUNCATE dropship.dropship_process_heartbeats, dropship.dropship_catalog_code_versions,
       dropship.dropship_vendor_selection_rules, dropship.dropship_vendor_selection_rule_set_revisions,
       dropship.dropship_audit_events, dropship.dropship_vendors RESTART IDENTITY CASCADE`);
@@ -173,66 +165,6 @@ describeDatabase.sequential("release readiness (PostgreSQL)", () => {
     expect((await pool.query(`SELECT process_key FROM dropship.dropship_process_heartbeats`)).rows)
       .toEqual([{ process_key: "web.2:recent" }]);
     expect((await pool.query(`SELECT count(*)::int AS n FROM dropship.dropship_catalog_code_versions`)).rows[0].n).toBe(1);
-    expect(DROPSHIP_CATALOG_CODE_VERSION).toBe(1);
-  });
-
-  describe("the rules save and B's freeze (§4.9 item 2)", () => {
-    const repository = () => new PgDropshipSelectionAtpRepository(pool);
-    const save = (key: string) => repository().replaceSelectionRules({
-      vendorId: VENDOR, idempotencyKey: key, requestHash: createHash("sha256").update(key).digest("hex"),
-      actor: { actorType: "vendor", actorId: "member-10" }, now: NOW,
-      rules: [{ scopeType: "catalog", action: "include", productLineId: null, productId: null, productVariantId: null,
-        category: null, autoConnectNewSkus: true, autoListNewSkus: false, priority: 0, metadata: {} }],
-    });
-
-    /** B's freeze, as its migration will raise it (§5.2 step 8), on the rules table. */
-    async function freeze(message: string): Promise<void> {
-      await pool.query(`CREATE OR REPLACE FUNCTION dropship.aa_selection_rules_retired_fixture() RETURNS trigger
-        LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION '${message}' USING ERRCODE = 'P0001'; END $$`);
-      await pool.query(`CREATE TRIGGER aa_selection_rules_retired BEFORE INSERT OR UPDATE OR DELETE
-        ON dropship.dropship_vendor_selection_rules FOR EACH STATEMENT
-        EXECUTE FUNCTION dropship.aa_selection_rules_retired_fixture()`);
-    }
-
-    async function revisionCount(): Promise<number> {
-      return (await pool.query(`SELECT count(*)::int AS n FROM dropship.dropship_vendor_selection_rule_set_revisions`)).rows[0].n;
-    }
-
-    it("answers the freeze with the retired refusal (410) and leaves no revision row", async () => {
-      await freeze(SELECTION_RULES_RETIRED_DB_MESSAGE);
-
-      const error = await save("save-after-freeze").then(() => null, (caught: unknown) => caught);
-      expect(error).toBeInstanceOf(DropshipError);
-      expect(error).toMatchObject({ code: "DROPSHIP_SELECTION_RULES_RETIRED", context: { retryable: false } });
-      expect(statusForDropshipVendorCatalogError((error as DropshipError).code)).toBe(410);
-      expect(await revisionCount()).toBe(0);
-      expect((await pool.query(`SELECT count(*)::int AS n FROM dropship.dropship_audit_events`)).rows[0].n).toBe(0);
-    });
-
-    it("keeps today's answer for another P0001, and saves as before with no trigger", async () => {
-      await freeze("SOMETHING_ELSE");
-      await expect(save("save-other-raise")).rejects.toMatchObject({ code: "P0001", message: "SOMETHING_ELSE" });
-      expect(await revisionCount()).toBe(0);
-
-      await pool.query(`DROP TRIGGER aa_selection_rules_retired ON dropship.dropship_vendor_selection_rules`);
-      const saved = await save("save-unfrozen");
-      expect(saved).toMatchObject({ idempotentReplay: false, rules: [expect.objectContaining({ scopeType: "catalog" })] });
-      expect(await revisionCount()).toBe(1);
-    });
-
-    it("refuses a legacy-picks- key before any write (CHK10)", async () => {
-      const service = new DropshipSelectionAtpService({
-        clock: { now: () => NOW },
-        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-        repository: repository(),
-        atp: { getVariantAtp: async () => ({ authority: "canonical", quantities: new Map() }) },
-        listingTiers: { resolveForVendor: async () => { throw new Error("not used"); } },
-      });
-
-      await expect(service.replaceSelectionRules({
-        vendorId: VENDOR, idempotencyKey: `legacy-picks-backfill:${VENDOR}`, actor: { actorType: "vendor", actorId: "member-10" }, rules: [],
-      })).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_KEY_RESERVED" });
-      expect(await revisionCount()).toBe(0);
-    });
+    expect(DROPSHIP_CATALOG_CODE_VERSION).toBe(2);
   });
 });

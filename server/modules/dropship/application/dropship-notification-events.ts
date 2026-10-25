@@ -61,6 +61,12 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   // PROPOSED (sync-back): an order eBay cancelled and Card Shellz refunded to the wallet, or an order on an eBay item
   // number Card Shellz does not know (owner rule 7d).
   EBAY_ORDER_UPDATE: "dropship_ebay_order_update",
+  // PROPOSED (step 1 plan B v4): Card Shellz added items to a category the vendor sells from (PLAN-B v4.1 §11.1,
+  // §11.3); at most one a day, never critical, so a vendor may mute it. Nothing is added until the vendor saves.
+  CATALOG_NEW_ITEMS: "dropship_catalog_new_items",
+  // PROPOSED (step 1 plan B v4): the vendor's rule that added new items by itself became one-time picks at PR B's
+  // release (§11.2 d); once per vendor, never critical.
+  SELECTION_RULES_CONVERTED: "dropship_selection_rules_converted",
 } as const;
 
 export type DropshipNotificationEventType =

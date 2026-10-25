@@ -1448,6 +1448,11 @@ export const dropshipVendorSelectionRuleSetRevisions = dropshipSchema.table(
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
+    // One-time picks (migration *_dropship_vendor_selected_variants.sql): what the revision records,
+    // how many sizes the vendor had picked after it, and the stored answer of a picks change.
+    requestKind: varchar("request_kind", { length: 30 }).notNull().default("rules_replace"),
+    pickCount: integer("pick_count"),
+    result: jsonb("result"),
   },
   (table) => [
     uniqueIndex("dropship_selection_rule_rev_vendor_idem_idx").on(
@@ -1465,6 +1470,14 @@ export const dropshipVendorSelectionRuleSetRevisions = dropshipSchema.table(
     check(
       "dropship_selection_rule_rev_count_chk",
       sql`${table.ruleCount} >= 0`,
+    ),
+    check(
+      "dropship_selection_rule_rev_kind_chk",
+      sql`${table.requestKind} IN ('rules_replace', 'picks_change', 'picks_backfill', 'picks_conversion_followup')`,
+    ),
+    check(
+      "dropship_selection_rule_rev_pick_count_chk",
+      sql`${table.pickCount} IS NULL OR ${table.pickCount} >= 0`,
     ),
   ],
 );
@@ -1590,6 +1603,105 @@ export const dropshipVendorVariantOverrides = dropshipSchema.table(
     ),
   ],
 );
+
+/**
+ * A vendor's one-time picks (step 1 plan S2-5, PR B; migration *_dropship_vendor_selected_variants.sql): one
+ * row per Card Shellz size the vendor chose. Readers keep the sellable and exposure filters; a pick of a size
+ * that is not offered now selects nothing. A deleted size takes its picks with it.
+ */
+export const dropshipVendorSelectedVariants = dropshipSchema.table("dropship_vendor_selected_variants", {
+  vendorId: integer("vendor_id").notNull(),
+  productVariantId: integer("product_variant_id").notNull(),
+  revisionId: integer("revision_id").notNull(),
+  source: varchar("source", { length: 30 }).notNull(),
+  selectedAt: timestamp("selected_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.vendorId, table.productVariantId] }),
+  index("dropship_vendor_selected_variants_variant_idx").on(table.productVariantId),
+  foreignKey({ name: "dropship_vendor_selected_variants_vendor_fk", columns: [table.vendorId],
+    foreignColumns: [dropshipVendors.id] }).onDelete("cascade"),
+  foreignKey({ name: "dropship_vendor_selected_variants_variant_fk", columns: [table.productVariantId],
+    foreignColumns: [productVariants.id] }).onDelete("cascade"),
+  foreignKey({ name: "dropship_vendor_selected_variants_revision_fk", columns: [table.revisionId],
+    foreignColumns: [dropshipVendorSelectionRuleSetRevisions.id] }),
+  check("dropship_vendor_selected_variants_source_chk",
+    sql`${table.source} IN ('vendor', 'legacy_variant_rule', 'legacy_broad_rule', 'conversion_repair')`),
+]);
+
+/** One record per vendor whose saved rules were converted at the PR B release: its follow-up and its notice. */
+export const dropshipSelectionConversions = dropshipSchema.table("dropship_selection_conversions", {
+  vendorId: integer("vendor_id").primaryKey(),
+  backfillRevisionId: integer("backfill_revision_id").notNull(),
+  broadRuleIds: integer("broad_rule_ids").array().notNull(),
+  convertedAt: timestamp("converted_at", { withTimezone: true }).notNull(),
+  followupState: varchar("followup_state", { length: 20 }).notNull(),
+  followupAt: timestamp("followup_at", { withTimezone: true }),
+  followupFailures: integer("followup_failures").notNull().default(0),
+  noticeState: varchar("notice_state", { length: 20 }).notNull(),
+  noticeAt: timestamp("notice_at", { withTimezone: true }),
+  lastErrorCode: varchar("last_error_code", { length: 80 }),
+}, (table) => [
+  foreignKey({ name: "dropship_selection_conversions_vendor_fk", columns: [table.vendorId],
+    foreignColumns: [dropshipVendors.id] }).onDelete("cascade"),
+  foreignKey({ name: "dropship_selection_conversions_revision_fk", columns: [table.backfillRevisionId],
+    foreignColumns: [dropshipVendorSelectionRuleSetRevisions.id] }),
+  index("dropship_selection_conversions_open_idx").on(table.vendorId)
+    .where(sql`followup_state = 'pending' OR notice_state = 'pending'`),
+  check("dropship_selection_conversions_followup_state_chk",
+    sql`${table.followupState} IN ('pending', 'done', 'requires_review')`),
+  check("dropship_selection_conversions_followup_failures_chk", sql`${table.followupFailures} >= 0`),
+  check("dropship_selection_conversions_notice_state_chk",
+    sql`${table.noticeState} IN ('not_needed', 'pending', 'sent', 'requires_review')`),
+  check("dropship_selection_conversions_followup_done_chk",
+    sql`(${table.followupState} = 'done') = (${table.followupAt} IS NOT NULL)`),
+  check("dropship_selection_conversions_notice_sent_chk",
+    sql`(${table.noticeState} = 'sent') = (${table.noticeAt} IS NOT NULL)`),
+  check("dropship_selection_conversions_review_code_chk",
+    sql`(${table.followupState} = 'requires_review' OR ${table.noticeState} = 'requires_review') = (${table.lastErrorCode} IS NOT NULL)`),
+]);
+
+/**
+ * Every Card Shellz size's matcher inputs as the PR B release's conversion read them (its product, the products' text
+ * category and the product's lines), written by the conversion's own statement. The conversion follow-up repairs a
+ * size only while its inputs are still these (B3 review FUP-1). Release history: no foreign key, never written again.
+ */
+export const dropshipSelectionConversionSizes = dropshipSchema.table("dropship_selection_conversion_sizes", {
+  productVariantId: integer("product_variant_id").primaryKey(),
+  productId: integer("product_id").notNull(),
+  category: text("category"),
+  productLineIds: integer("product_line_ids").array().notNull(),
+});
+
+/**
+ * When a Card Shellz size was first seen in a category (the new-items notice, PR B stage 5). Derived history:
+ * no foreign key, and a trigger refuses every update and delete.
+ */
+export const dropshipCatalogArrivals = dropshipSchema.table("dropship_catalog_arrivals", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  productVariantId: integer("product_variant_id").notNull(),
+  productId: integer("product_id").notNull(),
+  categoryId: integer("category_id").notNull(),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+  baseline: boolean("baseline").notNull(),
+}, (table) => [
+  unique("dropship_catalog_arrivals_variant_category_key").on(table.productVariantId, table.categoryId),
+  index("dropship_catalog_arrivals_category_idx").on(table.categoryId, table.id),
+]);
+
+/** How far a vendor has seen, and been emailed about, one category's arrivals. */
+export const dropshipVendorCategoryNoticeMarks = dropshipSchema.table("dropship_vendor_category_notice_marks", {
+  vendorId: integer("vendor_id").notNull(),
+  categoryId: integer("category_id").notNull(),
+  seenThroughArrivalId: bigint("seen_through_arrival_id", { mode: "number" }).notNull(),
+  notifiedThroughArrivalId: bigint("notified_through_arrival_id", { mode: "number" }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.vendorId, table.categoryId] }),
+  foreignKey({ name: "dropship_vendor_category_notice_marks_vendor_fk", columns: [table.vendorId],
+    foreignColumns: [dropshipVendors.id] }),
+  check("dropship_vendor_category_notice_marks_seen_chk", sql`${table.seenThroughArrivalId} >= 0`),
+  check("dropship_vendor_category_notice_marks_notified_chk", sql`${table.notifiedThroughArrivalId} >= 0`),
+]);
 
 export const dropshipPricingPolicies = dropshipSchema.table(
   "dropship_pricing_policies",
@@ -4534,6 +4646,22 @@ export type InsertDropshipVendorVariantOverride = z.infer<
 >;
 export type DropshipVendorVariantOverride =
   typeof dropshipVendorVariantOverrides.$inferSelect;
+
+export const insertDropshipVendorSelectedVariantSchema = createInsertSchema(dropshipVendorSelectedVariants);
+export type InsertDropshipVendorSelectedVariant = z.infer<typeof insertDropshipVendorSelectedVariantSchema>;
+export type DropshipVendorSelectedVariant = typeof dropshipVendorSelectedVariants.$inferSelect;
+
+export const insertDropshipSelectionConversionSchema = createInsertSchema(dropshipSelectionConversions);
+export type InsertDropshipSelectionConversion = z.infer<typeof insertDropshipSelectionConversionSchema>;
+export type DropshipSelectionConversion = typeof dropshipSelectionConversions.$inferSelect;
+
+export const insertDropshipCatalogArrivalSchema = createInsertSchema(dropshipCatalogArrivals).omit({ id: true });
+export type InsertDropshipCatalogArrival = z.infer<typeof insertDropshipCatalogArrivalSchema>;
+export type DropshipCatalogArrival = typeof dropshipCatalogArrivals.$inferSelect;
+
+export const insertDropshipVendorCategoryNoticeMarkSchema = createInsertSchema(dropshipVendorCategoryNoticeMarks);
+export type InsertDropshipVendorCategoryNoticeMark = z.infer<typeof insertDropshipVendorCategoryNoticeMarkSchema>;
+export type DropshipVendorCategoryNoticeMark = typeof dropshipVendorCategoryNoticeMarks.$inferSelect;
 
 export const insertDropshipPricingPolicySchema = createInsertSchema(
   dropshipPricingPolicies,
