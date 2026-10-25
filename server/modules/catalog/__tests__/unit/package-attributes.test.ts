@@ -48,13 +48,14 @@ describe("catalog package attributes", () => {
     })).toEqual({});
   });
 
-  it("distinguishes an omitted shipping type from an explicit correction or clear", () => {
-    expect(extractPackageAttributeUpdates({ shippingPackageType: "parcel" })).toEqual({ shippingPackageType: "parcel" });
-    expect(extractPackageAttributeUpdates({ shippingPackageType: null })).toEqual({ shippingPackageType: null });
-    expect(coercePackageAttributesOnVariantPayload({ name: "Unrelated edit" })).toEqual({});
-    for (const shippingPackageType of ["", "case", "PACKAGE_THICK_ENVELOPE", 1]) {
-      expect(() => extractPackageAttributeUpdates({ shippingPackageType })).toThrow(PackageAttributeValidationError);
+  it.each(["shippingPackageType", "shipping_package_type"])("rejects retired %s writes explicitly instead of silently retaining a hidden writer", key => {
+    for (const value of ["parcel", "letter", null, "", 1]) {
+      const payload = { [key]: value, weightGrams: 120.25 };
+      expect(() => extractPackageAttributeUpdates(payload)).toThrow(/no longer a catalog field/);
+      expect(() => coercePackageAttributesOnVariantPayload(payload)).toThrow(PackageAttributeValidationError);
+      expect(() => parsePackageAttributeBulkRows([{ variantId: 10, updates: payload }])).toThrow(/Refresh the page/);
     }
+    expect(coercePackageAttributesOnVariantPayload({ name: "Unrelated edit" })).toEqual({});
   });
 
   it("rejects bulk rows with no package field updates", () => {

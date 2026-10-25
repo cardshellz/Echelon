@@ -1002,7 +1002,7 @@ describe("eBay listing photo ownership", () => {
         payment: { id:"owner-payment", source:{scope:"store" as const} },
       }])),
       packageRequirementsByVariantId: new Map(SAMPLE_LISTING.variants.map(variant => [variant.variantId, {
-        weight: true, dimensions: false, packageType: false,
+        weight: true, dimensions: false,
       }])),
     }));
     const adapter = new EbayAdapter(createMockDb() as any, { resolve }, { resolveProductPolicies: resolvePolicies });

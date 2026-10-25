@@ -74,7 +74,6 @@ import { ProductSafetySummary } from "@/features/inventory-builds/ProductSafetyS
 import { transformationQueryKey } from "@/features/inventory-builds/package-conversion-draft";
 import { createProductVariant } from "@/features/catalog/create-product-variant";
 import { buildVariantPackagePatch } from "@/lib/variant-package";
-import { SHIPPING_PACKAGE_TYPES, shippingPackageTypeSchema, type ShippingPackageType } from "@shared/catalog/shipping-package";
 import {
   VARIANT_UOM_DEFINITIONS,
   getVariantUomDefinition,
@@ -346,7 +345,6 @@ interface ProductVariantRow {
   lengthMm: number | null;
   widthMm: number | null;
   heightMm: number | null;
-  shippingPackageType?: ShippingPackageType | null;
   shipsInOwnContainer: boolean;
   maxUnitsPerPackage: number | null;
   requiresShipping: boolean;
@@ -2149,7 +2147,6 @@ export default function ProductDetail() {
     parentVariantId: null as number | null,
     isBaseUnit: true,
     package: emptyVariantPackageInput(),
-    shippingPackageType: null as ShippingPackageType | null,
     shipsInOwnContainer: false,
     maxUnitsPerPackage: "",
     requiresShipping: true,
@@ -2228,7 +2225,6 @@ export default function ProductDetail() {
       parentVariantId: null,
       isBaseUnit: true,
       package: emptyVariantPackageInput(),
-      shippingPackageType: null,
       shipsInOwnContainer: false,
       maxUnitsPerPackage: "",
       requiresShipping: true,
@@ -2267,7 +2263,6 @@ export default function ProductDetail() {
       parentVariantId: null,
       isBaseUnit: false,
       package: emptyVariantPackageInput(),
-      shippingPackageType: null,
       shipsInOwnContainer: false,
       maxUnitsPerPackage: "",
       requiresShipping: true,
@@ -2295,7 +2290,6 @@ export default function ProductDetail() {
       parentVariantId: variant.parentVariantId,
       isBaseUnit: variant.isBaseUnit ?? false,
       package: variantPackageInputFromVariant(variant),
-      shippingPackageType: variant.shippingPackageType ?? null,
       shipsInOwnContainer: variant.shipsInOwnContainer ?? false,
       maxUnitsPerPackage: variant.maxUnitsPerPackage != null ? String(variant.maxUnitsPerPackage) : "",
       requiresShipping: variant.requiresShipping !== false,
@@ -2350,7 +2344,6 @@ export default function ProductDetail() {
         inventoryTrackingOverride: data.inventoryTrackingOverride,
         salesEligibility: data.salesEligibility,
         ...packageAttributes,
-        shippingPackageType: data.shippingPackageType,
         ...packingFlags,
       });
     },
@@ -2392,8 +2385,6 @@ export default function ProductDetail() {
           inventoryTrackingOverride: data.inventoryTrackingOverride,
           salesEligibility: data.salesEligibility,
           ...packageAttributes,
-          ...(data.shippingPackageType !== (editingVariant?.shippingPackageType ?? null)
-            ? { shippingPackageType: data.shippingPackageType } : {}),
           ...packingFlags,
         }),
       });
@@ -4160,19 +4151,6 @@ export default function ProductDetail() {
                 <p className="text-xs text-muted-foreground">
                   Stored on the variant and used by connected sales channels. Unspecified fields preserve existing channel package data; they do not erase it.
                 </p>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="variant-shipping-package-type">Shipping package type</Label>
-                <Select value={variantForm.shippingPackageType ?? "unspecified"}
-                  onValueChange={value => setVariantForm(previous => ({ ...previous,
-                    shippingPackageType: value === "unspecified" ? null : shippingPackageTypeSchema.parse(value) }))}>
-                  <SelectTrigger id="variant-shipping-package-type"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="unspecified">Unspecified — preserve channel value</SelectItem>
-                    {SHIPPING_PACKAGE_TYPES.map(type => <SelectItem key={type.value} value={type.value}>{type.label}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">Choose the physical shipping form. This is separate from Each, Box or Case.</p>
               </div>
               <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                 <div className="space-y-1.5">

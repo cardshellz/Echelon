@@ -1,6 +1,6 @@
 import { ebayAvailablePolicyValuesSchema, type EbayAvailablePolicyValues } from "@shared/ebay-business-policies";
 import { ChannelListingValidationError } from "@shared/channel-listing-validation";
-import type { ChannelPackageRequirements, ShippingPackageType } from "@shared/catalog/shipping-package";
+import type { ChannelPackageRequirements } from "@shared/catalog/shipping-package";
 import {
   EbayListingBuilder,
   type BuiltEbayListingDraft,
@@ -37,7 +37,6 @@ interface EbayRouteVariantInput {
   length_mm?: number | string | null;
   width_mm?: number | string | null;
   height_mm?: number | string | null;
-  shipping_package_type?: ShippingPackageType | null;
   isListed?: boolean;
 }
 
@@ -116,8 +115,7 @@ export function buildEbayRouteListingDraft(
       mpn: null,
       weightGrams: normalizePackageWeightGrams(routeVariant),
       package: { weightGrams: (routeVariant.ebay_weight_grams ?? routeVariant.weight_override ?? routeVariant.weight_grams ?? routeVariant.weightGrams ?? null) as number | string | null,
-        lengthMm: routeVariant.length_mm, widthMm: routeVariant.width_mm, heightMm: routeVariant.height_mm,
-        shippingPackageType: routeVariant.shipping_package_type },
+        lengthMm: routeVariant.length_mm, widthMm: routeVariant.width_mm, heightMm: routeVariant.height_mm },
       priceCents,
       compareAtPriceCents: normalizeCents(routeVariant.compare_at_price_cents),
       isListed,

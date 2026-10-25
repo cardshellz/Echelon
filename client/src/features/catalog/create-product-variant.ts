@@ -14,7 +14,6 @@ export type CreateProductVariantInput = {
   lengthMm?: number | null;
   widthMm?: number | null;
   heightMm?: number | null;
-  shippingPackageType?: import("@shared/catalog/shipping-package").ShippingPackageType | null;
   shipsInOwnContainer?: boolean;
   maxUnitsPerPackage?: number | null;
   requiresShipping?: boolean;

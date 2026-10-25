@@ -28,56 +28,75 @@ async function catalog(page: Page) {
   return state;
 }
 
-test("saving shipping type preserves exact existing package measurements and persists on reload", async ({ page }, info) => {
+test("package editor saves dimensions without a type and preserves untouched measurements", async ({ page }, info) => {
   const state = await catalog(page);
+  // Even an old API response cannot reintroduce the retired Catalog writer.
+  state.variant.shippingPackageType = "letter";
   await page.goto("/products/1?tab=variants&variantId=101");
   const dialog = page.getByRole("dialog", { name: "Edit Variant" });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByLabel("Shipping package type")).toContainText("Unspecified");
-  await dialog.getByLabel("Shipping package type").click();
-  await page.getByRole("option", { name: "Parcel / thick envelope", exact: true }).click();
+  await expect(dialog.getByLabel("Shipping package type")).toHaveCount(0);
+  await dialog.getByLabel("Length (in)", { exact: true }).fill("7");
   await dialog.getByRole("button", { name: "Save Changes", exact: true }).click();
   await expect(dialog).toBeHidden();
   expect(state.writes).toHaveLength(1);
-  expect(state.writes[0].shippingPackageType).toBe("parcel");
-  for (const field of ["weightGrams", "lengthMm", "widthMm", "heightMm"]) expect(state.writes[0]).not.toHaveProperty(field);
-  expect(state.variant).toMatchObject({ weightGrams: 3175.25, lengthMm: 152.41, widthMm: 101.61, heightMm: 25.41 });
+  expect(state.writes[0]).toHaveProperty("lengthMm", 177.8);
+  for (const field of ["shippingPackageType", "weightGrams", "widthMm", "heightMm"]) expect(state.writes[0]).not.toHaveProperty(field);
+  expect(state.variant).toMatchObject({ weightGrams: 3175.25, lengthMm: 177.8, widthMm: 101.61, heightMm: 25.41, shippingPackageType: "letter" });
   await page.reload();
-  await expect(dialog.getByLabel("Shipping package type")).toContainText("Parcel / thick envelope");
-  await dialog.getByLabel("Shipping package type").scrollIntoViewIfNeeded();
-  await page.screenshot({ path: info.outputPath("package-type-editor.png"), fullPage: true });
+  await expect(dialog.getByLabel("Length (in)", { exact: true })).toHaveValue("7");
+  await expect(dialog.getByLabel("Shipping package type")).toHaveCount(0);
+  await dialog.getByLabel("Length (in)", { exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: info.outputPath("package-measurements-editor.png"), fullPage: true });
 });
 
-test("clearing catalog type is explicit, failure stays visible, and untouched measurements are omitted", async ({ page }) => {
-  const state = await catalog(page); state.variant.shippingPackageType = "letter"; state.reject = true;
+test("a measurement save failure remains visible without sending or changing package type", async ({ page }) => {
+  const state = await catalog(page); state.reject = true;
   await page.goto("/products/1?tab=variants&variantId=101");
   const dialog = page.getByRole("dialog", { name: "Edit Variant" });
-  await dialog.getByLabel("Shipping package type").click();
-  await page.getByRole("option", { name: "Unspecified — preserve channel value", exact: true }).click();
+  await dialog.getByLabel("Length (in)", { exact: true }).fill("7");
   await dialog.getByRole("button", { name: "Save Changes", exact: true }).click();
   await expect(page.getByText("Package could not be saved. Refresh and retry.", { exact: true })).toBeVisible();
   await expect(dialog).toBeVisible();
-  expect(state.writes[0]).toHaveProperty("shippingPackageType", null);
+  expect(state.writes[0]).not.toHaveProperty("shippingPackageType");
   expect(state.writes[0]).not.toHaveProperty("weightGrams");
-  expect(state.variant.shippingPackageType).toBe("letter");
+  expect(state.variant.lengthMm).toBe(152.41);
 });
 
-for (const field of ["package_dimensions", "package_type"] as const) {
-  test(`${field} blocker names the variant and opens its actual catalog editor`, async ({ page }) => {
-    const feed = await setupEbayChannelPage(page);
-    const id = "6e4d8e03-3197-4d21-a6d7-aa1ddaecc775";
-    const issue = resolveEbayListingIssue({ code: "CHANNEL_LISTING_VALIDATION_FAILED", productId: 1, jobId: id,
-      validation: { field, reason: "required", productId: 1, variantId: 101, variantSku: "PACKAGE-TEST" } });
-    feed.jobs = [{ id, productId: 1, state: "needs_attention", code: issue.code, message: issue.message, issue,
-      nextAttemptAt: "2026-10-24T22:00:00Z", updatedAt: "2026-10-24T22:00:00Z" }];
-    await page.reload();
-    const link = page.getByRole("link", { name: "Open product variants", exact: true });
-    await expect(link).toHaveAttribute("href", "/products/1?tab=variants&variantId=101");
-    await expect(page.getByText(issue.message, { exact: true })).toBeVisible();
-    const state = await catalog(page);
-    await link.click();
-    await expect(page.getByRole("dialog", { name: "Edit Variant" })).toBeVisible();
-    await expect(page.getByLabel("Shipping package type")).toContainText("Unspecified");
-    expect(state.writes).toEqual([]); expect(feed.commands).toEqual([]);
-  });
-}
+test("a genuine dimensions blocker still opens the exact variant's measurement editor", async ({ page }) => {
+  const feed = await setupEbayChannelPage(page);
+  const id = "6e4d8e03-3197-4d21-a6d7-aa1ddaecc775";
+  const issue = resolveEbayListingIssue({ code: "CHANNEL_LISTING_VALIDATION_FAILED", productId: 1, jobId: id,
+    validation: { field: "package_dimensions", reason: "required", productId: 1, variantId: 101, variantSku: "PACKAGE-TEST" } });
+  feed.jobs = [{ id, productId: 1, state: "needs_attention", code: issue.code, message: issue.message, issue,
+    nextAttemptAt: "2026-10-24T22:00:00Z", updatedAt: "2026-10-24T22:00:00Z" }];
+  await page.reload();
+  const link = page.getByRole("link", { name: "Open product variants", exact: true });
+  await expect(link).toHaveAttribute("href", "/products/1?tab=variants&variantId=101");
+  await expect(page.getByText(issue.message, { exact: true })).toBeVisible();
+  const state = await catalog(page);
+  await link.click();
+  const dialog = page.getByRole("dialog", { name: "Edit Variant" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Length (in)", { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel("Shipping package type")).toHaveCount(0);
+  expect(state.writes).toEqual([]); expect(feed.commands).toEqual([]);
+});
+
+test("a historical package-type failure offers the normal sync action instead of a removed editor", async ({ page }) => {
+  const feed = await setupEbayChannelPage(page);
+  const id = "6e4d8e03-3197-4d21-a6d7-aa1ddaecc775";
+  const issue = resolveEbayListingIssue({ code: "CHANNEL_LISTING_VALIDATION_FAILED", productId: 1, jobId: id,
+    message: "Shipping package type is required for PACKAGE-TEST.",
+    validation: { field: "package_type", reason: "required", productId: 1, variantId: 101, variantSku: "PACKAGE-TEST" } });
+  feed.jobs = [{ id, productId: 1, state: "needs_attention", code: issue.code, message: issue.message, issue,
+    nextAttemptAt: "2026-10-24T22:00:00Z", updatedAt: "2026-10-24T22:00:00Z" }];
+  feed.response = { synced: 1, errors: 0, priceChanges: 0, qtyChanges: 0, policyChanges: 0, details: [{ success: true }] };
+  await page.reload();
+  await expect(page.getByText(issue.message, { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open product variants", exact: true })).toHaveCount(0);
+  expect(feed.requests).toEqual([]);
+  await page.getByRole("button", { name: "Retry Sync", exact: true }).click();
+  await expect.poll(() => feed.requests).toEqual(["/api/ebay/listings/sync-product/1"]);
+  expect(feed.errors).toEqual([]);
+});

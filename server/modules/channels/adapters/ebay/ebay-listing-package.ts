@@ -1,8 +1,6 @@
 import { z } from "zod";
 import Decimal from "decimal.js";
 import type { ChannelPackageFacts, ChannelPackageRequirements } from "@shared/catalog/shipping-package";
-import { shippingPackageTypeSchema } from "@shared/catalog/shipping-package";
-import { ChannelListingValidationError } from "@shared/channel-listing-validation";
 import { prepareChannelPackage, type ChannelPackagePlan, type ListingPackageValues } from "../../../marketplace-listings/domain/channel-package";
 import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -13,7 +11,6 @@ export interface EbayPackageSource {
   productId: number; variantId: number; facts: ChannelPackageFacts;
   requirements: ChannelPackageRequirements;
 }
-const packageTypes = { parcel: "PACKAGE_THICK_ENVELOPE", letter: "LETTER", large_envelope: "LARGE_ENVELOPE" } as const;
 const positive = z.number().finite().positive();
 const observedPackageSchema = z.object({
   weight: z.object({ value: positive, unit: z.enum(["GRAM", "KILOGRAM", "POUND", "OUNCE"]) }).passthrough().optional(),
@@ -33,8 +30,7 @@ function observedValues(value: EbayPackageWeightAndSize | undefined): ListingPac
   return { weightGrams: p.weight ? new Decimal(p.weight.value).mul(weightUnits[p.weight.unit]).toNumber() : null,
     lengthMm: p.dimensions ? new Decimal(p.dimensions.length).mul(lengthUnits[p.dimensions.unit]).toNumber() : null,
     widthMm: p.dimensions ? new Decimal(p.dimensions.width).mul(lengthUnits[p.dimensions.unit]).toNumber() : null,
-    heightMm: p.dimensions ? new Decimal(p.dimensions.height).mul(lengthUnits[p.dimensions.unit]).toNumber() : null,
-    packageType: p.packageType ?? null };
+    heightMm: p.dimensions ? new Decimal(p.dimensions.height).mul(lengthUnits[p.dimensions.unit]).toNumber() : null };
 }
 
 /** Transport translation only. The shared package owner selects facts and
@@ -42,15 +38,11 @@ function observedValues(value: EbayPackageWeightAndSize | undefined): ListingPac
 export function resolveEbayListingPackage(input: { source: EbayPackageSource; sku: string;
   observed?: EbayPackageWeightAndSize }): { payload: EbayPackageWeightAndSize; plan: ChannelPackagePlan } {
   const { facts } = input.source;
-  const parsedType = shippingPackageTypeSchema.nullish().safeParse(facts.shippingPackageType);
-  if (!parsedType.success) throw new ChannelListingValidationError({ field: "package_type", reason: "invalid",
-    productId: input.source.productId, variantId: input.source.variantId, variantSku: input.sku });
   const preserved = structuredClone(input.observed ?? {});
   if (facts.weightGrams != null) delete preserved.weight;
   if ([facts.lengthMm, facts.widthMm, facts.heightMm].some(value => value != null)) delete preserved.dimensions;
-  if (facts.shippingPackageType != null) delete preserved.packageType;
   const plan = prepareChannelPackage({ ...input.source, sku: input.sku,
-    catalog: { ...facts, packageType: parsedType.data ? packageTypes[parsedType.data] : null },
+    catalog: facts,
     observed: observedValues(preserved) });
   const payload: EbayPackageWeightAndSize = structuredClone(input.observed ?? {});
   if (plan.sources.weight === "catalog") payload.weight = { value: Number(plan.values.weightGrams), unit: "GRAM" };
@@ -59,7 +51,8 @@ export function resolveEbayListingPackage(input: { source: EbayPackageSource; sk
     width: new Decimal(plan.values.widthMm!).div(10).toNumber(),
     height: new Decimal(plan.values.heightMm!).div(10).toNumber(), unit: "CENTIMETER",
   };
-  if (plan.sources.packageType === "catalog") payload.packageType = plan.values.packageType!;
+  // packageType is optional in the Inventory API contract. It remains provider-owned:
+  // preserve an observed value, but never infer one or replay a retired catalog override.
   return { payload, plan };
 }
 
@@ -82,18 +75,20 @@ export async function prepareEbayListingPackages<T extends { productId: number; 
     else {
       plan = prepareChannelPackage({ productId: draft.productId,
         variantId: member.variantId, sku: item.sku,
-        catalog: observedValues(legacy), observed: observedValues(current?.packageWeightAndSize),
-        requirements: { weight: false, dimensions: false, packageType: false } });
+        catalog: observedValues({ weight: legacy?.weight, dimensions: legacy?.dimensions }), observed: observedValues(current?.packageWeightAndSize),
+        requirements: { weight: false, dimensions: false } });
       // Old builders supplied default provider flags without a catalog source.
-      // Only the three selected physical facts are authoritative in that draft;
+      // Only weight and dimensions are authoritative in that draft;
       // preserve provider flags and extensions instead of replaying defaults.
       payload = structuredClone(current?.packageWeightAndSize ?? {});
       if (plan.sources.weight === "catalog") payload.weight = structuredClone(legacy!.weight);
       if (plan.sources.dimensions === "catalog") payload.dimensions = structuredClone(legacy!.dimensions);
-      if (plan.sources.packageType === "catalog") payload.packageType = legacy!.packageType;
     }
+    // Remove the original container even when no measurements remain. Otherwise
+    // a legacy type-only draft would survive the conditional spread below.
+    const { packageWeightAndSize: _previousPackage, ...basePayload } = item.payload;
     inventoryItems.push({ ...item, packagePlan: plan,
-      payload: { ...item.payload, ...(Object.keys(payload).length ? { packageWeightAndSize: payload } : {}) } });
+      payload: { ...basePayload, ...(Object.keys(payload).length ? { packageWeightAndSize: payload } : {}) } });
   }
   return { ...draft, inventoryItems };
 }
@@ -110,7 +105,6 @@ export async function assertEbayPackagePreservation(client: ItemReader, items: r
       const copy = structuredClone(value ?? {});
       if (item.packagePlan!.sources.weight === "catalog") delete copy.weight;
       if (item.packagePlan!.sources.dimensions === "catalog") delete copy.dimensions;
-      if (item.packagePlan!.sources.packageType === "catalog") delete copy.packageType;
       return copy;
     };
     observedValues(preserved(current?.packageWeightAndSize));
