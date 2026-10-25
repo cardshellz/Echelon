@@ -1,3 +1,4 @@
+import { readIntegerMills } from "@shared/money-read";
 /**
  * Auto-Draft Job
  *
@@ -250,7 +251,7 @@ function toAutomaticHandoffItem(
     throw new RangeError(`Recommendation ${item.recommendationId} requires supplier quote-basis review`);
   }
   const quotedUnitCostMills = item.supplierBasis.quotedUnitCostMills;
-  if (!Number.isSafeInteger(quotedUnitCostMills) || Number(quotedUnitCostMills) < 0) {
+  if (!Number.isSafeInteger(quotedUnitCostMills) || readIntegerMills(quotedUnitCostMills, "quotedUnitCostMills", true) < 0) {
     throw new RangeError(`Recommendation ${item.recommendationId} has no valid original supplier quote`);
   }
   const quotedAt = item.supplierBasis.quotedAt
@@ -287,7 +288,7 @@ function toAutomaticHandoffItem(
     estimatedCostCents: item.estimatedCostCents,
     pricingBasis: item.supplierBasis.pricingBasis,
     purchaseUom: item.supplierBasis.purchaseUom,
-    quotedUnitCostMills: Number(quotedUnitCostMills),
+    quotedUnitCostMills: readIntegerMills(quotedUnitCostMills, "quotedUnitCostMills", true),
     piecesPerPurchaseUom: item.supplierBasis.piecesPerPurchaseUom,
     quoteReference: item.supplierBasis.quoteReference,
     quotedAt,

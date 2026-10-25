@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { hasInvoiceCreditHistory, SupplierCreditEvidenceError, assertInvoiceHasNoCreditHistory, assertInvoiceSettlementEvidence, readInvoiceCreditAmount, readVerifiedInvoiceSettlementProjections } from "./supplier-credit-settlement.repository";
 import { paymentApplicationInputSchema, paymentCalendarDateSchema, type PaymentApplicationInput } from "@shared/procurement/ap-payment-contract";
 import { readPaymentBalances } from "./ap-payment-balance.repository";
@@ -303,7 +304,7 @@ export function allocateProportionalPaidCents(
         itemId: item.id,
       });
     }
-    return [item.id, Number(allocatedPaidCents)];
+    return [item.id, readIntegerCents(allocatedPaidCents, "allocatedPaidCents", true)];
   }));
 }
 
@@ -2659,14 +2660,12 @@ async function importLinesFromPOWithClient(
     if (pol.status === "cancelled") continue;
     if (importedPoLineIds.has(pol.id)) continue;
     lineNum++;
-    const unitCostMills = Number(
-      pol.unitCostMills ?? centsToMills(Number(pol.unitCostCents ?? 0)),
-    );
+    const unitCostMills = readIntegerMills(pol.unitCostMills ?? centsToMills(readIntegerCents(pol.unitCostCents ?? 0, "unit cost")), "unit cost", true);
     const unitCostCents = millsToCents(unitCostMills);
     const qty = pol.orderQty;
     // Use the actual PO line total — it includes discounts + tax, no recomputation
     const lineTotal = pol.lineTotalCents != null
-      ? Number(pol.lineTotalCents)
+      ? readIntegerCents(pol.lineTotalCents, "line total", true)
       : computeLineTotalCentsFromMills(unitCostMills, qty); // Fallback only if PO line has no total
     const [line] = await client
       .insert(vendorInvoiceLines)
@@ -3797,7 +3796,7 @@ export async function createInvoiceFromShipmentCostsInTransaction(tx: ApLedgerDb
         code: "AP_INVOICE_TOTAL_OVERFLOW",
       });
     }
-    const totalCents = Number(totalCentsBigInt);
+    const totalCents = readIntegerCents(totalCentsBigInt, "invoice total", true);
 
     // ── 5. Insert vendor_invoices row ──
     const invoiceDate = invoiceDateInput ?? now;
@@ -4164,7 +4163,7 @@ export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
       if (c.invoiceStatus === "voided") {
         derivedStatus = "voided";
       } else {
-        const balance = Number(c.balanceCents) || 0;
+        const balance = readIntegerCents(c.balanceCents, "balance", true);
         derivedStatus = balance <= 0 ? "paid" : "invoiced";
       }
     }

@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { createHash } from "crypto";
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
@@ -765,8 +766,8 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
     if (!row) return null;
     return {
       intakeId: row.intake_id,
-      wholesaleSubtotalCents: Number(row.wholesale_subtotal_cents),
-      shippingCents: Number(row.shipping_cents),
+      wholesaleSubtotalCents: readIntegerCents(row.wholesale_subtotal_cents, "wholesale subtotal", true),
+      shippingCents: readIntegerCents(row.shipping_cents, "shipping", true),
       currency: row.currency,
       lines: mapEconomicsWholesaleLines(row.pricing_snapshot),
     };
@@ -1448,8 +1449,8 @@ async function getOrCreateWalletAccountForUpdate(
   return {
     walletAccountId: row.id,
     vendorId: row.vendor_id,
-    availableBalanceCents: Number(row.available_balance_cents),
-    pendingBalanceCents: Number(row.pending_balance_cents),
+    availableBalanceCents: readIntegerCents(row.available_balance_cents, "available balance", true),
+    pendingBalanceCents: readIntegerCents(row.pending_balance_cents, "pending balance", true),
     currency: row.currency,
     status: row.status,
   };
@@ -1496,8 +1497,8 @@ async function updateWalletAccountBalance(
   return {
     walletAccountId: row.id,
     vendorId: row.vendor_id,
-    availableBalanceCents: Number(row.available_balance_cents),
-    pendingBalanceCents: Number(row.pending_balance_cents),
+    availableBalanceCents: readIntegerCents(row.available_balance_cents, "available balance", true),
+    pendingBalanceCents: readIntegerCents(row.pending_balance_cents, "pending balance", true),
     currency: row.currency,
     status: row.status,
   };
@@ -1980,10 +1981,10 @@ function mapRmaItemRow(row: RmaItemRow): DropshipRmaItemRecord {
     requestedCreditCents:
       row.requested_credit_cents === null
         ? null
-        : Number(row.requested_credit_cents),
+        : readIntegerCents(row.requested_credit_cents, "requested credit", true),
     finalCreditCents:
-      row.final_credit_cents === null ? null : Number(row.final_credit_cents),
-    feeCents: row.fee_cents === null ? null : Number(row.fee_cents),
+      row.final_credit_cents === null ? null : readIntegerCents(row.final_credit_cents, "final credit", true),
+    feeCents: row.fee_cents === null ? null : readIntegerCents(row.fee_cents, "fee", true),
     createdAt: row.created_at,
   };
 }
@@ -1998,8 +1999,8 @@ function mapRmaInspectionRow(
     faultCategory: row.fault_category,
     notes: row.notes,
     photos: row.photos ?? [],
-    creditCents: Number(row.credit_cents),
-    feeCents: Number(row.fee_cents),
+    creditCents: readIntegerCents(row.credit_cents, "credit", true),
+    feeCents: readIntegerCents(row.fee_cents, "fee", true),
     feeBreakdown: row.fee_breakdown ?? {},
     inspectedBy: row.inspected_by,
     idempotencyKey: row.idempotency_key,
@@ -2015,20 +2016,20 @@ function mapWalletLedgerRow(row: WalletLedgerRow): DropshipWalletLedgerRecord {
     vendorId: row.vendor_id,
     type: row.type,
     status: row.status,
-    amountCents: Number(row.amount_cents),
+    amountCents: readIntegerCents(row.amount_cents, "amount", true),
     currency: row.currency,
     availableBalanceAfterCents:
       row.available_balance_after_cents === null
         ? null
-        : Number(row.available_balance_after_cents),
+        : readIntegerCents(row.available_balance_after_cents, "available balance after", true),
     pendingBalanceAfterCents:
       row.pending_balance_after_cents === null
         ? null
-        : Number(row.pending_balance_after_cents),
+        : readIntegerCents(row.pending_balance_after_cents, "pending balance after", true),
     rewardsBalanceAfterCents:
       row.rewards_balance_after_cents === null || row.rewards_balance_after_cents === undefined
         ? null
-        : Number(row.rewards_balance_after_cents),
+        : readIntegerCents(row.rewards_balance_after_cents, "rewards balance after", true),
     referenceType: row.reference_type,
     referenceId: row.reference_id,
     idempotencyKey: row.idempotency_key,

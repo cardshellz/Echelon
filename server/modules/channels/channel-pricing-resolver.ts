@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseDecimalCents, readIntegerCents, MoneyInputError } from "@shared/money-read";
 import type { ChannelPriceProvenance } from "@shared/types/channel-listing-price";
 import { and, eq, sql } from "drizzle-orm";
 import type { db } from "../../db";
@@ -47,34 +48,21 @@ interface ResolveChannelListingPriceInput {
 }
 
 export function normalizeIntegerCents(value: unknown): number | null {
-  if (value === null || value === undefined || value === "") return null;
-
-  if (typeof value === "number") {
-    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  try {
+    return readIntegerCents(typeof value === "string" ? value.trim() : value, "listing price");
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
+    return null;
   }
-
-  if (typeof value === "bigint") {
-    return value >= BigInt(0) && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
-  }
-
-  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
-    const parsed = BigInt(value.trim());
-    return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : null;
-  }
-
-  return null;
 }
 
 export function parseDollarPriceToCents(value: unknown): number | null {
-  if (value === null || value === undefined || value === "") return null;
-  const raw = String(value).trim();
-  if (!/^\d+(\.\d{1,2})?$/.test(raw)) return null;
-
-  const [dollarsRaw, centsRaw = ""] = raw.split(".");
-  const dollars = BigInt(dollarsRaw);
-  const cents = BigInt((centsRaw + "00").slice(0, 2));
-  const total = dollars * BigInt(100) + cents;
-  return total <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(total) : null;
+  try {
+    return parseDecimalCents(typeof value === "string" ? value.trim() : value, "listing price");
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
+    return null;
+  }
 }
 
 export async function resolveChannelListingPrice(

@@ -1,3 +1,4 @@
+import { parseDecimalCents } from "@shared/money-read";
 /**
  * eBay Order Ingestion
  *
@@ -275,7 +276,7 @@ async function ensureEbayOrderQueuedForWmsSync(
 
 function dollarsToCents(value: string | undefined | null): number {
   if (!value) return 0;
-  return Math.round(parseFloat(value) * 100);
+  return parseDecimalCents(value, "dollarsToCents");
 }
 
 function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {

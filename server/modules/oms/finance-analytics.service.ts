@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 /**
  * Finance Analytics Service
  *
@@ -112,12 +113,12 @@ async function aggregateRange(from: Date, to: Date): Promise<RawAgg> {
   const r = result.rows[0] as any;
   return {
     order_count: Number(r?.order_count) || 0,
-    gross_sales_cents: Number(r?.gross_sales_cents) || 0,
-    discount_cents: Number(r?.discount_cents) || 0,
-    shipping_cents: Number(r?.shipping_cents) || 0,
-    tax_cents: Number(r?.tax_cents) || 0,
-    total_collected_cents: Number(r?.total_collected_cents) || 0,
-    refund_cents: Number(r?.refund_cents) || 0,
+    gross_sales_cents: readIntegerCents(r?.gross_sales_cents, "gross sales", true),
+    discount_cents: readIntegerCents(r?.discount_cents, "discount", true),
+    shipping_cents: readIntegerCents(r?.shipping_cents, "shipping", true),
+    tax_cents: readIntegerCents(r?.tax_cents, "tax", true),
+    total_collected_cents: readIntegerCents(r?.total_collected_cents, "total collected", true),
+    refund_cents: readIntegerCents(r?.refund_cents, "refund", true),
     refunded_order_count: Number(r?.refunded_order_count) || 0,
     cancelled_order_count: Number(r?.cancelled_order_count) || 0,
   };
@@ -134,7 +135,7 @@ async function aggregateCogs(from: Date, to: Date): Promise<number> {
       AND oo.ordered_at < ${to}
       AND oo.cancelled_at IS NULL
   `);
-  return millsToCents(Math.round(Number((result.rows[0] as any)?.cogs_mills) || 0));
+  return millsToCents(Math.round(readIntegerMills((result.rows[0] as any)?.cogs_mills, "cogs", true)));
 }
 
 async function channelBreakdown(from: Date, to: Date): Promise<ChannelBreakdown[]> {
@@ -175,11 +176,11 @@ async function channelBreakdown(from: Date, to: Date): Promise<ChannelBreakdown[
   `);
   const cogsMap = new Map<number, number>();
   for (const row of cogsResult.rows as any[]) {
-    cogsMap.set(Number(row.channel_id), millsToCents(Math.round(Number(row.cogs_mills) || 0)));
+    cogsMap.set(Number(row.channel_id), millsToCents(Math.round(readIntegerMills(row.cogs_mills, "cogs", true))));
   }
 
   return (result.rows as any[]).map((r) => {
-    const netRev = Number(r.net_revenue_cents) || 0;
+    const netRev = readIntegerCents(r.net_revenue_cents, "net rev", true);
     const cogs = cogsMap.get(Number(r.channel_id)) || 0;
     const orderCount = Number(r.order_count) || 0;
     return {
@@ -187,12 +188,12 @@ async function channelBreakdown(from: Date, to: Date): Promise<ChannelBreakdown[
       channelName: r.channel_name,
       provider: r.provider,
       orderCount,
-      grossSalesCents: Number(r.gross_sales_cents) || 0,
-      discountCents: Number(r.discount_cents) || 0,
-      netSalesCents: Number(r.net_sales_cents) || 0,
-      shippingCents: Number(r.shipping_cents) || 0,
-      taxCents: Number(r.tax_cents) || 0,
-      refundCents: Number(r.refund_cents) || 0,
+      grossSalesCents: readIntegerCents(r.gross_sales_cents, "gross sales", true),
+      discountCents: readIntegerCents(r.discount_cents, "discount", true),
+      netSalesCents: readIntegerCents(r.net_sales_cents, "net sales", true),
+      shippingCents: readIntegerCents(r.shipping_cents, "shipping", true),
+      taxCents: readIntegerCents(r.tax_cents, "tax", true),
+      refundCents: readIntegerCents(r.refund_cents, "refund", true),
       netRevenueCents: netRev,
       cogsCents: cogs,
       grossMarginPct: netRev > 0 ? Math.round(((netRev - cogs) / netRev) * 1000) / 10 : null,
@@ -350,16 +351,16 @@ export async function getFinanceOrders(opts: {
       channelName: r.channel_name,
       provider: r.provider,
       orderedAt: r.ordered_at,
-      totalCents: Number(r.total_cents) || 0,
-      subtotalCents: Number(r.subtotal_cents) || 0,
-      discountCents: Number(r.discount_cents) || 0,
-      shippingCents: Number(r.shipping_cents) || 0,
-      taxCents: Number(r.tax_cents) || 0,
-      refundAmountCents: Number(r.refund_amount_cents) || 0,
+      totalCents: readIntegerCents(r.total_cents, "total", true),
+      subtotalCents: readIntegerCents(r.subtotal_cents, "subtotal", true),
+      discountCents: readIntegerCents(r.discount_cents, "discount", true),
+      shippingCents: readIntegerCents(r.shipping_cents, "shipping", true),
+      taxCents: readIntegerCents(r.tax_cents, "tax", true),
+      refundAmountCents: readIntegerCents(r.refund_amount_cents, "refund amount", true),
       financialStatus: r.financial_status,
       status: r.status,
       customerName: r.customer_name,
-      cogsCents: millsToCents(Math.round(Number(r.cogs_mills) || 0)),
+      cogsCents: millsToCents(Math.round(readIntegerMills(r.cogs_mills, "cogs", true))),
     })),
     total: Number((countResult.rows[0] as any)?.total) || 0,
     page,
@@ -491,11 +492,11 @@ export async function getFinanceOrderDetail(orderId: number): Promise<FinanceOrd
     title: r.title,
     variantTitle: r.variant_title,
     quantity: Number(r.quantity) || 0,
-    paidPriceCents: Number(r.paid_price_cents) || 0,
-    totalPriceCents: Number(r.total_price_cents) || 0,
-    totalDiscountCents: Number(r.total_discount_cents) || 0,
-    planDiscountCents: Number(r.plan_discount_cents) || 0,
-    couponDiscountCents: Number(r.coupon_discount_cents) || 0,
+    paidPriceCents: readIntegerCents(r.paid_price_cents, "paid price", true),
+    totalPriceCents: readIntegerCents(r.total_price_cents, "total price", true),
+    totalDiscountCents: readIntegerCents(r.total_discount_cents, "total discount", true),
+    planDiscountCents: readIntegerCents(r.plan_discount_cents, "plan discount", true),
+    couponDiscountCents: readIntegerCents(r.coupon_discount_cents, "coupon discount", true),
     taxable: r.taxable ?? true,
   }));
 
@@ -518,13 +519,13 @@ export async function getFinanceOrderDetail(orderId: number): Promise<FinanceOrd
   const costs: OrderCostDetail[] = (costsResult.rows as any[]).map((r) => ({
     sku: r.sku,
     qty: Number(r.qty) || 0,
-    unitCostCents: Number(r.unit_cost_cents) || 0,
-    totalCostCents: Number(r.total_cost_cents) || 0,
+    unitCostCents: readIntegerCents(r.unit_cost_cents, "unit cost", true),
+    totalCostCents: readIntegerCents(r.total_cost_cents, "total cost", true),
   }));
 
   const cogsTotalCents = costs.reduce((s, c) => s + c.totalCostCents, 0);
-  const totalCents = Number(o.total_cents) || 0;
-  const refundAmountCents = Number(o.refund_amount_cents) || 0;
+  const totalCents = readIntegerCents(o.total_cents, "total", true);
+  const refundAmountCents = readIntegerCents(o.refund_amount_cents, "refund amount", true);
   const netRevenueCents = totalCents - refundAmountCents;
 
   return {
@@ -539,10 +540,10 @@ export async function getFinanceOrderDetail(orderId: number): Promise<FinanceOrd
     customerName: o.customer_name,
     customerEmail: o.customer_email,
     orderedAt: o.ordered_at,
-    subtotalCents: Number(o.subtotal_cents) || 0,
-    discountCents: Number(o.discount_cents) || 0,
-    shippingCents: Number(o.shipping_cents) || 0,
-    taxCents: Number(o.tax_cents) || 0,
+    subtotalCents: readIntegerCents(o.subtotal_cents, "subtotal", true),
+    discountCents: readIntegerCents(o.discount_cents, "discount", true),
+    shippingCents: readIntegerCents(o.shipping_cents, "shipping", true),
+    taxCents: readIntegerCents(o.tax_cents, "tax", true),
     totalCents,
     refundAmountCents,
     currency: o.currency || "USD",

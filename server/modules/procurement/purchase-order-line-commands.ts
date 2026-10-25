@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { hasPoInvoiceHistory, readPoInvoiceHistory } from "./po-invoice-history.repository";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { and, eq, ne, sql } from "drizzle-orm";
@@ -415,17 +416,15 @@ export function vendorCatalogPricingMatches(
 ): boolean {
   const catalogBasis = vendorProduct.pricingBasis ?? "legacy_unknown";
   const catalogUnitCostMills = storedInteger(
-    vendorProduct.unitCostMills ?? Number(vendorProduct.unitCostCents ?? 0) * 100,
+    vendorProduct.unitCostMills ?? readIntegerCents(vendorProduct.unitCostCents ?? 0, "catalog unit cost", true) * 100,
     "vendor_product.unit_cost_mills",
   );
   if (catalogBasis === "per_piece" && pricing.basis === "per_piece") {
-    return pricing.unitCostMills === Number(
-      vendorProduct.quotedUnitCostMills ?? catalogUnitCostMills,
-    );
+    return pricing.unitCostMills === readIntegerMills(vendorProduct.quotedUnitCostMills ?? catalogUnitCostMills, "computed amount", true);
   }
   if (catalogBasis === "per_purchase_uom" && pricing.basis === "per_purchase_uom") {
     return (
-      pricing.quotedCostMillsPerUom === Number(vendorProduct.quotedUnitCostMills) &&
+      pricing.quotedCostMillsPerUom === readIntegerMills(vendorProduct.quotedUnitCostMills, "quoted unit cost", true) &&
       pricing.piecesPerUom === Number(vendorProduct.piecesPerPurchaseUom) &&
       pricing.purchaseUom.trim().toLowerCase() ===
         String(vendorProduct.purchaseUom ?? "").trim().toLowerCase()
@@ -1297,8 +1296,8 @@ export function createPurchaseOrderLineCommands(
       }
       const totalProductCostCents = input.pricing === undefined
         ? storedInteger(line.totalProductCostCents, "total_product_cost_cents")
-        : Number(patch.totalProductCostCents);
-      const resolvedPackagingCostCents = Number(patch.packagingCostCents);
+        : readIntegerCents(patch.totalProductCostCents, "total product cost", true);
+      const resolvedPackagingCostCents = readIntegerCents(patch.packagingCostCents, "resolved packaging cost", true);
       const discountCents = storedInteger(line.discountCents, "discount_cents");
       const taxCents = storedInteger(line.taxCents, "tax_cents");
       patch.lineTotalCents = safeMoney(

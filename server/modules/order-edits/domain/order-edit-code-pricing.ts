@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
@@ -147,7 +148,7 @@ export function splitOrderEditCodeLine(
   }
   const quantity = BigInt(parsed.quantity);
   const unit = BigInt(parsed.netCents) / quantity;
-  const remainder = Number(BigInt(parsed.netCents) % quantity);
+  const remainder = readIntegerCents(BigInt(parsed.netCents) % quantity, "remainder", true);
   const groups = [
     { quantity: parsed.quantity - remainder, unitCents: Number(unit) },
     ...(remainder
@@ -157,13 +158,11 @@ export function splitOrderEditCodeLine(
   // Product/member price is recorded separately; the full line budget survives subsequent edits.
   const productUnitCents = exactUnit(parsed.productNetCents, parsed.quantity);
   return groups.map((group) => {
-    const productNetCents = Number(
-      BigInt(productUnitCents) * BigInt(group.quantity),
-    );
+    const productNetCents = readIntegerCents(BigInt(productUnitCents) * BigInt(group.quantity), "product net", true);
     return {
       ...group,
       productNetCents,
-      netCents: Number(BigInt(group.quantity) * BigInt(group.unitCents)),
+      netCents: readIntegerCents(BigInt(group.quantity) * BigInt(group.unitCents), "net", true),
     };
   });
 }
@@ -175,10 +174,8 @@ export function presentOrderEditCodeFinancials(
 ): OrderEditFinancials {
   const productCents = sumOrderEditCents(
     pricing.lines.map((line) =>
-      Number(
-        BigInt(line.retailCents) * BigInt(line.quantity) -
-          BigInt(line.productNetCents),
-      ),
+      readIntegerCents(BigInt(line.retailCents) * BigInt(line.quantity) -
+          BigInt(line.productNetCents), "product", true),
     ),
   );
   const discounts = [

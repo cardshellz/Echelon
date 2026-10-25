@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 /**
  * Cost Resolver — COGS Phase 2
  *
@@ -68,17 +69,17 @@ export async function resolveCost(
     return { costCents: 0, source: "unresolved", provisional: true };
   }
 
-  const last = Number(variant.lastCostCents) || 0;
+  const last = readIntegerCents(variant.lastCostCents, "last", true);
   if (last > 0) {
     return { costCents: last, source: "last_paid", provisional: true };
   }
 
-  const standard = Number(variant.standardCostCents) || 0;
+  const standard = readIntegerCents(variant.standardCostCents, "standard", true);
   if (standard > 0) {
     return { costCents: standard, source: "standard", provisional: true };
   }
 
-  const avg = Number(variant.avgCostCents) || 0;
+  const avg = readIntegerCents(variant.avgCostCents, "avg", true);
   if (avg > 0) {
     return { costCents: avg, source: "avg", provisional: true };
   }

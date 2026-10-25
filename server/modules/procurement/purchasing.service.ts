@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { captureDocumentNumberTime } from "../../platform/document-numbering/document-number";
 import { hasPoInvoiceHistory, readPoInvoiceHistory } from "./po-invoice-history.repository";
 import type { PurchaseOrderEntryAction, PurchaseOrderEntryCommand } from "@shared/procurement/purchase-order-entry-command";
@@ -581,18 +582,16 @@ export function createPurchasingService(
     if (hasTotals) {
       // NEW SHAPE: totals are source of truth.
       resolvedTotalProductCostCents = line.totalProductCostCents as number;
-      resolvedPackagingCostCents = Number(line.packagingCostCents) || 0;
+      resolvedPackagingCostCents = readIntegerCents(line.packagingCostCents ?? 0, "packaging cost", true);
       subtotalCents = resolvedTotalProductCostCents + resolvedPackagingCostCents;
       // Normalize the product quote only. Packaging remains its own exact-cent
       // layer and must never be folded into the vendor's per-piece quote.
       resolvedUnitCostMills =
         qty > 0
-          ? Number(
-              signedRoundHalfUpDiv(
+          ? readIntegerMills(signedRoundHalfUpDiv(
                 BigInt(resolvedTotalProductCostCents) * BigInt(100),
                 BigInt(qty),
-              ),
-            )
+              ), "resolved unit cost", true)
           : 0;
       resolvedUnitCostCents =
         qty > 0
@@ -605,22 +604,20 @@ export function createPurchasingService(
         Number.isInteger(line.unitCostMills);
 
       subtotalCents = millsAuthoritative
-        ? Number(
-            signedRoundHalfUpDiv(
+        ? readIntegerCents(signedRoundHalfUpDiv(
               BigInt(line.unitCostMills as number) * BigInt(qty),
               BigInt(100),
-            ),
-          )
-        : qty * (Number(line.unitCostCents) || 0);
+            ), "subtotal", true)
+        : qty * readIntegerCents(line.unitCostCents ?? 0, "unit cost", true);
 
       resolvedTotalProductCostCents = subtotalCents;
       resolvedPackagingCostCents = 0;
       resolvedUnitCostMills = millsAuthoritative
         ? (line.unitCostMills as number)
-        : signedCentsToMills(Number(line.unitCostCents) || 0);
+        : signedCentsToMills(readIntegerCents(line.unitCostCents ?? 0, "unit cost", true));
       resolvedUnitCostCents = millsAuthoritative
         ? signedMillsToCents(line.unitCostMills as number)
-        : Number(line.unitCostCents) || 0;
+        : readIntegerCents(line.unitCostCents ?? 0, "unit cost", true);
     }
 
     const subtotal = new Decimal(subtotalCents);
@@ -667,7 +664,7 @@ export function createPurchasingService(
     let adjustmentTotal = BigInt(0);
     for (const line of lines) {
       if (line.status === "cancelled") continue;
-      const lineTotal = BigInt(Number(line.lineTotalCents) || 0);
+      const lineTotal = BigInt(readIntegerCents(line.lineTotalCents, "line total", true));
       const type: PoLineType = (line.lineType as PoLineType) ?? "product";
       switch (type) {
         case "product":
@@ -691,12 +688,12 @@ export function createPurchasingService(
     const total =
       productSubtotal + discountTotal + feeTotal + taxTotal + adjustmentTotal;
     return {
-      productSubtotalCents: Number(productSubtotal),
-      discountTotalCents: Number(discountTotal),
-      feeTotalCents: Number(feeTotal),
-      taxTotalCents: Number(taxTotal),
-      adjustmentTotalCents: Number(adjustmentTotal),
-      totalCents: Number(total),
+      productSubtotalCents: readIntegerCents(productSubtotal, "product subtotal", true),
+      discountTotalCents: readIntegerCents(discountTotal, "discount total", true),
+      feeTotalCents: readIntegerCents(feeTotal, "fee total", true),
+      taxTotalCents: readIntegerCents(taxTotal, "tax total", true),
+      adjustmentTotalCents: readIntegerCents(adjustmentTotal, "adjustment total", true),
+      totalCents: readIntegerCents(total, "purchase order total", true),
     };
   }
 
@@ -753,7 +750,7 @@ export function createPurchasingService(
     for (const line of lines) {
       if (line.status === "cancelled") continue;
       const type: PoLineType = (line.lineType as PoLineType) ?? "product";
-      const lineTotal = Number(line.lineTotalCents) || 0;
+      const lineTotal = readIntegerCents(line.lineTotalCents, "line total", true);
       if (type === "product") {
         productLines.push(line);
       } else {
@@ -769,7 +766,7 @@ export function createPurchasingService(
     // but still surface in `perLine` with allocatedCents=0 (so the caller
     // can stamp them with a clean record).
     const productSubtotalCents = productLines.reduce(
-      (sum, l) => sum + (Number(l.lineTotalCents) || 0),
+      (sum, l) => sum + (readIntegerCents(l.lineTotalCents, "product subtotal", true)),
       0,
     );
 
@@ -780,14 +777,14 @@ export function createPurchasingService(
       return {
         perLine: productLines.map((l) => ({
           purchaseOrderLineId: Number(l.id),
-          lineTotalCents: Number(l.lineTotalCents) || 0,
+          lineTotalCents: readIntegerCents(l.lineTotalCents, "line total", true),
           allocatedCents: 0,
-          landedLineTotalCents: Number(l.lineTotalCents) || 0,
+          landedLineTotalCents: readIntegerCents(l.lineTotalCents, "landed line total", true),
           landedUnitCostMills:
             typeof l.unitCostMills === "number"
               ? l.unitCostMills
-              : centsToMills(Number(l.unitCostCents) || 0),
-          landedUnitCostCents: Number(l.unitCostCents) || 0,
+              : centsToMills(readIntegerCents(l.unitCostCents, "landed unit cost", true)),
+          landedUnitCostCents: readIntegerCents(l.unitCostCents, "landed unit cost", true),
         })),
         pooledCents,
         productSubtotalCents,
@@ -803,7 +800,7 @@ export function createPurchasingService(
 
     for (let i = 0; i < productLines.length; i++) {
       const line = productLines[i];
-      const lineTotalCents = Number(line.lineTotalCents) || 0;
+      const lineTotalCents = readIntegerCents(line.lineTotalCents, "line total", true);
       const qty = Number(line.orderQty) || 0;
       const basis = lineTotalCents > 0 ? lineTotalCents : 0;
 
@@ -813,12 +810,10 @@ export function createPurchasingService(
       // and overflow safety.
       let allocatedCents = 0;
       if (basis > 0) {
-        allocatedCents = Number(
-          signedRoundHalfUpDiv(
+        allocatedCents = readIntegerCents(signedRoundHalfUpDiv(
             BigInt(pooledCents) * BigInt(basis),
             BigInt(productSubtotalCents),
-          ),
-        );
+          ), "allocated", true);
       }
       allocatedSoFar += allocatedCents;
 
@@ -832,18 +827,14 @@ export function createPurchasingService(
       // BigInt to stay safe on large pooled totals.
       const landedUnitCostMills =
         qty > 0
-          ? Number(
-              signedRoundHalfUpDiv(
+          ? readIntegerMills(signedRoundHalfUpDiv(
                 BigInt(landedLineTotalCents) * BigInt(100),
                 BigInt(qty),
-              ),
-            )
+              ), "landed unit cost", true)
           : 0;
       const landedUnitCostCents =
         qty > 0
-          ? Number(
-              signedRoundHalfUpDiv(BigInt(landedLineTotalCents), BigInt(qty)),
-            )
+          ? readIntegerCents(signedRoundHalfUpDiv(BigInt(landedLineTotalCents), BigInt(qty)), "landed unit cost", true)
           : 0;
 
       perLine.push({
@@ -865,15 +856,11 @@ export function createPurchasingService(
       target.landedLineTotalCents += remainder;
       const qty = Number(productLines[maxBasisIdx].orderQty) || 0;
       if (qty > 0) {
-        target.landedUnitCostMills = Number(
-          signedRoundHalfUpDiv(
+        target.landedUnitCostMills = readIntegerMills(signedRoundHalfUpDiv(
             BigInt(target.landedLineTotalCents) * BigInt(100),
             BigInt(qty),
-          ),
-        );
-        target.landedUnitCostCents = Number(
-          signedRoundHalfUpDiv(BigInt(target.landedLineTotalCents), BigInt(qty)),
-        );
+          ), "landed unit cost", true);
+        target.landedUnitCostCents = readIntegerCents(signedRoundHalfUpDiv(BigInt(target.landedLineTotalCents), BigInt(qty)), "landed unit cost", true);
       }
     }
 
@@ -934,8 +921,8 @@ export function createPurchasingService(
     // row (which would violate the to_status NOT NULL constraint when called
     // with no historyData). Regression of commit 4c0a3cc.
     return await storage.updatePurchaseOrder(purchaseOrderId, {
-      subtotalCents: Number(subtotalCents),
-      totalCents: Number(totalCents),
+      subtotalCents: readIntegerCents(subtotalCents, "subtotalCents", true),
+      totalCents: readIntegerCents(totalCents, "totalCents", true),
       lineCount,
       receivedLineCount,
       updatedBy: userId,
@@ -1078,9 +1065,9 @@ export function createPurchasingService(
         }
         trustedLineTotal = BigInt(costs.lineTotalCents);
         if (
-          Number(line.lineTotalCents) !== costs.lineTotalCents ||
-          Number(line.discountCents ?? 0) !== costs.discountCents ||
-          Number(line.taxCents ?? 0) !== costs.taxCents
+          readIntegerCents(line.lineTotalCents, "line total", true) !== costs.lineTotalCents ||
+          readIntegerCents(line.discountCents ?? 0, "computed amount", true) !== costs.discountCents ||
+          readIntegerCents(line.taxCents ?? 0, "computed amount", true) !== costs.taxCents
         ) {
           const repaired = await tx
             .update(purchaseOrderLinesTable)
@@ -2083,14 +2070,14 @@ export function createPurchasingService(
         track(
           "discountCents",
           "discount_cents",
-          Number(po.discountCents ?? 0),
+          readIntegerCents(po.discountCents ?? 0, "computed amount", true),
           updates.discountCents,
         );
-        track("taxCents", "tax_cents", Number(po.taxCents ?? 0), updates.taxCents);
+        track("taxCents", "tax_cents", readIntegerCents(po.taxCents ?? 0, "computed amount", true), updates.taxCents);
         track(
           "shippingCostCents",
           "shipping_cost_cents",
-          Number(po.shippingCostCents ?? 0),
+          readIntegerCents(po.shippingCostCents ?? 0, "computed amount", true),
           updates.shippingCostCents,
         );
         track(
@@ -2145,8 +2132,8 @@ export function createPurchasingService(
         }
         const subtotalCents = safeIntegerMoney(subtotal, "subtotal_cents");
         const totalCents = safeIntegerMoney(computedTotal, "total_cents");
-        before.subtotal_cents = Number(po.subtotalCents ?? 0);
-        before.total_cents = Number(po.totalCents ?? 0);
+        before.subtotal_cents = readIntegerCents(po.subtotalCents ?? 0, "subtotal", true);
+        before.total_cents = readIntegerCents(po.totalCents ?? 0, "total", true);
         after.subtotal_cents = subtotalCents;
         after.total_cents = totalCents;
 
@@ -2827,7 +2814,7 @@ export function createPurchasingService(
         actor, requireApproval: settings.requireApproval, tier: currentTier, totalCents: economics.totalCents,
       });
       if (economics.correctedLegacyEconomics || economics.totalCents !== expectedTotalCents
-        || Number(economics.po.totalCents) !== expectedTotalCents) {
+        || readIntegerCents(economics.po.totalCents, "total", true) !== expectedTotalCents) {
         throw new PurchasingError("The saved purchase amounts do not match the reviewed terms. Return the PO to draft, save its corrected terms, and review it again before approval.", 409, { code: "PO_APPROVAL_ECONOMICS_REVIEW_REQUIRED" });
       }
       if (
@@ -3093,7 +3080,7 @@ export function createPurchasingService(
       const receivedQty = BigInt(line.receivedQty ?? 0);
       if (receivedQty <= BigInt(0)) continue;
       const unitCostMills = BigInt(
-        line.unitCostMills ?? centsToMills(Number(line.unitCostCents ?? 0)),
+        line.unitCostMills ?? centsToMills(readIntegerCents(line.unitCostCents ?? 0, "unit cost", true)),
       );
       const current = totalsByVendorProductId.get(vendorProductId) ?? {
         extendedCostMills: BigInt(0),
@@ -5436,7 +5423,7 @@ export function createPurchasingService(
         }
 
         const pricing = effectiveLine.pricing ? normalizePoLinePricing(effectiveLine.pricing) : null;
-        const packagingCostCents = Number(effectiveLine.packagingCostCents) || 0;
+        const packagingCostCents = readIntegerCents(effectiveLine.packagingCostCents ?? 0, "packaging cost", true);
         const costs = pricing
           ? {
               subtotalCents: pricing.totalProductCostCents + packagingCostCents,
@@ -5450,7 +5437,7 @@ export function createPurchasingService(
             }
           : calculateLineCosts({
               orderQty: effectiveLine.orderQty,
-              unitCostCents: Number(effectiveLine.unitCostCents) || 0,
+              unitCostCents: readIntegerCents(effectiveLine.unitCostCents ?? 0, "unit cost", true),
               unitCostMills: typeof effectiveLine.unitCostMills === "number" ? effectiveLine.unitCostMills : null,
               totalProductCostCents:
                 typeof effectiveLine.totalProductCostCents === "number" ? effectiveLine.totalProductCostCents : null,
@@ -6550,7 +6537,7 @@ export function createPurchasingService(
       pricing = {
         basis: "per_piece",
         quantityPieces: orderQty,
-        unitCostMills: Number(vendorProduct.quotedUnitCostMills),
+        unitCostMills: readIntegerMills(vendorProduct.quotedUnitCostMills, "unit cost", true),
       };
     } else if (vendorProduct.pricingBasis === "per_purchase_uom") {
       if (vendorProduct.quotedUnitCostMills == null) return null;
@@ -6567,7 +6554,7 @@ export function createPurchasingService(
         purchaseUom: String(vendorProduct.purchaseUom ?? ""),
         uomQuantity: orderQty / piecesPerUom,
         piecesPerUom,
-        quotedCostMillsPerUom: Number(vendorProduct.quotedUnitCostMills),
+        quotedCostMillsPerUom: readIntegerMills(vendorProduct.quotedUnitCostMills, "quoted cost mills per uom", true),
       };
     } else {
       return null;
@@ -6629,18 +6616,18 @@ export function createPurchasingService(
   > {
     if (src.lineType === "product" || src.lineType == null) {
       if (src.totalProductCostCents !== null && src.totalProductCostCents !== undefined) {
-        const total = Number(src.totalProductCostCents);
+        const total = readIntegerCents(src.totalProductCostCents, "total", true);
         if (Number.isSafeInteger(total) && total >= 0) {
           return { totalProductCostCents: total };
         }
       }
     }
     if (src.unitCostMills !== null && src.unitCostMills !== undefined) {
-      const mills = Number(src.unitCostMills);
+      const mills = readIntegerMills(src.unitCostMills, "mills", true);
       if (Number.isSafeInteger(mills)) return { unitCostMills: mills };
     }
     if (src.unitCostCents !== null && src.unitCostCents !== undefined) {
-      const cents = Number(src.unitCostCents);
+      const cents = readIntegerCents(src.unitCostCents, "cents", true);
       if (Number.isSafeInteger(cents)) return { unitCostCents: cents };
     }
     throw new PurchasingError(
@@ -6651,7 +6638,7 @@ export function createPurchasingService(
   }
 
   function duplicateProductPackagingCost(src: any): number {
-    const packagingCostCents = Number(src.packagingCostCents ?? 0);
+    const packagingCostCents = readIntegerCents(src.packagingCostCents ?? 0, "packaging cost", true);
     if (!Number.isSafeInteger(packagingCostCents) || packagingCostCents < 0) {
       throw new PurchasingError(
         `Source PO line ${src.id} has invalid packaging economics and cannot be duplicated safely`,
@@ -7119,8 +7106,8 @@ export function createPurchasingService(
     try {
       const hasMills = entry.unitCostMills !== undefined && entry.unitCostMills !== null;
       const unitCostMills = hasMills
-        ? Number(entry.unitCostMills)
-        : centsToMills(Number(entry.unitCostCents));
+        ? readIntegerMills(entry.unitCostMills, "unit cost", true)
+        : centsToMills(readIntegerCents(entry.unitCostCents, "unit cost", true));
       return {
         unitCostMills,
         unitCostCents: millsToCents(unitCostMills),
@@ -8519,7 +8506,7 @@ export function createPurchasingService(
         let unitCostMills: number =
           typeof src.unitCostMills === "number" && src.unitCostMills >= 0
             ? src.unitCostMills
-            : centsToMills(Number(src.unitCostCents || 0));
+            : centsToMills(readIntegerCents(src.unitCostCents ?? 0, "unit cost", true));
         let catalogSource: PreloadLine["catalogSource"] = "duplicate";
         let vendorProductId: number | null = src.vendorProductId ?? null;
         let pricingBasis: PreloadLine["pricingBasis"] =
@@ -8613,7 +8600,7 @@ export function createPurchasingService(
         //   → centsToMills(variant.lastCostCents)
         //   → 0
         let unitCostMills: number = centsToMills(
-          Number(variant.standardCostCents ?? variant.lastCostCents ?? 0),
+          readIntegerCents(variant.standardCostCents ?? variant.lastCostCents ?? 0, "unit cost", true),
         );
         let catalogSource: PreloadLine["catalogSource"] = "product_default";
         let vendorProductId: number | null = null;

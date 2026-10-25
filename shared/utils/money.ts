@@ -1,4 +1,6 @@
 // shared/utils/money.ts
+import { parseDecimalCents } from "../money-read";
+export { readIntegerCents, parseDecimalCents, sumCents, formatCentsExact, MoneyInputError } from "../money-read";
 //
 // Money helpers used across server + client.
 //
@@ -22,17 +24,20 @@
 /**
  * Parse a user-typed dollar string into integer cents without floating
  * point. Accepts "12.34", "12", ".34", "-5.00", "$1,234.56", etc. Anything
- * non-numeric is stripped. Truncates at the 2nd decimal (does NOT round);
+ * currency symbols and separators are stripped. Truncates at the 2nd decimal (does NOT round);
  * preserved for back-compat with existing callers across the client.
  */
 export function dollarsToCents(dollars: string | number): number {
   const val = String(dollars).trim();
   if (!val) return 0;
-  const parts = val.replace(/[^0-9.-]/g, "").split(".");
-  const whole = parseInt(parts[0] || "0", 10);
-  const frac = (parts[1] || "00").padEnd(2, "0").slice(0, 2);
-  const cents = parseInt(frac, 10);
-  return whole * 100 + (whole < 0 ? -cents : cents);
+  const normalized = val.replace(/[$,\s]/g, "");
+  const match = /^(-?)(\d*)(?:\.(\d*))?$/.exec(normalized);
+  if (!match || (!match[2] && !match[3])) {
+    throw new RangeError("Enter a valid dollar amount");
+  }
+  // This form's established policy truncates extra decimal places. Provider
+  // readers reject them. Both paths share the exact conversion and bounds.
+  return parseDecimalCents(`${match[1]}${match[2] || "0"}.${(match[3] || "").padEnd(2, "0").slice(0, 2)}`, "dollar input", true);
 }
 
 /**

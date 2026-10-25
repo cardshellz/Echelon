@@ -1,4 +1,6 @@
 import { protectEbayPolicyWriteBoundary } from "../channels/interfaces/ebay-policy-write-boundary";
+import { readIntegerCents, MoneyInputError } from "@shared/money-read";
+import { dollarsToMills } from "@shared/utils/money";
 import { lotCostFollowUpQuerySchema } from "@shared/inventory/lot-cost-follow-up";
 import { returnCommandRequestSchema, returnCommandResultFor } from "@shared/inventory/return-command";
 import { isLevelDeleteForbiddenError, isRetiredEmptyLevel } from "./domain/retired-inventory-level";
@@ -2762,8 +2764,8 @@ export function registerInventoryRoutes(app: Express) {
         productVariantId,
         warehouseLocationId,
         qty: parseInt(qty),
-        unitCostCents: parseFloat(unitCostCents),
-        landedCostCents: landedCostCents ? parseFloat(landedCostCents) : undefined,
+        unitCostCents: readIntegerCents(unitCostCents, "unitCostCents"),
+        landedCostCents: landedCostCents == null ? undefined : readIntegerCents(landedCostCents, "landedCostCents"),
         batchNumber,
         receivedAt,
         notes,
@@ -2772,6 +2774,8 @@ export function registerInventoryRoutes(app: Express) {
       res.json({ success: true, lot });
     } catch (error: any) {
       console.error("Error creating manual cost entry:", error);
+      if (error instanceof MoneyInputError)
+        return res.status(400).json({ error: error.message, code: error.code, context: error.context });
       if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to create manual cost entry" });
     }
@@ -2876,12 +2880,19 @@ export function registerInventoryRoutes(app: Express) {
     try {
       const { cogs } = req.app.locals.services;
       const lotId = parseInt(req.params.lotId);
-      const dollars = Number(String(req.body?.cost_per_piece ?? "").replace(/[$,\s]/g, ""));
       if (!Number.isInteger(lotId) || lotId <= 0) return res.status(400).json({ error: "Invalid lotId" });
-      if (!Number.isFinite(dollars) || dollars < 0) return res.status(400).json({ error: "Invalid cost_per_piece" });
+      const rawCost = req.body?.cost_per_piece;
+      if ((typeof rawCost !== "string" && typeof rawCost !== "number") || String(rawCost).trim() === "")
+        return res.status(400).json({ error: "Invalid cost_per_piece" });
+      let perPieceMills: number;
+      try {
+        perPieceMills = dollarsToMills(String(rawCost).replace(/[$,\s]/g, ""));
+      } catch (error) {
+        if (!(error instanceof RangeError)) throw error;
+        return res.status(400).json({ error: "Invalid cost_per_piece" });
+      }
       const note = String(req.body?.reason ?? "").trim();
       const reason = note ? `manual_recost: ${note}` : "manual_recost";
-      const perPieceMills = Math.round(dollars * 10000);
       const result = await cogs.recostLotPerPiece(lotId, perPieceMills, reason, req.session.user?.id);
       if (!result) return res.status(404).json({ error: "Lot not found" });
       res.json(result);
