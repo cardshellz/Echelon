@@ -1352,7 +1352,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
     it("restores only empty owned work for a settled refund, retains all holds and audits once across retries", async () => {
       const { snapshot } = await seedStoppedRefundEdit();
       const enabledGateway = new OrderEditWarehouseGateway(database.pool,
-        { isConfigured: () => true, synchronizeOrderEditShipment: vi.fn() }, vi.fn(), () => new Date("2026-10-05T00:01:00Z"), () => true);
+        { isConfigured: () => true, synchronizeOrderEditShipment: vi.fn() }, vi.fn(), () => new Date("2026-10-05T00:01:00Z"));
       await enabledGateway.assertHeld(20, OP, snapshot);
       await enabledGateway.assertHeld(20, OP, snapshot);
       expect((await database.pool.query("SELECT warehouse_status,cancelled_at,on_hold,order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0])
@@ -1375,7 +1375,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       const { snapshot, now } = await seedRetiredProvider();
       const provider = vi.fn(async () => {});
       const enabledGateway = new OrderEditWarehouseGateway(database.pool,
-        { isConfigured: () => true, synchronizeOrderEditShipment: provider }, vi.fn(), () => now, () => true);
+        { isConfigured: () => true, synchronizeOrderEditShipment: provider }, vi.fn(), () => now);
       await enabledGateway.assertHeld(20, OP, snapshot);
       await enabledGateway.assertHeld(20, OP, snapshot);
       expect(provider.mock.calls).toEqual([
@@ -1402,7 +1402,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       vi.stubGlobal("fetch", request);
       try {
         const provider = createShipStationService(drizzle(database.pool), undefined, { sessionLock: async (_key, work) => work() });
-        const enabledGateway = new OrderEditWarehouseGateway(database.pool, provider, vi.fn(), () => now, () => true);
+        const enabledGateway = new OrderEditWarehouseGateway(database.pool, provider, vi.fn(), () => now);
         await enabledGateway.assertHeld(20, OP, snapshot);
         await enabledGateway.assertHeld(20, OP, snapshot);
         expect(request).toHaveBeenCalledTimes(6);
@@ -1421,7 +1421,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           if (failure === "concurrent_physical_change") await database.pool.query("UPDATE wms.orders SET started_at=now() WHERE id=10");
         });
         const enabledGateway = new OrderEditWarehouseGateway(database.pool,
-          { isConfigured: () => true, synchronizeOrderEditShipment: provider }, vi.fn(), () => now, () => true);
+          { isConfigured: () => true, synchronizeOrderEditShipment: provider }, vi.fn(), () => now);
         await expect(enabledGateway.assertHeld(20, OP, snapshot)).rejects.toThrow();
         expect((await database.pool.query("SELECT warehouse_status,on_hold,order_edit_operation_id FROM wms.orders WHERE id=10")).rows)
           .toEqual([{ warehouse_status: "cancelled", on_hold: 1, order_edit_operation_id: OP }]);
@@ -1439,7 +1439,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         if (kind === "source_cancelled") await database.pool.query("UPDATE oms.oms_orders SET status='cancelled',cancelled_at=now() WHERE id=20");
         if (kind === "refund_pending") snapshot.refunds[0].transactions[0].status = "PENDING";
         const enabledGateway = new OrderEditWarehouseGateway(database.pool,
-          { isConfigured: () => true, synchronizeOrderEditShipment: vi.fn() }, vi.fn(), () => new Date("2026-10-05T00:01:00Z"), () => true);
+          { isConfigured: () => true, synchronizeOrderEditShipment: vi.fn() }, vi.fn(), () => new Date("2026-10-05T00:01:00Z"));
         await expect(enabledGateway.assertHeld(20, OP, snapshot)).rejects.toThrow();
         expect((await database.pool.query("SELECT warehouse_status,order_edit_operation_id,on_hold FROM wms.orders WHERE id=10")).rows[0])
           .toMatchObject({ warehouse_status: "cancelled", on_hold: 1 });
@@ -1453,9 +1453,8 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       await database.pool.query(`INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,quantity,paid_quantity,
         authority_fulfillable_quantity,product_variant_id,authorization_status,paid_price_cents,retail_price_cents,total_price_cents)
         VALUES(31,20,'102',1,0,0,100,'seen',900,900,900)`);
-      // The default release cannot resume this historical operation on deployment alone.
-      expect(await new PostgresOrderEditStore(database.pool).pending(25, now)).toEqual([]);
-      const store = new PostgresOrderEditStore(database.pool, () => [36]);
+      // The ordinary Shopify worker admits the saved refund without rollout configuration.
+      const store = new PostgresOrderEditStore(database.pool);
       expect(await store.pending(25, now)).toEqual([OP]);
       const saveErrors: string[] = [];
       const save = store.save.bind(store);
@@ -1466,7 +1465,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       const inventory = inventoryProjection();
       inventory.claim!.claimId = "2";
       inventory.claim!.lines[0] = { ...inventory.claim!.lines[0], claimLineId: "2", lineKey: "item:41", orderItemId: 41 };
-      const projector = new OrderEditPaidProjection(database.pool, () => now, () => true);
+      const projector = new OrderEditPaidProjection(database.pool, () => now);
       let failed = false;
       const materialize = vi.fn(async () => {
         if (!failed) { failed = true; throw new Error("Synthetic interrupted synchronization"); }
@@ -1487,7 +1486,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         { getOrderReservationStatus: vi.fn(async () => inventory) }, (id, op, source) => projector.project(id, op, source));
       const enabledGateway = new OrderEditWarehouseGateway(database.pool,
         { isConfigured: () => true, synchronizeOrderEditShipment: vi.fn() },
-        (id, source, op) => synchronizer.synchronize(id, source, op), () => now, () => true);
+        (id, source, op) => synchronizer.synchronize(id, source, op), () => now);
       const synchronizeErrors: string[] = [];
       const reconcile = enabledGateway.reconcileAndRelease.bind(enabledGateway);
       vi.spyOn(enabledGateway, "reconcileAndRelease").mockImplementation(async (...args) => {
@@ -1498,7 +1497,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       h.provider.observeRefund.mockResolvedValue({ status: "succeeded", refundId: snapshot.refunds[0].id, evidence: snapshot.refunds[0] });
       h.provider.reconcileCommit.mockResolvedValue({ status: "applied", snapshot });
       const service = new OrderEditService(store, h.provider, enabledGateway, () => now, () => OP, h.report,
-        undefined, undefined, undefined, undefined, () => true);
+        undefined, undefined, undefined, undefined);
       await service.sweep();
       expect((await store.get(OP)).status).toBe("synchronizing");
       expect((await database.pool.query("SELECT warehouse_status,on_hold,order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0])

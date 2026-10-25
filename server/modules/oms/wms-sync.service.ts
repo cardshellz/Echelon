@@ -26,7 +26,7 @@ import {
   wmsOrderItems,
 } from "@shared/schema";
 import { logger } from "../../platform/observability/logger";
-import { channelMerchandiseAuthorityEnabled } from "./channel-merchandise-rollout";
+import { readChannelMerchandiseCapability, type ChannelMerchandiseCapabilityReader } from "./infrastructure/channel-merchandise-policy";
 import { isMerchandiseOrderCancelled } from "./domain/order-merchandise-state";
 import { assertChannelMerchandiseDispatchQuantities } from "./domain/channel-merchandise-dispatch";
 import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
@@ -504,7 +504,7 @@ export async function buildWmsLineItemFromOmsLine(
 
 interface WmsSyncServices {
   clock?: () => Date;
-  useChannelMerchandise?: (channelId: number) => boolean;
+  useChannelMerchandise?: ChannelMerchandiseCapabilityReader;
   readChannelMerchandise?: (input: { channelId: number; orderId: string }) => Promise<ShopifyMerchandiseSnapshot>;
   /** Exact channel-owned warehouse assignments, such as a Walmart ship node. */
   resolveChannelWarehouse?: (channelId: number) => Promise<{ warehouseId: number; warehouseType: string } | null>;
@@ -1522,10 +1522,16 @@ export class WmsSyncService {
     return "pending";
   }
 
+  private async usesChannelMerchandise(channelId: number): Promise<boolean> {
+    return this.services.useChannelMerchandise
+      ? this.services.useChannelMerchandise(channelId)
+      : readChannelMerchandiseCapability(db, channelId);
+  }
+
   private async resolveWarehouseStatus(omsOrder: typeof omsOrders.$inferSelect): Promise<string> {
     const legacy = this.determineWarehouseStatus(omsOrder);
     if (legacy !== "pending" || !["partially_refunded", "refunded"].includes(omsOrder.financialStatus ?? "")
-      || !(this.services.useChannelMerchandise ?? channelMerchandiseAuthorityEnabled)(omsOrder.channelId)
+      || !(await this.usesChannelMerchandise(omsOrder.channelId))
       || isMerchandiseOrderCancelled(omsOrder) || omsOrder.status === "refunded") return legacy;
     // New work after a completed refund needs positive channel/readiness and
     // prior payment proof. A financial status alone never promotes an order.
@@ -1612,10 +1618,7 @@ export class WmsSyncService {
       omsOrder.financialStatus ?? "",
     ).toLowerCase();
     if (
-      (
-        this.services.useChannelMerchandise ??
-        channelMerchandiseAuthorityEnabled
-      )(omsOrder.channelId)
+      await this.usesChannelMerchandise(omsOrder.channelId)
     ) {
       if (isMerchandiseOrderCancelled(omsOrder)) return true;
       if (
@@ -1623,7 +1626,7 @@ export class WmsSyncService {
         !["refunded", "voided"].includes(financialStatus)
       )
         return false;
-      // The scoped rollout never reactivates historical refunded work from a
+      // Provider capability never reactivates historical refunded work from a
       // status string alone. Read the originating channel and require its
       // complete quantities to agree with dated OMS facts and prior payment.
       const input = {
@@ -1708,10 +1711,7 @@ export class WmsSyncService {
   }): Promise<{ shipmentIdForPush: number | null; changedItems: number }> {
     const scoped =
       input.channelId !== undefined &&
-      (
-        this.services.useChannelMerchandise ??
-        channelMerchandiseAuthorityEnabled
-      )(input.channelId);
+      await this.usesChannelMerchandise(input.channelId);
     return db.transaction(async (tx: any) => {
       if (scoped)
         await tx.execute(

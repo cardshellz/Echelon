@@ -86,16 +86,17 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
   }
 
   it.each([
-    { enabled: false, channelId: 36, cash: "refunded", status: "processing", visible: false },
-    { enabled: true, channelId: 36, cash: "refunded", status: "processing", visible: true },
-    { enabled: true, channelId: 37, cash: "refunded", status: "processing", visible: false },
-    { enabled: true, channelId: 36, cash: "voided", status: "processing", visible: false },
-    { enabled: true, channelId: 36, cash: "paid", status: "cancelled", visible: false },
-    { enabled: true, channelId: 36, cash: "paid", status: "processing", visible: true },
-  ])("reads owed pick work independently of cash: enabled=$enabled channel=$channelId cash=$cash status=$status", async ({ enabled, channelId, cash, status, visible }) => {
-    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", String(enabled));
-    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_CHANNEL_IDS", "36");
+    { provider: "shopify", channelId: 36, cash: "refunded", status: "processing", visible: true },
+    { provider: "shopify", channelId: 37, cash: "refunded", status: "processing", visible: true },
+    { provider: "ebay", channelId: 38, cash: "refunded", status: "processing", visible: false },
+    { provider: "shopify", channelId: 36, cash: "voided", status: "processing", visible: false },
+    { provider: "shopify", channelId: 36, cash: "paid", status: "cancelled", visible: false },
+    { provider: "shopify", channelId: 36, cash: "paid", status: "processing", visible: true },
+  ])("reads owed pick work independently of cash: provider=$provider channel=$channelId cash=$cash status=$status", async ({ provider, channelId, cash, status, visible }) => {
+    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", "false");
     try {
+      await database.pool.query("INSERT INTO channels.channels(id,name,provider) VALUES($1,$2,$3)",
+        [channelId, "Synthetic quantity source", provider]);
       const [parent] = await orm.insert(schema.omsOrders).values({ channelId,
         externalOrderId: "separate-money-and-merchandise", orderedAt: new Date("2026-10-24T12:00:00Z"),
         status, financialStatus: cash }).returning();

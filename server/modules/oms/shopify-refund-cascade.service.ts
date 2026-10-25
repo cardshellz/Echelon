@@ -17,6 +17,7 @@ import { recordOmsWmsAuthorityCleanupAudit } from "../wms/oms-wms-authority-clea
 import { applyRefundAuthorityToWmsOrderItem } from "../wms/order-item-commands";
 import { createExpectedWmsReturn } from "../wms/expected-return-commands";
 import { observeChannelMerchandiseQuantity } from "./domain/channel-merchandise-quantity";
+import { channelMerchandiseDemandReduction } from "./domain/channel-merchandise-demand";
 import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
 
 const REFUND_LOCK_NAMESPACE = 918413;
@@ -52,7 +53,7 @@ interface RefundDemandReconciliationResult {
 }
 
 export interface ShopifyRefundCascadeHelpers {
-  /** Used only after explicit, channel-scoped activation. Observation never submits a command. */
+  /** Native merchandise evidence is required for item-affecting refunds. This is read-only. */
   readMerchandiseSnapshot?: () => Promise<ShopifyMerchandiseSnapshot>;
   resolveOmsOrder: (
     db: any,
@@ -88,7 +89,6 @@ export interface ShopifyRefundCascadeHelpers {
 
 export interface ShopifyRefundCascadeOptions {
   channelId: number;
-  useChannelQuantities?: boolean;
   sourceInboxId?: number | null;
   now?: Date;
   logPrefix?: string;
@@ -466,6 +466,7 @@ async function applyWmsLineState(
     useChannelQuantities: boolean;
     adjustments: ShopifyRefundLineAdjustment[];
     authorityLines: OmsLineStateRow[];
+    previousLines: ReadonlyMap<number, OmsLineStateRow>;
     now: Date;
   },
 ): Promise<{
@@ -600,7 +601,15 @@ async function applyWmsLineState(
         // Save the physical demand change, so retries after a committed WMS
         // leg can finish inventory reconciliation without deriving it again
         // from a financial refund. A different refund sees no second delta.
-        const reduced = Math.max(Number(row.quantity ?? 0) - nextQuantity, 0);
+        const previous = args.previousLines.get(omsOrderLineId);
+        if (!previous) throw new Error("The previous channel merchandise authority is unavailable.");
+        const reduced = channelMerchandiseDemandReduction({
+          warehouseQuantity: Number(row.quantity),
+          previousAuthorityQuantity: Number(previous.authority_fulfillable_quantity),
+          currentAuthorityQuantity: authorityFulfillableQuantity,
+          pickedQuantity,
+          fulfilledQuantity,
+        });
         const persisted = await tx.execute(sql`
           UPDATE oms.order_line_adjustments SET merchandise_reduction_quantity =
             COALESCE(merchandise_reduction_quantity, ${reduced})
@@ -1014,6 +1023,7 @@ async function applyInternalRefundState(
       useChannelQuantities: args.merchandise !== undefined,
       adjustments: args.adjustments,
       authorityLines: authorityResult.lines,
+      previousLines,
       now: args.now,
     });
     await refreshOmsLineMaterializedQuantities(tx, {
@@ -1359,20 +1369,16 @@ export async function applyShopifyRefundCascade(
     WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrder.id)})
        OR (source = 'shopify' AND source_table_id = ${String(omsOrder.id)})
     ORDER BY id
-    LIMIT ${options.useChannelQuantities ? 2 : 1}
+    LIMIT 2
   `);
-  if (options.useChannelQuantities && rowsOf(wmsOrderResult).length > 1)
+  if (rowsOf(wmsOrderResult).length > 1)
     throw Object.assign(new Error("A channel refund spans multiple warehouse partitions and requires quantity-allocation review."),
       { code: "CHANNEL_REFUND_PARTITIONS_REQUIRE_REVIEW", context: { omsOrderId: omsOrder.id } });
   const wmsOrderIdRaw = rowsOf<any>(wmsOrderResult)[0]?.id;
   const wmsOrderId = wmsOrderIdRaw == null ? null : Number(wmsOrderIdRaw);
 
-  // Activation is explicit and scoped by the composition caller. Disabled
-  // channels retain their existing behavior until staging acceptance/release.
-  const merchandise = options.useChannelQuantities
-    ? shopifyMerchandiseSnapshotSchema.parse(await helpers.readMerchandiseSnapshot?.()) : undefined;
-  if (options.useChannelQuantities && (!merchandise
-    || merchandise.orderId.replace(/^gid:\/\/shopify\/Order\//, "") !== String(payload.order_id)))
+  const merchandise = shopifyMerchandiseSnapshotSchema.parse(await helpers.readMerchandiseSnapshot?.());
+  if (merchandise.orderId.replace(/^gid:\/\/shopify\/Order\//, "") !== String(payload.order_id))
     throw new Error("A matching, complete channel merchandise snapshot is required.");
 
   const internal = await applyInternalRefundState(db, {
@@ -1397,7 +1403,7 @@ export async function applyShopifyRefundCascade(
   }
   if (internal.releaseTargets.length > 0) {
     const reconciliation = await helpers.reconcileRefundOrderDemand!({
-      ...(options.useChannelQuantities ? { requiredAuthority: "canonical" as const } : {}),
+      requiredAuthority: "canonical" as const,
       orderId: wmsOrderId!,
       sourceEventId: refundExternalId,
       releaseTargets: internal.releaseTargets,

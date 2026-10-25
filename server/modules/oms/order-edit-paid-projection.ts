@@ -17,7 +17,6 @@ import { wmsOmsOrderIdSql } from "./oms-wms-order-link.sql";
 import { buildOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 import { appendOrderEditAudit } from "../order-edits/infrastructure/order-edit-audit.writer";
 import { buildOrderEditPaidPricing } from "./order-edit-paid-pricing";
-import { channelMerchandiseAuthorityEnabled } from "./channel-merchandise-rollout";
 
 const integer = z.coerce.number().int().nonnegative().safe();
 const positive = integer.refine((value) => value > 0);
@@ -87,7 +86,6 @@ export class OrderEditPaidProjection {
   constructor(
     private readonly pool: Pool,
     private readonly clock: () => Date,
-    private readonly useChannelQuantities: (channelId: number) => boolean = channelMerchandiseAuthorityEnabled,
   ) {}
 
   async project(
@@ -314,8 +312,7 @@ export class OrderEditPaidProjection {
       // Exact native/quote matching above has already proven this line was
       // retired. Its warehouse authority will be zero, so historical refund
       // counters cannot regrant units or veto the verified replacement line.
-      const verifiedRetirement = this.useChannelQuantities(snapshot.channelId)
-        && target?.quantity === 0 && target.unfulfilledQuantity === 0;
+      const verifiedRetirement = target?.quantity === 0 && target.unfulfilledQuantity === 0;
       if (
         !target ||
         (!verifiedRetirement && (line.cancelled_quantity !== 0 || line.refunded_quantity !== 0)) ||

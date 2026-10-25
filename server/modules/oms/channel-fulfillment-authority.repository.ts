@@ -4,7 +4,7 @@ import { PackageAllocationSourceIdentityError } from "../shipping/package-alloca
 
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { channelMerchandiseAuthorityEnabled } from "./channel-merchandise-rollout";
+import { usesChannelMerchandiseQuantities } from "./domain/channel-merchandise-policy";
 import {
   canonicalCarrierValue,
   carrierIdentity,
@@ -697,7 +697,7 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
         refundedQuantity: row.refunded_quantity,
         refundCancelQuantity: row.refund_cancel_quantity,
         refundOtherQuantity: row.refund_other_quantity,
-        ...(row.channel_id != null && channelMerchandiseAuthorityEnabled(row.channel_id) && channelProvider === "shopify"
+        ...(usesChannelMerchandiseQuantities(channelProvider)
           && row.channel_current_quantity != null && row.channel_quantity_updated_at != null
           && Number.isFinite(new Date(row.channel_quantity_updated_at).getTime())
           ? { useChannelQuantities: true, channelCurrentQuantity: row.channel_current_quantity,

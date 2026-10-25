@@ -4,9 +4,13 @@ import type { ShopifyMerchandiseSnapshot } from "../../infrastructure/shopify-me
 
 const rows = vi.hoisted(() => ({
   lines: [] as Array<Record<string, unknown>>,
+  provider: "shopify",
 }));
 vi.mock("../../../../db", () => ({
-  db: { select: () => ({ from: () => ({ where: async () => rows.lines }) }) },
+  db: {
+    select: () => ({ from: () => ({ where: async () => rows.lines }) }),
+    execute: async () => ({ rows: [{ provider: rows.provider }] }),
+  },
 }));
 
 const VERSION = new Date("2026-10-24T12:00:00Z");
@@ -26,11 +30,11 @@ function native(): ShopifyMerchandiseSnapshot {
     ],
   };
 }
-function harness(enabled = true) {
+function harness(provider = "shopify") {
+  rows.provider = provider;
   const snapshot = native();
   const read = vi.fn(async () => snapshot);
   const service = new WmsSyncService({
-    useChannelMerchandise: () => enabled,
     readChannelMerchandise: read,
   } as unknown as ConstructorParameters<typeof WmsSyncService>[0]);
   const policy = service as unknown as {
@@ -53,7 +57,7 @@ function harness(enabled = true) {
     },
   };
 }
-describe("scoped WMS merchandise finality", () => {
+describe("provider-owned WMS merchandise finality", () => {
   it.each(["partially_refunded", "refunded"])("admits still-owed %s merchandise only with native quantity and prior dispatch permission", async financialStatus => {
     const h = harness(); h.order.financialStatus = financialStatus;
     rows.lines = [{ externalLineItemId: "101", paidQuantity: 1, channelCurrentQuantity: 1,
@@ -61,7 +65,7 @@ describe("scoped WMS merchandise finality", () => {
     expect(await h.policy.resolveWarehouseStatus(h.order)).toBe("ready");
     rows.lines[0].authorityFulfillableQuantity = 0;
     await expect(h.policy.resolveWarehouseStatus(h.order)).rejects.toMatchObject({ code: "CHANNEL_MERCHANDISE_INGEST_PENDING" });
-    expect(await harness(false).policy.resolveWarehouseStatus(h.order)).toBe("pending");
+    expect(await harness("ebay").policy.resolveWarehouseStatus(h.order)).toBe("pending");
   });
   beforeEach(() => {
     rows.lines = [
@@ -79,8 +83,8 @@ describe("scoped WMS merchandise finality", () => {
     expect(await h.policy.isFinalOrCancelledOmsOrder(h.order)).toBe(false);
     expect(h.read).toHaveBeenCalledWith({ channelId: 36, orderId: "1" });
   });
-  it("retains legacy financial finality until explicit activation", async () => {
-    const h = harness(false);
+  it("preserves the existing finality of providers without Shopify quantity evidence", async () => {
+    const h = harness("ebay");
     expect(await h.policy.isFinalOrCancelledOmsOrder(h.order)).toBe(true);
     expect(h.read).not.toHaveBeenCalled();
   });
