@@ -3,6 +3,7 @@ import { AddressInfo } from "net";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DropshipSelectionAtpService } from "../../application/dropship-selection-atp-service";
+import type { DropshipSelectionChangeService } from "../../application/dropship-selection-change-service";
 import { registerDropshipVendorCatalogRoutes } from "../../interfaces/http/dropship-vendor-catalog.routes";
 
 vi.mock("../../../../db", () => ({
@@ -27,7 +28,7 @@ describe("dropship vendor catalog routes", () => {
     await server?.close();
   });
 
-  it("replaces catalog selection rules for an authenticated vendor without step-up proof", async () => {
+  it("answers the retired rules save with 410 before any service call (PLAN-B v4.1 §8.4)", async () => {
     server = await startServer(buildApp(service as unknown as DropshipSelectionAtpService, true));
 
     const response = await jsonRequest(`${server.url}/api/dropship/catalog/selection-rules`, {
@@ -39,21 +40,9 @@ describe("dropship vendor catalog routes", () => {
       body: JSON.stringify({ rules: [] }),
     });
 
-    expect(response.status).toBe(201);
-    expect(response.body).toMatchObject({
-      revisionId: 77,
-      idempotentReplay: false,
-      rules: [],
-    });
-    expect(service.lastReplaceInput).toMatchObject({
-      vendorId: 10,
-      idempotencyKey: "catalog-selection-001",
-      actor: {
-        actorType: "vendor",
-        actorId: "member-1",
-      },
-      rules: [],
-    });
+    expect(response.status).toBe(410);
+    expect(response.body.error).toMatchObject({ code: "DROPSHIP_SELECTION_RULES_RETIRED" });
+    expect(service.vendorReads).toBe(0);
   });
 
   it("rejects catalog selection updates without an authenticated vendor session", async () => {
@@ -72,17 +61,21 @@ describe("dropship vendor catalog routes", () => {
     expect(response.body.error).toMatchObject({
       code: "DROPSHIP_AUTH_REQUIRED",
     });
-    expect(service.lastReplaceInput).toBeNull();
+    expect(service.vendorReads).toBe(0);
   });
 
   it("returns a safe retryable conflict when stock publication is finishing", async () => {
-    vi.spyOn(service, "replaceSelectionRules").mockRejectedValue(new Error("private SQL", {
-      cause: { code: "55P03", message: "PUBLICATION_SELECTION_BUSY" },
-    }));
-    server = await startServer(buildApp(service as unknown as DropshipSelectionAtpService, true));
-    const response = await jsonRequest(`${server.url}/api/dropship/catalog/selection-rules`, {
-      method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": "retry-selection" },
-      body: JSON.stringify({ rules: [] }),
+    const changes = {
+      preview: vi.fn(),
+      applyChange: vi.fn().mockRejectedValue(new Error("private SQL", {
+        cause: { code: "55P03", message: "PUBLICATION_SELECTION_BUSY" },
+      })),
+    };
+    server = await startServer(buildApp(service as unknown as DropshipSelectionAtpService, true, changes as unknown as DropshipSelectionChangeService));
+    const response = await jsonRequest(`${server.url}/api/dropship/catalog/selection/changes`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedRevisionId: null, add: { productVariantIds: [1] }, remove: { productVariantIds: [] },
+        idempotencyKey: "retry-selection", expectedEffectsHash: "0".repeat(64) }),
     });
     expect(response.status).toBe(409);
     expect(response.body).toEqual({ error: { code: "PUBLICATION_SELECTION_BUSY", retryable: true,
@@ -91,9 +84,10 @@ describe("dropship vendor catalog routes", () => {
 });
 
 class FakeDropshipSelectionAtpService {
-  lastReplaceInput: unknown = null;
+  vendorReads = 0;
 
   async requireVendorForMember(memberId: string) {
+    this.vendorReads += 1;
     return {
       vendorId: 10,
       memberId,
@@ -101,20 +95,12 @@ class FakeDropshipSelectionAtpService {
       entitlementStatus: "active",
     };
   }
-
-  async replaceSelectionRules(input: unknown) {
-    this.lastReplaceInput = input;
-    return {
-      revisionId: 77,
-      idempotentReplay: false,
-      rules: [],
-    };
-  }
 }
 
 function buildApp(
   service: DropshipSelectionAtpService,
   authenticated: boolean,
+  changes?: DropshipSelectionChangeService,
 ): express.Express {
   const app = express();
   app.use(express.json());
@@ -135,7 +121,7 @@ function buildApp(
       : {};
     next();
   });
-  registerDropshipVendorCatalogRoutes(app, service);
+  registerDropshipVendorCatalogRoutes(app, service, changes);
   return app;
 }
 

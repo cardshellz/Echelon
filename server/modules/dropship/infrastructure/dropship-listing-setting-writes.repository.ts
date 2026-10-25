@@ -144,8 +144,10 @@ export const SYSTEM_OWNER_SQL = `SELECT sc.vendor_id FROM dropship.dropship_stor
  * The same SHARE locks W9 and the content writer take: admin rule replacement
  * and selection phantoms wait, catalog reads do not. Exported for W1's apply
  * (plan PR 9, P37), which takes them after the store lock and the owner rows.
+ * The vendor's selection is its picks (PLAN-B v4.1 §9 row 11): a pick save
+ * waits until this write commits; the frozen rules table can no longer change.
  */
-export const LISTING_SELECTION_LOCK_SQL = `LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selection_rules,
+export const LISTING_SELECTION_LOCK_SQL = `LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selected_variants,
        dropship.dropship_vendor_variant_overrides, catalog.product_line_products IN SHARE MODE`;
 export const CATEGORY_LOCK_SQL = "SELECT id FROM catalog.product_categories WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
 export const PRODUCT_LOCK_SQL = "SELECT id FROM catalog.products WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
@@ -548,11 +550,11 @@ class WriteTransactionState {
     const target = { vendorId: scope.vendorId, storeConnectionId: scope.storeConnectionId };
     const contentTarget = { ...target, actorId: this.memberId };
     return {
-      vendorId: scope.vendorId,
+      // The selected-catalog reads, bound to the scope's vendor (its vendorId included).
+      ...selectedCatalogReaderForTransaction(client, scope.vendorId),
       storeConnectionId: scope.storeConnectionId,
       actor: scope.actor,
       requestKey: scope.requestKey,
-      ...selectedCatalogReaderForTransaction(client),
       loadProducts: async (productIds, options) => {
         this.assertOpen();
         if (options?.forUpdate === true) this.targetsTouched = true;

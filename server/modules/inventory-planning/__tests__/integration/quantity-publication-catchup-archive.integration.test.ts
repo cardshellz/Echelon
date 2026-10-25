@@ -558,8 +558,8 @@ dbDescribe.sequential("archived catch-up settlement through canonical mapping an
         VALUES(1,22,'ebay','live','managed_quantity_sync',true);
       INSERT INTO dropship.dropship_catalog_rules(id,scope_type,action,is_active,priority)
         VALUES(1,'catalog','include',true,0);
-      INSERT INTO dropship.dropship_vendor_selection_rules(id,vendor_id,scope_type,action,auto_connect_new_skus,auto_list_new_skus,is_active,priority)
-        VALUES(1,10,'catalog','include',true,true,true,0);`);
+      -- The vendor's picks: every catalog size, as the conversion turns a 'catalog' include (PLAN-B v4.1 §6 step 4).
+      INSERT INTO dropship.dropship_vendor_selected_variants(vendor_id,product_variant_id) SELECT 10, id FROM catalog.product_variants;`);
     await database.pool.query(`INSERT INTO dropship.dropship_vendor_listings
       (id,vendor_id,store_connection_id,product_variant_id,platform,status,external_listing_id,external_offer_id,updated_at)
       VALUES(1,10,22,$1,'ebay','active','dropship-archive-listing','dropship-archive-offer',$2)`, [target.variantId, NOW]);

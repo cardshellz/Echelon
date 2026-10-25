@@ -144,12 +144,12 @@ describe("PgDropshipVendorProvisioningRepository", () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it("counts only currently active include catalog rules for onboarding gates", async () => {
+  it("counts only currently active include catalog rules and the vendor's picks for onboarding gates", async () => {
     const release = vi.fn();
     const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({
       rows: [{
         admin_exposure_rule_count: "1",
-        vendor_selection_rule_count: "1",
+        vendor_selected_item_count: "3",
       }],
     }));
     const connect = vi.fn(async () => ({ query, release }));
@@ -162,11 +162,15 @@ describe("PgDropshipVendorProvisioningRepository", () => {
     expect(sql).toContain("action = 'include'");
     expect(sql).toContain("(starts_at IS NULL OR starts_at <= now())");
     expect(sql).toContain("(ends_at IS NULL OR ends_at > now())");
-    expect(sql).toContain("FROM dropship.dropship_vendor_selection_rules");
+    // One-time picks (PLAN-B v4.1 §9 row 7): the frozen rules are no longer the vendor's selection.
+    expect(sql).toContain("FROM dropship.dropship_vendor_selected_variants");
+    expect(sql).not.toContain("dropship.dropship_vendor_selection_rules");
     expect(query.mock.calls[0]?.[1]).toEqual([10]);
     expect(result).toEqual({
       adminExposureRuleCount: 1,
-      vendorSelectionRuleCount: 1,
+      vendorSelectedItemCount: 3,
+      // Kept one release with the same value (V17).
+      vendorSelectionRuleCount: 3,
     });
     expect(release).toHaveBeenCalledTimes(1);
   });
@@ -322,6 +326,7 @@ describe("DropshipVendorProvisioningService", () => {
     };
     repository.catalogSetupSummary = {
       adminExposureRuleCount: 2,
+      vendorSelectedItemCount: 0,
       vendorSelectionRuleCount: 0,
     };
     repository.walletSetupSummary = {
@@ -553,6 +558,7 @@ describe("DropshipVendorProvisioningService", () => {
     };
     repository.catalogSetupSummary = {
       adminExposureRuleCount: 2,
+      vendorSelectedItemCount: 1,
       vendorSelectionRuleCount: 1,
     };
     repository.walletSetupSummary = {
@@ -602,6 +608,7 @@ describe("DropshipVendorProvisioningService", () => {
     };
     repository.catalogSetupSummary = {
       adminExposureRuleCount: 2,
+      vendorSelectedItemCount: 1,
       vendorSelectionRuleCount: 1,
     };
     repository.walletSetupSummary = {
@@ -629,6 +636,37 @@ describe("DropshipVendorProvisioningService", () => {
       code: "DROPSHIP_VENDOR_ONBOARDING_ACTIVATED",
       context: { vendorId: 1, memberId: "member-1" },
     });
+  });
+
+  it("completes the selection gate from the vendor's picks alone: picks with no rules activate (PLAN-B v4.1 §9 row 7, TESTS-7)", async () => {
+    repository.vendor = makeVendorProfile({ status: "onboarding" });
+    repository.storeConnectionSummary = {
+      activeCount: 1, connectedCount: 1, launchReadyConnectedCount: 1, credentialAttentionCount: 0, needsAttentionCount: 0, totalCount: 1,
+    };
+    repository.walletSetupSummary = {
+      availableBalanceCents: 10000, pendingBalanceCents: 0, activeFundingMethodCount: 1, activeStripeFundingMethodCount: 1,
+      activeStripeCardFundingMethodCount: 1, activeUsdcBaseFundingMethodCount: 1, autoReloadEnabled: true, autoReloadFundingMethodId: 8,
+      autoReloadFundingMethodActive: true, autoReloadFundingMethodReady: true, autoReloadFundingMethodIsCard: true,
+    };
+    // Picks > 0, frozen rules 0 (an older field value that disagrees can only come from a fake: the repository sends one value).
+    repository.catalogSetupSummary = { adminExposureRuleCount: 2, vendorSelectedItemCount: 4, vendorSelectionRuleCount: 0 };
+
+    const picked = await service.getOnboardingState("member-1");
+    expect(picked.catalog.hasVendorSelection).toBe(true);
+    expect(picked.steps.find((step) => step.key === "catalog_selection")).toMatchObject({ status: "complete" });
+    await expect(service.activateOnboardingForMember("member-1")).resolves.toMatchObject({ vendor: { status: "active" } });
+
+    // No picks while frozen rules remain: the gate is incomplete and activation is refused.
+    repository.vendor = makeVendorProfile({ status: "onboarding" });
+    repository.lastActivationInput = null;
+    repository.catalogSetupSummary = { adminExposureRuleCount: 2, vendorSelectedItemCount: 0, vendorSelectionRuleCount: 3 };
+    const unpicked = await service.getOnboardingState("member-1");
+    expect(unpicked.catalog.hasVendorSelection).toBe(false);
+    expect(unpicked.steps.find((step) => step.key === "catalog_selection")).toMatchObject({ status: "incomplete" });
+    await expect(service.activateOnboardingForMember("member-1")).rejects.toMatchObject({
+      code: "DROPSHIP_ONBOARDING_INCOMPLETE", context: { incompleteRequiredSteps: ["catalog_selection"] },
+    });
+    expect(repository.lastActivationInput).toBeNull();
   });
 
   it("rejects onboarding activation when required launch gates are incomplete", async () => {
@@ -692,6 +730,7 @@ class FakeVendorProvisioningRepository implements DropshipVendorProvisioningRepo
   };
   catalogSetupSummary: DropshipCatalogSetupSummary = {
     adminExposureRuleCount: 0,
+    vendorSelectedItemCount: 0,
     vendorSelectionRuleCount: 0,
   };
   walletSetupSummary: DropshipWalletSetupSummary = {

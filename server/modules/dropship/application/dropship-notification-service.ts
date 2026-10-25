@@ -25,6 +25,10 @@ export interface DropshipLaunchNotificationPreferenceDefinition {
 
 export const DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES: DropshipLaunchNotificationPreferenceDefinition[] = [
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.AUTO_RELOAD_FAILED, critical: true },
+  // The new-items notice and the conversion notice (PLAN-B v4.1 §11.3, V41): not critical, so a vendor may mute
+  // them; a muted event stores nothing, and the jobs move their marks and states all the same.
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.CATALOG_NEW_ITEMS, critical: false },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.SELECTION_RULES_CONVERTED, critical: false },
   // Cost change notices are not critical here: the staff policy chooses their
   // channels (a critical event is forced onto both), and the policy alone
   // decides whether they go at all.
@@ -98,6 +102,11 @@ const markDropshipNotificationReadInputSchema = z.object({
   now: z.date(),
 }).strict();
 
+const listDropshipNotificationEventsByKeyInputSchema = z.object({
+  vendorId: positiveIdSchema,
+  idempotencyKey: idempotencyKeySchema,
+}).strict();
+
 const updateDropshipNotificationPreferenceInputSchema = z.object({
   vendorId: positiveIdSchema,
   eventType: eventTypeSchema,
@@ -111,6 +120,7 @@ const updateDropshipNotificationPreferenceInputSchema = z.object({
 export type SendDropshipNotificationServiceInput = z.infer<typeof sendDropshipNotificationInputSchema>;
 export type ListDropshipNotificationsInput = z.infer<typeof listDropshipNotificationsInputSchema>;
 export type MarkDropshipNotificationReadInput = z.infer<typeof markDropshipNotificationReadInputSchema>;
+export type ListDropshipNotificationEventsByKeyInput = z.infer<typeof listDropshipNotificationEventsByKeyInputSchema>;
 export type UpdateDropshipNotificationPreferenceInput = z.infer<typeof updateDropshipNotificationPreferenceInputSchema>;
 
 export interface DropshipNotificationEventRecord {
@@ -192,6 +202,8 @@ export interface DropshipNotificationRepository {
     deliveredAt: Date | null;
   }): Promise<DropshipNotificationEventRecord>;
   listEvents(input: ListDropshipNotificationsInput): Promise<DropshipNotificationListResult>;
+  /** The vendor's events stored under one idempotency key (every channel), read without a lock. */
+  listEventsByKey(input: ListDropshipNotificationEventsByKeyInput): Promise<DropshipNotificationEventRecord[]>;
   markRead(input: MarkDropshipNotificationReadInput): Promise<DropshipNotificationEventRecord>;
   listPreferences(vendorId: number): Promise<DropshipNotificationPreferenceRecord[]>;
   upsertPreference(
@@ -250,6 +262,21 @@ export class DropshipNotificationService {
       vendorId,
     }, "DROPSHIP_NOTIFICATION_INVALID_LIST");
     return this.deps.repository.listEvents(parsed);
+  }
+
+  /**
+   * The events stored under one key, every channel (PLAN-B v4.1 §11.3): the
+   * arrivals job looks today's key up before it sends, so a second tick of the
+   * same day moves its marks to what was emailed instead of sending again
+   * (FIDELITY-2). Read only; nothing stored means nothing was sent.
+   */
+  async listEventsByKey(input: unknown): Promise<DropshipNotificationEventRecord[]> {
+    const parsed = parseNotificationInput(
+      listDropshipNotificationEventsByKeyInputSchema,
+      input,
+      "DROPSHIP_NOTIFICATION_INVALID_LOOKUP",
+    );
+    return this.deps.repository.listEventsByKey(parsed);
   }
 
   async markReadForMember(memberId: string, notificationEventId: number): Promise<DropshipNotificationEventRecord> {

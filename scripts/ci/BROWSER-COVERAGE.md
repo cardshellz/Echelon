@@ -39,7 +39,8 @@ selection behavior as well.
 
 `dropship-browser-impact.mjs` selects groups declared in
 `dropship-browser-features.mjs`: catalog/listing settings, catalog at scale
-(choose, publish and end; step 1 plan S2-5), cost changes, wallet,
+(choose, publish and end; step 1 plan S2-5: PR A's publish spec and PR B's
+choose spec, one shard each), cost changes, wallet,
 orders, finance, onboarding, shipping estimates, shipping configuration, catalog
 conversions, page loading, and inventory opening. (The prices, content and
 policies/categories groups went with the older panels in Listing settings

@@ -1,29 +1,46 @@
 /**
- * Catalog step 1, "Choose what to sell" (step 1 stage 1, "The checkbox is the
- * choice"): the checkbox is the vendor's choice, checking or unchecking only
- * marks a change, and one "Save changes" sends every add and remove together.
- * Nothing changes on eBay before Save.
+ * Catalog step 1, "Choose what to sell", on one-time picks (step 1 plan S2-5,
+ * PR B; PLAN-B v4.1 §12.1): the checkbox is the vendor's choice, checking or
+ * unchecking only marks a change, and one "Save changes" sends every add and
+ * remove together as size ids. Nothing changes on eBay before Save, and
+ * nothing is ever added later by itself.
  *
  * This module holds the step's rules, with no React, no network and no clock:
- * - the answers the step reads (catalog page, selection rules), as Zod schemas;
- * - the change set (`reduceChooseChanges`): one mark per changed size;
- * - the row model (`chooseRowView`) and the header box (`shownTick`);
- * - what the bar says after a save (`ChooseBarOutcome`, `describeChooseMove`);
- * - the save builder (`buildChooseSelectionSave`): the vendor's saved rules,
- *   untouched except for the marked sizes, in the compact form the server
- *   stores and hashes exactly as the full form (see `toSelectionRuleInput`);
- * - the stops before sending (`chooseSaveBlock`): the server's 500-rule cap and
- *   its 100 KiB body limit;
- * - the stale check (`rulesFingerprint`, `sameRuleContent`), the error classes
- *   (`classifyChooseSaveError`) and the paging helpers.
+ * - the answers the step reads (a catalog page, with `picked` on every row),
+ *   as Zod schemas;
+ * - the change set (`reduceChooseChanges`): the ids to add, the ids to remove
+ *   and the head revision the changes were made on;
+ * - the row model (`chooseRowView`: the box and the How column from `picked`
+ *   and the reason, V24) and the header box (`shownTick`);
+ * - the room under the 10,000 cap (`chooseRoom`);
+ * - the bulk controls of §12.3: the "Check all N that match" line
+ *   (`chooseMatchLine`), each category's box (`chooseCategoryTicks`, from
+ *   what the page learned, `ChooseKnown`) and "Select everything"
+ *   (`chooseEverything`);
+ * - the save body (`chooseChangeBody`), the save question's lines
+ *   (`describeChooseConfirm`), the saved line (`describeChooseSaved`);
+ * - the error classes (`classifyChooseSaveError`, §12.4, §12.5, §14) and the
+ *   retry schedules the save runner follows;
+ * - the paging helpers.
  *
- * Stage 1 writes `variant` rules only: one-time picks (owner Q3). It never
- * writes a category, product line or catalog-wide rule, and never sends a
- * product line (owner Q2).
+ * It never sends a rule, a category name or a product line (owner Q2, Q3).
  */
 import { z } from "zod";
-import { DROPSHIP_CATALOG_READ_ERROR_CODES } from "@shared/dropship/vendor-catalog-reads";
-import { DropshipApiError } from "./dropship-ops-surface";
+import {
+  DROPSHIP_CATALOG_READ_ERROR_CODES,
+  dropshipCatalogReadSummarySchema,
+  type DropshipCatalogReadSummary,
+} from "@shared/dropship/vendor-catalog-reads";
+import {
+  MAX_SELECTION_CHANGE_IDS,
+  SELECTION_CHANGE_CAP,
+  SELECTION_CHANGE_ERROR_CODES,
+  type SelectionChangeAnswer,
+  type SelectionChangePreviewAnswer,
+  type SelectionChangePreviewRequest,
+} from "@shared/dropship/vendor-selection-changes";
+import { CATALOG_PAGE_CLIENT_VERSION } from "./dropship-catalog-publish";
+import { DROPSHIP_SITE_UPDATING_CODE, DropshipApiError } from "./dropship-ops-surface";
 import { CHOOSE_WORDS } from "./dropship-catalog-choose-words";
 
 /** The leave guard's id for step 1's unsaved changes; not a Listing settings id (`listing-settings:`). */
@@ -34,32 +51,66 @@ export const CHOOSE_PAGE_SIZE = 200;
 export const CHOOSE_MAX_ROWS_SHOWN = 1_000;
 /** Typing pauses this long before the list is searched, as step 2 does (LISTING_SETTINGS_SEARCH_DEBOUNCE_MS). */
 export const CHOOSE_SEARCH_PAUSE_MS = 300;
-/** The catalog read's `search` and `category` are 1..200 characters (dropship-selection-dtos.ts). */
+/** The catalog read's `search` is 1..200 characters (dropship-selection-dtos.ts). */
 export const CHOOSE_SEARCH_MAX_LENGTH = 200;
-/** The server's cap on rules in one save (`rules: z.array(...).max(500)`, dropship-selection-dtos.ts). Owner Q4 keeps it. */
-export const MAX_SELECTION_RULES = 500;
 /**
- * The global JSON body limit the save goes through (`GLOBAL_JSON_LIMIT_BYTES`,
- * rate-table-admin-body.middleware.ts); the route is not a bulk path. A body
- * above it is refused with 413 before the route runs.
+ * Ids on one side of one change: the server's `[0..10000]` per side (shared/dropship/vendor-selection-changes.ts),
+ * so a change set holds at most 20,000 ids. An action that would pass it is refused whole (`chooseActionOverLimit`).
  */
-export const SELECTION_SAVE_BODY_LIMIT_BYTES = 100 * 1024;
-/** The longest idempotency key the server accepts (`min(8).max(200)`); the size check measures with one this long. */
-export const SELECTION_SAVE_KEY_MAX_LENGTH = 200;
-/** One save is sent at most this many times, always with the same key and body. */
+export const CHOOSE_CHANGE_IDS_MAX = MAX_SELECTION_CHANGE_IDS;
+/** The most sizes a vendor may have selected; a change that grows past it is refused, removing always works (§7.4). */
+export const CHOOSE_SELECTION_CAP = SELECTION_CHANGE_CAP;
+
+// ---------------------------------------------------------------------------
+// The save's schedules (§12.4). Each send of one save carries the same key and body.
+// ---------------------------------------------------------------------------
+
+/** No answer, a 5xx, a 408 or a 429: one save is sent at most this many times, with these pauses between. */
 export const CHOOSE_SAVE_MAX_TRIES = 3;
-/** The pause before the second and third send. */
 export const CHOOSE_SAVE_BACKOFF_MS: readonly number[] = Object.freeze([1_000, 2_000]);
-/** Today's pick shapes (the step's former builder): an include outranks older broad rules, a keep-out outranks it. */
-export const PICK_INCLUDE_PRIORITY = 100;
-export const PICK_EXCLUDE_PRIORITY = 200;
-export const PICK_RULE_SOURCE = "portal_catalog";
+/** `PUBLICATION_SELECTION_BUSY`: after the first busy answer, one more send after each of these pauses, then `busy`. */
+export const CHOOSE_BUSY_BACKOFF_MS: readonly number[] = Object.freeze([2_000, 4_000, 8_000, 15_000, 15_000, 15_000]);
+/** Writes paused, an older dyno's answer (site updating, a 413 without its code): these pauses first… */
+export const CHOOSE_PAUSED_BACKOFF_MS: readonly number[] = Object.freeze([2_000, 4_000, 8_000]);
+/** …then one send every 15 s: longer than the server's `Retry-After: 5`, so the header need not be read. */
+export const CHOOSE_PAUSED_RETRY_MS = 15_000;
+/**
+ * How long the page keeps sending a paused save by itself, from the first paused answer, on the injected clock:
+ * the server's settle plus grace (NEW_VERSION_SETTLE_MS 300,000 + OLDER_PROCESS_GRACE_MS 120,000,
+ * server/modules/dropship/domain/catalog-code-version.ts; pinned equal by the requests test), so the pause of a
+ * release is always outlived (FIDELITY-7). Then `pausedStill`, the changes kept.
+ */
+export const PAUSED_RETRY_WINDOW_MS = 420_000;
+/**
+ * The bulk parser's body limit (DROPSHIP_BULK_JSON_LIMIT_BYTES, dropship-bulk-json.middleware.ts; pinned equal by
+ * the contract test). A 413 without its code for a body at most this large came from an older dyno's 100 KiB global
+ * parser (§12.5): transient, not "too large".
+ */
+export const CHOOSE_BULK_BODY_LIMIT_BYTES = 1024 * 1024;
+
+/**
+ * A backstop for a clock that does not move: the most sends one paused window takes on the schedule above (32: the
+ * first, three after the short pauses, then one per 15 s until 420 s have passed). With a moving clock the window
+ * ends the sends first or at the same send.
+ */
+export const CHOOSE_PAUSED_MAX_SENDS = 1 + CHOOSE_PAUSED_BACKOFF_MS.length
+  + Math.ceil((PAUSED_RETRY_WINDOW_MS - CHOOSE_PAUSED_BACKOFF_MS.reduce((sum, ms) => sum + ms, 0)) / CHOOSE_PAUSED_RETRY_MS);
+/** A save question asked again after the effects moved (§12.4 `effectsChanged`) at most this many times in one press. */
+export const CHOOSE_EFFECTS_REVIEWS_MAX = 3;
+
+/** The pause before paused retry `attempt` (0-based): 2 s, 4 s, 8 s, then 15 s each. */
+export function choosePausedDelayMs(attempt: number): number {
+  return CHOOSE_PAUSED_BACKOFF_MS[Math.max(0, attempt)] ?? CHOOSE_PAUSED_RETRY_MS;
+}
 
 // ---------------------------------------------------------------------------
 // What the step reads
 // ---------------------------------------------------------------------------
 
-/** The server's reasons, exactly (`DropshipVendorCatalogSelectionReason`, domain/vendor-selection.ts). */
+/**
+ * The server's reasons, exactly (`DropshipVendorCatalogSelectionReason`, domain/vendor-selection.ts). B's server
+ * never answers `excluded_by_vendor_rule` (a keep-out reads as not picked, §7.1); the union keeps it.
+ */
 export const chooseSelectionReasonSchema = z.enum([
   "selected",
   "not_exposed_by_admin",
@@ -69,7 +120,7 @@ export const chooseSelectionReasonSchema = z.enum([
 ]);
 export type ChooseSelectionReason = z.infer<typeof chooseSelectionReasonSchema>;
 
-const ruleIdSchema = z.number().int().positive();
+const idSchema = z.number().int().positive();
 const countSchema = z.number().int().nonnegative();
 
 /** The server's listing tiers, exactly (`DROPSHIP_LISTING_TIERS`, domain/listing-tiers.ts); pinned by the server contract test. */
@@ -79,24 +130,26 @@ export const chooseListingTierReasonSchema = z.enum(["autopay_off", "reserve_bel
 
 /**
  * A catalog row as step 1 reads it. Unknown fields are dropped, so the
- * product-line fields the server still sends never reach the table (owner Q2).
+ * product-line fields and the rule ids the server still sends for older tabs
+ * never reach the table (owner Q2). `picked` is required: a row from an older
+ * dyno has none, so its page is "site updating" and read again (V11).
  */
 export const chooseCatalogRowSchema = z.object({
-  productId: ruleIdSchema,
-  productVariantId: ruleIdSchema,
+  productId: idSchema,
+  productVariantId: idSchema,
   productSku: z.string().nullable(),
   productName: z.string(),
   variantSku: z.string().nullable(),
   variantName: z.string(),
   category: z.string().nullable(),
+  /** `catalog.products.category_id`: what the categories read and the Category filter key on (V40). */
+  categoryId: idSchema.nullable(),
   selectionDecision: z.object({
     selected: z.boolean(),
     reason: chooseSelectionReasonSchema,
     marketplaceQuantity: countSchema,
-    // The rules that matched this size when the row was read (domain/vendor-selection.ts): the How column and the
-    // builder reason from them.
-    includeRuleIds: z.array(ruleIdSchema),
-    excludeRuleIds: z.array(ruleIdSchema),
+    /** The vendor's saved pick of this size (V24): the box's saved state. */
+    picked: z.boolean(),
   }),
   listingTier: z.object({
     tier: chooseListingTierNameSchema,
@@ -109,226 +162,148 @@ export const chooseCatalogRowSchema = z.object({
 });
 export type ChooseCatalogRow = z.infer<typeof chooseCatalogRowSchema>;
 
-export const chooseCategoryFacetSchema = z.object({ category: z.string(), label: z.string(), rowCount: countSchema });
-export type ChooseCategoryFacet = z.infer<typeof chooseCategoryFacetSchema>;
-
-/** One page of `GET /api/dropship/catalog`. The product and product-line facets are dropped (owner Q2; no Product menu). */
+/**
+ * One page of `GET /api/dropship/catalog` with `includeFacets=false`: the
+ * facets (null) are dropped, the categories come from their own read (V40),
+ * and the filter's `summary` is required (VCR:53-56).
+ */
 export const chooseCatalogPageSchema = z.object({
   rows: z.array(chooseCatalogRowSchema),
   total: countSchema,
   page: z.number().int().min(1),
   limit: z.number().int().min(1),
-  facets: z.object({ categories: z.array(chooseCategoryFacetSchema) }),
+  summary: dropshipCatalogReadSummarySchema,
 });
 export type ChooseCatalogPage = z.infer<typeof chooseCatalogPageSchema>;
-
-/** The server's scopes and actions (`dropshipVendorSelectionScopeSchema`, `…ActionSchema`, dropship-selection-dtos.ts); pinned likewise. */
-export const chooseSelectionScopeSchema = z.enum(["catalog", "product_line", "category", "product", "variant"]);
-export const chooseSelectionActionSchema = z.enum(["include", "exclude"]);
-
-/** One saved rule as `GET /api/dropship/catalog/selection-rules` returns it (columns NOT NULL except metadata, migration 0086). */
-export const chooseSelectionRuleSchema = z.object({
-  id: ruleIdSchema,
-  revisionId: z.number().int().nullable().optional(),
-  scopeType: chooseSelectionScopeSchema,
-  action: chooseSelectionActionSchema,
-  productLineId: ruleIdSchema.nullable().optional(),
-  productId: ruleIdSchema.nullable().optional(),
-  productVariantId: ruleIdSchema.nullable().optional(),
-  category: z.string().nullable().optional(),
-  autoConnectNewSkus: z.boolean(),
-  autoListNewSkus: z.boolean(),
-  priority: z.number().int(),
-  metadata: z.record(z.unknown()).nullable().optional(),
-  isActive: z.boolean(),
-});
-export type ChooseSelectionRule = z.infer<typeof chooseSelectionRuleSchema>;
-
-export const chooseSelectionRulesResponseSchema = z.object({ rules: z.array(chooseSelectionRuleSchema) });
-export type ChooseSelectionRulesResponse = z.infer<typeof chooseSelectionRulesResponseSchema>;
-
-/** A rule as the save sends it: only its one target, no ids (`replaceDropshipVendorSelectionRuleSchema`). */
-export interface ChooseRuleInput {
-  scopeType: ChooseSelectionRule["scopeType"];
-  action: ChooseSelectionRule["action"];
-  productLineId?: number;
-  productId?: number;
-  productVariantId?: number;
-  category?: string;
-  autoConnectNewSkus: boolean;
-  autoListNewSkus: boolean;
-  priority: number;
-  metadata: Record<string, unknown>;
-}
 
 // ---------------------------------------------------------------------------
 // The change set
 // ---------------------------------------------------------------------------
 
-export type ChooseTarget = "selected" | "not_selected";
-
-/** The row's saved decision when the change was marked: what the builder reasons from. */
-export interface ChooseBasis {
-  reason: ChooseSelectionReason;
-  includeRuleIds: readonly number[];
-  excludeRuleIds: readonly number[];
-}
-
-export interface ChooseMark {
-  productVariantId: number;
-  to: ChooseTarget;
-  basis: ChooseBasis;
-}
-
 export interface ChooseChanges {
-  /** One per changed size, ascending by productVariantId; never a mark equal to the saved state. */
-  marks: readonly ChooseMark[];
-  /** `rulesFingerprint` of the rules shown when the first mark was made; null with no marks. */
-  baseFingerprint: string | null;
+  /** Ids to check (picked by the save), ascending when serialised. Never shares an id with `remove`. */
+  add: ReadonlySet<number>;
+  /** Ids to uncheck. */
+  remove: ReadonlySet<number>;
+  /** The head selection revision the changes were made on (the save's `expectedRevisionId`); null before any save. */
+  baseRevisionId: number | null;
 }
 
-/** The rules the page shows: their fingerprint and the rules by id (own pick vs older rule). */
-export interface ChooseRulesView {
-  fingerprint: string;
-  byId: ReadonlyMap<number, ChooseSelectionRule>;
+/** A row as a "check all shown" press sees it: its saved state and whether its box can change. */
+export interface ChooseShownRow {
+  productVariantId: number;
+  savedChecked: boolean;
+  changeable: boolean;
 }
 
 export type ChooseChangesAction =
-  | { type: "toggle"; row: ChooseCatalogRow; rules: ChooseRulesView }
-  | { type: "setShown"; rows: readonly ChooseCatalogRow[]; checked: boolean; rules: ChooseRulesView }
-  | { type: "reconcile"; rows: readonly ChooseCatalogRow[]; rules: ChooseRulesView | null }
+  /** One box: the vendor flips what it shows. */
+  | { type: "toggle"; productVariantId: number; savedChecked: boolean }
+  /** The header box: every changeable row shown to `checked`. */
+  | { type: "setShown"; rows: readonly ChooseShownRow[]; checked: boolean }
   /**
-   * The rules moved (another tab, or an earlier save of ours whose answer was lost). `committedMarksKey` is that earlier
-   * save's `chooseMarksKey` when it went through: those marks are saved, so they go whether their rows are loaded or not.
+   * An `idsOnly` answer ("Check all N", a category box, "Select everything"): `checked` adds every not-selected id and
+   * clears the pending removes of the selected ones; unchecked the reverse. A null list (over 10,000, VCR:65-69)
+   * leaves the other side's pending changes as they are.
    */
-  | { type: "rebase"; rows: readonly ChooseCatalogRow[]; rules: ChooseRulesView; committedMarksKey?: string }
+  | { type: "applyIds"; selectedIds: readonly number[] | null; notSelectedIds: readonly number[] | null; checked: boolean }
+  /** The head revision the page now counts from (another tab's save, the first summary read, this page's save); the changes stay. */
+  | { type: "rebase"; revisionId: number | null }
   | { type: "undo" }
   | { type: "saved" };
 
-export const EMPTY_CHOOSE_CHANGES: ChooseChanges = Object.freeze({ marks: Object.freeze([]) as readonly ChooseMark[], baseFingerprint: null });
+const NO_IDS: ReadonlySet<number> = new Set<number>();
 
-/** The view of the rules the page holds: active rules only (the read returns active rules; a stray inactive one never counts). */
-export function chooseRulesView(rules: readonly ChooseSelectionRule[]): ChooseRulesView {
-  const active = rules.filter((rule) => rule.isActive !== false);
-  return { fingerprint: rulesFingerprint(active), byId: new Map(active.map((rule) => [rule.id, rule])) };
+export const EMPTY_CHOOSE_CHANGES: ChooseChanges = Object.freeze({ add: NO_IDS, remove: NO_IDS, baseRevisionId: null });
+
+/** True with no pending add or remove. */
+export function chooseChangesEmpty(changes: Pick<ChooseChanges, "add" | "remove">): boolean {
+  return changes.add.size === 0 && changes.remove.size === 0;
 }
 
-function isOwnPick(rule: Pick<ChooseSelectionRule, "scopeType" | "productVariantId">, productVariantId: number): boolean {
-  return rule.scopeType === "variant" && rule.productVariantId === productVariantId;
+/** Copies made on first write, so an action that changes nothing allocates nothing and returns its input. */
+class ChangeDraft {
+  private add: Set<number> | null = null;
+  private remove: Set<number> | null = null;
+  constructor(private readonly base: ChooseChanges) {}
+
+  private addSet(): Set<number> { return (this.add ??= new Set(this.base.add)); }
+  private removeSet(): Set<number> { return (this.remove ??= new Set(this.base.remove)); }
+  private hasAdd(id: number): boolean { return (this.add ?? this.base.add).has(id); }
+  private hasRemove(id: number): boolean { return (this.remove ?? this.base.remove).has(id); }
+
+  /** The id ends up in `add` (and not in `remove`). */
+  toAdd(id: number): void {
+    if (this.hasRemove(id)) this.removeSet().delete(id);
+    if (!this.hasAdd(id)) this.addSet().add(id);
+  }
+
+  /** The id ends up in `remove` (and not in `add`). */
+  toRemove(id: number): void {
+    if (this.hasAdd(id)) this.addSet().delete(id);
+    if (!this.hasRemove(id)) this.removeSet().add(id);
+  }
+
+  /** The id has no pending change. */
+  clear(id: number): void {
+    if (this.hasAdd(id)) this.addSet().delete(id);
+    if (this.hasRemove(id)) this.removeSet().delete(id);
+  }
+
+  /** The box's state now: a pending change, else the saved state. */
+  shown(id: number, savedChecked: boolean): boolean {
+    if (this.hasAdd(id)) return true;
+    if (this.hasRemove(id)) return false;
+    return savedChecked;
+  }
+
+  /** The box to `checked`: a change only where it differs from the saved state. */
+  setTo(id: number, checked: boolean, savedChecked: boolean): void {
+    if (checked === savedChecked) this.clear(id);
+    else if (checked) this.toAdd(id);
+    else this.toRemove(id);
+  }
+
+  result(): ChooseChanges {
+    if (this.add === null && this.remove === null) return this.base;
+    return { add: this.add ?? this.base.add, remove: this.remove ?? this.base.remove, baseRevisionId: this.base.baseRevisionId };
+  }
 }
 
-/**
- * A size turned off for the vendor whose matching includes hold their own pick of it. The server checks the override
- * only after an include matched (domain/vendor-selection.ts), so the pick stays saved, counts toward the cap, and
- * selects the size again once the override is lifted: it is the vendor's choice, and the box shows and removes it
- * (verify V6).
- */
-function isTurnedOffOwnPick(row: ChooseCatalogRow, rulesById: ReadonlyMap<number, ChooseSelectionRule>): boolean {
-  return row.selectionDecision.reason === "disabled_by_vendor_override" && row.selectionDecision.includeRuleIds.some((id) => {
-    const rule = rulesById.get(id);
-    return rule !== undefined && rule.action === "include" && isOwnPick(rule, row.productVariantId);
-  });
-}
-
-/**
- * The box's saved state: checked when the size is selected, and when it is turned off for the vendor while their own
- * pick of it is saved (the How words say it can't be sold now). With the rules not known, selected only.
- */
-function savedTarget(row: ChooseCatalogRow, rulesById: ReadonlyMap<number, ChooseSelectionRule> | null): ChooseTarget {
-  if (row.selectionDecision.reason === "selected") return "selected";
-  return rulesById !== null && isTurnedOffOwnPick(row, rulesById) ? "selected" : "not_selected";
-}
-
-/**
- * Whether the vendor can change this row with its box. A size Card Shellz no
- * longer offers, or one an older broad rule keeps out, cannot be: exclude
- * always wins (domain/vendor-selection.ts), so a pick could not select it. A
- * size turned off for them can only lose their own pick of it (remove only:
- * its box is checked, see `savedTarget`); with no own pick it cannot be
- * changed. An exclusion whose rules are not all in `rulesById` (the row was
- * read under other rules) counts as changeable; the builder then treats its
- * basis as not fresh.
- */
-export function isChangeableRow(row: ChooseCatalogRow, rulesById: ReadonlyMap<number, ChooseSelectionRule>): boolean {
-  const { reason, excludeRuleIds } = row.selectionDecision;
-  if (reason === "selected" || reason === "missing_vendor_include_rule") return true;
-  if (reason === "disabled_by_vendor_override") return isTurnedOffOwnPick(row, rulesById);
-  if (reason !== "excluded_by_vendor_rule") return false;
-  return excludeRuleIds.every((id) => {
-    const rule = rulesById.get(id);
-    return rule === undefined || isOwnPick(rule, row.productVariantId);
-  });
-}
-
-function basisOf(row: ChooseCatalogRow): ChooseBasis {
-  return {
-    reason: row.selectionDecision.reason,
-    includeRuleIds: [...row.selectionDecision.includeRuleIds],
-    excludeRuleIds: [...row.selectionDecision.excludeRuleIds],
-  };
-}
-
-function sameBasis(left: ChooseBasis, right: ChooseBasis): boolean {
-  return left.reason === right.reason
-    && sameNumbers(left.includeRuleIds, right.includeRuleIds)
-    && sameNumbers(left.excludeRuleIds, right.excludeRuleIds);
-}
-
-function sameNumbers(left: readonly number[], right: readonly number[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-/** New marks sorted by size, with the fingerprint rule: set on 0 → 1, kept while marks remain, cleared at 0. */
-function withMarks(changes: ChooseChanges, marks: ChooseMark[], fingerprint: string | null): ChooseChanges {
-  if (marks.length === 0) return changes.marks.length === 0 ? changes : EMPTY_CHOOSE_CHANGES;
-  marks.sort((left, right) => left.productVariantId - right.productVariantId);
-  return { marks, baseFingerprint: changes.marks.length === 0 ? fingerprint : changes.baseFingerprint };
-}
-
-/**
- * Step 1's change set. Pure: never mutates its input, and returns the same
- * object when nothing changes (so a reload that changes nothing re-renders
- * nothing).
- */
-export function reduceChooseChanges(changes: ChooseChanges, action: ChooseChangesAction): ChooseChanges {
+/** The change set an action leads to, before the limit is checked. */
+function applyChooseAction(changes: ChooseChanges, action: ChooseChangesAction): ChooseChanges {
   switch (action.type) {
     case "toggle": {
-      const { row, rules } = action;
-      if (!isChangeableRow(row, rules.byId)) return changes;
-      const existing = changes.marks.find((mark) => mark.productVariantId === row.productVariantId);
-      const marks = changes.marks.filter((mark) => mark.productVariantId !== row.productVariantId);
-      if (!existing) {
-        marks.push({ productVariantId: row.productVariantId, to: savedTarget(row, rules.byId) === "selected" ? "not_selected" : "selected", basis: basisOf(row) });
-      }
-      return withMarks(changes, marks, rules.fingerprint);
+      const draft = new ChangeDraft(changes);
+      draft.setTo(action.productVariantId, !draft.shown(action.productVariantId, action.savedChecked), action.savedChecked);
+      return draft.result();
     }
     case "setShown": {
-      const target: ChooseTarget = action.checked ? "selected" : "not_selected";
-      const byId = new Map(changes.marks.map((mark) => [mark.productVariantId, mark]));
-      let changed = false;
+      const draft = new ChangeDraft(changes);
       for (const row of action.rows) {
-        if (!isChangeableRow(row, action.rules.byId)) continue;
-        const existing = byId.get(row.productVariantId);
-        if (savedTarget(row, action.rules.byId) === target) {
-          if (existing) { byId.delete(row.productVariantId); changed = true; }
-        } else if (!existing || existing.to !== target) {
-          byId.set(row.productVariantId, { productVariantId: row.productVariantId, to: target, basis: basisOf(row) });
-          changed = true;
-        }
+        if (row.changeable) draft.setTo(row.productVariantId, action.checked, row.savedChecked);
       }
-      return changed ? withMarks(changes, Array.from(byId.values()), action.rules.fingerprint) : changes;
+      return draft.result();
     }
-    case "reconcile":
-      return reconcileMarks(changes, action.rows, action.rules);
-    case "rebase": {
-      const reconciled = reconcileMarks(withoutCommitted(changes, action.committedMarksKey), action.rows, action.rules);
-      if (reconciled.marks.length === 0) return reconciled;
-      if (reconciled.baseFingerprint === action.rules.fingerprint) return reconciled;
-      return { marks: reconciled.marks, baseFingerprint: action.rules.fingerprint };
+    case "applyIds": {
+      const draft = new ChangeDraft(changes);
+      // The ids whose saved state is the target lose their pending change; the others get one.
+      const toTarget = action.checked ? action.notSelectedIds : action.selectedIds;
+      const atTarget = action.checked ? action.selectedIds : action.notSelectedIds;
+      for (const id of toTarget ?? []) {
+        if (action.checked) draft.toAdd(id);
+        else draft.toRemove(id);
+      }
+      for (const id of atTarget ?? []) draft.clear(id);
+      return draft.result();
     }
+    case "rebase":
+      return action.revisionId === changes.baseRevisionId ? changes : { ...changes, baseRevisionId: action.revisionId };
     case "undo":
     case "saved":
-      return changes.marks.length === 0 && changes.baseFingerprint === null ? changes : EMPTY_CHOOSE_CHANGES;
+      // The base stays: after a save the page rebases to the save's own revision, and adopts a newer head once its
+      // summary read lands (`chooseAdoptsHead`, forward only).
+      return chooseChangesEmpty(changes) ? changes : { add: NO_IDS, remove: NO_IDS, baseRevisionId: changes.baseRevisionId };
     default: {
       const unknownAction: never = action;
       throw new Error(`Unknown catalog choose action: ${JSON.stringify(unknownAction)}`);
@@ -336,129 +311,76 @@ export function reduceChooseChanges(changes: ChooseChanges, action: ChooseChange
   }
 }
 
-/** The marks without those an earlier save sent and committed (`"id:to"` in `committedMarksKey`). */
-function withoutCommitted(changes: ChooseChanges, committedMarksKey: string | undefined): ChooseChanges {
-  if (!committedMarksKey || changes.marks.length === 0) return changes;
-  const committed = new Set(committedMarksKey.split(","));
-  const marks = changes.marks.filter((mark) => !committed.has(`${mark.productVariantId}:${mark.to}`));
-  if (marks.length === changes.marks.length) return changes;
-  return marks.length === 0 ? EMPTY_CHOOSE_CHANGES : { marks, baseFingerprint: changes.baseFingerprint };
+function overLimit(changes: Pick<ChooseChanges, "add" | "remove">): boolean {
+  return changes.add.size > CHOOSE_CHANGE_IDS_MAX || changes.remove.size > CHOOSE_CHANGE_IDS_MAX;
 }
 
 /**
- * An add whose basis names an older broad keep-out the rules now hold: exclude always wins, so no save could apply it
- * (the builder refuses it). The row may have been read under rules that did not hold that keep-out yet.
+ * The side counts an action would leave when it passes CHOOSE_CHANGE_IDS_MAX on either side (the reducer then
+ * refuses it whole, so the page says `tooManyMatch` instead), or null when it fits.
  */
-function keptOutByOlderRule(mark: ChooseMark, rulesById: ReadonlyMap<number, ChooseSelectionRule>): boolean {
-  return mark.to === "selected" && mark.basis.excludeRuleIds.some((id) => {
-    const rule = rulesById.get(id);
-    return rule !== undefined && !isOwnPick(rule, mark.productVariantId);
-  });
+export function chooseActionOverLimit(changes: ChooseChanges, action: ChooseChangesAction): { add: number; remove: number } | null {
+  const next = applyChooseAction(changes, action);
+  return overLimit(next) ? { add: next.add.size, remove: next.remove.size } : null;
 }
 
 /**
- * Rows read again: each loaded row's mark is dropped when the row now reads
- * as the mark wants (saved here or in another tab) or when it can no longer be
- * changed (turned off with no own pick to remove, or kept out by an older
- * broad rule: no save could apply it); otherwise its basis is refreshed from
- * the row. With the rules not known, a turned-off row counts as unchangeable. A mark whose row is not
- * loaded stays as it is, unless the rules now show its add can never apply
- * (review MC8: it would otherwise keep Save refused with nothing on screen to
- * say which change is stuck).
+ * Step 1's change set. Pure: never mutates its input (its sets are copied on
+ * the first write), returns the same object when nothing changes (so a press
+ * that changes nothing re-renders nothing), and refuses whole an action that
+ * would hold more than CHOOSE_CHANGE_IDS_MAX ids on a side.
  */
-function reconcileMarks(changes: ChooseChanges, rows: readonly ChooseCatalogRow[], rules: ChooseRulesView | null): ChooseChanges {
-  if (changes.marks.length === 0) return changes;
-  const rowsById = new Map(rows.map((row) => [row.productVariantId, row]));
-  let changed = false;
-  const marks: ChooseMark[] = [];
-  for (const mark of changes.marks) {
-    const row = rowsById.get(mark.productVariantId);
-    if (!row) {
-      if (rules !== null && keptOutByOlderRule(mark, rules.byId)) { changed = true; continue; }
-      marks.push(mark);
-      continue;
-    }
-    const byId = rules?.byId ?? null;
-    const unchangeable = row.selectionDecision.reason === "not_exposed_by_admin"
-      || (byId !== null ? !isChangeableRow(row, byId) : row.selectionDecision.reason === "disabled_by_vendor_override");
-    if (savedTarget(row, byId) === mark.to || unchangeable) { changed = true; continue; }
-    const basis = basisOf(row);
-    if (sameBasis(basis, mark.basis)) { marks.push(mark); continue; }
-    marks.push({ ...mark, basis });
-    changed = true;
-  }
-  if (!changed) return changes;
-  return marks.length === 0 ? EMPTY_CHOOSE_CHANGES : { marks, baseFingerprint: changes.baseFingerprint };
+export function reduceChooseChanges(changes: ChooseChanges, action: ChooseChangesAction): ChooseChanges {
+  const next = applyChooseAction(changes, action);
+  return next !== changes && overLimit(next) ? changes : next;
 }
 
 /**
- * What a save did, from the rows read again after it (review MC4, CT3): a mark
- * whose reloaded row reads as marked took; one whose row still reads otherwise
- * did not (turned off for the vendor, or an older include that still selects
- * it), and its row's How words say why. A mark whose row is not loaded, or
- * every mark when the rows couldn't be read again (`rowsAfter` null), counts
- * as sent: its rule was saved, but its effect is not checked here. "Took" is
- * about selling: an add took when the size now reads selected (a pick on a
- * size turned off for the vendor is saved but did not take), a remove when it
- * no longer does.
+ * True when `headRevisionId` is newer than `baseRevisionId`, or is the first head known (base null). Revision ids are
+ * serial and the head is the vendor's newest revision, so a head only moves forward: an older head is a count read
+ * before the base was set (a cached summary while it is read again after this page's own save; review round 1 CLI-4).
  */
-export function chooseSaveResult(
-  marks: readonly ChooseMark[],
-  rowsAfter: readonly ChooseCatalogRow[] | null,
-): { add: number; remove: number; notTaken: number } {
-  const rowsById = new Map((rowsAfter ?? []).map((row) => [row.productVariantId, row]));
-  let add = 0;
-  let remove = 0;
-  let notTaken = 0;
-  for (const mark of marks) {
-    const row = rowsById.get(mark.productVariantId);
-    const sellsNow = row?.selectionDecision.reason === "selected";
-    if (row && sellsNow !== (mark.to === "selected")) notTaken += 1;
-    else if (mark.to === "selected") add += 1;
-    else remove += 1;
-  }
-  return { add, remove, notTaken };
+export function chooseHeadMovedPast(baseRevisionId: number | null, headRevisionId: number | null): boolean {
+  return headRevisionId !== null && (baseRevisionId === null || headRevisionId > baseRevisionId);
 }
-
-/** What the bar says after a save, until the next change. `notTaken`: saved changes whose rows still don't read as marked. */
-export type ChooseBarOutcome =
-  | { kind: "saved"; add: number; remove: number; notTaken: number }
-  /** Good news with nothing left to do, in the status line (verify V1). */
-  | { kind: "info"; message: string }
-  /** `reload`: the bar offers Reload beside the words (a save refused because this page is out of date, §4.9 item 2). */
-  | { kind: "error"; message: string; reload?: true };
 
 /**
- * The bar after a press that found the saved rules moved: an earlier save of
- * ours whose answer was lost went through (`committedEarlier`), or another tab
- * saved (`stale`); the marks were then rebased on the rules read again. Marks
- * left: the vendor reviews them and saves again. None left: nothing failed, so
- * it is never an error (verify V1): our earlier save is told as a save, with
- * what took; another tab's save that already matches is told as such.
+ * True when the page should count from `headRevisionId`: no pending change, and the head moved past the base. Never
+ * backwards: after a save the base is the save's own revision while the count may still say the one before.
  */
-export function describeChooseMove(
-  moved: "committedEarlier" | "stale",
-  marksLeft: number,
-  sent: readonly ChooseMark[],
-  rowsAfter: readonly ChooseCatalogRow[] | null,
-): ChooseBarOutcome {
-  if (marksLeft > 0) return { kind: "error", message: moved === "stale" ? CHOOSE_WORDS.stale : CHOOSE_WORDS.lastSaveWentThrough };
-  if (moved === "committedEarlier") return { kind: "saved", ...chooseSaveResult(sent, rowsAfter) };
-  return { kind: "info", message: CHOOSE_WORDS.staleNothingLeft };
+export function chooseAdoptsHead(changes: ChooseChanges, headRevisionId: number | null): boolean {
+  return chooseChangesEmpty(changes) && chooseHeadMovedPast(changes.baseRevisionId, headRevisionId);
 }
 
-export function chooseCounts(changes: Pick<ChooseChanges, "marks">): { add: number; remove: number } {
-  let add = 0;
-  for (const mark of changes.marks) if (mark.to === "selected") add += 1;
-  return { add, remove: changes.marks.length - add };
+export function chooseCounts(changes: Pick<ChooseChanges, "add" | "remove">): { add: number; remove: number } {
+  return { add: changes.add.size, remove: changes.remove.size };
 }
 
-/** The marks as "id:to" joined ascending: one save attempt is reused only for exactly these marks. */
-export function chooseMarksKey(marks: readonly ChooseMark[]): string {
-  return [...marks]
-    .sort((left, right) => left.productVariantId - right.productVariantId)
-    .map((mark) => `${mark.productVariantId}:${mark.to}`)
-    .join(",");
+function ascending(ids: ReadonlySet<number>): number[] {
+  return [...ids].sort((left, right) => left - right);
+}
+
+/**
+ * The preview body of the change (§8.2): both sides ascending, the base revision and this page's version (§12.6).
+ * The save body adds the key and the confirmed effects hash.
+ */
+export function chooseChangeBody(changes: ChooseChanges): SelectionChangePreviewRequest {
+  return {
+    clientVersion: CATALOG_PAGE_CLIENT_VERSION,
+    expectedRevisionId: changes.baseRevisionId,
+    add: { productVariantIds: ascending(changes.add) },
+    remove: { productVariantIds: ascending(changes.remove) },
+  };
+}
+
+/** The change in one string: a kept save is sent again only for exactly these changes on this base. */
+export function chooseChangesKey(changes: ChooseChanges): string {
+  return `${changes.baseRevisionId ?? "none"}|${ascending(changes.add).join(",")}|${ascending(changes.remove).join(",")}`;
+}
+
+/** UTF-8 bytes of a body as it is sent (JSON). */
+export function chooseBodyBytes(body: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(body)).length;
 }
 
 // ---------------------------------------------------------------------------
@@ -466,76 +388,64 @@ export function chooseMarksKey(marks: readonly ChooseMark[]): string {
 // ---------------------------------------------------------------------------
 
 /** The How column's state; the words are CHOOSE_WORDS.how[key]. */
-export type ChooseHow =
-  | "willAdd"
-  | "willRemove"
-  | "picked"
-  | "olderInclude"
-  | "removed"
-  | "olderExclude"
-  | "notSelected"
-  | "turnedOff"
-  | "notOffered"
-  | "selected"
-  | "keptOut";
+export type ChooseHow = keyof typeof CHOOSE_WORDS.how;
 
 export interface ChooseRowView {
-  /** Saved selected, or marked to add. */
+  /** What the box shows: a pending change, else the saved pick. */
   checked: boolean;
+  /** The saved pick. */
+  savedChecked: boolean;
+  /** A pending change that differs from the saved pick. */
   changed: "add" | "remove" | null;
-  /** False while the rules load, and for rows no pick can change. */
+  /** False for rows no box press can change. */
   changeable: boolean;
   how: ChooseHow;
   /** The marketplace quantity of a selected size; null for every other reason (the server sends 0 for those). */
   quantity: number | null;
   /** A selected size whose listing tier is not on sale (the tier badge). */
   tierOff: boolean;
+  /** Turned off for the vendor while their pick is saved: the box can only remove the pick (verify V6). */
+  pickTurnedOff: boolean;
 }
 
 /**
- * One row as the table shows it. "Own pick" is a `variant` rule for this size
- * among the row's matching rules; any other matching rule is an older,
- * broader setting (category, product, product line or catalog rules from older
- * data), named generically (owner Q2, Q3). Rule ids the page does not hold
- * (rules still loading, or the row read under other rules) fall back to the
- * plain "Selected" / "Kept out".
+ * A row's saved state, from `picked` and the reason (V24): the box shows the
+ * pick. A size Card Shellz no longer offers cannot be changed. A size turned
+ * off for the vendor can only lose their pick (its box is checked while the
+ * pick is saved), and with no pick it cannot be changed.
  */
-export function chooseRowView(
-  row: ChooseCatalogRow,
-  mark: ChooseMark | null | undefined,
-  rulesById: ReadonlyMap<number, ChooseSelectionRule> | null,
-): ChooseRowView {
-  const { reason, marketplaceQuantity, includeRuleIds, excludeRuleIds } = row.selectionDecision;
-  const savedChecked = savedTarget(row, rulesById) === "selected";
-  const quantity = reason === "selected" ? marketplaceQuantity : null;
-  const tierOff = reason === "selected" && row.listingTier !== undefined && !row.listingTier.eligible;
-  const changeable = rulesById !== null && isChangeableRow(row, rulesById);
-  if (mark) {
-    return { checked: mark.to === "selected", changed: mark.to === "selected" ? "add" : "remove", changeable, how: mark.to === "selected" ? "willAdd" : "willRemove", quantity, tierOff };
-  }
-  return { checked: savedChecked, changed: null, changeable, how: savedHow(row.productVariantId, reason, includeRuleIds, excludeRuleIds, rulesById), quantity, tierOff };
+export function chooseSavedState(row: ChooseCatalogRow): ChooseShownRow {
+  const { reason, picked } = row.selectionDecision;
+  const changeable = reason === "selected" || reason === "missing_vendor_include_rule" || reason === "excluded_by_vendor_rule"
+    || (reason === "disabled_by_vendor_override" && picked);
+  return { productVariantId: row.productVariantId, savedChecked: picked, changeable };
 }
 
-function savedHow(
-  productVariantId: number,
-  reason: ChooseSelectionReason,
-  includeRuleIds: readonly number[],
-  excludeRuleIds: readonly number[],
-  rulesById: ReadonlyMap<number, ChooseSelectionRule> | null,
-): ChooseHow {
-  if (reason === "missing_vendor_include_rule") return "notSelected";
+function savedHow(reason: ChooseSelectionReason): ChooseHow {
+  if (reason === "selected") return "picked";
   if (reason === "disabled_by_vendor_override") return "turnedOff";
   // Defensive: the catalog read drops rows Card Shellz does not offer (dropship-selection-atp-service.ts).
   if (reason === "not_exposed_by_admin") return "notOffered";
-  if (reason === "selected") {
-    if (rulesById === null) return "selected";
-    if (includeRuleIds.some((id) => { const rule = rulesById.get(id); return rule !== undefined && isOwnPick(rule, productVariantId); })) return "picked";
-    return includeRuleIds.length > 0 && includeRuleIds.every((id) => rulesById.has(id)) ? "olderInclude" : "selected";
-  }
-  if (rulesById === null) return "keptOut";
-  const known = excludeRuleIds.map((id) => rulesById.get(id)).filter((rule): rule is ChooseSelectionRule => rule !== undefined);
-  if (known.some((rule) => !isOwnPick(rule, productVariantId))) return "olderExclude";
-  return excludeRuleIds.length > 0 && known.length === excludeRuleIds.length ? "removed" : "keptOut";
+  return "notSelected";
+}
+
+/** One row as the table shows it, with the pending changes. */
+export function chooseRowView(row: ChooseCatalogRow, changes: Pick<ChooseChanges, "add" | "remove">): ChooseRowView {
+  const { reason, marketplaceQuantity, picked } = row.selectionDecision;
+  const saved = chooseSavedState(row);
+  const id = row.productVariantId;
+  const checked = changes.add.has(id) ? true : changes.remove.has(id) ? false : saved.savedChecked;
+  const changed = checked === saved.savedChecked ? null : checked ? "add" : "remove";
+  return {
+    checked,
+    savedChecked: saved.savedChecked,
+    changed,
+    changeable: saved.changeable,
+    how: changed === "add" ? "willAdd" : changed === "remove" ? "willRemove" : savedHow(reason),
+    quantity: reason === "selected" ? marketplaceQuantity : null,
+    tierOff: reason === "selected" && row.listingTier !== undefined && !row.listingTier.eligible,
+    pickTurnedOff: reason === "disabled_by_vendor_override" && picked,
+  };
 }
 
 export type ChooseShownTick = "all" | "some" | "none";
@@ -545,327 +455,450 @@ export type ChooseShownTick = "all" | "some" | "none";
  * checked, "some" when some are, "none" otherwise; `changeable` 0 turns it off.
  * A click on "all" unchecks them (`setShown(false)`), otherwise checks them.
  */
-export function shownTick(
-  rows: readonly ChooseCatalogRow[],
-  changes: Pick<ChooseChanges, "marks">,
-  rulesById: ReadonlyMap<number, ChooseSelectionRule> | null,
-): { tick: ChooseShownTick; changeable: number } {
-  if (rulesById === null) return { tick: "none", changeable: 0 };
-  const marks = new Map(changes.marks.map((mark) => [mark.productVariantId, mark]));
+export function shownTick(rows: readonly ChooseCatalogRow[], changes: Pick<ChooseChanges, "add" | "remove">): { tick: ChooseShownTick; changeable: number } {
   let changeable = 0;
   let checked = 0;
   for (const row of rows) {
-    if (!isChangeableRow(row, rulesById)) continue;
+    const view = chooseRowView(row, changes);
+    if (!view.changeable) continue;
     changeable += 1;
-    if (chooseRowView(row, marks.get(row.productVariantId), rulesById).checked) checked += 1;
+    if (view.checked) checked += 1;
   }
   const tick: ChooseShownTick = changeable > 0 && checked === changeable ? "all" : checked > 0 ? "some" : "none";
   return { tick, changeable };
 }
 
 // ---------------------------------------------------------------------------
-// The save
+// Room under the cap (§12.3)
 // ---------------------------------------------------------------------------
 
-/** A mark the builder cannot apply: a programming error, never sent (the page never makes one). */
-export class ChooseBuildRefusal extends Error {
-  readonly code = "DROPSHIP_CATALOG_CHOOSE_MARK_REFUSED";
-  readonly productVariantId: number;
-  constructor(productVariantId: number, why: string) {
-    super(`Catalog choose mark for size ${productVariantId} refused: ${why}`);
-    this.name = "ChooseBuildRefusal";
-    this.productVariantId = productVariantId;
+export interface ChooseRoom {
+  /** Selected now (saved). */
+  selected: number;
+  /** Selected after the pending changes, counting each pending id as written (the server's count may be lower). */
+  after: number;
+  /** `cap − after`, never below 0: how many more can be added. */
+  room: number;
+  /** The pending changes grow the count. */
+  grows: boolean;
+  /** Save stays off: the change grows the count past the cap (`overCapAdd`). A shrinking change is always allowed. */
+  overCapAdd: boolean;
+  /** The saved selection is over the cap (`overCapState`). */
+  overCapState: boolean;
+}
+
+/** `room = cap − selectedTotal − add + remove` from the selection summary (§12.3). */
+export function chooseRoom(selection: { selectedTotal: number; cap: number }, changes: Pick<ChooseChanges, "add" | "remove">): ChooseRoom {
+  const after = selection.selectedTotal + changes.add.size - changes.remove.size;
+  const grows = changes.add.size > changes.remove.size;
+  return {
+    selected: selection.selectedTotal,
+    after,
+    room: Math.max(0, selection.cap - after),
+    grows,
+    overCapAdd: grows && after > selection.cap,
+    overCapState: selection.selectedTotal > selection.cap,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// "Check all N that match" (§12.3)
+// ---------------------------------------------------------------------------
+
+export type ChooseIdsPurpose = "add" | "remove";
+
+export interface ChooseMatchLine {
+  /** `add`: "Check all {total} that match"; `remove`: "Uncheck all {total} that match". */
+  purpose: ChooseIdsPurpose;
+  /** The number the button says. */
+  total: number;
+  /** The changeable rows shown, all checked ("All {shown} shown are checked."); null for `remove`. */
+  shownChecked: number | null;
+  /** More matched than the button said at the last press: the line says so and asks again with the new number. */
+  changed: { now: number; was: number } | null;
+}
+
+/**
+ * The line under the header box, or null (§12.3). It follows a press of the
+ * header box while more rows match than are shown: "Check all" once the press
+ * checked every changeable row shown (and they still are), "Uncheck all" once
+ * it unchecked them. Hidden once its own press is applied (`applied`, until
+ * the next change), and after a save (the page forgets the header press).
+ */
+export function chooseMatchLine(input: {
+  tick: ChooseShownTick;
+  /** Changeable rows shown (`shownTick`). */
+  changeable: number;
+  /** Rows shown. */
+  shown: number;
+  /** Rows that match (the page's `total`). */
+  total: number;
+  /** The header box's last press on these filters: true checked the rows shown, false unchecked them. */
+  lastHeader: boolean | null;
+  /** The last press found more matching than the button said. */
+  changed: { purpose: ChooseIdsPurpose; now: number; was: number } | null;
+  applied: boolean;
+}): ChooseMatchLine | null {
+  if (input.applied || input.total <= input.shown || input.changeable === 0) return null;
+  const purpose: ChooseIdsPurpose | null = input.tick === "all" && input.lastHeader === true ? "add"
+    : input.tick === "none" && input.lastHeader === false ? "remove" : null;
+  if (purpose === null) return null;
+  const changed = input.changed !== null && input.changed.purpose === purpose ? { now: input.changed.now, was: input.changed.was } : null;
+  return { purpose, total: changed?.now ?? input.total, shownChecked: purpose === "add" ? input.changeable : null, changed };
+}
+
+/**
+ * An `idsOnly` answer against the number its button said. The answer counts
+ * only the changeable sizes (a size turned off for the vendor is in the
+ * page's `total` but never in the ids), so fewer is not a change; more is:
+ * the press would check (or uncheck) more than the vendor was told, so the
+ * page asks again (§12.3 "If `total` changed…, the line says so and asks
+ * again").
+ */
+export function chooseMatchGrew(answerTotal: number, said: number): boolean {
+  return answerTotal > said;
+}
+
+// ---------------------------------------------------------------------------
+// The categories card (§12.3): what the page knows, and each category's box
+// ---------------------------------------------------------------------------
+
+/** One size as the page knows it: its category (null: none) and whether it is selected (saved). */
+export interface ChooseKnownSize {
+  categoryId: number | null;
+  selected: boolean;
+}
+
+/** The complete changeable id lists of a scope (an `idsOnly` answer with neither list null). */
+export interface ChooseIdLists {
+  selectedIds: ReadonlySet<number>;
+  notSelectedIds: ReadonlySet<number>;
+}
+
+/**
+ * What the page learned at one saved revision, from the rows it read and the
+ * id reads it made, so a category's box can count pending changes whose rows
+ * are not on screen. Facts of an older revision are dropped (`chooseKnownAt`).
+ */
+export interface ChooseKnown {
+  revisionId: number | null;
+  sizes: ReadonlyMap<number, ChooseKnownSize>;
+  /** A category's complete lists, from an id read with only its category id (D26). */
+  categories: ReadonlyMap<number, ChooseIdLists>;
+  /** The whole catalog's complete lists, from an id read with no filter ("Select everything"). */
+  everything: ChooseIdLists | null;
+}
+
+export function emptyChooseKnown(revisionId: number | null): ChooseKnown {
+  return { revisionId, sizes: new Map(), categories: new Map(), everything: null };
+}
+
+/** The facts for `revisionId`: kept while it is the one they were learned at, else none. */
+export function chooseKnownAt(known: ChooseKnown, revisionId: number | null): ChooseKnown {
+  return known.revisionId === revisionId ? known : emptyChooseKnown(revisionId);
+}
+
+/** The facts with these rows' categories and saved states; the same object when nothing is new. */
+export function learnChooseRows(known: ChooseKnown, rows: readonly ChooseCatalogRow[]): ChooseKnown {
+  let sizes: Map<number, ChooseKnownSize> | null = null;
+  for (const row of rows) {
+    const fact = { categoryId: row.categoryId, selected: row.selectionDecision.selected };
+    const had = (sizes ?? known.sizes).get(row.productVariantId);
+    if (had && had.categoryId === fact.categoryId && had.selected === fact.selected) continue;
+    sizes ??= new Map(known.sizes);
+    sizes.set(row.productVariantId, fact);
   }
+  return sizes === null ? known : { ...known, sizes };
 }
 
 /**
- * A saved rule in the compact form the save sends: its one target only, the
- * category trimmed, flags, priority and `metadata ?? {}`; null targets are
- * left out. The server turns an omitted target into null and an omitted
- * metadata into {} before it hashes or stores (`normalizeVendorSelectionRule`),
- * so this stores and hashes exactly what the full form did, and 500 rules fit
- * the 100 KiB body (the full form fits about 450).
+ * The facts after an `idsOnly` answer. `scope.categoryId`: the read named
+ * that category, so every id in it is that category's. `scope.whole`: the
+ * read had no search and no Show filter, so its lists are the scope's
+ * complete changeable sizes (a category's, or with no category the whole
+ * catalog's). A null list is not complete.
  */
-export function toSelectionRuleInput(rule: Omit<ChooseSelectionRule, "id" | "isActive"> | ChooseRuleInput): ChooseRuleInput {
-  const category = rule.category?.trim();
-  return {
-    scopeType: rule.scopeType,
-    action: rule.action,
-    ...(typeof rule.productLineId === "number" ? { productLineId: rule.productLineId } : {}),
-    ...(typeof rule.productId === "number" ? { productId: rule.productId } : {}),
-    ...(typeof rule.productVariantId === "number" ? { productVariantId: rule.productVariantId } : {}),
-    ...(category ? { category } : {}),
-    autoConnectNewSkus: rule.autoConnectNewSkus,
-    autoListNewSkus: rule.autoListNewSkus,
-    priority: rule.priority,
-    metadata: rule.metadata ?? {},
-  };
+export function learnChooseIds(known: ChooseKnown, scope: { categoryId: number | null; whole: boolean },
+  answer: { selectedIds: readonly number[] | null; notSelectedIds: readonly number[] | null }): ChooseKnown {
+  let next = known;
+  if (scope.categoryId !== null) {
+    const sizes = new Map(known.sizes);
+    for (const id of answer.selectedIds ?? []) sizes.set(id, { categoryId: scope.categoryId, selected: true });
+    for (const id of answer.notSelectedIds ?? []) sizes.set(id, { categoryId: scope.categoryId, selected: false });
+    next = { ...next, sizes };
+  }
+  if (!scope.whole || answer.selectedIds === null || answer.notSelectedIds === null) return next;
+  const lists: ChooseIdLists = { selectedIds: new Set(answer.selectedIds), notSelectedIds: new Set(answer.notSelectedIds) };
+  if (scope.categoryId === null) return { ...next, everything: lists };
+  const categories = new Map(next.categories);
+  categories.set(scope.categoryId, lists);
+  return { ...next, categories };
 }
 
-function pickRule(productVariantId: number, action: "include" | "exclude"): ChooseRuleInput {
-  return {
-    scopeType: "variant",
-    action,
-    productVariantId,
-    autoConnectNewSkus: action === "include",
-    autoListNewSkus: false,
-    priority: action === "include" ? PICK_INCLUDE_PRIORITY : PICK_EXCLUDE_PRIORITY,
-    metadata: { source: PICK_RULE_SOURCE },
-  };
+export interface ChooseCategoryTick {
+  tick: ChooseShownTick;
+  /** Nothing in it can be changed (known from its own id read): its box is off. */
+  empty: boolean;
 }
 
-/** The server's duplicate key (`vendorSelectionRuleDedupeKey`, dropship-selection-dtos.ts). */
-function ruleDedupeKey(rule: ChooseRuleInput): string {
-  return [
-    rule.scopeType,
-    rule.action,
-    rule.productLineId ?? "",
-    rule.productId ?? "",
-    rule.productVariantId ?? "",
-    rule.category?.trim().toLowerCase() ?? "",
-  ].join(":");
+/** A category as the categories read counts it (VCR:73-81). */
+export interface ChooseCategoryCounts {
+  categoryId: number;
+  rowCount: number;
+  selectedCount: number;
+}
+
+function bump(counts: Map<number, number>, key: number): void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+function tickOf(checked: number, total: number): ChooseShownTick {
+  if (total > 0 && checked >= total) return "all";
+  return checked > 0 ? "some" : "none";
 }
 
 /**
- * The rules one save sends: `rules` (just read again) untouched except for the
- * marked sizes, plus the rules the marks need. Order: the existing rules in the
- * server's order, then new rules by ascending size. Pure and deterministic.
- *
- * Per mark, with `own(v)` = active `variant` rules for the size, and the basis
- * fresh when every rule id it names is still active:
- * - Add: drop own excludes; keep an own include, or add one, unless the basis
- *   is fresh and holds an older broad include (dropping the keep-out is then
- *   enough). A basis kept out by an older broad rule is refused: exclude always
- *   wins, so no pick could select it.
- * - Remove: drop own includes. Fresh and no broad include: nothing else, so
- *   the pick is gone and its slot freed. Fresh with a broad include, or a basis
- *   not fresh (the row was read under other rules and is not on screen now):
- *   add a keep-out unless one exists. An exclude always ends "not selected"
- *   whatever else matches; the cost is one slot.
- * Two rules the server would call duplicates are never sent: the first is
- * kept (both mean the same thing; a duplicate would be a permanent 400).
+ * Each category's box, with the pending changes (§12.3, B2a's observation):
+ * 1. After its own id read, exactly: its selected sizes not marked to remove
+ *    plus its not-selected sizes marked to add, of all its changeable sizes.
+ * 2. Else after "Select everything" while the category of every size it read
+ *    that is not checked now is known: ticked when none of them is in it.
+ * 3. Else from the counts: `selectedCount` plus its known pending adds of
+ *    sizes not selected, minus its known pending removes of selected sizes,
+ *    of `rowCount`. (The counts
+ *    include sizes turned off for the vendor, so such a category reads
+ *    "some" until its box is pressed once and case 1 applies.)
+ * A pending change whose size's category is unknown counts nowhere.
  */
-export function buildChooseSelectionSave(rules: readonly ChooseSelectionRule[], marks: readonly ChooseMark[]): ChooseRuleInput[] {
-  const active = rules.filter((rule) => rule.isActive !== false);
-  const byId = new Map(active.map((rule) => [rule.id, rule]));
-  const dropped = new Set<number>();
-  const added: ChooseRuleInput[] = [];
-  for (const mark of uniqueMarks(marks)) {
-    const size = mark.productVariantId;
-    const own = active.filter((rule) => isOwnPick(rule, size));
-    const ownIncludes = own.filter((rule) => rule.action === "include");
-    const ownExcludes = own.filter((rule) => rule.action === "exclude");
-    const fresh = [...mark.basis.includeRuleIds, ...mark.basis.excludeRuleIds].every((id) => byId.has(id));
-    const broadInclude = mark.basis.includeRuleIds.some((id) => { const rule = byId.get(id); return rule !== undefined && !isOwnPick(rule, size); });
-    if (mark.to === "selected") {
-      if (keptOutByOlderRule(mark, byId)) throw new ChooseBuildRefusal(size, "an older broad rule keeps it out");
-      for (const rule of ownExcludes) dropped.add(rule.id);
-      if (ownIncludes.length === 0 && !(fresh && broadInclude)) added.push(pickRule(size, "include"));
+export function chooseCategoryTicks(categories: readonly ChooseCategoryCounts[], changes: Pick<ChooseChanges, "add" | "remove">,
+  known: ChooseKnown): Map<number, ChooseCategoryTick> {
+  const addsIn = new Map<number, number>();
+  const removesIn = new Map<number, number>();
+  for (const id of changes.add) {
+    const size = known.sizes.get(id);
+    // A pending add of a size already selected (kept after a stale stop: another tab picked it) is in `selectedCount`
+    // already: counting it again would tick a category that is not fully selected (review round 1 CLI-5).
+    if (size && size.categoryId !== null && !size.selected) bump(addsIn, size.categoryId);
+  }
+  for (const id of changes.remove) {
+    const size = known.sizes.get(id);
+    // A pick turned off for the vendor is not in `selectedCount`: removing it moves nothing.
+    if (size && size.categoryId !== null && size.selected) bump(removesIn, size.categoryId);
+  }
+  const missingIn = everythingMissing(known, changes);
+  const ticks = new Map<number, ChooseCategoryTick>();
+  for (const category of categories) {
+    const lists = known.categories.get(category.categoryId);
+    if (lists) {
+      let checked = 0;
+      for (const id of lists.selectedIds) if (!changes.remove.has(id)) checked += 1;
+      for (const id of lists.notSelectedIds) if (changes.add.has(id)) checked += 1;
+      const total = lists.selectedIds.size + lists.notSelectedIds.size;
+      ticks.set(category.categoryId, { tick: tickOf(checked, total), empty: total === 0 });
+    } else if (missingIn !== null) {
+      // `rowCount − missing` may count sizes turned off for the vendor as checked: it only tells "some" from "none".
+      const missing = missingIn.get(category.categoryId) ?? 0;
+      const tick: ChooseShownTick = missing === 0 ? (category.rowCount > 0 ? "all" : "none")
+        : category.rowCount - missing > 0 ? "some" : "none";
+      ticks.set(category.categoryId, { tick, empty: false });
     } else {
-      for (const rule of ownIncludes) dropped.add(rule.id);
-      // A fresh basis with no broad include needs nothing more: deleting the pick leaves the size "Not selected".
-      if ((!fresh || broadInclude) && ownExcludes.length === 0) added.push(pickRule(size, "exclude"));
+      const after = category.selectedCount + (addsIn.get(category.categoryId) ?? 0) - (removesIn.get(category.categoryId) ?? 0);
+      ticks.set(category.categoryId, { tick: tickOf(after, category.rowCount), empty: false });
     }
   }
-  const kept = active.filter((rule) => !dropped.has(rule.id)).map((rule) => toSelectionRuleInput(rule));
-  added.sort((left, right) => (left.productVariantId ?? 0) - (right.productVariantId ?? 0)
-    || (left.action === right.action ? 0 : left.action === "include" ? -1 : 1));
-  const seen = new Set<string>();
-  const out: ChooseRuleInput[] = [];
-  for (const rule of [...kept, ...added]) {
-    const key = ruleDedupeKey(rule);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(rule);
-  }
-  return out;
-}
-
-/** Marks by size, sorted; the same size twice in one direction counts once, in both directions it is refused. */
-function uniqueMarks(marks: readonly ChooseMark[]): ChooseMark[] {
-  const bySize = new Map<number, ChooseMark>();
-  for (const mark of marks) {
-    if (!Number.isSafeInteger(mark.productVariantId) || mark.productVariantId <= 0) {
-      throw new ChooseBuildRefusal(mark.productVariantId, "not a size id");
-    }
-    const existing = bySize.get(mark.productVariantId);
-    if (existing && existing.to !== mark.to) throw new ChooseBuildRefusal(mark.productVariantId, "marked both ways");
-    if (!existing) bySize.set(mark.productVariantId, mark);
-  }
-  return Array.from(bySize.values()).sort((left, right) => left.productVariantId - right.productVariantId);
-}
-
-export type ChooseSaveBlock =
-  | { kind: "tooManyRules"; count: number }
-  | { kind: "tooLarge" }
-  | { kind: "refused" };
-
-/** UTF-8 bytes of the save body with the longest key the server allows, so the real body is never larger. */
-export function chooseSaveBodyBytes(rules: readonly ChooseRuleInput[]): number {
-  return new TextEncoder().encode(JSON.stringify({ idempotencyKey: "k".repeat(SELECTION_SAVE_KEY_MAX_LENGTH), rules })).length;
+  return ticks;
 }
 
 /**
- * Why this save must not be sent, or null. The bar shows it live as soon as
- * the marks would pass a limit, and the save runner checks it again on the
- * rules just read, so the vendor never presses into a refusal.
+ * After "Select everything": per category, the sizes of its complete lists
+ * that are not checked now (not marked to add, or marked to remove). Null
+ * when there is no such read, or any such size's category is unknown.
  */
-export function chooseSaveBlock(rules: readonly ChooseSelectionRule[], marks: readonly ChooseMark[]): ChooseSaveBlock | null {
-  let built: ChooseRuleInput[];
-  try {
-    built = buildChooseSelectionSave(rules, marks);
-  } catch (error) {
-    if (error instanceof ChooseBuildRefusal) return { kind: "refused" };
-    throw error;
+function everythingMissing(known: ChooseKnown, changes: Pick<ChooseChanges, "add" | "remove">): Map<number, number> | null {
+  if (known.everything === null) return null;
+  const missing = new Map<number, number>();
+  const count = (id: number): boolean => {
+    const size = known.sizes.get(id);
+    if (!size) return false;
+    if (size.categoryId !== null) bump(missing, size.categoryId);
+    return true;
+  };
+  for (const id of known.everything.notSelectedIds) if (!changes.add.has(id) && !count(id)) return null;
+  for (const id of known.everything.selectedIds) if (changes.remove.has(id) && !count(id)) return null;
+  return missing;
+}
+
+/** A category box's press: a ticked box unticks (reads the ids to remove), any other ticks (reads the ids to add). */
+export function chooseCategoryPurpose(tick: ChooseShownTick): ChooseIdsPurpose {
+  return tick === "all" ? "remove" : "add";
+}
+
+export interface ChooseEverything {
+  /** Every size Card Shellz offers the vendor (the categories read's rows plus those with no category). */
+  offered: number;
+  /** "Select everything" is off: nothing is left to add, or the room left is smaller than what is not yet selected (D27). */
+  disabled: boolean;
+  /** The off state has a reason worth saying (the room). */
+  overRoom: boolean;
+}
+
+/**
+ * "Select everything ({offered})": off while the room left under the cap is
+ * smaller than the number not yet selected, counting the pending changes as
+ * the bar does (D27). The number offered counts sizes turned off for the
+ * vendor too, so it can say more than one press adds.
+ */
+export function chooseEverything(categories: { categories: readonly { rowCount: number }[]; uncategorizedCount: number },
+  selection: { selectedTotal: number; cap: number }, changes: Pick<ChooseChanges, "add" | "remove">): ChooseEverything {
+  const offered = categories.categories.reduce((sum, category) => sum + category.rowCount, 0) + categories.uncategorizedCount;
+  const room = chooseRoom(selection, changes);
+  const notYetSelected = Math.max(0, offered - room.after);
+  const overRoom = room.room < notYetSelected;
+  return { offered, disabled: notYetSelected === 0 || overRoom, overRoom };
+}
+
+// ---------------------------------------------------------------------------
+// The save question and the saved line (§13)
+// ---------------------------------------------------------------------------
+
+/**
+ * The save question's lines from the server's preview, in order: the counts;
+ * per store (ascending, as the server sends them) its quantity 0 and its
+ * resumes, or `confirmNone` when no store has any; that removed listings are
+ * not ended (B only), when the save sets any listing to quantity 0; that the
+ * choice is for every store. Only what Echelon does (FIDELITY2): a removal no
+ * store has an entry for (no listing, ended on eBay, no change in whether it
+ * sells; V20) sets nothing to quantity 0, so that line is left out then
+ * (review round 1 CLI-6). A listing that ended on eBay is counted nowhere.
+ */
+export function describeChooseConfirm(preview: SelectionChangePreviewAnswer): string[] {
+  const lines = [CHOOSE_WORDS.confirmCounts(preview.toAdd, preview.toRemove, preview.alreadySelected + preview.alreadyNotSelected)];
+  let entries = 0;
+  let toZero = 0;
+  for (const store of preview.effects) {
+    if (store.goesToZero > 0) lines.push(CHOOSE_WORDS.confirmZero(store.storeName, store.goesToZero));
+    if (store.startsSelling > 0) lines.push(CHOOSE_WORDS.confirmResume(store.storeName, store.startsSelling));
+    entries += store.goesToZero + store.startsSelling;
+    toZero += store.goesToZero;
   }
-  if (built.length > MAX_SELECTION_RULES) return { kind: "tooManyRules", count: built.length };
-  if (chooseSaveBodyBytes(built) > SELECTION_SAVE_BODY_LIMIT_BYTES) return { kind: "tooLarge" };
-  return null;
-}
-
-/** The vendor's words for a block. */
-export function describeChooseSaveBlock(block: ChooseSaveBlock): string {
-  if (block.kind === "tooManyRules") return CHOOSE_WORDS.tooManyChoices(block.count, MAX_SELECTION_RULES);
-  if (block.kind === "tooLarge") return CHOOSE_WORDS.tooLarge;
-  return CHOOSE_WORDS.rejected;
-}
-
-// ---------------------------------------------------------------------------
-// Another tab: the fingerprint and the content compare
-// ---------------------------------------------------------------------------
-
-/**
- * The active rule ids, ascending and joined ("" for none). Every committed
- * save that keeps a rule re-inserts every rule with new ids
- * (dropship-selection-atp.repository.ts), so any save changes it; the nullable
- * `revisionId` is not used. Two empty sets compare equal, and a save on either
- * builds on the same empty set.
- */
-export function rulesFingerprint(rules: readonly Pick<ChooseSelectionRule, "id" | "isActive">[]): string {
-  return rules
-    .filter((rule) => rule.isActive !== false)
-    .map((rule) => rule.id)
-    .sort((left, right) => left - right)
-    .join(",");
-}
-
-function sortJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJsonValue);
-  if (value && typeof value === "object") {
-    return Object.keys(value as Record<string, unknown>).sort().reduce<Record<string, unknown>>((sorted, key) => {
-      sorted[key] = sortJsonValue((value as Record<string, unknown>)[key]);
-      return sorted;
-    }, {});
-  }
-  return value;
-}
-
-/** The server's canonical rule (`hashVendorSelectionRules` over `normalizeVendorSelectionRule`), as a string. */
-function canonicalRule(rule: ChooseRuleInput): string {
-  return JSON.stringify({
-    scopeType: rule.scopeType,
-    action: rule.action,
-    productLineId: rule.productLineId ?? null,
-    productId: rule.productId ?? null,
-    productVariantId: rule.productVariantId ?? null,
-    category: rule.category?.trim() || null,
-    autoConnectNewSkus: rule.autoConnectNewSkus,
-    autoListNewSkus: rule.autoListNewSkus,
-    priority: rule.priority,
-    metadata: sortJsonValue(rule.metadata ?? {}),
-  });
+  if (entries === 0) lines.push(CHOOSE_WORDS.confirmNone);
+  if (preview.toRemove > 0 && toZero > 0) lines.push(CHOOSE_WORDS.confirmNotEnded);
+  lines.push(CHOOSE_WORDS.confirmScope);
+  return lines;
 }
 
 /**
- * True when two rule sets hold the same rules in the server's canonical
- * fields, in any order and in full or compact form: how the page tells "our
- * earlier save went through" (the rules now are what it sent, under new ids)
- * from "another tab saved".
+ * The bar after a save, from the server's answer: `saved`, or `savedDrift`
+ * when the effects moved between the question and the save (a change with
+ * no adds goes through, §7.5); then `skipped` when any added size was no
+ * longer offered.
  */
-export function sameRuleContent(
-  left: readonly (ChooseSelectionRule | ChooseRuleInput)[],
-  right: readonly (ChooseSelectionRule | ChooseRuleInput)[],
-): boolean {
-  const canonical = (rules: readonly (ChooseSelectionRule | ChooseRuleInput)[]) => rules
-    .filter((rule) => !("isActive" in rule) || rule.isActive !== false)
-    .map((rule) => canonicalRule(toSelectionRuleInput(rule)))
-    .sort();
-  const a = canonical(left);
-  const b = canonical(right);
-  return a.length === b.length && a.every((value, index) => value === b[index]);
+export function describeChooseSaved(answer: SelectionChangeAnswer): string {
+  const zero = answer.effects.reduce((sum, store) => sum + store.goesToZero, 0);
+  const head = answer.drifted ? CHOOSE_WORDS.savedDrift(zero) : CHOOSE_WORDS.saved(answer.toAdd, answer.toRemove);
+  return answer.skipped.count > 0 ? `${head} ${CHOOSE_WORDS.skipped(answer.skipped.count)}` : head;
 }
 
 // ---------------------------------------------------------------------------
-// Errors (CLAUDE.md §6)
+// Errors (CLAUDE.md §6; PLAN-B v4.1 §12.4, §12.5, §14)
 // ---------------------------------------------------------------------------
 
-/** The busy answer while a stock update finishes (publication-selection-work.ts): the save wrote nothing; retry. */
-export const PUBLICATION_SELECTION_BUSY_CODE = "PUBLICATION_SELECTION_BUSY";
-/**
- * Step 1 plan S2-5 §4.9 item 2: once PR B froze the rules table, this page's PUT is refused with 410 and this code
- * (dropship-selection-atp.repository.ts `SELECTION_RULES_RETIRED_DB_MESSAGE`). Nothing was saved, and saving from this
- * page can never work again: the vendor reloads to get the new page.
- */
+/** The busy answer while a stock update finishes, after the server's own retries (§8.3): nothing was written. */
+export const PUBLICATION_SELECTION_BUSY_CODE = SELECTION_CHANGE_ERROR_CODES.busy;
+/** 410: an older page's rules save once PR B froze the rules; with C's 409 page outdated, the page reloads. */
 export const SELECTION_RULES_RETIRED_CODE = DROPSHIP_CATALOG_READ_ERROR_CODES.rulesRetired;
-const PERMANENT_REJECTED_CODES: ReadonlySet<string> = new Set(["DROPSHIP_IDEMPOTENCY_CONFLICT"]);
-
-/**
- * A 2xx answer the page can't read (not JSON, or not the route's contract). The route always answers its contract in
- * JSON, so this may come from something in between (a proxy, a captive portal): the save may or may not have gone
- * through, and the rules are read to tell (review CT6).
- */
-export class ChooseUnverifiedAnswerError extends Error {
-  readonly code = "DROPSHIP_CATALOG_CHOOSE_ANSWER_UNVERIFIED";
-  constructor(why: string) {
-    super(`Catalog choose save answer could not be read: ${why}`);
-    this.name = "ChooseUnverifiedAnswerError";
-  }
-}
 
 export type ChooseSaveErrorClass =
   /**
-   * `mayHaveCommitted`: the server may have saved it (no answer, a 5xx, an unreadable 2xx), so "not saved" can't be said
-   * until the rules show it (review MC1). False when the answer itself says nothing was written (busy, 408, 429).
+   * No answer, a 5xx, a 2xx the page can't read, a 408 or a 429: sent again (CHOOSE_SAVE_MAX_TRIES).
+   * `mayHaveCommitted`: the server may have saved it (no answer, a 5xx, an unreadable 2xx), so the kept save is sent
+   * again with its key on the next press, which replays it (review MC1). False when the answer says nothing was written.
    */
-  | { classification: "transient"; busyMessage: string | null; mayHaveCommitted: boolean }
-  /** `reload`: only a reload can help (the page is older than the server, §4.9 item 2); the bar offers Reload. */
-  | { classification: "permanent"; message: string; reload?: true };
+  | { kind: "network"; mayHaveCommitted: boolean }
+  /** `PUBLICATION_SELECTION_BUSY` (409, transient): sent again on the busy schedule. */
+  | { kind: "busy" }
+  /** Writes paused (503), an answer from code older than this page, or that code's 413: the paused schedule. */
+  | { kind: "paused" }
+  /** The head revision moved (409): read again, keep the changes, new key. `headRevisionId` when the server named it. */
+  | { kind: "stale"; headRevisionId: number | null | undefined }
+  /** The effects moved since the question (409): ask again, new key. */
+  | { kind: "effectsChanged" }
+  /** The key was used for another change (409): refused, a new key on the next press. */
+  | { kind: "keyConflict" }
+  /** 410 rules retired, or PR C's 409 page outdated: only a reload helps. */
+  | { kind: "retired" }
+  /** The bulk parser's 413 (permanent). */
+  | { kind: "tooLarge" }
+  /** 422: the change grows the selection past the cap. `after` when the server named it. */
+  | { kind: "overCap"; after: number | null }
+  /** Any other refusal, in words; never sent again. */
+  | { kind: "permanent"; message: string };
+
+function contextNumber(error: DropshipApiError, key: string): number | null | undefined {
+  const value = error.context?.[key];
+  if (value === null) return null;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
 
 /**
- * Transient (sent again with the same key and body): no answer (a network
- * failure or an aborted answer), any 5xx, an unreadable 2xx, the busy 409, 408
- * and 429. Permanent (never sent again): every other refusal. A 413 says the
- * body is too large, a 400 or a key conflict says the save can't be made from
- * this page; any other refusal shows the server's own words. Stale is not an
- * error: the runner stops before sending.
- *
- * A 5xx may have committed: the app commits in its own transaction, and a
- * router timeout (Heroku answers 503 at 30 s) can answer while the app still
- * commits. Busy, 408 and 429 are answered before anything is written.
+ * One failed send, classified. `bodyBytes` is the size of the body that was
+ * sent: a 413 without `DROPSHIP_REQUEST_TOO_LARGE` for a body within the bulk
+ * limit can only be an older dyno's global parser (100 KiB), which is
+ * replaced during the release (§12.5).
  */
-export function classifyChooseSaveError(error: unknown): ChooseSaveErrorClass {
+export function classifyChooseSaveError(error: unknown, sent: { bodyBytes: number }): ChooseSaveErrorClass {
   if (error instanceof DropshipApiError) {
-    if (error.status === 409 && error.code === PUBLICATION_SELECTION_BUSY_CODE) {
-      return { classification: "transient", busyMessage: error.message || null, mayHaveCommitted: false };
+    if (error.code === DROPSHIP_SITE_UPDATING_CODE) return { kind: "paused" };
+    if (error.status === 503 && error.code === SELECTION_CHANGE_ERROR_CODES.writesPaused) return { kind: "paused" };
+    if (error.status === 413) {
+      if (error.code === SELECTION_CHANGE_ERROR_CODES.requestTooLarge) return { kind: "tooLarge" };
+      return sent.bodyBytes <= CHOOSE_BULK_BODY_LIMIT_BYTES ? { kind: "paused" } : { kind: "tooLarge" };
     }
-    if (error.status >= 500) return { classification: "transient", busyMessage: null, mayHaveCommitted: true };
-    if (error.status === 408 || error.status === 429) return { classification: "transient", busyMessage: null, mayHaveCommitted: false };
-    if (error.status === 413) return { classification: "permanent", message: CHOOSE_WORDS.tooLarge };
-    if (error.status === 410 && error.code === SELECTION_RULES_RETIRED_CODE) {
-      return { classification: "permanent", message: CHOOSE_WORDS.retired, reload: true };
+    if (error.status === 409) {
+      switch (error.code) {
+        case SELECTION_CHANGE_ERROR_CODES.busy: return { kind: "busy" };
+        case SELECTION_CHANGE_ERROR_CODES.revisionConflict: return { kind: "stale", headRevisionId: contextNumber(error, "currentRevisionId") };
+        case SELECTION_CHANGE_ERROR_CODES.effectsChanged: return { kind: "effectsChanged" };
+        case SELECTION_CHANGE_ERROR_CODES.keyConflict: return { kind: "keyConflict" };
+        case SELECTION_CHANGE_ERROR_CODES.pageOutdated: return { kind: "retired" };
+        default: break;
+      }
     }
-    if (error.status === 400 || (error.status === 409 && error.code !== null && PERMANENT_REJECTED_CODES.has(error.code))) {
-      return { classification: "permanent", message: CHOOSE_WORDS.rejected };
+    if (error.status === 410 && error.code === SELECTION_CHANGE_ERROR_CODES.rulesRetired) return { kind: "retired" };
+    if (error.status === 422 && error.code === SELECTION_CHANGE_ERROR_CODES.tooLarge) {
+      return { kind: "overCap", after: contextNumber(error, "selectedAfter") ?? null };
     }
-    return { classification: "permanent", message: error.message.trim() || CHOOSE_WORDS.rejected };
+    if (error.status >= 500) return { kind: "network", mayHaveCommitted: true };
+    if (error.status === 408 || error.status === 429) return { kind: "network", mayHaveCommitted: false };
+    // A 400 (the body, the key) says the save can't be made from this page; never the server's words for it.
+    if (error.status === 400) return { kind: "permanent", message: CHOOSE_WORDS.rejected };
+    return { kind: "permanent", message: error.message.trim() || CHOOSE_WORDS.rejected };
   }
-  // fetch rejects with a TypeError when no answer came; an aborted answer is a DOMException. Either way the save
-  // may or may not have committed, and sending the same key and body again is safe (it replays).
-  if (error instanceof TypeError || (typeof DOMException !== "undefined" && error instanceof DOMException)) {
-    return { classification: "transient", busyMessage: null, mayHaveCommitted: true };
+  // fetch rejects with a TypeError when no answer came, an aborted answer is a DOMException, and a 2xx cut short is
+  // response.json()'s SyntaxError: the save may have committed, and sending the same key and body again replays it.
+  if (error instanceof TypeError || error instanceof SyntaxError || (typeof DOMException !== "undefined" && error instanceof DOMException)) {
+    return { kind: "network", mayHaveCommitted: true };
   }
-  if (error instanceof ChooseUnverifiedAnswerError) return { classification: "transient", busyMessage: null, mayHaveCommitted: true };
-  return { classification: "permanent", message: CHOOSE_WORDS.rejected };
+  return { kind: "permanent", message: CHOOSE_WORDS.rejected };
+}
+
+/**
+ * An `idsOnly` read refused for too many ids (422 `DROPSHIP_CATALOG_IDS_TOO_MANY`, SVC:340-345): `tooManyMatch` with
+ * the count the server needed, or null when it named none. Null for any other error.
+ */
+export function chooseIdsTooMany(error: unknown): { needed: number | null } | null {
+  if (!(error instanceof DropshipApiError) || error.status !== 422 || error.code !== DROPSHIP_CATALOG_READ_ERROR_CODES.idsTooMany) return null;
+  return { needed: contextNumber(error, "needed") ?? null };
+}
+
+/**
+ * Why a "Check all", category or "Select everything" press changed nothing, in words: more ids than one change
+ * takes (`tooManyMatch` with the server's count, else `fallback`), or the read gave up after its retries.
+ */
+export function describeChooseIdsFailure(error: unknown, fallback: number): string {
+  const tooMany = chooseIdsTooMany(error);
+  if (tooMany) return CHOOSE_WORDS.tooManyMatch(tooMany.needed ?? fallback);
+  return CHOOSE_WORDS.catalogFailedText;
 }
 
 // ---------------------------------------------------------------------------
@@ -877,7 +910,8 @@ export interface ChooseMergedPages {
   rows: ChooseCatalogRow[];
   /** From the newest page. */
   total: number;
-  categories: ChooseCategoryFacet[];
+  /** The filter's counts apart from Show, from the newest page. */
+  summary: DropshipCatalogReadSummary | null;
   /** More rows match than may be shown. */
   capped: boolean;
 }
@@ -897,8 +931,7 @@ export function mergeChoosePages(pages: readonly ChooseCatalogPage[]): ChooseMer
   return {
     rows,
     total,
-    // Facets ignore the category and Show filters (they apply search only), so the first page's list is the list.
-    categories: pages[0]?.facets.categories ?? [],
+    summary: newest?.summary ?? null,
     capped: rows.length >= CHOOSE_MAX_ROWS_SHOWN && total > rows.length,
   };
 }

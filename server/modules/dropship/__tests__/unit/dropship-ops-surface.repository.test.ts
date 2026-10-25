@@ -239,6 +239,34 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     });
   });
 
+  it("counts the vendor's picked items for the selection check, with the old field kept at the same value (PLAN-B v4.1 V17)", async () => {
+    const query = vi.fn(async () => ({ rows: [makeDogfoodReadinessRow({ vendor_selected_item_count: "12" })] }));
+    const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
+
+    const result = await repository.listDogfoodReadiness({ generatedAt: now, page: 1, limit: 50 });
+
+    const sql = String(query.mock.calls[0]?.[0]);
+    // Picks, not the frozen rules: the count and the package check both read the vendor's picks by their key.
+    expect(sql).toContain("FROM dropship.dropship_vendor_selected_variants vsv\n      WHERE vsv.vendor_id = v.id");
+    expect(sql).toContain("AND vsv.product_variant_id = pv.id");
+    expect(sql).not.toContain("dropship.dropship_vendor_selection_rules");
+    expect(result.items[0]?.metrics).toMatchObject({ vendorSelectedItemCount: 12, vendorSelectionIncludeRuleCount: 12 });
+    expect(result.items[0]?.checks.find((check) => check.key === "vendor_selection")).toMatchObject({
+      status: "ready", message: "12 items chosen by the vendor.",
+    });
+
+    query.mockResolvedValueOnce({ rows: [makeDogfoodReadinessRow({ vendor_selected_item_count: "1" })] });
+    const one = await repository.listDogfoodReadiness({ generatedAt: now, page: 1, limit: 50 });
+    expect(one.items[0]?.checks.find((check) => check.key === "vendor_selection")?.message).toBe("1 item chosen by the vendor.");
+
+    query.mockResolvedValueOnce({ rows: [makeDogfoodReadinessRow({ vendor_selected_item_count: "0" })] });
+    const none = await repository.listDogfoodReadiness({ generatedAt: now, page: 1, limit: 50 });
+    expect(none.items[0]?.metrics).toMatchObject({ vendorSelectedItemCount: 0, vendorSelectionIncludeRuleCount: 0 });
+    expect(none.items[0]?.checks.find((check) => check.key === "vendor_selection")).toMatchObject({
+      status: "blocked", message: "Vendor has not selected any catalog.",
+    });
+  });
+
   it("blocks dogfood readiness when the internal dropship channel is missing or ambiguous", async () => {
     const query = vi.fn(async () => ({
       rows: [
@@ -612,7 +640,7 @@ function makeDogfoodReadinessRow(overrides: Record<string, unknown> = {}) {
     listing_config_platform: "ebay",
     listing_config_active: true,
     admin_catalog_include_rule_count: "1",
-    vendor_selection_include_rule_count: "1",
+    vendor_selected_item_count: "1",
     active_shipping_box_count: "2",
     active_shipping_zone_rule_count: "1",
     active_shipping_rate_table_count: "1",

@@ -16,6 +16,7 @@ import { installCutoverAdmissionFixturePrerequisites } from "../../../inventory-
 import {
   DROPSHIP_EBAY_STOCK as F, addSecondFulfillmentNode, countDropshipStockRows, createDropshipEbayTarget, installDropshipEbayStockFixture,
 } from "../../../inventory-planning/__tests__/fixtures/dropship-ebay-stock.fixture";
+import { seedDropshipVendorPicks } from "../../../inventory-planning/__tests__/fixtures/publication-selection-work.fixture";
 import { quantityPublicationScopeLockKey, PostgresQuantityPublicationAdmission } from "../../../inventory-planning/infrastructure/quantity-publication-admission.repository";
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../../inventory-planning/infrastructure/inventory-publication-target-stop.repository";
 import { PostgresInventoryPublicationOutboxRepository } from "../../../inventory-planning/infrastructure/inventory-publication-outbox.repository";
@@ -104,7 +105,10 @@ const WORKER_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS dropship.dropship_listing_sync_events (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     listing_id integer NOT NULL, event_type varchar(80) NOT NULL, source varchar(40) NOT NULL, payload jsonb,
     created_at timestamptz NOT NULL DEFAULT now());
-  INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(102,20,'P6'),(103,20,'P7'),(104,20,'P8') ON CONFLICT DO NOTHING;`;
+  INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(102,20,'P6'),(103,20,'P7'),(104,20,'P8') ON CONFLICT DO NOTHING;
+  -- Both vendors pick the new sizes (PLAN-B v4.1 §15.3: at main their \`catalog\` includes chose them as they were created).
+  INSERT INTO dropship.dropship_vendor_selected_variants(vendor_id,product_variant_id)
+    SELECT vendor.id, size.id FROM (VALUES (10),(11)) vendor(id) CROSS JOIN (VALUES (102),(103),(104)) size(id) ON CONFLICT DO NOTHING;`;
 
 /**
  * What PR A's publish runs migration references, which the reduced schema lacks (rebase of PR A onto Fix PR 2a): the
@@ -889,6 +893,21 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
       expect(await ops().requeueAutomaticStockLinkFailures({ now: NOW, workerId: "sweep-p3", limit: 25 }))
         .toEqual({ requeued: [], exhausted: [], skipped: [], deferred: [], failed: [] });
     });
+
+    // V15 (FIDELITY-12): the re-send reads the selection through the stock reader, which reads the vendor's picks.
+    it("does not re-send a listing whose pick the vendor removed: it is marked skipped once, as an unselected size (PLAN-B v4.1 V15)", async () => {
+      await createDropshipEbayTarget(database.pool);
+      await failedBeforeDeploy();
+      await database.pool.query("DELETE FROM dropship.dropship_vendor_selected_variants WHERE vendor_id = $1 AND product_variant_id = $2",
+        [F.vendorId, F.variantId]);
+
+      const pass = await ops().requeueAutomaticStockLinkFailures({ now: NOW, workerId: "sweep-p3", limit: 25 });
+
+      expect(pass).toMatchObject({ requeued: [], skipped: [{ itemId: 1, errorCode: "PUBLICATION_LISTING_TARGET_UNMAPPED",
+        reason: "zero:missing_vendor_include_rule" }] });
+      expect(await item(1)).toMatchObject({ status: "failed", result: expect.objectContaining({ automaticRequeue: expect.objectContaining({ state: "skipped" }) }) });
+      expect(await auditEvents("listing_push_item_auto_resend_skipped")).toHaveLength(1);
+    });
   });
 
   it("re-queues each passing code only after its wait, up to its cap, and leaves every other code alone", async () => {
@@ -1020,6 +1039,7 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
   it("leaves a publish run's chunk job to its run, whether the run is processing, finished or stopped", async () => {
     await createDropshipEbayTarget(database.pool);
     await database.pool.query("INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(105,20,'P9') ON CONFLICT DO NOTHING");
+    await seedDropshipVendorPicks(database.pool, F.vendorId, [105]);
     const run = async (status: "processing" | "partial" | "cancelled") => (await database.pool.query<{ id: string }>(
       `INSERT INTO dropship.dropship_listing_push_runs (vendor_id, store_connection_id, scope, status, stop_reason, idempotency_key,
          request_hash, target_count, chunk_size, chunk_count, next_chunk_index, actor_type, cancel_requested_at, created_at, updated_at,

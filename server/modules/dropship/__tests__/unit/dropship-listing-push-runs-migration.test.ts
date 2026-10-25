@@ -97,7 +97,8 @@ describe("the vendor selection lock (TESTS16)", () => {
   it("keeps the key text the rules save has always hashed, so a run and a save take the same lock", () => {
     expect(DROPSHIP_VENDOR_SELECTION_LOCK_KEY).toBe("dropship_vendor_selection_rules");
     expect(DROPSHIP_VENDOR_SELECTION_LOCK_SQL).toBe("SELECT pg_advisory_xact_lock(hashtext('dropship_vendor_selection_rules'), $1::integer)");
-    const save = readFileSync(resolve(process.cwd(), "server/modules/dropship/infrastructure/dropship-selection-atp.repository.ts"), "utf8");
+    // PR B's picks save took over the selection writes (PLAN-B v4.1 V16): it must take the same lock as a run create.
+    const save = readFileSync(resolve(process.cwd(), "server/modules/dropship/infrastructure/dropship-selection-change.repository.ts"), "utf8");
     const run = readFileSync(resolve(process.cwd(), "server/modules/dropship/infrastructure/dropship-listing-push-run.repository.ts"), "utf8");
     expect(save).toContain("await lockVendorSelection(client, input.vendorId);");
     expect(run).toContain("await lockVendorSelection(client, input.vendorId);");

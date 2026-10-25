@@ -54,7 +54,8 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
       CREATE TABLE catalog.product_line_products (product_id integer);
       CREATE TABLE catalog.product_categories (id integer PRIMARY KEY, name varchar(100) NOT NULL);
       CREATE TABLE dropship.dropship_catalog_rules (id integer);
-      CREATE TABLE dropship.dropship_vendor_selection_rules (id integer);
+      -- The vendor's picks, which the selection SHARE lock names (PLAN-B v4.1 §9 row 11); reduced.
+      CREATE TABLE dropship.dropship_vendor_selected_variants (vendor_id integer, product_variant_id integer);
       CREATE TABLE dropship.dropship_vendor_variant_overrides (id integer);
       CREATE TABLE dropship.dropship_audit_events (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         vendor_id integer, store_connection_id integer, entity_type text, entity_id text,

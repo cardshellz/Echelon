@@ -108,3 +108,17 @@ export function fundingShortfallCents(funding: DropshipVendorFundingStanding): n
   const required = Math.max(funding.minimumBalanceCents ?? 0, 1);
   return Math.max(0, required - funding.availableBalanceCents);
 }
+
+/**
+ * The vendor statuses that may not open the catalog (Catalog, step 1, and
+ * its reads and actions): `DropshipSelectionAtpService.requireVendorForMember`
+ * refuses them with DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED. A paused vendor
+ * may still open it. The catalog's background notices (the new-items email
+ * and the one conversion notice, B3 review JOB-1) skip the same set, so a
+ * vendor is only told about a page it can open.
+ */
+export const DROPSHIP_CATALOG_ACCESS_BLOCKED_VENDOR_STATUSES: readonly DropshipVendorStatus[] = ["closed", "lapsed", "suspended"];
+
+export function isCatalogAccessBlockedVendorStatus(status: string): boolean {
+  return (DROPSHIP_CATALOG_ACCESS_BLOCKED_VENDOR_STATUSES as readonly string[]).includes(status);
+}

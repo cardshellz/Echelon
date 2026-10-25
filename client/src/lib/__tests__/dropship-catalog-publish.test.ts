@@ -6,7 +6,11 @@ import {
   type ListingPushRunProblem,
   type ListingPushRunView,
 } from "@shared/dropship/listing-push-runs";
-import type { DropshipCatalogSelectionSummary } from "@shared/dropship/vendor-catalog-reads";
+import {
+  DROPSHIP_CATALOG_READ_ERROR_CODES,
+  DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON,
+  type DropshipCatalogSelectionSummary,
+} from "@shared/dropship/vendor-catalog-reads";
 import {
   CATALOG_PAGE_CLIENT_VERSION,
   CHECK_CHUNK_SIZE,
@@ -22,6 +26,7 @@ import {
   describePublishChoices,
   describeRun,
   describeRunProblem,
+  isOlderCatalogServerError,
   isRunFinished,
   isTransientPublishError,
   mergeSelectedPages,
@@ -96,9 +101,9 @@ function summary(overrides: Partial<DropshipCatalogSelectionSummary> = {}): Drop
 }
 
 describe("limits and schedules", () => {
-  it("pins the page version to the server's A version, the check chunk under the preview cap, and the run poll", () => {
-    // PR B sets both this and DROPSHIP_CATALOG_CODE_VERSION (server/modules/dropship/domain/catalog-code-version.ts) to 2.
-    expect(CATALOG_PAGE_CLIENT_VERSION).toBe(1);
+  it("pins the page version to the server's B version, the check chunk under the preview cap, and the run poll", () => {
+    // PR B set both this and DROPSHIP_CATALOG_CODE_VERSION (server/modules/dropship/domain/catalog-code-version.ts) to 2.
+    expect(CATALOG_PAGE_CLIENT_VERSION).toBe(2);
     // One release's page and server carry one version: raising one without the other fails here (review round 2 CT6).
     expect(CATALOG_PAGE_CLIENT_VERSION).toBe(DROPSHIP_CATALOG_CODE_VERSION);
     expect(CHECK_CHUNK_SIZE).toBe(200);
@@ -135,6 +140,23 @@ describe("errors (§4.12)", () => {
     expect(isTransientPublishError(new DOMException("The operation was aborted.", "AbortError"))).toBe(false);
     expect(isTransientPublishError(apiError(409, LISTING_PUSH_RUN_ERROR_CODES.runActive))).toBe(false);
     expect(isTransientPublishError(new Error("boom"))).toBe(false);
+  });
+
+  it("(review round 1 CLI-2) an answer from code older than this page: site updating, or an older catalog server's 503 for a newer page; nothing else", () => {
+    expect(isOlderCatalogServerError(apiError(503, DROPSHIP_SITE_UPDATING_CODE))).toBe(true);
+    // What an A dyno answers every step 1 and step 3 read of this page (clientVersion 2 > its 1; §4 row 3, §12.6).
+    const newerPage = apiError(503, DROPSHIP_CATALOG_READ_ERROR_CODES.writesPaused, "x", { reason: DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON });
+    expect(isOlderCatalogServerError(newerPage)).toBe(true);
+    // Another paused reason, a plain 503, the same reason on another status or code, and no answer are not "updating".
+    expect(isOlderCatalogServerError(apiError(503, DROPSHIP_CATALOG_READ_ERROR_CODES.writesPaused, "x", { reason: "older_version_running" }))).toBe(false);
+    expect(isOlderCatalogServerError(apiError(503, DROPSHIP_CATALOG_READ_ERROR_CODES.writesPaused))).toBe(false);
+    expect(isOlderCatalogServerError(apiError(503))).toBe(false);
+    expect(isOlderCatalogServerError(apiError(500, DROPSHIP_CATALOG_READ_ERROR_CODES.writesPaused, "x", { reason: DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON }))).toBe(false);
+    expect(isOlderCatalogServerError(apiError(503, "DROPSHIP_ALLOCATION_UNAVAILABLE", "x", { reason: DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON }))).toBe(false);
+    expect(isOlderCatalogServerError(new TypeError("Failed to fetch"))).toBe(false);
+    expect(isOlderCatalogServerError(null)).toBe(false);
+    // It is still retried like every transient read.
+    expect(retryPublishRead(0, newerPage)).toBe(true);
   });
 
   it("maps every run create refusal to what the press does, in the plan's words", () => {

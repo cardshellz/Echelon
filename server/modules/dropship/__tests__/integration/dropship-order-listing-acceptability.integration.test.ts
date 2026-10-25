@@ -36,7 +36,7 @@ const SIZE = 1001;
 
 /** The columns listActiveDropshipCatalogRules reads that the shared fixture's reduced rules table lacks (0086). */
 const orderFixtureSql = `
-  ${listingPushRunsBaseFixtureSql}
+  ${listingPushRunsBaseFixtureSql()}
   ALTER TABLE dropship.dropship_catalog_rules ADD COLUMN revision_id integer, ADD COLUMN notes text,
     ADD COLUMN metadata jsonb, ADD COLUMN created_at timestamptz NOT NULL DEFAULT now(),
     ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now();

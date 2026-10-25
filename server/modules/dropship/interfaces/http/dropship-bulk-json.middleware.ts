@@ -17,6 +17,9 @@ export const PRICING_RULES_TOO_LARGE_MESSAGE =
   "These pricing rules are too large to save at once. Use category, product or product-line rules instead of long lists of single sizes.";
 /** A content profile is large from its template text alone (up to 100 groups of two 4,000-character parts). */
 export const CONTENT_PROFILE_TOO_LARGE_MESSAGE = "These descriptions are too large to save at once. Use fewer description groups or shorter text.";
+/** Step 1's picks save and its preview (PLAN-B v4.1 §8): up to 10,000 ids to add and 10,000 to remove, about 140 KB. */
+// PROPOSED (Stage 3/5, step 1 plan S2-5)
+export const SELECTION_CHANGE_TOO_LARGE_MESSAGE = "This change is too large to send at once. Change fewer items, then save.";
 
 const STORE_PATH = String.raw`^\/api\/dropship\/listings\/stores\/[^/]+`;
 const storePath = (suffix: string) => new RegExp(`${STORE_PATH}${suffix}$`);
@@ -40,6 +43,8 @@ export const BULK_JSON_PATHS: ReadonlyArray<{ method: "POST" | "PUT"; pattern: R
   { method: "POST", pattern: storePath(String.raw`\/listing-settings\/price-changes\/apply`) },
   // W13's "Got it for all N" (9g): up to 10,000 products.
   { method: "POST", pattern: storePath(String.raw`\/listing-settings\/category-moves\/acknowledge`) },
+  // Step 1's picks save and its preview (PLAN-B v4.1 §8): 20,000 ids are about 140 KB.
+  { method: "POST", pattern: /^\/api\/dropship\/catalog\/selection\/changes(\/preview)?$/ },
 ]);
 
 /** The global parser skips these requests; the route parses them after authentication. */

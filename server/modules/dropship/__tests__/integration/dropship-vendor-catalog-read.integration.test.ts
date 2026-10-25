@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,7 +14,7 @@ import {
   createInventoryCutoverTestDatabase,
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { listingPushRunsBaseFixtureSql } from "../fixtures/listing-push-runs.fixture";
+import { listingPushRunsBaseFixtureSql, seedPicks } from "../fixtures/listing-push-runs.fixture";
 
 /**
  * The vendor catalog reads against a real PostgreSQL (step 1 plan S2-5 §4.8,
@@ -44,7 +43,7 @@ const READ_HEAP_CEILING_BYTES = 64 * 1024 * 1024;
 
 /** The catalog tables the candidate SQL joins that the shared fixture does not create (production names, reduced). */
 const catalogReadFixtureSql = `
-  ${listingPushRunsBaseFixtureSql}
+  ${listingPushRunsBaseFixtureSql()}
   ALTER TABLE catalog.product_variants ADD COLUMN position integer NOT NULL DEFAULT 0;
   CREATE TABLE catalog.product_categories (id integer PRIMARY KEY, name varchar(100) NOT NULL);
   ALTER TABLE catalog.products ADD CONSTRAINT products_category_fk FOREIGN KEY (category_id)
@@ -65,6 +64,8 @@ describeDatabase.sequential("vendor catalog reads (PostgreSQL)", () => {
     repository: new PgDropshipSelectionAtpRepository(pool),
     atp: { getVariantAtp: async (targets) => ({ authority: "canonical", quantities: new Map(targets.map((target) => [target.productVariantId, 4])) }) },
     listingTiers: { resolveForVendor: async () => ({ eligibility: listingTiers }) },
+    // `selection=new` is the arrivals suite's (dropship-catalog-arrivals.integration.test.ts); no read here sends it.
+    newItems: { listNewVariantIds: async () => { throw new Error("not used"); } },
   });
 
   beforeAll(async () => {
@@ -78,7 +79,8 @@ describeDatabase.sequential("vendor catalog reads (PostgreSQL)", () => {
 
   beforeEach(async () => {
     await pool.query(`TRUNCATE dropship.dropship_vendor_listings, dropship.dropship_audit_events,
-      dropship.dropship_vendor_selection_rules, dropship.dropship_vendor_selection_rule_set_revisions,
+      dropship.dropship_vendor_selected_variants, dropship.dropship_vendor_selection_rules,
+      dropship.dropship_vendor_selection_rule_set_revisions,
       dropship.dropship_catalog_rules, dropship.dropship_vendor_variant_overrides,
       dropship.dropship_store_listing_configs, dropship.dropship_store_connections, dropship.dropship_vendors,
       catalog.product_line_products, catalog.product_lines, catalog.product_variants, catalog.products,
@@ -90,17 +92,9 @@ describeDatabase.sequential("vendor catalog reads (PostgreSQL)", () => {
     `);
   });
 
-  async function saveRules(vendorId: number, rules: Array<{ scopeType: string; productVariantId?: number }>, key: string): Promise<number> {
-    const saved = await new PgDropshipSelectionAtpRepository(pool).replaceSelectionRules({
-      vendorId, idempotencyKey: key, requestHash: createHash("sha256").update(key).digest("hex"),
-      actor: { actorType: "vendor", actorId: `member-${vendorId}` }, now: NOW,
-      rules: rules.map((rule, index) => ({
-        scopeType: rule.scopeType, action: "include", productLineId: null, productId: null,
-        productVariantId: rule.productVariantId ?? null, category: null, autoConnectNewSkus: true, autoListNewSkus: false,
-        priority: 100 - index, metadata: {},
-      })) as never,
-    });
-    return saved.revisionId;
+  /** The vendor's one-time picks, saved as one save writes them: a selection revision and the picks (PLAN-B v4.1 §9). */
+  async function savePicks(vendorId: number, productVariantIds: readonly number[]): Promise<number> {
+    return seedPicks(pool, vendorId, productVariantIds);
   }
 
   /**
@@ -131,7 +125,7 @@ describeDatabase.sequential("vendor catalog reads (PostgreSQL)", () => {
         (${VENDOR}, ${STORE}, 301, 'ebay', 'queued', 'EBAY-301'),
         (${VENDOR}, ${STORE}, 401, 'ebay', 'active', NULL);
     `);
-    return saveRules(VENDOR, [101, 102, 301, 401, 501].map((productVariantId) => ({ scopeType: "variant", productVariantId })), "picks-0001");
+    return savePicks(VENDOR, [101, 102, 301, 401, 501]);
   }
 
   const ids = async (input: Record<string, unknown>) => (await service().previewCatalog({ vendorId: VENDOR, limit: 200, ...input }))
@@ -221,11 +215,17 @@ describeDatabase.sequential("vendor catalog reads (PostgreSQL)", () => {
     });
   });
 
-  it("keeps the onboarding count of include rules (dropship-vendor-provisioning.repository.ts getCatalogSetupSummary)", async () => {
+  it("counts the vendor's picks for onboarding, the old field kept at the same value (getCatalogSetupSummary; V17)", async () => {
     await seedSmallCatalog();
 
     expect(await new PgDropshipVendorProvisioningRepository(pool).getCatalogSetupSummary(VENDOR)).toEqual({
-      adminExposureRuleCount: 1, vendorSelectionRuleCount: 5,
+      adminExposureRuleCount: 1, vendorSelectedItemCount: 5, vendorSelectionRuleCount: 5,
+    });
+    // Frozen rules count for nothing: a vendor with rules and no picks has selected nothing.
+    await pool.query(`INSERT INTO dropship.dropship_vendor_selection_rules (vendor_id, scope_type, action) VALUES ($1, 'catalog', 'include')`,
+      [OTHER_VENDOR]);
+    expect(await new PgDropshipVendorProvisioningRepository(pool).getCatalogSetupSummary(OTHER_VENDOR)).toEqual({
+      adminExposureRuleCount: 1, vendorSelectedItemCount: 0, vendorSelectionRuleCount: 0,
     });
   });
 
@@ -239,7 +239,8 @@ describeDatabase.sequential("vendor catalog reads (PostgreSQL)", () => {
       FROM generate_series(1, $1::int) AS g`, [PERF_SIZES]);
     await pool.query(`INSERT INTO dropship.dropship_vendor_listings (vendor_id, store_connection_id, product_variant_id, platform, status, external_listing_id)
       SELECT ${VENDOR}, ${STORE}, g, 'ebay', 'active', 'EBAY-' || g FROM generate_series(1, 2000) AS g`);
-    await saveRules(VENDOR, [{ scopeType: "catalog" }], "everything-0001");
+    // The vendor picks every size (at main one `catalog` include rule).
+    await savePicks(VENDOR, Array.from({ length: PERF_SIZES }, (_, index) => 1 + index));
 
     const measure = async <T>(label: string, read: () => Promise<T>): Promise<T> => {
       const heapBefore = process.memoryUsage().heapUsed;

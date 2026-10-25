@@ -8564,9 +8564,10 @@ function DogfoodReadinessTable({
                     </span>
                   </div>
                   <div className="text-sm">
-                    Vendor include:{" "}
+                    {/* Stage 3/5 (step 1 plan S2-5): PROPOSED (V17). One-time picks: the vendor's chosen sizes, "—" from an older server. */}
+                    Items chosen:{" "}
                     <span className="font-mono">
-                      {item.metrics.vendorSelectionIncludeRuleCount}
+                      {item.metrics.vendorSelectedItemCount ?? "—"}
                     </span>
                   </div>
                   <div className="text-xs text-muted-foreground">

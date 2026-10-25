@@ -31,7 +31,7 @@ export class PgDropshipListingContentRepository implements ContentRepository {
       const vendorId = owner.rows[0]?.vendor_id;
       if (!vendorId) throw new DropshipError("DROPSHIP_STORE_CONNECTION_REQUIRED", "Store connection was not found.");
       if (input.productVariantId) {
-        await client.query(`LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selection_rules,
+        await client.query(`LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selected_variants,
           dropship.dropship_vendor_variant_overrides, catalog.product_line_products IN SHARE MODE`);
         await client.query(`SELECT pv.id FROM catalog.product_variants pv JOIN catalog.products p ON p.id = pv.product_id
           WHERE pv.id = $1 FOR SHARE OF pv, p`, [input.productVariantId]);

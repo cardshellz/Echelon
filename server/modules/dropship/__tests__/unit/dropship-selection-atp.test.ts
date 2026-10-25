@@ -1,25 +1,22 @@
 import { describe, expect, it } from "vitest";
+import { dropshipVendorStatusEnum } from "../../../../../shared/schema/dropship.schema";
+import {
+  DROPSHIP_CATALOG_ACCESS_BLOCKED_VENDOR_STATUSES,
+  isCatalogAccessBlockedVendorStatus,
+} from "../../domain/vendor-standing";
 import type { DropshipCatalogExposureRule } from "../../domain/catalog-exposure";
 import {
-  computeDropshipMarketplaceQuantity,
-  evaluateDropshipVendorCatalogSelection,
-  type DropshipVendorSelectionRule,
-} from "../../domain/vendor-selection";
-import {
   DropshipSelectionAtpService,
-  hashVendorSelectionRules,
-  normalizeVendorSelectionRule,
   type DropshipAtpProvider,
+  type DropshipCatalogNewItemsReader,
   type DropshipSelectionAtpRepository,
   type DropshipVendorCatalogCandidate,
   type DropshipVendorProfile,
   type DropshipVendorSelectionCountRecord,
   type DropshipVendorSelectionRuleRecord,
   type DropshipVendorVariantOverrideRecord,
-  type ReplaceDropshipVendorSelectionRulesRepositoryInput,
-  type ReplaceDropshipVendorSelectionRulesRepositoryResult,
 } from "../../application/dropship-selection-atp-service";
-import type { DropshipVendorCatalogCandidateFilter, ListDropshipVendorSelectionRulesInput } from "../../application/dropship-selection-dtos";
+import type { DropshipVendorCatalogCandidateFilter } from "../../application/dropship-selection-dtos";
 import {
   dropshipCatalogCategoriesAnswerSchema,
   dropshipCatalogIdsAnswerSchema,
@@ -44,163 +41,18 @@ const candidate: DropshipVendorCatalogCandidate = {
   productIsActive: true,
   variantIsActive: true,
   variantUomType: "pack",
+  // One-time picks (PLAN-B v4.1 §9 row 1): the candidate scan reads whether the vendor picked the size.
+  picked: true,
 };
 
-const exposedDecision = {
-  exposed: true,
-  reason: "exposed" as const,
-  includeRuleIds: [1],
-  excludeRuleIds: [],
-};
-
-describe("dropship vendor selection domain", () => {
-  it("does not allow vendor rules to bypass admin catalog exposure", () => {
-    const decision = evaluateDropshipVendorCatalogSelection({
-      candidate,
-      adminExposureDecision: {
-        exposed: false,
-        reason: "missing_include_rule",
-        includeRuleIds: [],
-        excludeRuleIds: [],
-      },
-      rules: [{ id: 10, scopeType: "catalog", action: "include" }],
-      rawAtpUnits: 5,
-    });
-
-    expect(decision.selected).toBe(false);
-    expect(decision.reason).toBe("not_exposed_by_admin");
-    expect(decision.marketplaceQuantity).toBe(0);
-  });
-
-  it("lets a vendor exclusion block a broader vendor include", () => {
-    const rules: DropshipVendorSelectionRule[] = [
-      { id: 10, scopeType: "catalog", action: "include" },
-      { id: 11, scopeType: "variant", action: "exclude", productVariantId: 20 },
-    ];
-
-    const decision = evaluateDropshipVendorCatalogSelection({
-      candidate,
-      adminExposureDecision: exposedDecision,
-      rules,
-      rawAtpUnits: 5,
-    });
-
-    expect(decision.selected).toBe(false);
-    expect(decision.reason).toBe("excluded_by_vendor_rule");
-    expect(decision.includeRuleIds).toEqual([10]);
-    expect(decision.excludeRuleIds).toEqual([11]);
-  });
-
-  it("keeps category selections connected to matching new SKUs without auto-listing by default", () => {
-    const decision = evaluateDropshipVendorCatalogSelection({
-      candidate,
-      adminExposureDecision: exposedDecision,
-      rules: [{
-        id: 12,
-        scopeType: "category",
-        action: "include",
-        category: "supplies",
-        autoConnectNewSkus: true,
-        autoListNewSkus: false,
-      }],
-      rawAtpUnits: 9,
-    });
-
-    expect(decision.selected).toBe(true);
-    expect(decision.autoConnectNewSkus).toBe(true);
-    expect(decision.autoListNewSkus).toBe(false);
-    expect(decision.marketplaceQuantity).toBe(9);
-  });
-
-  it("applies vendor variant disable and quantity cap overrides after selection", () => {
-    const selected = evaluateDropshipVendorCatalogSelection({
-      candidate,
-      adminExposureDecision: exposedDecision,
-      rules: [{ id: 13, scopeType: "catalog", action: "include" }],
-      rawAtpUnits: 9,
-      override: { productVariantId: 20, marketplaceQuantityCap: 4 },
-    });
-    const disabled = evaluateDropshipVendorCatalogSelection({
-      candidate,
-      adminExposureDecision: exposedDecision,
-      rules: [{ id: 13, scopeType: "catalog", action: "include" }],
-      rawAtpUnits: 9,
-      override: { productVariantId: 20, enabledOverride: false, marketplaceQuantityCap: 4 },
-    });
-
-    expect(selected.selected).toBe(true);
-    expect(selected.marketplaceQuantity).toBe(4);
-    expect(selected.quantityCapApplied).toBe(true);
-    expect(disabled.selected).toBe(false);
-    expect(disabled.reason).toBe("disabled_by_vendor_override");
-    expect(disabled.marketplaceQuantity).toBe(0);
-  });
-
-  it("does not apply the retired vendor cap to a canonical target quantity", () => {
-    const selected = evaluateDropshipVendorCatalogSelection({
-      candidate,
-      adminExposureDecision: exposedDecision,
-      rules: [{ id: 13, scopeType: "catalog", action: "include" }],
-      rawAtpUnits: 9,
-      override: { productVariantId: 20, marketplaceQuantityCap: 4 },
-      applyMarketplaceQuantityCap: false,
-    });
-
-    expect(selected.selected).toBe(true);
-    expect(selected.marketplaceQuantity).toBe(9);
-    expect(selected.quantityCapApplied).toBe(false);
-  });
-
-  it("normalizes invalid or negative ATP to zero", () => {
-    expect(computeDropshipMarketplaceQuantity(-5)).toBe(0);
-    expect(computeDropshipMarketplaceQuantity(Number.NaN)).toBe(0);
-  });
-});
+// The evaluator's domain cases moved to vendor-selection.test.ts, rewritten for picks (PLAN-B v4.1 §15.1). The rules
+// save's cases (hash, duplicates, reserved key) went with the save (V10, FIDELITY-8); the reserved key is refused on
+// /changes now (dropship-selection-change-service.test.ts).
 
 describe("DropshipSelectionAtpService", () => {
-  it("hashes selection rules independently of request order", () => {
-    const first = [
-      normalizeVendorSelectionRule({
-        scopeType: "catalog",
-        action: "include",
-        autoConnectNewSkus: true,
-        autoListNewSkus: false,
-        priority: 0,
-      }),
-      normalizeVendorSelectionRule({
-        scopeType: "variant",
-        action: "exclude",
-        productVariantId: 20,
-        autoConnectNewSkus: true,
-        autoListNewSkus: false,
-        priority: 5,
-      }),
-    ];
-    const second = [...first].reverse();
-
-    expect(hashVendorSelectionRules(first)).toBe(hashVendorSelectionRules(second));
-  });
-
-  it("rejects duplicate vendor selection rules before repository writes", async () => {
-    const repository = new FakeDropshipSelectionAtpRepository();
-    const service = makeService(repository, new FakeAtpProvider());
-
-    await expect(service.replaceSelectionRules({
-      vendorId: 1,
-      idempotencyKey: "selection-rules-001",
-      actor: { actorType: "vendor", actorId: "member-1" },
-      rules: [
-        { scopeType: "catalog", action: "include" },
-        { scopeType: "catalog", action: "include" },
-      ],
-    })).rejects.toThrow();
-    expect(repository.lastReplace).toBeNull();
-  });
-
   it("previews only selected rows and returns capped vendor-facing marketplace quantity", async () => {
     const repository = new FakeDropshipSelectionAtpRepository();
     repository.catalogRules = [{ id: 1, scopeType: "catalog", action: "include" }];
-    repository.selectionRules = [makeSelectionRuleRecord({ id: 2, scopeType: "catalog", action: "include" })];
     repository.candidates = [
       candidate,
       { ...candidate, productVariantId: 21, variantSku: "V-21", category: "Other" },
@@ -229,13 +81,17 @@ describe("DropshipSelectionAtpService", () => {
     expect(result.rows[0].selectionDecision.selected).toBe(true);
     expect(result.rows[0].selectionDecision.marketplaceQuantity).toBe(2);
     expect(result.rows[0].selectionDecision.quantityCapApplied).toBe(true);
+    expect(result.rows[0].selectionDecision.picked).toBe(true);
     expect(result.rows[0]).not.toHaveProperty("rawAtpUnits");
+    // The pick rides on the decision only; the row keeps its shape (no top-level `picked`).
+    expect(result.rows[0]).not.toHaveProperty("picked");
+    // The catalog read never reads the frozen rules (they serve only the frozen rules GET).
+    expect(repository.selectionRuleReads).toBe(0);
   });
 
   it("uses the canonical target quantity without reapplying the legacy vendor cap", async () => {
     const repository = new FakeDropshipSelectionAtpRepository();
     repository.catalogRules = [{ id: 1, scopeType: "catalog", action: "include" }];
-    repository.selectionRules = [makeSelectionRuleRecord({ id: 2, scopeType: "catalog", action: "include" })];
     repository.candidates = [candidate];
     repository.overrides = [{
       id: 1,
@@ -260,7 +116,6 @@ describe("DropshipSelectionAtpService", () => {
   it("returns only exposed catalog rows and builds de-duped exposed facets", async () => {
     const repository = new FakeDropshipSelectionAtpRepository();
     repository.catalogRules = [{ id: 1, scopeType: "category", action: "include", category: "Supplies" }];
-    repository.selectionRules = [makeSelectionRuleRecord({ id: 2, scopeType: "catalog", action: "include" })];
     repository.candidates = [
       {
         ...candidate,
@@ -295,11 +150,8 @@ describe("DropshipSelectionAtpService", () => {
   it("reads stock only for the page it returns, and decides the total and selection without it", async () => {
     const repository = new FakeDropshipSelectionAtpRepository();
     repository.catalogRules = [{ id: 1, scopeType: "catalog", action: "include" }];
-    repository.selectionRules = [
-      makeSelectionRuleRecord({ id: 2, scopeType: "variant", action: "include", productVariantId: 22 }),
-      makeSelectionRuleRecord({ id: 3, scopeType: "variant", action: "include", productVariantId: 23 }),
-    ];
-    repository.candidates = [20, 21, 22, 23, 24].map((id) => ({ ...candidate, productVariantId: id, variantSku: `V-${id}` }));
+    repository.candidates = [20, 21, 22, 23, 24].map((id) => ({ ...candidate, productVariantId: id, variantSku: `V-${id}`,
+      picked: id === 22 || id === 23 }));
     const atp = new FakeAtpProvider();
     for (const id of [20, 21, 22, 23, 24]) atp.variantAtpByVariantId.set(id, id);
     const service = makeService(repository, atp);
@@ -323,27 +175,30 @@ describe("DropshipSelectionAtpService", () => {
     expect(atp.requestedVariantIds.at(-1)).toEqual([]);
   });
 
-  it("refuses a selection save key in the prefix B's release writes, before the repository (CHK10)", async () => {
-    const repository = new FakeDropshipSelectionAtpRepository();
-    const service = makeService(repository, new FakeAtpProvider());
-
-    await expect(service.replaceSelectionRules({
-      vendorId: 1, idempotencyKey: "legacy-picks-backfill:1", actor: { actorType: "vendor", actorId: "member-1" }, rules: [],
-    })).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_KEY_RESERVED", context: { retryable: false } });
-    expect(repository.lastReplace).toBeNull();
-    // A key that merely contains the words is the vendor's own.
-    await service.replaceSelectionRules({
-      vendorId: 1, idempotencyKey: "my-legacy-picks-key", actor: { actorType: "vendor", actorId: "member-1" }, rules: [],
-    });
-    expect(repository.lastReplace?.idempotencyKey).toBe("my-legacy-picks-key");
-  });
-
   it("requires a vendor profile before catalog access", async () => {
     const repository = new FakeDropshipSelectionAtpRepository();
     repository.vendor = null;
     const service = makeService(repository, new FakeAtpProvider());
 
     await expect(service.requireVendorForMember("member-1")).rejects.toThrow("vendor profile");
+  });
+
+  it("refuses catalog access to exactly the statuses the catalog's background notices skip (JOB-1's one list)", async () => {
+    expect(DROPSHIP_CATALOG_ACCESS_BLOCKED_VENDOR_STATUSES).toEqual(["closed", "lapsed", "suspended"]);
+    const refused: string[] = [];
+    for (const status of dropshipVendorStatusEnum) {
+      const repository = new FakeDropshipSelectionAtpRepository();
+      repository.vendor = { vendorId: 1, memberId: "member-1", status, entitlementStatus: "active" };
+      const outcome = await makeService(repository, new FakeAtpProvider()).requireVendorForMember("member-1")
+        .then(() => "allowed", (error: { code?: string }) => error.code);
+      if (outcome !== "allowed") {
+        expect(outcome, status).toBe("DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED");
+        refused.push(status);
+      }
+      expect(isCatalogAccessBlockedVendorStatus(status), status).toBe(outcome !== "allowed");
+    }
+    expect(refused.sort()).toEqual([...DROPSHIP_CATALOG_ACCESS_BLOCKED_VENDOR_STATUSES].sort());
+    expect(isCatalogAccessBlockedVendorStatus("unknown")).toBe(false);
   });
 });
 
@@ -358,7 +213,6 @@ class FakeDropshipSelectionAtpRepository implements DropshipSelectionAtpReposito
   selectionRules: DropshipVendorSelectionRuleRecord[] = [];
   candidates: DropshipVendorCatalogCandidate[] = [];
   overrides: DropshipVendorVariantOverrideRecord[] = [];
-  lastReplace: ReplaceDropshipVendorSelectionRulesRepositoryInput | null = null;
   /** The filter of every candidate scan, in call order. */
   candidateFilters: DropshipVendorCatalogCandidateFilter[] = [];
   counts: DropshipVendorSelectionCountRecord = { selectionRevisionId: 7, selectedTotal: 0, storeLive: null };
@@ -377,25 +231,12 @@ class FakeDropshipSelectionAtpRepository implements DropshipSelectionAtpReposito
     return this.catalogRules;
   }
 
-  async listSelectionRules(): Promise<DropshipVendorSelectionRuleRecord[]> {
-    return this.selectionRules;
-  }
+  /** How often the frozen rules were read: only the frozen rules GET may read them. */
+  selectionRuleReads = 0;
 
-  async replaceSelectionRules(
-    input: ReplaceDropshipVendorSelectionRulesRepositoryInput,
-  ): Promise<ReplaceDropshipVendorSelectionRulesRepositoryResult> {
-    this.lastReplace = input;
-    this.selectionRules = input.rules.map((rule, index) => makeSelectionRuleRecord({
-      ...rule,
-      id: index + 1,
-      revisionId: 1001,
-      vendorId: input.vendorId,
-    }));
-    return {
-      revisionId: 1001,
-      idempotentReplay: false,
-      rules: this.selectionRules,
-    };
+  async listSelectionRules(): Promise<DropshipVendorSelectionRuleRecord[]> {
+    this.selectionRuleReads += 1;
+    return this.selectionRules;
   }
 
   async listVendorCatalogCandidates(
@@ -430,9 +271,21 @@ class FakeAtpProvider implements DropshipAtpProvider {
   }
 }
 
+/** The new-items notice's "new for V" sizes (PLAN-B v4.1 §11.4), as the arrivals service answers them. */
+class FakeNewItemsReader implements DropshipCatalogNewItemsReader {
+  ids: number[] = [];
+  inputs: Array<{ vendorId: number; categoryId: number | null; now: Date }> = [];
+
+  async listNewVariantIds(input: { vendorId: number; categoryId: number | null; now: Date }): Promise<number[]> {
+    this.inputs.push(input);
+    return this.ids;
+  }
+}
+
 function makeService(
   repository: DropshipSelectionAtpRepository,
   atp: DropshipAtpProvider,
+  newItems: DropshipCatalogNewItemsReader = new FakeNewItemsReader(),
 ): DropshipSelectionAtpService {
   return new DropshipSelectionAtpService({
     clock: { now: () => now },
@@ -440,6 +293,7 @@ function makeService(
     repository,
     atp,
     listingTiers: { resolveForVendor: async () => ({ eligibility: catalogListingTiers }) },
+    newItems,
   });
 }
 
@@ -488,22 +342,21 @@ describe("DropshipSelectionAtpService catalog reads (S2-5 §4.8)", () => {
       { id: 1, scopeType: "catalog", action: "include" },
       { id: 2, scopeType: "variant", action: "exclude", productVariantId: 24 },
     ];
-    repository.selectionRules = [20, 21, 23, 24].map((productVariantId, index) => makeSelectionRuleRecord({
-      id: 10 + index, scopeType: "variant", action: "include", productVariantId,
-    }));
+    // 20, 21, 23 and 24 are picked (TESTS-6): the candidate scan carries `picked`.
     repository.candidates = [
-      { ...candidate, productVariantId: 20, categoryId: 5, categoryName: "Supplies" },
-      { ...candidate, productVariantId: 21, categoryId: 5, categoryName: "Supplies" },
-      { ...candidate, productVariantId: 22, categoryId: 6, categoryName: "Binders", category: "Binders" },
-      { ...candidate, productVariantId: 23, categoryId: null, categoryName: null, category: "Loose" },
-      { ...candidate, productVariantId: 24, categoryId: 6, categoryName: "Binders", category: "Binders" },
+      { ...candidate, productVariantId: 20, categoryId: 5, categoryName: "Supplies", picked: true },
+      { ...candidate, productVariantId: 21, categoryId: 5, categoryName: "Supplies", picked: true },
+      { ...candidate, productVariantId: 22, categoryId: 6, categoryName: "Binders", category: "Binders", picked: false },
+      { ...candidate, productVariantId: 23, categoryId: null, categoryName: null, category: "Loose", picked: true },
+      { ...candidate, productVariantId: 24, categoryId: 6, categoryName: "Binders", category: "Binders", picked: true },
     ];
     repository.overrides = [{
       id: 1, vendorId: 1, productVariantId: 21, enabledOverride: false, marketplaceQuantityCap: null,
       notes: null, createdAt: now, updatedAt: now,
     }];
     const atp = new FakeAtpProvider();
-    return { repository, atp, service: makeService(repository, atp) };
+    const newItems = new FakeNewItemsReader();
+    return { repository, atp, newItems, service: makeService(repository, atp, newItems) };
   }
 
   it("filters by selection three ways; not_selected holds a picked size the override turned off (TESTS2)", async () => {
@@ -519,6 +372,59 @@ describe("DropshipSelectionAtpService catalog reads (S2-5 §4.8)", () => {
     expect(await ids({ selectedOnly: true })).toEqual([20, 23]);
     expect(await ids({ selectedOnly: true, selection: "not_selected" })).toEqual([21, 22]);
     await expect(service.previewCatalog({ vendorId: 1, selection: "everything" })).rejects.toThrow();
+  });
+
+  it("filters a fourth way, selection=new: the notice's new sizes that are exposed and not selected (PLAN-B v4.1 §11.4, TESTS-8)", async () => {
+    const { newItems, service } = catalog();
+    // The notice names 20 (picked since: no longer new), 22, 24 (Card Shellz stopped offering it) and 99 (not in this read).
+    newItems.ids = [20, 22, 24, 99];
+    const read = async (input: Record<string, unknown>) => service.previewCatalog({ vendorId: 1, ...input });
+
+    const page = await read({ selection: "new", categoryId: 6 });
+    expect(page.rows.map((row) => row.productVariantId)).toEqual([22]);
+    expect(page.total).toBe(1);
+    // The summary stays apart from the selection filter.
+    expect(page.summary).toEqual({ matching: 4, matchingSelected: 2 });
+    // One read of the notice's sizes, for the session's vendor, the filter's category and the read's own time.
+    expect(newItems.inputs).toEqual([{ vendorId: 1, categoryId: 6, now }]);
+
+    // Without a category: every category the vendor sells from.
+    expect((await read({ selection: "new" })).rows.map((row) => row.productVariantId)).toEqual([22]);
+    expect(newItems.inputs[1]).toEqual({ vendorId: 1, categoryId: null, now });
+    // "Check all N that match" on the review: the new sizes are the ones to add.
+    expect(await service.listCatalogIds({ vendorId: 1, selection: "new", categoryId: 6, purpose: "add" }))
+      .toEqual({ selectedIds: [], notSelectedIds: [22], total: 1 });
+    // Nothing new: no rows, never every row.
+    newItems.ids = [];
+    expect((await read({ selection: "new", categoryId: 6 })).rows).toEqual([]);
+
+    // The other filters never read the notice.
+    newItems.inputs = [];
+    for (const selection of ["all", "selected", "not_selected"]) await read({ selection });
+    await read({});
+    await service.listCatalogIds({ vendorId: 1, purpose: "add" });
+    await service.listCatalogCategories({ vendorId: 1 });
+    expect(newItems.inputs).toEqual([]);
+  });
+
+  it("decides every catalog read from the candidates' picks and never reads the frozen rules (PLAN-B v4.1 §9 row 1)", async () => {
+    const { repository, service } = catalog();
+    // A frozen rule that would select 22 changes nothing: only the frozen rules GET reads the rules now.
+    repository.selectionRules = [makeSelectionRuleRecord({ id: 9, scopeType: "variant", action: "include", productVariantId: 22 })];
+
+    const rows = (await service.previewCatalog({ vendorId: 1 })).rows;
+    expect(rows.map((row) => [row.productVariantId, row.selectionDecision.picked, row.selectionDecision.selected,
+      row.selectionDecision.reason])).toEqual([
+      [20, true, true, "selected"],
+      [21, true, false, "disabled_by_vendor_override"],
+      [22, false, false, "missing_vendor_include_rule"],
+      [23, true, true, "selected"],
+    ]);
+    await service.listCatalogIds({ vendorId: 1, purpose: "add" });
+    await service.listCatalogCategories({ vendorId: 1 });
+    expect(repository.selectionRuleReads).toBe(0);
+    expect((await service.listSelectionRules({ vendorId: 1 })).rules).toHaveLength(1);
+    expect(repository.selectionRuleReads).toBe(1);
   });
 
   it("answers the filter's summary apart from the selection filter, and the paging total with it", async () => {
@@ -561,8 +467,7 @@ describe("DropshipSelectionAtpService catalog reads (S2-5 §4.8)", () => {
   it("refuses only the list the purpose needs above 10,000; the other list is null (TESTS22)", async () => {
     const repository = new FakeDropshipSelectionAtpRepository();
     repository.catalogRules = [{ id: 1, scopeType: "catalog", action: "include" }];
-    repository.selectionRules = [makeSelectionRuleRecord({ id: 2, scopeType: "catalog", action: "include" })];
-    repository.candidates = Array.from({ length: 10_001 }, (_, index) => ({ ...candidate, productVariantId: 1 + index }));
+    repository.candidates = Array.from({ length: 10_001 }, (_, index) => ({ ...candidate, productVariantId: 1 + index, picked: true }));
     const service = makeService(repository, new FakeAtpProvider());
 
     await expect(service.listCatalogIds({ vendorId: 1, purpose: "remove" })).rejects.toMatchObject({
@@ -574,7 +479,7 @@ describe("DropshipSelectionAtpService catalog reads (S2-5 §4.8)", () => {
       selectedIds: null, notSelectedIds: [], total: 10_001,
     });
 
-    repository.selectionRules = [];
+    repository.candidates = repository.candidates.map((row) => ({ ...row, picked: false }));
     await expect(service.listCatalogIds({ vendorId: 1, purpose: "add" })).rejects.toMatchObject({
       code: "DROPSHIP_CATALOG_IDS_TOO_MANY", context: { needed: 10_001 },
     });

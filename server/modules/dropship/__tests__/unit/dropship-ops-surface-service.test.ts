@@ -1293,6 +1293,7 @@ function makeDogfoodReadinessItem(
       dropshipOmsChannelCount: 1,
       defaultWarehouseId: 1,
       adminCatalogIncludeRuleCount: 1,
+      vendorSelectedItemCount: 1,
       vendorSelectionIncludeRuleCount: 1,
       activeShippingBoxCount: 1,
       activeShippingZoneRuleCount: 1,

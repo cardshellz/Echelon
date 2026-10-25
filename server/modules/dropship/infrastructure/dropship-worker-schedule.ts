@@ -13,7 +13,8 @@ export type DropshipWorkerScheduleName =
   | "costDetection"
   | "categoryMarks"
   | "rulesConversion"
-  | "marketplaceSyncBack";
+  | "marketplaceSyncBack"
+  | "catalogArrivals";
 
 interface DropshipWorkerScheduleDefinition {
   initialDelayEnvironmentVariable: string;
@@ -77,6 +78,14 @@ const SCHEDULE_DEFINITIONS: Record<
   marketplaceSyncBack: {
     initialDelayEnvironmentVariable: "DROPSHIP_MARKETPLACE_SYNC_BACK_WORKER_INITIAL_DELAY_MS",
     defaultInitialDelayMs: 300_000,
+  },
+  // The catalog arrivals job (PLAN-B v4.1 §11.1) ticks every minute: its
+  // first tick runs the conversion follow-up about a minute after boot, on a
+  // phase no other worker uses (between the USDC watcher's 45 s and the
+  // return intake's 90 s).
+  catalogArrivals: {
+    initialDelayEnvironmentVariable: "DROPSHIP_CATALOG_ARRIVALS_WORKER_INITIAL_DELAY_MS",
+    defaultInitialDelayMs: 60_000,
   },
 };
 

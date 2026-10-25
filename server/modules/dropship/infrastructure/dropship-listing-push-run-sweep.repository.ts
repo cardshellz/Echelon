@@ -207,7 +207,7 @@ export class PgDropshipListingPushRunSweepRepository implements DropshipListingP
       // Read only, one snapshot: the chunk's own sizes, never the whole catalog (TESTS10).
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const selected = await selectedVariantIdsAmong(
-        { vendorId: input.run.vendorId, ...selectedCatalogReaderForTransaction(client) }, ids, input.now);
+        selectedCatalogReaderForTransaction(client, input.run.vendorId), ids, input.now);
       const listings = await client.query<{ product_variant_id: number; status: string; external_listing_id: string | null }>(
         `SELECT product_variant_id, status, external_listing_id FROM dropship.dropship_vendor_listings
          WHERE vendor_id = $1 AND store_connection_id = $2 AND product_variant_id = ANY($3::int[])`,

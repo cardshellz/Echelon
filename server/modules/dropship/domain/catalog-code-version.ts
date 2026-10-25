@@ -8,7 +8,7 @@
  * 1 = PR A (rules selection, publish runs), 2 = PR B (one-time picks),
  * 3 = PR C (ending removed listings). Each PR sets its value; a unit test pins it.
  */
-export const DROPSHIP_CATALOG_CODE_VERSION = 1;
+export const DROPSHIP_CATALOG_CODE_VERSION = 2;
 
 /**
  * How long after its last heartbeat a process still counts as running: four

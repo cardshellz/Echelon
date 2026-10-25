@@ -16,7 +16,7 @@ import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 
 export type ListingPriceCatalogReader = Pick<DropshipListingPreviewRepository,
   "loadStoreContext" | "listCatalogCandidates" | "listCatalogExposureRules" |
-  "listSelectionRules" | "listVariantOverrides" | "listExistingListings">;
+  "listPickedVariantIds" | "listVariantOverrides" | "listExistingListings">;
 export interface ListingPriceTransaction {
   vendorId: number;
   // The price writer also checks Card Shellz's price limits. The other users of
@@ -136,9 +136,9 @@ async function authorizeListingPrice(tx: ListingPriceTransaction, target: Listin
   if (!["connected", "needs_reauth", "refresh_failed"].includes(context.storeStatus)) {
     throw new DropshipError("DROPSHIP_LISTING_STORE_BLOCKED", "This store is not available for listing-price changes.");
   }
-  const [candidates, rules, selections, overrides, listings, policies] = await Promise.all([
+  const [candidates, rules, pickedIds, overrides, listings, policies] = await Promise.all([
     tx.catalog.listCatalogCandidates([target.productVariantId]),
-    tx.catalog.listCatalogExposureRules(), tx.catalog.listSelectionRules(tx.vendorId),
+    tx.catalog.listCatalogExposureRules(), tx.catalog.listPickedVariantIds(tx.vendorId, [target.productVariantId]),
     tx.catalog.listVariantOverrides({ vendorId: tx.vendorId, productVariantIds: [target.productVariantId] }),
     tx.catalog.listExistingListings({ storeConnectionId: target.storeConnectionId, productVariantIds: [target.productVariantId] }),
     // Every answer needs the limits, not only a save: an `inherit` size whose
@@ -149,7 +149,7 @@ async function authorizeListingPrice(tx: ListingPriceTransaction, target: Listin
   if (!candidate) throw new DropshipError("DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "Listing price is not available for this item.");
   const exposure = evaluateDropshipCatalogExposure(candidate, rules, now);
   const selection = evaluateDropshipVendorCatalogSelection({
-    candidate, adminExposureDecision: exposure, rules: selections, rawAtpUnits: 0,
+    candidate, adminExposureDecision: exposure, picked: pickedIds.has(target.productVariantId), rawAtpUnits: 0,
     override: overrides.find((row) => row.productVariantId === target.productVariantId) ?? null,
   });
   if (!exposure.exposed || !selection.selected) {

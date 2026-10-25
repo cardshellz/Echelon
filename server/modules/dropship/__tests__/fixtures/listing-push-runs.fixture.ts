@@ -30,7 +30,7 @@ export function listingPushRunsMigrationSql(): string {
  * reduced shapes (only the columns the code names) for the rest. Named
  * schemas in a database of its own (createInventoryCutoverTestDatabase).
  */
-export const listingPushRunsBaseFixtureSql = `
+const LISTING_PUSH_RUNS_BASE_SQL = `
   CREATE SCHEMA dropship;
   CREATE SCHEMA catalog;
   CREATE SCHEMA ebay;
@@ -156,3 +156,54 @@ export const listingPushRunsBaseFixtureSql = `
     price_basis varchar(20), price_markup_bps integer, price_flat_cents integer, price_rounding varchar(10), text_above text,
     created_at timestamptz NOT NULL);
 `;
+
+/**
+ * The vendor's one-time picks (*_dropship_vendor_selected_variants.sql, PLAN-B v4.1 §6 step 2) in their
+ * production shape, every reader of the selection reads them (§9). No 0743 triggers: this base installs no
+ * 0743 (a suite that runs the real 0743 adds PICKS_SELECTION_TRIGGERS_SQL after it, V33).
+ */
+const LISTING_PUSH_RUNS_PICKS_SQL = `
+  CREATE TABLE dropship.dropship_vendor_selected_variants (
+    vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id) ON DELETE CASCADE,
+    product_variant_id integer NOT NULL REFERENCES catalog.product_variants(id) ON DELETE CASCADE,
+    revision_id integer NOT NULL REFERENCES dropship.dropship_vendor_selection_rule_set_revisions(id),
+    source varchar(30) NOT NULL CHECK (source IN ('vendor','legacy_variant_rule','legacy_broad_rule','conversion_repair')),
+    selected_at timestamptz NOT NULL,
+    PRIMARY KEY (vendor_id, product_variant_id));
+  CREATE INDEX dropship_vendor_selected_variants_variant_idx ON dropship.dropship_vendor_selected_variants(product_variant_id);
+`;
+
+/**
+ * The base schema; with the picks table unless `{ picks: false }` (the picks migration suite, whose real B
+ * file creates it without IF NOT EXISTS, TESTS-4).
+ */
+export function listingPushRunsBaseFixtureSql(options: { picks?: boolean } = {}): string {
+  return options.picks === false ? LISTING_PUSH_RUNS_BASE_SQL : `${LISTING_PUSH_RUNS_BASE_SQL}\n${LISTING_PUSH_RUNS_PICKS_SQL}`;
+}
+
+/**
+ * The vendor picks these sizes, as one save would: one selection revision (the head every reader and run
+ * create keys on) and a pick per size, `source 'vendor'`. Returns the revision id. Sizes already picked keep
+ * their pick (ON CONFLICT DO NOTHING); each call is a new revision, as each save is.
+ */
+export async function seedPicks(client: { query: (text: string, values?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  vendorId: number, productVariantIds: readonly number[]): Promise<number> {
+  const revision = await client.query(`INSERT INTO dropship.dropship_vendor_selection_rule_set_revisions
+      (vendor_id, idempotency_key, request_hash, actor_type, rule_count)
+    SELECT $1::integer, 'fixture-picks:' || $2::text || ':' || (count(*) + 1)::text, repeat('0', 64), 'system', 0
+    FROM dropship.dropship_vendor_selection_rule_set_revisions WHERE vendor_id = $1::integer
+    RETURNING id`, [vendorId, String(vendorId)]);
+  const revisionId = Number(revision.rows[0]?.id);
+  await client.query(`INSERT INTO dropship.dropship_vendor_selected_variants (vendor_id, product_variant_id, revision_id, source, selected_at)
+    SELECT $1, id, $2, 'vendor', now() FROM unnest($3::integer[]) id ON CONFLICT DO NOTHING`, [vendorId, revisionId, [...productVariantIds]]);
+  return revisionId;
+}
+
+/** The vendor no longer picks these sizes (a removal save): a new revision and the picks deleted. Returns the revision id. */
+export async function removePicks(client: Parameters<typeof seedPicks>[0], vendorId: number,
+  productVariantIds: readonly number[]): Promise<number> {
+  const revisionId = await seedPicks(client, vendorId, []);
+  await client.query("DELETE FROM dropship.dropship_vendor_selected_variants WHERE vendor_id = $1 AND product_variant_id = ANY($2::integer[])",
+    [vendorId, [...productVariantIds]]);
+  return revisionId;
+}

@@ -1,44 +1,62 @@
 import { describe, expect, it } from "vitest";
+import { DROPSHIP_CATALOG_READ_ERROR_CODES } from "@shared/dropship/vendor-catalog-reads";
 import {
-  SELECTION_RULES_RETIRED_CODE,
-  buildChooseSelectionSave,
-  ChooseBuildRefusal,
+  SELECTION_CHANGE_ERROR_CODES,
+  selectionChangePreviewRequestSchema,
+  type SelectionChangeAnswer,
+  type SelectionChangePreviewAnswer,
+} from "@shared/dropship/vendor-selection-changes";
+import {
+  CHOOSE_BULK_BODY_LIMIT_BYTES,
+  CHOOSE_CHANGE_IDS_MAX,
   CHOOSE_MAX_ROWS_SHOWN,
   CHOOSE_PAGE_SIZE,
-  chooseCatalogPageSchema,
-  chooseCounts,
-  chooseMarksKey,
-  chooseNextPageParam,
-  chooseRowView,
-  chooseRulesView,
-  chooseSaveBlock,
-  chooseSaveBodyBytes,
-  chooseSaveResult,
-  ChooseUnverifiedAnswerError,
-  classifyChooseSaveError,
-  describeChooseMove,
-  describeChooseSaveBlock,
-  describeChooseShown,
+  CHOOSE_PAUSED_MAX_SENDS,
+  CHOOSE_SELECTION_CAP,
   EMPTY_CHOOSE_CHANGES,
-  isChangeableRow,
-  MAX_SELECTION_RULES,
+  chooseActionOverLimit,
+  chooseAdoptsHead,
+  chooseHeadMovedPast,
+  chooseBodyBytes,
+  chooseCategoryPurpose,
+  chooseCategoryTicks,
+  chooseCatalogPageSchema,
+  chooseCatalogRowSchema,
+  chooseChangeBody,
+  chooseChangesEmpty,
+  chooseChangesKey,
+  chooseCounts,
+  chooseEverything,
+  chooseIdsTooMany,
+  chooseKnownAt,
+  chooseMatchGrew,
+  chooseMatchLine,
+  chooseNextPageParam,
+  choosePausedDelayMs,
+  chooseRoom,
+  chooseRowView,
+  chooseSavedState,
+  classifyChooseSaveError,
+  describeChooseConfirm,
+  describeChooseIdsFailure,
+  describeChooseSaved,
+  describeChooseShown,
+  emptyChooseKnown,
+  learnChooseIds,
+  learnChooseRows,
   mergeChoosePages,
   reduceChooseChanges,
-  rulesFingerprint,
-  sameRuleContent,
-  SELECTION_SAVE_BODY_LIMIT_BYTES,
   shownTick,
-  toSelectionRuleInput,
   type ChooseCatalogPage,
   type ChooseCatalogRow,
   type ChooseChanges,
-  type ChooseMark,
+  type ChooseChangesAction,
+  type ChooseKnown,
   type ChooseSelectionReason,
-  type ChooseSelectionRule,
 } from "../dropship-catalog-choose";
-import { DROPSHIP_CATALOG_READ_ERROR_CODES } from "@shared/dropship/vendor-catalog-reads";
 import { CHOOSE_WORDS } from "../dropship-catalog-choose-words";
-import { DropshipApiError } from "../dropship-ops-surface";
+import { CATALOG_PAGE_CLIENT_VERSION } from "../dropship-catalog-publish";
+import { DROPSHIP_SITE_UPDATING_CODE, DropshipApiError } from "../dropship-ops-surface";
 
 /** Every input is frozen all the way down, so a function that mutates one throws. */
 function deepFreeze<T>(value: T): T {
@@ -49,455 +67,552 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-type RuleTarget = Partial<Pick<ChooseSelectionRule, "productLineId" | "productId" | "productVariantId" | "category">>;
+/** A set whose writers throw: the reducer must copy before it writes. */
+function frozenSet(ids: Iterable<number>): ReadonlySet<number> {
+  const set = new Set(ids);
+  const refuse = (): never => { throw new Error("a change set was mutated"); };
+  Object.assign(set, { add: refuse, delete: refuse, clear: refuse });
+  return Object.freeze(set);
+}
 
-/** A rule as the server's GET returns it: every target column, null when unused. */
-function serverRule(id: number, scopeType: ChooseSelectionRule["scopeType"], action: ChooseSelectionRule["action"], target: RuleTarget = {},
-  extra: Partial<ChooseSelectionRule> = {}): ChooseSelectionRule {
-  return deepFreeze({
-    id, revisionId: 7, scopeType, action,
-    productLineId: target.productLineId ?? null, productId: target.productId ?? null,
-    productVariantId: target.productVariantId ?? null, category: target.category ?? null,
-    autoConnectNewSkus: action === "include", autoListNewSkus: false,
-    priority: action === "include" ? 100 : 200,
-    metadata: { source: "portal_catalog" }, isActive: true,
+function changes(add: Iterable<number>, remove: Iterable<number>, baseRevisionId: number | null = 7): ChooseChanges {
+  return Object.freeze({ add: frozenSet(add), remove: frozenSet(remove), baseRevisionId });
+}
+
+function action(value: ChooseChangesAction): ChooseChangesAction {
+  return deepFreeze(value);
+}
+
+const ids = (set: ReadonlySet<number>) => [...set].sort((left, right) => left - right);
+const range = (from: number, count: number) => Array.from({ length: count }, (_, index) => from + index);
+
+function expectDisjoint(value: ChooseChanges) {
+  for (const id of value.add) expect(value.remove.has(id), `id ${id} on both sides`).toBe(false);
+}
+
+/** A row as the server sends it (rule ids, product-line facts and all), read through the step's own contract. */
+function row(productVariantId: number, reason: ChooseSelectionReason, picked: boolean, extra: Record<string, unknown> = {}): ChooseCatalogRow {
+  return deepFreeze(chooseCatalogRowSchema.parse({
+    productId: 11, productVariantId, productSku: "ENV-SGL", productName: "Envelope Single Pocket", variantSku: `ENV-${productVariantId}`,
+    variantName: "Pack of 50", category: "Mailers", categoryId: 5, categoryName: "Mailers", productLineIds: [7],
+    productLineNames: ["Trading Card Supplies"], unitsPerVariant: 50,
+    selectionDecision: { selected: reason === "selected", reason, picked, marketplaceQuantity: reason === "selected" ? 1_433 : 0,
+      quantityCapApplied: false, autoConnectNewSkus: false, autoListNewSkus: false, includeRuleIds: [], excludeRuleIds: [] },
     ...extra,
-  });
-}
-
-const PICK_101 = serverRule(1, "variant", "include", { productVariantId: 101 });
-const MAILERS_INCLUDE = serverRule(2, "category", "include", { category: "Mailers" }, { priority: 50, metadata: { source: "portal_catalog_scope" } });
-const KEEP_OUT_103 = serverRule(3, "variant", "exclude", { productVariantId: 103 });
-const TOPLOADERS_EXCLUDE = serverRule(4, "category", "exclude", { category: "Toploaders" }, { priority: 150 });
-const PRODUCT_20_INCLUDE = serverRule(5, "product", "include", { productId: 20 }, { priority: 50 });
-const RULES: readonly ChooseSelectionRule[] = deepFreeze([PICK_101, MAILERS_INCLUDE, KEEP_OUT_103, TOPLOADERS_EXCLUDE, PRODUCT_20_INCLUDE]);
-const VIEW = chooseRulesView(RULES);
-
-function row(productVariantId: number, reason: ChooseSelectionReason, includeRuleIds: number[] = [], excludeRuleIds: number[] = [],
-  extra: Partial<ChooseCatalogRow> = {}): ChooseCatalogRow {
-  return deepFreeze({
-    productId: 10, productVariantId, productSku: "ENV", productName: "Envelope Single Pocket", variantSku: `ENV-${productVariantId}`,
-    variantName: "Pack of 50", category: "Mailers",
-    selectionDecision: { selected: reason === "selected", reason, marketplaceQuantity: reason === "selected" ? 25 : 0, includeRuleIds, excludeRuleIds },
-    ...extra,
-  });
-}
-
-/** The fixture catalog: each row as the server evaluates it under RULES. */
-const R101 = row(101, "selected", [1, 2]);
-const R102 = row(102, "selected", [2]);
-const R103 = row(103, "excluded_by_vendor_rule", [2], [3]);
-const R104 = row(104, "excluded_by_vendor_rule", [], [4], { category: "Toploaders" });
-const R105 = row(105, "missing_vendor_include_rule", [], [], { category: null });
-const R106 = row(106, "disabled_by_vendor_override", [2]);
-const R107 = row(107, "not_exposed_by_admin");
-
-function mark(productVariantId: number, to: ChooseMark["to"], basisRow?: ChooseCatalogRow): ChooseMark {
-  const decision = basisRow?.selectionDecision;
-  return deepFreeze({
-    productVariantId, to,
-    basis: { reason: decision?.reason ?? "missing_vendor_include_rule", includeRuleIds: decision?.includeRuleIds ?? [], excludeRuleIds: decision?.excludeRuleIds ?? [] },
-  });
-}
-
-function changesOf(marks: ChooseMark[], baseFingerprint = VIEW.fingerprint): ChooseChanges {
-  return deepFreeze({ marks, baseFingerprint: marks.length ? baseFingerprint : null });
+  }));
 }
 
 describe("change set (reducer)", () => {
-  it("R1 a toggle on a size that isn't selected marks it to add, from the row's basis, and takes the rules' fingerprint", () => {
-    const next = reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "toggle", row: R105, rules: VIEW });
-    expect(next.marks).toEqual([{ productVariantId: 105, to: "selected", basis: { reason: "missing_vendor_include_rule", includeRuleIds: [], excludeRuleIds: [] } }]);
-    expect(next.baseFingerprint).toBe("1,2,3,4,5");
+  it("C1 a toggle on an unpicked size adds it; a second toggle drops it; a picked size is removed and put back", () => {
+    const start = changes([], []);
+    const added = reduceChooseChanges(start, action({ type: "toggle", productVariantId: 102, savedChecked: false }));
+    expect([ids(added.add), ids(added.remove), added.baseRevisionId]).toEqual([[102], [], 7]);
+    const back = reduceChooseChanges(changes(added.add, added.remove), action({ type: "toggle", productVariantId: 102, savedChecked: false }));
+    expect(chooseChangesEmpty(back)).toBe(true);
+    const removed = reduceChooseChanges(start, action({ type: "toggle", productVariantId: 101, savedChecked: true }));
+    expect([ids(removed.add), ids(removed.remove)]).toEqual([[], [101]]);
+    expect(chooseChangesEmpty(reduceChooseChanges(changes(removed.add, removed.remove), action({ type: "toggle", productVariantId: 101, savedChecked: true })))).toBe(true);
   });
 
-  it("R2 a toggle on a selected size marks it to remove", () => {
-    const next = reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "toggle", row: R101, rules: VIEW });
-    expect(next.marks).toEqual([{ productVariantId: 101, to: "not_selected", basis: { reason: "selected", includeRuleIds: [1, 2], excludeRuleIds: [] } }]);
+  it("C2 the sides stay disjoint: a stale add on a size that reads picked now becomes its remove", () => {
+    const next = reduceChooseChanges(changes([101], []), action({ type: "toggle", productVariantId: 101, savedChecked: true }));
+    expect([ids(next.add), ids(next.remove)]).toEqual([[], [101]]);
+    expectDisjoint(next);
   });
 
-  it("R3 a second toggle drops the mark, and no marks clear the fingerprint", () => {
-    const once = reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "toggle", row: R101, rules: VIEW });
-    const twice = reduceChooseChanges(once, { type: "toggle", row: R101, rules: VIEW });
-    expect(twice).toBe(EMPTY_CHOOSE_CHANGES);
-    expect(twice.baseFingerprint).toBeNull();
+  it("C3 the header box sets every changeable row shown, clearing a change that matches the saved pick and skipping the rest", () => {
+    const rows = deepFreeze([
+      { productVariantId: 101, savedChecked: true, changeable: true },
+      { productVariantId: 102, savedChecked: false, changeable: true },
+      { productVariantId: 103, savedChecked: false, changeable: false },
+      { productVariantId: 104, savedChecked: true, changeable: true },
+    ]);
+    const start = changes([], [104, 900]);
+    const checked = reduceChooseChanges(start, action({ type: "setShown", rows, checked: true }));
+    // 104's remove is cleared (it is saved checked), 102 is added, 103 can't change, 900 (not shown) keeps its remove.
+    expect([ids(checked.add), ids(checked.remove)]).toEqual([[102], [900]]);
+    const unchecked = reduceChooseChanges(changes(checked.add, checked.remove), action({ type: "setShown", rows, checked: false }));
+    expect([ids(unchecked.add), ids(unchecked.remove)]).toEqual([[], [101, 104, 900]]);
+    expectDisjoint(unchecked);
   });
 
-  it("R4 ignores sizes no pick can change: turned off, kept out by an older setting, not offered", () => {
-    for (const blocked of [R104, R106, R107]) {
-      expect(reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "toggle", row: blocked, rules: VIEW })).toBe(EMPTY_CHOOSE_CHANGES);
+  it("C4 applyIds checked adds every not-selected id and clears the pending removes of the selected ones; unchecked the reverse", () => {
+    const start = changes([50], [10, 11, 60]);
+    const add = reduceChooseChanges(start, action({ type: "applyIds", selectedIds: [10, 11], notSelectedIds: [20, 21], checked: true }));
+    expect([ids(add.add), ids(add.remove)]).toEqual([[20, 21, 50], [60]]);
+    const remove = reduceChooseChanges(changes([20, 21, 50], [60]), action({ type: "applyIds", selectedIds: [10, 11], notSelectedIds: [20, 21], checked: false }));
+    expect([ids(remove.add), ids(remove.remove)]).toEqual([[50], [10, 11, 60]]);
+    expectDisjoint(remove);
+  });
+
+  it("C5 a null list (over 10,000) leaves the other side's pending changes as they are", () => {
+    const start = changes([30], [10]);
+    const add = reduceChooseChanges(start, action({ type: "applyIds", selectedIds: null, notSelectedIds: [20], checked: true }));
+    expect([ids(add.add), ids(add.remove)]).toEqual([[20, 30], [10]]);
+    const remove = reduceChooseChanges(start, action({ type: "applyIds", selectedIds: [11], notSelectedIds: null, checked: false }));
+    expect([ids(remove.add), ids(remove.remove)]).toEqual([[30], [10, 11]]);
+  });
+
+  it("C6 an action that changes nothing returns the same object", () => {
+    const start = changes([102], [101]);
+    expect(reduceChooseChanges(start, action({ type: "setShown", rows: [{ productVariantId: 102, savedChecked: false, changeable: true }], checked: true }))).toBe(start);
+    expect(reduceChooseChanges(start, action({ type: "applyIds", selectedIds: [], notSelectedIds: [102], checked: true }))).toBe(start);
+    expect(reduceChooseChanges(start, action({ type: "rebase", revisionId: 7 }))).toBe(start);
+    expect(reduceChooseChanges(EMPTY_CHOOSE_CHANGES, action({ type: "undo" }))).toBe(EMPTY_CHOOSE_CHANGES);
+    expect(reduceChooseChanges(EMPTY_CHOOSE_CHANGES, action({ type: "saved" }))).toBe(EMPTY_CHOOSE_CHANGES);
+  });
+
+  it("C7 a rebase moves the base and keeps the changes; undo and saved clear them and keep the base", () => {
+    const start = changes([102], [101], 7);
+    const rebased = reduceChooseChanges(start, action({ type: "rebase", revisionId: 9 }));
+    expect([ids(rebased.add), ids(rebased.remove), rebased.baseRevisionId]).toEqual([[102], [101], 9]);
+    for (const type of ["undo", "saved"] as const) {
+      const cleared = reduceChooseChanges(start, action({ type }));
+      expect([cleared.add.size, cleared.remove.size, cleared.baseRevisionId]).toEqual([0, 0, 7]);
     }
-    // "Removed by you" is changeable: its only keep-out is the vendor's own.
-    expect(reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "toggle", row: R103, rules: VIEW }).marks).toHaveLength(1);
+    expect(chooseAdoptsHead(changes([], [], 7), 9)).toBe(true);
+    expect(chooseAdoptsHead(changes([], [], 9), 9)).toBe(false);
+    expect(chooseAdoptsHead(changes([], [], null), null)).toBe(false);
+    // With changes pending the head is never adopted silently: the save's preview says stale instead.
+    expect(chooseAdoptsHead(changes([1], [], 7), 9)).toBe(false);
   });
 
-  it("R5 the header box checks every changeable row shown from a mixed state", () => {
-    const start = changesOf([mark(102, "not_selected", R102)]);
-    const next = reduceChooseChanges(start, { type: "setShown", rows: [R101, R102, R103, R104, R105, R106], checked: true, rules: VIEW });
-    // 102's remove mark is dropped (it is saved checked), 103 and 105 gain add marks; 101 stays as saved; 104 and 106 can't change.
-    expect(next.marks.map((entry) => `${entry.productVariantId}:${entry.to}`)).toEqual(["103:selected", "105:selected"]);
-    expect(next.baseFingerprint).toBe(VIEW.fingerprint);
+  it("C8 holds 20,000 ids (10,000 a side) and refuses whole an action past that, saying how many", () => {
+    const full = reduceChooseChanges(EMPTY_CHOOSE_CHANGES, action({ type: "applyIds", selectedIds: range(1, 10_000), notSelectedIds: range(20_001, 10_000), checked: true }));
+    expect(full.add.size).toBe(10_000);
+    const both = reduceChooseChanges(changes(full.add, []), action({ type: "applyIds", selectedIds: range(1, 10_000), notSelectedIds: null, checked: false }));
+    expect([both.add.size, both.remove.size]).toEqual([10_000, 10_000]);
+    expect(CHOOSE_CHANGE_IDS_MAX * 2).toBe(20_000);
+    const frozen = changes(both.add, both.remove);
+    const oneMore = action({ type: "toggle", productVariantId: 40_000, savedChecked: false });
+    expect(reduceChooseChanges(frozen, oneMore)).toBe(frozen);
+    expect(chooseActionOverLimit(frozen, oneMore)).toEqual({ add: 10_001, remove: 10_000 });
+    expect(chooseActionOverLimit(frozen, action({ type: "toggle", productVariantId: 20_001, savedChecked: false }))).toBeNull();
+    const overRemove = action({ type: "applyIds", selectedIds: range(50_000, 10_001), notSelectedIds: null, checked: false });
+    expect(chooseActionOverLimit(EMPTY_CHOOSE_CHANGES, overRemove)).toEqual({ add: 0, remove: 10_001 });
+    expect(reduceChooseChanges(EMPTY_CHOOSE_CHANGES, overRemove)).toBe(EMPTY_CHOOSE_CHANGES);
   });
 
-  it("R6 the header box unchecks every changeable row shown", () => {
-    const start = changesOf([mark(105, "selected", R105)]);
-    const next = reduceChooseChanges(start, { type: "setShown", rows: [R101, R102, R103, R104, R105, R106], checked: false, rules: VIEW });
-    expect(next.marks.map((entry) => `${entry.productVariantId}:${entry.to}`)).toEqual(["101:not_selected", "102:not_selected"]);
-    // Nothing to change: the same object.
-    const again = reduceChooseChanges(next, { type: "setShown", rows: [R101, R102, R103, R104, R105, R106], checked: false, rules: VIEW });
-    expect(again).toBe(next);
+  it("C9 the body: both sides ascending, the base revision and this page's version; the key names exactly the changes", () => {
+    const body = chooseChangeBody(changes([30, 10, 20], [5, 1], 42));
+    expect(body).toEqual({ clientVersion: 2, expectedRevisionId: 42, add: { productVariantIds: [10, 20, 30] }, remove: { productVariantIds: [1, 5] } });
+    expect(CATALOG_PAGE_CLIENT_VERSION).toBe(2);
+    // The client's body parses with the shared strict schema the server reads.
+    expect(selectionChangePreviewRequestSchema.safeParse(body).success).toBe(true);
+    expect(chooseChangesKey(changes([30, 10], [5], 42))).toBe("42|10,30|5");
+    expect(chooseChangesKey(changes([10, 30], [5], null))).toBe("none|10,30|5");
+    expect(chooseCounts(changes([1, 2], [3]))).toEqual({ add: 2, remove: 1 });
   });
 
-  it("R7 the fingerprint is set when the first mark is made and kept while marks remain", () => {
-    const first = reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "toggle", row: R105, rules: VIEW });
-    const otherView = chooseRulesView([...RULES, serverRule(9, "variant", "include", { productVariantId: 999 })]);
-    const second = reduceChooseChanges(first, { type: "toggle", row: R101, rules: otherView });
-    expect(second.baseFingerprint).toBe(VIEW.fingerprint);
-    expect(second.marks.map((entry) => entry.productVariantId)).toEqual([101, 105]);
+  it("C10 20,000 ids are about 140 KB: over an older dyno's 100 KiB parser, within the bulk parser's 1 MiB", () => {
+    const body = { ...chooseChangeBody(changes(range(1_000_000, 10_000), range(2_000_000, 10_000), 2_147_000_000)),
+      idempotencyKey: `catalog-selection:${"0".repeat(36)}`, expectedEffectsHash: "a".repeat(64) };
+    const bytes = chooseBodyBytes(body);
+    expect(bytes).toBeGreaterThan(100 * 1024);
+    expect(bytes).toBeLessThan(CHOOSE_BULK_BODY_LIMIT_BYTES);
+    expect(bytes).toBeLessThan(200 * 1024);
   });
 
-  it("R8 a reload drops a mark it made true, refreshes a basis, drops a mark no save could apply and keeps marks of rows not loaded", () => {
-    const start = changesOf([mark(101, "not_selected", R101), mark(102, "not_selected", R102), mark(105, "selected", R105), mark(201, "selected")]);
-    // 101 was removed in another tab; 102 is now selected by a new rule too; 105 was turned off for the vendor; 201 is not loaded.
-    const reloaded = [row(101, "missing_vendor_include_rule"), row(102, "selected", [2, 8]), row(105, "disabled_by_vendor_override", [2])];
-    const next = reduceChooseChanges(start, { type: "reconcile", rows: reloaded, rules: VIEW });
-    expect(next.marks.map((entry) => entry.productVariantId)).toEqual([102, 201]);
-    expect(next.marks[0].basis.includeRuleIds).toEqual([2, 8]);
-    expect(next.baseFingerprint).toBe(start.baseFingerprint);
-    // An unchanged reload returns the same object (no re-render loop).
-    expect(reduceChooseChanges(next, { type: "reconcile", rows: reloaded, rules: VIEW })).toBe(next);
+  it("C11 an unknown action is a programming error", () => {
+    expect(() => reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "nope" } as unknown as ChooseChangesAction)).toThrow(/Unknown catalog choose action/);
   });
 
-  it("R9 a rebase reconciles and takes the new rules' fingerprint; with no marks left it is null", () => {
-    const start = changesOf([mark(105, "selected", R105)], "1,2");
-    const moved = chooseRulesView([...RULES, serverRule(12, "variant", "include", { productVariantId: 300 })]);
-    const rebased = reduceChooseChanges(start, { type: "rebase", rows: [R105], rules: moved });
-    expect(rebased.baseFingerprint).toBe("1,2,3,4,5,12");
-    expect(rebased.marks).toEqual(start.marks);
-    const settled = reduceChooseChanges(start, { type: "rebase", rows: [row(105, "selected", [12])], rules: moved });
-    expect(settled).toBe(EMPTY_CHOOSE_CHANGES);
-  });
-
-  it("R10 marks survive a filter that loads other rows; undo and saved empty the set; nothing to do returns the same object", () => {
-    const start = changesOf([mark(105, "selected", R105)]);
-    expect(reduceChooseChanges(start, { type: "reconcile", rows: [R101, R102], rules: VIEW })).toBe(start);
-    expect(reduceChooseChanges(start, { type: "undo" })).toBe(EMPTY_CHOOSE_CHANGES);
-    expect(reduceChooseChanges(start, { type: "saved" })).toBe(EMPTY_CHOOSE_CHANGES);
-    expect(reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "undo" })).toBe(EMPTY_CHOOSE_CHANGES);
-    expect(chooseCounts(changesOf([mark(101, "not_selected", R101), mark(105, "selected", R105), mark(103, "selected", R103)]))).toEqual({ add: 2, remove: 1 });
-    expect(chooseMarksKey([mark(105, "selected"), mark(101, "not_selected")])).toBe("101:not_selected,105:selected");
-  });
-});
-
-describe("row model", () => {
-  const view = (target: ChooseCatalogRow, entry: ChooseMark | null = null, byId: ReadonlyMap<number, ChooseSelectionRule> | null = VIEW.byId) =>
-    chooseRowView(target, entry, byId);
-
-  it("V1 V2 a marked row says what will happen and shows the box as it will be", () => {
-    expect(view(R105, mark(105, "selected", R105))).toMatchObject({ checked: true, changed: "add", how: "willAdd", changeable: true });
-    expect(view(R101, mark(101, "not_selected", R101))).toMatchObject({ checked: false, changed: "remove", how: "willRemove", quantity: 25 });
-  });
-
-  it("V3 V4 a selected size reads from its include rules: the vendor's own pick, or only an older setting", () => {
-    expect(view(R101)).toMatchObject({ checked: true, changed: null, how: "picked", quantity: 25, changeable: true });
-    expect(view(R102)).toMatchObject({ checked: true, how: "olderInclude" });
-    expect(view(row(110, "selected", [5]))).toMatchObject({ how: "olderInclude" });
-  });
-
-  it("V5 V6 a kept-out size: the vendor's own keep-out can be checked again, an older setting's can't", () => {
-    expect(view(R103)).toMatchObject({ checked: false, how: "removed", changeable: true, quantity: null });
-    expect(view(R104)).toMatchObject({ checked: false, how: "olderExclude", changeable: false });
-  });
-
-  it("V7 V8 V9 not selected, turned off, not offered", () => {
-    expect(view(R105)).toMatchObject({ how: "notSelected", changeable: true, quantity: null });
-    expect(view(R106)).toMatchObject({ how: "turnedOff", changeable: false, quantity: null });
-    expect(view(R107)).toMatchObject({ how: "notOffered", changeable: false, quantity: null });
-  });
-
-  it("V10 while the rules load, every box is off and the words are plain", () => {
-    expect(view(R101, null, null)).toMatchObject({ how: "selected", changeable: false, checked: true });
-    expect(view(R103, null, null)).toMatchObject({ how: "keptOut", changeable: false });
-    expect(view(R105, null, null)).toMatchObject({ how: "notSelected", changeable: false });
-  });
-
-  it("V11 rule ids the page doesn't hold fall back to the plain words, and an unknown keep-out stays changeable", () => {
-    const readUnderOtherRules = row(120, "selected", [70]);
-    expect(view(readUnderOtherRules)).toMatchObject({ how: "selected" });
-    const unknownExclude = row(121, "excluded_by_vendor_rule", [], [71]);
-    expect(view(unknownExclude)).toMatchObject({ how: "keptOut", changeable: true });
-    expect(isChangeableRow(unknownExclude, VIEW.byId)).toBe(true);
-    // A known older keep-out wins over an unknown id.
-    expect(view(row(122, "excluded_by_vendor_rule", [], [4, 71]))).toMatchObject({ how: "olderExclude", changeable: false });
-  });
-
-  it("V12 only a selected size has a quantity, and only a selected size shows its tier badge", () => {
-    for (const unselected of [R103, R104, R105, R106, R107]) expect(view(unselected).quantity).toBeNull();
-    const tier = { tier: "case" as const, eligible: false, reason: "balance_below_tier" as const, policyMinimumCents: 50_000, reserveShortfallCents: 0, balanceShortfallCents: 1 };
-    expect(view(row(130, "selected", [2], [], { listingTier: tier })).tierOff).toBe(true);
-    expect(view(row(131, "missing_vendor_include_rule", [], [], { listingTier: tier })).tierOff).toBe(false);
-    expect(view(row(132, "selected", [2], [], { listingTier: { ...tier, eligible: true } })).tierOff).toBe(false);
-    expect(view(row(133, "selected", [2], [], { selectionDecision: { selected: true, reason: "selected", marketplaceQuantity: 0, includeRuleIds: [2], excludeRuleIds: [] } })).quantity).toBe(0);
+  it("C12 (review round 1 CLI-4) the head is adopted only forward: a cached older head never pulls an empty set's base back; a null base takes the first head", () => {
+    // Revision ids are serial and the head is the newest (dropship_selection_rule_revisions), so a head never goes down.
+    expect(chooseHeadMovedPast(7, 8)).toBe(true);
+    expect(chooseHeadMovedPast(null, 7)).toBe(true);
+    expect(chooseHeadMovedPast(8, 8)).toBe(false);
+    expect(chooseHeadMovedPast(8, 7)).toBe(false);
+    expect(chooseHeadMovedPast(7, null)).toBe(false);
+    expect(chooseHeadMovedPast(null, null)).toBe(false);
+    // After our own save the base is its revision (8) while the count read again still holds 7: the base stays 8.
+    expect(chooseAdoptsHead(changes([], [], 8), 7)).toBe(false);
+    expect(chooseAdoptsHead(changes([], [], 8), 9)).toBe(true);
+    // Before any count was read the base is null: the first count's head is adopted.
+    expect(chooseAdoptsHead(changes([], [], null), 7)).toBe(true);
+    expect(chooseAdoptsHead(changes([], [], 7), null)).toBe(false);
+    // Pending changes still never move by themselves.
+    expect(chooseAdoptsHead(changes([1], [], null), 7)).toBe(false);
   });
 });
 
-describe("header box", () => {
-  it("H1 H2 H3 H4 all, some, none, and off with no changeable row", () => {
-    expect(shownTick([R101, R102, R104, R106], EMPTY_CHOOSE_CHANGES, VIEW.byId)).toEqual({ tick: "all", changeable: 2 });
-    expect(shownTick([R101, R105], EMPTY_CHOOSE_CHANGES, VIEW.byId)).toEqual({ tick: "some", changeable: 2 });
-    expect(shownTick([R101, R105], changesOf([mark(101, "not_selected", R101)]), VIEW.byId)).toEqual({ tick: "none", changeable: 2 });
-    expect(shownTick([R104, R106, R107], EMPTY_CHOOSE_CHANGES, VIEW.byId)).toEqual({ tick: "none", changeable: 0 });
-    expect(shownTick([R101], EMPTY_CHOOSE_CHANGES, null)).toEqual({ tick: "none", changeable: 0 });
+describe("row model (from picked, V24)", () => {
+  const none = changes([], []);
+
+  it("V1 a picked selected size is checked, picked by you, with its quantity", () => {
+    expect(chooseRowView(row(101, "selected", true), none)).toEqual({
+      checked: true, savedChecked: true, changed: null, changeable: true, how: "picked", quantity: 1_433, tierOff: false, pickTurnedOff: false,
+    });
+  });
+
+  it("V2 an unpicked size is unchecked and changeable; a pending add says Will be added and shows checked", () => {
+    expect(chooseRowView(row(102, "missing_vendor_include_rule", false), none)).toMatchObject({ checked: false, changeable: true, how: "notSelected", quantity: null });
+    expect(chooseRowView(row(102, "missing_vendor_include_rule", false), changes([102], []))).toMatchObject({ checked: true, changed: "add", how: "willAdd" });
+    expect(chooseRowView(row(101, "selected", true), changes([], [101]))).toMatchObject({ checked: false, changed: "remove", how: "willRemove", quantity: 1_433 });
+  });
+
+  it("V3 a pending change that equals the saved pick shows no change", () => {
+    expect(chooseRowView(row(101, "selected", true), changes([101], []))).toMatchObject({ checked: true, changed: null, how: "picked" });
+    expect(chooseRowView(row(102, "missing_vendor_include_rule", false), changes([], [102]))).toMatchObject({ checked: false, changed: null, how: "notSelected" });
+  });
+
+  it("V4 turned off with the pick saved: checked, can only remove the pick, and says so; with no pick it can't change", () => {
+    const offPicked = chooseRowView(row(104, "disabled_by_vendor_override", true), none);
+    expect(offPicked).toMatchObject({ checked: true, changeable: true, how: "turnedOff", pickTurnedOff: true, quantity: null });
+    expect(chooseRowView(row(104, "disabled_by_vendor_override", true), changes([], [104]))).toMatchObject({ checked: false, how: "willRemove" });
+    expect(chooseRowView(row(105, "disabled_by_vendor_override", false), none)).toMatchObject({ checked: false, changeable: false, how: "turnedOff", pickTurnedOff: false });
+  });
+
+  it("V5 not offered can't change; a keep-out reason from older code reads as not selected", () => {
+    expect(chooseRowView(row(106, "not_exposed_by_admin", true), none)).toMatchObject({ changeable: false, how: "notOffered", quantity: null });
+    expect(chooseRowView(row(107, "excluded_by_vendor_rule", false), none)).toMatchObject({ changeable: true, how: "notSelected" });
+    expect(chooseSavedState(row(106, "not_exposed_by_admin", false))).toEqual({ productVariantId: 106, savedChecked: false, changeable: false });
+  });
+
+  it("V6 only a selected size shows its tier badge", () => {
+    const tier = { tier: "case", eligible: false, reason: "balance_below_tier", policyMinimumCents: 50_000, reserveShortfallCents: 0, balanceShortfallCents: 38_000 };
+    expect(chooseRowView(row(101, "selected", true, { listingTier: tier }), none).tierOff).toBe(true);
+    expect(chooseRowView(row(102, "missing_vendor_include_rule", false, { listingTier: tier }), none).tierOff).toBe(false);
+    expect(chooseRowView(row(101, "selected", true, { listingTier: { ...tier, eligible: true, reason: null } }), none).tierOff).toBe(false);
+  });
+
+  it("V7 the header box: all, some, none, and off with no changeable row", () => {
+    const rows = [row(101, "selected", true), row(102, "missing_vendor_include_rule", false), row(105, "disabled_by_vendor_override", false)];
+    expect(shownTick(rows, changes([102], []))).toEqual({ tick: "all", changeable: 2 });
+    expect(shownTick(rows, none)).toEqual({ tick: "some", changeable: 2 });
+    expect(shownTick(rows, changes([], [101]))).toEqual({ tick: "none", changeable: 2 });
+    expect(shownTick([row(105, "disabled_by_vendor_override", false)], none)).toEqual({ tick: "none", changeable: 0 });
+  });
+
+  it("V8 a row needs picked and a category id: an older dyno's row (no picked) is off the contract; rule ids and product lines are dropped", () => {
+    const base = { productId: 1, productVariantId: 2, productSku: null, productName: "P", variantSku: null, variantName: "S", category: null,
+      categoryId: null, selectionDecision: { selected: true, reason: "selected", marketplaceQuantity: 1, includeRuleIds: [3], excludeRuleIds: [] } };
+    expect(chooseCatalogRowSchema.safeParse(base).success).toBe(false);
+    const withPick = chooseCatalogRowSchema.parse({ ...base, productLineNames: ["Trading Card Supplies"], selectionDecision: { ...base.selectionDecision, picked: true } });
+    expect(JSON.stringify(withPick)).not.toMatch(/includeRuleIds|excludeRuleIds|Trading Card Supplies/);
+    const { categoryId: _categoryId, ...noCategoryId } = base;
+    expect(chooseCatalogRowSchema.safeParse({ ...noCategoryId, selectionDecision: { ...base.selectionDecision, picked: true } }).success).toBe(false);
+    expect(chooseCatalogRowSchema.safeParse({ ...base, selectionDecision: { ...base.selectionDecision, picked: true, reason: "kept_out" } }).success).toBe(false);
+  });
+
+  it("V9 a page accepts facets: null and requires the summary", () => {
+    const page = { rows: [], total: 0, page: 1, limit: 200, facets: null, summary: { matching: 0, matchingSelected: 0 } };
+    expect(chooseCatalogPageSchema.safeParse(page).success).toBe(true);
+    const { summary: _summary, ...noSummary } = page;
+    expect(chooseCatalogPageSchema.safeParse(noSummary).success).toBe(false);
   });
 });
 
-describe("save builder", () => {
-  const compact = (rules: readonly ChooseSelectionRule[]) => rules.map((entry) => toSelectionRuleInput(entry));
-  const include = (productVariantId: number) => ({ scopeType: "variant", action: "include", productVariantId, autoConnectNewSkus: true,
-    autoListNewSkus: false, priority: 100, metadata: { source: "portal_catalog" } });
-  const exclude = (productVariantId: number) => ({ scopeType: "variant", action: "exclude", productVariantId, autoConnectNewSkus: false,
-    autoListNewSkus: false, priority: 200, metadata: { source: "portal_catalog" } });
-
-  it("B1 adding a size that isn't selected adds one pick", () => {
-    expect(buildChooseSelectionSave(RULES, [mark(105, "selected", R105)])).toEqual([...compact(RULES), include(105)]);
+describe("room under the cap (§12.3)", () => {
+  it("M1 room = cap − selected − add + remove, never below 0", () => {
+    expect(chooseRoom({ selectedTotal: 4_000, cap: 10_000 }, changes(range(1, 1_500), range(20_000, 400)))).toEqual({
+      selected: 4_000, after: 5_100, room: 4_900, grows: true, overCapAdd: false, overCapState: false,
+    });
+    expect(chooseRoom({ selectedTotal: 9_000, cap: 10_000 }, changes(range(1, 1_500), range(20_000, 400)))).toMatchObject({ after: 10_100, room: 0, overCapAdd: true });
+    expect(chooseRoom({ selectedTotal: 9_000, cap: 10_000 }, changes(range(1, 1_000), []))).toMatchObject({ after: 10_000, room: 0, overCapAdd: false });
+    expect(CHOOSE_SELECTION_CAP).toBe(10_000);
   });
 
-  it("B2 adding a size the vendor kept out, with no older include, drops the keep-out and adds a pick", () => {
-    const rules = deepFreeze([...RULES, serverRule(6, "variant", "exclude", { productVariantId: 140 })]);
-    const target = row(140, "excluded_by_vendor_rule", [], [6]);
-    expect(buildChooseSelectionSave(rules, [mark(140, "selected", target)])).toEqual([...compact(RULES), include(140)]);
+  it("M2 an over-cap vendor (10,050) may always remove; adding one is refused before sending", () => {
+    expect(chooseRoom({ selectedTotal: 10_050, cap: 10_000 }, changes([], range(1, 100)))).toMatchObject({ after: 9_950, grows: false, overCapAdd: false, overCapState: true });
+    expect(chooseRoom({ selectedTotal: 10_050, cap: 10_000 }, changes([1], []))).toMatchObject({ after: 10_051, grows: true, overCapAdd: true, overCapState: true });
+    // A swap that does not grow the count is a shrinking-or-equal change: allowed even over the cap.
+    expect(chooseRoom({ selectedTotal: 10_050, cap: 10_000 }, changes([1], [2]))).toMatchObject({ grows: false, overCapAdd: false });
   });
 
-  it("B3 adding back a size removed under an older include only drops the keep-out", () => {
-    expect(buildChooseSelectionSave(RULES, [mark(103, "selected", R103)])).toEqual(compact([PICK_101, MAILERS_INCLUDE, TOPLOADERS_EXCLUDE, PRODUCT_20_INCLUDE]));
+  it("M3 zero: nothing selected and nothing pending", () => {
+    expect(chooseRoom({ selectedTotal: 0, cap: 10_000 }, EMPTY_CHOOSE_CHANGES)).toEqual({
+      selected: 0, after: 0, room: 10_000, grows: false, overCapAdd: false, overCapState: false,
+    });
+  });
+});
+
+describe("bulk controls (§12.3)", () => {
+  /** A row in a category, frozen like every input. */
+  const inCategory = (productVariantId: number, categoryId: number | null, reason: ChooseSelectionReason, picked: boolean) =>
+    row(productVariantId, reason, picked, { categoryId });
+  const counts = (categoryId: number, rowCount: number, selectedCount: number) => deepFreeze({ categoryId, rowCount, selectedCount });
+  const frozenKnown = (known: ChooseKnown): ChooseKnown => deepFreeze(known);
+
+  it("B1 the Check all line follows the header box: checked every row shown and more match → Check all; unchecked → Uncheck all", () => {
+    const base = { changeable: 200, shown: 200, total: 1_433, changed: null, applied: false } as const;
+    expect(chooseMatchLine({ ...base, tick: "all", lastHeader: true })).toEqual({ purpose: "add", total: 1_433, shownChecked: 200, changed: null });
+    expect(chooseMatchLine({ ...base, tick: "none", lastHeader: false })).toEqual({ purpose: "remove", total: 1_433, shownChecked: null, changed: null });
+    // Not after a row's own box, not while some rows differ, not once everything matching is shown, not once applied.
+    expect(chooseMatchLine({ ...base, tick: "all", lastHeader: null })).toBeNull();
+    expect(chooseMatchLine({ ...base, tick: "some", lastHeader: true })).toBeNull();
+    expect(chooseMatchLine({ ...base, tick: "none", lastHeader: true })).toBeNull();
+    expect(chooseMatchLine({ ...base, tick: "all", lastHeader: true, total: 200 })).toBeNull();
+    expect(chooseMatchLine({ ...base, tick: "all", lastHeader: true, applied: true })).toBeNull();
+    expect(chooseMatchLine({ ...base, tick: "all", lastHeader: true, changeable: 0 })).toBeNull();
+    // "All {shown} shown are checked" counts the rows a box can change (a turned-off row is shown but never checked).
+    expect(chooseMatchLine({ ...base, changeable: 197, tick: "all", lastHeader: true })?.shownChecked).toBe(197);
   });
 
-  it("B4 adding a size that already has its own pick never adds a second one", () => {
-    const ownPick = serverRule(7, "variant", "include", { productVariantId: 150 });
-    const ownKeepOut = serverRule(8, "variant", "exclude", { productVariantId: 150 });
-    const rules = deepFreeze([...RULES, ownPick, ownKeepOut]);
-    const target = row(150, "excluded_by_vendor_rule", [7], [8]);
-    expect(buildChooseSelectionSave(rules, [mark(150, "selected", target)])).toEqual([...compact(RULES), toSelectionRuleInput(ownPick)]);
+  it("B2 more matching at the press than the button said: the line says so and asks again with the new number; fewer is not a change", () => {
+    const changed = { purpose: "add" as const, now: 1_500, was: 1_433 };
+    const line = chooseMatchLine({ tick: "all", changeable: 200, shown: 200, total: 1_433, lastHeader: true, changed, applied: false });
+    expect(line).toEqual({ purpose: "add", total: 1_500, shownChecked: 200, changed: { now: 1_500, was: 1_433 } });
+    expect(CHOOSE_WORDS.matchChanged(1_500, 1_433)).toBe("1,500 now match (was 1,433).");
+    // A change found for the other purpose says nothing here.
+    expect(chooseMatchLine({ tick: "none", changeable: 200, shown: 200, total: 1_433, lastHeader: false, changed, applied: false })?.changed).toBeNull();
+    expect(chooseMatchGrew(1_434, 1_433)).toBe(true);
+    // The ids count only changeable sizes: three turned off among 1,433 read 1,430, which is no change.
+    expect(chooseMatchGrew(1_430, 1_433)).toBe(false);
+    expect(chooseMatchGrew(1_433, 1_433)).toBe(false);
   });
 
-  it("B5 a mark kept out by an older setting is refused, never built", () => {
-    expect(() => buildChooseSelectionSave(RULES, [mark(104, "selected", R104)])).toThrow(ChooseBuildRefusal);
-    expect(chooseSaveBlock(RULES, [mark(104, "selected", R104)])).toEqual({ kind: "refused" });
-    expect(describeChooseSaveBlock({ kind: "refused" })).toBe(CHOOSE_WORDS.rejected);
-    // The same size marked both ways is refused too.
-    expect(() => buildChooseSelectionSave(RULES, [mark(105, "selected", R105), mark(105, "not_selected", R105)])).toThrow(ChooseBuildRefusal);
+  it("B3 what the page learns: rows across filters, a category's id read (complete without search or Show), Select everything; another revision forgets", () => {
+    const empty = frozenKnown(emptyChooseKnown(7));
+    const rows = [inCategory(1, 5, "selected", true), inCategory(2, 5, "missing_vendor_include_rule", false), inCategory(3, null, "selected", true)];
+    const learned = learnChooseRows(empty, rows);
+    expect(learned).not.toBe(empty);
+    expect([...learned.sizes.entries()]).toEqual([[1, { categoryId: 5, selected: true }], [2, { categoryId: 5, selected: false }], [3, { categoryId: null, selected: true }]]);
+    // Rows already known change nothing: the same object.
+    expect(learnChooseRows(frozenKnown(learned), rows)).toBe(learned);
+    const byCategory = learnChooseIds(frozenKnown(learned), { categoryId: 9, whole: true }, deepFreeze({ selectedIds: [10], notSelectedIds: [11, 12] }));
+    expect(byCategory.sizes.get(11)).toEqual({ categoryId: 9, selected: false });
+    expect([...(byCategory.categories.get(9)?.notSelectedIds ?? [])]).toEqual([11, 12]);
+    // With a search (or a Show filter) the ids are the category's but not all of it; a null list is not complete.
+    expect(learnChooseIds(empty, { categoryId: 9, whole: false }, { selectedIds: [10], notSelectedIds: [11] }).categories.size).toBe(0);
+    expect(learnChooseIds(empty, { categoryId: 9, whole: true }, { selectedIds: null, notSelectedIds: [11] }).categories.size).toBe(0);
+    const everything = learnChooseIds(empty, { categoryId: null, whole: true }, { selectedIds: [1], notSelectedIds: [2, 20] });
+    expect([...(everything.everything?.notSelectedIds ?? [])]).toEqual([2, 20]);
+    expect(everything.sizes.size).toBe(0);
+    expect(learnChooseIds(empty, { categoryId: null, whole: false }, { selectedIds: [1], notSelectedIds: [2] })).toBe(empty);
+    expect(chooseKnownAt(byCategory, 7)).toBe(byCategory);
+    expect(chooseKnownAt(byCategory, 8)).toEqual(emptyChooseKnown(8));
   });
 
-  it("B6 (ported from the deleted builder) an add drops the size's keep-out and keeps every other rule", () => {
-    const rules = deepFreeze([
-      serverRule(1, "catalog", "include"),
-      serverRule(2, "variant", "exclude", { productVariantId: 42 }),
-      serverRule(3, "variant", "include", { productVariantId: 99 }),
+  it("B4 a category's box from the counts: selected plus its known pending adds, minus its known pending removes of selected sizes (B2a observation)", () => {
+    const known = frozenKnown(learnChooseRows(emptyChooseKnown(7), [
+      inCategory(1, 5, "selected", true), inCategory(2, 5, "missing_vendor_include_rule", false),
+      inCategory(3, 5, "disabled_by_vendor_override", true), inCategory(4, 6, "missing_vendor_include_rule", false),
+    ]));
+    const categories = [counts(5, 3, 1), counts(6, 1, 0), counts(8, 2, 2), counts(9, 0, 0)];
+    const saved = chooseCategoryTicks(categories, changes([], []), known);
+    expect(saved.get(5)).toEqual({ tick: "some", empty: false });
+    expect(saved.get(6)).toEqual({ tick: "none", empty: false });
+    expect(saved.get(8)).toEqual({ tick: "all", empty: false });
+    expect(saved.get(9)).toEqual({ tick: "none", empty: false });
+    // A pending add counts in its category; the other category does not move.
+    const added = chooseCategoryTicks(categories, changes([4], []), known);
+    expect(added.get(6)?.tick).toBe("all");
+    expect(added.get(5)?.tick).toBe("some");
+    // A pending remove of the only selected size unticks the category to none; a turned-off pick's remove moves nothing.
+    expect(chooseCategoryTicks(categories, changes([], [1]), known).get(5)?.tick).toBe("none");
+    expect(chooseCategoryTicks(categories, changes([], [3]), known).get(5)?.tick).toBe("some");
+    // A pending change whose category is not known counts nowhere.
+    expect(chooseCategoryTicks(categories, changes([999], [998]), known)).toEqual(saved);
+  });
+
+  it("B4b (review round 1 CLI-5) a pending add of a size already selected (kept after a stale stop) is in selectedCount already: never counted twice", () => {
+    // X (1) is selected, Y (2) is not, both in category 5: "1 of 2 selected". Another tab picked X while this tab's
+    // add of X was pending; the stale stop kept the add and the rows read again teach X as selected (J21, C5).
+    const known = frozenKnown(learnChooseRows(emptyChooseKnown(7), [
+      inCategory(1, 5, "selected", true), inCategory(2, 5, "missing_vendor_include_rule", false),
+    ]));
+    const categories = [counts(5, 2, 1)];
+    const keptAdd = chooseCategoryTicks(categories, changes([1], []), known).get(5);
+    expect(keptAdd).toEqual({ tick: "some", empty: false });
+    // So a press of the box adds Y, never removes X.
+    expect(chooseCategoryPurpose(keptAdd?.tick ?? "none")).toBe("add");
+    // With Y marked to add too, every size of the category is checked.
+    expect(chooseCategoryTicks(categories, changes([1, 2], []), known).get(5)).toEqual({ tick: "all", empty: false });
+    expect(chooseCategoryTicks(categories, changes([2], []), known).get(5)).toEqual({ tick: "all", empty: false });
+  });
+
+  it("B5 after its own id read a category's box is exact: a size turned off for the vendor no longer keeps it from reading ticked", () => {
+    const categories = [counts(5, 4, 3)];
+    // 4 rows, 3 selected, 1 turned off: the counts alone read "some".
+    expect(chooseCategoryTicks(categories, changes([], []), emptyChooseKnown(7)).get(5)?.tick).toBe("some");
+    const known = frozenKnown(learnChooseIds(emptyChooseKnown(7), { categoryId: 5, whole: true }, { selectedIds: [1, 2, 3], notSelectedIds: [] }));
+    expect(chooseCategoryTicks(categories, changes([], []), known).get(5)).toEqual({ tick: "all", empty: false });
+    expect(chooseCategoryTicks(categories, changes([], [2]), known).get(5)?.tick).toBe("some");
+    expect(chooseCategoryTicks(categories, changes([], [1, 2, 3]), known).get(5)?.tick).toBe("none");
+    const adds = frozenKnown(learnChooseIds(emptyChooseKnown(7), { categoryId: 5, whole: true }, { selectedIds: [1], notSelectedIds: [2, 3] }));
+    expect(chooseCategoryTicks(categories, changes([2, 3], []), adds).get(5)?.tick).toBe("all");
+    // Nothing in it a box can change: the box is off.
+    const none = learnChooseIds(emptyChooseKnown(7), { categoryId: 5, whole: true }, { selectedIds: [], notSelectedIds: [] });
+    expect(chooseCategoryTicks(categories, changes([], []), none).get(5)).toEqual({ tick: "none", empty: true });
+  });
+
+  it("B6 after Select everything every category reads ticked; a size left unchecked in a known category unticks only that one", () => {
+    const categories = [counts(5, 2, 0), counts(6, 1, 1), counts(7, 3, 0)];
+    let known = learnChooseIds(emptyChooseKnown(7), { categoryId: null, whole: true }, { selectedIds: [3], notSelectedIds: [1, 2, 4, 5, 6] });
+    known = frozenKnown(learnChooseRows(known, [inCategory(1, 5, "missing_vendor_include_rule", false), inCategory(3, 6, "selected", true)]));
+    const all = chooseCategoryTicks(categories, changes([1, 2, 4, 5, 6], []), known);
+    expect([...all.values()].map((value) => value.tick)).toEqual(["all", "all", "all"]);
+    // Size 1 (category 5) unchecked again: only category 5 reads "some".
+    const one = chooseCategoryTicks(categories, changes([2, 4, 5, 6], []), known);
+    expect([one.get(5)?.tick, one.get(6)?.tick, one.get(7)?.tick]).toEqual(["some", "all", "all"]);
+    // A size left out whose category is unknown: back to the counts (nothing known pending in 7, so its saved state).
+    expect(chooseCategoryTicks(categories, changes([1, 2, 4, 5], []), known).get(7)?.tick).toBe("none");
+  });
+
+  it("B7 a category's press: a ticked box removes, any other adds", () => {
+    expect(chooseCategoryPurpose("all")).toBe("remove");
+    expect(chooseCategoryPurpose("some")).toBe("add");
+    expect(chooseCategoryPurpose("none")).toBe("add");
+  });
+
+  it("B8 Select everything counts every size offered and is off while the room is smaller than what is not yet selected (D27)", () => {
+    const categories = deepFreeze({ categories: [{ rowCount: 3_000 }, { rowCount: 1_200 }], uncategorizedCount: 100 });
+    expect(chooseEverything(categories, { selectedTotal: 0, cap: 10_000 }, EMPTY_CHOOSE_CHANGES)).toEqual({ offered: 4_300, disabled: false, overRoom: false });
+    const big = deepFreeze({ categories: [{ rowCount: 12_000 }], uncategorizedCount: 0 });
+    expect(chooseEverything(big, { selectedTotal: 9_000, cap: 10_000 }, EMPTY_CHOOSE_CHANGES)).toEqual({ offered: 12_000, disabled: true, overRoom: true });
+    // An over-cap vendor has no room at all.
+    expect(chooseEverything(big, { selectedTotal: 10_050, cap: 10_000 }, EMPTY_CHOOSE_CHANGES)).toMatchObject({ disabled: true, overRoom: true });
+    // Everything already checked: nothing to add, off without a room reason.
+    expect(chooseEverything(categories, { selectedTotal: 4_000, cap: 10_000 }, changes(range(1, 300), []))).toEqual({ offered: 4_300, disabled: true, overRoom: false });
+    // Zero offered.
+    expect(chooseEverything({ categories: [], uncategorizedCount: 0 }, { selectedTotal: 0, cap: 10_000 }, EMPTY_CHOOSE_CHANGES)).toEqual({ offered: 0, disabled: true, overRoom: false });
+  });
+
+  it("B9 a bulk press that changed nothing says why: too many at once (the server's count, else the button's), or the read failed", () => {
+    const tooMany = new DropshipApiError({ message: "x", status: 422, code: DROPSHIP_CATALOG_READ_ERROR_CODES.idsTooMany, context: { needed: 10_050 } });
+    expect(describeChooseIdsFailure(tooMany, 9_000)).toBe(CHOOSE_WORDS.tooManyMatch(10_050));
+    expect(CHOOSE_WORDS.tooManyMatch(10_050)).toBe("Too many to change at once (10,050). Search or pick a category to narrow the list.");
+    const unnamed = new DropshipApiError({ message: "x", status: 422, code: DROPSHIP_CATALOG_READ_ERROR_CODES.idsTooMany });
+    expect(describeChooseIdsFailure(unnamed, 9_000)).toBe(CHOOSE_WORDS.tooManyMatch(9_000));
+    expect(describeChooseIdsFailure(new TypeError("Failed to fetch"), 1)).toBe(CHOOSE_WORDS.catalogFailedText);
+  });
+});
+
+function preview(overrides: Partial<SelectionChangePreviewAnswer> = {}): SelectionChangePreviewAnswer {
+  return deepFreeze({
+    headRevisionId: 7, toAdd: 3, toRemove: 2, alreadySelected: 0, alreadyNotSelected: 0, skipped: { count: 0, first: [] },
+    selectedBefore: 10, selectedAfter: 11, cap: 10_000, overCapAfter: false, refused: null,
+    effects: [
+      { storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 12, startsSelling: 8 },
+      { storeConnectionId: 2, storeName: "Second Store", platform: "ebay", goesToZero: 0, startsSelling: 1 },
+    ],
+    effectsHash: "a".repeat(64),
+    ...overrides,
+  } as SelectionChangePreviewAnswer);
+}
+
+describe("the save question and the saved line (§13)", () => {
+  it("Q1 counts, then each store's quantity 0 and resumes in the server's order, removed-not-ended, then every store", () => {
+    expect(describeChooseConfirm(preview({ alreadySelected: 2, alreadyNotSelected: 1 }))).toEqual([
+      "3 added · 2 removed · 3 were already as you chose",
+      "On Card Corner: 12 listings are set to quantity 0, so buyers can't buy them.",
+      "On Card Corner: 8 listings get their quantity back shortly after you save, at the price they have on eBay now. To send today's prices, publish them in step 3.",
+      CHOOSE_WORDS.confirmResume("Second Store", 1),
+      "Removed items are set to quantity 0 on eBay. Their listings aren't ended.",
+      "Your choice applies to all your stores.",
     ]);
-    // The row was read under other rules (its ids are gone), so the add brings its own pick.
-    const replacement = buildChooseSelectionSave(rules, [mark(42, "selected", row(42, "excluded_by_vendor_rule", [], [77]))]);
-    expect(replacement).toEqual([
-      expect.objectContaining({ scopeType: "catalog", action: "include" }),
-      expect.objectContaining({ scopeType: "variant", action: "include", productVariantId: 99 }),
-      expect.objectContaining({ scopeType: "variant", action: "include", productVariantId: 42 }),
-    ]);
-    expect(replacement.some((rule) => rule.action === "exclude" && rule.productVariantId === 42)).toBe(false);
   });
 
-  it("B7 (ported from the deleted builder) the same size marked twice is sent once", () => {
-    const rules = deepFreeze([serverRule(1, "catalog", "include")]);
-    const selectedByCatalog = row(42, "selected", [1]);
-    expect(buildChooseSelectionSave(rules, [mark(42, "not_selected", selectedByCatalog), mark(42, "not_selected", selectedByCatalog)])).toEqual([
-      expect.objectContaining({ scopeType: "catalog", action: "include" }),
-      expect.objectContaining({ scopeType: "variant", action: "exclude", productVariantId: 42 }),
-    ]);
+  it("Q2 no store with any entry says nothing changes; an add-only change never says removed listings aren't ended", () => {
+    const quiet = describeChooseConfirm(preview({ toRemove: 0, effects: [{ storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 0, startsSelling: 0 }] }));
+    expect(quiet).toEqual(["3 added · 0 removed", "Nothing changes on your eBay listings now.", "Your choice applies to all your stores."]);
+    // No store at all (no connected store): the same.
+    expect(describeChooseConfirm(preview({ toRemove: 0, effects: [] }))).toEqual(quiet);
+    // No ended-listing line exists (V20, FIDELITY-9): an ended listing is counted nowhere.
+    for (const line of describeChooseConfirm(preview())) expect(line).not.toMatch(/\bended on eBay\b|relist/i);
   });
 
-  it("B8 removing a lone pick deletes it and writes no keep-out", () => {
-    const lone = serverRule(9, "variant", "include", { productVariantId: 160 });
-    const rules = deepFreeze([...RULES, lone]);
-    const built = buildChooseSelectionSave(rules, [mark(160, "not_selected", row(160, "selected", [9]))]);
-    expect(built).toEqual(compact(RULES));
-    expect(built.some((rule) => rule.productVariantId === 160)).toBe(false);
+  it("Q3 the saved line from the server's answer; drift and skipped sizes are said", () => {
+    const answer = (overrides: Partial<SelectionChangeAnswer>): SelectionChangeAnswer => ({
+      ...preview(), revisionId: 9, confirmedEffectsHash: "a".repeat(64), drifted: false, ...overrides,
+    } as SelectionChangeAnswer);
+    expect(describeChooseSaved(answer({}))).toBe("Saved. 3 added, 2 removed.");
+    expect(describeChooseSaved(answer({ drifted: true, effectsHash: "b".repeat(64) })))
+      .toBe("Saved. A few listings changed on eBay while you were deciding; 12 listings are set to quantity 0.");
+    expect(describeChooseSaved(answer({ skipped: { count: 2, first: [5, 6] } })))
+      .toBe("Saved. 3 added, 2 removed. 2 are no longer offered by Card Shellz and were skipped.");
   });
 
-  it("B9 removing a pick under an older include deletes it and keeps the size out", () => {
-    expect(buildChooseSelectionSave(RULES, [mark(101, "not_selected", R101)]))
-      .toEqual([...compact([MAILERS_INCLUDE, KEEP_OUT_103, TOPLOADERS_EXCLUDE, PRODUCT_20_INCLUDE]), exclude(101)]);
-  });
-
-  it("B10 removing a size whose basis is stale keeps it out (an exclude always wins)", () => {
-    expect(buildChooseSelectionSave(RULES, [mark(170, "not_selected", row(170, "selected", [55]))])).toEqual([...compact(RULES), exclude(170)]);
-    // A remove never adds a second keep-out.
-    const rules = deepFreeze([...RULES, serverRule(10, "variant", "exclude", { productVariantId: 171 })]);
-    expect(buildChooseSelectionSave(rules, [mark(171, "not_selected", row(171, "selected", [56]))])).toEqual(compact(rules));
-  });
-
-  it("B11 adds and removes go in one set, and untouched rules pass through unchanged and in order", () => {
-    const built = buildChooseSelectionSave(RULES, [mark(105, "selected", R105), mark(102, "not_selected", R102), mark(103, "selected", R103)]);
-    expect(built).toEqual([...compact([PICK_101, MAILERS_INCLUDE, TOPLOADERS_EXCLUDE, PRODUCT_20_INCLUDE]), exclude(102), include(105)]);
-  });
-
-  it("B12 the order is fixed whatever order the marks come in", () => {
-    const marks = [mark(180, "selected"), mark(105, "selected", R105), mark(102, "not_selected", R102)];
-    const forward = buildChooseSelectionSave(RULES, marks);
-    expect(buildChooseSelectionSave(RULES, [...marks].reverse())).toEqual(forward);
-    expect(forward.slice(-3).map((rule) => rule.productVariantId)).toEqual([102, 105, 180]);
-  });
-
-  it("B13 the compact form leaves out empty targets and keeps priority, flags and metadata", () => {
-    const odd = serverRule(11, "category", "include", { category: "  Sleeves  " }, { priority: -5, autoConnectNewSkus: false, autoListNewSkus: true, metadata: null });
-    expect(toSelectionRuleInput(odd)).toEqual({ scopeType: "category", action: "include", category: "Sleeves", autoConnectNewSkus: false,
-      autoListNewSkus: true, priority: -5, metadata: {} });
-    for (const rule of buildChooseSelectionSave(RULES, [mark(105, "selected", R105)])) {
-      expect(Object.values(rule)).not.toContain(null);
-      expect(Object.keys(rule)).not.toContain("id");
-      expect(Object.keys(rule)).not.toContain("isActive");
-    }
-    expect(toSelectionRuleInput(serverRule(12, "catalog", "include"))).toEqual({ scopeType: "catalog", action: "include",
-      autoConnectNewSkus: true, autoListNewSkus: false, priority: 100, metadata: { source: "portal_catalog" } });
-  });
-
-  it("B14 two saved rules the server would call duplicates are sent once (the first)", () => {
-    const rules = deepFreeze([MAILERS_INCLUDE, serverRule(13, "category", "include", { category: " mailers " }, { priority: 1 })]);
-    expect(buildChooseSelectionSave(rules, [])).toEqual(compact([MAILERS_INCLUDE]));
-    // An inactive rule is never sent.
-    expect(buildChooseSelectionSave(deepFreeze([{ ...MAILERS_INCLUDE, isActive: false }]), [])).toEqual([]);
+  it("Q4 (review round 1 CLI-6) removals no store sets to quantity 0: never the quantity 0 line, so the question never contradicts itself", () => {
+    const store = (storeConnectionId: number, storeName: string, goesToZero: number, startsSelling: number) =>
+      ({ storeConnectionId, storeName, platform: "ebay", goesToZero, startsSelling }) as SelectionChangePreviewAnswer["effects"][number];
+    // Five removals whose listings never existed or ended on eBay (V20's no-entry cases): nothing changes there.
+    const removalOnly = describeChooseConfirm(preview({ toAdd: 0, toRemove: 5, effects: [store(1, "Card Corner", 0, 0)] }));
+    expect(removalOnly).toEqual(["0 added · 5 removed", CHOOSE_WORDS.confirmNone, CHOOSE_WORDS.confirmScope]);
+    // No store at all: the same.
+    expect(describeChooseConfirm(preview({ toAdd: 0, toRemove: 5, effects: [] }))).toEqual(removalOnly);
+    // The only entries are the adds' resumes: the removals set nothing to quantity 0, so the line is left out.
+    expect(describeChooseConfirm(preview({ toAdd: 3, toRemove: 2, effects: [store(1, "Card Corner", 0, 3)] })))
+      .toEqual(["3 added · 2 removed", CHOOSE_WORDS.confirmResume("Card Corner", 3), CHOOSE_WORDS.confirmScope]);
+    // One listing set to quantity 0 on any store brings the line back.
+    expect(describeChooseConfirm(preview({ toAdd: 0, toRemove: 2, effects: [store(1, "Card Corner", 0, 0), store(2, "Second Store", 1, 0)] })))
+      .toEqual(["0 added · 2 removed", CHOOSE_WORDS.confirmZero("Second Store", 1), CHOOSE_WORDS.confirmNotEnded, CHOOSE_WORDS.confirmScope]);
   });
 });
 
-describe("stops before sending", () => {
-  const picks = (count: number, firstId = 1000) => Array.from({ length: count }, (_, index) =>
-    serverRule(firstId + index, "variant", "include", { productVariantId: 10_000 + index }));
+describe("error classes (§12.4, §12.5, §14)", () => {
+  const small = { bodyBytes: 2_000 };
+  const api = (status: number, code: string | null, context: Record<string, unknown> | null = null, message = "Server words.") =>
+    new DropshipApiError({ status, code, context, message });
 
-  it("K1 K2 500 rules may be saved; 501 is stopped with the count", () => {
-    const rules = deepFreeze(picks(499));
-    expect(chooseSaveBlock(rules, [mark(105, "selected", R105)])).toBeNull();
-    expect(chooseSaveBlock(rules, [mark(105, "selected", R105), mark(106, "selected")])).toEqual({ kind: "tooManyRules", count: 501 });
-    expect(MAX_SELECTION_RULES).toBe(500);
-    expect(describeChooseSaveBlock({ kind: "tooManyRules", count: 501 })).toContain("This save would make 501, which is 1 over.");
+  it("E1 writes paused, site updating and an older dyno's 413 follow the paused schedule", () => {
+    expect(classifyChooseSaveError(api(503, SELECTION_CHANGE_ERROR_CODES.writesPaused, { reason: "older_version_running" }), small)).toEqual({ kind: "paused" });
+    expect(classifyChooseSaveError(api(503, DROPSHIP_SITE_UPDATING_CODE, { reason: "not_json" }), small)).toEqual({ kind: "paused" });
+    expect(classifyChooseSaveError(api(503, DROPSHIP_SITE_UPDATING_CODE, { reason: "answer_shape" }), small)).toEqual({ kind: "paused" });
+    // §12.5: a 413 without the bulk parser's code, for a body within its 1 MiB, came from an older dyno's 100 KiB parser.
+    expect(classifyChooseSaveError(api(413, null), { bodyBytes: 140_000 })).toEqual({ kind: "paused" });
+    expect(classifyChooseSaveError(api(413, null), { bodyBytes: CHOOSE_BULK_BODY_LIMIT_BYTES })).toEqual({ kind: "paused" });
+    expect(classifyChooseSaveError(api(413, null), { bodyBytes: CHOOSE_BULK_BODY_LIMIT_BYTES + 1 })).toEqual({ kind: "tooLarge" });
+    expect(classifyChooseSaveError(api(413, SELECTION_CHANGE_ERROR_CODES.requestTooLarge), small)).toEqual({ kind: "tooLarge" });
   });
 
-  it("K3 a body over 102,400 bytes (large older metadata) is stopped; at the limit it may be sent", () => {
-    const withNote = (length: number) => deepFreeze([serverRule(1, "catalog", "include", {}, { metadata: { note: "x".repeat(length) } })]);
-    const base = chooseSaveBodyBytes(buildChooseSelectionSave(withNote(0), []));
-    const atLimit = SELECTION_SAVE_BODY_LIMIT_BYTES - base;
-    expect(chooseSaveBodyBytes(buildChooseSelectionSave(withNote(atLimit), []))).toBe(SELECTION_SAVE_BODY_LIMIT_BYTES);
-    expect(chooseSaveBlock(withNote(atLimit), [])).toBeNull();
-    expect(chooseSaveBlock(withNote(atLimit + 1), [])).toEqual({ kind: "tooLarge" });
-    expect(describeChooseSaveBlock({ kind: "tooLarge" })).toBe(CHOOSE_WORDS.tooLarge);
+  it("E2 busy, revision conflict (with the head the server named), effects changed, key conflict", () => {
+    expect(classifyChooseSaveError(api(409, SELECTION_CHANGE_ERROR_CODES.busy), small)).toEqual({ kind: "busy" });
+    expect(classifyChooseSaveError(api(409, SELECTION_CHANGE_ERROR_CODES.revisionConflict, { currentRevisionId: 12 }), small)).toEqual({ kind: "stale", headRevisionId: 12 });
+    expect(classifyChooseSaveError(api(409, SELECTION_CHANGE_ERROR_CODES.revisionConflict, { currentRevisionId: null }), small)).toEqual({ kind: "stale", headRevisionId: null });
+    expect(classifyChooseSaveError(api(409, SELECTION_CHANGE_ERROR_CODES.revisionConflict, { currentRevisionId: "12" }), small)).toEqual({ kind: "stale", headRevisionId: undefined });
+    expect(classifyChooseSaveError(api(409, SELECTION_CHANGE_ERROR_CODES.effectsChanged), small)).toEqual({ kind: "effectsChanged" });
+    expect(classifyChooseSaveError(api(409, SELECTION_CHANGE_ERROR_CODES.keyConflict), small)).toEqual({ kind: "keyConflict" });
   });
 
-  it("K4 500 compact picks fit the body limit; 500 in the old full form (null targets) would not", () => {
-    const built = buildChooseSelectionSave(deepFreeze(picks(500)), []);
-    expect(built).toHaveLength(500);
-    expect(chooseSaveBodyBytes(built)).toBeLessThan(SELECTION_SAVE_BODY_LIMIT_BYTES);
-    const fullForm = built.map((rule) => ({ productLineId: null, productId: null, category: null, ...rule }));
-    const fullBytes = new TextEncoder().encode(JSON.stringify({ idempotencyKey: "catalog-selection:".padEnd(54, "0"), rules: fullForm })).length;
-    expect(fullBytes).toBeGreaterThan(SELECTION_SAVE_BODY_LIMIT_BYTES);
-  });
-});
-
-describe("another tab: fingerprint and content", () => {
-  it("F1 F2 F3 the fingerprint is the active ids in order; any id change moves it; two empty sets match", () => {
-    expect(rulesFingerprint(RULES)).toBe(rulesFingerprint([...RULES].reverse()));
-    expect(rulesFingerprint([...RULES.slice(1), { ...PICK_101, id: 99 }])).not.toBe(rulesFingerprint(RULES));
-    expect(rulesFingerprint([{ ...PICK_101, isActive: false }])).toBe("");
-    expect(rulesFingerprint([])).toBe(rulesFingerprint([]));
+  it("E3 PR C's 409 page outdated and the 410 rules retired both say retired (Reload); another 410 is the server's words", () => {
+    expect(classifyChooseSaveError(api(409, SELECTION_CHANGE_ERROR_CODES.pageOutdated), small)).toEqual({ kind: "retired" });
+    expect(classifyChooseSaveError(api(410, DROPSHIP_CATALOG_READ_ERROR_CODES.rulesRetired), small)).toEqual({ kind: "retired" });
+    expect(classifyChooseSaveError(api(410, "SOMETHING_ELSE"), small)).toEqual({ kind: "permanent", message: "Server words." });
   });
 
-  it("F4 the same rules match across order, new ids and full or compact form", () => {
-    const sent = buildChooseSelectionSave(RULES, [mark(105, "selected", R105)]);
-    const reread = [...sent].reverse().map((rule, index) => serverRule(500 + index, rule.scopeType, rule.action,
-      { productLineId: rule.productLineId, productId: rule.productId, productVariantId: rule.productVariantId, category: rule.category },
-      { priority: rule.priority, autoConnectNewSkus: rule.autoConnectNewSkus, autoListNewSkus: rule.autoListNewSkus, metadata: { ...rule.metadata } }));
-    expect(sameRuleContent(reread, sent)).toBe(true);
-    expect(sameRuleContent(RULES, compactAll(RULES))).toBe(true);
+  it("E4 the cap's 422 names the count; no answer, a 5xx and an unreadable 2xx may have committed; 408 and 429 wrote nothing", () => {
+    expect(classifyChooseSaveError(api(422, SELECTION_CHANGE_ERROR_CODES.tooLarge, { selectedAfter: 10_001 }), small)).toEqual({ kind: "overCap", after: 10_001 });
+    expect(classifyChooseSaveError(api(422, SELECTION_CHANGE_ERROR_CODES.tooLarge), small)).toEqual({ kind: "overCap", after: null });
+    expect(classifyChooseSaveError(api(500, "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR"), small)).toEqual({ kind: "network", mayHaveCommitted: true });
+    expect(classifyChooseSaveError(api(503, "DROPSHIP_ALLOCATION_UNAVAILABLE"), small)).toEqual({ kind: "network", mayHaveCommitted: true });
+    expect(classifyChooseSaveError(new TypeError("Failed to fetch"), small)).toEqual({ kind: "network", mayHaveCommitted: true });
+    expect(classifyChooseSaveError(new SyntaxError("Unexpected end of JSON input"), small)).toEqual({ kind: "network", mayHaveCommitted: true });
+    expect(classifyChooseSaveError(new DOMException("aborted", "AbortError"), small)).toEqual({ kind: "network", mayHaveCommitted: true });
+    expect(classifyChooseSaveError(api(408, null), small)).toEqual({ kind: "network", mayHaveCommitted: false });
+    expect(classifyChooseSaveError(api(429, DROPSHIP_CATALOG_READ_ERROR_CODES.rateLimited), small)).toEqual({ kind: "network", mayHaveCommitted: false });
   });
 
-  it("F5 any field that differs makes the content differ", () => {
-    const sent = compactAll(RULES);
-    const variants: Array<Partial<ChooseSelectionRule>> = [
-      { action: "exclude" }, { priority: 101 }, { autoConnectNewSkus: false }, { autoListNewSkus: true }, { metadata: { source: "other" } },
-      { productVariantId: 102 },
-    ];
-    for (const change of variants) expect(sameRuleContent([{ ...PICK_101, ...change }, ...RULES.slice(1)], sent)).toBe(false);
-    expect(sameRuleContent(RULES.slice(1), sent)).toBe(false);
-    // Metadata key order never matters (the server sorts keys before hashing).
-    const ordered = serverRule(1, "variant", "include", { productVariantId: 101 }, { metadata: { a: 1, b: 2 } });
-    const reordered = serverRule(2, "variant", "include", { productVariantId: 101 }, { metadata: { b: 2, a: 1 } });
-    expect(sameRuleContent([ordered], [reordered])).toBe(true);
+  it("E5 a 400 is the page's words; any other refusal the server's; an unknown error the page's", () => {
+    expect(classifyChooseSaveError(api(400, SELECTION_CHANGE_ERROR_CODES.invalidInput), small)).toEqual({ kind: "permanent", message: CHOOSE_WORDS.rejected });
+    expect(classifyChooseSaveError(api(400, SELECTION_CHANGE_ERROR_CODES.conflicting), small)).toEqual({ kind: "permanent", message: CHOOSE_WORDS.rejected });
+    expect(classifyChooseSaveError(api(403, "DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED", null, "Your account is paused."), small)).toEqual({ kind: "permanent", message: "Your account is paused." });
+    expect(classifyChooseSaveError(api(403, null, null, "  "), small)).toEqual({ kind: "permanent", message: CHOOSE_WORDS.rejected });
+    expect(classifyChooseSaveError(new Error("boom"), small)).toEqual({ kind: "permanent", message: CHOOSE_WORDS.rejected });
   });
 
-  function compactAll(rules: readonly ChooseSelectionRule[]) {
-    return rules.map((rule) => toSelectionRuleInput(rule));
-  }
-});
-
-describe("error classes", () => {
-  const apiError = (status: number, code: string | null = null, message = "Server words.") => new DropshipApiError({ status, code, message });
-
-  // Review round MC1: each transient class also says whether the save may have gone through on the server.
-  it("E1 no answer is transient, and the save may have gone through", () => {
-    expect(classifyChooseSaveError(new TypeError("Failed to fetch"))).toEqual({ classification: "transient", busyMessage: null, mayHaveCommitted: true });
-    expect(classifyChooseSaveError(new DOMException("The operation was aborted.", "AbortError"))).toEqual({ classification: "transient", busyMessage: null, mayHaveCommitted: true });
+  it("E6 an idsOnly read refused for too many ids says how many it needed", () => {
+    expect(chooseIdsTooMany(api(422, DROPSHIP_CATALOG_READ_ERROR_CODES.idsTooMany, { needed: 10_050, total: 10_050, limit: 10_000 }))).toEqual({ needed: 10_050 });
+    expect(chooseIdsTooMany(api(422, DROPSHIP_CATALOG_READ_ERROR_CODES.idsTooMany))).toEqual({ needed: null });
+    expect(chooseIdsTooMany(api(422, SELECTION_CHANGE_ERROR_CODES.tooLarge))).toBeNull();
+    expect(chooseIdsTooMany(new Error("x"))).toBeNull();
   });
 
-  it("E2 a 5xx is transient, and the save may have gone through (a router timeout answers while the app still commits)", () => {
-    for (const status of [500, 502, 503]) expect(classifyChooseSaveError(apiError(status))).toEqual({ classification: "transient", busyMessage: null, mayHaveCommitted: true });
-  });
-
-  it("E3 the busy 409 is transient, keeps the server's words, and wrote nothing", () => {
-    const busy = apiError(409, "PUBLICATION_SELECTION_BUSY", "A stock update is finishing. Your selection was not saved; retry it in a moment.");
-    expect(classifyChooseSaveError(busy)).toEqual({ classification: "transient", busyMessage: "A stock update is finishing. Your selection was not saved; retry it in a moment.", mayHaveCommitted: false });
-  });
-
-  it("E4 408 and 429 are transient and wrote nothing", () => {
-    expect(classifyChooseSaveError(apiError(408))).toEqual({ classification: "transient", busyMessage: null, mayHaveCommitted: false });
-    expect(classifyChooseSaveError(apiError(429))).toEqual({ classification: "transient", busyMessage: null, mayHaveCommitted: false });
-  });
-
-  it("E7 (review CT6) a 2xx the page can't read is transient and may have gone through: the runner checks the rules", () => {
-    const unverified = new ChooseUnverifiedAnswerError("not JSON");
-    expect(unverified.code).toBe("DROPSHIP_CATALOG_CHOOSE_ANSWER_UNVERIFIED");
-    expect(classifyChooseSaveError(unverified)).toEqual({ classification: "transient", busyMessage: null, mayHaveCommitted: true });
-  });
-
-  it("E5 a 400, a key conflict and a 413 are permanent, in the page's words", () => {
-    expect(classifyChooseSaveError(apiError(400, "DROPSHIP_VENDOR_CATALOG_INVALID_INPUT"))).toEqual({ classification: "permanent", message: CHOOSE_WORDS.rejected });
-    expect(classifyChooseSaveError(apiError(400, "DROPSHIP_IDEMPOTENCY_KEY_REQUIRED"))).toEqual({ classification: "permanent", message: CHOOSE_WORDS.rejected });
-    expect(classifyChooseSaveError(apiError(409, "DROPSHIP_IDEMPOTENCY_CONFLICT"))).toEqual({ classification: "permanent", message: CHOOSE_WORDS.rejected });
-    expect(classifyChooseSaveError(apiError(413))).toEqual({ classification: "permanent", message: CHOOSE_WORDS.tooLarge });
-  });
-
-  it("E8 (step 1 plan S2-5 §4.9 item 2) the 410 after PR B froze the rules is permanent, says retired and offers Reload", () => {
-    expect(classifyChooseSaveError(apiError(410, "DROPSHIP_SELECTION_RULES_RETIRED", CHOOSE_WORDS.retired)))
-      .toEqual({ classification: "permanent", message: CHOOSE_WORDS.retired, reload: true });
-    // Only that code: another 410 keeps the server's words and offers no Reload.
-    expect(classifyChooseSaveError(apiError(410, "SOMETHING_ELSE", "Gone.")))
-      .toEqual({ classification: "permanent", message: "Gone." });
-    expect(CHOOSE_WORDS.retired).toBe("This page was updated, so your last changes weren't saved. Reload it and make them again.");
-    // The page reads the code from the shared contract the server answers with (review CT4).
-    expect(SELECTION_RULES_RETIRED_CODE).toBe(DROPSHIP_CATALOG_READ_ERROR_CODES.rulesRetired);
-    expect(DROPSHIP_CATALOG_READ_ERROR_CODES.rulesRetired).toBe("DROPSHIP_SELECTION_RULES_RETIRED");
-  });
-
-  it("E6 any other refusal is permanent in the server's words; an unknown error is permanent", () => {
-    expect(classifyChooseSaveError(apiError(403, "DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED", "Dropship vendor status does not allow catalog access.")))
-      .toEqual({ classification: "permanent", message: "Dropship vendor status does not allow catalog access." });
-    for (const status of [401, 404, 422]) expect(classifyChooseSaveError(apiError(status)).classification).toBe("permanent");
-    expect(classifyChooseSaveError(apiError(409, "DROPSHIP_VENDOR_PROFILE_REQUIRED", "Profile required."))).toEqual({ classification: "permanent", message: "Profile required." });
-    expect(classifyChooseSaveError(apiError(422, null, "  "))).toEqual({ classification: "permanent", message: CHOOSE_WORDS.rejected });
-    expect(classifyChooseSaveError(new Error("boom"))).toEqual({ classification: "permanent", message: CHOOSE_WORDS.rejected });
+  it("E7 the paused schedule: 2 s, 4 s, 8 s, then 15 s; 32 sends fill the 420 s window", () => {
+    expect([0, 1, 2, 3, 4, 40].map(choosePausedDelayMs)).toEqual([2_000, 4_000, 8_000, 15_000, 15_000, 15_000]);
+    expect(CHOOSE_PAUSED_MAX_SENDS).toBe(32);
   });
 });
+
+function catalogPage(page: number, sizes: number[], total: number, limit = CHOOSE_PAGE_SIZE): ChooseCatalogPage {
+  return deepFreeze({
+    rows: sizes.map((size) => row(size, "missing_vendor_include_rule", false)),
+    total, page, limit, summary: { matching: total, matchingSelected: 0 },
+  });
+}
 
 describe("paging", () => {
-  function catalogPage(page: number, ids: number[], total: number, limit = CHOOSE_PAGE_SIZE): ChooseCatalogPage {
-    return deepFreeze({ rows: ids.map((id) => row(id, "missing_vendor_include_rule")), total, page, limit,
-      facets: { categories: [{ category: "Mailers", label: "Mailers", rowCount: total }] } });
-  }
-
   it("P1 pages merge, a repeated size counts once, and at most 1,000 rows show", () => {
     const merged = mergeChoosePages([catalogPage(1, [1, 2, 3], 5, 3), catalogPage(2, [3, 4, 5], 5, 3)]);
     expect(merged.rows.map((entry) => entry.productVariantId)).toEqual([1, 2, 3, 4, 5]);
@@ -508,159 +623,28 @@ describe("paging", () => {
     expect(capped.capped).toBe(true);
   });
 
-  it("P2 the next page stops at the total", () => {
+  it("P2 P3 the next page stops at the total and at 1,000 rows", () => {
     const first = catalogPage(1, Array.from({ length: 200 }, (_, index) => index + 1), 230);
     expect(chooseNextPageParam(first, [first])).toBe(2);
     const second = catalogPage(2, Array.from({ length: 30 }, (_, index) => index + 201), 230);
     expect(chooseNextPageParam(second, [first, second])).toBeUndefined();
-    const exact = catalogPage(1, Array.from({ length: 200 }, (_, index) => index + 1), 200);
-    expect(chooseNextPageParam(exact, [exact])).toBeUndefined();
-  });
-
-  it("P3 the next page stops at 1,000 rows", () => {
-    const pages = Array.from({ length: 5 }, (_, index) => catalogPage(index + 1, [index + 1], 4_300));
+    const pages = Array.from({ length: 5 }, (_, index) => catalogPage(index + 1, Array.from({ length: 200 }, (__, at) => index * 200 + at + 1), 4_300));
     expect(chooseNextPageParam(pages[3], pages.slice(0, 4))).toBe(5);
     expect(chooseNextPageParam(pages[4], pages)).toBeUndefined();
   });
 
-  it("P4 the total comes from the newest page; categories from the first; no pages is empty", () => {
+  it("P4 the total and the summary come from the newest page; no pages is empty", () => {
     const merged = mergeChoosePages([catalogPage(1, [1], 300), catalogPage(2, [2], 290)]);
     expect(merged.total).toBe(290);
-    expect(merged.categories).toEqual([{ category: "Mailers", label: "Mailers", rowCount: 300 }]);
-    expect(mergeChoosePages([])).toEqual({ rows: [], total: 0, categories: [], capped: false });
+    expect(merged.summary).toEqual({ matching: 290, matchingSelected: 0 });
+    expect(mergeChoosePages([])).toEqual({ rows: [], total: 0, summary: null, capped: false });
   });
 
-  it("drops the product-line facts the server still sends, and refuses a reason the server never sends", () => {
-    const answer = { rows: [{ ...row(1, "selected", [2]), productLineIds: [4], productLineNames: ["Trading Card Supplies"], unitsPerVariant: 50 }],
-      total: 1, page: 1, limit: 200,
-      facets: { categories: [], productLines: [{ productLineIds: [4], label: "Trading Card Supplies", rowCount: 1 }], products: [] } };
-    const parsed = chooseCatalogPageSchema.parse(answer);
-    expect(JSON.stringify(parsed)).not.toContain("Trading Card Supplies");
-    expect(JSON.stringify(parsed)).not.toContain("productLine");
-    const notAReason = { ...answer, rows: [{ ...answer.rows[0], selectionDecision: { ...answer.rows[0].selectionDecision, reason: "not_selected" } }] };
-    expect(chooseCatalogPageSchema.safeParse(notAReason).success).toBe(false);
-  });
-});
-
-describe("review round (step 1 stage 1)", () => {
-  it("R11 (MC3) after an earlier save went through, a rebase drops every mark that save sent, loaded or not", () => {
-    // 101's remove and 201's add were sent and committed; 105 was marked after. Only 105's row is loaded now.
-    const start = changesOf([mark(101, "not_selected", R101), mark(105, "selected", R105), mark(201, "selected")]);
-    const moved = chooseRulesView([serverRule(40, "category", "include", { category: "Mailers" }), serverRule(41, "variant", "include", { productVariantId: 201 })]);
-    const rebased = reduceChooseChanges(start, { type: "rebase", rows: [R105], rules: moved, committedMarksKey: "101:not_selected,201:selected" });
-    expect(rebased.marks.map((entry) => `${entry.productVariantId}:${entry.to}`)).toEqual(["105:selected"]);
-    expect(rebased.baseFingerprint).toBe(moved.fingerprint);
-    // A mark whose direction differs from the one sent is not the change that was saved: it stays.
-    const flipped = reduceChooseChanges(changesOf([mark(201, "not_selected")]), { type: "rebase", rows: [], rules: moved, committedMarksKey: "201:selected" });
-    expect(flipped.marks.map((entry) => entry.productVariantId)).toEqual([201]);
-    // Every sent mark gone: empty.
-    expect(reduceChooseChanges(changesOf([mark(201, "selected")]), { type: "rebase", rows: [], rules: moved, committedMarksKey: "201:selected" })).toBe(EMPTY_CHOOSE_CHANGES);
-  });
-
-  it("R12 (MC8) when the rules now hold the older keep-out an add's row was read under, the add is dropped even when its row is not loaded", () => {
-    // 301 was read kept out by rule 60, which the page's rules did not hold then (another tab's save): the box was changeable.
-    const unknownExclude = row(301, "excluded_by_vendor_rule", [], [60]);
-    const start = reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "toggle", row: unknownExclude, rules: VIEW });
-    expect(start.marks).toHaveLength(1);
-    const withExclude = chooseRulesView([...RULES, serverRule(60, "category", "exclude", { category: "Binders" })]);
-    // The vendor has moved to another filter: 301's row is not loaded.
-    const next = reduceChooseChanges(start, { type: "reconcile", rows: [R101], rules: withExclude });
-    expect(next).toBe(EMPTY_CHOOSE_CHANGES);
-    expect(chooseSaveBlock([...RULES, serverRule(60, "category", "exclude", { category: "Binders" })], start.marks)).toEqual({ kind: "refused" });
-    // A remove, or a keep-out that is the vendor's own, is never dropped this way.
-    const own = changesOf([mark(103, "selected", R103), mark(102, "not_selected", R102)]);
-    expect(reduceChooseChanges(own, { type: "reconcile", rows: [], rules: VIEW })).toBe(own);
-  });
-
-  it("SR1 (MC4, CT3) the saved line counts what took: a loaded row that doesn't read as marked is named; a row not loaded counts as sent", () => {
-    const marks = [mark(101, "not_selected", R101), mark(105, "selected", R105), mark(106, "selected"), mark(201, "selected")];
-    const after = [
-      row(101, "missing_vendor_include_rule"),
-      row(105, "selected", [9]),
-      // Turned off for the vendor: the include was written, the size is still not selected.
-      row(106, "disabled_by_vendor_override", [9]),
-    ];
-    expect(chooseSaveResult(marks, after)).toEqual({ add: 2, remove: 1, notTaken: 1 });
-    // A remove that an older include still selects did not take either.
-    expect(chooseSaveResult([mark(102, "not_selected", R102)], [row(102, "selected", [2])])).toEqual({ add: 0, remove: 0, notTaken: 1 });
-    // The rows couldn't be read again: every change counts as sent.
-    expect(chooseSaveResult(marks, null)).toEqual({ add: 3, remove: 1, notTaken: 0 });
-  });
-
-  it("K5 (CT8, DUX4) the limit words name the server's cap and how far over, and never point at the button that clears everything", () => {
-    const words = describeChooseSaveBlock({ kind: "tooManyRules", count: 1_204 });
-    expect(words).toContain(`up to ${MAX_SELECTION_RULES} saved choices`);
-    expect(words).toContain("This save would make 1,204, which is 704 over.");
-    expect(words).not.toMatch(/\bUndo\b/);
-    expect(describeChooseSaveBlock({ kind: "tooLarge" })).not.toMatch(/\bUndo\b/);
-  });
-
-  it("SL1 (DUX5, DUX11) the shown line: all, some with more to load, past the cap, and rows the paging can't reach", () => {
-    const merged = (shown: number, total: number, capped = false) => ({ rows: Array.from({ length: shown }, (_, index) => row(index + 1, "selected")), total, categories: [], capped });
+  it("P5 the shown line: all, some with more to load, past the cap, and rows the paging can't reach", () => {
+    const merged = (shown: number, total: number, capped = false) => ({ rows: Array.from({ length: shown }, (_, index) => row(index + 1, "selected", true)), total, summary: null, capped });
     expect(describeChooseShown(merged(230, 230), false)).toBe("Showing all 230");
     expect(describeChooseShown(merged(200, 230), true)).toBe("Showing 200 of 230");
     expect(describeChooseShown(merged(1_000, 4_300, true), false)).toBe(CHOOSE_WORDS.shownCapLine(1_000, 4_300));
-    expect(CHOOSE_WORDS.shownCapLine(1_000, 4_300)).not.toMatch(/choose/i);
-    // No next page, not capped, yet fewer rows than the total (a row skipped between pages): say how to reach it.
     expect(describeChooseShown(merged(199, 200), false)).toBe(CHOOSE_WORDS.shownShortLine(199, 200));
-  });
-});
-
-describe("verify round (step 1 stage 1)", () => {
-  // Size 140 is turned off for the vendor while their own pick of it is saved (the server checks the override only
-  // after an include matches, domain/vendor-selection.ts); 141 is turned off under an older setting only.
-  const OWN_PICK_140 = serverRule(40, "variant", "include", { productVariantId: 140 });
-  const WITH_PICK = chooseRulesView([...RULES, OWN_PICK_140]);
-  const OFF_PICKED = row(140, "disabled_by_vendor_override", [40]);
-  const OFF_PICKED_AND_OLDER = row(140, "disabled_by_vendor_override", [2, 40]);
-  const OFF_OLDER_ONLY = row(141, "disabled_by_vendor_override", [2]);
-
-  it("VR1 (V6) a turned-off size holding the vendor's own pick shows checked and can only be unchecked", () => {
-    expect(chooseRowView(OFF_PICKED, null, WITH_PICK.byId)).toMatchObject({ checked: true, changeable: true, how: "turnedOff", quantity: null, tierOff: false });
-    expect(isChangeableRow(OFF_PICKED, WITH_PICK.byId)).toBe(true);
-    // Under an older setting only, or while the rules load, nothing on the page can change it.
-    expect(chooseRowView(OFF_OLDER_ONLY, null, WITH_PICK.byId)).toMatchObject({ checked: false, changeable: false, how: "turnedOff" });
-    expect(chooseRowView(OFF_PICKED, null, null)).toMatchObject({ checked: false, changeable: false, how: "turnedOff" });
-    const marked = reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "toggle", row: OFF_PICKED, rules: WITH_PICK });
-    expect(marked.marks).toEqual([{ productVariantId: 140, to: "not_selected", basis: { reason: "disabled_by_vendor_override", includeRuleIds: [40], excludeRuleIds: [] } }]);
-    expect(chooseRowView(OFF_PICKED, marked.marks[0], WITH_PICK.byId)).toMatchObject({ checked: false, changed: "remove", how: "willRemove" });
-    expect(reduceChooseChanges(marked, { type: "toggle", row: OFF_PICKED, rules: WITH_PICK })).toBe(EMPTY_CHOOSE_CHANGES);
-    // The header box: checking leaves it (already checked), unchecking marks it; an older-setting-only row is skipped.
-    expect(reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "setShown", rows: [OFF_PICKED, OFF_OLDER_ONLY], checked: true, rules: WITH_PICK })).toBe(EMPTY_CHOOSE_CHANGES);
-    expect(reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "setShown", rows: [OFF_PICKED, OFF_OLDER_ONLY], checked: false, rules: WITH_PICK }).marks
-      .map((entry) => `${entry.productVariantId}:${entry.to}`)).toEqual(["140:not_selected"]);
-    expect(shownTick([OFF_PICKED, OFF_OLDER_ONLY], EMPTY_CHOOSE_CHANGES, WITH_PICK.byId)).toEqual({ tick: "all", changeable: 1 });
-  });
-
-  it("VR2 (V6) a reload keeps the remove while the pick is saved, drops it once the size reads not selected, and drops it when the pick is gone", () => {
-    const marked = reduceChooseChanges(EMPTY_CHOOSE_CHANGES, { type: "toggle", row: OFF_PICKED, rules: WITH_PICK });
-    expect(marked.marks).toHaveLength(1);
-    expect(reduceChooseChanges(marked, { type: "reconcile", rows: [OFF_PICKED], rules: WITH_PICK })).toBe(marked);
-    expect(reduceChooseChanges(marked, { type: "reconcile", rows: [row(140, "missing_vendor_include_rule")], rules: VIEW })).toBe(EMPTY_CHOOSE_CHANGES);
-    // Another tab replaced the pick with an older setting: no pick left to remove.
-    expect(reduceChooseChanges(marked, { type: "reconcile", rows: [row(140, "disabled_by_vendor_override", [2])], rules: VIEW })).toBe(EMPTY_CHOOSE_CHANGES);
-  });
-
-  it("VR3 (V6) removing a turned-off size's own pick deletes it; under an older include too, a keep-out is written", () => {
-    const remove = mark(140, "not_selected", OFF_PICKED);
-    expect(buildChooseSelectionSave([...RULES, OWN_PICK_140], [remove])).toEqual(RULES.map((entry) => toSelectionRuleInput(entry)));
-    const withOlder = mark(140, "not_selected", OFF_PICKED_AND_OLDER);
-    expect(buildChooseSelectionSave([...RULES, OWN_PICK_140], [withOlder])).toEqual([
-      ...RULES.map((entry) => toSelectionRuleInput(entry)),
-      { scopeType: "variant", action: "exclude", productVariantId: 140, autoConnectNewSkus: false, autoListNewSkus: false, priority: 200, metadata: { source: "portal_catalog" } },
-    ]);
-    // The saved line: the size now reads not selected, so the remove took.
-    expect(chooseSaveResult([remove], [row(140, "missing_vendor_include_rule")])).toEqual({ add: 0, remove: 1, notTaken: 0 });
-  });
-
-  it("VR4 (V1) after an earlier save is found or another tab saved: with nothing left to save, the bar says what happened, never an error", () => {
-    const sent = [mark(105, "selected", R105), mark(101, "not_selected", R101)];
-    const after = [row(105, "selected", [9]), row(101, "missing_vendor_include_rule")];
-    expect(describeChooseMove("committedEarlier", 0, sent, after)).toEqual({ kind: "saved", add: 1, remove: 1, notTaken: 0 });
-    expect(describeChooseMove("committedEarlier", 0, sent, null)).toEqual({ kind: "saved", add: 1, remove: 1, notTaken: 0 });
-    expect(describeChooseMove("stale", 0, sent, after)).toEqual({ kind: "info", message: CHOOSE_WORDS.staleNothingLeft });
-    // Changes left: the vendor reviews and saves again.
-    expect(describeChooseMove("committedEarlier", 1, sent, after)).toEqual({ kind: "error", message: CHOOSE_WORDS.lastSaveWentThrough });
-    expect(describeChooseMove("stale", 2, sent, after)).toEqual({ kind: "error", message: CHOOSE_WORDS.stale });
   });
 });

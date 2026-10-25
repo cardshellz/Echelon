@@ -22,7 +22,7 @@ import type { DropshipStoreListingConfig } from "../application/dropship-marketp
 import type { DropshipEbayListingPolicyOverride } from "../application/dropship-ebay-listing-policy-override";
 import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
-import type { DropshipVendorSelectionRule, DropshipVendorVariantOverride } from "../domain/vendor-selection";
+import type { DropshipVendorVariantOverride } from "../domain/vendor-selection";
 import type { SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import {
   EMPTY_LISTING_SETTING_LAYERS,
@@ -76,19 +76,6 @@ interface CatalogRuleRow {
   category: string | null;
   starts_at: Date | null;
   ends_at: Date | null;
-}
-
-interface SelectionRuleRow {
-  id: number;
-  scope_type: string;
-  action: string;
-  product_line_id: number | null;
-  product_id: number | null;
-  product_variant_id: number | null;
-  category: string | null;
-  auto_connect_new_skus: boolean;
-  auto_list_new_skus: boolean;
-  is_active: boolean;
 }
 
 interface CandidateRow {
@@ -350,19 +337,24 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     }
   }
 
-  async listSelectionRules(vendorId: number): Promise<DropshipVendorSelectionRule[]> {
+  /**
+   * Which of these sizes the vendor picked (one-time picks, PLAN-B v4.1 §9
+   * row 2): a bounded primary-key lookup over the sizes the caller holds,
+   * never the vendor's whole selection. A pick is the vendor's choice only;
+   * exposure, the override and the sellable filter stay with the evaluator.
+   */
+  async listPickedVariantIds(vendorId: number, productVariantIds: readonly number[]): Promise<Set<number>> {
+    if (productVariantIds.length === 0) return new Set();
     const client = await this.dbPool.connect();
     try {
-      const result = await client.query<SelectionRuleRow>(
-        `SELECT id, scope_type, action, product_line_id, product_id,
-                product_variant_id, category, auto_connect_new_skus,
-                auto_list_new_skus, is_active
-         FROM dropship.dropship_vendor_selection_rules
-         WHERE vendor_id = $1 AND is_active = true
-         ORDER BY priority DESC, id ASC`,
-        [vendorId],
+      const result = await client.query<{ product_variant_id: number }>(
+        `SELECT product_variant_id
+         FROM dropship.dropship_vendor_selected_variants
+         WHERE vendor_id = $1
+           AND product_variant_id = ANY($2::int[])`,
+        [vendorId, [...new Set(productVariantIds)]],
       );
-      return result.rows.map(mapSelectionRuleRow);
+      return new Set(result.rows.map((row) => row.product_variant_id));
     } finally {
       client.release();
     }
@@ -1154,21 +1146,6 @@ function mapCatalogRuleRow(row: CatalogRuleRow): DropshipCatalogExposureRule {
     category: row.category,
     startsAt: row.starts_at,
     endsAt: row.ends_at,
-  };
-}
-
-function mapSelectionRuleRow(row: SelectionRuleRow): DropshipVendorSelectionRule {
-  return {
-    id: row.id,
-    scopeType: row.scope_type as DropshipVendorSelectionRule["scopeType"],
-    action: row.action as DropshipVendorSelectionRule["action"],
-    productLineId: row.product_line_id,
-    productId: row.product_id,
-    productVariantId: row.product_variant_id,
-    category: row.category,
-    autoConnectNewSkus: row.auto_connect_new_skus,
-    autoListNewSkus: row.auto_list_new_skus,
-    isActive: row.is_active,
   };
 }
 

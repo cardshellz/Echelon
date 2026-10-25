@@ -43,7 +43,7 @@ function makeDependencies() {
     catalog: {
       listCatalogCandidates: vi.fn(async () => [makeCandidate()]),
       listCatalogExposureRules: vi.fn<DropshipListingShippingEstimateDependencies["catalog"]["listCatalogExposureRules"]>(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
-      listSelectionRules: vi.fn<DropshipListingShippingEstimateDependencies["catalog"]["listSelectionRules"]>(async () => [{ id: 2, vendorId: 10, scopeType: "catalog", action: "include" }]),
+      listPickedVariantIds: vi.fn<DropshipListingShippingEstimateDependencies["catalog"]["listPickedVariantIds"]>(async (_vendorId, ids) => new Set(ids)),
       listVariantOverrides: vi.fn<DropshipListingShippingEstimateDependencies["catalog"]["listVariantOverrides"]>(async () => []),
     },
     calculation: {
@@ -76,6 +76,8 @@ describe("read-only listing shipping estimate", () => {
       destination: { country: "US", region: "PA", postalCode: "17046" },
     });
     expect(deps.contexts.loadForMember).toHaveBeenCalledWith("member-1", 22);
+    // The vendor's picks are read for this one size only (PLAN-B v4.1 §9 row 2).
+    expect(deps.catalog.listPickedVariantIds).toHaveBeenCalledWith(makeContext().vendorId, [101]);
     expect(deps.calculation.cartonization.cartonize).toHaveBeenCalledWith(expect.objectContaining({ warehouseId: 3, items: [{ productVariantId: 101, quantity: 2 }], quotedAt: at }));
     expect(input).toEqual(original);
     // No write methods, provisioning, ATP/reservation, wallets or marketplace APIs exist in the service contract.
@@ -107,12 +109,12 @@ describe("read-only listing shipping estimate", () => {
     await expect(service.estimateForMember("", input)).rejects.toMatchObject({ code: "DROPSHIP_AUTH_REQUIRED" });
     expect(deps.contexts.loadForMember).not.toHaveBeenCalled();
   });
-  it.each(["missing", "inactive", "unexposed", "unselected", "excluded", "disabled"])("rejects %s product before calculating", async (scenario) => {
+  it.each(["missing", "inactive", "unexposed", "unselected", "another size picked", "disabled"])("rejects %s product before calculating", async (scenario) => {
     if (scenario === "missing") deps.catalog.listCatalogCandidates.mockResolvedValue([]);
     if (scenario === "inactive") deps.catalog.listCatalogCandidates.mockResolvedValue([{ ...makeCandidate(), variantIsActive: false }]);
     if (scenario === "unexposed") deps.catalog.listCatalogExposureRules.mockResolvedValue([]);
-    if (scenario === "unselected") deps.catalog.listSelectionRules.mockResolvedValue([]);
-    if (scenario === "excluded") deps.catalog.listSelectionRules.mockResolvedValue([{ id: 2, scopeType: "catalog", action: "include" }, { id: 3, scopeType: "variant", action: "exclude", productVariantId: 101 }]);
+    if (scenario === "unselected") deps.catalog.listPickedVariantIds.mockResolvedValue(new Set());
+    if (scenario === "another size picked") deps.catalog.listPickedVariantIds.mockResolvedValue(new Set([102]));
     if (scenario === "disabled") deps.catalog.listVariantOverrides.mockResolvedValue([{ productVariantId: 101, enabledOverride: false }]);
     await expect(service.estimateForMember("member-1", input)).rejects.toMatchObject({ code: "DROPSHIP_LISTING_SHIPPING_VARIANT_NOT_SELECTED" });
     expect(deps.calculation.pricingProvider.quote).not.toHaveBeenCalled();

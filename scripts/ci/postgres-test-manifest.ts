@@ -243,4 +243,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-sweep.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-ebay-sync-back-orders.integration.test.ts",
   "server/modules/oms/__tests__/integration/dropship-marketplace-cancel.integration.test.ts",
+  "server/modules/dropship/__tests__/integration/dropship-selection-picks-migration.integration.test.ts",
+  "server/modules/dropship/__tests__/integration/dropship-selection-change.integration.test.ts",
+  "server/modules/dropship/__tests__/integration/dropship-catalog-arrivals.integration.test.ts",
 ]);

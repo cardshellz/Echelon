@@ -15,7 +15,6 @@ import {
 } from "@/lib/dropship-listing-push-status";
 import {
   fetchJson,
-  isDropshipSiteUpdatingError,
   listLaunchReadyStoreConnections,
   queryErrorMessage,
   type DropshipEbayStoreCategoryResponse,
@@ -59,15 +58,8 @@ import {
   rememberCatalogStore,
   type CatalogStep,
 } from "@/lib/dropship-catalog-steps";
-import { CHOOSE_GUARD_ID, EMPTY_CHOOSE_CHANGES, reduceChooseChanges } from "@/lib/dropship-catalog-choose";
-import {
-  CHOOSE_CATALOG_QUERY_KEY,
-  checkChoosePending,
-  freshSelectionRulesReader,
-  selectionRulesQueryOptions,
-  type ChoosePendingSave,
-} from "@/lib/dropship-catalog-choose-requests";
-import { CHOOSE_WORDS } from "@/lib/dropship-catalog-choose-words";
+import { CHOOSE_GUARD_ID, EMPTY_CHOOSE_CHANGES, chooseChangesEmpty, reduceChooseChanges } from "@/lib/dropship-catalog-choose";
+import { isOlderCatalogServerError } from "@/lib/dropship-catalog-publish";
 import { SELECTED_LIST_QUERY_KEY, SELECTION_SUMMARY_QUERY_KEY, selectionSummaryQueryOptions } from "@/lib/dropship-catalog-publish-requests";
 import { PUBLISH_WORDS } from "@/lib/dropship-catalog-publish-words";
 export { formatListingPreviewIssue as formatIssue } from "@/lib/dropship-listing-preview";
@@ -122,17 +114,13 @@ function DropshipPortalCatalogPage() {
   // drops them, and the rail's way back to step 1 drops nothing; Next from step 1 still asks (toSetupScope holds them).
   const [chooseChanges, dispatchChooseChanges] = useReducer(reduceChooseChanges, EMPTY_CHOOSE_CHANGES);
   const discardChooseChanges = useCallback(() => dispatchChooseChanges({ type: "undo" }), []);
-  // A step 1 save sent with no sure answer, held beside the changes so leaving step 1 never drops it (review MC1).
-  const choosePendingRef = useRef<ChoosePendingSave | null>(null);
   // While step 1's save runs, the leave question asks the vendor to wait: leaving can't stop it (review MC6).
   const [chooseSaving, setChooseSaving] = useState(false);
-  // What the check below found, shown in step 1's bar (or above the step the vendor is on).
-  const [chooseNotice, setChooseNotice] = useState<string | null>(null);
-  useUnsavedDraft(CHOOSE_GUARD_ID, CATALOG_STEP_LABELS.choose, chooseChanges.marks.length > 0,
-    { changes: chooseChanges.marks.length, discard: discardChooseChanges, saving: chooseSaving });
+  const chooseChangeCount = chooseChanges.add.size + chooseChanges.remove.size;
+  useUnsavedDraft(CHOOSE_GUARD_ID, CATALOG_STEP_LABELS.choose, !chooseChangesEmpty(chooseChanges),
+    { changes: chooseChangeCount, discard: discardChooseChanges, saving: chooseSaving });
   const toStoreScope = scopeWithoutPrefix(guardDrafts, CHOOSE_GUARD_ID);
   const toChooseScope = scopeWithoutPrefix(guardDrafts, CHOOSE_GUARD_ID);
-  const selectionRulesQuery = useQuery(selectionRulesQueryOptions());
   const settingsQuery = useQuery<DropshipSettingsResponse>({
     queryKey: ["/api/dropship/settings"],
     queryFn: () => fetchJson<DropshipSettingsResponse>("/api/dropship/settings"),
@@ -206,9 +194,9 @@ function DropshipPortalCatalogPage() {
   }, [location, navigate, step]);
 
   /**
-   * The saved selection moved (step 1's save, a lost answer that went through, a run that ended, a publish refused for
-   * a moved selection): the count, the rules (the rail tick), step 3's selected list and onboarding are read again,
-   * and the rail's Listing settings line is marked stale. Step 3's Check goes once the count shows a new revision.
+   * The saved selection moved (step 1's save, another tab's, a run that ended, a publish refused for a moved
+   * selection): the count (the rail tick, PLAN-B v4.1 V25), step 3's selected list and onboarding are read again, and
+   * the rail's Listing settings line is marked stale. Step 3's Check goes once the count shows a new revision.
    */
   async function afterSelectionSaved() {
     // Deliberate fire-and-forget (review round 2 DUX4): the count's read retries on the run poll's schedule (up to
@@ -217,7 +205,6 @@ function DropshipPortalCatalogPage() {
     // failure with Try again.
     void queryClient.invalidateQueries({ queryKey: [...SELECTION_SUMMARY_QUERY_KEY] });
     await Promise.allSettled([
-      selectionRulesQuery.refetch(),
       queryClient.invalidateQueries({ queryKey: [...ONBOARDING_QUERY_KEY] }),
       queryClient.invalidateQueries({ queryKey: [...SELECTED_LIST_QUERY_KEY] }),
     ]);
@@ -231,42 +218,7 @@ function DropshipPortalCatalogPage() {
     void afterSelectionSavedRef.current();
   }, []);
 
-  /**
-   * Step 1's changes are all gone (Undo, "Discard and leave", or a reload that showed them saved) while a save that may
-   * have gone through is held: read the rules before forgetting it (review MC1). If it went through, or the rules moved
-   * some other way since it was built (verify V2), everything is read again and the vendor is told; if the rules can't
-   * be read, they are told to reload. Unchanged rules: it never went through, nothing to say.
-   */
-  useEffect(() => {
-    if (chooseChanges.marks.length > 0) {
-      setChooseNotice(null);
-      return;
-    }
-    const pending = choosePendingRef.current;
-    choosePendingRef.current = null;
-    if (!pending?.mayHaveCommitted) return;
-    // Deliberate fire-and-forget: checkChoosePending never rejects (a failed read is its "unreadable" answer), the
-    // reads after it are allSettled, and its outcome is shown as a notice.
-    void (async () => {
-      const found = await checkChoosePending(freshSelectionRulesReader(queryClient), pending);
-      if (found === "wentThrough" || found === "moved") {
-        // Step 1's lists were read under the old rules: a list not on screen is dropped (read afresh when shown), the
-        // one on screen is read again.
-        queryClient.removeQueries({ queryKey: [...CHOOSE_CATALOG_QUERY_KEY], type: "inactive" });
-        await Promise.allSettled([queryClient.invalidateQueries({ queryKey: [...CHOOSE_CATALOG_QUERY_KEY] }), afterSelectionSaved()]);
-        setChooseNotice(found === "wentThrough" ? CHOOSE_WORDS.undoneButSaved : CHOOSE_WORDS.pendingMoved);
-      } else if (found === "unreadable") {
-        setChooseNotice(CHOOSE_WORDS.undoneUnknown);
-      }
-    })();
-    // Runs when the count of changes moves; the closures it uses are this render's.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chooseChanges.marks.length]);
-
-  const chooseSavingChange = useCallback((saving: boolean) => {
-    setChooseSaving(saving);
-    if (saving) setChooseNotice(null);
-  }, []);
+  const chooseSavingChange = useCallback((saving: boolean) => setChooseSaving(saving), []);
 
   /** A saved change moves the summary the rail reads, so read it again. */
   function refreshListingSettings() {
@@ -331,8 +283,9 @@ function DropshipPortalCatalogPage() {
   });
   // The selection summary's count (step 1 plan S2-5 §4.10, stage 1 dependency): one counter for step 1, the rail and Next.
   const selectedCount = selectionSummaryQuery.data?.selectedTotal ?? null;
+  // An older catalog server's 503 for this newer page is "updating" too (review round 1 CLI-2).
   const countSiteUpdating = selectionSummaryQuery.isFetching && selectionSummaryQuery.failureCount > 0
-    && isDropshipSiteUpdatingError(selectionSummaryQuery.failureReason);
+    && isOlderCatalogServerError(selectionSummaryQuery.failureReason);
   // Any other passing failure while the count is read again (or waits for the network): neutral words, not a blank
   // count for up to 7 minutes (verify VC5).
   const countRetrying = !countSiteUpdating && selectionSummaryQuery.data === undefined
@@ -368,7 +321,7 @@ function DropshipPortalCatalogPage() {
         <CatalogStepRail
           current={activeStep}
           hrefFor={stepHref}
-          ticks={{ choose: chooseStepTick(selectionRulesQuery.data?.rules), setup: setupRail.tick, publish: null }}
+          ticks={{ choose: chooseStepTick(selectionSummaryQuery.data?.selectedTotal), setup: setupRail.tick, publish: null }}
           details={{
             choose: selectedCount === null ? "Loading selection" : `${selectedCount} selected`,
             setup: setupRail.line,
@@ -418,22 +371,6 @@ function DropshipPortalCatalogPage() {
             queuedMessage="The saved listing workflow is loading. Provider completion is not yet confirmed." />}
         </div>}
 
-        {chooseNotice && activeStep !== "choose" && (
-          <Alert className="mt-5" data-testid="catalog-choose-notice">
-            <AlertCircle className="h-4 w-4" />
-            <AlertDescription>{chooseNotice}</AlertDescription>
-          </Alert>
-        )}
-        {/* Step 1 shows its own card for this read (ChooseStep), and a failed re-read keeps its rules on screen, so the
-            page says it only off step 1 and only with nothing to show: one cause, one message (verify V4). */}
-        {activeStep !== "choose" && selectionRulesQuery.isError && selectionRulesQuery.data === undefined && (
-          <Alert variant="destructive" className="mt-5">
-            <AlertCircle className="h-4 w-4" />
-            <AlertDescription>
-              {queryErrorMessage(selectionRulesQuery.error, "Unable to load catalog selection rules.")}
-            </AlertDescription>
-          </Alert>
-        )}
         {/* Step 3 says it in its own card, with Try again. Off step 3 (review round 2 DUX11): "site updating" while
             the count is read again after an answer from an older dyno, and once the reads give up, the count's own
             words with Try again (never the retry's "will try again" as final words). */}
@@ -471,11 +408,9 @@ function DropshipPortalCatalogPage() {
           <>
             <CatalogStepIntro step="choose" detail="Selection applies to all your stores." />
             <ChooseStep
-              selectedCount={selectedCount}
+              selection={selectionSummaryQuery.data ?? null}
               changes={chooseChanges}
               onChanges={dispatchChooseChanges}
-              pendingRef={choosePendingRef}
-              notice={chooseNotice}
               next={nextAction}
               summary={actionBar.summary}
               onSaved={afterSelectionSaved}

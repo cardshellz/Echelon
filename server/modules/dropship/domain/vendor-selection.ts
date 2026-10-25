@@ -3,6 +3,7 @@ import {
   normalizeCatalogCategory,
   type DropshipCatalogExposureDecision,
   type DropshipCatalogExposureScope,
+  type DropshipCatalogExposureSubject,
   type DropshipCatalogVariantCandidate,
 } from "./catalog-exposure";
 import { DropshipError } from "./errors";
@@ -30,6 +31,14 @@ export interface DropshipVendorVariantOverride {
   marketplaceQuantityCap?: number | null;
 }
 
+/**
+ * Why a size is or is not selected. The names are stored: preview blockers
+ * `selection:<reason>` (dropship-listing-preview-service.ts), push job results
+ * and stage 1 client words read them, so a not-picked size keeps the name
+ * `missing_vendor_include_rule`. `excluded_by_vendor_rule` is never produced
+ * since PR B (one-time picks have no keep-out rules); it stays in the union for
+ * data stored before PR B.
+ */
 export type DropshipVendorCatalogSelectionReason =
   | "selected"
   | "not_exposed_by_admin"
@@ -41,6 +50,13 @@ export interface DropshipVendorCatalogSelectionDecision {
   selected: boolean;
   reason: DropshipVendorCatalogSelectionReason;
   adminExposureReason: DropshipCatalogExposureDecision["reason"];
+  /** The vendor's pick of this size, whatever the reason: a picked size Card Shellz stopped offering, or the vendor turned off, stays picked. */
+  picked: boolean;
+  /**
+   * Always empty since PR B, and the two automation flags always false: picks
+   * are one-time and add nothing by themselves. Kept one release so an older
+   * stage 1 tab still parses a catalog row (client/src/lib/dropship-catalog-choose.ts).
+   */
   includeRuleIds: number[];
   excludeRuleIds: number[];
   autoConnectNewSkus: boolean;
@@ -50,9 +66,11 @@ export interface DropshipVendorCatalogSelectionDecision {
 }
 
 export interface EvaluateDropshipVendorCatalogSelectionInput {
+  /** Not read since PR B (picks replace the rule match); kept so every caller passes one shape. */
   candidate: DropshipCatalogVariantCandidate;
   adminExposureDecision: DropshipCatalogExposureDecision;
-  rules: readonly DropshipVendorSelectionRule[];
+  /** Whether the vendor picked this size (a row of `dropship.dropship_vendor_selected_variants`). */
+  picked: boolean;
   rawAtpUnits: number;
   override?: DropshipVendorVariantOverride | null;
   /**
@@ -80,39 +98,15 @@ export function evaluateDropshipVendorCatalogSelection(
     return blockedSelectionDecision({
       reason: "not_exposed_by_admin",
       adminExposureReason: input.adminExposureDecision.reason,
-      marketplaceQuantity: 0,
-      quantityCapApplied: false,
+      picked: input.picked,
     });
   }
 
-  const activeRules = input.rules.filter((rule) => rule.isActive !== false);
-  const matchingIncludeRules = activeRules.filter(
-    (rule) => rule.action === "include" && dropshipCatalogRuleMatchesVariant(rule, input.candidate),
-  );
-  const matchingExcludeRules = activeRules.filter(
-    (rule) => rule.action === "exclude" && dropshipCatalogRuleMatchesVariant(rule, input.candidate),
-  );
-
-  const includeRuleIds = numericRuleIds(matchingIncludeRules);
-  const excludeRuleIds = numericRuleIds(matchingExcludeRules);
-
-  if (excludeRuleIds.length > 0) {
-    return blockedSelectionDecision({
-      reason: "excluded_by_vendor_rule",
-      adminExposureReason: input.adminExposureDecision.reason,
-      includeRuleIds,
-      excludeRuleIds,
-      marketplaceQuantity: 0,
-      quantityCapApplied: false,
-    });
-  }
-
-  if (includeRuleIds.length === 0) {
+  if (!input.picked) {
     return blockedSelectionDecision({
       reason: "missing_vendor_include_rule",
       adminExposureReason: input.adminExposureDecision.reason,
-      marketplaceQuantity: 0,
-      quantityCapApplied: false,
+      picked: false,
     });
   }
 
@@ -120,10 +114,7 @@ export function evaluateDropshipVendorCatalogSelection(
     return blockedSelectionDecision({
       reason: "disabled_by_vendor_override",
       adminExposureReason: input.adminExposureDecision.reason,
-      includeRuleIds,
-      excludeRuleIds,
-      marketplaceQuantity: 0,
-      quantityCapApplied: false,
+      picked: true,
     });
   }
 
@@ -131,13 +122,33 @@ export function evaluateDropshipVendorCatalogSelection(
     selected: true,
     reason: "selected",
     adminExposureReason: input.adminExposureDecision.reason,
-    includeRuleIds,
-    excludeRuleIds,
-    autoConnectNewSkus: matchingIncludeRules.some((rule) => rule.autoConnectNewSkus !== false),
-    autoListNewSkus: matchingIncludeRules.some((rule) => rule.autoListNewSkus === true),
+    picked: true,
+    includeRuleIds: [],
+    excludeRuleIds: [],
+    autoConnectNewSkus: false,
+    autoListNewSkus: false,
     marketplaceQuantity,
     quantityCapApplied,
   };
+}
+
+/**
+ * The frozen vendor rules' answer for one size (PLAN-B v4.1 §7.1, V36): some
+ * active include rule matches it and no active exclude rule does, with the
+ * rules A's evaluator counted (only rules with an id; a rule without one was
+ * never saved). It is A's rule decision, VS:88-117 at cea5cb027, without the
+ * exposure and override steps, which the evaluator still applies. Readers
+ * decide from picks; this answers what the frozen rules chose, for the
+ * conversion follow-up (§11.2) and tests.
+ */
+export function vendorRulesPick(
+  rules: readonly DropshipVendorSelectionRule[],
+  candidate: DropshipCatalogExposureSubject,
+): boolean {
+  const matching = rules.filter((rule) => rule.isActive !== false && dropshipCatalogRuleMatchesVariant(rule, candidate));
+  const includeRuleIds = numericRuleIds(matching.filter((rule) => rule.action === "include"));
+  const excludeRuleIds = numericRuleIds(matching.filter((rule) => rule.action === "exclude"));
+  return includeRuleIds.length > 0 && excludeRuleIds.length === 0;
 }
 
 export function computeDropshipMarketplaceQuantity(
@@ -186,24 +197,23 @@ export function assertDropshipVendorSelectionRuleTarget(rule: DropshipVendorSele
   }
 }
 
+/** A size that is not selected lists nothing and its marketplace quantity is 0. */
 function blockedSelectionDecision(input: {
-  reason: Exclude<DropshipVendorCatalogSelectionReason, "selected">;
+  reason: Exclude<DropshipVendorCatalogSelectionReason, "selected" | "excluded_by_vendor_rule">;
   adminExposureReason: DropshipCatalogExposureDecision["reason"];
-  includeRuleIds?: number[];
-  excludeRuleIds?: number[];
-  marketplaceQuantity: number;
-  quantityCapApplied: boolean;
+  picked: boolean;
 }): DropshipVendorCatalogSelectionDecision {
   return {
     selected: false,
     reason: input.reason,
     adminExposureReason: input.adminExposureReason,
-    includeRuleIds: input.includeRuleIds ?? [],
-    excludeRuleIds: input.excludeRuleIds ?? [],
+    picked: input.picked,
+    includeRuleIds: [],
+    excludeRuleIds: [],
     autoConnectNewSkus: false,
     autoListNewSkus: false,
-    marketplaceQuantity: input.marketplaceQuantity,
-    quantityCapApplied: input.quantityCapApplied,
+    marketplaceQuantity: 0,
+    quantityCapApplied: false,
   };
 }
 
