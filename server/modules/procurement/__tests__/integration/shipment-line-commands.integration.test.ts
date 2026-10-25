@@ -243,7 +243,10 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     try {
       if (pool) {
         const cleanup: Array<() => Promise<unknown>> = [];
-        if (commandTablesReady) cleanup.push(() => pool.query("DELETE FROM public.financial_command_results WHERE actor_id=$1 AND idempotency_key LIKE $2", ["procurement.shipment-line", `${runId}-%`]));
+        if (commandTablesReady) cleanup.push(() => pool.query(
+          "DELETE FROM public.financial_command_results WHERE (actor_id=$1 AND idempotency_key LIKE $2) OR (actor_id=$3 AND idempotency_key LIKE $4)",
+          ["procurement.shipment-line", `${runId}-%`, actorId, `editor-${runId}-%`],
+        ));
         if (ownsAudit) cleanup.push(() => pool.query("DROP TABLE public.audit_events"));
         else if (auditReady) cleanup.push(() => pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]]));
         // Both schemas are created only by this suite; never drop pre-existing schemas.
