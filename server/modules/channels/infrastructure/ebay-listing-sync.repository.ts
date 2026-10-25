@@ -76,8 +76,10 @@ const rowSql = `SELECT id::text,product_id AS "productId",state,error_code AS co
     AND evidence.event='stage_completed' AND evidence.evidence->>'key' IN ('publish','publication_accepted')) AS "publicationAcceptedRevision"
   FROM channels.ebay_listing_sync_jobs`;
 function decode(row: Record<string, unknown>): StoredEbayListingSyncJob {
+  const result = row.result as StoredEbayListingSyncJob["result"];
   return storedEbayListingSyncJobSchema.parse({
     ...row,
+    warnings: row.state === "completed" ? result?.warnings : undefined,
     nextAttemptAt: (row.nextAttemptAt as Date).toISOString(),
     updatedAt: (row.updatedAt as Date).toISOString(),
   });
@@ -428,11 +430,12 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         `SELECT * FROM (SELECT DISTINCT ON ("productId") * FROM (
           SELECT id::text,product_id AS "productId",'sync' AS kind,operation,state,error_code AS code,error_message AS message,
           next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt",read_retry_paused AS "readRetryPaused",
+          CASE WHEN state='completed' THEN result->'warnings' ELSE NULL END AS warnings,
           (SELECT evidence.evidence->'diagnostic'->'context'->'providerRead' FROM channels.ebay_listing_sync_events evidence
            WHERE evidence.job_id=ebay_listing_sync_jobs.id AND evidence.revision=ebay_listing_sync_jobs.revision
              AND evidence.evidence->>'code'=ebay_listing_sync_jobs.error_code ORDER BY evidence.id DESC LIMIT 1) AS "providerRead"
           FROM channels.ebay_listing_sync_jobs WHERE channel_id=$1
-          UNION ALL SELECT command_key::text,product_id,'admission',operation,'needs_attention',error_code,error_message,created_at,created_at,false,NULL::jsonb
+          UNION ALL SELECT command_key::text,product_id,'admission',operation,'needs_attention',error_code,error_message,created_at,created_at,false,NULL::jsonb,NULL::jsonb
           FROM channels.ebay_listing_sync_admission_failures WHERE channel_id=$1) all_jobs
           ORDER BY "productId","updatedAt" DESC,id DESC)
           latest ORDER BY "updatedAt" DESC LIMIT 500`,
@@ -861,6 +864,10 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       // Quantity projections belong to inventory publication, not this content job.
       const current=decode((await client.query(rowSql+" WHERE id=$1",[job.id])).rows[0]);
       const currentRevision=current.revision;
+      if (outcome.result?.warnings?.some(warning => warning.productId !== job.identity.productId
+        || !job.identity.variants.some(member => member.variantId === warning.variantId && member.sku === warning.variantSku
+          && member.contentSyncEnabled !== false)))
+        throw new EbayListingSyncError("EBAY_SYNC_RESULT_SCOPE_INVALID", "Package warnings must identify an included member of this exact saved update.");
       // A business error after the send began cannot turn uncertainty into a
       // fresh publish command. Keep its saved recovery reachable and active.
       const retainBarrier=outcome.state==="needs_attention" && (hasPublicationBarrier(current) || (current.operation === "withdraw" && (current.withdrawalWriteCompleted || current.withdrawalWriteStarted)));

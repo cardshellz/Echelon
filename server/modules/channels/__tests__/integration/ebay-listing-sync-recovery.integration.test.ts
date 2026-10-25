@@ -313,7 +313,8 @@ const configured =
     });
     const galleryPhotos = ["https://example.com/current-front.jpg", "https://example.com/current-back.jpg"];
 
-    async function prepareFromCatalog(f: ReturnType<typeof fixture>, weight: number | null = 120, calculated = false) {
+    async function prepareFromCatalog(f: ReturnType<typeof fixture>, weight: number | null = 120, calculated = false,
+      maintenanceRecommended = false) {
       // Catalog read dependencies are fixtures; all queue/receipt/audit indexes
       // and constraints above come from the unchanged production migrations.
       await database.pool.query(`ALTER TABLE catalog.product_variants ADD COLUMN IF NOT EXISTS weight_grams numeric(10,2);
@@ -332,10 +333,12 @@ const configured =
           variantPrices: new Map([[101, 1149]]), atpByVariantId: new Map([[101, 7]]),
           marketplaceId: "EBAY_US", ebayBrowseCategoryId: "183454",
           resolvedPoliciesByVariantId: new Map([[101, { fulfillmentPolicyId: "fulfillment", returnPolicyId: "return", paymentPolicyId: "payment" }]]),
-          packageRequirementsByVariantId: new Map([[101, { weight: true, dimensions: calculated }]]),
+          packageRequirementsByVariantId: new Map([[101, { weight: true, dimensions: calculated,
+            ...(maintenanceRecommended ? { dimensionsOnMaintenance: "recommended" as const } : {}) }]]),
           storeCategoryNames: [], merchantLocationKey: "HQ", existingGroupKey: identity.groupKey });
         return { ...await f.provider.prepare(), identity: structuredClone(identity), client: f.client,
-          draft: await prepareEbayListingPackages(f.client, { ...draft, productId: 20, marketplaceId: "EBAY_US" }) };
+          draft: await prepareEbayListingPackages(f.client, { ...draft, productId: 20, marketplaceId: "EBAY_US" },
+            maintenanceRecommended ? identity : undefined) };
       });
     }
 
@@ -490,6 +493,112 @@ const configured =
       expect(f.provider.currentItem().packageWeightAndSize).toEqual({ weight: { value: 120.25, unit: "GRAM" },
         dimensions: { length: 15.24, width: 10.16, height: 2.54, unit: "CENTIMETER" } });
       expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(evidence);
+    });
+
+    it("persists optional-dimension warnings through concurrent maintenance, readback and idempotent replay", async () => {
+      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      const key = randomUUID();
+      const saved = await Promise.all([f.service.enqueue(identity, "operator", key), f.service.enqueue(identity, "operator", key)]);
+      expect(saved[0].id).toBe(saved[1].id);
+      await processConcurrently(f, saved[0].id);
+      const warning = { code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
+        productId: 20, variantId: 101, variantSku: "P5" };
+      expect(await f.store.get(saved[0].id)).toMatchObject({ state: "completed", code: null,
+        result: { errors: 0, warnings: [warning] }, warnings: [warning] });
+      expect(await f.service.list(1)).toEqual(expect.arrayContaining([expect.objectContaining({ id: saved[0].id, state: "completed", warnings: [warning] })]));
+      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ weight: { value: 120.25, unit: "GRAM" } });
+      expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+        .toEqual({ length_mm: null, width_mm: null, height_mm: null });
+      const writes = f.mutations.length; expect(writes).toBeGreaterThan(0);
+      await f.service.enqueue(identity, "operator", key); await processConcurrently(f, saved[0].id);
+      expect(f.mutations).toHaveLength(writes);
+      expect(f.provider.client.publishOffer).not.toHaveBeenCalled();
+      expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+    });
+
+    it("finishes already-current maintenance read-only while retaining the dimension warning", async () => {
+      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      // Prepare once to set exact desired content on the provider; the worker
+      // must then use inspection, not write an unchanged listing again.
+      const current = await f.prepare();
+      const item = current.draft.inventoryItems[0];
+      Object.assign(f.provider.currentItem(), structuredClone(item.payload));
+      const group = current.draft.itemGroup;
+      if (group) Object.assign(f.provider.currentGroup(), structuredClone(group.payload));
+      Object.assign(f.provider.currentOffer(), structuredClone(current.draft.offers[0].payload));
+      const saved = await f.service.enqueue(identity, "operator");
+      await processConcurrently(f, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed", warnings: [{ variantId: 101 }] });
+      expect(f.mutations).toHaveLength(0);
+    });
+
+    it("keeps dimensions required when an existing offer would change fulfillment policies", async () => {
+      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      f.provider.currentOffer().listingPolicies.fulfillmentPolicyId = "previous-shipping-policy";
+      const saved = await f.service.enqueue(identity, "operator");
+      await processConcurrently(f, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED",
+        issue: { action: { href: "/products/20?tab=variants&variantId=101" } } });
+      expect(f.mutations).toHaveLength(0);
+    });
+
+    it("does not soften partial dimensions during maintenance and clears a warning after a real correction", async () => {
+      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      await database.pool.query("UPDATE catalog.product_variants SET length_mm=152.40 WHERE id=101");
+      const partial = await f.service.enqueue(identity, "operator"); await f.service.processDue(1, partial.id);
+      expect(await f.store.get(partial.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED" });
+      expect(f.mutations).toHaveLength(0);
+      await database.pool.query("UPDATE catalog.product_variants SET width_mm=101.60,height_mm=25.40 WHERE id=101");
+      advance();
+      const corrected = await f.service.enqueue(identity, "operator"); await processConcurrently(f, corrected.id);
+      expect(await f.store.get(corrected.id)).toMatchObject({ state: "completed" });
+      expect((await f.store.get(corrected.id)).warnings).toBeUndefined();
+      expect(f.provider.currentItem().packageWeightAndSize?.dimensions)
+        .toEqual({ length: 15.24, width: 10.16, height: 2.54, unit: "CENTIMETER" });
+    });
+
+    it("retains an actual dimension refusal and its immutable HTTP receipt after allowing maintenance", async () => {
+      const f = fixture({ reject: request => request.path.includes("/inventory_item/")
+        && !(request.body as { packageWeightAndSize?: { dimensions?: unknown } }).packageWeightAndSize?.dimensions
+        ? new Response(JSON.stringify({ errors: [{ errorId: 25002, category: "REQUEST",
+          message: "Package dimensions are required by the selected shipping service." }] }), { status: 400 }) : undefined });
+      await prepareFromCatalog(f, 120.25, true, true);
+      const saved = await f.service.enqueue(identity, "operator"); await processConcurrently(f, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "needs_attention", code: "EBAY_QUANTITY_REJECTED" });
+      expect((await f.store.get(saved.id)).message).toContain("Package dimensions are required");
+      const evidence = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows;
+      expect(evidence[0].evidence.diagnostic.context.providerWrite)
+        .toEqual({ provider: "ebay", kind: "validation", httpStatus: 400, errorCodes: ["25002"] });
+      expect(f.mutations).toHaveLength(1);
+      await database.pool.query("UPDATE catalog.product_variants SET length_mm=152.40,width_mm=101.60,height_mm=25.40 WHERE id=101");
+      advance();
+      const corrected = await f.service.enqueue(identity, "operator"); await processConcurrently(f, corrected.id);
+      expect(await f.store.get(corrected.id)).toMatchObject({ state: "completed" });
+      expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(evidence);
+    });
+
+    it("fences a shipping-policy edit between package preparation and mutation", async () => {
+      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      const prepare = f.prepare.getMockImplementation()!;
+      f.prepare.mockImplementation(async () => {
+        const result = await prepare();
+        f.provider.currentOffer().listingPolicies.fulfillmentPolicyId = "concurrent-policy-edit";
+        return result;
+      });
+      const saved = await f.service.enqueue(identity, "operator"); await processConcurrently(f, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "recovering", code: "EBAY_SYNC_PACKAGE_CHANGED" });
+      expect(f.mutations).toHaveLength(0);
+    });
+
+    it("rejects a warning that belongs to another product instead of projecting it onto this listing", async () => {
+      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      const execute = f.executor.execute.bind(f.executor);
+      vi.spyOn(f.executor, "execute").mockImplementation(async (...args) => ({ ...await execute(...args),
+        warnings: [{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
+          productId: 999, variantId: 101, variantSku: "P5" }] }));
+      const saved = await f.service.enqueue(identity, "operator"); await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "needs_attention", code: "EBAY_SYNC_RESULT_SCOPE_INVALID" });
+      expect((await f.store.get(saved.id)).result).toBeNull();
     });
 
     it("completes calculated shipping without a package type under concurrent and idempotent retry", async () => {

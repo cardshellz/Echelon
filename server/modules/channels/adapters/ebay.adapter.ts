@@ -253,6 +253,7 @@ export class EbayAdapter implements IChannelAdapter {
       status: pushResult.status,
       externalProductId: pushResult.externalProductId,
       externalVariantIds: pushResult.externalVariantIds,
+      ...(pushResult.warnings?.length ? { warnings: pushResult.warnings } : {}),
     };
   }
 

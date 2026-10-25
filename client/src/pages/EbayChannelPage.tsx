@@ -88,6 +88,7 @@ import { useChannelProjectionRefresh } from "@/hooks/use-channel-projection-refr
 import { EbayListingIssueCard } from "@/components/ebay/EbayListingIssueCard";
 import { EbayMappingRepairDialog } from "@/components/ebay/EbayMappingRepairDialog";
 import { EbaySyncRecoveryDialog } from "@/components/ebay/EbaySyncRecoveryDialog";
+import { ChannelListingWarnings } from "@/components/channels/ChannelListingWarnings";
 import { MarketplaceListingRegistrationDialog } from "@/components/marketplace/MarketplaceListingRegistrationDialog";
 import { MarketplaceListingChangesDialog } from "@/components/marketplace/MarketplaceListingChangesDialog";
 import {
@@ -2197,7 +2198,8 @@ export default function EbayChannelPage() {
                               <div className="mt-1"><EbayListingJobProgress job={syncJob} label={`Sync status for ${item.name}`}
                                 detail={syncPending ? savedSyncIssue?.message : null} /></div>
                             )}
-                            {syncJob && (syncJob.state !== "completed" || syncJob.inventoryReconciliation) && syncJob.operation === "sync" && syncIssue?.action.kind !== "check_status" && <Button variant="outline" size="sm" className="min-h-[44px] mt-1 text-xs" onClick={event => {
+                            {syncJob?.state === "completed" && !syncJob.inventoryReconciliation && <ChannelListingWarnings warnings={syncJob.warnings} />}
+                            {syncJob && (syncJob.state !== "completed" || syncJob.inventoryReconciliation || !!syncJob.warnings?.length) && syncJob.operation === "sync" && syncIssue?.action.kind !== "check_status" && <Button variant="outline" size="sm" className="min-h-[44px] mt-1 text-xs" onClick={event => {
                               event.stopPropagation();
                               setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name });
                             }}>View update status</Button>}
