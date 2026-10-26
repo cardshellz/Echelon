@@ -78,36 +78,37 @@ function AccountModal({
   return (
     <dialog
       ref={dialog}
-      className="csz-account-dialog"
-      aria-labelledby="csz-account-dialog-title"
+      className={`csz-account-dialog${choice.kind === "edit" ? "" : " csz-return-dialog"}`}
+      aria-labelledby={choice.kind === "edit" ? "csz-account-dialog-title" : undefined}
+      aria-label={choice.kind === "edit" ? undefined : "Return items"}
       onCancel={(event) => {
         event.preventDefault();
         if (!busy) onClose();
       }}
     >
       <div className="csz-account-ui" ref={setPortalRoot}>
-        <header className="csz-dialog-heading">
-          <div>
-            <h2 id="csz-account-dialog-title">
-              {choice.kind === "edit" ? "Edit your order" : "Return items"}
-            </h2>
-            <p>
-              {choice.kind === "edit"
-                ? "Update your items, then apply your changes."
-                : "Choose the items and quantities you want to send back."}
-            </p>
-          </div>
-          <button
-            type="button"
-            className="csz-modal-close"
-            aria-label="Close order tools"
-            disabled={busy}
-            onClick={onClose}
-          >
-            ×
-          </button>
-        </header>
-        <div className="csz-dialog-body">
+        {choice.kind === "edit" && (
+          <header className="csz-dialog-heading">
+            <div>
+              <h2 id="csz-account-dialog-title">
+                Edit your order
+              </h2>
+              <p>
+                Update your items, then apply your changes.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="csz-modal-close"
+              aria-label="Close order tools"
+              disabled={busy}
+              onClick={onClose}
+            >
+              ×
+            </button>
+          </header>
+        )}
+        <div className={choice.kind === "edit" ? "csz-dialog-body" : "csz-return-dialog-body"}>
           {error && (
             <p
               role="alert"
@@ -138,6 +139,7 @@ function AccountModal({
               (choice.returnOrder || choice.returnStatus) && (
                 <CustomerWorkspace
                   embedded
+                  onBusy={setBusy}
                   initialOrder={choice.returnOrder}
                   initialStatus={choice.returnStatus}
                   sessionKey={session.session.sessionKey!}

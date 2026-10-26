@@ -76,7 +76,8 @@ export const BROWSER_FEATURES = Object.freeze({
       "tests": [
         "test/browser/returns-portal-preview.spec.ts",
         "test/browser/returns-policy-shipping.spec.ts",
-        "test/browser/returns-customer.spec.ts"
+        "test/browser/returns-customer.spec.ts",
+        "test/browser/returns-account-layout.spec.ts"
       ],
       "roots": [
         "client/src/main.tsx"

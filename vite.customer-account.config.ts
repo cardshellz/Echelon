@@ -18,7 +18,7 @@ export default defineConfig({
         const css = postcss.parse(asset.source);
         css.walkRules(rule => {
           if (rule.parent?.type === "atrule" && /keyframes$/.test(rule.parent.name)) return;
-          rule.selectors = rule.selectors.map(selector => selector.includes(".csz-account-") || selector.includes(".csz-dialog-") || selector.includes(".csz-modal-")
+          rule.selectors = rule.selectors.map(selector => selector.includes(".csz-account-") || selector.includes(".csz-dialog-") || selector.includes(".csz-modal-") || selector.includes(".csz-return-")
             ? selector : /^(:root|:host|html|body)$/.test(selector) ? ".csz-account-ui" : `.csz-account-ui ${selector}`);
         });
         css.walkDecls(declaration => { declaration.value = declaration.value.replace(/(-?\d*\.?\d+)rem\b/g, (_match, value: string) => `${Number(value) * 16}px`); });
