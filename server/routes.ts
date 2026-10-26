@@ -56,6 +56,7 @@ import { registerDropshipAdminCatalogRoutes } from "./modules/dropship/interface
 import { registerDropshipAdminStoreConnectionRoutes } from "./modules/dropship/interfaces/http/dropship-admin-store-connection.routes";
 import { registerDropshipAdminOrderOpsRoutes } from "./modules/dropship/interfaces/http/dropship-admin-order-ops.routes";
 import { registerDropshipAdminListingPushOpsRoutes } from "./modules/dropship/interfaces/http/dropship-admin-listing-push-ops.routes";
+import { registerDropshipAdminListingEndOpsRoutes } from "./modules/dropship/interfaces/http/dropship-admin-listing-end-ops.routes";
 import { registerDropshipAdminTrackingPushOpsRoutes } from "./modules/dropship/interfaces/http/dropship-admin-tracking-push-ops.routes";
 import { registerDropshipAdminNotificationOpsRoutes } from "./modules/dropship/interfaces/http/dropship-admin-notification-ops.routes";
 import { registerDropshipAdminShippingConfigRoutes } from "./modules/dropship/interfaces/http/dropship-admin-shipping-config.routes";
@@ -155,6 +156,8 @@ export async function registerRoutes(
   registerDropshipAdminStoreConnectionRoutes(app);
   registerDropshipAdminOrderOpsRoutes(app);
   registerDropshipAdminListingPushOpsRoutes(app);
+  // PR C (PLAN-C v4.1 §10): the eBay listings Card Shellz could not end, with Retry and Mark resolved.
+  registerDropshipAdminListingEndOpsRoutes(app);
   registerDropshipAdminTrackingPushOpsRoutes(app);
   registerDropshipAdminNotificationOpsRoutes(app);
   // Retired Dropship shipping writes must be intercepted before legacy routes.

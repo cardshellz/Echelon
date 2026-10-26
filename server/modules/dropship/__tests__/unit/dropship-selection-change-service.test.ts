@@ -16,18 +16,23 @@ import {
   type SelectionChangePlanFacts,
   type StoredSelectionChangeRevision,
 } from "../../application/dropship-selection-change-service";
-import { NEW_VERSION_SETTLE_MS, OLDER_PROCESS_GRACE_MS } from "../../domain/catalog-code-version";
+import { DROPSHIP_CATALOG_CODE_VERSION, NEW_VERSION_SETTLE_MS, OLDER_PROCESS_GRACE_MS } from "../../domain/catalog-code-version";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipStockSelectionCandidate } from "../../domain/stock-publication-selection";
 import type { SelectionEffectsListing } from "../../domain/vendor-selection-effects";
-import { selectionChangeAnswerSchema } from "../../../../../shared/dropship/vendor-selection-changes";
+import type { PlannedListingEnd } from "../../domain/vendor-selection-ends";
+import { MAX_SELECTION_END_LISTINGS, selectionChangeAnswerSchema } from "../../../../../shared/dropship/vendor-selection-changes";
+import { hashSelectionChangeRequest, parseSelectionChangeBody } from "../../application/dropship-selection-change-dtos";
+import { B_STORED_ANSWER, bSelectionChangeAnswerSchema } from "../fixtures/vendor-selection-changes-b.fixture";
 
 /**
  * The picks save's service with its transaction stubbed (PLAN-B v4.1 §8.3, §10, §14, §15.1; precedent
  * dropship-listing-price-in-transaction.test.ts): the step order, replay, the writes gate, every refusal, the
- * server retries with seeded jitter, the plan-moved rollback and the no-op save. Sizes on the vendor's one store:
- * 101 picked and live (a removal sets it to 0), 102 offered with a zeroed live listing (an add sells it again),
- * 103 not offered (skipped), 104 already picked, 105 not picked (an already-not-selected removal).
+ * server retries with seeded jitter, the plan-moved rollback and the no-op save. Sizes on the vendor's one eBay
+ * store: 101 picked and live (PR C: a removal ends its listing), 102 offered with a zeroed live listing (an add
+ * sells it again), 103 not offered (skipped), 104 already picked, 105 not picked (an already-not-selected removal).
+ * Each size is its own product (1_000 + size). PR C's cases (PLAN-C v4.1 §4.7, §13.1): the page version and the
+ * echo after the replay (2a), the end writes after the picks writes (9), the pick count with hidden removals.
  */
 
 const NOW = new Date("2026-10-24T12:00:00.000Z");
@@ -42,7 +47,8 @@ function candidate(productVariantId: number): DropshipStockSelectionCandidate {
 
 function listing(id: number, productVariantId: number, patch: Partial<SelectionEffectsListing> = {}): SelectionEffectsListing {
   return { id, productVariantId, status: "active", externalListingId: `L-${id}`, externalOfferId: `O-${id}`, livePushItemId: null,
-    vendorQuantityLimit: null, marketplaceEndedAt: null, marketplaceIssueCodes: [], ...patch };
+    vendorQuantityLimit: null, marketplaceEndedAt: null, marketplaceIssueCodes: [], openEndId: null, openEndState: null,
+    pushInFlight: false, ...patch };
 }
 
 function facts(patch: Partial<SelectionChangePlanFacts> = {}): SelectionChangePlanFacts {
@@ -51,13 +57,15 @@ function facts(patch: Partial<SelectionChangePlanFacts> = {}): SelectionChangePl
     offered: new Set([101, 102, 104]),
     selectedBefore: 10,
     pickCountBefore: 12,
+    siblingPicks: new Set(),
+    pendingEnds: [],
     effects: {
       candidates: [101, 102, 103, 104, 105].map(candidate),
       adminRules: [{ id: 1, scopeType: "catalog", action: "include" }],
       overrides: [],
-      stores: [{ storeConnectionId: 22, storeName: "Card corner", platform: "ebay",
-        config: { listingMode: "live", inventoryMode: "managed_quantity_sync", isActive: true }, storePaused: false,
-        listings: [listing(501, 101), listing(502, 102)] }],
+      stores: [{ storeConnectionId: 22, storeName: "Card corner", platform: "ebay", status: "connected", externalAccountId: "seller-22",
+        providerEnvironment: "production", config: { listingMode: "live", inventoryMode: "managed_quantity_sync", isActive: true },
+        storePaused: false, listings: [listing(501, 101), listing(502, 102)] }],
     },
     ...patch,
   };
@@ -70,11 +78,14 @@ interface Body {
   remove: { productVariantIds: number[] };
   idempotencyKey: string;
   expectedEffectsHash: string;
+  expectedEnds?: { listingIds: number[]; hiddenRemovedIds: number[] };
+  expectedOtherEntriesHash?: string;
 }
 
+/** A body of this release's page (version 3, PLAN-C v4.1 §4.1); saveBody fills the confirmed hash and the echo. */
 function changeBody(patch: Partial<Body> = {}): Body {
-  return { expectedRevisionId: 41, add: { productVariantIds: [102, 103, 104] }, remove: { productVariantIds: [101, 105] },
-    idempotencyKey: KEY, expectedEffectsHash: "0".repeat(64), ...patch };
+  return { clientVersion: DROPSHIP_CATALOG_CODE_VERSION, expectedRevisionId: 41, add: { productVariantIds: [102, 103, 104] },
+    remove: { productVariantIds: [101, 105] }, idempotencyKey: KEY, expectedEffectsHash: "0".repeat(64), ...patch };
 }
 
 function pgError(code: string, message: string): Error & { code: string } {
@@ -100,6 +111,8 @@ class FakeChangeRepository implements DropshipSelectionChangeRepository {
   preLockResult: ((ids: readonly number[], attempt: number) => number[]) | null = null;
   deleteCount: ((ids: readonly number[], attempt: number) => number) | null = null;
   insertCount: ((ids: readonly number[], attempt: number) => number) | null = null;
+  supersedeCount: ((ids: readonly number[], attempt: number) => number) | null = null;
+  endInsertCount: ((ends: readonly PlannedListingEnd[], attempt: number) => number) | null = null;
   nextRevisionId = 42;
   previewRuns = 0;
 
@@ -149,6 +162,20 @@ class FakeChangeRepository implements DropshipSelectionChangeRepository {
         this.log("insertPicks", attempt); pending.push({ op: "insertPicks", input: ins });
         return this.insertCount ? this.insertCount(ins.productVariantIds, attempt) : ins.productVariantIds.length;
       },
+      supersedeListingEnds: async (sup) => {
+        this.log("supersedeListingEnds", attempt); pending.push({ op: "supersedeListingEnds", input: sup });
+        const ids = this.supersedeCount ? sup.endIds.slice(0, this.supersedeCount(sup.endIds, attempt)) : sup.endIds;
+        return ids.map((id) => ({ id, storeConnectionId: 22, listingId: 900 + id, productVariantId: 102, reason: "size_removed" as const }));
+      },
+      insertListingEnds: async (ins) => {
+        this.log("insertListingEnds", attempt); pending.push({ op: "insertListingEnds", input: ins });
+        const ends = this.endInsertCount ? ins.ends.slice(0, this.endInsertCount(ins.ends, attempt)) : ins.ends;
+        return ends.map((end, index) => ({ id: 7_000 + index, storeConnectionId: end.storeConnectionId, listingId: end.listingId,
+          productVariantId: end.productVariantId, reason: end.reason }));
+      },
+      insertListingEndAudits: async (audits) => {
+        this.log("insertListingEndAudits", attempt); pending.push({ op: "insertListingEndAudits", input: audits });
+      },
     };
     try {
       const result = await work(tx);
@@ -192,13 +219,16 @@ function setup(options: { disabled?: boolean; seed?: number } = {}) {
   return { repository, service, logs, sleeps };
 }
 
-/** The effects hash the vendor would confirm for this body (the preview's answer). */
-async function confirmedHash(body: Body, setupFacts?: SelectionChangePlanFacts): Promise<string> {
+/** What the vendor would confirm for this body (the preview's answer): its effects hash and the ends echo. */
+async function confirmed(body: Body, setupFacts?: SelectionChangePlanFacts): Promise<Pick<Body, "expectedEffectsHash" | "expectedEnds"
+  | "expectedOtherEntriesHash">> {
   const { service, repository } = setup();
   if (setupFacts) repository.defaultFacts = setupFacts;
-  const { idempotencyKey: _key, expectedEffectsHash: _hash, ...previewBody } = body;
+  const { idempotencyKey: _key, expectedEffectsHash: _hash, expectedEnds: _ends, expectedOtherEntriesHash: _other, ...previewBody } = body;
   const preview = await service.preview({ vendorId: VENDOR, body: previewBody });
-  return preview.effectsHash;
+  return { expectedEffectsHash: preview.effectsHash,
+    expectedEnds: { listingIds: preview.ends.listingIds, hiddenRemovedIds: preview.ends.hiddenRemovedIds },
+    expectedOtherEntriesHash: preview.otherEntriesHash! };
 }
 
 function refusalOf(promise: Promise<unknown>): Promise<DropshipError> {
@@ -210,7 +240,7 @@ function refusalOf(promise: Promise<unknown>): Promise<DropshipError> {
 
 async function saveBody(patch: Partial<Body> = {}, setupFacts?: SelectionChangePlanFacts): Promise<Body> {
   const body = changeBody(patch);
-  return { ...body, expectedEffectsHash: await confirmedHash(body, setupFacts) };
+  return { ...body, ...await confirmed(body, setupFacts) };
 }
 
 describe("the preview (§8.2)", () => {
@@ -224,9 +254,13 @@ describe("the preview (§8.2)", () => {
     expect(preview).toMatchObject({
       headRevisionId: 41, toAdd: 1, toRemove: 1, alreadySelected: 1, alreadyNotSelected: 1,
       skipped: { count: 1, first: [103] }, selectedBefore: 10, selectedAfter: 10, cap: 10_000, overCapAfter: false, refused: null,
-      effects: [{ storeConnectionId: 22, storeName: "Card corner", platform: "ebay", goesToZero: 1, startsSelling: 1 }],
+      // PR C: removing 101 ends its eBay listing (B counted it goesToZero).
+      effects: [{ storeConnectionId: 22, storeName: "Card corner", platform: "ebay", goesToZero: 0, startsSelling: 1, ends: 1,
+        storeConnected: true }],
+      ends: { listingIds: [501], hiddenRemovedIds: [], otherSizes: 0, stillEnding: 0, endReview: 0, endedReAdd: 0 },
     });
     expect(preview.effectsHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(preview.otherEntriesHash).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("answers a stale expected revision with the head (the page re-reads), and a growth past the cap as refused", async () => {
@@ -257,7 +291,9 @@ describe("the save's order (§8.3)", () => {
     expect(idempotentReplay).toBe(false);
     expect(repository.calls).toEqual([
       `begin+lock:${VENDOR}`, "findRevisionByKey", "readWritesGate", "readHeadRevisionId", "readPlanFacts",
-      "insertRevision", "insertAudit", "preLockVariants", "deletePicks", "insertPicks", "commit",
+      "insertRevision", "insertAudit", "preLockVariants", "deletePicks", "insertPicks",
+      // PR C step 9 (FID-2): the end writes after the picks writes.
+      "insertListingEnds", "insertListingEndAudits", "commit",
     ]);
     expect(repository.gateInputs).toEqual([{ version: PICKS_WRITES_CODE_VERSION, graceMs: OLDER_PROCESS_GRACE_MS, settleMs: NEW_VERSION_SETTLE_MS }]);
     expect(answer).toMatchObject({ revisionId: 42, toAdd: 1, toRemove: 1, alreadySelected: 1, alreadyNotSelected: 1,
@@ -447,7 +483,8 @@ describe("server retries (§8.3; V22, SAFETY-3, SAFETY-9)", () => {
     const { answer } = await service.applyChange({ vendorId: VENDOR, actor: ACTOR, body: await saveBody() });
     expect(repository.attempts).toBe(2);
     expect(repository.calls.filter((entry) => entry === "rollback")).toHaveLength(1);
-    expect(repository.committedOps()).toEqual(["insertRevision", "insertAudit", "deletePicks", "insertPicks"]);
+    expect(repository.committedOps()).toEqual(["insertRevision", "insertAudit", "deletePicks", "insertPicks", "insertListingEnds",
+      "insertListingEndAudits"]);
     expect(answer.revisionId).toBe(42);
     expect(sleeps).toEqual([selectionSaveRetryDelayMs(1, seededJitterSource(7))]);
     expect(logs.filter((line) => line.level === "debug")).toEqual([expect.objectContaining({
@@ -570,5 +607,232 @@ describe("logging", () => {
     await expect(service.applyChange({ vendorId: 0, actor: ACTOR, body: changeBody() })).rejects.not.toBeInstanceOf(DropshipError);
     await expect(service.applyChange({ vendorId: VENDOR, actor: { actorType: "admin", actorId: "x" }, body: changeBody() }))
       .rejects.toThrow("Selection change service input failed validation");
+  });
+});
+
+/**
+ * PR C (PLAN-C v4.1 §4.1, §4.6, §4.7, §13.1): the older page after the replay (2a), the echo, the end writes after
+ * the picks writes (9), and the pick count with the hidden picks of a wholly removed product (FID-1).
+ */
+describe("PR C: older pages and the echo (step 2a)", () => {
+  it.each([
+    ["a version-2 page", 2],
+    ["a page that sends no version", undefined],
+  ])("refuses %s after the replay with 409 PAGE_OUTDATED, writing nothing", async (_label, clientVersion) => {
+    const { service, repository } = setup();
+    const body = { ...await saveBody(), clientVersion };
+    const error = await refusalOf(service.applyChange({ vendorId: VENDOR, actor: ACTOR, body }));
+    expect(error).toMatchObject({ code: "DROPSHIP_SELECTION_PAGE_OUTDATED", message: "This page was updated, so your last changes weren't saved. Reload it and make them again.",
+      context: { classification: "permanent", retryable: false, serverVersion: DROPSHIP_CATALOG_CODE_VERSION, clientVersion: clientVersion ?? null } });
+    expect(repository.calls).toEqual([`begin+lock:${VENDOR}`, "findRevisionByKey", "rollback"]);
+    expect(repository.committedOps()).toEqual([]);
+    expect(repository.attempts).toBe(1);
+  });
+
+  it("answers a B page's stored answer again (200) before refusing older pages: a save that went through is never told it failed", async () => {
+    // B6's red case: the outdated check before the replay would answer this lost answer 409.
+    const first = setup();
+    // A B page's body: version 2, no echo.
+    const bBody = { ...changeBody({ clientVersion: 2 }), expectedEffectsHash: "e".repeat(64) };
+    // The B save's own request hash (B's canonical form: no echo fields).
+    first.repository.stored = { revisionId: 30, requestHash: hashSelectionChangeRequest(parseSelectionChangeBody(bBody)), requestKind: "picks_change",
+      result: { ...B_STORED_ANSWER } };
+    const replay = await first.service.applyChange({ vendorId: VENDOR, actor: ACTOR, body: bBody });
+    expect(replay.idempotentReplay).toBe(true);
+    // A B-shaped stored answer replays through C's schema: the new fields take their defaults.
+    expect(replay.answer).toMatchObject({ revisionId: 30, effects: [{ goesToZero: 1, startsSelling: 1, ends: 0, storeConnected: true }],
+      ends: { listingIds: [], hiddenRemovedIds: [], otherSizes: 0, stillEnding: 0, endReview: 0, endedReAdd: 0 } });
+    expect(replay.answer).not.toHaveProperty("otherEntriesHash");
+    expect(first.repository.calls).toEqual([`begin+lock:${VENDOR}`, "findRevisionByKey", "commit"]);
+    expect(first.repository.committedOps()).toEqual([]);
+  });
+
+  it("a C answer still parses with B's frozen answer schema (a B page replaying on a C dyno, TST-9)", async () => {
+    const { service } = setup();
+    const { answer } = await service.applyChange({ vendorId: VENDOR, actor: ACTOR, body: await saveBody() });
+    const asB = bSelectionChangeAnswerSchema.safeParse(JSON.parse(JSON.stringify(answer)));
+    expect(asB.success).toBe(true);
+    expect(selectionChangeAnswerSchema.safeParse(B_STORED_ANSWER).success).toBe(false); // no revision id: the stored form
+    expect(selectionChangeAnswerSchema.safeParse({ ...B_STORED_ANSWER, revisionId: 30 }).success).toBe(true);
+  });
+
+  it("refuses a version-3 body without the echo, or with an echo that is not the confirmed preview, with 400 before the gate", async () => {
+    const body = await saveBody();
+    for (const [label, patch, reason] of [
+      ["no expectedEnds", { expectedEnds: undefined }, "confirmed_ends_missing"],
+      ["no expectedOtherEntriesHash", { expectedOtherEntriesHash: undefined }, "confirmed_ends_missing"],
+      ["one more end", { expectedEnds: { listingIds: [501, 999], hiddenRemovedIds: [] } }, "confirmed_ends_mismatch"],
+      ["a hidden removal", { expectedEnds: { listingIds: [501], hiddenRemovedIds: [106] } }, "confirmed_ends_mismatch"],
+      ["another other-entries hash", { expectedOtherEntriesHash: "f".repeat(64) }, "confirmed_ends_mismatch"],
+    ] as const) {
+      const { service, repository } = setup();
+      const error = await refusalOf(service.applyChange({ vendorId: VENDOR, actor: ACTOR, body: { ...body, ...patch } }));
+      expect(error, label).toMatchObject({ code: "DROPSHIP_SELECTION_CHANGE_INVALID_INPUT", context: { classification: "permanent", reason } });
+      expect(repository.calls, label).toEqual([`begin+lock:${VENDOR}`, "findRevisionByKey", "rollback"]);
+    }
+  });
+});
+
+describe("PR C: the end writes (step 9) and the pick count", () => {
+  /** 101 removed (product 1_101); its siblings: 106 hidden (does not ship) and picked, 107 visible, not picked, listed. */
+  function productFacts(): SelectionChangePlanFacts {
+    const base = facts();
+    const sibling = (productVariantId: number, patch: Partial<DropshipStockSelectionCandidate> = {}) =>
+      ({ ...candidate(productVariantId), productId: 1_101, ...patch });
+    return facts({
+      siblingPicks: new Set([106]),
+      effects: { ...base.effects,
+        candidates: [...base.effects.candidates, sibling(106, { requiresShipping: false }), sibling(107)],
+        stores: [{ ...base.effects.stores[0]!, listings: [listing(501, 101), listing(502, 102), listing(506, 106), listing(507, 107)] }] },
+    });
+  }
+
+  it("deletes the removed and the hidden picks in one statement, ends every listing of the product, and counts the pick rows (FID-1)", async () => {
+    const { service, repository } = setup();
+    const productAt = productFacts();
+    repository.defaultFacts = productAt;
+    const body = await saveBody({}, productAt);
+    expect(body.expectedEnds).toEqual({ listingIds: [501, 506, 507], hiddenRemovedIds: [106] });
+    const { answer } = await service.applyChange({ vendorId: VENDOR, actor: ACTOR, body });
+    expect(repository.committedInput<{ productVariantIds: number[] }>("deletePicks").productVariantIds).toEqual([101, 106]);
+    // pick_count = before + inserts - deletes - hidden: 12 + 1 - 1 - 1.
+    expect(repository.committedInput<{ pickCount: number }>("insertRevision").pickCount).toBe(11);
+    const ends = repository.committedInput<{ ends: PlannedListingEnd[]; revisionId: number; now: Date }>("insertListingEnds");
+    expect(ends).toMatchObject({ revisionId: 42, now: NOW });
+    expect(ends.ends.map((end) => [end.listingId, end.productId, end.productVariantId, end.reason])).toEqual([
+      [501, 1_101, 101, "size_removed"], [506, 1_101, 106, "product_removed"], [507, 1_101, 107, "product_removed"]]);
+    expect(ends.ends[0]!.requestedIdentity).toEqual({ externalListingId: "L-501", externalOfferId: "O-501", externalAccountId: "seller-22",
+      providerEnvironment: "production" });
+    expect(answer.ends).toEqual({ listingIds: [501, 506, 507], hiddenRemovedIds: [106], otherSizes: 2, stillEnding: 0, endReview: 0, endedReAdd: 0 });
+    expect(answer.effects[0]).toMatchObject({ ends: 3, goesToZero: 0, startsSelling: 1 });
+  });
+
+  it("writes one audit row per end and one summary row on the revision, and plans the counts in the picks audit", async () => {
+    const { service, repository } = setup();
+    repository.defaultFacts = productFacts();
+    await service.applyChange({ vendorId: VENDOR, actor: ACTOR, body: await saveBody({}, productFacts()) });
+    expect(repository.committedInput<{ payload: Record<string, unknown> }>("insertAudit").payload).toMatchObject({
+      plannedEnds: { sizeRemoved: 1, productRemoved: 2, hiddenRemoved: 1, superseded: 0 } });
+    const audits = repository.committedInput<{ rows: Array<{ eventType: string; entityId: string; storeConnectionId: number | null;
+      payload: Record<string, unknown> }>; actor: unknown; now: Date }>("insertListingEndAudits");
+    expect(audits).toMatchObject({ actor: ACTOR, now: NOW });
+    expect(audits.rows.map((row) => [row.eventType, row.entityId, row.storeConnectionId])).toEqual([
+      ["listing_end_requested", "7000", 22], ["listing_end_requested", "7001", 22], ["listing_end_requested", "7002", 22],
+      ["vendor_selection_ends_recorded", "42", null]]);
+    expect(audits.rows[0]!.payload).toMatchObject({ endRequestId: 7000, listingId: 501, reason: "size_removed", revisionId: 42,
+      before: { state: null }, after: { state: "pending" } });
+    expect(audits.rows[3]!.payload).toEqual({ revisionId: 42, endRequestIds: { size_removed: [7000], product_removed: [7001, 7002] },
+      supersededEndIds: [], hiddenRemovedVariantIds: [106], hiddenRemovedReason: "removed_with_product" });
+  });
+
+  it("supersedes the pending end of a re-picked size before inserting, audits it, and the answer counts it selling again", async () => {
+    const { service, repository } = setup();
+    const repick = facts({ pendingEnds: [{ id: 5, listingId: 502, productId: 1_102, productVariantId: 102, reason: "size_removed" }],
+      effects: { ...facts().effects, stores: [{ ...facts().effects.stores[0]!, listings: [listing(501, 101),
+        listing(502, 102, { openEndId: 5, openEndState: "pending" })] }] } });
+    repository.defaultFacts = repick;
+    const { answer } = await service.applyChange({ vendorId: VENDOR, actor: ACTOR, body: await saveBody({}, repick) });
+    // Step 9a before the gated picks writes, step 9b after them (review DB-5).
+    expect(repository.calls.slice(-7)).toEqual(["supersedeListingEnds", "insertListingEndAudits", "deletePicks", "insertPicks",
+      "insertListingEnds", "insertListingEndAudits", "commit"]);
+    expect(repository.committedInput<{ endIds: number[]; now: Date }>("supersedeListingEnds")).toMatchObject({ endIds: [5], now: NOW });
+    expect(answer.effects[0]).toMatchObject({ startsSelling: 1, ends: 1 });
+    const audits = repository.committed.filter((entry) => entry.op === "insertListingEndAudits")
+      .map((entry) => (entry.input as { rows: Array<{ eventType: string; payload: Record<string, unknown> }> }).rows);
+    expect(audits[0]![0]).toMatchObject({ eventType: "listing_end_superseded", payload: { endRequestId: 5, before: { state: "pending" },
+      after: { state: "superseded", code: "DROPSHIP_LISTING_END_SUPERSEDED_BY_SELECTION" } } });
+    // The save's summary, written with the new ends after the picks writes, still names the supersede.
+    expect(audits.at(-1)!.at(-1)!.payload).toMatchObject({ supersededEndIds: [5] });
+  });
+
+  it("takes back pending ends and writes their audit rows before the gated picks writes; only the new ends come after (DB-5)", async () => {
+    const { service, repository } = setup();
+    const repick = facts({ pendingEnds: [{ id: 5, listingId: 502, productId: 1_102, productVariantId: 102, reason: "size_removed" }],
+      effects: { ...facts().effects, stores: [{ ...facts().effects.stores[0]!, listings: [listing(501, 101),
+        listing(502, 102, { openEndId: 5, openEndState: "pending" })] }] } });
+    repository.defaultFacts = repick;
+    await service.applyChange({ vendorId: VENDOR, actor: ACTOR, body: await saveBody({}, repick) });
+    const calls = repository.calls;
+    // The supersede and its audit rows hold no gate (the end table's trigger is ungated), so they run before step 8.
+    expect(calls.indexOf("supersedeListingEnds")).toBeLessThan(calls.indexOf("deletePicks"));
+    expect(calls.indexOf("supersedeListingEnds")).toBeLessThan(calls.indexOf("insertPicks"));
+    expect(calls.indexOf("insertListingEndAudits")).toBeLessThan(calls.indexOf("deletePicks"));
+    // The new ends' FK row locks still come after the picks writes (FID-2), with their audit rows and the save's summary.
+    expect(calls.indexOf("insertListingEnds")).toBeGreaterThan(calls.indexOf("insertPicks"));
+    expect(calls.lastIndexOf("insertListingEndAudits")).toBeGreaterThan(calls.indexOf("insertListingEnds"));
+    const audits = repository.committed.filter((entry) => entry.op === "insertListingEndAudits")
+      .map((entry) => (entry.input as { rows: Array<{ eventType: string }> }).rows.map((row) => row.eventType));
+    expect(audits).toEqual([["listing_end_superseded"], ["listing_end_requested", "vendor_selection_ends_recorded"]]);
+  });
+
+  it.each([
+    ["supersede", "supersedeCount"],
+    ["end insert", "endInsertCount"],
+  ] as const)("rolls back a %s count below the plan (PLAN_MOVED) and saves on the retry", async (_label, hook) => {
+    const { service, repository } = setup();
+    const repick = facts({ pendingEnds: [{ id: 5, listingId: 502, productId: 1_102, productVariantId: 102, reason: "size_removed" }],
+      effects: { ...facts().effects, stores: [{ ...facts().effects.stores[0]!, listings: [listing(501, 101),
+        listing(502, 102, { openEndId: 5, openEndState: "pending" })] }] } });
+    repository.defaultFacts = repick;
+    (repository as unknown as Record<string, unknown>)[hook] = (ids: readonly unknown[], attempt: number) => (attempt === 1 ? ids.length - 1 : ids.length);
+    const body = await saveBody({}, repick);
+    await service.applyChange({ vendorId: VENDOR, actor: ACTOR, body });
+    expect(repository.attempts).toBe(2);
+    expect(repository.calls.filter((call) => call === "rollback")).toHaveLength(1);
+    expect(repository.committed.filter((entry) => entry.op === "insertListingEnds")).toHaveLength(1);
+    // One audit statement for the supersede (step 9a) and one for the new ends with the summary (step 9b).
+    expect(repository.committed.filter((entry) => entry.op === "insertListingEndAudits")).toHaveLength(2);
+  });
+
+  it("a replay of a C save that created ends answers its stored answer and writes no end, supersede or audit row (TST-5)", async () => {
+    const first = setup();
+    first.repository.defaultFacts = productFacts();
+    const body = await saveBody({}, productFacts());
+    const original = await first.service.applyChange({ vendorId: VENDOR, actor: ACTOR, body });
+    const revision = first.repository.committedInput<{ requestHash: string; result: unknown }>("insertRevision");
+    const { service, repository } = setup();
+    repository.defaultFacts = productFacts();
+    repository.stored = { revisionId: 42, requestHash: revision.requestHash, requestKind: "picks_change", result: JSON.parse(JSON.stringify(revision.result)) };
+    const replay = await service.applyChange({ vendorId: VENDOR, actor: ACTOR, body });
+    expect(replay).toEqual({ idempotentReplay: true, answer: original.answer });
+    expect(repository.calls).toEqual([`begin+lock:${VENDOR}`, "findRevisionByKey", "commit"]);
+    expect(repository.committedOps()).toEqual([]);
+  });
+
+  it("an adds-only save writes no end row (and so takes no listing key lock)", async () => {
+    const { service, repository } = setup();
+    await service.applyChange({ vendorId: VENDOR, actor: ACTOR, body: await saveBody({ remove: { productVariantIds: [] } }) });
+    expect(repository.calls).not.toContain("insertListingEnds");
+    expect(repository.calls).not.toContain("insertListingEndAudits");
+  });
+
+  it("refuses a preview and a save that would end more than 30,000 listings with 422 REMOVAL_TOO_LARGE, before any write", async () => {
+    const { service, repository } = setup();
+    // One product of 30,001 listed sizes: removing its one pick removes the product, so every listing would be ended.
+    const sizes = Array.from({ length: MAX_SELECTION_END_LISTINGS + 1 }, (_, index) => 200_001 + index);
+    repository.defaultFacts = facts({ pickedBefore: new Set([200_001]), offered: new Set(sizes),
+      effects: { ...facts().effects, candidates: sizes.map((id) => ({ ...candidate(id), productId: 9_999 })),
+        stores: [{ ...facts().effects.stores[0]!, listings: sizes.map((size) => listing(size, size)) }] } });
+    const change = { clientVersion: 3, expectedRevisionId: 41, add: { productVariantIds: [] }, remove: { productVariantIds: [200_001] } };
+    await expect(refusalOf(service.preview({ vendorId: VENDOR, body: change })))
+      .resolves.toMatchObject({ code: "DROPSHIP_SELECTION_REMOVAL_TOO_LARGE", context: { endListings: 30_001, limit: 30_000,
+        classification: "permanent" } });
+    // A well-formed echo (it passes 2a), so the save reaches its plan and is refused there.
+    const { combineSelectionEffectsHash, selectionEndsHash } = await import("../../domain/vendor-selection-effects");
+    const expectedEnds = { listingIds: [], hiddenRemovedIds: [] };
+    const other = "a".repeat(64);
+    const error = await refusalOf(service.applyChange({ vendorId: VENDOR, actor: ACTOR, body: { ...change, idempotencyKey: KEY,
+      expectedEnds, expectedOtherEntriesHash: other, expectedEffectsHash: combineSelectionEffectsHash(selectionEndsHash(expectedEnds), other) } }));
+    expect(error).toMatchObject({ code: "DROPSHIP_SELECTION_REMOVAL_TOO_LARGE" });
+    expect(repository.calls).not.toContain("insertRevision");
+    expect(repository.committedOps()).toEqual([]);
+  });
+
+  it("logs the ends, the supersedes and the hidden removals on the changed line", async () => {
+    const { service, repository, logs } = setup();
+    repository.defaultFacts = productFacts();
+    await service.applyChange({ vendorId: VENDOR, actor: ACTOR, body: await saveBody({}, productFacts()) });
+    expect(logs).toEqual([expect.objectContaining({ level: "info", code: "dropship.selection.changed",
+      context: expect.objectContaining({ ends: 3, superseded: 0, hidden_removed: 1 }) })]);
   });
 });

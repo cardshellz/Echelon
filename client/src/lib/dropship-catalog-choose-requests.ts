@@ -8,7 +8,7 @@
  * older than this page (its HTML, or JSON without a field this page needs,
  * such as a row's `picked`) is the transient `DROPSHIP_SITE_UPDATING`, and
  * the same request is sent again. Every read and both bodies carry this
- * page's version (`clientVersion=2`, §12.6).
+ * page's version (`clientVersion`, CATALOG_PAGE_CLIENT_VERSION, §12.6).
  *
  * The one write is `POST /api/dropship/catalog/selection/changes`, after a
  * `…/changes/preview` the vendor confirms. The network calls, the question,
@@ -76,7 +76,7 @@ export type ChooseFetch = (url: string, init?: RequestInit) => Promise<Response>
 const defaultFetch: ChooseFetch = (url, init) => fetch(url, init);
 
 /** One request with the portal's cookie, its answer read and checked with `schema`; the status tells a replay (200). */
-export async function requestChooseAnswer<T>(fetcher: ChooseFetch, url: string, schema: z.ZodType<T>,
+export async function requestChooseAnswer<T>(fetcher: ChooseFetch, url: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>,
   init: { method?: "GET" | "POST"; body?: unknown; signal?: AbortSignal } = {}): Promise<{ answer: T; status: number }> {
   const response = await fetcher(url, {
     method: init.method ?? "GET",
@@ -292,6 +292,8 @@ export type ChooseSaveOutcome =
   | { kind: "retired" }
   /** The bulk parser's 413. */
   | { kind: "tooLarge" }
+  /** PR C's 422: the removal covers more than one save may; nothing was written. */
+  | { kind: "tooManyRemoved" }
   /** Refused for good; the next press makes a new save with a new key. */
   | { kind: "rejected"; message: string }
   /** The effects moved again after every question this press allowed (CHOOSE_EFFECTS_REVIEWS_MAX). */
@@ -314,6 +316,7 @@ function refusalOutcome(failure: Exclude<ChooseSaveErrorClass, { kind: "network"
     case "keyConflict": return { kind: "rejected", message: CHOOSE_WORDS.rejected };
     case "retired": return { kind: "retired" };
     case "tooLarge": return { kind: "tooLarge" };
+    case "tooManyRemoved": return { kind: "tooManyRemoved" };
     case "overCap": return { kind: "overCap", after: failure.after };
     case "permanent": return { kind: "rejected", message: failure.message };
     default: {
@@ -429,7 +432,12 @@ export async function runChooseSave(deps: ChooseSaveDeps, input: ChooseSaveInput
       if (preview.refused === "too_large") return { kind: "overCap", after: preview.selectedAfter };
       if (!(await deps.confirm(preview, { effectsChanged }))) return { kind: "cancelled" };
       pending = {
-        body: selectionChangeRequestSchema.parse({ ...previewBody, idempotencyKey: deps.newKey(), expectedEffectsHash: preview.effectsHash }),
+        body: selectionChangeRequestSchema.parse({
+          ...previewBody, idempotencyKey: deps.newKey(), expectedEffectsHash: preview.effectsHash,
+          // PR C (PLAN-C v4.1 §4.6): the confirmed ends, echoed, so the save never ends more than the vendor saw.
+          expectedEnds: { listingIds: preview.ends.listingIds, hiddenRemovedIds: preview.ends.hiddenRemovedIds },
+          expectedOtherEntriesHash: preview.otherEntriesHash,
+        }),
         changesKey,
         confirmed: preview,
         mayHaveCommitted: false,
@@ -460,6 +468,7 @@ export function describeChooseSaveOutcome(outcome: ChooseSaveOutcome): ChooseBar
     case "overCap": return { kind: "error", message: outcome.after !== null ? CHOOSE_WORDS.overCapAdd(outcome.after) : CHOOSE_WORDS.rejected };
     case "retired": return { kind: "error", message: CHOOSE_WORDS.retired, reload: true };
     case "tooLarge": return { kind: "error", message: CHOOSE_WORDS.tooLarge };
+    case "tooManyRemoved": return { kind: "error", message: CHOOSE_WORDS.tooManyRemoved };
     case "rejected": return { kind: "error", message: outcome.message };
     case "effectsChanged": return { kind: "error", message: CHOOSE_WORDS.effectsChanged };
     case "busy": return { kind: "error", message: CHOOSE_WORDS.busy };

@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { z } from "zod";
 import { pool as defaultPool } from "../../../db";
 import { countSelectedVariants, offeredVariantIdsAmong } from "../application/dropship-selected-catalog";
 import { selectedCountBeforeChange } from "../domain/vendor-selection-change";
@@ -8,9 +9,11 @@ import type {
   DropshipSelectionChangeTransaction,
   SelectionChangePlanFacts,
   StoredSelectionChangeRevision,
+  WrittenListingEnd,
 } from "../application/dropship-selection-change-service";
+import { LISTING_END_REASONS, LISTING_END_SUPERSEDED_BY_SELECTION, type PendingListingEnd } from "../domain/vendor-selection-ends";
 import { readHeadSelectionRevisionId } from "./dropship-listing-push-run.repository";
-import { catalogVersionSettled, hasLiveOlderCatalogProcess } from "./dropship-process-heartbeat.repository";
+import { catalogVersionAtLeastSettled, hasLiveOlderCatalogProcess } from "./dropship-process-heartbeat.repository";
 import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
 import { readDropshipSelectionEffectsFacts } from "./dropship-selection-effects.reader";
 import { lockVendorSelection } from "./dropship-vendor-selection-lock";
@@ -100,7 +103,9 @@ function selectionChangeTransaction(client: Queryable): DropshipSelectionChangeT
 
     async readWritesGate({ version, graceMs, settleMs }) {
       const olderVersionLive = await hasLiveOlderCatalogProcess(client, { belowVersion: version, graceMs });
-      const versionSettled = await catalogVersionSettled(client, { version, settleMs });
+      // This version or any later one (every later version writes picks too): a database that never ran version 2
+      // settles on version 3's row (review SAV-1).
+      const versionSettled = await catalogVersionAtLeastSettled(client, { minVersion: version, settleMs });
       return { olderVersionLive, versionSettled };
     },
 
@@ -152,7 +157,94 @@ function selectionChangeTransaction(client: Queryable): DropshipSelectionChangeT
         [vendorId, revisionId, [...productVariantIds], now]);
       return inserted.rowCount ?? 0;
     },
+
+    async supersedeListingEnds({ vendorId, endIds, now }): Promise<WrittenListingEnd[]> {
+      // Guarded by the state: only a `pending` end is taken back (§4.4 rule 6); the claim and staff routes take the
+      // vendor lock this save holds, and the remote work changes only `ending` rows, so nothing here can be waited on.
+      const updated = await client.query(
+        `UPDATE dropship.dropship_listing_end_requests
+         SET state = 'superseded', code = $3, next_attempt_at = NULL, decided_at = $4, updated_at = $4, version = version + 1
+         WHERE vendor_id = $1 AND id = ANY($2::bigint[]) AND state = 'pending'
+         RETURNING ${WRITTEN_END_COLUMNS}`,
+        [vendorId, endIds.map(String), LISTING_END_SUPERSEDED_BY_SELECTION, now]);
+      return z.array(writtenEndSchema).parse(updated.rows);
+    },
+
+    async insertListingEnds({ vendorId, revisionId, ends, now }): Promise<WrittenListingEnd[]> {
+      // The insert's foreign key takes each listing FOR KEY SHARE. The save already holds the products' publication
+      // work rows (the picks writes re-planned them), and a sync adoption takes a listing FOR UPDATE before its own
+      // re-plan of that product, so waiting here could close a lock cycle (review DB-1). The keys are taken first, in
+      // listing order and without waiting: a held listing rolls the attempt back (55P03) and the service retries it,
+      // so the adoption is never the one PostgreSQL rolls back.
+      const listingIds = [...new Set(ends.map((end) => end.listingId))].sort((left, right) => left - right);
+      if (listingIds.length > 0) {
+        await client.query(`SELECT id FROM dropship.dropship_vendor_listings WHERE id = ANY($1::integer[]) ORDER BY id FOR KEY SHARE NOWAIT`,
+          [listingIds]);
+      }
+      // One statement for every end (the consistency trigger proves them together); listing order, so two saves
+      // could only ever lock listing keys in one order. A listing with an open end is left out by the one-open
+      // index, and the service compares the count with its plan.
+      const rows = ends.map((end) => ({
+        store_connection_id: end.storeConnectionId, listing_id: end.listingId, product_id: end.productId,
+        product_variant_id: end.productVariantId, reason: end.reason, requested_identity: end.requestedIdentity,
+      }));
+      const inserted = await client.query(
+        `INSERT INTO dropship.dropship_listing_end_requests
+           (vendor_id, store_connection_id, listing_id, product_id, product_variant_id, selection_revision_id, reason, state,
+            requested_identity, next_attempt_at, created_at, updated_at)
+         SELECT $1, e.store_connection_id, e.listing_id, e.product_id, e.product_variant_id, $2, e.reason, 'pending',
+           e.requested_identity, $3, $3, $3
+         FROM jsonb_to_recordset($4::jsonb) AS e(store_connection_id integer, listing_id integer, product_id integer,
+           product_variant_id integer, reason varchar(30), requested_identity jsonb)
+         ORDER BY e.listing_id
+         ON CONFLICT (listing_id) WHERE state IN ('pending', 'ending', 'failed') DO NOTHING
+         RETURNING ${WRITTEN_END_COLUMNS}`,
+        [vendorId, revisionId, now, JSON.stringify(rows)]);
+      return z.array(writtenEndSchema).parse(inserted.rows);
+    },
+
+    async insertListingEndAudits({ vendorId, actor, now, rows }): Promise<void> {
+      await client.query(
+        `INSERT INTO dropship.dropship_audit_events
+           (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
+         SELECT $1, a.store_connection_id, a.entity_type, a.entity_id, a.event_type, $2, $3, 'info', a.payload, $4
+         FROM jsonb_to_recordset($5::jsonb) AS a(store_connection_id integer, entity_type varchar(80), entity_id varchar(255),
+           event_type varchar(120), payload jsonb)`,
+        [vendorId, actor.actorType, actor.actorId, now, JSON.stringify(rows.map((row) => ({
+          store_connection_id: row.storeConnectionId, entity_type: row.entityType, entity_id: row.entityId,
+          event_type: row.eventType, payload: row.payload,
+        })))]);
+    },
   };
+}
+
+const rowId = z.number().int().positive().max(2_147_483_647);
+/** A bigint end request id as node-postgres returns it (text), read as a safe integer. */
+const endRequestId = z.string().regex(/^[1-9][0-9]{0,15}$/).transform(Number)
+  .refine(Number.isSafeInteger, { message: "End request ids must be safe integers." });
+const WRITTEN_END_COLUMNS = `id::text AS id, store_connection_id AS "storeConnectionId", listing_id AS "listingId",
+  product_variant_id AS "productVariantId", reason`;
+const writtenEndSchema = z.object({
+  id: endRequestId, storeConnectionId: rowId, listingId: rowId, productVariantId: rowId, reason: z.enum(LISTING_END_REASONS),
+});
+const pendingEndSchema = z.object({
+  id: endRequestId, listingId: rowId, productId: rowId, productVariantId: rowId, reason: z.enum(LISTING_END_REASONS),
+});
+
+/**
+ * The vendor's `pending` ends of these products (§4.2 item 5; `dropship_end_vendor_product_open_idx`): the ends a
+ * save that adds a size of one of them may take back. Under the vendor lock no `pending` row is created, claimed or
+ * retried by anyone else, so this read stays true until the save commits.
+ */
+async function readPendingListingEnds(client: Queryable, vendorId: number, productIds: readonly number[]): Promise<PendingListingEnd[]> {
+  if (productIds.length === 0) return [];
+  const found = await client.query(
+    `SELECT id::text AS id, listing_id AS "listingId", product_id AS "productId", product_variant_id AS "productVariantId", reason
+     FROM dropship.dropship_listing_end_requests
+     WHERE vendor_id = $1 AND product_id = ANY($2::integer[]) AND state = 'pending'
+     ORDER BY id`,
+    [vendorId, [...productIds]]);
+  return z.array(pendingEndSchema).parse(found.rows);
 }
 
 /**
@@ -166,11 +258,18 @@ function selectionChangeTransaction(client: Queryable): DropshipSelectionChangeT
  * the selected count and the pick count take the touched sizes from the
  * plan's own reads and only the rest from their own statements
  * (selectedCountBeforeChange; SRV-1).
+ *
+ * PR C (PLAN-C v4.1 §4.2): the effects facts widen to every size of the
+ * removed sizes' products (with the vendor's picks among them,
+ * `siblingPicks`, which the untouched pick count already holds), and the
+ * `pending` ends of the added sizes' products are read for the supersede.
  */
 async function readSelectionChangePlanFacts(client: Queryable, input: {
-  vendorId: number; touchedIds: readonly number[]; now: Date;
+  vendorId: number; touchedIds: readonly number[]; removedIds: readonly number[]; addedIds: readonly number[]; now: Date;
 }): Promise<SelectionChangePlanFacts> {
-  const effects = await readDropshipSelectionEffectsFacts(client, { vendorId: input.vendorId, productVariantIds: input.touchedIds });
+  const effects = await readDropshipSelectionEffectsFacts(client, {
+    vendorId: input.vendorId, productVariantIds: input.touchedIds, removedIds: input.removedIds,
+  });
   const reader = selectedCatalogReaderForTransaction(client, input.vendorId);
   const offered = await offeredVariantIdsAmong(reader, input.touchedIds, input.now);
   const counts = await countSelectedVariants(reader, input.now, new Set(input.touchedIds));
@@ -189,11 +288,17 @@ async function readSelectionChangePlanFacts(client: Queryable, input: {
   const untouchedPickCount = pickRows.rows[0]?.untouched_pick_count;
   if (typeof untouchedPickCount !== "number") throw new Error("Dropship pick count read returned no row.");
   const pickCountBefore = untouchedPickCount + effects.pickedBefore.size;
+  const added = new Set(input.addedIds);
+  const addedProductIds = [...new Set(effects.candidates.filter((candidate) => added.has(candidate.productVariantId))
+    .map((candidate) => candidate.productId))].sort((left, right) => left - right);
+  const pendingEnds = await readPendingListingEnds(client, input.vendorId, addedProductIds);
   return {
     pickedBefore: effects.pickedBefore,
     offered,
     selectedBefore,
     pickCountBefore,
+    siblingPicks: effects.siblingPicks,
+    pendingEnds,
     effects: { candidates: effects.candidates, adminRules: effects.adminRules, overrides: effects.overrides, stores: effects.stores },
   };
 }

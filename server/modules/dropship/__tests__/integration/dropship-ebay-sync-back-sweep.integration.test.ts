@@ -29,6 +29,7 @@ import {
 } from "../../infrastructure/dropship-marketplace-sync.repository";
 import { enqueueMarketplaceSyncNoticesWithClient } from "../../infrastructure/dropship-marketplace-sync-notices.repository";
 import { ebaySyncBackBaseFixtureSql, installEbaySyncBackSchema } from "../fixtures/ebay-sync-back.fixture";
+import { LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL } from "../fixtures/listing-end-reduced.fixture";
 import { rawInventoryItem, rawOffer, READ_LISTING_ID, READ_OFFER_ID, READ_SKU } from "../fixtures/ebay-sync-back-reads.fixture";
 
 /**
@@ -72,6 +73,10 @@ const SWEEP_FIXTURE_SQL = `
   CREATE TABLE dropship.dropship_listing_push_runs (id integer PRIMARY KEY, status text NOT NULL);
   CREATE TABLE dropship.dropship_listing_push_run_targets (run_id integer NOT NULL, job_item_id integer NOT NULL, outcome text,
     code text, retryable boolean, decided_at timestamptz);
+  -- PR C's end requests (reduced; empty but for the health case): the sweep's predicate, its adoption re-check and the
+  -- health copy read them (PLAN-C v4.1 §9 I1); their cases are in dropship-listing-end-interplay.integration.test.ts.
+  -- The end worker's two health checks (§5.7) count them in the ops-health case below.
+  ${LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL}
 `;
 
 /** W9's save on the adoption transaction's client, as the system (its authorization runs in W9's own suites). */
@@ -117,8 +122,8 @@ describeDatabase.sequential("eBay sync-back sweep persistence (PostgreSQL)", () 
       dropship.dropship_listing_price_revisions, dropship.dropship_ebay_listing_policy_overrides,
       dropship.dropship_ebay_listing_policy_override_revisions, dropship.dropship_vendor_listings, dropship.dropship_store_listing_configs,
       dropship.dropship_store_connections, dropship.dropship_vendors, catalog.product_variants, catalog.products,
-      inventory.quantity_publication_attempts, inventory.inventory_publication_outbox, inventory.inventory_publication_targets
-      RESTART IDENTITY CASCADE`);
+      inventory.quantity_publication_attempts, inventory.inventory_publication_outbox, inventory.inventory_publication_targets,
+      dropship.dropship_listing_end_requests RESTART IDENTITY CASCADE`);
     await pool.query(`
       INSERT INTO dropship.dropship_vendors (id, member_id) VALUES (${VENDOR}, 'member-10'), (11, 'member-11');
       INSERT INTO dropship.dropship_store_connections (id, vendor_id, platform, status, setup_status, last_order_sync_at, access_token_ref,
@@ -620,8 +625,39 @@ describeDatabase.sequential("eBay sync-back sweep persistence (PostgreSQL)", () 
       expect(counted).toEqual({
         DROPSHIP_MARKETPLACE_LISTING_NEEDS_REVIEW: 1, DROPSHIP_LISTING_POLICY_INCOMPATIBLE: 0, DROPSHIP_LISTING_ENDED_OUT_OF_STOCK: 0,
         DROPSHIP_MARKETPLACE_SYNC_QUANTITY_PENDING: 0, DROPSHIP_LISTING_QUANTITY_RESTORE_BLOCKED: 1, DROPSHIP_MARKETPLACE_SYNC_NOTICE_DEAD_LETTER: 0,
-        DROPSHIP_MARKETPLACE_SYNC_CORRECTION_RATE: 0,
+        DROPSHIP_MARKETPLACE_SYNC_CORRECTION_RATE: 0, DROPSHIP_LISTING_END_FAILED: 0, DROPSHIP_LISTING_END_STUCK: 0,
       });
+    });
+
+    it("counts and samples the listing ends that need a person and the ends that waited more than 7 days (PLAN-C v4.1 §5.7)", async () => {
+      // A failed end, an end that ended, a fresh pending end, and a pending end of 8 days ago.
+      const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+      await pool.query(`INSERT INTO dropship.dropship_listing_end_requests (listing_id, state, ended_at, vendor_id, store_connection_id,
+          product_variant_id, code, context, decided_at, created_at) VALUES
+        ($1, 'failed', NULL, ${VENDOR}, ${STORE}, 101, 'DROPSHIP_LISTING_END_REJECTED', '{"attemptIds": ["a-1", "a-2"]}', $3, $3),
+        ($2, 'ended', $3, ${VENDOR}, ${STORE}, 102, NULL, '{}', $3, $3),
+        ($4, 'pending', NULL, ${VENDOR}, ${STORE}, 103, NULL, '{}', NULL, now()),
+        ($5, 'pending', NULL, ${VENDOR}, ${STORE}, 104, 'DROPSHIP_LISTING_END_STORE_NOT_CONNECTED', '{}', NULL, $6)`,
+      [ids.live, ids.readEarlier, T1, ids.draft, ids.staged, eightDaysAgo]);
+      const dialect = new PgDialect();
+      const run = async (code: string) => {
+        const check = DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS.find((entry) => entry.code === code)!;
+        const count = dialect.sqlToQuery(check.countSql);
+        const sample = dialect.sqlToQuery(check.sampleSql);
+        return { count: Number((await pool.query<{ count: number }>(count.sql, count.params)).rows[0]!.count),
+          sample: (await pool.query(sample.sql, sample.params)).rows };
+      };
+      expect(await run("DROPSHIP_LISTING_END_FAILED")).toEqual({ count: 1, sample: [{ end_request_id: "1", vendor_id: VENDOR,
+        store_connection_id: STORE, listing_id: ids.live, product_variant_id: 101, code: "DROPSHIP_LISTING_END_REJECTED",
+        attempt_ids: ["a-1", "a-2"], decided_at: T1 }] });
+      expect(await run("DROPSHIP_LISTING_END_STUCK")).toEqual({ count: 1, sample: [{ end_request_id: "4", vendor_id: VENDOR,
+        store_connection_id: STORE, listing_id: ids.staged, state: "pending", code: "DROPSHIP_LISTING_END_STORE_NOT_CONNECTED",
+        deferral_count: 0, created_at: eightDaysAgo }] });
+      // Staff retry or resolve the failed end, and the stuck one moves on: both clear.
+      await pool.query(`UPDATE dropship.dropship_listing_end_requests SET state = 'resolved' WHERE state = 'failed'`);
+      await pool.query(`UPDATE dropship.dropship_listing_end_requests SET state = 'superseded' WHERE id = 4`);
+      expect((await run("DROPSHIP_LISTING_END_FAILED")).count).toBe(0);
+      expect((await run("DROPSHIP_LISTING_END_STUCK")).count).toBe(0);
     });
   });
 });

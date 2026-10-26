@@ -33,6 +33,12 @@ import { createDropshipStoreConnectionServiceFromEnv } from "./dropship-store-co
 export interface DropshipMarketplaceRegistrationOwnerAdapters {
   readonly ownerReader: MarketplaceListingRegistrationOwnerReader;
   readonly observer: MarketplaceListingRegistrationObserver;
+  /**
+   * The same observer's read-only inspection of every offer of a SKU (PR C, PLAN-C v4.1 §5.5 step 4, FID-15): the
+   * listing end worker's observe and verify. A separate field, as the channels factory has it
+   * (ebay-marketplace-registration.factory.ts), so registration's port stays as it is.
+   */
+  readonly inspector: Pick<EbayMarketplaceRegistrationObserver, "inspectExistingPublication">;
   readonly accountClaimer: MarketplaceListingProviderAccountClaimer;
   readonly credentials: EbayRegistrationCredentialProvider;
 }
@@ -61,15 +67,17 @@ export function createDropshipMarketplaceRegistrationAdapters(
   );
   const transport = input.transport
     ?? new FetchEbayRegistrationReadTransport(input.fetch);
+  const observer = new EbayMarketplaceRegistrationObserver(
+    credentials,
+    transport,
+    { now: input.now },
+  );
   return {
     ownerReader: new DropshipMarketplaceRegistrationOwnerReader(
       input.ownerRepository,
     ),
-    observer: new EbayMarketplaceRegistrationObserver(
-      credentials,
-      transport,
-      { now: input.now },
-    ),
+    observer,
+    inspector: observer,
     accountClaimer: input.accountClaimer,
     credentials,
   };

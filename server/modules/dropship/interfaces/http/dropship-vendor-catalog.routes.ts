@@ -37,7 +37,7 @@ import { requireDropshipAuth } from "./dropship-auth.routes";
 import { SELECTION_CHANGE_TOO_LARGE_MESSAGE, parseDropshipBulkJsonFor } from "./dropship-bulk-json.middleware";
 import { logger } from "../../../../platform/observability/logger";
 import { CATALOG_READ_WORDS } from "../../domain/catalog-read-words";
-import { DROPSHIP_CATALOG_CODE_VERSION, decideCatalogPageVersion } from "../../domain/catalog-code-version";
+import { DROPSHIP_CATALOG_CODE_VERSION, decideCatalogPageVersion, isCatalogPageOutdated } from "../../domain/catalog-code-version";
 import {
   DROPSHIP_CATALOG_IDS_PURPOSES,
   DROPSHIP_CATALOG_READ_ERROR_CODES,
@@ -187,6 +187,9 @@ export function registerDropshipVendorCatalogRoutes(
       try {
         // The page version first (§8.1): a newer page's body is never read with this release's strict schema.
         assertBodyPageNotNewerThanServer(req.body);
+        // PR C (PLAN-C v4.1 §4.1): an older page is told to reload before any read; a preview writes nothing, so
+        // nothing is lost. The save refuses one in its service, after its replay lookup.
+        assertBodyPageNotOutdated(req.body);
         const vendor = await requireSessionVendor(service, req, res);
         const answer = await changeService.preview({ vendorId: vendor.vendorId, body: req.body });
         return sendCatalogAnswer(res, parseOutbound(selectionChangePreviewAnswerSchema, answer));
@@ -356,6 +359,22 @@ function assertBodyPageNotNewerThanServer(
       serverVersion: DROPSHIP_CATALOG_CODE_VERSION,
       retryable: true,
       classification: "transient",
+    });
+  }
+}
+
+/**
+ * PR C's refusal of a step 1 preview from an older page (§4.1, D39): 409 `DROPSHIP_SELECTION_PAGE_OUTDATED` with the
+ * page's own `retired` words, so it offers Reload. Permanent for that page.
+ */
+function assertBodyPageNotOutdated(body: unknown): void {
+  const clientVersion = readSelectionChangeClientVersion(body);
+  if (isCatalogPageOutdated(clientVersion)) {
+    throw new DropshipError(SELECTION_CHANGE_ERROR_CODES.pageOutdated, CATALOG_READ_WORDS.retired, {
+      clientVersion,
+      serverVersion: DROPSHIP_CATALOG_CODE_VERSION,
+      retryable: false,
+      classification: "permanent",
     });
   }
 }
@@ -594,10 +613,13 @@ export function statusForDropshipVendorCatalogError(code: string): number {
     || code === SELECTION_CHANGE_ERROR_CODES.effectsChanged
     // A DropshipError the save throws after its retries (SAFETY-3): a plain lock timeout, 40P01 or 40001 never reaches the 500.
     || code === SELECTION_CHANGE_ERROR_CODES.busy
+    // PR C (PLAN-C v4.1 §4.1): an older page's preview or save; the page offers Reload.
+    || code === SELECTION_CHANGE_ERROR_CODES.pageOutdated
   ) {
     return 409;
   }
-  if (code === SELECTION_CHANGE_ERROR_CODES.tooLarge) {
+  // PR C (§4.2, FID-4): a removal over the facts or end bound has its own code and words.
+  if (code === SELECTION_CHANGE_ERROR_CODES.tooLarge || code === SELECTION_CHANGE_ERROR_CODES.removalTooLarge) {
     return 422;
   }
   // The save's reads disagree with each other, or a plan moved past every retry: the server's fault, never the page's.

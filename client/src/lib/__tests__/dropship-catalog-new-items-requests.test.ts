@@ -73,14 +73,14 @@ function harness(...answers: Array<DropshipCatalogNoticeAcknowledgeAnswer | Erro
 
 describe("the notice's read (§11.4, §12.2)", () => {
   it("Q1 reads GET /api/dropship/catalog/new-items with this page's version only, with the portal's cookie, through the shared schema", async () => {
-    expect(catalogNewItemsUrl()).toBe("/api/dropship/catalog/new-items?clientVersion=2");
+    expect(catalogNewItemsUrl()).toBe("/api/dropship/catalog/new-items?clientVersion=3");
     const good = fetcher(respond(NEW_ITEMS));
     const options = catalogNewItemsQueryOptions(good.fetch);
     expect(options.queryKey).toEqual([CATALOG_NEW_ITEMS_URL]);
     expect(CATALOG_NEW_ITEMS_QUERY_KEY).toEqual(["/api/dropship/catalog/new-items"]);
     const read = await (options.queryFn as (context: { signal: AbortSignal }) => Promise<DropshipCatalogNewItemsAnswer>)({ signal: new AbortController().signal });
     expect(read).toEqual(NEW_ITEMS);
-    expect(good.requests[0]).toMatchObject({ url: "/api/dropship/catalog/new-items?clientVersion=2", init: { method: "GET", credentials: "include" } });
+    expect(good.requests[0]).toMatchObject({ url: "/api/dropship/catalog/new-items?clientVersion=3", init: { method: "GET", credentials: "include" } });
   });
 
   it("Q2 retried on step 3's schedule like every step 1 read (V11), never on focus", () => {
@@ -102,8 +102,8 @@ describe("the notice's read (§11.4, §12.2)", () => {
 
   it("Q4 (LR Show new) Review's list and id reads send selection=new with the line's category id, the page's version, no search", () => {
     const review = newItemsReviewFilters(61);
-    expect(chooseCatalogUrl(review, 1)).toBe("/api/dropship/catalog?categoryId=61&selection=new&includeFacets=false&clientVersion=2&page=1&limit=200");
-    expect(chooseIdsUrl(review, "add")).toBe("/api/dropship/catalog?categoryId=61&selection=new&idsOnly=true&purpose=add&clientVersion=2");
+    expect(chooseCatalogUrl(review, 1)).toBe("/api/dropship/catalog?categoryId=61&selection=new&includeFacets=false&clientVersion=3&page=1&limit=200");
+    expect(chooseIdsUrl(review, "add")).toBe("/api/dropship/catalog?categoryId=61&selection=new&idsOnly=true&purpose=add&clientVersion=3");
   });
 });
 
@@ -111,7 +111,7 @@ describe("Got it (§11.4, §14)", () => {
   it("K1 sends the line's category and throughArrivalId with this page's version, once, and returns the server's answer", async () => {
     const { deps, sent, sleeps } = harness(ACKNOWLEDGED);
     expect(await runNewItemsAcknowledge(deps, LINE)).toEqual({ kind: "acknowledged", answer: ACKNOWLEDGED });
-    expect(sent).toEqual([{ clientVersion: 2, categoryId: 61, throughArrivalId: 104 }]);
+    expect(sent).toEqual([{ clientVersion: 3, categoryId: 61, throughArrivalId: 104 }]);
     expect(sleeps).toEqual([]);
     // An earlier press (another tab) is the same outcome: the line goes.
     const seen = { ...ACKNOWLEDGED, outcome: "already_seen" as const };
@@ -162,7 +162,7 @@ describe("Got it (§11.4, §14)", () => {
   });
 
   it("K7 the POST sends JSON to its route with the portal's cookie; its answer is read through the shared schema", async () => {
-    const body = { clientVersion: 2, categoryId: 61, throughArrivalId: 104 };
+    const body = { clientVersion: 3, categoryId: 61, throughArrivalId: 104 };
     const good = fetcher(respond(ACKNOWLEDGED));
     expect(await postCatalogNewItemsAcknowledge(body, good.fetch)).toEqual(ACKNOWLEDGED);
     expect(good.requests[0]).toMatchObject({ url: CATALOG_NEW_ITEMS_ACKNOWLEDGE_URL,

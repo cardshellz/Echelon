@@ -109,6 +109,18 @@ describe("dropship vendor order routes: payment hold summary", () => {
     expect(response.status).toBe(400);
     expect(response.body.error.code).toBe("DROPSHIP_ORDER_OPS_PAYMENT_HOLD_SUMMARY_INVALID_INPUT");
   });
+
+  // PR C (DC14, TST-7): the review code for an order on an ended listing answers as the generic listing refusal does.
+  it.each(["DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER", "DROPSHIP_ORDER_LISTING_NOT_ACCEPTABLE"])(
+    "answers %s as a conflict (409), not a server fault", async (code) => {
+      summaryError = new DropshipError(code, "This order is for an eBay listing that was ended before the order was placed.",
+        { requiresReview: true, retryable: false });
+
+      const response = await jsonRequest(`${server.url}/api/dropship/orders/payment-hold-summary`);
+
+      expect(response.status).toBe(409);
+      expect(response.body.error.code).toBe(code);
+    });
 });
 
 describe("dropship vendor order routes: order detail", () => {

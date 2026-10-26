@@ -427,8 +427,11 @@ export class PgDropshipCostChangeListingActionRepository implements DropshipCost
    *   an unfinished or refused item (a retry of an older job included) last
    *   wrote: before the live status fix that queue, retry or failure wrote
    *   queued/failed/blocked over the listing, which is the only way an active
-   *   live listing read as inactive (no code writes 'ended';
-   *   domain/listing-live-status). Pushes are ordered by when they wrote
+   *   live listing read as inactive (domain/listing-live-status). An
+   *   `ended` listing really left its marketplace: eBay sync-back writes it
+   *   for a vendor's end and PR C for Card Shellz's own, and no queue, retry
+   *   or failure writes over it (PLAN-C v4.1 §6.3), so it is never restored
+   *   here. Pushes are ordered by when they wrote
    *   (updated_at, then id), not by id: an older job's retry can end after a
    *   newer job's push completed. A retry queued before the release whose
    *   item ended after it is not counted (no restore on that guess);

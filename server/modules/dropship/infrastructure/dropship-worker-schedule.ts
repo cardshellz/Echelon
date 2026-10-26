@@ -14,7 +14,8 @@ export type DropshipWorkerScheduleName =
   | "categoryMarks"
   | "rulesConversion"
   | "marketplaceSyncBack"
-  | "catalogArrivals";
+  | "catalogArrivals"
+  | "listingEnd";
 
 interface DropshipWorkerScheduleDefinition {
   initialDelayEnvironmentVariable: string;
@@ -86,6 +87,12 @@ const SCHEDULE_DEFINITIONS: Record<
   catalogArrivals: {
     initialDelayEnvironmentVariable: "DROPSHIP_CATALOG_ARRIVALS_WORKER_INITIAL_DELAY_MS",
     defaultInitialDelayMs: 60_000,
+  },
+  // The listing end worker (PLAN-C v4.1 §5.2) ticks every ten seconds like the push worker, on a phase of that
+  // cycle no other worker uses (between the push worker's 2 s and order processing's 7 s).
+  listingEnd: {
+    initialDelayEnvironmentVariable: "DROPSHIP_LISTING_END_WORKER_INITIAL_DELAY_MS",
+    defaultInitialDelayMs: 5_000,
   },
 };
 

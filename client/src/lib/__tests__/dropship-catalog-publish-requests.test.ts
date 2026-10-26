@@ -58,11 +58,11 @@ function apiError(status: number, code: string, context: Record<string, unknown>
 
 describe("the URLs", () => {
   it("sends this page's version on every catalog read, and the selected list's alias beside the new filter (CHK7)", () => {
-    expect(selectionSummaryUrl(5)).toBe("/api/dropship/catalog/selection?storeConnectionId=5&clientVersion=2");
-    expect(selectionSummaryUrl(null)).toBe("/api/dropship/catalog/selection?clientVersion=2");
-    expect(selectionSummaryUrl(0)).toBe("/api/dropship/catalog/selection?clientVersion=2");
-    expect(selectedListUrl(2)).toBe("/api/dropship/catalog?selection=selected&selectedOnly=true&includeFacets=false&clientVersion=2&page=2&limit=200");
-    expect(selectedIdsUrl()).toBe("/api/dropship/catalog?selection=selected&idsOnly=true&purpose=remove&clientVersion=2");
+    expect(selectionSummaryUrl(5)).toBe("/api/dropship/catalog/selection?storeConnectionId=5&clientVersion=3");
+    expect(selectionSummaryUrl(null)).toBe("/api/dropship/catalog/selection?clientVersion=3");
+    expect(selectionSummaryUrl(0)).toBe("/api/dropship/catalog/selection?clientVersion=3");
+    expect(selectedListUrl(2)).toBe("/api/dropship/catalog?selection=selected&selectedOnly=true&includeFacets=false&clientVersion=3&page=2&limit=200");
+    expect(selectedIdsUrl()).toBe("/api/dropship/catalog?selection=selected&idsOnly=true&purpose=remove&clientVersion=3");
   });
 
   it("reads the newest run of a store, a run's problems after a size, and refuses a bad run id", () => {

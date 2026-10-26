@@ -68,8 +68,8 @@ test("P1 1,234 selected: Check runs 7 sequential previews of at most 200 with pr
   await expect(card(page).getByTestId("publish-selected-shown")).toHaveText("Showing 400 of 1,234");
   const listReads = state.reads.filter((read) => read.path === "/api/dropship/catalog" && read.search.includes("selection=selected&selectedOnly=true"));
   expect(listReads.map((read) => read.search)).toEqual([
-    "?selection=selected&selectedOnly=true&includeFacets=false&clientVersion=2&page=1&limit=200",
-    "?selection=selected&selectedOnly=true&includeFacets=false&clientVersion=2&page=2&limit=200",
+    "?selection=selected&selectedOnly=true&includeFacets=false&clientVersion=3&page=1&limit=200",
+    "?selection=selected&selectedOnly=true&includeFacets=false&clientVersion=3&page=2&limit=200",
   ]);
 
   await card(page).getByRole("button", { name: "Check listings" }).click();
@@ -79,7 +79,7 @@ test("P1 1,234 selected: Check runs 7 sequential previews of at most 200 with pr
   expect(new Set(state.previewBodies.map((body) => body.storeConnectionId))).toEqual(new Set([MARZ.storeConnectionId]));
   // One id read for the check, this page's version on it.
   expect(state.reads.filter((read) => read.search.includes("idsOnly=true")).map((read) => read.search))
-    .toEqual(["?selection=selected&idsOnly=true&purpose=remove&clientVersion=2"]);
+    .toEqual(["?selection=selected&idsOnly=true&purpose=remove&clientVersion=3"]);
   // The check's table replaces the list; nothing was published.
   await expect(card(page).getByTestId("publish-selected")).toHaveCount(0);
   expect(state.runCreates).toEqual([]);
@@ -278,7 +278,7 @@ test("P12 an older dyno answers HTML: the create is sent again with the same key
 });
 
 test("P25 (review round 1 CLI-2) an older (A) dyno refuses the count for this newer page: site updating while it is read again, then the count", async ({ page }) => {
-  // What an A dyno answers clientVersion 2 (plan §4 row 3, §12.6): 503 page_newer_than_server, never the app's HTML.
+  // What an older dyno answers this newer page (plan §4 row 3, §12.6): 503 page_newer_than_server, never the app's HTML.
   const state = await openCatalog(page, PUBLISH_PATH, { ...selected(3), proofs: { bulk_listing_push: LIVE_PROOF },
     selectionSummaryAnswers: [pageNewerThanServerAnswer(), pageNewerThanServerAnswer()] });
   await expect(card(page).getByTestId("publish-site-updating")).toHaveText(SITE_UPDATING);

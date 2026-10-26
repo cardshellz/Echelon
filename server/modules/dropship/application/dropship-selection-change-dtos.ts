@@ -38,6 +38,12 @@ export interface CanonicalSelectionChange {
 export interface CanonicalSelectionChangeSave extends CanonicalSelectionChange {
   idempotencyKey: string;
   expectedEffectsHash: string;
+  /**
+   * PR C (PLAN-C v4.1 §4.6): the preview's end sets, each unique and ascending, and its other entries' hash, as the
+   * page echoed them; null when absent (a B page's body, which the save refuses after its replay lookup).
+   */
+  expectedEnds: { listingIds: number[]; hiddenRemovedIds: number[] } | null;
+  expectedOtherEntriesHash: string | null;
 }
 
 /**
@@ -62,7 +68,16 @@ export function parseSelectionChangePreviewBody(body: unknown): CanonicalSelecti
 export function parseSelectionChangeBody(body: unknown): CanonicalSelectionChangeSave {
   const parsed = selectionChangeRequestSchema.safeParse(body);
   if (!parsed.success) throw invalidInput(parsed.error);
-  return { ...canonical(parsed.data), idempotencyKey: parsed.data.idempotencyKey, expectedEffectsHash: parsed.data.expectedEffectsHash };
+  const { expectedEnds, expectedOtherEntriesHash } = parsed.data;
+  return {
+    ...canonical(parsed.data),
+    idempotencyKey: parsed.data.idempotencyKey,
+    expectedEffectsHash: parsed.data.expectedEffectsHash,
+    expectedEnds: expectedEnds === undefined ? null : {
+      listingIds: uniqueAscending(expectedEnds.listingIds), hiddenRemovedIds: uniqueAscending(expectedEnds.hiddenRemovedIds),
+    },
+    expectedOtherEntriesHash: expectedOtherEntriesHash ?? null,
+  };
 }
 
 /**
@@ -71,7 +86,8 @@ export function parseSelectionChangeBody(body: unknown): CanonicalSelectionChang
  * another order or with a duplicate is the same request; the confirmed
  * effects are part of it, so a key sent again after a new confirm is a
  * conflict, never a silent replay. The page version is not: it says which
- * page sent it, not what it asks.
+ * page sent it, not what it asks. PR C's echo (§4.6) is part of it only when
+ * present, so a B body hashes exactly as B stored it.
  */
 export function hashSelectionChangeRequest(change: CanonicalSelectionChangeSave): string {
   const canonicalForm = {
@@ -80,6 +96,8 @@ export function hashSelectionChangeRequest(change: CanonicalSelectionChangeSave)
     addIds: change.addIds,
     removeIds: change.removeIds,
     expectedEffectsHash: change.expectedEffectsHash,
+    ...(change.expectedEnds === null ? {} : { expectedEnds: change.expectedEnds }),
+    ...(change.expectedOtherEntriesHash === null ? {} : { expectedOtherEntriesHash: change.expectedOtherEntriesHash }),
   };
   return createHash("sha256").update(JSON.stringify(canonicalForm)).digest("hex");
 }
