@@ -1136,7 +1136,9 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       let totalOpenLines = 0;
       openPoSummary.forEach((po) => {
         if (['approved', 'sent', 'acknowledged', 'partially_received'].includes(po.status)) {
-          inboundPipelineValueCents += readIntegerCents(po.total_value_cents, "total value", true);
+          // SUM(total_cents) is NULL when every PO in the group has no total
+          // (nullable column); that group contributes nothing, as before 10-25.
+          inboundPipelineValueCents += po.total_value_cents == null ? 0 : readIntegerCents(po.total_value_cents, "total value", true);
           totalOpenLines += Number(po.total_lines) || 0;
         }
       });
