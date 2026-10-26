@@ -834,6 +834,7 @@ export function CustomerReturnMoveItemsDialog({
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent
+        aria-labelledby={`${id}-title`}
         className={`max-h-[85dvh] overflow-y-auto ${singleProduct ? "sm:max-w-md" : "sm:max-w-xl"}`}
         onCloseAutoFocus={(event) => { event.preventDefault(); onCloseAutoFocus(); }}
       >
