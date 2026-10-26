@@ -377,6 +377,40 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
       landedUnitCostMills: 35500,
     }));
   });
+
+  // 2026-10-26, S260821004377: a line with no cost allocation yet (null
+  // allocated_cost_cents, no allocation rows) made the strict cents reader
+  // throw and 500ed the whole shipment page.
+  it("loads a line with no cost allocation as nothing allocated instead of failing the page", async () => {
+    const storage = buildStorage({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 11, sku: null, purchaseOrderId: 1, purchaseOrderLineId: 21,
+        productVariantId: null, qtyShipped: 5, allocatedCostCents: null, landedUnitCostCents: null }]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, purchaseOrderId: 1, lineType: "product", sku: "PO-SKU",
+        productName: "PO Product", orderQty: 5, totalProductCostCents: 500, unitCostCents: 100, unitCostMills: 10000 }),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const [line] = await service.getEnrichedLines(1);
+
+    expect(line).toEqual(expect.objectContaining({ allocatedCostCents: null, freightAllocatedCents: null,
+      freightAllocatedMillsPerUnit: 0, totalAllocatedMillsPerUnit: 0, poUnitCostMills: 10000, landedUnitCostMills: 10000 }));
+  });
+
+  it("still rejects a present allocation that is not exact integer cents", async () => {
+    const storage = buildStorage({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 11, sku: null, purchaseOrderId: 1, purchaseOrderLineId: 21,
+        productVariantId: null, qtyShipped: 5, allocatedCostCents: "12.5", landedUnitCostCents: null }]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, purchaseOrderId: 1, lineType: "product", sku: "PO-SKU",
+        productName: "PO Product", orderQty: 5, totalProductCostCents: 500, unitCostCents: 100, unitCostMills: 10000 }),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    await expect(service.getEnrichedLines(1)).rejects.toThrow("allocatedCents: invalid cents amount");
+  });
 });
 
 describe("ShipmentTrackingService.getLandedCostMillsForPoLine", () => {

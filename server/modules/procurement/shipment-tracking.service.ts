@@ -197,7 +197,11 @@ function rawLineBasisForDimension(line: any, method: string): number {
 }
 
 function allocatedCentsPerUnitMills(allocatedCents: unknown, qtyShipped: unknown): number | null {
-  const cents = readIntegerCents(allocatedCents, "allocatedCents", true);
+  // A line with no cost allocation yet has nothing allocated (null column / no
+  // breakdown). 7493a0b96 sent that null to the strict reader, which threw and
+  // 500ed the whole shipment page (S260821004377, 2026-10-26). A present value
+  // must still be exact integer cents.
+  const cents = allocatedCents == null ? 0 : readIntegerCents(allocatedCents, "allocatedCents", true);
   const qty = Number(qtyShipped);
   if (!Number.isInteger(cents) || cents < 0 || !Number.isInteger(qty) || qty <= 0) return null;
   return perUnitMills(cents * 100, qty);
