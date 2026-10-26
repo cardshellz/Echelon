@@ -106,8 +106,8 @@ export function PreviewItems({
           There are no items available for return on this order.
         </PreviewNote>
       )}
-      <div className="divide-y overflow-hidden rounded-lg border">
-        <div className="flex items-center justify-between gap-3 bg-muted/30 px-3 py-2 text-xs font-medium sm:px-4">
+      <div className="csz-return-items">
+        <div className="csz-return-items-heading">
           <span>Items</span>
           <span className="text-muted-foreground">Quantity / available</span>
         </div>
@@ -132,17 +132,18 @@ export function PreviewItems({
             <article
               key={line.id}
               data-testid={`preview-line-${line.id}`}
-              className={`grid min-w-0 grid-cols-[minmax(0,1fr)_6.5rem] items-start gap-x-3 gap-y-2 p-3 sm:grid-cols-[minmax(0,1fr)_11rem_6.5rem] sm:items-center sm:px-4 ${selected ? "bg-muted/20" : "bg-background"}`}
+              className="csz-return-item"
+              data-unavailable={disabled}
             >
-              <div className="col-span-2 flex min-w-0 items-start gap-2.5 sm:col-span-1">
+              <div className="csz-return-item-copy">
                 <div
                   aria-hidden="true"
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-background text-muted-foreground"
+                  className="csz-return-item-icon"
                 >
                   <Package className="h-4 w-4" />
                 </div>
-                <div className="min-w-0 flex-1">
-                  <h3 className="break-words text-sm font-medium leading-5">
+                <div className="csz-return-item-text">
+                  <h3 className="csz-return-item-title">
                     {line.title}
                   </h3>
                   <p className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 break-words text-xs leading-4 text-muted-foreground">
@@ -196,12 +197,12 @@ export function PreviewItems({
                   )}
                 </div>
               </div>
-              <div className="col-start-2 row-start-2 min-w-0 sm:col-start-3 sm:row-start-1">
+              <div className="csz-return-item-quantity" data-unavailable={disabled}>
                 <Label htmlFor={quantityId} className="sr-only">
                   Return quantity
                 </Label>
                 <div
-                  className={`flex min-w-0 items-center rounded-md border border-input bg-background focus-within:ring-2 focus-within:ring-ring ${disabled ? "opacity-50" : ""}`}
+                  className="csz-return-quantity-control"
                 >
                   <Input
                     id={quantityId}
@@ -212,7 +213,7 @@ export function PreviewItems({
                     min="0"
                     max={line.eligibleQuantity}
                     step="1"
-                    className="h-11 min-w-0 flex-1 border-0 px-2 text-center tabular-nums shadow-none focus-visible:ring-0 sm:h-9"
+                    className="csz-return-quantity-input"
                     value={draft.quantity}
                     disabled={disabled}
                     onChange={(event) =>
@@ -234,14 +235,14 @@ export function PreviewItems({
                 </div>
               </div>
               {selected && (
-                <div className="col-start-1 row-start-2 min-w-0 sm:col-start-2 sm:row-start-1">
+                <div className="csz-return-item-reason">
                   <Label htmlFor={reasonId} className="sr-only">
                     Reason (optional)
                   </Label>
                   <select
                     id={reasonId}
                     aria-label={`Reason for returning ${description.accessibleName} (optional)`}
-                    className="h-11 w-full min-w-0 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-9"
+                    className="csz-return-reason-select"
                     value={draft.reasonCode ?? ""}
                     title={
                       reasons.find(
@@ -278,7 +279,7 @@ export function PreviewItems({
           );
         })}
       </div>
-      <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-between">
+      <div className="csz-return-actions">
         <Button variant="ghost" className="min-h-11" onClick={onBack}>
           <ArrowLeft className="mr-2 h-4 w-4" />
           Back to order
@@ -361,23 +362,23 @@ export function PreviewReview({
           refund is issued through Shopify.
         </p>
       </div>
-      <div className="space-y-3 border-t pt-6">
-        <Button
-          className="min-h-11 w-full"
-          disabled={!onGetLabels || busy}
-          onClick={onGetLabels}
-          aria-describedby="return-testing-status"
-        >
-          Get return labels
-        </Button>
+      <div className="csz-return-actions border-t">
         <Button
           variant="ghost"
-          className="min-h-11 w-full"
+          className="min-h-11"
           onClick={onBack}
           disabled={busy}
         >
           <ArrowLeft className="mr-2 h-4 w-4" />
           Back to packing
+        </Button>
+        <Button
+          className="min-h-11"
+          disabled={!onGetLabels || busy}
+          onClick={onGetLabels}
+        >
+          Get return labels
+          <ArrowRight aria-hidden="true" className="ml-2 h-4 w-4" />
         </Button>
       </div>
     </div>

@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { ArrowRight, Check, Loader2, Package } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { ArrowRight, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { cn } from "@/lib/utils";
+import { CustomerReturnSurface } from "./CustomerReturnSurface";
 import {
   assertReturnFlowOrderMatches,
   assertPreviewReviewMatches,
@@ -39,6 +39,10 @@ export interface CustomerReturnFlowProps {
   onChooseAnotherOrder?: (message?: string) => void;
   gateway: CustomerReturnFlowGateway;
   onAccessDenied: (message: string) => void;
+  onClose?: () => void;
+  closeDisabled?: boolean;
+  onBusy?: (busy: boolean) => void;
+  notice?: ReactNode;
 }
 
 const MAX_ORDER_REFERENCE_LENGTH = 256;
@@ -56,7 +60,7 @@ const headings: Record<Step, string> = {
   review: "Review your return",
 };
 function errorMessage(error: unknown): string {
-  return error instanceof Error
+  return error instanceof Error && !(error instanceof TypeError)
     ? error.message
     : "Your return could not be loaded. Please try again.";
 }
@@ -69,6 +73,10 @@ export function CustomerReturnFlow({
   onChooseAnotherOrder,
   gateway,
   onAccessDenied,
+  onClose,
+  closeDisabled = false,
+  onBusy,
+  notice,
 }: CustomerReturnFlowProps) {
   const [step, setStep] = useState<Step>(initialOrder ? "items" : "find");
   const [reference, setReference] = useState(
@@ -86,6 +94,11 @@ export function CustomerReturnFlow({
     useState<CustomerReturnFlowReviewInput | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The host's Escape/unload guard must be current before controls are painted.
+  useLayoutEffect(() => {
+    onBusy?.(busy);
+    return () => onBusy?.(false);
+  }, [busy, onBusy]);
   const canvas = useRef<HTMLElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const previousStep = useRef<Step>(step);
@@ -249,181 +262,152 @@ export function CustomerReturnFlow({
     (candidate) => candidate.id === step,
   );
   return (
-    <section
+    <CustomerReturnSurface
       ref={canvas}
-      data-testid="preview-canvas"
-      aria-label="Customer return experience"
-      className="mx-auto w-full max-w-3xl scroll-mt-20 overflow-hidden rounded-2xl border bg-card shadow-sm"
+      testId="preview-canvas"
+      onClose={onClose}
+      closeDisabled={busy || closeDisabled}
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-950 px-4 py-4 text-white sm:px-6">
-        <div className="flex items-center gap-2.5">
-          <Package aria-hidden="true" className="h-6 w-6 text-blue-400" />
-          <span className="text-lg font-bold tracking-tight">CARD SHELLZ</span>
-          <span className="ml-1 border-l border-white/20 pl-3 text-sm text-slate-300">
-            Returns
-          </span>
-        </div>
-      </div>
-      <div className="p-4 sm:p-6">
-        <ol
-          aria-label="Return steps"
-          className={cn(
-            "mb-6 grid gap-2",
-            initialOrder ? "grid-cols-3" : "grid-cols-4",
-          )}
-        >
-          {visibleSteps.map((candidate, index) => (
-            <li
-              key={candidate.id}
-              aria-current={step === candidate.id ? "step" : undefined}
-              className={cn(
-                "min-w-0 space-y-2 border-t-2 pt-2",
-                index <= stepIndex ? "border-primary" : "border-muted",
-              )}
-            >
-              <div className="flex items-center gap-1 text-xs font-medium">
-                <span
-                  className={cn(
-                    "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px]",
-                    index <= stepIndex
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-muted-foreground",
-                  )}
-                >
-                  {index < stepIndex ? (
-                    <Check aria-hidden="true" className="h-3 w-3" />
-                  ) : (
-                    index + 1
-                  )}
-                </span>
-                <span
-                  className={
-                    index === stepIndex
-                      ? "text-foreground"
-                      : "text-muted-foreground"
-                  }
-                >
-                  {candidate.label}
-                </span>
-              </div>
-            </li>
-          ))}
-        </ol>
-        <div className="mb-4 space-y-1.5">
-          <h1
-            ref={heading}
-            tabIndex={-1}
-            className="text-xl font-semibold tracking-tight outline-none sm:text-2xl"
+      <ol
+        aria-label="Return steps"
+        className="csz-return-steps"
+        data-step-count={visibleSteps.length}
+      >
+        {visibleSteps.map((candidate, index) => (
+          <li
+            key={candidate.id}
+            aria-current={step === candidate.id ? "step" : undefined}
+            className="csz-return-step"
+            data-active={index <= stepIndex}
           >
-            {headings[step]}
-          </h1>
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            {step === "find"
-              ? "Start with the order number from your confirmation."
-              : step === "items"
-                ? "Choose the items and quantities you want to send back."
-                : step === "packing"
-                  ? "Tell us what goes in each box so every item is accounted for."
-                  : "Check your items and boxes before the next step."}
-          </p>
-          {order && (
-            <p className="pt-1 text-xs font-medium text-muted-foreground">
-              Order #{normalizedPreviewReference(order.orderReference)}
-            </p>
-          )}
-        </div>
-        <div className="space-y-5">
-          <PreviewError message={error} />
-          {step === "find" && (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                void findOrder();
-              }}
-              className="space-y-5"
-            >
-              <div className="space-y-2">
-                <Label htmlFor="preview-order-reference">Order number</Label>
-                <Input
-                  id="preview-order-reference"
-                  autoComplete="off"
-                  className="min-h-12"
-                  value={reference}
-                  maxLength={MAX_ORDER_REFERENCE_LENGTH}
-                  disabled={busy}
-                  onChange={(event) => {
-                    setReference(event.target.value);
-                    setError(null);
-                  }}
-                  aria-describedby="preview-order-help"
-                />
-                <p
-                  id="preview-order-help"
-                  className="text-xs leading-relaxed text-muted-foreground"
-                >
-                  You can enter the number with or without the #.
-                </p>
-              </div>
-              <Button type="submit" className="min-h-12 w-full" disabled={busy}>
-                {busy ? (
-                  <>
-                    <Loader2
-                      aria-hidden="true"
-                      className="mr-2 h-4 w-4 animate-spin"
-                    />
-                    Finding your order…
-                  </>
+            <div className="csz-return-step-label">
+              <span className="csz-return-step-number">
+                {index < stepIndex ? (
+                  <Check aria-hidden="true" className="h-3 w-3" />
                 ) : (
-                  <>
-                    Find order
-                    <ArrowRight className="ml-2 h-4 w-4" />
-                  </>
+                  index + 1
                 )}
-              </Button>
-              <PreviewPromises />
-            </form>
-          )}
-          {step === "items" && order && (
-            <PreviewItems
-              order={order}
-              drafts={drafts}
-              onChange={updateDrafts}
-              onContinue={continueToPacking}
-              onBack={() =>
-                onChooseAnotherOrder ? onChooseAnotherOrder() : back("find")
-              }
-            />
-          )}
-          {step === "packing" && order && selected?.ok && (
-            <PreviewPacking
-              order={order}
-              selections={selected.value}
-              parcels={parcels}
-              busy={busy}
-              onChange={(next) => {
-                setParcels(next);
-                setReview(null);
-                setError(null);
-              }}
-              onContinue={() => void reviewReturn()}
-              onBack={() => back("items")}
-            />
-          )}
-          {step === "review" && review && order && (
-            <PreviewReview
-              order={order}
-              review={review}
-              onBack={() => back("packing")}
-              onGetLabels={
-                gateway.labels && reviewInput
-                  ? () => void createLabels()
-                  : undefined
-              }
-              busy={busy}
-            />
-          )}
-        </div>
+              </span>
+              <span>{candidate.label}</span>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <div className="csz-return-intro">
+        <h1
+          ref={heading}
+          tabIndex={-1}
+          className="outline-none"
+        >
+          {headings[step]}
+        </h1>
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          {step === "find"
+            ? "Start with the order number from your confirmation."
+            : step === "items"
+              ? "Choose the items and quantities you want to send back."
+              : step === "packing"
+                ? "Tell us what goes in each box so every item is accounted for."
+                : "Check your items and boxes before the next step."}
+        </p>
+        {order && (
+          <p className="csz-return-order-reference">
+            Order #{normalizedPreviewReference(order.orderReference)}
+          </p>
+        )}
       </div>
-    </section>
+      <div className="space-y-5">
+        {notice}
+        <PreviewError message={error} />
+        {step === "find" && (
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void findOrder();
+            }}
+            className="space-y-5"
+          >
+            <div className="space-y-2">
+              <Label htmlFor="preview-order-reference">Order number</Label>
+              <Input
+                id="preview-order-reference"
+                autoComplete="off"
+                className="min-h-12"
+                value={reference}
+                maxLength={MAX_ORDER_REFERENCE_LENGTH}
+                disabled={busy}
+                onChange={(event) => {
+                  setReference(event.target.value);
+                  setError(null);
+                }}
+                aria-describedby="preview-order-help"
+              />
+              <p
+                id="preview-order-help"
+                className="text-xs leading-relaxed text-muted-foreground"
+              >
+                You can enter the number with or without the #.
+              </p>
+            </div>
+            <Button type="submit" className="min-h-12 w-full" disabled={busy}>
+              {busy ? (
+                <>
+                  <Loader2
+                    aria-hidden="true"
+                    className="mr-2 h-4 w-4 animate-spin"
+                  />
+                  Finding your order…
+                </>
+              ) : (
+                <>
+                  Find order
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </>
+              )}
+            </Button>
+            <PreviewPromises />
+          </form>
+        )}
+        {step === "items" && order && (
+          <PreviewItems
+            order={order}
+            drafts={drafts}
+            onChange={updateDrafts}
+            onContinue={continueToPacking}
+            onBack={() =>
+              onChooseAnotherOrder ? onChooseAnotherOrder() : back("find")
+            }
+          />
+        )}
+        {step === "packing" && order && selected?.ok && (
+          <PreviewPacking
+            order={order}
+            selections={selected.value}
+            parcels={parcels}
+            busy={busy}
+            onChange={(next) => {
+              setParcels(next);
+              setReview(null);
+              setError(null);
+            }}
+            onContinue={() => void reviewReturn()}
+            onBack={() => back("items")}
+          />
+        )}
+        {step === "review" && review && order && (
+          <PreviewReview
+            order={order}
+            review={review}
+            onBack={() => back("packing")}
+            onGetLabels={
+              gateway.labels && reviewInput
+                ? () => void createLabels()
+                : undefined
+            }
+            busy={busy}
+          />
+        )}
+      </div>
+    </CustomerReturnSurface>
   );
 }

@@ -216,6 +216,7 @@ export function CustomerReturnMoveItemsDialog({
   onClose,
   onApply,
   onCloseAutoFocus,
+  inline = false,
 }: {
   order: CustomerReturnFlowOrder;
   selections: PreviewSelections;
@@ -225,8 +226,13 @@ export function CustomerReturnMoveItemsDialog({
   onClose: () => void;
   onApply: (command: PreviewPackingMoveCommand) => PreviewPackingMoveResult;
   onCloseAutoFocus: () => void;
+  inline?: boolean;
 }) {
   const id = useId();
+  const inlineRoot = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    if (inline) inlineRoot.current?.focus();
+  }, [inline]);
   const isDrop = request.intent === "drop";
   const isSplit = request.intent === "split";
   const singleProduct =
@@ -478,353 +484,361 @@ export function CustomerReturnMoveItemsDialog({
     }
   }
 
-  return (
-    <Dialog
-      open
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-    >
-      <DialogContent
-        className={`max-h-[85dvh] overflow-y-auto ${singleProduct ? "sm:max-w-md" : "sm:max-w-xl"}`}
-        onCloseAutoFocus={(event) => {
+  const Title = inline ? "h2" : DialogTitle;
+  const Description = inline ? "p" : DialogDescription;
+  const content = (
+    <>
+      <DialogHeader className={inline ? "csz-return-editor-heading" : undefined}>
+        <Title id={`${id}-title`}>{title}</Title>
+        <Description className={isDrop ? "sr-only" : undefined}>
+          {request.removeSource
+            ? "All items in this box will move together. Choose the box they should go in."
+            : isSplit
+              ? `Choose items from ${sourceName}.`
+              : isDrop
+                ? "Choose how many to move."
+                : singleProduct
+                  ? "Choose a box and how many to move."
+                  : "Choose the items, quantities, and box. Nothing changes until you confirm."}
+        </Description>
+      </DialogHeader>
+      <form
+        noValidate
+        className="min-w-0 space-y-4"
+        onSubmit={(event) => {
           event.preventDefault();
-          onCloseAutoFocus();
+          apply();
         }}
       >
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription className={isDrop ? "sr-only" : undefined}>
-            {request.removeSource
-              ? "All items in this box will move together. Choose the box they should go in."
-              : isSplit
-                ? `Choose items from ${sourceName}.`
-                : isDrop
-                  ? "Choose how many to move."
-                  : singleProduct
-                    ? "Choose a box and how many to move."
-                    : "Choose the items, quantities, and box. Nothing changes until you confirm."}
-          </DialogDescription>
-        </DialogHeader>
-        <form
-          noValidate
-          className="min-w-0 space-y-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            apply();
-          }}
-        >
-          {!fixedDestination && (
-            <div className="space-y-1.5">
-              <Label htmlFor={`${id}-destination`}>Destination box</Label>
-              <select
-                id={`${id}-destination`}
-                aria-label="Destination box"
-                aria-describedby={error ? `${id}-error` : undefined}
-                className="min-h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                value={destinationValue}
-                disabled={busy || !contextValid}
-                onChange={(event) => changeDestination(event.target.value)}
-              >
-                <option value="">Choose a box</option>
-                {destinationValue && !destination && (
-                  <option value={destinationValue} disabled>
-                    Destination unavailable
-                  </option>
-                )}
-                {targets.map((parcel) => (
-                  <option key={parcel.key} value={`box-${parcel.key}`}>
-                    Box{" "}
-                    {parcels.findIndex(
-                      (candidate) => candidate.key === parcel.key,
-                    ) + 1}
-                  </option>
-                ))}
-                {canCreateBox && <option value="new">New box</option>}
-              </select>
-            </div>
-          )}
-          {contextValid && (
-            <div
-              className={`divide-y rounded-lg border ${isSplit ? "overflow-hidden" : ""}`}
+        {!fixedDestination && (
+          <div className="space-y-1.5">
+            <Label htmlFor={`${id}-destination`}>Destination box</Label>
+            <select
+              id={`${id}-destination`}
+              aria-label="Destination box"
+              aria-describedby={error ? `${id}-error` : undefined}
+              className="min-h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              value={destinationValue}
+              disabled={busy || !contextValid}
+              onChange={(event) => changeDestination(event.target.value)}
             >
-              {visibleSources.map((source, index) => {
-                const line = order.lines.find(
-                  (item) => item.id === source.lineId,
-                )!;
-                const description = describePreviewItem(order, line.id);
-                const context = previewPackingItemContext(order, line.id);
-                const draft = request.removeSource
-                  ? { selected: true, quantity: String(source.quantity) }
-                  : (drafts.get(source.lineId) ?? {
-                      selected: false,
-                      quantity: "1",
-                      quantityEdited: false,
-                    });
-                const quantity = readPreviewQuantity(draft.quantity);
-                const invalid =
-                  draft.selected &&
-                  (quantity === null ||
-                    quantity < 1 ||
-                    quantity > source.quantity);
-                const helpId = `${id}-quantity-help-${index}`;
-                const product = (
-                  <span className="min-w-0 break-words text-sm [overflow-wrap:anywhere]">
-                    {line.title}
-                    {context && (
-                      <span className="mt-1 block text-xs text-muted-foreground">
-                        {context}
-                      </span>
-                    )}
-                  </span>
-                );
-                if (isSplit) {
-                  return (
-                    <div
-                      key={line.id}
-                      data-testid={`move-line-${line.id}`}
-                      className={`grid min-w-0 grid-cols-1 items-center gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-4 ${draft.selected ? "bg-primary/5" : ""}`}
-                    >
-                      {product}
-                      <div className="max-w-full justify-self-end">
-                        <SplitBoxItemControl
-                          accessibleName={description.accessibleName}
-                          sourceName={sourceName}
-                          availableQuantity={source.quantity}
-                          draft={draft}
-                          quantity={quantity}
-                          invalid={invalid}
-                          busy={busy}
-                          helpId={helpId}
-                          onQuantityChange={(value) => {
-                            // Empty input is an unfinished edit, not a request to remove.
-                            const deselect =
-                              value !== "" && readPreviewQuantity(value) === 0;
-                            updateDraft(line.id, {
-                              selected: !deselect,
-                              quantity: value,
-                              quantityEdited: true,
-                            });
-                          }}
-                        />
-                      </div>
-                    </div>
-                  );
-                }
+              <option value="">Choose a box</option>
+              {destinationValue && !destination && (
+                <option value={destinationValue} disabled>
+                  Destination unavailable
+                </option>
+              )}
+              {targets.map((parcel) => (
+                <option key={parcel.key} value={`box-${parcel.key}`}>
+                  Box{" "}
+                  {parcels.findIndex(
+                    (candidate) => candidate.key === parcel.key,
+                  ) + 1}
+                </option>
+              ))}
+              {canCreateBox && <option value="new">New box</option>}
+            </select>
+          </div>
+        )}
+        {contextValid && (
+          <div
+            className={`divide-y rounded-lg border ${isSplit ? "overflow-hidden" : ""}`}
+          >
+            {visibleSources.map((source, index) => {
+              const line = order.lines.find(
+                (item) => item.id === source.lineId,
+              )!;
+              const description = describePreviewItem(order, line.id);
+              const context = previewPackingItemContext(order, line.id);
+              const draft = request.removeSource
+                ? { selected: true, quantity: String(source.quantity) }
+                : (drafts.get(source.lineId) ?? {
+                    selected: false,
+                    quantity: "1",
+                    quantityEdited: false,
+                  });
+              const quantity = readPreviewQuantity(draft.quantity);
+              const invalid =
+                draft.selected &&
+                (quantity === null ||
+                  quantity < 1 ||
+                  quantity > source.quantity);
+              const helpId = `${id}-quantity-help-${index}`;
+              const product = (
+                <span className="min-w-0 break-words text-sm [overflow-wrap:anywhere]">
+                  {line.title}
+                  {context && (
+                    <span className="mt-1 block text-xs text-muted-foreground">
+                      {context}
+                    </span>
+                  )}
+                </span>
+              );
+              if (isSplit) {
                 return (
                   <div
                     key={line.id}
                     data-testid={`move-line-${line.id}`}
-                    className="min-w-0 space-y-2 p-3"
+                    className={`grid min-w-0 grid-cols-1 items-center gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-4 ${draft.selected ? "bg-primary/5" : ""}`}
                   >
-                    <div className="flex min-w-0 flex-wrap items-start gap-3">
-                      {singleProduct ? (
-                        <div className="min-w-0 flex-1 basis-36 py-1">
-                          {product}
-                        </div>
-                      ) : (
-                        <label
-                          htmlFor={`${id}-select-${index}`}
-                          className="flex min-h-11 min-w-0 flex-1 basis-36 items-start gap-2 py-1"
-                        >
-                          <input
-                            id={`${id}-select-${index}`}
-                            type="checkbox"
-                            className="mt-0.5 h-5 w-5 shrink-0 accent-primary"
-                            aria-label={`Select ${description.accessibleName} to move`}
-                            checked={draft.selected}
-                            disabled={busy || request.removeSource}
-                            onChange={(event) =>
-                              updateDraft(line.id, {
-                                selected: event.target.checked,
-                              })
-                            }
-                          />
-                          {product}
-                        </label>
-                      )}
-                      {(!singleProduct || source.quantity > 1) && (
-                        <div className="max-w-full space-y-1">
-                          <Label
-                            htmlFor={`${id}-quantity-${index}`}
-                            className="text-xs"
-                          >
-                            Quantity to move
-                          </Label>
-                          <Input
-                            id={`${id}-quantity-${index}`}
-                            type="number"
-                            inputMode="numeric"
-                            min="1"
-                            max={source.quantity}
-                            step="1"
-                            className="min-h-11 max-w-full text-center tabular-nums"
-                            style={{
-                              width: `calc(${Math.max(draft.quantity.length, 2)}ch + 2.5rem)`,
-                            }}
-                            aria-label={`Quantity of ${description.accessibleName} to move`}
-                            aria-invalid={invalid || undefined}
-                            aria-describedby={helpId}
-                            disabled={
-                              busy || request.removeSource || !draft.selected
-                            }
-                            value={draft.quantity}
-                            onChange={(event) =>
-                              updateDraft(line.id, {
-                                quantity: event.target.value,
-                                quantityEdited: true,
-                              })
-                            }
-                          />
-                        </div>
-                      )}
+                    {product}
+                    <div className="max-w-full justify-self-end">
+                      <SplitBoxItemControl
+                        accessibleName={description.accessibleName}
+                        sourceName={sourceName}
+                        availableQuantity={source.quantity}
+                        draft={draft}
+                        quantity={quantity}
+                        invalid={invalid}
+                        busy={busy}
+                        helpId={helpId}
+                        onQuantityChange={(value) => {
+                          // Empty input is an unfinished edit, not a request to remove.
+                          const deselect =
+                            value !== "" && readPreviewQuantity(value) === 0;
+                          updateDraft(line.id, {
+                            selected: !deselect,
+                            quantity: value,
+                            quantityEdited: true,
+                          });
+                        }}
+                      />
                     </div>
-                    <p
-                      id={helpId}
-                      className={`break-words text-xs ${invalid ? "text-destructive" : "text-muted-foreground"}`}
-                    >
-                      {invalid
-                        ? `Enter a whole number from 1 to ${source.quantity}.`
-                        : `${source.quantity} available`}
-                    </p>
                   </div>
                 );
-              })}
+              }
+              return (
+                <div
+                  key={line.id}
+                  data-testid={`move-line-${line.id}`}
+                  className="min-w-0 space-y-2 p-3"
+                >
+                  <div className="flex min-w-0 flex-wrap items-start gap-3">
+                    {singleProduct ? (
+                      <div className="min-w-0 flex-1 basis-36 py-1">
+                        {product}
+                      </div>
+                    ) : (
+                      <label
+                        htmlFor={`${id}-select-${index}`}
+                        className="flex min-h-11 min-w-0 flex-1 basis-36 items-start gap-2 py-1"
+                      >
+                        <input
+                          id={`${id}-select-${index}`}
+                          type="checkbox"
+                          className="mt-0.5 h-5 w-5 shrink-0 accent-primary"
+                          aria-label={`Select ${description.accessibleName} to move`}
+                          checked={draft.selected}
+                          disabled={busy || request.removeSource}
+                          onChange={(event) =>
+                            updateDraft(line.id, {
+                              selected: event.target.checked,
+                            })
+                          }
+                        />
+                        {product}
+                      </label>
+                    )}
+                    {(!singleProduct || source.quantity > 1) && (
+                      <div className="max-w-full space-y-1">
+                        <Label
+                          htmlFor={`${id}-quantity-${index}`}
+                          className="text-xs"
+                        >
+                          Quantity to move
+                        </Label>
+                        <Input
+                          id={`${id}-quantity-${index}`}
+                          type="number"
+                          inputMode="numeric"
+                          min="1"
+                          max={source.quantity}
+                          step="1"
+                          className="min-h-11 max-w-full text-center tabular-nums"
+                          style={{
+                            width: `calc(${Math.max(draft.quantity.length, 2)}ch + 2.5rem)`,
+                          }}
+                          aria-label={`Quantity of ${description.accessibleName} to move`}
+                          aria-invalid={invalid || undefined}
+                          aria-describedby={helpId}
+                          disabled={
+                            busy || request.removeSource || !draft.selected
+                          }
+                          value={draft.quantity}
+                          onChange={(event) =>
+                            updateDraft(line.id, {
+                              quantity: event.target.value,
+                              quantityEdited: true,
+                            })
+                          }
+                        />
+                      </div>
+                    )}
+                  </div>
+                  <p
+                    id={helpId}
+                    className={`break-words text-xs ${invalid ? "text-destructive" : "text-muted-foreground"}`}
+                  >
+                    {invalid
+                      ? `Enter a whole number from 1 to ${source.quantity}.`
+                      : `${source.quantity} available`}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {error && (
+          <p
+            id={`${id}-error`}
+            role="alert"
+            className="text-sm text-destructive"
+          >
+            {error}
+          </p>
+        )}
+        {!isSplit && contextValid && !selected.length && (
+          <p className="text-sm text-muted-foreground">
+            Select at least one item to move.
+          </p>
+        )}
+        {!isDrop &&
+          preview?.kind === "updated" &&
+          (showMoveTotals ||
+            preview.removedParcelKeys.length > 0 ||
+            destinationRenumbered) && (
+            <section
+              aria-label="Move preview"
+              aria-live="polite"
+              className="space-y-2 rounded-lg bg-muted/50 p-3 text-sm"
+            >
+              {showMoveTotals && (
+                <>
+                  <p className="font-medium">Before → After</p>
+                  <dl className="space-y-1 tabular-nums">
+                    <div className="flex flex-wrap justify-between gap-x-3">
+                      <dt>{sourceName}</dt>
+                      <dd className="break-all">
+                        {sourceQuantity} →{" "}
+                        {request.sourceParcelKey === null
+                          ? sourceQuantity - (movingQuantity ?? 0)
+                          : (boxQuantity(
+                              preview.parcels.find(
+                                (parcel) =>
+                                  parcel.key === request.sourceParcelKey,
+                              ),
+                            ) ?? "Check quantity")}{" "}
+                        items
+                      </dd>
+                    </div>
+                    <div className="flex flex-wrap justify-between gap-x-3">
+                      <dt>{destinationName}</dt>
+                      <dd className="break-all">
+                        {boxQuantity(destinationParcel) ?? "Check quantity"} →{" "}
+                        {boxQuantity(
+                          preview.parcels.find(
+                            (parcel) =>
+                              parcel.key === preview.destinationParcelKey,
+                          ),
+                        ) ?? "Check quantity"}{" "}
+                        items
+                      </dd>
+                    </div>
+                  </dl>
+                </>
+              )}
+              {preview.removedParcelKeys.map((key) => (
+                <p key={key} className="text-xs text-muted-foreground">
+                  Box {parcels.findIndex((parcel) => parcel.key === key) + 1}{" "}
+                  will be removed because all its items are moving.
+                </p>
+              ))}
+              {destinationRenumbered && (
+                <p className="text-xs text-muted-foreground">
+                  {destinationName} will be shown as Box{" "}
+                  {preview.parcels.findIndex(
+                    (parcel) => parcel.key === preview.destinationParcelKey,
+                  ) + 1}{" "}
+                  after the empty box is removed.
+                </p>
+              )}
+            </section>
+          )}
+        <div
+          className={
+            isSplit
+              ? "flex flex-wrap items-center justify-between gap-4 border-t pt-4"
+              : undefined
+          }
+        >
+          {isSplit && contextValid && (
+            <div
+              role="status"
+              aria-label="New box summary"
+              aria-live="polite"
+              aria-atomic="true"
+              className="min-w-0 space-y-1 text-sm"
+            >
+              <p className="font-medium tabular-nums">
+                {splitQuantity === null
+                  ? "Check item quantities"
+                  : `${splitQuantity} ${splitQuantity === 1 ? "item" : "items"} in new box`}
+              </p>
+              {remainingSourceQuantity !== null && (
+                <p className="text-xs text-muted-foreground tabular-nums">
+                  {remainingSourceQuantity}{" "}
+                  {remainingSourceQuantity === 1
+                    ? "item stays"
+                    : "items stay"}{" "}
+                  in {sourceName}
+                </p>
+              )}
             </div>
           )}
-          {error && (
-            <p
-              id={`${id}-error`}
-              role="alert"
-              className="text-sm text-destructive"
-            >
-              {error}
-            </p>
-          )}
-          {!isSplit && contextValid && !selected.length && (
-            <p className="text-sm text-muted-foreground">
-              Select at least one item to move.
-            </p>
-          )}
-          {!isDrop &&
-            preview?.kind === "updated" &&
-            (showMoveTotals ||
-              preview.removedParcelKeys.length > 0 ||
-              destinationRenumbered) && (
-              <section
-                aria-label="Move preview"
-                aria-live="polite"
-                className="space-y-2 rounded-lg bg-muted/50 p-3 text-sm"
-              >
-                {showMoveTotals && (
-                  <>
-                    <p className="font-medium">Before → After</p>
-                    <dl className="space-y-1 tabular-nums">
-                      <div className="flex flex-wrap justify-between gap-x-3">
-                        <dt>{sourceName}</dt>
-                        <dd className="break-all">
-                          {sourceQuantity} →{" "}
-                          {request.sourceParcelKey === null
-                            ? sourceQuantity - (movingQuantity ?? 0)
-                            : (boxQuantity(
-                                preview.parcels.find(
-                                  (parcel) =>
-                                    parcel.key === request.sourceParcelKey,
-                                ),
-                              ) ?? "Check quantity")}{" "}
-                          items
-                        </dd>
-                      </div>
-                      <div className="flex flex-wrap justify-between gap-x-3">
-                        <dt>{destinationName}</dt>
-                        <dd className="break-all">
-                          {boxQuantity(destinationParcel) ?? "Check quantity"} →{" "}
-                          {boxQuantity(
-                            preview.parcels.find(
-                              (parcel) =>
-                                parcel.key === preview.destinationParcelKey,
-                            ),
-                          ) ?? "Check quantity"}{" "}
-                          items
-                        </dd>
-                      </div>
-                    </dl>
-                  </>
-                )}
-                {preview.removedParcelKeys.map((key) => (
-                  <p key={key} className="text-xs text-muted-foreground">
-                    Box {parcels.findIndex((parcel) => parcel.key === key) + 1}{" "}
-                    will be removed because all its items are moving.
-                  </p>
-                ))}
-                {destinationRenumbered && (
-                  <p className="text-xs text-muted-foreground">
-                    {destinationName} will be shown as Box{" "}
-                    {preview.parcels.findIndex(
-                      (parcel) => parcel.key === preview.destinationParcelKey,
-                    ) + 1}{" "}
-                    after the empty box is removed.
-                  </p>
-                )}
-              </section>
-            )}
           <div
             className={
               isSplit
-                ? "flex flex-wrap items-center justify-between gap-4 border-t pt-4"
-                : undefined
+                ? "ml-auto flex flex-wrap gap-2"
+                : "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"
             }
           >
-            {isSplit && contextValid && (
-              <div
-                role="status"
-                aria-label="New box summary"
-                aria-live="polite"
-                aria-atomic="true"
-                className="min-w-0 space-y-1 text-sm"
-              >
-                <p className="font-medium tabular-nums">
-                  {splitQuantity === null
-                    ? "Check item quantities"
-                    : `${splitQuantity} ${splitQuantity === 1 ? "item" : "items"} in new box`}
-                </p>
-                {remainingSourceQuantity !== null && (
-                  <p className="text-xs text-muted-foreground tabular-nums">
-                    {remainingSourceQuantity}{" "}
-                    {remainingSourceQuantity === 1
-                      ? "item stays"
-                      : "items stay"}{" "}
-                    in {sourceName}
-                  </p>
-                )}
-              </div>
-            )}
-            <div
-              className={
-                isSplit
-                  ? "ml-auto flex flex-wrap gap-2"
-                  : "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"
-              }
+            <Button
+              type="button"
+              variant="ghost"
+              className="min-h-11"
+              onClick={onClose}
             >
-              <Button
-                type="button"
-                variant="ghost"
-                className="min-h-11"
-                onClick={onClose}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                className="min-h-11"
-                disabled={!ready}
-                aria-describedby={error ? `${id}-error` : undefined}
-              >
-                {action}
-              </Button>
-            </div>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              className="min-h-11"
+              disabled={!ready}
+              aria-describedby={error ? `${id}-error` : undefined}
+            >
+              {action}
+            </Button>
           </div>
-        </form>
+        </div>
+      </form>
+    </>
+  );
+  if (inline) return (
+    <section ref={inlineRoot} tabIndex={-1} aria-labelledby={`${id}-title`} className="csz-return-inline-editor"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
+      }}>
+      {content}
+    </section>
+  );
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent
+        aria-labelledby={`${id}-title`}
+        className={`max-h-[85dvh] overflow-y-auto ${singleProduct ? "sm:max-w-md" : "sm:max-w-xl"}`}
+        onCloseAutoFocus={(event) => { event.preventDefault(); onCloseAutoFocus(); }}
+      >
+        {content}
       </DialogContent>
     </Dialog>
   );
