@@ -725,12 +725,12 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
   app.get("/api/inbound-shipments/:id/receipt-pack-resolution", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const shipmentId = Number(req.params.id);
-      if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      if (!shipmentLineResourceIdSchema.safeParse(shipmentId).success) {
         return res.status(400).json({ error: "Invalid shipment id" });
       }
       const rawPurchaseOrderId = req.query.purchaseOrderId ?? req.query.purchase_order_id;
       const purchaseOrderId = rawPurchaseOrderId === undefined ? undefined : Number(rawPurchaseOrderId);
-      if (purchaseOrderId !== undefined && (!Number.isInteger(purchaseOrderId) || purchaseOrderId <= 0)) {
+      if (purchaseOrderId !== undefined && !shipmentLineResourceIdSchema.safeParse(purchaseOrderId).success) {
         return res.status(400).json({ error: "Invalid purchase order id" });
       }
       const resolution = await purchasing.getShipmentReceiptPackResolution(shipmentId, { purchaseOrderId });
@@ -775,12 +775,12 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
   app.post("/api/inbound-shipments/:id/create-receipt", requirePermission("inventory", "receive"), requireIdempotency(), async (req, res) => {
     try {
       const shipmentId = Number(req.params.id);
-      if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      if (!shipmentLineResourceIdSchema.safeParse(shipmentId).success) {
         return res.status(400).json({ error: "Invalid shipment id" });
       }
       const rawPurchaseOrderId = req.body?.purchaseOrderId ?? req.body?.purchase_order_id ?? req.query.purchaseOrderId;
       const purchaseOrderId = rawPurchaseOrderId === undefined ? undefined : Number(rawPurchaseOrderId);
-      if (purchaseOrderId !== undefined && (!Number.isInteger(purchaseOrderId) || purchaseOrderId <= 0)) {
+      if (purchaseOrderId !== undefined && !shipmentLineResourceIdSchema.safeParse(purchaseOrderId).success) {
         return res.status(400).json({ error: "Invalid purchase order id" });
       }
       const userId = (req as any).session?.user?.id;

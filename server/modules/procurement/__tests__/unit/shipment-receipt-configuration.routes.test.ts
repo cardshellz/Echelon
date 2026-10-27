@@ -60,6 +60,14 @@ describe("shipment receiving configuration HTTP boundary", () => {
     expect((await post("/api/inbound-shipments/42/create-receipt", {}, "purchasing:view")).status).toBe(403);
     expect(preview).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
   });
+  it.each(["0", "-1", "17.5", "2147483648", "wrong"])("rejects invalid document identifier %s before reading or writing", async id => {
+    expect((await post(`/api/inbound-shipments/${id}/receipt-pack-resolution`, {})).status).toBe(400);
+    expect((await post(`/api/inbound-shipments/${id}/create-receipt`, {}, "inventory:receive")).status).toBe(400);
+    const result = await requestLocalHttp(`${origin}/api/inbound-shipments/42/receipt-pack-resolution?purchaseOrderId=${id}`,
+      { headers: { "x-test-permission": "purchasing:view" } });
+    expect(result.status).toBe(400);
+    expect(preview).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
+  });
   it("passes the reviewed product configuration to preview and to the authorized receipt owner", async () => {
     const body = { purchaseOrderId: 17, receiptUnitSelections: [choice] };
     preview.mockResolvedValue({ canCreateReceipt: true }); create.mockResolvedValue({ id: 31 });
