@@ -1,4 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
+import { retainShippingPackageDimensionsMetadata } from "./package-dimensions.domain";
 
 import {
   carrierDispatchAttempts,
@@ -1380,6 +1381,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
             serviceCode: shippingProviderLabels.serviceCode,
             labelCreatedAt: shippingProviderLabels.labelCreatedAt,
             voidedAt: shippingProviderLabels.voidedAt,
+            metadata: shippingProviderLabels.metadata,
           })
           .from(shippingProviderLabels)
           .where(and(
@@ -1424,6 +1426,8 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                 ${observation.observedAt}
               )`,
               metadata: {
+                ...retainShippingPackageDimensionsMetadata(existing[0].metadata, observation.sanitizedPayload.packageDimensions,
+                  observation.observedAt, observation.eventHash),
                 authorityMode: "carrier_dispatch_cutover",
                 labelDirection: effectiveLabelDirection,
               },
@@ -1455,6 +1459,8 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               lastObservedAt: observation.observedAt,
               source: observation.observationSource,
               metadata: {
+                ...retainShippingPackageDimensionsMetadata(undefined, observation.sanitizedPayload.packageDimensions,
+                  observation.observedAt, observation.eventHash),
                 authorityMode: "carrier_dispatch_cutover",
                 labelDirection: effectiveLabelDirection,
               },
