@@ -31,6 +31,9 @@ import { CustomerReturnShopifySnapshotError, customerReturnShopifySnapshotSchema
   type CustomerReturnShopifySnapshotReader, type CustomerReturnShopifySnapshot } from "./customer-return-shopify-snapshot.ports";
 import { customerReturnCanonicalOrderScopeSchema, type CustomerReturnCanonicalOrderScope } from "./customer-return-order-access.service";
 import type { CustomerReturnBoxMeasurements } from "./customer-return-box-measurements.ports";
+import type { PackageHistoryReadPort } from "@shared/shipping/package-history";
+import { projectHistoricalReturnBoxes } from "./customer-return-package-history";
+import { MAX_RETURN_ORIGINAL_BOXES } from "@shared/returns/customer-return-parcel";
 
 const MAX_OBSERVATION_AGE_MS = 120_000;
 export interface CustomerReturnLiveDependencies {
@@ -39,6 +42,7 @@ export interface CustomerReturnLiveDependencies {
   dimensions: CustomerReturnPackageDimensionsReader;
   storedDimensions?: CustomerReturnStoredPackageDimensionsReader;
   measurements?: CustomerReturnBoxMeasurements;
+  packageHistory?: PackageHistoryReadPort;
   policies: CustomerReturnPortalPolicyReader;
   reportBoxDiagnostic?: ReturnBoxReporter;
   rates?: ReturnRateProvider;
@@ -149,6 +153,23 @@ export class CustomerReturnLiveService {
     verifyIdentity(first, provider, reference);
     const boxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic,
       this.dependencies.measurements, this.dependencies.storedDimensions);
+    if (this.dependencies.packageHistory) {
+      try {
+        const history = await this.dependencies.packageHistory.read({ omsOrderId: first.order.omsOrderId,
+          channelId: shop.channelId, externalOrderId: first.order.externalOrderId });
+        if (history) {
+          const originalBoxes=projectHistoricalReturnBoxes(first,provider,history);
+          if(originalBoxes.length+boxOptions.length>MAX_RETURN_ORIGINAL_BOXES)throw new Error("RETURN_BOX_HISTORY_LIMIT");
+          boxOptions.push(...originalBoxes);
+        }
+      } catch {
+        // Package-history outages do not change eligibility. Customers can
+        // enter their actual box size; the classified diagnostic is observable.
+        const event = { operation: "original_box_dimensions" as const, code: "RETURN_BOX_HISTORY_UNAVAILABLE" };
+        try { (this.dependencies.reportBoxDiagnostic ?? (value => console.warn(JSON.stringify(value))))(event); }
+        catch { console.warn(JSON.stringify(event)); }
+      }
+    }
     const finalRaw = await this.dependencies.local.read(lookup);
     if (finalRaw === null) throw changed();
     const local = customerReturnLocalInspectionSnapshotSchema.parse(finalRaw);
