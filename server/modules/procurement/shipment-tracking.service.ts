@@ -1,6 +1,7 @@
 import { readIntegerCents } from "@shared/money-read";
 import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
 import { readShipmentReceivingSetup, shipmentReceivingUnitSource } from "./shipment-receiving-setup.service";
+import type { ShipmentReceivingSetup } from "@shared/procurement/shipment-receiving-setup";
 import { executeCreateShipmentInTransaction as createShipmentInTransaction, assertShipmentCreateActor } from "./shipment-create.service";
 import { shipmentDefaultAllocation } from "./domain/shipment-create";
 import type { ShipmentCreateTransaction } from "./shipment-create.repository";
@@ -1800,9 +1801,16 @@ export function createShipmentTrackingService(
     };
   }
 
-  async function checkReceivingSetup(tx: any, shipmentId: number, required: boolean) {
-    const setup = await readShipmentReceivingSetup(tx, storage, shipmentId, true);
-    if (required && !setup.ready) throw new ShipmentTrackingError(
+  async function checkReceivingSetup(tx: any, shipmentId: number, required: boolean, options: { previous?: ShipmentReceivingSetup; lockEvidence?: boolean } = {}) {
+    const { previous } = options;
+    if (previous && previous.shipmentId !== shipmentId) throw new Error("Receiving setup review belongs to another shipment");
+    const setup = await readShipmentReceivingSetup(tx, storage, shipmentId, options.lockEvidence !== false);
+    // Existing booked shipments may need several approved repair batches. An
+    // edit may retain inherited issues, but cannot introduce an unready item.
+    // Booking/departure supply no previous snapshot and always require all ready.
+    const priorIssueIds = new Set(previous?.lines.filter(line => line.issue !== null).map(line => line.lineId));
+    const requiresRepair = !setup.lines.length || !previous || setup.lines.some(line => line.issue !== null && !priorIssueIds.has(line.lineId));
+    if (required && !setup.ready && requiresRepair) throw new ShipmentTrackingError(
       setup.lines.length ? `${setup.issueCount} shipment item(s) need receiving setup. Edit the shipment, choose or add their configurations, then retry booking or shipping.`
         : "Add shipment items and their receiving configurations before booking or shipping.",
       409, { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED", receivingSetup: setup });
