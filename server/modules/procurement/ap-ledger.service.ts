@@ -2405,15 +2405,29 @@ export async function runApPaymentCommandPostCommit(
 }
 
 export async function getApSummary(options: { now?: Date } = {}) {
-  const now = options.now ?? new Date();
-  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+  const requestedNow = options.now ?? new Date();
+  const nowEpoch = requestedNow instanceof Date ? requestedNow.getTime() : Number.NaN;
+  if (!Number.isFinite(nowEpoch)) {
     throw new ApLedgerError("AP summary clock is invalid", 500, {
       code: "AP_SUMMARY_CLOCK_INVALID",
     });
   }
+  // Capture the caller's instant before awaiting a connection. All summary
+  // balances, activity and aggregates need the same snapshot and aging clock.
+  const now = new Date(nowEpoch);
+  return db.transaction(
+    tx => readApSummaryInSnapshot(tx, now),
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}
+
+async function readApSummaryInSnapshot(
+  tx: Pick<ApLedgerDbClient, "select" | "execute">,
+  now: Date,
+) {
   const openStatuses = ["received", "approved", "partially_paid", "disputed"];
 
-  const allOpen = await db
+  const allOpen = await tx
     .select({
       id: vendorInvoices.id,
       vendorId: vendorInvoices.vendorId,
@@ -2493,10 +2507,10 @@ export async function getApSummary(options: { now?: Date } = {}) {
   // Payment totals
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
   const [paidThisMonthResult, paidAllTimeResult] = await Promise.all([
-    db.select({ total: sql<number>`COALESCE(SUM(${apPayments.totalAmountCents}), 0)` })
+    tx.select({ total: sql<number>`COALESCE(SUM(${apPayments.totalAmountCents}), 0)` })
       .from(apPayments)
       .where(and(eq(apPayments.status, COMPLETED_AP_PAYMENT_STATUS), gte(apPayments.paymentDate, startOfMonth))),
-    db.select({ total: sql<number>`COALESCE(SUM(${apPayments.totalAmountCents}), 0)` })
+    tx.select({ total: sql<number>`COALESCE(SUM(${apPayments.totalAmountCents}), 0)` })
       .from(apPayments)
       .where(eq(apPayments.status, COMPLETED_AP_PAYMENT_STATUS)),
   ]);
@@ -2510,12 +2524,12 @@ export async function getApSummary(options: { now?: Date } = {}) {
     "paidAllTimeCents",
   );
 
-  const creditTotals=await db.execute(sql`SELECT coalesce(sum(a.applied_amount_cents),0) AS total
+  const creditTotals=await tx.execute(sql`SELECT coalesce(sum(a.applied_amount_cents),0) AS total
     FROM procurement.supplier_credit_applications a JOIN procurement.supplier_credits c ON c.id=a.supplier_credit_id
     LEFT JOIN procurement.supplier_credit_application_reversals r ON r.application_id=a.id WHERE c.status='approved' AND r.id IS NULL`);
   const creditedAllTimeCents=bigintMoneyToNumber(databaseMoneyToBigInt(creditTotals.rows[0]?.total??0,"creditedAllTimeCents"),"creditedAllTimeCents");
   // Recent payments (last 10)
-  const recentPayments = await db
+  const recentPayments = await tx
     .select({
       id: apPayments.id,
       paymentNumber: apPayments.paymentNumber,
@@ -2536,7 +2550,7 @@ export async function getApSummary(options: { now?: Date } = {}) {
   const openInvoiceCount = allOpen.length;
 
   // Recently paid invoices (last 10)
-  const recentlyPaid = await db
+  const recentlyPaid = await tx
     .select({
       id: vendorInvoices.id,
       invoiceNumber: vendorInvoices.invoiceNumber,
