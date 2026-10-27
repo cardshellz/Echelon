@@ -117,6 +117,31 @@ integration("durable customer action lookup and transactional source invalidatio
     const next = await store.claim(1, new Date(NOW.getTime() + 60_000), OTHER_LEASE);
     expect(next.map(value => value.omsOrderId)).toEqual([100]);
   });
+  it("does not hide unchanged display evidence just because its refresh is due", async () => {
+    const scope = await claim();
+    await store.complete(scope, SNAPSHOT, NOW, new Date(NOW.getTime() + 3_600_000), undefined, new Date(NOW.getTime() + 60_000));
+    expect((await read("100", new Date(NOW.getTime() + 120_000))).orders[0].state).toBe("ready");
+    expect((await store.claim(1, new Date(NOW.getTime() + 120_000), OTHER_LEASE))[0].omsOrderId).toBe(100);
+    expect((await read("100", new Date(NOW.getTime() + 3_600_000))).orders[0].state).toBe("refreshing");
+  });
+  it("does not starve a due failed inspection behind unbuilt history", async () => {
+    const scope = await claim();
+    await store.fail(scope, NOW, new Date(NOW.getTime() + 60_000), "ORDER_ACTION_INSPECTION_FAILED");
+    await pool.query("UPDATE oms.customer_order_actions SET lease_id=NULL,lease_until=NULL WHERE oms_order_id<>100");
+    expect((await store.claim(1, new Date(NOW.getTime() + 60_000), OTHER_LEASE))[0].omsOrderId).toBe(100);
+  });
+  it("gives unbuilt history a slot even when more than one populated panel is due", async () => {
+    await pool.query(`INSERT INTO oms.oms_orders(id,channel_id,external_order_id,external_order_number,external_customer_id,ordered_at)
+      OVERRIDING SYSTEM VALUE VALUES(300,36,'3000','#TEST-300','100',$1)`, [NOW]);
+    await store.drainInvalidations(1_000);
+    const scoped = new PostgresOrderActionProjectionStore(pool, ["test-shop.myshopify.com"], [100,300]);
+    for (const scope of await scoped.claim(2, NOW, LEASE))
+      await scoped.complete(scope, SNAPSHOT, NOW, new Date(NOW.getTime() + 60_000));
+    const claimed = await store.claim(2, new Date(NOW.getTime() + 60_000), OTHER_LEASE);
+    expect(claimed).toHaveLength(2);
+    expect(claimed.some(scope => scope.omsOrderId===200)).toBe(true);
+    expect(claimed.some(scope => scope.omsOrderId===100 || scope.omsOrderId===300)).toBe(true);
+  });
   it("a maintenance scope cannot seed or claim unrelated orders", async () => {
     await pool.query("DELETE FROM oms.customer_order_actions");
     const scoped = new PostgresOrderActionProjectionStore(pool, ["test-shop.myshopify.com", "other-shop.myshopify.com"], [100]);

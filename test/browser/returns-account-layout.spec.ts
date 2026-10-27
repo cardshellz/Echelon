@@ -8,7 +8,7 @@ import { customerReturnFlowReviewInputSchema } from "../../shared/returns/custom
 
 // Exercise the actual shipped IIFE and scoped stylesheet, not a component with
 // the staff app's global CSS. All transport is fictional and intercepted.
-async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?: boolean; holdReview?: Promise<void>; originalBox?: boolean; openReturn?: boolean } = {}) {
+async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?: boolean; holdReview?: Promise<void>; originalBox?: boolean; openReturn?: boolean; invalidateAfterFirstLookup?: boolean } = {}) {
   const service = new CustomerReturnPreviewService();
   const { mode: _mode, scenarioId: _scenario, ...fields } = service.lookup({ scenarioId: "split_delivered", orderReference: "TEST-1001" });
   const order = { ...fields, sourceRevision: "a".repeat(64), lines: [
@@ -25,7 +25,7 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     parcels: [{ parcelId: 30, number: 1, status: "ready", trackingNumber: "FIXTURE-TRACK", downloadPath: "/api/returns/customer/returns/20/parcels/30/download" }] };
   const calls: CustomerAccountRequest[] = [];
   const errors: string[] = [];
-  let reviewFailed = false, submitCount = 0;
+  let reviewFailed = false, submitCount = 0, actionReads = 0;
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/return-layout-assets/*", async (route) => {
@@ -44,9 +44,13 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10, currency: "USD", totalCents: 741, financialStatus: "Paid", cancelled: false, fulfillment: { code: "shipped", label: "Shipped" } }],
       unavailableExternalOrderIds: [], statusUnavailable: false,
     } });
-    if (input.path === "/account/order-actions") return route.fulfill({ json: { orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10,
-      state: "ready", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
-      snapshot: { order: actionOrder, returnOrder: detail, orderFailed: false, returnFailed: false } }] } });
+    if (input.path === "/account/order-actions") {
+      actionReads++;
+      const ready = !options.invalidateAfterFirstLookup || actionReads===1;
+      return route.fulfill({ json: { orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10,
+        state: ready ? "ready" : "refreshing", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
+        snapshot: ready ? { order: actionOrder, returnOrder: detail, orderFailed: false, returnFailed: false } : null }] } });
+    }
     if (input.path === "/order-edits/orders/10") return route.fulfill({ json: {
       connectionId: 4, omsOrderId: 10, orderNumber: "#TEST-1001", customerName: "Synthetic customer", customerEmail: null, activeOperationId: null, revision: "fixture", currency: "USD",
       eligibility: { editable: false, reasons: ["Picking or fulfillment has already started."] }, lines: [], totalCents: 741, financialStatus: "Paid", warehouseStatus: "shipped", fulfillment: { code: "shipped", label: "Shipped" },
@@ -82,7 +86,7 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     await page.getByRole("button", { name: "Return items", exact: true }).click();
     await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
   }
-  return { calls, errors, submitCount: () => submitCount };
+  return { calls, errors, submitCount: () => submitCount, actionReads: () => actionReads };
 }
 
 async function assertFrame(page: Page) {
@@ -140,6 +144,19 @@ test("an already-loaded order panel opens with its return action without workflo
   await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled({ timeout: 250 });
   expect(f.calls.slice(before)).toEqual([]);
   expect(f.calls.filter(call => call.path.startsWith("/order-edits/") || /^\/returns\/orders\//.test(call.path))).toEqual([]);
+});
+
+test("a visible account observes local invalidation while the panel is closed without provider inspection", async ({ page }) => {
+  await page.clock.install({ time: new Date() });
+  const f = await fixture(page, { openReturn: false, invalidateAfterFirstLookup: true });
+  await page.getByRole("button", { name: "Close order options" }).click();
+  await page.clock.fastForward(30_000);
+  await expect.poll(f.actionReads).toBe(2);
+  await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
+  await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeDisabled();
+  await expect(page.getByText("Order options are being refreshed. Your order has not changed.", { exact: true })).toBeVisible();
+  expect(f.calls.filter(call => call.path.startsWith("/order-edits/") || /^\/returns\/orders\//.test(call.path))).toEqual([]);
+  expect(f.errors).toEqual([]);
 });
 
 test("verified original dimensions are the default and Change box reveals prefilled editable fields", async ({ page }, info) => {

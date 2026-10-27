@@ -6,6 +6,10 @@ const ACTIVE_REFRESH_MS = 60_000;
 const RETURN_REFRESH_MS = 5 * 60_000;
 const CLOSED_REFRESH_MS = 24 * 60 * 60_000;
 const MAX_RETRY_MS = 30 * 60_000;
+// A refresh deadline is not a permission deadline. These are navigation/display
+// facts; every command still uses the existing fresh owners. Local source changes
+// invalidate immediately, and time-bound return eligibility expires at its window.
+const MAX_PRESENTATION_AGE_MS = 24 * 60 * 60_000;
 
 /** All slow provider inspection belongs here, never in account display reads.
  * A lease and generation compare prevent duplicate workers or a late inspection
@@ -38,11 +42,13 @@ export class OrderActionProjectionWorker {
             : snapshot.order?.activeOperationId || snapshot.order?.eligibility.editable ? ACTIVE_REFRESH_MS
               : snapshot.returnOrder?.order.lines.some(line => line.eligibleQuantity > 0) ? RETURN_REFRESH_MS : CLOSED_REFRESH_MS;
           const windowEnd = snapshot.returnOrder?.order.returnWindowEndsAt;
+          let validMs = MAX_PRESENTATION_AGE_MS;
           if (windowEnd && Date.parse(windowEnd) > instant.getTime())
-            refreshMs = Math.min(refreshMs, Date.parse(windowEnd) - instant.getTime());
-          const validUntil = new Date(instant.getTime() + refreshMs);
-          const published = failureClass ? await store.complete(scope, snapshot, instant, validUntil, failureClass)
-            : await store.complete(scope, snapshot, instant, validUntil);
+            validMs = Math.min(validMs, Date.parse(windowEnd) - instant.getTime());
+          refreshMs = Math.min(refreshMs, validMs);
+          const validUntil = new Date(instant.getTime() + validMs);
+          const refreshAt = new Date(instant.getTime() + refreshMs);
+          const published = await store.complete(scope, snapshot, instant, validUntil, failureClass, refreshAt);
           report({ action: "order_action_projection", outcome: published ? "published" : "superseded", omsOrderId: scope.omsOrderId,
             durationMs: instant.getTime() - started });
         } catch {

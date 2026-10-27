@@ -22,9 +22,9 @@ Two inspections can execute at once in each process. Work is leased with
 `FOR UPDATE SKIP LOCKED`, so different processes cannot claim the same order.
 Provider calls happen outside database transactions. A five-minute lease recovers
 interrupted workers; no work is leased ahead of its available execution slots.
-Due refreshes of already-populated panels take precedence over the initial
-historical backfill, which otherwise starts at negative infinity and could
-starve every existing panel.
+One available slot prefers due published evidence; another prefers unbuilt
+history. Either lane can use otherwise-idle capacity. Neither a busy refresh
+queue nor initial backfill can starve the other.
 
 Source triggers only append this module's invalidation events. They do not calculate
 eligibility, lock the derived row or modify their source records. Events are committed or
@@ -35,12 +35,14 @@ coalesces events into generation changes. Completion checks the lease, pending
 events, generation and current owner; a late
 inspection cannot replace newer evidence.
 
-Active/otherwise editable orders are refreshed at least once a minute. Returnable
-orders are refreshed within five minutes, including external updates whose local
-event has not arrived. Closed/ineligible orders are revisited daily. The exact
-return-window boundary shortens these deadlines even without an event. Local
-events invalidate immediately. The browser only polls the local lookup while a
-projection is pending or expires; it never requests background provider work.
+Active/otherwise editable orders are scheduled for refresh after one minute;
+returnable orders after five minutes; closed/ineligible orders daily. Scheduling
+a provider refresh does not make unchanged, verified navigation evidence unusable.
+Its separate hard validity is bounded to 24 hours and the exact return-window
+boundary. Local source events invalidate immediately. A visible page polls only
+the local lookup every 30 seconds (five seconds while pending), so it observes
+those invalidations without starting provider work. Existing fresh review and
+command owners, rather than this presentation evidence, authorize every mutation.
 
 Independent inspection failures do not discard the other capability's verified
 result. Known permanent faults wait for a source/configuration change. Transient

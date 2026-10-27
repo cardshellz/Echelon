@@ -25,7 +25,7 @@ export interface OrderActionProjectionStore extends OrderActionProjectionReader 
   seed(limit: number): Promise<number>;
   claim(limit: number, now: Date, leaseId: string): Promise<OrderActionScope[]>;
   complete(scope: OrderActionScope, snapshot: CustomerOrderActionSnapshot, now: Date, validUntil: Date,
-    failureClass?: "permanent" | "transient"): Promise<boolean>;
+    failureClass?: "permanent" | "transient", refreshAt?: Date): Promise<boolean>;
   fail(scope: OrderActionScope, now: Date, retryAt: Date, code: string): Promise<void>;
 }
 export interface OrderActionProjectionInspector {

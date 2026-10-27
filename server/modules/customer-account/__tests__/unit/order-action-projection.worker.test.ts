@@ -27,7 +27,8 @@ describe("background customer order action projection", () => {
     expect(h.store.drainInvalidations).toHaveBeenCalledExactlyOnceWith(1_000);
     expect(h.store.seed).toHaveBeenCalledExactlyOnceWith(200);
     expect(h.store.claim).toHaveBeenCalledExactlyOnceWith(2, NOW, scope.leaseId);
-    expect(h.store.complete).toHaveBeenCalledExactlyOnceWith(scope, snapshot, NOW, new Date(NOW.getTime() + 60_000));
+    expect(h.store.complete).toHaveBeenCalledExactlyOnceWith(scope, snapshot, NOW,
+      new Date(NOW.getTime() + 24 * 60 * 60_000), undefined, new Date(NOW.getTime() + 60_000));
     expect(h.store.fail).not.toHaveBeenCalled();
   });
   it("retains independent verified actions when return inspection failed", async () => {

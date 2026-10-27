@@ -228,7 +228,10 @@ function CustomerAccount({
     const refresh = () => { if (document.visibilityState === "visible") void loadActions(controller.signal); };
     const expires = [...actions.values()].map(row => row.validUntil ? Date.parse(row.validUntil) : 0).filter(value => value > Date.now());
     const pending = !actions.size || [...actions.values()].some(row => row.state === "refreshing");
-    const delay = pending ? 5_000 : expires.length ? Math.max(1_000, Math.min(...expires) - Date.now()) : null;
+    // This cheap local lookup observes source invalidations while the page stays
+    // visible. Provider refresh scheduling never controls whether a known panel
+    // can render, and opening the panel itself still starts no request.
+    const delay = pending ? 5_000 : expires.length ? Math.max(1_000, Math.min(30_000, Math.min(...expires) - Date.now())) : null;
     const timer = delay === null ? null : setTimeout(refresh, delay);
     document.addEventListener("visibilitychange", refresh);
     return () => { controller.abort(); if (timer !== null) clearTimeout(timer); document.removeEventListener("visibilitychange", refresh); };

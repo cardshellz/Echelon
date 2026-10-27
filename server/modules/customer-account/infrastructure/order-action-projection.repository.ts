@@ -88,7 +88,7 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
 
   async claim(limit: number, now: Date, leaseId: string): Promise<OrderActionScope[]> {
     z.number().int().min(1).max(10).parse(limit); z.date().parse(now); z.string().uuid().parse(leaseId);
-    const result = await this.pool.query(`WITH pending AS (
+    const result = await this.pool.query(`WITH eligible AS MATERIALIZED (
       SELECT p.oms_order_id,cc.id AS connection_id FROM oms.customer_order_actions p
       JOIN oms.oms_orders o ON o.id=p.oms_order_id JOIN channels.channels c ON c.id=o.channel_id
       JOIN channels.channel_connections cc ON cc.channel_id=c.id AND cc.shop_domain IS NOT NULL
@@ -100,10 +100,24 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
       AND (p.lease_until IS NULL OR p.lease_until<=$2)
       AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations dirty WHERE dirty.oms_order_id=o.id)
       AND (SELECT count(*) FROM channels.channel_connections sibling WHERE sibling.channel_id=c.id AND sibling.shop_domain IS NOT NULL)=1
-      -- Keep published evidence fresh while initial history is being populated.
-      -- New rows start at -infinity; ordering only by due time would starve every
-      -- already-built panel until the entire historical backlog had completed.
-      ORDER BY (p.verified_at IS NOT NULL) DESC,p.next_refresh_at,p.oms_order_id DESC LIMIT $1 FOR UPDATE OF p SKIP LOCKED
+    ), first_slot AS MATERIALIZED (
+      SELECT p.oms_order_id,eligible.connection_id FROM eligible
+      JOIN oms.customer_order_actions p ON p.oms_order_id=eligible.oms_order_id
+      WHERE p.next_refresh_at<=$2 AND (p.lease_until IS NULL OR p.lease_until<=$2)
+      ORDER BY (p.verified_at IS NOT NULL OR p.attempts>0) DESC,p.next_refresh_at,p.oms_order_id DESC
+      LIMIT 1 FOR UPDATE OF p SKIP LOCKED
+    ), remaining_slots AS MATERIALIZED (
+      SELECT p.oms_order_id,eligible.connection_id FROM eligible
+      JOIN oms.customer_order_actions p ON p.oms_order_id=eligible.oms_order_id
+      WHERE p.next_refresh_at<=$2 AND (p.lease_until IS NULL OR p.lease_until<=$2)
+      AND p.oms_order_id NOT IN(SELECT oms_order_id FROM first_slot)
+      -- One immediately-executable slot prefers due published evidence; another
+      -- prefers unbuilt history. Either lane may use idle capacity in the other.
+      -- Neither a busy active-order lane nor initial backfill can starve the other.
+      ORDER BY (p.verified_at IS NULL) DESC,p.next_refresh_at,p.oms_order_id DESC
+      LIMIT ($1-(SELECT count(*) FROM first_slot)) FOR UPDATE OF p SKIP LOCKED
+    ), pending AS (
+      SELECT * FROM first_slot UNION ALL SELECT * FROM remaining_slots
     ), leased AS (UPDATE oms.customer_order_actions p SET lease_id=$3,lease_until=$4
       FROM pending WHERE pending.oms_order_id=p.oms_order_id
       RETURNING p.*,pending.connection_id)
@@ -115,9 +129,9 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
   }
 
   async complete(raw: OrderActionScope, snapshot: CustomerOrderActionSnapshot, now: Date, validUntil: Date,
-    failureClass?: "permanent" | "transient"): Promise<boolean> {
+    failureClass?: "permanent" | "transient", refreshAt: Date = validUntil): Promise<boolean> {
     const scope = orderActionScopeSchema.parse(raw); const value = customerOrderActionSnapshotSchema.parse(snapshot);
-    z.date().parse(now); z.date().min(now).parse(validUntil);
+    z.date().parse(now); z.date().min(now).parse(validUntil); z.date().min(now).max(validUntil).parse(refreshAt);
     customerOrderActionsSchema.parse({ externalOrderId: scope.externalOrderId, orderReference: scope.orderReference,
       omsOrderId: scope.omsOrderId, state: "ready", verifiedAt: now.toISOString(), validUntil: validUntil.toISOString(), snapshot: value });
     if (value.order && value.order.connectionId !== scope.connectionId) throw new Error("ORDER_ACTION_CONNECTION_MISMATCH");
@@ -125,7 +139,7 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
     const classification = failed ? z.enum(["permanent", "transient"]).parse(failureClass ?? "transient") : null;
     const result = await this.pool.query(`UPDATE oms.customer_order_actions p SET
       snapshot=$4::jsonb,computed_generation=generation,verified_at=$5,valid_until=$6,
-      next_refresh_at=CASE WHEN $11::text='permanent' OR ($11::text='transient' AND attempts>=4) THEN 'infinity'::timestamptz ELSE $6 END,
+      next_refresh_at=CASE WHEN $11::text='permanent' OR ($11::text='transient' AND attempts>=4) THEN 'infinity'::timestamptz ELSE $12 END,
       lease_id=NULL,lease_until=NULL,attempts=CASE WHEN $11::text IS NULL THEN 0 ELSE LEAST(attempts+1,30) END,
       last_error_code=CASE WHEN $11::text IS NULL THEN NULL ELSE 'ORDER_ACTION_PARTIAL_INSPECTION_FAILED' END,
       last_error_class=CASE WHEN $11::text='transient' AND attempts>=4 THEN 'permanent' ELSE $11::text END
@@ -134,7 +148,7 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
       AND EXISTS(SELECT 1 FROM oms.oms_orders o WHERE o.id=p.oms_order_id AND o.channel_id=$7
         AND o.external_customer_id=$8 AND o.external_order_id IN ($9,$10))`,
     [scope.omsOrderId, scope.generation, scope.leaseId, JSON.stringify(value), now, validUntil, scope.channelId,
-      scope.externalCustomerId, scope.externalOrderId, `gid://shopify/Order/${scope.externalOrderId}`, classification]);
+      scope.externalCustomerId, scope.externalOrderId, `gid://shopify/Order/${scope.externalOrderId}`, classification, refreshAt]);
     if (!result.rowCount) await this.pool.query(`UPDATE oms.customer_order_actions SET lease_id=NULL,lease_until=NULL
       WHERE oms_order_id=$1 AND lease_id=$2`, [scope.omsOrderId, scope.leaseId]);
     return result.rowCount === 1;
