@@ -12,12 +12,14 @@ import { EbayAutomaticPublicationRecoveryService } from "../application/ebay-aut
 import { PostgresEbayAutomaticPublicationRecoveryRepository } from "./ebay-automatic-publication-recovery.repository";
 import { PostgresEbayPublicationReconciliationRepository } from "./ebay-publication-reconciliation.repository";
 import { PostgresEbayPublicationRejectionReader } from "./ebay-publication-rejection.reader";
+import { PostgresEbayLegacyMaintenanceEvidenceReader } from "../../channels/infrastructure/ebay-legacy-maintenance-evidence";
 
 /** Shared production instance bounds nested provider connections across the known quantity owners. */
 export const quantityPublicationAdmission = new PostgresQuantityPublicationAdmission(pool);
 export const quantityProviderResponseRecovery = new PostgresQuantityProviderResponseRecovery(pool, () => new Date());
 export const ebayPublicationRejectionReader = new PostgresEbayPublicationRejectionReader(pool);
-export const automaticEbayPublicationRecovery = new EbayAutomaticPublicationRecoveryService(new PostgresEbayAutomaticPublicationRecoveryRepository(pool));
+export const automaticEbayPublicationRecovery = new EbayAutomaticPublicationRecoveryService(
+  new PostgresEbayAutomaticPublicationRecoveryRepository(pool, new PostgresEbayLegacyMaintenanceEvidenceReader()));
 export const ebayPublicationReconciliationRepository = new PostgresEbayPublicationReconciliationRepository(pool);
 
 function ebayRequestAdmission(base: Omit<QuantityPublicationScope, "externalInventoryItemId">,
