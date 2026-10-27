@@ -176,22 +176,60 @@ describe("private live order inspection", () => {
     shopifyFacts.order.id = gid("Order", localFacts.order.externalOrderId);
     expect((await service.lookup(lookup)).lines[0].eligibleQuantity).toBe(2);
   });
-  it.each(["shop", "order", "reference", "purchase", "country", "line", "quantity", "shipping"])("rejects conflicting %s identity", async kind => {
+  it.each(["shop", "order", "reference", "country", "line", "quantity", "shipping"])("rejects conflicting %s identity", async kind => {
     const { service, shopifyFacts } = setup();
     if (kind === "shop") shopifyFacts.shop.connectionId = 5;
     if (kind === "order") shopifyFacts.order.id = gid("Order", 9999);
     if (kind === "reference") shopifyFacts.order.name = "#12-A";
-    if (kind === "purchase") shopifyFacts.order.createdAt = "2026-09-02T12:00:00.000Z";
     if (kind === "country") shopifyFacts.order.destinationCountryCode = "CA";
     if (kind === "line") shopifyFacts.lines[0].id = gid("LineItem", 9999);
     if (kind === "quantity") shopifyFacts.lines[0].quantity = 4;
     if (kind === "shipping") shopifyFacts.lines[0].requiresShipping = false;
     await expect(service.lookup(lookup)).rejects.toMatchObject({ code: "RETURN_LIVE_DATA_UNVERIFIED" });
   });
-  it("matches the ingested createdAt order date without conflating Shopify processedAt", async () => {
+  it("uses the verified Shopify creation date without conflating processedAt", async () => {
     const { service, shopifyFacts } = setup();
     shopifyFacts.order.processedAt = "2026-08-31T12:00:00.000Z";
     expect((await service.lookup(lookup)).purchasedAt).toBe(shopifyFacts.order.createdAt);
+  });
+  it.each(["2026-09-01T12:00:01.901Z", "2021-01-01T00:00:00.000Z", "2026-09-22T23:59:59.999Z"])(
+    "uses the sales-channel purchase date when the stored OMS date is %s without rewriting either source", async purchasedAt => {
+      const s = setupCanonical();
+      s.policies.read.mockResolvedValue([labelActivePolicy({ returnWindowDays: 30 })]);
+      const baseline = await s.service.lookupCanonical(s.scope);
+      s.localFacts.order.purchasedAt = purchasedAt;
+      const before = structuredClone({ local: s.localFacts, provider: s.shopifyFacts });
+      for (const order of [await s.service.lookup(lookup), await s.service.lookupCanonical(s.scope)]) {
+        expect(order.purchasedAt).toBe(s.shopifyFacts.order.createdAt);
+        expect(order.returnWindowEndsAt).toBe(baseline.returnWindowEndsAt);
+        expect(order.lines.map(line => line.eligibleQuantity)).toEqual([2, 1]);
+      }
+      await expect(s.service.reviewCanonical(await reviewInput(s.service), s.scope)).resolves.toMatchObject({ effects: "none" });
+      expect({ local: s.localFacts, provider: s.shopifyFacts }).toEqual(before);
+    },
+  );
+  it.each(["local", "provider"])("still rejects an invalid %s purchase timestamp", async source => {
+    const s = setupCanonical();
+    if (source === "local") s.localFacts.order.purchasedAt = "invalid";
+    else s.shopifyFacts.order.createdAt = "invalid";
+    await expect(s.service.lookupCanonical(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_DATA_UNVERIFIED" });
+  });
+  it("still rejects a stored date changed while Shopify evidence is being read", async () => {
+    const s = setupCanonical();
+    s.local.read.mockResolvedValueOnce(structuredClone(s.localFacts));
+    s.localFacts.order.purchasedAt = "2026-09-01T12:00:01.901Z";
+    await expect(s.service.lookupCanonical(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_REVIEW_CHANGED" });
+  });
+  it("invalidates review when the sales-channel purchase date changes and uses it for the window", async () => {
+    const s = setupCanonical();
+    s.policies.read.mockResolvedValue([labelActivePolicy({ returnWindowDays: 30 })]);
+    const initial = await s.service.lookupCanonical(s.scope);
+    const input = await reviewInput(s.service);
+    s.shopifyFacts.order.createdAt = "2026-09-02T12:00:00.000Z";
+    const changed = await s.service.lookupCanonical(s.scope);
+    expect(changed.purchasedAt).toBe(s.shopifyFacts.order.createdAt);
+    expect(Date.parse(changed.returnWindowEndsAt) - Date.parse(initial.returnWindowEndsAt)).toBe(86_400_000);
+    await expect(s.service.reviewCanonical(input, s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_REVIEW_CHANGED" });
   });
   it.each(["United States", "United States of America", "USA", " u.s. ", "us"])(
     "verifies a stored country alias %s without changing ownership, quantities, or raw evidence", async country => {
@@ -207,11 +245,13 @@ describe("private live order inspection", () => {
       await expect(s.service.lookupCanonical(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_ORDER_NOT_FOUND" });
     },
   );
-  it("inspects a historical cancelled, unfulfilled order stored with a full country name as ineligible", async () => {
+  it.each(["2021-10-18T15:30:08.000Z", "2021-10-18T15:30:09.901Z"])(
+    "inspects a historical cancelled, unfulfilled order with stored date %s as ineligible", async storedDate => {
     const s = setupCanonical();
     const purchasedAt = "2021-10-18T15:30:08.000Z";
     s.localFacts.order.shipToCountry = "United States";
-    s.localFacts.order.purchasedAt = purchasedAt;
+    s.localFacts.order.purchasedAt = storedDate;
+    s.localFacts.order.cancelledAt = "2021-10-19T10:25:19.000Z";
     s.localFacts.lines = [{ ...s.localFacts.lines[0], quantity: 1 }];
     s.shopifyFacts.order.createdAt = purchasedAt;
     s.shopifyFacts.order.processedAt = purchasedAt;
