@@ -54,6 +54,14 @@ const resolution = () => ({ shipmentId: 42, purchaseOrderId: 17, shipmentNumber:
   receivePlan: { productVariantId: 2, unitsPerVariant: 1, expectedQty: 501, countsAsPieces: true, preferredVariantId: 3, preferredUnitsPerVariant: 50 },
 }] });
 describe("shipment receive plan preflight", () => {
+  it("requires manual choice review and rejects a plan that differs from the selected configuration", () => {
+    const value = { ...resolution(), receiptUnitSelections: [{ shipmentLineId: 7, productVariantId: 2, unitsPerVariant: 1, expectedBaseQty: 501 }] };
+    const parsed = parseShipmentReceiptResolution(value, { shipmentId: 42, purchaseOrderId: 17 });
+    expect(requiresReceiptUnitReview(parsed)).toBe(true);
+    for (const patch of [{ productVariantId: 3 }, { expectedBaseQty: 500 }, { unitsPerVariant: 50 }, { shipmentLineId: 999 }]) {
+      expect(() => parseShipmentReceiptResolution({ ...value, receiptUnitSelections: [{ ...value.receiptUnitSelections[0], ...patch }] }, { shipmentId: 42, purchaseOrderId: 17 })).toThrow(/do not match/);
+    }
+  });
   it("requires review for 501 pieces in 11 cartons and proves the plan preserves shipped pieces", () => {
     const result = parseShipmentReceiptResolution(resolution(), { shipmentId: 42, purchaseOrderId: 17 });
     expect(requiresReceiptUnitReview(result)).toBe(true);
