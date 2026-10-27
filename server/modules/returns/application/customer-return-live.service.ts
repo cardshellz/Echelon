@@ -272,8 +272,11 @@ function verifyProviderOwnership(provider: CustomerReturnShopifySnapshot, scope:
   }
 }
 
-// The existing Shopify ingestion writes created_at to OMS ordered_at. processedAt
-// can differ for imported/backdated orders and is not that field's provenance.
+// Identity comes from the exact channel/order/customer and purchased-line links,
+// not a replicated order date. Legacy OMS ingestion can retain a receipt time.
+// The freshly verified Shopify createdAt owns purchase/window calculations;
+// processedAt and local ordered_at must not override it. Both observations remain
+// validated and included in sourceRevision, so mid-read/review changes still fail.
 function verifyIdentity(local: CustomerReturnLocalInspectionSnapshot, provider: CustomerReturnShopifySnapshot, reference: string): void {
   // Legacy OMS imports retain country names; Shopify returns ISO codes. Compare
   // their identities without rewriting evidence or inventing a missing country.
@@ -282,7 +285,6 @@ function verifyIdentity(local: CustomerReturnLocalInspectionSnapshot, provider: 
   if (provider.shop.channelId !== local.shop.channelId || provider.shop.connectionId !== local.shop.connectionId
     || provider.shop.shopDomain !== local.shop.shopDomain || provider.order.id !== gid("Order", local.order.externalOrderId)
     || sourceOrderReference(provider.order.name) !== reference
-    || Date.parse(provider.order.createdAt) !== Date.parse(local.order.purchasedAt)
     || provider.order.destinationCountryCode !== localCountry
     || local.lines.length !== provider.lines.length) throw unavailable();
   const localIds = new Set<string>();
