@@ -7,18 +7,15 @@ import { readIntegerMills, readIntegerCents } from "@shared/money-read";
  * go on — but each warning is logged persistently through the PO exceptions
  * pattern (payload-hash deduped) and shown inline in the UI.
  *
- * Three detector families:
- *   1. UOM disagreement — the receiving variant's units_per_variant disagrees
- *      with the linked PO line's UOM fields (units_per_uom /
- *      expected_receive_units_per_variant), or the variant is_base_unit while
- *      the PO line implies a pack size > 1. (The March 2026 incident class.)
- *   2. Cost way off — resolved per-piece cost differs from the PO line's
+ * Cost way off — resolved per-piece cost differs from the PO line's
  *      implied per-piece cost by more than a configurable threshold (default
  *      ±25%, echelon_settings key `receiving_cost_variance_warn_pct`), or is
  *      an order of magnitude off (ratio > 5× or < 0.2×) — hard warn.
- *   3. Variant config sanity — case-named variant (units_per_variant > 1)
- *      flagged is_base_unit. Conversion permissions are not receiving warnings:
- *      they belong to the reviewed transformation model, never parent links.
+ * The receiving owner validates and saves the receipt's count configuration.
+ * That frozen factor owns inventory, lot costs and PO received pieces. A PO's
+ * preferred pack or catalog classification cannot invalidate a saved receipt
+ * configuration. Unit/source errors are rejected by the receiving command;
+ * they are not advisory comparisons against another document's pack size.
  *
  * Money discipline (Rule #3): integer mills only. Ratios are computed with
  * integer cross-multiplication — no floats anywhere on the money path.
@@ -29,11 +26,11 @@ import { sql } from "drizzle-orm";
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export const RECEIVE_WARNING_KINDS = [
-  "uom_disagreement",
-  "base_unit_pack_conflict",
+  "uom_disagreement", // Historical records only; never emitted for a saved configuration.
+  "base_unit_pack_conflict", // Historical records only.
   "cost_variance_soft",
   "cost_variance_hard",
-  "variant_base_unit_misconfig",
+  "variant_base_unit_misconfig", // Historical catalog-classification warning only.
   "variant_missing_parent", // Historical warning records only; no current detector emits this.
 ] as const;
 export type ReceiveWarningKind = typeof RECEIVE_WARNING_KINDS[number];
@@ -55,7 +52,7 @@ export type ReceiveWarningInput = {
   // Resolved per-PIECE cost on the receiving line (mills authoritative).
   unitCostMills?: number | null;
   unitCostCents?: number | null;
-  // Receiving variant (looked up live).
+  /** @deprecated Accepted for older callers; a live catalog variant is not the receipt's count authority. */
   variant?: {
     id: number;
     unitsPerVariant: number;
@@ -69,10 +66,13 @@ export type ReceiveWarningInput = {
   // Linked PO line.
   poLine?: {
     id: number;
-    orderQty: number;
+    /** @deprecated Purchase quantity does not define the saved receipt pack. */
+    orderQty?: number;
     unitCostMills?: number | null;
     unitCostCents?: number | null;
+    /** @deprecated A PO pack preference is not a receiving validation rule. */
     unitsPerUom?: number | null;
+    /** @deprecated The saved receipt configuration supersedes this preference. */
     expectedReceiveUnitsPerVariant?: number | null;
   } | null;
 };
@@ -99,56 +99,9 @@ export function evaluateReceiveWarnings(
   const warnings: ReceiveWarning[] = [];
   const warnPct = normalizeWarnPct(opts.costVarianceWarnPct);
 
-  const variant = input.variant ?? null;
   const poLine = input.poLine ?? null;
-  const unitsPerVariant = Math.max(1, Number(variant?.unitsPerVariant) || 1);
 
-  // ── 1. UOM disagreement ────────────────────────────────────────────────
-  if (poLine && variant) {
-    const poImpliedPack = resolvePoImpliedPackSize(poLine);
-    if (poImpliedPack !== null && poImpliedPack !== unitsPerVariant) {
-      warnings.push({
-        kind: "uom_disagreement",
-        severity: "warn",
-        receivingLineId: input.receivingLineId,
-        purchaseOrderLineId: poLine.id,
-        title: "Receive UOM disagrees with PO line",
-        detail:
-          `Receiving variant packs ${unitsPerVariant} piece${unitsPerVariant === 1 ? "" : "s"} ` +
-          `but the PO line implies ${poImpliedPack} per receive unit. ` +
-          `Received qty is interpreted in the variant's units — verify the pack size before closing.`,
-        payload: {
-          receivingLineId: input.receivingLineId,
-          purchaseOrderLineId: poLine.id,
-          variantUnitsPerVariant: unitsPerVariant,
-          poImpliedPackSize: poImpliedPack,
-        },
-      });
-    }
-
-    // Variant flagged base-unit while the PO line implies a pack > 1.
-    if (variant.isBaseUnit === true && poImpliedPack !== null && poImpliedPack > 1) {
-      warnings.push({
-        kind: "base_unit_pack_conflict",
-        severity: "warn",
-        receivingLineId: input.receivingLineId,
-        purchaseOrderLineId: poLine.id,
-        title: "Base-unit variant vs PO pack size",
-        detail:
-          `Receiving variant is flagged as the base unit but the PO line implies ` +
-          `a pack size of ${poImpliedPack}. A base-unit variant receiving against a ` +
-          `case-priced PO line posts pieces as cases (the March 2026 incident class).`,
-        payload: {
-          receivingLineId: input.receivingLineId,
-          purchaseOrderLineId: poLine.id,
-          variantIsBaseUnit: true,
-          poImpliedPackSize: poImpliedPack,
-        },
-      });
-    }
-  }
-
-  // ── 2. Cost way off ────────────────────────────────────────────────────
+  // Both prices are per piece, independent of the receipt's chosen pack size.
   if (poLine) {
     const actualMills = resolvePerPieceMills(input.unitCostMills, input.unitCostCents);
     const poMills = resolvePerPieceMills(poLine.unitCostMills, poLine.unitCostCents);
@@ -182,30 +135,6 @@ export function evaluateReceiveWarnings(
     }
   }
 
-  // ── 3. Variant config sanity ───────────────────────────────────────────
-  if (variant) {
-    if (unitsPerVariant > 1 && variant.isBaseUnit === true) {
-      warnings.push({
-        kind: "variant_base_unit_misconfig",
-        severity: "warn",
-        receivingLineId: input.receivingLineId,
-        purchaseOrderLineId: poLine?.id,
-        title: "Case-sized variant flagged as base unit",
-        detail:
-          `Variant "${variant.name ?? variant.id}" packs ${unitsPerVariant} pieces but is ` +
-          `flagged is_base_unit. Catalog misconfiguration — receiving will credit ` +
-          `${unitsPerVariant}× too few pieces per unit.`,
-        payload: {
-          receivingLineId: input.receivingLineId,
-          variantId: variant.id,
-          unitsPerVariant,
-          isBaseUnit: true,
-        },
-      });
-    }
-
-  }
-
   return warnings;
 }
 
@@ -218,29 +147,15 @@ function normalizeWarnPct(value: number | undefined): number {
   return parsed;
 }
 
-/**
- * The pack size the PO line implies for receiving. Prefers
- * expected_receive_units_per_variant (the modern field), falls back to the
- * legacy units_per_uom. Returns null when neither implies a pack size
- * (both unset or <= 1 means pieces — no disagreement possible).
- */
-function resolvePoImpliedPackSize(poLine: {
-  unitsPerUom?: number | null;
-  expectedReceiveUnitsPerVariant?: number | null;
-}): number | null {
-  const expected = Number(poLine.expectedReceiveUnitsPerVariant);
-  if (Number.isSafeInteger(expected) && expected > 0) return expected;
-  const legacy = Number(poLine.unitsPerUom);
-  if (Number.isSafeInteger(legacy) && legacy > 0) return legacy;
-  return null;
-}
-
 function resolvePerPieceMills(
   mills: number | null | undefined,
   cents: number | null | undefined,
 ): number | null {
   if (typeof mills === "number" && Number.isSafeInteger(mills) && mills >= 0) return mills;
-  if (typeof cents === "number" && Number.isSafeInteger(cents) && cents >= 0) return cents * 100;
+  if (typeof cents === "number" && Number.isSafeInteger(cents) && cents >= 0) {
+    const millsFromCents = BigInt(cents) * BigInt(100);
+    return millsFromCents <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(millsFromCents) : null;
+  }
   return null;
 }
 
@@ -250,8 +165,8 @@ function resolvePerPieceMills(
  */
 function isHardVariance(actualMills: number, poMills: number): boolean {
   return (
-    actualMills > poMills * COST_VARIANCE_HARD_RATIO_NUM ||
-    actualMills * COST_VARIANCE_HARD_RATIO_NUM < poMills
+    BigInt(actualMills) > BigInt(poMills) * BigInt(COST_VARIANCE_HARD_RATIO_NUM) ||
+    BigInt(actualMills) * BigInt(COST_VARIANCE_HARD_RATIO_NUM) < BigInt(poMills)
   );
 }
 
@@ -260,12 +175,12 @@ function isHardVariance(actualMills: number, poMills: number): boolean {
  * |actual - po| × 100 > po × pct (integer math only).
  */
 function isSoftVariance(actualMills: number, poMills: number, pct: number): boolean {
-  const diff = Math.abs(actualMills - poMills);
-  return diff * 100 > poMills * pct;
+  const delta = BigInt(actualMills) - BigInt(poMills);
+  const diff = delta < BigInt(0) ? -delta : delta;
+  return diff * BigInt(100) > BigInt(poMills) * BigInt(pct);
 }
 
 export const __testing__ = {
-  resolvePoImpliedPackSize,
   resolvePerPieceMills,
   isHardVariance,
   isSoftVariance,
@@ -274,8 +189,8 @@ export const __testing__ = {
 
 // ── Fact-gathering service ──────────────────────────────────────────────────
 //
-// Pulls the live variant / PO-line facts for each receiving line and runs the
-// pure evaluator. Used by:
+// Reads per-piece receipt/PO prices in one statement and runs the pure
+// evaluator. Pack conversion remains owned by the saved receipt. Used by:
 //   * the receive UI preview endpoint (GET .../validation-warnings), and
 //   * the receiving close path, which persists warnings through the PO
 //     exceptions pattern (payload-hash deduped, detectQtyVariance-style).
@@ -304,9 +219,11 @@ export class ReceiveValidationService {
              rl.received_qty,
              rl.unit_cost,
              rl.unit_cost_mills,
-             rl.product_variant_id,
-             rl.product_id
+             po.id AS matched_po_line_id,
+             po.unit_cost_mills AS po_unit_cost_mills,
+             po.unit_cost_cents AS po_unit_cost_cents
       FROM procurement.receiving_lines rl
+      LEFT JOIN procurement.purchase_order_lines po ON po.id=rl.purchase_order_line_id
       WHERE rl.receiving_order_id = ${receivingOrderId}
         AND rl.received_qty > 0
       ORDER BY rl.id
@@ -315,51 +232,14 @@ export class ReceiveValidationService {
 
     const warnings: ReceiveWarning[] = [];
     for (const row of lineRows.rows) {
-      const variantId = Number(row.product_variant_id);
-      let variant: ReceiveWarningInput["variant"] = null;
-
-      if (Number.isSafeInteger(variantId) && variantId > 0) {
-        const variantRows = await this.db.execute(sql`
-          SELECT id, units_per_variant, is_base_unit, name, product_id
-          FROM catalog.product_variants
-          WHERE id = ${variantId}
-          LIMIT 1
-        `);
-        const v = variantRows.rows?.[0];
-        if (v) {
-          variant = {
-            id: Number(v.id),
-            unitsPerVariant: Math.max(1, Number(v.units_per_variant) || 1),
-            isBaseUnit: v.is_base_unit === true,
-            name: v.name ?? null,
-          };
-        }
-      }
-
       let poLine: ReceiveWarningInput["poLine"] = null;
-      const poLineId = Number(row.purchase_order_line_id);
+      const poLineId = Number(row.matched_po_line_id);
       if (Number.isSafeInteger(poLineId) && poLineId > 0) {
-        const poLineRows = await this.db.execute(sql`
-          SELECT id, order_qty, unit_cost_mills, unit_cost_cents,
-                 units_per_uom, expected_receive_units_per_variant
-          FROM procurement.purchase_order_lines
-          WHERE id = ${poLineId}
-          LIMIT 1
-        `);
-        const p = poLineRows.rows?.[0];
-        if (p) {
-          poLine = {
-            id: Number(p.id),
-            orderQty: Number(p.order_qty) || 0,
-            unitCostMills: p.unit_cost_mills === null ? null : readIntegerMills(p.unit_cost_mills, "unit cost", true),
-            unitCostCents: p.unit_cost_cents === null ? null : readIntegerCents(p.unit_cost_cents, "unit cost", true),
-            unitsPerUom: p.units_per_uom === null ? null : Number(p.units_per_uom),
-            expectedReceiveUnitsPerVariant:
-              p.expected_receive_units_per_variant === null
-                ? null
-                : Number(p.expected_receive_units_per_variant),
-          };
-        }
+        poLine = {
+          id: poLineId,
+          unitCostMills: row.po_unit_cost_mills === null ? null : readIntegerMills(row.po_unit_cost_mills, "PO unit cost", true),
+          unitCostCents: row.po_unit_cost_cents === null ? null : readIntegerCents(row.po_unit_cost_cents, "PO unit cost", true),
+        };
       }
 
       warnings.push(
@@ -370,7 +250,6 @@ export class ReceiveValidationService {
             receivedQty: Number(row.received_qty) || 0,
             unitCostMills: row.unit_cost_mills === null ? null : readIntegerMills(row.unit_cost_mills, "unit cost", true),
             unitCostCents: row.unit_cost === null ? null : readIntegerCents(row.unit_cost, "received unit cost", true),
-            variant,
             poLine,
           },
           { costVarianceWarnPct: warnPct },

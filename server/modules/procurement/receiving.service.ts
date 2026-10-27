@@ -1251,10 +1251,10 @@ export class ReceivingService {
     return { order: updatedOrder, lines, line, before: order };
   }
 
-  private async loadReceiveVariant(tx: any, variantId: number, expectedProductId?: unknown): Promise<{ id: number; productId: number; unitsPerVariant: number }> {
+  private async loadReceiveVariant(tx: any, variantId: number, expectedProductId?: unknown): Promise<{ id: number; productId: number; unitsPerVariant: number; sku: string | null }> {
     receiptInteger(variantId, "Receive variant ID", true);
     const rows = await tx.execute(sql`
-      SELECT id, product_id, units_per_variant, is_active
+      SELECT id, product_id, units_per_variant, is_active, sku
       FROM catalog.product_variants WHERE id = ${variantId} FOR SHARE
     `);
     const variant = rows.rows?.[0];
@@ -1266,7 +1266,7 @@ export class ReceivingService {
     if (expectedProductId != null && Number(expectedProductId) !== productId) {
       throw new ReceivingError("The receive variant belongs to a different product than this receipt line.", 409, { code: "RECEIVING_VARIANT_PRODUCT_MISMATCH", productVariantId: variantId });
     }
-    return { id: variantId, productId, unitsPerVariant };
+    return { id: variantId, productId, unitsPerVariant, sku: typeof variant.sku === "string" ? variant.sku : null };
   }
 
   private validateReceiptBaseCounts(line: Record<string, unknown>, factor: number): void {
@@ -1350,6 +1350,9 @@ export class ReceivingService {
         }
         updates.productId = variant.productId;
         updates.unitsPerVariantSnapshot = variant.unitsPerVariant;
+        // The receipt's scan/display identity must follow its saved count
+        // configuration too. The unit audit retains the original source label.
+        if (variant.sku !== null) updates.sku = variant.sku;
       } else if (confirmLegacyUnit) {
         throw new ReceivingError("Unit confirmation requires an explicit receive variant.", 400);
       }
