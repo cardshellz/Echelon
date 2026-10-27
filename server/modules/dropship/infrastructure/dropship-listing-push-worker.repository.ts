@@ -20,6 +20,12 @@ import { restoreListingsOfCancelledItems, syncRunTargetsOfItems } from "./dropsh
 import { updateMarketplaceIssueCodesWithClient } from "./dropship-marketplace-listing-sync-state.repository";
 import { recordPreviousMarketplaceIdWithClient } from "./dropship-marketplace-previous-ids.repository";
 import type { MarketplaceIssueCode } from "../domain/marketplace-sync-decision";
+import {
+  decideListingEndFence,
+  type ListingEndFenceOutcome,
+  type ListingPushItemStart,
+  type OpenListingEndState,
+} from "../domain/listing-end-fence";
 
 /**
  * Listing issues a completed push disproves (eBay sync-back plan v4 §5 step 7): eBay took the write, so the listing
@@ -199,7 +205,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
     itemId: number;
     workerId: string;
     now: Date;
-  }): Promise<boolean> {
+  }): Promise<ListingPushItemStart> {
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
@@ -222,6 +228,13 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
            AND status = 'processing'`,
         [input.jobId, input.now],
       );
+      // PR C's push fence (PLAN-C v4.1 §6.2), before the stopped-run branch so its "send once more" is fenced too.
+      const fence = await readListingEndFenceWithClient(client, input);
+      if (fence !== null) {
+        // The item is left as it is: the worker blocks or skips it (nothing is sent).
+        await client.query("COMMIT");
+        return fence;
+      }
       const stoppedRun = run.rows[0]?.cancel_requested_at ? run.rows[0] : null;
       if (stoppedRun) {
         const cancelRequestedAt = stoppedRun.cancel_requested_at as Date;
@@ -254,7 +267,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
             occurredAt: input.now,
           });
           await client.query("COMMIT");
-          return true;
+          return "started";
         }
         // Anything else the queue holds after the stop (a pause, a staff retry) is cancelled now, never started
         // (review MC4).
@@ -283,7 +296,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
           });
         }
         await client.query("COMMIT");
-        return false;
+        return "not_started";
       }
       // Guarded: an item a stop cancelled, or another worker took, is never started.
       const result = await client.query(
@@ -296,7 +309,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
         [input.jobId, input.itemId, input.now],
       );
       await client.query("COMMIT");
-      return result.rowCount === 1;
+      return result.rowCount === 1 ? "started" : "not_started";
     } catch (error) {
       await rollbackQuietly(client);
       throw error;
@@ -459,11 +472,20 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
-      const skipped = await client.query(
-        `UPDATE dropship.dropship_listing_push_job_items
+      // The status before, for the audit row: `processing` after a pre-read stop, `queued` for an item PR C's push
+      // fence never started (PLAN-C v4.1 §6.2). The CTE only reports it; the row is locked as the update locks it.
+      const skipped = await client.query<{ previous_status: string }>(
+        `WITH current_item AS (
+           SELECT id, status FROM dropship.dropship_listing_push_job_items
+           WHERE id = $1 AND status IN ('queued', 'processing')
+           FOR UPDATE
+         )
+         UPDATE dropship.dropship_listing_push_job_items AS item
          SET status = 'cancelled', error_code = $2, error_message = $3,
-             result = COALESCE(result, '{}'::jsonb) || $4::jsonb, updated_at = $5
-         WHERE id = $1 AND status IN ('queued', 'processing')`,
+             result = COALESCE(item.result, '{}'::jsonb) || $4::jsonb, updated_at = $5
+         FROM current_item
+         WHERE item.id = current_item.id
+         RETURNING current_item.status AS previous_status`,
         [input.item.itemId, input.code, input.message,
           JSON.stringify({ push: { status: "skipped", errorCode: input.code, errorMessage: input.message, retryable: false,
             workerId: input.workerId, processedAt: input.now.toISOString() } }),
@@ -487,7 +509,8 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
           entityId: String(input.item.itemId),
           eventType: "listing_push_item_skipped",
           actorId: input.workerId,
-          payload: { jobId: input.job.jobId, listingId: input.item.listingId, code: input.code, before: "processing", after: "cancelled" },
+          payload: { jobId: input.job.jobId, listingId: input.item.listingId, code: input.code,
+            before: skipped.rows[0]?.previous_status ?? "processing", after: "cancelled" },
           occurredAt: input.now,
         });
       }
@@ -777,9 +800,10 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
       let listingStatuses: Array<{ listingId: number; before: string; after: string }> = [];
       if (listingIds.length > 0) {
         // As a failed item marks its listing (markItemTerminalFailure), for every item at once, under the same rule: a
-        // listing live on its marketplace keeps its live status, so it still takes orders (domain/listing-live-status);
-        // the error is still recorded on it. Rows are locked in id order, so two writers never wait on each other in
-        // opposite orders; the CTE only reports the status before the update.
+        // listing live on its marketplace keeps its live status, so it still takes orders (domain/listing-live-status),
+        // and an ended listing stays ended (PLAN-C v4.1 §6.3); the error is still recorded on it. Rows are locked in id
+        // order, so two writers never wait on each other in opposite orders; the CTE only reports the status before the
+        // update.
         const updated = await client.query<{ id: number; previous_status: string; status: string }>(
           `WITH current_listing AS (
              SELECT id, status FROM dropship.dropship_vendor_listings
@@ -789,6 +813,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
            )
            UPDATE dropship.dropship_vendor_listings AS listing
            SET status = CASE
+                 WHEN listing.status = 'ended' THEN 'ended'
                  WHEN NULLIF(BTRIM(listing.external_listing_id), '') IS NOT NULL
                    AND listing.status = ANY($4::text[])
                  THEN listing.status
@@ -933,8 +958,11 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
       if (input.item.listingId !== null) {
         // A failed or blocked update of a listing that is live on its
         // marketplace changed nothing buyers see: it keeps its live status, so
-        // it still takes orders (domain/listing-live-status). The error is
-        // still recorded on the listing, its sync history and the audit trail.
+        // it still takes orders (domain/listing-live-status). An ended listing
+        // stays ended: only a completed push moves a row off `ended` (PLAN-C
+        // v4.1 §6.3, SB8), and `updated_at` moves on, so the failed item no
+        // longer counts as a push newer than the end. The error is still
+        // recorded on the listing, its sync history and the audit trail.
         // Decided on the locked row in one statement; the CTE only reports the
         // status before the update for the audit row.
         const updated = await client.query<{ previous_status: string; status: string }>(
@@ -943,6 +971,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
            )
            UPDATE dropship.dropship_vendor_listings AS listing
            SET status = CASE
+                 WHEN listing.status = 'ended' THEN 'ended'
                  WHEN NULLIF(BTRIM(listing.external_listing_id), '') IS NOT NULL
                    AND listing.status = ANY($5::text[])
                  THEN listing.status
@@ -1037,6 +1066,39 @@ async function findJobForUpdate(client: PoolClient, jobId: number): Promise<JobR
     [jobId],
   );
   return result.rows[0] ?? null;
+}
+
+/**
+ * PR C's push fence (PLAN-C v4.1 §6.2, D31): reads, on the caller's
+ * transaction, whether a queued item's listing has an open end request, or a
+ * Card Shellz end finished after the item was created. Lock order job ->
+ * item -> listing, as every item writer (the caller already wrote the job's
+ * heartbeat): the item FOR UPDATE, then its listing FOR SHARE, so an end's
+ * claim (listing FOR UPDATE) either waits for this transaction and then sees
+ * the item processing, or committed first and is seen here. The end reads are
+ * plain reads. Null: no fence (no such queued item, no listing, or no end).
+ */
+async function readListingEndFenceWithClient(client: PoolClient, input: { jobId: number; itemId: number }):
+  Promise<ListingEndFenceOutcome | null> {
+  const item = await client.query<{ listing_id: number | null; created_at: Date }>(
+    `SELECT listing_id, created_at FROM dropship.dropship_listing_push_job_items
+     WHERE job_id = $1 AND id = $2 AND status = 'queued'
+     FOR UPDATE`,
+    [input.jobId, input.itemId],
+  );
+  const listingId = item.rows[0]?.listing_id ?? null;
+  if (listingId === null) return null;
+  await client.query("SELECT 1 FROM dropship.dropship_vendor_listings WHERE id = $1 FOR SHARE", [listingId]);
+  const end = await client.query<{ open_end_state: OpenListingEndState | null; ended_since_queued: boolean }>(
+    `SELECT
+       (SELECT state FROM dropship.dropship_listing_end_requests
+        WHERE listing_id = $1 AND state IN ('pending', 'ending', 'failed')) AS open_end_state,
+       EXISTS (SELECT 1 FROM dropship.dropship_listing_end_requests
+        WHERE listing_id = $1 AND state = 'ended' AND ended_at > $2) AS ended_since_queued`,
+    [listingId, item.rows[0]!.created_at],
+  );
+  const row = requiredRow(end.rows[0], "The listing end fence read returned no row.");
+  return decideListingEndFence({ openEndState: row.open_end_state, endedSinceQueued: row.ended_since_queued });
 }
 
 async function recoverStaleProcessingJob(

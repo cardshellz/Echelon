@@ -81,12 +81,21 @@ type Client = Pick<PoolClient, "query">;
 const VARIANT_SHARE_SQL = `SELECT pv.id FROM catalog.product_variants pv JOIN catalog.products p ON p.id = pv.product_id
   WHERE pv.id = $1 FOR SHARE OF pv, p`;
 
+/** A listing's open end request (PR C: pending, ending, or failed and waiting for staff), as a subquery body. */
+function openListingEndSql(listingId: "l.id" | "$1"): string {
+  return `SELECT 1 FROM dropship.dropship_listing_end_requests open_end
+    WHERE open_end.listing_id = ${listingId} AND open_end.state IN ('pending', 'ending', 'failed')`;
+}
+
 /**
  * Listings the sweep reads (§6.2): eBay, with our saved offer id; for sale
  * with a published item number (a staged draft records its offer id as its
  * item number, dropship-ebay-listing-push.provider.ts, and is left out), or
  * ended by a read; not dead-lettered; no job item queued or running (its write
- * would race the read). `$1` is the store, `$2` the swept statuses.
+ * would race the read); no open end request (PR C, PLAN-C v4.1 §9 I1: a read
+ * between Card Shellz's withdraw and its finish would otherwise record the
+ * withdrawn offer as the vendor's own end). `$1` is the store, `$2` the swept
+ * statuses.
  */
 const SWEPT_LISTING_PREDICATE = `l.store_connection_id = $1 AND l.platform = 'ebay'
   AND l.external_offer_id IS NOT NULL AND btrim(l.external_offer_id) <> ''
@@ -95,7 +104,8 @@ const SWEPT_LISTING_PREDICATE = `l.store_connection_id = $1 AND l.platform = 'eb
       AND l.external_listing_id IS DISTINCT FROM l.external_offer_id)
     OR (l.status = 'ended' AND l.marketplace_ended_at IS NOT NULL))
   AND NOT EXISTS (SELECT 1 FROM dropship.dropship_listing_push_job_items item
-    WHERE item.listing_id = l.id AND item.status IN ('queued', 'processing'))`;
+    WHERE item.listing_id = l.id AND item.status IN ('queued', 'processing'))
+  AND NOT EXISTS (${openListingEndSql("l.id")})`;
 
 /** The same predicate for the store in the row `sc`, with the statuses as $1. */
 const STORE_LISTING_PREDICATE = SWEPT_LISTING_PREDICATE.replaceAll("$1", "sc.id").replaceAll("$2", "$1");
@@ -222,6 +232,7 @@ export class PgDropshipMarketplaceSyncRepository implements MarketplaceSyncRepos
   async applyListingSync(input: MarketplaceListingSyncWrite): Promise<MarketplaceListingSyncWriteResult> {
     return this.inTransaction(async (client) => {
       const state = await lockListing(client, input, { selectionLocks: input.price !== null });
+      if (input.trigger === "sweep") await assertNoOpenListingEnd(client, input.listingId);
       // SB4: the decision was made on the listing's events as they were. A newer one (a push completed, another read
       // synced) means it may be stale: it is read again first next tick, never written from here.
       const newest = await readNewestMarketplaceSyncEventIdWithClient(client, input.listingId);
@@ -412,6 +423,23 @@ async function lockListing(client: Client, input: Pick<MarketplaceListingSyncWri
     throw listingGone(input.listingId);
   }
   return state;
+}
+
+/**
+ * PR C (PLAN-C v4.1 §9 I1): a sweep's read decided before an end request
+ * opened is never applied. Read under the listing's row lock (lockListing): an
+ * end the save inserts needs a key lock on this listing row, so it either
+ * committed before this read or waits for this transaction. The sweep's
+ * predicate skips the listing from the next tick on. A push's pre-read is not
+ * stopped here: the push fence refuses the push itself before it reads.
+ */
+async function assertNoOpenListingEnd(client: Client, listingId: number): Promise<void> {
+  const open = await client.query<{ open: boolean }>(`SELECT EXISTS (${openListingEndSql("$1")}) AS open`,
+    [listingId]);
+  if (open.rows[0]?.open === true) {
+    throw marketplaceSyncError(MARKETPLACE_SYNC_CODES.observationChanged, "The listing changed since it was read.", "transient",
+      { listingId, reason: "listing_end_open" });
+  }
 }
 
 /** Step 6: the size's policy row with the ids the vendor changed, keyed by them and the row's current revision. */

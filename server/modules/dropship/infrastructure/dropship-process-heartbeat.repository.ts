@@ -90,6 +90,26 @@ export async function catalogVersionSettled(client: Queryable, input: {
 }
 
 /**
+ * Whether a catalog code version at or above `minVersion` first ran longer ago than `settleMs`: picks writes open
+ * on any version that writes picks, so a database where only a later version ever ran is not closed for good (review
+ * SAV-1). The exact-version check above stays for the end worker, which needs version 3 itself.
+ */
+export async function catalogVersionAtLeastSettled(client: Queryable, input: {
+  minVersion: number;
+  settleMs: number;
+}): Promise<boolean> {
+  const result = await client.query<{ settled: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM dropship.dropship_catalog_code_versions
+       WHERE catalog_code_version >= $1
+         AND first_seen_at < clock_timestamp() - make_interval(secs => $2::double precision / 1000.0)
+     ) AS settled`,
+    [input.minVersion, input.settleMs],
+  );
+  return result.rows[0]?.settled === true;
+}
+
+/**
  * Processes of an older version still reporting within the grace although
  * this version first ran more than `alertAfterMs` ago (§3.1). Empty while this
  * version is younger than that, and when no older process is fresh.

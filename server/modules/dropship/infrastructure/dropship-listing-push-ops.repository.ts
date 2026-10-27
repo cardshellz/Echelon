@@ -1248,10 +1248,13 @@ async function markRequeuedListingsQueued(
   }
   // A retried push changes nothing buyers see until it completes, so a
   // listing live on its marketplace keeps its status and keeps taking orders
-  // (domain/listing-live-status); a listing never published shows as queued.
+  // (domain/listing-live-status); an ended listing stays ended, as only a
+  // completed push moves a row off `ended` (PLAN-C v4.1 §6.3, SB8); a listing
+  // never published shows as queued.
   await client.query(
     `UPDATE dropship.dropship_vendor_listings
      SET status = CASE
+           WHEN status = 'ended' THEN 'ended'
            WHEN NULLIF(BTRIM(external_listing_id), '') IS NOT NULL AND status = ANY($4::text[])
            THEN status
            ELSE 'queued'

@@ -27,6 +27,7 @@ import {
   admittedWhilePushing,
   decideListingOrderAcceptability,
   assertNoMarketplaceVariationLines,
+  listingEndedBeforeOrderError,
   parseIntakeOrderedAt,
 } from "../domain/order-listing-acceptability";
 import { logger } from "../../../platform/observability/logger";
@@ -130,6 +131,8 @@ interface ListingCandidateRow {
   sales_eligibility: "sellable" | "internal_only";
   catalog_retail_price_cents: string | number | null;
   marketplace_ended_at: Date | null;
+  /** PR C: when Card Shellz's newest end of this listing finished (its ended end request), or null. */
+  listing_end_ended_at: Date | null;
   /** Item numbers the listing had before a relist (plan v4 §7.3 step 7). */
   previous_external_listing_ids: string[] | null;
 }
@@ -1804,6 +1807,9 @@ async function resolveAcceptanceLinesWithClient(
        dl.external_listing_id,
        dl.external_offer_id,
        dl.marketplace_ended_at,
+       (SELECT er.ended_at FROM dropship.dropship_listing_end_requests er
+        WHERE er.listing_id = dl.id AND er.state = 'ended'
+        ORDER BY er.ended_at DESC, er.id DESC LIMIT 1) AS listing_end_ended_at,
        ARRAY(SELECT prev.external_listing_id FROM dropship.dropship_listing_previous_marketplace_ids prev
              WHERE prev.listing_id = dl.id ORDER BY prev.id)::text[] AS previous_external_listing_ids,
        dl.vendor_retail_price_cents,
@@ -2910,6 +2916,7 @@ function mapListingCandidateRow(
   variantIsActive: boolean;
   customerSellable: boolean;
   marketplaceEndedAt: Date | null;
+  listingEndedAt: Date | null;
   previousExternalListingIds: string[];
 } {
   const catalogRetailPriceCents = row.catalog_retail_price_cents === null
@@ -2943,6 +2950,7 @@ function mapListingCandidateRow(
     variantIsActive: row.variant_is_active,
     customerSellable: row.sales_eligibility === "sellable",
     marketplaceEndedAt: row.marketplace_ended_at ?? null,
+    listingEndedAt: row.listing_end_ended_at ?? null,
     previousExternalListingIds: row.previous_external_listing_ids ?? [],
   };
 }
@@ -2987,8 +2995,27 @@ function assertListingCandidateCanAccept(
     status: candidate.listingStatus,
     externalListingId: candidate.externalListingId,
     marketplaceEndedAt: candidate.marketplaceEndedAt,
+    listingEndedAt: candidate.listingEndedAt,
     orderedAt: catalog.orderedAt,
   });
+  if (!acceptability.acceptable && acceptability.reason === "listing_ended") {
+    // DC14 (PLAN-C v4.1 §8 step 3): eBay sold on a listing recorded as ended. ERROR: a person decides the order.
+    const refusal = listingEndedBeforeOrderError({ context: { intakeId: catalog.intakeId }, lineIndex,
+      listingId: candidate.listingId, listingStatus: candidate.listingStatus, marketplaceEndedAt: candidate.marketplaceEndedAt,
+      listingEndedAt: candidate.listingEndedAt, orderedAt: catalog.orderedAt });
+    logger.error("dropship.order.listing_ended_before_order", {
+      outcome: "requires_review",
+      error_code: refusal.code,
+      listing_id: candidate.listingId,
+      intake_id: catalog.intakeId,
+      line_index: lineIndex,
+      ended_at: refusal.context?.endedAt ?? null,
+      ordered_at: refusal.context?.orderedAt ?? null,
+      end_source: refusal.context?.endSource ?? null,
+      path: "acceptance",
+    });
+    throw refusal;
+  }
   if (!acceptability.acceptable) {
     throw new DropshipError(
       "DROPSHIP_ORDER_LISTING_NOT_ACCEPTABLE",
@@ -3044,6 +3071,7 @@ function assertListingCandidateCanAccept(
       intake_id: catalog.intakeId,
       line_index: lineIndex,
       marketplace_ended_at: candidate.marketplaceEndedAt?.toISOString() ?? null,
+      listing_end_ended_at: candidate.listingEndedAt?.toISOString() ?? null,
       path: "acceptance",
     });
   }

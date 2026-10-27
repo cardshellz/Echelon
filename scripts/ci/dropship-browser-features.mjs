@@ -20,11 +20,11 @@ export const DROPSHIP_BROWSER_FEATURES = Object.freeze({
     "dropship-policy-listing-settings-step", "dropship-policy-listing-settings-updated",
   ], ["dropship-catalog"], 3),
   // Step 1 plan S2-5 (TESTS18): the journeys of choosing, publishing and ending at scale, so `listings` keeps its size.
-  // PR A added the publish spec, PR B the choose spec (PLAN-B v4.1 V29); C adds its own. One harness (the Catalog
-  // page's), one shard per spec.
+  // PR A added the publish spec, PR B the choose spec (PLAN-B v4.1 V29), PR C the end spec (PLAN-C v4.1 §13.4). One
+  // harness (the Catalog page's), one shard per spec.
   "catalog-scale": feature("Catalog choose, publish and end at scale", [
-    "dropship-policy-catalog-publish-runs", "dropship-policy-catalog-choose-scale",
-  ], ["dropship-catalog"], 2),
+    "dropship-policy-catalog-publish-runs", "dropship-policy-catalog-choose-scale", "dropship-policy-catalog-end",
+  ], ["dropship-catalog"], 3),
   "cost-changes": feature("Cost change notices", [
     "dropship-policy-cost-changes", "dropship-policy-cost-changes-portal",
   ], ["dropship-cost-change-policy", "dropship-cost-changes"]),

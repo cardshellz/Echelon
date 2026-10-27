@@ -18,7 +18,8 @@
  *   what the page learned, `ChooseKnown`) and "Select everything"
  *   (`chooseEverything`);
  * - the save body (`chooseChangeBody`), the save question's lines
- *   (`describeChooseConfirm`), the saved line (`describeChooseSaved`);
+ *   (`describeChooseConfirm`) and button (`describeChooseConfirmButton`), the
+ *   saved line (`describeChooseSaved`);
  * - the error classes (`classifyChooseSaveError`, §12.4, §12.5, §14) and the
  *   retry schedules the save runner follows;
  * - the paging helpers.
@@ -763,40 +764,62 @@ export function chooseEverything(categories: { categories: readonly { rowCount: 
 
 /**
  * The save question's lines from the server's preview, in order: the counts;
- * per store (ascending, as the server sends them) its quantity 0 and its
- * resumes, or `confirmNone` when no store has any; that removed listings are
- * not ended (B only), when the save sets any listing to quantity 0; that the
- * choice is for every store. Only what Echelon does (FIDELITY2): a removal no
- * store has an entry for (no listing, ended on eBay, no change in whether it
- * sells; V20) sets nothing to quantity 0, so that line is left out then
- * (review round 1 CLI-6). A listing that ended on eBay is counted nowhere.
+ * per store (ascending, as the server sends them) the eBay listings it ends
+ * (`confirmEnd`, or `confirmEndWaitsForStore` while the store can't be used),
+ * its quantity 0 and its resumes; then PR C's vendor-level lines (other sizes
+ * of products removed completely, hidden sizes they take with them, added
+ * sizes still being ended, ends waiting for Card Shellz, sizes Card Shellz
+ * ended); `confirmNone` only when no line came before; that the choice is for
+ * every store (PLAN-C v4.1 §11). Only what Echelon does (FIDELITY2): a removal
+ * no store has an entry for (no listing, ended on eBay, no change in whether
+ * it sells; V20) says nothing about eBay (review round 1 CLI-6). A listing
+ * that ended on eBay is counted nowhere.
  */
 export function describeChooseConfirm(preview: SelectionChangePreviewAnswer): string[] {
-  const lines = [CHOOSE_WORDS.confirmCounts(preview.toAdd, preview.toRemove, preview.alreadySelected + preview.alreadyNotSelected)];
-  let entries = 0;
-  let toZero = 0;
+  const counts = CHOOSE_WORDS.confirmCounts(preview.toAdd, preview.toRemove, preview.alreadySelected + preview.alreadyNotSelected);
+  const lines: string[] = [];
   for (const store of preview.effects) {
+    if (store.ends > 0) {
+      lines.push(store.storeConnected ? CHOOSE_WORDS.confirmEnd(store.storeName, store.ends)
+        : CHOOSE_WORDS.confirmEndWaitsForStore(store.storeName, store.ends));
+    }
     if (store.goesToZero > 0) lines.push(CHOOSE_WORDS.confirmZero(store.storeName, store.goesToZero));
     if (store.startsSelling > 0) lines.push(CHOOSE_WORDS.confirmResume(store.storeName, store.startsSelling));
-    entries += store.goesToZero + store.startsSelling;
-    toZero += store.goesToZero;
   }
-  if (entries === 0) lines.push(CHOOSE_WORDS.confirmNone);
-  if (preview.toRemove > 0 && toZero > 0) lines.push(CHOOSE_WORDS.confirmNotEnded);
-  lines.push(CHOOSE_WORDS.confirmScope);
-  return lines;
+  const { ends } = preview;
+  if (ends.otherSizes > 0) lines.push(CHOOSE_WORDS.confirmEndOtherSizes(ends.otherSizes));
+  if (ends.hiddenRemovedIds.length > 0) lines.push(CHOOSE_WORDS.confirmEndHidden(ends.hiddenRemovedIds.length));
+  if (ends.stillEnding > 0) lines.push(CHOOSE_WORDS.confirmStillEnding(ends.stillEnding));
+  if (ends.endReview > 0) lines.push(CHOOSE_WORDS.confirmEndReview(ends.endReview));
+  if (ends.endedReAdd > 0) lines.push(CHOOSE_WORDS.confirmEndedReAdd(ends.endedReAdd));
+  if (lines.length === 0) lines.push(CHOOSE_WORDS.confirmNone);
+  return [counts, ...lines, CHOOSE_WORDS.confirmScope];
+}
+
+/**
+ * The question's own button (PLAN-C v4.1 §11): `saveEndButton` with the count when the save ends any eBay listing
+ * (the vendor-level `ends.listingIds`, the set the save echoes), else `confirmSave`.
+ */
+export function describeChooseConfirmButton(preview: SelectionChangePreviewAnswer): string {
+  const ends = preview.ends.listingIds.length;
+  return ends > 0 ? CHOOSE_WORDS.saveEndButton(ends) : CHOOSE_WORDS.confirmSave;
 }
 
 /**
  * The bar after a save, from the server's answer: `saved`, or `savedDrift`
  * when the effects moved between the question and the save (a change with
- * no adds goes through, §7.5); then `skipped` when any added size was no
- * longer offered.
+ * no adds goes through, §7.5), counting the listings set to quantity 0 and
+ * the eBay listings ended (both stop selling, FID-14); then `savedEnding`
+ * when the save ended any eBay listing (PR C); then `skipped` when any added
+ * size was no longer offered.
  */
 export function describeChooseSaved(answer: SelectionChangeAnswer): string {
   const zero = answer.effects.reduce((sum, store) => sum + store.goesToZero, 0);
-  const head = answer.drifted ? CHOOSE_WORDS.savedDrift(zero) : CHOOSE_WORDS.saved(answer.toAdd, answer.toRemove);
-  return answer.skipped.count > 0 ? `${head} ${CHOOSE_WORDS.skipped(answer.skipped.count)}` : head;
+  const ended = answer.ends.listingIds.length;
+  const parts = [answer.drifted ? CHOOSE_WORDS.savedDrift(zero + ended) : CHOOSE_WORDS.saved(answer.toAdd, answer.toRemove)];
+  if (ended > 0) parts.push(CHOOSE_WORDS.savedEnding(ended));
+  if (answer.skipped.count > 0) parts.push(CHOOSE_WORDS.skipped(answer.skipped.count));
+  return parts.join(" ");
 }
 
 // ---------------------------------------------------------------------------
@@ -831,6 +854,8 @@ export type ChooseSaveErrorClass =
   | { kind: "tooLarge" }
   /** 422: the change grows the selection past the cap. `after` when the server named it. */
   | { kind: "overCap"; after: number | null }
+  /** PR C's 422: the removal covers more sizes or eBay listings than one save may (permanent). */
+  | { kind: "tooManyRemoved" }
   /** Any other refusal, in words; never sent again. */
   | { kind: "permanent"; message: string };
 
@@ -865,6 +890,8 @@ export function classifyChooseSaveError(error: unknown, sent: { bodyBytes: numbe
       }
     }
     if (error.status === 410 && error.code === SELECTION_CHANGE_ERROR_CODES.rulesRetired) return { kind: "retired" };
+    // Before the over-cap branch: its words ask to undo additions, which a removal does not have (FID-4).
+    if (error.status === 422 && error.code === SELECTION_CHANGE_ERROR_CODES.removalTooLarge) return { kind: "tooManyRemoved" };
     if (error.status === 422 && error.code === SELECTION_CHANGE_ERROR_CODES.tooLarge) {
       return { kind: "overCap", after: contextNumber(error, "selectedAfter") ?? null };
     }

@@ -2,9 +2,11 @@
  * The vendor's words for Catalog step 1, "Choose what to sell". Words marked
  * "Interim (step 1 PROPOSAL)" are stage 1's, words marked "Kept" are the
  * step's words from before stage 1, and words marked "Stage 3/5 (step 1 plan
- * S2-5)" are PR B's one-time picks (PLAN-B v4.1 §13, PROPOSED), so a later
- * stage can change them in one place. No function returns a raw reason code
- * or a product-line name (owner Q2). Pure: no React, no network, no clock.
+ * S2-5)" are PR B's one-time picks (PLAN-B v4.1 §13, PROPOSED), and words
+ * marked "Stage 4 (step 1 plan S2-5)" are PR C's listing ends (PLAN-C v4.1
+ * §11, PROPOSED; a count of 1 reads in the singular), so a later stage can
+ * change them in one place. No function returns a raw reason code or a
+ * product-line name (owner Q2). Pure: no React, no network, no clock.
  */
 import { SELECTION_CHANGE_CAP } from "@shared/dropship/vendor-selection-changes";
 import { formatStatus, type DropshipCatalogListingTier } from "./dropship-ops-surface";
@@ -36,6 +38,11 @@ const HOW_WORDS = Object.freeze({
 /** The per-store effect lines of the save question: "listing is" or "listings are", by count. */
 function listingsAre(n: number): string {
   return n === 1 ? "1 listing is" : `${formatChooseCount(n)} listings are`;
+}
+
+/** PR C's end lines: "1 eBay listing" or "3 eBay listings" (§11's "{l} eBay listing(s)"). */
+function ebayListings(n: number): string {
+  return n === 1 ? "1 eBay listing" : `${formatChooseCount(n)} eBay listings`;
 }
 
 export const CHOOSE_WORDS = Object.freeze({
@@ -177,6 +184,10 @@ export const CHOOSE_WORDS = Object.freeze({
     `You can have up to ${CAP_WORDS} selected. ${selected === 1 ? "1 is" : `${formatChooseCount(selected)} are`} selected, so ${formatChooseCount(Math.max(0, room))} more can be added.`,
   // Stage 3/5 (step 1 plan S2-5): PROPOSED. A growing change over the cap (also the server's 422).
   overCapAdd: (after: number) => `This would make ${formatChooseCount(after)} selected, over the ${CAP_WORDS} limit. Undo some additions to save.`,
+  // PR C's 422 DROPSHIP_SELECTION_REMOVAL_TOO_LARGE: a removal whose products have more sizes, or that would end more
+  // eBay listings, than one save covers (never the over-cap words, FID-4).
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  tooManyRemoved: "That's too many items to change at once. Remove fewer products in one save.",
   // Stage 3/5 (step 1 plan S2-5): PROPOSED. The saved selection is over the cap.
   overCapState: (selected: number) =>
     `${formatChooseCount(selected)} selected, over the ${CAP_WORDS} limit. Publishing refuses more than ${CAP_WORDS}. Remove some, then publish.`,
@@ -198,10 +209,43 @@ export const CHOOSE_WORDS = Object.freeze({
   confirmNone: "Nothing changes on your eBay listings now.",
   // Stage 3/5 (step 1 plan S2-5): PROPOSED.
   confirmScope: "Your choice applies to all your stores.",
-  // Stage 3/5 (step 1 plan S2-5): PROPOSED. B only: PR C ends removed listings and replaces this line.
-  confirmNotEnded: "Removed items are set to quantity 0 on eBay. Their listings aren't ended.",
+  // PR C (PLAN-C v4.1 §11): the eBay listings a removal ends on a store that can be used now (`ends`, storeConnected).
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  confirmEnd: (store: string, n: number) =>
+    `On ${store}: ${ebayListings(n)} will be ended. To sell one again later, choose it here and publish it in step 3.`,
+  // The same on a store that can't be used now (not `connected`): its ends wait for it, at quantity 0.
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  confirmEndWaitsForStore: (store: string, n: number) =>
+    `On ${store}: ${ebayListings(n)} will be ended when the store can be used again. ${n === 1 ? "It stays" : "They stay"} at quantity 0 until then.`,
+  // Of the ends above, those of other sizes of a product removed completely (`ends.otherSizes`).
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  confirmEndOtherSizes: (n: number) => (n === 1
+    ? "1 of these is a listing of another size of a product you removed completely: a size you removed earlier, or that Card Shellz isn't offering now."
+    : `${formatChooseCount(n)} of these are listings of other sizes of products you removed completely: sizes you removed earlier, or that Card Shellz isn't offering now.`),
+  // The hidden picks a wholly removed product takes with it (`ends.hiddenRemovedIds`), vendor level.
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  confirmEndHidden: (n: number) =>
+    `Removing every size you can see of a product also removes ${formatChooseCount(n)} of its sizes that Card Shellz isn't offering right now.`,
+  // Added sizes whose listing Card Shellz is still ending (`ends.stillEnding`): the save never stops an end under way.
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  confirmStillEnding: (n: number) => (n === 1
+    ? "1 of the items you're adding is still being ended on eBay. When that's done, publish it again in step 3."
+    : `${formatChooseCount(n)} of the items you're adding are still being ended on eBay. When that's done, publish them again in step 3.`),
+  // Added sizes whose end failed and waits for Card Shellz (`ends.endReview`).
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  confirmEndReview: (n: number) => (n === 1
+    ? "1 of the items you're adding has an eBay listing Card Shellz couldn't end yet. Card Shellz is looking into it; it stays at quantity 0 until then."
+    : `${formatChooseCount(n)} of the items you're adding have an eBay listing Card Shellz couldn't end yet. Card Shellz is looking into it; they stay at quantity 0 until then.`),
+  // Added sizes whose listing Card Shellz ended (`ends.endedReAdd`): only step 3 publishes them again.
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  confirmEndedReAdd: (n: number) => (n === 1
+    ? "1 of the items you're adding was ended on eBay. Publish it in step 3 to sell it again."
+    : `${formatChooseCount(n)} of the items you're adding were ended on eBay. Publish them in step 3 to sell them again.`),
   // Interim (step 1 PROPOSAL).
   confirmSave: "Save changes",
+  // The question's own button when the save ends any eBay listing (`ends.listingIds`), in place of `confirmSave`.
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  saveEndButton: (n: number) => (n === 1 ? "End 1 listing and save" : `End ${formatChooseCount(n)} listings and save`),
   // Interim (step 1 PROPOSAL).
   confirmCancel: "Cancel",
   // Stage 3/5 (step 1 plan S2-5): PROPOSED. Added sizes Card Shellz stopped offering.
@@ -211,6 +255,9 @@ export const CHOOSE_WORDS = Object.freeze({
   saved: (added: number, removed: number) => `Saved. ${formatChooseCount(added)} added, ${formatChooseCount(removed)} removed.`,
   // Stage 3/5 (step 1 plan S2-5): PROPOSED. A removal-only save whose effects moved between the question and the save (§7.5).
   savedDrift: (n: number) => `Saved. A few listings changed on eBay while you were deciding; ${listingsAre(n)} set to quantity 0.`,
+  // After `saved` or `savedDrift` when the save ended any eBay listing (the answer's `ends.listingIds`).
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  savedEnding: (n: number) => `${ebayListings(n)} ${n === 1 ? "is" : "are"} being ended.`,
   // Stage 3/5 (step 1 plan S2-5): PROPOSED. While the server answers busy and the page sends the same save again.
   savingStill: "Still saving… eBay updates are in progress. Your changes are kept.",
   // Stage 3/5 (step 1 plan S2-5): PROPOSED. Busy past every try.

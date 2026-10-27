@@ -32,6 +32,7 @@ import {
   NEW_VERSION_SETTLE_MS,
   OLDER_PROCESS_GRACE_MS,
   decideCatalogPageVersion,
+  isCatalogPageOutdated,
 } from "../../domain/catalog-code-version";
 import type { DropshipVendorCatalogSelectionReason } from "../../domain/vendor-selection";
 import { DROPSHIP_LISTING_TIERS, type DropshipListingTierBlockReason, type DropshipListingTierEligibility } from "../../domain/listing-tiers";
@@ -39,6 +40,7 @@ import { DROPSHIP_BULK_JSON_LIMIT_BYTES } from "../../interfaces/http/dropship-b
 import { statusForDropshipVendorCatalogError } from "../../interfaces/http/dropship-vendor-catalog.routes";
 import { DROPSHIP_CATALOG_READ_ERROR_CODES } from "../../../../../shared/dropship/vendor-catalog-reads";
 import {
+  MAX_SELECTION_END_LISTINGS,
   SELECTION_CHANGE_ERROR_CODES,
   selectionChangeRequestSchema,
   type SelectionChangeAnswer,
@@ -69,6 +71,8 @@ function previewAnswer(headRevisionId: number | null): SelectionChangePreviewAns
   return {
     headRevisionId, toAdd: 1, toRemove: 1, alreadySelected: 0, alreadyNotSelected: 0, skipped: { count: 0, first: [] },
     selectedBefore: 1, selectedAfter: 1, cap: 10_000, overCapAfter: false, refused: null, effects: [], effectsHash: HASH,
+    ends: { listingIds: [7], hiddenRemovedIds: [], otherSizes: 0, stillEnding: 0, endReview: 0, endedReAdd: 0 },
+    otherEntriesHash: "d".repeat(64),
   } as SelectionChangePreviewAnswer;
 }
 
@@ -163,8 +167,10 @@ describe("catalog step 1 read contracts against the server", () => {
 describe("catalog step 1 change bodies against the server's /changes parsing (V30)", () => {
   it("C1 the preview body passes the page-version read and the strict preview parse, in canonical form", () => {
     const body = chooseChangeBody(changes([30, 10, 20], [5, 1], 42));
-    expect(readSelectionChangeClientVersion(body)).toBe(2);
-    expect(parseSelectionChangePreviewBody(body)).toEqual({ clientVersion: 2, expectedRevisionId: 42, addIds: [10, 20, 30], removeIds: [1, 5] });
+    expect(readSelectionChangeClientVersion(body)).toBe(3);
+    expect(parseSelectionChangePreviewBody(body)).toEqual({ clientVersion: 3, expectedRevisionId: 42, addIds: [10, 20, 30], removeIds: [1, 5] });
+    // PR C's page is not outdated for the server's step 1 POSTs (PLAN-C v4.1 §4.1).
+    expect(isCatalogPageOutdated(readSelectionChangeClientVersion(body))).toBe(false);
     // Never saved before: the base is null, as the server's head is.
     expect(parseSelectionChangePreviewBody(chooseChangeBody(changes([1], [], null))).expectedRevisionId).toBeNull();
   });
@@ -176,8 +182,10 @@ describe("catalog step 1 change bodies against the server's /changes parsing (V3
     expect(posted).toHaveLength(4);
     const parsed = posted.map((body) => parseSelectionChangeBody(body));
     expect(parsed[0]).toEqual({
-      clientVersion: 2, expectedRevisionId: 7, addIds: [102, 105], removeIds: [101],
+      clientVersion: 3, expectedRevisionId: 7, addIds: [102, 105], removeIds: [101],
       idempotencyKey: "catalog-selection:00000000-0000-4000-8000-000000000001", expectedEffectsHash: HASH,
+      // PR C (§4.6): the preview's ends and other entries' hash, echoed.
+      expectedEnds: { listingIds: [7], hiddenRemovedIds: [] }, expectedOtherEntriesHash: "d".repeat(64),
     });
     expect(new Set(parsed.map((body) => hashSelectionChangeRequest(body))).size).toBe(1);
     // The key is never the system's reserved prefix (V8).
@@ -197,8 +205,24 @@ describe("catalog step 1 change bodies against the server's /changes parsing (V3
   it("C4 the page's version is the server's current one; a later page is told to wait (503), never parsed with this meaning", () => {
     expect(CATALOG_PAGE_CLIENT_VERSION).toBe(DROPSHIP_CATALOG_CODE_VERSION);
     expect(decideCatalogPageVersion(readSelectionChangeClientVersion(chooseChangeBody(changes([1], [], 1))))).toBe("current");
-    expect(decideCatalogPageVersion(readSelectionChangeClientVersion({ ...chooseChangeBody(changes([1], [], 1)), clientVersion: 3 })))
+    expect(decideCatalogPageVersion(readSelectionChangeClientVersion({ ...chooseChangeBody(changes([1], [], 1)), clientVersion: 4 })))
       .toBe("page_newer_than_server");
+    // PR B's page (version 2) is outdated for the step 1 POSTs, and still current for every read.
+    expect(isCatalogPageOutdated(2)).toBe(true);
+    expect(decideCatalogPageVersion(2)).toBe("current");
+  });
+
+  it("C3b (PR C, TST-8) the largest echo, 30,000 + 30,000 end ids beside 10,000 + 10,000 ids, passes and stays under the bulk limit", async () => {
+    const bounds = { listingIds: range(1_000_001, MAX_SELECTION_END_LISTINGS), hiddenRemovedIds: range(2_000_001, MAX_SELECTION_END_LISTINGS) };
+    const posted = await sentBodies(changes(range(1, 10_000), range(50_001, 10_000), 3));
+    const largest = { ...posted[0], expectedEnds: bounds };
+    expect(parseSelectionChangeBody(largest).expectedEnds).toEqual(bounds);
+    expect(Buffer.byteLength(JSON.stringify(largest))).toBeLessThan(CHOOSE_BULK_BODY_LIMIT_BYTES);
+    // One id more on either end set is refused by the same schema on both sides.
+    for (const field of ["listingIds", "hiddenRemovedIds"] as const) {
+      const over = { ...largest, expectedEnds: { ...bounds, [field]: range(3_000_001, MAX_SELECTION_END_LISTINGS + 1) } };
+      expect(selectionChangeRequestSchema.safeParse(over).success).toBe(false);
+    }
   });
 
   it("C5 the page's limits are the server's: the bulk parser's body limit and the paused window (settle + grace)", () => {
@@ -221,6 +245,9 @@ describe("catalog step 1 change bodies against the server's /changes parsing (V3
     expect(classified(SELECTION_CHANGE_ERROR_CODES.tooLarge, { selectedAfter: 10_001 })).toEqual({ kind: "overCap", after: 10_001 });
     expect(classified(SELECTION_CHANGE_ERROR_CODES.writesPaused, { reason: "older_version_running" })).toEqual({ kind: "paused" });
     expect(classified(SELECTION_CHANGE_ERROR_CODES.rulesRetired)).toEqual({ kind: "retired" });
+    // PR C (PLAN-C v4.1 §4.1, §4.2): an older page's 409 reloads; a removal too large has its own words, not the cap's.
+    expect(classified(SELECTION_CHANGE_ERROR_CODES.pageOutdated)).toEqual({ kind: "retired" });
+    expect(classified(SELECTION_CHANGE_ERROR_CODES.removalTooLarge, { factSizes: 30_001 })).toEqual({ kind: "tooManyRemoved" });
     // The server's own faults may have committed nothing or everything: the page sends the same request again.
     expect(classified("DROPSHIP_SELECTION_COUNT_INCONSISTENT")).toEqual({ kind: "network", mayHaveCommitted: true });
     expect(classified(SELECTION_CHANGE_PLAN_MOVED)).toEqual({ kind: "network", mayHaveCommitted: true });

@@ -9,10 +9,12 @@ import {
   type SelectionChangeRequest,
 } from "@shared/dropship/vendor-selection-changes";
 import {
+  CHOOSE_BULK_BODY_LIMIT_BYTES,
   CHOOSE_BUSY_BACKOFF_MS,
   CHOOSE_PAUSED_MAX_SENDS,
   CHOOSE_SAVE_BACKOFF_MS,
   PAUSED_RETRY_WINDOW_MS,
+  chooseBodyBytes,
   type ChooseChanges,
 } from "../dropship-catalog-choose";
 import {
@@ -62,13 +64,18 @@ const CHANGES = changes([105, 102], [101]);
 const range = (from: number, count: number) => Array.from({ length: count }, (_, index) => from + index);
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
+const HASH_C = "c".repeat(64);
 
 function preview(overrides: Partial<SelectionChangePreviewAnswer> = {}): SelectionChangePreviewAnswer {
   return Object.freeze({
     headRevisionId: 7, toAdd: 2, toRemove: 1, alreadySelected: 0, alreadyNotSelected: 0, skipped: { count: 0, first: [] },
     selectedBefore: 10, selectedAfter: 11, cap: 10_000, overCapAfter: false, refused: null,
-    effects: [{ storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 1, startsSelling: 2 }],
+    effects: [{ storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 1, startsSelling: 2, ends: 1,
+      storeConnected: true }],
     effectsHash: HASH_A,
+    // PR C: what the change ends, and the other entries' hash the save echoes with it (PLAN-C v4.1 §4.6).
+    ends: { listingIds: [501], hiddenRemovedIds: [], otherSizes: 0, stillEnding: 0, endReview: 0, endedReAdd: 0 },
+    otherEntriesHash: HASH_C,
     ...overrides,
   } as SelectionChangePreviewAnswer);
 }
@@ -138,9 +145,9 @@ function sameKeyAndBody(posted: readonly SelectionChangeRequest[]) {
 describe("reads (§12.2)", () => {
   it("Q1 the list sends search, the category id, Show, no facets, this page's version, the page and 200 rows; never selectedOnly or a name", () => {
     const url = chooseCatalogUrl({ search: "  toploader ", categoryId: 5, show: "not_selected" }, 2);
-    expect(url).toBe("/api/dropship/catalog?search=toploader&categoryId=5&selection=not_selected&includeFacets=false&clientVersion=2&page=2&limit=200");
+    expect(url).toBe("/api/dropship/catalog?search=toploader&categoryId=5&selection=not_selected&includeFacets=false&clientVersion=3&page=2&limit=200");
     expect(chooseCatalogUrl({ search: "", categoryId: null, show: "all" }, 1))
-      .toBe("/api/dropship/catalog?selection=all&includeFacets=false&clientVersion=2&page=1&limit=200");
+      .toBe("/api/dropship/catalog?selection=all&includeFacets=false&clientVersion=3&page=1&limit=200");
     expect(chooseCatalogUrl({ search: "x".repeat(250), categoryId: null, show: "selected" }, 1)).toContain(`search=${"x".repeat(200)}&`);
     for (const value of [url, chooseIdsUrl({ search: "a", categoryId: 5, show: "all" }, "add")]) {
       expect(value).not.toMatch(/selectedOnly|category=|productLine|productId/);
@@ -149,10 +156,10 @@ describe("reads (§12.2)", () => {
 
   it("Q2 the id reads: Check all with the table's filters, a category's box with its id only, Select everything with none", () => {
     expect(chooseIdsUrl({ search: "sleeve", categoryId: null, show: "selected" }, "remove"))
-      .toBe("/api/dropship/catalog?search=sleeve&selection=selected&idsOnly=true&purpose=remove&clientVersion=2");
-    expect(chooseIdsUrl(chooseCategoryFilters(12), "add")).toBe("/api/dropship/catalog?categoryId=12&selection=all&idsOnly=true&purpose=add&clientVersion=2");
-    expect(chooseIdsUrl(CHOOSE_EVERYTHING_FILTERS, "add")).toBe("/api/dropship/catalog?selection=all&idsOnly=true&purpose=add&clientVersion=2");
-    expect(chooseCategoriesUrl()).toBe("/api/dropship/catalog/categories?clientVersion=2");
+      .toBe("/api/dropship/catalog?search=sleeve&selection=selected&idsOnly=true&purpose=remove&clientVersion=3");
+    expect(chooseIdsUrl(chooseCategoryFilters(12), "add")).toBe("/api/dropship/catalog?categoryId=12&selection=all&idsOnly=true&purpose=add&clientVersion=3");
+    expect(chooseIdsUrl(CHOOSE_EVERYTHING_FILTERS, "add")).toBe("/api/dropship/catalog?selection=all&idsOnly=true&purpose=add&clientVersion=3");
+    expect(chooseCategoriesUrl()).toBe("/api/dropship/catalog/categories?clientVersion=3");
   });
 
   function respond(body: unknown, status = 200, contentType = "application/json"): Response {
@@ -202,7 +209,7 @@ describe("reads (§12.2)", () => {
     await expect(readChooseIds(CHOOSE_EVERYTHING_FILTERS, "add", offContract.fetch)).rejects.toMatchObject({ code: "DROPSHIP_CATALOG_IDS_OFF_CONTRACT" });
     const fine = fetcher(respond({ selectedIds: null, notSelectedIds: [3, 4], total: 10_052 }));
     expect(await readChooseIds(CHOOSE_EVERYTHING_FILTERS, "add", fine.fetch)).toEqual({ selectedIds: null, notSelectedIds: [3, 4], total: 10_052 });
-    expect(fine.requests[0].url).toBe("/api/dropship/catalog?selection=all&idsOnly=true&purpose=add&clientVersion=2");
+    expect(fine.requests[0].url).toBe("/api/dropship/catalog?selection=all&idsOnly=true&purpose=add&clientVersion=3");
   });
 
   it("Q6 a failure card names the code and, for older code's answer, why", () => {
@@ -212,7 +219,7 @@ describe("reads (§12.2)", () => {
   });
 
   it("Q7 the two POSTs send JSON to their routes; the save tells a replay (200) from a first answer (201)", async () => {
-    const body = { clientVersion: 2, expectedRevisionId: 7, add: { productVariantIds: [1] }, remove: { productVariantIds: [] } };
+    const body = { clientVersion: 3, expectedRevisionId: 7, add: { productVariantIds: [1] }, remove: { productVariantIds: [] } };
     const previewFetch = fetcher(respond(preview()));
     expect(await postChoosePreview(body, previewFetch.fetch)).toEqual(preview());
     expect(previewFetch.requests[0]).toMatchObject({ url: SELECTION_CHANGES_PREVIEW_URL,
@@ -245,15 +252,17 @@ describe("reads (§12.2)", () => {
 });
 
 describe("the save (§12.4)", () => {
-  it("S1 preview, question, save: both bodies carry clientVersion 2, the base revision and every id; the save adds the key and the confirmed hash", async () => {
+  it("S1 preview, question, save: both bodies carry clientVersion 3, the base revision and every id; the save adds the key, the confirmed hash and the ends echo", async () => {
     const run = harness({ previews: [preview()], posts: [{ answer: answer(), replay: false }] });
     const outcome = await runChooseSave(run.deps, { changes: CHANGES, pending: null });
     expect(outcome).toEqual({ kind: "saved", answer: answer(), replay: false });
     expect(run.calls).toEqual(["preview", "confirm", "post"]);
-    expect(run.previewed[0]).toEqual({ clientVersion: 2, expectedRevisionId: 7, add: { productVariantIds: [102, 105] }, remove: { productVariantIds: [101] } });
-    expect(run.posted[0]).toEqual({ ...run.previewed[0], idempotencyKey: "catalog-selection:key-1", expectedEffectsHash: HASH_A });
+    expect(run.previewed[0]).toEqual({ clientVersion: 3, expectedRevisionId: 7, add: { productVariantIds: [102, 105] }, remove: { productVariantIds: [101] } });
+    expect(run.posted[0]).toEqual({ ...run.previewed[0], idempotencyKey: "catalog-selection:key-1", expectedEffectsHash: HASH_A,
+      expectedEnds: { listingIds: [501], hiddenRemovedIds: [] }, expectedOtherEntriesHash: HASH_C });
     expect(run.questions).toEqual([{ preview: preview(), effectsChanged: false }]);
-    expect(describeChooseSaveOutcome(outcome)).toEqual({ kind: "saved", message: "Saved. 2 added, 1 removed." });
+    // The save ended the one eBay listing the question named (PLAN-C v4.1 §11 savedEnding).
+    expect(describeChooseSaveOutcome(outcome)).toEqual({ kind: "saved", message: "Saved. 2 added, 1 removed. 1 eBay listing is being ended." });
   });
 
   it("S2 a head revision other than the base stops before the question: stale, nothing sent, the changes untouched", async () => {
@@ -429,6 +438,8 @@ describe("the save (§12.4)", () => {
       [api(410, SELECTION_CHANGE_ERROR_CODES.rulesRetired), { kind: "retired" }],
       [api(413, SELECTION_CHANGE_ERROR_CODES.requestTooLarge), { kind: "tooLarge" }],
       [api(422, SELECTION_CHANGE_ERROR_CODES.tooLarge, { selectedAfter: 10_002 }), { kind: "overCap", after: 10_002 }],
+      // PR C (FID-4): a removal over the facts or end bound has its own outcome and words.
+      [api(422, SELECTION_CHANGE_ERROR_CODES.removalTooLarge, { factSizes: 30_001 }), { kind: "tooManyRemoved" }],
       [api(400, SELECTION_CHANGE_ERROR_CODES.invalidInput), { kind: "rejected", message: CHOOSE_WORDS.rejected }],
       [api(403, "DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED"), { kind: "rejected", message: "Server words." }],
     ] as const) {
@@ -439,20 +450,51 @@ describe("the save (§12.4)", () => {
     }
     expect(describeChooseSaveOutcome({ kind: "retired" })).toEqual({ kind: "error", message: CHOOSE_WORDS.retired, reload: true });
     expect(describeChooseSaveOutcome({ kind: "tooLarge" })).toEqual({ kind: "error", message: CHOOSE_WORDS.tooLarge });
+    expect(describeChooseSaveOutcome({ kind: "tooManyRemoved" })).toEqual({ kind: "error", message: CHOOSE_WORDS.tooManyRemoved });
+    expect(CHOOSE_WORDS.tooManyRemoved).toBe("That's too many items to change at once. Remove fewer products in one save.");
+    // The preview's 422 for a removal too large stops before the question, with the same words.
+    const removalTooLarge = harness({ previews: [api(422, SELECTION_CHANGE_ERROR_CODES.removalTooLarge, { factSizes: 30_001 })] });
+    expect(await runChooseSave(removalTooLarge.deps, { changes: CHANGES, pending: null })).toEqual({ kind: "tooManyRemoved" });
+    expect(removalTooLarge.calls).toEqual(["preview"]);
     // The preview's refusals stop too, before any question.
     const outdated = harness({ previews: [api(409, SELECTION_CHANGE_ERROR_CODES.pageOutdated)] });
     expect(await runChooseSave(outdated.deps, { changes: CHANGES, pending: null })).toEqual({ kind: "retired" });
     expect(outdated.calls).toEqual(["preview"]);
   });
 
-  it("S16 savedDrift: a removal whose effects moved went through; the bar says so with the save's quantity-0 count", async () => {
+  it("S16 savedDrift: a removal whose effects moved went through; the bar says so with the save's quantity-0 and end count, then the ends", async () => {
     const drifted = answer({ toAdd: 0, toRemove: 3, drifted: true, effectsHash: HASH_B,
-      effects: [{ storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 2, startsSelling: 0 }] });
+      effects: [{ storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 2, startsSelling: 0, ends: 0,
+        storeConnected: true }], ends: { listingIds: [], hiddenRemovedIds: [], otherSizes: 0, stillEnding: 0, endReview: 0, endedReAdd: 0 } });
     const run = harness({ previews: [preview({ toAdd: 0, toRemove: 3 })], posts: [{ answer: drifted, replay: false }] });
     const outcome = await runChooseSave(run.deps, { changes: changes([], [101, 102, 103]), pending: null });
     expect(describeChooseSaveOutcome(outcome)).toEqual({
       kind: "saved", message: "Saved. A few listings changed on eBay while you were deciding; 2 listings are set to quantity 0.",
     });
+    // PR C (PLAN-C v4.1 §11, FID-14): fewer ends than confirmed went through; the drift line counts them, then savedEnding.
+    const fewer = answer({ toAdd: 0, toRemove: 2, drifted: true, effectsHash: HASH_B,
+      effects: [{ storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 0, startsSelling: 0, ends: 1, storeConnected: true }] });
+    const second = harness({ previews: [preview({ toAdd: 0, toRemove: 2, ends: { ...preview().ends, listingIds: [501, 502] } })],
+      posts: [{ answer: fewer, replay: false }] });
+    const fewerOutcome = await runChooseSave(second.deps, { changes: changes([], [101, 102]), pending: null });
+    expect(second.posted[0].expectedEnds).toEqual({ listingIds: [501, 502], hiddenRemovedIds: [] });
+    expect(describeChooseSaveOutcome(fewerOutcome)).toEqual({
+      kind: "saved", message: "Saved. A few listings changed on eBay while you were deciding; 1 listing is set to quantity 0. 1 eBay listing is being ended.",
+    });
+  });
+
+  it("S16b (PLAN-C v4.1 §13.3, TST-8) the largest echo, 30,000 + 30,000 end ids beside 10,000 + 10,000 ids, is sent in one body under the bulk limit", async () => {
+    const ends = { listingIds: range(1_000_001, 30_000), hiddenRemovedIds: range(2_000_001, 30_000), otherSizes: 29_999, stillEnding: 0,
+      endReview: 0, endedReAdd: 0 };
+    const big = changes(range(1, 10_000), range(100_001, 10_000));
+    const run = harness({ previews: [preview({ toAdd: 10_000, toRemove: 10_000, ends })], posts: [{ answer: answer(), replay: false }] });
+    expect((await runChooseSave(run.deps, { changes: big, pending: null })).kind).toBe("saved");
+    const sent = run.posted[0];
+    expect(sent.expectedEnds).toEqual({ listingIds: ends.listingIds, hiddenRemovedIds: ends.hiddenRemovedIds });
+    expect(selectionChangeRequestSchema.safeParse(sent).success).toBe(true);
+    // The page's mirror of the bulk parser's 1 MiB (dropship-bulk-json.middleware.ts): the body fits with room to spare.
+    expect(chooseBodyBytes(sent)).toBeLessThan(CHOOSE_BULK_BODY_LIMIT_BYTES);
+    expect(new TextEncoder().encode(JSON.stringify(sent)).length).toBe(chooseBodyBytes(sent));
   });
 
   it("S17 a kept save is sent again only for exactly its changes; other changes get a new preview, question and key", async () => {
@@ -543,12 +585,12 @@ describe("the save (§12.4)", () => {
       { kind: "saved", answer: answer({ skipped: { count: 1, first: [9] } }), replay: false },
       { kind: "stale", headRevisionId: undefined }, { kind: "overCap", after: null }, { kind: "retired" }, { kind: "tooLarge" },
       { kind: "rejected", message: "Refused." }, { kind: "effectsChanged" }, { kind: "busy", pending }, { kind: "pausedStill", pending },
-      { kind: "unconfirmed", pending }, { kind: "notSaved", pending: null },
+      { kind: "unconfirmed", pending }, { kind: "notSaved", pending: null }, { kind: "tooManyRemoved" },
     ];
     expect(outcomes.map((outcome) => describeChooseSaveOutcome(outcome)?.message)).toEqual([
-      "Saved. 2 added, 1 removed. 1 is no longer offered by Card Shellz and was skipped.",
+      "Saved. 2 added, 1 removed. 1 eBay listing is being ended. 1 is no longer offered by Card Shellz and was skipped.",
       CHOOSE_WORDS.stale, CHOOSE_WORDS.rejected, CHOOSE_WORDS.retired, CHOOSE_WORDS.tooLarge, "Refused.", CHOOSE_WORDS.effectsChanged,
-      CHOOSE_WORDS.busy, CHOOSE_WORDS.pausedStill, CHOOSE_WORDS.unconfirmed, CHOOSE_WORDS.notSaved,
+      CHOOSE_WORDS.busy, CHOOSE_WORDS.pausedStill, CHOOSE_WORDS.unconfirmed, CHOOSE_WORDS.notSaved, CHOOSE_WORDS.tooManyRemoved,
     ]);
   });
 });

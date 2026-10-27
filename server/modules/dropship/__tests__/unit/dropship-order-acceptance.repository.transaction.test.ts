@@ -816,7 +816,6 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
   it.each([
     { listing_status: "queued", external_listing_id: null },
     { listing_status: "failed", external_listing_id: "" },
-    { listing_status: "ended", external_listing_id: "L1" },
     { listing_status: "preview_ready", external_listing_id: null },
   ])("refuses an order on a $listing_status listing with id $external_listing_id before any financial write", async (listing) => {
     const db = createFakeDb(baseHandlers({
@@ -855,15 +854,53 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     }
   });
 
-  it("refuses an order placed after sync-back saw its listing end, before any financial write", async () => {
-    const db = createFakeDb(baseHandlers({
-      listings: { match: "FROM dropship.dropship_vendor_listings dl", rows: [listingCandidateRow({ listing_status: "ended",
-        marketplace_ended_at: new Date("2026-09-12T13:59:59.000Z") })] },
-    }));
-    const { repository } = createRepository(db, availableCost());
-    await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
-      code: "DROPSHIP_ORDER_LISTING_NOT_ACCEPTABLE", context: expect.objectContaining({ listingStatus: "ended" }) });
-    expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(0);
+  // DC14 (PLAN-C v4.1 §8 step 3): every refusal because the listing had ended is one review code, sync-back's included.
+  it.each([
+    { label: "after sync-back saw its listing end", times: { marketplace_ended_at: new Date("2026-09-12T13:59:59.000Z") },
+      endSource: "marketplace_end", endedAt: "2026-09-12T13:59:59.000Z" },
+    { label: "after Card Shellz ended its listing", times: { listing_end_ended_at: new Date("2026-09-12T13:59:59.000Z") },
+      endSource: "card_shellz_end", endedAt: "2026-09-12T13:59:59.000Z" },
+    { label: "on an ended listing with no end time (no proof)", times: {}, endSource: "unknown", endedAt: null },
+  ])("refuses an order placed $label for review, before any financial write", async ({ times, endSource, endedAt }) => {
+    const error = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    try {
+      const db = createFakeDb(baseHandlers({
+        listings: { match: "FROM dropship.dropship_vendor_listings dl", rows: [listingCandidateRow({ listing_status: "ended", ...times })] },
+      }));
+      const { repository, loadProductCosts } = createRepository(db, availableCost());
+      await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
+        code: "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER",
+        context: expect.objectContaining({ intakeId: 1, lineIndex: 0, listingId: 501, listingStatus: "ended", endedAt,
+          orderedAt: "2026-09-12T14:00:00.000Z", endSource, requiresReview: true, retryable: false, classification: "permanent" }),
+      });
+      expect(error).toHaveBeenCalledWith("dropship.order.listing_ended_before_order", expect.objectContaining({
+        outcome: "requires_review", error_code: "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER", listing_id: 501, intake_id: 1,
+        end_source: endSource, path: "acceptance" }));
+      expect(loadProductCosts).not.toHaveBeenCalled();
+      expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(0);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("accepts an order placed before Card Shellz ended its listing, and reads that end in the candidate SQL", async () => {
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    try {
+      const db = createFakeDb(baseHandlers({
+        listings: { match: "FROM dropship.dropship_vendor_listings dl", rows: [listingCandidateRow({ listing_status: "ended",
+          marketplace_ended_at: null, listing_end_ended_at: new Date("2026-09-12T14:00:00.000Z") })] },
+      }));
+      const { repository } = createRepository(db, availableCost());
+
+      await expect(repository.acceptOrder(acceptanceInput())).resolves.toMatchObject({ outcome: "accepted" });
+
+      expect(info).toHaveBeenCalledWith("dropship.order.listing_acceptable_before_end", expect.objectContaining({
+        listing_id: 501, marketplace_ended_at: null, listing_end_ended_at: "2026-09-12T14:00:00.000Z", path: "acceptance" }));
+      const listingQuery = db.calls.find((call) => call.sql.includes("FROM dropship.dropship_vendor_listings dl"));
+      expect(listingQuery?.sql.replace(/\s+/g, " ")).toContain("(SELECT er.ended_at FROM dropship.dropship_listing_end_requests er WHERE er.listing_id = dl.id AND er.state = 'ended' ORDER BY er.ended_at DESC, er.id DESC LIMIT 1) AS listing_end_ended_at");
+    } finally {
+      info.mockRestore();
+    }
   });
 
   it("matches an eBay line on the item number its listing had before a relist", async () => {

@@ -141,7 +141,7 @@ import {
 // Step 1's new-items notice (PLAN-B v4.1 §11.4, B3): the server's own grouping and "Got it" rule.
 import { decideAcknowledge, groupNewItems, type CatalogArrivalFact } from "../../server/modules/dropship/domain/catalog-arrivals";
 import { generateVendorListingPreviewInputSchema } from "../../server/modules/dropship/application/dropship-use-case-dtos";
-import { DROPSHIP_CATALOG_CODE_VERSION } from "../../server/modules/dropship/domain/catalog-code-version";
+import { DROPSHIP_CATALOG_CODE_VERSION, isCatalogPageOutdated } from "../../server/modules/dropship/domain/catalog-code-version";
 import {
   LISTING_PUSH_RUN_CHUNK_SIZE,
   LISTING_PUSH_RUN_ERROR_CODES,
@@ -182,6 +182,7 @@ import {
   selectionChangeAnswerSchema,
   selectionChangePreviewAnswerSchema,
   type SelectionChangeAnswer,
+  type SelectionChangeEnds,
   type SelectionChangePreviewAnswer,
   type SelectionChangeStoreEffects,
 } from "../../shared/dropship/vendor-selection-changes";
@@ -203,6 +204,28 @@ import {
   selectedCountAfterChange,
   type SelectionChangePlan,
 } from "../../server/modules/dropship/domain/vendor-selection-change";
+// PR C (PLAN-C v4.1 §13.4, TST-10): the server's own end decision, effects hash and drift rule. The stock decision
+// behind B's quantity effects cannot be imported here (its imports load the listing lifecycle repositories), so
+// stubSelectionEffects keeps its copy of it, pinned to the server's by catalog-stub-selection-effects-parity.test.ts.
+import {
+  combineSelectionEffectsHash,
+  compareSelectionEffects,
+  selectionEffectsHash,
+  selectionEndsEchoMatches,
+  selectionEndsHash,
+  type SelectionEffect,
+  type SelectionEffectEntry,
+} from "../../server/modules/dropship/domain/vendor-selection-drift";
+import {
+  decideListingEnds,
+  type ListingEndCandidate,
+  type ListingEndDecision,
+  type ListingEndReason,
+  type ListingEndStoreFacts,
+  type PendingListingEnd,
+} from "../../server/modules/dropship/domain/vendor-selection-ends";
+// PR C's push fence (PLAN-C v4.1 §6.2): its codes and words, for the run problems of a target whose end is open.
+import { LISTING_END_FENCE_CODES, LISTING_END_FENCE_WORDS } from "../../server/modules/dropship/domain/listing-end-fence";
 import { publicationSelectionBusyIssue } from "../../server/modules/inventory-planning/publication-selection-work";
 
 /**
@@ -783,6 +806,18 @@ export interface StubState {
   changeKeys: Record<string, { hash: string; answer: SelectionChangeAnswer }>;
   /** Each store's listings that ended on eBay (sync-back, #1900): never counted by the save question (V20, C13). */
   endedVariantIds: Record<number, number[]>;
+  /**
+   * PR C's end requests (`dropship_listing_end_requests`, PLAN-C v4.1 §3), oldest first: a journey seeds some, and
+   * every save adds a `pending` one per end it plans and supersedes the `pending` ones it takes back (§4.7 step 9).
+   * No worker runs in the stub, so an end moves on only when a journey changes it. An `ended` one is Card Shellz's
+   * end: its listing reads `ended` with no eBay end time (§5.5 step 8).
+   */
+  listingEnds: StubListingEnd[];
+  /**
+   * Sizes of the catalog step 1 does not list because Card Shellz isn't offering them now (not sellable to buyers):
+   * a pick of one is a hidden pick, which a wholly removed product takes with it (PLAN-C v4.1 §4.3, §4.4 rule 2).
+   */
+  hiddenRows: ChooseRowFact[];
   /** How many categories reads still answer 500 before they answer (`READ_FAILURES_UNTIL_GIVE_UP` makes one give up). */
   categoriesReadFailures: number;
   /** Catalog reads that answer 500, each once, matched in order by Show filter and page (verify V5, V8). */
@@ -2769,7 +2804,8 @@ export const defaultStubState = (): StubState => ({
   conversionNotices: {}, conversionNoticeAcknowledges: [], conversionNoticeAcknowledgeAnswers: [],
   reviews: {}, keyedAnswers: {}, nextRevision: 40,
   chooseRows: [ROW_FACT], picks: new Set<number>(), selectionRevision: 1, changeCalls: [], changePreviews: [], changeAnswers: [],
-  changePreviewAnswers: [], afterChangePreview: [], changeKeys: {}, endedVariantIds: {}, categoriesReadFailures: 0, catalogReadFailures: [], olderServerReads: [],
+  changePreviewAnswers: [], afterChangePreview: [], changeKeys: {}, endedVariantIds: {}, listingEnds: [], hiddenRows: [],
+  categoriesReadFailures: 0, catalogReadFailures: [], olderServerReads: [],
   catalogArrivals: [], noticeMarks: {}, noticeAcknowledges: [], noticeAcknowledgeAnswers: [],
   proofs: {}, codesSent: [], liveVariantIds: {}, selectionSummaryAnswers: [], previewBodies: [], previewAnswers: [],
   runs: [], runCreates: [], runCreateAnswers: [], nextRunFrames: null, runSnapshotShort: 0, runDetailReads: [], runStops: [],
@@ -3231,42 +3267,173 @@ async function answerNewItemsAcknowledge(state: StubState, route: Route) {
 }
 
 /** A listing's id in the stub: one per store and size. */
-function stubListingId(storeConnectionId: number, productVariantId: number): number {
+export function stubListingId(storeConnectionId: number, productVariantId: number): number {
   return storeConnectionId * 1_000_000 + productVariantId;
 }
 
+/** An end request's states (PLAN-C v4.1 §3): `pending`, `ending` and `failed` are open; the rest are closed. */
+export type StubListingEndState = "pending" | "ending" | "failed" | "ended" | "superseded";
+const OPEN_END_STATES: ReadonlySet<StubListingEndState> = new Set<StubListingEndState>(["pending", "ending", "failed"]);
+
+/** One end request as the stub holds it: its listing (by store and size), its reason and its state. */
+export interface StubListingEnd {
+  id: number;
+  storeConnectionId: number;
+  productVariantId: number;
+  productId: number;
+  reason: ListingEndReason;
+  state: StubListingEndState;
+}
+
+/** The open end of a store's listing of a size, if any (at most one, the table's one-open index). */
+function openListingEnd(state: StubState, storeConnectionId: number, productVariantId: number): StubListingEnd | null {
+  return state.listingEnds.find((end) => end.storeConnectionId === storeConnectionId && end.productVariantId === productVariantId
+    && OPEN_END_STATES.has(end.state)) ?? null;
+}
+
+/** Whether Card Shellz ended a store's listing of a size (an `ended` request, §5.5 step 8). */
+function endedByCardShellz(state: StubState, storeConnectionId: number, productVariantId: number): boolean {
+  return state.listingEnds.some((end) => end.storeConnectionId === storeConnectionId && end.productVariantId === productVariantId
+    && end.state === "ended");
+}
+
+/** Whether a store can be used now (the store connection's `connected`, as the effects reader reads it). */
+function stubStoreConnected(state: StubState, storeConnectionId: number): boolean {
+  return (state.storeStatuses[storeConnectionId] ?? "connected") === "connected";
+}
+
 /**
- * What a planned change does on each of the vendor's stores (§7.6, V20), as `decideSelectionEffects` and
- * `classifySelectionEffect` (domain/vendor-selection-effects.ts) count it, over the stub's listing model: a size has
- * a listing on a store when it is in that store's `liveVariantIds` (live) or `endedVariantIds` (ended on eBay). No
- * listing: nothing is promised. Ended on eBay: no change either way, never `startsSelling`. Otherwise a size sells
- * while it is selected (picked and offered), so a picked offered size removed goes to quantity 0 and an offered size
- * added gets its quantity back; a size Card Shellz does not offer sells neither before nor after. (Paused stores,
- * vendor limits and the stock decision's other branches are not modelled: no journey sets them.) Every store is
- * listed, ascending, zero counts included; the hash is the domain's (sha256 of the sorted entries' JSON).
+ * The stub's facts as the server's end decision reads them (PR C, PLAN-C v4.1 §4.4): every catalog row is an active,
+ * exposed, sellable size of its product (so every one is visible in step 1, and none is archived), and a hidden row
+ * (`hiddenRows`) is one Card Shellz isn't offering now (`internal_only`, so step 1 does not list it). A store's
+ * listings are its live sizes (`liveVariantIds`, with eBay ids) and its sizes ended on eBay (`endedVariantIds`, with
+ * sync-back's end time); a listing whose end Card Shellz finished reads `ended` with no end time; an open end request
+ * (`listingEnds`) is the listing's `openEndId`/`openEndState`.
+ */
+export function stubListingEndFacts(state: StubState): { candidates: ListingEndCandidate[]; stores: ListingEndStoreFacts[] } {
+  const candidate = (fact: ChooseRowFact, hidden: boolean): ListingEndCandidate => ({
+    productId: fact.productId, productVariantId: fact.productVariantId, productLineIds: fact.productLineIds, category: fact.category,
+    productIsActive: true, variantIsActive: true, requiresShipping: true, trackInventory: true, salesEligibility: hidden ? "internal_only" : "sellable",
+  });
+  const candidates = [...state.chooseRows.map((fact) => candidate(fact, false)), ...state.hiddenRows.map((fact) => candidate(fact, true))];
+  const stores = [...state.stores].sort((left, right) => left.storeConnectionId - right.storeConnectionId).map((store): ListingEndStoreFacts => {
+    const ended = new Set(state.endedVariantIds[store.storeConnectionId] ?? []);
+    const sizes = [...new Set([...(state.liveVariantIds[store.storeConnectionId] ?? []), ...ended])].sort((left, right) => left - right);
+    return {
+      storeConnectionId: store.storeConnectionId, platform: store.platform, externalAccountId: `stub-account-${store.storeConnectionId}`,
+      providerEnvironment: "production",
+      listings: sizes.map((productVariantId) => {
+        const id = stubListingId(store.storeConnectionId, productVariantId);
+        const open = openListingEnd(state, store.storeConnectionId, productVariantId);
+        const endedOnEbay = ended.has(productVariantId);
+        return { id, productVariantId, status: endedOnEbay || endedByCardShellz(state, store.storeConnectionId, productVariantId) ? "ended" : "active",
+          externalListingId: `L-${id}`, externalOfferId: `O-${id}`, marketplaceEndedAt: endedOnEbay ? new Date(STAMP) : null,
+          openEndId: open?.id ?? null, openEndState: open === null ? null : open.state as "pending" | "ending" | "failed", pushInFlight: false };
+      }),
+    };
+  });
+  return { candidates, stores };
+}
+
+/** The `pending` ends a save may take back (the service reads those of the added sizes' products, §4.2 item 5). */
+function stubPendingEnds(state: StubState): PendingListingEnd[] {
+  return state.listingEnds.filter((end) => end.state === "pending").map((end) => ({ id: end.id, listingId: stubListingId(end.storeConnectionId,
+    end.productVariantId), productId: end.productId, productVariantId: end.productVariantId, reason: end.reason }));
+}
+
+/** What the stub's effects answer carries: B's per-store counts with PR C's, the vendor-level ends and both hashes. */
+export interface StubSelectionEffects {
+  stores: SelectionChangeStoreEffects[];
+  ends: SelectionChangeEnds;
+  otherEntriesHash: string;
+  effectsHash: string;
+  decision: ListingEndDecision;
+}
+
+/**
+ * What a planned change does on each of the vendor's stores (§7.6, V20; PR C §4.5), as `decideSelectionEffects`
+ * (domain/vendor-selection-effects.ts) counts it over the stub's listing model. The ends are the server's own
+ * decideListingEnds over stubListingEndFacts; a listing with an end planned now is an `ends` entry instead of B's
+ * `goesToZero`. B's quantity rule is a copy (pinned to the domain by catalog-stub-selection-effects-parity.test.ts):
+ * a size has a listing on a store when it is in that store's `liveVariantIds` (live) or `endedVariantIds` (ended on
+ * eBay). No listing: nothing is promised. Ended (on eBay, or by Card Shellz): no change either way, never
+ * `startsSelling`. Otherwise a size sells while it is selected (picked and offered) and no end is open on its listing
+ * (the stock decision's `endOpen`, §7): before the save an end is open as read; after it, one superseded now is closed.
+ * So a picked offered size removed goes to quantity 0, an offered size added gets its quantity back, and a size whose
+ * end is `ending` or `failed` sells neither before nor after; a size Card Shellz does not offer sells neither. (Paused
+ * stores, vendor limits and the stock decision's other branches are not modelled: no journey sets them.) Every store
+ * is listed, ascending, zero counts included; the hashes are the domain's own functions.
  */
 export function stubSelectionEffects(state: StubState, plan: Pick<SelectionChangePlan, "insertIds" | "deleteIds">,
-  offered: ReadonlySet<number>): { stores: SelectionChangeStoreEffects[]; effectsHash: string } {
+  offered: ReadonlySet<number>): StubSelectionEffects {
+  const facts = stubListingEndFacts(state);
+  const decision = decideListingEnds({
+    now: new Date(STAMP), removedNow: plan.deleteIds, added: plan.insertIds, pickedBefore: state.picks, candidates: facts.candidates,
+    archivedIds: [], rules: [{ id: 1, scopeType: "catalog", action: "include" }], stores: facts.stores, pendingEnds: stubPendingEnds(state),
+  });
+  const plannedEnds = new Set(decision.endPlans.map((end) => end.listingId));
+  const superseded = new Set(decision.supersedeIds);
   const pickedAfter = new Map<number, boolean>();
   for (const id of plan.insertIds) pickedAfter.set(id, true);
-  for (const id of plan.deleteIds) pickedAfter.set(id, false);
-  const touched = [...pickedAfter.entries()].sort((left, right) => left[0] - right[0]);
-  const entries: Array<[number, number, number, "goesToZero" | "startsSelling"]> = [];
-  const stores = [...state.stores].sort((left, right) => left.storeConnectionId - right.storeConnectionId).map((store) => {
-    const counts: SelectionChangeStoreEffects = { storeConnectionId: store.storeConnectionId, storeName: store.name, platform: store.platform,
-      goesToZero: 0, startsSelling: 0 };
-    const live = new Set(state.liveVariantIds[store.storeConnectionId] ?? []);
-    const ended = new Set(state.endedVariantIds[store.storeConnectionId] ?? []);
-    for (const [productVariantId, picked] of touched) {
-      if (!live.has(productVariantId) || ended.has(productVariantId) || !offered.has(productVariantId)) continue;
-      const effect = picked ? "startsSelling" : "goesToZero";
-      counts[effect] += 1;
-      entries.push([store.storeConnectionId, stubListingId(store.storeConnectionId, productVariantId), productVariantId, effect]);
+  for (const id of [...plan.deleteIds, ...decision.hiddenRemovedIds]) pickedAfter.set(id, false);
+  const reported = new Map<number, SelectionEffect>();
+  for (const [effect, rows] of [["stillEnding", decision.stillEnding], ["endReview", decision.endReview],
+    ["endedReAdd", decision.endedReAdd]] as const) for (const row of rows) reported.set(row.listingId, effect);
+  const entries: SelectionEffectEntry[] = [];
+  const stores = facts.stores.map((store) => {
+    const fixture = state.stores.find((entry) => entry.storeConnectionId === store.storeConnectionId)!;
+    const counts: SelectionChangeStoreEffects = { storeConnectionId: store.storeConnectionId, storeName: fixture.name, platform: store.platform,
+      goesToZero: 0, startsSelling: 0, ends: 0, storeConnected: stubStoreConnected(state, store.storeConnectionId) };
+    for (const listing of store.listings) {
+      if (plannedEnds.has(listing.id)) {
+        counts.ends += 1;
+        entries.push([store.storeConnectionId, listing.id, listing.productVariantId, "ends"]);
+        continue;
+      }
+      const picked = pickedAfter.get(listing.productVariantId);
+      if (picked === undefined) continue;
+      if (listing.status !== "ended" && listing.marketplaceEndedAt === null && offered.has(listing.productVariantId)) {
+        const openBefore = listing.openEndState !== null;
+        const openAfter = openBefore && !(listing.openEndId !== null && superseded.has(listing.openEndId));
+        const sellsBefore = !picked && !openBefore;
+        const sellsAfter = picked && !openAfter;
+        const effect = sellsBefore && !sellsAfter ? "goesToZero" : !sellsBefore && sellsAfter ? "startsSelling" : null;
+        if (effect !== null) {
+          counts[effect] += 1;
+          entries.push([store.storeConnectionId, listing.id, listing.productVariantId, effect]);
+        }
+      }
+      const told = reported.get(listing.id);
+      if (told !== undefined) entries.push([store.storeConnectionId, listing.id, listing.productVariantId, told]);
     }
     return counts;
   });
-  const sorted = entries.sort((left, right) => left[0] - right[0] || left[1] - right[1] || left[2] - right[2]);
-  return { stores, effectsHash: createHash("sha256").update(JSON.stringify(sorted)).digest("hex") };
+  for (const productVariantId of decision.hiddenRemovedIds) entries.push([0, 0, productVariantId, "removedWithProduct"]);
+  const ends: SelectionChangeEnds = {
+    listingIds: [...plannedEnds].sort((left, right) => left - right), hiddenRemovedIds: decision.hiddenRemovedIds,
+    otherSizes: decision.endPlans.filter((end) => end.reason === "product_removed").length,
+    // By size, as the domain counts them (a size listed on two stores is one item you're adding).
+    stillEnding: new Set(decision.stillEnding.map((entry) => entry.productVariantId)).size,
+    endReview: new Set(decision.endReview.map((entry) => entry.productVariantId)).size,
+    endedReAdd: new Set(decision.endedReAdd.map((entry) => entry.productVariantId)).size,
+  };
+  const otherEntriesHash = selectionEffectsHash(entries.filter((entry) => entry[3] !== "ends" && entry[3] !== "removedWithProduct"));
+  return { stores, ends, otherEntriesHash, effectsHash: combineSelectionEffectsHash(selectionEndsHash(ends), otherEntriesHash), decision };
+}
+
+/**
+ * The save's end writes (§4.7 step 9), after its picks writes: the `pending` ends it takes back are superseded, then
+ * one `pending` end per planned end, with the next id (the table's identity grows past every row it holds).
+ */
+function stubWriteListingEnds(state: StubState, decision: ListingEndDecision): void {
+  const superseded = new Set(decision.supersedeIds);
+  for (const end of state.listingEnds) if (end.state === "pending" && superseded.has(end.id)) end.state = "superseded";
+  let nextId = Math.max(700, ...state.listingEnds.map((end) => end.id)) + 1;
+  for (const planned of decision.endPlans) {
+    state.listingEnds.push({ id: nextId, storeConnectionId: planned.storeConnectionId, productVariantId: planned.productVariantId,
+      productId: planned.productId, reason: planned.reason, state: "pending" });
+    nextId += 1;
+  }
 }
 
 /** A change planned from the stub's picks, as the service plans it (`planFromFacts`, with the domain's planner and cap). */
@@ -3304,6 +3471,8 @@ function plannedAnswer(planned: StubPlannedChange): Omit<SelectionChangePreviewA
     overCapAfter: planned.selectedAfter > SELECTION_CHANGE_CAP,
     effects: planned.effects.stores,
     effectsHash: planned.effects.effectsHash,
+    ends: planned.effects.ends,
+    otherEntriesHash: planned.effects.otherEntriesHash,
   };
 }
 
@@ -3383,6 +3552,14 @@ async function answerSelectionChange(state: StubState, route: Route, kind: "prev
       answered(503);
       return writesPausedAnswer(route, DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON);
     }
+    // PR C (PLAN-C v4.1 §4.1): an older page's preview is refused in the route, before any read; this page never
+    // sends one, so it is recorded as unexpected.
+    if (kind === "preview" && isCatalogPageOutdated(clientVersion)) {
+      answered(409);
+      state.unexpected.push(`POST ${path} (page outdated: ${clientVersion})`);
+      return fulfillError(route, { status: 409, code: SELECTION_CHANGE_ERROR_CODES.pageOutdated, message: CATALOG_READ_WORDS.retired,
+        context: { clientVersion, serverVersion: DROPSHIP_CATALOG_CODE_VERSION, classification: "permanent", retryable: false } });
+    }
     if (kind === "preview") {
       change = parseSelectionChangePreviewBody(body);
     } else {
@@ -3454,6 +3631,25 @@ async function answerSelectionChange(state: StubState, route: Route, kind: "prev
     answered(200);
     return route.fulfill({ status: 200, json: seen.answer });
   }
+  // PR C's step 2a, after the replay (§4.1, §4.6): an older page is told to reload, and this page's echo of the
+  // confirmed ends must be the preview it confirmed. This page always sends both, so either refusal is unexpected.
+  if (isCatalogPageOutdated(save.clientVersion)) {
+    answered(409);
+    state.unexpected.push(`POST ${path} (page outdated: ${save.clientVersion})`);
+    return fulfillError(route, { status: 409, code: SELECTION_CHANGE_ERROR_CODES.pageOutdated, message: CATALOG_READ_WORDS.retired,
+      context: { vendorId: 1, clientVersion: save.clientVersion, serverVersion: DROPSHIP_CATALOG_CODE_VERSION,
+        classification: "permanent", retryable: false } });
+  }
+  if (save.expectedEnds === null || save.expectedOtherEntriesHash === null || !selectionEndsEchoMatches({
+    expectedEffectsHash: save.expectedEffectsHash, expectedEnds: save.expectedEnds, expectedOtherEntriesHash: save.expectedOtherEntriesHash,
+  })) {
+    answered(400);
+    state.unexpected.push(`POST ${path} (confirmed ends echo refused)`);
+    return fulfillError(route, { status: 400, code: SELECTION_CHANGE_ERROR_CODES.invalidInput,
+      message: "This save doesn't match what you confirmed. Reload the page and try again.",
+      context: { vendorId: 1, classification: "permanent", retryable: false } });
+  }
+  const expectedEnds = save.expectedEnds;
   // After the replay, as the service checks them: the writes gate, and busy after the server's own retries.
   if (scripts[0] === "paused") {
     scripts.shift();
@@ -3478,9 +3674,12 @@ async function answerSelectionChange(state: StubState, route: Route, kind: "prev
       context: { vendorId: 1, selectedBefore: planned.selectedBefore, selectedAfter: planned.selectedAfter, cap: SELECTION_CHANGE_CAP,
         classification: "permanent", retryable: false } });
   }
-  // The drift rule (§7.5): effects that moved since the question refuse a change that adds; one that only removes goes through.
-  const drifted = planned.effects.effectsHash !== save.expectedEffectsHash;
-  if (drifted && save.addIds.length > 0) {
+  // The drift rule (§7.5; PR C §4.6), the server's own: effects that moved since the question refuse a change that
+  // adds, and a removal that would end a listing or remove a hidden pick the vendor did not confirm; fewer go through.
+  const comparison = compareSelectionEffects({ expectedEffectsHash: save.expectedEffectsHash, actualEffectsHash: planned.effects.effectsHash,
+    addIds: save.addIds, expectedEnds, actualEnds: planned.effects.ends });
+  const drifted = comparison.outcome === "drifted";
+  if (comparison.outcome === "changed") {
     answered(409);
     return fulfillError(route, { status: 409, code: SELECTION_CHANGE_ERROR_CODES.effectsChanged, message: SELECTION_CHANGE_SERVER_WORDS.effectsChanged,
       context: { vendorId: 1, expectedEffectsHash: save.expectedEffectsHash, actualEffectsHash: planned.effects.effectsHash,
@@ -3488,8 +3687,9 @@ async function answerSelectionChange(state: StubState, route: Route, kind: "prev
   }
   const commit = scripts[0] === "drop-after-commit" || scripts[0] === "slow" ? scripts.shift() : undefined;
   if (commit === "slow") await new Promise<void>((resolve) => { setTimeout(resolve, SLOW_SELECTION_SAVE_MS); });
-  for (const id of planned.plan.deleteIds) state.picks.delete(id);
+  for (const id of [...planned.plan.deleteIds, ...planned.effects.decision.hiddenRemovedIds]) state.picks.delete(id);
   for (const id of planned.plan.insertIds) state.picks.add(id);
+  stubWriteListingEnds(state, planned.effects.decision);
   // A no-op save writes its revision too (§8.3).
   state.selectionRevision += 1;
   const answer = contractAnswer(selectionChangeAnswerSchema, {
@@ -3762,7 +3962,8 @@ async function answerRunCreate(state: StubState, route: Route) {
     chunkCount: Math.ceil(targets / LISTING_PUSH_RUN_CHUNK_SIZE), nextChunkIndex: 0, cancelRequestedAt: null,
     createdAt: STAMP, updatedAt: STAMP, completedAt: null,
   };
-  const frames = state.nextRunFrames ?? [{ counts: { pending: 0, queued: targets } }, { status: "completed", counts: { queued: 0, completed: targets } }];
+  const frames = state.nextRunFrames ?? defaultRunFrames(state, request.storeConnectionId, request.scope === "not_live"
+    ? selected.filter((id) => !live.includes(id)) : selected, targets);
   state.nextRunFrames = null;
   state.runs.push({ view, counts: { ...emptyListingPushRunCounts(), pending: targets }, problems: [], waitingUntil: null, drafts: 0,
     frames: [...frames], key: request.idempotencyKey, body: sent });
@@ -3774,6 +3975,29 @@ async function answerRunCreate(state: StubState, route: Route) {
   }
   record(202);
   return route.fulfill({ status: 202, json });
+}
+
+/**
+ * A run's frames when the journey scripts none: queued, then done. A target whose listing on the run's store has an
+ * open end request is fenced before eBay (PLAN-C v4.1 §6.2): a vendor run item is blocked with the fence's code
+ * (`pending`/`ending` → END_IN_PROGRESS, `failed` → END_REVIEW), so the run finishes partial with that problem; every
+ * other target completes. (`targetIds` may name more sizes than `targets` when the snapshot is scripted short.)
+ */
+function defaultRunFrames(state: StubState, storeConnectionId: number, targetIds: readonly number[], targets: number): StubRunFrame[] {
+  const facts = new Map(state.chooseRows.map((fact) => [fact.productVariantId, fact]));
+  const problems: ListingPushRunProblem[] = targetIds.flatMap((productVariantId) => {
+    const open = openListingEnd(state, storeConnectionId, productVariantId);
+    const fact = facts.get(productVariantId);
+    if (open === null || !fact) return [];
+    const review = open.state === "failed";
+    return [{ productVariantId, productId: fact.productId, productName: fact.productName, variantName: fact.variantName, sku: fact.variantSku,
+      outcome: "blocked" as const, code: review ? LISTING_END_FENCE_CODES.review : LISTING_END_FENCE_CODES.inProgress,
+      // The fence's own server words, as the worker stores them on the item.
+      message: review ? LISTING_END_FENCE_WORDS.review : LISTING_END_FENCE_WORDS.inProgress, retryable: false }];
+  });
+  if (problems.length === 0) return [{ counts: { pending: 0, queued: targets } }, { status: "completed", counts: { queued: 0, completed: targets } }];
+  return [{ counts: { pending: 0, queued: targets } },
+    { status: "partial", counts: { queued: 0, completed: targets - problems.length, blocked: problems.length }, problems }];
 }
 
 /**

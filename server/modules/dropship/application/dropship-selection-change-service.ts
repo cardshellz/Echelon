@@ -9,7 +9,13 @@ import {
   type SelectionWritesPausedReason,
 } from "../../../../shared/dropship/vendor-selection-changes";
 import { CATALOG_READ_WORDS } from "../domain/catalog-read-words";
-import { NEW_VERSION_SETTLE_MS, OLDER_PROCESS_GRACE_MS } from "../domain/catalog-code-version";
+import {
+  DROPSHIP_CATALOG_CODE_VERSION,
+  NEW_VERSION_SETTLE_MS,
+  OLDER_PROCESS_GRACE_MS,
+  isCatalogPageOutdated,
+} from "../domain/catalog-code-version";
+import { isArchivedCatalogMember } from "../../marketplace-listings/listing-member-lifecycle";
 import { DropshipError } from "../domain/errors";
 import { isReservedSelectionIdempotencyKey } from "../domain/selection-release";
 import {
@@ -21,10 +27,20 @@ import {
 import {
   compareSelectionEffects,
   decideSelectionEffects,
+  selectionEndsEchoMatches,
   type DecideSelectionEffectsInput,
   type SelectionEffects,
   type SelectionEffectsComparison,
+  type SelectionEndSets,
 } from "../domain/vendor-selection-effects";
+import {
+  LISTING_END_SUPERSEDED_BY_SELECTION,
+  decideListingEnds,
+  type ListingEndDecision,
+  type ListingEndReason,
+  type PendingListingEnd,
+  type PlannedListingEnd,
+} from "../domain/vendor-selection-ends";
 import {
   hashSelectionChangeRequest,
   parseSelectionChangeBody,
@@ -52,6 +68,18 @@ import type { DropshipClock, DropshipLogger } from "./dropship-ports";
  * plan that moved under the transaction rolls the whole attempt back and is
  * retried here, up to SELECTION_SAVE_ATTEMPTS times; then the vendor is told
  * "busy" (409, transient) and the page retries with the same key.
+ *
+ * PR C (PLAN-C v4.1 §4.7) ends the eBay listings of removed sizes and of
+ * wholly removed products: after the replay an older page is refused (2a) and
+ * the page's echo of the confirmed ends is proven; the plan decides the ends
+ * (decideListingEnds) with the effects, and the drift rule never lets a save
+ * end more than the vendor confirmed; the picks delete also takes the hidden
+ * picks of wholly removed products; the `pending` ends it takes back are
+ * superseded before the picks writes (9a: they hold no gate, so the exclusive
+ * publication gate is not held for them; review DB-5), and after the picks
+ * writes (9b) the new end requests are inserted, each with its audit row, in
+ * the same transaction. The end worker (C4) does the eBay calls later; the
+ * save never calls eBay.
  */
 
 /** Attempts of one save in one request (§8.3; V22). */
@@ -62,8 +90,11 @@ export const SELECTION_SAVE_RETRY_JITTER = 0.5;
 /**
  * The catalog code version that writes picks (PR B). Picks writes stay closed
  * while a process of an older version reported within the grace, and until
- * this version first ran a settle ago (§10; CHK10): an A worker plans stock
- * from the frozen rules, so a picks change it never re-plans would be lost.
+ * this version, or any later one, first ran a settle ago (§10; CHK10): an A
+ * worker plans stock from the frozen rules, so a picks change it never
+ * re-plans would be lost. A later version writes picks too (PR C reports 3),
+ * so a database that never ran version 2 settles on version 3's row (review
+ * SAV-1; dropship-process-heartbeat.repository.ts catalogVersionAtLeastSettled).
  */
 export const PICKS_WRITES_CODE_VERSION = 2;
 /** The kill switch (§4.4): read as `=== "true"`; anything else keeps writes open by the gate alone. */
@@ -97,9 +128,14 @@ export const SELECTION_CHANGE_WORDS = {
   // PROPOSED (Stage 3/5, step 1 plan S2-5)
   planMoved: "The catalog changed while this save was being written; it is planned again.",
   keyReserved: CATALOG_READ_WORDS.keyReserved,
+  /** PR C's 409 for a B page (§4.1): the page's own `retired` words, so the vendor reloads. */
+  pageOutdated: CATALOG_READ_WORDS.retired,
+  // PROPOSED (Stage 4, step 1 plan S2-5)
+  echoInvalid: "This save doesn't match what you confirmed. Reload the page and try again.",
 } as const;
 
-/** The effects facts of the touched sizes (dropship-selection-effects.reader.ts reads them). */
+
+/** The effects facts of every size in the facts (dropship-selection-effects.reader.ts reads them). */
 export type SelectionChangeEffectsFacts = Pick<DecideSelectionEffectsInput, "candidates" | "adminRules" | "overrides" | "stores">;
 
 /**
@@ -119,13 +155,22 @@ export interface SelectionChangePlanFacts {
   selectedBefore: number;
   /** The vendor's pick rows before the change, offered or not (the revision's `pick_count` after it): the touched ones are `pickedBefore`. */
   pickCountBefore: number;
+  /**
+   * PR C (FID-1): the vendor's picks among the other sizes of the removed sizes' products. Read only by
+   * decideListingEnds; never counted twice (the untouched pick count already holds them).
+   */
+  siblingPicks: ReadonlySet<number>;
+  /** PR C (§4.2 item 5): the `pending` ends of the products of the added sizes (the supersede candidates). */
+  pendingEnds: readonly PendingListingEnd[];
   effects: SelectionChangeEffectsFacts;
 }
 
 /** The reads of a preview and of a save, in the caller's snapshot. */
 export interface DropshipSelectionChangeReads {
   readHeadRevisionId(input: { vendorId: number }): Promise<number | null>;
-  readPlanFacts(input: { vendorId: number; touchedIds: readonly number[]; now: Date }): Promise<SelectionChangePlanFacts>;
+  readPlanFacts(input: {
+    vendorId: number; touchedIds: readonly number[]; removedIds: readonly number[]; addedIds: readonly number[]; now: Date;
+  }): Promise<SelectionChangePlanFacts>;
 }
 
 /** A revision found by the request key. `result` is the stored answer of a picks change (null for any other kind). */
@@ -156,6 +201,24 @@ export interface SelectionChangeAuditInsert {
   now: Date;
 }
 
+/** An end request a save superseded or inserted, as the statement returned it (for its audit row). */
+export interface WrittenListingEnd {
+  id: number;
+  storeConnectionId: number;
+  listingId: number;
+  productVariantId: number;
+  reason: ListingEndReason;
+}
+
+/** One row of `dropship.dropship_audit_events` a save writes for its ends (§4.7 step 9c). */
+export interface ListingEndAuditRow {
+  storeConnectionId: number | null;
+  entityType: "dropship_listing_end_request" | "dropship_vendor_selection_ruleset";
+  entityId: string;
+  eventType: "listing_end_requested" | "listing_end_superseded" | "vendor_selection_ends_recorded";
+  payload: Record<string, unknown>;
+}
+
 /** One save's transaction. The repository has already begun it and taken the vendor's selection lock. */
 export interface DropshipSelectionChangeTransaction extends DropshipSelectionChangeReads {
   findRevisionByKey(input: { vendorId: number; idempotencyKey: string }): Promise<StoredSelectionChangeRevision | null>;
@@ -171,6 +234,19 @@ export interface DropshipSelectionChangeTransaction extends DropshipSelectionCha
   deletePicks(input: { vendorId: number; productVariantIds: readonly number[] }): Promise<number>;
   /** Gated. `source 'vendor'`, ON CONFLICT DO NOTHING. Returns the rows inserted. */
   insertPicks(input: { vendorId: number; revisionId: number; productVariantIds: readonly number[]; now: Date }): Promise<number>;
+  /**
+   * PR C step 9a: `pending` → `superseded` for these of the vendor's end requests, guarded by `state = 'pending'`.
+   * Returns the rows it changed.
+   */
+  supersedeListingEnds(input: { vendorId: number; endIds: readonly number[]; now: Date }): Promise<WrittenListingEnd[]>;
+  /**
+   * PR C step 9b: the new end requests, `pending` and due now, with the new revision; a listing that already has an
+   * open end is left out (ON CONFLICT DO NOTHING on the one-open index). Returns the rows inserted.
+   */
+  insertListingEnds(input: { vendorId: number; revisionId: number; ends: readonly PlannedListingEnd[]; now: Date }): Promise<WrittenListingEnd[]>;
+  /** PR C step 9c: the ends' audit rows, in one statement. */
+  insertListingEndAudits(input: { vendorId: number; actor: { actorType: "vendor"; actorId: string }; now: Date;
+    rows: readonly ListingEndAuditRow[] }): Promise<void>;
 }
 
 export interface DropshipSelectionChangeRepository {
@@ -213,7 +289,7 @@ export class DropshipSelectionChangeService {
     const now = this.deps.clock.now();
     const { headRevisionId, facts } = await this.deps.repository.runPreview(async (reads) => ({
       headRevisionId: await reads.readHeadRevisionId({ vendorId }),
-      facts: await reads.readPlanFacts({ vendorId, touchedIds: touchedIds(change), now }),
+      facts: await reads.readPlanFacts(planFactsInput(vendorId, change, now)),
     }));
     const planned = planFromFacts(change, facts, now);
     return {
@@ -287,7 +363,18 @@ export class DropshipSelectionChangeService {
     const { vendorId, change } = input;
     // Step 2: a replay first, so a lost answer is answered again while writes are paused.
     const stored = await tx.findRevisionByKey({ vendorId, idempotencyKey: change.idempotencyKey });
-    if (stored) return { idempotentReplay: true, answer: replayedAnswer(stored, input.requestHash, vendorId) };
+    if (stored) return { idempotentReplay: true, answer: replayedAnswer(stored, input.requestHash, vendorId), superseded: 0 };
+
+    // Step 2a (PR C, §4.1, §4.6): after the replay, so a B page whose save went through before C's release and lost
+    // its answer gets it back; a page without a stored answer is refused before anything is written. A page of this
+    // release must echo the confirmed ends, and the echo must be the preview it confirmed.
+    if (isCatalogPageOutdated(change.clientVersion)) {
+      throw new DropshipError(SELECTION_CHANGE_ERROR_CODES.pageOutdated, SELECTION_CHANGE_WORDS.pageOutdated, {
+        vendorId, clientVersion: change.clientVersion, serverVersion: DROPSHIP_CATALOG_CODE_VERSION,
+        classification: "permanent", retryable: false,
+      });
+    }
+    const expectedEnds = confirmedEnds(change, vendorId);
 
     // Step 3: the writes readiness gate (§10).
     if (this.deps.picksWritesDisabled()) throw writesPaused("disabled", vendorId);
@@ -306,7 +393,7 @@ export class DropshipSelectionChangeService {
     }
 
     // Step 5: read and plan; nothing is written before the plan stands.
-    const facts = await tx.readPlanFacts({ vendorId, touchedIds: touchedIds(change), now: input.now });
+    const facts = await tx.readPlanFacts(planFactsInput(vendorId, change, input.now));
     const planned = planFromFacts(change, facts, input.now);
     if (planned.growsOverCap) {
       throw new DropshipError(SELECTION_CHANGE_ERROR_CODES.tooLarge, SELECTION_CHANGE_WORDS.tooLarge(planned.selectedAfter), {
@@ -316,6 +403,7 @@ export class DropshipSelectionChangeService {
     }
     const comparison = compareSelectionEffects({
       expectedEffectsHash: change.expectedEffectsHash, actualEffectsHash: planned.effects.effectsHash, addIds: change.addIds,
+      expectedEnds, actualEnds: planned.effects.ends,
     });
     if (comparison.outcome === "changed") {
       throw new DropshipError(SELECTION_CHANGE_ERROR_CODES.effectsChanged, SELECTION_CHANGE_WORDS.effectsChanged, {
@@ -329,11 +417,13 @@ export class DropshipSelectionChangeService {
       drifted: comparison.outcome === "drifted",
     };
 
-    // Step 6: the ungated rows. The audit names the planned writes; step 8 proves every one was written.
+    // Step 6: the ungated rows. The audit names the planned writes; steps 8 and 9 prove every one was written.
+    // Hidden picks removed with their product are sibling picks, counted in the untouched pick count (FID-1).
     const { insertIds, deleteIds } = planned.plan;
+    const { hiddenRemovedIds } = planned.ends;
     const revisionId = await tx.insertRevision({
       vendorId, idempotencyKey: change.idempotencyKey, requestHash: input.requestHash, actor: input.actor,
-      pickCount: facts.pickCountBefore + insertIds.length - deleteIds.length, result, now: input.now,
+      pickCount: facts.pickCountBefore + insertIds.length - deleteIds.length - hiddenRemovedIds.length, result, now: input.now,
     });
     await tx.insertAudit({
       vendorId, revisionId, actor: input.actor, now: input.now,
@@ -346,16 +436,59 @@ export class DropshipSelectionChangeService {
       if (locked.length !== insertIds.length) throw planMoved(vendorId, "pre_lock", insertIds.length, locked.length);
     }
 
-    // Step 8: the gated writes. A no-op change writes the revision and audit only and takes no gate.
-    if (deleteIds.length > 0) {
-      const deleted = await tx.deletePicks({ vendorId, productVariantIds: deleteIds });
-      if (deleted !== deleteIds.length) throw planMoved(vendorId, "delete", deleteIds.length, deleted);
+    // Step 9a (PR C): the `pending` ends taken back, with their audit rows, before the gate. Their statement trigger
+    // re-plans products but takes no gate, so the exclusive publication gate is not held while thousands are written
+    // (review DB-5; BUILD-NOTES R-C3-2). Under the vendor lock only this save writes `pending` rows, so a count off the
+    // plan is an invariant break: rolled back and planned again.
+    const superseded = await this.supersedeListingEnds(tx, { vendorId, actor: input.actor, revisionId, ends: planned.ends, now: input.now });
+
+    // Step 8: the gated writes. A no-op change writes the revision and audit only and takes no gate. One delete for
+    // the removed sizes and the hidden picks of wholly removed products.
+    const deletes = [...deleteIds, ...hiddenRemovedIds].sort((left, right) => left - right);
+    if (deletes.length > 0) {
+      const deleted = await tx.deletePicks({ vendorId, productVariantIds: deletes });
+      if (deleted !== deletes.length) throw planMoved(vendorId, "delete", deletes.length, deleted);
     }
     if (insertIds.length > 0) {
       const inserted = await tx.insertPicks({ vendorId, revisionId, productVariantIds: insertIds, now: input.now });
       if (inserted !== insertIds.length) throw planMoved(vendorId, "insert", insertIds.length, inserted);
     }
-    return { idempotentReplay: false, answer: { revisionId, ...result } };
+
+    // Step 9b (PR C, after the picks writes, FID-2): the save already holds the picks table, so the end insert's
+    // listing row locks come after it, in the order every other writer takes them; the repository takes them without
+    // waiting (a listing held FOR UPDATE by a sync adoption retries the save instead of closing a cycle through the
+    // product's work row; review DB-1).
+    await this.insertListingEnds(tx, { vendorId, actor: input.actor, revisionId, ends: planned.ends, superseded, now: input.now });
+    return { idempotentReplay: false, answer: { revisionId, ...result }, superseded: planned.ends.supersedeIds.length };
+  }
+
+  /** Step 9a: supersede, then one audit row per end taken back. */
+  private async supersedeListingEnds(tx: DropshipSelectionChangeTransaction, input: {
+    vendorId: number; actor: { actorType: "vendor"; actorId: string }; revisionId: number; ends: ListingEndDecision; now: Date;
+  }): Promise<WrittenListingEnd[]> {
+    const { vendorId, ends, now } = input;
+    if (ends.supersedeIds.length === 0) return [];
+    const superseded = await tx.supersedeListingEnds({ vendorId, endIds: ends.supersedeIds, now });
+    if (superseded.length !== ends.supersedeIds.length) throw planMoved(vendorId, "end_supersede", ends.supersedeIds.length, superseded.length);
+    await tx.insertListingEndAudits({ vendorId, actor: input.actor, now, rows: listingEndAuditRows({
+      revisionId: input.revisionId, superseded, inserted: [], hiddenRemovedIds: [], summary: false,
+    }) });
+    return superseded;
+  }
+
+  /** Step 9b: insert, then one audit row per new end and one for the save's end summary (supersedes included). */
+  private async insertListingEnds(tx: DropshipSelectionChangeTransaction, input: {
+    vendorId: number; actor: { actorType: "vendor"; actorId: string }; revisionId: number; ends: ListingEndDecision;
+    superseded: readonly WrittenListingEnd[]; now: Date;
+  }): Promise<void> {
+    const { vendorId, ends, now } = input;
+    const inserted = ends.endPlans.length > 0
+      ? await tx.insertListingEnds({ vendorId, revisionId: input.revisionId, ends: ends.endPlans, now }) : [];
+    if (inserted.length !== ends.endPlans.length) throw planMoved(vendorId, "end_insert", ends.endPlans.length, inserted.length);
+    if (input.superseded.length + inserted.length + ends.hiddenRemovedIds.length === 0) return;
+    await tx.insertListingEndAudits({ vendorId, actor: input.actor, now, rows: listingEndAuditRows({
+      revisionId: input.revisionId, superseded: input.superseded, inserted, hiddenRemovedIds: ends.hiddenRemovedIds, perSuperseded: false,
+    }) });
   }
 
   private logOutcome(vendorId: number, actorId: string, outcome: AttemptOutcome, attempt: number): void {
@@ -380,6 +513,10 @@ export class DropshipSelectionChangeService {
         selected_after: answer.selectedAfter,
         effects: answer.effects,
         drift: answer.drifted,
+        // PR C: the eBay listings the save ends, the ends it took back and the hidden picks removed with a product.
+        ends: answer.ends.listingIds.length,
+        superseded: outcome.superseded,
+        hidden_removed: answer.ends.hiddenRemovedIds.length,
       },
     });
   }
@@ -388,29 +525,48 @@ export class DropshipSelectionChangeService {
 interface AttemptOutcome {
   idempotentReplay: boolean;
   answer: SelectionChangeAnswer;
+  /** End requests superseded by this attempt (0 for a replay). */
+  superseded: number;
 }
 
 interface PlannedChange {
   plan: SelectionChangePlan;
   selectedAfter: number;
   growsOverCap: boolean;
+  ends: ListingEndDecision;
   effects: SelectionEffects;
   selectedBefore: number;
 }
 
-/** The pure part shared by the preview and the save: the plan, the counts, the cap and the effects. */
+/**
+ * The pure part shared by the preview and the save: the plan, the counts, the cap, the ends (PR C) and the effects.
+ * The ends are decided over the same facts as the effects, with every pick before the save (the touched sizes'
+ * and their siblings'); a hidden pick removed with its product is passed to the effects as a delete too (its
+ * listing is zero before and after, so it adds no quantity entry). Hidden picks are never selected (every visible
+ * size is offered unless turned off), so the selected count does not change with them.
+ */
 function planFromFacts(change: CanonicalSelectionChange, facts: SelectionChangePlanFacts, now: Date): PlannedChange {
   const plan = planSelectionChange({
     pickedBefore: facts.pickedBefore, add: change.addIds, remove: change.removeIds, offered: facts.offered,
   });
   const selectedAfter = selectedCountAfterChange({ selectedBefore: facts.selectedBefore, plan, offeredDeletes: facts.offered });
+  const ends = decideListingEnds({
+    now, removedNow: plan.deleteIds, added: plan.insertIds,
+    pickedBefore: new Set([...facts.pickedBefore, ...facts.siblingPicks]),
+    candidates: facts.effects.candidates,
+    // The catalog's own rule (the stock decision's archived branch, SPS): retirement owns these sizes.
+    archivedIds: facts.effects.candidates.filter((candidate) => isArchivedCatalogMember({ productActive: candidate.productIsActive,
+      variantActive: candidate.variantIsActive, productStatus: candidate.productStatus })).map((candidate) => candidate.productVariantId),
+    rules: facts.effects.adminRules, stores: facts.effects.stores, pendingEnds: facts.pendingEnds,
+  });
   const effects = decideSelectionEffects({
-    now, insertIds: plan.insertIds, deleteIds: plan.deleteIds, ...facts.effects,
+    now, insertIds: plan.insertIds, deleteIds: [...plan.deleteIds, ...ends.hiddenRemovedIds], ...facts.effects, ends,
   });
   return {
     plan,
     selectedAfter,
     growsOverCap: refuseGrowthOverCap({ before: facts.selectedBefore, after: selectedAfter, cap: SELECTION_CHANGE_CAP }),
+    ends,
     effects,
     selectedBefore: facts.selectedBefore,
   };
@@ -432,6 +588,8 @@ function plannedAnswer(planned: PlannedChange): Omit<SelectionChangePreviewAnswe
     overCapAfter: planned.selectedAfter > SELECTION_CHANGE_CAP,
     effects: planned.effects.stores,
     effectsHash: planned.effects.effectsHash,
+    ends: planned.effects.ends,
+    otherEntriesHash: planned.effects.otherEntriesHash,
   };
 }
 
@@ -451,9 +609,48 @@ function auditPayload(change: CanonicalSelectionChangeSave, planned: PlannedChan
     selectedAfter: planned.selectedAfter,
     effects: planned.effects.stores,
     effectsHash: planned.effects.effectsHash,
+    // PR C (§4.7 step 6): the planned ends, counted; step 9's own audit rows name each one.
+    plannedEnds: {
+      sizeRemoved: planned.ends.endPlans.filter((end) => end.reason === "size_removed").length,
+      productRemoved: planned.ends.endPlans.filter((end) => end.reason === "product_removed").length,
+      hiddenRemoved: planned.ends.hiddenRemovedIds.length,
+      superseded: planned.ends.supersedeIds.length,
+    },
     // Both hashes only when the effects moved since the vendor confirmed them (a removal-only change, §7.5).
     ...(comparison.outcome === "drifted" ? { confirmedEffectsHash: comparison.expectedEffectsHash, drifted: true } : {}),
   };
+}
+
+/**
+ * The audit rows of a save's ends (§4.7 step 9c; CLAUDE.md §10): one per end it superseded (`pending` →
+ * `superseded`; step 9a, unless `perSuperseded` is false) and per end it requested (none → `pending`), each with
+ * before and after, then one row on the revision naming every id by reason, the superseded ids and the hidden picks
+ * removed with their product (step 9b, unless `summary` is false).
+ */
+function listingEndAuditRows(input: {
+  revisionId: number; superseded: readonly WrittenListingEnd[]; inserted: readonly WrittenListingEnd[]; hiddenRemovedIds: readonly number[];
+  perSuperseded?: boolean; summary?: boolean;
+}): ListingEndAuditRow[] {
+  const endRow = (end: WrittenListingEnd, eventType: "listing_end_requested" | "listing_end_superseded",
+    before: string | null, after: string): ListingEndAuditRow => ({
+    storeConnectionId: end.storeConnectionId, entityType: "dropship_listing_end_request", entityId: String(end.id), eventType,
+    payload: { endRequestId: end.id, listingId: end.listingId, productVariantId: end.productVariantId, reason: end.reason,
+      revisionId: input.revisionId, before: { state: before }, after: {
+        state: after, ...(eventType === "listing_end_superseded" ? { code: LISTING_END_SUPERSEDED_BY_SELECTION } : {}) } },
+  });
+  const idsOf = (reason: ListingEndReason) => input.inserted.filter((end) => end.reason === reason).map((end) => end.id);
+  return [
+    ...(input.perSuperseded === false ? [] : input.superseded.map((end) => endRow(end, "listing_end_superseded", "pending", "superseded"))),
+    ...input.inserted.map((end) => endRow(end, "listing_end_requested", null, "pending")),
+    ...(input.summary === false ? [] : [{ storeConnectionId: null, entityType: "dropship_vendor_selection_ruleset", entityId: String(input.revisionId),
+      eventType: "vendor_selection_ends_recorded", payload: {
+        revisionId: input.revisionId,
+        endRequestIds: { size_removed: idsOf("size_removed"), product_removed: idsOf("product_removed") },
+        supersededEndIds: input.superseded.map((end) => end.id),
+        hiddenRemovedVariantIds: [...input.hiddenRemovedIds],
+        hiddenRemovedReason: "removed_with_product",
+      } } satisfies ListingEndAuditRow]),
+  ];
 }
 
 /** The stored answer of the same request, or a key conflict. The stored row is read back through the answer's contract. */
@@ -471,6 +668,24 @@ function replayedAnswer(stored: StoredSelectionChangeRevision, requestHash: stri
 
 function touchedIds(change: CanonicalSelectionChange): number[] {
   return [...change.addIds, ...change.removeIds].sort((left, right) => left - right);
+}
+
+function planFactsInput(vendorId: number, change: CanonicalSelectionChange, now: Date) {
+  return { vendorId, touchedIds: touchedIds(change), removedIds: change.removeIds, addedIds: change.addIds, now };
+}
+
+/**
+ * The confirmed end sets of a page of this release (§4.6, FID-11): both echo fields are required, and they must
+ * combine to the confirmed effects hash, else 400 (the echo is not the confirmed preview). Pure.
+ */
+function confirmedEnds(change: CanonicalSelectionChangeSave, vendorId: number): SelectionEndSets {
+  const invalid = (reason: string) => new DropshipError(SELECTION_CHANGE_ERROR_CODES.invalidInput, SELECTION_CHANGE_WORDS.echoInvalid, {
+    vendorId, reason, classification: "permanent", retryable: false,
+  });
+  if (change.expectedEnds === null || change.expectedOtherEntriesHash === null) throw invalid("confirmed_ends_missing");
+  if (!selectionEndsEchoMatches({ expectedEffectsHash: change.expectedEffectsHash, expectedEnds: change.expectedEnds,
+    expectedOtherEntriesHash: change.expectedOtherEntriesHash })) throw invalid("confirmed_ends_mismatch");
+  return change.expectedEnds;
 }
 
 function writesPaused(reason: Exclude<SelectionWritesPausedReason, "page_newer_than_server">, vendorId: number,

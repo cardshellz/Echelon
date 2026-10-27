@@ -8,6 +8,7 @@ import {
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { listingPushRunsBaseFixtureSql } from "../fixtures/listing-push-runs.fixture";
 import { ebaySyncBackListingColumnsSql } from "../fixtures/ebay-sync-back.fixture";
+import { LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL } from "../fixtures/listing-end-reduced.fixture";
 
 /**
  * Orders during re-sends against a real PostgreSQL (step 1 plan S2-5 §4.7,
@@ -15,6 +16,8 @@ import { ebaySyncBackListingColumnsSql } from "../fixtures/ebay-sync-back.fixtur
  * status the 0086 CHECK allows. A listing being re-sent (queued, pushing,
  * failed, blocked) that carries its eBay listing id is quoted; one without an
  * id, or ended, is refused as before; the catalog check still applies.
+ * An ended listing's refusal is DC14's review code since PR C (PLAN-C v4.1
+ * §8), for sync-back's vendor end and for Card Shellz's end alike.
  *
  * Deviation (recorded in BUILD-NOTES A2): the plan names
  * dropship-canonical-acceptance-stage.integration.test.ts, whose fixture has
@@ -34,13 +37,17 @@ const VENDOR = 10;
 const STORE = 22;
 const SIZE = 1001;
 
-/** The columns listActiveDropshipCatalogRules reads that the shared fixture's reduced rules table lacks (0086). */
+/**
+ * The columns listActiveDropshipCatalogRules reads that the shared fixture's reduced rules table lacks (0086), and
+ * PR C's end requests (reduced), which the candidate query reads for Card Shellz's end time.
+ */
 const orderFixtureSql = `
   ${listingPushRunsBaseFixtureSql()}
   ALTER TABLE dropship.dropship_catalog_rules ADD COLUMN revision_id integer, ADD COLUMN notes text,
     ADD COLUMN metadata jsonb, ADD COLUMN created_at timestamptz NOT NULL DEFAULT now(),
     ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now();
   ${ebaySyncBackListingColumnsSql()}
+  ${LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL}
 `;
 
 describeDatabase.sequential("orders on listings being re-sent (PostgreSQL)", () => {
@@ -57,7 +64,7 @@ describeDatabase.sequential("orders on listings being re-sent (PostgreSQL)", () 
   });
 
   beforeEach(async () => {
-    await pool.query(`TRUNCATE dropship.dropship_vendor_listings, dropship.dropship_catalog_rules,
+    await pool.query(`TRUNCATE dropship.dropship_listing_end_requests, dropship.dropship_vendor_listings, dropship.dropship_catalog_rules,
       dropship.dropship_store_connections, dropship.dropship_vendors, catalog.product_variants, catalog.products
       RESTART IDENTITY CASCADE`);
     await pool.query(`
@@ -105,7 +112,6 @@ describeDatabase.sequential("orders on listings being re-sent (PostgreSQL)", () 
   it.each([
     ["queued", null],
     ["failed", "   "],
-    ["ended", "110012345678"],
     ["not_listed", null],
     ["preview_ready", null],
   ])("refuses an order on a %s listing with id %j, as before", async (status, externalListingId) => {
@@ -113,6 +119,15 @@ describeDatabase.sequential("orders on listings being re-sent (PostgreSQL)", () 
     await expect(quote({ productVariantId: SIZE })).rejects.toMatchObject({
       code: "DROPSHIP_ORDER_PROCESSING_LISTING_NOT_QUOTABLE",
       context: { intakeId: 77, listingStatus: status },
+    });
+  });
+
+  // DC14 (PLAN-C v4.1 §8): an ended listing with no end time on record is refused for review, never as "not quotable".
+  it("refuses an order on an ended listing with no end time for review, with DC14's code", async () => {
+    await listing("ended", "110012345678");
+    await expect(quote({ productVariantId: SIZE }, "2026-10-20T09:59:00.000Z")).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER",
+      context: { intakeId: 77, listingStatus: "ended", endedAt: null, endSource: "unknown", requiresReview: true, retryable: false },
     });
   });
 
@@ -130,8 +145,30 @@ describeDatabase.sequential("orders on listings being re-sent (PostgreSQL)", () 
     await pool.query(`UPDATE dropship.dropship_vendor_listings SET marketplace_ended_at = $1`, [new Date("2026-10-20T10:00:00.000Z")]);
     await expect(quote({ productVariantId: SIZE }, "2026-10-20T09:59:00.000Z")).resolves.toEqual([{ lineIndex: 0, productVariantId: SIZE, quantity: 1 }]);
     await expect(quote({ productVariantId: SIZE }, "2026-10-20T10:01:00.000Z")).rejects.toMatchObject({
-      code: "DROPSHIP_ORDER_PROCESSING_LISTING_NOT_QUOTABLE", context: { listingStatus: "ended" } });
-    await expect(quote({ productVariantId: SIZE })).rejects.toMatchObject({ code: "DROPSHIP_ORDER_PROCESSING_LISTING_NOT_QUOTABLE" });
+      code: "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER", context: { listingStatus: "ended", endSource: "marketplace_end",
+        endedAt: "2026-10-20T10:00:00.000Z", orderedAt: "2026-10-20T10:01:00.000Z", requiresReview: true } });
+    await expect(quote({ productVariantId: SIZE })).rejects.toMatchObject({ code: "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER",
+      context: { orderedAt: null } });
+  });
+
+  // PR C (PLAN-C v4.1 §8, I8): Card Shellz's end has no vendor end time; its end request's ended_at decides instead.
+  it("quotes an order placed before Card Shellz's end finished, and refuses one placed after for review", async () => {
+    await listing("ended", "110012345678");
+    await pool.query(`INSERT INTO dropship.dropship_listing_end_requests (listing_id, state, ended_at)
+      SELECT id, 'superseded', NULL FROM dropship.dropship_vendor_listings`);
+    await pool.query(`INSERT INTO dropship.dropship_listing_end_requests (listing_id, state, ended_at)
+      SELECT id, 'ended', $1 FROM dropship.dropship_vendor_listings`, [new Date("2026-10-20T08:00:00.000Z")]);
+    await pool.query(`INSERT INTO dropship.dropship_listing_end_requests (listing_id, state, ended_at)
+      SELECT id, 'ended', $1 FROM dropship.dropship_vendor_listings`, [new Date("2026-10-20T10:00:00.000Z")]);
+    // The newest end decides: an order between the two ends was placed while the listing was relisted.
+    await expect(quote({ productVariantId: SIZE }, "2026-10-20T09:59:00.000Z")).resolves.toEqual([{ lineIndex: 0, productVariantId: SIZE, quantity: 1 }]);
+    await expect(quote({ productVariantId: SIZE }, "2026-10-20T10:01:00.000Z")).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER", context: { intakeId: 77, lineIndex: 0, listingStatus: "ended",
+        endSource: "card_shellz_end", endedAt: "2026-10-20T10:00:00.000Z", orderedAt: "2026-10-20T10:01:00.000Z",
+        requiresReview: true, retryable: false, classification: "permanent" } });
+    // Sync-back's vendor end time, when the listing has one, wins over Card Shellz's.
+    await pool.query(`UPDATE dropship.dropship_vendor_listings SET marketplace_ended_at = $1`, [new Date("2026-10-20T11:00:00.000Z")]);
+    await expect(quote({ productVariantId: SIZE }, "2026-10-20T10:01:00.000Z")).resolves.toEqual([{ lineIndex: 0, productVariantId: SIZE, quantity: 1 }]);
   });
 
   it("finds a relisted listing by the item number it had before the relist (FF-6)", async () => {

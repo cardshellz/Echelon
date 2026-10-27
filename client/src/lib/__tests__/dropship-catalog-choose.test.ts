@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import { DROPSHIP_CATALOG_READ_ERROR_CODES } from "@shared/dropship/vendor-catalog-reads";
 import {
   SELECTION_CHANGE_ERROR_CODES,
+  emptySelectionChangeEnds,
   selectionChangePreviewRequestSchema,
   type SelectionChangeAnswer,
+  type SelectionChangeEnds,
   type SelectionChangePreviewAnswer,
 } from "@shared/dropship/vendor-selection-changes";
 import {
@@ -38,6 +40,7 @@ import {
   chooseSavedState,
   classifyChooseSaveError,
   describeChooseConfirm,
+  describeChooseConfirmButton,
   describeChooseIdsFailure,
   describeChooseSaved,
   describeChooseShown,
@@ -195,8 +198,8 @@ describe("change set (reducer)", () => {
 
   it("C9 the body: both sides ascending, the base revision and this page's version; the key names exactly the changes", () => {
     const body = chooseChangeBody(changes([30, 10, 20], [5, 1], 42));
-    expect(body).toEqual({ clientVersion: 2, expectedRevisionId: 42, add: { productVariantIds: [10, 20, 30] }, remove: { productVariantIds: [1, 5] } });
-    expect(CATALOG_PAGE_CLIENT_VERSION).toBe(2);
+    expect(body).toEqual({ clientVersion: 3, expectedRevisionId: 42, add: { productVariantIds: [10, 20, 30] }, remove: { productVariantIds: [1, 5] } });
+    expect(CATALOG_PAGE_CLIENT_VERSION).toBe(3);
     // The client's body parses with the shared strict schema the server reads.
     expect(selectionChangePreviewRequestSchema.safeParse(body).success).toBe(true);
     expect(chooseChangesKey(changes([30, 10], [5], 42))).toBe("42|10,30|5");
@@ -479,33 +482,51 @@ describe("bulk controls (§12.3)", () => {
   });
 });
 
+type StoreEffects = SelectionChangePreviewAnswer["effects"][number];
+
+/** One store's counts as the server sends them (PR C's `ends` and `storeConnected` included). */
+function storeEffects(storeConnectionId: number, storeName: string, counts: Partial<Omit<StoreEffects, "storeConnectionId" | "storeName">> = {}): StoreEffects {
+  return { storeConnectionId, storeName, platform: "ebay", goesToZero: 0, startsSelling: 0, ends: 0, storeConnected: true, ...counts };
+}
+
+/** PR C's vendor-level ends (none by default, as every answer PR B stored). */
+function endsOf(overrides: Partial<SelectionChangeEnds> = {}): SelectionChangeEnds {
+  return { ...emptySelectionChangeEnds(), ...overrides };
+}
+
 function preview(overrides: Partial<SelectionChangePreviewAnswer> = {}): SelectionChangePreviewAnswer {
   return deepFreeze({
     headRevisionId: 7, toAdd: 3, toRemove: 2, alreadySelected: 0, alreadyNotSelected: 0, skipped: { count: 0, first: [] },
     selectedBefore: 10, selectedAfter: 11, cap: 10_000, overCapAfter: false, refused: null,
     effects: [
-      { storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 12, startsSelling: 8 },
-      { storeConnectionId: 2, storeName: "Second Store", platform: "ebay", goesToZero: 0, startsSelling: 1 },
+      storeEffects(1, "Card Corner", { goesToZero: 12, startsSelling: 8 }),
+      storeEffects(2, "Second Store", { startsSelling: 1 }),
     ],
-    effectsHash: "a".repeat(64),
+    effectsHash: "a".repeat(64), otherEntriesHash: "c".repeat(64), ends: endsOf(),
     ...overrides,
-  } as SelectionChangePreviewAnswer);
+  } satisfies SelectionChangePreviewAnswer);
 }
 
-describe("the save question and the saved line (§13)", () => {
-  it("Q1 counts, then each store's quantity 0 and resumes in the server's order, removed-not-ended, then every store", () => {
+function answer(overrides: Partial<SelectionChangeAnswer>): SelectionChangeAnswer {
+  const { headRevisionId: _head, refused: _refused, ...planned } = preview();
+  return { ...planned, revisionId: 9, confirmedEffectsHash: "a".repeat(64), drifted: false, ...overrides };
+}
+
+describe("the save question and the saved line (§13; PLAN-C v4.1 §11)", () => {
+  it("Q1 counts, then each store's quantity 0 and resumes in the server's order, then every store; no line says a listing is not ended", () => {
     expect(describeChooseConfirm(preview({ alreadySelected: 2, alreadyNotSelected: 1 }))).toEqual([
       "3 added · 2 removed · 3 were already as you chose",
       "On Card Corner: 12 listings are set to quantity 0, so buyers can't buy them.",
       "On Card Corner: 8 listings get their quantity back shortly after you save, at the price they have on eBay now. To send today's prices, publish them in step 3.",
       CHOOSE_WORDS.confirmResume("Second Store", 1),
-      "Removed items are set to quantity 0 on eBay. Their listings aren't ended.",
       "Your choice applies to all your stores.",
     ]);
+    // B's "Their listings aren't ended" is gone (PLAN-C v4.1 §11): a removal now ends its eBay listings instead.
+    for (const line of describeChooseConfirm(preview())) expect(line).not.toMatch(/aren't ended/);
   });
 
-  it("Q2 no store with any entry says nothing changes; an add-only change never says removed listings aren't ended", () => {
-    const quiet = describeChooseConfirm(preview({ toRemove: 0, effects: [{ storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 0, startsSelling: 0 }] }));
+  it("Q2 no store with any entry says nothing changes; an add-only change never says anything is ended", () => {
+    const quiet = describeChooseConfirm(preview({ toRemove: 0, effects: [storeEffects(1, "Card Corner")] }));
     expect(quiet).toEqual(["3 added · 0 removed", "Nothing changes on your eBay listings now.", "Your choice applies to all your stores."]);
     // No store at all (no connected store): the same.
     expect(describeChooseConfirm(preview({ toRemove: 0, effects: [] }))).toEqual(quiet);
@@ -513,31 +534,89 @@ describe("the save question and the saved line (§13)", () => {
     for (const line of describeChooseConfirm(preview())) expect(line).not.toMatch(/\bended on eBay\b|relist/i);
   });
 
-  it("Q3 the saved line from the server's answer; drift and skipped sizes are said", () => {
-    const answer = (overrides: Partial<SelectionChangeAnswer>): SelectionChangeAnswer => ({
-      ...preview(), revisionId: 9, confirmedEffectsHash: "a".repeat(64), drifted: false, ...overrides,
-    } as SelectionChangeAnswer);
+  it("Q3 the saved line from the server's answer; drift, ends and skipped sizes are said, in that order", () => {
     expect(describeChooseSaved(answer({}))).toBe("Saved. 3 added, 2 removed.");
     expect(describeChooseSaved(answer({ drifted: true, effectsHash: "b".repeat(64) })))
       .toBe("Saved. A few listings changed on eBay while you were deciding; 12 listings are set to quantity 0.");
     expect(describeChooseSaved(answer({ skipped: { count: 2, first: [5, 6] } })))
       .toBe("Saved. 3 added, 2 removed. 2 are no longer offered by Card Shellz and were skipped.");
+    // PR C: the ends follow B's line, then the skipped sizes.
+    const ending = { ends: endsOf({ listingIds: [5_000_101] }), effects: [storeEffects(1, "Card Corner", { ends: 1 })] };
+    expect(describeChooseSaved(answer({ ...ending, toAdd: 0, toRemove: 1 }))).toBe("Saved. 0 added, 1 removed. 1 eBay listing is being ended.");
+    expect(describeChooseSaved(answer({ ...ending, toAdd: 1, toRemove: 1, skipped: { count: 1, first: [7] } })))
+      .toBe("Saved. 1 added, 1 removed. 1 eBay listing is being ended. 1 is no longer offered by Card Shellz and was skipped.");
+    // Drift counts the listings set to quantity 0 and the ends (both stop selling, FID-14), then says the ends.
+    const drifted = answer({ toAdd: 0, toRemove: 3, drifted: true, effectsHash: "b".repeat(64),
+      ends: endsOf({ listingIds: [5_000_101, 5_000_102], otherSizes: 1 }),
+      effects: [storeEffects(1, "Card Corner", { ends: 2 }), storeEffects(3, "Test Shop", { goesToZero: 1 })] });
+    expect(describeChooseSaved(drifted))
+      .toBe("Saved. A few listings changed on eBay while you were deciding; 3 listings are set to quantity 0. 2 eBay listings are being ended.");
+    // An answer PR B stored (no ends, defaulted) reads as before.
+    expect(describeChooseSaved(answer({ ends: emptySelectionChangeEnds() }))).toBe("Saved. 3 added, 2 removed.");
   });
 
-  it("Q4 (review round 1 CLI-6) removals no store sets to quantity 0: never the quantity 0 line, so the question never contradicts itself", () => {
-    const store = (storeConnectionId: number, storeName: string, goesToZero: number, startsSelling: number) =>
-      ({ storeConnectionId, storeName, platform: "ebay", goesToZero, startsSelling }) as SelectionChangePreviewAnswer["effects"][number];
+  it("Q4 (review round 1 CLI-6) removals no store sets to quantity 0 or ends: nothing about eBay but that nothing changes", () => {
     // Five removals whose listings never existed or ended on eBay (V20's no-entry cases): nothing changes there.
-    const removalOnly = describeChooseConfirm(preview({ toAdd: 0, toRemove: 5, effects: [store(1, "Card Corner", 0, 0)] }));
+    const removalOnly = describeChooseConfirm(preview({ toAdd: 0, toRemove: 5, effects: [storeEffects(1, "Card Corner")] }));
     expect(removalOnly).toEqual(["0 added · 5 removed", CHOOSE_WORDS.confirmNone, CHOOSE_WORDS.confirmScope]);
     // No store at all: the same.
     expect(describeChooseConfirm(preview({ toAdd: 0, toRemove: 5, effects: [] }))).toEqual(removalOnly);
-    // The only entries are the adds' resumes: the removals set nothing to quantity 0, so the line is left out.
-    expect(describeChooseConfirm(preview({ toAdd: 3, toRemove: 2, effects: [store(1, "Card Corner", 0, 3)] })))
+    // The only entries are the adds' resumes.
+    expect(describeChooseConfirm(preview({ toAdd: 3, toRemove: 2, effects: [storeEffects(1, "Card Corner", { startsSelling: 3 })] })))
       .toEqual(["3 added · 2 removed", CHOOSE_WORDS.confirmResume("Card Corner", 3), CHOOSE_WORDS.confirmScope]);
-    // One listing set to quantity 0 on any store brings the line back.
-    expect(describeChooseConfirm(preview({ toAdd: 0, toRemove: 2, effects: [store(1, "Card Corner", 0, 0), store(2, "Second Store", 1, 0)] })))
-      .toEqual(["0 added · 2 removed", CHOOSE_WORDS.confirmZero("Second Store", 1), CHOOSE_WORDS.confirmNotEnded, CHOOSE_WORDS.confirmScope]);
+    // One listing set to quantity 0 (a Shopify store keeps quantity 0, D18): its line, and no other.
+    expect(describeChooseConfirm(preview({ toAdd: 0, toRemove: 2, effects: [storeEffects(1, "Card Corner"),
+      storeEffects(2, "Second Store", { platform: "shopify", goesToZero: 1 })] })))
+      .toEqual(["0 added · 2 removed", CHOOSE_WORDS.confirmZero("Second Store", 1), CHOOSE_WORDS.confirmScope]);
+  });
+
+  it("Q5 (PLAN-C v4.1 §11) per store its ends, then quantity 0 and resumes; then the vendor-level end lines; nothing changes is left out", () => {
+    const lines = describeChooseConfirm(preview({
+      toAdd: 3, toRemove: 2,
+      effects: [
+        storeEffects(3, "Test Shop", { platform: "shopify", goesToZero: 2 }),
+        storeEffects(5, "Marz Cards", { ends: 4, startsSelling: 1 }),
+        storeEffects(9, "Marz Cards Outlet", { ends: 1, storeConnected: false }),
+      ],
+      ends: endsOf({ listingIds: [1, 2, 3, 4, 5], hiddenRemovedIds: [901, 902], otherSizes: 3, stillEnding: 1, endReview: 2, endedReAdd: 1 }),
+    }));
+    expect(lines).toEqual([
+      "3 added · 2 removed",
+      CHOOSE_WORDS.confirmZero("Test Shop", 2),
+      "On Marz Cards: 4 eBay listings will be ended. To sell one again later, choose it here and publish it in step 3.",
+      CHOOSE_WORDS.confirmResume("Marz Cards", 1),
+      "On Marz Cards Outlet: 1 eBay listing will be ended when the store can be used again. It stays at quantity 0 until then.",
+      CHOOSE_WORDS.confirmEndOtherSizes(3),
+      CHOOSE_WORDS.confirmEndHidden(2),
+      CHOOSE_WORDS.confirmStillEnding(1),
+      CHOOSE_WORDS.confirmEndReview(2),
+      CHOOSE_WORDS.confirmEndedReAdd(1),
+      CHOOSE_WORDS.confirmScope,
+    ]);
+    expect(lines).not.toContain(CHOOSE_WORDS.confirmNone);
+    // A store's own end line comes before its quantity 0 (FID-14: an end is not a quantity 0).
+    const both = describeChooseConfirm(preview({ toAdd: 0, toRemove: 2, effects: [storeEffects(5, "Marz Cards", { ends: 1, goesToZero: 1 })],
+      ends: endsOf({ listingIds: [1] }) }));
+    expect(both).toEqual(["0 added · 2 removed", CHOOSE_WORDS.confirmEnd("Marz Cards", 1), CHOOSE_WORDS.confirmZero("Marz Cards", 1), CHOOSE_WORDS.confirmScope]);
+  });
+
+  it("Q6 (PLAN-C v4.1 §11) vendor-level lines alone stand in for nothing changes: an add whose listing is still being ended", () => {
+    expect(describeChooseConfirm(preview({ toAdd: 1, toRemove: 0, effects: [storeEffects(5, "Marz Cards")], ends: endsOf({ stillEnding: 1 }) })))
+      .toEqual(["1 added · 0 removed", CHOOSE_WORDS.confirmStillEnding(1), CHOOSE_WORDS.confirmScope]);
+    expect(describeChooseConfirm(preview({ toAdd: 2, toRemove: 0, effects: [], ends: endsOf({ endReview: 1, endedReAdd: 1 }) })))
+      .toEqual(["2 added · 0 removed", CHOOSE_WORDS.confirmEndReview(1), CHOOSE_WORDS.confirmEndedReAdd(1), CHOOSE_WORDS.confirmScope]);
+    // A wholly removed product whose hidden pick has no listing: its line still says the pick goes.
+    expect(describeChooseConfirm(preview({ toAdd: 0, toRemove: 1, effects: [storeEffects(5, "Marz Cards")], ends: endsOf({ hiddenRemovedIds: [902] }) })))
+      .toEqual(["0 added · 1 removed", CHOOSE_WORDS.confirmEndHidden(1), CHOOSE_WORDS.confirmScope]);
+  });
+
+  it("Q7 (PLAN-C v4.1 §11) the question's button names the eBay listings it ends, from the vendor-level set; else Save changes", () => {
+    expect(describeChooseConfirmButton(preview())).toBe("Save changes");
+    expect(describeChooseConfirmButton(preview({ ends: endsOf({ listingIds: [5_000_101] }) }))).toBe("End 1 listing and save");
+    expect(describeChooseConfirmButton(preview({ ends: endsOf({ listingIds: [5_000_101, 5_000_102, 9_000_102] }) }))).toBe("End 3 listings and save");
+    // Hidden removals and re-add reports end nothing on eBay by this save: the plain button.
+    expect(describeChooseConfirmButton(preview({ ends: endsOf({ hiddenRemovedIds: [902], stillEnding: 2, endReview: 1, endedReAdd: 1 }) })))
+      .toBe("Save changes");
   });
 });
 
@@ -570,6 +649,14 @@ describe("error classes (§12.4, §12.5, §14)", () => {
     expect(classifyChooseSaveError(api(409, SELECTION_CHANGE_ERROR_CODES.pageOutdated), small)).toEqual({ kind: "retired" });
     expect(classifyChooseSaveError(api(410, DROPSHIP_CATALOG_READ_ERROR_CODES.rulesRetired), small)).toEqual({ kind: "retired" });
     expect(classifyChooseSaveError(api(410, "SOMETHING_ELSE"), small)).toEqual({ kind: "permanent", message: "Server words." });
+  });
+
+  it("E3b PR C's 422 REMOVAL_TOO_LARGE is its own class, never the over-cap one (FID-4)", () => {
+    expect(classifyChooseSaveError(api(422, SELECTION_CHANGE_ERROR_CODES.removalTooLarge, { factSizes: 30_001, limit: 30_000 }), small))
+      .toEqual({ kind: "tooManyRemoved" });
+    expect(classifyChooseSaveError(api(422, SELECTION_CHANGE_ERROR_CODES.tooLarge), small)).toEqual({ kind: "overCap", after: null });
+    // Only at 422: the same code at another status is the server's words.
+    expect(classifyChooseSaveError(api(400, SELECTION_CHANGE_ERROR_CODES.removalTooLarge), small)).toEqual({ kind: "permanent", message: CHOOSE_WORDS.rejected });
   });
 
   it("E4 the cap's 422 names the count; no answer, a 5xx and an unreadable 2xx may have committed; 408 and 429 wrote nothing", () => {

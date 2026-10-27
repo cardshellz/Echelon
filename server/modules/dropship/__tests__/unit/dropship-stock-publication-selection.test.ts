@@ -147,3 +147,45 @@ describe("the vendor's quantity limit on a publish decision", () => {
     expect(selection({ publishLimitUnits: 2.5 }).success).toBe(false);
   });
 });
+
+// PR C (PLAN-C v4.1 §7, D42): while Card Shellz ends a listing on eBay nothing sells on it, whatever the vendor picks.
+describe("a listing with an open end request", () => {
+  const open = (patch: Partial<NonNullable<Input["listing"]>> = {}, overrides: Partial<Input> = {}) =>
+    decide({ listing: { ...input().listing!, endOpen: true, ...patch }, ...overrides });
+
+  it("zeroes a listing with eBay identity or a saved live push, even when the size is picked again", () => {
+    expect(open()).toEqual({ productVariantId: 101, action: "zero", reason: "listing_end_in_progress", blockers: [],
+      listingSelected: true });
+    expect(open({ externalListingId: null, externalOfferId: null, livePushItemId: 77 }))
+      .toMatchObject({ action: "zero", reason: "listing_end_in_progress" });
+    expect(open({}, { picked: false })).toMatchObject({ action: "zero", reason: "listing_end_in_progress", listingSelected: false });
+  });
+
+  it("asks for nothing on a listing with no duty to clear", () => {
+    expect(open({ externalListingId: null, externalOfferId: null, livePushItemId: null }))
+      .toMatchObject({ action: "none", reason: "listing_end_in_progress" });
+  });
+
+  it("carries no publish limit, so the vendor's limit pauses with it", () => {
+    expect(open({ vendorQuantityLimit: 4 })).not.toHaveProperty("publishLimitUnits");
+  });
+
+  it("leaves retirement and a finished end their own outcomes (the archived and ended rules come first)", () => {
+    const archived = input({ listing: { ...input().listing!, endOpen: true } });
+    archived.candidate!.productIsActive = false;
+    expect(decideDropshipStockPublicationSelection(archived)).toEqual(decideDropshipStockPublicationSelection({
+      ...archived, listing: { ...archived.listing!, endOpen: false } }));
+    expect(open({ status: "ended" })).toMatchObject({ action: "none", reason: "listing_ended" });
+    expect(open({}, { candidate: null })).toMatchObject({ reason: "catalog_identity_missing" });
+  });
+
+  it("is exactly today's decision without an open end", () => {
+    expect(decide({ listing: { ...input().listing!, endOpen: false } })).toEqual(decide());
+    expect(decide({ listing: { ...input().listing!, endOpen: undefined } })).toEqual(decide());
+  });
+
+  it("parses through the shared stock selection contract", () => {
+    const variant = open();
+    expect(stockPublicationSelectionSchema.safeParse({ productId: 20, fingerprint: "a".repeat(64), variants: [variant] }).success).toBe(true);
+  });
+});

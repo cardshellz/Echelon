@@ -145,6 +145,8 @@ describe("affected feature browser selection", () => {
     ["test/browser/dropship-policy-catalog-publish-runs.spec.ts", ["catalog-scale"]],
     // PLAN-B v4.1 V29: step 1 at scale is the catalog-scale group's second spec.
     ["test/browser/dropship-policy-catalog-choose-scale.spec.ts", ["catalog-scale"]],
+    // PLAN-C v4.1 §13.4: step 1's listing ends are its third.
+    ["test/browser/dropship-policy-catalog-end.spec.ts", ["catalog-scale"]],
     ["test/browser/dropship-policy-listing-settings-helpers.ts", ["listings"]],
     ["shared/ebay-listing-issue.ts", []],
     ["docs/migration-allocation.md", []],
