@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { shipmentReceiptUnitSelectionsSchema, type ShipmentReceiptUnitSelection } from "@shared/procurement/shipment-receipt-plan";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const variant = z.object({ id, sku: z.string().nullable(), name: z.string().nullable(), unitsPerVariant: id });
@@ -24,6 +25,7 @@ export const shipmentReceiptResolutionSchema = z.object({
   shipmentId: id, shipmentNumber: z.string().nullable(), status: z.string().nullable(),
   purchaseOrderId: id, poNumber: z.string().nullable(), canCreateReceipt: z.boolean(),
   unresolvedCount: z.number().int().nonnegative(), lineCount: z.number().int().nonnegative(), issue: z.string().nullable(),
+  receiptUnitSelections: shipmentReceiptUnitSelectionsSchema.optional(),
   receivedBaseQty: z.number().int().nonnegative().safe().nullable().optional(),
   remainingBaseQty: z.number().int().nonnegative().safe().nullable().optional(),
   qtyShipped: z.number().int().nonnegative().safe().nullable().optional(),
@@ -50,17 +52,56 @@ export function parseShipmentReceiptResolution(value: unknown, expected: { shipm
   if (resolution.shipmentId !== expected.shipmentId || resolution.purchaseOrderId !== expected.purchaseOrderId) {
     throw new Error("The receive-unit check belongs to a different shipment or purchase order. Refresh before continuing.");
   }
-  if (resolution.lineCount !== resolution.lines.length || resolution.canCreateReceipt && (resolution.lines.length === 0 || resolution.lines.some((line) => {
+  if (resolution.lineCount !== resolution.lines.length || resolution.unresolvedCount !== resolution.lines.filter(line => line.blocking).length || resolution.canCreateReceipt && (resolution.lines.length === 0 || resolution.lines.some((line) => {
     const plan = line.receivePlan;
     return line.blocking || !plan || plan.productVariantId !== line.matchedVariant?.id ||
       plan.unitsPerVariant !== line.matchedVariant.unitsPerVariant || plan.countsAsPieces !== (plan.unitsPerVariant === 1) ||
       line.qtyShipped === null || BigInt(plan.expectedQty) * BigInt(plan.unitsPerVariant) !== BigInt(line.qtyShipped);
   }))) throw new Error("The receive-unit plan could not be verified against shipped pieces. Refresh before creating the receipt.");
+  if (resolution.canCreateReceipt && resolution.receiptUnitSelections?.some(selection => {
+    const line = resolution.lines.find(value => value.shipmentLineId === selection.shipmentLineId);
+    return !line || selection.expectedBaseQty !== line.qtyShipped || selection.productVariantId !== line.receivePlan?.productVariantId || selection.unitsPerVariant !== line.receivePlan.unitsPerVariant;
+  })) throw new Error("The reviewed configurations do not match the receipt plan. Refresh before creating the receipt.");
   return resolution;
 }
 
 export function requiresReceiptUnitReview(resolution: ShipmentReceiptPackResolution): boolean {
-  return !resolution.canCreateReceipt || resolution.lines.some((line) => line.receivePlan?.countsAsPieces && (line.receivePlan.preferredUnitsPerVariant ?? 1) > 1);
+  return !resolution.canCreateReceipt || !!resolution.issue || !!resolution.receiptUnitSelections?.length || resolution.lines.some((line) => line.receivePlan?.countsAsPieces && (line.receivePlan.preferredUnitsPerVariant ?? 1) > 1);
+}
+
+export function receiptUnitDraftKey(scope: { shipmentId: number; purchaseOrderId: number }): string {
+  return `shipment-receipt-units:${scope.shipmentId}:${scope.purchaseOrderId}`;
+}
+
+export function readReceiptUnitDraft(scope: { shipmentId: number; purchaseOrderId: number }): ShipmentReceiptUnitSelection[] {
+  try {
+    const result = shipmentReceiptUnitSelectionsSchema.safeParse(JSON.parse(sessionStorage.getItem(receiptUnitDraftKey(scope)) ?? "[]"));
+    return result.success ? result.data : [];
+  } catch { return []; }
+}
+
+export function saveReceiptUnitDraft(scope: { shipmentId: number; purchaseOrderId: number }, selections: ShipmentReceiptUnitSelection[]): void {
+  sessionStorage.setItem(receiptUnitDraftKey(scope), JSON.stringify(shipmentReceiptUnitSelectionsSchema.parse(selections)));
+}
+
+export function clearReceiptUnitDraft(scope: { shipmentId: number; purchaseOrderId: number }): void {
+  try { sessionStorage.removeItem(receiptUnitDraftKey(scope)); }
+  catch (error) { console.warn("Receipt configuration draft cleanup failed", { shipmentId: scope.shipmentId, purchaseOrderId: scope.purchaseOrderId, error }); }
+}
+
+export async function fetchShipmentReceiptResolution(scope: { shipmentId: number; purchaseOrderId: number }, selections = readReceiptUnitDraft(scope)): Promise<ShipmentReceiptPackResolution> {
+  const query = new URLSearchParams({ purchaseOrderId: String(scope.purchaseOrderId) });
+  const response = await fetch(`/api/inbound-shipments/${scope.shipmentId}/receipt-pack-resolution${selections.length ? "" : `?${query}`}`,
+    selections.length ? { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ purchaseOrderId: scope.purchaseOrderId, receiptUnitSelections: shipmentReceiptUnitSelectionsSchema.parse(selections) }) } : undefined);
+  const body = await response.json().catch(() => null);
+  if (selections.length && response.status === 409 && body?.details?.code === "SHIPMENT_RECEIPT_SELECTION_SCOPE_CHANGED") {
+    clearReceiptUnitDraft(scope);
+    const latest = await fetchShipmentReceiptResolution(scope, []);
+    return { ...latest, issue: "The remaining shipment lines changed. Previous configuration choices were cleared. Review the current items before creating a receipt." };
+  }
+  if (!response.ok) throw new Error(body?.error || "The receiving configurations could not be checked. Refresh and try again.");
+  return parseShipmentReceiptResolution(body, scope);
 }
 
 

@@ -1,5 +1,7 @@
 import { readIntegerCents } from "@shared/money-read";
 import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
+import { readShipmentReceivingSetup, shipmentReceivingUnitSource } from "./shipment-receiving-setup.service";
+import type { ShipmentReceivingSetup } from "@shared/procurement/shipment-receiving-setup";
 import { executeCreateShipmentInTransaction as createShipmentInTransaction, assertShipmentCreateActor } from "./shipment-create.service";
 import { shipmentDefaultAllocation } from "./domain/shipment-create";
 import type { ShipmentCreateTransaction } from "./shipment-create.repository";
@@ -493,10 +495,8 @@ export function createShipmentTrackingService(
       if (purchaseOrder) purchaseOrderMap.set(id, purchaseOrder);
     }));
 
-    const shipmentUnitOptions = await readShipmentUnitOptions(db, lines.map((line) => ({
-      key: line.id, productId: (line.purchaseOrderLineId ? poLineMap.get(line.purchaseOrderLineId)?.productId : null)
-        ?? (line.productVariantId ? variantMap.get(line.productVariantId)?.productId : null) ?? null,
-      selectedVariantId: line.productVariantId, unitsPerVariantSnapshot: line.unitsPerVariantSnapshot ?? null,
+    const shipmentUnitOptions = await readShipmentUnitOptions(db, lines.map((line) => ({ key: line.id,
+      ...shipmentReceivingUnitSource(line, line.purchaseOrderLineId ? poLineMap.get(line.purchaseOrderLineId) : undefined),
     })));
     return lines.map(line => {
       const pv = line.productVariantId ? variantMap.get(line.productVariantId) : null;
@@ -631,6 +631,7 @@ export function createShipmentTrackingService(
       // close must not apply a decision made from the previous costing state.
       const shipment = await lockShipment(tx, id);
       assertTransition(shipment.status, targetStatus);
+      if (targetStatus === "booked" || targetStatus === "in_transit") await checkReceivingSetup(tx, id, true);
       if (targetStatus === "cancelled") {
         const blockers = shipmentCancellationBlockers(await readShipmentCancellationEvidence(tx, id));
         if (blockers.length > 0) throw new ShipmentTrackingError(
@@ -1800,10 +1801,34 @@ export function createShipmentTrackingService(
     };
   }
 
+  async function checkReceivingSetup(tx: any, shipmentId: number, required: boolean, options: { previous?: ShipmentReceivingSetup; lockEvidence?: boolean } = {}) {
+    const { previous } = options;
+    if (previous && previous.shipmentId !== shipmentId) throw new Error("Receiving setup review belongs to another shipment");
+    const setup = await readShipmentReceivingSetup(tx, storage, shipmentId, options.lockEvidence !== false);
+    // Existing booked shipments may need several approved repair batches. An
+    // edit may retain inherited issues, but cannot introduce an unready item.
+    // Booking/departure supply no previous snapshot and always require all ready.
+    const priorIssueIds = new Set(previous?.lines.filter(line => line.issue !== null).map(line => line.lineId));
+    const requiresRepair = !setup.lines.length || !previous || setup.lines.some(line => line.issue !== null && !priorIssueIds.has(line.lineId));
+    if (required && !setup.ready && requiresRepair) throw new ShipmentTrackingError(
+      setup.lines.length ? `${setup.issueCount} shipment item(s) need receiving setup. Edit the shipment, choose or add their configurations, then retry booking or shipping.`
+        : "Add shipment items and their receiving configurations before booking or shipping.",
+      409, { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED", receivingSetup: setup });
+    return setup;
+  }
+
+  async function getReceivingSetup(shipmentId: number) {
+    return db.transaction(async (tx: any) => {
+      if (!await storage.getInboundShipmentById(shipmentId, tx)) throw new ShipmentTrackingError("Shipment not found", 404);
+      return readShipmentReceivingSetup(tx, storage, shipmentId);
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+  }
+
   // ─── Public API ────────────────────────────────────────────────
 
   const lineMutationOwner = createShipmentLineMutationOwner({
     storage, lockShipment, resolveDimensions: resolveDimensionsForVariant,
+    checkReceivingSetup,
     recomputeTotals: recomputeShipmentTotals,
     refreshAllocations: async (tx, shipmentId, shipment, recordedAt) => {
       for (const cost of await storage.getInboundFreightCosts(shipmentId, tx)) assertCostCurrencyBasis(cost);
@@ -1819,6 +1844,7 @@ export function createShipmentTrackingService(
     getShipments,
     getShipmentPage,
     getShipmentPurchaseOrders,
+    getReceivingSetup,
     getShipmentsCount: (filters?: any) => storage.getInboundShipmentsCount(filters),
     getShipmentByNumber: (num: string) => storage.getInboundShipmentByNumber(num),
     updateShipment,

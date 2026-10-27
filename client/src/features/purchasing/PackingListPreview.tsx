@@ -5,12 +5,13 @@ import { packingListQuantityDraft, type PackingListRow } from "@/lib/shipment-pa
 import { shipmentQuantityPreview, type ShipmentQuantityDraft } from "@/lib/shipment-unit-entry";
 import { shipmentUnitSelectionSchema, type ShipmentUnits } from "@shared/procurement/shipment-unit-selection";
 
-export function PackingListPreview({ rows, errors, unitOptions, onChange, onQuantityChange }: {
+export function PackingListPreview({ rows, errors, unitOptions, onChange, onQuantityChange, draftAllowed = true }: {
   rows: PackingListRow[];
   errors: Array<{ row: number; error: string }>;
   unitOptions: ReadonlyArray<{ row: number; units: ShipmentUnits }>;
   onChange: (index: number, field: string, value: string) => void;
   onQuantityChange: (index: number, draft: ShipmentQuantityDraft, units: ShipmentUnits | null) => void;
+  draftAllowed?: boolean;
 }) {
   const errorsByRow = new Map(errors.map((failure) => [failure.row, failure.error]));
   return <div role="region" aria-label="Packing list rows" tabIndex={0} className="max-h-[55dvh] min-w-0 overflow-y-auto space-y-3">
@@ -34,7 +35,7 @@ export function PackingListPreview({ rows, errors, unitOptions, onChange, onQuan
           {row.productVariantId !== undefined && field("productVariantId", "Product variant ID")}
         </div>
         {invalidUnit && <p role="alert" className="text-sm text-destructive">The CSV receive-unit evidence is incomplete or invalid. Select the configured receive unit and enter its count before importing.</p>}
-        <ShipmentQuantityControl id={`packing-row-${index + 1}`} value={draft} units={units}
+        <ShipmentQuantityControl id={`packing-row-${index + 1}`} value={draft} units={units} draftAllowed={draftAllowed}
           quantityLabel={`Data row ${index + 1} Pieces shipped`} onChange={(quantity) => onQuantityChange(index, quantity, units)} />
         {mismatch && <p role="alert" className="text-sm text-destructive">CSV pieces ({String(row.qtyShipped)}) disagree with the receive-unit total ({preview.pieces}). Review and enter the intended quantity before importing.</p>}
         <fieldset className="rounded border p-3 space-y-2"><legend className="px-1 text-sm">Physical packing</legend>

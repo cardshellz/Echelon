@@ -17,6 +17,7 @@ const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage,
 import { requirePermission, requireAnyPermission } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
 import { PurchasingError } from "./purchasing.service";
+import { ReceivingUnitError } from "./receiving-unit-contract";
 import { DocumentNumberError } from "../../platform/document-numbering/document-number";
 import * as poExceptionsService from "./po-exceptions.service";
 import { PoExceptionError } from "./po-exceptions.service";
@@ -34,6 +35,7 @@ import { getShippablePurchaseOrderLines, ShipmentSourceCapacityError } from "./s
 import { shipmentLineResourceIdSchema } from "@shared/procurement/shipment-line-command";
 import { createPurchaseWorkspaceService, PurchaseWorkspaceError } from "./purchase-workspace.service";
 import { z } from "zod";
+import { shipmentReceiptPlanRequestSchema } from "@shared/procurement/shipment-receipt-plan";
 import { users as identityUsers } from "../../storage/base";
 import {
   buildPoAutoDraftActionPlan,
@@ -58,6 +60,15 @@ const poEmailRequestSchema = z.object({
   ccEmail: z.string().trim().email().max(320).optional(),
   message: z.string().trim().max(10_000).optional(),
 }).strict();
+
+function sendShipmentReceiptError(res: Response, error: unknown, shipmentId: unknown, operation: string): Response {
+  if (error instanceof PurchasingError || error instanceof ReceivingUnitError) {
+    logger.warn("procurement.shipment_receipt.rejected", { shipmentId, operation, code: error.details?.code, message: error.message });
+    return res.status(error.statusCode).json({ error: error.message, details: error.details });
+  }
+  logger.error("procurement.shipment_receipt.failed", { shipmentId, operation, error_class: error instanceof Error ? error.name : typeof error });
+  return res.status(500).json({ error: "The shipment receipt could not be prepared. Refresh and try again." });
+}
 
 function getRequiredIdempotencyKey(req: Request): string {
   const value = req.get("Idempotency-Key");
@@ -714,18 +725,31 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
   app.get("/api/inbound-shipments/:id/receipt-pack-resolution", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const shipmentId = Number(req.params.id);
-      if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      if (!shipmentLineResourceIdSchema.safeParse(shipmentId).success) {
         return res.status(400).json({ error: "Invalid shipment id" });
       }
       const rawPurchaseOrderId = req.query.purchaseOrderId ?? req.query.purchase_order_id;
       const purchaseOrderId = rawPurchaseOrderId === undefined ? undefined : Number(rawPurchaseOrderId);
-      if (purchaseOrderId !== undefined && (!Number.isInteger(purchaseOrderId) || purchaseOrderId <= 0)) {
+      if (purchaseOrderId !== undefined && !shipmentLineResourceIdSchema.safeParse(purchaseOrderId).success) {
         return res.status(400).json({ error: "Invalid purchase order id" });
       }
       const resolution = await purchasing.getShipmentReceiptPackResolution(shipmentId, { purchaseOrderId });
       res.json(resolution);
     } catch (error: any) {
-      res.status(error?.statusCode || 500).json({ error: error?.message || "Failed to resolve shipment receipt packs" });
+      sendShipmentReceiptError(res, error, req.params.id, "preview");
+    }
+  });
+
+  // Preview explicit product configurations without changing cartons, PO terms,
+  // inventory or catalog records. Creation revalidates the same choices under locks.
+  app.post("/api/inbound-shipments/:id/receipt-pack-resolution", requirePermission("purchasing", "view"), async (req, res) => {
+    const shipmentId = shipmentLineResourceIdSchema.safeParse(Number(req.params.id));
+    const input = shipmentReceiptPlanRequestSchema.safeParse(req.body);
+    if (!shipmentId.success || !input.success) return res.status(400).json({ error: "Invalid shipment receiving configuration request", code: "SHIPMENT_RECEIPT_INPUT_INVALID" });
+    try {
+      res.json(await purchasing.getShipmentReceiptPackResolution(shipmentId.data, input.data));
+    } catch (error: any) {
+      sendShipmentReceiptError(res, error, shipmentId.data, "preview");
     }
   });
 
@@ -751,19 +775,21 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
   app.post("/api/inbound-shipments/:id/create-receipt", requirePermission("inventory", "receive"), requireIdempotency(), async (req, res) => {
     try {
       const shipmentId = Number(req.params.id);
-      if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      if (!shipmentLineResourceIdSchema.safeParse(shipmentId).success) {
         return res.status(400).json({ error: "Invalid shipment id" });
       }
       const rawPurchaseOrderId = req.body?.purchaseOrderId ?? req.body?.purchase_order_id ?? req.query.purchaseOrderId;
       const purchaseOrderId = rawPurchaseOrderId === undefined ? undefined : Number(rawPurchaseOrderId);
-      if (purchaseOrderId !== undefined && (!Number.isInteger(purchaseOrderId) || purchaseOrderId <= 0)) {
+      if (purchaseOrderId !== undefined && !shipmentLineResourceIdSchema.safeParse(purchaseOrderId).success) {
         return res.status(400).json({ error: "Invalid purchase order id" });
       }
       const userId = (req as any).session?.user?.id;
-      const receipt = await purchasing.createReceiptFromShipment(shipmentId, userId, { purchaseOrderId });
+      const input = shipmentReceiptPlanRequestSchema.safeParse({ purchaseOrderId, receiptUnitSelections: req.body?.receiptUnitSelections });
+      if (!input.success) return res.status(400).json({ error: "Invalid shipment receiving configuration request", code: "SHIPMENT_RECEIPT_INPUT_INVALID" });
+      const receipt = await purchasing.createReceiptFromShipment(shipmentId, userId, input.data);
       res.status(201).json(receipt);
     } catch (error: any) {
-      res.status(error?.statusCode || 500).json({ error: error?.message || "Failed to create receipt from shipment" });
+      sendShipmentReceiptError(res, error, req.params.id, "create");
     }
   });
 
