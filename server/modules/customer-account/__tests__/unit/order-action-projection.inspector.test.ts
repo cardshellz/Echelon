@@ -5,6 +5,9 @@ import { OrderEditError } from "../../../order-edits/domain/order-edit-error";
 import { CustomerReturnLiveError } from "../../../returns/application/customer-return-live-error";
 import { CustomerReturnPreviewService } from "../../../returns/application/customer-return-preview.service";
 import { customerOrderActionsSchema } from "@shared/customer-account/order-actions";
+import { CustomerReturnLiveService } from "../../../returns/application/customer-return-live.service";
+import { LIVE_NOW, liveGid, liveLocalFixture, liveShop, liveShopifyFixture } from "../../../returns/__tests__/support/live-inspection-fixtures";
+import { labelActivePolicy } from "../../../returns/__tests__/support/label-fixtures";
 
 const scope = { omsOrderId: 1, channelId: 36, connectionId: 4, externalOrderId: "99", externalCustomerId: "100",
   orderReference: "#TEST-1001", generation: "1", leaseId: "00000000-0000-4000-8000-000000000001", attempts: 0 };
@@ -22,6 +25,42 @@ function fixture() {
   return { service, readEdit, inspectReturnAndRetainMeasurements, report };
 }
 describe("order action inspection reuses existing capability owners", () => {
+  it("publishes cancelled-order options without a failure across retries when the OMS receipt time differs", async () => {
+    const local = liveLocalFixture();
+    local.order.externalCustomerId = "100";
+    local.order.purchasedAt = "2026-09-01T12:00:01.901Z";
+    local.order.cancelledAt = LIVE_NOW;
+    const provider = liveShopifyFixture();
+    provider.order.customerId = liveGid("Customer", "100");
+    provider.order.cancelledAt = LIVE_NOW;
+    const sourceBefore = structuredClone({ local, provider });
+    const returns = new CustomerReturnLiveService({
+      local: { listShops: async () => [liveShop], read: async () => structuredClone(local) },
+      shopify: { read: async () => structuredClone(provider) },
+      policies: { read: async () => [labelActivePolicy()] }, now: () => new Date(LIVE_NOW),
+    });
+    const ownedScope = { ...scope, omsOrderId: 100, externalOrderId: "1001", orderReference: "#0012-A" };
+    const report = vi.fn();
+    const inspector = new OrderActionProjectionInspectorService({
+      readEdit: async () => ({ ...order, omsOrderId: 100, orderNumber: ownedScope.orderReference,
+        financialStatus: "Refunded", fulfillment: { code: "cancelled", label: "Cancelled" } }),
+      inspectReturnAndRetainMeasurements: async () => {
+        const { mode: _mode, ...fields } = await returns.lookupCanonical({ channelId: ownedScope.channelId,
+          omsOrderId: ownedScope.omsOrderId, externalOrderId: ownedScope.externalOrderId,
+          externalCustomerId: ownedScope.externalCustomerId });
+        return { omsOrderId: 100, settingsVersion: null, order: fields };
+      }, report,
+    });
+    const first = await inspector.inspect(ownedScope);
+    const retried = await inspector.inspect({ ...ownedScope, attempts: 4 });
+    expect(first).toEqual(retried);
+    expect(first).toMatchObject({ orderFailed: false, returnFailed: false,
+      returnOrder: { order: { purchasedAt: provider.order.createdAt, message: expect.stringContaining("canceled") } } });
+    expect(first.returnOrder?.order.lines.every(line => line.eligibleQuantity === 0)).toBe(true);
+    expect(first).not.toHaveProperty("failureClass");
+    expect(report).not.toHaveBeenCalled();
+    expect({ local, provider }).toEqual(sourceBefore);
+  });
   it("accepts a legacy display reference without '#' while retaining exact external/order ownership", async () => {
     const h = fixture();
     const snapshot = await h.service.inspect({ ...scope, orderReference: "TEST-1001" });

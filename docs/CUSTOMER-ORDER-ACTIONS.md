@@ -51,6 +51,16 @@ source invalidation clears the failure and permits new inspection. Structured
 logs identify the order and phase without provider bodies, addresses or secrets.
 An unavailable, expired or invalidated projection cannot enable unknown actions.
 
+### Purchase-date authority
+
+The returns inspector verifies exact channel, connection, order, customer and
+purchased-line identities. A replicated OMS order date is not an identity key:
+legacy imports can retain the local receipt time. The freshly verified Shopify
+`createdAt` owns the displayed purchase date and return-window calculation.
+`processedAt` and OMS `ordered_at` do not override that source. Both observations
+remain validated and bound into the review revision; changed evidence during a
+read or between selection and review still requires a new review.
+
 ## Original return packages
 
 Verified original package measurements are retained separately in
@@ -61,6 +71,15 @@ voided, unattributable or changed packages do not inherit unrelated measurements
 Only the background inspector retains measurements; customer GET paths do not
 write them. A missing measurement falls back to the existing exact provider
 lookup; a cache outage is reported and does not suppress that fallback.
+
+These are verified return-package measurements, not a complete inbound shipment
+measurement feed. `CanonicalShipmentEvent` currently has no dimensions contract,
+and `physical_shipments` has no typed dimension columns. The inbound adapter maps
+shipment identity, tracking, service, cost and items, without measurements.
+Shipping pack-plan dimensions describe the plan and must not be treated as an
+observed original package. A historical order without canonical purchased-line
+and package allocation links cannot acquire a verified original box through its
+display number or SKU alone.
 
 The existing unique-covering-box rule supplies the default. The customer sees
 "Using your original shipping box", its dimensions and "Change box". That action
