@@ -192,11 +192,14 @@ describe("feature browser coverage registration", () => {
 
   it("registers every injected HTML entrypoint, including those hidden behind spec helpers", () => {
     const { files, readSource } = repositorySources();
+    // All groups inspect the same source snapshot. Reuse only parsed edges;
+    // every closure still traverses and validates its own spec entrypoints.
+    const dependencyEdges = new Map<string, string[]>();
     for (const [name, group] of Object.entries(DROPSHIP_BROWSER_FEATURES)) {
       const harnesses = new Set<string>();
       // Imports from specs reach helper files such as the catalog stubs. Their
       // HTML module strings are not TypeScript imports and need explicit roots.
-      for (const file of dependencyClosure(group.tests, files, readSource)) {
+      for (const file of dependencyClosure(group.tests, files, readSource, dependencyEdges)) {
         for (const match of readSource(file).matchAll(/["'](test\/browser\/fixtures\/[^"']+\.tsx)["']/g)) harnesses.add(match[1]);
       }
       expect([...harnesses].sort(), name).toEqual([...group.roots].sort());

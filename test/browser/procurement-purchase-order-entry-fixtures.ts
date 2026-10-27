@@ -9,4 +9,4 @@ export function purchaseEntryFixture(request: Request, action: PurchaseOrderEntr
     entryCommand: { action, targetId, actorId, idempotencyKey: request.headers()["idempotency-key"], purchaseOrderId: purchase.id,
       requestCanonical: canonicalJson({ action, targetId, payload: request.postData() ? request.postDataJSON() : {} }) } };
 }
-export const purchasingAuthFixture = { user: { id: "test-user", username: "test", role: "admin" }, permissions: ["purchasing:create", "purchasing:edit"], roles: ["admin"] };
+export const purchasingAuthFixture = { user: { id: "test-user", username: "test", role: "admin" }, permissions: ["purchasing:view", "purchasing:create", "purchasing:edit"], roles: ["admin"] };

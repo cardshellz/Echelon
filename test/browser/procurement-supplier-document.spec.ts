@@ -11,12 +11,12 @@ test("saved terms render with exact pricing, public notes and usable narrow-scre
   Object.assign(source.lines[0], { orderQty: 100, pricingBasis: "per_purchase_uom", purchaseUom: "Carton",
     purchaseUomQuantity: 2, piecesPerPurchaseUom: 50, quotedUnitCostMills: 123450, unitCostMills: 2469,
     unitCostCents: 25, totalProductCostCents: 2469, lineTotalCents: 2469 });
-  const document = buildSupplierPoDocument(source);
+  const supplierDocument = buildSupplierPoDocument(source);
   const errors: string[] = [];
   const requests: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.route("**/*", route => { requests.push(route.request().url()); return route.abort(); });
-  await page.setContent(renderPoHtml(document));
+  await page.setContent(renderPoHtml(supplierDocument));
   await expect(page.getByRole("heading", { name: "PURCHASE ORDER", exact: true })).toBeVisible();
   await expect(page.locator(".notice")).toContainText("DRAFT");
   await expect(page.getByRole("table", { name: "Purchase order lines" })).toContainText("$12.345");
@@ -47,9 +47,9 @@ test("multi-page print keeps commercial rows and total readable", async ({ page 
     productName: `Saved supplier item ${String(index + 1).padStart(2, "0")}`, description: null,
     sku: `SKU-${String(index + 1).padStart(2, "0")}`, vendorSku: `SUPPLIER-${String(index + 1).padStart(2, "0")}` }));
   source.po.subtotalCents = source.po.totalCents = 24 * 12345;
-  const document = buildSupplierPoDocument(source);
+  const supplierDocument = buildSupplierPoDocument(source);
   await page.route("**/*", route => route.abort());
-  await page.setContent(renderPoHtml(document));
+  await page.setContent(renderPoHtml(supplierDocument));
   await page.emulateMedia({ media: "print" });
   await expect(page.locator(".lines tbody tr")).toHaveCount(24);
   await expect(page.locator(".notice")).toContainText("CURRENT COMMERCIAL COPY");

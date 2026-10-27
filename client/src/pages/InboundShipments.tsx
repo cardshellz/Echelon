@@ -1,3 +1,4 @@
+import { useAuth } from "@/lib/auth";
 import { shipmentListState } from "@/lib/shipment-list-navigation";
 import { shipmentWarehouseOptionsSchema } from "@shared/procurement/shipment-create-source";
 import { useShipmentCreation } from "@/hooks/use-shipment-creation";
@@ -81,6 +82,8 @@ type LandedCostFollowupFilter = ShipmentCostFilter;
 type InboundShipment = ShipmentWorkListItem;
 
 export default function InboundShipments() {
+  const { hasPermission } = useAuth();
+  const canCreateShipment = hasPermission("purchasing", "create");
   const shipmentCreation = useShipmentCreation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -183,6 +186,7 @@ export default function InboundShipments() {
     retry: false,
     networkMode: "always",
     mutationFn: (submission: ShipmentCreateSubmission) => {
+      if (!canCreateShipment) throw new Error("Purchasing creation permission is required to create a shipment.");
       if (!submission.visit.isCurrent()) throw new Error("The shipment creation view changed. Review the saved request before sending.");
       return shipmentCreation.execute(submission.body, submission.recovery);
     },
@@ -324,7 +328,7 @@ export default function InboundShipments() {
             Track and manage inbound freight shipments
           </p>
         </div>
-        <Button onClick={() => setShowCreateDialog(true)} className="min-h-[44px] w-full sm:w-auto">
+        <Button disabled={!canCreateShipment} onClick={() => setShowCreateDialog(true)} className="min-h-[44px] w-full sm:w-auto">
           <Plus className="h-4 w-4 mr-2" />
           New Shipment
         </Button>
@@ -699,7 +703,7 @@ export default function InboundShipments() {
             <DialogDescription>Create a draft shipment. You can add PO lines after creation.</DialogDescription>
           </DialogHeader>
           <ShipmentCreateRecovery recovery={shipmentCreation.recovery} error={shipmentCreation.error} pending={createMutation.isPending} onRetry={recoverShipmentCreation} onRefresh={shipmentCreation.refresh} />
-          <fieldset disabled={createMutation.isPending || !shipmentCreation.ready || !!shipmentCreation.recovery || !!shipmentCreation.error} className="space-y-4 min-w-0">
+          <fieldset disabled={!canCreateShipment || createMutation.isPending || !shipmentCreation.ready || !!shipmentCreation.recovery || !!shipmentCreation.error} className="space-y-4 min-w-0">
             {warehousesQuery.isPending && <p role="status">Loading available warehouses...</p>}
             {warehousesQuery.isError && <div role="alert">Warehouse options could not be loaded or verified. <Button type="button" variant="outline" onClick={() => void warehousesQuery.refetch()}>Retry warehouses</Button></div>}
             <div className="space-y-2">

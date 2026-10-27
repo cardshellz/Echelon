@@ -5,7 +5,7 @@ import {installFixtures} from "./procurement-fixtures";
 const destinationId="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",deliveryId="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",receiptId="cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 async function setup(page:Page,options:{canRetry?:boolean;unconfigured?:boolean}={}) {
   const failures=await installFixtures(page);
-  await page.route("**/api/auth/me",(route) => route.fulfill({json:{user:{id:"report-reviewer",username:"test",role:"admin"},roles:["admin"],permissions:["inventory:view",...(options.canRetry===false ? [] : ["purchasing:approve"])]}}));
+  await page.route("**/api/auth/me",(route) => route.fulfill({json:{user:{id:"report-reviewer",username:"test",role:"admin"},roles:["admin"],permissions:["purchasing:view",...(options.canRetry===false ? [] : ["purchasing:approve"])]}}));
   await page.route("**/api/purchase-orders/17/workspace",(route) => route.fulfill({json:{purchase:{id:17,poNumber:"TEST-PO-17",status:"acknowledged",physicalStatus:"acknowledged",financialStatus:"paid",currency:"USD",vendorName:"Test vendor",totalCents:10000,invoicedTotalCents:10000,paidTotalCents:10000,outstandingCents:0,expectedDeliveryDate:null,confirmedDeliveryDate:null,actualDeliveryDate:null,lines:[]},rfqOrigins:[],shipments:[],receipts:[],invoices:[],edges:[],limitations:[]}}));
   const now="2026-09-07T12:00:00.000Z";
   const pending={id:deliveryId,sourceEventId:"101",applicationId:"20",destinationId,state:"dead_letter" as const,attemptCount:8,nextAttemptAt:null,lastErrorCode:"COST_REPORT_ATTEMPTS_EXHAUSTED",lastErrorMessage:"Automatic delivery attempts exhausted; review and retry explicitly.",acknowledgement:null,recordedAt:now,updatedAt:now};

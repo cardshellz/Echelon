@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createApSummaryReadBarrier } from "./ap-summary-read-barrier";
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { supplierCreditCommandResultSchema, supplierCreditDetailSchema, supplierCreditOptionsSchema, supplierCreditListSchema,
@@ -107,6 +108,41 @@ databaseTests.sequential("supplier credit financial ownership and recovery", () 
     await expectSettlement(200_000, 10_000, 0);
     expect((await fixture.graph()).payments.map(row => row.total_amount_cents)).toEqual(["200000"]);
     expect((await detail(credit.id)).unappliedAmountCents).toBe(0);
+  });
+
+  it.each(["apply", "reverse"] as const)("keeps AP summary snapshot coherent during concurrent supplier credit %s", async command => {
+    let credit = await approved(10_000);
+    if (command === "reverse") credit = result(await apply(credit, 10_000)).credit;
+    const { pool: modulePool } = await import("../../../../db");
+    const { getApSummary } = await import("../../ap-ledger.service");
+    const at = new Date("2026-10-13T12:00:00Z");
+    const before = await getApSummary({ now: at });
+    const barrier = createApSummaryReadBarrier(modulePool);
+    const pending = getApSummary({ now: at });
+    try {
+      await barrier.waitForRead(pending);
+      if (command === "apply") {
+        result(await apply(credit, 10_000));
+      } else {
+        result(await fixture.request(`/api/supplier-credits/${credit.id}/applications/${credit.applications[0].id}/reverse`, {
+          key: randomUUID(), body: { expectedVersion: credit.version, reason: "Synthetic concurrent summary credit reversal" },
+        }));
+      }
+      const afterCommit = await getApSummary({ now: at });
+      const committedState = await creditGraph();
+      expect(afterCommit).toMatchObject({
+        totalOutstandingCents: command === "apply" ? 410_000 : 420_000,
+        creditedAllTimeCents: command === "apply" ? 10_000 : 0,
+        paidAllTimeCents: 0,
+      });
+      expect(afterCommit).not.toEqual(before);
+      barrier.resume();
+      expect(await pending).toEqual(before);
+      expect(barrier.snapshot).toMatchObject({ isolation: "repeatable read", readOnly: "on" });
+      expect(barrier.readerReleaseCount).toBe(1);
+      expect(await getApSummary({ now: at })).toEqual(afterCommit);
+      expect(await creditGraph()).toEqual(committedState);
+    } finally { await barrier.close(pending); }
   });
 
   it("can apply a supplier credit to another payable of the same supplier while retaining its original source", async () => {

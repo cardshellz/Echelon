@@ -1,0 +1,129 @@
+name: Procurement connected acceptance
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: procurement-connected-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    permissions:
+      contents: read
+      pull-requests: read
+    name: Select connected procurement coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.impact.outputs.run }}
+      migrations: ${{ steps.migrations.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: migrations
+        name: Validate migration identities before dependency setup
+        run: node scripts/migrations/check-migrations.mjs --ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - id: impact
+        env:
+          BROWSER_SUITE: procurementConnected
+          BROWSER_EVENT_NAME: ${{ github.event_name }}
+          BROWSER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BROWSER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci/browser-suite-impact.mjs
+
+  browser:
+    name: Connected procurement database and browser (${{ matrix.shard }}/4)
+    needs: select
+    if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
+    runs-on: ubuntu-latest
+    # Twelve minutes for each test shard, with setup and artifact headroom.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: echelon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d echelon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ECHELON_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/echelon_test
+      ECHELON_TEST_DATABASE_DISPOSABLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx tsc -p tsconfig.tests.connected.json
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+      - name: Install browser and OS dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Build actual frontend
+        run: npx vite build
+      - name: Run real login, HTTP, database and browser recovery
+        run: npx playwright test --config playwright.procurement-connected.config.ts --shard=${{ matrix.shard }}/4 --forbid-only
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: procurement-connected-evidence-${{ matrix.shard }}
+          path: test-results/procurement-connected/
+          retention-days: 7
+
+  result:
+    name: Procurement connected acceptance
+    needs: [select, browser]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require connected coverage or an explicit safe skip
+        env:
+          MIGRATIONS_RESULT: ${{ needs.select.outputs.migrations }}
+          SELECT_RESULT: ${{ needs.select.result }}
+          RUN_SUITE: ${{ needs.select.outputs.run }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
+        run: |
+          if [ "$MIGRATIONS_RESULT" != "success" ]; then
+            echo "::error::Migration validation did not pass"
+            exit 1
+          fi
+          if [ "$SELECT_RESULT" != "success" ]; then
+            echo "::error::Connected coverage selection failed"
+            exit 1
+          fi
+          if [ "$RUN_SUITE" = "false" ] && [ "$BROWSER_RESULT" = "skipped" ]; then
+            echo "Dependency analysis found no affected connected procurement coverage."
+            exit 0
+          fi
+          if [ "$RUN_SUITE" != "true" ] || [ "$BROWSER_RESULT" != "success" ]; then
+            echo "::error::Connected procurement coverage did not pass (result: $BROWSER_RESULT)"
+            exit 1
+          fi

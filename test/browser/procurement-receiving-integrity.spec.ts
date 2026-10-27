@@ -10,7 +10,7 @@ const locations = [
 type Options = { warehouseFailure?: "rejected" | "lost"; close?: "source" | "cached_error" | "cost_pending"; delayDefault?: boolean };
 
 async function setup(page: Page, options: Options = {}) {
-  const failures = await installFixtures(page);
+  const failures = await installFixtures(page, { permissions: ["inventory:view", "inventory:adjust", "purchasing:view"] });
   const line = (id: number, putawayLocationId: number | null) => ({
     id, receivingOrderId: 31, sku: `REVIEW-${id}`, productName: `Review product ${id}`, productId: 10, productVariantId: 2,
     unitsPerVariantSnapshot: 1, unitVersion: "a".repeat(64), expectedQty: 2, receivedQty: 2, damagedQty: 0,
@@ -179,7 +179,7 @@ test("an unsaved count must be resolved before changing the default", async ({ p
 
 
 test("the receipt list offers discard only for drafts and preserves a concurrent-start rejection", async ({ page }) => {
-  const failures = await installFixtures(page);
+  const failures = await installFixtures(page, { permissions: ["inventory:view", "inventory:adjust", "purchasing:view"] });
   const orders = [
     { ...receipt(31), status: "draft", receivedTotalUnits: 0 },
     { ...receipt(32), status: "open" },

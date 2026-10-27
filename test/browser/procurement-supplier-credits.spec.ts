@@ -3,7 +3,7 @@ import {expect,test,type Page,type Route} from "@playwright/test";
 import {installFixtures,po} from "./procurement-fixtures";
 import {invoiceSourceFixture,unbilledOwnershipFixture} from "../fixtures/invoice-source";
 import {installQuarantineFixtures} from "./procurement-quarantine-fixtures";
-import {invoiceListItem,workListPage} from "./procurement-ap-work-list-fixtures";
+import {apSummaryFixture,invoiceListItem,workListPage} from "./procurement-ap-work-list-fixtures";
 import {supplierCreditFixture,supplierCreditOptionsFixture,creditAllowed,creditDenied} from "../fixtures/supplier-credit";
 import type {SupplierCreditDetail} from "../../shared/procurement/supplier-credit";
 
@@ -90,7 +90,7 @@ for(const screen of ["invoice","invoice-list","shipment","po","dashboard"] as co
  await page.route("**/api/purchase-orders/17/invoices",route=>route.fulfill({json:{invoices:[invoice]}}));
  await page.route("**/api/purchase-orders/17/financial-evidence",route=>route.fulfill({json:{purchaseOrderId:17,currency:"USD",state:"complete",invoiceCount:1,invoicedAmountCents:10000,paidAmountCents:7500,creditedAmountCents:2500,settledAmountCents:10000,outstandingAmountCents:0,reviewReasons:[]}}));
  await page.route("**/api/inbound-shipments/42/invoices",route=>route.fulfill({json:{invoices:[invoice],summary:{invoiceCount:1,activeInvoiceCount:1,totalInvoicedCents:10000,totalPaidCents:7500,totalCreditedCents:2500,outstandingCents:0}}}));
- await page.route("**/api/ap/summary",route=>route.fulfill({json:{totalOutstandingCents:0,openInvoiceCount:0,paidAllTimeCents:7500,creditedAllTimeCents:2500,agingBuckets:{},vendorAging:[],recentPayments:[],recentlyPaid:[invoice]}}));
+ await page.route("**/api/ap/summary",route=>route.fulfill({json:apSummaryFixture({paidAllTimeCents:7500,creditedAllTimeCents:2500,recentlyPaid:[invoice]})}));
  await page.goto(screen==="invoice"?"/ap-invoices/71":screen==="invoice-list"?"/ap-invoices":screen==="shipment"?"/shipments/42?tab=invoices":screen==="po"?"/purchase-orders/17?tab=invoices":"/ap");
  if(screen==="po"){const card=page.getByRole("region",{name:"Purchase order financial evidence"});await expect(card).toContainText("Cash paid for this PO$75.00");await expect(card).toContainText("Credits applied to this PO$25.00");await expect(card).toContainText("Invoiced to this PO$100.00");}
  else if(screen==="invoice"){await expect(page.getByText("Credits applied",{exact:true})).toBeVisible();await expect(page.getByText("$25.00",{exact:true})).toBeVisible();await expect(page.getByText("$75.00",{exact:true})).toBeVisible();await expect(page.getByText("$100.00",{exact:true}).first()).toBeVisible();}

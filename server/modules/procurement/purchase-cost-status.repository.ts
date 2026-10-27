@@ -31,16 +31,22 @@ function bounded<T>(rows: T[], limit: number, kind: string): T[] {
   return rows;
 }
 
+/** Keep the exact same boundary on direct reads and snapshot-reader hits. A
+ * duplicate ID does not enlarge the review scope; a string is never an ID. */
+export function normalizePurchaseCostStatusLineIds(purchaseOrderLineIds: readonly number[]): number[] {
+  const values = z.array(idSchema).parse(purchaseOrderLineIds);
+  const ids = [...new Set(values)].sort((a, b) => a - b);
+  bounded(ids, MAX_LINES, "purchase line set");
+  return ids;
+}
+
 /** Shared current supplier-cost read for receipt processing, shipment review and
  * health. Callers own a read-only repeatable-read transaction. No flag is cleared. */
 export async function readPurchaseCostStatus(
   tx: CostEvidenceTransaction,
   purchaseOrderLineIds: readonly number[],
 ): Promise<PurchaseCostStatus> {
-  const ids = [
-    ...new Set(purchaseOrderLineIds.map((value) => idSchema.parse(value))),
-  ].sort((a, b) => a - b);
-  bounded(ids, MAX_LINES, "purchase line set");
+  const ids = normalizePurchaseCostStatusLineIds(purchaseOrderLineIds);
   if (!ids.length) return { lines: [] };
   const lines = (
     await tx.execute(sql`SELECT id,purchase_order_id,sku FROM procurement.purchase_order_lines

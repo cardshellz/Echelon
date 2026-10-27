@@ -58,10 +58,13 @@ import { shipmentWorkListQuerySchema, shipmentWorkListPageSchema, matchesShipmen
 import type { ShipmentListFilters } from "./shipment-work-list.repository";
 import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { readShipmentCostReview, readShipmentCostReviewInTransaction } from "./shipment-cost-review.repository";
+import { createPurchaseCostStatusSnapshotReader, type PurchaseCostStatusSnapshotReader } from "./purchase-cost-status-snapshot.repository";
 import { purchaseLineNeedsCostReview, purchaseCostNextAction } from "@shared/procurement/purchase-cost-status";
 import { shipmentAllocationsEqual } from "./domain/shipment-allocation-equality";
 import { shipmentCancellationBlockers, SHIPMENT_CANCELLATION_REASON_MAX_LENGTH } from "./domain/shipment-cancellation";
 import { readShipmentCancellationEvidence } from "./shipment-cancellation.repository";
+import { readShipmentHealthEvidence, type ShipmentAllocationReadEvidence, type ShipmentHealthReadEvidence } from "./shipment-health-evidence.repository";
+import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
 
 /**
  * Allocate a shipment line's NON-PRODUCT landed cost (freight+duty+insurance+other,
@@ -199,11 +202,10 @@ function rawLineBasisForDimension(line: any, method: string): number {
 }
 
 function allocatedCentsPerUnitMills(allocatedCents: unknown, qtyShipped: unknown): number | null {
-  // A line with no cost allocation yet has nothing allocated (null column / no
-  // breakdown). 7493a0b96 sent that null to the strict reader, which threw and
-  // 500ed the whole shipment page (S260821004377, 2026-10-26). A present value
-  // must still be exact integer cents.
-  const cents = allocatedCents == null ? 0 : readIntegerCents(allocatedCents, "allocatedCents", true);
+  // An unallocated line has no recorded amount yet. Keep that evidence unknown;
+  // only an explicitly recorded zero can produce a zero per-unit allocation.
+  if (allocatedCents === null || allocatedCents === undefined) return null;
+  const cents = readIntegerCents(allocatedCents, "allocatedCents", true);
   const qty = Number(qtyShipped);
   if (!Number.isInteger(cents) || cents < 0 || !Number.isInteger(qty) || qty <= 0) return null;
   return perUnitMills(cents * 100, qty);
@@ -289,19 +291,23 @@ export function createShipmentTrackingService(
     catch (error) { throw new ShipmentTrackingError(error instanceof Error ? error.message : "Invalid allocation policy", 409, { code: "INVALID_ALLOCATION_METHOD" }); }
   }
 
-  async function buildAllocationBasis(lines: InboundShipmentLine[], method: string, executor?: any) {
+  async function buildAllocationBasis(lines: InboundShipmentLine[], method: string, executor?: any,
+    sourceEvidence?: Pick<ShipmentAllocationReadEvidence, "purchaseLinesById" | "purchaseOrdersById">) {
     const inputs: ShipmentAllocationBasisLine[] = [];
     const purchaseOrdersById = new Map<number, { currency: string | null } | null>();
     for (const line of lines) {
       const poLine = method === "by_value" && line.purchaseOrderLineId
-        ? await storage.getPurchaseOrderLineById(line.purchaseOrderLineId, executor) : null;
+        ? sourceEvidence ? sourceEvidence.purchaseLinesById.get(line.purchaseOrderLineId)
+          : await storage.getPurchaseOrderLineById(line.purchaseOrderLineId, executor) : null;
       if (method === "by_value" && poLine && (poLine.lineType !== "product"
         || poLine.purchaseOrderId !== line.purchaseOrderId || poLine.id !== line.purchaseOrderLineId)) {
         throw new ShipmentTrackingError(`Shipment line ${line.id} needs its original product PO source reviewed`, 409,
           { code: "INVALID_ALLOCATION_BASIS", lineId: line.id });
       }
       if (method === "by_value" && line.purchaseOrderId && !purchaseOrdersById.has(line.purchaseOrderId)) {
-        purchaseOrdersById.set(line.purchaseOrderId, await storage.getPurchaseOrderById(line.purchaseOrderId, executor) ?? null);
+        purchaseOrdersById.set(line.purchaseOrderId, sourceEvidence
+          ? sourceEvidence.purchaseOrdersById.get(line.purchaseOrderId) ?? null
+          : await storage.getPurchaseOrderById(line.purchaseOrderId, executor) ?? null);
       }
       inputs.push({ lineId: line.id, qtyShipped: line.qtyShipped, totalVolumeCbm: line.totalVolumeCbm,
         totalWeightKg: line.totalWeightKg, chargeableWeightKg: line.chargeableWeightKg,
@@ -313,11 +319,12 @@ export function createShipmentTrackingService(
     catch (error) { throw new ShipmentTrackingError(error instanceof Error ? error.message : "Invalid allocation basis", 409, { code: "INVALID_ALLOCATION_BASIS" }); }
   }
 
-  async function projectLineProductValue(line: InboundShipmentLine, allocatedCents: number, executor?: any) {
+  async function projectLineProductValue(line: InboundShipmentLine, allocatedCents: number, executor?: any,
+    sourceEvidence?: Pick<ShipmentAllocationReadEvidence, "purchaseLinesById" | "purchaseOrdersById">) {
     // Legacy shipments can have no purchase source. Keep their product value
     // unknown; the cost-revision owner already records the required review.
     if (line.purchaseOrderLineId == null || line.purchaseOrderId == null) return null;
-    const basis = await buildAllocationBasis([line], "by_value", executor);
+    const basis = await buildAllocationBasis([line], "by_value", executor, sourceEvidence);
     const evidence = buildShipmentAllocationEvidence(basis, line.id);
     try { return { evidence, amounts: projectShipmentProductValue(evidence, allocatedCents) }; }
     catch (error) {
@@ -1093,6 +1100,12 @@ export function createShipmentTrackingService(
     const shipment = await getShipment(shipmentId, executor);
     const lines = await storage.getInboundShipmentLines(shipmentId, executor);
     const costs = await storage.getInboundFreightCosts(shipmentId, executor);
+    return evaluateAllocationStatus(shipment, lines, costs, executor);
+  }
+
+  async function evaluateAllocationStatus(shipment: InboundShipment, lines: InboundShipmentLine[], costs: InboundFreightCost[],
+    executor?: any, evidence?: ShipmentAllocationReadEvidence) {
+    const shipmentId = shipment.id;
     const currentLineIds = new Set(lines.map((line) => line.id));
     const issues: Array<{
       severity: "blocker" | "warning";
@@ -1118,13 +1131,14 @@ export function createShipmentTrackingService(
     for (const cost of costs) {
       const effectiveCents = cost.actualCents ?? cost.estimatedCents ?? 0;
       const { method, source } = resolveAllocationMethod(cost, shipment);
-      const allocations = await storage.getInboundFreightCostAllocations(cost.id, executor);
+      const allocations = evidence ? evidence.allocationsByCostId.get(cost.id) ?? []
+        : await storage.getInboundFreightCostAllocations(cost.id, executor);
       const allocatedCents = allocations.reduce((sum: number, allocation: any) => sum + readIntegerCents(allocation.allocatedCents ?? 0, "allocated", true), 0);
       const staleAllocationCount = allocations.filter((allocation: any) => !currentLineIds.has(allocation.inboundShipmentLineId)).length;
       let basisSummary: ShipmentAllocationBasis | null = null;
       let basisIssue: string | null = null;
       if (lines.length > 0 && effectiveCents !== 0) {
-        try { basisSummary = await buildAllocationBasis(lines, method, executor); }
+        try { basisSummary = await buildAllocationBasis(lines, method, executor, evidence); }
         catch (error) {
           if (!(error instanceof ShipmentTrackingError) || error.details?.code !== "INVALID_ALLOCATION_BASIS") throw error;
           basisIssue = error.message;
@@ -1241,7 +1255,7 @@ export function createShipmentTrackingService(
     // A failed by-value basis already reports this review at the cost level.
     if (!costStatuses.some((cost) => cost.status === "invalid_value_basis")) {
       for (const line of lines) {
-        try { await projectLineProductValue(line, 0, executor); }
+        try { await projectLineProductValue(line, 0, executor, evidence); }
         catch (error) {
           if (!(error instanceof ShipmentTrackingError)
             || !["INVALID_ALLOCATION_BASIS", "INVALID_SHIPMENT_PRODUCT_VALUE"].includes(error.details?.code)) throw error;
@@ -1282,16 +1296,18 @@ export function createShipmentTrackingService(
   }
 
   /** Both list membership and overview consume this current posting/reconciliation evidence. */
-  async function readShipmentHealthIssues(shipment: InboundShipment, tx: any): Promise<LandedCostHealth["items"]> {
+  async function readShipmentHealthIssues(shipment: InboundShipment, tx: any, evidence: ShipmentHealthReadEvidence,
+    supplierSnapshot: PurchaseCostStatusSnapshotReader): Promise<LandedCostHealth["items"]> {
     const items: LandedCostHealth["items"] = [];
     if (shipment.status !== "costing" && shipment.status !== "closed") return items;
-    const lines = await storage.getInboundShipmentLines(shipment.id, tx);
-    const provisionalLots = await storage.getProvisionalLotsByShipment(shipment.id, tx);
-    const allocation = await getAllocationStatus(shipment.id, tx);
-    const review = await readShipmentCostReviewInTransaction(tx, shipment.id);
+    const { lines, provisionalLots } = evidence;
+    const allocation = await evaluateAllocationStatus(shipment, lines, evidence.costs, tx, evidence);
+    const review = await readShipmentCostReviewInTransaction(tx, shipment.id, supplierSnapshot);
+    const lineIds = new Set(lines.map(line => line.id));
     if (!review || review.shipmentId !== shipment.id || review.lines.length !== lines.length
+      || lineIds.size !== lines.length
       || new Set(review.lines.map(line => line.lineId)).size !== lines.length
-      || review.lines.some(line => !lines.some(source => source.id === line.lineId))) {
+      || review.lines.some(line => !lineIds.has(line.lineId))) {
       throw new ShipmentTrackingError("Current shipment cost evidence is incomplete. Reload cost health.", 503,
         { code: "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE", shipmentId: shipment.id });
     }
@@ -1303,8 +1319,8 @@ export function createShipmentTrackingService(
     let finalizedLineCount = 0;
 
     for (const line of lines) {
-      const snapshots = await storage.getLandedCostSnapshots(line.id, tx);
-      if (snapshots.length > 0 && snapshots[0]?.landedUnitCostCents != null) {
+      const snapshot = evidence.snapshotsByLineId.get(line.id);
+      if (snapshot?.landedUnitCostCents != null) {
         finalizedLineCount += 1;
       } else if (!postedLineIds.has(line.id)) {
         missingSnapshotLineIds.push(line.id);
@@ -1392,6 +1408,28 @@ export function createShipmentTrackingService(
     return items;
   }
 
+  async function readShipmentHealthPage(shipments: InboundShipment[], tx: any): Promise<Map<number, LandedCostHealth["items"]>> {
+    const result = new Map<number, LandedCostHealth["items"]>(shipments.map(shipment => [shipment.id, []]));
+    const eligible = shipments.filter(shipment => shipment.status === "costing" || shipment.status === "closed");
+    for (let offset = 0; offset < eligible.length; offset += SHIPMENT_SCAN_PAGE_SIZE) {
+      const page = eligible.slice(offset, offset + SHIPMENT_SCAN_PAGE_SIZE);
+      let evidence: Map<number, ShipmentHealthReadEvidence>;
+      try { evidence = await readShipmentHealthEvidence(tx, page.map(shipment => shipment.id)); }
+      catch (error) {
+        if (!(error instanceof CostEvidenceError) || error.code !== "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE") throw error;
+        throw new ShipmentTrackingError(error.message, 503, { code: error.code });
+      }
+      const supplierSnapshot = createPurchaseCostStatusSnapshotReader(tx);
+      for (const shipment of page) {
+        const current = evidence.get(shipment.id);
+        if (!current) throw new ShipmentTrackingError("Current shipment cost evidence is incomplete. Reload cost health.", 503,
+          { code: "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE", shipmentId: shipment.id });
+        result.set(shipment.id, await readShipmentHealthIssues(shipment, tx, current, supplierSnapshot));
+      }
+    }
+    return result;
+  }
+
   async function getLandedCostHealth(options: { limit?: number } = {}): Promise<LandedCostHealth> {
     const limit = options.limit ?? 100;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
@@ -1412,9 +1450,10 @@ export function createShipmentTrackingService(
       let scannedShipments = 0, critical = 0, warning = 0;
       for (let offset = 0; ; offset += SHIPMENT_SCAN_PAGE_SIZE) {
         const page = await storage.getInboundShipments({ status: ["costing", "closed"], limit: SHIPMENT_SCAN_PAGE_SIZE, offset }, tx);
+        const health = await readShipmentHealthPage(page, tx);
         for (const shipment of page) {
           scannedShipments++;
-          for (const item of await readShipmentHealthIssues(shipment, tx)) {
+          for (const item of health.get(shipment.id)!) {
             if (item.severity === "critical") critical++; else warning++;
             const key = countKeys[item.type];
             if (key) counts[key]++;
@@ -1438,14 +1477,16 @@ export function createShipmentTrackingService(
       if (costFilter === "all") {
         total = await storage.getInboundShipmentsCount(filters, tx);
         shipments = await storage.getInboundShipments(filters, tx);
-        for (const shipment of shipments) costHealthItems.push(...await readShipmentHealthIssues(shipment, tx));
+        const health = await readShipmentHealthPage(shipments, tx);
+        for (const shipment of shipments) costHealthItems.push(...health.get(shipment.id)!);
       } else {
         // Cost evidence is an application projection, not a SQL status flag. Stream
         // matching headers and retain only the requested page; no full-list materialization.
         for (let offset = 0; ; offset += SHIPMENT_SCAN_PAGE_SIZE) {
           const candidates = await storage.getInboundShipments({ ...filters, limit: SHIPMENT_SCAN_PAGE_SIZE, offset }, tx);
+          const health = await readShipmentHealthPage(candidates, tx);
           for (const shipment of candidates) {
-            const issues = await readShipmentHealthIssues(shipment, tx);
+            const issues = health.get(shipment.id)!;
             if (!matchesShipmentCostFilter(issues, costFilter)) continue;
             if (total >= query.offset && shipments.length < query.limit) {
               shipments.push(shipment);
