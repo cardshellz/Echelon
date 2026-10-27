@@ -1,3 +1,4 @@
+import { openReceivingMoreActions } from "../../browser/procurement-receiving-helpers";
 import type { Locator, Page, TestInfo } from "@playwright/test";
 import { test, expect, login, prepareCaseReceipt, type Backend, type ConnectedActor, type ConnectedState } from "./fixtures";
 
@@ -113,6 +114,7 @@ test("view-only lead cannot start, discard or import into an independently creat
   await switchActor(page, backend, actor(backend, "connected-viewer"));
   await page.goto(backend.url + "/receiving?open=" + draft.id);
   await expect(page.getByTestId("btn-open-receipt")).toBeDisabled();
+  await openReceivingMoreActions(page);
   await expect(page.getByTestId("btn-discard-receipt")).toBeDisabled();
   await expect(page.getByTestId("btn-import-csv")).toBeDisabled();
   await expect(page.getByTestId("btn-add-line")).toBeDisabled();
@@ -283,7 +285,7 @@ test("receiving adjustment does not grant vendor or catalog creation", async ({ 
   const deniedCatalog = await page.request.post(backend.url + "/api/receiving/lines/" + lineId + "/create-variant");
   expect(deniedCatalog.status(), await deniedCatalog.text()).toBe(403);
   await page.goto(receiptUrl(backend));
-  const resolveSku = page.getByRole("button", { name: /^SKU(?: not linked)?$/, exact: true }).filter({ visible: true });
+  const resolveSku = page.getByRole("button", { name: "Link SKU", exact: true }).filter({ visible: true });
   await expect(resolveSku).toBeVisible();
   await resolveSku.click();
   await expect.soft(page.getByRole("button", { name: "Create catalog variant", exact: true })).toBeDisabled();
@@ -311,7 +313,7 @@ test("a catalog creator can create metadata without gaining receipt adjustment a
   expect(grants).toEqual(expect.arrayContaining(["inventory:create", "inventory:view"]));
   expect(grants).not.toContain("inventory:adjust");
   await page.goto(receiptUrl(backend));
-  const resolveSku = page.getByRole("button", { name: /^SKU(?: not linked)?$/, exact: true }).filter({ visible: true });
+  const resolveSku = page.getByRole("button", { name: "Link SKU", exact: true }).filter({ visible: true });
   await expect(resolveSku).toBeEnabled();
   await resolveSku.click();
   const createButton = page.getByRole("button", { name: "Create catalog variant", exact: true });

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, receipt } from "./procurement-fixtures";
+import { openReceivingLineOptions, openReceivingSetup } from "./procurement-receiving-helpers";
 
 const locations = [
   { id: 5, code: "RCV-01", name: "Receiving one", warehouseId: 1, isActive: 1, locationType: "receiving" },
@@ -63,19 +64,23 @@ async function setup(page: Page, options: Options = {}) {
   });
   await page.goto("/receiving?open=31");
   await expect(page.getByRole("heading", { name: /Receipt TEST-RECEIPT-31/ })).toBeVisible();
+  await openReceivingSetup(page);
+  await openReceivingLineOptions(page, 7);
+  await openReceivingLineOptions(page, 8);
   return { state, failures, release };
 }
 
 const warehouse = (page: Page) => page.getByRole("combobox", { name: "Receiving warehouse", exact: true });
-const lineLocations = (page: Page) => page.getByRole("combobox", { name: "Inventory location", exact: true }).filter({ visible: true });
+const lineLocations = (page: Page) => page.getByRole("combobox", { name: /^Location for line / }).filter({ visible: true });
+const savedLineLocation = (page: Page, lineId: number) => page.getByTestId(`receipt-line-options-${lineId}`).locator("summary");
 
 test("default location fills only unassigned lines with one atomic command", async ({ page }) => {
   const { state, failures } = await setup(page);
   await page.getByRole("combobox", { name: "Default receiving location" }).click();
   await page.getByRole("option", { name: /RCV-02/ }).click();
   await expect.poll(() => state.reads).toBeGreaterThan(1);
-  await expect(lineLocations(page).nth(0)).toContainText("RCV-01");
-  await expect(lineLocations(page).nth(1)).toContainText("RCV-02");
+  await expect(savedLineLocation(page, 7)).toContainText("RCV-01");
+  await expect(savedLineLocation(page, 8)).toContainText("RCV-02");
   expect(state.writes).toEqual([{ path: "/api/receiving/31", body: { receivingLocationId: 6, applyDefaultToUnassigned: true } }]);
   expect(failures).toEqual([]);
 });
@@ -107,6 +112,8 @@ test("lost warehouse response requires readback before further receiving", async
     await expect(defaults.nth(1)).toBeDisabled();
   }
   await page.getByRole("button", { name: "Load latest receipt and discard unsaved counts" }).click();
+  await expect(page.locator('summary[aria-label="Receiving setup"]')).toContainText("Other");
+  await openReceivingSetup(page);
   await expect(warehouse(page)).toContainText("Other (W2)");
   expect(state.order.warehouseId).toBe(2);
   expect(state.writes).toHaveLength(1);
@@ -158,7 +165,7 @@ test("a pending default save cannot discard a newly edited count", async ({ page
   }
   expect(state.writes).toHaveLength(1);
   release();
-  await expect(lineLocations(page).nth(1)).toContainText("RCV-02");
+  await expect(savedLineLocation(page, 8)).toContainText("RCV-02");
   expect(failures).toEqual([]);
 });
 

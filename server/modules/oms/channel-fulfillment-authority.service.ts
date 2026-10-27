@@ -1,4 +1,4 @@
-import type { EbayLabelReplacementResult } from "./ebay-label-replacement.repository";
+import type { EbayLabelReplacementResult, LabelReplacementOperation } from "./ebay-label-replacement.repository";
 import type { ShopifyLabelLifecycleService } from "./shopify-label-lifecycle.service";
 import { randomUUID } from "node:crypto";
 
@@ -395,9 +395,9 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
   const createLeaseToken = dependencies.createLeaseToken ?? randomUUID;
   const leaseDurationMs = dependencies.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
 
-  async function reconcileEbayLabelReplacement(labelId: number): Promise<EbayLabelReplacementResult | null> {
+  async function reconcileEbayLabelReplacement(labelId: number, operation: LabelReplacementOperation = "label_observation"): Promise<EbayLabelReplacementResult | null> {
     if (dependencies.labelReplacementEnabled === false) return null;
-    const result = await dependencies.repository.reconcileEbayLabelReplacement?.(labelId, clock.now()) ?? null;
+    const result = await dependencies.repository.reconcileEbayLabelReplacement?.(labelId, clock.now(), operation) ?? null;
     if (result?.outcome === "applied") {
       await dependencies.projector.projectPhysicalShipment(result.materialized.physicalShipmentId);
       await dependencies.repository.markEbayLabelReplacementProjected?.(labelId, clock.now());
@@ -413,10 +413,16 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
   } = {}): Promise<ChannelFulfillmentBatchResult> {
     const limit = options.limit ?? DEFAULT_BATCH_SIZE;
     if (dependencies.labelReplacementEnabled !== false && !options.commandIds && dependencies.repository.findWaitingEbayLabelReplacements) {
-      for (const labelId of await dependencies.repository.findWaitingEbayLabelReplacements(Math.min(limit, 25))) {
-        try { await reconcileEbayLabelReplacement(labelId); } catch (error) {
-          logger.error({ code: "EBAY_LABEL_REPLACEMENT_RETRY", labelId, error: errorMessage(error) });
+      try {
+        for (const labelId of await dependencies.repository.findWaitingEbayLabelReplacements(Math.min(limit, 25), clock.now())) {
+          try { await reconcileEbayLabelReplacement(labelId, "repair"); } catch (error) {
+            logger.error({ code: "EBAY_LABEL_REPLACEMENT_RETRY", labelId, error: errorMessage(error) });
+          }
         }
+      } catch (error) {
+        // Correction discovery has its own durable work. A failed scan must
+        // not prevent fresh, already-authorized commands from being claimed.
+        logger.error({ code: "LABEL_REPLACEMENT_RECOVERY_DISCOVERY_FAILED", error: errorMessage(error) });
       }
     }
     const claimed = await dependencies.repository.claimCommands({

@@ -141,7 +141,12 @@ test("actor-scoped recovery cannot be submitted by a different operator", async 
 test("revoked permission keeps recovery but blocks dispatch until restored", async ({ page }) => {
   const { commands, state, submit, failures } = await setup(page, "save-draft", "lost");
   await submit.click(); await expect(recover(page)).toBeEnabled();
-  state.allowed = false; await page.reload(); await expect(recover(page)).toBeDisabled(); await expect(notice(page)).toContainText("purchasing permission");
+  state.allowed = false; await page.reload();
+  await expect(page).toHaveURL(/\/picking$/);
+  // Revocation removes editor access; the read-authorized detail still owns
+  // recovery of the original request without granting mutation authority.
+  await page.goto("/purchase-orders/17");
+  await expect(recover(page)).toBeDisabled(); await expect(notice(page)).toContainText("purchasing permission");
   expect(commands).toHaveLength(1); state.allowed = true; await page.reload(); await recover(page).click();
   await expect(notice(page)).toHaveCount(0); expect(commands[1]).toEqual(commands[0]); expect(failures).toEqual([]);
 });

@@ -9,6 +9,7 @@ import { ORDER_EDIT_PRICING_DISPLAY_HEADER, ORDER_EDIT_PRICING_DISPLAY_VERSION }
 import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
 import { customerOrderCancellationInputSchema, customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
 import { customerAccountOrderSummariesInputSchema, customerAccountOrderSummariesSchema, customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
+import { customerOrderActionPageSchema } from "@shared/customer-account/order-actions";
 
 export const customerAccountPageConfigSchema = z.object({
   themeId: z.string().max(30).regex(/^[1-9][0-9]*$/),
@@ -91,6 +92,14 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
       return result;
     },
     resolve: async (raw: unknown, signal?: AbortSignal) => json(await call({ method: "POST", path: "/account/resolve", body: customerAccountOrderIdentityInputSchema.parse(raw) }, signal), customerAccountOrderIdentitySchema),
+    orderActions: async (raw: unknown, signal?: AbortSignal) => {
+      const input = customerAccountOrderSummariesInputSchema.parse(raw);
+      const result = await json(await call({ method: "POST", path: "/account/order-actions", body: input }, signal), customerOrderActionPageSchema);
+      if (result.orders.length !== input.orders.length || result.orders.some(row => !input.orders.some(
+        expected => row.externalOrderId === expected.externalOrderId && row.orderReference === expected.orderReference)))
+        throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_ACTION_MISMATCH", "Order options could not be verified. Please try again.");
+      return result;
+    },
     orderSummaries: async (raw: unknown, signal?: AbortSignal) => {
       const input = customerAccountOrderSummariesInputSchema.parse(raw);
       const result = await json(await call({ method: "POST", path: "/account/order-summaries", body: input }, signal), customerAccountOrderSummariesSchema);

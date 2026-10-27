@@ -101,6 +101,21 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request({}, proof(), { Origin: "https://other.test" })).status).toBe(403);
     expect(services).not.toHaveBeenCalled();
   });
+  it("serves stored action lookups through the owned signed boundary without constructing return services", async () => {
+    const input = { externalOrderId: "99", orderReference: "#TEST-1" };
+    const actions = vi.fn(async () => ({ orders: [{ ...input, omsOrderId: null, state: "not_managed", snapshot: null, verifiedAt: null, validUntil: null }] }));
+    const returns = vi.fn();
+    services.mockImplementation(() => ({ edits: { connection }, orders: { actions }, returns }) as never);
+    const sessionKey = (await (await request()).json()).session.sessionKey;
+    const response = await request({ method: "POST", path: "/account/order-actions", sessionKey, body: { orders: [input] } });
+    expect(response.status).toBe(200);
+    expect(actions).toHaveBeenCalledExactlyOnceWith({ orders: [input] });
+    expect(returns).not.toHaveBeenCalled();
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    enabled = false;
+    expect((await request({ method: "POST", path: "/account/order-actions", sessionKey, body: { orders: [input] } })).status).toBe(403);
+    expect(actions).toHaveBeenCalledOnce();
+  });
   it("admits any signed customer for the enabled shop without a tester allowlist", async () => {
     const response = await request({ expectedCustomerId: "101" }, proof({ logged_in_customer_id: "101" }));
     expect(response.status).toBe(200);

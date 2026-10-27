@@ -345,6 +345,14 @@ describe("dropship marketplace listing push providers", () => {
     }
     const liveRequest = () => makeRequest({ platform:"ebay",listingMode:"live",marketplaceConfig:ebayMarketplaceConfig() });
 
+    function expectOfferDiscoveryOnly(fetcher: FakeFetch): void {
+      // Discovery and ownership refusals precede package reads and listing writes.
+      expect(fetcher.calls).toEqual([{
+        url: "https://api.ebay.com/sell/inventory/v1/offer?sku=SKU-101&marketplace_id=EBAY_US",
+        init: expect.objectContaining({ method: "GET" }),
+      }]);
+    }
+
     it("reaches eBay's identity read with the stored provider_user_id credential", async () => {
       const { provider, fetcher, readCalls, query } = adoptionProvider({ status:200,body:{ userId:"seller-1",username:"seller" } },
         [emptyResponse(),emptyResponse()]);
@@ -359,7 +367,7 @@ describe("dropship marketplace listing push providers", () => {
       const error = await provider.pushListing(liveRequest()).catch((value: unknown) => value);
       expect(error).toBeInstanceOf(DropshipError);
       expect(error).toMatchObject({ code:"EBAY_SYNC_IDENTITY_CHANGED",context:{ retryable:false,source:"ebay_listing_connector" } });
-      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET"]);
+      expectOfferDiscoveryOnly(fetcher);
       expect(credentials.authFailures).toEqual([]);
     });
 
@@ -368,7 +376,7 @@ describe("dropship marketplace listing push providers", () => {
       await expect(provider.pushListing(liveRequest())).rejects.toMatchObject({
         code:"EBAY_REGISTRATION_READ_FAILED",context:{ retryable:true,source:"ebay_listing_connector" },
       });
-      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET"]);
+      expectOfferDiscoveryOnly(fetcher);
       expect(credentials.authFailures).toEqual([]);
     });
 
@@ -380,7 +388,7 @@ describe("dropship marketplace listing push providers", () => {
       const error = await provider.pushListing(liveRequest()).catch((value: unknown) => value);
       expect(error).toBeInstanceOf(DropshipError);
       expect(error).toMatchObject({ code:"EBAY_AUTH_REQUIRED",context:{ retryable:true,source:"ebay_listing_connector" } });
-      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET"]);
+      expectOfferDiscoveryOnly(fetcher);
       expect(credentials.authFailures).toEqual([{
         vendorId:10,storeConnectionId:22,platform:"ebay",
         expectedCredential:{ accessTokenRef:"access-ref",refreshTokenRef:"refresh-ref" },
@@ -396,7 +404,7 @@ describe("dropship marketplace listing push providers", () => {
       credentials.recordAuthFailure = async (input) => { credentials.authFailures.push(input); throw changed; };
       const { provider, fetcher } = adoptionProvider({ status:401,body:{} },[],credentials);
       await expect(provider.pushListing(liveRequest())).rejects.toBe(changed);
-      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET"]);
+      expectOfferDiscoveryOnly(fetcher);
       expect(credentials.authFailures).toHaveLength(1);
     });
 
@@ -405,7 +413,7 @@ describe("dropship marketplace listing push providers", () => {
       await expect(provider.pushListing(liveRequest())).rejects.toMatchObject({
         code:"EBAY_PROVIDER_ACCESS_DENIED",context:{ retryable:false,source:"ebay_listing_connector" },
       });
-      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET"]);
+      expectOfferDiscoveryOnly(fetcher);
       expect(credentials.authFailures).toEqual([]);
     });
 
@@ -416,7 +424,7 @@ describe("dropship marketplace listing push providers", () => {
       await expect(provider.pushListing(liveRequest())).rejects.toMatchObject({
         code:"EBAY_SYNC_MAPPING_INVALID",context:{ retryable:false,source:"ebay_listing_connector" },
       });
-      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET"]);
+      expectOfferDiscoveryOnly(fetcher);
     });
   });
 
@@ -566,8 +574,8 @@ describe("dropship marketplace listing push providers", () => {
 
     expect(result).toMatchObject({ status: "created", externalListingId: "listing-201", externalOfferId: "offer-201", rawResult: { published: true } });
     expect(fetcher.calls.map((call) => `${call.init.method} ${new URL(call.url).pathname}`)).toEqual([
-      "GET /sell/inventory/v1/inventory_item/SKU-101",
       "GET /sell/inventory/v1/offer",
+      "GET /sell/inventory/v1/inventory_item/SKU-101",
       "GET /sell/inventory/v1/inventory_item/SKU-101",
       "PUT /sell/inventory/v1/inventory_item/SKU-101",
       "POST /sell/inventory/v1/offer",
@@ -1134,8 +1142,14 @@ describe("eBay listing push stock link (Fix PR 2a-2)", () => {
     await expect(provider(fetcher, gate).pushListing(live())).resolves.toMatchObject({ externalListingId: "listing-101", externalOfferId: "offer-101" });
 
     expect(ensureCalls).toEqual([3]);
-    expect(fetcher.calls[0]).toMatchObject({ init: { method: "GET" } });
-    expect(fetcher.calls[1]!.url).toContain("/sell/inventory/v1/offer?sku=SKU-101");
+    expect(fetcher.calls.slice(0, ensureCalls[0]).map(call => {
+      const url = new URL(call.url);
+      return `${call.init.method} ${url.pathname}${url.search}`;
+    })).toEqual([
+      "GET /sell/inventory/v1/offer?sku=SKU-101&marketplace_id=EBAY_US",
+      "GET /sell/inventory/v1/inventory_item/SKU-101",
+      "GET /sell/inventory/v1/inventory_item/SKU-101",
+    ]);
     expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET", "GET", "PUT", "POST", "PUT", "GET", "POST", "GET"]);
   });
 

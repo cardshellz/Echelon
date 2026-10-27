@@ -213,6 +213,15 @@ async function setup(
             },
           });
     }
+    if (input.path === "/account/order-actions") {
+      const currentOrder = options.orderRead ? await options.orderRead() : order;
+      return route.fulfill({ json: { orders: identities.map(identity => ({ ...identity,
+        omsOrderId: identity.externalOrderId === "99" ? 1 : null,
+        state: identity.externalOrderId !== "99" ? "not_managed" : currentOrder ? "ready" : "failed",
+        verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 60_000).toISOString(),
+        snapshot: identity.externalOrderId === "99" && currentOrder ? { order: { ...currentOrder, activeOperationId: activeOperation },
+          returnOrder: null, orderFailed: false, returnFailed: false } : null })) } });
+    }
     if (input.path === "/returns/returns")
       return route.fulfill({
         json: { returns: [], nextBeforeAuthorizationId: null },
@@ -333,6 +342,7 @@ async function setup(
             ![
               "/account/bootstrap",
               "/account/order-summaries",
+              "/account/order-actions",
               "/returns/returns",
               "/order-edits/orders/1",
               `/order-edits/operations/${id}`,

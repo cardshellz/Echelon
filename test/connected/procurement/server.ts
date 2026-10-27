@@ -64,14 +64,17 @@ async function main(): Promise<void> {
   async function stop(): Promise<void> {
     if (stopping) return;
     stopping = true;
+    console.log(JSON.stringify({ event: "procurement_connected_stopping", stage: "http" }));
     if (server.listening) {
       await new Promise<void>((done, reject) => {
         server.close(error => error ? reject(error) : done());
         server.closeIdleConnections();
       });
     }
+    console.log(JSON.stringify({ event: "procurement_connected_stopping", stage: "database" }));
     store?.close();
     await ownedDatabase.close();
+    console.log(JSON.stringify({ event: "procurement_connected_stopped" }));
   }
   try {
     const { db, pool } = await import("../../../server/db");

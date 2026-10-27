@@ -29,7 +29,7 @@ import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitContr
 import { ReceivingCountControl } from "@/components/purchasing/ReceivingCountControl";
 import { ReceivingQuarantineRecoveryNotice } from "@/components/purchasing/ReceivingQuarantineRecoveryNotice";
 import { ReceivingQuarantinePanel } from "@/components/purchasing/ReceivingQuarantinePanel";
-import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
+import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, receivingBaseQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
 import { ProcurementContext } from "@/components/procurement-context";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -97,7 +97,8 @@ import {
   XCircle,
   MapPin,
   Building2,
-  ChevronsUpDown
+  ChevronsUpDown,
+  ArrowLeft
 } from "lucide-react";
 
 interface Vendor {
@@ -211,8 +212,8 @@ function LocationTypeahead({
       searchPlaceholder="Search locations..."
       emptyMessage="No matching locations found."
       allowClear
-      triggerClassName="h-10 min-h-11 w-28"
-      contentClassName="min-w-72"
+      triggerClassName="min-h-11 w-full max-w-xs"
+      contentClassName="w-72 max-w-[calc(100vw-2rem)]"
     />
   );
 }
@@ -975,15 +976,24 @@ DEF-456,25,,,5.00,,Location TBD`;
     } finally { if (isCurrentReceiptNavigation(context)) setReloadingUnits(false); }
   }
 
-  function renderReceivedCount(line: ReceivingLine, layout: "mobile" | "desktop") {
+  function openLineReversal(line: ReceivingLine): void {
+    const remaining = (line.receivedQty ?? 0) - (line.reversedQty ?? 0);
+    setReverseError(null);
+    setReverseTarget({ scope: "line", lineId: line.id, lineLabel: line.sku || `Line #${line.id}`, maxQty: remaining });
+    setReverseQty(String(remaining));
+    setReverseReason("");
+    setReverseAllowNegative(false);
+  }
+
+  function renderReceivedCount(line: ReceivingLine) {
     if (selectedReceipt?.status !== "open" && selectedReceipt?.status !== "receiving") {
-      return selectedReceipt?.status === "draft"
-        ? <span className="text-xs text-muted-foreground italic">Press Start to count</span>
-        : <span>{line.receivedQty}</span>;
+      return <span className="text-lg font-semibold tabular-nums">{line.receivedQty.toLocaleString("en-US")}</span>;
     }
     const draft = countDrafts[line.id];
+    const factor = recordedReceivingFactor(line);
     return <ReceivingCountControl
       lineId={line.id}
+      unitDescription={factor === null ? "The count unit needs confirmation." : factor === 1 ? "Count individual pieces." : `Count in packs of ${factor.toLocaleString("en-US")} pieces.`}
       value={draft?.value ?? String(line.receivedQty)}
       hasDraft={!!draft}
       showSave={line.status !== "complete" || !!draft}
@@ -992,8 +1002,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       confirmed={line.status === "complete" && !draft && hasReceivingUnitVersion(line) && recordedReceivingFactor(line) !== null && !unitErrors[line.id]}
       disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
       discardDisabled={updateLineMutation.isPending}
-      compact={layout === "desktop"}
-      saveTestId={layout === "desktop" ? `btn-complete-line-${line.id}` : `btn-complete-line-mobile-${line.id}`}
+      compact={false}
+      inline
+      saveTestId={`btn-complete-line-${line.id}`}
       onChange={(value) => setReceivedDraft(line, value)}
       onSave={() => saveReceivedCount(line)}
       onDiscard={() => setCountDrafts((current) => {
@@ -1008,19 +1019,20 @@ DEF-456,25,,,5.00,,Location TBD`;
     const mutable = !!selectedReceipt && !["closed", "cancelled"].includes(selectedReceipt.status);
     // Older or incomplete command responses need a source read, not a guessed version.
     const error = unitErrors[line.id] ?? (mutable && !hasReceivingUnitVersion(line) ? new ReceivingUnitVersionError() : null);
-    return <div className="space-y-2">
+    return <div className="contents md:block md:space-y-2">
       <ReceivingUnitControl
         line={line}
+        compact
         variants={variants}
         mutable={mutable}
         pending={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
         onChange={(variantId, confirm, factor) => applyVariant(line, variantId, confirm, factor)}
       />
-      {selectedReceipt?.status === "closed" && selectedReceipt.inboundShipmentId && <ReceiptShipmentQuantityCorrection receiptLineId={line.id}
+      {selectedReceipt?.status === "closed" && selectedReceipt.inboundShipmentId && <div className="col-span-2"><ReceiptShipmentQuantityCorrection receiptLineId={line.id}
         onSaved={() => { void refreshReceiptAfterQuarantine().catch((error: Error) => {
           setReceiptSettingsError(error.message);
-        }); }}/>}
-      {error && <div role="alert" className="rounded border border-destructive/40 p-2 text-xs text-destructive">
+        }); }}/></div>}
+      {error && <div role="alert" className="col-span-2 rounded border border-destructive/40 p-2 text-xs text-destructive">
         <p>{error.message}</p>
         {error.needsRefresh && <Button size="sm" variant="outline" className="mt-2 h-auto min-h-10 whitespace-normal" disabled={entryBlocked || entryMutation.isPending || quarantineCommandPending || reloadingUnits || updateLineMutation.isPending} onClick={() => void reloadReceiptUnits(line.id)}>Load latest line and discard count draft</Button>}
       </div>}
@@ -1971,15 +1983,13 @@ DEF-456,25,,,5.00,,Location TBD`;
 
       {/* Receipt Detail Dialog */}
       <Dialog open={showReceiptDetail} onOpenChange={(open) => { if (!open) closeReceiptDetail(); }}>
-        <DialogContent className="min-w-0 max-w-4xl max-h-[90vh] overflow-y-auto overflow-x-hidden p-4 [&>*]:min-w-0">
-          <div className="pr-6">
-            <Button asChild variant="ghost" size="sm">
-              <Link href={procurementNavigation.backHref("/receiving")}>
-                {procurementNavigation.backLabel || "Back to receiving"}
-              </Link>
-            </Button>
-          </div>
-          <ProcurementContext navigation={procurementNavigation} />
+        <DialogContent data-testid="receipt-workspace" className="min-w-0 shrink-0 w-[calc(100vw-1rem)] max-w-6xl max-h-[calc(100dvh-1rem)] gap-1 overflow-y-auto overflow-x-hidden p-3 sm:p-4 [&>*]:min-w-0 [&>button:last-child]:min-h-11 [&>button:last-child]:min-w-11 [&>button:last-child]:right-1 [&>button:last-child]:top-1">
+          <nav aria-label="Receipt return navigation" className="flex min-h-11 min-w-0 flex-wrap items-center gap-x-3 pr-10">
+            <Link className="inline-flex min-h-11 items-center gap-2 rounded text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" href={procurementNavigation.backHref("/receiving")}>
+              <ArrowLeft className="h-4 w-4 shrink-0" aria-hidden="true" />{procurementNavigation.backLabel || "Back to receiving"}
+            </Link>
+            {procurementNavigation.purchaseHref && procurementNavigation.backLabel !== `Back to ${procurementNavigation.purchaseLabel}` && <Link className="ml-auto inline-flex min-h-11 items-center text-xs text-primary underline-offset-4 hover:underline" href={procurementNavigation.purchaseHref}>Return to {procurementNavigation.purchaseLabel}</Link>}
+          </nav>
           {!receivingEntry.allowed && <p role="status" className="rounded border p-3 text-sm text-muted-foreground">
             Receiving is read-only. Inventory adjustment permission is required to change quantities, locations or receipt status.
           </p>}
@@ -2009,7 +2019,7 @@ DEF-456,25,,,5.00,,Location TBD`;
           )}
           {selectedReceipt && (
             <>
-              <DialogHeader>
+              <DialogHeader className="text-left">
                 <DialogTitle className="flex flex-wrap items-center gap-2">
                   <FileText className="h-5 w-5" />
                   <span className="text-base md:text-lg">Receipt {selectedReceipt.receiptNumber}</span>
@@ -2018,38 +2028,45 @@ DEF-456,25,,,5.00,,Location TBD`;
                   </Badge>
                 </DialogTitle>
                 <DialogDescription className="text-xs md:text-sm">
-                  {selectedReceipt.sourceType === "initial_load" ? "Initial Inventory Load" :
-                   selectedReceipt.sourceType === "po" ? (
-                     selectedReceipt.purchaseOrderId ? (
-                       <span>PO: <Link href={procurementNavigation.childHref(`/purchase-orders/${selectedReceipt.purchaseOrderId}`)} className="text-primary underline">{selectedReceipt.poNumber || `#${selectedReceipt.purchaseOrderId}`}</Link></span>
-                     ) : `PO: ${selectedReceipt.poNumber}`
-                   ) : selectedReceipt.sourceType}
-                  {selectedReceipt.vendor && ` • ${selectedReceipt.vendor.name}`}
+                  {selectedReceipt.vendor?.name || (selectedReceipt.sourceType === "initial_load" ? "Initial inventory load" : "Count the items delivered, then finalize to update inventory.")}
                 </DialogDescription>
               </DialogHeader>
-              <nav aria-label="Receipt related records" className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
+              <nav aria-label="Receipt related records" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                 {selectedReceipt.status === "closed" && <SupplierReturnLink vendorId={selectedReceipt.vendorId ?? undefined} receivingOrderId={selectedReceipt.id} purchaseOrderId={selectedReceipt.purchaseOrderId ?? undefined} />}
                 {selectedReceipt.purchaseOrderId && (
-                  <Link href={procurementNavigation.childHref(`/purchase-orders/${selectedReceipt.purchaseOrderId}`)} className="text-primary underline">
-                    Purchase order {selectedReceipt.poNumber || `#${selectedReceipt.purchaseOrderId}`}
+                  <Link href={procurementNavigation.childHref(`/purchase-orders/${selectedReceipt.purchaseOrderId}`)} aria-label={`Purchase order ${selectedReceipt.poNumber || `#${selectedReceipt.purchaseOrderId}`}`} className="inline-flex min-h-11 items-center text-primary underline">
+                    {selectedReceipt.poNumber || `PO #${selectedReceipt.purchaseOrderId}`}
                   </Link>
                 )}
                 {selectedReceipt.inboundShipmentId && (
-                  <Link href={procurementNavigation.childHref(`/shipments/${selectedReceipt.inboundShipmentId}`)} className="text-primary underline">
+                  <Link href={procurementNavigation.childHref(`/shipments/${selectedReceipt.inboundShipmentId}`)} className="inline-flex min-h-11 items-center text-primary underline">
                     Shipment #{selectedReceipt.inboundShipmentId}
                   </Link>
                 )}
                 <details key={`relationships-${selectedReceipt.id}`} open={!!procurementNavigation.record?.relationship?.line} className="min-w-0 open:basis-full">
-                  <summary className="cursor-pointer text-primary">PO, shipment and receipt links</summary>
+                  <summary className="flex min-h-11 cursor-pointer items-center text-primary">Related lines</summary>
                   <div className="mt-3"><DocumentRelationships root={{ kind: "receipt", id: selectedReceipt.id }} purchaseId={selectedReceipt.purchaseOrderId ?? undefined} /></div>
                 </details>
               </nav>
 
-              <div className="space-y-4">
-                {/* Action buttons */}
-                <div className="flex gap-2 flex-wrap">
+              <div className="space-y-2">
+                {/* A single sticky command bar keeps the next step reachable while counting. */}
+                <div className="sticky -top-3 z-10 -mx-3 flex flex-wrap items-center gap-2 border-y bg-background/95 px-3 py-2 backdrop-blur sm:-top-4 sm:-mx-4 sm:px-4" data-testid="receipt-actions">
                   {selectedReceipt.status === "draft" && (
                     <>
+                      <Button
+                        className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
+                        onClick={() => openReceiptMutation.mutate(selectedReceipt.id)}
+                        disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || openReceiptMutation.isPending}
+                        data-testid="btn-open-receipt"
+                      >
+                        <Play className="h-4 w-4 mr-1 md:mr-2" />
+                        Start receiving
+                      </Button>
+                      <p className="hidden min-w-0 flex-1 text-xs text-muted-foreground sm:block">Review pack sizes, then start counting.</p>
+                      <details className="relative">
+                        <summary className="flex min-h-11 cursor-pointer items-center rounded-md border px-3 text-sm">More actions</summary>
+                        <div className="absolute right-0 top-full z-20 mt-1 flex w-56 flex-col gap-1 rounded-md border bg-popover p-2 shadow-md">
                       {/* CSV bulk-entry builds the line list for blind/manual
                           receipts; a PO receipt is already populated from the PO,
                           so hide it here to keep the common flow clean. */}
@@ -2076,15 +2093,6 @@ DEF-456,25,,,5.00,,Location TBD`;
                           </Button>
                         </>
                       )}
-                      <Button 
-                        className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
-                        onClick={() => openReceiptMutation.mutate(selectedReceipt.id)}
-                        disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || openReceiptMutation.isPending}
-                        data-testid="btn-open-receipt"
-                      >
-                        <Play className="h-4 w-4 mr-1 md:mr-2" />
-                        Start
-                      </Button>
                       {/* Discard draft — only when no lines have been received */}
                       {(selectedReceipt.lines && selectedReceipt.lines.every(l => (l.receivedQty ?? 0) === 0 && (l.damagedQty ?? 0) === 0 && (l.putawayComplete ?? 0) === 0)) && (
                         <AlertDialog>
@@ -2119,6 +2127,8 @@ DEF-456,25,,,5.00,,Location TBD`;
                           </AlertDialogContent>
                         </AlertDialog>
                       )}
+                        </div>
+                      </details>
                     </>
                   )}
                   {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && (
@@ -2126,21 +2136,23 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <Button 
                         variant="outline"
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
+                        aria-label="Accept All Quantities"
                         onClick={() => completeAllMutation.mutate({ orderId: selectedReceipt.id, lines: selectedReceipt.lines ?? [] })}
                         disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || !quarantineAcceptAll.allowed || updateReceiptMutation.isPending || !!receiptSettingsError || completeAllMutation.isPending || updateLineMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || !selectedReceipt.lines?.length || selectedReceipt.lines.some((line) => recordedReceivingFactor(line) === null || !hasReceivingUnitVersion(line))}
                         data-testid="btn-complete-all"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
-                        Accept All Quantities
+                        Accept expected
                       </Button>
                       <Button
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={handlePreCloseValidation}
                         disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || receiveUnitsNeedReview}
                         data-testid="btn-close-receipt"
+                        aria-label="Finalize and update inventory"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
-                        Finalize &amp; Update Inventory
+                        Finish receiving
                       </Button>
                     </>
                   )}
@@ -2195,20 +2207,6 @@ DEF-456,25,,,5.00,,Location TBD`;
                   </div>
                 )}
 
-                {/* Source banner — where these goods (and their cost) come from */}
-                {selectedReceipt.sourceType === "shipment" && selectedReceipt.status !== "closed" && (
-                  <div className="flex items-start gap-2 p-3 rounded-lg border bg-blue-50 border-blue-200 text-blue-800 text-sm">
-                    <Package className="h-4 w-4 mt-0.5 shrink-0 text-blue-600" />
-                    <span>Receiving against an <strong>inbound shipment</strong>. Review freight and total costs from the linked shipment.</span>
-                  </div>
-                )}
-                {selectedReceipt.sourceType === "po" && selectedReceipt.status !== "closed" && (
-                  <div className="flex items-start gap-2 p-3 rounded-lg border bg-muted/40 text-muted-foreground text-sm">
-                    <FileText className="h-4 w-4 mt-0.5 shrink-0" />
-                    <span>Receiving against <strong>PO {selectedReceipt.poNumber}</strong> directly — no inbound‑shipment freight applies on this receipt.</span>
-                  </div>
-                )}
-
                 {(receiptSettingsError || closeIssues.length > 0) && (
                   <div role="alert" className="space-y-2 rounded border border-destructive/40 p-3 text-sm text-destructive">
                     {receiptSettingsError && <p>{receiptSettingsError}</p>}
@@ -2225,7 +2223,15 @@ DEF-456,25,,,5.00,,Location TBD`;
 
                 {/* Warehouse & Default Location */}
                 {selectedReceipt.status !== "closed" && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-muted/30 border rounded-lg">
+                  <details key={`receipt-settings-${selectedReceipt.id}`} open={!selectedReceipt.warehouseId || !selectedReceipt.receivingLocationId || undefined} className="rounded-md border bg-muted/20">
+                    <summary className="flex min-h-11 cursor-pointer flex-wrap items-center gap-x-2 px-3 text-xs" aria-label="Receiving setup">
+                      <MapPin className="h-4 w-4 shrink-0" aria-hidden="true" />
+                      <span className="font-medium">{warehouses.find((warehouse) => warehouse.id === selectedReceipt.warehouseId)?.name || "Choose warehouse"}</span>
+                      <span className="text-muted-foreground">/ {locations.find((item) => item.id === selectedReceipt.receivingLocationId)?.code || "Set default location"}</span>
+                      <span className="ml-auto text-primary">Change</span>
+                    </summary>
+                    <div className="grid grid-cols-1 gap-3 border-t p-3 sm:grid-cols-2">
+
                     <div>
                       <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Receiving Warehouse</label>
                       <Select
@@ -2239,7 +2245,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                           });
                         }}
                       >
-                        <SelectTrigger className="h-9 text-xs" aria-label="Receiving warehouse">
+                        <SelectTrigger className="min-h-11 text-sm" aria-label="Receiving warehouse">
                           <SelectValue placeholder="Select warehouse..." />
                         </SelectTrigger>
                         <SelectContent>
@@ -2265,12 +2271,13 @@ DEF-456,25,,,5.00,,Location TBD`;
                       />
                       <p className="mt-1 text-xs text-muted-foreground">Fills lines without a location. Existing line locations are preserved. Save any count drafts first.</p>
                     </div>
-                  </div>
+                    </div>
+                  </details>
                 )}
 
                 {/* Lines section */}
                 <Card className="min-w-0 max-w-full">
-                  <CardHeader className="p-3 md:pb-2 flex flex-row items-center justify-between">
+                  <CardHeader className="flex flex-row items-center justify-between space-y-0 px-3 py-1.5">
                     <CardTitle className="text-sm md:text-base">Lines ({selectedReceipt.lines?.length || 0})</CardTitle>
                     {selectedReceipt.status !== "closed" && (
                       <Button 
@@ -2310,277 +2317,75 @@ DEF-456,25,,,5.00,,Location TBD`;
                     </div>
                   )}
                   <CardContent className="min-w-0 max-w-full p-0">
-                    {/* Mobile card view for lines */}
-                    <div className="md:hidden p-2 space-y-2">
-                      {sortedLines.length === 0 ? (
-                        <div className="text-center text-muted-foreground py-8 text-sm">
-                          No lines yet. Import CSV or add lines manually.
-                        </div>
-                      ) : (
-                        sortedLines.map((line) => (
-                          <Card key={line.id} className="border">
-                            <CardContent className="p-3 space-y-2">
-                              <div className="flex items-start justify-between">
-                                <div className="flex-1 min-w-0">
-                                  <div className="font-mono text-sm font-medium truncate">{line.sku || "-"}</div>
-                                  <div className="text-xs text-muted-foreground truncate">{line.productName || "-"}</div>
+                    <div className="divide-y" role="list" aria-label="Receipt lines">
+                      {sortedLines.length === 0 ? <p className="p-6 text-center text-sm text-muted-foreground">No lines yet. Import CSV or add lines manually.</p> : sortedLines.map((line) => {
+                        const factor = recordedReceivingFactor(line);
+                        const expectedPieces = receivingBaseQuantity(line.expectedQty, factor);
+                        const receivedPieces = receivingBaseQuantity(line.receivedQty, factor);
+                        const locationCode = line.putawayLocationId ? locations.find((item) => item.id === line.putawayLocationId)?.code ?? "Location set" : "No location";
+                        const active = selectedReceipt.status === "open" || selectedReceipt.status === "receiving";
+                        return <article key={line.id} role="listitem" data-testid={`receipt-line-${line.id}`} className="min-w-0 px-3 py-2 sm:px-4">
+                          <div className="grid min-w-0 gap-x-5 gap-y-1 md:grid-cols-[minmax(0,1fr)_minmax(0,.8fr)_minmax(0,1fr)]">
+                            <div className="min-w-0">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <h3 className="break-words text-sm font-semibold leading-snug">{line.productName || "Unmatched product"}</h3>
                                 </div>
-                                <Badge variant={
-                                  line.status === "complete" ? "default" :
-                                  line.status === "partial" ? "outline" :
-                                  line.status === "overage" ? "destructive" :
-                                  "secondary"
-                                } className="text-xs ml-2">
-                                  {line.status}
-                                </Badge>
+                                {line.damagedQty > 0 && <Badge variant="destructive" className="shrink-0 text-xs">{line.damagedQty.toLocaleString("en-US")} damaged</Badge>}
+                                {line.status !== "pending" && (!active || line.status !== "complete") && <Badge variant={line.status === "complete" ? "default" : line.status === "overage" ? "destructive" : "outline"} className="shrink-0 text-xs">{line.status}</Badge>}
                               </div>
-                              {/* Issue badges */}
-                              {selectedReceipt.status !== "closed" && (!line.productVariantId || !line.putawayLocationId) && (
-                                <div className="flex gap-1 flex-wrap">
-                                  {!line.productVariantId && (
-                                    <button
-                                      className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
-                                      disabled={skuResolutionBlocked}
-                                      onClick={() => openResolve(line, 'sku')}
-                                    >
-                                      <AlertTriangle className="h-3 w-3" /> SKU not linked
-                                    </button>
-                                  )}
-                                  {!line.putawayLocationId && (
-                                    <button
-                                      className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
-                                      disabled={adjustmentBlocked}
-                                      onClick={() => openResolve(line, 'location')}
-                                    >
-                                      <AlertTriangle className="h-3 w-3" /> Location missing
-                                    </button>
-                                  )}
-                                </div>
-                              )}
-                              {renderUnitControl(line)}
-                              <div className="grid grid-cols-2 gap-2 text-xs">
-                                <div>
-                                  <Label className="text-xs text-muted-foreground">Expected receive units</Label>
-                                  <div className="font-medium">{line.expectedQty}</div>
-                                </div>
-                                <div>
-                                  <Label className="text-xs text-muted-foreground">Received</Label>
-                                  {renderReceivedCount(line, "mobile")}
-                                </div>
-                              </div>
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex-1">
-                                  <Label className="text-xs text-muted-foreground">Location</Label>
-                                  <div className="mt-1">
-                                    {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
-                                      <>
-                                      <LocationTypeahead
-                                        locations={selectedReceipt?.warehouseId ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId) : locations}
-                                        value={line.putawayLocationId}
-                                        onChange={(locationId) => updateLineMutation.mutate({
-                                          lineId: line.id,
-                                          updates: { putawayLocationId: locationId }
-                                        })}
-                                        disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
-                                      />
-                                      {selectedReceipt.receivingLocationId && !line.putawayLocationId && (
-                                        <button
-                                          className="text-[10px] text-primary mt-1 hover:underline"
-                                          disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
-                                          onClick={() => updateLineMutation.mutate({
-                                            lineId: line.id,
-                                            updates: { putawayLocationId: selectedReceipt.receivingLocationId }
-                                          })}
-                                        >
-                                          Use default ({locations.find(l => l.id === selectedReceipt.receivingLocationId)?.code})
-                                        </button>
-                                      )}
-                                    </>
-                                    ) : (
-                                      <span className="text-sm">
-                                        {line.putawayLocationId
-                                          ? locations.find(l => l.id === line.putawayLocationId)?.code || "Set"
-                                          : (selectedReceipt.status === "closed" ? "Via CSV" : "—")
-                                        }
-                                      </span>
-                                    )}
-                                  </div>
-                                </div>
-
-                                {selectedReceipt.status === "closed" &&
-                                  ((line.receivedQty ?? 0) - (line.reversedQty ?? 0)) > 0 && (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="min-h-[44px] text-destructive hover:text-destructive hover:bg-destructive/10"
-                                    onClick={() => {
-                                      const remaining = (line.receivedQty ?? 0) - (line.reversedQty ?? 0);
-                                      setReverseError(null);
-                                      setReverseTarget({
-                                        scope: "line",
-                                        lineId: line.id,
-                                        lineLabel: line.sku || `Line #${line.id}`,
-                                        maxQty: remaining,
-                                      });
-                                      setReverseQty(String(remaining));
-                                      setReverseReason("");
-                                      setReverseAllowNegative(false);
-                                    }}
-                                    data-testid={`btn-reverse-line-mobile-${line.id}`}
-                                    disabled={entryBlocked || entryMutation.isPending || quarantineCommandPending || reversalBlocked || !receiptReversalSourceCapability(line.reversalCapability).allowed}
-                                  >
-                                    <X className="h-4 w-4 mr-1" />
-                                    Reverse
-                                  </Button>
-                                )}
-                                {selectedReceipt.status === "closed" && !receiptReversalSourceCapability(line.reversalCapability).allowed && <p className="text-xs text-muted-foreground">{receiptReversalSourceCapability(line.reversalCapability).reason}</p>}
-                                {selectedReceipt.status === "closed" && (line.reversedQty ?? 0) > 0 && (
-                                  <span className="text-xs text-destructive font-medium">−{line.reversedQty} reversed</span>
-                                )}
-                              </div>
-                            </CardContent>
-                          </Card>
-                        ))
-                      )}
-                    </div>
-                    
-                    {/* Desktop table view for lines */}
-                    <Table className="hidden md:table">
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>SKU</TableHead>
-                          <TableHead>Product</TableHead>
-                          <TableHead>Receive in</TableHead>
-                          <TableHead>Expected</TableHead>
-                          <TableHead>Received</TableHead>
-                          <TableHead>Location</TableHead>
-                          <TableHead>Status</TableHead>
-                          {selectedReceipt.status === "closed" && <TableHead>Reversed</TableHead>}
-                          {selectedReceipt.status === "closed" && <TableHead></TableHead>}
-                          {selectedReceipt.status !== "closed" && <TableHead>Issues</TableHead>}
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {sortedLines.length === 0 ? (
-                          <TableRow>
-                            <TableCell colSpan={selectedReceipt.status === "closed" ? 9 : 8} className="text-center text-muted-foreground py-8">
-                              No lines yet. Import CSV or add lines manually.
-                            </TableCell>
-                          </TableRow>
-                        ) : (
-                          sortedLines.map((line) => (
-                            <TableRow key={line.id}>
-                              <TableCell className="font-mono whitespace-nowrap">{line.sku || "-"}</TableCell>
-                              <TableCell>{line.productName || "-"}</TableCell>
-                              <TableCell className="min-w-64">{renderUnitControl(line)}</TableCell>
-                              <TableCell className="whitespace-nowrap"><b>{line.expectedQty}</b> receive units</TableCell>
-                              <TableCell>
-                                {renderReceivedCount(line, "desktop")}
-                              </TableCell>
-                              <TableCell>
-                                {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
-                                  <LocationTypeahead
-                                    locations={selectedReceipt.warehouseId ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId) : locations}
-                                    value={line.putawayLocationId}
-                                    onChange={(locationId) => updateLineMutation.mutate({
-                                      lineId: line.id,
-                                      updates: { putawayLocationId: locationId }
-                                    })}
-                                    disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
-                                  />
-                                ) : (
-                                  <span className="text-sm text-muted-foreground">
-                                    {line.putawayLocationId
-                                      ? locations.find(l => l.id === line.putawayLocationId)?.code || "Set"
-                                      : (selectedReceipt.status === "closed" ? "Via CSV" : "—")
-                                    }
-                                  </span>
-                                )}
-                              </TableCell>
-                              <TableCell>
-                                <Badge variant={
-                                  line.status === "complete" ? "default" :
-                                  line.status === "partial" ? "outline" :
-                                  line.status === "overage" ? "destructive" :
-                                  "secondary"
-                                }>
-                                  {line.status}
-                                </Badge>
-                              </TableCell>
-                              {selectedReceipt.status === "closed" && (
-                                <TableCell>
-                                  {(line.reversedQty ?? 0) > 0 ? (
-                                    <span className="text-xs text-destructive font-medium" data-testid={`reversed-qty-${line.id}`}>
-                                      −{line.reversedQty} reversed
-                                    </span>
-                                  ) : (
-                                    <span className="text-xs text-muted-foreground">—</span>
-                                  )}
-                                </TableCell>
-                              )}
-                              {selectedReceipt.status === "closed" && (
-                                <TableCell>
-                                  {((line.receivedQty ?? 0) - (line.reversedQty ?? 0)) > 0 && (
-                                    <Button
-                                      variant="ghost"
-                                      size="sm"
-                                      className="min-h-[44px] text-destructive hover:text-destructive hover:bg-destructive/10"
-                                      onClick={() => {
-                                        const remaining = (line.receivedQty ?? 0) - (line.reversedQty ?? 0);
-                                        setReverseError(null);
-                                        setReverseTarget({
-                                          scope: "line",
-                                          lineId: line.id,
-                                          lineLabel: line.sku || `Line #${line.id}`,
-                                          maxQty: remaining,
-                                        });
-                                        setReverseQty(String(remaining));
-                                        setReverseReason("");
-                                        setReverseAllowNegative(false);
-                                      }}
-                                      data-testid={`btn-reverse-line-${line.id}`}
-                                      disabled={entryBlocked || entryMutation.isPending || quarantineCommandPending || reversalBlocked || !receiptReversalSourceCapability(line.reversalCapability).allowed}
-                                    >
-                                      <X className="h-4 w-4 mr-1" />
-                                      Reverse
-                                    </Button>
-                                  )}
-                                  {!receiptReversalSourceCapability(line.reversalCapability).allowed && <p className="text-xs text-muted-foreground">{receiptReversalSourceCapability(line.reversalCapability).reason}</p>}
-                                </TableCell>
-                              )}
-                              {selectedReceipt.status !== "closed" && (
-                                <TableCell>
-                                  {(!line.productVariantId || !line.putawayLocationId) && (
-                                    <div className="flex gap-1">
-                                      {!line.productVariantId && (
-                                        <button
-                                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
-                                          disabled={skuResolutionBlocked}
-                                          onClick={() => openResolve(line, 'sku')}
-                                          title="SKU not linked to a product variant"
-                                        >
-                                          <AlertTriangle className="h-3 w-3" /> SKU
-                                        </button>
-                                      )}
-                                      {!line.putawayLocationId && (
-                                        <button
-                                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
-                                          disabled={adjustmentBlocked}
-                                          onClick={() => openResolve(line, 'location')}
-                                          title="Location not set"
-                                        >
-                                          <AlertTriangle className="h-3 w-3" /> Loc
-                                        </button>
-                                      )}
+                              <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-2">
+                                <p className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground" title={line.sku || undefined}>{line.sku || "SKU not recorded"}</p>
+                                <details className="min-w-0 open:basis-full" data-testid={`receipt-line-options-${line.id}`}>
+                                  <summary className="flex min-h-11 cursor-pointer items-center gap-1 text-xs text-primary" aria-label={`Line options for ${line.sku || `line ${line.id}`}`}><MapPin className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />{locationCode}<span className="text-muted-foreground"> / Details</span></summary>
+                                  <div className="grid gap-3 rounded-md bg-muted/30 p-3 text-xs sm:grid-cols-2">
+                                    <div>
+                                      <Label className="mb-1 block text-xs">Putaway location</Label>
+                                      {active ? <>
+                                        <LocationTypeahead ariaLabel={`Location for line ${line.id}`} locations={selectedReceipt.warehouseId ? locations.filter((item) => item.warehouseId === selectedReceipt.warehouseId) : locations}
+                                          value={line.putawayLocationId}
+                                          onChange={(locationId) => updateLineMutation.mutate({ lineId: line.id, updates: { putawayLocationId: locationId } })}
+                                          disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError} />
+                                        {selectedReceipt.receivingLocationId && !line.putawayLocationId && <Button variant="ghost" size="sm" className="min-h-11" disabled={adjustmentBlocked || entryMutation.isPending || quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
+                                          onClick={() => updateLineMutation.mutate({ lineId: line.id, updates: { putawayLocationId: selectedReceipt.receivingLocationId } })}>Use default ({locations.find((item) => item.id === selectedReceipt.receivingLocationId)?.code})</Button>}
+                                      </> : <p>{locationCode}</p>}
                                     </div>
-                                  )}
-                                </TableCell>
-                              )}
-                            </TableRow>
-                          ))
-                        )}
-                      </TableBody>
-                    </Table>
+                                    <div className="space-y-1 text-muted-foreground">
+                                      <p className="break-all">{line.sku || "SKU not recorded"}</p>
+                                      <p>Receipt line #{line.id}{line.inboundShipmentLineId ? ` / Shipment line #${line.inboundShipmentLineId}` : ""}</p>
+                                      <p>Expected: {expectedPieces ?? "unconfirmed"} pieces / Received: {receivedPieces ?? "unconfirmed"} pieces</p>
+                                      {line.damagedQty > 0 && <p>Damaged: {line.damagedQty.toLocaleString("en-US")} receive units ({receivingBaseQuantity(line.damagedQty, factor) ?? "unconfirmed"} pieces)</p>}
+                                      {line.notes && <p>{line.notes}</p>}
+                                    </div>
+                                    {selectedReceipt.status === "closed" && <div className="space-y-1 sm:col-span-2">
+                                      {(line.reversedQty ?? 0) > 0 && <p className="text-destructive" data-testid={`reversed-qty-${line.id}`}>-{line.reversedQty} reversed</p>}
+                                      {((line.receivedQty ?? 0) - (line.reversedQty ?? 0)) > 0 && <Button variant="outline" size="sm" className="min-h-11 text-destructive" data-testid={`btn-reverse-line-${line.id}`}
+                                        disabled={entryBlocked || entryMutation.isPending || quarantineCommandPending || reversalBlocked || !receiptReversalSourceCapability(line.reversalCapability).allowed}
+                                        onClick={() => openLineReversal(line)}><X className="mr-1 h-4 w-4" />Reverse line</Button>}
+                                      {!receiptReversalSourceCapability(line.reversalCapability).allowed && <p>{receiptReversalSourceCapability(line.reversalCapability).reason}</p>}
+                                    </div>}
+                                  </div>
+                                </details>
+                              </div>
+                              {selectedReceipt.status !== "closed" && (!line.productVariantId || !line.putawayLocationId) && <div className="mt-1 flex flex-wrap gap-1">
+                                {!line.productVariantId && <Button variant="outline" size="sm" className="min-h-11 border-amber-300 text-amber-800" disabled={skuResolutionBlocked} onClick={() => openResolve(line, "sku")}>Link SKU</Button>}
+                                {!line.putawayLocationId && <Button variant="outline" size="sm" className="min-h-11 border-amber-300 text-amber-800" disabled={adjustmentBlocked} onClick={() => openResolve(line, "location")}>Set location</Button>}
+                              </div>}
+                            </div>
+                            <div className="grid min-w-0 grid-cols-2 items-start gap-x-3 md:block">
+                              <div><p className="text-sm"><span className="text-xs text-muted-foreground">Expected </span><strong className="tabular-nums">{line.expectedQty.toLocaleString("en-US")}</strong> {factor === null ? "units (unconfirmed)" : factor === 1 ? "pieces" : "packs"}{factor !== null && factor !== 1 && <span className="block text-xs text-muted-foreground">{expectedPieces} pieces</span>}</p></div>
+                              {renderUnitControl(line)}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="mb-1 text-xs font-medium text-muted-foreground">{active ? "Received count" : "Received"}{factor !== null && factor !== 1 ? " (packs)" : factor === 1 ? " (pieces)" : " (unit unconfirmed)"}</p>
+                              {renderReceivedCount(line)}
+                              {factor !== null && factor !== 1 && line.receivedQty > 0 && <p className="mt-1 text-xs text-muted-foreground">{receivedPieces} pieces saved</p>}
+                            </div>
+                          </div>
+
+                        </article>;
+                      })}
+                    </div>
                   </CardContent>
                 </Card>
 

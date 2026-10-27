@@ -70,7 +70,7 @@ async function cleanOwnedDatabase(databaseName: string): Promise<boolean> {
   } finally { await admin.end(); }
 }
 export const test = base.extend<{ backend: Backend }>({
-  backend: async ({ playwright }, use, info) => {
+  backend: async ({ playwright, context }, use, info) => {
     const token = randomBytes(32).toString("hex");
     const environment = childEnvironment(token);
     const logPath = info.outputPath("connected-server.log");
@@ -135,6 +135,11 @@ export const test = base.extend<{ backend: Backend }>({
     } finally {
       const cleanupErrors: unknown[] = [];
       try {
+        // The real application can keep HTTP/WebSocket connections open while
+        // leaving a document. End this test's browser traffic before asking its
+        // server to drain; the separate control request remains available.
+        try { await context.close(); }
+        catch (error) { cleanupErrors.push(error); }
         try {
           if (ready && child.exitCode === null) await control(request, ready, token, "shutdown", {});
         } catch (error) { cleanupErrors.push(error); }

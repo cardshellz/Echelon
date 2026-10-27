@@ -279,8 +279,8 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
     expect(result.items[0]).toMatchObject({ status: "completed", errorCode: null });
     expect(await listing()).toEqual({ status: "active", external_listing_id: "fake-listing-1", external_offer_id: "fake-offer-1" });
     expect(h.fake.calls.map(call => `${call.method} ${call.path.split("?")[0]}`)).toEqual([
-      "GET /sell/inventory/v1/inventory_item/P5",
       "GET /sell/inventory/v1/offer",
+      "GET /sell/inventory/v1/inventory_item/P5",
       "GET /sell/inventory/v1/inventory_item/P5",
       "PUT /sell/inventory/v1/inventory_item/P5",
       "POST /sell/inventory/v1/offer",

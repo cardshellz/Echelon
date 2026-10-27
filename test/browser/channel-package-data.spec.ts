@@ -83,6 +83,28 @@ test("a genuine dimensions blocker still opens the exact variant's measurement e
   expect(state.writes).toEqual([]); expect(feed.commands).toEqual([]);
 });
 
+test("a completed update retains its optional dimensions warning in the feed and saved status", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  const id = "6e4d8e03-3197-4d21-a6d7-aa1ddaecc775";
+  state.jobs = [{ id, productId: 1, operation: "sync", state: "completed", code: null, message: null,
+    nextAttemptAt: "2026-10-25T22:00:00Z", updatedAt: "2026-10-25T22:00:00Z",
+    warnings: [{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions", productId: 1,
+      variantId: 101, variantSku: "PACKAGE-TEST" }] }];
+  await page.reload();
+  const warning = page.getByRole("region", { name: "Listing warnings" });
+  await expect(warning).toContainText("PACKAGE-TEST: package dimensions are missing. Shipping estimates may be inaccurate.");
+  await expect(warning.getByRole("link", { name: "Edit package dimensions" })).toHaveAttribute("href", "/products/1?tab=variants&variantId=101");
+  await expect(page.getByRole("button", { name: "Sync", exact: true }).last()).toBeEnabled();
+  await page.getByRole("button", { name: "View update status", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Listing update status" });
+  await expect(dialog.getByRole("region", { name: "Listing warnings" })).toContainText("PACKAGE-TEST");
+  await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
+  await page.reload();
+  await expect(warning).toBeVisible();
+  expect(state.commands).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
 test("a historical package-type failure offers the normal sync action instead of a removed editor", async ({ page }) => {
   const feed = await setupEbayChannelPage(page);
   const id = "6e4d8e03-3197-4d21-a6d7-aa1ddaecc775";
