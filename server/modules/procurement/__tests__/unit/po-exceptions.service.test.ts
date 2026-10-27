@@ -68,12 +68,33 @@ import {
   listExceptions,
   countOpenExceptions,
   detectQtyVariance,
+  recordReceiveValidationWarnings,
 } from "../../po-exceptions.service";
+import { db } from "../../../../db";
+import { RETIRED_RECEIVE_EXCEPTION_KINDS, RETIRED_RECEIVE_WARNING_KINDS } from "../../receive-warning-policy";
+import type { ExceptionKind } from "@shared/schema";
 
 beforeEach(() => {
   dbState.selectChain = [];
   dbState.insertReturn = null;
   dbState.updateReturn = null;
+});
+
+describe("retired receiving pack comparisons", () => {
+  it.each(RETIRED_RECEIVE_EXCEPTION_KINDS)("rejects new %s exceptions before any database work", async kind => {
+    const callsBefore = vi.mocked(db.transaction).mock.calls.length;
+    await expect(upsertException({ poId: 123, kind: kind as ExceptionKind, severity: "warn", title: "Obsolete comparison" }))
+      .rejects.toMatchObject({ code: "RETIRED_RECEIVE_PACK_WARNING", context: { kind } });
+    expect(vi.mocked(db.transaction).mock.calls).toHaveLength(callsBefore);
+  });
+
+  it("does not persist obsolete warnings supplied by an older evaluator", async () => {
+    const callsBefore = vi.mocked(db.transaction).mock.calls.length;
+    await recordReceiveValidationWarnings({ receivingOrderId: 31, purchaseOrderId: 123,
+      warnings: RETIRED_RECEIVE_WARNING_KINDS.map(kind => ({ kind, receivingLineId: 7,
+        severity: "warn" as const, title: "Old comparison", detail: "Old PO preferred pack differs", payload: {} })) });
+    expect(vi.mocked(db.transaction).mock.calls).toHaveLength(callsBefore);
+  });
 });
 
 // ─── computePayloadHash ──────────────────────────────────────────────────────

@@ -3,7 +3,7 @@ import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invo
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
-import { invoiceListItem, paymentListItem, workListPage } from "./procurement-ap-work-list-fixtures";
+import { apSummaryFixture, invoiceListItem, paymentListItem, workListPage } from "./procurement-ap-work-list-fixtures";
 
 async function setup(page: Page) {
   const failures = await installFixtures(page);
@@ -128,4 +128,123 @@ test("invoice PO linking searches beyond 100 without losing linked exclusions or
   await dialog.getByRole("button", { name: "PO-125 $100.00 · closed", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "Link & Import Lines", exact: true })).toBeEnabled();
   expect(requests.every(params => params.get("purpose") === "invoice-link" && params.get("excludeIds") === "17")).toBe(true); expect(failures).toEqual([]);
+});
+
+
+test("AP overview keeps failed and malformed reads unavailable until an explicit successful retry", async ({ page }) => {
+  const failures = await setup(page);
+  let response: "failure" | "missing" | "invalid" | "balances" | "zero" = "failure";
+  let reads = 0;
+  await page.route("**/api/ap/summary", route => {
+    reads += 1;
+    if (response === "failure") return route.fulfill({ status: 503, json: { error: "Synthetic AP read failure" } });
+    if (response === "missing") return route.fulfill({ json: null });
+    if (response === "invalid") return route.fulfill({ json: { ...apSummaryFixture(), totalOutstandingCents: "9000" } });
+    return route.fulfill({ json: response === "zero" ? apSummaryFixture() : apSummaryFixture({
+      totalOutstandingCents: 9000, overdueCents: 4000, dueSoonCents: 5000,
+      paidThisMonthCents: 7000, paidAllTimeCents: 12000, creditedAllTimeCents: 2500, openInvoiceCount: 2,
+      agingBuckets: { current: 5000, days1_30: 4000, days31_60: 0, days61_90: 0, days90plus: 0 },
+    }) });
+  });
+  await page.goto("/ap");
+  const unavailable = page.getByRole("alert").filter({ hasText: "Accounts payable overview is unavailable" });
+  const retry = page.getByRole("button", { name: "Retry AP overview", exact: true });
+  for (const next of ["missing", "invalid", "balances"] as const) {
+    await expect(unavailable).toBeVisible();
+    await expect(page.getByText("Total Outstanding", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("No AP activity yet", { exact: true })).toHaveCount(0);
+    response = next;
+    await retry.click();
+  }
+  await expect(unavailable).toHaveCount(0);
+  await expect(page.getByText("$90.00", { exact: true })).toBeVisible();
+  await expect(page.getByText("$120.00", { exact: true })).toBeVisible();
+  await expect(page.getByText("$25.00", { exact: true })).toBeVisible();
+  // A failed later refresh must also hide the cached successful balances.
+  await page.getByRole("link", { name: "All Invoices", exact: true }).click();
+  await expect(page).toHaveURL(/\/ap-invoices$/);
+  response = "failure";
+  await page.goBack();
+  await expect(page).toHaveURL(/\/ap$/);
+  await expect(unavailable).toBeVisible();
+  await expect(page.getByText("$90.00", { exact: true })).toHaveCount(0);
+  response = "zero";
+  await retry.click();
+  await expect(page.getByText("No AP activity yet", { exact: true })).toBeVisible();
+  await expect(page.getByText("$0.00", { exact: true })).toHaveCount(5);
+  expect(reads).toBe(6);
+  expect(failures).toEqual([]);
+});
+
+test("manual invoice amount validation retains the draft without requests and accepts a corrected amount", async ({ page }) => {
+  const failures = await setup(page);
+  const submitted: Array<Record<string, unknown>> = [];
+  await page.route("**/api/vendor-invoices/next-number", route => route.fulfill({ json: { invoiceNumber: "VALIDATED-INVOICE" } }));
+  await page.route("**/api/vendor-invoices", route => {
+    submitted.push(route.request().postDataJSON());
+    return route.fulfill({ status: 201, json: { id: 71 } });
+  });
+  await page.goto("/ap-invoices");
+  await page.getByRole("button", { name: "New Invoice", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("combobox", { name: "Invoice vendor", exact: true }).selectOption("2");
+  const amount = dialog.getByRole("spinbutton", { name: "Invoice amount", exact: true });
+  for (const raw of ["90071992547409.92", "1e3"]) {
+    await amount.fill(raw);
+    await dialog.getByRole("button", { name: "Create Invoice", exact: true }).click();
+    await expect(page.getByText("Invalid invoice amount", { exact: true }).last()).toBeVisible();
+    await expect(dialog).toBeVisible();
+    await expect(amount).toHaveValue(raw);
+    expect(submitted).toEqual([]);
+    expect(failures).toEqual([]);
+  }
+  await amount.fill("12.34");
+  await dialog.getByRole("button", { name: "Create Invoice", exact: true }).click();
+  await expect(page).toHaveURL(/\/ap-invoices\/71$/);
+  expect(submitted).toEqual([expect.objectContaining({ vendorId: 2, invoiceNumber: "VALIDATED-INVOICE", invoicedAmountCents: 1234 })]);
+  expect(failures).toEqual([]);
+});
+
+test("PO charge amount validation prevents unsafe or malformed requests and keeps each charge editable for correction", async ({ page }) => {
+  const failures = await setup(page);
+  const submitted: Array<Record<string, unknown>> = [];
+  const order = { id: 17, poNumber: "TEST-PO-17", vendorId: 2, vendor: { name: "Test vendor" },
+    status: "draft", physicalStatus: "draft", financialStatus: "unpaid", lines: [],
+    subtotalCents: 10000, totalCents: 10000, discountCents: 0, taxCents: 0, shippingCostCents: 0 };
+  await page.route("**/api/purchase-orders/17", route => route.fulfill({ json: order }));
+  await page.route("**/api/purchase-orders/17/incoterms-charges", route => {
+    const body = route.request().postDataJSON();
+    submitted.push(body);
+    Object.assign(order, body);
+    return route.fulfill({ json: order });
+  });
+  // An explicit lifecycle tab intentionally keeps a draft on its supported
+  // detail screen instead of redirecting into the separate full PO editor.
+  await page.goto("/purchase-orders/17?tab=lines");
+  const fields = [
+    { label: "Discount", edit: "Edit discount", save: "Save discount", field: "discountCents", corrected: "0.46", cents: 46 },
+    { label: "Supplier tax / duties", edit: "Edit supplier tax / duties", save: "Save supplier tax / duties", field: "taxCents", corrected: "12.34", cents: 1234 },
+    { label: "Supplier freight", edit: "Edit supplier freight", save: "Save supplier freight", field: "shippingCostCents", corrected: "0.00", cents: 0 },
+  ];
+  for (const [index, field] of fields.entries()) {
+    await page.getByRole("button", { name: field.edit, exact: true }).click();
+    const amount = page.getByRole("spinbutton", { name: field.label, exact: true });
+    await amount.fill("90071992547409.92");
+    await page.getByRole("button", { name: field.save, exact: true }).click();
+    await expect(page.getByText("Invalid " + field.label.toLowerCase(), { exact: true }).last()).toBeVisible();
+    await expect(amount).toHaveValue("90071992547409.92");
+    expect(submitted).toHaveLength(index);
+    await amount.fill("1e3");
+    await amount.press("Enter");
+    await expect(page.getByText("Enter a valid dollar amount.", { exact: true }).last()).toBeVisible();
+    await expect(amount).toHaveValue("1e3");
+    expect(submitted).toHaveLength(index);
+    expect(failures).toEqual([]);
+    await amount.fill(field.corrected);
+    await page.getByRole("button", { name: field.save, exact: true }).click();
+    await expect(amount).toHaveCount(0);
+    expect(submitted[index]).toEqual({ [field.field]: field.cents });
+  }
+  expect(submitted).toHaveLength(3);
+  expect(failures).toEqual([]);
 });

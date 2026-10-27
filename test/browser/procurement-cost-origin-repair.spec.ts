@@ -168,8 +168,8 @@ async function install(page: Page, admin = true, loseResponse = false) {
             role: admin ? "admin" : "lead",
           },
           permissions: admin
-            ? ["purchasing:view", "purchasing:approve"]
-            : ["purchasing:view"],
+            ? ["purchasing:view", "purchasing:approve", "inventory:view"]
+            : ["purchasing:view", "inventory:view"],
           roles: admin ? ["admin"] : ["lead"],
         },
       });

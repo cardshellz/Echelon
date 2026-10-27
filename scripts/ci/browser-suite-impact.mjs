@@ -24,6 +24,14 @@ export const BROWSER_SUITES = {
     roots: ["client/src/main.tsx"],
     ownedPrefixes: ["client/src/features/purchasing/", "client/src/features/po-edit/", "client/src/components/purchasing/"],
   },
+  procurementConnected: {
+    config: "playwright.procurement-connected.config.ts",
+    workflow: ".github/workflows/procurement-connected.yml",
+    tests: /^test\/connected\/procurement\/.*\.spec\.ts$/,
+    // The backend is started in a child process; it must be an explicit root.
+    roots: ["client/src/main.tsx", "test/connected/procurement/server.ts"],
+    ownedPrefixes: ["test/connected/procurement/", "server/modules/procurement/", "migrations/", "tsconfig.tests.connected.json"],
+  },
   dropship: {
     config: "playwright.dropship-pricing.config.ts",
     workflow: ".github/workflows/dropship-pricing.yml",

@@ -5,7 +5,7 @@ const NOW = "2026-10-18T12:00:00.000Z";
 const STORAGE_KEY = "echelon:shipment-create:v1:test-user";
 type Captured = { key: string; body: Record<string, any>; path: string };
 async function setup(page: Page, options: { lost?: boolean; malformed?: boolean; failedSources?: boolean; delayed?: boolean; rejected?: boolean; numberExhausted?: boolean; sourcePayload?: unknown; warehousePayload?: unknown } = {}) {
-  const failures = await installFixtures(page);
+  const failures = await installFixtures(page, { permissions: ["inventory:view", "purchasing:view", "purchasing:create"] });
   const state = { requests: [] as Captured[], creations: 0, shipmentNumber: "RECOVERED-SHIPMENT", sourceReads: 0, sourceFailure: !!options.failedSources, offline: false, sourcePayload: options.sourcePayload, warehousePayload: options.warehousePayload,
     lines: [] as Array<{ id: number; inboundShipmentId: number; purchaseOrderId: number; purchaseOrderLineId: number; sku: string; qtyShipped: number; cartonCount: number }> };
   const replays = new Map<string, Record<string, unknown>>();

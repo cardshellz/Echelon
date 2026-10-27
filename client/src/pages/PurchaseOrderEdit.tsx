@@ -1858,7 +1858,8 @@ export default function PurchaseOrderEdit() {
         ...(preparationError ? { variant: "destructive" as const } : {}),
       });
       if (prepareForSupplier) navigate(`/purchase-orders/${po.id}`);
-      else if (!isEditMode) navigate(`/purchase-orders/${po.id}/edit`);
+      else if (!isEditMode) navigate(purchaseEntry.allowed("save-draft")
+        ? `/purchase-orders/${po.id}/edit` : `/purchase-orders/${po.id}`);
       else await refreshConfirmedDraft();
     } catch (error) {
       if (visit.isCurrent()) toast({ title: "Purchase request needs attention", description: error instanceof Error ? error.message : "Unable to confirm the purchase request.", variant: "destructive" });

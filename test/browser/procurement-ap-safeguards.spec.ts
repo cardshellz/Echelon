@@ -1,5 +1,5 @@
 import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
-import { invoiceListItem, paymentListItem, workListPage } from "./procurement-ap-work-list-fixtures";
+import { apSummaryFixture, invoiceListItem, paymentListItem, workListPage } from "./procurement-ap-work-list-fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 
@@ -97,7 +97,7 @@ test("unsupported historical payments require review and cannot be voided", asyn
 
 test("dashboard identifies disputed debt and the open list includes disputed invoices", async ({ page }) => {
   const failures = await setup(page); const statuses: string[] = [];
-  await page.route("**/api/ap/summary", route => route.fulfill({ json: { totalOutstandingCents: 2000, disputedOutstandingCents: 2000, disputedInvoiceCount: 1, openInvoiceCount: 1, overdueCents: 2000, paidAllTimeCents: 8000, paidThisMonthCents: 8000, dueSoonCents: 2000, agingBuckets: { current: 2000 }, vendorAging: [], recentPayments: [], recentlyPaid: [] } }));
+  await page.route("**/api/ap/summary", route => route.fulfill({ json: apSummaryFixture({ totalOutstandingCents: 2000, disputedOutstandingCents: 2000, disputedInvoiceCount: 1, openInvoiceCount: 1, overdueCents: 2000, paidAllTimeCents: 8000, paidThisMonthCents: 8000, dueSoonCents: 2000, agingBuckets: { current: 2000, days1_30: 0, days31_60: 0, days61_90: 0, days90plus: 0 } }) }));
   await page.route("**/api/vendor-invoices/work-list?*", route => { statuses.push(new URL(route.request().url()).searchParams.get("status") ?? ""); return route.fulfill({ json: workListPage([invoiceListItem(invoice())], route.request().url()) }); });
   await page.goto("/ap");
   await expect(page.getByText("Includes $20.00 in 1 disputed invoice, on hold for review.", { exact: true })).toBeVisible();

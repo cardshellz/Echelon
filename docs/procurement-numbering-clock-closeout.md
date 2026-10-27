@@ -66,4 +66,6 @@ Exact commands, run reports, source fingerprints, the repeatable synthetic bench
 
 After this batch is merged and deployed, remaining acceptance work is connected browser-to-real-HTTP recovery against a disposable active quantity ledger, outstanding non-admin authority/navigation cases and representative synthetic-volume health/cost query measurements. Any additional system correction depends on those checks identifying a concrete failure; no additional defect is claimed from the outstanding acceptance work alone.
 
+The subsequent corrections and verification are tracked in [Connected procurement verification](procurement-connected-verification-closeout.md). Its recorded sources, validation results and remaining boundaries provide the follow-up status; the numbering and clock evidence above retains its original source scope.
+
 PO 144, PO 149 and shipments 95/97 remain a separate historical evidence and repair queue. Foreign-currency support and mixed/converted-source returns remain separately scoped capabilities with existing guards.

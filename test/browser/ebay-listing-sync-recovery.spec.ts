@@ -303,6 +303,34 @@ test("an existing listing can request normal Sync while its old response needs c
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
+test("normal Sync recovers proved legacy maintenance, survives reload and completes without acknowledgement", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  state.jobs = [{ ...job, operation: "sync", state: "needs_attention", code: "PUBLICATION_RECOVERY_REVIEW_REQUIRED",
+    message: "An earlier request has no reliable final receipt." }];
+  const fresh = { ...job, id: "7d529462-285a-4efb-b867-32ca4c639c32", operation: "sync" };
+  state.response = { ...pending, jobs: [fresh] };
+  await page.reload();
+  await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Queued for eBay");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("checkbox", { name: /unknown|authorize/i })).toHaveCount(0);
+
+  state.jobs = [{ ...fresh, state: "running", code: null, message: null }];
+  await page.reload();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Listing update in progress");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("normal-legacy-recovery-running.png"), fullPage: true });
+
+  state.jobs = [{ ...fresh, state: "completed", code: null, message: null }];
+  await page.reload();
+  await expect(page.getByRole("status", { name: statusName })).toHaveCount(0);
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /unknown|authorize/i })).toHaveCount(0);
+  expect(state.requests).toEqual(["/api/ebay/listings/sync-product/1"]);
+  expect(state.commands).toHaveLength(1);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("an unfinished withdrawal cannot enter normal Sync from a stale listed feed", async ({ page }) => {
   const state = await setupEbayChannelPage(page);
   state.jobs = [{ ...job, operation: "withdraw", state: "awaiting_evidence", code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",

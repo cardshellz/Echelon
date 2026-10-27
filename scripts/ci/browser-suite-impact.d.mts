@@ -18,7 +18,7 @@ export interface BrowserSelection {
   reason: string;
 }
 
-export const BROWSER_SUITES: Record<"orderEdits" | "procurement" | "dropship", BrowserSuiteDefinition>;
+export const BROWSER_SUITES: Record<"orderEdits" | "procurement" | "procurementConnected" | "dropship", BrowserSuiteDefinition>;
 
 export function parseChangedFiles(output: string): BrowserFileChange[];
 
@@ -26,6 +26,7 @@ export function dependencyClosure(
   roots: readonly string[],
   files: ReadonlySet<string>,
   readSource: (file: string) => string,
+  edges?: Map<string, string[]>,
 ): Set<string>;
 
 export function selectBrowserSuite(options: {

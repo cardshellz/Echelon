@@ -11,7 +11,7 @@ async function cancellationFixture(
   if (!withAction) purchase.lifecycle.nextActions = [];
   const calls: Array<{ path: string; body: unknown }> = [];
   await page.route("**/api/auth/me", (route) => route.fulfill({ json: {
-    user: { id: "test-user", username: "test", role: "admin" }, permissions, roles: ["admin"],
+    user: { id: "test-user", username: "test", role: "admin" }, permissions: ["purchasing:view", ...permissions], roles: ["admin"],
   } }));
   await page.route("**/api/purchase-orders/17", (route) => route.fulfill({ json: purchase }));
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: {

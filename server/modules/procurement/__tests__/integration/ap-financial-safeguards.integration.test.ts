@@ -1,4 +1,5 @@
 import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
+import { createApSummaryReadBarrier } from "./ap-summary-read-barrier";
 import pg from "pg";
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -130,6 +131,119 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
     expect(await service.getApSummary({ now: new Date("2026-10-13T12:00:00Z") })).toMatchObject({ paidAllTimeCents: 8000, paidThisMonthCents: 8000, totalOutstandingCents: 2000 });
     expect(await service.getPaymentsForPo(10)).toEqual([expect.objectContaining({ appliedAmountCents: 8000, paymentStatus: "completed" })]);
   });
+  async function summaryFinancialState() {
+    const tables = ["procurement.vendor_invoices", "procurement.ap_payments",
+      "procurement.ap_payment_allocations", "public.audit_events"];
+    return Promise.all(tables.map(table => pool.query(`SELECT * FROM ${table} ORDER BY id`).then(result => result.rows)));
+  }
+
+  it.each(["record", "void"] as const)("keeps AP summary snapshot coherent during a concurrent %s payment commit", async command => {
+    const at = new Date("2026-10-13T12:00:00Z");
+    const existingPayment = command === "void" ? await pay(10000) : undefined;
+    const before = await service.getApSummary({ now: at });
+    const barrier = createApSummaryReadBarrier(modulePool);
+    const pending = service.getApSummary({ now: at });
+    try {
+      await barrier.waitForRead(pending);
+      if (existingPayment) {
+        await db.transaction((tx: any) => service.executeApPaymentCommandInTransaction("void_payment", {
+          now: new Date("2026-10-25T13:00:00Z"), paymentId: existingPayment.id,
+          reason: "Synthetic concurrent snapshot reversal", userId: actor,
+        }, tx));
+      } else {
+        await pay(10000);
+      }
+      const afterCommit = await service.getApSummary({ now: at });
+      const committedState = await summaryFinancialState();
+      expect(afterCommit).toMatchObject(command === "record"
+        ? { totalOutstandingCents: 0, openInvoiceCount: 0, paidAllTimeCents: 10000, paidThisMonthCents: 10000 }
+        : { totalOutstandingCents: 10000, openInvoiceCount: 1, paidAllTimeCents: 0, paidThisMonthCents: 0 });
+      expect(afterCommit).not.toEqual(before);
+      barrier.resume();
+      // The entire response, including recent payment/invoice activity, belongs
+      // to the pre-commit reader snapshot, not a mixture of old/new sections.
+      expect(await pending).toEqual(before);
+      expect(barrier.snapshot).toMatchObject({ isolation: "repeatable read", readOnly: "on" });
+      expect(barrier.readerReleaseCount).toBe(1);
+      expect(await service.getApSummary({ now: at })).toEqual(afterCommit);
+      expect(await summaryFinancialState()).toEqual(committedState);
+    } finally { await barrier.close(pending); }
+  });
+
+  it("captures AP summary clock before a caller mutates its Date", async () => {
+    await pay(3000);
+    const originalTime = "2026-10-13T12:00:00Z";
+    let sourceClockReads = 0;
+    class ObservedDate extends Date {
+      override getTime(): number { sourceClockReads += 1; return super.getTime(); }
+    }
+    const suppliedClock = new ObservedDate(originalTime);
+    const before = await service.getApSummary({ now: new Date(originalTime) });
+    const state = await summaryFinancialState();
+    const barrier = createApSummaryReadBarrier(modulePool);
+    const pending = service.getApSummary({ now: suppliedClock });
+    try {
+      await barrier.waitForRead(pending);
+      suppliedClock.setTime(new Date("2027-03-13T12:00:00Z").getTime());
+      barrier.resume();
+      expect(await pending).toEqual(before);
+      expect(barrier.snapshot).toMatchObject({ isolation: "repeatable read", readOnly: "on" });
+      expect(barrier.readerReleaseCount).toBe(1);
+      expect(suppliedClock.toISOString()).toBe("2027-03-13T12:00:00.000Z");
+      expect(sourceClockReads).toBe(1);
+      expect(await service.getApSummary({ now: new Date(originalTime) })).toEqual(before);
+      expect(await summaryFinancialState()).toEqual(state);
+    } finally { await barrier.close(pending); }
+  });
+
+  it.each([{ label: "invalid Date", clock: new Date(Number.NaN) }, { label: "non-Date", clock: "2026-10-13T12:00:00Z" }])("rejects a $label AP summary clock before attempting any database transport", async ({ clock }) => {
+    const barrier = createApSummaryReadBarrier(modulePool);
+    const pending = service.getApSummary({ now: clock as Date });
+    try {
+      await expect(pending).rejects.toMatchObject({
+        statusCode: 500, details: { code: "AP_SUMMARY_CLOCK_INVALID" },
+      });
+      expect(barrier.transportAttempts).toEqual({ directQueries: 0, connections: 0 });
+      expect(barrier.statements).toEqual([]);
+      expect(barrier.readerReleaseCount).toBe(0);
+    } finally { await barrier.close(pending); }
+  });
+
+  it("accepts a finite zero-epoch AP summary clock without replacing it with system time", async () => {
+    const clock = new Date(0);
+    const barrier = createApSummaryReadBarrier(modulePool);
+    const pending = service.getApSummary({ now: clock });
+    try {
+      await barrier.waitForRead(pending);
+      barrier.resume();
+      expect(await pending).toMatchObject({ totalOutstandingCents: 10000, openInvoiceCount: 1,
+        overdueCents: 0, dueSoonCents: 0, paidThisMonthCents: 0,
+        agingBuckets: { current: 10000, days1_30: 0, days31_60: 0, days61_90: 0, days90plus: 0 } });
+      expect(barrier.snapshot).toMatchObject({ isolation: "repeatable read", readOnly: "on" });
+      expect(barrier.readerReleaseCount).toBe(1);
+      expect(clock.getTime()).toBe(0);
+    } finally { await barrier.close(pending); }
+  });
+
+  it("rolls back and releases an AP summary reader after a PostgreSQL read failure", async () => {
+    const at = new Date("2026-10-13T12:00:00Z");
+    const before = await service.getApSummary({ now: at });
+    const state = await summaryFinancialState();
+    const barrier = createApSummaryReadBarrier(modulePool, { failAfterRead: true });
+    const pending = service.getApSummary({ now: at });
+    try {
+      await barrier.waitForRead(pending);
+      barrier.resume();
+      await expect(pending).rejects.toMatchObject({ code: "22012" });
+      expect(barrier.snapshot).toMatchObject({ isolation: "repeatable read", readOnly: "on" });
+      expect(barrier.statements.some(statement => /^rollback\b/i.test(statement))).toBe(true);
+      expect(barrier.readerReleaseCount).toBe(1);
+    } finally { await barrier.close(pending); }
+    expect(await service.getApSummary({ now: at })).toEqual(before);
+    expect(await summaryFinancialState()).toEqual(state);
+    expect(pool.waitingCount).toBe(0);
+  });
+
   it("rejects header reduction after payment and dispute without changing balances or adding mutation audit", async () => {
     await pay(8000); await invoiceCommand("dispute_invoice");
     await expect(service.updateInvoice(71, { invoicedAmountCents: 5000 }, actor)).rejects.toMatchObject(historyRejection);

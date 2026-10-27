@@ -43,7 +43,79 @@ function repositorySources() {
   return { files, readSource: (file: string) => readFileSync(file, "utf8") };
 }
 
+function connectedDiscovery(shard?: { current: number; total: number }): JSONReport {
+  return JSON.parse(execFileSync(process.execPath, [
+    createRequire(import.meta.url).resolve("@playwright/test/cli"), "test",
+    "--config", BROWSER_SUITES.procurementConnected.config, "--list", "--reporter=json", "--forbid-only",
+    ...(shard ? [`--shard=${shard.current}/${shard.total}`] : []),
+  ], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 30_000 }));
+}
+
+function discoveredTestIds(report: JSONReport): string[] {
+  const collect = (suites: JSONReport["suites"]): string[] => suites.flatMap(suite => [
+    ...suite.specs.flatMap(spec => spec.tests.map(test => `${test.projectId}/${spec.id}`)),
+    ...collect(suite.suites ?? []),
+  ]);
+  return collect(report.suites);
+}
+
 describe("browser CI impact selection", () => {
+
+  it.each([
+    "test/connected/procurement/server.ts",
+    "test/connected/procurement/authority.spec.ts",
+    "server/modules/procurement/receiving.service.ts",
+    "migrations/900000027000019030001_receiving_entry_audit_guard.sql",
+    "tsconfig.tests.connected.json",
+  ])("runs connected acceptance for its owned path: %s", file => {
+    expect(selection(file, "procurementConnected", {
+      "test/connected/procurement/receiving-recovery.spec.ts": 'import "@playwright/test";',
+      [file]: "",
+    }).run).toBe(true);
+  });
+
+  it("follows the child server's real authority dependencies", () => {
+    const path = "server/modules/identity/infrastructure/command-authority.repository.ts";
+    expect(selection(path, "procurementConnected", {
+      "test/connected/procurement/receiving-recovery.spec.ts": 'import "@playwright/test";',
+      "test/connected/procurement/server.ts": 'import "../../../server/modules/identity/infrastructure/command-authority.repository";',
+      [path]: "export const authority = true;",
+    })).toEqual({ run: true, reason: "Transitive suite dependency: " + path });
+  });
+
+  it("discovers every connected spec without starting its database or server", () => {
+    const report = connectedDiscovery();
+    expect(report.errors).toEqual([]);
+    const discovered = [...new Set(report.suites.map(suite => "test/connected/procurement/" + suite.file))].sort();
+    const registered = [...repositorySources().files].filter(file => BROWSER_SUITES.procurementConnected.tests.test(file)).sort();
+    expect(discovered.length).toBeGreaterThan(0);
+    expect(discovered).toEqual(registered);
+  });
+
+  it("partitions every connected desktop/mobile case exactly once across the actual CI shards", () => {
+    const workflow = readFileSync(".github/workflows/procurement-connected.yml", "utf8");
+    const indices: number[] = JSON.parse(workflow.match(/^        shard: (\[[\d, ]+\])$/m)?.[1] ?? "[]");
+    expect(indices).toEqual([1, 2, 3, 4]);
+    const full = connectedDiscovery();
+    expect(full.errors).toEqual([]);
+    expect(full.config.fullyParallel).toBe(true);
+    expect(full.config.workers).toBe(1);
+    expect(full.config.globalTimeout).toBe(12 * 60_000);
+    const expected = discoveredTestIds(full);
+    expect(expected.length).toBeGreaterThan(indices.length);
+    expect(new Set(expected).size).toBe(expected.length);
+    const shards = indices.map(current => {
+      const report = connectedDiscovery({ current, total: indices.length });
+      expect(report.errors).toEqual([]);
+      return discoveredTestIds(report);
+    });
+    const assigned = shards.flat();
+    expect(new Set(assigned).size, "A case must not appear in more than one shard").toBe(assigned.length);
+    expect(assigned.sort(), "No discovered project/case may be omitted or invented").toEqual(expected.sort());
+    const counts = shards.map(shard => shard.length);
+    expect(Math.max(...counts) - Math.min(...counts), "Split individual cases rather than whole spec files").toBeLessThanOrEqual(1);
+  }, 60_000);
+
   it.each([
     ".github/workflows/order-edits.yml",
     "playwright.order-edits.config.ts",
