@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000034000019260001_refresh_failed_return_options.sql",
+  "generation": 34,
+  "pr": 1926,
+  "ordinal": 1,
+  "after": [
+    "900000033000019220001_customer_order_action_projection.sql"
+  ]
+}
