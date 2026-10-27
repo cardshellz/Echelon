@@ -235,6 +235,7 @@ export interface NormalizedShippingProviderLabelObservation {
 }
 
 const shipStationLabelObservationSchema = z.object({
+  dimensions: z.unknown().optional(),
   shipmentId: positiveSafeIntegerSchema,
   orderId: positiveSafeIntegerSchema.nullish(),
   orderKey: boundedOptionalString(200),

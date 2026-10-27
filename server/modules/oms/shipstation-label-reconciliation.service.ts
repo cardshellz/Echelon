@@ -18,6 +18,7 @@ export interface LabelRecoveryCompletion {
 /** Label observation is not an order-import DTO. Opaque contents are validated
  * by the existing shipping owner, not by requirements for SKU, cost or address. */
 export interface ShipStationLabelSnapshot extends ShipStationLabelCommercialFulfillmentShipment {
+  dimensions?: unknown;
   trackingNumber: string;
   carrierCode?: string | null;
   serviceCode?: string | null;
