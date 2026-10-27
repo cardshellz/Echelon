@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import { sqlIntegerArray } from "../../infrastructure/postgres-array";
-import { currentChannelPackageEvidenceSql, currentPushedShipmentItemQuantitySql } from "./channel-fulfillment-package-coverage.sql";
+import { currentChannelPackageEvidenceSql, currentPushedShipmentItemQuantitySql, shipmentHasRetiredPackageSql } from "./channel-fulfillment-package-coverage.sql";
 import {
   evaluateShopifyWritebackDebt,
   type ShopifyAggregateFulfillmentEvidence,
@@ -377,6 +377,9 @@ async function resolveWithExecutor(
             AND ${currentChannelPackageEvidenceSql({
               physicalShipmentId: sql`receipt.physical_shipment_id`, omsOrderId: sql`${input.omsOrderId}`,
             })}
+            AND (receipt.physical_shipment_id IS NOT NULL OR NOT ${shipmentHasRetiredPackageSql({
+              shipmentId: sql`shipment_item.shipment_id`, omsOrderId: sql`${input.omsOrderId}`,
+            })})
             AND LOWER(COALESCE(receipt.raw_payload->>'status', '')) NOT IN ('cancelled', 'canceled', 'failure', 'error')
         ) evidence
       ), 0)::int AS direct_evidence_quantity

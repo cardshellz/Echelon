@@ -193,6 +193,11 @@ function shippedChannelShipmentsCte(
                       AND ${currentChannelPackageEvidenceSql({
                         physicalShipmentId: sql`receipt.physical_shipment_id`, omsOrderId: sql`oo.id`,
                       })}
+                      -- Unmapped legacy receipts cannot prove which relabelled
+                      -- package is current. Preserve their normal legacy use.
+                      AND (receipt.physical_shipment_id IS NOT NULL OR NOT ${shipmentHasRetiredPackageSql({
+                        shipmentId: sql`os.id`, omsOrderId: sql`oo.id`,
+                      })})
                       AND LOWER(COALESCE(receipt.raw_payload->>'status', '')) NOT IN ('cancelled', 'canceled', 'failure', 'error')
                       AND receipt_item.quantity = eligible_item.qty
                   )

@@ -1317,10 +1317,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       expect((await pool.query('SELECT qty FROM wms.outbound_shipment_items ORDER BY id')).rows).toEqual([{ qty: 4 }, { qty: 1 }]);
     }, 30_000);
 
-  it.each(['unsent', 'sent', 'late_void', 'missed_void_poll', 'missed_void_webhook', 'split', 'repair_only', 'split_repair_only', 'historical_repair', 'historical_void_repair', 'repair_concurrent', 'repair_after_contents_resolution', 'repair_after_review_resolution', 'replacement_evidence_review', 'lost_cancel_response', 'claimed_before_void', 'concurrent', 'receipt_rollback', 'contents_changed'])(
+  it.each(['unsent', 'sent', 'late_void', 'missed_void_poll', 'missed_void_webhook', 'split', 'repair_only', 'split_repair_only', 'historical_repair', 'historical_void_repair', 'repair_with_legacy_receipt', 'repair_concurrent', 'repair_after_contents_resolution', 'repair_after_review_resolution', 'replacement_evidence_review', 'lost_cancel_response', 'claimed_before_void', 'concurrent', 'receipt_rollback', 'contents_changed'])(
     'corrects Shopify void/relabel end to end without changing a sibling: %s', async mode => {
       const split = mode === 'split' || mode === 'split_repair_only';
-      const repairOnly = ['repair_only', 'split_repair_only', 'historical_repair', 'historical_void_repair', 'repair_concurrent', 'repair_after_contents_resolution', 'repair_after_review_resolution'].includes(mode);
+      const repairOnly = ['repair_only', 'split_repair_only', 'historical_repair', 'historical_void_repair', 'repair_with_legacy_receipt', 'repair_concurrent', 'repair_after_contents_resolution', 'repair_after_review_resolution'].includes(mode);
       const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, 'SHOPIFY-RELABEL', split ? 2 : 1);
       const channelId = Number((await pool.query('SELECT channel_id FROM oms.oms_orders')).rows[0].channel_id);
       const warehouse = (await pool.query(`INSERT INTO warehouse.warehouses(code, name, shopify_location_id)
@@ -1516,6 +1516,15 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       if (mode === 'concurrent') await Promise.all([worker.runLabelLifecycleBatch!(), worker.runLabelLifecycleBatch!()]);
       else await worker.runLabelLifecycleBatch!();
       if (repairOnly) {
+        if (mode === 'repair_with_legacy_receipt') {
+          const receipt = await pool.query(`INSERT INTO oms.channel_fulfillment_receipts
+            (receipt_key,request_hash,source_provider,source_channel_id,source_order_id,source_fulfillment_id,
+             event_kind,source,processing_status,oms_order_id,raw_payload,processed_at)
+            SELECT 'legacy-relabel-test',$1,'shopify',$2,'640001','640030','created','test_legacy_receipt','ignored',id,
+              '{"status":"success"}'::jsonb,now() FROM oms.oms_orders RETURNING id`, ['d'.repeat(64),channelId]);
+          await pool.query(`INSERT INTO oms.channel_fulfillment_receipt_items(receipt_id,channel_order_line_id,quantity,legacy_wms_shipment_item_id)
+            VALUES($1,'640002',1,$2)`,[receipt.rows[0].id,sourceId]);
+        }
         // Stale order summaries and old shipment dates must not hide durable
         // correction work. Reproduce a completed cancellation with no webhook.
         await pool.query("UPDATE oms.oms_orders SET fulfillment_status = 'fulfilled'");
