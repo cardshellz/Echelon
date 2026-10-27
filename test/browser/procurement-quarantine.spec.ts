@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installQuarantineFixtures } from "./procurement-quarantine-fixtures";
+import { openReceivingSetup } from "./procurement-receiving-helpers";
 
 async function ready(page: Page) {
   await expect(page.getByRole("heading", { name: /Receipt TEST-RECEIPT-31/ })).toBeVisible();
@@ -139,6 +140,7 @@ test("stale source rejection requires readback before another reviewed command",
 
 test("pending intake locks normal receipt count, warehouse and finalization controls", async ({ page }) => {
   const { state, failures, release } = await installQuarantineFixtures(page, { delayed: true });
+  await openReceivingSetup(page);
   await unknownIntake(page);
   await page.getByRole("button", { name: "Record held goods", exact: true }).click();
   await expect.poll(() => state.commands.length).toBe(1);
