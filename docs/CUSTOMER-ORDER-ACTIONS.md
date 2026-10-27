@@ -13,17 +13,20 @@ precedence over older action evidence in the panel header.
 
 ## Maintenance and concurrency
 
-The normal background scheduler seeds missing Shopify orders in bounded batches.
+The normal background scheduler seeds missing orders for the already-enabled
+customer-account shops in bounded batches; it does not inspect unrelated shops.
 Two inspections can execute at once in each process. Work is leased with
 `FOR UPDATE SKIP LOCKED`, so different processes cannot claim the same order.
 Provider calls happen outside database transactions. A five-minute lease recovers
 interrupted workers; no work is leased ahead of its available execution slots.
 
-Source triggers only invalidate this module's derived row. They do not calculate
-eligibility or modify their source records. Generation changes are committed or
+Source triggers only append this module's invalidation events. They do not calculate
+eligibility, lock the derived row or modify their source records. Events are committed or
 rolled back with the order, line, warehouse, claim, fulfillment, delivery,
 catalog-weight and configuration changes that caused them. Relinking invalidates
-both parents. Completion checks the lease, generation and current owner; a late
+both parents. Reads immediately reject evidence with a pending event. The worker
+coalesces events into generation changes. Completion checks the lease, pending
+events, generation and current owner; a late
 inspection cannot replace newer evidence.
 
 Active/otherwise editable orders are refreshed at least once a minute. Returnable

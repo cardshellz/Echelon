@@ -19,6 +19,7 @@ export interface OrderActionProjectionReader {
   read(input: CustomerAccountOrderSummariesInput & { channelId: number; externalCustomerId: string }, now: Date): Promise<CustomerOrderActionPage>;
 }
 export interface OrderActionProjectionStore extends OrderActionProjectionReader {
+  drainInvalidations(limit: number): Promise<number>;
   seed(limit: number): Promise<number>;
   claim(limit: number, now: Date, leaseId: string): Promise<OrderActionScope[]>;
   complete(scope: OrderActionScope, snapshot: CustomerOrderActionSnapshot, now: Date, validUntil: Date,

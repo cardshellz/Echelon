@@ -14,6 +14,7 @@ import { OrderActionProjectionWorker } from "../application/order-action-project
 import { OrderActionProjectionInspectorService } from "../application/order-action-projection.inspector";
 import type { OrderActionScope } from "../application/order-action-projection.ports";
 import { PostgresOrderActionProjectionStore } from "./order-action-projection.repository";
+import { readCustomerAccountStagingConfig } from "../domain/customer-account-staging";
 
 export type OrderActionProjectionReport = (event: {
   action: string; outcome: string; omsOrderId?: number; code?: string; durationMs?: number;
@@ -22,6 +23,8 @@ const SWEEP_INTERVAL_MS = 5_000;
 
 export function createOrderActionProjectionWorker(pool: Pool, edits: OrderEditService, report: OrderActionProjectionReport) {
   const store = new PostgresOrderEditStore(pool);
+  const config = readCustomerAccountStagingConfig(process.env.CUSTOMER_ACCOUNT_STAGING_CONFIG);
+  const shopDomains = Object.entries(config?.shops ?? {}).filter(([, shop]) => shop.enabled).map(([domain]) => domain);
   const measurements = new PostgresCustomerReturnBoxMeasurements(pool);
   const now = () => new Date();
   const context = async (scope: OrderActionScope) => {
@@ -51,7 +54,7 @@ export function createOrderActionProjectionWorker(pool: Pool, edits: OrderEditSe
       return result;
     },
   });
-  return new OrderActionProjectionWorker({ store: new PostgresOrderActionProjectionStore(pool), now, newId: randomUUID, report, inspector });
+  return new OrderActionProjectionWorker({ store: new PostgresOrderActionProjectionStore(pool, shopDomains), now, newId: randomUUID, report, inspector });
 }
 
 /** Read-model maintenance only: no order/points/label command or recovery worker. */

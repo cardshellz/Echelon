@@ -16,7 +16,10 @@ const resultRowSchema = z.object({
 /** The customer read is a bounded local lookup. It cannot enqueue work or call
  * a provider. Ownership is checked against current OMS, not the cached document. */
 export class PostgresOrderActionProjectionStore implements OrderActionProjectionStore {
-  constructor(private readonly pool: Pick<Pool, "query">) {}
+  private readonly shopDomains: readonly string[];
+  constructor(private readonly pool: Pick<Pool, "query">, shopDomains: readonly string[] = []) {
+    this.shopDomains = Object.freeze(z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/)).max(20).parse(shopDomains));
+  }
 
   async read(raw: Parameters<OrderActionProjectionStore["read"]>[0], now: Date) {
     const { channelId, externalCustomerId } = principalSchema.parse(raw);
@@ -25,7 +28,8 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
     const ids = input.orders.map(order => order.externalOrderId);
     const result = await this.pool.query(`SELECT replace(o.external_order_id,'gid://shopify/Order/','') AS "externalOrderId",
       o.external_order_number AS "orderReference",o.id AS "omsOrderId",p.snapshot,
-      COALESCE(p.computed_generation=p.generation AND p.valid_until>$4 AND p.verified_at<=$4,false) AS current,
+      COALESCE(p.computed_generation=p.generation AND p.valid_until>$4 AND p.verified_at<=$4
+        AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations dirty WHERE dirty.oms_order_id=o.id),false) AS current,
       COALESCE(p.last_error_code IS NOT NULL,false) AS failed,p.verified_at AS "verifiedAt",p.valid_until AS "validUntil"
       FROM oms.oms_orders o LEFT JOIN oms.customer_order_actions p ON p.oms_order_id=o.id
       WHERE o.channel_id=$1 AND o.external_customer_id=$2
@@ -48,13 +52,33 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
     }) });
   }
 
+  async drainInvalidations(limit: number): Promise<number> {
+    z.number().int().min(1).max(1_000).parse(limit);
+    // Source transactions only append events. Coalescing/locking a derived row
+    // belongs to this worker, so source writes cannot deadlock on cache updates.
+    const result = await this.pool.query(`WITH pending AS MATERIALIZED (
+      SELECT id,oms_order_id FROM oms.customer_order_action_invalidations ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED
+    ), refreshed AS (
+      INSERT INTO oms.customer_order_actions(oms_order_id)
+      SELECT DISTINCT o.id FROM pending dirty JOIN oms.oms_orders o ON o.id=dirty.oms_order_id
+      JOIN channels.channels c ON c.id=o.channel_id WHERE c.provider='shopify' AND o.external_customer_id ~ '^[1-9][0-9]*$'
+      AND EXISTS(SELECT 1 FROM channels.channel_connections cc WHERE cc.channel_id=c.id AND cc.shop_domain=ANY($2::text[]))
+      ORDER BY o.id ON CONFLICT(oms_order_id) DO UPDATE SET
+        generation=oms.customer_order_actions.generation+1,next_refresh_at='-infinity',attempts=0,last_error_code=NULL,last_error_class=NULL
+      RETURNING oms_order_id
+    ) DELETE FROM oms.customer_order_action_invalidations WHERE id IN (SELECT id FROM pending)
+      AND (SELECT count(*) FROM refreshed)>=0`, [limit, this.shopDomains]);
+    return result.rowCount ?? 0;
+  }
+
   async seed(limit: number): Promise<number> {
     z.number().int().min(1).max(200).parse(limit);
     const result = await this.pool.query(`INSERT INTO oms.customer_order_actions(oms_order_id)
       SELECT o.id FROM oms.oms_orders o JOIN channels.channels c ON c.id=o.channel_id
       WHERE c.provider='shopify' AND c.status='active' AND o.external_customer_id ~ '^[1-9][0-9]*$'
+      AND EXISTS(SELECT 1 FROM channels.channel_connections cc WHERE cc.channel_id=c.id AND cc.shop_domain=ANY($2::text[]))
       AND NOT EXISTS(SELECT 1 FROM oms.customer_order_actions p WHERE p.oms_order_id=o.id)
-      ORDER BY o.id DESC LIMIT $1 ON CONFLICT DO NOTHING`, [limit]);
+      ORDER BY o.id DESC LIMIT $1 ON CONFLICT DO NOTHING`, [limit, this.shopDomains]);
     return result.rowCount ?? 0;
   }
 
@@ -65,9 +89,11 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
       JOIN oms.oms_orders o ON o.id=p.oms_order_id JOIN channels.channels c ON c.id=o.channel_id
       JOIN channels.channel_connections cc ON cc.channel_id=c.id AND cc.shop_domain IS NOT NULL
       WHERE c.provider='shopify' AND c.status='active' AND o.external_customer_id ~ '^[1-9][0-9]*$'
+      AND cc.shop_domain=ANY($5::text[])
       AND o.external_order_id ~ '^(gid://shopify/Order/)?[1-9][0-9]*$'
       AND o.external_order_number IS NOT NULL AND p.next_refresh_at<=$2
       AND (p.lease_until IS NULL OR p.lease_until<=$2)
+      AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations dirty WHERE dirty.oms_order_id=o.id)
       AND (SELECT count(*) FROM channels.channel_connections sibling WHERE sibling.channel_id=c.id AND sibling.shop_domain IS NOT NULL)=1
       ORDER BY p.next_refresh_at,p.oms_order_id DESC LIMIT $1 FOR UPDATE OF p SKIP LOCKED
     ), leased AS (UPDATE oms.customer_order_actions p SET lease_id=$3,lease_until=$4
@@ -76,7 +102,7 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
     SELECT p.oms_order_id AS "omsOrderId",o.channel_id AS "channelId",p.connection_id AS "connectionId",
       replace(o.external_order_id,'gid://shopify/Order/','') AS "externalOrderId",o.external_customer_id AS "externalCustomerId",
       o.external_order_number AS "orderReference",p.generation::text AS generation,p.lease_id::text AS "leaseId",p.attempts
-      FROM leased p JOIN oms.oms_orders o ON o.id=p.oms_order_id`, [limit, now, leaseId, new Date(now.getTime() + LEASE_MS)]);
+      FROM leased p JOIN oms.oms_orders o ON o.id=p.oms_order_id`, [limit, now, leaseId, new Date(now.getTime() + LEASE_MS), this.shopDomains]);
     return z.array(orderActionScopeSchema.extend({ omsOrderId: z.coerce.number().int().positive().safe() })).max(limit).parse(result.rows);
   }
 
@@ -96,6 +122,7 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
       last_error_code=CASE WHEN $11::text IS NULL THEN NULL ELSE 'ORDER_ACTION_PARTIAL_INSPECTION_FAILED' END,
       last_error_class=CASE WHEN $11::text='transient' AND attempts>=4 THEN 'permanent' ELSE $11::text END
       WHERE oms_order_id=$1 AND generation=$2::bigint AND lease_id=$3 AND lease_until>$5
+      AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations dirty WHERE dirty.oms_order_id=p.oms_order_id)
       AND EXISTS(SELECT 1 FROM oms.oms_orders o WHERE o.id=p.oms_order_id AND o.channel_id=$7
         AND o.external_customer_id=$8 AND o.external_order_id IN ($9,$10))`,
     [scope.omsOrderId, scope.generation, scope.leaseId, JSON.stringify(value), now, validUntil, scope.channelId,

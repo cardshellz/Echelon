@@ -1118,6 +1118,9 @@
   "oms.channel_fulfillment_receipts": [
     "modules/oms"
   ],
+  "oms.customer_order_action_invalidations": [
+    "modules/customer-account"
+  ],
   "oms.customer_order_actions": [
     "modules/customer-account"
   ],

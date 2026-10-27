@@ -12,8 +12,10 @@ const snapshot: CustomerOrderActionSnapshot = { order: { connectionId: 4, omsOrd
   eligibility: { editable: true, reasons: [] }, lines: [], totalCents: 0, financialStatus: "Paid", warehouseStatus: "Not shipped" },
 returnOrder: null, orderFailed: false, returnFailed: false };
 function fixture(value: CustomerOrderActionSnapshot = structuredClone(snapshot)) {
-  const store = { seed: vi.fn(async () => 1), claim: vi.fn(async () => [scope]), complete: vi.fn(async () => true),
-    fail: vi.fn(async () => undefined), read: vi.fn() } satisfies OrderActionProjectionStore;
+  const store = { drainInvalidations: vi.fn<OrderActionProjectionStore["drainInvalidations"]>(async () => 1),
+    seed: vi.fn<OrderActionProjectionStore["seed"]>(async () => 1), claim: vi.fn<OrderActionProjectionStore["claim"]>(async () => [scope]),
+    complete: vi.fn<OrderActionProjectionStore["complete"]>(async () => true),
+    fail: vi.fn<OrderActionProjectionStore["fail"]>(async () => undefined), read: vi.fn<OrderActionProjectionStore["read"]>() } satisfies OrderActionProjectionStore;
   const inspector = { inspect: vi.fn(async () => value) };
   const report = vi.fn();
   const worker = new OrderActionProjectionWorker({ store, inspector, now: () => new Date(NOW), newId: () => scope.leaseId, report });
@@ -22,6 +24,7 @@ function fixture(value: CustomerOrderActionSnapshot = structuredClone(snapshot))
 describe("background customer order action projection", () => {
   it("leases only immediately executable work and retains a bounded refresh deadline", async () => {
     const h = fixture(); await h.worker.run();
+    expect(h.store.drainInvalidations).toHaveBeenCalledExactlyOnceWith(1_000);
     expect(h.store.seed).toHaveBeenCalledExactlyOnceWith(200);
     expect(h.store.claim).toHaveBeenCalledExactlyOnceWith(2, NOW, scope.leaseId);
     expect(h.store.complete).toHaveBeenCalledExactlyOnceWith(scope, snapshot, NOW, new Date(NOW.getTime() + 60_000));

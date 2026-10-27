@@ -744,7 +744,13 @@ function startEchelonSyncScheduler(
       const write = event.outcome === "failed" ? logger.error : logger.info;
       write(action, { ...event, ...(code ? { error_code: code } : {}) });
     };
-    httpServer.once("close", startOrderActionProjectionScheduler(createOrderActionProjectionWorker(dbPool, orderEdits, reportActions), reportActions));
+    try {
+      httpServer.once("close", startOrderActionProjectionScheduler(createOrderActionProjectionWorker(dbPool, orderEdits, reportActions), reportActions));
+    } catch {
+      // A read-model configuration problem must not prevent the shared service
+      // from starting. The account's existing authorization gate still applies.
+      logger.error("order_action_projection_start", { outcome: "failed", error_code: "ORDER_ACTION_CONFIG_INVALID" });
+    }
   }
   // Register the exact account suffix before the existing returns proxy's 404.
   // Its default-off gate does not change staff APIs or public return access.

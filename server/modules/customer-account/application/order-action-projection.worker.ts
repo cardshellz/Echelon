@@ -21,6 +21,7 @@ export class OrderActionProjectionWorker {
 
   async run(): Promise<void> {
     const { store, inspector, now, report } = this.dependencies;
+    await store.drainInvalidations(1_000);
     await store.seed(200);
     // Do not lease work that will sit behind a slow provider call in this process.
     const scopes = await store.claim(CONCURRENCY, now(), this.dependencies.newId());
