@@ -163,7 +163,9 @@ export function completedEbayListingSyncResult(
     prepared: PreparedEbayListingSync,
     policyChanges: ReadonlySet<number>,
   ): EbayProductSyncResult {
+    const warnings = prepared.draft.inventoryItems.flatMap(item => item.packagePlan?.warnings ?? []);
     return ebayProductSyncResultSchema.parse({
+      ...(warnings.length ? { warnings } : {}),
       synced: prepared.variants.length,
       priceChanges: prepared.variants.filter((member) => member.priceChanged)
         .length,

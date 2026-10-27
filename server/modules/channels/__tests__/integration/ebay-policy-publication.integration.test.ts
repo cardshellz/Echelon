@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -59,7 +59,7 @@ const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 (databaseUrl && disposable ? describe : describe.skip).sequential("current policy correction through a real saved eBay publication", () => {
   let database: InventoryCutoverTestDatabase;
-  beforeAll(async () => {
+  beforeEach(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, cutoverCompositionBaseSql);
     runtime.pool = database.pool;
     await installEbayPublicationInventoryFixture(database.pool, { includePreflightRecoveryMigrations: true, seedPublicationJob: false });
@@ -115,7 +115,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       productId: 20, purpose: "publish", variants: [{ productVariantId: 101, sku: "P5" }] },
     { commandKey: randomUUID(), actor: "test-stock-setup", now: new Date() });
   }, 60_000);
-  afterAll(async () => { await database?.close(); runtime.pool = null; runtime.provider = null; vi.unstubAllGlobals(); });
+  afterEach(async () => { await database?.close(); runtime.pool = null; runtime.provider = null; vi.unstubAllGlobals(); });
 
   it.each(["price_cents", "compare_at_price_cents"] as const)("rejects unsafe bigint %s before policy or provider requests", async column => {
     const catalog = new EbayPolicyCatalogHttp(); vi.stubGlobal("fetch", catalog.fetch);
@@ -127,14 +127,17 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(runtime.provider.writes).toEqual([]);
   });
 
-  it("blocks missing policy and package facts before mutations, then completes the same saved publication after correction", async () => {
+  it.each([
+    { costType: "CALCULATED", grouped: false }, { costType: "CALCULATED", grouped: true },
+    { costType: "FLAT_RATE", grouped: false }, { costType: "FLAT_RATE", grouped: true },
+  ])("corrects policies and classifies $costType dimensions through real publication (grouped=$grouped)", async ({ costType, grouped }) => {
     const catalog = new EbayPolicyCatalogHttp(); vi.stubGlobal("fetch", catalog.fetch);
     catalog.catalog.set("fulfillment", { fulfillmentPolicies: providerPolicyCatalog("fulfillment").fulfillmentPolicies.map(policy => ({
-      ...policy, shippingOptions: [{ costType: "CALCULATED" }],
+      ...policy, shippingOptions: [{ costType }],
     })) });
     let timestamp = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now.getTime() + 1_000;
     const clock = () => new Date(timestamp++);
-    runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"]);
+    runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"], grouped ? "group" : "single");
     const source = await readEbayPublicationSource(20);
     const store = new PostgresEbayListingSyncRepository(database.pool);
     const registration = new PgMarketplaceListingRegistrationRepository(database.pool);
@@ -164,29 +167,38 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     const retried = await service.enqueue(source, "user:policy-reviewer", randomUUID(), "sync");
     expect(retried.id).toBe(job.id);
     await service.processDue(1, job.id);
-    expect(await store.get(job.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED" });
-    expect((await service.get(job.id)).issue?.action?.href).toBe("/products/20?tab=variants&variantId=101");
-    expect(runtime.provider.writes).toEqual([]);
-    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_provider_requests")).rows[0].count).toBe(0);
-
-    // Measurements are explicit test facts, never defaults inferred from the SKU.
-    await database.pool.query(`UPDATE catalog.product_variants SET length_mm=254,width_mm=177.8,height_mm=50.8 WHERE id=101`);
-    timestamp += 60_000;
-    expect((await service.enqueue(source, "user:package-reviewer", randomUUID(), "sync")).id).toBe(job.id);
-    await service.processDue(1, job.id);
+    if (costType === "CALCULATED") {
+      expect(await store.get(job.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED" });
+      expect((await service.get(job.id)).issue?.action?.href).toBe("/products/20?tab=variants&variantId=101");
+      expect(runtime.provider.writes).toEqual([]);
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_provider_requests")).rows[0].count).toBe(0);
+      // Explicit fixture measurements, never defaults inferred from a SKU.
+      await database.pool.query(`UPDATE catalog.product_variants SET length_mm=254,width_mm=177.8,height_mm=50.8 WHERE id=101`);
+      timestamp += 60_000;
+      expect((await service.enqueue(source, "user:package-reviewer", randomUUID(), "sync")).id).toBe(job.id);
+      await service.processDue(1, job.id);
+    }
     const completed = await store.get(job.id);
     expect(completed, `${completed.code}: ${completed.message}`).toMatchObject({ state: "completed", code: null, operation: "publish" });
     expect(runtime.provider.snapshot().offer).toMatchObject({ status: "PUBLISHED", listingId: "listing-20", availableQuantity: 17,
       listingPolicies: { fulfillmentPolicyId: "store-shipping", returnPolicyId: "product-returns", paymentPolicyId: "product-payment" } });
     expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 100, unit: "GRAM" },
-      dimensions: { length: 25.4, width: 17.78, height: 5.08, unit: "CENTIMETER" } });
+      ...(costType === "CALCULATED" ? { dimensions: { length: 25.4, width: 17.78, height: 5.08, unit: "CENTIMETER" } } : {}) });
+    if (costType === "FLAT_RATE") {
+      expect(completed.warnings).toEqual([{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
+        productId: 20, variantId: 101, variantSku: "P5" }]);
+      expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+        .toEqual({ length_mm: null, width_mm: null, height_mm: null });
+    }
     expect(runtime.provider.snapshot().item.packageWeightAndSize).not.toHaveProperty("packageType");
-    expect(runtime.provider.writes.filter(write => write.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group")).toHaveLength(1);
+    const publishPath = grouped ? "/sell/inventory/v1/offer/publish_by_inventory_item_group"
+      : `/sell/inventory/v1/offer/${runtime.provider.snapshot().offer.offerId}/publish`;
+    expect(runtime.provider.writes.filter(write => write.path === publishPath)).toHaveLength(1);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_jobs")).rows[0].count).toBe(1);
     expect((await database.pool.query("SELECT actor,changes FROM public.audit_events WHERE action='ebay.business_policies.changed'")).rows)
       .toMatchObject([{ actor: "user:policy-reviewer", changes: { before: { fulfillmentPolicyId: "deleted-shipping" }, after: { fulfillmentPolicyId: null } } }]);
     await service.processDue(1, job.id);
     expect(runtime.provider.snapshot().item.packageWeightAndSize).not.toHaveProperty("packageType");
-    expect(runtime.provider.writes.filter(write => write.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group")).toHaveLength(1);
+    expect(runtime.provider.writes.filter(write => write.path === publishPath)).toHaveLength(1);
   }, 30_000);
 });

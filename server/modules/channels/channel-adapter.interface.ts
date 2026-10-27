@@ -67,6 +67,7 @@ export interface ListingPushResult {
   externalProductId?: string;
   externalVariantIds?: Record<number, string>; // variantId → externalVariantId
   error?: string;
+  warnings?: import("@shared/channel-listing-validation").ChannelListingWarning[];
 }
 
 /** Per-variant inventory quantity to push */

@@ -62,8 +62,9 @@ const actor = "user:policy-reviewer";
     })) });
     await patch(target, { fulfillmentPolicyId: "replacement-shipping" });
     const result = await service.resolveProductPolicies({ productId: 20, variantIds: [101, 102] });
-    expect(result.packageRequirementsByVariantId.get(101)).toEqual({ weight: true, dimensions: true });
-    expect(result.packageRequirementsByVariantId.get(102)).toEqual({ weight: true, dimensions: target.kind !== "variant" });
+    expect(result.packageRequirementsByVariantId.get(101)).toEqual({ weight: true, dimensions: true, dimensionsOnMaintenance: "recommended" });
+    expect(result.packageRequirementsByVariantId.get(102)).toEqual({ weight: true,
+      dimensions: target.kind !== "variant" ? true : "recommended", dimensionsOnMaintenance: "recommended" });
     expect(result.provenanceByVariantId.get(101)?.fulfillment.source.scope).toBe(target.kind === "category" ? "category" : target.kind);
   });
 
