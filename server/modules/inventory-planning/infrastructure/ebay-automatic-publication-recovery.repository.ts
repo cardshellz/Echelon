@@ -5,13 +5,14 @@ import { ebayAutomaticRecoveryCommandSchema, sortedRecoveryScopes, supportsAutom
 import type { EbayAutomaticPublicationRecoveryStore, EbayAutomaticRecoveryResult } from "../application/ebay-automatic-publication-recovery.service";
 import { quantityPublicationScopeLockKey, retainCatchupScopes } from "./quantity-publication-admission.repository";
 import { reconciliationHash, reconciliationFailure, tryLockReconciliationScopes, withReconciliationTransaction } from "./ebay-publication-reconciliation.persistence";
+import type { LegacyMaintenanceEvidenceReader } from "../application/legacy-maintenance-evidence.port";
 
 interface AttemptRow {
   id: string; owner_kind: string; before_record: string; affected_scope_keys: string[]; outbox_scope_proven: boolean;
 }
 
 export class PostgresEbayAutomaticPublicationRecoveryRepository implements EbayAutomaticPublicationRecoveryStore {
-  constructor(private readonly pool: Pick<Pool, "connect">) {}
+  constructor(private readonly pool: Pick<Pool, "connect">, private readonly legacyEvidence?: LegacyMaintenanceEvidenceReader) {}
   async recover(raw: EbayAutomaticRecoveryInput & { now: Date }): Promise<EbayAutomaticRecoveryResult> {
     const { now, ...input } = raw;
     const command = ebayAutomaticRecoveryCommandSchema.parse(input);
@@ -50,18 +51,22 @@ export class PostgresEbayAutomaticPublicationRecoveryRepository implements EbayA
       }
       const requested = new Set(keys);
       const evidence = new Map<string, string>();
+      const maintenanceSources = new Map<string, unknown>();
       for (const attempt of attempts) {
         const receipts = (await client.query<{ ordinal: number; method: string; path: string; request_record: string; result_record: string | null }>(
           `SELECT q.ordinal,q.method,q.path,to_jsonb(q)::text AS request_record,to_jsonb(r)::text AS result_record
            FROM inventory.quantity_provider_requests q LEFT JOIN inventory.quantity_provider_request_results r ON r.request_id=q.id
            WHERE q.attempt_id=$1 ORDER BY q.ordinal LIMIT 2001`, [attempt.id])).rows;
+        const maintenance = attempt.owner_kind === "legacy" && receipts.length === 0 && this.legacyEvidence
+          ? await this.legacyEvidence.read(client, { attemptId: attempt.id, syncJobId: command.syncJobId, syncRevision: command.syncRevision, scopes }) : null;
         if (attempt.affected_scope_keys.length === 0 || attempt.affected_scope_keys.some(key => !requested.has(key))
           || !supportsAutomaticEbayReplacement({ owner: attempt.owner_kind, outboxScopeProven: attempt.outbox_scope_proven,
-            requests: receipts as SavedEbayRequestOperation[] })) {
+            requests: receipts as SavedEbayRequestOperation[], legacyMaintenance: maintenance?.policy })) {
           return { superseded: [], unresolved: attempts.map(row => row.id), busy: false, watchId: existing?.id ?? null, reviewRequired: true };
         }
         // Preserve bigint identifiers and all missing result records verbatim.
         evidence.set(attempt.id, `[${receipts.map(row => `{"request_record":${row.request_record},"result_record":${row.result_record ?? "null"}}`).join(",")}]`);
+        if (maintenance) maintenanceSources.set(attempt.id, maintenance.source);
       }
       const watch = (await client.query<{ id: string }>(`INSERT INTO inventory.ebay_publication_reconciliation_watches
         (product_id,connection_id,external_scope_id,scope_hash,scopes,next_check_at,created_at,updated_at)
@@ -72,10 +77,12 @@ export class PostgresEbayAutomaticPublicationRecoveryRepository implements EbayA
         RETURNING id::text`, [scopes[0]!.productId, scopes[0]!.connectionId, scopes[0]!.externalScopeId,
         scopeHash, JSON.stringify(scopes), now.toISOString()])).rows[0]!;
       for (const attempt of attempts) {
+        const maintenanceSource = maintenanceSources.get(attempt.id);
         await client.query(`INSERT INTO inventory.ebay_automatic_publication_recoveries
-          (attempt_id,sync_job_id,sync_revision,watch_id,scope_hash,scope_keys,before_record,request_evidence,created_at)
-          VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9)`, [attempt.id, command.syncJobId, command.syncRevision,
-          watch.id, scopeHash, keys, attempt.before_record, evidence.get(attempt.id), now.toISOString()]);
+          (attempt_id,sync_job_id,sync_revision,watch_id,scope_hash,scope_keys,before_record,request_evidence,created_at${maintenanceSource ? ",legacy_maintenance_source" : ""})
+          VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9${maintenanceSource ? ",$10::jsonb" : ""})`, [attempt.id, command.syncJobId, command.syncRevision,
+          watch.id, scopeHash, keys, attempt.before_record, evidence.get(attempt.id), now.toISOString(),
+          ...(maintenanceSource ? [JSON.stringify(maintenanceSource)] : [])]);
         const updated = await client.query("UPDATE inventory.quantity_publication_attempts SET state='superseded_unknown' WHERE id=$1 AND state IN ('running','uncertain')", [attempt.id]);
         if (updated.rowCount !== 1) throw reconciliationFailure("PUBLICATION_AUTOMATIC_RECOVERY_CHANGED", "A prior inventory request changed during recovery.");
       }

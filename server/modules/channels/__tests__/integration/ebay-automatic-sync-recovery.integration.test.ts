@@ -35,6 +35,7 @@ import type { EbayQuantityHttpRequest, EbayQuantityRequestAdmission } from "../.
 import { ebayInventoryOffersPath, publishEbayInventoryQuantity, readEbayInventoryQuantity,
   type EbayInventoryQuantityClient } from "../../adapters/ebay/ebay-inventory-quantity";
 import { AutomaticSyncEbayProvider, automaticSyncOldPhotos, automaticSyncPhotos } from "../fixtures/ebay-automatic-sync-provider.fixture";
+import { PostgresEbayLegacyMaintenanceEvidenceReader } from "../../infrastructure/ebay-legacy-maintenance-evidence";
 
 const runtime = vi.hoisted(() => ({ pool: null as Pool | null, api: vi.fn() }));
 vi.mock("../../../../db", () => ({
@@ -87,6 +88,7 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
       "0736_ebay_listing_mapping_repairs.sql",
       "0737_ebay_publication_completion.sql",
       "0741_ebay_durable_withdrawal.sql", "900000021000018880001_channel_lifecycle_recovery.sql", "900000023000018880003_listing_work_settlement.sql",
+      "900000035000019290001_legacy_maintenance_replacement.sql",
     ]) await database.pool.query(readFileSync(resolve("migrations", file), "utf8"));
     await database.pool.query(`ALTER TABLE channels.channel_listings
       ADD COLUMN last_synced_price integer, ADD COLUMN last_synced_qty integer,
@@ -140,7 +142,8 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
       variants: members.map(member => ({ variantId: member.variantId, sku: member.sku, productName: "Pack", priceCents: 1149, priceChanged: true })),
     });
     const store = new PostgresEbayListingSyncRepository(database.pool, new PostgresEbayPublicationRejectionReader(database.pool));
-    const automaticRecovery = new EbayAutomaticPublicationRecoveryService(new PostgresEbayAutomaticPublicationRecoveryRepository(database.pool), clock);
+    const automaticRecovery = new EbayAutomaticPublicationRecoveryService(new PostgresEbayAutomaticPublicationRecoveryRepository(database.pool,
+      new PostgresEbayLegacyMaintenanceEvidenceReader()), clock);
     const connector = new EbayMarketplaceListingConnector({ delay: async () => {}, inventoryDelayMs: 0, offerDelayMs: 0 });
     const responseRecovery = new PostgresQuantityProviderResponseRecovery(database.pool, clock);
     const owner = { kind: "channel" as const, channelId: 67, productId: 20, provider: "ebay" as const, marketplaceId: "EBAY_US" };
@@ -248,6 +251,113 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
     });
     expect(f.provider.writes.every(write => write.method === "PUT" || write.path === QUANTITY_PATH || (publication && write.path === PUBLISH_PATH))).toBe(true);
   }
+
+  async function legacyMaintenance(f: ReturnType<typeof fixture>, options: { key?: string; identity?: EbayListingSyncIdentity;
+    operation?: "sync" | "publish" | "withdraw"; successor?: "recovering" | "stage_completed"; duplicate?: boolean;
+    code?: string; message?: string } = {}) {
+    const oldIdentity = options.identity ?? identity;
+    const key = options.key ?? "group:PACK";
+    const group = key.startsWith("group:") || key === "publish" || key === "withdraw";
+    const root = { ...scope(group ? "group:PACK" : "P5"), productId: null, productVariantId: null };
+    const member = { ...scope("P5"), productId: null, productVariantId: null };
+    const jobId = randomUUID(), owner = randomUUID(), started = clock();
+    const insertJob = async (id: string) => {
+      await database.pool.query(`INSERT INTO channels.ebay_listing_sync_jobs
+        (id,channel_id,connection_id,product_id,operation,state,identity,identity_hash,requested_by,next_attempt_at,created_at,updated_at)
+        VALUES($1,67,9,20,$2,'needs_attention',$3::jsonb,$4,'legacy-fixture',$5,$5,$5)`,
+      [id, options.operation ?? "sync", JSON.stringify(oldIdentity), "b".repeat(64), started.toISOString()]);
+      await database.pool.query(`INSERT INTO channels.ebay_listing_sync_events(job_id,revision,event,owner_token,evidence,created_at)
+        VALUES($1,1,'stage_started',$2,$3::jsonb,$4)`, [id, owner, JSON.stringify({ key, preparedIntentHash: "a".repeat(64) }), started.toISOString()]);
+    };
+    await insertJob(jobId);
+    if (options.duplicate) await insertJob(randomUUID());
+    await expect(f.admission.runQuantityReducingLifecycle(root, async () => {
+      // The pre-journal worker failed on a read inside an admitted callback.
+      // Missing receipts do not prove that earlier effects were not sent.
+      throw new Error("retained old provider read failure");
+    }, group ? [member] : [])).rejects.toThrow("retained old provider read failure");
+    const before = await uncertainAttempt();
+    const finish = clock();
+    await database.pool.query(`INSERT INTO channels.ebay_listing_sync_events(job_id,revision,event,owner_token,evidence,created_at)
+      SELECT id,1,$1,$2,$3::jsonb,$4 FROM channels.ebay_listing_sync_jobs WHERE requested_by='legacy-fixture'`,
+    [options.successor ?? "recovering", owner, JSON.stringify({ code: options.code ?? "EBAY_LISTING_SYNC_FAILED",
+      message: options.message ?? 'eBay API GET /sell/inventory/v1/inventory_item/P5 failed (500): {"errors":[{"errorId":25001}]}' }), finish.toISOString()]);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_provider_requests WHERE attempt_id=$1", [before.id])).rows[0].count).toBe(0);
+    return before;
+  }
+
+  it.each(["item:P5", "group:PACK", "offer:offer-P5"])("normal Sync recovers proved unjournaled %s maintenance and verifies current content", async key => {
+    const f = fixture(); const before = await legacyMaintenance(f, { key });
+    const job = await f.service.enqueue(identity, "operator");
+    await f.service.processDue(1, job.id);
+    expect(await f.store.get(job.id)).toMatchObject({ state: "completed", code: null });
+    expectCurrentListing(f, 17);
+    await expectUnknownOutcomeRetained(before);
+    const receipt = (await database.pool.query(`SELECT legacy_maintenance_source,request_evidence FROM inventory.ebay_automatic_publication_recoveries WHERE attempt_id=$1`, [before.id])).rows[0];
+    expect(receipt).toMatchObject({ request_evidence: [], legacy_maintenance_source: { stage: { evidence: { key } },
+      current: { id: job.id, identity: { accountId: "seller-36" } } } });
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_publication_operator_resumes")).rows[0].count).toBe(0);
+    expect((await database.pool.query("SELECT state FROM inventory.ebay_publication_reconciliation_watches")).rows).toEqual([{ state: "pending" }]);
+    const replay = await f.automaticRecovery.recover({ syncJobId: job.id, syncRevision: "1", scopes: [scope("group:PACK"), scope("P5")] });
+    expect(replay).toMatchObject({ superseded: [before.id], unresolved: [], busy: false });
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.ebay_automatic_publication_recoveries")).rows[0].count).toBe(1);
+  });
+
+  it.each([
+    { key: "publish", operation: "publish" as const }, { key: "withdraw", operation: "withdraw" as const },
+    { key: "unrecognized:PACK" }, { successor: "stage_completed" as const }, { duplicate: true },
+    { code: "PUBLICATION_SCOPE_BUSY" }, { message: "An unclassified process failure" },
+    { identity: { ...identity, variants: identity.variants.map(member => ({ ...member, offerId: "old-other-offer" })) } },
+  ])("does not silently resume unproved legacy work: %j", async options => {
+    const f = fixture(); const job = await f.service.enqueue(identity, "operator");
+    const before = await legacyMaintenance(f, options);
+    await f.service.processDue(1, job.id);
+    expect(await f.store.get(job.id)).toMatchObject({ state: "needs_attention", code: "PUBLICATION_RECOVERY_REVIEW_REQUIRED" });
+    expect(f.provider.writes).toEqual([]);
+    expect((await database.pool.query("SELECT to_jsonb(a) AS record FROM inventory.quantity_publication_attempts a WHERE id=$1", [before.id])).rows[0].record).toEqual(before.record);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.ebay_automatic_publication_recoveries")).rows[0].count).toBe(0);
+  });
+
+  it.each(["source", "target"])("rolls forged maintenance %s evidence back at the PostgreSQL guard", async field => {
+    const f = fixture(); const before = await legacyMaintenance(f, field === "target"
+      ? { identity: { ...identity, variants: identity.variants.map(member => ({ ...member, offerId: "other-offer" })) } } : {});
+    const implementation = PostgresEbayLegacyMaintenanceEvidenceReader.prototype.read;
+    const tampered = vi.spyOn(PostgresEbayLegacyMaintenanceEvidenceReader.prototype, "read").mockImplementation(async (client, input) => {
+      const proof = await implementation.call(new PostgresEbayLegacyMaintenanceEvidenceReader(), client, input);
+      if (!proof) return null;
+      return field === "source" ? { ...proof, source: { ...(proof.source as object), forged: true } }
+        : { ...proof, policy: { ...proof.policy, currentTarget: proof.policy.previousTarget } };
+    });
+    try {
+      const job = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, job.id);
+      expect(await f.store.get(job.id)).toMatchObject({ state: "recovering", code: "PUBLICATION_AUTOMATIC_RECOVERY_FAILED" });
+      expect(f.provider.writes).toEqual([]);
+      expect((await database.pool.query("SELECT to_jsonb(a) AS record FROM inventory.quantity_publication_attempts a WHERE id=$1", [before.id])).rows[0].record).toEqual(before.record);
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.ebay_publication_reconciliation_watches")).rows[0].count).toBe(0);
+    } finally { tampered.mockRestore(); }
+  });
+
+  it("does not supersede an active scope owner and completes once through concurrent normal Sync workers", async () => {
+    const f = fixture(); const before = await legacyMaintenance(f);
+    const holder = await database.pool.connect();
+    const lock = quantityPublicationScopeLockKey(scope("group:PACK"));
+    const job = await f.service.enqueue(identity, "operator");
+    try {
+      await holder.query("SELECT pg_advisory_lock(hashtextextended($1,918420))", [lock]);
+      await f.service.processDue(1, job.id);
+      expect(await f.store.get(job.id)).toMatchObject({ state: "recovering", code: "PUBLICATION_SCOPE_BUSY" });
+      expect(f.provider.writes).toEqual([]);
+    } finally {
+      await holder.query("SELECT pg_advisory_unlock(hashtextextended($1,918420))", [lock]); holder.release();
+    }
+    advance();
+    await Promise.all([f.service.processDue(1, job.id), fixture({ provider: f.provider }).service.processDue(1, job.id)]);
+    expect(await f.store.get(job.id)).toMatchObject({ state: "completed", code: null });
+    await expectUnknownOutcomeRetained(before);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.ebay_automatic_publication_recoveries")).rows[0].count).toBe(1);
+    expectCurrentListing(f, 17);
+  });
 
   it("recovers a request whose accepted response was lost during a process crash and finishes the saved Sync", async () => {
     const f = fixture();
