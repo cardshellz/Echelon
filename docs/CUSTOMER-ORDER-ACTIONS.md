@@ -4,6 +4,9 @@ The account page loads `/account/order-actions` alongside the existing native
 financial summaries after authenticated bootstrap. It is a bounded, owned local
 lookup for the visible page. Opening or reopening Manage order does not read
 Shopify, ShipStation, edit eligibility or the complete return inspection.
+Historical OMS display references may omit Shopify's leading `#`; comparisons
+normalize that display prefix while retaining the exact external order ID and
+current customer/channel ownership checks.
 
 `oms.customer_order_actions` is derived presentation evidence, never the source
 of truth for order quantities, money, warehouse work, return claims or permission.

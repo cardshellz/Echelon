@@ -3,6 +3,7 @@ import { customerReturnCustomerOrderSchema, type CustomerReturnCustomerOrder } f
 import { OrderEditError } from "../../order-edits/domain/order-edit-error";
 import { CustomerReturnLiveError } from "../../returns/application/customer-return-live-error";
 import type { OrderActionScope, OrderActionProjectionInspector } from "./order-action-projection.ports";
+import { customerOrderActionReferenceKey } from "@shared/customer-account/order-actions";
 
 function classify(error: unknown): "permanent" | "transient" {
   if ((error instanceof OrderEditError || error instanceof CustomerReturnLiveError)
@@ -28,7 +29,8 @@ export class OrderActionProjectionInspectorService implements OrderActionProject
     let orderFailed = false, returnFailed = false;
     try {
       order = orderEditOrderSchema.parse(await this.dependencies.readEdit(scope));
-      if (order.omsOrderId !== scope.omsOrderId || order.connectionId !== scope.connectionId || order.orderNumber !== scope.orderReference)
+      if (order.omsOrderId !== scope.omsOrderId || order.connectionId !== scope.connectionId
+        || customerOrderActionReferenceKey(order.orderNumber) !== customerOrderActionReferenceKey(scope.orderReference))
         throw new OrderEditError("ORDER_ACTION_IDENTITY_CHANGED", "The order identity changed.", 409);
     } catch (error) {
       order = null; orderFailed = true; failures.push(classify(error));
@@ -40,7 +42,7 @@ export class OrderActionProjectionInspectorService implements OrderActionProject
       try {
         returnOrder = customerReturnCustomerOrderSchema.parse(await this.dependencies.inspectReturnAndRetainMeasurements(scope));
         if (returnOrder.omsOrderId !== scope.omsOrderId
-          || returnOrder.order.orderReference.replace(/^#/, "") !== scope.orderReference.replace(/^#/, ""))
+          || customerOrderActionReferenceKey(returnOrder.order.orderReference) !== customerOrderActionReferenceKey(scope.orderReference))
           throw new OrderEditError("ORDER_ACTION_IDENTITY_CHANGED", "The return identity changed.", 409);
       } catch (error) {
         returnOrder = null; returnFailed = true; failures.push(classify(error));

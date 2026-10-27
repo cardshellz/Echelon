@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { z } from "zod";
 import { customerAccountOrderSummariesInputSchema } from "@shared/customer-account/customer-account-orders";
-import { customerOrderActionPageSchema, customerOrderActionsSchema, customerOrderActionSnapshotSchema, type CustomerOrderActionSnapshot } from "@shared/customer-account/order-actions";
+import { customerOrderActionReferenceKey, customerOrderActionPageSchema, customerOrderActionsSchema, customerOrderActionSnapshotSchema, type CustomerOrderActionSnapshot } from "@shared/customer-account/order-actions";
 import { orderActionScopeSchema, orderActionMaintenanceIdsSchema, type OrderActionScope, type OrderActionProjectionStore } from "../application/order-action-projection.ports";
 import { logger } from "../../../platform/observability/logger";
 
@@ -39,7 +39,8 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
     [channelId, externalCustomerId, ids, now, ids.map(id => `gid://shopify/Order/${id}`)]);
     const rows = z.array(resultRowSchema).max(ids.length * 2).parse(result.rows);
     return customerOrderActionPageSchema.parse({ orders: input.orders.map(identity => {
-      const matches = rows.filter(row => row.externalOrderId === identity.externalOrderId && row.orderReference === identity.orderReference);
+      const matches = rows.filter(row => row.externalOrderId === identity.externalOrderId
+        && customerOrderActionReferenceKey(row.orderReference) === customerOrderActionReferenceKey(identity.orderReference));
       // Ambiguous and foreign orders never acquire capabilities through a cache.
       const row = matches.length === 1 ? matches[0] : null;
       const value = { ...identity, omsOrderId: row?.omsOrderId ?? null,

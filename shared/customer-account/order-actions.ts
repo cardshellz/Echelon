@@ -4,6 +4,12 @@ import { customerReturnCustomerOrderSchema } from "../returns/customer-return-ac
 import { customerAccountOrderIdentityInputSchema } from "./customer-account.contract";
 import { CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE } from "./customer-account-orders";
 
+/** Legacy OMS imports omitted Shopify's display '#'. The separately verified
+ * external order ID remains the identity; this only compares display references. */
+export function customerOrderActionReferenceKey(reference: string): string {
+  return reference.replace(/^#/, "");
+}
+
 /** Presentation evidence only. Never accepted as authorization by a command. */
 export const customerOrderActionSnapshotSchema = z.object({
   order: orderEditOrderSchema.nullable(),
@@ -24,9 +30,9 @@ export const customerOrderActionsSchema = customerAccountOrderIdentityInputSchem
     ctx.addIssue({ code: "custom", message: "Only current action evidence may be displayed." });
   if (value.snapshot && (value.omsOrderId === null || !value.verifiedAt || !value.validUntil
     || (value.snapshot.order && (value.snapshot.order.omsOrderId !== value.omsOrderId
-      || value.snapshot.order.orderNumber !== value.orderReference))
+      || customerOrderActionReferenceKey(value.snapshot.order.orderNumber) !== customerOrderActionReferenceKey(value.orderReference)))
     || (value.snapshot.returnOrder && (value.snapshot.returnOrder.omsOrderId !== value.omsOrderId
-      || value.snapshot.returnOrder.order.orderReference.replace(/^#/, "") !== value.orderReference.replace(/^#/, "")))
+      || customerOrderActionReferenceKey(value.snapshot.returnOrder.order.orderReference) !== customerOrderActionReferenceKey(value.orderReference)))
     || (value.verifiedAt && value.validUntil && Date.parse(value.validUntil) <= Date.parse(value.verifiedAt))))
     ctx.addIssue({ code: "custom", message: "Action evidence does not match the requested order." });
   const order = value.snapshot?.order;

@@ -66,6 +66,14 @@ integration("durable customer action lookup and transactional source invalidatio
     expect((await read("200")).orders[0]).toMatchObject({ state: "not_managed", snapshot: null, omsOrderId: null });
     expect((await read("100", new Date(NOW.getTime() + 60_000))).orders[0]).toMatchObject({ state: "refreshing", snapshot: null });
   });
+  it("matches a historical stored reference without '#' to the native account reference", async () => {
+    await pool.query("UPDATE oms.oms_orders SET external_order_number='TEST-1' WHERE id=100");
+    await store.drainInvalidations(1_000);
+    const scope = await claim();
+    expect(scope.orderReference).toBe("TEST-1");
+    expect(await store.complete(scope, SNAPSHOT, NOW, new Date(NOW.getTime() + 60_000))).toBe(true);
+    expect((await read()).orders[0]).toMatchObject({ state: "ready", orderReference: "#TEST-1", omsOrderId: 100 });
+  });
   it("invalidates within a source transaction and rolls back its dirty marker with the source", async () => {
     const scope = await claim(); await store.complete(scope, SNAPSHOT, NOW, new Date(NOW.getTime() + 60_000));
     const client = await pool.connect();

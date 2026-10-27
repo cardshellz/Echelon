@@ -4,6 +4,7 @@ import type { OrderEditOrder } from "@shared/order-edits/order-edit.contract";
 import { OrderEditError } from "../../../order-edits/domain/order-edit-error";
 import { CustomerReturnLiveError } from "../../../returns/application/customer-return-live-error";
 import { CustomerReturnPreviewService } from "../../../returns/application/customer-return-preview.service";
+import { customerOrderActionsSchema } from "@shared/customer-account/order-actions";
 
 const scope = { omsOrderId: 1, channelId: 36, connectionId: 4, externalOrderId: "99", externalCustomerId: "100",
   orderReference: "#TEST-1001", generation: "1", leaseId: "00000000-0000-4000-8000-000000000001", attempts: 0 };
@@ -21,6 +22,15 @@ function fixture() {
   return { service, readEdit, inspectReturnAndRetainMeasurements, report };
 }
 describe("order action inspection reuses existing capability owners", () => {
+  it("accepts a legacy display reference without '#' while retaining exact external/order ownership", async () => {
+    const h = fixture();
+    const snapshot = await h.service.inspect({ ...scope, orderReference: "TEST-1001" });
+    expect(snapshot).toMatchObject({ orderFailed: false, returnFailed: false, order: { orderNumber: "#TEST-1001" } });
+    const dto = { externalOrderId: "99", orderReference: "TEST-1001", omsOrderId: 1, state: "ready",
+      verifiedAt: "2026-10-27T12:00:00.000Z", validUntil: "2026-10-27T12:05:00.000Z", snapshot };
+    expect(customerOrderActionsSchema.safeParse(dto).success).toBe(true);
+    expect(customerOrderActionsSchema.safeParse({ ...dto, orderReference: "TEST-1002" }).success).toBe(false);
+  });
   it("retains return actions independently of a failed edit inspection", async () => {
     const h = fixture(); h.readEdit.mockRejectedValue(new Error("transport failed"));
     expect(await h.service.inspect(scope)).toMatchObject({ order: null, orderFailed: true, returnFailed: false, returnOrder: { omsOrderId: 1 }, failureClass: "transient" });
