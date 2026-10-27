@@ -21,7 +21,8 @@ export type OrderActionProjectionReport = (event: {
 }) => void;
 const SWEEP_INTERVAL_MS = 5_000;
 
-export function createOrderActionProjectionWorker(pool: Pool, edits: OrderEditService, report: OrderActionProjectionReport) {
+export function createOrderActionProjectionWorker(pool: Pool, edits: OrderEditService, report: OrderActionProjectionReport,
+  maintenance?: { orderIds: readonly number[] }) {
   const store = new PostgresOrderEditStore(pool);
   const config = readCustomerAccountStagingConfig(process.env.CUSTOMER_ACCOUNT_STAGING_CONFIG);
   const shopDomains = Object.entries(config?.shops ?? {}).filter(([, shop]) => shop.enabled).map(([domain]) => domain);
@@ -54,7 +55,7 @@ export function createOrderActionProjectionWorker(pool: Pool, edits: OrderEditSe
       return result;
     },
   });
-  return new OrderActionProjectionWorker({ store: new PostgresOrderActionProjectionStore(pool, shopDomains), now, newId: randomUUID, report, inspector });
+  return new OrderActionProjectionWorker({ store: new PostgresOrderActionProjectionStore(pool, shopDomains, maintenance?.orderIds), now, newId: randomUUID, report, inspector });
 }
 
 /** Read-model maintenance only: no order/points/label command or recovery worker. */

@@ -14,6 +14,8 @@ export const orderActionScopeSchema = z.object({
   attempts: z.number().int().nonnegative().safe(),
 }).strict();
 export type OrderActionScope = z.infer<typeof orderActionScopeSchema>;
+export const orderActionMaintenanceIdsSchema = z.array(z.number().int().positive().safe()).min(1).max(20)
+  .refine(ids => new Set(ids).size === ids.length, "Duplicate order IDs are not allowed.");
 
 export interface OrderActionProjectionReader {
   read(input: CustomerAccountOrderSummariesInput & { channelId: number; externalCustomerId: string }, now: Date): Promise<CustomerOrderActionPage>;

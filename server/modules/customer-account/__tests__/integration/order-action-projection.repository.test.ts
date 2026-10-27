@@ -103,6 +103,20 @@ integration("durable customer action lookup and transactional source invalidatio
     const enabled = new PostgresOrderActionProjectionStore(pool, ["test-shop.myshopify.com"]);
     expect((await enabled.claim(2, NOW, LEASE)).map(scope => scope.omsOrderId)).toEqual([100]);
   });
+  it("does not starve an expired populated panel behind unbuilt historical rows", async () => {
+    const scope = await claim(); await store.complete(scope, SNAPSHOT, NOW, new Date(NOW.getTime() + 60_000));
+    await pool.query("UPDATE oms.customer_order_actions SET lease_id=NULL,lease_until=NULL WHERE oms_order_id<>100");
+    const next = await store.claim(1, new Date(NOW.getTime() + 60_000), OTHER_LEASE);
+    expect(next.map(value => value.omsOrderId)).toEqual([100]);
+  });
+  it("a maintenance scope cannot seed or claim unrelated orders", async () => {
+    await pool.query("DELETE FROM oms.customer_order_actions");
+    const scoped = new PostgresOrderActionProjectionStore(pool, ["test-shop.myshopify.com", "other-shop.myshopify.com"], [100]);
+    expect(await scoped.seed(200)).toBe(1);
+    expect((await scoped.claim(2, NOW, LEASE)).map(value => value.omsOrderId)).toEqual([100]);
+    expect((await pool.query("SELECT oms_order_id FROM oms.customer_order_actions")).rows).toEqual([{ oms_order_id: "100" }]);
+    expect(() => new PostgresOrderActionProjectionStore(pool, [], [])).toThrow();
+  });
   it("catalog metadata changes do not fan out but changed return weights invalidate evidence", async () => {
     const scope = await claim(); await store.complete(scope, SNAPSHOT, NOW, new Date(NOW.getTime() + 60_000));
     await pool.query("UPDATE catalog.product_variants SET name=name || ' revised' WHERE id IN (SELECT product_variant_id FROM oms.oms_order_lines WHERE order_id=100)");

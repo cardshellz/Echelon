@@ -4,6 +4,7 @@
   "include": [
     "server/**/*",
     "shared/**/*",
-    "scripts/verify-preserved-reward-staging.ts"
+    "scripts/verify-preserved-reward-staging.ts",
+    "scripts/warm-customer-order-actions.ts"
   ]
 }

@@ -19,6 +19,9 @@ Two inspections can execute at once in each process. Work is leased with
 `FOR UPDATE SKIP LOCKED`, so different processes cannot claim the same order.
 Provider calls happen outside database transactions. A five-minute lease recovers
 interrupted workers; no work is leased ahead of its available execution slots.
+Due refreshes of already-populated panels take precedence over the initial
+historical backfill, which otherwise starts at negative infinity and could
+starve every existing panel.
 
 Source triggers only append this module's invalidation events. They do not calculate
 eligibility, lock the derived row or modify their source records. Events are committed or
@@ -67,6 +70,12 @@ for the customer's actual package rather than inventing a size.
 2. Check worker failure logs and lookup coverage for the staging account before
    releasing the companion bundle. Initial historical backfill is asynchronous;
    do not equate a merged backend with a fully warmed account.
+   For bounded release warming, run `npx tsx scripts/warm-customer-order-actions.ts
+   --order-id=INTERNAL_OMS_ID --actor=OPERATOR_ID` first as a dry run, then append
+   `--execute`. Repeated `--order-id` values select at most 20 unique IDs;
+   `--passes` is bounded to 1–10. This uses the same leased inspector, respects
+   enabled shops and retry deadlines, and writes only derived lookup/measurement
+   state. It does not start the application or recovery schedulers.
 3. Deploy the rebuilt account assets only to unpublished theme 174740308127.
 4. Verify that opening an already-loaded panel sends no eligibility/provider
    requests and displays its actions without waiting for them. The target is

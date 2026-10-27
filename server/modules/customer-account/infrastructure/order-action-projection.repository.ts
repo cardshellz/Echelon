@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { z } from "zod";
 import { customerAccountOrderSummariesInputSchema } from "@shared/customer-account/customer-account-orders";
 import { customerOrderActionPageSchema, customerOrderActionsSchema, customerOrderActionSnapshotSchema, type CustomerOrderActionSnapshot } from "@shared/customer-account/order-actions";
-import { orderActionScopeSchema, type OrderActionScope, type OrderActionProjectionStore } from "../application/order-action-projection.ports";
+import { orderActionScopeSchema, orderActionMaintenanceIdsSchema, type OrderActionScope, type OrderActionProjectionStore } from "../application/order-action-projection.ports";
 import { logger } from "../../../platform/observability/logger";
 
 const LEASE_MS = 5 * 60_000;
@@ -17,8 +17,10 @@ const resultRowSchema = z.object({
  * a provider. Ownership is checked against current OMS, not the cached document. */
 export class PostgresOrderActionProjectionStore implements OrderActionProjectionStore {
   private readonly shopDomains: readonly string[];
-  constructor(private readonly pool: Pick<Pool, "query">, shopDomains: readonly string[] = []) {
+  private readonly maintenanceIds: readonly number[] | null;
+  constructor(private readonly pool: Pick<Pool, "query">, shopDomains: readonly string[] = [], maintenanceIds?: readonly number[]) {
     this.shopDomains = Object.freeze(z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/)).max(20).parse(shopDomains));
+    this.maintenanceIds = maintenanceIds === undefined ? null : Object.freeze(orderActionMaintenanceIdsSchema.parse(maintenanceIds));
   }
 
   async read(raw: Parameters<OrderActionProjectionStore["read"]>[0], now: Date) {
@@ -77,8 +79,9 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
       SELECT o.id FROM oms.oms_orders o JOIN channels.channels c ON c.id=o.channel_id
       WHERE c.provider='shopify' AND c.status='active' AND o.external_customer_id ~ '^[1-9][0-9]*$'
       AND EXISTS(SELECT 1 FROM channels.channel_connections cc WHERE cc.channel_id=c.id AND cc.shop_domain=ANY($2::text[]))
+      AND ($3::bigint[] IS NULL OR o.id=ANY($3::bigint[]))
       AND NOT EXISTS(SELECT 1 FROM oms.customer_order_actions p WHERE p.oms_order_id=o.id)
-      ORDER BY o.id DESC LIMIT $1 ON CONFLICT DO NOTHING`, [limit, this.shopDomains]);
+      ORDER BY o.id DESC LIMIT $1 ON CONFLICT DO NOTHING`, [limit, this.shopDomains, this.maintenanceIds]);
     return result.rowCount ?? 0;
   }
 
@@ -90,19 +93,23 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
       JOIN channels.channel_connections cc ON cc.channel_id=c.id AND cc.shop_domain IS NOT NULL
       WHERE c.provider='shopify' AND c.status='active' AND o.external_customer_id ~ '^[1-9][0-9]*$'
       AND cc.shop_domain=ANY($5::text[])
+      AND ($6::bigint[] IS NULL OR o.id=ANY($6::bigint[]))
       AND o.external_order_id ~ '^(gid://shopify/Order/)?[1-9][0-9]*$'
       AND o.external_order_number IS NOT NULL AND p.next_refresh_at<=$2
       AND (p.lease_until IS NULL OR p.lease_until<=$2)
       AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations dirty WHERE dirty.oms_order_id=o.id)
       AND (SELECT count(*) FROM channels.channel_connections sibling WHERE sibling.channel_id=c.id AND sibling.shop_domain IS NOT NULL)=1
-      ORDER BY p.next_refresh_at,p.oms_order_id DESC LIMIT $1 FOR UPDATE OF p SKIP LOCKED
+      -- Keep published evidence fresh while initial history is being populated.
+      -- New rows start at -infinity; ordering only by due time would starve every
+      -- already-built panel until the entire historical backlog had completed.
+      ORDER BY (p.verified_at IS NOT NULL) DESC,p.next_refresh_at,p.oms_order_id DESC LIMIT $1 FOR UPDATE OF p SKIP LOCKED
     ), leased AS (UPDATE oms.customer_order_actions p SET lease_id=$3,lease_until=$4
       FROM pending WHERE pending.oms_order_id=p.oms_order_id
       RETURNING p.*,pending.connection_id)
     SELECT p.oms_order_id AS "omsOrderId",o.channel_id AS "channelId",p.connection_id AS "connectionId",
       replace(o.external_order_id,'gid://shopify/Order/','') AS "externalOrderId",o.external_customer_id AS "externalCustomerId",
       o.external_order_number AS "orderReference",p.generation::text AS generation,p.lease_id::text AS "leaseId",p.attempts
-      FROM leased p JOIN oms.oms_orders o ON o.id=p.oms_order_id`, [limit, now, leaseId, new Date(now.getTime() + LEASE_MS), this.shopDomains]);
+      FROM leased p JOIN oms.oms_orders o ON o.id=p.oms_order_id`, [limit, now, leaseId, new Date(now.getTime() + LEASE_MS), this.shopDomains, this.maintenanceIds]);
     return z.array(orderActionScopeSchema.extend({ omsOrderId: z.coerce.number().int().positive().safe() })).max(limit).parse(result.rows);
   }
 
