@@ -2,6 +2,7 @@ import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../s
 vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
 import { describe, expect, it, vi } from "vitest";
 import { createShipmentTrackingService } from "../../shipment-tracking.service";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 const commandTime = new Date("2026-09-06T12:00:00.000Z");
 
@@ -16,7 +17,13 @@ function harness() {
   const transactions: any[] = [];
   const db = {
     transaction: vi.fn(async (work: (tx: any) => Promise<unknown>) => {
-      const tx = { execute: vi.fn().mockResolvedValue({ rows: [{ id: 1 }] }), state: structuredClone(state) };
+      const tx = { execute: vi.fn(async query => {
+        const text = new PgDialect().sqlToQuery(query).sql;
+        return { rows: text.includes("FROM catalog.product_variants")
+          ? [{ id: 10, productId: 100, sku: "TEST-PIECE", name: "Piece", unitsPerVariant: 1, isActive: true }]
+          : text.includes("FROM procurement.purchase_order_lines") ? [{ id: 21, purchaseOrderId: 1, productId: 100,
+            productVariantId: 10, expectedReceiveVariantId: 10, expectedReceiveUnitsPerVariant: 1, lineType: "product" }] : [{ id: 1 }] };
+      }), state: structuredClone(state) };
       transactions.push(tx);
       try {
         const result = await work(tx);
@@ -40,7 +47,8 @@ function harness() {
     getPurchaseOrderById: vi.fn(async (_id: number, tx: any) => { inTransaction(tx); return { id: 1, currency: "USD" }; }),
     getPurchaseOrderLineById: vi.fn(async (_id: number, tx: any) => {
       inTransaction(tx);
-      return { id: 21, purchaseOrderId: 1, lineType: "product", orderQty: 5, totalProductCostCents: 500, unitCostCents: 100 };
+      return { id: 21, purchaseOrderId: 1, productId: 100, productVariantId: 10, expectedReceiveVariantId: 10,
+        expectedReceiveUnitsPerVariant: 1, lineType: "product", orderQty: 5, totalProductCostCents: 500, unitCostCents: 100 };
     }),
     deleteAllocationsForShipment: vi.fn(async (_id: number, tx: any) => { inTransaction(tx); }),
     bulkCreateInboundFreightCostAllocations: vi.fn(async (_data: unknown, tx: any) => { inTransaction(tx); return []; }),

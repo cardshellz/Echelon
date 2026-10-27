@@ -167,6 +167,19 @@ export function registerInboundShipmentRoutes(app: Express) {
     }
   });
 
+  app.get("/api/inbound-shipments/:id/receiving-setup", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const id = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentLineResourceIdSchema).parse(req.params.id);
+      res.json(await shipmentTracking.getReceivingSetup(id));
+    } catch (error: unknown) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_RECEIVING_SETUP_INPUT_INVALID", error: "Enter a valid shipment ID." });
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message });
+      console.error(JSON.stringify({ event: "procurement.shipment_receiving_setup.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_RECEIVING_SETUP_UNAVAILABLE",
+        errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(503).json({ code: "SHIPMENT_RECEIVING_SETUP_UNAVAILABLE", error: "Receiving setup could not be verified. Refresh before booking or shipping." });
+    }
+  });
+
   app.post("/api/inbound-shipments", requirePermission("purchasing", "create"), async (req, res) => {
     try {
       const actorId = getActorId(req);
@@ -219,21 +232,27 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   app.post("/api/inbound-shipments/:id/book", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const shipment = await shipmentTracking.book(Number(req.params.id), req.session.user?.id, req.body.notes);
+      const id = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentLineResourceIdSchema).parse(req.params.id);
+      const shipment = await shipmentTracking.book(id, req.session.user?.id, req.body.notes);
       res.json(shipment);
     } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_TRANSITION_INPUT_INVALID", error: "Enter a valid shipment ID." });
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
+      console.error(JSON.stringify({ event: "procurement.shipment_booking.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_BOOKING_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(503).json({ code: "SHIPMENT_BOOKING_UNAVAILABLE", error: "Booking could not be verified. Reload the shipment before retrying." });
     }
   });
 
   app.post("/api/inbound-shipments/:id/in-transit", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const shipment = await shipmentTracking.markInTransit(Number(req.params.id), req.session.user?.id, req.body.notes, req.body.shipDate ? new Date(req.body.shipDate) : undefined);
+      const id = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentLineResourceIdSchema).parse(req.params.id);
+      const shipment = await shipmentTracking.markInTransit(id, req.session.user?.id, req.body.notes, req.body.shipDate ? new Date(req.body.shipDate) : undefined);
       res.json(shipment);
     } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_TRANSITION_INPUT_INVALID", error: "Enter a valid shipment ID." });
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
+      console.error(JSON.stringify({ event: "procurement.shipment_departure.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_DEPARTURE_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(503).json({ code: "SHIPMENT_DEPARTURE_UNAVAILABLE", error: "Shipping could not be verified. Reload the shipment before retrying." });
     }
   });
 

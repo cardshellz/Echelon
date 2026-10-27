@@ -13,14 +13,40 @@ describe("receipt unit planning", () => {
     expect(planReceiptUnits({ ...input, baseQty: 501 })).toMatchObject({ productVariantId: 1, unitsPerVariant: 1, expectedQty: 501, countsAsPieces: true });
   });
   it("requires a real active piece variant for a partial quantity", () => {
-    expect(() => planReceiptUnits({ ...input, baseQty: 501, variants: [pack] })).toThrow(/active one-piece variant/);
-    expect(() => planReceiptUnits({ ...input, baseQty: 501, variants: [pack, { ...piece, isActive: false }] })).toThrow(/active one-piece variant/);
+    expect(() => planReceiptUnits({ ...input, baseQty: 501, variants: [pack] })).toThrow(/configuration that actually arrived/);
+    expect(() => planReceiptUnits({ ...input, baseQty: 501, variants: [pack, { ...piece, isActive: false }] })).toThrow(/configuration that actually arrived/);
   });
   it("rejects missing or cross-product preferred variants instead of guessing", () => {
     expect(() => planReceiptUnits({ ...input, baseQty: 500, variants: [piece, { ...pack, productId: 10 }] })).toThrow(/another product/);
   });
   it("rejects changed recorded source packs", () => {
     expect(() => planReceiptUnits({ ...input, baseQty: 500, recordedPreferredUnits: 100 })).toThrow(/differs/);
+  });
+  it("asks for the actual configuration when no receive default was recorded, without inventing a piece requirement", () => {
+    expect(() => planReceiptUnits({ ...input, baseQty: 500, preferredVariantId: null, variants: [pack] }))
+      .toThrow(expect.objectContaining({ details: expect.objectContaining({ code: "RECEIVING_VARIANT_SELECTION_REQUIRED" }) }));
+    expect(() => planReceiptUnits({ ...input, baseQty: 500, preferredVariantId: null, variants: [] }))
+      .toThrow(expect.objectContaining({ details: expect.objectContaining({ code: "RECEIVING_VARIANT_REQUIRED" }) }));
+  });
+  it("uses only the operator's selected product configuration, independent of the default", () => {
+    expect(planReceiptUnits({ ...input, baseQty: 500, preferredVariantId: null, variants: [pack], selection: { productVariantId: 2, unitsPerVariant: 50 } }))
+      .toMatchObject({ expectedQty: 10, unitsPerVariant: 50, productVariantId: 2, countsAsPieces: false });
+  });
+  it("does not assume the shipment arrived as loose pieces just because a piece variant exists", () => {
+    expect(() => planReceiptUnits({ ...input, baseQty: 500, preferredVariantId: null, requireConfiguredUnit: true }))
+      .toThrow(/actually arrived/);
+  });
+  it.each([
+    { productVariantId: 2, unitsPerVariant: 100 },
+    { productVariantId: 999, unitsPerVariant: 50 },
+  ])("rejects missing or changed explicit configurations %j", selection => {
+    expect(() => planReceiptUnits({ ...input, baseQty: 500, selection })).toThrow();
+  });
+  it("rejects partial, inactive and foreign-product selections without choosing a different configuration", () => {
+    const selection = { productVariantId: 2, unitsPerVariant: 50 };
+    expect(() => planReceiptUnits({ ...input, baseQty: 501, selection })).toThrow(/whole count/);
+    expect(() => planReceiptUnits({ ...input, baseQty: 500, selection, variants: [piece, { ...pack, isActive: false }] })).toThrow(/inactive/);
+    expect(() => planReceiptUnits({ ...input, baseQty: 500, selection, variants: [piece, { ...pack, productId: 10 }] })).toThrow(/another product/);
   });
   it.each([0, -1, 1.5, NaN, Infinity, 2_147_483_648, null, "501"])("rejects invalid expected pieces %s", (baseQty) => {
     expect(() => planReceiptUnits({ ...input, baseQty: baseQty as number })).toThrow();

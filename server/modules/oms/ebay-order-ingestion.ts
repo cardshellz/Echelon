@@ -274,9 +274,12 @@ async function ensureEbayOrderQueuedForWmsSync(
 // eBay Order → OMS OrderData mapping
 // ---------------------------------------------------------------------------
 
-function dollarsToCents(value: string | undefined | null): number {
+// eBay reports pricingSummary.priceDiscount as a negative amount ("-1.50").
+// 7493a0b96 read it unsigned, so every eBay order with a seller discount threw
+// at intake and was retried forever. Signed keeps the pre-10-25 values exactly.
+export function dollarsToCents(value: string | undefined | null): number {
   if (!value) return 0;
-  return parseDecimalCents(value, "dollarsToCents");
+  return parseDecimalCents(value, "dollarsToCents", true);
 }
 
 function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {

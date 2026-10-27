@@ -15,6 +15,7 @@ import { ShipmentTrackingError } from "./shipment-tracking.service";
 import { computeShipmentLinePhysicalTotals, validateShipmentPhysicalTotals } from "./shipment-line-physical-values";
 import { lockShipmentSourceCapacity } from "./shipment-source-capacity";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
+import type { ShipmentReceivingSetup } from "@shared/procurement/shipment-receiving-setup";
 
 type Dimensions = Pick<InboundShipmentLine, "weightKg" | "lengthCm" | "widthCm" | "heightCm">;
 interface LineStorage {
@@ -34,6 +35,7 @@ interface Dependencies {
   resolveDimensions(variantId: number, vendorId: number | undefined, tx: any): Promise<Dimensions>;
   recomputeTotals(id: number, tx: any, now?: Date): Promise<void>;
   refreshAllocations(tx: any, id: number, shipment: InboundShipment, now?: Date): Promise<unknown>;
+  checkReceivingSetup(tx: any, shipmentId: number, required: boolean, options?: { previous?: ShipmentReceivingSetup; lockEvidence?: boolean }): Promise<ShipmentReceivingSetup>;
 }
 
 function reject(message: string, code: string, status = 409): never {
@@ -241,6 +243,10 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     const shipmentId = initial?.inboundShipmentId ?? command.resourceId;
     const shipment = await dependencies.lockShipment(tx, shipmentId);
     if (shipment.status === "closed" || shipment.status === "cancelled") reject("Closed or cancelled shipment lines cannot be changed here.", "SHIPMENT_LINE_TERMINAL");
+    const guardedSetup = shipment.status === "booked" || shipment.status === "in_transit";
+    // This read is only the before/after baseline. Leave source/catalog locking
+    // to the write validation, after the PO-capacity locks have been acquired.
+    const setupBefore = guardedSetup && !deferDerivedUpdates ? await dependencies.checkReceivingSetup(tx, shipmentId, false, { lockEvidence: false }) : undefined;
     const before = await storage.getInboundShipmentLines(shipmentId, tx);
     const current = isLine ? before.find((line) => line.id === command.resourceId) : null;
     if (isLine && !current) reject("Shipment line not found.", "SHIPMENT_LINE_NOT_FOUND", 404);
@@ -325,6 +331,9 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
       } else reject("Unsupported shipment line command.", "SHIPMENT_LINE_OPERATION_INVALID", 400);
     }
     if (affectsPhysical && !deferDerivedUpdates) {
+      // Drafts may be incomplete. Do not retroactively prevent corrections to
+      // delivered history; the operational booking/departure gates own readiness.
+      await dependencies.checkReceivingSetup(tx, shipmentId, guardedSetup, { previous: setupBefore });
       validateShipmentPhysicalTotals(await storage.getInboundShipmentLines(shipmentId, tx));
       await dependencies.recomputeTotals(shipmentId, tx, now);
       await dependencies.refreshAllocations(tx, shipmentId, shipment, now);
@@ -348,6 +357,8 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
   async function executeLineBatchInTransaction(tx: any, shipmentId: number, commands: ShipmentLineCommand[], actorId: string, now: Date) {
     await lockInventoryCostGraph(tx);
     const shipment = await dependencies.lockShipment(tx, shipmentId);
+    const guardedSetup = shipment.status === "booked" || shipment.status === "in_transit";
+    const setupBefore = guardedSetup ? await dependencies.checkReceivingSetup(tx, shipmentId, false, { lockEvidence: false }) : undefined;
     const results: unknown[] = [];
     for (const command of commands) {
       const line = ["update", "delete"].includes(command.operation) ? await storage.getInboundShipmentLineById(command.resourceId, tx) : null;
@@ -356,6 +367,7 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     }
     const lines = await storage.getInboundShipmentLines(shipmentId, tx);
     if (!lines.length) reject("A shipment needs at least one line. Cancel the shipment to remove the whole delivery.", "SHIPMENT_EDITOR_EMPTY");
+    await dependencies.checkReceivingSetup(tx, shipmentId, guardedSetup, { previous: setupBefore });
     validateShipmentPhysicalTotals(lines);
     await dependencies.recomputeTotals(shipmentId, tx, now);
     await dependencies.refreshAllocations(tx, shipmentId, shipment, now);

@@ -15,6 +15,10 @@ import { financialCommandFetchJson, FinancialCommandRequestError } from "@/lib/f
 import { exactMoneyAsInput } from "@/lib/exact-money-input";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { ShipmentLineAdditions, type AddedShipmentLine } from "./ShipmentLineAdditions";
+import { ShipmentQuantityControl } from "@/components/purchasing/ShipmentQuantityControl";
+import { parseShipmentUnits, shipmentQuantityDraft, shipmentQuantityPayload, type ShipmentQuantityDraft } from "@/lib/shipment-unit-entry";
+import type { ShipmentUnits } from "@shared/procurement/shipment-unit-selection";
+import { reviewReceivingConfiguration } from "@shared/procurement/receiving-configuration";
 
 type Line = ShipmentEditorContext["lines"][number];
 type Field = typeof SHIPMENT_LINE_EDITABLE_FIELDS[number];
@@ -48,6 +52,10 @@ export function ShipmentEditSummary({ preview }: { preview: ShipmentEditorPrevie
     if (field === "dimensionBasis") return line.fields[field] === "carton" ? "Shipping carton" : "Piece";
     return String(line.fields[field]);
   };
+  const configuration = (line: Line | undefined) => {
+    const units = line?.shipmentUnits, selected = units?.variants.find(variant => variant.id === units.selectedVariantId);
+    return selected && units?.unitsPerVariantSnapshot ? `${selected.sku ?? selected.name ?? "Configuration"} · ${units.unitsPerVariantSnapshot.toLocaleString()} pieces per unit` : "Not recorded";
+  };
   return <div className="space-y-4 text-sm">
     <div><h4 className="font-semibold">Shipment cost shares</h4>{review.costShares.map(share => <p key={share.purchaseOrderId ?? "unlinked"}>{share.poNumber ?? "Unlinked lines"}: {exactMoneyAsInput(share.beforeCents, 2)} → {exactMoneyAsInput(share.afterCents, 2)}</p>)}</div>
     <p>Shipment charges: {review.charges.length ? review.charges.map(charge => `${exactMoneyAsInput(charge.cents, 2)} ${charge.currency}`).join(", ") : "No charges recorded"}. The charge amounts stay the same; their allocation follows the edited lines.</p>
@@ -56,6 +64,9 @@ export function ShipmentEditSummary({ preview }: { preview: ShipmentEditorPrevie
       const before = review.before.find(line => line.key === key), after = review.after.find(line => line.key === key), line = after ?? before!;
       const packingFields = SHIPMENT_LINE_EDITABLE_FIELDS.filter(field => field !== "qtyShipped" && field !== "cartonCount" && before?.fields[field] !== after?.fields[field]);
       const totalFields = (["totalWeightKg", "totalVolumeCbm"] as const).filter(field => before?.[field] !== after?.[field]);
+      const units = after?.shipmentUnits;
+      const setup = units ? reviewReceivingConfiguration({ pieces: after?.fields.qtyShipped ?? 0, variantId: units.selectedVariantId,
+        recordedUnits: units.unitsPerVariantSnapshot, activeVariants: units.variants }) : null;
       return <section key={key} className="rounded border p-3">
         <p className="font-semibold">{line.poNumber ?? "Unlinked PO"} · {line.name}</p>
         {(!before || !after) && <p className="text-muted-foreground">{!before ? "Added to shipment" : "Removed from shipment"}</p>}
@@ -64,9 +75,11 @@ export function ShipmentEditSummary({ preview }: { preview: ShipmentEditorPrevie
           <tbody>
             <tr><td className="py-1">Pieces</td><td className="text-right">{before?.fields.qtyShipped?.toLocaleString() ?? "—"}</td><td className="text-right font-medium">{after?.fields.qtyShipped?.toLocaleString() ?? "—"}</td></tr>
             <tr><td className="py-1">Shipping cartons</td><td className="text-right">{displayField(before, "cartonCount")}</td><td className="text-right">{displayField(after, "cartonCount")}</td></tr>
+            <tr><td className="py-1">Receiving configuration</td><td className="text-right">{configuration(before)}</td><td className="text-right">{configuration(after)}</td></tr>
             <tr><td className="py-1">Cost share (USD)</td><td className="text-right">{before ? exactMoneyAsInput(before.allocatedCostCents, 2) : "—"}</td><td className="text-right font-medium">{after ? exactMoneyAsInput(after.allocatedCostCents, 2) : "—"}</td></tr>
           </tbody>
         </table>
+        {setup?.issue && <p className="mt-2 text-amber-800">Receiving setup still needed: {setup.issue.message} Booking and shipping stay unavailable until it is complete.</p>}
         {(packingFields.length > 0 || totalFields.length > 0) && <details className="mt-2 border-t pt-2"><summary className="cursor-pointer">Packing and measurement changes</summary>
           <table className="mt-2 w-full table-fixed text-left"><thead><tr><th className="w-2/5">Item</th><th>Before</th><th>After</th></tr></thead><tbody>
             {packingFields.map(field => <tr key={field}><td className="py-1">{labels[field]}</td><td className="break-words">{displayField(before, field)}</td><td className="break-words">{displayField(after, field)}</td></tr>)}
@@ -102,6 +115,7 @@ function Editor({ initial, storageKey, onLock, onClose, onSaved, onCorrect }: {
   // A refreshed query must not silently replace the evidence an admin is editing.
   const [context] = useState(initial);
   const [drafts, setDrafts] = useState(() => Object.fromEntries(context.lines.map(line => [line.id!, draftFor(line)])));
+  const [unitEdits, setUnitEdits] = useState<Record<number, { draft: ShipmentQuantityDraft; units: ShipmentUnits | null }>>({});
   const [removed, setRemoved] = useState<number[]>([]);
   const [added, setAdded] = useState<AddedShipmentLine[]>([]);
   const [pendingLine, setPendingLine] = useState(false);
@@ -135,7 +149,9 @@ function Editor({ initial, storageKey, onLock, onClose, onSaved, onCorrect }: {
     try {
       const changes = context.lines.filter(line => !removed.includes(line.id!)).flatMap(line => {
         const fields = changedFields(line, drafts[line.id!]);
-        return Object.keys(fields).length ? [{ lineId: line.id!, fields }] : [];
+        const edit = unitEdits[line.id!];
+        const unitSelection = edit?.draft.variantId != null ? shipmentQuantityPayload(edit.draft, edit.units).unitSelection : undefined;
+        return Object.keys(fields).length || unitSelection ? [{ lineId: line.id!, fields, ...(unitSelection ? { unitSelection } : {}) }] : [];
       });
       const request = shipmentEditorRequestSchema.parse({ sourceVersion: context.sourceVersion, reason, changes, removals: removed, additions: added.map(line => line.input) });
       const value = shipmentEditorPreviewSchema.parse(await financialCommandFetchJson(`${root}/preview`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }));
@@ -143,7 +159,12 @@ function Editor({ initial, storageKey, onLock, onClose, onSaved, onCorrect }: {
       setReview({ request, preview: value }); setConfirmed(false);
     } catch (cause) {
       setError(cause instanceof z.ZodError ? "Make at least one change, enter valid whole quantities and measurements, and give a reason of at least 10 characters." : cause instanceof Error ? cause.message : "The edit could not be reviewed.");
-      if (cause instanceof FinancialCommandRequestError && cause.status === 409) setStale(true);
+      if (cause instanceof FinancialCommandRequestError && cause.status === 409) {
+        const code = z.object({ code: z.string().optional() }).safeParse(cause.responseBody);
+        // Missing setup is correctable in this editor. A changed document or
+        // quantity version still requires loading a new source snapshot.
+        if (!code.success || code.data.code !== "SHIPMENT_RECEIVING_SETUP_REQUIRED") setStale(true);
+      }
     } finally { inFlight.current = false; setBusy(false); }
   }
   async function approve(savedIntent?: Intent) {
@@ -177,6 +198,26 @@ function Editor({ initial, storageKey, onLock, onClose, onSaved, onCorrect }: {
   }
   function update(id: number, field: Field, value: string) {
     setDrafts(previous => ({ ...previous, [id]: { ...previous[id], [field]: value } }));
+    if (field === "qtyShipped") setUnitEdits(previous => {
+      const edit = previous[id];
+      if (!edit) return previous;
+      return { ...previous, [id]: { ...edit, draft: shipmentQuantityDraft(Number(value), edit.units === null ? null : {
+        ...edit.units, selectedVariantId: edit.draft.variantId, unitsPerVariantSnapshot: edit.draft.variantId === null ? null : edit.draft.unitsPerVariant }) } };
+    });
+  }
+  function refreshConfigurationOptions(updated: ShipmentUnits) {
+    // An added catalog configuration is reusable by every line of that product.
+    // Keep each line's saved selection and any in-progress quantity draft.
+    setUnitEdits(previous => {
+      const next = { ...previous };
+      for (const line of context.lines) {
+        const units = previous[line.id!]?.units ?? parseShipmentUnits(line.shipmentUnits);
+        if (units?.productId !== updated.productId) continue;
+        next[line.id!] = { units: { ...units, variants: updated.variants },
+          draft: previous[line.id!]?.draft ?? shipmentQuantityDraft(Number(drafts[line.id!].qtyShipped), units) };
+      }
+      return next;
+    });
   }
   return <div className="flex min-h-0 flex-col">
     <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
@@ -185,7 +226,27 @@ function Editor({ initial, storageKey, onLock, onClose, onSaved, onCorrect }: {
       {!preview && !recovery.current.error && <fieldset disabled={locked || !!blocked || stale} className="space-y-4">
         <div className="overflow-x-auto rounded border"><table className="w-full min-w-[650px] text-sm"><thead><tr className="border-b text-left"><th className="p-2">PO / product</th><th className="p-2">Pieces</th><th className="p-2">Shipping cartons</th><th className="p-2">Packing details</th><th className="p-2">Remove</th></tr></thead>
           <tbody>{context.lines.map(line => <tr key={line.id} className={`border-t align-top ${removed.includes(line.id!) ? "bg-muted" : ""}`}>
-            <td className="p-2"><p className="font-medium">{line.poNumber ?? "Unlinked PO"}</p><p>{line.sku} · {line.name}</p>{removed.includes(line.id!) && <strong>Will be removed</strong>}</td>
+            <td className="p-2"><p className="font-medium">{line.poNumber ?? "Unlinked PO"}</p><p>{line.sku} · {line.name}</p>{removed.includes(line.id!) && <strong>Will be removed</strong>}
+              <details className="mt-2"><summary className="cursor-pointer">Receiving configuration</summary>
+                <ShipmentQuantityControl id={`shipment-setup-${line.id}`} productName={line.name} draftAllowed={context.status === "draft"}
+                  value={unitEdits[line.id!]?.draft ?? shipmentQuantityDraft(Number(drafts[line.id!].qtyShipped), parseShipmentUnits(line.shipmentUnits))}
+                  units={unitEdits[line.id!]?.units ?? parseShipmentUnits(line.shipmentUnits)} disabled={removed.includes(line.id!)}
+                  onUnitsChange={refreshConfigurationOptions}
+                  onRefreshUnits={async () => {
+                    const fresh = shipmentEditorContextSchema.parse(await financialCommandFetchJson(root, { credentials: "include" }));
+                    if (fresh.shipmentId !== context.shipmentId || fresh.sourceVersion !== context.sourceVersion) {
+                      setStale(true); throw new Error("Shipment records changed. Close and reopen the editor before changing configurations.");
+                    }
+                    for (const item of fresh.lines) if (item.shipmentUnits) refreshConfigurationOptions(item.shipmentUnits);
+                  }}
+                  onChange={draft => {
+                    const units = unitEdits[line.id!]?.units ?? parseShipmentUnits(line.shipmentUnits);
+                    setUnitEdits(previous => ({ ...previous, [line.id!]: { units: previous[line.id!]?.units ?? units, draft } }));
+                    try { const payload = shipmentQuantityPayload(draft, units); setDrafts(previous => ({ ...previous, [line.id!]: { ...previous[line.id!], qtyShipped: String(payload.qtyShipped) } })); }
+                    catch { /* Keep the entered piece total until the new unit count is complete. */ }
+                  }} />
+              </details>
+            </td>
             <td className="p-2"><Input className="min-w-24" aria-label={`Pieces ${line.id}`} inputMode="numeric" value={drafts[line.id!].qtyShipped} disabled={removed.includes(line.id!)} onChange={event => update(line.id!, "qtyShipped", event.target.value)} /></td>
             <td className="p-2"><Input className="min-w-20" aria-label={`Shipping cartons ${line.id}`} inputMode="numeric" value={drafts[line.id!].cartonCount} disabled={removed.includes(line.id!)} onChange={event => update(line.id!, "cartonCount", event.target.value)} /></td>
             <td className="p-2"><details><summary className="cursor-pointer">Measurements and notes</summary><fieldset disabled={removed.includes(line.id!)} className="min-w-52 space-y-2 pt-2">
@@ -195,7 +256,7 @@ function Editor({ initial, storageKey, onLock, onClose, onSaved, onCorrect }: {
             </fieldset></details></td>
             <td className="p-2"><Button size="sm" variant="outline" onClick={() => setRemoved(values => values.includes(line.id!) ? values.filter(id => id !== line.id) : [...values, line.id!])}>{removed.includes(line.id!) ? "Undo removal" : "Remove line"}</Button></td>
           </tr>)}</tbody></table></div>
-        {!blocked && <ShipmentLineAdditions lines={added} existingPoLineIds={context.lines.flatMap(line => line.purchaseOrderLineId === null ? [] : [line.purchaseOrderLineId])} onChange={setAdded} onDraftChange={setPendingLine} disabled={locked || stale} />}
+        {!blocked && <ShipmentLineAdditions lines={added} draftAllowed={context.status === "draft"} existingPoLineIds={context.lines.flatMap(line => line.purchaseOrderLineId === null ? [] : [line.purchaseOrderLineId])} onChange={setAdded} onDraftChange={setPendingLine} disabled={locked || stale} />}
       </fieldset>}
       {preview && <ShipmentEditSummary preview={preview} />}
       {result && <p role="status" className="rounded bg-green-50 p-3 font-semibold text-green-800">Shipment edit saved. Approved by {result.actorName} on {new Date(result.approvedAt).toLocaleString()}. Audit #{result.auditId}.</p>}

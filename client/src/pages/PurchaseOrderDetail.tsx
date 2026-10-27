@@ -24,7 +24,8 @@ import { PoLineLandedCost } from "@/features/purchasing/PoLineLandedCost";
 import { PurchaseCostOriginHistory } from "@/features/purchasing/PurchaseCostOriginHistory";
 import { poFinancialWorkflowSchema } from "@shared/procurement/po-financial-workflow";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { parsePoDirectReceiveOption, parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
+import { clearReceiptUnitDraft, fetchShipmentReceiptResolution, parsePoDirectReceiveOption, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
+import type { ShipmentReceiptUnitSelection } from "@shared/procurement/shipment-receipt-plan";
 import { ShipmentCustodyReceiptLinks } from "@/components/purchasing/ShipmentCustodyReceiptLinks";
 import React from "react";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
@@ -1741,9 +1742,9 @@ export default function PurchaseOrderDetail() {
   // Receive AGAINST a shipment: links the receipt to the shipment so its freight
   // attaches to exactly these lots (vs createReceiptMutation, which is PO-direct).
   const createReceiptFromShipmentMutation = useMutation({
-    onMutate: (variables: { shipmentId: number; purchaseOrderId: number; navigation?: NavigationSnapshot }) =>
+    onMutate: (variables: { shipmentId: number; purchaseOrderId: number; navigation?: NavigationSnapshot; receiptUnitSelections?: ShipmentReceiptUnitSelection[] }) =>
       variables.navigation ?? captureNavigation(),
-    mutationFn: async ({ shipmentId, purchaseOrderId }: { shipmentId: number; purchaseOrderId: number; navigation?: NavigationSnapshot }) => {
+    mutationFn: async ({ shipmentId, purchaseOrderId, receiptUnitSelections = [] }: { shipmentId: number; purchaseOrderId: number; navigation?: NavigationSnapshot; receiptUnitSelections?: ShipmentReceiptUnitSelection[] }) => {
       const idempotencyKey = (
         typeof crypto !== "undefined" && "randomUUID" in crypto
           ? (crypto as any).randomUUID()
@@ -1755,12 +1756,13 @@ export default function PurchaseOrderDetail() {
           "Content-Type": "application/json",
           "Idempotency-Key": idempotencyKey,
         },
-        body: JSON.stringify({ purchaseOrderId }),
+        body: JSON.stringify({ purchaseOrderId, ...(receiptUnitSelections.length ? { receiptUnitSelections } : {}) }),
       });
       if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create receipt"); }
       return res.json();
     },
     onSuccess: (receipt, variables, context) => {
+      clearReceiptUnitDraft(variables);
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}`] });
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}/receipts`] });
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${variables.purchaseOrderId}/receive-options`] });
@@ -1854,12 +1856,8 @@ export default function PurchaseOrderDetail() {
     },
   });
 
-  async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }) {
-    const query = new URLSearchParams({ purchaseOrderId: String(params.purchaseOrderId) });
-    const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
-    const body = await res.json().catch(() => null);
-    if (!res.ok) throw new Error(body?.error || "Failed to check shipment receipt packs");
-    return parseShipmentReceiptResolution(body, params);
+  async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }, selections?: ShipmentReceiptUnitSelection[]) {
+    return fetchShipmentReceiptResolution(params, selections);
   }
 
   async function openShipmentReceiptPackBlocker(params: { shipmentId: number; purchaseOrderId: number } | undefined | null): Promise<boolean> {
@@ -1907,24 +1905,24 @@ export default function PurchaseOrderDetail() {
     }
   }
 
-  async function refreshShipmentReceiptPackResolution() {
+  async function refreshShipmentReceiptPackResolution(selections?: ShipmentReceiptUnitSelection[]) {
     if (!pendingShipmentReceipt) return;
     const navigation = captureNavigation();
     setCheckingShipmentReceiptPacks(true);
     try {
-      const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt);
+      const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt, selections);
       if (!navigation.isCurrent()) return;
       setShipmentReceiptPackResolution(resolution);
     } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      throw err;
     } finally {
       if (navigation.isCurrent()) setCheckingShipmentReceiptPacks(false);
     }
   }
 
-  function createPendingShipmentReceipt() {
+  function createPendingShipmentReceipt(selections: ShipmentReceiptUnitSelection[] = []) {
     if (!pendingShipmentReceipt) return;
-    createReceiptFromShipmentMutation.mutate(pendingShipmentReceipt);
+    createReceiptFromShipmentMutation.mutate({ ...pendingShipmentReceipt, receiptUnitSelections: selections });
   }
 
   function openReceiptVariantSetup(line?: ShipmentReceiptPackResolutionLine) {
@@ -5626,7 +5624,7 @@ export default function PurchaseOrderDetail() {
                         <span className="break-all">{line.sku ?? `PO line ${line.id}`}</span>
                       </label>
                       <p className="text-xs text-muted-foreground">{line.productName || line.description || "Product"} · Ordered {line.orderQty.toLocaleString("en-US")} pieces · Shipped {line.alreadyShippedQty.toLocaleString("en-US")} pieces</p>
-                      <ShipmentQuantityControl id={`create-shipment-line-${line.id}`} value={selected.quantity}
+                      <ShipmentQuantityControl id={`create-shipment-line-${line.id}`} value={selected.quantity} productName={line.productName ?? line.sku ?? "Product"}
                         units={parseShipmentUnits(line.shipmentUnits)} maximumPieces={line.remainingQty} disabled={!selected.checked}
                         onChange={(quantity) => setLineSelections((previous) => ({ ...previous, [line.id]: { ...selected, quantity } }))} />
                     </div>;
