@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeShipStationPackageDimensions } from "./shipstation-package-dimensions.domain";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { normalizeShipStationDate, normalizeShipStationV1Date, ShipStationDateError } from "@shared/utils/shipstation-date";
@@ -956,8 +957,12 @@ export function normalizeShipStationLabelObservation(
     isReturnLabel: shipment.isReturnLabel ?? null,
     shipmentItems: redactShipStationSourceItems(shipment.shipmentItems),
   }));
+  const packageDimensions = normalizeShipStationPackageDimensions(shipment.dimensions);
   const sanitizedPayload = {
     payloadSchemaVersion: 2,
+    // Additive, independently versioned package evidence. Keep the existing
+    // contents-authority hash unchanged: box size cannot authorize units/dispatch.
+    ...(packageDimensions === null ? {} : { packageDimensions }),
     providerLabelId: String(shipment.shipmentId),
     providerOrderId: shipment.orderId == null ? null : String(shipment.orderId),
     providerOrderKey: nullableString(shipment.orderKey),

@@ -1,6 +1,6 @@
-import Decimal from "decimal.js";
 import { z } from "zod";
-import { customerReturnDimensionsSchema, type CustomerReturnDimensions } from "../../../../shared/returns/customer-return-parcel";
+import type { CustomerReturnDimensions } from "../../../../shared/returns/customer-return-parcel";
+import { normalizeShipStationPackageDimensions } from "../../shipping/shipstation-package-dimensions.domain";
 import { createShipStationLabelReconciliationClient } from "../../oms/shipstation-label-reconciliation.client";
 import { LabelReconciliationError } from "../../oms/shipstation-label-reconciliation.service";
 import type { ShipStationApiRequester } from "../../oms/shipstation-api-request";
@@ -11,7 +11,6 @@ import { CustomerReturnPackageDimensionsError, customerReturnPackageDimensionsIn
 const SHIPSTATION_V1_ORIGIN = "https://ssapi.shipstation.com";
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1_000_000;
-const DimensionDecimal = Decimal.clone({ precision: 30 });
 const credentialSchema = z.string().min(1).max(4096)
   .refine(value => value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value));
 const shipmentMeasurementSchema = z.object({
@@ -19,11 +18,6 @@ const shipmentMeasurementSchema = z.object({
   voided: z.boolean(), voidDate: z.string().max(200).nullish(), isReturnLabel: z.boolean(),
   dimensions: z.unknown().optional(),
 });
-// https://www.shipstation.com/docs/api/models/dimensions/ documents these two units.
-const providerDimensionsSchema = z.object({
-  units: z.enum(["inches", "centimeters"]),
-  length: z.number().finite().positive(), width: z.number().finite().positive(), height: z.number().finite().positive(),
-}).strict();
 
 export interface CustomerReturnShipStationDimensionsDependencies {
   /** Server composition passes its V1 account credentials explicitly. No environment fallback. */
@@ -56,15 +50,10 @@ export function createCustomerReturnShipStationDimensionsReader(
           throw new CustomerReturnPackageDimensionsError("RETURN_PACKAGE_IDENTITY_MISMATCH");
         }
         if (shipment.voided || shipment.isReturnLabel || (shipment.voidDate !== null && shipment.voidDate !== undefined && shipment.voidDate !== "")) return null;
-        if (shipment.dimensions === null || shipment.dimensions === undefined) return null;
-        const dimensions = providerDimensionsSchema.safeParse(shipment.dimensions);
-        if (!dimensions.success) throw new CustomerReturnPackageDimensionsError("RETURN_PACKAGE_RESPONSE_INVALID");
-        const factor = dimensions.data.units === "inches" ? "25.4" : "10";
-        const convert = (value: number): number => new DimensionDecimal(value).times(factor).toNumber();
-        const output = customerReturnDimensionsSchema.safeParse({ lengthMm: convert(dimensions.data.length),
-          widthMm: convert(dimensions.data.width), heightMm: convert(dimensions.data.height) });
-        if (!output.success) throw new CustomerReturnPackageDimensionsError("RETURN_PACKAGE_RESPONSE_INVALID");
-        return output.data;
+        const dimensions = normalizeShipStationPackageDimensions(shipment.dimensions);
+        if (dimensions === null) return null;
+        if (dimensions.status !== "verified") throw new CustomerReturnPackageDimensionsError("RETURN_PACKAGE_RESPONSE_INVALID");
+        return dimensions.dimensions;
       } catch (error) {
         if (error instanceof CustomerReturnPackageDimensionsError) throw error;
         if (error instanceof LabelReconciliationError) {

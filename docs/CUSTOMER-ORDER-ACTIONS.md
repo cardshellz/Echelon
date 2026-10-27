@@ -53,13 +53,18 @@ An unavailable, expired or invalidated projection cannot enable unknown actions.
 
 ## Original return packages
 
-Verified original package measurements are retained separately in
-`returns.customer_return_box_measurements`. Each measurement is bound to the
+Shipping's normal label ingestion retains observed package dimensions with an
+immutable evidence link. Returns reads that saved evidence first, checking exact
+active outbound package identity. Invalid or unproven stored evidence cannot be
+bypassed with an old cache. See `SHIPPING-PACKAGE-DIMENSIONS.md` for the contract.
+
+Historical verified package measurements are also retained in
+`returns.customer_return_box_measurements`. Each cached measurement is bound to the
 channel, original package identity and a fingerprint of tracking and all retained
 contents. Local package/label provenance is still rechecked before reuse. Mixed,
 voided, unattributable or changed packages do not inherit unrelated measurements.
-Only the background inspector retains measurements; customer GET paths do not
-write them. A missing measurement falls back to the existing exact provider
+Only the background inspector retains this return cache; customer GET paths do not
+write measurements. Unrecorded shipping measurements fall back to this cache or the exact provider
 lookup; a cache outage is reported and does not suppress that fallback.
 
 The existing unique-covering-box rule supplies the default. The customer sees

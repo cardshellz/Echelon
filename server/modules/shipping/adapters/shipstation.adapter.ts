@@ -208,6 +208,10 @@ export function createShipStationEngine(
       );
       await ss.observeProviderLabels(ssShipments);
 
+      // The shipping owner retains observed package dimensions in its immutable
+      // label ledger here, before projecting dispatch events. Size is evidence
+      // about this exact package, not authorization to ship units.
+
       return ssShipments.map((s: any) => {
         const voidDate = normalizeShipStationV1Date(s.voidDate, "voidDate");
         if (voidDate.kind !== "missing") {
