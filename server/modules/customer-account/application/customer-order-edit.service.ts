@@ -26,7 +26,7 @@ export class CustomerOrderEditService {
   private readonly actorId: string;
   constructor(
     private readonly dependencies: {
-      principal: CustomerReturnCustomerSession;
+      principal: Pick<CustomerReturnCustomerSession, "channelId" | "externalCustomerId" | "shopDomain">;
       rewards?: CustomerRewards;
       access: Pick<
         CustomerReturnOrderAccessService,

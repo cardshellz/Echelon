@@ -46,6 +46,7 @@ import { orderEditResponsePresentation, orderEditOrderManagementPresentation } f
 import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
 import { customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
 import { customerAccountOrderDetailsSchema, customerAccountOrderSummariesSchema } from "@shared/customer-account/customer-account-orders";
+import { customerOrderActionPageSchema } from "@shared/customer-account/order-actions";
 
 type Services = ReturnType<ReturnType<typeof customerAccountServices>>;
 export interface CustomerAccountRouteDependencies {
@@ -243,6 +244,10 @@ async function dispatch(
   if (path === "/account/order-summaries" && !read) {
     empty.parse(query);
     return customerAccountOrderSummariesSchema.parse(await services.orders.summaries(body));
+  }
+  if (path === "/account/order-actions" && !read) {
+    empty.parse(query);
+    return customerOrderActionPageSchema.parse(await services.orders.actions(body));
   }
   if (path === "/account/order-details" && !read) {
     empty.parse(query);

@@ -30,12 +30,14 @@ import { CustomerReturnLocalInspectionError, customerReturnInspectionShopSchema,
 import { CustomerReturnShopifySnapshotError, customerReturnShopifySnapshotSchema,
   type CustomerReturnShopifySnapshotReader, type CustomerReturnShopifySnapshot } from "./customer-return-shopify-snapshot.ports";
 import { customerReturnCanonicalOrderScopeSchema, type CustomerReturnCanonicalOrderScope } from "./customer-return-order-access.service";
+import type { CustomerReturnBoxMeasurements } from "./customer-return-box-measurements.ports";
 
 const MAX_OBSERVATION_AGE_MS = 120_000;
 export interface CustomerReturnLiveDependencies {
   local: CustomerReturnLocalInspectionReader;
   shopify: CustomerReturnShopifySnapshotReader;
   dimensions: CustomerReturnPackageDimensionsReader;
+  measurements?: CustomerReturnBoxMeasurements;
   policies: CustomerReturnPortalPolicyReader;
   reportBoxDiagnostic?: ReturnBoxReporter;
   rates?: ReturnRateProvider;
@@ -144,7 +146,7 @@ export class CustomerReturnLiveService {
     }));
     if (canonicalScope) verifyProviderOwnership(provider, canonicalScope);
     verifyIdentity(first, provider, reference);
-    const boxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic);
+    const boxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic, this.dependencies.measurements);
     const finalRaw = await this.dependencies.local.read(lookup);
     if (finalRaw === null) throw changed();
     const local = customerReturnLocalInspectionSnapshotSchema.parse(finalRaw);

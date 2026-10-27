@@ -431,7 +431,7 @@ test("split shipments move directly from the first box into a new box without li
   await expect(
     page
       .getByTestId("preview-box-2")
-      .getByText("Original box size · 10 × 8 × 4 in", { exact: true }),
+      .getByText("10 × 8 × 4 in", { exact: true }),
   ).toBeVisible();
   await page.screenshot({
     animations: "disabled",
@@ -2731,7 +2731,7 @@ test("one matching original box defaults its dimensions and custom edits survive
     .click();
   const box = page.getByTestId("preview-box-1");
   await expect(
-    box.getByText("Original box size · 10 × 8 × 4 in", { exact: true }),
+    box.getByText("10 × 8 × 4 in", { exact: true }),
   ).toBeVisible();
   await expectNoCustomerWeights(page);
   await expect(box.getByRole("spinbutton", { name: /weight/i })).toHaveCount(0);

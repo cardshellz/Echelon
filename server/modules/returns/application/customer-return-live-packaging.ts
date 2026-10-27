@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { CustomerReturnBoxMeasurements } from "./customer-return-box-measurements.ports";
 import { customerReturnDimensionsSchema, MAX_RETURN_ORIGINAL_BOXES,
   type CustomerReturnBoxOption } from "../../../../shared/returns/customer-return-parcel";
 import { customerReturnPackageDimensionsInputSchema, CustomerReturnPackageDimensionsError,
@@ -95,7 +96,8 @@ export function projectCustomerReturnOriginalBoxCandidates(raw: CustomerReturnLo
 /** Optional measurements never change eligibility. Abort bounds the whole phase,
  * including adapters that ignore cancellation, and never reserves or buys labels. */
 export async function readCustomerReturnOriginalBoxes(local: CustomerReturnLocalInspectionSnapshot,
-  reader: CustomerReturnPackageDimensionsReader, report: ReturnBoxReporter = defaultReporter): Promise<CustomerReturnBoxOption[]> {
+  reader: CustomerReturnPackageDimensionsReader, report: ReturnBoxReporter = defaultReporter,
+  measurements?: CustomerReturnBoxMeasurements): Promise<CustomerReturnBoxOption[]> {
   const candidates = projectCustomerReturnOriginalBoxCandidates(local);
   if (candidates.length > MAX_RETURN_ORIGINAL_BOXES) { safeReport(report, "RETURN_BOX_DIMENSIONS_LIMIT"); return []; }
   if (candidates.length === 0) return [];
@@ -108,8 +110,15 @@ export async function readCustomerReturnOriginalBoxes(local: CustomerReturnLocal
     while (!controller.signal.aborted && next < candidates.length) {
       const candidate = candidates[next++];
       try {
-        const raw = await Promise.race([reader.read({ providerPhysicalShipmentId: candidate.providerPhysicalShipmentId,
-          trackingNumber: candidate.trackingNumber }, controller.signal), cancelled]);
+        const work = async () => {
+          let saved = null;
+          try { saved = await measurements?.read({ channelId: local.shop.channelId, boxId: candidate.id,
+            sourceFingerprint: customerReturnBoxSourceFingerprint(candidate) }) ?? null; }
+          catch { safeReport(report, "RETURN_BOX_MEASUREMENT_CACHE_UNAVAILABLE"); }
+          return saved ?? reader.read({ providerPhysicalShipmentId: candidate.providerPhysicalShipmentId,
+            trackingNumber: candidate.trackingNumber }, controller.signal);
+        };
+        const raw = await Promise.race([work(), cancelled]);
         if (controller.signal.aborted) return;
         if (raw === null) { safeReport(report, "RETURN_BOX_DIMENSIONS_MISSING"); continue; }
         const parsed = customerReturnDimensionsSchema.safeParse(raw);
@@ -125,6 +134,12 @@ export async function readCustomerReturnOriginalBoxes(local: CustomerReturnLocal
   try { await Promise.all(Array.from({ length: Math.min(DIMENSIONS_CONCURRENCY, candidates.length) }, worker)); }
   finally { clearTimeout(timer); controller.abort(); }
   return results.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** Track identity AND all retained contents; a changed or mixed package cannot
+ * inherit measurements saved for a formerly verified original package. */
+export function customerReturnBoxSourceFingerprint(candidate: ReturnType<typeof projectCustomerReturnOriginalBoxCandidates>[number]): string {
+  return createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
 }
 
 function tracking(value: string | null): string | null { return value?.replace(/[^a-z0-9]/gi, "").toUpperCase() || null; }

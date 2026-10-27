@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { projectCustomerReturnOriginalBoxCandidates, readCustomerReturnOriginalBoxes } from "../../application/customer-return-live-packaging";
+import { projectCustomerReturnOriginalBoxCandidates, readCustomerReturnOriginalBoxes, customerReturnBoxSourceFingerprint } from "../../application/customer-return-live-packaging";
 import { CustomerReturnPackageDimensionsError } from "../../application/customer-return-package-dimensions.ports";
 import { addLiveOriginalBox, liveLocalFixture } from "../support/live-inspection-fixtures";
 
@@ -8,6 +8,29 @@ function fixture() { const local = liveLocalFixture(); addLiveOriginalBox(local)
 afterEach(() => { vi.useRealTimers(); });
 
 describe("exact original return box projection", () => {
+  it("reuses retained verified dimensions without a provider call", async () => {
+    const local = fixture(), candidate = projectCustomerReturnOriginalBoxCandidates(local)[0];
+    const provider = { read: vi.fn(async () => { throw new Error("provider must not be called"); }) };
+    const saved = { read: vi.fn(async () => dimensions) };
+    const boxes = await readCustomerReturnOriginalBoxes(local, provider, vi.fn(), saved);
+    expect(boxes[0].dimensions).toEqual(dimensions);
+    expect(provider.read).not.toHaveBeenCalled();
+    expect(saved.read).toHaveBeenCalledExactlyOnceWith({ channelId: local.shop.channelId, boxId: candidate.id,
+      sourceFingerprint: customerReturnBoxSourceFingerprint(candidate) });
+  });
+  it("does not reuse measurements after a package identity/content change", async () => {
+    const local = fixture(), source = projectCustomerReturnOriginalBoxCandidates(local)[0];
+    local.packageItems[0].trackingNumber = "CHANGED";
+    expect(projectCustomerReturnOriginalBoxCandidates(local)).toEqual([]);
+    expect(customerReturnBoxSourceFingerprint({ ...source, trackingNumber: "CHANGED" })).not.toBe(customerReturnBoxSourceFingerprint(source));
+  });
+  it("reports a cache outage and still attempts the exact provider lookup", async () => {
+    const provider = { read: vi.fn(async () => dimensions) }, report = vi.fn();
+    const result = await readCustomerReturnOriginalBoxes(fixture(), provider, report, { read: async () => { throw new Error("private database details"); } });
+    expect(result[0].dimensions).toEqual(dimensions); expect(provider.read).toHaveBeenCalledOnce();
+    expect(report).toHaveBeenCalledWith({ operation: "original_box_dimensions", code: "RETURN_BOX_MEASUREMENT_CACHE_UNAVAILABLE" });
+    expect(JSON.stringify(report.mock.calls)).not.toContain("private");
+  });
   it("reads one original package once and retains separate same-SKU purchased quantities without leaking provider IDs", async () => {
     const local = fixture(), before = JSON.stringify(local);
     const read = vi.fn(async () => dimensions);
@@ -85,7 +108,7 @@ describe("exact original return box projection", () => {
       return dimensions;
     });
     const work = readCustomerReturnOriginalBoxes(local, { read }, vi.fn());
-    expect(read).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
     finish[0]();
     await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
     finish[1](); finish[2]();

@@ -18,6 +18,11 @@
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
   text-transform: none; letter-spacing: normal;
 }
+/* The storefront declares h1's display font !important. Keep this override
+ * confined to return headings rather than changing the store's typography. */
+.csz-return-ui :is(h1,h2,h3,h4) {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif !important;
+}
 .csz-return-ui h1 { font-size: 26px; font-weight: 600; line-height: 1.25; }
 .csz-return-ui h2 { font-size: 19px; font-weight: 600; line-height: 1.4; }
 .csz-return-ui h3 { font-size: 15px; font-weight: 600; line-height: 1.45; }

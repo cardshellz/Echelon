@@ -9,6 +9,7 @@ import { CustomerOrderEditService } from "../application/customer-order-edit.ser
 import { ClubOrderEditCodeRedemptions } from "../../order-edits/infrastructure/club-order-edit-code-redemptions";
 import { CustomerAccountOrderQueriesService } from "../application/customer-account-order-queries.service";
 import { PostgresCustomerAccountOrderContextReader } from "./customer-account-order-context.repository";
+import { PostgresOrderActionProjectionStore } from "./order-action-projection.repository";
 
 export function customerAccountServices(pool: Pool, edits: OrderEditService) {
   const store = new PostgresOrderEditStore(pool);
@@ -41,6 +42,8 @@ export function customerAccountServices(pool: Pool, edits: OrderEditService) {
         edits,
         connection: () => customerEdits.connection(),
         context: new PostgresCustomerAccountOrderContextReader(pool),
+        actions: new PostgresOrderActionProjectionStore(pool),
+        now: () => new Date(),
         report: (event) =>
           console.error(
             JSON.stringify({

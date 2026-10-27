@@ -91,7 +91,8 @@ export function CustomerOrderPanel({
     error: null as string | null,
   });
   const order = state.order;
-  const displayedOrder = order ?? summary;
+  // A newer native financial summary must not be replaced by cached action data.
+  const displayedOrder = summary ?? order;
   const fulfillmentLabel =
     knownCustomerOrderFulfillment(displayedOrder?.fulfillment)?.label ??
     (row
@@ -303,7 +304,7 @@ export function CustomerOrderPanel({
               </div>
             )}
             {!accessNotice && state.loading && (
-              <p role="status">Loading order options…</p>
+              <p role="status">Order options are being refreshed. Your order has not changed.</p>
             )}
             {!accessNotice && state.error && (
               <div className="csz-panel-error" role="alert">
@@ -359,6 +360,9 @@ export function CustomerOrderPanel({
                     : "Edit order",
                 () => onEdit(order!.omsOrderId),
               )}
+            {state.loading && showChangeActions && (
+              <button type="button" className="csz-panel-option" disabled>Edit order</button>
+            )}
             {showChangeActions &&
               addressUrl &&
               (canChangeAddress ? (
@@ -431,6 +435,9 @@ export function CustomerOrderPanel({
             {state.returnOrder?.order.lines.some(
               (line) => line.eligibleQuantity > 0,
             ) && option("Return items", () => onReturn(state.returnOrder!))}
+            {state.loading && ["fulfilled", "partial"].includes(row.dataset.fulfillment ?? "") && row.dataset.cancelled !== "true" && (
+              <button type="button" className="csz-panel-option" disabled>Return items</button>
+            )}
             {returns.map((item) => (
               <button
                 type="button"
