@@ -152,7 +152,7 @@ integration("durable customer action lookup and transactional source invalidatio
   });
   it("catalog metadata changes do not fan out but changed return weights invalidate evidence", async () => {
     const scope = await claim(); await store.complete(scope, SNAPSHOT, NOW, new Date(NOW.getTime() + 60_000));
-    await pool.query("UPDATE catalog.product_variants SET name=name || ' revised' WHERE id IN (SELECT product_variant_id FROM oms.oms_order_lines WHERE order_id=100)");
+    await pool.query("UPDATE catalog.product_variants SET name=name || ' revised',weight_grams=weight_grams WHERE id IN (SELECT product_variant_id FROM oms.oms_order_lines WHERE order_id=100)");
     expect((await read()).orders[0].state).toBe("ready");
     await pool.query("UPDATE catalog.product_variants SET weight_grams=weight_grams+1 WHERE id IN (SELECT product_variant_id FROM oms.oms_order_lines WHERE order_id=100)");
     expect((await read()).orders[0].state).toBe("refreshing");

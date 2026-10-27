@@ -79,6 +79,10 @@ LANGUAGE plpgsql SET search_path=pg_catalog,oms,wms,returns,channels AS $$
 DECLARE value jsonb; before_value jsonb; source jsonb; ids bigint[]; all_ids bigint[]:=ARRAY[]::bigint[]; identifier bigint; record_id bigint;
 BEGIN
   IF TG_OP='UPDATE' AND (to_jsonb(OLD)-'updated_at')=(to_jsonb(NEW)-'updated_at') THEN RETURN NEW; END IF;
+  -- UPDATE OF also fires when an ORM lists an unchanged weight alongside other
+  -- changed fields. Only an actual weight change affects return inspection.
+  IF TG_ARGV[0]='catalog_variant' AND TG_OP='UPDATE'
+    AND (to_jsonb(OLD)->'weight_grams') IS NOT DISTINCT FROM (to_jsonb(NEW)->'weight_grams') THEN RETURN NEW; END IF;
   IF TG_OP<>'INSERT' THEN before_value=to_jsonb(OLD); END IF;
   IF TG_OP<>'DELETE' THEN value=to_jsonb(NEW); END IF;
   -- Invalidate BOTH parents if a record is relinked. No slow provider I/O and no
