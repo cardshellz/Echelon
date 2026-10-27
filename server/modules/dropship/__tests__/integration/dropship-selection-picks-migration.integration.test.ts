@@ -46,6 +46,7 @@ import {
   type SelectionGoldenEntry,
   type SelectionOracleTime,
 } from "../fixtures/selection-oracle.fixture";
+import { LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL } from "../fixtures/listing-end-reduced.fixture";
 
 /**
  * The picks migration of PR B against a real PostgreSQL (step 1 plan S2-5, PLAN-B v4.1 §15.3).
@@ -273,6 +274,9 @@ async function createPicksDatabase(seeds: readonly string[]): Promise<PicksDatab
   let pool: pg.Pool | undefined;
   try {
     await installPicksMigrationPrerequisites(database.pool);
+    // PR C's end requests (reduced, empty, no keys): SPR and the effects reader read each listing's open end since C2
+    // (PLAN-C v4.1 §7); with none open, every answer and fingerprint is main's, so the golden still holds.
+    await database.pool.query(LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL);
     for (const seed of seeds) await database.pool.query(seed);
     pool = new pg.Pool({ connectionString: database.connectionString, max: 8 });
     const opened = pool;
@@ -737,11 +741,15 @@ function picksOfVendor(picks: readonly string[], vendorId: number): number[] {
   return picks.filter((key) => key.startsWith(`${vendorId}:`)).map((key) => Number(key.split(":")[1])).sort((left, right) => left - right);
 }
 
-/** A listing as the stock decision receives it from SPR: the effects reader's row without #1900's end facts. */
+/**
+ * A listing as the stock decision receives it from SPR: the effects reader's row without #1900's end facts and
+ * without PR C's end request id and push-in-flight flag (SPR reads only the open end's state, PLAN-C v4.1 §7).
+ */
 function withoutEndFacts(input: StockDecisionInput): StockDecisionInput {
   if (!input.listing) return input;
-  const { marketplaceEndedAt: _ended, marketplaceIssueCodes: _issues, ...listing } = input.listing as StockDecisionInput["listing"]
-    & { marketplaceEndedAt?: unknown; marketplaceIssueCodes?: unknown };
+  const { marketplaceEndedAt: _ended, marketplaceIssueCodes: _issues, openEndId: _endId, pushInFlight: _inFlight, ...listing } =
+    input.listing as StockDecisionInput["listing"]
+      & { marketplaceEndedAt?: unknown; marketplaceIssueCodes?: unknown; openEndId?: unknown; pushInFlight?: unknown };
   return { ...input, listing };
 }
 
@@ -883,6 +891,8 @@ describeDatabase.sequential("picks migration: the readers on the converted schem
         const effects = decideSelectionEffects({
           now, insertIds: sizes.filter((id) => !facts.pickedBefore.has(id)), deleteIds: sizes.filter((id) => facts.pickedBefore.has(id)),
           candidates: facts.candidates, adminRules: facts.adminRules, overrides: facts.overrides, stores: facts.stores,
+          // PR C: no end planned, so every listing keeps B's quantity decision, the one compared with SPR's here.
+          ends: { endPlans: [], hiddenRemovedIds: [], supersedeIds: [], stillEnding: [], endReview: [], endedReAdd: [] },
         });
         entries.push(...effects.entries.map((entry) => entry[1]));
       } finally {

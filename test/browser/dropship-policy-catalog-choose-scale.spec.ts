@@ -4,6 +4,7 @@ import {
   MAILERS_CATEGORY_ID,
   MARZ,
   ROW_FACT,
+  SHOP,
   SLEEVES_CATEGORY_ID,
   TOPLOADERS_CATEGORY_ID,
   chooseRowsFixture,
@@ -34,7 +35,6 @@ const CHOOSE_PATH = `${CATALOG_PATH}/choose`;
 const ENVELOPES_CATEGORY_ID = 61;
 
 const CONFIRM_NONE = "Nothing changes on your eBay listings now.";
-const CONFIRM_NOT_ENDED = "Removed items are set to quantity 0 on eBay. Their listings aren't ended.";
 const CONFIRM_SCOPE = "Your choice applies to all your stores.";
 const STALE = "Your saved choices changed after this page loaded. Review them and save again.";
 const SAVING_STILL = "Still saving… eBay updates are in progress. Your changes are kept.";
@@ -136,7 +136,7 @@ function expectClean(state: StubState) {
   expect(state.errors).toEqual([]);
   expect(state.reads.filter((read) => read.path === "/api/dropship/catalog/selection-rules")).toEqual([]);
   // Every body carried this page's version (§12.6).
-  for (const call of [...state.changePreviews, ...state.changeCalls]) expect(call.body.clientVersion).toBe(2);
+  for (const call of [...state.changePreviews, ...state.changeCalls]) expect(call.body.clientVersion).toBe(3);
 }
 
 test("C1 1,433 match: the header box, then Check all 1,433 that match, adds the 1,121 not selected in one save", async ({ page }) => {
@@ -151,7 +151,7 @@ test("C1 1,433 match: the header box, then Check all 1,433 that match, adds the 
   await match.getByRole("button", { name: "Check all 1,433 that match" }).click();
   await expect(status(page)).toHaveText("Not saved: 1,121 to add · 0 to remove");
   // One id read with the table's filters: the ids, never a rule or a category name (§12.3).
-  expect(idReads(state)).toEqual(["?selection=all&idsOnly=true&purpose=add&clientVersion=2"]);
+  expect(idReads(state)).toEqual(["?selection=all&idsOnly=true&purpose=add&clientVersion=3"]);
   await expect(match).toHaveCount(0);
 
   await saveButton(page).click();
@@ -185,7 +185,7 @@ test("C2 ticking a category adds only its sizes not selected yet, says later ite
   await expect(line).toHaveAttribute("data-tick", "all");
   await expect(status(page)).toHaveText("Not saved: 20 to add · 0 to remove");
   // Only the category's id, whatever the table shows (D26).
-  expect(idReads(state)).toEqual([`?categoryId=${ENVELOPES_CATEGORY_ID}&selection=all&idsOnly=true&purpose=add&clientVersion=2`]);
+  expect(idReads(state)).toEqual([`?categoryId=${ENVELOPES_CATEGORY_ID}&selection=all&idsOnly=true&purpose=add&clientVersion=3`]);
 
   await saveAndConfirm(page);
   await expect(status(page)).toHaveText("Saved. 20 added, 0 removed.");
@@ -202,8 +202,10 @@ test("C3 unticking a fully selected category removes all of it, and the question
     { name: "Sleeves", categoryId: SLEEVES_CATEGORY_ID, count: 6 },
   ]);
   const toploaders = inCategory(rows, TOPLOADERS_CATEGORY_ID);
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: rows, picks: picksOf(rows),
-    liveVariantIds: { [MARZ.storeConnectionId]: ids(toploaders.slice(0, 3)) } });
+  // On a Shopify store: since PR C a removal ends an eBay listing instead (PLAN-C v4.1 §4.4 rule 4; the end journeys
+  // are dropship-policy-catalog-end.spec.ts), and a Shopify listing still only goes to quantity 0.
+  const state = await openCatalog(page, CHOOSE_PATH, { stores: [MARZ, SHOP], chooseRows: rows, picks: picksOf(rows),
+    liveVariantIds: { [SHOP.storeConnectionId]: ids(toploaders.slice(0, 3)) } });
   const line = categoryLine(page, TOPLOADERS_CATEGORY_ID);
   await expect(line).toHaveText("Toploaders · 8 of 8 selected");
   await expect(line).toHaveAttribute("data-tick", "all");
@@ -215,9 +217,12 @@ test("C3 unticking a fully selected category removes all of it, and the question
 
   await saveButton(page).click();
   await expect(confirmLines(page)).toHaveText(["0 added · 8 removed",
-    "On Marz Cards: 3 listings are set to quantity 0, so buyers can't buy them.", CONFIRM_NOT_ENDED, CONFIRM_SCOPE]);
+    "On Test Shop: 3 listings are set to quantity 0, so buyers can't buy them.", CONFIRM_SCOPE]);
   await confirmSave(page);
   await expect(status(page)).toHaveText("Saved. 0 added, 8 removed.");
+  // The save echoed the preview's ends (none: nothing on eBay is ended), bound to its hash (PLAN-C v4.1 §4.6).
+  expect(state.changeCalls[0].body).toMatchObject({ expectedEnds: { listingIds: [], hiddenRemovedIds: [] },
+    expectedOtherEntriesHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
   expect(sentIds(state, 0, "remove")).toEqual(ids(toploaders));
   expect(sentIds(state, 0, "add")).toEqual([]);
   await expect(line).toHaveText("Toploaders · 0 of 8 selected");
@@ -250,7 +255,7 @@ test("C4 Select everything is off with the room as its reason when everything wo
     "Adds every item Card Shellz offers that isn't selected yet (30). Items Card Shellz adds later aren't added. You'll see a notice for new items in categories you sell from.");
   await expect(status(fits)).toHaveText("Not saved: 30 to add · 0 to remove");
   // No filter at all (D27).
-  expect(idReads(state)).toEqual(["?selection=all&idsOnly=true&purpose=add&clientVersion=2"]);
+  expect(idReads(state)).toEqual(["?selection=all&idsOnly=true&purpose=add&clientVersion=3"]);
   await saveAndConfirm(fits);
   await expect(status(fits)).toHaveText("Saved. 30 added, 0 removed.");
   expect(sentIds(state, 0, "add")).toEqual(ids(rows.slice(10)));
@@ -413,10 +418,11 @@ test("C10 over the cap: Uncheck all 10,050 is too many at once; narrowed to one 
   ]);
   const sleeves = inCategory(rows, SLEEVES_CATEGORY_ID);
   const live = ids(sleeves.slice(0, 3));
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: rows, picks: picksOf(rows),
-    liveVariantIds: { [MARZ.storeConnectionId]: live },
-    // While the vendor reads the question, one of the three ends on eBay: the removal goes through with two (§7.5).
-    afterChangePreview: [(stub) => { stub.endedVariantIds = { [MARZ.storeConnectionId]: [live[0]] }; }] });
+  // On a Shopify store, where a removal still only sets quantity 0 (PR C ends eBay listings; PLAN-C v4.1 §4.4 rule 4).
+  const state = await openCatalog(page, CHOOSE_PATH, { stores: [MARZ, SHOP], chooseRows: rows, picks: picksOf(rows),
+    liveVariantIds: { [SHOP.storeConnectionId]: live },
+    // While the vendor reads the question, one of the three ends on the store: the removal goes through with two (§7.5).
+    afterChangePreview: [(stub) => { stub.endedVariantIds = { [SHOP.storeConnectionId]: [live[0]] }; }] });
   await box(page, "Select all shown").uncheck();
   const match = page.getByTestId("catalog-choose-match");
   await match.getByRole("button", { name: "Uncheck all 10,050 that match" }).click();
@@ -431,13 +437,13 @@ test("C10 over the cap: Uncheck all 10,050 is too many at once; narrowed to one 
   await match.getByRole("button", { name: "Uncheck all 9,000 that match" }).click();
   await expect(status(page)).toHaveText("Not saved: 0 to add · 9,000 to remove");
   expect(idReads(state)).toEqual([
-    "?selection=all&idsOnly=true&purpose=remove&clientVersion=2",
-    `?categoryId=${SLEEVES_CATEGORY_ID}&selection=all&idsOnly=true&purpose=remove&clientVersion=2`,
+    "?selection=all&idsOnly=true&purpose=remove&clientVersion=3",
+    `?categoryId=${SLEEVES_CATEGORY_ID}&selection=all&idsOnly=true&purpose=remove&clientVersion=3`,
   ]);
 
   await saveButton(page).click();
   await expect(confirmLines(page)).toHaveText(["0 added · 9,000 removed",
-    "On Marz Cards: 3 listings are set to quantity 0, so buyers can't buy them.", CONFIRM_NOT_ENDED, CONFIRM_SCOPE]);
+    "On Test Shop: 3 listings are set to quantity 0, so buyers can't buy them.", CONFIRM_SCOPE]);
   await confirmSave(page);
   await expect(status(page)).toHaveText("Saved. A few listings changed on eBay while you were deciding; 2 listings are set to quantity 0.");
   expect(state.changeCalls.map((call) => call.status)).toEqual([201]);
@@ -553,7 +559,7 @@ test("N1 the new-items notice: Review shows the category's new items, two are ch
   await expect(page.getByTestId("catalog-choose-show")).toHaveText("New from Card Shellz");
   await expect(page.getByTestId("catalog-choose-category")).toHaveText("Envelopes (12)");
   await expect(page.getByTestId("catalog-choose-shown")).toHaveText("Showing all 3");
-  expect(listReads(state)).toContain(`?categoryId=${ENVELOPES_CATEGORY_ID}&selection=new&includeFacets=false&clientVersion=2&page=1&limit=200`);
+  expect(listReads(state)).toContain(`?categoryId=${ENVELOPES_CATEGORY_ID}&selection=new&includeFacets=false&clientVersion=3&page=1&limit=200`);
   await box(page, "Select Envelopes 0003, Pack of 50").check();
   await box(page, "Select Envelopes 0003, Pack of 75").check();
   await expect(status(page)).toHaveText("Not saved: 2 to add · 0 to remove");
@@ -575,7 +581,7 @@ test("N1 the new-items notice: Review shows the category's new items, two are ch
 
   await page.getByRole("button", { name: "Got it: 1 new item from Card Shellz in Envelopes", exact: true }).click();
   await expect(noticeLine(page, ENVELOPES_CATEGORY_ID)).toHaveCount(0);
-  expect(state.noticeAcknowledges).toEqual([{ body: { clientVersion: 2, categoryId: ENVELOPES_CATEGORY_ID, throughArrivalId: 103 }, status: 200 }]);
+  expect(state.noticeAcknowledges).toEqual([{ body: { clientVersion: 3, categoryId: ENVELOPES_CATEGORY_ID, throughArrivalId: 103 }, status: 200 }]);
   // The review of that category is over: the table shows all of it again, and focus is on the next line.
   await expect(page.getByTestId("catalog-choose-show")).toHaveText("All");
   await expect(page.getByTestId("catalog-choose-shown")).toHaveText("Showing all 12");
@@ -589,7 +595,7 @@ test("N1 the new-items notice: Review shows the category's new items, two are ch
   expect(state.changeCalls).toHaveLength(1);
   expect(state.picks.size).toBe(12);
   expect(state.reads.filter((read) => read.path === "/api/dropship/catalog/new-items").length).toBeGreaterThanOrEqual(4);
-  for (const read of state.reads.filter((entry) => entry.path === "/api/dropship/catalog/new-items")) expect(read.search).toBe("?clientVersion=2");
+  for (const read of state.reads.filter((entry) => entry.path === "/api/dropship/catalog/new-items")) expect(read.search).toBe("?clientVersion=3");
   expectClean(state);
 });
 
@@ -602,8 +608,8 @@ test("N3 Got it while New from Card Shellz lists every category: the acknowledge
   const sleeves = inCategory(rows, SLEEVES_CATEGORY_ID);
   const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: rows, picks: picksOf([...envelopes.slice(0, 6), ...sleeves.slice(0, 4)]),
     catalogArrivals: arrivals([...envelopes.slice(9), sleeves[7]]), noticeMarks: marks([ENVELOPES_CATEGORY_ID, SLEEVES_CATEGORY_ID]) });
-  const envelopesNew = `?categoryId=${ENVELOPES_CATEGORY_ID}&selection=new&includeFacets=false&clientVersion=2&page=1&limit=200`;
-  const everyNew = "?selection=new&includeFacets=false&clientVersion=2&page=1&limit=200";
+  const envelopesNew = `?categoryId=${ENVELOPES_CATEGORY_ID}&selection=new&includeFacets=false&clientVersion=3&page=1&limit=200`;
+  const everyNew = "?selection=new&includeFacets=false&clientVersion=3&page=1&limit=200";
   const readsOf = (search: string) => listReads(state).filter((read) => read === search).length;
 
   await page.getByRole("button", { name: "Review: 3 new items from Card Shellz in Envelopes", exact: true }).click();
@@ -633,7 +639,7 @@ test("N3 Got it while New from Card Shellz lists every category: the acknowledge
   await expect(page.getByText("No items match your search and filters.")).toBeVisible();
   expect(readsOf(envelopesNew)).toBe(2);
   // Nothing was added: Got it only moved the notice's mark.
-  expect(state.noticeAcknowledges).toEqual([{ body: { clientVersion: 2, categoryId: ENVELOPES_CATEGORY_ID, throughArrivalId: 103 }, status: 200 }]);
+  expect(state.noticeAcknowledges).toEqual([{ body: { clientVersion: 3, categoryId: ENVELOPES_CATEGORY_ID, throughArrivalId: 103 }, status: 200 }]);
   expect(state.changePreviews).toEqual([]);
   expect(state.changeCalls).toEqual([]);
   expect(state.picks.size).toBe(10);

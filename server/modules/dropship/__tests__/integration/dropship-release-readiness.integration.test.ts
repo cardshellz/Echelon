@@ -7,6 +7,7 @@ import {
   OLDER_PROCESS_GRACE_MS,
 } from "../../domain/catalog-code-version";
 import {
+  catalogVersionAtLeastSettled,
   catalogVersionSettled,
   deleteStaleProcessHeartbeats,
   hasLiveOlderCatalogProcess,
@@ -134,6 +135,20 @@ describeDatabase.sequential("release readiness (PostgreSQL)", () => {
     expect(await catalogVersionSettled(pool, { version: 3, settleMs: NEW_VERSION_SETTLE_MS })).toBe(false);
   });
 
+  it("settles picks writes on version 2 or any later one: a database where only version 3 ran opens once 3 settles (review SAV-1)", async () => {
+    const settleSeconds = NEW_VERSION_SETTLE_MS / 1000;
+    const atLeastTwo = () => catalogVersionAtLeastSettled(pool, { minVersion: 2, settleMs: NEW_VERSION_SETTLE_MS });
+    expect(await atLeastTwo()).toBe(false);
+    await writeProcessHeartbeat(pool, { processKey: "web.3:boot-c", catalogCodeVersion: 3 });
+    await firstSeenAgo(3, settleSeconds - EDGE_MARGIN_SECONDS);
+    expect(await atLeastTwo()).toBe(false);
+    await firstSeenAgo(3, settleSeconds + EDGE_MARGIN_SECONDS);
+    expect(await atLeastTwo()).toBe(true);
+    // The exact check is unchanged (the end worker's gate on version 3 itself), and a version below never counts.
+    expect(await catalogVersionSettled(pool, { version: 2, settleMs: NEW_VERSION_SETTLE_MS })).toBe(false);
+    expect(await catalogVersionAtLeastSettled(pool, { minVersion: 4, settleMs: NEW_VERSION_SETTLE_MS })).toBe(false);
+  });
+
   it("lists an older process still reporting 30 minutes after the newest version first ran, and nothing before", async () => {
     const alertSeconds = OLDER_PROCESS_ALERT_AFTER_MS / 1000;
     await writeProcessHeartbeat(pool, { processKey: "web.1:boot-old", catalogCodeVersion: 1 });
@@ -165,6 +180,6 @@ describeDatabase.sequential("release readiness (PostgreSQL)", () => {
     expect((await pool.query(`SELECT process_key FROM dropship.dropship_process_heartbeats`)).rows)
       .toEqual([{ process_key: "web.2:recent" }]);
     expect((await pool.query(`SELECT count(*)::int AS n FROM dropship.dropship_catalog_code_versions`)).rows[0].n).toBe(1);
-    expect(DROPSHIP_CATALOG_CODE_VERSION).toBe(2);
+    expect(DROPSHIP_CATALOG_CODE_VERSION).toBe(3);
   });
 });

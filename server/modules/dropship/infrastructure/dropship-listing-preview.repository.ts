@@ -987,6 +987,9 @@ async function upsertVendorListingForPreview(
   //   may take a price nothing will send as the listing's (order acceptance's
   //   fallback price, the cost change controls' settings price);
   // - quantity_cap and metadata have no reader that decides anything.
+  // An ended listing stays `ended` with its `updated_at` (PLAN-C v4.1 §6.3, SB8): only a completed push moves a row
+  // off `ended`. The stock reader then counts the new item as a saved push newer than the end (its created_at after
+  // the row's updated_at), and the push's pre-read still sees the end, so no queue can resurrect an ended listing.
   const result = await client.query<{ id: number }>(
     `INSERT INTO dropship.dropship_vendor_listings AS existing
       (vendor_id, store_connection_id, product_variant_id, platform, status,
@@ -996,6 +999,7 @@ async function upsertVendorListingForPreview(
      ON CONFLICT (store_connection_id, product_variant_id)
      DO UPDATE SET
        status = CASE
+         WHEN existing.status = 'ended' THEN 'ended'
          WHEN NULLIF(BTRIM(existing.external_listing_id), '') IS NOT NULL
            AND existing.status = ANY($11::text[])
          THEN existing.status
@@ -1008,7 +1012,7 @@ async function upsertVendorListingForPreview(
        quantity_cap = EXCLUDED.quantity_cap,
        last_preview_hash = EXCLUDED.last_preview_hash,
        metadata = EXCLUDED.metadata,
-       updated_at = EXCLUDED.updated_at
+       updated_at = CASE WHEN existing.status = 'ended' THEN existing.updated_at ELSE EXCLUDED.updated_at END
      RETURNING id`,
     [
       input.vendorId,

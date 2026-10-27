@@ -75,12 +75,15 @@ class FakeChangeService {
   }
 }
 
+/** This release's page (PR C: version 3; an older page's step 1 POSTs are refused, PLAN-C v4.1 §4.1). */
 function previewBody(patch: Record<string, unknown> = {}) {
-  return { clientVersion: 2, expectedRevisionId: 41, add: { productVariantIds: [7] }, remove: { productVariantIds: [] }, ...patch };
+  return { clientVersion: DROPSHIP_CATALOG_CODE_VERSION, expectedRevisionId: 41, add: { productVariantIds: [7] }, remove: { productVariantIds: [] },
+    ...patch };
 }
 
 function changeBody(patch: Record<string, unknown> = {}) {
-  return { ...previewBody(), idempotencyKey: "catalog-selection:0001", expectedEffectsHash: HASH, ...patch };
+  return { ...previewBody(), idempotencyKey: "catalog-selection:0001", expectedEffectsHash: HASH,
+    expectedEnds: { listingIds: [], hiddenRemovedIds: [] }, expectedOtherEntriesHash: HASH, ...patch };
 }
 
 describe("the picks save routes (PLAN-B v4.1 §8)", () => {
@@ -140,6 +143,28 @@ describe("the picks save routes (PLAN-B v4.1 §8)", () => {
     const realUrl = await start(new FakeAtpService(), real);
     const unknown = await post(realUrl + PREVIEW, previewBody({ aFieldOfPrC: true }));
     expect(unknown).toMatchObject({ status: 400, body: { error: { code: "DROPSHIP_SELECTION_CHANGE_INVALID_INPUT" } } });
+  });
+
+  it.each([
+    ["a version-2 page", { clientVersion: 2 }],
+    ["a page that sends no version", { clientVersion: undefined }],
+  ])("PR C: refuses %s's preview with 409 PAGE_OUTDATED before the vendor read; its save goes to the service (replay first)", async (_label, patch) => {
+    const debug = vi.spyOn(logger, "debug").mockImplementation(() => undefined);
+    const atp = new FakeAtpService();
+    const changes = new FakeChangeService();
+    const url = await start(atp, changes);
+    const preview = await post(url + PREVIEW, previewBody(patch));
+    expect(preview).toMatchObject({ status: 409, body: { error: { code: "DROPSHIP_SELECTION_PAGE_OUTDATED", message: CATALOG_READ_WORDS.retired,
+      context: { clientVersion: patch.clientVersion ?? null, serverVersion: DROPSHIP_CATALOG_CODE_VERSION, classification: "permanent",
+        retryable: false } } } });
+    expect(atp.vendorReads).toBe(0);
+    expect(changes.previewInputs).toEqual([]);
+    expect(debug).toHaveBeenCalledWith("dropship.vendor_catalog.request_refused", expect.objectContaining({
+      error_code: "DROPSHIP_SELECTION_PAGE_OUTDATED", error_class: "permanent", status: 409, vendor_id: null }));
+    // The save: the route passes the body and its version on; the service refuses it after the replay lookup.
+    const body = changeBody(patch);
+    expect((await post(url + CHANGES, body)).status).toBe(201);
+    expect(changes.changeInputs).toEqual([{ vendorId: 10, actor: { actorType: "vendor", actorId: "member-1" }, body: JSON.parse(JSON.stringify(body)) }]);
   });
 
   it("parses a 20,000-id body with the bulk parser and answers 413 above 1 MiB with the save's words", async () => {
@@ -236,6 +261,10 @@ describe("every §14 code's answer (SAFETY-14, TESTS-9)", () => {
       level: "debug", errorClass: "transient", retryAfter: false },
     { label: "too large", code: SELECTION_CHANGE_ERROR_CODES.tooLarge, status: 422, context: { classification: "permanent" },
       level: "debug", errorClass: "permanent", retryAfter: false },
+    { label: "removal too large (PR C)", code: SELECTION_CHANGE_ERROR_CODES.removalTooLarge, status: 422,
+      context: { factSizes: 30_001, limit: 30_000, classification: "permanent" }, level: "debug", errorClass: "permanent", retryAfter: false },
+    { label: "page outdated (PR C, the save after its replay)", code: SELECTION_CHANGE_ERROR_CODES.pageOutdated, status: 409,
+      context: { classification: "permanent" }, level: "debug", errorClass: "permanent", retryAfter: false },
     { label: "paused: older version", code: SELECTION_CHANGE_ERROR_CODES.writesPaused, status: 503,
       context: { reason: "older_version_running", classification: "transient" }, level: "debug", errorClass: "transient", retryAfter: true },
     { label: "paused: disabled", code: SELECTION_CHANGE_ERROR_CODES.writesPaused, status: 503,
@@ -335,6 +364,9 @@ describe("every §14 code's answer (SAFETY-14, TESTS-9)", () => {
       [SELECTION_CHANGE_ERROR_CODES.effectsChanged]: 409,
       [SELECTION_CHANGE_ERROR_CODES.busy]: 409,
       [SELECTION_CHANGE_ERROR_CODES.tooLarge]: 422,
+      // PR C (PLAN-C v4.1 §4.1, §4.2): an older page reloads; a removal too large has its own 422.
+      [SELECTION_CHANGE_ERROR_CODES.pageOutdated]: 409,
+      [SELECTION_CHANGE_ERROR_CODES.removalTooLarge]: 422,
       [SELECTION_CHANGE_ERROR_CODES.writesPaused]: 503,
       [SELECTION_CHANGE_ERROR_CODES.rulesRetired]: 410,
       DROPSHIP_SELECTION_COUNT_INCONSISTENT: 500,
@@ -342,9 +374,9 @@ describe("every §14 code's answer (SAFETY-14, TESTS-9)", () => {
       [SELECTION_CHANGE_PLAN_MOVED]: 500,
     };
     for (const [code, status] of Object.entries(expected)) expect(statusForDropshipVendorCatalogError(code), code).toBe(status);
-    // Every code of the contract has a row above, except the two no route of this server answers through the map:
-    // the bulk parser's own 413 (asserted above) and PR C's page-outdated 409.
-    const answeredElsewhere = new Set([SELECTION_CHANGE_ERROR_CODES.requestTooLarge, SELECTION_CHANGE_ERROR_CODES.pageOutdated]);
+    // Every code of the contract has a row above, except the one no route answers through the map: the bulk parser's
+    // own 413 (asserted above).
+    const answeredElsewhere = new Set([SELECTION_CHANGE_ERROR_CODES.requestTooLarge]);
     for (const code of Object.values(SELECTION_CHANGE_ERROR_CODES)) {
       if (!answeredElsewhere.has(code as never)) expect(expected, code).toHaveProperty([code]);
     }

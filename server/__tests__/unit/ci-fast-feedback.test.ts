@@ -359,6 +359,10 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/__tests__/dropship-portal-cost-changes-page.test.ts",
       // PLAN-B v4.1 V17 (B2b deviation 11; review CLI-7/TST-3): the only pin of the admin "Items chosen" label.
       "client/src/pages/__tests__/dropship-launch-readiness-panels.test.ts",
+      // PLAN-C v4.1 §13.3 (TST-1, DC33): the admin section's client lib and the page's source contract (no browser harness
+      // mounts the staff page), registered by hand.
+      "client/src/lib/__tests__/dropship-listing-end-ops.test.ts",
+      "client/src/pages/__tests__/dropship-listing-end-ops.test.ts",
       "shared/dropship/__tests__/program-finance-money.test.ts",
       "shared/dropship/__tests__/program-finance-contract.test.ts",
       "shared/dropship/__tests__/program-finance-definitions.test.ts",
@@ -372,6 +376,8 @@ describe("fast CI preserves coverage and required checks", () => {
       "test/browser/dropship-policy-catalog-steps.spec.ts", "test/browser/dropship-policy-catalog-choose.spec.ts",
       // PLAN-B v4.1 V29: step 1 at scale, on the same stubs.
       "test/browser/dropship-policy-catalog-choose-scale.spec.ts",
+      // PLAN-C v4.1 §13.4: step 1's listing ends, on the same stubs.
+      "test/browser/dropship-policy-catalog-end.spec.ts",
       "test/browser/dropship-policy-catalog-publish-runs.spec.ts", "test/browser/dropship-policy-listing-access.spec.ts",
       // Review round 2 CT12: every file the step names, the cost changes portal spec too.
       "test/browser/dropship-policy-cost-changes-portal.spec.ts"]) {

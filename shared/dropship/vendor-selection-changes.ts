@@ -31,6 +31,13 @@ export const MAX_SELECTION_CHANGE_IDS = MAX_NAMED_CATALOG_GROUP_ITEMS;
 export const SELECTION_CHANGE_CAP = MAX_NAMED_CATALOG_GROUP_ITEMS;
 /** Skipped ids an answer names (the rest are counted). */
 export const SELECTION_CHANGE_SKIPPED_SHOWN = 20;
+/**
+ * The most sizes one save's facts may cover (PR C, PLAN-C v4.1 §4.2): the touched sizes and every size of the
+ * products a removal touches. Above it the save and its preview answer 422 DROPSHIP_SELECTION_REMOVAL_TOO_LARGE.
+ */
+export const MAX_SELECTION_FACT_SIZES = 30_000;
+/** The most eBay listings one save may end (PR C, §4.5); above it the same 422. */
+export const MAX_SELECTION_END_LISTINGS = 30_000;
 
 /** Every code the two routes answer with, besides the account codes every catalog route shares (§14). */
 export const SELECTION_CHANGE_ERROR_CODES = {
@@ -49,6 +56,11 @@ export const SELECTION_CHANGE_ERROR_CODES = {
   requestTooLarge: "DROPSHIP_REQUEST_TOO_LARGE",
   /** 409 from PR C's server only: a B page saving there is told to reload. */
   pageOutdated: "DROPSHIP_SELECTION_PAGE_OUTDATED",
+  /**
+   * 422 (PR C, PLAN-C v4.1 §4.2, FID-4): the removed products have more sizes, or the save would end more eBay
+   * listings, than one save covers. Not `tooLarge`, whose page words ask to undo additions.
+   */
+  removalTooLarge: "DROPSHIP_SELECTION_REMOVAL_TOO_LARGE",
 } as const;
 
 /** Why picks writes answer 503 `DROPSHIP_SELECTION_WRITES_PAUSED` (transient; `Retry-After: 5`). */
@@ -66,6 +78,9 @@ const count = z.number().int().nonnegative();
 const sha256Hex = z.string().regex(/^[a-f0-9]{64}$/);
 const idList = z.array(id).max(MAX_SELECTION_CHANGE_IDS);
 const side = z.object({ productVariantIds: idList }).strict();
+const endIdList = z.array(id).max(MAX_SELECTION_END_LISTINGS);
+const isStrictlyAscending = (ids: readonly number[]) => ids.every((value, index) => index === 0 || ids[index - 1]! < value);
+const ascendingEndIdList = endIdList.refine(isStrictlyAscending, { message: "End ids are unique and ascending." });
 
 /** The same bounds as every other dropship request key (dropship-selection-dtos.ts, listing-push-runs.ts). */
 export const selectionChangeIdempotencyKeySchema = z.string().trim().min(8).max(200);
@@ -102,10 +117,20 @@ export const selectionChangeRequestSchema = z.object({
   ...changeFields,
   idempotencyKey: selectionChangeIdempotencyKeySchema,
   expectedEffectsHash: sha256Hex,
+  /**
+   * PR C (PLAN-C v4.1 §4.6): the preview's `ends` sets and `otherEntriesHash`, echoed. Optional, so a B page's body
+   * still parses for its replay; a page of version 3 or later must send both, and the server proves them against
+   * `expectedEffectsHash` before anything else, so a save never ends a listing the vendor did not confirm.
+   */
+  expectedEnds: z.object({ listingIds: endIdList, hiddenRemovedIds: endIdList }).strict().optional(),
+  expectedOtherEntriesHash: sha256Hex.optional(),
 }).strict().refine(atLeastOneId, AT_LEAST_ONE_ID);
 export type SelectionChangeRequest = z.infer<typeof selectionChangeRequestSchema>;
 
-/** What a change does on one of the vendor's stores (PR C adds `ends`). Between PR B and PR C a removal only sets quantity 0. */
+/**
+ * What a change does on one of the vendor's stores. PR C's fields have defaults, so an answer PR B stored (without
+ * them) replays unchanged through this schema (PLAN-C v4.1 §4.8).
+ */
 export const selectionChangeStoreEffectsSchema = z.object({
   storeConnectionId: id,
   storeName: z.string(),
@@ -114,6 +139,10 @@ export const selectionChangeStoreEffectsSchema = z.object({
   goesToZero: count,
   /** Listings that get their quantity back shortly after the save. */
   startsSelling: count,
+  /** eBay listings Card Shellz ends because of this save (PR C). */
+  ends: count.default(0),
+  /** The store can be used now (`connected`); otherwise its ends wait for it (PR C). */
+  storeConnected: z.boolean().default(true),
 });
 export type SelectionChangeStoreEffects = z.infer<typeof selectionChangeStoreEffectsSchema>;
 
@@ -124,6 +153,27 @@ export const selectionChangeSkippedSchema = z.object({
 }).refine((skipped) => skipped.first.length === Math.min(skipped.count, SELECTION_CHANGE_SKIPPED_SHOWN), {
   message: "The named skipped ids are the first of the count.",
 });
+
+/**
+ * What a change ends, for the whole vendor (PR C, PLAN-C v4.1 §4.5): the eBay listings it ends and the hidden picks
+ * it removes with a wholly removed product (both ascending; the save's echo is checked against them), then counts:
+ * `otherSizes` of the ends belong to other sizes of products removed completely; `stillEnding`, `endReview` and
+ * `endedReAdd` are added sizes whose listing is still being ended, could not be ended yet, or was ended by Card Shellz.
+ */
+export const selectionChangeEndsSchema = z.object({
+  listingIds: ascendingEndIdList,
+  hiddenRemovedIds: ascendingEndIdList,
+  otherSizes: count,
+  stillEnding: count,
+  endReview: count,
+  endedReAdd: count,
+});
+export type SelectionChangeEnds = z.infer<typeof selectionChangeEndsSchema>;
+
+/** A change that ends nothing (and every answer PR B stored). A new object each time, so no answer shares one. */
+export function emptySelectionChangeEnds(): SelectionChangeEnds {
+  return { listingIds: [], hiddenRemovedIds: [], otherSizes: 0, stillEnding: 0, endReview: 0, endedReAdd: 0 };
+}
 
 const plannedFields = {
   /** Sizes this change picks / unpicks. */
@@ -141,6 +191,13 @@ const plannedFields = {
   /** Every store of the vendor, ascending by id, zero counts included. */
   effects: z.array(selectionChangeStoreEffectsSchema),
   effectsHash: sha256Hex,
+  /** PR C: what the change ends (empty in an answer PR B stored). */
+  ends: selectionChangeEndsSchema.default(emptySelectionChangeEnds),
+  /**
+   * PR C: the hash of every effect except the ends (`effectsHash` = sha256(ends hash ":" this)). The page echoes it
+   * with `ends`; absent in an answer PR B stored.
+   */
+  otherEntriesHash: sha256Hex.optional(),
 };
 
 const overCapMatches = (answer: { overCapAfter: boolean; selectedAfter: number; cap: number }) =>

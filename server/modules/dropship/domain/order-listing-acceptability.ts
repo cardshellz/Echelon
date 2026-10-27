@@ -21,7 +21,12 @@ import { DropshipError } from "./errors";
  * sync-back, plan v4 §7.3 step 8): sync-back writes `ended` with
  * `marketplace_ended_at`, the time it saw the end. That time is later than
  * the real end, so every order genuinely placed while the listing was live
- * passes; an order placed after it is refused as before.
+ * passes; an order placed after it is refused as before. Card Shellz's own
+ * end (PR C, PLAN-C v4.1 §8) leaves `marketplace_ended_at` NULL and records
+ * the time on its end request (`ended_at`, after eBay read the offer
+ * withdrawn), which the readers pass as `listingEndedAt`. An order refused
+ * because its listing had ended is reviewed by a person (DC14): eBay sold on a
+ * listing recorded as ended.
  *
  * This rule builds on the live-status rule (domain/listing-live-status), the
  * one definition of the statuses that always take orders and of a
@@ -71,6 +76,8 @@ export interface ListingOrderAcceptabilityInput {
   externalListingId: string | null;
   /** `dropship_vendor_listings.marketplace_ended_at`: when sync-back saw the listing ended; null otherwise. */
   marketplaceEndedAt?: Date | null;
+  /** PR C: the newest `ended_at` of the listing's ended end requests (Card Shellz's own end); null otherwise. */
+  listingEndedAt?: Date | null;
   /** The order's own time (the intake's `orderedAt`); null when the marketplace sent none. */
   orderedAt?: Date | null;
 }
@@ -92,12 +99,60 @@ export function decideListingOrderAcceptability(input: ListingOrderAcceptability
   return { acceptable: false, reason: "listing_status_not_orderable" };
 }
 
-/** An ended listing refuses the order unless both times are known and the order came first (no time, no proof). */
+/**
+ * An ended listing refuses the order unless both times are known and the order came first (no time, no proof). The
+ * vendor's end (sync-back) is the listing's current end when it is set: it is cleared by a completed push, so a set
+ * value is newer than any Card Shellz end before that push.
+ */
 function endedBeforeOrder(input: ListingOrderAcceptabilityInput): boolean {
-  const endedAt = input.marketplaceEndedAt ?? null;
+  const endedAt = listingEndTime(input);
   const orderedAt = input.orderedAt ?? null;
   if (endedAt === null || orderedAt === null) return true;
   return orderedAt.getTime() > endedAt.getTime();
+}
+
+function listingEndTime(input: Pick<ListingOrderAcceptabilityInput, "marketplaceEndedAt" | "listingEndedAt">): Date | null {
+  return input.marketplaceEndedAt ?? input.listingEndedAt ?? null;
+}
+
+/**
+ * The refusal of an order line whose listing had ended before the order (DC14,
+ * PLAN-C v4.1 §8 step 3), for either end: the vendor's (sync-back) or Card
+ * Shellz's (PR C). Permanent and for review, never retried: eBay took an
+ * order on a listing recorded as ended, and a person decides it (the ops
+ * check DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER counts these intakes).
+ */
+export const ORDER_LISTING_ENDED_BEFORE_ORDER_CODE = "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER";
+// PROPOSED (Stage 4, step 1 plan S2-5) (orderEndedBeforeOrder)
+export const ORDER_LISTING_ENDED_BEFORE_ORDER_MESSAGE =
+  "This order is for an eBay listing that was ended before the order was placed. Card Shellz will review it.";
+
+/** Which end refused the order: the vendor's on eBay (sync-back), Card Shellz's own, or none recorded (no proof). */
+export type ListingEndSource = "marketplace_end" | "card_shellz_end" | "unknown";
+
+export function listingEndedBeforeOrderError(input: {
+  context: Readonly<Record<string, unknown>>;
+  lineIndex: number;
+  listingId: number;
+  listingStatus: string;
+  marketplaceEndedAt: Date | null;
+  listingEndedAt: Date | null;
+  orderedAt: Date | null;
+}): DropshipError {
+  const endSource: ListingEndSource = input.marketplaceEndedAt !== null ? "marketplace_end"
+    : input.listingEndedAt !== null ? "card_shellz_end" : "unknown";
+  return new DropshipError(ORDER_LISTING_ENDED_BEFORE_ORDER_CODE, ORDER_LISTING_ENDED_BEFORE_ORDER_MESSAGE, {
+    ...input.context,
+    lineIndex: input.lineIndex,
+    listingId: input.listingId,
+    listingStatus: input.listingStatus,
+    endedAt: listingEndTime(input)?.toISOString() ?? null,
+    orderedAt: input.orderedAt?.toISOString() ?? null,
+    endSource,
+    requiresReview: true,
+    retryable: false,
+    classification: "permanent",
+  });
 }
 
 /**

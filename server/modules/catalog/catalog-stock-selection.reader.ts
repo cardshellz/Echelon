@@ -63,7 +63,29 @@ export async function readCatalogStockSelectionFactsForVariants(client: StockSel
   variantIds: readonly number[]): Promise<CatalogStockVariantFacts[]> {
   const ids = [...new Set(z.array(id).parse(variantIds))];
   if (ids.length === 0) return [];
-  const rows = (await client.query<Record<string, unknown>>(`SELECT pv.id,pv.product_id AS "productId",pv.sku,
+  const rows = (await client.query<Record<string, unknown>>(`${STOCK_VARIANT_FACTS_SELECT}
+    WHERE pv.id=ANY($1::integer[]) ORDER BY pv.id`, [ids])).rows;
+  return parseStockVariantFacts(rows);
+}
+
+/**
+ * The same facts as readCatalogStockSelectionFactsForVariants for every size of these products, in one statement
+ * (the dropship step 1 save decides which eBay listings a removal ends from every size of a removed product, PR C,
+ * PLAN-C v4.1 §4.2). Ascending by size id; at most `maxSizes + 1` rows, so a caller that bounds the read sees an
+ * overflow without reading every size of a very large product.
+ */
+export async function readCatalogStockSelectionFactsForProducts(client: StockSelectionQueryClient,
+  productIds: readonly number[], options: { maxSizes: number }): Promise<CatalogStockVariantFacts[]> {
+  const ids = [...new Set(z.array(id).parse(productIds))];
+  const maxSizes = z.number().int().positive().max(1_000_000).parse(options.maxSizes);
+  if (ids.length === 0) return [];
+  const rows = (await client.query<Record<string, unknown>>(`${STOCK_VARIANT_FACTS_SELECT}
+    WHERE pv.product_id=ANY($1::integer[]) ORDER BY pv.id LIMIT $2`, [ids, maxSizes + 1])).rows;
+  return parseStockVariantFacts(rows);
+}
+
+/** One size with its own product's facts: the columns both multi-product reads return. */
+const STOCK_VARIANT_FACTS_SELECT = `SELECT pv.id,pv.product_id AS "productId",pv.sku,
     pv.uom_type AS "uomType",pv.is_active AS "isActive",pv.requires_shipping AS "requiresShipping",
     pv.track_inventory AS "trackInventory",pv.sales_eligibility AS "salesEligibility",
     pv.ebay_listing_excluded AS "ebayListingExcluded",
@@ -71,7 +93,8 @@ export async function readCatalogStockSelectionFactsForVariants(client: StockSel
       'category',p.category,'ebayListingExcluded',p.ebay_listing_excluded,
       'productLineIds',ARRAY(SELECT product_line_id FROM catalog.product_line_products
         WHERE product_id=p.id ORDER BY product_line_id)) AS product
-    FROM catalog.product_variants pv INNER JOIN catalog.products p ON p.id=pv.product_id
-    WHERE pv.id=ANY($1::integer[]) ORDER BY pv.id`, [ids])).rows;
+    FROM catalog.product_variants pv INNER JOIN catalog.products p ON p.id=pv.product_id`;
+
+function parseStockVariantFacts(rows: readonly Record<string, unknown>[]): CatalogStockVariantFacts[] {
   return rows.map(({ product, ...variant }) => ({ product: productSchema.parse(product), variant: variantSchema.parse(variant) }));
 }

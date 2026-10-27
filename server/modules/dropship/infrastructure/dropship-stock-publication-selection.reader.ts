@@ -39,12 +39,20 @@ const targetSchema = z.object({
 const exposureRuleSchema = targetSchema.extend({ startsAt: z.date().nullable(), endsAt: z.date().nullable() });
 const pickSchema = z.object({ productVariantId: id });
 const overrideSchema = z.object({ productVariantId: id, enabledOverride: z.boolean().nullable() });
+/** The open states of a listing end request (PLAN-C v4.1 §3: one open end per listing; a failed end stays open). */
+export const OPEN_LISTING_END_STATES = ["pending", "ending", "failed"] as const;
+/** A bigint end request id as node-postgres returns it (text), read as a safe integer. */
+const endRequestId = z.string().regex(/^[1-9][0-9]{0,15}$/).transform(Number)
+  .refine(Number.isSafeInteger, { message: "End request ids must be safe integers." });
 /**
  * The listing as this reader decides and fingerprints it. Not strict: the
- * shared listing SQL also returns the store id and #1900's end facts for the
- * selection effects reader, and they are dropped here, so this reader's
- * fingerprint is byte for byte what it was before the SQL was shared
- * (PLAN-B v4.1 V21, R6). Zod builds the parsed object in this key order.
+ * shared listing SQL also returns the store id, #1900's end facts and PR C's
+ * end request facts for the selection effects reader, and they are dropped
+ * here, so this reader's fingerprint is byte for byte what it was before the
+ * SQL was shared (PLAN-B v4.1 V21, R6). The one PR C fact it reads is the
+ * open end's state (PLAN-C v4.1 §7), which reaches the fingerprint only as
+ * `endOpen: true` on a listing with an open end. Zod builds the parsed object
+ * in this key order.
  */
 const listingSchema = z.object({
   id, productVariantId: id,
@@ -52,14 +60,28 @@ const listingSchema = z.object({
   externalListingId: z.string().min(1).nullable(), externalOfferId: z.string().min(1).nullable(),
   livePushItemId: id.nullable(),
   vendorQuantityLimit: z.number().int().min(0).max(2_147_483_647).nullable(),
+  openEndState: z.enum(OPEN_LISTING_END_STATES).nullable(),
 });
 /** A row of DROPSHIP_STOCK_LISTING_ROWS_SQL with every column it returns (the selection effects reader's parse). */
 export const dropshipStockListingRowSchema = listingSchema.extend({
   storeConnectionId: id,
   marketplaceEndedAt: z.date().nullable(),
   marketplaceIssueCodes: z.array(z.string()),
+  openEndId: endRequestId.nullable(),
+  pushInFlight: z.boolean(),
 });
 export type DropshipStockListingRow = z.infer<typeof dropshipStockListingRowSchema>;
+
+/**
+ * The listing as the stock decision receives it from either reader: the row,
+ * plus `endOpen: true` while an end request is open (PLAN-C v4.1 §7, D42).
+ * One function for SPR and the effects reader, so both decide a listing from
+ * the same facts.
+ */
+export function withListingEndState<Row extends { openEndState: (typeof OPEN_LISTING_END_STATES)[number] | null }>(row: Row):
+  Row & { endOpen?: true } {
+  return row.openEndState === null ? row : { ...row, endOpen: true };
+}
 
 /**
  * The vendor's listing rows of these sizes on these stores, each with its
@@ -69,12 +91,27 @@ export type DropshipStockListingRow = z.infer<typeof dropshipStockListingRowSche
  * (PLAN-B v4.1 §7.7, V21; R5). $1 vendor id, $2 store ids, $3 size ids. A
  * listing counts only on its own store's platform. Ordered by store, then
  * size; one store's rows are therefore in size order, as before.
+ *
+ * PR C (PLAN-C v4.1 §4.2 item 4, §7) adds the listing's open end request (at
+ * most one: the open-end unique index) and whether a push may be on its way
+ * to eBay: a `processing` item, or a `queued` one stale recovery put back
+ * after a worker died mid-send (`result.staleRecovery`), which may have
+ * reached eBay unrecorded. A plain `queued` item is not in flight: the
+ * push-time selection check blocks an unpicked size before eBay. The EXISTS
+ * joins jobs on vendor, store and size like the intent lateral, because job
+ * items have no listing index.
  */
 export const DROPSHIP_STOCK_LISTING_ROWS_SQL = `SELECT vl.id, vl.store_connection_id AS "storeConnectionId",
     vl.product_variant_id AS "productVariantId",vl.status,vl.external_listing_id AS "externalListingId",
     vl.external_offer_id AS "externalOfferId", intent.id AS "livePushItemId",
     vl.vendor_quantity_limit AS "vendorQuantityLimit",
-    vl.marketplace_ended_at AS "marketplaceEndedAt", vl.marketplace_issue_codes AS "marketplaceIssueCodes"
+    vl.marketplace_ended_at AS "marketplaceEndedAt", vl.marketplace_issue_codes AS "marketplaceIssueCodes",
+    open_end.id::text AS "openEndId", open_end.state AS "openEndState",
+    EXISTS (SELECT 1 FROM dropship.dropship_listing_push_job_items fi
+      INNER JOIN dropship.dropship_listing_push_jobs fj ON fj.id=fi.job_id
+      WHERE fj.vendor_id=vl.vendor_id AND fj.store_connection_id=vl.store_connection_id
+        AND fi.product_variant_id=vl.product_variant_id AND fi.listing_id=vl.id
+        AND (fi.status='processing' OR (fi.status='queued' AND fi.result ? 'staleRecovery'))) AS "pushInFlight"
     FROM dropship.dropship_vendor_listings vl
     INNER JOIN dropship.dropship_store_connections listing_store
       ON listing_store.id=vl.store_connection_id AND listing_store.platform=vl.platform
@@ -89,6 +126,8 @@ export const DROPSHIP_STOCK_LISTING_ROWS_SQL = `SELECT vl.id, vl.store_connectio
         AND ji.result->'listingIntent'->>'platform'=vl.platform
         AND (vl.status<>'ended' OR ji.created_at>vl.updated_at)
       ORDER BY ji.id DESC LIMIT 1) intent ON true
+    LEFT JOIN dropship.dropship_listing_end_requests open_end
+      ON open_end.listing_id=vl.id AND open_end.state IN ('pending','ending','failed')
     WHERE vl.vendor_id=$1 AND vl.store_connection_id=ANY($2::integer[]) AND vl.product_variant_id=ANY($3::integer[])
     ORDER BY vl.store_connection_id, vl.product_variant_id`;
 
@@ -121,6 +160,7 @@ export async function readDropshipListingStockSelection(client: StockSelectionQu
     [store.vendorId, [store.id], productVariantIds])).rows : []);
   if ([listings, overrides].some(rows => new Set(rows.map(row => row.productVariantId)).size !== rows.length))
     throw new DropshipError("DROPSHIP_STOCK_SELECTION_AMBIGUOUS", "Multiple saved selections or listings describe this store variant.");
+  const decisionListings = listings.map(withListingEndState);
   const variants = productVariantIds.map(productVariantId => {
     const candidate = dropshipStockSelectionCandidate(catalog.product, catalog.variants.find(row => row.id === productVariantId) ?? null,
       productVariantId);
@@ -129,17 +169,20 @@ export async function readDropshipListingStockSelection(client: StockSelectionQu
       candidate,
       rules, picked: pickedIds.has(productVariantId),
       override: overrides.find(row => row.productVariantId === productVariantId) ?? null,
-      listing: listings.find(row => row.productVariantId === productVariantId) ?? null,
+      listing: decisionListings.find(row => row.productVariantId === productVariantId) ?? null,
       config: store.config, storePaused: store.status === "paused", now: input.now,
     });
   });
   // Fingerprints describe effective intent and exact identity, not the time a
   // preview happened or a changing stock balance. Scheduled rules affect it when
   // their effective decision changes.
-  // The vendor limit (eBay sync-back) joins the fingerprint only when a listing has one, so every fingerprint
-  // without a limit is byte for byte the one main computed.
-  const fingerprintListings = listings.map(({ vendorQuantityLimit, ...listing }) =>
-    vendorQuantityLimit === null ? listing : { ...listing, vendorQuantityLimit });
+  // The vendor limit (eBay sync-back) and an open end (PR C, §7) join the fingerprint only when a listing has
+  // them, so every fingerprint without either is byte for byte the one main computed. The end's state is not in
+  // it: pending, ending and failed all hold the listing at zero.
+  const fingerprintListings = listings.map(({ vendorQuantityLimit, openEndState, ...listing }) => {
+    const limited = vendorQuantityLimit === null ? listing : { ...listing, vendorQuantityLimit };
+    return openEndState === null ? limited : { ...limited, endOpen: true };
+  });
   const fingerprint = createHash("sha256").update(JSON.stringify({
     productId: input.productId, store, catalog, listings: fingerprintListings,
     // Additive listing status metadata must not invalidate existing stock proofs.

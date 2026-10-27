@@ -2,7 +2,7 @@
  * Catalog step 1's new-items notice requests (step 1 plan S2-5, PR B;
  * PLAN-B v4.1 §11.4, §12.2): the notice's read and "Got it".
  *
- * - `GET /api/dropship/catalog/new-items?clientVersion=2` once per step 1
+ * - `GET /api/dropship/catalog/new-items?clientVersion=<page version>` once per step 1
  *   visit, after each save and after each "Got it"; read through
  *   `readDropshipAnswer` like every step 1 read (V11), so an older server's
  *   answer is "site updating" and read again on step 3's schedule.

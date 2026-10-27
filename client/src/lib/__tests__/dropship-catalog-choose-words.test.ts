@@ -93,7 +93,7 @@ describe("catalog step 1 words", () => {
     expect(CHOOSE_WORDS.overCapState(10_050)).toBe("10,050 selected, over the 10,000 limit. Publishing refuses more than 10,000. Remove some, then publish.");
   });
 
-  it("W7 (§13) the save question says only what Echelon does, and B never ends a listing", () => {
+  it("W7 (§13) the save question says only what Echelon does", () => {
     expect(CHOOSE_WORDS.confirmTitle).toBe("Save your changes?");
     expect(CHOOSE_WORDS.confirmCounts(12, 8, 0)).toBe("12 added · 8 removed");
     expect(CHOOSE_WORDS.confirmCounts(12, 8, 3)).toBe("12 added · 8 removed · 3 were already as you chose");
@@ -104,11 +104,53 @@ describe("catalog step 1 words", () => {
     expect(CHOOSE_WORDS.confirmResume("Card Corner", 1)).toBe("On Card Corner: 1 listing gets its quantity back shortly after you save, at the price it has on eBay now. To send today's price, publish it in step 3.");
     expect(CHOOSE_WORDS.confirmNone).toBe("Nothing changes on your eBay listings now.");
     expect(CHOOSE_WORDS.confirmScope).toBe("Your choice applies to all your stores.");
-    expect(CHOOSE_WORDS.confirmNotEnded).toBe("Removed items are set to quantity 0 on eBay. Their listings aren't ended.");
     expect([CHOOSE_WORDS.confirmSave, CHOOSE_WORDS.confirmCancel]).toEqual(["Save changes", "Cancel"]);
-    // FIDELITY2: nothing promises what eBay shows, and nothing says a listing is ended (that is PR C).
+    // FIDELITY2: nothing promises what eBay shows, and B's lines never say a listing is ended (PR C's own lines do, W7b).
     for (const words of [CHOOSE_WORDS.confirmZero("S", 2), CHOOSE_WORDS.confirmResume("S", 2), CHOOSE_WORDS.confirmNone]) {
       expect(words).not.toMatch(/\bend(s|ed)\b|delist|removed from eBay/i);
+    }
+    // PR C deleted B's "aren't ended" line (PLAN-C v4.1 §11): a removal now ends its eBay listings.
+    expect(Object.keys(CHOOSE_WORDS)).not.toContain("confirmNotEnded");
+  });
+
+  it("W7b (PLAN-C v4.1 §11) PR C's end lines, button and saved line, word for word, one and many", () => {
+    expect(CHOOSE_WORDS.confirmEnd("Marz Cards", 3))
+      .toBe("On Marz Cards: 3 eBay listings will be ended. To sell one again later, choose it here and publish it in step 3.");
+    expect(CHOOSE_WORDS.confirmEnd("Marz Cards", 1))
+      .toBe("On Marz Cards: 1 eBay listing will be ended. To sell one again later, choose it here and publish it in step 3.");
+    expect(CHOOSE_WORDS.confirmEnd("Marz Cards", 1_200)).toContain("1,200 eBay listings will be ended.");
+    expect(CHOOSE_WORDS.confirmEndWaitsForStore("Marz Cards", 3))
+      .toBe("On Marz Cards: 3 eBay listings will be ended when the store can be used again. They stay at quantity 0 until then.");
+    expect(CHOOSE_WORDS.confirmEndWaitsForStore("Marz Cards", 1))
+      .toBe("On Marz Cards: 1 eBay listing will be ended when the store can be used again. It stays at quantity 0 until then.");
+    expect(CHOOSE_WORDS.confirmEndOtherSizes(2))
+      .toBe("2 of these are listings of other sizes of products you removed completely: sizes you removed earlier, or that Card Shellz isn't offering now.");
+    expect(CHOOSE_WORDS.confirmEndOtherSizes(1))
+      .toBe("1 of these is a listing of another size of a product you removed completely: a size you removed earlier, or that Card Shellz isn't offering now.");
+    expect(CHOOSE_WORDS.confirmEndHidden(4))
+      .toBe("Removing every size you can see of a product also removes 4 of its sizes that Card Shellz isn't offering right now.");
+    expect(CHOOSE_WORDS.confirmEndHidden(1))
+      .toBe("Removing every size you can see of a product also removes 1 of its sizes that Card Shellz isn't offering right now.");
+    expect(CHOOSE_WORDS.confirmStillEnding(2))
+      .toBe("2 of the items you're adding are still being ended on eBay. When that's done, publish them again in step 3.");
+    expect(CHOOSE_WORDS.confirmStillEnding(1))
+      .toBe("1 of the items you're adding is still being ended on eBay. When that's done, publish it again in step 3.");
+    expect(CHOOSE_WORDS.confirmEndReview(2))
+      .toBe("2 of the items you're adding have an eBay listing Card Shellz couldn't end yet. Card Shellz is looking into it; they stay at quantity 0 until then.");
+    expect(CHOOSE_WORDS.confirmEndReview(1))
+      .toBe("1 of the items you're adding has an eBay listing Card Shellz couldn't end yet. Card Shellz is looking into it; it stays at quantity 0 until then.");
+    expect(CHOOSE_WORDS.confirmEndedReAdd(2)).toBe("2 of the items you're adding were ended on eBay. Publish them in step 3 to sell them again.");
+    expect(CHOOSE_WORDS.confirmEndedReAdd(1)).toBe("1 of the items you're adding was ended on eBay. Publish it in step 3 to sell it again.");
+    expect(CHOOSE_WORDS.saveEndButton(1)).toBe("End 1 listing and save");
+    expect(CHOOSE_WORDS.saveEndButton(3)).toBe("End 3 listings and save");
+    expect(CHOOSE_WORDS.saveEndButton(12_000)).toBe("End 12,000 listings and save");
+    expect(CHOOSE_WORDS.savedEnding(1)).toBe("1 eBay listing is being ended.");
+    expect(CHOOSE_WORDS.savedEnding(3)).toBe("3 eBay listings are being ended.");
+    // One actor everywhere (FID-14): Card Shellz, never "we" or "Echelon".
+    for (const words of [CHOOSE_WORDS.confirmEnd("S", 2), CHOOSE_WORDS.confirmEndWaitsForStore("S", 2), CHOOSE_WORDS.confirmEndOtherSizes(2),
+      CHOOSE_WORDS.confirmEndHidden(2), CHOOSE_WORDS.confirmStillEnding(2), CHOOSE_WORDS.confirmEndReview(2), CHOOSE_WORDS.confirmEndedReAdd(2),
+      CHOOSE_WORDS.saveEndButton(2), CHOOSE_WORDS.savedEnding(2), CHOOSE_WORDS.tooManyRemoved]) {
+      expect(words).not.toMatch(/\bwe\b|Echelon|DROPSHIP_/i);
     }
   });
 
@@ -153,7 +195,8 @@ describe("catalog step 1 words", () => {
     expect(formatCatalogDollars(50_000)).toBe("$500");
   });
 
-  // Every string carries its stage's marker; PR B's new strings carry "Stage 3/5 (step 1 plan S2-5)" (PLAN-B v4.1 §13).
+  // Every string carries its stage's marker; PR B's new strings carry "Stage 3/5 (step 1 plan S2-5)" (PLAN-B v4.1 §13),
+  // PR C's "Stage 4 (step 1 plan S2-5)" (PLAN-C v4.1 §11).
   it("marks every string with its stage, and names no product line", () => {
     const source = readFileSync(join(process.cwd(), "client/src/lib/dropship-catalog-choose-words.ts"), "utf8");
     const body = source.slice(source.indexOf("export const CHOOSE_WORDS"), source.indexOf("export function describeCatalogListingTier"));
@@ -163,14 +206,17 @@ describe("catalog step 1 words", () => {
     for (const words of [body, how]) {
       for (const match of words.matchAll(/\n( {2}\/\/ [^\n]*\n)?( {2}\w+: )/g)) {
         expect(match[1], `no comment above ${match[2].trim()}`)
-          .toMatch(/\/\/ (Interim \(step 1 PROPOSAL\)|Kept|Stage 2 \(step 1 plan S2-5\): PROPOSED|Stage 3\/5 \(step 1 plan S2-5\): PROPOSED)/);
+          .toMatch(/\/\/ (Interim \(step 1 PROPOSAL\)|Kept|Stage 2 \(step 1 plan S2-5\): PROPOSED|Stage 3\/5 \(step 1 plan S2-5\): PROPOSED|Stage 4 \(step 1 plan S2-5\): PROPOSED\.$)/m);
       }
     }
+    const stage4 = [...body.matchAll(/\n {2}\/\/ Stage 4 \(step 1 plan S2-5\): PROPOSED\.\n {2}(\w+): /g)].map((match) => match[1]);
+    expect(stage4).toEqual(["tooManyRemoved", "confirmEnd", "confirmEndWaitsForStore", "confirmEndOtherSizes", "confirmEndHidden",
+      "confirmStillEnding", "confirmEndReview", "confirmEndedReAdd", "saveEndButton", "savedEnding"]);
     const stage3 = [...body.matchAll(/\n {2}\/\/ Stage 3\/5 \(step 1 plan S2-5\): PROPOSED[^\n]*\n {2}(\w+): /g)].map((match) => match[1]);
     expect(stage3).toEqual([
       "showNotSelected", "categoriesHeading", "categoryLine", "categoryBox", "categoryShowOnly", "noCategory", "tickAdds", "tickRemoves",
       "checkAllShown", "checkAll", "uncheckAll", "matchChanged", "tooManyMatch", "selectEverything", "everythingAdds", "room", "overCapAdd",
-      "overCapState", "confirmCounts", "confirmZero", "confirmResume", "confirmNone", "confirmScope", "confirmNotEnded", "skipped", "saved",
+      "overCapState", "confirmCounts", "confirmZero", "confirmResume", "confirmNone", "confirmScope", "skipped", "saved",
       "savedDrift", "savingStill", "busy", "stale", "effectsChanged", "paused", "pausedStill",
       // Review round 1 CLI-1, TST-2: PROPOSED beyond §13 (BUILD-NOTES "## Review round 1", client group).
       "undoneSaveMoved",

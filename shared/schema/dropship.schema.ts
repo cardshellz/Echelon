@@ -2249,6 +2249,90 @@ export const dropshipMarketplaceSyncNotices = dropshipSchema.table("dropship_mar
     AND (${table.failureCode} IS NULL OR ${table.failureCode} ~ '^[A-Z0-9_]{1,120}$')`),
 ]);
 
+// ---------------------------------------------------------------------------
+// Listing ends (PR C; migration *_dropship_listing_end_requests.sql)
+// ---------------------------------------------------------------------------
+
+/**
+ * One end of one vendor eBay listing, requested when the vendor removed its size in Catalog step 1 (PLAN-C v4.1 §3).
+ * The step 1 save inserts it; the end worker and the staff routes move it. The writers are raw SQL; declared so a
+ * schema push keeps the table. No catalog key: a statement trigger proves the size and product against the listing,
+ * another refuses any change of the identity columns, and a third re-plans the product on a state change.
+ */
+export const dropshipListingEndRequests = dropshipSchema.table("dropship_listing_end_requests", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull(),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  listingId: integer("listing_id").notNull(),
+  productId: integer("product_id").notNull(),
+  productVariantId: integer("product_variant_id").notNull(),
+  selectionRevisionId: integer("selection_revision_id").notNull(),
+  reason: varchar("reason", { length: 30 }).notNull(),
+  state: varchar("state", { length: 20 }).notNull(),
+  requestedIdentity: jsonb("requested_identity").notNull(),
+  resolvedIdentity: jsonb("resolved_identity"),
+  code: varchar("code", { length: 100 }),
+  message: text("message"),
+  context: jsonb("context").notNull().default(sql`'{}'::jsonb`),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  deferralCount: integer("deferral_count").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+  withdrawCallCount: integer("withdraw_call_count").notNull().default(0),
+  withdrawRequestedAt: timestamp("withdraw_requested_at", { withTimezone: true }),
+  withdrawReturnedAt: timestamp("withdraw_returned_at", { withTimezone: true }),
+  withdrawOutcome: varchar("withdraw_outcome", { length: 60 }),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  endedAt: timestamp("ended_at", { withTimezone: true }),
+  staffAction: varchar("staff_action", { length: 20 }),
+  staffActionKey: varchar("staff_action_key", { length: 200 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  version: integer("version").notNull().default(1),
+}, (table) => [
+  foreignKey({ name: "dropship_end_vendor_fk", columns: [table.vendorId], foreignColumns: [dropshipVendors.id] })
+    .onDelete("cascade"),
+  foreignKey({ name: "dropship_end_listing_fk", columns: [table.listingId], foreignColumns: [dropshipVendorListings.id] })
+    .onDelete("cascade"),
+  foreignKey({ name: "dropship_end_revision_fk", columns: [table.selectionRevisionId],
+    foreignColumns: [dropshipVendorSelectionRuleSetRevisions.id] }),
+  foreignKey({
+    name: "dropship_end_store_owner_fk",
+    columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId],
+  }).onDelete("cascade"),
+  uniqueIndex("dropship_end_one_open_idx").on(table.listingId).where(sql`state IN ('pending', 'ending', 'failed')`),
+  index("dropship_end_due_idx").on(table.nextAttemptAt, table.id).where(sql`next_attempt_at IS NOT NULL`),
+  index("dropship_end_vendor_product_open_idx").on(table.vendorId, table.productId)
+    .where(sql`state IN ('pending', 'ending', 'failed')`),
+  index("dropship_end_store_decided_idx").on(table.storeConnectionId, table.decidedAt.desc())
+    .where(sql`state IN ('ended', 'failed')`),
+  index("dropship_end_withdraw_started_idx").on(table.storeConnectionId, table.withdrawRequestedAt)
+    .where(sql`withdraw_requested_at IS NOT NULL`),
+  index("dropship_end_listing_ended_idx").on(table.listingId, table.endedAt.desc()).where(sql`state = 'ended'`),
+  index("dropship_end_state_idx").on(table.state, table.id),
+  check("dropship_end_reason_chk", sql`${table.reason} IN ('size_removed', 'product_removed')`),
+  check("dropship_end_state_chk",
+    sql`${table.state} IN ('pending', 'ending', 'ended', 'failed', 'superseded', 'resolved')`),
+  check("dropship_end_requested_identity_chk", sql`jsonb_typeof(${table.requestedIdentity}) = 'object'`),
+  check("dropship_end_resolved_identity_chk",
+    sql`${table.resolvedIdentity} IS NULL OR jsonb_typeof(${table.resolvedIdentity}) = 'object'`),
+  check("dropship_end_context_chk", sql`jsonb_typeof(${table.context}) = 'object'`),
+  check("dropship_end_attempt_count_chk", sql`${table.attemptCount} >= 0`),
+  check("dropship_end_deferral_count_chk", sql`${table.deferralCount} >= 0`),
+  check("dropship_end_withdraw_call_count_chk", sql`${table.withdrawCallCount} BETWEEN 0 AND 3`),
+  check("dropship_end_staff_action_chk",
+    sql`${table.staffAction} IS NULL OR ${table.staffAction} IN ('retry', 'resolve_ended', 'resolve_left')`),
+  check("dropship_end_version_chk", sql`${table.version} > 0`),
+  check("dropship_end_ended_at_chk", sql`(${table.state} = 'ended') = (${table.endedAt} IS NOT NULL)`),
+  check("dropship_end_due_chk", sql`(${table.state} IN ('pending', 'ending')) = (${table.nextAttemptAt} IS NOT NULL)`),
+  check("dropship_end_decided_chk",
+    sql`(${table.state} IN ('ended', 'failed', 'superseded', 'resolved')) = (${table.decidedAt} IS NOT NULL)`),
+  check("dropship_end_withdraw_chk", sql`${table.withdrawReturnedAt} IS NULL
+    OR (${table.withdrawRequestedAt} IS NOT NULL AND ${table.withdrawReturnedAt} >= ${table.withdrawRequestedAt})`),
+  check("dropship_end_ending_identity_chk", sql`${table.state} <> 'ending' OR ${table.resolvedIdentity} IS NOT NULL`),
+  check("dropship_end_staff_key_chk", sql`(${table.staffAction} IS NULL) = (${table.staffActionKey} IS NULL)`),
+]);
+
 export const dropshipWalletAccounts = dropshipSchema.table(
   "dropship_wallet_accounts",
   {

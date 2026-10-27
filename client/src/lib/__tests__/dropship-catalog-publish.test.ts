@@ -101,9 +101,9 @@ function summary(overrides: Partial<DropshipCatalogSelectionSummary> = {}): Drop
 }
 
 describe("limits and schedules", () => {
-  it("pins the page version to the server's B version, the check chunk under the preview cap, and the run poll", () => {
-    // PR B set both this and DROPSHIP_CATALOG_CODE_VERSION (server/modules/dropship/domain/catalog-code-version.ts) to 2.
-    expect(CATALOG_PAGE_CLIENT_VERSION).toBe(2);
+  it("pins the page version to the server's C version, the check chunk under the preview cap, and the run poll", () => {
+    // PR C set both this and DROPSHIP_CATALOG_CODE_VERSION (server/modules/dropship/domain/catalog-code-version.ts) to 3.
+    expect(CATALOG_PAGE_CLIENT_VERSION).toBe(3);
     // One release's page and server carry one version: raising one without the other fails here (review round 2 CT6).
     expect(CATALOG_PAGE_CLIENT_VERSION).toBe(DROPSHIP_CATALOG_CODE_VERSION);
     expect(CHECK_CHUNK_SIZE).toBe(200);
@@ -144,7 +144,7 @@ describe("errors (§4.12)", () => {
 
   it("(review round 1 CLI-2) an answer from code older than this page: site updating, or an older catalog server's 503 for a newer page; nothing else", () => {
     expect(isOlderCatalogServerError(apiError(503, DROPSHIP_SITE_UPDATING_CODE))).toBe(true);
-    // What an A dyno answers every step 1 and step 3 read of this page (clientVersion 2 > its 1; §4 row 3, §12.6).
+    // What an A dyno answers every step 1 and step 3 read of this page (this page's version > its own; §4 row 3, §12.6).
     const newerPage = apiError(503, DROPSHIP_CATALOG_READ_ERROR_CODES.writesPaused, "x", { reason: DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON });
     expect(isOlderCatalogServerError(newerPage)).toBe(true);
     // Another paused reason, a plain 503, the same reason on another status or code, and no answer are not "updating".
@@ -318,6 +318,22 @@ describe("a run in the vendor's words", () => {
     }
     // A size the catalog no longer has (its names joined as null).
     expect(describeRunProblem(problem({ productName: null, variantName: null, sku: null })).name).toBe("Variant 101");
+  });
+
+  // PR C's push fence (PLAN-C v4.1 §6.2, §11): a size the vendor removed in step 1 whose eBay listing is being ended.
+  it("words the three listing end fence codes, never the server's text", () => {
+    const fenced = (code: string) => describeRunProblem({ productVariantId: 101, productId: 11, productName: "Envelope Single Pocket",
+      variantName: "Pack of 50", sku: "ENV-SGL-P50", outcome: "blocked", code, message: "server words", retryable: false });
+    expect(fenced("DROPSHIP_LISTING_END_IN_PROGRESS")).toMatchObject({
+      reason: "This listing is being ended on eBay, so it wasn't published.", nextStep: "Publish it again after it has ended." });
+    expect(fenced("DROPSHIP_LISTING_END_REVIEW")).toMatchObject({
+      reason: "Card Shellz is looking into this listing; it stays at quantity 0.", nextStep: null });
+    expect(fenced("DROPSHIP_LISTING_ENDED_SINCE_PUBLISH")).toMatchObject({
+      reason: "This listing was ended after you published it.", nextStep: "Publish it again in step 3 to sell it." });
+    expect([PUBLISH_WORDS.endInProgressRow, PUBLISH_WORDS.endInProgressStep, PUBLISH_WORDS.endReviewRow, PUBLISH_WORDS.endedSincePublishRow,
+      PUBLISH_WORDS.endedSincePublishStep]).toEqual(["This listing is being ended on eBay, so it wasn't published.",
+      "Publish it again after it has ended.", "Card Shellz is looking into this listing; it stays at quantity 0.",
+      "This listing was ended after you published it.", "Publish it again in step 3 to sell it."]);
   });
 });
 

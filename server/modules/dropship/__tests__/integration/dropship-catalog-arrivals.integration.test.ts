@@ -30,6 +30,8 @@ import {
   selectedVariantsMigrationSql,
 } from "../fixtures/selection-picks-migration.fixture";
 import { readSelectionOracleSnapshot } from "../fixtures/selection-oracle.fixture";
+// PR C's end requests (reduced, empty): SPR and the effects reader read each listing's open end since C2 (PLAN-C v4.1 §7).
+import { LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL } from "../fixtures/listing-end-reduced.fixture";
 import { dropshipCatalogNewItemsAnswerSchema } from "../../../../../shared/dropship/vendor-catalog-reads";
 
 /**
@@ -273,6 +275,7 @@ describeDatabase.sequential("the new-items notice and the conversion follow-up (
     const database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, `${picksMigrationSchemaSql}\n${noticeSchemaSql}`);
     try {
       await installPicksMigrationPrerequisites(database.pool);
+      await database.pool.query(LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL);
       await database.pool.query(releaseSeedSql);
     } catch (error) {
       await database.close();
@@ -778,6 +781,7 @@ describeDatabase.sequential("the B3 review cases on the real B file: release-win
     const database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, `${picksMigrationSchemaSql}\n${noticeSchemaSql}`);
     try {
       await installPicksMigrationPrerequisites(database.pool);
+      await database.pool.query(LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL);
       await database.pool.query(releaseSeedSql);
       await database.pool.query(reviewSeedSql);
     } catch (error) {
@@ -973,6 +977,7 @@ describeDatabase.sequential("a large tidy on the real B file (PostgreSQL, measur
     const database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, `${picksMigrationSchemaSql}\n${noticeSchemaSql}`);
     try {
       await installPicksMigrationPrerequisites(database.pool);
+      await database.pool.query(LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL);
       await database.pool.query(PICKS_PRODUCTION_INDEXES_SQL);
       await database.pool.query(tidySeedSql);
     } catch (error) {

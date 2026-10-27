@@ -31,6 +31,11 @@ describe("resolveDropshipWorkerSchedule", () => {
       initialDelayMs: 60_000, initialDelayEnvironmentVariable: "DROPSHIP_CATALOG_ARRIVALS_WORKER_INITIAL_DELAY_MS",
     });
     expect(resolveDropshipWorkerSchedule("catalogArrivals", { DROPSHIP_CATALOG_ARRIVALS_WORKER_INITIAL_DELAY_MS: "0" }).initialDelayMs).toBe(0);
+    // The listing end worker (PLAN-C v4.1 §5.2): every ten seconds like the push worker, 5 s after boot, on a delay no
+    // other worker uses.
+    expect(resolveDropshipWorkerSchedule("listingEnd", environment)).toEqual({
+      initialDelayMs: 5_000, initialDelayEnvironmentVariable: "DROPSHIP_LISTING_END_WORKER_INITIAL_DELAY_MS",
+    });
   });
 
   it("accepts a non-negative per-worker environment override", () => {

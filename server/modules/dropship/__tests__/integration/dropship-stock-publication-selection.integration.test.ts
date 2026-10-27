@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { readDropshipListingStockSelection } from "../../stock-publication-selection";
+import { LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL } from "../fixtures/listing-end-reduced.fixture";
 
 const configured = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const now = new Date("2026-10-12T12:00:00Z");
@@ -33,13 +34,15 @@ const MAIN_FINGERPRINT = "b0ef162dd96302db265a41d5a820f3e73b7d2520f7aece6d3b06a9
       CREATE TABLE dropship.dropship_listing_push_jobs(id integer PRIMARY KEY,vendor_id integer,store_connection_id integer,job_type text,status text);
       CREATE TABLE dropship.dropship_listing_push_job_items(id integer PRIMARY KEY,job_id integer,listing_id integer,product_variant_id integer,
         action text,status text,result jsonb,created_at timestamptz);
+      -- PR C's end requests (PLAN-C v4.1 §7), reduced: the shared listing SQL reads the open end of each listing.
+      ${LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL}
     `);
   }, 60_000);
   beforeEach(async () => {
     await database.pool.query(`TRUNCATE catalog.products,catalog.product_variants,catalog.product_line_products,
       dropship.dropship_store_connections,dropship.dropship_store_listing_configs,dropship.dropship_catalog_rules,
       dropship.dropship_vendor_selected_variants,dropship.dropship_vendor_variant_overrides,dropship.dropship_vendor_listings,
-      dropship.dropship_listing_push_jobs,dropship.dropship_listing_push_job_items;
+      dropship.dropship_listing_push_jobs,dropship.dropship_listing_push_job_items,dropship.dropship_listing_end_requests;
       INSERT INTO catalog.products VALUES (20,true,'active','Toploader','Supplies',false),(21,true,'active','Toploader','Supplies',false);
       INSERT INTO catalog.product_variants VALUES(101,20,'SKU-101','pack',true,true,true,'sellable',false),
         (102,20,'SKU-102','case',true,true,true,'sellable',false),(103,21,'SKU-103','pack',true,true,true,'sellable',false);
@@ -175,6 +178,27 @@ const MAIN_FINGERPRINT = "b0ef162dd96302db265a41d5a820f3e73b7d2520f7aece6d3b06a9
     expect((await read()).variants[0]).toMatchObject({ publishLimitUnits: 0 });
     await database.pool.query("UPDATE dropship.dropship_vendor_listings SET vendor_quantity_limit=NULL WHERE id=50");
     expect((await read()).fingerprint).toBe(before.fingerprint);
+  });
+
+  // PR C (PLAN-C v4.1 §7, D42): while an end is open nothing sells on the listing; main's fingerprint holds without one.
+  it("zeroes a listing with an open end request, and fingerprints only that an end is open", async () => {
+    const before = await read();
+    expect(before.fingerprint).toBe(MAIN_FINGERPRINT);
+    await database.pool.query("INSERT INTO dropship.dropship_listing_end_requests (listing_id, state) VALUES (50, 'pending')");
+    const pending = await read();
+    expect(pending.variants[0]).toMatchObject({ productVariantId: 101, action: "zero", reason: "listing_end_in_progress", listingSelected: true });
+    expect(pending.variants[1]).toEqual(before.variants[1]);
+    expect(pending.fingerprint).not.toBe(MAIN_FINGERPRINT);
+    for (const state of ["ending", "failed"]) {
+      await database.pool.query("UPDATE dropship.dropship_listing_end_requests SET state=$1 WHERE listing_id=50", [state]);
+      expect((await read()).fingerprint).toBe(pending.fingerprint);
+    }
+    // A closed end (superseded, or Card Shellz's finished end on a listing a push later relisted) is no longer open.
+    await database.pool.query("UPDATE dropship.dropship_listing_end_requests SET state='superseded' WHERE listing_id=50");
+    expect(await read()).toEqual(before);
+    await database.pool.query(`INSERT INTO dropship.dropship_listing_end_requests (listing_id, state, ended_at)
+      VALUES (50, 'ended', '2026-10-12T11:00:00Z')`);
+    expect((await read()).fingerprint).toBe(MAIN_FINGERPRINT);
   });
 
   it("rejects duplicate/invalid IDs and a missing store", async () => {
