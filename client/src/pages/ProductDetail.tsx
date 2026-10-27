@@ -2239,6 +2239,8 @@ export default function ProductDetail() {
     const searchParams = new URLSearchParams(searchStr);
     if (searchParams.get("receiptSetup") !== "1") return;
 
+    setActiveTab("variants");
+
     const unitsPerVariant = parsePositiveInt(searchParams.get("unitsPerVariant"));
     if (!unitsPerVariant) return;
 
@@ -2248,7 +2250,6 @@ export default function ProductDetail() {
 
     const hierarchyLevel = parsePositiveInt(searchParams.get("hierarchyLevel")) ?? 3;
     const uomType = inferLegacyVariantUomType({ hierarchyLevel, unitsPerVariant, isBaseUnit: false });
-    setActiveTab("variants");
     setEditingVariant(null);
     setSkuManuallyEdited(false);
     setNameManuallyEdited(false);

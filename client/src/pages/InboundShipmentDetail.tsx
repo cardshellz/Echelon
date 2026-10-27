@@ -5,7 +5,8 @@ import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { shipmentRecordedUnitSummary, shipmentDimensionBasisLabel } from "@/lib/shipment-unit-entry";
 import { ShipmentQuantityEditor } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
-import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
+import { clearReceiptUnitDraft, fetchShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
+import type { ShipmentReceiptUnitSelection } from "@shared/procurement/shipment-receipt-plan";
 import { ShipmentCustodyReceiptLinks } from "@/components/purchasing/ShipmentCustodyReceiptLinks";
 import { formatMills } from "@shared/utils/money";
 import { useEffect, useMemo, useState, useRef } from "react";
@@ -604,17 +605,14 @@ export default function InboundShipmentDetail() {
     }
   };
 
-  async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }) {
-    const query = new URLSearchParams({ purchaseOrderId: String(params.purchaseOrderId) });
-    const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
-    const body = await res.json().catch(() => null);
-    if (!res.ok) throw new Error(body?.error || "Failed to check shipment receipt packs");
-    return parseShipmentReceiptResolution(body, params);
+  async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }, selections?: ShipmentReceiptUnitSelection[]) {
+    return fetchShipmentReceiptResolution(params, selections);
   }
 
   async function createReceiptForShipment(
     params: { shipmentId: number; purchaseOrderId: number },
     navigation: NavigationSnapshot = captureNavigation(),
+    receiptUnitSelections: ShipmentReceiptUnitSelection[] = [],
   ) {
     if (navigation.isCurrent()) setCreatingShipmentReceipt(true);
     try {
@@ -629,10 +627,11 @@ export default function InboundShipmentDetail() {
           "Content-Type": "application/json",
           "Idempotency-Key": idempotencyKey,
         },
-        body: JSON.stringify({ purchaseOrderId: params.purchaseOrderId }),
+        body: JSON.stringify({ purchaseOrderId: params.purchaseOrderId, ...(receiptUnitSelections.length ? { receiptUnitSelections } : {}) }),
       });
       const body = await res.json().catch(() => null);
       if (!res.ok) throw new Error(body?.error || "Failed to create receipt");
+      clearReceiptUnitDraft(params);
       toast({ title: "Receipt created", description: `${body.receiptNumber} created from shipment` });
       invalidatePoViews();
       if (!navigation.isCurrent()) return;
@@ -691,24 +690,24 @@ export default function InboundShipmentDetail() {
     }
   }
 
-  async function refreshShipmentReceiptPackResolution() {
+  async function refreshShipmentReceiptPackResolution(selections?: ShipmentReceiptUnitSelection[]) {
     if (!pendingShipmentReceipt) return;
     const navigation = captureNavigation();
     setCheckingShipmentReceiptPacks(true);
     try {
-      const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt);
+      const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt, selections);
       if (!navigation.isCurrent()) return;
       setShipmentReceiptPackResolution(resolution);
     } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      throw err;
     } finally {
       if (navigation.isCurrent()) setCheckingShipmentReceiptPacks(false);
     }
   }
 
-  function createPendingShipmentReceipt() {
+  function createPendingShipmentReceipt(selections: ShipmentReceiptUnitSelection[] = []) {
     if (!pendingShipmentReceipt) return;
-    createReceiptForShipment(pendingShipmentReceipt);
+    createReceiptForShipment(pendingShipmentReceipt, captureNavigation(), selections);
   }
 
   function openReceiptVariantSetup(line?: ShipmentReceiptPackResolutionLine) {

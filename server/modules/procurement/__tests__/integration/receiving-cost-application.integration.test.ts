@@ -297,6 +297,88 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await receiving.updateLine(line.id, { receivedQty: quantity, putawayLocationId: 99, expectedUnitVersion: receivingUnitVersion(line) }, actorId);
     return { receiptId: receipt.id as number, lineId: line.id as number };
   }
+
+  it("receives a missing shipment configuration through an explicit catalog choice without changing shipping or purchase quantities", async () => {
+    await pool.query(`UPDATE procurement.purchase_order_lines SET expected_receive_variant_id=NULL,product_variant_id=NULL WHERE id=21;
+      UPDATE procurement.inbound_shipment_lines SET product_variant_id=NULL WHERE id=11;
+      UPDATE catalog.product_variants SET is_active=false WHERE id=201`);
+    const before = await purchasing.getShipmentReceiptPackResolution(1, { purchaseOrderId: 10 });
+    expect(before).toMatchObject({ canCreateReceipt: false, unresolvedCount: 1, lines: [{ status: "selection_required" }] });
+    const receiptUnitSelections = [{ shipmentLineId: 11, productVariantId: 200, unitsPerVariant: 50, expectedBaseQty: 100 }];
+    const preview = await purchasing.getShipmentReceiptPackResolution(1, { purchaseOrderId: 10, receiptUnitSelections });
+    expect(preview).toMatchObject({ canCreateReceipt: true, lines: [{ receivePlan: { expectedQty: 2, unitsPerVariant: 50 } }] });
+    const receipt = await purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10, receiptUnitSelections });
+    expect(await storage.getReceivingLines(receipt.id)).toMatchObject([{ expectedQty: 2, unitsPerVariantSnapshot: 50, productVariantId: 200, inboundShipmentLineId: 11 }]);
+    expect((await pool.query("SELECT order_qty,received_qty FROM procurement.purchase_order_lines WHERE id=21")).rows[0]).toEqual({ order_qty: 200, received_qty: 0 });
+    expect((await pool.query("SELECT qty_shipped,carton_count FROM procurement.inbound_shipment_lines WHERE id=11")).rows[0]).toEqual({ qty_shipped: 100, carton_count: 2 });
+    expect((await pool.query("SELECT actual_cents FROM procurement.inbound_freight_costs WHERE id=31")).rows[0].actual_cents).toBe("5000");
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_lots")).rows[0].count).toBe(0);
+    const audit = await pool.query("SELECT actor,changes FROM public.audit_events WHERE actor=$1 AND action='procurement.shipment_receipt.receiving_configuration_selected'", [actorId]);
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0].changes).toMatchObject({ before: [{ productVariantId: null }], after: [{ productVariantId: 200, unitsPerVariant: 50, expectedQty: 2 }] });
+    const replay = await purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10, receiptUnitSelections });
+    expect(replay).toMatchObject({ id: receipt.id, reusedExisting: true });
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1 AND action='procurement.shipment_receipt.receiving_configuration_selected'", [actorId])).rows[0].count).toBe(1);
+  });
+
+  it("uses a newly added product configuration through receiving and posts exactly the shipment's original pieces", async () => {
+    await pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit)
+      VALUES(202,100,'AUDIT-NEW-CASE','Case of 100',100,'case',false)`);
+    const receiptUnitSelections = [{ shipmentLineId: 11, productVariantId: 202, unitsPerVariant: 100, expectedBaseQty: 100 }];
+    const receipt = await purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10, receiptUnitSelections });
+    const [line] = await storage.getReceivingLines(receipt.id);
+    expect(line).toMatchObject({ expectedQty: 1, unitsPerVariantSnapshot: 100, productVariantId: 202, sku: "AUDIT-NEW-CASE" });
+    await receiving.open(receipt.id, actorId);
+    await receiving.updateLine(line.id, { receivedQty: 1, putawayLocationId: 99, expectedUnitVersion: receivingUnitVersion(line) }, actorId);
+    await receiving.close(receipt.id, actorId);
+    expect((await pool.query("SELECT received_qty FROM procurement.purchase_order_lines WHERE id=21")).rows[0].received_qty).toBe(100);
+    expect((await pool.query("SELECT qty_received FROM procurement.po_receipts WHERE receiving_order_id=$1", [receipt.id])).rows).toEqual([{ qty_received: 100 }]);
+    expect((await pool.query("SELECT product_variant_id,qty_received FROM inventory.inventory_lots WHERE receiving_order_id=$1", [receipt.id])).rows).toEqual([{ product_variant_id: 202, qty_received: 1 }]);
+    expect(await lot()).toMatchObject({ product: "1000000", packaging: "100000", freight: "0", total: "1100000" });
+    await approveEvidence();
+    await shipment.finalizeAllocations(1, actorId);
+    await shipment.pushLandedCostsToLots(1, actorId);
+    // One 100-piece configuration carries the same extended value as two
+    // 50-piece configurations: $120 product + $10 packaging + $50 freight.
+    expect(await lot()).toMatchObject({ product: "1200000", packaging: "100000", freight: "500000", total: "1800000" });
+    expect((await pool.query(`SELECT count(*)::int AS count FROM ${qualifiedTable(schema.orderLineCosts)}`)).rows[0].count).toBe(0);
+  });
+
+  it("rejects a reviewed pack-size change before creating a receiving order", async () => {
+    const receiptUnitSelections = [{ shipmentLineId: 11, productVariantId: 200, unitsPerVariant: 50, expectedBaseQty: 100 }];
+    expect((await purchasing.getShipmentReceiptPackResolution(1, { purchaseOrderId: 10, receiptUnitSelections })).canCreateReceipt).toBe(true);
+    await pool.query("UPDATE catalog.product_variants SET units_per_variant=100 WHERE id=200");
+    await expect(purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10, receiptUnitSelections }))
+      .rejects.toMatchObject({ details: { code: "RECEIVING_UNIT_SOURCE_CHANGED" } });
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receiving_orders")).rows[0].count).toBe(0);
+  });
+
+  it("serializes competing configuration choices into one receipt and one audit", async () => {
+    await pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit)
+      VALUES(202,100,'AUDIT-OTHER-CASE','Case of 100',100,'case',false)`);
+    const results = await Promise.all([200, 202].map(productVariantId => purchasing.createReceiptFromShipment(1, actorId, {
+      purchaseOrderId: 10, receiptUnitSelections: [{ shipmentLineId: 11, productVariantId,
+        unitsPerVariant: productVariantId === 200 ? 50 : 100, expectedBaseQty: 100 }],
+    })));
+    expect(results[0].id).toBe(results[1].id);
+    const savedLines = await storage.getReceivingLines(results[0].id);
+    expect(savedLines).toHaveLength(1);
+    expect(savedLines[0].expectedQty * savedLines[0].unitsPerVariantSnapshot).toBe(100);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receiving_orders")).rows[0].count).toBe(1);
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1 AND action='procurement.shipment_receipt.receiving_configuration_selected'", [actorId])).rows[0].count).toBe(1);
+  });
+
+  it("rolls back the receipt when recording its selected configuration audit fails", async () => {
+    await pool.query(`CREATE FUNCTION public.reject_receipt_unit_test_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.action='procurement.shipment_receipt.receiving_configuration_selected' THEN RAISE EXCEPTION 'test audit unavailable'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER reject_receipt_unit_test_audit BEFORE INSERT ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.reject_receipt_unit_test_audit()`);
+    try {
+      await expect(purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10,
+        receiptUnitSelections: [{ shipmentLineId: 11, productVariantId: 200, unitsPerVariant: 50, expectedBaseQty: 100 }] })).rejects.toThrow(/test audit unavailable/);
+      expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receiving_orders")).rows[0].count).toBe(0);
+      expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receiving_lines")).rows[0].count).toBe(0);
+    } finally { await pool.query("DROP TRIGGER reject_receipt_unit_test_audit ON public.audit_events; DROP FUNCTION public.reject_receipt_unit_test_audit()"); }
+  });
   async function receive(quantity = 2) {
     const ids = await prepareReceipt(quantity);
     await receiving.close(ids.receiptId, actorId);

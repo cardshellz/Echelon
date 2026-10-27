@@ -48,7 +48,7 @@ function shipmentReceiptDbRows(input: {
 
 function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, any> = {}) {
   const captured: { order: any; lines: any } = { order: null, lines: null };
-  const tx = { execute: vi.fn(async (query: any) => {
+  const tx = { insert: vi.fn(() => ({ values: vi.fn(async () => undefined) })), execute: vi.fn(async (query: any) => {
     const text = sqlToStr(query);
     if (text.includes("from procurement.inbound_shipments") && text.includes("for update")) return { rows: [{ id: 84 }] };
     return db.execute(query);
@@ -97,6 +97,46 @@ function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, 
 }
 
 describe("createReceiptFromShipment", () => {
+  const selection = { shipmentLineId: 1, productVariantId: 469, unitsPerVariant: 10, expectedBaseQty: 20 };
+  it("offers actual product configurations for missing legacy setup and freezes the reviewed choice on the receipt", async () => {
+    const { svc, captured, storage, tx } = build({ getPurchaseOrderLines: vi.fn().mockResolvedValue([
+      { id: 228, purchaseOrderId: 140, productId: 327, expectedReceiveVariantId: null, unitCostMills: 26000 },
+    ]), getInboundShipmentLines: vi.fn().mockResolvedValue([
+      { id: 1, purchaseOrderId: 140, purchaseOrderLineId: 228, qtyShipped: 20, cartonCount: 3 },
+    ]), getProductVariantsByProductId: vi.fn().mockResolvedValue([{ id: 469, productId: 327, unitsPerVariant: 10, isActive: true }]) });
+    const before = await svc.getShipmentReceiptPackResolution(84, { purchaseOrderId: 140 });
+    expect(before).toMatchObject({ canCreateReceipt: false, lines: [{ status: "selection_required", blocking: true }] });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+    const preview = await svc.getShipmentReceiptPackResolution(84, { purchaseOrderId: 140, receiptUnitSelections: [selection] });
+    expect(preview).toMatchObject({ canCreateReceipt: true, receiptUnitSelections: [selection], lines: [{ receivePlan: { expectedQty: 2, unitsPerVariant: 10 } }] });
+    await svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 140, receiptUnitSelections: [selection] });
+    expect(captured.lines[0]).toMatchObject({ productVariantId: 469, unitsPerVariantSnapshot: 10, expectedQty: 2 });
+    expect(tx.insert).toHaveBeenCalled();
+  });
+  it.each([
+    { ...selection, shipmentLineId: 999 }, { ...selection, unitsPerVariant: 20 },
+    { ...selection, expectedBaseQty: 21 }, { ...selection, productVariantId: 999 },
+  ])("rejects stale or foreign receiving choices before any writes %j", async chosen => {
+    const { svc, storage } = build();
+    await expect(svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 140, receiptUnitSelections: [chosen] })).rejects.toThrow();
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+  it("rejects duplicate choices and requires an identified receiver", async () => {
+    const { svc, storage } = build();
+    await expect(svc.createReceiptFromShipment(84, "u1", { receiptUnitSelections: [selection, selection] })).rejects.toThrow();
+    await expect(svc.createReceiptFromShipment(84, undefined, { receiptUnitSelections: [selection] })).rejects.toMatchObject({ statusCode: 401 });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+  it("rejects a selection belonging to another PO on the same consolidated shipment", async () => {
+    const { svc, storage } = build({ getInboundShipmentLines: vi.fn().mockResolvedValue([
+      { id: 1, purchaseOrderId: 140, purchaseOrderLineId: 228, qtyShipped: 20 },
+      { id: 2, purchaseOrderId: 141, purchaseOrderLineId: 300, qtyShipped: 10 },
+    ]) });
+    await expect(svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 140,
+      receiptUnitSelections: [{ shipmentLineId: 2, productVariantId: 472, unitsPerVariant: 1, expectedBaseQty: 10 }] }))
+      .rejects.toMatchObject({ details: { code: "SHIPMENT_RECEIPT_SELECTION_SCOPE_CHANGED" } });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
   it("creates a shipment-linked draft receipt with lines from qtyShipped (scaled to the case)", async () => {
     const { svc, storage, captured, db, tx } = build();
     const order: any = await svc.createReceiptFromShipment(84, "u1");
@@ -214,7 +254,8 @@ describe("createReceiptFromShipment", () => {
       getProductVariantsByProductId: vi.fn().mockResolvedValue([{ id: 472, productId: 329, unitsPerVariant: 1, isActive: true }]),
     });
 
-    const order: any = await svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 141 });
+    const order: any = await svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 141,
+      receiptUnitSelections: [{ shipmentLineId: 2, productVariantId: 472, unitsPerVariant: 1, expectedBaseQty: 10 }] });
 
     expect(order).toMatchObject({ id: 999 });
     expect(captured.order).toMatchObject({
@@ -267,7 +308,7 @@ describe("createReceiptFromShipment", () => {
     const resolution = await svc.getShipmentReceiptPackResolution(84, { purchaseOrderId: 140 });
     expect(resolution).toMatchObject({ canCreateReceipt: false, unresolvedCount: 1, lineCount: 1 });
     expect(resolution.lines[0]).toMatchObject({ shipmentLineId: 1, status: "missing_piece_variant", blocking: true, receivePlan: null, unitsPerCarton: null });
-    expect(resolution.lines[0].issue).toMatch(/one-piece variant/);
+    expect(resolution.lines[0].issue).toMatch(/configuration that actually arrived/);
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
   });
 
