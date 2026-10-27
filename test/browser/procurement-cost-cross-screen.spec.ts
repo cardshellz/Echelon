@@ -37,7 +37,7 @@ async function installCostScreens(page: Page) {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (request.method() !== "GET") return route.fallback();
     if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" },
-      roles: ["admin"], permissions: ["purchasing:view", "purchasing:approve"] } });
+      roles: ["admin"], permissions: ["purchasing:view", "purchasing:approve", "inventory:view"] } });
     if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), subtotalCents: 100000, totalCents: 100000 } });
     if (path === "/api/purchase-orders/17/shipment-costs") return route.fulfill(state.failCosts
       ? { status: 503, json: { error: "Synthetic cost summary unavailable" } } : { json: state.costs });

@@ -39,7 +39,7 @@ import type {
 export interface IProductStorage {
   getAllProducts(includeInactive?: boolean, executor?: any): Promise<Product[]>;
   getProductById(id: number, executor?: any): Promise<Product | undefined>;
-  getProductBySku(sku: string): Promise<Product | undefined>;
+  getProductBySku(sku: string, executor?: any): Promise<Product | undefined>;
   getProductByShopifyProductId(shopifyProductId: string): Promise<Product | undefined>;
   createProduct(product: InsertProduct, executor?: any): Promise<Product>;
   updateProduct(id: number, updates: Partial<InsertProduct>, executor?: any): Promise<Product | null>;
@@ -141,8 +141,8 @@ export const productMethods: IProductStorage = {
     return result[0];
   },
 
-  async getProductBySku(sku: string): Promise<Product | undefined> {
-    const result = await db.select().from(products)
+  async getProductBySku(sku: string, executor: any = db): Promise<Product | undefined> {
+    const result = await executor.select().from(products)
       .where(eq(products.sku, sku.toUpperCase()));
     return result[0];
   },

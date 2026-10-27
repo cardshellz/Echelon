@@ -47,8 +47,8 @@ function workspace(): PurchaseWorkspace {
   };
 }
 
-async function setup(page: Page) {
-  const failures = await installFixtures(page);
+async function setup(page: Page, permissions?: readonly string[]) {
+  const failures = await installFixtures(page, { permissions });
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: workspace() }));
   return failures;
 }
@@ -207,7 +207,7 @@ test("recorded cost history shows exact lot lineage and COGS with a separate rec
   const data = { ...workspace(), costTrace: traceData };
   data.receipts[0] = { ...data.receipts[0], status: "closed", closedDate: "2026-09-07T12:00:00Z" };
   await page.route("**/api/auth/me", (route) => route.fulfill({ json: {
-    user: { id: "test-user", username: "test", role: "admin" }, permissions: ["purchasing:approve"], roles: ["admin"],
+    user: { id: "test-user", username: "test", role: "admin" }, permissions: ["purchasing:view", "purchasing:approve"], roles: ["admin"],
   } }));
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: data }));
   const keys: string[] = [];
@@ -266,7 +266,7 @@ test("recorded cost history shows exact lot lineage and COGS with a separate rec
 });
 
 test("cost history stays inspectable without exposing a retry to users without approval capability", async ({ page }) => {
-  const failures = await setup(page);
+  const failures = await setup(page, ["purchasing:view", "inventory:view"]);
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: { ...workspace(), costTrace: purchaseCostApplicationsFixture() } }));
   await page.goto("/purchase-orders/17?tab=lifecycle");
   await expect(page.getByTestId("receipt-cost-request-61")).toContainText("Retry required");

@@ -14,7 +14,7 @@ async function setup(page: Page, mode: Mode) {
   const state = { actor: "test-user", allowed: true, offline: false, detailFailure: 0, postings: 0 };
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actor, username: state.actor, role: "admin" }, roles: ["admin"], permissions: state.allowed ? ["purchasing:approve"] : [] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actor, username: state.actor, role: "admin" }, roles: ["admin"], permissions: ["purchasing:view", ...(state.allowed ? ["purchasing:approve"] : [])] } });
     const match = /^\/api\/purchase-orders\/(17|99)(\/approve|\/workspace)?$/.exec(path);
     if (!match) return route.fallback();
     const id = Number(match[1]), purchase = purchases.get(id)!;

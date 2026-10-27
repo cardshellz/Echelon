@@ -1,0 +1,2043 @@
+{
+  "version": 1,
+  "generatedAt": "2026-10-25T21:01:01.818Z",
+  "description": "Bounded synthetic PostgreSQL service-owner comparison; no live database or historical cleanup records accessed.",
+  "baselineHead": "719b60983453a5723f27d224953a536f30502b57",
+  "measuredCurrentHead": "4ad7c4a375d521f187b578340a88923d41273c10",
+  "quietSerialWindow": true,
+  "completeOwnerTierPairsCompared": 26,
+  "samplesPerOwnerAndTier": 3,
+  "exactCompleteOutputEquality": true,
+  "excludedOutputFields": [],
+  "helpers": [
+    {
+      "path": "test/performance/procurement/query-measurement.ts",
+      "sha256": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685"
+    },
+    {
+      "path": "test/performance/procurement/health-cost.fixture.ts",
+      "sha256": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7"
+    },
+    {
+      "path": "test/performance/procurement/run-health-cost.ts",
+      "sha256": "a46154c4784943aa57ee00500da6a7d5ae13279456718734d15f0d4a91fbba31"
+    },
+    {
+      "path": "test/performance/procurement/compare-health-cost.ts",
+      "sha256": "1fc45acd49f5b28f501e3dbdc3c0cce85937c6c29aef95f4ee2edb55222fb904"
+    },
+    {
+      "path": "test/performance/procurement/tsconfig.json",
+      "sha256": "e7f6fab018134f654f863543eee81c6db17f5113cb23bbc7e38c826fea2fd142"
+    }
+  ],
+  "measuredSourceHashes": {
+    "baseline": {
+      "server/modules/procurement/shipment-tracking.service.ts": "c0654a915b45cdbc78173414114a173489cc3e590f193770c0692b916b27adf4",
+      "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+      "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+      "server/modules/procurement/purchase-cost-status.repository.ts": "b23d481aeec34c95b8eba81b2a1c4b3882c289305bbac6990d460cc5211d11c3",
+      "server/modules/procurement/shipment-cost-posting-read.repository.ts": "4339f59234b4619a2e0cc02794118f51491b69db5d8079d9679cdd3d39f620ef",
+      "server/modules/procurement/procurement.storage.ts": "3c3cf5976213df3ab5a06b57fe2bf026c44c786a6bfb5566668c2889e60a9164",
+      "server/modules/procurement/domain/current-shipment-cost-source.ts": "664af0d6bf602c5632c7ddda298b7e3a9a8cd6c27a077869c9115be7ab820479",
+      "server/modules/procurement/shipment-health-evidence.repository.ts": null,
+      "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+      "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+      "test/performance/procurement/run-health-cost.ts": "a46154c4784943aa57ee00500da6a7d5ae13279456718734d15f0d4a91fbba31"
+    },
+    "current": {
+      "server/modules/procurement/shipment-tracking.service.ts": "40ea65c591204489fdefb380c64f138bea17594002c54b0769cae73a9486adf4",
+      "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+      "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+      "server/modules/procurement/purchase-cost-status.repository.ts": "b23d481aeec34c95b8eba81b2a1c4b3882c289305bbac6990d460cc5211d11c3",
+      "server/modules/procurement/shipment-cost-posting-read.repository.ts": "d1a0ce7f77fed2e1f25e15ac12a0ea4dabdd0c8f445fde5973a3497f11915032",
+      "server/modules/procurement/procurement.storage.ts": "3c3cf5976213df3ab5a06b57fe2bf026c44c786a6bfb5566668c2889e60a9164",
+      "server/modules/procurement/domain/current-shipment-cost-source.ts": "b61c1576859e993ee5fca216b7c030c305ded9ff1a166b75e7fec823db9c57dd",
+      "server/modules/procurement/shipment-health-evidence.repository.ts": "62d1f62e2f75bb176d42700e59d9102c97bd25c006b1f4e4ec852315bc36fdfb",
+      "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+      "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+      "test/performance/procurement/run-health-cost.ts": "a46154c4784943aa57ee00500da6a7d5ae13279456718734d15f0d4a91fbba31"
+    }
+  },
+  "profiles": [
+    {
+      "mode": "unresolved",
+      "tiers": [
+        10,
+        100,
+        500
+      ],
+      "linesPerShipment": 5,
+      "maxPoShipmentFanout": 100,
+      "installedTableCount": 114,
+      "installedIndexCount": 235,
+      "installedIndexesEqual": true,
+      "fixtureTableCountsEqual": true,
+      "databaseConfiguration": {
+        "version": "PostgreSQL 17.11 on x86_64-windows, compiled by msvc-19.44.35228, 64-bit",
+        "shared_buffers": "400kB",
+        "work_mem": "4MB",
+        "max_connections": "25"
+      },
+      "runs": [
+        {
+          "revision": "baseline",
+          "originalReport": "performance-1792960860677.json",
+          "originalReportSha256": "fa9dcfb3b87cec4e0fa2ff07b1cadbba63bb831a9ce0d116a4af85fe24000270",
+          "originalCleanupReceipt": "performance-wrapper-1792960860677.json",
+          "originalCleanupReceiptSha256": "cfb485f7b4d97613a13a4dd0c259ad9172317b355866dcaea0409d3412a938ca",
+          "startedAt": "2026-10-25T20:41:01.286Z",
+          "finishedAt": "2026-10-25T20:42:54.511Z",
+          "status": "passed",
+          "fixtureDisposed": true,
+          "wrapperExitCode": 0,
+          "ownedDatabaseDropped": true,
+          "sourceBeforeAfterEqual": true,
+          "tableFingerprints": [
+            {
+              "tier": 10,
+              "tableCount": 114,
+              "beforeAfterExactEqualityAsserted": true,
+              "retainedTableFingerprintSha256": "2588306e6e941c4829ae8ca7a2aa8936b37f8ac4e02a8e091a4a62e454b7564f"
+            },
+            {
+              "tier": 100,
+              "tableCount": 114,
+              "beforeAfterExactEqualityAsserted": true,
+              "retainedTableFingerprintSha256": "7e9b3ffbc627674ba29943091a311e8d85ba7a3223ce3103234ca8eba521d65f"
+            },
+            {
+              "tier": 500,
+              "tableCount": 114,
+              "beforeAfterExactEqualityAsserted": true,
+              "retainedTableFingerprintSha256": "03e1e2577cd04b8b386018f544d2eb2ecc84ce803be0e7ed3da917139d66e416"
+            }
+          ]
+        },
+        {
+          "revision": "current",
+          "originalReport": "performance-1792960988187.json",
+          "originalReportSha256": "9c37d2b051a22d1b6c380bfdded0e5e5ee4d8e9e4b47215656fd621aea9d6c43",
+          "originalCleanupReceipt": "performance-wrapper-1792960988187.json",
+          "originalCleanupReceiptSha256": "2b7531e21a50d9e48ecd0f573900802686f3fcf181b9f3a3cc20a8f0f3e7ce2c",
+          "startedAt": "2026-10-25T20:43:08.790Z",
+          "finishedAt": "2026-10-25T20:43:56.931Z",
+          "status": "passed",
+          "fixtureDisposed": true,
+          "wrapperExitCode": 0,
+          "ownedDatabaseDropped": true,
+          "sourceBeforeAfterEqual": true,
+          "tableFingerprints": [
+            {
+              "tier": 10,
+              "tableCount": 114,
+              "beforeAfterExactEqualityAsserted": true,
+              "retainedTableFingerprintSha256": "09bc9bfc20f2b63034d82e8e634e8a122831df27de620f2b84b77ae4a28ba217"
+            },
+            {
+              "tier": 100,
+              "tableCount": 114,
+              "beforeAfterExactEqualityAsserted": true,
+              "retainedTableFingerprintSha256": "a5c24156a76f017b94d4927838f3ea57691a2f7a76b4568d52bf03199a01700f"
+            },
+            {
+              "tier": 500,
+              "tableCount": 114,
+              "beforeAfterExactEqualityAsserted": true,
+              "retainedTableFingerprintSha256": "3efccad9334e183478843101bbdc1ba941a2b7eb4e8eb3902eae7937d08ec025"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "mode": "posted",
+      "tiers": [
+        10,
+        100
+      ],
+      "linesPerShipment": 5,
+      "maxPoShipmentFanout": 100,
+      "installedTableCount": 114,
+      "installedIndexCount": 235,
+      "installedIndexesEqual": true,
+      "fixtureTableCountsEqual": true,
+      "databaseConfiguration": {
+        "version": "PostgreSQL 17.11 on x86_64-windows, compiled by msvc-19.44.35228, 64-bit",
+        "shared_buffers": "400kB",
+        "work_mem": "4MB",
+        "max_connections": "25"
+      },
+      "runs": [
+        {
+          "revision": "baseline",
+          "originalReport": "performance-1792961049561.json",
+          "originalReportSha256": "3dce6a1fb3dfe82890ea97d9c5e93873125f7eed3db333b3f12e2b2e51d29c99",
+          "originalCleanupReceipt": "performance-wrapper-1792961049561.json",
+          "originalCleanupReceiptSha256": "305b5e8060af6210c1c074189cec62f08ca6f663fcd5a65167736ecccc9afed4",
+          "startedAt": "2026-10-25T20:44:10.054Z",
+          "finishedAt": "2026-10-25T20:50:02.228Z",
+          "status": "passed",
+          "fixtureDisposed": true,
+          "wrapperExitCode": 0,
+          "ownedDatabaseDropped": true,
+          "sourceBeforeAfterEqual": true,
+          "tableFingerprints": [
+            {
+              "tier": 10,
+              "tableCount": 114,
+              "beforeAfterExactEqualityAsserted": true,
+              "retainedTableFingerprintSha256": "f9cf73fa7435a1474daa61f1d6817b63a3f27e0603ff1723a1416ead5e262766"
+            },
+            {
+              "tier": 100,
+              "tableCount": 114,
+              "beforeAfterExactEqualityAsserted": true,
+              "retainedTableFingerprintSha256": "0ef37018baee2458de2e115bdaf8c2a620ea3e0143a589e21b331211097bc61c"
+            }
+          ]
+        },
+        {
+          "revision": "current",
+          "originalReport": "performance-1792961429094.json",
+          "originalReportSha256": "a692c1ded18a8c182c51c5b2509de938df3e6eb6b6a16529e5a0a1c0b7b9a6aa",
+          "originalCleanupReceipt": "performance-wrapper-1792961429094.json",
+          "originalCleanupReceiptSha256": "d6496c3723276de9fd3f6eab43294011e635faa13c4be923c191e1acfa36838a",
+          "startedAt": "2026-10-25T20:50:29.677Z",
+          "finishedAt": "2026-10-25T20:56:52.576Z",
+          "status": "passed",
+          "fixtureDisposed": true,
+          "wrapperExitCode": 0,
+          "ownedDatabaseDropped": true,
+          "sourceBeforeAfterEqual": true,
+          "tableFingerprints": [
+            {
+              "tier": 10,
+              "tableCount": 114,
+              "beforeAfterExactEqualityAsserted": true,
+              "retainedTableFingerprintSha256": "9090773eb74dea875859411f645f655c2fcbc34a340ce2e0b9b5cd4c3b299909"
+            },
+            {
+              "tier": 100,
+              "tableCount": 114,
+              "beforeAfterExactEqualityAsserted": true,
+              "retainedTableFingerprintSha256": "2a443c8f166496b66f1b7c281895f1221334968ecf61aa484bce384c202423ab"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "measurements": [
+    {
+      "mode": "unresolved",
+      "tier": 10,
+      "owner": "landed-health",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 393,
+        "elapsedMs": [
+          224.63560000000052,
+          181.9928,
+          168.35350000000017
+        ],
+        "accumulatedQueryElapsedMs": [
+          131.66790000000856,
+          116.57600000000002,
+          110.78089999999247
+        ],
+        "peakObservedProcessRssBytes": [
+          387985408,
+          412962816,
+          416174080
+        ]
+      },
+      "after": {
+        "queries": 130,
+        "elapsedMs": [
+          101.65229999999974,
+          86.55099999999948,
+          111.79030000000057
+        ],
+        "accumulatedQueryElapsedMs": [
+          66.02250000000095,
+          63.20129999999881,
+          82.37870000000021
+        ],
+        "peakObservedProcessRssBytes": [
+          371171328,
+          385675264,
+          399089664
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 10,
+      "owner": "unfiltered-shipments",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 395,
+        "elapsedMs": [
+          174.22329999999965,
+          182.48260000000028,
+          185.2565999999997
+        ],
+        "accumulatedQueryElapsedMs": [
+          114.13670000001002,
+          123.77290000001085,
+          124.76179999999749
+        ],
+        "peakObservedProcessRssBytes": [
+          424103936,
+          430149632,
+          438456320
+        ]
+      },
+      "after": {
+        "queries": 132,
+        "elapsedMs": [
+          88.95290000000023,
+          83.51649999999972,
+          80.47569999999996
+        ],
+        "accumulatedQueryElapsedMs": [
+          64.33970000000318,
+          63.78500000000713,
+          59.932600000001
+        ],
+        "peakObservedProcessRssBytes": [
+          406163456,
+          424165376,
+          425574400
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 10,
+      "owner": "filtered-shipments",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 394,
+        "elapsedMs": [
+          189.47239999999965,
+          174.41089999999986,
+          185.71270000000004
+        ],
+        "accumulatedQueryElapsedMs": [
+          126.29309999999623,
+          115.00620000000345,
+          128.8608999999933
+        ],
+        "peakObservedProcessRssBytes": [
+          445464576,
+          445759488,
+          446685184
+        ]
+      },
+      "after": {
+        "queries": 131,
+        "elapsedMs": [
+          82.6885000000002,
+          73.80459999999948,
+          68.29250000000047
+        ],
+        "accumulatedQueryElapsedMs": [
+          63.19250000000102,
+          57.885300000002644,
+          54.14930000000095
+        ],
+        "peakObservedProcessRssBytes": [
+          427200512,
+          430166016,
+          430841856
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 10,
+      "owner": "purchasing-health",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 415,
+        "elapsedMs": [
+          230.02160000000003,
+          197.04120000000057,
+          196.00790000000052
+        ],
+        "accumulatedQueryElapsedMs": [
+          354.7380999999923,
+          170.435300000001,
+          170.9777999999933
+        ],
+        "peakObservedProcessRssBytes": [
+          449458176,
+          448020480,
+          448073728
+        ]
+      },
+      "after": {
+        "queries": 152,
+        "elapsedMs": [
+          117.69980000000032,
+          88.03120000000035,
+          82.19130000000041
+        ],
+        "accumulatedQueryElapsedMs": [
+          292.0833999999986,
+          107.15870000000359,
+          104.57220000000052
+        ],
+        "peakObservedProcessRssBytes": [
+          432840704,
+          432226304,
+          432345088
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 10,
+      "owner": "po-cost-fanout",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 79,
+        "elapsedMs": [
+          40.4412999999995,
+          42.966599999999744,
+          40.41870000000017
+        ],
+        "accumulatedQueryElapsedMs": [
+          30.45550000000094,
+          33.85050000000592,
+          31.191499999999905
+        ],
+        "peakObservedProcessRssBytes": [
+          451694592,
+          451715072,
+          448241664
+        ]
+      },
+      "after": {
+        "queries": 19,
+        "elapsedMs": [
+          13.955699999999524,
+          11.161600000000362,
+          10.902200000000448
+        ],
+        "accumulatedQueryElapsedMs": [
+          9.042900000003101,
+          8.318599999997787,
+          8.51129999999921
+        ],
+        "peakObservedProcessRssBytes": [
+          434143232,
+          434913280,
+          434929664
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 100,
+      "owner": "landed-health",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 3904,
+        "elapsedMs": [
+          2051.1329000000005,
+          1852.250900000001,
+          1884.3657000000003
+        ],
+        "accumulatedQueryElapsedMs": [
+          1500.4154999999937,
+          1359.7656000000388,
+          1382.5645999999706
+        ],
+        "peakObservedProcessRssBytes": [
+          552595456,
+          593674240,
+          496484352
+        ]
+      },
+      "after": {
+        "queries": 1211,
+        "elapsedMs": [
+          672.6751000000004,
+          736.5452999999998,
+          701.1959999999999
+        ],
+        "accumulatedQueryElapsedMs": [
+          540.5338000000338,
+          585.2570999999698,
+          572.1010000000315
+        ],
+        "peakObservedProcessRssBytes": [
+          454352896,
+          470519808,
+          489086976
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 100,
+      "owner": "unfiltered-shipments",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 1955,
+        "elapsedMs": [
+          900.5726999999988,
+          923.7646000000004,
+          925.0962
+        ],
+        "accumulatedQueryElapsedMs": [
+          659.7523999999394,
+          679.9323999999942,
+          684.5771000001514
+        ],
+        "peakObservedProcessRssBytes": [
+          498597888,
+          496074752,
+          496467968
+        ]
+      },
+      "after": {
+        "queries": 612,
+        "elapsedMs": [
+          352.09419999999955,
+          338.78199999999924,
+          344.29190000000017
+        ],
+        "accumulatedQueryElapsedMs": [
+          281.4547999999777,
+          273.5599999999977,
+          275.60609999997905
+        ],
+        "peakObservedProcessRssBytes": [
+          496156672,
+          503767040,
+          509480960
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 100,
+      "owner": "filtered-shipments",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 3905,
+        "elapsedMs": [
+          1723.1336999999985,
+          1727.1653000000006,
+          1752.7185999999965
+        ],
+        "accumulatedQueryElapsedMs": [
+          1273.2212999999829,
+          1265.9461000001356,
+          1289.7674000000661
+        ],
+        "peakObservedProcessRssBytes": [
+          501841920,
+          507928576,
+          509247488
+        ]
+      },
+      "after": {
+        "queries": 1212,
+        "elapsedMs": [
+          633.8559999999998,
+          694.223899999999,
+          634.0299000000014
+        ],
+        "accumulatedQueryElapsedMs": [
+          513.5361999999986,
+          557.4660000000094,
+          509.4205999999922
+        ],
+        "peakObservedProcessRssBytes": [
+          514220032,
+          367919104,
+          358117376
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 100,
+      "owner": "purchasing-health",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 3926,
+        "elapsedMs": [
+          1800.0276000000013,
+          1802.3410000000003,
+          1805.9739000000009
+        ],
+        "accumulatedQueryElapsedMs": [
+          1448.8678999999174,
+          1380.168999999958,
+          1363.274099999995
+        ],
+        "peakObservedProcessRssBytes": [
+          515125248,
+          509325312,
+          519438336
+        ]
+      },
+      "after": {
+        "queries": 1233,
+        "elapsedMs": [
+          635.8294999999998,
+          688.4056,
+          618.1707999999999
+        ],
+        "accumulatedQueryElapsedMs": [
+          571.8428999999433,
+          598.9587000000447,
+          526.988600000006
+        ],
+        "peakObservedProcessRssBytes": [
+          364204032,
+          362352640,
+          379215872
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 100,
+      "owner": "po-cost-fanout",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 619,
+        "elapsedMs": [
+          335.2263000000021,
+          300.565300000002,
+          274.2584999999999
+        ],
+        "accumulatedQueryElapsedMs": [
+          272.7850000000617,
+          244.92739999996775,
+          219.4405999999799
+        ],
+        "peakObservedProcessRssBytes": [
+          525910016,
+          519516160,
+          517496832
+        ]
+      },
+      "after": {
+        "queries": 19,
+        "elapsedMs": [
+          28.221299999999246,
+          31.604199999999764,
+          27.38220000000001
+        ],
+        "accumulatedQueryElapsedMs": [
+          18.268099999995684,
+          19.57459999999628,
+          16.867999999998574
+        ],
+        "peakObservedProcessRssBytes": [
+          386875392,
+          395100160,
+          394248192
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 500,
+      "owner": "landed-health",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 19508,
+        "elapsedMs": [
+          9477.112799999999,
+          8327.712,
+          7980.197500000002
+        ],
+        "accumulatedQueryElapsedMs": [
+          7066.448700000241,
+          6245.886199999899,
+          5993.674799999739
+        ],
+        "peakObservedProcessRssBytes": [
+          522694656,
+          522924032,
+          523575296
+        ]
+      },
+      "after": {
+        "queries": 6043,
+        "elapsedMs": [
+          3542.0966000000008,
+          3672.4072000000015,
+          3553.672699999999
+        ],
+        "accumulatedQueryElapsedMs": [
+          2925.046000000035,
+          3013.6569000001946,
+          2932.4996000000174
+        ],
+        "peakObservedProcessRssBytes": [
+          466890752,
+          522989568,
+          526098432
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 500,
+      "owner": "unfiltered-shipments",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 1955,
+        "elapsedMs": [
+          751.7704000000012,
+          769.9725000000035,
+          774.6345000000001
+        ],
+        "accumulatedQueryElapsedMs": [
+          563.3119000002407,
+          573.3072000000393,
+          580.7767999999123
+        ],
+        "peakObservedProcessRssBytes": [
+          529973248,
+          520368128,
+          520237056
+        ]
+      },
+      "after": {
+        "queries": 612,
+        "elapsedMs": [
+          350.91400000000067,
+          384.4988000000012,
+          323.0441000000028
+        ],
+        "accumulatedQueryElapsedMs": [
+          287.78419999990365,
+          315.1473999999944,
+          267.5389999999825
+        ],
+        "peakObservedProcessRssBytes": [
+          532140032,
+          523288576,
+          523468800
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 500,
+      "owner": "filtered-shipments",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 19509,
+        "elapsedMs": [
+          7898.548500000004,
+          7739.175500000012,
+          7908.458800000008
+        ],
+        "accumulatedQueryElapsedMs": [
+          5935.898200000258,
+          5836.241200000586,
+          5941.442799998622
+        ],
+        "peakObservedProcessRssBytes": [
+          532033536,
+          523616256,
+          521715712
+        ]
+      },
+      "after": {
+        "queries": 6044,
+        "elapsedMs": [
+          3243.466099999998,
+          3044.1506999999983,
+          3322.131199999996
+        ],
+        "accumulatedQueryElapsedMs": [
+          2682.939499999731,
+          2528.072000000131,
+          2752.369399999756
+        ],
+        "peakObservedProcessRssBytes": [
+          534568960,
+          526221312,
+          530649088
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 500,
+      "owner": "purchasing-health",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 19530,
+        "elapsedMs": [
+          8821.151699999988,
+          9746.005799999999,
+          9904.810999999987
+        ],
+        "accumulatedQueryElapsedMs": [
+          6620.59519999956,
+          7275.892599999424,
+          7431.208899999314
+        ],
+        "peakObservedProcessRssBytes": [
+          534216704,
+          548450304,
+          550821888
+        ]
+      },
+      "after": {
+        "queries": 6065,
+        "elapsedMs": [
+          3238.532999999996,
+          3089.4645999999993,
+          3113.4850000000006
+        ],
+        "accumulatedQueryElapsedMs": [
+          2834.1185999999434,
+          2645.9199999997436,
+          2601.9918000003818
+        ],
+        "peakObservedProcessRssBytes": [
+          543596544,
+          547926016,
+          555253760
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 500,
+      "owner": "po-cost-fanout",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 619,
+        "elapsedMs": [
+          447.726800000004,
+          426.35029999999097,
+          415.5802999999869
+        ],
+        "accumulatedQueryElapsedMs": [
+          368.2524999999587,
+          348.7670999999973,
+          343.38050000001385
+        ],
+        "peakObservedProcessRssBytes": [
+          565850112,
+          549793792,
+          549826560
+        ]
+      },
+      "after": {
+        "queries": 19,
+        "elapsedMs": [
+          26.697999999996682,
+          33.564800000000105,
+          28.3804999999993
+        ],
+        "accumulatedQueryElapsedMs": [
+          17.377499999987776,
+          23.857199999998556,
+          19.25039999998262
+        ],
+        "peakObservedProcessRssBytes": [
+          568086528,
+          568733696,
+          553500672
+        ]
+      }
+    },
+    {
+      "mode": "unresolved",
+      "tier": 500,
+      "owner": "po-cost-single",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 25,
+        "elapsedMs": [
+          16.554000000003725,
+          13.7444000000105,
+          13.207699999999022
+        ],
+        "accumulatedQueryElapsedMs": [
+          13.689500000007683,
+          11.50680000000284,
+          11.04290000005858
+        ],
+        "peakObservedProcessRssBytes": [
+          565809152,
+          565809152,
+          565809152
+        ]
+      },
+      "after": {
+        "queries": 19,
+        "elapsedMs": [
+          12.404599999994389,
+          9.061399999998685,
+          10.157800000000861
+        ],
+        "accumulatedQueryElapsedMs": [
+          10.338299999995797,
+          7.557500000009895,
+          8.497299999995448
+        ],
+        "peakObservedProcessRssBytes": [
+          569384960,
+          569409536,
+          569409536
+        ]
+      }
+    },
+    {
+      "mode": "posted",
+      "tier": 10,
+      "owner": "landed-health",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 403,
+        "elapsedMs": [
+          250.64480000000003,
+          277.3689999999988,
+          254.4969000000001
+        ],
+        "accumulatedQueryElapsedMs": [
+          170.5201999999972,
+          188.819299999981,
+          171.52349999999024
+        ],
+        "peakObservedProcessRssBytes": [
+          359530496,
+          368115712,
+          374427648
+        ]
+      },
+      "after": {
+        "queries": 200,
+        "elapsedMs": [
+          149.1241000000009,
+          151.9902000000002,
+          136.48489999999947
+        ],
+        "accumulatedQueryElapsedMs": [
+          109.90539999999419,
+          111.20300000001225,
+          101.87800000002062
+        ],
+        "peakObservedProcessRssBytes": [
+          360878080,
+          364118016,
+          367833088
+        ]
+      }
+    },
+    {
+      "mode": "posted",
+      "tier": 10,
+      "owner": "unfiltered-shipments",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 405,
+        "elapsedMs": [
+          249.48179999999957,
+          260.4539999999997,
+          255.8675000000003
+        ],
+        "accumulatedQueryElapsedMs": [
+          172.38899999997557,
+          179.89309999998113,
+          172.58310000001984
+        ],
+        "peakObservedProcessRssBytes": [
+          380067840,
+          386756608,
+          391548928
+        ]
+      },
+      "after": {
+        "queries": 202,
+        "elapsedMs": [
+          129.46830000000045,
+          126.41700000000128,
+          140.20390000000043
+        ],
+        "accumulatedQueryElapsedMs": [
+          94.55939999999282,
+          92.71650000000591,
+          102.50189999999202
+        ],
+        "peakObservedProcessRssBytes": [
+          371179520,
+          372080640,
+          375324672
+        ]
+      }
+    },
+    {
+      "mode": "posted",
+      "tier": 10,
+      "owner": "filtered-shipments",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 404,
+        "elapsedMs": [
+          266.6958000000013,
+          264.7444999999989,
+          226.6771000000008
+        ],
+        "accumulatedQueryElapsedMs": [
+          181.8039999999928,
+          182.55240000000958,
+          160.72239999999147
+        ],
+        "peakObservedProcessRssBytes": [
+          399822848,
+          405684224,
+          409911296
+        ]
+      },
+      "after": {
+        "queries": 201,
+        "elapsedMs": [
+          140.8189999999995,
+          140.22130000000107,
+          142.64159999999902
+        ],
+        "accumulatedQueryElapsedMs": [
+          105.16729999998097,
+          104.57149999997637,
+          103.32990000001155
+        ],
+        "peakObservedProcessRssBytes": [
+          378044416,
+          379416576,
+          381583360
+        ]
+      }
+    },
+    {
+      "mode": "posted",
+      "tier": 10,
+      "owner": "purchasing-health",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 428,
+        "elapsedMs": [
+          279.0455000000002,
+          251.43199999999888,
+          238.88690000000133
+        ],
+        "accumulatedQueryElapsedMs": [
+          405.21789999999964,
+          216.3353999999963,
+          195.24520000002303
+        ],
+        "peakObservedProcessRssBytes": [
+          417492992,
+          424173568,
+          429355008
+        ]
+      },
+      "after": {
+        "queries": 225,
+        "elapsedMs": [
+          181.8832999999995,
+          158.122800000001,
+          151.5051000000003
+        ],
+        "accumulatedQueryElapsedMs": [
+          361.8277000000071,
+          154.344699999996,
+          145.4041000000234
+        ],
+        "peakObservedProcessRssBytes": [
+          385048576,
+          387604480,
+          390094848
+        ]
+      }
+    },
+    {
+      "mode": "posted",
+      "tier": 10,
+      "owner": "po-cost-fanout",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 80,
+        "elapsedMs": [
+          63.511100000001534,
+          65.7469000000001,
+          84.23070000000007
+        ],
+        "accumulatedQueryElapsedMs": [
+          43.358900000012,
+          46.53299999999763,
+          52.96600000000035
+        ],
+        "peakObservedProcessRssBytes": [
+          431992832,
+          432447488,
+          433487872
+        ]
+      },
+      "after": {
+        "queries": 80,
+        "elapsedMs": [
+          61.582800000000134,
+          56.81259999999929,
+          58.76479999999901
+        ],
+        "accumulatedQueryElapsedMs": [
+          44.292700000003606,
+          41.401600000001054,
+          43.298799999998664
+        ],
+        "peakObservedProcessRssBytes": [
+          393580544,
+          392122368,
+          392380416
+        ]
+      }
+    },
+    {
+      "mode": "posted",
+      "tier": 100,
+      "owner": "landed-health",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 4004,
+        "elapsedMs": [
+          3975.0832999999984,
+          4135.9615999999805,
+          4024.6917999999714
+        ],
+        "accumulatedQueryElapsedMs": [
+          2880.4334000000963,
+          2999.948200001614,
+          2918.82960000413
+        ],
+        "peakObservedProcessRssBytes": [
+          539832320,
+          540332032,
+          540463104
+        ]
+      },
+      "after": {
+        "queries": 1911,
+        "elapsedMs": [
+          4765.460199999972,
+          4746.46259999997,
+          4871.592799999984
+        ],
+        "accumulatedQueryElapsedMs": [
+          3427.5339000002714,
+          3462.677999999083,
+          3529.873599998362
+        ],
+        "peakObservedProcessRssBytes": [
+          531959808,
+          536432640,
+          536694784
+        ]
+      }
+    },
+    {
+      "mode": "posted",
+      "tier": 100,
+      "owner": "unfiltered-shipments",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 2005,
+        "elapsedMs": [
+          1968.6394999999902,
+          1863.298199999961,
+          1858.7138999999734
+        ],
+        "accumulatedQueryElapsedMs": [
+          1426.0452999992413,
+          1344.5487000005087,
+          1344.7081000013277
+        ],
+        "peakObservedProcessRssBytes": [
+          543477760,
+          541958144,
+          542404608
+        ]
+      },
+      "after": {
+        "queries": 962,
+        "elapsedMs": [
+          2429.066200000001,
+          2439.123399999982,
+          2511.012400000007
+        ],
+        "accumulatedQueryElapsedMs": [
+          1764.5703000004287,
+          1768.4659999992582,
+          1826.35569999984
+        ],
+        "peakObservedProcessRssBytes": [
+          538714112,
+          536649728,
+          536764416
+        ]
+      }
+    },
+    {
+      "mode": "posted",
+      "tier": 100,
+      "owner": "filtered-shipments",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 4005,
+        "elapsedMs": [
+          3697.669899999979,
+          3946.638399999996,
+          4677.425199999998
+        ],
+        "accumulatedQueryElapsedMs": [
+          2676.176500002097,
+          2855.196400002402,
+          3344.077800000028
+        ],
+        "peakObservedProcessRssBytes": [
+          545640448,
+          542187520,
+          542003200
+        ]
+      },
+      "after": {
+        "queries": 1912,
+        "elapsedMs": [
+          5040.706499999971,
+          4838.9522,
+          4918.961299999966
+        ],
+        "accumulatedQueryElapsedMs": [
+          3628.8118000013637,
+          3489.1151000006357,
+          3559.1960999998846
+        ],
+        "peakObservedProcessRssBytes": [
+          539607040,
+          537559040,
+          537206784
+        ]
+      }
+    },
+    {
+      "mode": "posted",
+      "tier": 100,
+      "owner": "purchasing-health",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 4025,
+        "elapsedMs": [
+          4981.592400000023,
+          5165.095700000005,
+          5559.4856000000145
+        ],
+        "accumulatedQueryElapsedMs": [
+          3734.167900000408,
+          3757.826100000064,
+          4005.5241000007372
+        ],
+        "peakObservedProcessRssBytes": [
+          546349056,
+          542236672,
+          545468416
+        ]
+      },
+      "after": {
+        "queries": 1932,
+        "elapsedMs": [
+          5366.767099999997,
+          5334.887999999977,
+          5344.191300000006
+        ],
+        "accumulatedQueryElapsedMs": [
+          4058.6941000006627,
+          3943.224400000705,
+          3906.771899999294
+        ],
+        "peakObservedProcessRssBytes": [
+          541822976,
+          537124864,
+          538632192
+        ]
+      }
+    },
+    {
+      "mode": "posted",
+      "tier": 100,
+      "owner": "po-cost-fanout",
+      "exactCompleteOutputEquality": true,
+      "excludedOutputFields": [],
+      "before": {
+        "queries": 620,
+        "elapsedMs": [
+          729.771699999983,
+          654.5599999999977,
+          672.2679999999818
+        ],
+        "accumulatedQueryElapsedMs": [
+          512.6257999986992,
+          476.9675000011921,
+          480.6979000001447
+        ],
+        "peakObservedProcessRssBytes": [
+          546828288,
+          544292864,
+          541593600
+        ]
+      },
+      "after": {
+        "queries": 620,
+        "elapsedMs": [
+          848.8908999999985,
+          792.9164999999921,
+          835.1946999999927
+        ],
+        "accumulatedQueryElapsedMs": [
+          610.0011999992421,
+          564.745100000524,
+          600.6845999995712
+        ],
+        "peakObservedProcessRssBytes": [
+          540377088,
+          536981504,
+          538570752
+        ]
+      }
+    }
+  ],
+  "limitations": [
+    "Synthetic local datasets and instrumented service-owner reads, not production latency or live acceptance.",
+    "Reduced fixture schema with selected real migrations/indexes; each full report contains exact installed table/index catalog.",
+    "Unresolved: estimated unallocated freight and no lot lineage. Posted: real receipts, cost applications and untransformed unsold lots; supplier estimates remain provisional.",
+    "No broad sales-history/forecast-volume or transformed-lot stress profile; three serial samples per owner share OS/PostgreSQL caches.",
+    "The local PostgreSQL cluster has shared_buffers=400kB and work_mem=4MB. Initial posted-100 timings increased despite fewer queries; a subsequent quiet baseline/current pair had lower medians for four health/list owners and a slightly higher PO-summary median. Order, cache and scheduling effects are not isolated, and neither experiment establishes a blanket latency guarantee or production SLO.",
+    "Process RSS includes retained diagnostic results and is not an allocation profile.",
+    "Per-shipment supplier-cost review and accepted/reconciled freshness reads remain, preserving their original safety bounds; cost health still scales with eligible shipments."
+  ],
+  "controlledPosted100Rerun": {
+    "version": 1,
+    "generatedAt": "2026-10-25T21:43:13.976Z",
+    "description": "Controlled local posted-100 rerun; no live records, same PostgreSQL configuration and same helpers.",
+    "executionOrder": [
+      "baseline",
+      "current"
+    ],
+    "quietSerialWindow": true,
+    "measuredScope": "Only explicit measured owner/helper files are checked for source stability; unrelated UI and fixture editing may continue.",
+    "samplesPerOwnerPerRun": 3,
+    "samplesPerOwnerPerVersion": 3,
+    "fullPublicOutputEquality": true,
+    "excludedOutputFields": [],
+    "allRepeatedOutputsIdentical": true,
+    "allTableFingerprintsUnchanged": true,
+    "allMeasuredSourceHashesUnchanged": true,
+    "allHelperHashesIdentical": true,
+    "allOwnedDatabasesDropped": true,
+    "databaseConfiguration": {
+      "version": "PostgreSQL 17.11 on x86_64-windows, compiled by msvc-19.44.35228, 64-bit",
+      "shared_buffers": "400kB",
+      "work_mem": "4MB",
+      "max_connections": "25"
+    },
+    "installedTableCount": 114,
+    "installedIndexCount": 235,
+    "sourceHashes": {
+      "baseline": {
+        "server/modules/procurement/shipment-tracking.service.ts": "c0654a915b45cdbc78173414114a173489cc3e590f193770c0692b916b27adf4",
+        "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+        "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+        "server/modules/procurement/purchase-cost-status.repository.ts": "b23d481aeec34c95b8eba81b2a1c4b3882c289305bbac6990d460cc5211d11c3",
+        "server/modules/procurement/shipment-cost-posting-read.repository.ts": "4339f59234b4619a2e0cc02794118f51491b69db5d8079d9679cdd3d39f620ef",
+        "server/modules/procurement/procurement.storage.ts": "3c3cf5976213df3ab5a06b57fe2bf026c44c786a6bfb5566668c2889e60a9164",
+        "server/modules/procurement/domain/current-shipment-cost-source.ts": "664af0d6bf602c5632c7ddda298b7e3a9a8cd6c27a077869c9115be7ab820479",
+        "server/modules/procurement/shipment-health-evidence.repository.ts": null,
+        "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+        "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+        "test/performance/procurement/run-health-cost.ts": "a46154c4784943aa57ee00500da6a7d5ae13279456718734d15f0d4a91fbba31"
+      },
+      "current": {
+        "server/modules/procurement/shipment-tracking.service.ts": "40ea65c591204489fdefb380c64f138bea17594002c54b0769cae73a9486adf4",
+        "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+        "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+        "server/modules/procurement/purchase-cost-status.repository.ts": "b23d481aeec34c95b8eba81b2a1c4b3882c289305bbac6990d460cc5211d11c3",
+        "server/modules/procurement/shipment-cost-posting-read.repository.ts": "d1a0ce7f77fed2e1f25e15ac12a0ea4dabdd0c8f445fde5973a3497f11915032",
+        "server/modules/procurement/procurement.storage.ts": "3c3cf5976213df3ab5a06b57fe2bf026c44c786a6bfb5566668c2889e60a9164",
+        "server/modules/procurement/domain/current-shipment-cost-source.ts": "b61c1576859e993ee5fca216b7c030c305ded9ff1a166b75e7fec823db9c57dd",
+        "server/modules/procurement/shipment-health-evidence.repository.ts": "62d1f62e2f75bb176d42700e59d9102c97bd25c006b1f4e4ec852315bc36fdfb",
+        "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+        "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+        "test/performance/procurement/run-health-cost.ts": "a46154c4784943aa57ee00500da6a7d5ae13279456718734d15f0d4a91fbba31"
+      }
+    },
+    "helperHashes": {
+      "query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+      "health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+      "run-health-cost.ts": "a46154c4784943aa57ee00500da6a7d5ae13279456718734d15f0d4a91fbba31",
+      "compare-health-cost.ts": "1fc45acd49f5b28f501e3dbdc3c0cce85937c6c29aef95f4ee2edb55222fb904",
+      "tsconfig.json": "e7f6fab018134f654f863543eee81c6db17f5113cb23bbc7e38c826fea2fd142"
+    },
+    "runs": [
+      {
+        "run": 1,
+        "version": "baseline",
+        "head": "719b60983453a5723f27d224953a536f30502b57",
+        "startedAt": "2026-10-25T21:32:25.138Z",
+        "finishedAt": "2026-10-25T21:38:21.744Z",
+        "reportFile": "performance-1792963944284.json",
+        "reportSha256": "49e2e707c3f54be0f752db20a4555013fd2b03bedafcb3f6168b2378c98618c6",
+        "wrapperFile": "performance-wrapper-1792963944284.json",
+        "wrapperSha256": "ff91ea1710f2ae24879371b0bd3de072002e706ef6818cd91a2c679d5fbb2dd9",
+        "childExitConfirmed": true,
+        "childCloseConfirmed": true,
+        "disposed": true,
+        "dropped": true,
+        "otherActiveDatabaseSessionsAtStart": [],
+        "measurements": [
+          {
+            "owner": "landed-health",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 3960,
+                "queries": 4004,
+                "queryElapsedMs": 2857
+              },
+              {
+                "elapsedMs": 4138,
+                "queries": 4004,
+                "queryElapsedMs": 3076
+              },
+              {
+                "elapsedMs": 4683,
+                "queries": 4004,
+                "queryElapsedMs": 3411
+              }
+            ]
+          },
+          {
+            "owner": "unfiltered-shipments",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 2159,
+                "queries": 2005,
+                "queryElapsedMs": 1583
+              },
+              {
+                "elapsedMs": 2136,
+                "queries": 2005,
+                "queryElapsedMs": 1576
+              },
+              {
+                "elapsedMs": 2069,
+                "queries": 2005,
+                "queryElapsedMs": 1519
+              }
+            ]
+          },
+          {
+            "owner": "filtered-shipments",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 4153,
+                "queries": 4005,
+                "queryElapsedMs": 3056
+              },
+              {
+                "elapsedMs": 4038,
+                "queries": 4005,
+                "queryElapsedMs": 2981
+              },
+              {
+                "elapsedMs": 3934,
+                "queries": 4005,
+                "queryElapsedMs": 2907
+              }
+            ]
+          },
+          {
+            "owner": "purchasing-health",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 4069,
+                "queries": 4025,
+                "queryElapsedMs": 3116
+              },
+              {
+                "elapsedMs": 4101,
+                "queries": 4025,
+                "queryElapsedMs": 3059
+              },
+              {
+                "elapsedMs": 4014,
+                "queries": 4025,
+                "queryElapsedMs": 2983
+              }
+            ]
+          },
+          {
+            "owner": "po-cost-fanout",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 476,
+                "queries": 620,
+                "queryElapsedMs": 338
+              },
+              {
+                "elapsedMs": 452,
+                "queries": 620,
+                "queryElapsedMs": 332
+              },
+              {
+                "elapsedMs": 457,
+                "queries": 620,
+                "queryElapsedMs": 329
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "run": 2,
+        "version": "current",
+        "head": "7b4a6e941060c3afeeab6e04e0a951b06e43b9e3",
+        "startedAt": "2026-10-25T21:38:39.849Z",
+        "finishedAt": "2026-10-25T21:43:10.735Z",
+        "reportFile": "performance-1792964319433.json",
+        "reportSha256": "d8554dc6c5f075f78dbffd8ae5272034bf678eaccb068956beeef89035dac338",
+        "wrapperFile": "performance-wrapper-1792964319433.json",
+        "wrapperSha256": "b30860aa82ec4cc8b478619e5bd61c8598e1f027c9b3eb1ae447d0002c5d6815",
+        "childExitConfirmed": true,
+        "childCloseConfirmed": true,
+        "disposed": true,
+        "dropped": true,
+        "otherActiveDatabaseSessionsAtStart": [],
+        "measurements": [
+          {
+            "owner": "landed-health",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 5849,
+                "queries": 1911,
+                "queryElapsedMs": 4179
+              },
+              {
+                "elapsedMs": 3276,
+                "queries": 1911,
+                "queryElapsedMs": 2466
+              },
+              {
+                "elapsedMs": 3590,
+                "queries": 1911,
+                "queryElapsedMs": 2675
+              }
+            ]
+          },
+          {
+            "owner": "unfiltered-shipments",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 1687,
+                "queries": 962,
+                "queryElapsedMs": 1266
+              },
+              {
+                "elapsedMs": 1584,
+                "queries": 962,
+                "queryElapsedMs": 1198
+              },
+              {
+                "elapsedMs": 1686,
+                "queries": 962,
+                "queryElapsedMs": 1267
+              }
+            ]
+          },
+          {
+            "owner": "filtered-shipments",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 3321,
+                "queries": 1912,
+                "queryElapsedMs": 2496
+              },
+              {
+                "elapsedMs": 3351,
+                "queries": 1912,
+                "queryElapsedMs": 2532
+              },
+              {
+                "elapsedMs": 3227,
+                "queries": 1912,
+                "queryElapsedMs": 2433
+              }
+            ]
+          },
+          {
+            "owner": "purchasing-health",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 3361,
+                "queries": 1932,
+                "queryElapsedMs": 2670
+              },
+              {
+                "elapsedMs": 3365,
+                "queries": 1932,
+                "queryElapsedMs": 2556
+              },
+              {
+                "elapsedMs": 3365,
+                "queries": 1932,
+                "queryElapsedMs": 2569
+              }
+            ]
+          },
+          {
+            "owner": "po-cost-fanout",
+            "tier": 100,
+            "samples": [
+              {
+                "elapsedMs": 486,
+                "queries": 620,
+                "queryElapsedMs": 352
+              },
+              {
+                "elapsedMs": 490,
+                "queries": 620,
+                "queryElapsedMs": 349
+              },
+              {
+                "elapsedMs": 490,
+                "queries": 620,
+                "queryElapsedMs": 354
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "ownerResults": [
+      {
+        "owner": "landed-health",
+        "tier": 100,
+        "completePublicOutputsIdentical": true,
+        "baseline": {
+          "queries": [
+            4004
+          ],
+          "elapsedMs": [
+            3960,
+            4138,
+            4683
+          ],
+          "medianElapsedMs": 4138,
+          "queryElapsedMs": [
+            2857,
+            3076,
+            3411
+          ]
+        },
+        "current": {
+          "queries": [
+            1911
+          ],
+          "elapsedMs": [
+            5849,
+            3276,
+            3590
+          ],
+          "medianElapsedMs": 3590,
+          "queryElapsedMs": [
+            4179,
+            2466,
+            2675
+          ]
+        }
+      },
+      {
+        "owner": "unfiltered-shipments",
+        "tier": 100,
+        "completePublicOutputsIdentical": true,
+        "baseline": {
+          "queries": [
+            2005
+          ],
+          "elapsedMs": [
+            2159,
+            2136,
+            2069
+          ],
+          "medianElapsedMs": 2136,
+          "queryElapsedMs": [
+            1583,
+            1576,
+            1519
+          ]
+        },
+        "current": {
+          "queries": [
+            962
+          ],
+          "elapsedMs": [
+            1687,
+            1584,
+            1686
+          ],
+          "medianElapsedMs": 1686,
+          "queryElapsedMs": [
+            1266,
+            1198,
+            1267
+          ]
+        }
+      },
+      {
+        "owner": "filtered-shipments",
+        "tier": 100,
+        "completePublicOutputsIdentical": true,
+        "baseline": {
+          "queries": [
+            4005
+          ],
+          "elapsedMs": [
+            4153,
+            4038,
+            3934
+          ],
+          "medianElapsedMs": 4038,
+          "queryElapsedMs": [
+            3056,
+            2981,
+            2907
+          ]
+        },
+        "current": {
+          "queries": [
+            1912
+          ],
+          "elapsedMs": [
+            3321,
+            3351,
+            3227
+          ],
+          "medianElapsedMs": 3321,
+          "queryElapsedMs": [
+            2496,
+            2532,
+            2433
+          ]
+        }
+      },
+      {
+        "owner": "purchasing-health",
+        "tier": 100,
+        "completePublicOutputsIdentical": true,
+        "baseline": {
+          "queries": [
+            4025
+          ],
+          "elapsedMs": [
+            4069,
+            4101,
+            4014
+          ],
+          "medianElapsedMs": 4069,
+          "queryElapsedMs": [
+            3116,
+            3059,
+            2983
+          ]
+        },
+        "current": {
+          "queries": [
+            1932
+          ],
+          "elapsedMs": [
+            3361,
+            3365,
+            3365
+          ],
+          "medianElapsedMs": 3365,
+          "queryElapsedMs": [
+            2670,
+            2556,
+            2569
+          ]
+        }
+      },
+      {
+        "owner": "po-cost-fanout",
+        "tier": 100,
+        "completePublicOutputsIdentical": true,
+        "baseline": {
+          "queries": [
+            620
+          ],
+          "elapsedMs": [
+            476,
+            452,
+            457
+          ],
+          "medianElapsedMs": 457,
+          "queryElapsedMs": [
+            338,
+            332,
+            329
+          ]
+        },
+        "current": {
+          "queries": [
+            620
+          ],
+          "elapsedMs": [
+            486,
+            490,
+            490
+          ],
+          "medianElapsedMs": 490,
+          "queryElapsedMs": [
+            352,
+            349,
+            354
+          ]
+        }
+      }
+    ],
+    "supplierHealthQueries": [
+      {
+        "label": "supplier-current-product-packaging",
+        "runs": [
+          {
+            "run": 1,
+            "version": "baseline",
+            "samples": [
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1104,
+                "maxMs": 17
+              },
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1181,
+                "maxMs": 17
+              },
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1390,
+                "maxMs": 18
+              }
+            ]
+          },
+          {
+            "run": 2,
+            "version": "current",
+            "samples": [
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1742,
+                "maxMs": 26
+              },
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1101,
+                "maxMs": 17
+              },
+              {
+                "fingerprint": "6b58c065cef8b5324decbc81ed5ffa6a6a2fc6f73d6ba0ac8ee8e26a844dfc40",
+                "calls": 100,
+                "rows": 1000,
+                "totalMs": 1264,
+                "maxMs": 17
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "label": "supplier-descendant-lots",
+        "runs": [
+          {
+            "run": 1,
+            "version": "baseline",
+            "samples": [
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 334,
+                "maxMs": 4
+              },
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 362,
+                "maxMs": 5
+              },
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 391,
+                "maxMs": 6
+              }
+            ]
+          },
+          {
+            "run": 2,
+            "version": "current",
+            "samples": [
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 609,
+                "maxMs": 11
+              },
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 343,
+                "maxMs": 7
+              },
+              {
+                "fingerprint": "088c9ea0847c9a9d7ec3161fcd04e6910069c2ebb907ac510160e67e76b7c1eb",
+                "calls": 100,
+                "rows": 50000,
+                "totalMs": 374,
+                "maxMs": 5
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "label": "supplier-component-application-lots",
+        "runs": [
+          {
+            "run": 1,
+            "version": "baseline",
+            "samples": [
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 180,
+                "maxMs": 3
+              },
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 221,
+                "maxMs": 3
+              },
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 217,
+                "maxMs": 3
+              }
+            ]
+          },
+          {
+            "run": 2,
+            "version": "current",
+            "samples": [
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 309,
+                "maxMs": 7
+              },
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 210,
+                "maxMs": 4
+              },
+              {
+                "fingerprint": "18f0b176987c0a46b2571933340a1c97a2921c941b157c95044cda3334c4e346",
+                "calls": 100,
+                "rows": 100000,
+                "totalMs": 211,
+                "maxMs": 4
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "limitations": [
+      "Synthetic local posted shipments with five lines each and one PO linked to 100 shipments; no production statistics or records.",
+      "Original PostgreSQL 17.11 settings are preserved, including shared_buffers=400kB. The baseline runs before current; execution-order, cache and scheduling effects are not isolated.",
+      "Each run uses a fresh database, actual receipt closing and cost revision application, then read-only measurements. Caches and host scheduling are not experimentally controlled.",
+      "Per-shipment supplier review remains; the unchanged supplier query fingerprints, call counts and row volumes identify repeat work without proving a specific production SLO or CPU cause."
+    ]
+  }
+}
