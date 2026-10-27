@@ -270,6 +270,34 @@ import { DropshipWalletPolicyPanel } from "./dropship-wallet-policy-panel";
 import { DropshipCostChangePolicyPanel } from "./dropship-cost-change-policy-panel";
 import { DropshipFinancePanel } from "./dropship-finance-panel";
 import { refreshFinanceQueries } from "./dropship-finance-model";
+import {
+  LISTING_END_OPS_DEFAULT_LIMIT,
+  LISTING_END_OPS_DEFAULT_STATE,
+  LISTING_END_REQUEST_STATES,
+  LISTING_END_STAFF_REASON_MAX_LENGTH,
+  type ListingEndOpsRow,
+  type ListingEndRequestState,
+  type ListingEndStaffAction,
+} from "@shared/dropship/listing-end-ops";
+import {
+  LISTING_END_OPS_QUERY_KEY,
+  LISTING_END_OPS_SECTION_WORDS,
+  LISTING_END_OPS_WORDS,
+  buildListingEndResolveRequest,
+  buildListingEndRetryRequest,
+  canActOnListingEnd,
+  checkListingEndResolveDraft,
+  describeListingEndOpsError,
+  describeListingEndResolveProblem,
+  fetchListingEnds,
+  isTransientListingEndOpsError,
+  listingEndOpsPager,
+  newListingEndStaffKey,
+  sendListingEndAction,
+  type ListingEndOpsActionRequest,
+  type ListingEndOpsFetch,
+  type ListingEndResolveDraft,
+} from "@/lib/dropship-listing-end-ops";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
@@ -1611,7 +1639,287 @@ function ListingPushOpsTab({
         summary={listingPushJobsQuery.data?.summary ?? []}
         total={listingPushJobsQuery.data?.total ?? 0}
       />
+
+      <ListingEndOpsSection />
     </div>
+  );
+}
+
+const listingEndOpsFetch: ListingEndOpsFetch = (url, init) => fetch(url, init);
+
+/**
+ * PR C (PLAN-C v4.1 §10, DC33): the eBay listings Card Shellz could not end, after the push jobs. Retry sets a failed
+ * end pending again (the worker's claim re-checks everything; the server refuses while an inventory request on the SKU
+ * is open); Mark resolved records "Ended on eBay" or "Left on sale" with a required reason. Requests, answers and
+ * words come from client/src/lib/dropship-listing-end-ops.ts, which reads every answer through readDropshipAnswer.
+ */
+function ListingEndOpsSection() {
+  const queryClient = useQueryClient();
+  const words = LISTING_END_OPS_WORDS;
+  const sectionWords = LISTING_END_OPS_SECTION_WORDS;
+  const [state, setState] = useState<ListingEndRequestState>(LISTING_END_OPS_DEFAULT_STATE);
+  const [page, setPage] = useState(1);
+  const [resolving, setResolving] = useState<{ endRequestId: number; draft: ListingEndResolveDraft } | null>(null);
+  const [pendingEndRequestId, setPendingEndRequestId] = useState<number | null>(null);
+  // One key per press, kept while its failure is transient, so pressing again replays the same action.
+  const [pressKeys, setPressKeys] = useState<Record<string, string>>({});
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const listQuery = useQuery({
+    queryKey: [...LISTING_END_OPS_QUERY_KEY, state, page],
+    queryFn: ({ signal }) =>
+      fetchListingEnds(listingEndOpsFetch, { state, page, limit: LISTING_END_OPS_DEFAULT_LIMIT }, signal),
+  });
+  const rows = listQuery.data?.items ?? [];
+  const pager = listingEndOpsPager({
+    page,
+    limit: LISTING_END_OPS_DEFAULT_LIMIT,
+    answer: listQuery.data ? { total: listQuery.data.total, settled: !listQuery.isFetching } : null,
+  });
+  // Review TST-1: Retry and Mark resolved move the row out of the filtered state and refetch the same page, so an action
+  // can empty the last page; once that answer settles, step back to the last page that has rows.
+  useEffect(() => {
+    if (pager.stepBackTo !== null) setPage(pager.stepBackTo);
+  }, [pager.stepBackTo]);
+
+  async function runAction(
+    row: ListingEndOpsRow,
+    action: ListingEndStaffAction,
+    build: (idempotencyKey: string) => ListingEndOpsActionRequest,
+    done: string,
+  ) {
+    const slot = `${row.endRequestId}:${action}`;
+    const idempotencyKey = pressKeys[slot] ?? newListingEndStaffKey(action, row.endRequestId);
+    setPendingEndRequestId(row.endRequestId);
+    setError("");
+    setMessage("");
+    try {
+      await sendListingEndAction(listingEndOpsFetch, build(idempotencyKey));
+      setPressKeys(({ [slot]: _done, ...rest }) => rest);
+      setResolving(null);
+      setMessage(done);
+      await queryClient.invalidateQueries({ queryKey: LISTING_END_OPS_QUERY_KEY });
+    } catch (caught) {
+      const keep = isTransientListingEndOpsError(caught);
+      setPressKeys(({ [slot]: _old, ...rest }) => (keep ? { ...rest, [slot]: idempotencyKey } : rest));
+      setError(describeListingEndOpsError(caught));
+    } finally {
+      setPendingEndRequestId(null);
+    }
+  }
+
+  function retry(row: ListingEndOpsRow) {
+    void runAction(row, "retry", (idempotencyKey) =>
+      buildListingEndRetryRequest({ endRequestId: row.endRequestId, idempotencyKey }), sectionWords.retried);
+  }
+
+  function submitResolve(row: ListingEndOpsRow, draft: ListingEndResolveDraft) {
+    const checked = checkListingEndResolveDraft(draft);
+    if (!checked.ok) {
+      setMessage("");
+      setError(describeListingEndResolveProblem(checked.problem));
+      return;
+    }
+    const action: ListingEndStaffAction = checked.outcome === "ended_on_ebay" ? "resolve_ended" : "resolve_left";
+    void runAction(row, action, (idempotencyKey) =>
+      buildListingEndResolveRequest({ endRequestId: row.endRequestId, idempotencyKey, outcome: checked.outcome,
+        reason: checked.reason }), sectionWords.resolved);
+  }
+
+  function updateDraft(change: Partial<ListingEndResolveDraft>) {
+    setResolving((current) => (current ? { ...current, draft: { ...current.draft, ...change } } : current));
+  }
+
+  return (
+    <section className="rounded-md border bg-card" data-testid="listing-end-ops">
+      <div className="flex flex-col gap-3 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">{words.staffSection}</h2>
+          <p className="text-sm text-muted-foreground">{sectionWords.intro}</p>
+        </div>
+        <Select
+          value={state}
+          onValueChange={(value) => {
+            setState(value as ListingEndRequestState);
+            setPage(1);
+            setResolving(null);
+          }}
+        >
+          <SelectTrigger className="lg:w-48" aria-label={sectionWords.stateFilter}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {LISTING_END_REQUEST_STATES.map((option) => (
+              <SelectItem key={option} value={option}>
+                {formatStatus(option)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {(error || listQuery.error) && (
+        <Alert variant="destructive" className="m-4 w-auto">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error || describeListingEndOpsError(listQuery.error)}</AlertDescription>
+        </Alert>
+      )}
+      {message && (
+        <Alert className="m-4 w-auto border-emerald-200 bg-emerald-50 text-emerald-900">
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertDescription>{message}</AlertDescription>
+        </Alert>
+      )}
+
+      {listQuery.isLoading || pager.stepBackTo !== null ? (
+        <div className="space-y-2 p-4">
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-full" />
+        </div>
+      ) : rows.length === 0 ? (
+        <EmptyState title={words.staffSection} description={sectionWords.empty} />
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-[150px]">{sectionWords.columns.listing}</TableHead>
+              <TableHead>{sectionWords.columns.vendorStore}</TableHead>
+              <TableHead>{sectionWords.columns.size}</TableHead>
+              <TableHead>{sectionWords.columns.state}</TableHead>
+              <TableHead>{sectionWords.columns.problem}</TableHead>
+              <TableHead className="w-[90px]">{sectionWords.columns.tries}</TableHead>
+              <TableHead className="w-[145px]">{sectionWords.columns.decided}</TableHead>
+              <TableHead className="w-[200px] text-right">{sectionWords.columns.action}</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row) => {
+              const open = resolving?.endRequestId === row.endRequestId ? resolving : null;
+              const pending = pendingEndRequestId === row.endRequestId;
+              const reasonId = `dropship-listing-end-reason-${row.endRequestId}`;
+              return [
+                <TableRow key={row.endRequestId}>
+                  <TableCell>
+                    <div className="font-mono text-sm">#{row.endRequestId}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {[row.listing.externalListingId, row.listing.externalOfferId].filter(Boolean).join(" / ") ||
+                        `Listing ${row.listing.listingId}`}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="font-medium">
+                      {row.vendor.businessName || row.vendor.email || `Vendor ${row.vendor.vendorId}`}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {row.store.displayName || `Store ${row.store.storeConnectionId}`}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="font-mono text-sm">{row.sku ?? `#${row.productVariantId}`}</div>
+                    <div className="text-xs text-muted-foreground">{formatStatus(row.reason)}</div>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline">{formatStatus(row.state)}</Badge>
+                  </TableCell>
+                  <TableCell>
+                    <div className="font-mono text-xs">{row.code ?? row.context.lastCode ?? ""}</div>
+                    <div className="text-sm">{row.message}</div>
+                    {row.context.attemptIds.length > 0 && (
+                      <div className="text-xs text-muted-foreground">#{row.context.attemptIds.join(", #")}</div>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-sm">
+                    {row.attemptCount} / {row.withdraw.callCount}
+                  </TableCell>
+                  <TableCell className="text-sm">{formatDateTime(row.decidedAt)}</TableCell>
+                  <TableCell className="text-right">
+                    {canActOnListingEnd(row) && (
+                      <div className="flex justify-end gap-2">
+                        <Button size="sm" variant="outline" disabled={pending} onClick={() => retry(row)}>
+                          <RotateCcw className="h-4 w-4" />
+                          {words.staffRetry}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={pending}
+                          onClick={() => setResolving({ endRequestId: row.endRequestId, draft: { outcome: null, reason: "" } })}
+                        >
+                          <CheckCircle2 className="h-4 w-4" />
+                          {words.staffResolve}
+                        </Button>
+                      </div>
+                    )}
+                  </TableCell>
+                </TableRow>,
+                open && (
+                  <TableRow key={`${row.endRequestId}-resolve`}>
+                    <TableCell colSpan={8}>
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+                        <div className="flex gap-2" role="group" aria-label={words.staffResolve}>
+                          <Button
+                            size="sm"
+                            variant={open.draft.outcome === "ended_on_ebay" ? "default" : "outline"}
+                            aria-pressed={open.draft.outcome === "ended_on_ebay"}
+                            onClick={() => updateDraft({ outcome: "ended_on_ebay" })}
+                          >
+                            {words.staffResolveEnded}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant={open.draft.outcome === "left_on_sale" ? "default" : "outline"}
+                            aria-pressed={open.draft.outcome === "left_on_sale"}
+                            onClick={() => updateDraft({ outcome: "left_on_sale" })}
+                          >
+                            {words.staffResolveLeft}
+                          </Button>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <label className="text-sm font-medium" htmlFor={reasonId}>
+                            {words.staffResolveReason}
+                          </label>
+                          <Textarea
+                            id={reasonId}
+                            required
+                            value={open.draft.reason}
+                            maxLength={LISTING_END_STAFF_REASON_MAX_LENGTH}
+                            onChange={(event) => updateDraft({ reason: event.target.value })}
+                            className="mt-2"
+                          />
+                        </div>
+                        <div className="flex gap-2">
+                          <Button size="sm" disabled={pending} onClick={() => submitResolve(row, open.draft)}>
+                            {words.staffResolve}
+                          </Button>
+                          <Button size="sm" variant="ghost" disabled={pending} onClick={() => setResolving(null)}>
+                            {sectionWords.cancel}
+                          </Button>
+                        </div>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ),
+              ];
+            })}
+          </TableBody>
+        </Table>
+      )}
+
+      {pager.show && (
+        <div className="flex items-center justify-end gap-2 border-t px-4 py-3 text-sm">
+          <Button size="sm" variant="outline" disabled={!pager.canGoBack} onClick={() => setPage((current) => Math.max(1, current - 1))}>
+            <ChevronLeft className="h-4 w-4" />
+            {sectionWords.previous}
+          </Button>
+          <span>{pager.label}</span>
+          <Button size="sm" variant="outline" disabled={!pager.canGoForward} onClick={() => setPage((current) => current + 1)}>
+            {sectionWords.next}
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
+    </section>
   );
 }
 

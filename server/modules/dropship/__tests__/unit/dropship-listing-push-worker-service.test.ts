@@ -22,6 +22,12 @@ import type { DropshipMarketplaceListingIntent, DropshipStoreListingConfig } fro
 import type { MarketplacePrePushInput, MarketplacePrePushResult } from "../../application/dropship-marketplace-sync-service";
 import type { MarketplacePushGuard } from "../../domain/marketplace-sync-decision";
 import { marketplaceSyncError, MARKETPLACE_SYNC_CODES } from "../../domain/marketplace-sync-errors";
+import {
+  LISTING_END_FENCE_CODES,
+  LISTING_END_FENCE_WORDS,
+  type ListingEndFenceOutcome,
+  type ListingPushItemStart,
+} from "../../domain/listing-end-fence";
 
 const now = new Date("2026-05-01T19:00:00.000Z");
 
@@ -1008,6 +1014,94 @@ function parseIntent(result: Record<string, unknown> | null): DropshipMarketplac
   return (result as { listingIntent: DropshipMarketplaceListingIntent }).listingIntent;
 }
 
+// PR C's push fence (PLAN-C v4.1 §6.2, DC11, FID-13): nothing is sent for an item whose listing Card Shellz is ending,
+// whose end failed and waits for staff, or that Card Shellz ended after the item was queued.
+describe("DropshipListingPushWorkerService: the listing end fence (PLAN-C v4.1 §6.2)", () => {
+  const FENCES: ReadonlyArray<[ListingEndFenceOutcome, string, string]> = [
+    ["end_open", LISTING_END_FENCE_CODES.inProgress, LISTING_END_FENCE_WORDS.inProgress],
+    ["end_review", LISTING_END_FENCE_CODES.review, LISTING_END_FENCE_WORDS.review],
+    ["ended_since_queued", LISTING_END_FENCE_CODES.endedSincePublish, LISTING_END_FENCE_WORDS.endedSincePublish],
+  ];
+
+  function setup(options: { runId?: number | null; vendorCreated: boolean }) {
+    const repository = new FakeListingPushWorkerRepository();
+    const marketplacePush = new FakeMarketplacePushProvider();
+    const notificationSender = new FakeNotificationSender();
+    const logs: DropshipLogEvent[] = [];
+    const calls: string[] = [];
+    repository.job = { ...repository.job, runId: options.runId ?? null };
+    const item = makeQueuedItem();
+    repository.items = [{ ...item, result: { ...item.result, ...(options.vendorCreated ? { relistAllowed: true } : {}) } }];
+    const service = new DropshipListingPushWorkerService({
+      repository, marketplacePush, notificationSender,
+      refreshListingIntent: async () => { calls.push("refresh"); return parseIntent(repository.items[0].result); },
+      marketplaceSync: {
+        async syncListingBeforePush() { calls.push("pre_read"); return null as unknown as MarketplacePrePushResult; },
+        async recordPushAttempt() { calls.push("attempt"); },
+      },
+      clock: { now: () => now },
+      logger: { info: (event) => logs.push(event), warn: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+    return { service, repository, marketplacePush, notificationSender, logs, calls };
+  }
+
+  it.each(FENCES)("blocks a vendor's own publish-run item fenced %s with its code and words; nothing is read or sent", async (outcome, code, message) => {
+    const f = setup({ runId: 4, vendorCreated: true });
+    f.repository.fenceByItemId.set(1, outcome);
+    const result = await f.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: `fence-run-${outcome}` });
+
+    expect(f.marketplacePush.requests).toEqual([]);
+    expect(f.calls).toEqual([]);
+    expect(f.repository.blockInputs).toEqual([expect.objectContaining({ code, message, item: expect.objectContaining({ itemId: 1 }),
+      workerId: "worker-1", now })]);
+    expect(f.repository.skipInputs).toEqual([]);
+    expect(result.items[0]).toMatchObject({ status: "blocked", errorCode: code });
+    // A run's chunk sends no email of its own: step 3's run problems show the reason.
+    expect(f.notificationSender.sent).toEqual([]);
+    expect(f.logs).toContainEqual(expect.objectContaining({ code, context: expect.objectContaining({ jobId: 30, runId: 4, itemId: 1,
+      listingId: 100, fence: outcome, outcome: "blocked" }) }));
+  });
+
+  it.each(FENCES)("cancels a vendor's own push outside a run quietly when fenced %s: no failure email (FID-13)", async (outcome, code, message) => {
+    const f = setup({ runId: null, vendorCreated: true });
+    f.repository.fenceByItemId.set(1, outcome);
+    const result = await f.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: `fence-p1-${outcome}` });
+
+    expect(f.marketplacePush.requests).toEqual([]);
+    expect(f.repository.skipInputs).toEqual([expect.objectContaining({ code, message })]);
+    expect(f.repository.blockInputs).toEqual([]);
+    expect(result.items[0]).toMatchObject({ status: "cancelled", errorCode: code });
+    expect(f.notificationSender.sent).toEqual([]);
+  });
+
+  it.each([
+    ...FENCES.map(([outcome, code]) => ({ outcome, code, runId: 4 })),
+    ...FENCES.map(([outcome, code]) => ({ outcome, code, runId: null })),
+  ])("cancels a system item quietly when fenced $outcome (run $runId)", async ({ outcome, code, runId }) => {
+    const f = setup({ runId, vendorCreated: false });
+    f.repository.fenceByItemId.set(1, outcome);
+    await f.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: `fence-system-${outcome}-${runId}` });
+
+    expect(f.marketplacePush.requests).toEqual([]);
+    expect(f.calls).toEqual([]);
+    expect(f.repository.skipInputs).toEqual([expect.objectContaining({ code })]);
+    expect(f.repository.blockInputs).toEqual([]);
+    expect(f.notificationSender.sent).toEqual([]);
+    expect(f.logs).toContainEqual(expect.objectContaining({ code, context: expect.objectContaining({ outcome: "skipped", fence: outcome }) }));
+  });
+
+  it("fences only its own item: the job's next item is read and sent as before", async () => {
+    const f = setup({ runId: null, vendorCreated: false });
+    const second = makeQueuedItem();
+    f.repository.items.push({ ...second, itemId: 2, listingId: 200, listing: { ...second.listing!, listingId: 200 } });
+    f.repository.fenceByItemId.set(1, "end_open");
+    const result = await f.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "fence-next" });
+
+    expect(f.marketplacePush.requests.map((request) => request.jobItemId)).toEqual([2]);
+    expect(result.items.map((item) => item.status)).toEqual(["cancelled", "completed"]);
+  });
+});
+
 class FakeMarketplacePushProvider implements DropshipMarketplaceListingPushProvider {
   requests: Parameters<DropshipMarketplaceListingPushProvider["pushListing"]>[0][] = [];
   error: Error | null = null;
@@ -1116,18 +1210,23 @@ class FakeListingPushWorkerRepository implements DropshipListingPushWorkerReposi
   /** The vendor stopped this job's publish run (cancel_requested_at): as the real repository, a run item starting after it is cancelled. */
   runStopRequested = false;
 
-  async markItemProcessing(input: { jobId: number; itemId: number; workerId: string; now: Date }): Promise<boolean> {
+  /** PR C's push fence (PLAN-C v4.1 §6.2): what the real repository answers for these items' listings; the item is left as it is. */
+  fenceByItemId = new Map<number, ListingEndFenceOutcome>();
+
+  async markItemProcessing(input: { jobId: number; itemId: number; workerId: string; now: Date }): Promise<ListingPushItemStart> {
     this.markInputs.push(input);
     const index = this.items.findIndex((item) => item.itemId === input.itemId);
     if (this.items[index].status !== "queued") {
-      return false;
+      return "not_started";
     }
+    const fence = this.fenceByItemId.get(input.itemId);
+    if (fence) return fence;
     if (this.job.runId && this.runStopRequested) {
       this.items[index] = { ...this.items[index], status: "cancelled" };
-      return false;
+      return "not_started";
     }
     this.items[index] = { ...this.items[index], status: "processing" };
-    return true;
+    return "started";
   }
 
   async completeItem(input: Parameters<DropshipListingPushWorkerRepository["completeItem"]>[0]): Promise<DropshipListingPushWorkerItemRecord> {

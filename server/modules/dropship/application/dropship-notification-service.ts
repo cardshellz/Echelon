@@ -46,6 +46,8 @@ export const DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES: DropshipLaunchNotificatio
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.EBAY_ORDER_UPDATE, critical: false },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.ENTITLEMENT_BLOCKED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_PUSH_FAILED, critical: true },
+  // A removed size's eBay listing Card Shellz could not end (PLAN-C v4.1 §5.7): critical, like a failed push.
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_END_FAILED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_TIER_GRACE_NOTICE, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_TIER_HELD, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_TIER_RELEASED, critical: false },

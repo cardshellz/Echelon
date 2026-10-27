@@ -45,6 +45,10 @@ describe("ops-health :: Dropship eBay sync-back", () => {
       ["DROPSHIP_ORDER_MARKETPLACE_CANCEL_REVIEW", "critical"],
       ["DROPSHIP_EBAY_ORDER_CANCEL_UNPROCESSABLE", "critical"],
       ["DROPSHIP_ORDER_UNMATCHED_LISTING", "warning"],
+      // PR C (PLAN-C v4.1 §5.7): ends that need a person, ends that wait too long, orders on an ended listing.
+      ["DROPSHIP_LISTING_END_FAILED", "critical"],
+      ["DROPSHIP_LISTING_END_STUCK", "warning"],
+      ["DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER", "critical"],
     ]);
   });
 

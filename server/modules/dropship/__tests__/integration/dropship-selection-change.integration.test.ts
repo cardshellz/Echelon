@@ -10,12 +10,15 @@ import {
   type DropshipSelectionChangeRepository,
   type DropshipSelectionChangeTransaction,
 } from "../../application/dropship-selection-change-service";
+import { DROPSHIP_CATALOG_CODE_VERSION } from "../../domain/catalog-code-version";
 import { DropshipError } from "../../domain/errors";
+import { combineSelectionEffectsHash, selectionEndsHash } from "../../domain/vendor-selection-drift";
 import { writeProcessHeartbeat } from "../../infrastructure/dropship-process-heartbeat.repository";
 import { PgDropshipSelectionChangeRepository } from "../../infrastructure/dropship-selection-change.repository";
 import { LISTING_SELECTION_LOCK_SQL } from "../../infrastructure/dropship-listing-setting-writes.repository";
 import { createInventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { LISTING_PUSH_RUNS_MIGRATION_FILE, listingPushRunsMigrationSql, seedPicks } from "../fixtures/listing-push-runs.fixture";
+import { LISTING_END_MIGRATION_FILE, listingEndMigrationSql } from "../fixtures/listing-end.fixture";
 import {
   PICKS_PRODUCTION_INDEXES_SQL,
   PUBLICATION_SELECTION_GATE_LOCK_SQL,
@@ -35,7 +38,9 @@ import type { SelectionChangeAnswer, SelectionChangePreviewAnswer } from "../../
  * publication gate held and released between attempts, the pre-lock waiting before the gate, a no-op save,
  * a deadlock with an ungated multi-product writer (R7), the writes readiness gate, the SHARE-lock statements,
  * a size deleted between the plan and the pre-lock (SAFETY-9), a catalog change between the plan's own reads
- * (SRV-1), and 10,000 picks on two stores with budgets.
+ * (SRV-1), and 10,000 picks on two stores with budgets. PR C (PLAN-C v4.1 §4, §13.2): every page is version 3 and
+ * echoes the ends it confirmed; the scale removal ends its 20,000 live eBay listings; a removal past the 30,000-size
+ * bound is refused 422. The save's end writes, B pages and the interleavings are in the listing-end suite.
  *
  * Every functional case uses a vendor of its own on one shared catalog, so no case cleans up after another
  * (the B file's freeze is never touched: nothing here deletes a vendor or a revision; V7).
@@ -82,7 +87,10 @@ interface ChangeDatabase {
   close: () => Promise<void>;
 }
 
-/** A database of its own: the schema, the reduced owners, the real 0743, PR A's runs migration, the B file. */
+/**
+ * A database of its own: the schema, the reduced owners, the real 0743, PR A's runs migration, the B file and PR C's
+ * end requests (the effects reader reads each listing's open end since C2, PLAN-C v4.1 §7; no case writes one yet).
+ */
 async function createChangeDatabase(seed: string): Promise<ChangeDatabase> {
   const database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, picksMigrationSchemaSql);
   let pool: pg.Pool | undefined;
@@ -92,7 +100,7 @@ async function createChangeDatabase(seed: string): Promise<ChangeDatabase> {
     const client = await pool.connect();
     try {
       for (const [file, sql] of [[LISTING_PUSH_RUNS_MIGRATION_FILE, listingPushRunsMigrationSql()],
-        [SELECTED_VARIANTS_MIGRATION_FILE, selectedVariantsMigrationSql()]] as const) {
+        [SELECTED_VARIANTS_MIGRATION_FILE, selectedVariantsMigrationSql()], [LISTING_END_MIGRATION_FILE, listingEndMigrationSql()]] as const) {
         await executeMigrationWithRetry({
           client, file, sql, contentHash: createHash("sha256").update(sql).digest("hex"),
           options: { maxAttempts: 1, retryBaseDelayMs: 1, retryMaxDelayMs: 1, lockTimeoutMs: 15_000 },
@@ -151,19 +159,25 @@ interface ChangeRequest { vendorId: number; add?: number[]; remove?: number[]; k
 async function previewOf(h: Harness, request: ChangeRequest): Promise<SelectionChangePreviewAnswer> {
   const head = await headRevision(request.vendorId);
   return h.service.preview({ vendorId: request.vendorId, body: {
-    clientVersion: 2, expectedRevisionId: head, add: { productVariantIds: request.add ?? [] }, remove: { productVariantIds: request.remove ?? [] },
+    clientVersion: DROPSHIP_CATALOG_CODE_VERSION, expectedRevisionId: head, add: { productVariantIds: request.add ?? [] },
+    remove: { productVariantIds: request.remove ?? [] },
   } });
 }
 
-/** A press of Save as the page makes it: the preview's head and effects, then the change with a fresh key. */
+/**
+ * A press of Save as a version-3 page makes it (PLAN-C v4.1 §4.1, §4.6): the preview's head and effects, the ends it
+ * confirmed echoed with the hash of the other entries, then the change with a fresh key.
+ */
 async function saveOf(h: Harness, request: ChangeRequest, confirmed?: SelectionChangePreviewAnswer): Promise<{
   answer: SelectionChangeAnswer; idempotentReplay: boolean;
 }> {
   const preview = confirmed ?? await previewOf(h, request);
   return h.service.applyChange({ vendorId: request.vendorId, actor: { actorType: "vendor", actorId: `member-${request.vendorId}` }, body: {
-    clientVersion: 2, expectedRevisionId: preview.headRevisionId, add: { productVariantIds: request.add ?? [] },
+    clientVersion: DROPSHIP_CATALOG_CODE_VERSION, expectedRevisionId: preview.headRevisionId, add: { productVariantIds: request.add ?? [] },
     remove: { productVariantIds: request.remove ?? [] }, idempotencyKey: request.key ?? `catalog-selection:${request.vendorId}:${keySeq += 1}`,
     expectedEffectsHash: preview.effectsHash,
+    expectedEnds: { listingIds: preview.ends.listingIds, hiddenRemovedIds: preview.ends.hiddenRemovedIds },
+    expectedOtherEntriesHash: preview.otherEntriesHash,
   } });
 }
 let keySeq = 0;
@@ -424,6 +438,37 @@ describeDatabase.sequential("the picks save (PostgreSQL)", () => {
     }
   }, CASE_TIMEOUT_MS);
 
+  it("review SAV-1: a database where only version 3 ever ran keeps writes closed until version 3 is five minutes old, then opens", async () => {
+    // A fresh database deployed straight to PR C: no version-2 process ever beat, so there is no version-2 row.
+    const h = harness(db.pool);
+    const versionTwo = (await db.pool.query<{ first_seen_at: Date }>(
+      "SELECT first_seen_at FROM dropship.dropship_catalog_code_versions WHERE catalog_code_version = 2")).rows[0]!.first_seen_at;
+    try {
+      await db.pool.query("DELETE FROM dropship.dropship_catalog_code_versions WHERE catalog_code_version = 2");
+      await writeProcessHeartbeat(db.pool, { processKey: "web.9:c", catalogCodeVersion: 3 });
+      await db.pool.query(`UPDATE dropship.dropship_catalog_code_versions SET first_seen_at = clock_timestamp() - interval '60 seconds'
+        WHERE catalog_code_version = 3`);
+      const settling = await refusalOf(saveOf(h, { vendorId: 28, add: [2001] }));
+      expect(settling).toMatchObject({ code: "DROPSHIP_SELECTION_WRITES_PAUSED", context: { reason: "older_version_running",
+        olderVersionLive: false, versionSettled: false } });
+      expect(await counts(db.pool, 28)).toEqual({ revisions: 0, audits: 0, picks: [] });
+
+      await db.pool.query(`UPDATE dropship.dropship_catalog_code_versions SET first_seen_at = clock_timestamp() - interval '310 seconds'
+        WHERE catalog_code_version = 3`);
+      const { answer } = await saveOf(h, { vendorId: 28, add: [2001] });
+      expect(answer.toAdd).toBe(1);
+      // A live version-1 process still closes writes, whatever version settled (hasLiveOlderCatalogProcess below 2).
+      await writeProcessHeartbeat(db.pool, { processKey: "web.9:a1", catalogCodeVersion: 1 });
+      expect(await refusalOf(saveOf(h, { vendorId: 28, add: [2002] }))).toMatchObject({ code: "DROPSHIP_SELECTION_WRITES_PAUSED",
+        context: { olderVersionLive: true } });
+    } finally {
+      await db.pool.query("DELETE FROM dropship.dropship_process_heartbeats WHERE process_key IN ('web.9:c', 'web.9:a1')");
+      await db.pool.query(`INSERT INTO dropship.dropship_catalog_code_versions (catalog_code_version, first_seen_at) VALUES (2, $1)
+        ON CONFLICT (catalog_code_version) DO NOTHING`, [versionTwo]);
+      await db.pool.query("DELETE FROM dropship.dropship_catalog_code_versions WHERE catalog_code_version = 3");
+    }
+  }, CASE_TIMEOUT_MS);
+
   it("waits for the SHARE-lock statements (settings writes, sync-back's lockListing) before a pick delete, without holding the gate", async () => {
     await seedPicks(db.pool, 18, [2003]);
     const settings = await db.pool.connect();
@@ -535,6 +580,39 @@ describeDatabase.sequential("the picks save (PostgreSQL)", () => {
     expect(await counts(db.pool, 21)).toEqual({ revisions: 2, audits: 2, picks: [] });
     // The touched pick is counted from the plan's own read, so the cascade never made the pick count negative (23514).
     expect(await revisionPickCount(answer.revisionId)).toBe(0);
+  }, CASE_TIMEOUT_MS);
+
+  it("PR C: a removal whose products hold more than 30,000 sizes is refused 422 by the preview and the save, with nothing written", async () => {
+    // Products 5001-8001 with ten sizes each (600001-630010, no mapping head, so 0743 enrols none); vendor 22 picked the
+    // first size of each and removes them all: the facts would widen to 30,010 sizes. Ten per product, as a large
+    // catalog has them (0743's row trigger reads a product's sizes per inserted size).
+    await db.pool.query(`INSERT INTO catalog.products (id, sku, name, category, is_active, status, product_type, ebay_listing_excluded)
+      SELECT g, 'P-' || g, 'Product ' || g, 'Supplies', true, 'active', 'sleeves', false FROM generate_series(5001, 8001) g`);
+    await db.pool.query(`INSERT INTO catalog.product_variants (id, product_id, sku, name, uom_type, is_active, requires_shipping, track_inventory,
+        sales_eligibility, ebay_listing_excluded)
+      SELECT g, 5001 + (g - 600001) / 10, 'S-' || g, 'Size ' || g, 'pack', true, true, true, 'sellable', false
+      FROM generate_series(600001, 630010) g`);
+    const removed = Array.from({ length: 3_001 }, (_, index) => 600_001 + index * 10);
+    await seedPicks(db.pool, 22, removed);
+    const h = harness(db.pool);
+    const before = await counts(db.pool, 22);
+    const tooLarge = { code: "DROPSHIP_SELECTION_REMOVAL_TOO_LARGE",
+      context: { factSizes: 30_001, limit: 30_000, classification: "permanent", retryable: false } };
+    await expect(refusalOf(previewOf(h, { vendorId: 22, remove: removed }))).resolves.toMatchObject(tooLarge);
+    // A well-formed echo of an empty end set (it passes step 2a), so the save reaches its facts read and is refused there.
+    const expectedEnds = { listingIds: [], hiddenRemovedIds: [] };
+    const other = "a".repeat(64);
+    const save = h.service.applyChange({ vendorId: 22, actor: { actorType: "vendor", actorId: "member-22" }, body: {
+      clientVersion: DROPSHIP_CATALOG_CODE_VERSION, expectedRevisionId: await headRevision(22), add: { productVariantIds: [] },
+      remove: { productVariantIds: removed }, idempotencyKey: "catalog-selection:22:too-large",
+      expectedEffectsHash: combineSelectionEffectsHash(selectionEndsHash(expectedEnds), other), expectedEnds, expectedOtherEntriesHash: other,
+    } });
+    await expect(refusalOf(save)).resolves.toMatchObject(tooLarge);
+    // Permanent: no server retry, and nothing written.
+    expect(h.sleeps).toEqual([]);
+    expect(await counts(db.pool, 22)).toEqual(before);
+    expect((await db.pool.query("SELECT count(*)::int AS n FROM dropship.dropship_listing_end_requests WHERE vendor_id = 22")).rows)
+      .toEqual([{ n: 0 }]);
   }, CASE_TIMEOUT_MS);
 });
 
@@ -649,16 +727,24 @@ describeDatabase.sequential("the picks save at 10,000 picks (PostgreSQL)", () =>
     started = performance.now();
     const removePreview = await previewOf(h, { vendorId: 50, remove: sizes });
     measured.previewRemoveMs = performance.now() - started;
+    // PR C (PLAN-C v4.1 §4.4 rule 1, §4.5): every removed size's live eBay listing is ended, not set to 0, on both stores.
     expect(removePreview).toMatchObject({ toRemove: 10_000, selectedAfter: 0,
-      effects: [{ storeConnectionId: 150, goesToZero: 10_000 }, { storeConnectionId: 151, goesToZero: 10_000 }] });
+      effects: [{ storeConnectionId: 150, goesToZero: 0, ends: 10_000 }, { storeConnectionId: 151, goesToZero: 0, ends: 10_000 }],
+      ends: { hiddenRemovedIds: [], otherSizes: 0 } });
+    expect(removePreview.ends.listingIds).toHaveLength(20_000);
 
     sampler = samplePublicationSelectionGate(db.pool);
     started = performance.now();
     const removed = await saveOf(h, { vendorId: 50, remove: sizes }, removePreview);
     measured.saveRemoveMs = performance.now() - started;
     measured.gateHoldRemoveMs = publicationSelectionGateHoldMs(await sampler.stop());
-    expect(removed.answer).toMatchObject({ toRemove: 10_000, selectedAfter: 0 });
+    expect(removed.answer).toMatchObject({ toRemove: 10_000, selectedAfter: 0, drifted: false });
     expect((await counts(db.pool, 50)).picks).toEqual([]);
+    // One pending end per removed listing, each for its own size, written with the revision.
+    expect((await db.pool.query(`SELECT count(*)::int AS n, count(DISTINCT listing_id)::int AS listings,
+        bool_and(state = 'pending' AND reason = 'size_removed' AND selection_revision_id = $2) AS planned
+      FROM dropship.dropship_listing_end_requests WHERE vendor_id = $1`, [50, removed.answer.revisionId])).rows)
+      .toEqual([{ n: 20_000, listings: 20_000, planned: true }]);
 
     const busyRetries = h.logs.filter((line) => line.code === "dropship.selection.change_retry").length;
     // Recorded for BUILD-NOTES (§15.3), as the picks migration suite records its lock windows.

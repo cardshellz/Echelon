@@ -7,6 +7,7 @@ import { PgDropshipListingPushJobQueueRepository } from "../../infrastructure/dr
 import { PgDropshipListingPushWorkerRepository } from "../../infrastructure/dropship-listing-push-worker.repository";
 import { listingPushRunsMigrationSql } from "../fixtures/listing-push-runs.fixture";
 import { ebaySyncBackListingColumnsSql } from "../fixtures/ebay-sync-back.fixture";
+import { LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL } from "../fixtures/listing-end-reduced.fixture";
 
 /**
  * The worker repository against a real PostgreSQL: claim, item outcome and
@@ -88,6 +89,8 @@ describeDatabase.sequential("listing push worker repository (PostgreSQL)", () =>
     await pool.query(qualify(listingPushRunsMigrationSql()));
     // The eBay sync-back listing columns a completed push writes (plan v4 §5 step 7), from the real migration.
     await pool.query(qualify(ebaySyncBackListingColumnsSql()));
+    // PR C's end requests, reduced: every item start reads its listing's end (the push fence, PLAN-C v4.1 §6.2).
+    await pool.query(qualify(LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL));
     const scopedPool = {
       query: (sql: string, values?: unknown[]) => pool!.query(qualify(sql), values),
       connect: async () => {
@@ -140,7 +143,7 @@ describeDatabase.sequential("listing push worker repository (PostgreSQL)", () =>
     expect(claim.job.status).toBe("processing");
     expect(claim.items).toHaveLength(1);
 
-    expect(await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: NOW, workerId: WORKER })).toBe(true);
+    expect(await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: NOW, workerId: WORKER })).toBe("started");
     const completed = await repository.completeItem({
       job: claim.job, item: claim.items[0]!, intent: intent(), workerId: WORKER, now: NOW,
       pushResult: { status: "created", externalListingId: "123456789012", externalOfferId: "offer-1",
@@ -204,7 +207,7 @@ describeDatabase.sequential("listing push worker repository (PostgreSQL)", () =>
     const seeded = await seedJob({ jobStatus: "queued", itemStatus: "queued" });
     await repository.claimJob({ jobId: seeded.jobId, workerId: WORKER, idempotencyKey: "process-6", now: NOW });
     const later = new Date(NOW.getTime() + 29 * 60_000);
-    expect(await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: later, workerId: WORKER })).toBe(true);
+    expect(await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: later, workerId: WORKER })).toBe("started");
     const job = await pool!.query(qualify("SELECT status, updated_at FROM dropship.dropship_listing_push_jobs WHERE id = $1"), [seeded.jobId]);
     expect(job.rows[0]).toEqual({ status: "processing", updated_at: later });
     // 40 minutes after the claim, 11 after the heartbeat: still running, not stale.
@@ -218,8 +221,8 @@ describeDatabase.sequential("listing push worker repository (PostgreSQL)", () =>
     expect(recovered.claimed).toBe(true);
     expect(recovered.items.map((item) => item.status)).toEqual(["queued"]);
     // A guarded start never takes an item that is not queued.
-    expect(await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: stale, workerId: WORKER })).toBe(true);
-    expect(await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: stale, workerId: WORKER })).toBe(false);
+    expect(await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: stale, workerId: WORKER })).toBe("started");
+    expect(await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: stale, workerId: WORKER })).toBe("not_started");
   });
 
   it("pauses: the item and job go back to queued with a backoff the queue honours, and a completed push resets the count", async () => {

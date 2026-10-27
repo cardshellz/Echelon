@@ -16,6 +16,11 @@ import {
   itemTransientPauses,
 } from "../domain/listing-push-run";
 import { LISTING_PUSH_RUN_WORDS } from "../domain/listing-push-run-words";
+import {
+  decideListingEndFenceAction,
+  type ListingEndFenceOutcome,
+  type ListingPushItemStart,
+} from "../domain/listing-end-fence";
 import { isVendorRelistAllowed } from "../domain/marketplace-push-rule";
 import { MARKETPLACE_SYNC_CODES } from "../domain/marketplace-sync-errors";
 import { MARKETPLACE_PUSH_STOP_WORDS } from "../domain/marketplace-sync-words";
@@ -129,18 +134,23 @@ export interface DropshipListingPushWorkerRepository {
     staleProcessingMinutes?: number;
   }): Promise<DropshipListingPushWorkerClaim>;
   /**
-   * Starts a queued item, with the job's heartbeat, in one transaction. False
-   * when the item is not queued any more (a stop cancelled it, another worker
-   * took it), or when its run was stopped: then the item is cancelled here,
-   * whichever path put it back in the queue (a pause, stale recovery; review
-   * MC4), so nothing of a stopped run starts after the stop.
+   * Starts a queued item, with the job's heartbeat, in one transaction.
+   * `not_started` when the item is not queued any more (a stop cancelled it,
+   * another worker took it), or when its run was stopped: then the item is
+   * cancelled here, whichever path put it back in the queue (a pause, stale
+   * recovery; review MC4), so nothing of a stopped run starts after the stop.
+   * PR C's push fence (PLAN-C v4.1 §6.2) comes first: while Card Shellz ends
+   * the item's listing on eBay (`end_open`), after such an end failed
+   * (`end_review`), or when Card Shellz ended it after the item was queued
+   * (`ended_since_queued`), the item is left untouched and the caller blocks
+   * or skips it; nothing is sent.
    */
   markItemProcessing(input: {
     jobId: number;
     itemId: number;
     workerId: string;
     now: Date;
-  }): Promise<boolean>;
+  }): Promise<ListingPushItemStart>;
   completeItem(input: {
     job: DropshipListingPushWorkerJobRecord;
     item: DropshipListingPushWorkerItemRecord;
@@ -376,14 +386,18 @@ export class DropshipListingPushWorkerService {
     }
 
     // Also the job's heartbeat: a long job is not taken for stale while its items still start (F5).
-    const marked = await this.deps.repository.markItemProcessing({
+    const started = await this.deps.repository.markItemProcessing({
       jobId: claim.job.jobId,
       itemId: item.itemId,
       workerId: parsed.workerId,
       now: this.deps.clock.now(),
     });
-    if (!marked) {
+    if (started === "not_started") {
       // Not queued any more (a stop cancelled it, or another worker took it), or its run was stopped (cancelled now).
+      return "done";
+    }
+    if (started !== "started") {
+      await this.fenceItem(parsed, claim, item, started);
       return "done";
     }
 
@@ -545,6 +559,34 @@ export class DropshipListingPushWorkerService {
       if (endsPauseRun) state.consecutivePauses = 0;
       return "done";
     }
+  }
+
+  /**
+   * PR C's push fence (PLAN-C v4.1 §6.2, DC11): the item's listing is being
+   * ended on eBay, its end failed and waits for staff, or Card Shellz ended it
+   * after the item was queued. Nothing is sent: a vendor's own item in a
+   * publish run is blocked with the reason (step 3's run problems); every
+   * other item is cancelled quietly (no failure email, never re-queued).
+   */
+  private async fenceItem(
+    parsed: ProcessListingPushJobInput,
+    claim: DropshipListingPushWorkerClaim,
+    item: DropshipListingPushWorkerItemRecord,
+    outcome: ListingEndFenceOutcome,
+  ): Promise<void> {
+    const fenced = decideListingEndFenceAction({ outcome, itemResult: item.result, inRun: Boolean(claim.job.runId) });
+    const decision = { job: claim.job, item, code: fenced.code, message: fenced.message, workerId: parsed.workerId,
+      now: this.deps.clock.now() };
+    if (fenced.action === "block") await this.deps.repository.blockItem(decision);
+    else await this.deps.repository.skipItem(decision);
+    // INFO: a state transition the vendor chose (a removal in step 1), not an anomaly (CLAUDE.md §10).
+    this.deps.logger.info({
+      code: fenced.code,
+      message: "A listing push item was not sent: Card Shellz is ending, or ended, its eBay listing.",
+      context: { jobId: claim.job.jobId, runId: claim.job.runId ?? null, itemId: item.itemId, vendorId: claim.job.vendorId,
+        storeConnectionId: claim.job.storeConnectionId, listingId: item.listingId, productVariantId: item.productVariantId,
+        fence: outcome, outcome: fenced.action === "block" ? "blocked" : "skipped" },
+    });
   }
 
   /**

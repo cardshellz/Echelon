@@ -67,6 +67,9 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   // PROPOSED (step 1 plan B v4): the vendor's rule that added new items by itself became one-time picks at PR B's
   // release (§11.2 d); once per vendor, never critical.
   SELECTION_RULES_CONVERTED: "dropship_selection_rules_converted",
+  // PROPOSED (Stage 4, step 1 plan S2-5): Card Shellz could not end some eBay listings the vendor removed in step 1
+  // (PLAN-C v4.1 §5.7); critical, one per vendor per worker tick that failed any of its ends.
+  LISTING_END_FAILED: "dropship_listing_end_failed",
 } as const;
 
 export type DropshipNotificationEventType =

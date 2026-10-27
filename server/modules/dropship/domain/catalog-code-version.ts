@@ -8,7 +8,7 @@
  * 1 = PR A (rules selection, publish runs), 2 = PR B (one-time picks),
  * 3 = PR C (ending removed listings). Each PR sets its value; a unit test pins it.
  */
-export const DROPSHIP_CATALOG_CODE_VERSION = 2;
+export const DROPSHIP_CATALOG_CODE_VERSION = 3;
 
 /**
  * How long after its last heartbeat a process still counts as running: four
@@ -43,4 +43,15 @@ export function decideCatalogPageVersion(
   serverVersion: number = DROPSHIP_CATALOG_CODE_VERSION,
 ): CatalogPageVersionDecision {
   return clientVersion !== null && clientVersion > serverVersion ? "page_newer_than_server" : "current";
+}
+
+/**
+ * A step 1 save or preview from a page older than this server (PR C, PLAN-C v4.1 §4.1, D39): a page that sends no
+ * version, or one below `minimum`, means a B page, whose confirm never named the eBay listings a save ends. Only the
+ * two step 1 POSTs read this (the preview refuses in its route, the save after its replay lookup); every catalog
+ * read and the new-items acknowledge keep decideCatalogPageVersion, so a B page still reads. Only the step 1 page
+ * posts them, and it always sends its version (dropship-catalog-choose.ts chooseChangeBody).
+ */
+export function isCatalogPageOutdated(clientVersion: number | null, minimum: number = DROPSHIP_CATALOG_CODE_VERSION): boolean {
+  return clientVersion === null || clientVersion < minimum;
 }

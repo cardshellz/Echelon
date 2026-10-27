@@ -22,6 +22,11 @@ export interface DropshipStockListingState {
   livePushItemId: number | null;
   /** eBay sync-back (owner rule 1): the vendor's limit on this listing; absent or null when it has none. */
   vendorQuantityLimit?: number | null;
+  /**
+   * PR C (PLAN-C v4.1 §7, D42): Card Shellz is ending this listing on eBay (an end request is pending, ending, or
+   * failed and waiting for staff). Absent or false when none is open.
+   */
+  endOpen?: boolean;
 }
 
 export interface DropshipStockSelectionConfig {
@@ -85,6 +90,11 @@ export function decideDropshipStockPublicationSelection(input: {
     rawAtpUnits: 0, applyMarketplaceQuantityCap: false,
   });
   listingSelected = selection.selected && isCustomerSellableVariant(input.candidate);
+  // While Card Shellz ends the listing on eBay nothing may sell on it, whatever the vendor picks meanwhile (PLAN-C
+  // v4.1 §7, D42). After the archived and ended rules, so retirement and a finished end keep their outcomes; after
+  // listingSelected, which the lifecycle reader reads. `zero` carries no publish limit, so the vendor's limit
+  // pauses with it.
+  if (listing?.endOpen) return result(retainedDuty ? "zero" : "none", "listing_end_in_progress");
   const stockEligible = input.candidate.requiresShipping === true
     && input.candidate.trackInventory !== false
     && isCustomerSellableVariant(input.candidate);

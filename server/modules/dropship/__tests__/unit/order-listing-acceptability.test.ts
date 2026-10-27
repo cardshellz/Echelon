@@ -10,7 +10,10 @@ import {
   decideListingOrderAcceptability,
   assertNoMarketplaceVariationLines,
   isUnsupportedMarketplaceVariationLine,
+  listingEndedBeforeOrderError,
   ORDER_LINE_VARIATION_UNSUPPORTED_CODE,
+  ORDER_LISTING_ENDED_BEFORE_ORDER_CODE,
+  ORDER_LISTING_ENDED_BEFORE_ORDER_MESSAGE,
   parseIntakeOrderedAt,
   PUSH_PROGRESS_LISTING_STATUSES,
 } from "../../domain/order-listing-acceptability";
@@ -132,6 +135,64 @@ describe("an order on a listing sync-back saw end (eBay sync-back plan v4 §7.3 
       expect(decideListingOrderAcceptability({ status, externalListingId: "110012345678", ...times }))
         .toEqual(decideListingOrderAcceptability({ status, externalListingId: "110012345678" }));
     }
+  });
+});
+
+// PR C (PLAN-C v4.1 §8): Card Shellz's own end leaves marketplace_ended_at NULL; its end request's ended_at is the time.
+describe("an order on a listing Card Shellz ended (PLAN-C v4.1 §8)", () => {
+  const listingEndedAt = new Date("2026-10-25T12:00:00.000Z");
+  const ended = (orderedAt: Date | null, times: { marketplaceEndedAt?: Date | null; listingEndedAt?: Date | null } = { listingEndedAt }) =>
+    decideListingOrderAcceptability({ status: "ended", externalListingId: "110012345678", orderedAt, ...times });
+
+  it("accepts an order placed before Card Shellz's end, or at its very time", () => {
+    expect(ended(new Date("2026-10-25T11:59:59.999Z"))).toEqual({ acceptable: true, reason: "ordered_before_listing_ended" });
+    expect(ended(listingEndedAt)).toEqual({ acceptable: true, reason: "ordered_before_listing_ended" });
+  });
+
+  it("refuses an order placed after it, and an order with no time (no proof)", () => {
+    expect(ended(new Date("2026-10-25T12:00:00.001Z"))).toEqual({ acceptable: false, reason: "listing_ended" });
+    expect(ended(null)).toEqual({ acceptable: false, reason: "listing_ended" });
+    expect(ended(new Date("2026-10-24T00:00:00.000Z"), { listingEndedAt: null })).toEqual({ acceptable: false, reason: "listing_ended" });
+  });
+
+  it("judges by the vendor's end when sync-back recorded one (it is the newer: a completed push clears it)", () => {
+    const vendorEndedAt = new Date("2026-10-26T12:00:00.000Z");
+    const between = new Date("2026-10-26T00:00:00.000Z");
+    expect(ended(between, { marketplaceEndedAt: vendorEndedAt, listingEndedAt })).toEqual({ acceptable: true, reason: "ordered_before_listing_ended" });
+    expect(ended(between, { marketplaceEndedAt: new Date("2026-10-25T18:00:00.000Z"), listingEndedAt: vendorEndedAt }))
+      .toEqual({ acceptable: false, reason: "listing_ended" });
+  });
+
+  it("does not let Card Shellz's end time change any other status", () => {
+    for (const status of ALL_STATUSES.filter((entry) => entry !== "ended")) {
+      expect(decideListingOrderAcceptability({ status, externalListingId: "110012345678", listingEndedAt, orderedAt: new Date("2026-10-26T00:00:00Z") }))
+        .toEqual(decideListingOrderAcceptability({ status, externalListingId: "110012345678" }));
+    }
+  });
+});
+
+// DC14 (PLAN-C v4.1 §8 step 3): every listing_ended refusal, sync-back's included, is one review code.
+describe("the refusal of an order whose listing had ended before it", () => {
+  const base = { context: { intakeId: 7 }, lineIndex: 1, listingId: 501, listingStatus: "ended" };
+  const orderedAt = new Date("2026-10-26T00:00:00.000Z");
+
+  it("is permanent, for review, never retried, in the vendor's words, naming Card Shellz's end", () => {
+    const error = listingEndedBeforeOrderError({ ...base, marketplaceEndedAt: null, listingEndedAt: new Date("2026-10-25T12:00:00.000Z"), orderedAt });
+    expect(error.code).toBe(ORDER_LISTING_ENDED_BEFORE_ORDER_CODE);
+    expect(ORDER_LISTING_ENDED_BEFORE_ORDER_CODE).toBe("DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER");
+    expect(error.message).toBe(ORDER_LISTING_ENDED_BEFORE_ORDER_MESSAGE);
+    expect(error.message).toBe("This order is for an eBay listing that was ended before the order was placed. Card Shellz will review it.");
+    expect(error.context).toEqual({ intakeId: 7, lineIndex: 1, listingId: 501, listingStatus: "ended",
+      endedAt: "2026-10-25T12:00:00.000Z", orderedAt: "2026-10-26T00:00:00.000Z", endSource: "card_shellz_end",
+      requiresReview: true, retryable: false, classification: "permanent" });
+  });
+
+  it("names the vendor's end when sync-back saw it, and no end when neither time is known", () => {
+    const vendorEnd = listingEndedBeforeOrderError({ ...base, marketplaceEndedAt: new Date("2026-10-25T09:00:00.000Z"),
+      listingEndedAt: new Date("2026-10-24T00:00:00.000Z"), orderedAt });
+    expect(vendorEnd.context).toMatchObject({ endSource: "marketplace_end", endedAt: "2026-10-25T09:00:00.000Z" });
+    const unknown = listingEndedBeforeOrderError({ ...base, marketplaceEndedAt: null, listingEndedAt: null, orderedAt: null });
+    expect(unknown.context).toMatchObject({ endSource: "unknown", endedAt: null, orderedAt: null, requiresReview: true });
   });
 });
 

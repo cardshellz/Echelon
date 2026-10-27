@@ -11,6 +11,7 @@ import {
   admittedWhilePushing,
   decideListingOrderAcceptability,
   assertNoMarketplaceVariationLines,
+  listingEndedBeforeOrderError,
   parseIntakeOrderedAt,
 } from "../domain/order-listing-acceptability";
 import { logger } from "../../../platform/observability/logger";
@@ -61,6 +62,8 @@ interface ListingCandidateRow {
   variant_is_active: boolean;
   sales_eligibility: "sellable" | "internal_only";
   marketplace_ended_at: Date | null;
+  /** PR C: when Card Shellz's newest end of this listing finished (its ended end request), or null. */
+  listing_end_ended_at: Date | null;
   /** Item numbers the listing had before a relist (dropship_listing_previous_marketplace_ids, plan v4 §7.3 step 7). */
   previous_external_listing_ids: string[] | null;
 }
@@ -188,6 +191,9 @@ export class PgDropshipOrderProcessingRepository implements DropshipOrderProcess
          dl.external_listing_id,
          dl.external_offer_id,
          dl.marketplace_ended_at,
+         (SELECT er.ended_at FROM dropship.dropship_listing_end_requests er
+          WHERE er.listing_id = dl.id AND er.state = 'ended'
+          ORDER BY er.ended_at DESC, er.id DESC LIMIT 1) AS listing_end_ended_at,
          ARRAY(SELECT prev.external_listing_id FROM dropship.dropship_listing_previous_marketplace_ids prev
                WHERE prev.listing_id = dl.id ORDER BY prev.id)::text[] AS previous_external_listing_ids,
          p.sku AS product_sku,
@@ -588,12 +594,32 @@ function assertCandidateCanQuote(
   // A listing being re-sent is live on the marketplace while its Echelon status
   // shows push progress (step 1 plan S2-5 §4.7); an ended listing takes an order
   // placed before its end (plan v4 §7.3 step 8); see decideListingOrderAcceptability.
+  const listingEndedAt = candidate.listing_end_ended_at ?? null;
   const acceptability = decideListingOrderAcceptability({
     status: candidate.listing_status,
     externalListingId: candidate.external_listing_id,
     marketplaceEndedAt: candidate.marketplace_ended_at,
+    listingEndedAt,
     orderedAt: input.orderedAt,
   });
+  if (!acceptability.acceptable && acceptability.reason === "listing_ended") {
+    // DC14 (PLAN-C v4.1 §8 step 3): eBay sold on a listing recorded as ended. ERROR: a person decides the order.
+    const refusal = listingEndedBeforeOrderError({ context: { intakeId }, lineIndex, listingId: candidate.listing_id,
+      listingStatus: candidate.listing_status, marketplaceEndedAt: candidate.marketplace_ended_at ?? null, listingEndedAt,
+      orderedAt: input.orderedAt });
+    logger.error("dropship.order.listing_ended_before_order", {
+      outcome: "requires_review",
+      error_code: refusal.code,
+      listing_id: candidate.listing_id,
+      intake_id: intakeId,
+      line_index: lineIndex,
+      ended_at: refusal.context?.endedAt ?? null,
+      ordered_at: refusal.context?.orderedAt ?? null,
+      end_source: refusal.context?.endSource ?? null,
+      path: "quote",
+    });
+    throw refusal;
+  }
   if (!acceptability.acceptable) {
     throw new DropshipError(
       "DROPSHIP_ORDER_PROCESSING_LISTING_NOT_QUOTABLE",
@@ -655,6 +681,7 @@ function assertCandidateCanQuote(
       intake_id: intakeId,
       line_index: lineIndex,
       marketplace_ended_at: candidate.marketplace_ended_at?.toISOString() ?? null,
+      listing_end_ended_at: listingEndedAt?.toISOString() ?? null,
       path: "quote",
     });
   }

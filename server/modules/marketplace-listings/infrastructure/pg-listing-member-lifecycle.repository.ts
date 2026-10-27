@@ -59,6 +59,19 @@ function record(row: Row): ListingMemberRetirement {
     state: row.state, code: row.code, message: row.message, verifiedAt: row.verified_at?.toISOString() ?? null });
 }
 
+/**
+ * Takes the remote-member lock of one listing member until the caller's transaction ends, without waiting: the one
+ * lock every remote removal of that member holds across its provider calls (retirement's withMember below, and
+ * Dropship's listing end worker, PR C PLAN-C v4.1 §5.5). The key is the remote identity (listingMemberRemoteKey), so
+ * two local connections addressing the same provider member serialize. Published through listing-member-lifecycle.ts;
+ * the namespace stays private to this file. False: another remover holds it, nothing was locked.
+ */
+export async function tryLockListingMemberRemote(client: Pick<PoolClient, "query">, identity: ListingMemberIdentity): Promise<boolean> {
+  const locked = (await client.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS locked",
+    [LOCK_NAMESPACE, listingMemberRemoteKey(listingMemberIdentitySchema.parse(identity))])).rows[0]?.locked;
+  return locked === true;
+}
+
 /** Invoked under the existing account/SKU publication lock. The current catalog
  * source, rather than worker discovery timing, stops stale queued submissions. */
 export async function assertArchivedMemberPublicationAllowed(
@@ -153,9 +166,7 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
       if (!row) { await client.query("ROLLBACK"); return null; }
       let current = record(row);
       // Two generations/destinations addressing the same remote member cannot race.
-      const locked = (await client.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS locked",
-        [LOCK_NAMESPACE, listingMemberRemoteKey(current.identity)])).rows[0]?.locked;
-      if (!locked) { await client.query("ROLLBACK"); return null; }
+      if (!(await tryLockListingMemberRemote(client, current.identity))) { await client.query("ROLLBACK"); return null; }
       // The prior worker may have committed between the first read and lock.
       current = record((await client.query<Row>("SELECT * FROM marketplace.listing_member_retirements WHERE id=$1", [id])).rows[0]);
       // Catalog owns archive/reactivation. Hold only this product/member while a

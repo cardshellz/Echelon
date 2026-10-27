@@ -6,6 +6,7 @@ import {
   READ_FAILURES_UNTIL_GIVE_UP,
   ROW,
   ROW_FACT,
+  SHOP,
   SLOW_SELECTION_SAVE_MS,
   TOPLOADERS_CATEGORY_ID,
   catalogReadFailuresFor,
@@ -44,7 +45,6 @@ const TOPLOADER: ChooseRowFact = { ...ROW_FACT, productId: 12, productVariantId:
   variantName: "Pack of 25", variantSku: "TL-35-25", category: "Toploaders", categoryId: TOPLOADERS_CATEGORY_ID, stock: 9 };
 
 const CONFIRM_NONE = "Nothing changes on your eBay listings now.";
-const CONFIRM_NOT_ENDED = "Removed items are set to quantity 0 on eBay. Their listings aren't ended.";
 const CONFIRM_SCOPE = "Your choice applies to all your stores.";
 const STALE = "Your saved choices changed after this page loaded. Review them and save again.";
 const SAVING_STILL = "Still saving… eBay updates are in progress. Your changes are kept.";
@@ -90,7 +90,7 @@ async function saveAndConfirm(page: Page) {
 
 /** The body the page sends for a change: ids ascending, the revision it counted from, this page's version (§12.4, §12.6). */
 function changeBody(expectedRevisionId: number | null, add: number[], remove: number[]) {
-  return { clientVersion: 2, expectedRevisionId, add: { productVariantIds: add }, remove: { productVariantIds: remove } };
+  return { clientVersion: 3, expectedRevisionId, add: { productVariantIds: add }, remove: { productVariantIds: remove } };
 }
 
 function expectClean(state: StubState) {
@@ -138,8 +138,10 @@ test("J1 checking a size marks it, sends nothing, and one save after the questio
   // One save: the preview's body, a request key and the effects the vendor confirmed.
   expect(state.changeCalls).toHaveLength(1);
   expect(state.changeCalls[0].status).toBe(201);
+  // PR C (PLAN-C v4.1 §4.6): the preview's ends (none here) and its other entries' hash, echoed and bound to the hash.
   expect(state.changeCalls[0].body).toEqual({ ...changeBody(1, [102], []), idempotencyKey: expect.stringMatching(/^catalog-selection:/),
-    expectedEffectsHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expectedEffectsHash: expect.stringMatching(/^[a-f0-9]{64}$/), expectedEnds: { listingIds: [], hiddenRemovedIds: [] },
+    expectedOtherEntriesHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
   expect([...state.picks].sort()).toEqual([101, 102]);
   await expect(row(page, 102)).toContainText("Picked by you");
   await expect(row(page, 102)).not.toHaveAttribute("data-changed", /.+/);
@@ -148,17 +150,20 @@ test("J1 checking a size marks it, sends nothing, and one save after the questio
   expectClean(state);
 });
 
-test("J2 unchecking a pick removes it, says removed listings are only set to quantity 0, and the size reads Not selected", async ({ page }) => {
-  // The pick is listed on Marz Cards, so the save sets that listing to quantity 0 (J2b: a removal with no listing).
-  const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND], liveVariantIds: { [MARZ.storeConnectionId]: [101] } });
+test("J2 unchecking a pick removes it, says its Shopify listing is set to quantity 0, and the size reads Not selected", async ({ page }) => {
+  // The pick is listed on a Shopify store, so the save sets that listing to quantity 0 (J2b: a removal with no listing).
+  // Since PR C a removal ends an eBay listing instead, and B's "Their listings aren't ended" line is gone (PLAN-C v4.1
+  // §4.4, §11; dropship-policy-catalog-end.spec.ts).
+  const state = await openCatalog(page, CHOOSE_PATH, { stores: [MARZ, SHOP], chooseRows: [ROW_FACT, SECOND],
+    liveVariantIds: { [SHOP.storeConnectionId]: [101] } });
   await box(page, "Select Envelope Single Pocket, Pack of 50").uncheck();
   await expect(row(page, 101)).toHaveAttribute("data-changed", "remove");
   await expect(row(page, 101)).toContainText("Will be removed");
   await expect(status(page)).toHaveText("Not saved: 0 to add · 1 to remove");
 
   await saveButton(page).click();
-  await expect(confirmLines(page)).toHaveText(["0 added · 1 removed", "On Marz Cards: 1 listing is set to quantity 0, so buyers can't buy it.",
-    CONFIRM_NOT_ENDED, CONFIRM_SCOPE]);
+  await expect(confirmLines(page)).toHaveText(["0 added · 1 removed", "On Test Shop: 1 listing is set to quantity 0, so buyers can't buy it.",
+    CONFIRM_SCOPE]);
   await page.getByRole("alertdialog").getByRole("button", { name: "Save changes" }).click();
   await expect(status(page)).toHaveText("Saved. 0 added, 1 removed.");
 
@@ -175,7 +180,7 @@ test("J2b (review round 1 CLI-6) removing a pick no store lists: the question sa
   const state = await openCatalog(page, CHOOSE_PATH, { chooseRows: [ROW_FACT, SECOND] });
   await box(page, "Select Envelope Single Pocket, Pack of 50").uncheck();
   await saveButton(page).click();
-  // Only what Echelon does (FIDELITY2): no listing, so no quantity 0 and no "aren't ended" line beside "Nothing changes".
+  // Only what Echelon does (FIDELITY2): no listing, so no quantity 0 and no end line beside "Nothing changes".
   await expect(confirmLines(page)).toHaveText(["0 added · 1 removed", CONFIRM_NONE, CONFIRM_SCOPE]);
   await page.getByRole("alertdialog").getByRole("button", { name: "Save changes" }).click();
   await expect(status(page)).toHaveText("Saved. 0 added, 1 removed.");
@@ -226,8 +231,8 @@ test("J5 200 rows a page: the header box checks those shown, Load more keeps the
   await expect(page.getByRole("button", { name: "Load more" })).toHaveCount(0);
   // Every catalog page asked for 200 rows, with no facets and this page's version (§12.2).
   expect(listReads(state)).toEqual([
-    "?selection=all&includeFacets=false&clientVersion=2&page=1&limit=200",
-    "?selection=all&includeFacets=false&clientVersion=2&page=2&limit=200",
+    "?selection=all&includeFacets=false&clientVersion=3&page=1&limit=200",
+    "?selection=all&includeFacets=false&clientVersion=3&page=2&limit=200",
   ]);
 
   await page.getByRole("button", { name: "Undo changes" }).click();
@@ -366,7 +371,7 @@ test("J11 no product line shows anywhere on step 1, and no Product, Product line
   for (const read of state.reads.filter((entry) => entry.path === "/api/dropship/catalog")) {
     expect(read.search).not.toMatch(/productLine|productId|[?&]category=/);
   }
-  expect(listReads(state)).toContain(`?categoryId=${TOPLOADERS_CATEGORY_ID}&selection=all&includeFacets=false&clientVersion=2&page=1&limit=200`);
+  expect(listReads(state)).toContain(`?categoryId=${TOPLOADERS_CATEGORY_ID}&selection=all&includeFacets=false&clientVersion=3&page=1&limit=200`);
   expectClean(state);
 });
 

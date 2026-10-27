@@ -66,7 +66,8 @@ describe("step 3's publish words (§4.11)", () => {
     const entries = [...body.matchAll(/\n( {2}\/\/ [^\n]*\n)?( {2}\w+: )/g)];
     expect(entries.length).toBeGreaterThan(50);
     for (const match of entries) {
-      expect(match[1], `no marker above ${match[2].trim()}`).toMatch(/\/\/ (Stage 2 \(step 1 plan S2-5\): PROPOSED|Kept)/);
+      // Stage 4 is PR C's (PLAN-C v4.1 §11): the push fence's run problem rows.
+      expect(match[1], `no marker above ${match[2].trim()}`).toMatch(/\/\/ (Stage [24] \(step 1 plan S2-5\): PROPOSED|Kept)/);
     }
     const shown = Object.values(PUBLISH_WORDS as Record<string, unknown>).filter((value): value is string => typeof value === "string");
     for (const words of shown) expect(words).not.toMatch(/[A-Z]{2,}_[A-Z_]+/);

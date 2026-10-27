@@ -4,9 +4,10 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DropshipCatalogCategoriesAnswer, DropshipCatalogNewItemsAnswer } from "@shared/dropship/vendor-catalog-reads";
-import type { SelectionChangePreviewAnswer } from "@shared/dropship/vendor-selection-changes";
+import { emptySelectionChangeEnds, type SelectionChangePreviewAnswer } from "@shared/dropship/vendor-selection-changes";
 import {
   chooseCatalogRowSchema,
+  describeChooseConfirmButton,
   EMPTY_CHOOSE_CHANGES,
   type ChooseCatalogRow,
   type ChooseCategoryTick,
@@ -265,28 +266,55 @@ describe("CatalogActionBar children", () => {
 
 describe("ChooseSaveConfirmBody", () => {
   const html = (words: string) => words.replace(/'/g, "&#x27;");
+  type StoreEffects = SelectionChangePreviewAnswer["effects"][number];
+  const store = (storeConnectionId: number, storeName: string, counts: Partial<StoreEffects> = {}): StoreEffects =>
+    ({ storeConnectionId, storeName, platform: "ebay", goesToZero: 0, startsSelling: 0, ends: 0, storeConnected: true, ...counts });
   const preview = (overrides: Partial<SelectionChangePreviewAnswer> = {}): SelectionChangePreviewAnswer => ({
     headRevisionId: 7, toAdd: 12, toRemove: 8, alreadySelected: 0, alreadyNotSelected: 0, skipped: { count: 0, first: [] },
     selectedBefore: 100, selectedAfter: 104, cap: 10_000, overCapAfter: false, refused: null,
-    effects: [{ storeConnectionId: 1, storeName: "Card Corner", platform: "ebay", goesToZero: 8, startsSelling: 3 }], effectsHash: "a".repeat(64),
+    effects: [store(1, "Card Corner", { goesToZero: 8, startsSelling: 3 })], effectsHash: "a".repeat(64),
+    otherEntriesHash: "c".repeat(64), ends: emptySelectionChangeEnds(),
     ...overrides,
-  } as SelectionChangePreviewAnswer);
+  });
 
-  it("(PLAN-B v4.1 §13) counts the server's numbers per store, says removed listings aren't ended, and never names an ended listing", () => {
+  it("(PLAN-B v4.1 §13) counts the server's numbers per store and never names an ended listing", () => {
     const markup = render(React.createElement(ChooseSaveConfirmBody, { preview: preview() }));
-    // Exactly these lines, in this order: no line for listings that ended on eBay (V20, FIDELITY-9).
+    // Exactly these lines, in this order: no line for listings that ended on eBay (V20, FIDELITY-9), and no
+    // "aren't ended" line since PR C (PLAN-C v4.1 §11).
     const lines = ["12 added · 8 removed", CHOOSE_WORDS.confirmZero("Card Corner", 8), CHOOSE_WORDS.confirmResume("Card Corner", 3),
-      CHOOSE_WORDS.confirmNotEnded, CHOOSE_WORDS.confirmScope];
+      CHOOSE_WORDS.confirmScope];
     expect(markup).toBe(`<div class="space-y-2 text-sm text-zinc-600" data-testid="catalog-choose-confirm">${lines.map((line) => `<p>${html(line)}</p>`).join("")}</div>`);
     expect(CHOOSE_WORDS.confirmZero("Card Corner", 8)).toBe("On Card Corner: 8 listings are set to quantity 0, so buyers can't buy them.");
     expect(CHOOSE_WORDS.confirmResume("Card Corner", 3)).toBe("On Card Corner: 3 listings get their quantity back shortly after you save, at the price they have on eBay now. To send today's prices, publish them in step 3.");
     expect(markup.toLowerCase()).not.toContain("ended on ebay");
+    expect(markup).not.toContain("aren&#x27;t ended");
     expect(markup).not.toContain("catalog-choose-confirm-changed");
     const quiet = render(React.createElement(ChooseSaveConfirmBody, { preview: preview({ toRemove: 0, effects: [] }) }));
     expect(quiet).toContain(`<p>${CHOOSE_WORDS.confirmNone}</p>`);
-    expect(quiet).not.toContain(html(CHOOSE_WORDS.confirmNotEnded));
     const again = render(React.createElement(ChooseSaveConfirmBody, { preview: preview(), effectsChanged: true }));
     expect(again).toContain(`data-testid="catalog-choose-confirm-changed">${CHOOSE_WORDS.effectsChanged}</p>`);
+  });
+
+  it("(PLAN-C v4.1 §11) a removal that ends eBay listings says so per store and for the products removed completely", () => {
+    const ending = preview({ toAdd: 0, toRemove: 1, effects: [store(3, "Test Shop", { platform: "shopify", goesToZero: 1 }), store(5, "Marz Cards", { ends: 3 })],
+      ends: { ...emptySelectionChangeEnds(), listingIds: [5_000_101, 5_000_102, 5_000_105], hiddenRemovedIds: [105], otherSizes: 2 } });
+    const markup = render(React.createElement(ChooseSaveConfirmBody, { preview: ending }));
+    const lines = ["0 added · 1 removed", CHOOSE_WORDS.confirmZero("Test Shop", 1), CHOOSE_WORDS.confirmEnd("Marz Cards", 3),
+      CHOOSE_WORDS.confirmEndOtherSizes(2), CHOOSE_WORDS.confirmEndHidden(1), CHOOSE_WORDS.confirmScope];
+    expect(markup).toBe(`<div class="space-y-2 text-sm text-zinc-600" data-testid="catalog-choose-confirm">${lines.map((line) => `<p>${html(line)}</p>`).join("")}</div>`);
+    expect(markup).not.toContain(html(CHOOSE_WORDS.confirmNone));
+  });
+
+  it("(PLAN-C v4.1 §11) the question's button: End {l} listing(s) and save when it ends any, singular and plural; else Save changes", () => {
+    const ends = (listingIds: number[]) => ({ ...emptySelectionChangeEnds(), listingIds });
+    expect(describeChooseConfirmButton(preview())).toBe("Save changes");
+    expect(describeChooseConfirmButton(preview({ ends: ends([5_000_102]) }))).toBe("End 1 listing and save");
+    expect(describeChooseConfirmButton(preview({ ends: ends([5_000_101, 5_000_102]) }))).toBe("End 2 listings and save");
+    // The dialog's action button reads it from the question's own preview (ChooseStep.tsx), never the bar's Save.
+    const choose = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/ChooseStep.tsx"), "utf8");
+    const action = choose.slice(choose.indexOf("<AlertDialogAction"), choose.indexOf("</AlertDialogAction>"));
+    expect(action).toContain("{question ? describeChooseConfirmButton(question.preview) : CHOOSE_WORDS.confirmSave}");
+    expect(choose.match(/describeChooseConfirmButton\(/g)).toHaveLength(1);
   });
 });
 

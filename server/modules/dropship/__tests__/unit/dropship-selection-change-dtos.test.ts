@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   MAX_SELECTION_CHANGE_IDS,
+  MAX_SELECTION_END_LISTINGS,
+  MAX_SELECTION_FACT_SIZES,
   SELECTION_CHANGE_ERROR_CODES,
   SELECTION_WRITES_PAUSED_REASONS,
   selectionChangeAnswerSchema,
@@ -57,6 +60,8 @@ describe("selection change requests (strict)", () => {
     });
     expect(parseSelectionChangeBody(saveBody({ idempotencyKey: `  ${KEY}  ` }))).toEqual({
       clientVersion: null, expectedRevisionId: 41, addIds: [1, 2, 3], removeIds: [9], idempotencyKey: KEY, expectedEffectsHash: HASH,
+      // A body without PR C's echo (a B page's) parses, for its replay; the service refuses it after the replay lookup.
+      expectedEnds: null, expectedOtherEntriesHash: null,
     });
     // A vendor that never saved counts from no revision.
     expect(parseSelectionChangePreviewBody(body({ expectedRevisionId: null })).expectedRevisionId).toBeNull();
@@ -173,8 +178,8 @@ describe("selection change answers (not strict)", () => {
     const preview = selectionChangePreviewAnswerSchema.parse({ headRevisionId: 41, ...answer(), refused: null, endsListings: 3 });
     expect(preview).not.toHaveProperty("endsListings");
     expect(selectionChangePreviewAnswerSchema.safeParse({ headRevisionId: 41, ...answer() }).success).toBe(false);
-    const saved = selectionChangeAnswerSchema.parse({ revisionId: 42, ...answer(), confirmedEffectsHash: HASH, drifted: false, ends: [] });
-    expect(saved).not.toHaveProperty("ends");
+    const saved = selectionChangeAnswerSchema.parse({ revisionId: 42, ...answer(), confirmedEffectsHash: HASH, drifted: false, aFieldOfPrD: [] });
+    expect(saved).not.toHaveProperty("aFieldOfPrD");
   });
 
   it("keeps overCapAfter, drifted and the skipped ids consistent with the counts", () => {
@@ -195,5 +200,80 @@ describe("selection change answers (not strict)", () => {
 
   it("names the three paused reasons", () => {
     expect([...SELECTION_WRITES_PAUSED_REASONS]).toEqual(["older_version_running", "disabled", "page_newer_than_server"]);
+  });
+});
+
+/** PR C (PLAN-C v4.1 §4.6, §4.8, §13.1; TST-8, TST-9): the echo in the request, and the answer fields with defaults. */
+describe("PR C: the confirmed ends echo", () => {
+  const echo = (listingIds: number[], hiddenRemovedIds: number[] = []) => ({ expectedEnds: { listingIds, hiddenRemovedIds },
+    expectedOtherEntriesHash: "b".repeat(64) });
+
+  it("parses the echo optional and strict, each set unique and ascending in canonical form", () => {
+    expect(parseSelectionChangeBody(saveBody(echo([30, 10, 30], [7, 5])))).toMatchObject({
+      expectedEnds: { listingIds: [10, 30], hiddenRemovedIds: [5, 7] }, expectedOtherEntriesHash: "b".repeat(64) });
+    for (const [label, value] of [
+      ["an unknown field inside the echo", { expectedEnds: { listingIds: [], hiddenRemovedIds: [], more: 1 } }],
+      ["a set left out", { expectedEnds: { listingIds: [] } }],
+      ["a zero id", { expectedEnds: { listingIds: [0], hiddenRemovedIds: [] } }],
+      ["an other-entries hash that is not sha256 hex", { expectedOtherEntriesHash: "B".repeat(64) }],
+      ["a short other-entries hash", { expectedOtherEntriesHash: "b".repeat(63) }],
+    ] as const) {
+      expect(() => parseSelectionChangeBody(saveBody(value)), label).toThrow(expect.objectContaining({ code: SELECTION_CHANGE_ERROR_CODES.invalidInput }));
+    }
+  });
+
+  it.each(["listingIds", "hiddenRemovedIds"] as const)("accepts 29,999 and 30,000 %s and refuses 30,001 (TST-8)", (field) => {
+    for (const size of [MAX_SELECTION_END_LISTINGS - 1, MAX_SELECTION_END_LISTINGS]) {
+      const sets = { listingIds: [] as number[], hiddenRemovedIds: [] as number[], [field]: ids(size) };
+      expect(parseSelectionChangeBody(saveBody({ expectedEnds: sets, expectedOtherEntriesHash: HASH })).expectedEnds?.[field]).toHaveLength(size);
+    }
+    const over = { listingIds: [] as number[], hiddenRemovedIds: [] as number[], [field]: ids(MAX_SELECTION_END_LISTINGS + 1) };
+    expect(() => parseSelectionChangeBody(saveBody({ expectedEnds: over, expectedOtherEntriesHash: HASH })))
+      .toThrow(expect.objectContaining({ code: SELECTION_CHANGE_ERROR_CODES.invalidInput }));
+    expect(MAX_SELECTION_END_LISTINGS).toBe(30_000);
+    expect(MAX_SELECTION_FACT_SIZES).toBe(30_000);
+  });
+
+  it("hashes a B body exactly as B did, and makes the echo part of the request when present", () => {
+    const bBody = parseSelectionChangeBody(saveBody());
+    // B's canonical form at 1ddaf0470 (dropship-selection-change-dtos.ts hashSelectionChangeRequest), so a B save's stored
+    // request hash still matches its replay on a C dyno.
+    const bHash = createHash("sha256").update(JSON.stringify({ kind: "picks_change", expectedRevisionId: 41, addIds: [1, 2, 3], removeIds: [9],
+      expectedEffectsHash: HASH })).digest("hex");
+    expect(hashSelectionChangeRequest(bBody)).toBe(bHash);
+    const withEcho = hashSelectionChangeRequest(parseSelectionChangeBody(saveBody(echo([10]))));
+    expect(withEcho).not.toBe(bHash);
+    expect(hashSelectionChangeRequest(parseSelectionChangeBody(saveBody(echo([11]))))).not.toBe(withEcho);
+    expect(hashSelectionChangeRequest(parseSelectionChangeBody(saveBody({ ...echo([10]), expectedOtherEntriesHash: "c".repeat(64) }))))
+      .not.toBe(withEcho);
+    // In another order the echo is the same request.
+    expect(hashSelectionChangeRequest(parseSelectionChangeBody(saveBody(echo([10, 10]))))).toBe(withEcho);
+  });
+});
+
+describe("PR C: answer fields with defaults (an answer B stored replays unchanged, §4.8)", () => {
+  it("defaults a store's ends and storeConnected, the vendor-level ends, and leaves the other entries' hash out", () => {
+    const parsed = selectionChangeAnswerSchema.parse({ revisionId: 42, ...answer(), confirmedEffectsHash: HASH, drifted: false });
+    expect(parsed.effects[0]).toEqual({ storeConnectionId: 22, storeName: "Shop", platform: "ebay", goesToZero: 0, startsSelling: 1, ends: 0,
+      storeConnected: true });
+    expect(parsed.ends).toEqual({ listingIds: [], hiddenRemovedIds: [], otherSizes: 0, stillEnding: 0, endReview: 0, endedReAdd: 0 });
+    expect(parsed).not.toHaveProperty("otherEntriesHash");
+    // Each parse gets its own default object.
+    const again = selectionChangeAnswerSchema.parse({ revisionId: 42, ...answer(), confirmedEffectsHash: HASH, drifted: false });
+    expect(again.ends).not.toBe(parsed.ends);
+  });
+
+  it("keeps C's fields and refuses end sets out of order", () => {
+    const ends = { listingIds: [3, 9], hiddenRemovedIds: [4], otherSizes: 1, stillEnding: 0, endReview: 0, endedReAdd: 0 };
+    const parsed = selectionChangePreviewAnswerSchema.parse({ headRevisionId: 41, ...answer(), refused: null, ends, otherEntriesHash: HASH });
+    expect(parsed).toMatchObject({ ends, otherEntriesHash: HASH });
+    expect(selectionChangePreviewAnswerSchema.safeParse({ headRevisionId: 41, ...answer(), refused: null,
+      ends: { ...ends, listingIds: [9, 3] } }).success).toBe(false);
+    expect(selectionChangePreviewAnswerSchema.safeParse({ headRevisionId: 41, ...answer(), refused: null,
+      ends: { ...ends, hiddenRemovedIds: [4, 4] } }).success).toBe(false);
+  });
+
+  it("names the code of a removal too large", () => {
+    expect(SELECTION_CHANGE_ERROR_CODES.removalTooLarge).toBe("DROPSHIP_SELECTION_REMOVAL_TOO_LARGE");
   });
 });

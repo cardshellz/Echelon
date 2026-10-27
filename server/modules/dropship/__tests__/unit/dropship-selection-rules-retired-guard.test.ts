@@ -146,3 +146,29 @@ describe("the frozen vendor selection rules are named only where allowed (PLAN-B
     ])).toEqual([]);
   });
 });
+
+/**
+ * PR C (PLAN-C v4.1 §3 FID-7, §4.4 rule 3, §13.1): only the step 1 save inserts end requests, so no other writer
+ * (stock, cost, exposure, the conversion follow-up's pick deletes, the end worker) can ever ask Card Shellz to end
+ * a listing, and the save's picks delete is what re-plans the product (the table has no insert invalidation).
+ * Updates (the worker, staff) are allowed; inserts are not.
+ */
+describe("only the step 1 save inserts listing end requests (PR C)", () => {
+  const ENDS_INSERT = /\bINSERT\s+INTO\s+dropship\.dropship_listing_end_requests\b|\.insert\(\s*dropshipListingEndRequests\b/i;
+  const SAVE_REPOSITORY = "server/modules/dropship/infrastructure/dropship-selection-change.repository.ts";
+  const files = repositorySources();
+
+  it("finds exactly one inserter in non-test source of server/, scripts/ and shared/: the save's repository", () => {
+    const inserters = files.filter((file) => !isTestPath(file.path) && SOURCE_FILE.test(file.path) && ENDS_INSERT.test(file.text))
+      .map((file) => file.path);
+    expect(inserters).toEqual([SAVE_REPOSITORY]);
+  });
+
+  it("red case: a raw or Drizzle insert is caught; an update, a read and a test fixture are not", () => {
+    expect(ENDS_INSERT.test("INSERT INTO dropship.dropship_listing_end_requests (vendor_id) VALUES ($1)")).toBe(true);
+    expect(ENDS_INSERT.test("await tx.insert(dropshipListingEndRequests).values(rows)")).toBe(true);
+    expect(ENDS_INSERT.test("UPDATE dropship.dropship_listing_end_requests SET state = 'ending'")).toBe(false);
+    expect(ENDS_INSERT.test("SELECT id FROM dropship.dropship_listing_end_requests")).toBe(false);
+    expect(isTestPath("server/modules/dropship/__tests__/fixtures/listing-end.fixture.ts")).toBe(true);
+  });
+});
