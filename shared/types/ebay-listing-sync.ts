@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { channelProviderReadDiagnosticSchema } from "../channel-provider-read";
 import { ebayListingIssueSchema } from "./ebay-listing-issue";
+import { channelListingWarningSchema } from "../channel-listing-validation";
 
 const syncCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const ebayListingSyncPhaseSchema = z.enum([
@@ -38,6 +39,7 @@ export const ebayListingSyncJobSchema = z.object({
   code: z.string().max(100).nullable(), message: z.string().max(1000).nullable(),
   nextAttemptAt: z.string().datetime(), updatedAt: z.string().datetime(),
   issue: ebayListingIssueSchema.optional(),
+  warnings: z.array(channelListingWarningSchema).max(1000).nullish().transform(value => value ?? undefined),
   // Scheduling may pause while the original uncertain write remains fenced.
   readRetryPaused: z.boolean().optional(),
   providerRead: channelProviderReadDiagnosticSchema.nullish().transform(value => value ?? undefined),
@@ -55,6 +57,7 @@ export const ebayProductSyncResultSchema = z.object({
   qtyChanges: syncCount,
   policyChanges: syncCount,
   errors: syncCount,
+  warnings: z.array(channelListingWarningSchema).max(1000).optional(),
   pending: syncCount.default(0),
   jobs: z.array(ebayListingSyncJobSchema).default([]),
   details: z.array(z.object({ success: z.boolean(), error: z.string().optional(),

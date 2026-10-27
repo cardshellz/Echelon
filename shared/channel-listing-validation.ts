@@ -10,6 +10,15 @@ export const channelListingValidationSchema = z.object({
 }).strict();
 export type ChannelListingValidation = z.infer<typeof channelListingValidationSchema>;
 
+export const channelListingWarningSchema = z.object({
+  code: z.literal("CHANNEL_PACKAGE_DIMENSIONS_MISSING"),
+  field: z.literal("package_dimensions"),
+  productId: id,
+  variantId: id,
+  variantSku: z.string().trim().min(1).max(255).regex(/^[^\u0000-\u001f\u007f]+$/),
+}).strict();
+export type ChannelListingWarning = z.infer<typeof channelListingWarningSchema>;
+
 /** A source correction is not a transport failure. Only typed, safe fields
  * cross into durable diagnostics; no raw input, SQL or provider body is saved. */
 export class ChannelListingValidationError extends Error {

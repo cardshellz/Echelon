@@ -137,5 +137,6 @@ export function syncProviderFixture() {
     },
     currentItem: () => item,
     currentGroup: () => group,
+    currentOffer: () => offer,
   };
 }

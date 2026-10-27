@@ -46,6 +46,7 @@ export function ebayPreparedContentHash(
       .map((item) => ({
         sku: item.sku,
         ...(item.packagePlan ? { packagePlan: item.packagePlan } : {}),
+        ...(item.packageMaintenance ? { packageMaintenance: item.packageMaintenance } : {}),
         payload: inventoryItemSyncContent(item.payload),
       }))
       .sort((a, b) => (a.sku < b.sku ? -1 : a.sku > b.sku ? 1 : 0)),

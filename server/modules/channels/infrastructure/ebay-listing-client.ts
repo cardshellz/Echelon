@@ -237,6 +237,10 @@ export function createEbayRouteListingClient(
         throw error;
       }
     },
+    getOffer: async (offerId) => {
+      const body = await request<unknown>("GET", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`);
+      return normalizeEbayObservedOffers({ offers: [body] })[0] ?? null;
+    },
     createOffer: async (offer) => {
       const response = await request<unknown>(
         "POST",
