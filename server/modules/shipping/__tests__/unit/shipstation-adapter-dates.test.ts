@@ -20,6 +20,16 @@ function fixture(shipDate: string, holdUntilDate: string) {
 }
 
 describe("ShipStation engine boundary date handling", () => {
+  it("passes actual provider package measurements to the shipping owner before projecting shipment events", async () => {
+    const { engine, ref, handle, shipment } = fixture("2026-09-16", "2026-09-18");
+    const measured = { ...shipment, dimensions: { units: "inches", length: 10, width: 8, height: 4 } };
+    const before = structuredClone(measured);
+    vi.mocked(handle.getShipments).mockResolvedValue([measured]);
+    const events = await engine.getShipments(ref);
+    expect(handle.observeProviderLabels).toHaveBeenCalledExactlyOnceWith([before]);
+    expect(events[0]).toMatchObject({ kind: "shipped", shipmentId: measured.shipmentId });
+    expect(measured).toEqual(before);
+  });
   it("keeps calendar dates separate and still selects the package for authoritative reconciliation", async () => {
     const { engine, ref } = fixture("2026-09-16", "2026-09-18");
     const state = await engine.getState(ref);

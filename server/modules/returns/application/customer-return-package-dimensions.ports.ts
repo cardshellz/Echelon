@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { CustomerReturnDimensions } from "../../../../shared/returns/customer-return-parcel";
+import type { StoredShippingPackageDimensions } from "@shared/shipping/package-dimensions";
 
 /** These identities come from a verified local physical package, never a browser. */
 export const customerReturnPackageDimensionsInputSchema = z.object({
@@ -13,6 +14,10 @@ export type CustomerReturnPackageDimensionsInput = z.infer<typeof customerReturn
 export interface CustomerReturnPackageDimensionsReader {
   /** null means no usable original measurement, not a fabricated box size. */
   read(input: CustomerReturnPackageDimensionsInput, signal?: AbortSignal): Promise<CustomerReturnDimensions | null>;
+}
+
+export interface CustomerReturnStoredPackageDimensionsReader {
+  read(input: CustomerReturnPackageDimensionsInput): Promise<StoredShippingPackageDimensions>;
 }
 
 export type CustomerReturnPackageDimensionsErrorCode =

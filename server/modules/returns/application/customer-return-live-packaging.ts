@@ -3,7 +3,8 @@ import type { CustomerReturnBoxMeasurements } from "./customer-return-box-measur
 import { customerReturnDimensionsSchema, MAX_RETURN_ORIGINAL_BOXES,
   type CustomerReturnBoxOption } from "../../../../shared/returns/customer-return-parcel";
 import { customerReturnPackageDimensionsInputSchema, CustomerReturnPackageDimensionsError,
-  type CustomerReturnPackageDimensionsInput, type CustomerReturnPackageDimensionsReader } from "./customer-return-package-dimensions.ports";
+  type CustomerReturnPackageDimensionsInput, type CustomerReturnPackageDimensionsReader,
+  type CustomerReturnStoredPackageDimensionsReader } from "./customer-return-package-dimensions.ports";
 import { customerReturnLocalInspectionSnapshotSchema, type CustomerReturnLocalInspectionSnapshot } from "./customer-return-local-inspection.ports";
 import { customerReturnProviderGid as gid } from "./customer-return-live-identity";
 
@@ -97,7 +98,7 @@ export function projectCustomerReturnOriginalBoxCandidates(raw: CustomerReturnLo
  * including adapters that ignore cancellation, and never reserves or buys labels. */
 export async function readCustomerReturnOriginalBoxes(local: CustomerReturnLocalInspectionSnapshot,
   reader: CustomerReturnPackageDimensionsReader, report: ReturnBoxReporter = defaultReporter,
-  measurements?: CustomerReturnBoxMeasurements): Promise<CustomerReturnBoxOption[]> {
+  measurements?: CustomerReturnBoxMeasurements, stored?: CustomerReturnStoredPackageDimensionsReader): Promise<CustomerReturnBoxOption[]> {
   const candidates = projectCustomerReturnOriginalBoxCandidates(local);
   if (candidates.length > MAX_RETURN_ORIGINAL_BOXES) { safeReport(report, "RETURN_BOX_DIMENSIONS_LIMIT"); return []; }
   if (candidates.length === 0) return [];
@@ -111,6 +112,14 @@ export async function readCustomerReturnOriginalBoxes(local: CustomerReturnLocal
       const candidate = candidates[next++];
       try {
         const work = async () => {
+          if (stored) {
+            // Shipping owns observed package measurements. Check its current
+            // evidence before an older return-only cache or provider fallback.
+            const original = await stored.read({ providerPhysicalShipmentId: candidate.providerPhysicalShipmentId,
+              trackingNumber: candidate.trackingNumber });
+            if (original.status === "verified") return original.dimensions;
+            if (original.status === "unusable") { safeReport(report, "RETURN_BOX_STORED_MEASUREMENT_UNUSABLE"); return null; }
+          }
           let saved = null;
           try { saved = await measurements?.read({ channelId: local.shop.channelId, boxId: candidate.id,
             sourceFingerprint: customerReturnBoxSourceFingerprint(candidate) }) ?? null; }

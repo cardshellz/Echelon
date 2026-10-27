@@ -650,6 +650,8 @@ export interface ShipStationShipmentItem {
 }
 
 export interface ShipStationShipment {
+  /** Opaque provider measurements; the shipping observation owner validates and normalizes them. */
+  dimensions?: unknown;
   shipmentId: number;
   orderId: number;
   orderKey: string;
