@@ -2,7 +2,7 @@ import { sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { readLabelEvidence } from "./ebay-label-replacement.repository";
 import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
-import { enqueueShopifyLabelVoids } from "./shopify-label-void-intake.repository";
+import { enqueueShopifyLabelReplacementRecovery, enqueueShopifyLabelVoids } from "./shopify-label-void-intake.repository";
 import { createPackageAllocationLabelCommercialReviewRepository } from "../shipping/package-allocation-label-commercial-review.repository";
 
 export interface LabelLifecycleDatabase {
@@ -31,6 +31,21 @@ export function createShopifyLabelLifecycleRepository(db: LabelLifecycleDatabase
 
   async function due(now: Date, limit: number): Promise<readonly { id: number; omsOrderId: number }[]> {
     z.date().parse(now); z.number().int().min(1).max(25).parse(limit);
+    // A label can predate the observer/cancellation worker. Adopt missing work
+    // by exact provider package identity, without requiring another webhook.
+    const missing = rows<{ id: string }>(await db.execute(sql`
+      SELECT DISTINCT label.id
+      FROM wms.shipping_provider_labels label
+      JOIN wms.physical_shipments package ON package.provider = label.provider
+        AND package.provider_physical_shipment_id = label.provider_label_id
+      JOIN oms.channel_fulfillment_pushes command ON command.physical_shipment_id = package.id
+      WHERE label.provider = 'shipstation' AND label.label_status = 'voided' AND label.label_direction = 'outbound'
+        AND command.channel_provider = 'shopify'
+        AND NOT EXISTS (SELECT 1 FROM oms.shopify_label_void_work existing
+          WHERE existing.physical_shipment_id = package.id AND existing.oms_order_id = command.oms_order_id)
+      ORDER BY label.id LIMIT ${limit}
+    `));
+    for (const label of missing) await observe(positiveId.parse(label.id), now);
     return rows<{ id: string; oms_order_id: string }>(await db.execute(sql`
       SELECT id, oms_order_id FROM oms.shopify_label_void_work
       WHERE state = 'pending' AND next_attempt_at <= ${now} ORDER BY next_attempt_at, id LIMIT ${limit}
@@ -112,6 +127,9 @@ export function createShopifyLabelLifecycleRepository(db: LabelLifecycleDatabase
         (work_id, attempt_number, outcome, error_code, evidence, actor, completed_at)
         VALUES (${work.id}, ${work.attemptCount + 1}, ${input.state}, ${input.errorCode},
           ${JSON.stringify(input.evidence)}::jsonb, 'system:shopify_label_lifecycle', ${input.now})`);
+      if (input.state === 'complete') {
+        await enqueueShopifyLabelReplacementRecovery(tx, input.now, { limit: 25, voidWorkId: work.id });
+      }
       if (input.state === 'review') {
         const { label, lifecycle } = await readLabelEvidence(tx, work.labelId);
         if (!label) throw new Error('Shopify void review has no persisted label');

@@ -1,5 +1,6 @@
-import { reconcileEbayLabelReplacement as reconcileLabelReplacement, readLabelReplacementMaterialization, type AuthorizedLabelReplacement, type EbayLabelReplacementResult } from "./ebay-label-replacement.repository";
+import { reconcileEbayLabelReplacement as reconcileLabelReplacement, readLabelReplacementMaterialization, type AuthorizedLabelReplacement, type EbayLabelReplacementResult, type LabelReplacementOperation } from "./ebay-label-replacement.repository";
 import { createHash } from "node:crypto";
+import { enqueueShopifyLabelReplacementRecovery } from "./shopify-label-void-intake.repository";
 import { PackageAllocationSourceIdentityError } from "../shipping/package-allocation-source-identity.domain";
 
 import { sql } from "drizzle-orm";
@@ -239,9 +240,9 @@ export interface ClaimChannelFulfillmentCommandsInput {
 }
 
 export interface ChannelFulfillmentAuthorityRepository {
-  reconcileEbayLabelReplacement?(labelId: number, now: Date): Promise<EbayLabelReplacementResult | null>;
+  reconcileEbayLabelReplacement?(labelId: number, now: Date, operation?: LabelReplacementOperation): Promise<EbayLabelReplacementResult | null>;
   markEbayLabelReplacementProjected?(labelId: number, now: Date): Promise<void>;
-  findWaitingEbayLabelReplacements?(limit: number): Promise<readonly number[]>;
+  findWaitingEbayLabelReplacements?(limit: number, now: Date): Promise<readonly number[]>;
   resolveLegacyPhysicalPackage(legacyWmsShipmentId: number): Promise<ResolvedLegacyPhysicalPackage>;
   validatePhysicalPackageIdentity(input: MaterializePhysicalPackageInput): Promise<void>;
   materializePhysicalPackage(input: MaterializePhysicalPackageInput): Promise<MaterializePhysicalPackageResult>;
@@ -4310,9 +4311,9 @@ export function createChannelFulfillmentAuthorityRepository(
     return transactionOverride ? execute(transactionOverride) : db.transaction(execute);
   }
 
-  async function reconcileEbayLabelReplacement(labelId: number, now: Date): Promise<EbayLabelReplacementResult | null> {
+  async function reconcileEbayLabelReplacement(labelId: number, now: Date, operation: LabelReplacementOperation = "label_observation"): Promise<EbayLabelReplacementResult | null> {
     return db.transaction(async (tx: any) => reconcileLabelReplacement(tx, labelId, now,
-      (input, authority) => materializePhysicalPackage(input, authority, tx)), { isolationLevel: 'serializable' });
+      (input, authority) => materializePhysicalPackage(input, authority, tx), operation), { isolationLevel: 'serializable' });
   }
 
   async function markEbayLabelReplacementProjected(labelId: number, now: Date): Promise<void> {
@@ -4320,8 +4321,27 @@ export function createChannelFulfillmentAuthorityRepository(
       WHERE shipping_provider_label_id = ${labelId} AND state = 'applied' AND projected_at IS NULL`);
   }
 
-  async function findWaitingEbayLabelReplacements(limit: number): Promise<readonly number[]> {
+  async function findWaitingEbayLabelReplacements(limit: number, now: Date): Promise<readonly number[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new FulfillmentAuthorityError("INVALID_INPUT", "Invalid replacement batch limit");
+    // Also adopt corrections completed before replacement work was durable.
+    // The unique label key preserves review/applied work and concurrent claims.
+    await enqueueShopifyLabelReplacementRecovery(db, now, { limit });
+    // An audited contents correction is new evidence, not a blind retry of a
+    // review. Consume it once; another rejection advances updated_at past it.
+    await db.execute(sql`
+      WITH corrected AS (
+        SELECT work.shipping_provider_label_id
+        FROM wms.shipping_provider_label_events correction
+        JOIN wms.ebay_label_replacement_work work ON work.shipping_provider_label_id = correction.shipping_provider_label_id
+        WHERE correction.event_type = 'contents_recovered' AND work.state = 'review'
+          AND correction.received_at > work.updated_at AND correction.received_at <= ${now}
+        ORDER BY correction.received_at, work.shipping_provider_label_id LIMIT ${limit}
+        FOR UPDATE OF work SKIP LOCKED
+      )
+      UPDATE wms.ebay_label_replacement_work work SET state = 'waiting',
+        reason = 'contents_correction_completed', updated_at = ${now}
+      FROM corrected WHERE corrected.shipping_provider_label_id = work.shipping_provider_label_id AND work.state = 'review'
+    `);
     return rowsOf<{ shipping_provider_label_id: string }>(await db.execute(sql`
       SELECT shipping_provider_label_id FROM wms.ebay_label_replacement_work
       WHERE state = 'waiting' OR (state = 'applied' AND projected_at IS NULL) ORDER BY updated_at, shipping_provider_label_id LIMIT ${limit}`))
