@@ -1,4 +1,5 @@
 import { readIntegerMills, readIntegerCents } from "@shared/money-read";
+import { RETIRED_RECEIVE_WARNING_KINDS } from "./receive-warning-policy";
 /**
  * Receive-time validation warnings (Spec D, Part 2, 2026-08-07).
  *
@@ -8,9 +9,9 @@ import { readIntegerMills, readIntegerCents } from "@shared/money-read";
  * pattern (payload-hash deduped) and shown inline in the UI.
  *
  * Cost way off — resolved per-piece cost differs from the PO line's
- *      implied per-piece cost by more than a configurable threshold (default
- *      ±25%, echelon_settings key `receiving_cost_variance_warn_pct`), or is
- *      an order of magnitude off (ratio > 5× or < 0.2×) — hard warn.
+ * implied per-piece cost by more than a configurable threshold (default
+ * ±25%, echelon_settings key `receiving_cost_variance_warn_pct`), or is
+ * an order of magnitude off (ratio > 5× or < 0.2×) — hard warn.
  * The receiving owner validates and saves the receipt's count configuration.
  * That frozen factor owns inventory, lot costs and PO received pieces. A PO's
  * preferred pack or catalog classification cannot invalidate a saved receipt
@@ -26,12 +27,9 @@ import { sql } from "drizzle-orm";
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export const RECEIVE_WARNING_KINDS = [
-  "uom_disagreement", // Historical records only; never emitted for a saved configuration.
-  "base_unit_pack_conflict", // Historical records only.
   "cost_variance_soft",
   "cost_variance_hard",
-  "variant_base_unit_misconfig", // Historical catalog-classification warning only.
-  "variant_missing_parent", // Historical warning records only; no current detector emits this.
+  ...RETIRED_RECEIVE_WARNING_KINDS, // Historical records remain readable.
 ] as const;
 export type ReceiveWarningKind = typeof RECEIVE_WARNING_KINDS[number];
 
@@ -154,7 +152,8 @@ function resolvePerPieceMills(
   if (typeof mills === "number" && Number.isSafeInteger(mills) && mills >= 0) return mills;
   if (typeof cents === "number" && Number.isSafeInteger(cents) && cents >= 0) {
     const millsFromCents = BigInt(cents) * BigInt(100);
-    return millsFromCents <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(millsFromCents) : null;
+    return millsFromCents <= BigInt(Number.MAX_SAFE_INTEGER)
+      ? readIntegerMills(millsFromCents, "Received per-piece unit cost") : null;
   }
   return null;
 }

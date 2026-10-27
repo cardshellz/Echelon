@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installFixtures, receipt } from "./procurement-fixtures";
 import { openReceivingMoreActions, openReceivingPackSelector, openReceivingSetup } from "./procurement-receiving-helpers";
+import { evaluateReceiveWarnings } from "../../server/modules/procurement/receive-validation.service";
 
 const initialVersion = "a".repeat(64);
 const savedVersion = "b".repeat(64);
@@ -33,7 +34,8 @@ async function setupWorkspace(page: Page, status: "draft" | "open" = "draft") {
         productId: 1000 + index, productVariantId: 100 + index,
         unitsPerVariantSnapshot: Number(factor), unitVersion: initialVersion, inboundShipmentLineId: 157 + index,
         expectedQty: Number(expectedQty), receivedQty: 0, damagedQty: 0, status: "pending",
-        putawayLocationId: 5, putawayComplete: 0, unitCost: null, notes: null, purchaseOrderLineId: 9 + index,
+        putawayLocationId: 5, putawayComplete: 0, unitCost: null, unitCostMills: null as number | null,
+        notes: null, purchaseOrderLineId: 9 + index,
       })),
     },
     writes: [] as Array<{ path: string; body: Record<string, unknown> }>,
@@ -43,6 +45,15 @@ async function setupWorkspace(page: Page, status: "draft" | "open" = "draft") {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
+      if (path === "/api/procurement/receiving-orders/31/validation-warnings") {
+        return route.fulfill({ json: state.order.lines.filter(line => line.receivedQty > 0).flatMap(line => evaluateReceiveWarnings({
+          receivingLineId: line.id, purchaseOrderLineId: line.purchaseOrderLineId, receivedQty: line.receivedQty,
+          unitCostMills: line.unitCostMills,
+          variant: { id: line.productVariantId, unitsPerVariant: line.unitsPerVariantSnapshot },
+          poLine: { id: line.purchaseOrderLineId, unitCostMills: 10000,
+            unitsPerUom: 1, expectedReceiveUnitsPerVariant: 1 },
+        })) });
+      }
       if (path === "/api/receiving/31") return route.fulfill({ json: state.order });
       if (path === "/api/receiving") return route.fulfill({ json: [state.order] });
       if (path === "/api/warehouses") return route.fulfill({ json: [{ id: 1, code: "LEON", name: "Leonberg" }] });
@@ -56,6 +67,13 @@ async function setupWorkspace(page: Page, status: "draft" | "open" = "draft") {
       state.writes.push({ path, body: {} });
       state.order.status = "open";
       return route.fulfill({ json: state.order });
+    }
+    if (path === "/api/receiving/31/close" && request.method() === "POST") {
+      state.writes.push({ path, body: request.postDataJSON() as Record<string, unknown> });
+      state.order.status = "closed";
+      return route.fulfill({ json: { success: true, order: { id: 31, status: "closed" },
+        linesProcessed: state.order.lines.length, unitsReceived: state.order.lines.reduce((sum, line) => sum + line.receivedQty, 0),
+        costReconciliation: { state: "applied" } } });
     }
     if (/^\/api\/receiving\/lines\/\d+$/.test(path) && request.method() === "PATCH") {
       const body = request.postDataJSON() as Record<string, unknown>;
@@ -81,6 +99,7 @@ async function setupWorkspace(page: Page, status: "draft" | "open" = "draft") {
         line.damagedQty = line.damagedQty * oldFactor / variant.unitsPerVariant;
         line.productVariantId = variant.id;
         line.unitsPerVariantSnapshot = variant.unitsPerVariant;
+        line.sku = variant.sku;
       }
       line.unitVersion = savedVersion;
       return route.fulfill({ json: line });
@@ -219,5 +238,42 @@ test("counting remains usable on a small phone and a tablet without sideways scr
   expect(state.order.lines[0].receivedQty).toBe(80);
   expect(state.writes).toHaveLength(1);
   await page.screenshot({ path: testInfo.outputPath("receipt-narrow-count.png"), animations: "disabled" });
+  expect(failures).toEqual([]);
+});
+
+test("a saved multi-pack receipt finalizes without obsolete PO pack warnings", async ({ page }) => {
+  const { state, failures } = await setupWorkspace(page, "open");
+  await openReceivingPackSelector(page, 7);
+  await page.getByRole("combobox", { name: "Receive variant for line 7", exact: true }).selectOption("200");
+  await expect(row(page)).toContainText("EG-SLV-SLM-P5000");
+  for (const line of state.order.lines) {
+    await count(page, line.id).fill(String(line.expectedQty));
+    await count(page, line.id).press("Enter");
+    await expect(page.getByRole("status", { name: `Received count confirmed for line ${line.id}`, exact: true })).toBeVisible();
+  }
+  const saved = state.order.lines.map(line => ({ id: line.id, count: line.receivedQty, factor: line.unitsPerVariantSnapshot }));
+  const warningRead = page.waitForResponse(response => response.url().includes("/validation-warnings") && response.request().method() === "GET");
+  await page.reload();
+  expect(await (await warningRead).json()).toEqual([]);
+  await expect(page.getByTestId("receive-validation-warnings")).toHaveCount(0);
+  await expect(count(page)).toHaveValue("160");
+  await expect(row(page)).toContainText("800,000 pieces saved");
+  await page.getByTestId("btn-close-receipt").click();
+  await expect(page.getByText("Receipt closed — inventory updated", { exact: true })).toBeVisible();
+  expect(state.order.status).toBe("closed");
+  expect(state.order.lines.map(line => ({ id: line.id, count: line.receivedQty, factor: line.unitsPerVariantSnapshot }))).toEqual(saved);
+  expect(state.writes.filter(write => write.path.endsWith("/close"))).toHaveLength(1);
+  expect(failures).toEqual([]);
+});
+
+test("retiring pack comparisons does not hide a genuine per-piece cost warning", async ({ page }) => {
+  const { state, failures } = await setupWorkspace(page, "open");
+  Object.assign(state.order.lines[0], { receivedQty: 80, status: "complete", unitCostMills: 14000 });
+  const warningRead = page.waitForResponse(response => response.url().includes("/validation-warnings") && response.request().method() === "GET");
+  await page.reload();
+  expect(await (await warningRead).json()).toMatchObject([{ kind: "cost_variance_soft", receivingLineId: 7 }]);
+  await expect(page.getByTestId("receive-validation-warnings")).toContainText("Receive cost differs from PO cost");
+  await expect(page.getByTestId("receive-validation-warnings")).not.toContainText("UOM");
+  expect(state.writes).toEqual([]);
   expect(failures).toEqual([]);
 });
