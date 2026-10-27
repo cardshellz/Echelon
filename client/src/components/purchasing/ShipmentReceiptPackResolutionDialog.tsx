@@ -89,11 +89,12 @@ function ReceiptSetupDialog({
           onChange={event => { const variant = line.activeVariants.find(value => value.id === Number(event.target.value)); choose(line, variant?.id ?? null, variant?.unitsPerVariant); }}>
           <option value="">Choose the configuration that arrived</option>
           {line.activeVariants.map(variant => <option key={variant.id} value={variant.id} disabled={line.qtyShipped === null || line.qtyShipped % variant.unitsPerVariant !== 0}>
-            {variant.name ?? variant.sku ?? `Variant ${variant.id}`} · {variant.unitsPerVariant.toLocaleString("en-US")} pieces{line.qtyShipped !== null && line.qtyShipped % variant.unitsPerVariant !== 0 ? " · not a whole count" : ""}
+            {variant.sku ? `${variant.sku} · ` : ""}{variant.name ?? "Receiving configuration"} · {variant.unitsPerVariant.toLocaleString("en-US")} pieces{line.qtyShipped !== null && line.qtyShipped % variant.unitsPerVariant !== 0 ? " · not a whole count" : ""}
           </option>)}
         </select>
       </label>
       {count !== null && selected && <p className="text-sm font-medium">{count.toLocaleString("en-US")} × {selected.unitsPerVariant.toLocaleString("en-US")} pieces = {line.qtyShipped!.toLocaleString("en-US")} pieces</p>}
+      {selected?.sku && <p className="text-xs text-muted-foreground">Inventory SKU: <span className="font-mono">{selected.sku}</span></p>}
       {choice && selected && count !== null && (choice.unitsPerVariant !== selected.unitsPerVariant || choice.expectedBaseQty !== line.qtyShipped) &&
         <Button type="button" size="sm" variant="outline" disabled={busy || !!addingFor} onClick={() => choose(line, selected.id, selected.unitsPerVariant)}>Use these updated counts</Button>}
       {choice && dirty && <p className="text-xs text-muted-foreground">Before: {line.receivePlan ? `${line.receivePlan.expectedQty.toLocaleString("en-US")} × ${line.receivePlan.unitsPerVariant.toLocaleString("en-US")} pieces` : "No receiving configuration"}. Review the selected count before creating the receipt.</p>}
