@@ -1,5 +1,6 @@
 import { expect, test, type Page, type Locator } from "@playwright/test";
 import { installFixtures, po, receipt } from "./procurement-fixtures";
+import { openReceivingLineOptions, openReceivingPackSelector } from "./procurement-receiving-helpers";
 
 const version = "a".repeat(64), nextVersion = "b".repeat(64);
 const variants = [
@@ -116,9 +117,10 @@ async function setup(page: Page, options: { legacy?: boolean; unresolved?: boole
   });
   await page.goto("/receiving?open=31");
   await expect(page.getByRole("heading", { name: /Receipt TEST-RECEIPT-31/ })).toBeVisible();
+  await openReceivingLineOptions(page, 7);
   return { state, failures, release };
 }
-const control = (page: Page) => page.locator('[aria-label="Receive unit for line 7"]:visible');
+const control = (page: Page) => page.getByTestId("receipt-line-7");
 const count = (page: Page) => page.locator('input[aria-label="Received count for line 7"]:visible');
 const done = (page: Page) => page.locator('[data-testid="btn-complete-line-7"]:visible, [data-testid="btn-complete-line-mobile-7"]:visible');
 // The "Count saved" toast is raised by the same success handler that replaces the
@@ -151,7 +153,7 @@ test("a shipment count can be saved beside its field without horizontal scrollin
   await expect(page.getByText(/Use Confirm count beside each Received field/)).toBeVisible();
   await done(page).click();
   await expectCountSaved(page);
-  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(control(page)).toContainText("Received: 525,000 pieces");
   await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
   expect(state.commands).toEqual([
     { path: "/api/receiving/31/open", body: {} },
@@ -170,7 +172,7 @@ test("Enter saves actual shipment counts, including a zero edit to a completed l
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   await count(page).press("Enter");
   await expectCountSaved(page);
-  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(control(page)).toContainText("Received: 525,000 pieces");
   await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
   await expect(done(page)).toHaveCount(0);
   await expect(confirmedCount(page)).toHaveText("Count confirmed");
@@ -183,7 +185,7 @@ test("Enter saves actual shipment counts, including a zero edit to a completed l
   await expect(confirmedCount(page)).toHaveCount(0);
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   await count(page).press("Enter");
-  await expect(control(page)).toContainText("received: 0 pieces");
+  await expect(control(page)).toContainText("Received: 0 pieces");
   await expect(page.getByText("Unsaved count", { exact: true })).toHaveCount(0);
   await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
   expect(state.commands).toEqual([
@@ -233,14 +235,14 @@ test("starting a shipment receipt retains its version and saves 525 cases before
   const { state, failures } = await setup(page, { draft: true, shipmentCase: true });
   await page.getByTestId("btn-open-receipt").click();
   await expect(page.getByTestId("btn-complete-all")).toBeEnabled();
-  await expect(control(page)).toContainText("Expected: 525,000 pieces; received: 0 pieces");
+  await expect(control(page)).toContainText("Expected: 525,000 pieces / Received: 0 pieces");
   await count(page).fill("525"); await done(page).click();
   await expectCountSaved(page);
   expect(state.commands).toEqual([
     { path: "/api/receiving/31/open", body: {} },
     { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
   ]);
-  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(control(page)).toContainText("Received: 525,000 pieces");
   await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
   await page.getByTestId("btn-close-receipt").click();
   await expect(page.getByText("Receipt closed — inventory updated", { exact: true })).toBeVisible();
@@ -317,7 +319,8 @@ async function expectModalFits(page: Page, dialog: Locator) {
 
 test("opening a receipt does not mutate units; Confirm count preserves partial counts and saved zero", async ({ page }, testInfo) => {
   const { state, failures } = await setup(page);
-  await expect(control(page)).toContainText("Expected: 501 pieces; received: 401 pieces; damaged: 3 pieces");
+  await expect(control(page)).toContainText("Expected: 501 pieces / Received: 401 pieces");
+  await expect(control(page)).toContainText("Damaged: 3 receive units (3 pieces)");
   expect(state.commands).toEqual([]);
   await done(page).click(); await expect.poll(() => state.commands.length).toBe(1);
   expect(state.commands[0].body).toEqual({ receivedQty: 401, expectedUnitVersion: version });
@@ -330,7 +333,7 @@ test("opening a receipt does not mutate units; Confirm count preserves partial c
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   await done(page).click(); await expect.poll(() => state.commands.length).toBe(2);
   expect(state.commands[1].body).toEqual({ receivedQty: 0, expectedUnitVersion: nextVersion });
-  await expect(control(page)).toContainText("received: 0 pieces");
+  await expect(control(page)).toContainText("Received: 0 pieces");
   await expect(count(page)).toHaveValue("0");
   await done(page).click(); await expect.poll(() => state.commands.length).toBe(3);
   expect(state.commands[2].body).toEqual({ receivedQty: 0, expectedUnitVersion: nextVersion });
@@ -345,12 +348,12 @@ test("opening a receipt does not mutate units; Confirm count preserves partial c
 
 test("legacy units require an explicit same-variant confirmation with counts unchanged", async ({ page }) => {
   const { state, failures } = await setup(page, { legacy: true });
-  await expect(control(page)).toContainText("base pieces unknown");
+  await expect(control(page)).toContainText("Confirm pack size");
   await expect(count(page)).toBeDisabled();
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   expect(state.commands).toEqual([]);
   await control(page).getByRole("button", { name: /Confirm these counts are in Piece/ }).click();
-  await expect(control(page)).toContainText("Expected: 501 pieces; received: 401 pieces");
+  await expect(control(page)).toContainText("Expected: 501 pieces / Received: 401 pieces");
   expect(state.commands[0].body).toEqual({ productVariantId: 2, confirmLegacyUnit: true, expectedUnitVersion: version, expectedUnitsPerVariant: 1 });
   expect(state.line).toMatchObject({ expectedQty: 501, receivedQty: 401, damagedQty: 3 });
   expect(failures).toEqual([]);
@@ -358,21 +361,24 @@ test("legacy units require an explicit same-variant confirmation with counts unc
 
 test("server converts expected received and damaged counts exactly; an inexact change needs review", async ({ page }) => {
   const { state, failures } = await setup(page, { exact: true });
-  await control(page).getByRole("combobox").selectOption("3");
-  await expect(control(page)).toContainText("Receive units of 50 pieces");
+  await openReceivingPackSelector(page, 7);
+  await control(page).getByRole("combobox", { name: "Receive variant for line 7" }).selectOption("3");
+  await expect(control(page)).toContainText("Pack of 50");
   await expect(count(page)).toHaveValue("8");
   expect(state.commands[0].body).toEqual({ productVariantId: 3, expectedUnitVersion: version });
   expect(state.line).toMatchObject({ expectedQty: 10, receivedQty: 8, damagedQty: 1 });
   await count(page).fill("7"); await done(page).click();
-  await expect(control(page)).toContainText("received: 350 pieces");
+  await expect(control(page)).toContainText("Received: 350 pieces");
   expect(failures).toEqual([]);
 });
 
 test("partial-carton conversion is rejected without resetting any count", async ({ page }) => {
   const { state, failures } = await setup(page);
-  await control(page).getByRole("combobox").selectOption("3");
+  await openReceivingPackSelector(page, 7);
+  await control(page).getByRole("combobox", { name: "Receive variant for line 7" }).selectOption("3");
   await expect(page.locator('[role="alert"]:visible').filter({ hasText: /cannot be represented/ }).first()).toBeVisible();
-  await expect(control(page)).toContainText("Expected: 501 pieces; received: 401 pieces; damaged: 3 pieces");
+  await expect(control(page)).toContainText("Expected: 501 pieces / Received: 401 pieces");
+  await expect(control(page)).toContainText("Damaged: 3 receive units (3 pieces)");
   expect(state.line.unitsPerVariantSnapshot).toBe(1);
   await expect(count(page)).toBeDisabled();
   expect(failures).toEqual([]);
@@ -423,7 +429,7 @@ test("late A response cannot overwrite a later A visit or the intervening receip
 
 test("catalog-factor drift requires an explicit server-owned rebase", async ({ page }) => {
   const { state, failures } = await setup(page, { drift: true });
-  await expect(control(page)).toContainText("Expected: 500 pieces; received: 400 pieces");
+  await expect(control(page)).toContainText("Expected: 500 pieces / Received: 400 pieces");
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   await control(page).getByRole("button", { name: /Review and apply current catalog factor/ }).click();
   await expect(count(page)).toHaveValue("400");
@@ -433,7 +439,7 @@ test("catalog-factor drift requires an explicit server-owned rebase", async ({ p
 
 test("creating a catalog variant leaves receipt counts untouched until explicit unit confirmation", async ({ page }) => {
   const { state, failures } = await setup(page, { legacy: true, unresolved: true });
-  await page.getByRole("button", { name: /^(SKU|SKU not linked)$/ }).first().click();
+  await page.getByRole("button", { name: /^Link SKU$/ }).first().click();
   const dialog = page.getByRole("dialog", { name: "Resolve SKU" });
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Create catalog variant" }).click();
@@ -449,7 +455,7 @@ test("creating a catalog variant leaves receipt counts untouched until explicit 
 
 test("existing variant search also requires explicit legacy count-basis confirmation", async ({ page }) => {
   const { state, failures } = await setup(page, { legacy: true, unresolved: true });
-  await page.getByRole("button", { name: /^(SKU|SKU not linked)$/ }).first().click();
+  await page.getByRole("button", { name: /^Link SKU$/ }).first().click();
   const dialog = page.getByRole("dialog", { name: "Resolve SKU" });
   await dialog.getByRole("button", { name: /TEST-PC1 Piece/ }).click();
   expect(state.commands).toEqual([]);
@@ -505,7 +511,7 @@ test("legacy confirmation binds the visible factor and reloads catalog drift bef
   expect(state.line.unitsPerVariantSnapshot).toBeNull();
   await page.locator('button:visible').filter({ hasText: "Load latest line and discard count draft" }).click();
   await control(page).getByRole("button", { name: /Confirm these counts are in Piece \(2 pieces\)/ }).click();
-  await expect(control(page)).toContainText("Expected: 1,002 pieces; received: 802 pieces");
+  await expect(control(page)).toContainText("Expected: 1,002 pieces / Received: 802 pieces");
   expect(state.commands[1].body).toEqual({ productVariantId: 2, confirmLegacyUnit: true, expectedUnitVersion: version, expectedUnitsPerVariant: 2 });
   expect(failures).toEqual([]);
 });

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, receipt } from "./procurement-fixtures";
+import { openReceivingMoreActions } from "./procurement-receiving-helpers";
 
 type ImportMode = "ambiguous" | "existing" | "changed" | "malformed" | "lost" | "invalid_count" | "partial" | "success";
 async function setup(page: Page, mode: ImportMode, options: { beforeResponse?: () => Promise<void>; startFromList?: boolean } = {}) {
@@ -40,6 +41,7 @@ async function setup(page: Page, mode: ImportMode, options: { beforeResponse?: (
     await page.goto("/receiving");
     await page.locator("a:visible").filter({ hasText: /^TEST-RECEIPT-31$/ }).click();
   } else await page.goto("/receiving?open=31");
+  await openReceivingMoreActions(page);
   await page.getByTestId("btn-import-csv").click();
   const dialog = page.getByRole("dialog", { name: "Import from CSV" });
   await expect(dialog).toBeVisible();
@@ -176,6 +178,7 @@ test("CSV drafts stay with their receipt and late import errors cannot enter a l
   await page.goBack();
   await expect(dialog).toBeHidden();
   await page.locator("a:visible").filter({ hasText: /^TEST-RECEIPT-32$/ }).click();
+  await openReceivingMoreActions(page);
   await page.getByTestId("btn-import-csv").click();
   await expect(page.getByTestId("textarea-csv")).toHaveValue("");
   release();
@@ -186,11 +189,13 @@ test("CSV drafts stay with their receipt and late import errors cannot enter a l
   await page.getByTestId("textarea-csv").fill(otherCsv);
   await page.goBack();
   await page.locator("a:visible").filter({ hasText: /^TEST-RECEIPT-31$/ }).click();
+  await openReceivingMoreActions(page);
   await page.getByTestId("btn-import-csv").click();
   await expect(page.getByTestId("textarea-csv")).toHaveValue(originalCsv);
   await expect(dialog.getByRole("alert")).toHaveCount(0);
   await page.goBack();
   await page.locator("a:visible").filter({ hasText: /^TEST-RECEIPT-32$/ }).click();
+  await openReceivingMoreActions(page);
   await page.getByTestId("btn-import-csv").click();
   await expect(page.getByTestId("textarea-csv")).toHaveValue(otherCsv);
   expect(requests).toHaveLength(1);
@@ -222,6 +227,7 @@ test("a delayed CSV file read cannot populate another receipt's draft", async ({
   });
   await page.goBack();
   await page.locator("a:visible").filter({ hasText: /^TEST-RECEIPT-32$/ }).click();
+  await openReceivingMoreActions(page);
   await page.getByTestId("btn-import-csv").click();
   const currentCsv = "sku,qty\nOTHER,7";
   await page.getByTestId("textarea-csv").fill(currentCsv);
