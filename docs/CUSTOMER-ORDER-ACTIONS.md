@@ -82,12 +82,11 @@ Only the background inspector retains this return cache; customer GET paths do n
 write measurements. Unrecorded shipping measurements fall back to this cache or the exact provider
 lookup; a cache outage is reported and does not suppress that fallback.
 
-These are verified return-package measurements, not a complete inbound shipment
-measurement feed. `CanonicalShipmentEvent` currently has no dimensions contract,
-and `physical_shipments` has no typed dimension columns. The inbound adapter maps
-shipment identity, tracking, service, cost and items, without measurements.
-Shipping pack-plan dimensions describe the plan and must not be treated as an
-observed original package. A historical order without canonical purchased-line
+Shipping records measurements before projecting dispatch events. The
+`CanonicalShipmentEvent` dispatch contract remains independent of box dimensions;
+the shipping label ledger owns observed sizes and the physical package owns unit
+allocations. Shipping pack-plan dimensions describe the plan and must not be
+treated as an observed original package. A historical order without canonical purchased-line
 and package allocation links cannot acquire a verified original box through its
 display number or SKU alone.
 
