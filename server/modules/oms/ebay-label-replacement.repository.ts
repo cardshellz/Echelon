@@ -11,9 +11,11 @@ import {
   scopeLabelReplacementPredecessors,
 } from "./label-replacement-scope.domain";
 import { enqueueShopifyLabelVoids } from "./shopify-label-void-intake.repository";
+import { createPackageAllocationLabelCommercialReviewRepository } from "../shipping/package-allocation-label-commercial-review.repository";
 import type { MaterializePhysicalPackageInput, MaterializePhysicalPackageResult } from "./channel-fulfillment-authority.repository";
 
 type Transaction = { execute(query: ReturnType<typeof sql>): Promise<unknown> };
+export type LabelReplacementOperation = "label_observation" | "repair";
 export type EbayLabelReplacementResult =
   | { readonly outcome: "waiting" | "review" | "skipped"; readonly reason: string }
   | { readonly outcome: "applied"; readonly materialized: MaterializePhysicalPackageResult };
@@ -104,8 +106,10 @@ export async function reconcileEbayLabelReplacement(
   labelId: number,
   now: Date,
   materialize: (input: MaterializePhysicalPackageInput, authority: AuthorizedLabelReplacement) => Promise<MaterializePhysicalPackageResult>,
+  operation: LabelReplacementOperation = "label_observation",
 ): Promise<EbayLabelReplacementResult | null> {
   if (!Number.isSafeInteger(labelId) || labelId <= 0 || !Number.isFinite(now.getTime())) throw new Error("Invalid label replacement identity or clock");
+  if (operation !== "label_observation" && operation !== "repair") throw new Error("Invalid label replacement operation");
   // Applied identity is immutable. Finish a pending projection even if this
   // label was subsequently voided; command claiming separately rejects voids.
   const applied = rows<{ physical_shipment_id: string }>(await tx.execute(sql`
@@ -113,7 +117,21 @@ export async function reconcileEbayLabelReplacement(
     WHERE shipping_provider_label_id = ${labelId} AND state = 'applied'`))[0];
   if (applied) return { outcome: "applied", materialized: await readLabelReplacementMaterialization(tx, Number(applied.physical_shipment_id)) };
   const { label, events, lifecycle } = await readLabelEvidence(tx, labelId);
-  if (!label || label.label_direction !== "outbound") return null;
+  async function rejectQueuedRecovery(reason: string): Promise<EbayLabelReplacementResult | null> {
+    const changed = rows<{ source_item_ids: number[] }>(await tx.execute(sql`
+      UPDATE wms.ebay_label_replacement_work SET state = 'review', reason = ${reason}, updated_at = ${now}
+      WHERE shipping_provider_label_id = ${labelId} AND state = 'waiting' RETURNING source_item_ids`));
+    if (changed.length === 0) return null;
+    if (label) await createPackageAllocationLabelCommercialReviewRepository(tx).record({
+      shippingProviderLabelId: labelId, providerShipmentId: label.provider_label_id,
+      providerOrderId: label.provider_order_id, providerOrderKey: label.provider_order_key,
+      orderNumber: null, trackingNumber: label.tracking_number, reasonCode: reason,
+      sourceWmsShipmentItemIds: changed[0].source_item_ids,
+      details: { authority: "label_replacement_recovery" },
+    });
+    return { outcome: "review", reason };
+  }
+  if (!label || label.label_direction !== "outbound") return rejectQueuedRecovery("replacement_label_scope_unproven");
   if (label.label_status === "voided" || label.label_status === "superseded") {
     await tx.execute(sql`UPDATE wms.ebay_label_replacement_work SET state = 'review', reason = 'replacement_label_inactive', updated_at = ${now}
       WHERE shipping_provider_label_id = ${labelId} AND state = 'waiting'`);
@@ -121,16 +139,18 @@ export async function reconcileEbayLabelReplacement(
   }
   if (!lifecycle || lifecycle.outcome !== "projected" || lifecycle.projection.contentsStatus !== "authoritative"
     || lifecycle.projection.reconciliationStatus !== "clear" || lifecycle.projection.labelStatus !== "active") {
-    return null; // Existing allocation owner records rejected evidence for review.
+    // A durable recovery request must not remain waiting forever on rejected
+    // contents. Preserve the evidence and surface it in the existing review UI.
+    return rejectQueuedRecovery("replacement_contents_evidence_unproven");
   }
   const contents = lifecycle.projection.authoritativeContents?.map(item => ({ sourceShipmentItemId: item.wmsShipmentItemId, quantity: item.quantity }));
-  if (!contents) return null;
+  if (!contents) return rejectQueuedRecovery("replacement_contents_evidence_unproven");
   const sourceIds = contents.map(item => item.sourceShipmentItemId);
   // Shared source locks serialize different labels even when their provider order IDs differ.
   const sources = await readSources(tx, sourceIds);
   const shopifyPackageScope = sources.length > 0 && sources.every(item => item.provider === "shopify");
   if (sources.length !== sourceIds.length || sources.some(item => item.purpose !== "customer_fulfillment")
-    || (!shopifyPackageScope && sources.some(item => item.provider !== "ebay"))) return null;
+    || (!shopifyPackageScope && sources.some(item => item.provider !== "ebay"))) return rejectQueuedRecovery("replacement_source_scope_conflict");
   let allocated = await readPreviousItems(tx, sourceIds, label.provider_label_id);
   async function defer(state: "waiting" | "review", reason: string): Promise<EbayLabelReplacementResult> {
     await tx.execute(sql`INSERT INTO wms.ebay_label_replacement_work
@@ -142,7 +162,7 @@ export async function reconcileEbayLabelReplacement(
     return { outcome: state, reason };
   }
   if (allocated.length > MAX_LABEL_REPLACEMENT_ITEMS) return defer("review", "replacement_candidate_limit_exceeded");
-  if (allocated.length === 0) return null;
+  if (allocated.length === 0) return rejectQueuedRecovery("replacement_predecessor_allocation_missing");
   const scopeInput = allocated.map(item => ({
     physicalItemId: Number(item.id), physicalShipmentId: Number(item.physical_shipment_id),
     sourceItemId: Number(item.source_id), providerOrderId: item.provider_order_id, labelStatus: item.label_status,
@@ -251,8 +271,15 @@ export async function reconcileEbayLabelReplacement(
     if (corrections.length === 0) return defer('review', 'shopify_predecessor_command_missing');
     if (corrections.some(work => work.state !== 'complete')) return defer('waiting', 'shopify_predecessor_void_pending');
   }
-  if (targets.some(target => typeof target.events[0]?.sanitized_payload.carrierCode !== 'string'
-    || !(target.events[0].sanitized_payload.carrierCode as string).trim() || !target.label.tracking_number
+  // Contents corrections are later events, but do not replace the immutable
+  // provider observation's carrier identity or its first observation time.
+  const carriers = new Map(targets.map(target => {
+    const observation = target.events.find(event => event.event_type === 'label_observed'
+      && typeof event.sanitized_payload.carrierCode === 'string'
+      && event.sanitized_payload.carrierCode.trim().length > 0);
+    return [Number(target.label.id), observation ? String(observation.sanitized_payload.carrierCode).trim() : null] as const;
+  }));
+  if (targets.some(target => !carriers.get(Number(target.label.id)) || !target.label.tracking_number
     || (!target.label.provider_order_id && !target.label.provider_order_key))) return defer('review', 'replacement_provider_identity_missing');
   await defer("waiting", "materializing_replacement");
   const operationHash = createHash("sha256").update(`shipstation-label-repack:${decision.labelIds.join(',')}:${decision.physicalItemIds.join(',')}`).digest("hex");
@@ -288,8 +315,12 @@ export async function reconcileEbayLabelReplacement(
       legacyWmsShipmentIds: [...new Set(targetSources.filter(source => ids.includes(source.id)).map(source => source.shipment_id))], shippingProvider: 'shipstation',
       providerPhysicalShipmentId: target.label.provider_label_id, providerOrderId: target.label.provider_order_id,
       providerOrderKey: target.label.provider_order_key, trackingNumber: target.label.tracking_number,
-      carrier: (target.events[0].sanitized_payload.carrierCode as string).trim(),
-      shippedAt: new Date(target.events[0].received_at), source: 'shipstation_label_replacement', legacyHeaderPolicy: 'aggregate_projection',
+      carrier: carriers.get(id)!,
+      shippedAt: new Date(target.label.first_observed_at), source: 'shipstation_label_replacement', legacyHeaderPolicy: 'aggregate_projection',
+      // Worker catch-up is a repair operation, including when its labels are
+      // recent. Preserve notifying live intake; never resend customer mail for
+      // a newly materialized historical/retried Shopify replacement.
+      ...(shopifyPackageScope && operation === "repair" ? { notifyCustomer: false } : {}),
       correlationId: `shipping-provider-label:${id}`,
     }, { labelId: id, sourceItemIds: ids, sourceItems: items, packageScope: true });
     await tx.execute(sql`UPDATE wms.ebay_label_replacement_work SET state = 'applied', reason = NULL,

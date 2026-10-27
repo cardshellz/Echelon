@@ -134,7 +134,7 @@ describe("channel-writeback.service", () => {
       excludeRetryStates: false,
     });
 
-    const text = JSON.stringify(execute.mock.calls[0]?.[0]);
+    const text = dialect.sqlToQuery(execute.mock.calls[0]?.[0] as any).sql;
     expect(text).toContain("shopify_fulfillment_reconciled");
     expect(text).toContain("coverageVersion");
     expect(text).toContain("writebackComplete");
@@ -147,6 +147,10 @@ describe("channel-writeback.service", () => {
     expect(text).toContain("wms.effective_physical_shipment_items");
     expect(text).toContain("physical_item.label_replacement_source_item_id");
     expect(text).toContain("allocation_source.source_wms_shipment_item_id) = eligible_item.id");
+    expect(text).toContain("SUM(covered_item.quantity)");
+    expect(text).toContain("MAX(push_item.quantity_pushed)");
+    expect(text).toContain("coverage_label.label_status IN ('voided', 'superseded')");
+    expect(text).toContain("oms.shopify_label_void_work coverage_void");
     expect(text).toContain("LEFT JOIN LATERAL");
     expect(text).not.toMatch(
       /c\.provider = 'shopify'[^)]*shopify_fulfillment_id[^)]*IS NOT NULL/,
