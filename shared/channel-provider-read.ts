@@ -21,8 +21,8 @@ export type ChannelProviderReadDiagnostic = z.infer<typeof channelProviderReadDi
  * back into an exception path. Error translations must retain this as cause. */
 export class ChannelProviderReadError extends Error {
   readonly context: { providerRead: ChannelProviderReadDiagnostic };
-  constructor(read: ChannelProviderReadDiagnostic) {
-    super("Channel provider read did not complete.");
+  constructor(read: ChannelProviderReadDiagnostic, options?: ErrorOptions) {
+    super("Channel provider read did not complete.", options);
     this.name = "ChannelProviderReadError";
     this.context = { providerRead: channelProviderReadDiagnosticSchema.parse(read) };
   }

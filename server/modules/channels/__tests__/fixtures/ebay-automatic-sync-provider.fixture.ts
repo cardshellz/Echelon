@@ -33,7 +33,9 @@ export class AutomaticSyncEbayProvider {
     variesBy: { specifications: [{ name: "Pack Size", values: ["5"] }] },
   };
 
-  constructor(private readonly clock: () => Date, private readonly publicationEnabled = false, skus: readonly string[] = ["P5"]) {
+  constructor(private readonly clock: () => Date, private readonly publicationEnabled = false, skus: readonly string[] = ["P5"],
+    private readonly listingShape: "group" | "single" = "group") {
+    if (listingShape === "single" && skus.length !== 1) throw new Error("A single-listing provider fixture requires exactly one SKU.");
     for (const sku of skus) {
       if (!sku || this.members.has(sku)) throw new Error("Provider fixture requires distinct nonempty SKUs.");
       this.members.set(sku, {
@@ -144,7 +146,7 @@ export class AutomaticSyncEbayProvider {
     const url = new URL(path, "https://example.test");
     if (url.pathname === "/commerce/identity/v1/user/") return { userId: "seller-36" };
     const sku = url.pathname.match(/^\/sell\/inventory\/v1\/inventory_item\/([^/]+)$/)?.[1];
-    if (sku) return { ...structuredClone(this.member(decodeURIComponent(sku)).item), groupIds: ["PACK"] };
+    if (sku) return { ...structuredClone(this.member(decodeURIComponent(sku)).item), groupIds: this.listingShape === "group" ? ["PACK"] : [] };
     if (url.pathname === "/sell/inventory/v1/inventory_item_group/PACK") return structuredClone(this.group);
     const offer = [...this.members.values()].find(member => url.pathname === `/sell/inventory/v1/offer/${member.offer.offerId}`)?.offer;
     if (offer) return structuredClone(offer);
@@ -188,9 +190,16 @@ export class AutomaticSyncEbayProvider {
         }) };
       }) };
     }
-    if (this.publicationEnabled && request.method === "POST" && request.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group") {
+    if (this.publicationEnabled && this.listingShape === "group" && request.method === "POST" && request.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group") {
       for (const current of this.members.values()) current.offer = { ...current.offer, status: "PUBLISHED", listingId: "listing-20" };
       return { listingId: "listing-20" };
+    }
+    if (this.publicationEnabled && this.listingShape === "single" && request.method === "POST") {
+      const target = [...this.members.values()].find(current => request.path === `/sell/inventory/v1/offer/${current.offer.offerId}/publish`);
+      if (target) {
+        target.offer = { ...target.offer, status: "PUBLISHED", listingId: "listing-20" };
+        return { listingId: "listing-20" };
+      }
     }
     // Any accidental create/publish/delete in existing-listing recovery fails
     // the test instead of quietly manufacturing another listing.

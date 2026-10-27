@@ -55,6 +55,8 @@ describe("EbayMarketplaceListingConnector beforeFirstMutation", () => {
 
   it("passes the proven published listing after the identity check", async () => {
     const f = await fixture("PUBLISHED");
+    f.draft.inventoryItems[0].packageSource = { productId: 20, variantId: 101, facts: { weightGrams: 120.25 },
+      requirements: { weight: true, dimensions: true, dimensionsOnMaintenance: "recommended" } };
     const hook = vi.fn(async () => {});
     const identity = (externalId: string) => ({ externalId, identityNamespace: "ebay:production" });
     const resolvePublishedIdentity = vi.fn(async () => ({
@@ -64,10 +66,38 @@ describe("EbayMarketplaceListingConnector beforeFirstMutation", () => {
       members: [{ sku: "P5", variantIdentity: null, offerIdentity: identity("offer-101"), inventoryItemIdentity: identity("P5") }],
       evidence: {}, observedAt: new Date("2026-10-21T12:00:00.000Z"),
     }));
-    await f.connector.pushListing({ ...f, resolvePublishedIdentity, beforeFirstMutation: hook });
+    const result = await f.connector.pushListing({ ...f, resolvePublishedIdentity, beforeFirstMutation: hook });
+    expect(result.warnings).toEqual([{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
+      productId: 20, variantId: 101, variantSku: "P5" }]);
     expect(resolvePublishedIdentity).toHaveBeenCalledTimes(1);
     expect(hook).toHaveBeenCalledWith({ offers: [{ variantId: 101, sku: "P5", existingOfferId: "offer-101", observedOffer: f.observed }],
       verifiedPublishedListingId: "listing-20" });
+  });
+
+  it.each([false, true])("publishes optional-dimension %s group listings with a warning and no invented dimensions", async grouped => {
+    const f = await fixture();
+    if (grouped) {
+      const prepared = await syncProviderFixture().prepare();
+      f.draft.itemGroup = prepared.draft.itemGroup;
+      vi.mocked(f.client.publishOfferByInventoryItemGroup).mockResolvedValue({ listingId: "listing-20" });
+    }
+    f.draft.inventoryItems[0].packageSource = { productId: 20, variantId: 101, facts: { weightGrams: 120.25 },
+      requirements: { weight: true, dimensions: "recommended" } };
+    const result = await f.connector.pushListing(f);
+    expect(result.warnings).toHaveLength(1);
+    expect(vi.mocked(f.client.createOrReplaceInventoryItem).mock.calls[0][1].packageWeightAndSize)
+      .toEqual({ weight: { value: 120.25, unit: "GRAM" } });
+    if (grouped) expect(f.client.publishOfferByInventoryItemGroup).toHaveBeenCalledExactlyOnceWith("PACK", "EBAY_US");
+    else expect(f.client.publishOffer).toHaveBeenCalledExactlyOnceWith("offer-101");
+  });
+
+  it.each([false, true])("blocks required-dimension %s group publication before its first mutation", async grouped => {
+    const f = await fixture();
+    if (grouped) f.draft.itemGroup = (await syncProviderFixture().prepare()).draft.itemGroup;
+    f.draft.inventoryItems[0].packageSource = { productId: 20, variantId: 101, facts: { weightGrams: 120.25 },
+      requirements: { weight: true, dimensions: true, dimensionsOnMaintenance: "recommended" } };
+    await expect(f.connector.pushListing(f)).rejects.toMatchObject({ code: "CHANNEL_LISTING_VALIDATION_FAILED" });
+    for (const write of writes(f.client)) expect(write).not.toHaveBeenCalled();
   });
 
   it.each([

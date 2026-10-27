@@ -63,6 +63,17 @@ function fixture() {
   return { service, edits, context, report };
 }
 describe("owned, query-only account history", () => {
+  it("reads action projections without a provider, connection, or warehouse inspection", async () => {
+    const h = fixture();
+    const actions = { read: vi.fn(async () => ({ orders: [] })) };
+    const connect = vi.fn(async () => connection);
+    const now = new Date("2026-10-27T12:00:00.000Z");
+    const service = new CustomerAccountOrderQueriesService({ principal, connection: connect, edits: h.edits, context: h.context,
+      actions, now: () => now, report: h.report });
+    await service.actions({ orders: [identity] });
+    expect(actions.read).toHaveBeenCalledExactlyOnceWith({ orders: [identity], channelId: 2, externalCustomerId: "100" }, now);
+    expect(connect).not.toHaveBeenCalled(); expect(h.edits.orderSummaries).not.toHaveBeenCalled(); expect(h.context.read).not.toHaveBeenCalled();
+  });
   it("returns an exact zero total for a historical purchase without an OMS order", async () => {
     const h = fixture();
     const result = await h.service.summaries({ orders: [identity] });

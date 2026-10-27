@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import type { CustomerOrderActions } from "@shared/customer-account/order-actions";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -12,7 +13,6 @@ import {
 import { CustomerAccountOrderStatus } from "./CustomerAccountOrderStatus";
 import { CustomerAccountOrderHistory } from "./CustomerAccountOrderHistory";
 import { CustomerOrderPanelLoader } from "./CustomerOrderPanelLoader";
-import type { OrderEditOrder } from "@shared/order-edits/order-edit.contract";
 import {
   loadOrderEditPaymentReturn,
   orderEditPaymentReturnStorage,
@@ -183,6 +183,8 @@ function CustomerAccount({
   } | null>(null);
   const [error, setError] = useState<CustomerAccountAccessNotice | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [actions, setActions] = useState<ReadonlyMap<HTMLElement, CustomerOrderActions>>(new Map());
+  const [actionError, setActionError] = useState(false);
   const [totals, setTotals] = useState<
     ReadonlyMap<HTMLElement, CustomerOrderTotalsState>
   >(() => new Map(rows.map((row) => [row, { status: "loading" as const }])));
@@ -203,6 +205,37 @@ function CustomerAccount({
   );
   const requestGeneration = useRef(new Map<HTMLElement, number>());
   const accountRequests = useRef<AbortController | null>(null);
+  const actionGeneration = useRef(0);
+
+  const loadActions = useCallback(async (signal?: AbortSignal) => {
+    if (!rows.length) return;
+    const generation = ++actionGeneration.current;
+    try {
+      const result = await api.orderActions({ orders: rows.map(row => ({ externalOrderId: row.dataset.externalOrderId,
+        orderReference: row.dataset.orderReference })) }, signal);
+      if (signal?.aborted || generation !== actionGeneration.current) return;
+      setActions(new Map(rows.map(row => [row, result.orders.find(item => item.externalOrderId === row.dataset.externalOrderId)!])));
+      setActionError(false);
+    } catch {
+      if (!signal?.aborted && generation === actionGeneration.current) setActionError(true);
+    }
+  }, [api, rows]);
+
+  // This timer reads only the saved projection. All external work is in the worker.
+  useEffect(() => {
+    if (!session) return;
+    const controller = new AbortController();
+    const refresh = () => { if (document.visibilityState === "visible") void loadActions(controller.signal); };
+    const expires = [...actions.values()].map(row => row.validUntil ? Date.parse(row.validUntil) : 0).filter(value => value > Date.now());
+    const pending = !actions.size || [...actions.values()].some(row => row.state === "refreshing");
+    // This cheap local lookup observes source invalidations while the page stays
+    // visible. Provider refresh scheduling never controls whether a known panel
+    // can render, and opening the panel itself still starts no request.
+    const delay = pending ? 5_000 : expires.length ? Math.max(1_000, Math.min(30_000, Math.min(...expires) - Date.now())) : null;
+    const timer = delay === null ? null : setTimeout(refresh, delay);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { controller.abort(); if (timer !== null) clearTimeout(timer); document.removeEventListener("visibilitychange", refresh); };
+  }, [session, actions, loadActions]);
 
   const loadSummaries = useCallback(
     async (
@@ -290,19 +323,6 @@ function CustomerAccount({
     [api, accessSurface],
   );
 
-  const verifiedOrder = useCallback(
-    (row: HTMLElement, order: OrderEditOrder) => {
-      // Prevent an earlier list request from replacing newer detailed native facts.
-      requestGeneration.current.set(
-        row,
-        (requestGeneration.current.get(row) ?? 0) + 1,
-      );
-      setTotals((previous) =>
-        new Map(previous).set(row, { status: "verified", order }),
-      );
-    },
-    [],
-  );
   const closePanel = useCallback(() => setManaged(null), []);
   const closeModal = () => {
     const omsOrderId = choice?.omsOrderId;
@@ -314,6 +334,7 @@ function CustomerAccount({
       );
     });
     if (row) void loadSummaries([row]);
+    void loadActions(accountRequests.current?.signal);
   };
 
   useEffect(() => {
@@ -330,6 +351,7 @@ function CustomerAccount({
         // One small native query covers this page, including purchases predating
         // OMS. Edit eligibility and return policy checks are demand-loaded.
         void loadSummaries(rows, controller.signal);
+        void loadActions(controller.signal);
         const paymentStorage = orderEditPaymentReturnStorage();
         const paymentReturn =
           paymentStorage &&
@@ -387,7 +409,7 @@ function CustomerAccount({
       controller.abort();
       client.clear();
     };
-  }, [api, rows, attempt, client, customerId, loadSummaries, accessSurface]);
+  }, [api, rows, attempt, client, customerId, loadSummaries, loadActions, accessSurface]);
 
   async function showReturn(
     authorizationId: number,
@@ -469,12 +491,13 @@ function CustomerAccount({
           row={managed.row}
           opener={managed.opener}
           summary={totals.get(managed.row)}
+          actions={actions.get(managed.row)}
+          actionError={actionError}
           statusUnavailable={statusFailures.has(managed.row)}
           api={api}
           customerId={customerId}
           connectionId={session?.connection.connectionId ?? null}
           enabled={session?.connection.enabled ?? false}
-          sessionKey={session?.session.sessionKey ?? undefined}
           accessNotice={error}
           signInUrl={signInUrl}
           history={history}
@@ -482,9 +505,10 @@ function CustomerAccount({
           onClose={closePanel}
           onRefresh={() => {
             void loadSummaries([managed.row]);
+            void loadActions(accountRequests.current?.signal);
           }}
+          onActionRetry={() => { void loadActions(accountRequests.current?.signal); }}
           onAccessRetry={() => setAttempt((value) => value + 1)}
-          onVerified={verifiedOrder}
           onEdit={(omsOrderId) => {
             setManaged(null);
             setChoice({ kind: "edit", omsOrderId });

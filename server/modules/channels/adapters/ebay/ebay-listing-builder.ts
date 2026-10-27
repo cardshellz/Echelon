@@ -15,7 +15,7 @@ import { centsToDollarString } from "@shared/utils/money";
 import { ChannelListingValidationError } from "@shared/channel-listing-validation";
 import type { ChannelPackageRequirements } from "@shared/catalog/shipping-package";
 import type { ChannelPackagePlan } from "../../../marketplace-listings/domain/channel-package";
-import type { EbayPackageSource } from "./ebay-listing-package";
+import type { EbayPackageSource, EbayPackageMaintenanceProof } from "./ebay-listing-package";
 import { assertEbayListingPhotoPlan, buildEbayListingPhotoPlan, type EbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
 
 import type {
@@ -61,6 +61,7 @@ export interface BuiltInventoryItem {
   sku: string;
   packageSource?: EbayPackageSource;
   packagePlan?: ChannelPackagePlan;
+  packageMaintenance?: EbayPackageMaintenanceProof;
   payload: Omit<EbayInventoryItem, "sku">;
 }
 

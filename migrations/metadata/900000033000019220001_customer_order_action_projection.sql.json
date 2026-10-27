@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000033000019220001_customer_order_action_projection.sql",
+  "generation": 33,
+  "pr": 1922,
+  "ordinal": 1,
+  "after": [
+    "900000032000019150001_retire_catalog_shipping_package_type.sql"
+  ]
+}

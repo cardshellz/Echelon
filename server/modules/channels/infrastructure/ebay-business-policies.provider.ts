@@ -129,10 +129,12 @@ function fulfillmentPackageRequirements(policy: Record<string, unknown>) {
   const shippingOptions = z.array(z.object({ costType: z.enum(["CALCULATED", "FLAT_RATE", "NOT_SPECIFIED"]) }).passthrough())
     .parse(policy.shippingOptions ?? []);
   const calculated = shippingOptions.some(option => option.costType === "CALCULATED");
-  // Existing listing policy requires weight, also covering flat-rate surcharges.
-  // Inventory API PackageWeightAndSize requires measurements for calculated
-  // shipping, but does not require an explicit packageType. Preserve that
-  // provider setting without turning it into a Catalog data-entry requirement.
+  // Inventory publication documents dimensions for calculated shipping. Existing
+  // published weight-only items have accepted maintenance writes; the package
+  // adapter must prove exact publication and unchanged fulfillment policy before
+  // using the maintenance recommendation. A policy change/new variation remains
+  // publication validation. Optional dimensions still carry an accuracy warning.
   // https://developer.ebay.com/api-docs/master/sell/inventory/openapi/3/sell_inventory_v1_oas3.json
-  return { weight: true, dimensions: calculated };
+  return { weight: true, dimensions: calculated ? true : "recommended" as const,
+    dimensionsOnMaintenance: "recommended" as const };
 }
