@@ -7,7 +7,7 @@ import { createDrizzleCarrierTrackingRepository } from "../../carrier-tracking.r
 import { normalizeShipStationLabelObservation } from "../../carrier-tracking.domain";
 import { ShippingPackageDimensionsReader } from "../../package-dimensions.reader";
 import { resolveReturnsTestDatabase } from "../../../returns/__tests__/support/disposable-database";
-import { addLiveOriginalBox, LIVE_NOW, liveLocalFixture, liveShop, liveShopifyFixture } from "../../../returns/__tests__/support/live-inspection-fixtures";
+import { addLiveOriginalBox, LIVE_NOW, liveGid, liveLocalFixture, liveShop, liveShopifyFixture } from "../../../returns/__tests__/support/live-inspection-fixtures";
 import { CustomerReturnLiveService } from "../../../returns/application/customer-return-live.service";
 import { labelActivePolicy } from "../../../returns/__tests__/support/label-fixtures";
 
@@ -51,6 +51,8 @@ integration("shipping observations persist original package dimensions for retur
     expect(await reader.read(identity)).toEqual({ status: "verified", dimensions: expected });
     const local = liveLocalFixture(); addLiveOriginalBox(local);
     const provider = liveShopifyFixture();
+    local.order.externalCustomerId = "901";
+    provider.order.customerId = liveGid("Customer", "901");
     const remoteDimensions = { read: vi.fn(async () => { throw new Error("Provider must not be called"); }) };
     const service = new CustomerReturnLiveService({
       local: { listShops: async () => [liveShop], read: async () => structuredClone(local) },
@@ -58,7 +60,7 @@ integration("shipping observations persist original package dimensions for retur
       storedDimensions: { read: input => reader.read({ provider: "shipstation", ...input }) },
       policies: { read: async () => [labelActivePolicy()] }, now: () => new Date(LIVE_NOW),
     });
-    const order = await service.lookup({ channelId: 36, orderReference: "0012-A" });
+    const order = await service.lookupCanonical({ channelId: 36, omsOrderId: 100, externalOrderId: "1001", externalCustomerId: "901" });
     expect(order.boxOptions).toHaveLength(1);
     expect(order.boxOptions[0].dimensions).toEqual(expected);
     expect(order.boxOptions[0].items).toHaveLength(2);
