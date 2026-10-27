@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000035000019290001_legacy_maintenance_replacement.sql",
+  "generation": 35,
+  "pr": 1929,
+  "ordinal": 1,
+  "after": [
+    "900000020000018840001_shared_publication_recovery.sql",
+    "900000034000019260001_refresh_failed_return_options.sql"
+  ]
+}
