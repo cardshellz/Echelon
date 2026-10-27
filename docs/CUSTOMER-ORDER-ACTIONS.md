@@ -61,6 +61,11 @@ legacy imports can retain the local receipt time. The freshly verified Shopify
 remain validated and bound into the review revision; changed evidence during a
 read or between selection and review still requires a new review.
 
+The purchase-date correction release invalidates previously failed derived return
+inspections through the existing dirty queue. This includes stopped retries, so
+the normal worker can rebuild their options without an order-specific repair.
+Healthy entries and edit-only failures are not requeued by that migration.
+
 ## Original return packages
 
 Verified original package measurements are retained separately in

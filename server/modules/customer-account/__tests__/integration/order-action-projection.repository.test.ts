@@ -205,6 +205,39 @@ integration("durable customer action lookup and transactional source invalidatio
     const row = (await pool.query("SELECT last_error_class,attempts FROM oms.customer_order_actions WHERE oms_order_id=100")).rows[0];
     expect(row).toEqual({ last_error_class: "permanent", attempts: 5 });
   });
+  it("reinspects previously stopped return-option failures through the normal queue without source mutations", async () => {
+    const migration = readFileSync("migrations/900000034000019260001_refresh_failed_return_options.sql", "utf8");
+    const source = async () => (await pool.query(`SELECT jsonb_build_object(
+      'orders',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM oms.oms_orders o),
+      'lines',(SELECT jsonb_agg(to_jsonb(l) ORDER BY l.id) FROM oms.oms_order_lines l)) AS facts`)).rows[0].facts;
+    const before = await source();
+    for (const scope of await store.claim(2, NOW, LEASE)) {
+      await store.complete(scope, scope.omsOrderId === 100 ? { ...SNAPSHOT, returnFailed: true } : SNAPSHOT,
+        NOW, new Date(NOW.getTime() + 60_000), scope.omsOrderId === 100 ? "permanent" : undefined);
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN"); await client.query(migration);
+      expect((await client.query("SELECT oms_order_id FROM oms.customer_order_action_invalidations")).rows).toEqual([{ oms_order_id: "100" }]);
+      await client.query("ROLLBACK");
+    } finally { client.release(); }
+    expect((await pool.query("SELECT count(*)::int AS count FROM oms.customer_order_action_invalidations")).rows[0].count).toBe(0);
+    await pool.query(migration); await pool.query(migration);
+    expect((await pool.query("SELECT oms_order_id FROM oms.customer_order_action_invalidations")).rows).toEqual([{ oms_order_id: "100" }]);
+    await store.drainInvalidations(1_000);
+    const scopes = await store.claim(2, NOW, OTHER_LEASE);
+    expect(scopes.map(scope => scope.omsOrderId)).toEqual([100]);
+    expect(scopes[0].attempts).toBe(0);
+    expect(await store.complete(scopes[0], SNAPSHOT, NOW, new Date(NOW.getTime() + 60_000))).toBe(true);
+    expect((await read()).orders[0]).toMatchObject({ state: "ready", snapshot: SNAPSHOT });
+    expect(await source()).toEqual(before);
+  });
+  it("does not requeue unrelated edit failures when refreshing corrected return inspection", async () => {
+    for (const scope of await store.claim(2, NOW, LEASE))
+      await store.complete(scope, { ...SNAPSHOT, orderFailed: true }, NOW, new Date(NOW.getTime() + 60_000), "permanent");
+    await pool.query(readFileSync("migrations/900000034000019260001_refresh_failed_return_options.sql", "utf8"));
+    expect((await pool.query("SELECT count(*)::int AS count FROM oms.customer_order_action_invalidations")).rows[0].count).toBe(0);
+  });
   it("source changes do not wait behind a locked cache row", async () => {
     const holder = await pool.connect(), source = await pool.connect();
     try {
