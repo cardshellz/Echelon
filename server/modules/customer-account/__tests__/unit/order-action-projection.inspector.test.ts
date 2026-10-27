@@ -37,6 +37,7 @@ describe("order action inspection reuses existing capability owners", () => {
     const returns = new CustomerReturnLiveService({
       local: { listShops: async () => [liveShop], read: async () => structuredClone(local) },
       shopify: { read: async () => structuredClone(provider) },
+      dimensions: { read: async () => null },
       policies: { read: async () => [labelActivePolicy()] }, now: () => new Date(LIVE_NOW),
     });
     const ownedScope = { ...scope, omsOrderId: 100, externalOrderId: "1001", orderReference: "#0012-A" };
