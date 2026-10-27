@@ -8,6 +8,34 @@ function fixture() { const local = liveLocalFixture(); addLiveOriginalBox(local)
 afterEach(() => { vi.useRealTimers(); });
 
 describe("exact original return box projection", () => {
+  it("prefers shipping's observed measurement to an older return cache without provider calls", async () => {
+    const provider = { read: vi.fn(async () => dimensions) }, cached = { read: vi.fn(async () => dimensions) };
+    const latest = { ...dimensions, lengthMm: 350 };
+    const stored = { read: vi.fn(async () => ({ status: "verified" as const, dimensions: latest })) };
+    const boxes = await readCustomerReturnOriginalBoxes(fixture(), provider, vi.fn(), cached, stored);
+    expect(boxes[0].dimensions).toEqual(latest);
+    expect(cached.read).not.toHaveBeenCalled(); expect(provider.read).not.toHaveBeenCalled();
+  });
+  it("does not bypass invalid/voided stored evidence through an old cache or provider fallback", async () => {
+    const provider = { read: vi.fn(async () => dimensions) }, cached = { read: vi.fn(async () => dimensions) };
+    const report = vi.fn();
+    expect(await readCustomerReturnOriginalBoxes(fixture(), provider, report, cached,
+      { read: async () => ({ status: "unusable" }) })).toEqual([]);
+    expect(cached.read).not.toHaveBeenCalled(); expect(provider.read).not.toHaveBeenCalled();
+    expect(report).toHaveBeenCalledWith({ operation: "original_box_dimensions", code: "RETURN_BOX_STORED_MEASUREMENT_UNUSABLE" });
+  });
+  it("retains the historical verified-cache fallback only when shipping has no recorded measurement", async () => {
+    const provider = { read: vi.fn(async () => dimensions) }, cached = { read: vi.fn(async () => dimensions) };
+    const boxes = await readCustomerReturnOriginalBoxes(fixture(), provider, vi.fn(), cached,
+      { read: async () => ({ status: "not_recorded" }) });
+    expect(boxes[0].dimensions).toEqual(dimensions); expect(cached.read).toHaveBeenCalledOnce(); expect(provider.read).not.toHaveBeenCalled();
+  });
+  it("keeps manual sizing available and reports a shipping-read failure without exposing its cause", async () => {
+    const provider = { read: vi.fn(async () => dimensions) }, report = vi.fn();
+    expect(await readCustomerReturnOriginalBoxes(fixture(), provider, report, undefined,
+      { read: async () => { throw new Error("private connection details"); } })).toEqual([]);
+    expect(provider.read).not.toHaveBeenCalled(); expect(JSON.stringify(report.mock.calls)).not.toContain("private");
+  });
   it("reuses retained verified dimensions without a provider call", async () => {
     const local = fixture(), candidate = projectCustomerReturnOriginalBoxCandidates(local)[0];
     const provider = { read: vi.fn(async () => { throw new Error("provider must not be called"); }) };

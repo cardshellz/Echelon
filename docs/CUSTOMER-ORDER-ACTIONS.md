@@ -68,21 +68,25 @@ Healthy entries and edit-only failures are not requeued by that migration.
 
 ## Original return packages
 
-Verified original package measurements are retained separately in
-`returns.customer_return_box_measurements`. Each measurement is bound to the
+Shipping's normal label ingestion retains observed package dimensions with an
+immutable evidence link. Returns reads that saved evidence first, checking exact
+active outbound package identity. Invalid or unproven stored evidence cannot be
+bypassed with an old cache. See `SHIPPING-PACKAGE-DIMENSIONS.md` for the contract.
+
+Historical verified package measurements are also retained in
+`returns.customer_return_box_measurements`. Each cached measurement is bound to the
 channel, original package identity and a fingerprint of tracking and all retained
 contents. Local package/label provenance is still rechecked before reuse. Mixed,
 voided, unattributable or changed packages do not inherit unrelated measurements.
-Only the background inspector retains measurements; customer GET paths do not
-write them. A missing measurement falls back to the existing exact provider
+Only the background inspector retains this return cache; customer GET paths do not
+write measurements. Unrecorded shipping measurements fall back to this cache or the exact provider
 lookup; a cache outage is reported and does not suppress that fallback.
 
-These are verified return-package measurements, not a complete inbound shipment
-measurement feed. `CanonicalShipmentEvent` currently has no dimensions contract,
-and `physical_shipments` has no typed dimension columns. The inbound adapter maps
-shipment identity, tracking, service, cost and items, without measurements.
-Shipping pack-plan dimensions describe the plan and must not be treated as an
-observed original package. A historical order without canonical purchased-line
+Shipping records measurements before projecting dispatch events. The
+`CanonicalShipmentEvent` dispatch contract remains independent of box dimensions;
+the shipping label ledger owns observed sizes and the physical package owns unit
+allocations. Shipping pack-plan dimensions describe the plan and must not be
+treated as an observed original package. A historical order without canonical purchased-line
 and package allocation links cannot acquire a verified original box through its
 display number or SKU alone.
 

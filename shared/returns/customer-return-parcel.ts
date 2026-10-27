@@ -1,17 +1,13 @@
 import Decimal from "decimal.js";
 import { z } from "zod";
-import { boxDimensionMmSchema } from "../shipping/dimensions";
+import { shippingPackageDimensionsSchema } from "../shipping/package-dimensions";
 
 // Read bounds only. Carrier-specific limits are checked when rating a label.
 export const MAX_RETURN_ORIGINAL_BOXES = 100;
 const MAX_ORIGINAL_BOX_LINES = 200;
 const WeightDecimal = Decimal.clone({ precision: 40, rounding: Decimal.ROUND_CEIL });
 
-export const customerReturnDimensionsSchema = z.object({
-  lengthMm: boxDimensionMmSchema,
-  widthMm: boxDimensionMmSchema,
-  heightMm: boxDimensionMmSchema,
-}).strict();
+export const customerReturnDimensionsSchema = shippingPackageDimensionsSchema;
 export type CustomerReturnDimensions = z.infer<typeof customerReturnDimensionsSchema>;
 
 export const customerReturnUnitWeightSchema = z.number().finite().positive().max(Number.MAX_SAFE_INTEGER).nullable();
