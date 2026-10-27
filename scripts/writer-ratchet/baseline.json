@@ -276,6 +276,9 @@
   "dropship.dropship_listing_content_settings": [
     "modules/dropship"
   ],
+  "dropship.dropship_listing_end_requests": [
+    "modules/dropship"
+  ],
   "dropship.dropship_listing_marketplace_sales": [
     "modules/dropship"
   ],

@@ -37,6 +37,7 @@ import {
   chooseMatchLine,
   chooseRoom,
   chooseSavedState,
+  describeChooseConfirmButton,
   describeChooseIdsFailure,
   describeChooseShown,
   emptyChooseKnown,
@@ -813,7 +814,9 @@ export function ChooseStep({ selection, changes, onChanges, next, summary, onSav
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{CHOOSE_WORDS.confirmCancel}</AlertDialogCancel>
-            <AlertDialogAction onClick={() => { confirmedRef.current = true; answer(true); }}>{CHOOSE_WORDS.confirmSave}</AlertDialogAction>
+            <AlertDialogAction onClick={() => { confirmedRef.current = true; answer(true); }}>
+              {question ? describeChooseConfirmButton(question.preview) : CHOOSE_WORDS.confirmSave}
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

@@ -38,6 +38,9 @@ export async function installFixtures(page: Page, options: { permissions?: reado
     else if (/^\/api\/purchase-orders\/\d+\/cost-reporting$/.test(path)) json = {
       purchaseOrderId: Number(path.split("/")[3]), configuration: "not_configured", deliveries: [], unqueuedEventCount: 0, truncated: false,
     };
+    else if (/^\/api\/inbound-shipments\/\d+\/receiving-setup$/.test(path)) json = {
+      shipmentId: Number(path.split("/")[3]), ready: false, issueCount: 0, lines: [],
+    };
     else if (/^\/api\/inbound-shipments\/\d+\/tracking$/.test(path)) json = {
       pollingEnabled: false, providers: [
         { provider: "searates", configured: false, setup: "SeaRates credentials required." },

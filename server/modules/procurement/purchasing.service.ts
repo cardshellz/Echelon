@@ -57,6 +57,7 @@ import { readReceiptCustodyPresence } from "./receiving-quarantine.repository";
 import { ReceivingUnitSnapshotError } from "./receiving-unit-snapshot";
 import { shipmentReceiptSourceVersion } from "./shipment-receipt-source-version";
 import { planReceiptUnits, ReceivingUnitError, type ReceiptUnitPlan, type ReceiptVariant } from "./receiving-unit-contract";
+import { shipmentReceiptPlanRequestSchema, type ShipmentReceiptPlanRequest, type ShipmentReceiptUnitSelection } from "@shared/procurement/shipment-receipt-plan";
 import {
   checkReceiveConfigurationReadyToLeaveDraft,
   checkReceiveVariantChosen,
@@ -3673,7 +3674,7 @@ export function createPurchasingService(
     qtyShipped: number | null;
     cartonCount: number | null;
     unitsPerCarton: number | null;
-    status: "resolved" | "missing_product" | "missing_variant" | "invalid_po_line" | "invalid_quantity" | "missing_piece_variant" | "unit_mismatch";
+    status: "resolved" | "missing_product" | "missing_variant" | "invalid_po_line" | "invalid_quantity" | "missing_piece_variant" | "unit_mismatch" | "selection_required";
     blocking: boolean;
     issue: string | null;
     receivePlan: ReceiptUnitPlan | null;
@@ -3681,19 +3682,33 @@ export function createPurchasingService(
     activeVariants: Array<{ id: number; sku: string | null; name: string | null; unitsPerVariant: number }>;
   };
 
-  async function resolveReceiptPlan(poLine: any, baseQty: number, shipmentLine: any | null, executor?: any): Promise<ReceiptUnitPlan> {
+  async function resolveReceiptPlan(poLine: any, baseQty: number, shipmentLine: any | null, executor?: any, selection?: ShipmentReceiptUnitSelection): Promise<ReceiptUnitPlan> {
     const productId = parsePositiveInteger(poLine.productId);
     if (!productId) throw new PurchasingError("The source PO line needs a product before receiving.", 409, { code: "RECEIVING_PRODUCT_REQUIRED", purchaseOrderLineId: poLine.id });
     if (!storage.getProductVariantsByProductId) throw new PurchasingError("Receipt catalog lookup is unavailable.", 503, { code: "RECEIVING_CATALOG_UNAVAILABLE" });
     const variants = await storage.getProductVariantsByProductId(productId, executor);
-    return receiptPlanFromVariants(poLine, baseQty, shipmentLine, variants);
+    return receiptPlanFromVariants(poLine, baseQty, shipmentLine, variants, selection);
   }
 
-  function receiptPlanFromVariants(poLine: any, baseQty: number, shipmentLine: any | null, variants: ReceiptVariant[]): ReceiptUnitPlan {
+  function receiptPlanFromVariants(poLine: any, baseQty: number, shipmentLine: any | null, variants: ReceiptVariant[], selection?: ShipmentReceiptUnitSelection): ReceiptUnitPlan {
+    if (selection && (selection.shipmentLineId !== shipmentLine?.id || selection.expectedBaseQty !== baseQty)) {
+      throw new ReceivingUnitError("The remaining shipment pieces changed. Refresh and review the receiving count before continuing.", 409,
+        { code: "SHIPMENT_RECEIPT_COVERAGE_CHANGED", shipmentLineId: shipmentLine?.id });
+    }
     const preferredVariantId = parsePositiveInteger(shipmentLine?.productVariantId ?? poLine.expectedReceiveVariantId ?? poLine.productVariantId);
     const recordedPreferredUnits = shipmentLine?.unitsPerVariantSnapshot
       ?? (preferredVariantId !== null && preferredVariantId === poLine.expectedReceiveVariantId ? poLine.expectedReceiveUnitsPerVariant : null);
-    return planReceiptUnits({ baseQty, productId: poLine.productId, preferredVariantId, recordedPreferredUnits, variants });
+    return planReceiptUnits({ baseQty, productId: poLine.productId, preferredVariantId, recordedPreferredUnits, variants, selection,
+      requireConfiguredUnit: shipmentLine !== null });
+  }
+
+  function scopedReceiptUnitSelections(selections: readonly ShipmentReceiptUnitSelection[], remainingLines: readonly { id: number }[]): Map<number, ShipmentReceiptUnitSelection> {
+    const ids = new Set(remainingLines.map(line => line.id));
+    if (selections.some(selection => !ids.has(selection.shipmentLineId))) {
+      throw new PurchasingError("A receiving configuration belongs to another shipment, PO, or a line with no remaining pieces. Refresh the receipt check.", 409,
+        { code: "SHIPMENT_RECEIPT_SELECTION_SCOPE_CHANGED" });
+    }
+    return new Map(selections.map(selection => [selection.shipmentLineId, selection]));
   }
 
   function parsePositiveInteger(value: unknown): number | null {
@@ -4119,8 +4134,9 @@ export function createPurchasingService(
 
   async function getShipmentReceiptPackResolution(
     inboundShipmentId: number,
-    options: { purchaseOrderId?: number } = {},
+    options: ShipmentReceiptPlanRequest = {},
   ) {
+    options = shipmentReceiptPlanRequestSchema.parse(options);
     const shipment = await storage.getInboundShipmentById(inboundShipmentId);
     if (!shipment) throw new PurchasingError("Inbound shipment not found", 404);
 
@@ -4157,6 +4173,7 @@ export function createPurchasingService(
     const received = await getShipmentReceiptCoverage(purchaseOrderId, inboundShipmentId, scopedShipmentLines);
     const coverage = summarizeShipmentReceiptCoverage(scopedShipmentLines, received);
     const receivableShipmentLines = coverage.remainingLines;
+    const selections = scopedReceiptUnitSelections(options.receiptUnitSelections ?? [], receivableShipmentLines);
 
     const productIds = new Set<number>();
     for (const sl of receivableShipmentLines) {
@@ -4174,7 +4191,7 @@ export function createPurchasingService(
       const poLine = poLineById.get(sl.purchaseOrderLineId);
       const productId = parsePositiveInteger(poLine?.productId);
       const variants = productId ? variantsByProductId.get(productId) ?? [] : [];
-      const activeVariants = summarizeActiveVariants(variants);
+      const activeVariants = summarizeActiveVariants(variants.filter(variant => variant.productId === productId));
       let receivePlan: ReceiptUnitPlan | null = null;
       let status: ShipmentReceiptPackResolutionLine["status"] = "resolved";
       let issue: string | null = null;
@@ -4182,15 +4199,16 @@ export function createPurchasingService(
       else if (!productId) { status = "missing_product"; issue = "The source PO line needs a product before receiving."; }
       else {
         try {
-          receivePlan = receiptPlanFromVariants(poLine, sl.qtyShipped, sl, variants);
+          receivePlan = receiptPlanFromVariants(poLine, sl.qtyShipped, sl, variants, selections.get(sl.id));
           if (receivePlan.countsAsPieces && (receivePlan.preferredUnitsPerVariant ?? 1) > 1) {
             issue = `${sl.qtyShipped} pieces do not fill whole packs of ${receivePlan.preferredUnitsPerVariant}. This receipt will be counted in pieces; recorded cartons remain packing information.`;
           }
         } catch (error) {
           if (!(error instanceof ReceivingUnitError)) throw error;
           status = error.details.code === "RECEIVING_PIECE_VARIANT_REQUIRED" ? "missing_piece_variant"
+            : error.details.code === "RECEIVING_VARIANT_SELECTION_REQUIRED" ? "selection_required"
             : error.details.code === "RECEIVING_UNIT_SOURCE_CHANGED" ? "unit_mismatch"
-            : error.details.code === "INVALID_RECEIVING_UNIT_QUANTITY" ? "invalid_quantity" : "missing_variant";
+            : ["INVALID_RECEIVING_UNIT_QUANTITY", "SHIPMENT_RECEIPT_COVERAGE_CHANGED", "RECEIVING_UNIT_SELECTION_INEXACT"].includes(String(error.details.code)) ? "invalid_quantity" : "missing_variant";
           issue = error.message;
         }
       }
@@ -4213,6 +4231,7 @@ export function createPurchasingService(
       status: shipment.status ?? null,
       purchaseOrderId,
       poNumber: po.poNumber ?? po.po_number ?? null,
+      receiptUnitSelections: options.receiptUnitSelections ?? [],
       qtyShipped: coverage.totalExpectedBaseQty,
       receivedBaseQty: coverage.totalReceivedBaseQty,
       remainingBaseQty: coverage.totalRemainingBaseQty,
@@ -4248,8 +4267,9 @@ export function createPurchasingService(
   async function createReceiptFromShipment(
     inboundShipmentId: number,
     userId?: string,
-    options: { purchaseOrderId?: number } = {},
+    options: ShipmentReceiptPlanRequest = {},
   ) {
+    options = shipmentReceiptPlanRequestSchema.parse(options);
     const shipment = await storage.getInboundShipmentById(inboundShipmentId);
     if (!shipment) throw new PurchasingError("Inbound shipment not found", 404);
 
@@ -4361,9 +4381,12 @@ export function createPurchasingService(
     }
 
     const receiptPlans = new Map<number, ReceiptUnitPlan>();
+    const selections = scopedReceiptUnitSelections(options.receiptUnitSelections ?? [], receiptShipmentLines);
+    if (selections.size > 0 && (typeof userId !== "string" || !userId.trim())) throw new PurchasingError("Sign in before choosing a receipt's receiving configuration.", 401,
+      { code: "RECEIVING_ACTOR_REQUIRED" });
     for (const sl of receiptShipmentLines) {
       const poLine = poLineById.get(sl.purchaseOrderLineId);
-      receiptPlans.set(sl.id, await resolveReceiptPlan(poLine, sl.qtyShipped, sl));
+      receiptPlans.set(sl.id, await resolveReceiptPlan(poLine, sl.qtyShipped, sl, undefined, selections.get(sl.id)));
     }
 
     // Receipt units come from the selected catalog variant, never carton ratios.
@@ -4387,7 +4410,7 @@ export function createPurchasingService(
       return {
         productVariantId: resolvedVariantId,
         productId,
-        sku: poLine?.sku ?? sl.sku,
+        sku: plan.selectedVariantSku ?? poLine?.sku ?? sl.sku,
         productName: poLine?.productName,
         expectedQty: plan.expectedQty,
         unitsPerVariantSnapshot: plan.unitsPerVariant,
@@ -4507,13 +4530,14 @@ export function createPurchasingService(
           await tx.execute(sql`SELECT id FROM catalog.product_variants WHERE product_id = ${productId} ORDER BY id FOR SHARE`);
         }
         for (const line of receiptShipmentLines) {
-          const currentPlan = await resolveReceiptPlan(poLineById.get(line.purchaseOrderLineId), line.qtyShipped, line, tx);
+          const currentPlan = await resolveReceiptPlan(poLineById.get(line.purchaseOrderLineId), line.qtyShipped, line, tx, selections.get(line.id));
           if (canonicalJson(currentPlan) !== canonicalJson(receiptPlans.get(line.id))) {
             throw new PurchasingError("The catalog receive unit changed during preparation. Review the current receive units.", 409, { code: "RECEIVING_UNIT_SOURCE_CHANGED", shipmentLineId: line.id });
           }
         }
 
-        const receiptNumber = await storage.generateReceiptNumber(tx, now());
+        const receiptCreatedAt = now();
+        const receiptNumber = await storage.generateReceiptNumber(tx, receiptCreatedAt);
         const receivingOrder = await storage.createReceivingOrder({
           receiptNumber,
           poNumber: po.poNumber,
@@ -4536,6 +4560,18 @@ export function createPurchasingService(
           putawayLocationId: lockedLocations.get(line.productVariantId) ?? null,
         }));
         await storage.bulkCreateReceivingLines(receivingLinesToCreate as any, tx);
+        if (selections.size > 0) {
+          await tx.insert(auditEventsTable).values({ timestamp: receiptCreatedAt, level: "AUDIT", actor: userId!,
+            action: "procurement.shipment_receipt.receiving_configuration_selected", target: `receipt:${receivingOrder.id}`,
+            changes: { before: receiptShipmentLines.map((line: any) => ({ shipmentLineId: line.id,
+              productVariantId: line.productVariantId ?? poLineById.get(line.purchaseOrderLineId)?.expectedReceiveVariantId ?? null,
+              unitsPerVariant: line.unitsPerVariantSnapshot ?? poLineById.get(line.purchaseOrderLineId)?.expectedReceiveUnitsPerVariant ?? null,
+              expectedBaseQty: line.qtyShipped })),
+              after: receivingLinesToCreate.map((line: any) => ({ shipmentLineId: line.inboundShipmentLineId,
+                productVariantId: line.productVariantId, unitsPerVariant: line.unitsPerVariantSnapshot, expectedQty: line.expectedQty,
+                expectedBaseQty: line.expectedQty * line.unitsPerVariantSnapshot })) },
+            context: { inboundShipmentId, purchaseOrderId, receivingOrderId: receivingOrder.id } });
+        }
         return receivingOrder;
       });
     } catch (error: any) {

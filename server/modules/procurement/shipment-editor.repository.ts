@@ -11,6 +11,8 @@ import { hasQuantityAmendmentAuthority } from "./po-quantity-amendment.policy";
 import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
 import { shipmentLineVersion } from "./shipment-line-version";
 import { rejectShipmentEdit, sumShipmentCents, shipmentEditorBlockedReason } from "./shipment-editor.policy";
+import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
+import { shipmentReceivingUnitSource } from "./shipment-receiving-setup.service";
 
 const number = (value: unknown) => costInteger(value, "shipment value", -Number.MAX_SAFE_INTEGER);
 const nullableId = (value: unknown) => value == null ? null : costInteger(value, "linked document", 1);
@@ -20,7 +22,8 @@ export async function readShipmentEditorSource(tx: AmendmentTransaction, shipmen
   await lockInventoryCostGraph(tx);
   const [shipment] = (await tx.execute(sql`SELECT * FROM procurement.inbound_shipments WHERE id=${shipmentId} FOR UPDATE`)).rows;
   if (!shipment) rejectShipmentEdit("Shipment not found.", "SHIPMENT_EDITOR_NOT_FOUND", 404);
-  const lines = (await tx.execute(sql`SELECT l.*,p.po_number,pl.product_name FROM procurement.inbound_shipment_lines l
+  const lines = (await tx.execute(sql`SELECT l.*,p.po_number,pl.product_name,pl.product_id AS source_product_id,
+    pl.expected_receive_variant_id,pl.product_variant_id AS source_variant_id,pl.expected_receive_units_per_variant FROM procurement.inbound_shipment_lines l
     LEFT JOIN procurement.purchase_orders p ON p.id=l.purchase_order_id
     LEFT JOIN procurement.purchase_order_lines pl ON pl.id=l.purchase_order_line_id
     WHERE l.inbound_shipment_id=${shipmentId} ORDER BY l.id FOR UPDATE OF l`)).rows;
@@ -35,6 +38,10 @@ export async function readShipmentEditorSource(tx: AmendmentTransaction, shipmen
   const actor = await readPurchaseApprovalActor(tx, actorId);
   const protectedCharges = costs.map(row => ({ id: row.id, actual: row.actual_cents, estimated: row.estimated_cents, currency: row.currency }));
   const currencies = [...new Set(costs.map(cost => nullableString(cost.currency)))].sort();
+  const unitOptions = await readShipmentUnitOptions(tx, lines.map(row => ({ key: number(row.id),
+    ...shipmentReceivingUnitSource({ productVariantId: nullableId(row.product_variant_id), unitsPerVariantSnapshot: nullableId(row.units_per_variant_snapshot) },
+      { productId: nullableId(row.source_product_id), expectedReceiveVariantId: nullableId(row.expected_receive_variant_id),
+        productVariantId: nullableId(row.source_variant_id), expectedReceiveUnitsPerVariant: nullableId(row.expected_receive_units_per_variant) }) })));
   const context = shipmentEditorContextSchema.parse({ shipmentId, shipmentNumber: shipment.shipment_number, status: shipment.status,
     sourceVersion: costFingerprint({ shipment, lines, costs, allocations, receipts, posted, actor }),
     canApprove: hasQuantityAmendmentAuthority(actor),
@@ -44,7 +51,7 @@ export async function readShipmentEditorSource(tx: AmendmentTransaction, shipmen
       purchaseOrderId: nullableId(row.purchase_order_id), purchaseOrderLineId: nullableId(row.purchase_order_line_id), poNumber: nullableString(row.po_number),
       fields: shipmentLineEditableSchema.parse({ qtyShipped: row.qty_shipped, cartonCount: row.carton_count,
         dimensionBasis: row.dimension_basis, weightKg: row.weight_kg, lengthCm: row.length_cm, widthCm: row.width_cm, heightCm: row.height_cm, notes: row.notes }),
-      allocatedCostCents: number(row.allocated_cost_cents ?? 0), totalWeightKg: nullableString(row.total_weight_kg), totalVolumeCbm: nullableString(row.total_volume_cbm) })),
+      shipmentUnits: unitOptions.get(number(row.id)), allocatedCostCents: number(row.allocated_cost_cents ?? 0), totalWeightKg: nullableString(row.total_weight_kg), totalVolumeCbm: nullableString(row.total_volume_cbm) })),
     charges: currencies.map(currency => ({ currency: currency ?? "Unspecified currency", cents: sumShipmentCents(costs.filter(cost => cost.currency === currency).map(cost => number(cost.actual_cents ?? cost.estimated_cents ?? 0))) })),
     receipts: receipts.map(row => ({ id: number(row.id), number: row.receipt_number })),
   });

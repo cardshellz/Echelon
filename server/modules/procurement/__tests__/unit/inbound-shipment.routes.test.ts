@@ -76,6 +76,7 @@ function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
     getShipments: vi.fn(),
     getShipmentsCount: vi.fn(),
     getShipment: vi.fn(),
+    getReceivingSetup: vi.fn(),
     getShipmentPurchaseOrders: vi.fn().mockResolvedValue([]),
     getEnrichedLines: vi.fn(),
     getCosts: vi.fn(),
@@ -146,6 +147,27 @@ describe("inbound shipment routes", () => {
   afterEach(async () => {
     if (server) await server.close();
     server = undefined;
+  });
+
+  it("reads receiving readiness through its application owner", async () => {
+    const setup = { shipmentId: 42, ready: false, issueCount: 0, lines: [] };
+    const service = buildShipmentTrackingMock({ getReceivingSetup: vi.fn().mockResolvedValue(setup) });
+    server = await startServer(buildApp(service));
+    expect(await requestJson(server.url, "GET", "/api/inbound-shipments/42/receiving-setup")).toEqual({ status: 200, body: setup });
+    expect(service.getReceivingSetup).toHaveBeenCalledExactlyOnceWith(42);
+  });
+  it.each(["0", "-1", "42x", "1.5", "2147483648", "0042"])("rejects invalid receiving setup identity %s", async id => {
+    const service = buildShipmentTrackingMock(); server = await startServer(buildApp(service));
+    expect((await requestJson(server.url, "GET", `/api/inbound-shipments/${id}/receiving-setup`)).status).toBe(400);
+    expect(service.getReceivingSetup).not.toHaveBeenCalled();
+  });
+  it("redacts receiving setup failures and keeps booking unavailable", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const service = buildShipmentTrackingMock({ getReceivingSetup: vi.fn().mockRejectedValue(new Error("private SQL connection details")) });
+    server = await startServer(buildApp(service));
+    const result = await requestJson(server.url, "GET", "/api/inbound-shipments/42/receiving-setup");
+    expect(result).toMatchObject({ status: 503, body: { code: "SHIPMENT_RECEIVING_SETUP_UNAVAILABLE" } });
+    expect(JSON.stringify(result)).not.toContain("private SQL"); expect(logged).toHaveBeenCalled(); logged.mockRestore();
   });
 
   it("does not wrap durable shipment invoice creation in legacy idempotency", () => {

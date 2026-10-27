@@ -225,6 +225,10 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-selection-change.integration.test.ts",
       // The new-items notice (PR B, B3): the arrivals ledger, marks, daily email and step 1 reads, and the conversion follow-up.
       "server/modules/dropship/__tests__/integration/dropship-catalog-arrivals.integration.test.ts",
+      // Listing ends (PR C, C1): the end requests migration through the release executor, its CHECKs and triggers.
+      "server/modules/dropship/__tests__/integration/dropship-listing-end.integration.test.ts",
+      // Listing ends (PR C, C2): the push fence, the four writers that keep ended, stock, sync-back and catch-up interplay.
+      "server/modules/dropship/__tests__/integration/dropship-listing-end-interplay.integration.test.ts",
     ];
     addedSuites.push(
       "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",

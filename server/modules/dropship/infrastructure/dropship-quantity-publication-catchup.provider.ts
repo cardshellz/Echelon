@@ -9,7 +9,11 @@ import type { DropshipListingPushOpsService } from "../application/dropship-list
 const actor = { actorType: "system" as const, actorId: "inventory_publication_catchup" };
 const bigintId = z.string().regex(/^[1-9][0-9]{0,18}$/).refine(value => BigInt(value) <= BigInt("9223372036854775807"));
 const claimIdentitySchema = z.object({ catchupId: bigintId, revision: bigintId });
-interface ListingIdentity { listing_id: number; vendor_id: number; product_variant_id: number; product_id: number; sku: string; status: string }
+interface ListingIdentity {
+  listing_id: number; vendor_id: number; product_variant_id: number; product_id: number; sku: string; status: string;
+  /** PR C (PLAN-C v4.1 §6.4): Card Shellz is ending this listing on eBay (an open end request). */
+  end_open: boolean;
+}
 interface ExistingJob { id: number; vendor_id: number; store_connection_id: number; status: string; item_count: number; exact_item_count: number }
 
 export interface DropshipQuantityPublicationCatchupDependencies {
@@ -116,7 +120,9 @@ export class DropshipQuantityPublicationCatchupProvider {
     }
     const rows = (await this.dependencies.database.query<ListingIdentity>(
       `SELECT listing.id AS listing_id,listing.vendor_id,listing.product_variant_id,
-        variant.product_id,variant.sku,listing.status
+        variant.product_id,variant.sku,listing.status,
+        EXISTS (SELECT 1 FROM dropship.dropship_listing_end_requests open_end WHERE open_end.listing_id=listing.id
+          AND open_end.state IN ('pending','ending','failed')) AS end_open
        FROM dropship.dropship_vendor_listings listing
        JOIN dropship.dropship_store_connections connection ON connection.id=listing.store_connection_id
          AND connection.vendor_id=listing.vendor_id AND connection.platform=listing.platform
@@ -129,9 +135,10 @@ export class DropshipQuantityPublicationCatchupProvider {
     )).rows;
     if (rows.length !== 1) throw failure("PUBLICATION_CATCHUP_OWNER_UNRESOLVED", "Exactly one persisted listing must own the retained provider identity.");
     const row = rows[0];
+    // A listing being ended (PR C, §6.4) is refused like an ended one: its catch-up job would only be fenced.
     if ((scope.productId !== null && scope.productId !== row.product_id)
       || (scope.productVariantId !== null && scope.productVariantId !== row.product_variant_id)
-      || !row.sku || row.status === "paused" || row.status === "ended") {
+      || !row.sku || row.status === "paused" || row.status === "ended" || row.end_open) {
       throw failure("PUBLICATION_CATCHUP_LISTING_CHANGED", "Listing identity or explicit listing lifecycle no longer permits this catch-up.");
     }
     return row;

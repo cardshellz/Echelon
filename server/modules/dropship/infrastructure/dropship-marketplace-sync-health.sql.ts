@@ -37,15 +37,25 @@ const UNPROCESSABLE_CANCEL_STATUS = "marketplace_cancel_unprocessable";
 const CANCEL_DEAD_LETTER_WITHOUT_INTAKE = sql`e.event_type = 'order_marketplace_cancel_unprocessable' AND e.created_at > NOW() - INTERVAL '7 days'
   AND NOT EXISTS (SELECT 1 FROM dropship.dropship_order_intake oi
     WHERE oi.store_connection_id = e.store_connection_id AND oi.external_order_id = e.payload->>'externalOrderId')`;
+/**
+ * An order refused because its eBay listing had ended before the order (PR C, PLAN-C v4.1 §5.7, FID-3):
+ * markIntakeFailure stores 'CODE: message' (dropship-order-processing.repository.ts).
+ */
+const LISTING_ENDED_BEFORE_ORDER_REASON_PATTERN = "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER:%";
 /** The correction rate warns above max(25, 10% of the listings read in 24 hours) (§10). */
 const CORRECTION_RATE_FLOOR = 25;
 const CORRECTION_RATE_DIVISOR = 10;
 
-/** Listings the sweep reads (its selection, without the push-item condition). */
+/**
+ * Listings the sweep reads (its selection, without the push-item condition), and without a listing Card Shellz is
+ * ending on eBay (PR C, PLAN-C v4.1 §9 I1: the sweep leaves those alone, so they are not its issues).
+ */
 const SWEPT = sql`l.platform = 'ebay' AND l.external_offer_id IS NOT NULL AND btrim(l.external_offer_id) <> ''
   AND ((l.status = ANY(ARRAY['active','drift_detected','queued','failed','blocked']::text[]) AND l.external_listing_id IS NOT NULL
       AND btrim(l.external_listing_id) <> '' AND l.external_listing_id IS DISTINCT FROM l.external_offer_id)
-    OR (l.status = 'ended' AND l.marketplace_ended_at IS NOT NULL))`;
+    OR (l.status = 'ended' AND l.marketplace_ended_at IS NOT NULL))
+  AND NOT EXISTS (SELECT 1 FROM dropship.dropship_listing_end_requests open_end
+    WHERE open_end.listing_id = l.id AND open_end.state IN ('pending', 'ending', 'failed'))`;
 
 function listingIssue(where: SQL): { countSql: SQL; sampleSql: SQL } {
   return {
@@ -187,5 +197,43 @@ export const DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS: readonly DropshipMarketpla
     sampleSql: sql`SELECT u.store_connection_id, u.external_listing_id, COUNT(*)::int AS open_lines, MIN(u.first_seen_at) AS first_seen_at
       FROM dropship.dropship_unmatched_marketplace_orders u WHERE u.status = 'open'
       GROUP BY u.store_connection_id, u.external_listing_id ORDER BY first_seen_at ASC, u.store_connection_id ASC LIMIT ${SAMPLE_LIMIT}`,
+  },
+  // PR C's listing ends (PLAN-C v4.1 §5.7, D36): the staff alert for ends that need a person, and ends that wait too
+  // long. A failed end clears when staff retry or resolve it; a stuck one when it moves on.
+  {
+    code: "DROPSHIP_LISTING_END_FAILED",
+    severity: "critical",
+    // PROPOSED (Stage 4, step 1 plan S2-5) (opsHealthEndFailed)
+    message: "Some Dropship eBay listings could not be ended (a refusal, an identity check, an uncertain eBay answer or repeated errors). Review them under Dropship → eBay listings that couldn't be ended.",
+    countSql: sql`SELECT COUNT(*)::int AS count FROM dropship.dropship_listing_end_requests er WHERE er.state = 'failed'`,
+    sampleSql: sql`SELECT er.id AS end_request_id, er.vendor_id, er.store_connection_id, er.listing_id, er.product_variant_id, er.code,
+        er.context->'attemptIds' AS attempt_ids, er.decided_at
+      FROM dropship.dropship_listing_end_requests er WHERE er.state = 'failed'
+      ORDER BY er.decided_at ASC, er.id ASC LIMIT ${SAMPLE_LIMIT}`,
+  },
+  {
+    code: "DROPSHIP_LISTING_END_STUCK",
+    severity: "warning",
+    // PROPOSED (Stage 4, step 1 plan S2-5) (opsHealthEndStuck)
+    message: "Some Dropship eBay listing ends have waited more than 7 days (store not connected, account not verified, or publication stopped).",
+    countSql: sql`SELECT COUNT(*)::int AS count FROM dropship.dropship_listing_end_requests er
+      WHERE er.state IN ('pending', 'ending') AND er.created_at < NOW() - INTERVAL '7 days'`,
+    sampleSql: sql`SELECT er.id AS end_request_id, er.vendor_id, er.store_connection_id, er.listing_id, er.state, er.code, er.deferral_count,
+        er.created_at
+      FROM dropship.dropship_listing_end_requests er
+      WHERE er.state IN ('pending', 'ending') AND er.created_at < NOW() - INTERVAL '7 days'
+      ORDER BY er.created_at ASC, er.id ASC LIMIT ${SAMPLE_LIMIT}`,
+  },
+  {
+    code: "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER",
+    severity: "critical",
+    // PROPOSED (Stage 4, step 1 plan S2-5) (opsHealthOrderEnded)
+    message: "Some Dropship eBay orders were placed on a listing that had already been ended. Decide each order; nothing was fulfilled.",
+    countSql: sql`SELECT COUNT(*)::int AS count FROM dropship.dropship_order_intake oi
+      WHERE oi.status = 'failed' AND oi.rejection_reason LIKE ${LISTING_ENDED_BEFORE_ORDER_REASON_PATTERN}`,
+    sampleSql: sql`SELECT oi.id AS intake_id, oi.vendor_id, oi.store_connection_id, oi.external_order_id, oi.updated_at
+      FROM dropship.dropship_order_intake oi
+      WHERE oi.status = 'failed' AND oi.rejection_reason LIKE ${LISTING_ENDED_BEFORE_ORDER_REASON_PATTERN}
+      ORDER BY oi.updated_at ASC, oi.id ASC LIMIT ${SAMPLE_LIMIT}`,
   },
 ]);

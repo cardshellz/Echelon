@@ -132,6 +132,16 @@ export const PUBLISH_WORDS = Object.freeze({
   failedRow: "It couldn't be sent. Publish again, or contact Card Shellz support if it keeps failing.",
   // Stage 2 (step 1 plan S2-5): PROPOSED. A size whose product's stock could not be read; only that product's sizes fail (verify V6, VC8).
   stockUnreadRow: "Its stock couldn't be read, so it wasn't sent.",
+  // Stage 4 (step 1 plan S2-5): PROPOSED. A size Card Shellz is ending on eBay (DROPSHIP_LISTING_END_IN_PROGRESS, PLAN-C v4.1 §11).
+  endInProgressRow: "This listing is being ended on eBay, so it wasn't published.",
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  endInProgressStep: "Publish it again after it has ended.",
+  // Stage 4 (step 1 plan S2-5): PROPOSED. An end that failed and waits for Card Shellz (DROPSHIP_LISTING_END_REVIEW); no step.
+  endReviewRow: "Card Shellz is looking into this listing; it stays at quantity 0.",
+  // Stage 4 (step 1 plan S2-5): PROPOSED. Ended after the press (DROPSHIP_LISTING_ENDED_SINCE_PUBLISH).
+  endedSincePublishRow: "This listing was ended after you published it.",
+  // Stage 4 (step 1 plan S2-5): PROPOSED.
+  endedSincePublishStep: "Publish it again in step 3 to sell it.",
   // The "Didn't publish" rows' reasons and next steps for codes the server's message is not written for the vendor
   // (review round 2 DUX5; HEAD's listingPushNextStep and STOCK_GATE_REFUSALS words, for runs: "publish again").
   // Stage 2 (step 1 plan S2-5): PROPOSED.

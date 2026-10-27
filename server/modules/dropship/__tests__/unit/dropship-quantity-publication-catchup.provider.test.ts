@@ -9,7 +9,7 @@ const scope: QuantityPublicationScope = { destinationKind: "dropship_store_conne
   providerKey: "ebay", providerScopeType: "account", externalScopeId: "account-one", externalInventoryItemId: "P5",
   productId: null, productVariantId: null };
 const claim: QuantityPublicationCatchup = { catchupId: "3", revision: "2", attemptBoundaryId: "0", scope };
-const listing = { listing_id: 4, vendor_id: 5, product_variant_id: 101, product_id: 20, sku: "P5", status: "active" };
+const listing = { listing_id: 4, vendor_id: 5, product_variant_id: 101, product_id: 20, sku: "P5", status: "active", end_open: false };
 const row = { productId: 20, productVariantId: 101, sku: "P5", previewStatus: "ready", listingIntent: { quantity: 14 },
   contentEvidenceHash: "a".repeat(64), rulePriceEvidenceHash: "b".repeat(64), priceSettingRevisionId: 8, priceCents: 1200 };
 const job = { jobId: 9, vendorId: 5, storeConnectionId: 7, status: "queued" };
@@ -91,6 +91,19 @@ describe("Dropship current-quantity catch-up owner", () => {
     expect(context.processJob).not.toHaveBeenCalled();
   });
 
+  // PR C (PLAN-C v4.1 §6.4): a listing Card Shellz is ending is refused as a changed lifecycle, never pushed (B15).
+  it("does not catch up a listing with an open end request, before any job is found or created", async () => {
+    const context = setup();
+    context.query.mockReset().mockResolvedValueOnce({ rows: [{ ...listing, end_open: true }] });
+    await expect(context.provider.refresh(scope, claim)).rejects.toMatchObject({ code: "PUBLICATION_CATCHUP_LISTING_CHANGED" });
+    expect(context.query).toHaveBeenCalledTimes(1);
+    expect(context.generatePreview).not.toHaveBeenCalled();
+    expect(context.createListingPushJob).not.toHaveBeenCalled();
+    expect(context.processJob).not.toHaveBeenCalled();
+    const sql = String(context.query.mock.calls[0][0]).replace(/\s+/g, " ");
+    expect(sql).toContain("EXISTS (SELECT 1 FROM dropship.dropship_listing_end_requests open_end WHERE open_end.listing_id=listing.id AND open_end.state IN ('pending','ending','failed')) AS end_open");
+  });
+
   it("rejects a stored job whose contents include another listing", async () => {
     const context = setup();
     context.query.mockReset().mockResolvedValueOnce({ rows: [listing] }).mockResolvedValueOnce({ rows: [{
@@ -129,7 +142,7 @@ describe("Dropship current-quantity catch-up owner", () => {
       repository: { claimJob: vi.fn().mockResolvedValue({ claimed: true, job: { ...job, platform: "ebay" },
         config: { platform: "ebay", isActive: true, listingMode: "live" },
         eligibility: { vendorStatus: "active", entitlementStatus: "active", storeLaunchReady: true }, items: [storedItem] }),
-        markItemProcessing: vi.fn().mockResolvedValue(true), completeItem,
+        markItemProcessing: vi.fn().mockResolvedValue("started"), completeItem,
         blockItem: vi.fn(), failItem: vi.fn(),
         finalizeJob: vi.fn(async () => ({ job: { ...job, status: completedItem.status }, items: [completedItem],
           summary: { total: 1, completed: 1, failed: 0, blocked: 0, skipped: 0 } })),

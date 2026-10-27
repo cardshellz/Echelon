@@ -1,14 +1,16 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   useSyncExternalStore,
 } from "react";
-import { Loader2, Package } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CustomerReturnFlow } from "@/components/returns/CustomerReturnFlow";
+import { CustomerReturnSurface } from "@/components/returns/CustomerReturnSurface";
 import { PreviewError } from "@/components/returns/CustomerReturnPreviewSteps";
 import { PreviewAccessError } from "@/lib/customer-return-preview";
 import {
@@ -28,7 +30,7 @@ type History = Awaited<
   ReturnType<ReturnType<typeof createCustomerReturnTransport>["history"]>
 >;
 const message = (cause: unknown) =>
-  cause instanceof Error
+  cause instanceof Error && !(cause instanceof TypeError)
     ? cause.message
     : "We could not complete the request. Please try again.";
 
@@ -88,33 +90,34 @@ export default function CustomerReturnCustomerPortal() {
             onSignedOut={signedOut}
           />
         ) : (
-          <section className="space-y-5 rounded-2xl border bg-white p-6 shadow-sm">
-            <Brand />
-            <h1 className="text-2xl font-semibold">Return an order</h1>
-            <PreviewError message={error} />
-            {!session && !error ? (
-              <Loading text="Checking your sign-in…" />
-            ) : (
-              <>
-                <p className="text-sm text-muted-foreground">
-                  Sign in to your Card Shellz account to see orders available
-                  for return and your existing returns.
-                </p>
-                <Button asChild className="min-h-12">
-                  <a href="/customer-returns/start">Sign in to Card Shellz</a>
-                </Button>
-                {error && (
-                  <Button
-                    variant="outline"
-                    className="ml-2"
-                    onClick={() => setAttempt((value) => value + 1)}
-                  >
-                    Check sign-in again
+          <CustomerReturnSurface>
+            <div className="csz-return-status">
+              <h1 className="text-2xl font-semibold">Return an order</h1>
+              <PreviewError message={error} />
+              {!session && !error ? (
+                <Loading text="Checking your sign-in…" />
+              ) : (
+                <>
+                  <p className="text-sm text-muted-foreground">
+                    Sign in to your Card Shellz account to see orders available
+                    for return and your existing returns.
+                  </p>
+                  <Button asChild className="min-h-12">
+                    <a href="/customer-returns/start">Sign in to Card Shellz</a>
                   </Button>
-                )}
-              </>
-            )}
-          </section>
+                  {error && (
+                    <Button
+                      variant="outline"
+                      className="ml-2"
+                      onClick={() => setAttempt((value) => value + 1)}
+                    >
+                      Check sign-in again
+                    </Button>
+                  )}
+                </>
+              )}
+            </div>
+          </CustomerReturnSurface>
         )}
       </div>
     </main>
@@ -130,6 +133,7 @@ export function CustomerWorkspace({
   initialStatus,
   downloadRequest = fetch,
   embedded = false,
+  onBusy,
 }: {
   sessionKey: string;
   onDenied: (message: string) => void;
@@ -139,6 +143,7 @@ export function CustomerWorkspace({
   initialStatus?: CustomerReturnCustomerLabelStatus;
   downloadRequest?: typeof fetch;
   embedded?: boolean;
+  onBusy?: (busy: boolean) => void;
 }) {
   const api = useMemo(
     () => transport ?? createCustomerReturnTransport(fetch, sessionKey),
@@ -172,11 +177,13 @@ export function CustomerWorkspace({
     useState<CustomerReturnCustomerLabelStatus | null>(initialStatus ?? null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [flowBusy, setFlowBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const operation = useRef<AbortController | null>(null);
   const downloads = useRef(new Set<string>());
   const chooser = useRef<HTMLHeadingElement>(null);
+  const statusHeading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     commands.activate();
     if (commands.getSnapshot().record) void commands.check();
@@ -290,7 +297,14 @@ export function CustomerWorkspace({
 
   const status = command.record ? command.status : historicalStatus;
   const showStatus = command.record !== null || historicalStatus !== null;
-  const inProgress = busy || command.busy;
+  useEffect(() => {
+    if (showStatus) statusHeading.current?.focus();
+  }, [showStatus, status?.authorizationId]);
+  const inProgress = busy || command.busy || flowBusy;
+  useLayoutEffect(() => {
+    onBusy?.(inProgress);
+    return () => onBusy?.(false);
+  }, [inProgress, onBusy]);
   const signOut = embedded ? null : (
     <Button
       variant="ghost"
@@ -332,88 +346,63 @@ export function CustomerWorkspace({
   }
   if (showStatus)
     return (
-      <section
-        className="space-y-5 rounded-2xl border bg-white p-6 shadow-sm"
-        aria-label="Your return"
-      >
-        <Brand />
-        <h1 className="text-2xl font-semibold">
-          {status
-            ? `Return ${status.authorizationNumber}`
-            : command.rejected
-              ? "Return not accepted"
-              : "Checking your return"}
-        </h1>
-        <PreviewError message={error ?? command.error ?? notice} />
-        {!status && !command.rejected && (
-          <p className="text-sm text-muted-foreground">
-            Your request is saved. Check its status or retry this same request
-            before starting another return.
-          </p>
-        )}
-        {inProgress && <Loading text="Checking your return…" />}
-        {status?.parcels.map((parcel) => (
-          <section
-            key={parcel.parcelId}
-            className="space-y-3 rounded-xl border p-4"
-          >
-            <h2 className="font-semibold">Box {parcel.number}</h2>
-            <p className="text-sm">
-              {parcel.status === "ready"
-                ? "Ready to download."
-                : parcel.status === "pending"
-                  ? "Your label is waiting to be prepared."
-                  : parcel.status === "processing"
-                    ? "We are checking whether this label was created."
-                    : "This label needs verification. Contact support if checking its status does not resolve it."}
+      <CustomerReturnSurface label="Your return" onClose={embedded ? onSignedOut : undefined} closeDisabled={inProgress}>
+        <div className="csz-return-status">
+          <h1 ref={statusHeading} tabIndex={-1} className="text-2xl font-semibold outline-none">
+            {status
+              ? `Return ${status.authorizationNumber}`
+              : command.rejected
+                ? "Return not accepted"
+                : "Checking your return"}
+          </h1>
+          <PreviewError message={error ?? command.error ?? notice} />
+          {!status && !command.rejected && (
+            <p className="text-sm text-muted-foreground">
+              Your request is saved. Check its status or retry this same request
+              before starting another return.
             </p>
-            {parcel.trackingNumber && (
-              <p className="break-all text-sm">
-                Tracking: {parcel.trackingNumber}
-              </p>
-            )}
-            {parcel.downloadPath && (
-              <Button
-                variant="outline"
-                disabled={inProgress}
-                onClick={() => void download(parcel.parcelId)}
-              >
-                Download label for box {parcel.number}
-              </Button>
-            )}
-          </section>
-        ))}
-        <div className="flex flex-wrap gap-3">
-          <Button
-            variant="outline"
-            disabled={inProgress}
-            onClick={() => {
-              if (command.record) void commands.check();
-              else if (status)
-                void run(async (signal) => {
-                  const result = await api.status(
-                    status.authorizationId,
-                    signal,
-                  );
-                  if (!signal.aborted) setHistoricalStatus(result);
-                });
-            }}
-          >
-            Check status
-          </Button>
-          {command.record && !status && !command.rejected && (
-            <Button disabled={inProgress} onClick={() => void commands.retry()}>
-              Retry saved request
-            </Button>
           )}
-          {status?.canProgress && (
+          {inProgress && <Loading text="Checking your return…" />}
+          {status?.parcels.map((parcel) => (
+            <section
+              key={parcel.parcelId}
+              className="space-y-3 rounded-xl border p-4"
+            >
+              <h2 className="font-semibold">Box {parcel.number}</h2>
+              <p className="text-sm">
+                {parcel.status === "ready"
+                  ? "Ready to download."
+                  : parcel.status === "pending"
+                    ? "Your label is waiting to be prepared."
+                    : parcel.status === "processing"
+                      ? "We are checking whether this label was created."
+                      : "This label needs verification. Contact support if checking its status does not resolve it."}
+              </p>
+              {parcel.trackingNumber && (
+                <p className="break-all text-sm">
+                  Tracking: {parcel.trackingNumber}
+                </p>
+              )}
+              {parcel.downloadPath && (
+                <Button
+                  variant="outline"
+                  disabled={inProgress}
+                  onClick={() => void download(parcel.parcelId)}
+                >
+                  Download label for box {parcel.number}
+                </Button>
+              )}
+            </section>
+          ))}
+          <div className="flex flex-wrap gap-3">
             <Button
+              variant="outline"
               disabled={inProgress}
               onClick={() => {
-                if (command.record) void commands.progress();
-                else
+                if (command.record) void commands.check();
+                else if (status)
                   void run(async (signal) => {
-                    const result = await api.progress(
+                    const result = await api.status(
                       status.authorizationId,
                       signal,
                     );
@@ -421,51 +410,67 @@ export function CustomerWorkspace({
                   });
               }}
             >
-              Prepare or recover labels
+              Check status
             </Button>
-          )}
-          {command.record &&
-            (command.rejected || customerReturnCanLeave(status)) && (
+            {command.record && !status && !command.rejected && (
+              <Button disabled={inProgress} onClick={() => void commands.retry()}>
+                Retry saved request
+              </Button>
+            )}
+            {status?.canProgress && (
+              <Button
+                disabled={inProgress}
+                onClick={() => {
+                  if (command.record) void commands.progress();
+                  else
+                    void run(async (signal) => {
+                      const result = await api.progress(
+                        status.authorizationId,
+                        signal,
+                      );
+                      if (!signal.aborted) setHistoricalStatus(result);
+                    });
+                }}
+              >
+                Prepare or recover labels
+              </Button>
+            )}
+            {command.record &&
+              (command.rejected || customerReturnCanLeave(status)) && (
+                <Button
+                  variant="ghost"
+                  disabled={inProgress}
+                  onClick={() => {
+                    commands.finish();
+                    if (!commands.getSnapshot().record) chooseAnother();
+                  }}
+                >
+                  Back to your orders
+                </Button>
+              )}
+            {!command.record && (
               <Button
                 variant="ghost"
                 disabled={inProgress}
-                onClick={() => {
-                  commands.finish();
-                  if (!commands.getSnapshot().record) chooseAnother();
-                }}
+                onClick={() => chooseAnother()}
               >
                 Back to your orders
               </Button>
             )}
-          {!command.record && (
-            <Button
-              variant="ghost"
-              disabled={inProgress}
-              onClick={() => chooseAnother()}
-            >
-              Back to your orders
-            </Button>
-          )}
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Use one label per box. Our team inspects returned items and reviews
+            any refund. Creating a label does not issue a refund.
+          </p>
+          {signOut}
         </div>
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Use one label per box. Our team inspects returned items and reviews
-          any refund. Creating a label does not issue a refund.
-        </p>
-        {signOut}
-      </section>
+      </CustomerReturnSurface>
     );
 
   if (selected && gateway)
     return (
       <>
-        <div className="flex justify-end">{signOut}</div>
-        <PreviewError message={command.error} />
-        {selected.settingsVersion === null && (
-          <p role="status" className="rounded-lg border bg-white p-3 text-sm">
-            Return labels are temporarily unavailable. You can review your
-            items, or contact support for help.
-          </p>
-        )}
+        {signOut && <div className="flex justify-end">{signOut}</div>}
         <CustomerReturnFlow
           key={`${selected.omsOrderId}:${selected.order.sourceRevision}`}
           initialOrderReference={selected.order.orderReference}
@@ -473,178 +478,180 @@ export function CustomerWorkspace({
           onChooseAnotherOrder={chooseAnother}
           gateway={gateway}
           onAccessDenied={onDenied}
+          onClose={embedded ? onSignedOut : undefined}
+          closeDisabled={inProgress}
+          onBusy={setFlowBusy}
+          notice={<>
+            <PreviewError message={command.error} />
+            {selected.settingsVersion === null && (
+              <p role="status" className="rounded-lg border bg-white p-3 text-sm">
+                Return labels are temporarily unavailable. You can review your
+                items, or contact support for help.
+              </p>
+            )}
+          </>}
         />
       </>
     );
 
   return (
-    <section className="space-y-6 rounded-2xl border bg-white p-6 shadow-sm">
-      <Brand />
-      <h1
-        ref={chooser}
-        tabIndex={-1}
-        className="text-2xl font-semibold outline-none"
-      >
-        Choose an order to return
-      </h1>
-      <PreviewError message={error ?? command.error ?? notice} />
-      {busy && <Loading text="Loading your orders…" />}
-      {unavailableOrders > 0 && (
-        <p role="status" className="text-sm text-muted-foreground">
-          Some orders could not be checked. Refresh or contact support.
-        </p>
-      )}
-      {!busy && !error && !orders.length && unavailableOrders === 0 && (
-        <p className="text-sm text-muted-foreground">
-          No eligible orders were found on this page. Items must meet the return
-          policy and have confirmed delivery.
-        </p>
-      )}
-      <div className="space-y-3">
-        {orders.map((item) => (
-          <div
-            key={item.omsOrderId}
-            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4"
-          >
-            <div>
-              <h2 className="font-semibold">
-                Order #{item.order.orderReference.replace(/^#\s*/, "")}
-              </h2>
-              <p className="text-sm text-muted-foreground">
-                {new Date(item.order.purchasedAt).toLocaleDateString()} ·{" "}
-                {item.order.lines.reduce(
-                  (sum, line) => sum + line.eligibleQuantity,
-                  0,
-                )}{" "}
-                items available
-              </p>
+    <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={inProgress}>
+      <div className="csz-return-status">
+        <h1
+          ref={chooser}
+          tabIndex={-1}
+          className="text-2xl font-semibold outline-none"
+        >
+          Choose an order to return
+        </h1>
+        <PreviewError message={error ?? command.error ?? notice} />
+        {busy && <Loading text="Loading your orders…" />}
+        {unavailableOrders > 0 && (
+          <p role="status" className="text-sm text-muted-foreground">
+            Some orders could not be checked. Refresh or contact support.
+          </p>
+        )}
+        {!busy && !error && !orders.length && unavailableOrders === 0 && (
+          <p className="text-sm text-muted-foreground">
+            No eligible orders were found on this page. Items must meet the return
+            policy and have confirmed delivery.
+          </p>
+        )}
+        <div className="space-y-3">
+          {orders.map((item) => (
+            <div
+              key={item.omsOrderId}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4"
+            >
+              <div>
+                <h2 className="font-semibold">
+                  Order #{item.order.orderReference.replace(/^#\s*/, "")}
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {new Date(item.order.purchasedAt).toLocaleDateString()} ·{" "}
+                  {item.order.lines.reduce(
+                    (sum, line) => sum + line.eligibleQuantity,
+                    0,
+                  )}{" "}
+                  items available
+                </p>
+              </div>
+              <Button
+                disabled={busy}
+                onClick={() =>
+                  void run(async (signal) => {
+                    const detail = await api.order(item.omsOrderId, signal);
+                    if (!signal.aborted) {
+                      setNotice(null);
+                      setSelected(detail);
+                    }
+                  })
+                }
+              >
+                Return items
+              </Button>
             </div>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => setAttempt((value) => value + 1)}
+          >
+            Refresh orders
+          </Button>
+          {nextOrder !== null && (
             <Button
+              variant="outline"
               disabled={busy}
               onClick={() =>
                 void run(async (signal) => {
-                  const detail = await api.order(item.omsOrderId, signal);
+                  const page = await api.orders(nextOrder, signal);
                   if (!signal.aborted) {
-                    setNotice(null);
-                    setSelected(detail);
+                    setOrders((previous) => [
+                      ...previous.filter(
+                        (item) =>
+                          !page.orders.some(
+                            (next) => next.omsOrderId === item.omsOrderId,
+                          ),
+                      ),
+                      ...page.orders,
+                    ]);
+                    setNextOrder(page.nextBeforeOmsOrderId);
+                    setUnavailableOrders(
+                      (previous) => previous + page.unavailableOrderCount,
+                    );
                   }
                 })
               }
             >
-              Return items
+              More orders
             </Button>
-          </div>
-        ))}
-      </div>
-      <div className="flex flex-wrap gap-3">
-        <Button
-          variant="outline"
-          disabled={busy}
-          onClick={() => setAttempt((value) => value + 1)}
+          )}
+        </div>
+        <section
+          className="space-y-3 border-t pt-5"
+          aria-label="Existing returns"
         >
-          Refresh orders
-        </Button>
-        {nextOrder !== null && (
-          <Button
-            variant="outline"
-            disabled={busy}
-            onClick={() =>
-              void run(async (signal) => {
-                const page = await api.orders(nextOrder, signal);
-                if (!signal.aborted) {
-                  setOrders((previous) => [
-                    ...previous.filter(
-                      (item) =>
-                        !page.orders.some(
-                          (next) => next.omsOrderId === item.omsOrderId,
-                        ),
-                    ),
-                    ...page.orders,
-                  ]);
-                  setNextOrder(page.nextBeforeOmsOrderId);
-                  setUnavailableOrders(
-                    (previous) => previous + page.unavailableOrderCount,
+          <h2 className="text-lg font-semibold">Your returns</h2>
+          <PreviewError message={historyError} />
+          {!history.returns.length && !historyError && (
+            <p className="text-sm text-muted-foreground">
+              Your saved returns will appear here.
+            </p>
+          )}
+          {history.returns.map((item) => (
+            <Button
+              key={item.authorizationId}
+              variant="outline"
+              className="mr-2 min-h-11"
+              disabled={busy}
+              onClick={() =>
+                void run(async (signal) => {
+                  const result = await api.status(item.authorizationId, signal);
+                  if (!signal.aborted) setHistoricalStatus(result);
+                })
+              }
+            >
+              {item.authorizationNumber}
+              {item.orderReference ? ` · Order ${item.orderReference}` : ""}
+            </Button>
+          ))}
+          {history.nextBeforeAuthorizationId !== null && (
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() =>
+                void run(async (signal) => {
+                  const page = await api.history(
+                    history.nextBeforeAuthorizationId,
+                    signal,
                   );
-                }
-              })
-            }
-          >
-            More orders
-          </Button>
-        )}
+                  if (!signal.aborted)
+                    setHistory((previous) => ({
+                      ...page,
+                      returns: [
+                        ...previous.returns.filter(
+                          (item) =>
+                            !page.returns.some(
+                              (next) =>
+                                next.authorizationId === item.authorizationId,
+                            ),
+                        ),
+                        ...page.returns,
+                      ],
+                    }));
+                })
+              }
+            >
+              More returns
+            </Button>
+          )}
+        </section>
+        {signOut}
       </div>
-      <section
-        className="space-y-3 border-t pt-5"
-        aria-label="Existing returns"
-      >
-        <h2 className="text-lg font-semibold">Your returns</h2>
-        <PreviewError message={historyError} />
-        {!history.returns.length && !historyError && (
-          <p className="text-sm text-muted-foreground">
-            Your saved returns will appear here.
-          </p>
-        )}
-        {history.returns.map((item) => (
-          <Button
-            key={item.authorizationId}
-            variant="outline"
-            className="mr-2 min-h-11"
-            disabled={busy}
-            onClick={() =>
-              void run(async (signal) => {
-                const result = await api.status(item.authorizationId, signal);
-                if (!signal.aborted) setHistoricalStatus(result);
-              })
-            }
-          >
-            {item.authorizationNumber}
-            {item.orderReference ? ` · Order ${item.orderReference}` : ""}
-          </Button>
-        ))}
-        {history.nextBeforeAuthorizationId !== null && (
-          <Button
-            variant="ghost"
-            disabled={busy}
-            onClick={() =>
-              void run(async (signal) => {
-                const page = await api.history(
-                  history.nextBeforeAuthorizationId,
-                  signal,
-                );
-                if (!signal.aborted)
-                  setHistory((previous) => ({
-                    ...page,
-                    returns: [
-                      ...previous.returns.filter(
-                        (item) =>
-                          !page.returns.some(
-                            (next) =>
-                              next.authorizationId === item.authorizationId,
-                          ),
-                      ),
-                      ...page.returns,
-                    ],
-                  }));
-              })
-            }
-          >
-            More returns
-          </Button>
-        )}
-      </section>
-      {signOut}
-    </section>
-  );
-}
-function Brand() {
-  return (
-    <div className="flex items-center gap-2 font-bold tracking-tight">
-      <Package aria-hidden="true" className="h-6 w-6 text-blue-600" />
-      CARD SHELLZ{" "}
-      <span className="border-l pl-2 text-sm font-normal text-muted-foreground">
-        Returns
-      </span>
-    </div>
+    </CustomerReturnSurface>
   );
 }
 function Loading({ text }: { text: string }) {

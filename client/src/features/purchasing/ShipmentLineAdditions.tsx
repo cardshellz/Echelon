@@ -15,9 +15,10 @@ import { WorkListPagination } from "./WorkListPagination";
 
 export type AddedShipmentLine = { input: ShipmentEditorRequest["additions"][number]; label: string; poNumber: string };
 
-export function ShipmentLineAdditions({ lines, existingPoLineIds, disabled, onChange, onDraftChange }: {
+export function ShipmentLineAdditions({ lines, existingPoLineIds, disabled, onChange, onDraftChange, draftAllowed = false }: {
   lines: AddedShipmentLine[]; existingPoLineIds: number[]; disabled: boolean; onChange: (lines: AddedShipmentLine[]) => void;
   onDraftChange: (pending: boolean) => void;
+  draftAllowed?: boolean;
 }) {
   const [adding, setAdding] = useState(false);
   useEffect(() => { onDraftChange(adding); return () => onDraftChange(false); }, [adding, onDraftChange]);
@@ -46,11 +47,11 @@ export function ShipmentLineAdditions({ lines, existingPoLineIds, disabled, onCh
     try {
       if (!po || !selected) throw new Error("Choose a purchase order and line.");
       const payload = shipmentQuantityPayload(quantity, units, selected.remainingQty);
-      if (!payload.unitSelection) throw new Error("Choose a configured counting unit so its pieces per unit can be verified.");
+      if (!payload.unitSelection && !draftAllowed) throw new Error("Choose a configured counting unit so its pieces per unit can be verified.");
       const packingValues = shipmentLinePackingSchema.parse(Object.fromEntries(Object.entries(packing).filter(([, value]) => value !== "")
         .map(([field, value]) => [field, field === "cartonCount" ? /^\d+$/.test(value) ? Number(value) : NaN : value])));
       const next = { input: { clientKey: editingKey ?? crypto.randomUUID(), purchaseOrderId: po.id, purchaseOrderLineId: selected.id,
-        quantityPieces: payload.qtyShipped, unitSelection: payload.unitSelection, ...(Object.keys(packingValues).length ? { packing: packingValues } : {}) },
+        quantityPieces: payload.qtyShipped, ...(payload.unitSelection ? { unitSelection: payload.unitSelection } : {}), ...(Object.keys(packingValues).length ? { packing: packingValues } : {}) },
         label: selected.productName ?? selected.sku ?? `Line ${selected.id}`, poNumber: po.poNumber };
       onChange(editingKey ? lines.map(line => line.input.clientKey === editingKey ? next : line) : [...lines, next]);
       setAdding(false); setEditingKey(null); setLineId(null); setPacking(emptyPacking); setError(null);
@@ -62,7 +63,9 @@ export function ShipmentLineAdditions({ lines, existingPoLineIds, disabled, onCh
       <span>{line.input.quantityPieces.toLocaleString()} pieces</span>
       <Button variant="outline" size="sm" disabled={disabled || adding} onClick={() => {
         setEditingKey(line.input.clientKey); setPo({ id: line.input.purchaseOrderId, poNumber: line.poNumber }); setLineId(line.input.purchaseOrderLineId);
-        setQuantity({ variantId: line.input.unitSelection.productVariantId, unitsPerVariant: line.input.unitSelection.unitsPerVariant, quantity: String(line.input.unitSelection.quantity) });
+        const selection = line.input.unitSelection;
+        setQuantity(selection ? { variantId: selection.productVariantId, unitsPerVariant: selection.unitsPerVariant, quantity: String(selection.quantity) }
+          : shipmentQuantityDraft(line.input.quantityPieces, null));
         setPacking({ ...emptyPacking, ...Object.fromEntries(Object.entries(line.input.packing ?? {}).map(([field, value]) => [field, value == null ? "" : String(value)])) }); setAdding(true);
       }}>Edit new line</Button>
       <Button variant="outline" size="sm" disabled={disabled || adding} onClick={() => onChange(lines.filter(row => row.input.clientKey !== line.input.clientKey))}>Remove new line</Button>
@@ -92,7 +95,7 @@ export function ShipmentLineAdditions({ lines, existingPoLineIds, disabled, onCh
         {shippable.data?.reviewRequiredLines.map(row => <p key={row.id} className="text-sm text-amber-800">Line {row.id}: {row.error}</p>)}
         <p className="text-xs text-muted-foreground">Lines already on this shipment can be edited in the table above.</p>
       </>}
-      {selected && <ShipmentQuantityControl id="new-shipment-line" value={quantity} units={units} maximumPieces={selected.remainingQty} onChange={setQuantity} />}
+      {selected && <ShipmentQuantityControl id="new-shipment-line" value={quantity} units={units} draftAllowed={draftAllowed} productName={selected.productName ?? selected.sku ?? "Product"} maximumPieces={selected.remainingQty} onChange={setQuantity} />}
       {selected && <details><summary className="cursor-pointer text-sm">Shipping cartons, measurements and notes</summary>
         <p className="my-2 text-xs text-muted-foreground">Enter packing measurements when allocating charges by weight or volume.</p>
         <div className="grid gap-3 sm:grid-cols-3">

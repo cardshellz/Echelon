@@ -9,6 +9,7 @@ import {
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { decideAcceptedCancelOutcome } from "../../domain/marketplace-order-cancel";
+import { ORDER_LISTING_ENDED_BEFORE_ORDER_CODE, ORDER_LISTING_ENDED_BEFORE_ORDER_MESSAGE } from "../../domain/order-listing-acceptability";
 import { decideOrderProcessingFailure, ORDER_PROCESSING_MAX_ATTEMPTS } from "../../domain/order-processing-retry";
 import { PgDropshipEbayMarketplaceOrderEffects } from "../../infrastructure/dropship-ebay-marketplace-order-effects.repository";
 import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../../infrastructure/dropship-marketplace-sync-health.sql";
@@ -405,6 +406,11 @@ describeDatabase.sequential("eBay sync-back order fixes (PostgreSQL)", () => {
     const listing = await insertListing({ variant: 101, itemNumber: "111" });
     await insertIntake({ externalOrderId: "EXHAUSTED", status: "failed", attempts: 64 });
     await pool.query(`UPDATE dropship.dropship_order_intake SET rejection_reason = 'DROPSHIP_ORDER_PROCESSING_RETRIES_EXHAUSTED: stopped'`);
+    // An order placed on a listing that had ended before it (PR C, PLAN-C v4.1 §5.7, FID-3): failed with the code first.
+    const ended = await insertIntake({ externalOrderId: "ENDED", status: "failed", attempts: 1 });
+    // markIntakeFailure stores `${code}: ${message}` (dropship-order-processing.repository.ts).
+    await pool.query(`UPDATE dropship.dropship_order_intake SET rejection_reason = $2 WHERE id = $1`,
+      [ended, `${ORDER_LISTING_ENDED_BEFORE_ORDER_CODE}: ${ORDER_LISTING_ENDED_BEFORE_ORDER_MESSAGE}`]);
     await insertIntake({ externalOrderId: "REVIEW", status: "accepted", cancellationStatus: "marketplace_cancel_review", marketplaceCancelledAt: T0 });
     await new PgDropshipEbayMarketplaceOrderEffects(pool).recordPollFacts({ storeConnectionId: STORE, seenAt: T0, saleLines: [],
       unmatchedLines: [{ externalOrderId: "O9", externalLineItemId: "L1", externalListingId: "777", sku: "SKU-101", candidateListingId: listing,
@@ -413,7 +419,7 @@ describeDatabase.sequential("eBay sync-back order fixes (PostgreSQL)", () => {
       externalOrderId: "BAD", failureCode: "DROPSHIP_EBAY_ORDER_CANCEL_UNPROCESSABLE", message: "x", at: new Date() });
     const dialect = new PgDialect();
     for (const code of ["DROPSHIP_ORDER_PROCESSING_RETRIES_EXHAUSTED", "DROPSHIP_ORDER_MARKETPLACE_CANCEL_REVIEW",
-      "DROPSHIP_EBAY_ORDER_CANCEL_UNPROCESSABLE", "DROPSHIP_ORDER_UNMATCHED_LISTING"]) {
+      "DROPSHIP_EBAY_ORDER_CANCEL_UNPROCESSABLE", "DROPSHIP_ORDER_UNMATCHED_LISTING", "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER"]) {
       const check = DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS.find((entry) => entry.code === code)!;
       const count = dialect.sqlToQuery(check.countSql);
       expect((await pool.query(count.sql, count.params)).rows[0].count, code).toBe(1);

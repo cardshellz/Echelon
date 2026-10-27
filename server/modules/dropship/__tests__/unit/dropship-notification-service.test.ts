@@ -210,6 +210,16 @@ describe("DropshipNotificationService", () => {
     })).rejects.toMatchObject({ code: "DROPSHIP_NOTIFICATION_CRITICAL_MUTE_REJECTED" });
   });
 
+  it("registers the listing end failure as a critical event that cannot be muted (PLAN-C v4.1 §5.7)", async () => {
+    expect(DROPSHIP_NOTIFICATION_EVENTS.LISTING_END_FAILED).toBe("dropship_listing_end_failed");
+    expect(DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.filter((preference) => preference.eventType === DROPSHIP_NOTIFICATION_EVENTS.LISTING_END_FAILED))
+      .toEqual([{ eventType: "dropship_listing_end_failed", critical: true }]);
+    const service = makeService(new FakeNotificationRepository(), new FakeEmailSender(), []);
+    await expect(service.updatePreference({
+      vendorId: 10, eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_END_FAILED, emailEnabled: false, inAppEnabled: false,
+    })).rejects.toMatchObject({ code: "DROPSHIP_NOTIFICATION_CRITICAL_MUTE_REJECTED" });
+  });
+
   it("registers the new-items and conversion notices as mutable, non-critical events (PLAN-B v4.1 §11.3, V41)", async () => {
     expect(DROPSHIP_NOTIFICATION_EVENTS.CATALOG_NEW_ITEMS).toBe("dropship_catalog_new_items");
     expect(DROPSHIP_NOTIFICATION_EVENTS.SELECTION_RULES_CONVERTED).toBe("dropship_selection_rules_converted");

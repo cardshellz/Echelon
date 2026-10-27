@@ -1,4 +1,5 @@
-import { useLayoutEffect, useRef, useState, type DragEvent } from "react";
+import { useContext, useLayoutEffect, useRef, useState, type DragEvent } from "react";
+import { CustomerReturnEmbeddedContext } from "./CustomerReturnSurface";
 import {
   ArrowLeft,
   ArrowRight,
@@ -66,6 +67,7 @@ export function CustomerReturnPacking({
   onContinue: () => void;
   onBack: () => void;
 }) {
+  const embedded = useContext(CustomerReturnEmbeddedContext);
   const boxesHeading = useRef<HTMLHeadingElement>(null);
 
   const boxHeadings = useRef(new Map<number, HTMLHeadingElement>());
@@ -92,6 +94,12 @@ export function CustomerReturnPacking({
   const [request, setRequest] = useState<CustomerReturnMoveRequest | null>(
     null,
   );
+  const wasEditingInline = useRef(false);
+  useLayoutEffect(() => {
+    if (!embedded) return;
+    if (wasEditingInline.current && !request) restoreDialogFocus();
+    wasEditingInline.current = request !== null;
+  }, [embedded, request]);
   const [notice, setNotice] = useState<PackingNotice | null>(null);
   const summary = summarizePreviewPacking(selections, parcels);
   const allocations = previewPackingAllocations(selections, parcels);
@@ -342,6 +350,7 @@ export function CustomerReturnPacking({
 
   return (
     <div className="space-y-5">
+      <div hidden={embedded && request !== null} className="space-y-5">
       <CustomerReturnPackingSummary
         order={order}
         summary={summary}
@@ -597,7 +606,7 @@ export function CustomerReturnPacking({
           </div>
         )}
       </section>
-      <div className="flex flex-col-reverse gap-3 border-t pt-6 sm:flex-row sm:justify-between">
+      <div className="csz-return-actions border-t">
         <Button variant="ghost" className="min-h-11" onClick={onBack}>
           <ArrowLeft aria-hidden="true" className="mr-2 h-4 w-4" /> Back to
           items
@@ -623,6 +632,7 @@ export function CustomerReturnPacking({
           )}
         </Button>
       </div>
+      </div>
       {request && (
         <CustomerReturnMoveItemsDialog
           order={order}
@@ -633,6 +643,7 @@ export function CustomerReturnPacking({
           onApply={applyMove}
           onClose={() => setRequest(null)}
           onCloseAutoFocus={restoreDialogFocus}
+          inline={embedded}
         />
       )}
     </div>

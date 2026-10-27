@@ -15,6 +15,7 @@ import {
   type DropshipProcessHeartbeatTimers,
 } from "../../infrastructure/dropship-process-heartbeat";
 import {
+  catalogVersionAtLeastSettled,
   catalogVersionSettled,
   deleteStaleProcessHeartbeats,
   hasLiveOlderCatalogProcess,
@@ -102,17 +103,17 @@ function harness(beat: DropshipProcessHeartbeatStore["beat"]) {
 const flush = () => new Promise((resolveFlush) => setImmediate(resolveFlush));
 
 describe("startDropshipProcessHeartbeat (S2-5 §4.9 item 1)", () => {
-  it("resolves only after its first beat is written, with this process's key and catalog code version 2 (PR B)", async () => {
+  it("resolves only after its first beat is written, with this process's key and catalog code version 3 (PR C)", async () => {
     const write = deferred();
     const { store, start, logs } = harness(() => write.promise);
     let started = false;
     const handle = start().then((value) => { started = true; return value; });
 
     await flush();
-    expect(store.beat).toHaveBeenCalledWith({ processKey: "web.1:boot-a", catalogCodeVersion: 2 });
+    expect(store.beat).toHaveBeenCalledWith({ processKey: "web.1:boot-a", catalogCodeVersion: 3 });
     expect(started).toBe(false);
     write.resolve();
-    expect(await handle).toMatchObject({ firstBeat: "written", catalogCodeVersion: 2, processKey: "web.1:boot-a" });
+    expect(await handle).toMatchObject({ firstBeat: "written", catalogCodeVersion: 3, processKey: "web.1:boot-a" });
     expect(logs).toEqual([expect.objectContaining({ level: "info", action: "dropship.process_heartbeat.started" })]);
   });
 
@@ -269,8 +270,8 @@ describe("startDropshipProcessHeartbeat (S2-5 §4.9 item 1)", () => {
     hourly.callback();
     await flush();
     expect(store.deleteStale).toHaveBeenCalledWith({ olderThanMs: PROCESS_HEARTBEAT_RETENTION_MS });
-    // PR B's processes (version 2) alert on a PR A process (version 1) still reporting.
-    expect(store.listOlderStillRunning).toHaveBeenCalledWith({ version: 2, graceMs: 120_000, alertAfterMs: 1_800_000 });
+    // PR C's processes (version 3) alert on an older process still reporting.
+    expect(store.listOlderStillRunning).toHaveBeenCalledWith({ version: 3, graceMs: 120_000, alertAfterMs: 1_800_000 });
     expect(logs.some((entry) => entry.level === "error")).toBe(false);
 
     store.listOlderStillRunning.mockResolvedValueOnce([{
@@ -333,6 +334,14 @@ describe("process heartbeat SQL (one database clock, F30)", () => {
       expect(call.sql).toContain("clock_timestamp()");
       expect(call.sql).not.toMatch(/\bnow\(\)/);
     }
+  });
+
+  it("settles picks writes on this version or any later one, on the database clock (review SAV-1)", async () => {
+    const { calls, client } = recorder();
+    await catalogVersionAtLeastSettled(client as never, { minVersion: 2, settleMs: 300_000 });
+    expect(calls.map((call) => call.params)).toEqual([[2, 300_000]]);
+    expect(calls[0].sql).toMatch(/catalog_code_version >= \$1/);
+    expect(calls[0].sql).toContain("clock_timestamp()");
   });
 });
 

@@ -50,10 +50,11 @@ import { PUBLISH_WORDS, type RunCountParts } from "./dropship-catalog-publish-wo
  * The catalog code version this page was built for (§4.8, CHK7): every catalog
  * read sends it, and a server older than the page answers 503 "try again".
  * Equals the server's `DROPSHIP_CATALOG_CODE_VERSION`
- * (server/modules/dropship/domain/catalog-code-version.ts): 2 since PR B
- * (one-time picks), set with the server's in one commit (PLAN-B v4.1 V9).
+ * (server/modules/dropship/domain/catalog-code-version.ts): 3 since PR C
+ * (ending removed listings; a step 1 save from an older page is refused),
+ * set with the server's in one commit (PLAN-C v4.1 §4.1).
  */
-export const CATALOG_PAGE_CLIENT_VERSION = 2;
+export const CATALOG_PAGE_CLIENT_VERSION = 3;
 /** Sizes per Check request: under the preview's 500 cap (createListingPushJobInputSchema), as the redesign asks (RD:568-570). */
 export const CHECK_CHUNK_SIZE = 200;
 /** "Selected items" reads 200 rows a page (the catalog read's `limit` cap) and shows at most 1,000 (as step 1 does). */
@@ -452,6 +453,10 @@ const PROBLEM_WORDS_BY_CODE: Readonly<Record<string, { reason: string; nextStep:
   // A product whose stock could not be read failed its sizes (verify V6); the server's message names the product id.
   DROPSHIP_CHANNEL_QUANTITY_UNAVAILABLE: { reason: PUBLISH_WORDS.stockUnreadRow, nextStep: PUBLISH_WORDS.retryStep },
   DROPSHIP_ALLOCATION_UNAVAILABLE: { reason: PUBLISH_WORDS.stockUnreadRow, nextStep: PUBLISH_WORDS.retryStep },
+  // PR C's push fence (PLAN-C v4.1 §6.2): a size removed in step 1 whose eBay listing Card Shellz is ending or ended.
+  DROPSHIP_LISTING_END_IN_PROGRESS: { reason: PUBLISH_WORDS.endInProgressRow, nextStep: PUBLISH_WORDS.endInProgressStep },
+  DROPSHIP_LISTING_END_REVIEW: { reason: PUBLISH_WORDS.endReviewRow, nextStep: null },
+  DROPSHIP_LISTING_ENDED_SINCE_PUBLISH: { reason: PUBLISH_WORDS.endedSincePublishRow, nextStep: PUBLISH_WORDS.endedSincePublishStep },
 });
 
 const ACCOUNT_BLOCK_CODES: ReadonlySet<string> = new Set([

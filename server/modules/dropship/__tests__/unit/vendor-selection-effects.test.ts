@@ -8,19 +8,25 @@ import {
   type DropshipStockSelectionConfig,
 } from "../../domain/stock-publication-selection";
 import {
+  SELECTION_EFFECTS,
   classifySelectionEffect,
+  combineSelectionEffectsHash,
   compareSelectionEffects,
   decideSelectionEffects,
   selectionEffectsHash,
+  selectionEndsEchoMatches,
+  selectionEndsHash,
   type DecideSelectionEffectsInput,
   type SelectionEffectEntry,
   type SelectionEffectsListing,
   type SelectionEffectsStore,
 } from "../../domain/vendor-selection-effects";
+import { decideListingEnds, type ListingEndDecision, type PendingListingEnd } from "../../domain/vendor-selection-ends";
 
 /**
  * What a step 1 save does to the vendor's listings (step 1 plan S2-5, PLAN-B v4.1 §7.5, §7.6, §15.1; V20,
- * V39): counted only where Echelon acts, with #1900's listing states.
+ * V39): counted only where Echelon acts, with #1900's listing states. B's quantity cases decide with no end planned
+ * (NO_ENDS); PR C's cases (PLAN-C v4.1 §4.5, §4.6, §13.1) decide the ends with decideListingEnds over the same facts.
  */
 
 const NOW = new Date("2026-10-24T12:00:00.000Z");
@@ -35,19 +41,36 @@ function candidate(productVariantId: number, patch: Partial<DropshipStockSelecti
 
 function listing(id: number, productVariantId: number, patch: Partial<SelectionEffectsListing> = {}): SelectionEffectsListing {
   return { id, productVariantId, status: "active", externalListingId: `L-${id}`, externalOfferId: `O-${id}`, livePushItemId: null,
-    vendorQuantityLimit: null, marketplaceEndedAt: null, marketplaceIssueCodes: [], ...patch };
+    vendorQuantityLimit: null, marketplaceEndedAt: null, marketplaceIssueCodes: [], openEndId: null, openEndState: null,
+    pushInFlight: false, ...patch };
 }
 
 function store(storeConnectionId: number, listings: SelectionEffectsListing[], patch: Partial<SelectionEffectsStore> = {}): SelectionEffectsStore {
-  return { storeConnectionId, storeName: `Store ${storeConnectionId}`, platform: "ebay", config: LIVE, storePaused: false, listings, ...patch };
+  return { storeConnectionId, storeName: `Store ${storeConnectionId}`, platform: "ebay", status: "connected",
+    externalAccountId: `seller-${storeConnectionId}`, providerEnvironment: "production", config: LIVE, storePaused: false, listings, ...patch };
 }
+
+/** No end planned: B's quantity effects alone. */
+const NO_ENDS: ListingEndDecision = Object.freeze({ endPlans: [], hiddenRemovedIds: [], supersedeIds: [], stillEnding: [], endReview: [],
+  endedReAdd: [] }) as ListingEndDecision;
 
 function effects(input: Partial<DecideSelectionEffectsInput> & { stores: SelectionEffectsStore[] }) {
   const touched = [...(input.insertIds ?? []), ...(input.deleteIds ?? [])];
   return decideSelectionEffects({
     now: NOW, insertIds: [], deleteIds: [], adminRules: ADMIN_RULES, overrides: [],
-    candidates: touched.map((id) => candidate(id)), ...input,
+    candidates: touched.map((id) => candidate(id)), ends: NO_ENDS, ...input,
   });
+}
+
+/** The store counts of a store with only B's quantity effects. */
+function counts(storeConnectionId: number, goesToZero: number, startsSelling: number, patch: Record<string, unknown> = {}) {
+  return { storeConnectionId, storeName: `Store ${storeConnectionId}`, platform: "ebay", goesToZero, startsSelling, ends: 0,
+    storeConnected: true, ...patch };
+}
+
+/** The effects hash of entries with no end and no hidden removal. */
+function hashWithoutEnds(entries: readonly SelectionEffectEntry[]): string {
+  return combineSelectionEffectsHash(selectionEndsHash({ listingIds: [], hiddenRemovedIds: [] }), selectionEffectsHash(entries));
 }
 
 /** One listing on one live store: the effect of removing (pick → no pick) or re-adding (no pick → pick) its size. */
@@ -89,7 +112,7 @@ describe("selection effects: the confirm counts (§7.6)", () => {
   it("removing a selected size with a live listing sets it to quantity 0", () => {
     const result = oneListing("remove");
     expect(result.entries).toEqual([[7, 501, 11, "goesToZero"]]);
-    expect(result.stores).toEqual([{ storeConnectionId: 7, storeName: "Store 7", platform: "ebay", goesToZero: 1, startsSelling: 0 }]);
+    expect(result.stores).toEqual([counts(7, 1, 0)]);
   });
 
   it("re-adding a zeroed size whose listing is in a live managed store gets its quantity back", () => {
@@ -202,7 +225,7 @@ describe("classifySelectionEffect", () => {
 describe("selection effects: stores, order, hash and input safety", () => {
   function twoStores(): DecideSelectionEffectsInput {
     return {
-      now: NOW, insertIds: [21, 22], deleteIds: [11, 12], adminRules: ADMIN_RULES, overrides: [],
+      now: NOW, insertIds: [21, 22], deleteIds: [11, 12], adminRules: ADMIN_RULES, overrides: [], ends: NO_ENDS,
       candidates: [11, 12, 21, 22].map((id) => candidate(id)),
       stores: [
         store(9, [listing(905, 22), listing(901, 11), listing(903, 21, { status: "ended" })]),
@@ -214,16 +237,15 @@ describe("selection effects: stores, order, hash and input safety", () => {
 
   it("counts per store, every store listed in id order, entries sorted by store, listing and size", () => {
     const result = decideSelectionEffects(twoStores());
-    expect(result.stores).toEqual([
-      { storeConnectionId: 4, storeName: "Store 4", platform: "ebay", goesToZero: 2, startsSelling: 1 },
-      { storeConnectionId: 6, storeName: "Empty store", platform: "ebay", goesToZero: 0, startsSelling: 0 },
-      { storeConnectionId: 9, storeName: "Store 9", platform: "ebay", goesToZero: 1, startsSelling: 1 },
-    ]);
+    expect(result.stores).toEqual([counts(4, 2, 1), counts(6, 0, 0, { storeName: "Empty store" }), counts(9, 1, 1)]);
     expect(result.entries).toEqual([
       [4, 401, 11, "goesToZero"], [4, 402, 12, "goesToZero"], [4, 403, 21, "startsSelling"],
       [9, 901, 11, "goesToZero"], [9, 905, 22, "startsSelling"],
     ]);
-    expect(result.effectsHash).toBe(createHash("sha256").update(JSON.stringify(result.entries)).digest("hex"));
+    // Two parts (FID-11): the end sets, then B's hash form over every other entry.
+    expect(result.otherEntriesHash).toBe(createHash("sha256").update(JSON.stringify(result.entries)).digest("hex"));
+    expect(result.effectsHash).toBe(createHash("sha256").update(`${createHash("sha256")
+      .update(JSON.stringify({ listingIds: [], hiddenRemovedIds: [] })).digest("hex")}:${result.otherEntriesHash}`).digest("hex"));
   });
 
   it("the hash does not depend on read order", () => {
@@ -251,8 +273,9 @@ describe("selection effects: stores, order, hash and input safety", () => {
   it("an empty change has no entries and the empty hash", () => {
     const result = effects({ stores: [store(7, [listing(501, 11)])] });
     expect(result).toEqual({
-      stores: [{ storeConnectionId: 7, storeName: "Store 7", platform: "ebay", goesToZero: 0, startsSelling: 0 }],
-      entries: [], effectsHash: selectionEffectsHash([]),
+      stores: [counts(7, 0, 0)], entries: [],
+      ends: { listingIds: [], hiddenRemovedIds: [], otherSizes: 0, stillEnding: 0, endReview: 0, endedReAdd: 0 },
+      otherEntriesHash: selectionEffectsHash([]), effectsHash: hashWithoutEnds([]),
     });
   });
 
@@ -269,7 +292,7 @@ describe("selection effects: stores, order, hash and input safety", () => {
     const result = decideSelectionEffects({
       now: NOW, insertIds: added, deleteIds: removed, adminRules: ADMIN_RULES, overrides: [],
       candidates: [...removed, ...added].map((id) => candidate(id)),
-      stores: [store(7, [...removed, ...added].map((id) => listing(id, id)))],
+      stores: [store(7, [...removed, ...added].map((id) => listing(id, id)))], ends: NO_ENDS,
     });
     expect(result.stores[0]).toMatchObject({ goesToZero: 10_000, startsSelling: 10_001 });
     expect(result.entries).toHaveLength(20_001);
@@ -293,27 +316,30 @@ describe("selection effects: stores, order, hash and input safety", () => {
 describe("the drift rule (§7.5, V39)", () => {
   const a = selectionEffectsHash([[4, 401, 11, "goesToZero"]]);
   const b = selectionEffectsHash([]);
+  const none = { listingIds: [], hiddenRemovedIds: [] };
+  const compare = (input: { expectedEffectsHash: string; actualEffectsHash: string; addIds: number[] }) =>
+    compareSelectionEffects({ ...input, expectedEnds: none, actualEnds: none });
 
   it("unchanged effects proceed", () => {
-    expect(compareSelectionEffects({ expectedEffectsHash: a, actualEffectsHash: a, addIds: [5] })).toEqual({ outcome: "unchanged", effectsHash: a });
-    expect(compareSelectionEffects({ expectedEffectsHash: a, actualEffectsHash: a, addIds: [] })).toEqual({ outcome: "unchanged", effectsHash: a });
+    expect(compare({ expectedEffectsHash: a, actualEffectsHash: a, addIds: [5] })).toEqual({ outcome: "unchanged", effectsHash: a });
+    expect(compare({ expectedEffectsHash: a, actualEffectsHash: a, addIds: [] })).toEqual({ outcome: "unchanged", effectsHash: a });
   });
 
   it("no adds and different effects: proceed with both hashes", () => {
-    expect(compareSelectionEffects({ expectedEffectsHash: a, actualEffectsHash: b, addIds: [] }))
+    expect(compare({ expectedEffectsHash: a, actualEffectsHash: b, addIds: [] }))
       .toEqual({ outcome: "drifted", expectedEffectsHash: a, actualEffectsHash: b });
   });
 
   it("adds and any difference: changed (409, re-confirm)", () => {
-    expect(compareSelectionEffects({ expectedEffectsHash: a, actualEffectsHash: b, addIds: [5] }))
+    expect(compare({ expectedEffectsHash: a, actualEffectsHash: b, addIds: [5] }))
       .toEqual({ outcome: "changed", expectedEffectsHash: a, actualEffectsHash: b });
   });
 
   it("refuses a hash that is not sha256 hex", () => {
     for (const bad of ["", "A".repeat(64), "a".repeat(63), `${"a".repeat(63)}g`]) {
-      expect(refusal(() => compareSelectionEffects({ expectedEffectsHash: bad, actualEffectsHash: a, addIds: [] })).code)
+      expect(refusal(() => compare({ expectedEffectsHash: bad, actualEffectsHash: a, addIds: [] })).code)
         .toBe("DROPSHIP_SELECTION_CHANGE_INVALID_INPUT");
-      expect(refusal(() => compareSelectionEffects({ expectedEffectsHash: a, actualEffectsHash: bad, addIds: [] })).code)
+      expect(refusal(() => compare({ expectedEffectsHash: a, actualEffectsHash: bad, addIds: [] })).code)
         .toBe("DROPSHIP_SELECTION_CHANGE_INVALID_INPUT");
     }
   });
@@ -323,7 +349,7 @@ describe("the drift rule (§7.5, V39)", () => {
     const save = oneListing("remove", { marketplaceEndedAt: new Date("2026-10-24T11:59:00.000Z") });
     expect(preview.entries).toEqual([[7, 501, 11, "goesToZero"]]);
     expect(save.entries).toEqual([]);
-    expect(compareSelectionEffects({ expectedEffectsHash: preview.effectsHash, actualEffectsHash: save.effectsHash, addIds: [] }).outcome)
+    expect(compare({ expectedEffectsHash: preview.effectsHash, actualEffectsHash: save.effectsHash, addIds: [] }).outcome)
       .toBe("drifted");
   });
 
@@ -347,7 +373,7 @@ describe("the drift rule (§7.5, V39)", () => {
           marketplaceIssueCodes: pick([[], ["ended_out_of_stock"], ["sku_changed"]]),
         })), { config: pick(configs), storePaused: random() < 0.2 }));
       const result = decideSelectionEffects({
-        now: NOW, insertIds: [], deleteIds: sizes.filter(() => random() < 0.7), adminRules: pick([ADMIN_RULES, ADMIN_RULES, []]),
+        now: NOW, insertIds: [], deleteIds: sizes.filter(() => random() < 0.7), adminRules: pick([ADMIN_RULES, ADMIN_RULES, []]), ends: NO_ENDS,
         overrides: sizes.filter(() => random() < 0.2).map((productVariantId) => ({ productVariantId, enabledOverride: pick([false, true, null]) })),
         candidates: sizes.filter(() => random() < 0.9).map((id) => candidate(id, {
           salesEligibility: pick(["sellable", "internal_only"] as const), trackInventory: pick([true, false]) })),
@@ -359,5 +385,134 @@ describe("the drift rule (§7.5, V39)", () => {
     }
     // Not vacuous: removals did set listings to quantity 0 (the seed fixes the count).
     expect(goesToZero).toBeGreaterThan(30);
+  });
+});
+
+/**
+ * PR C (PLAN-C v4.1 §4.5, §4.6): the ends decided over the same facts, as the service's planFromFacts runs them
+ * (hidden removals are deletes too). Sizes 11-13 are product 1 (candidate's productId 1_001).
+ */
+function withEnds(input: { insertIds?: number[]; deleteIds?: number[]; picked?: number[]; pendingEnds?: PendingListingEnd[];
+  stores: SelectionEffectsStore[]; candidates?: DecideSelectionEffectsInput["candidates"] }) {
+  const insertIds = input.insertIds ?? [];
+  const deleteIds = input.deleteIds ?? [];
+  const sizes = new Set([...insertIds, ...deleteIds, ...(input.picked ?? []), ...input.stores.flatMap((entry) => entry.listings.map((row) => row.productVariantId))]);
+  const candidates = input.candidates ?? [...sizes].map((id) => candidate(id));
+  const ends = decideListingEnds({ now: NOW, removedNow: deleteIds, added: insertIds, pickedBefore: [...deleteIds, ...(input.picked ?? [])],
+    candidates, archivedIds: [], rules: ADMIN_RULES, stores: input.stores, pendingEnds: input.pendingEnds ?? [] });
+  return decideSelectionEffects({ now: NOW, insertIds, deleteIds: [...deleteIds, ...ends.hiddenRemovedIds], adminRules: ADMIN_RULES,
+    overrides: [], candidates, stores: input.stores, ends });
+}
+
+describe("selection effects with ends (PR C, §4.5)", () => {
+  it("lists all seven kinds", () => {
+    expect(SELECTION_EFFECTS).toEqual(["goesToZero", "startsSelling", "ends", "stillEnding", "endReview", "endedReAdd", "removedWithProduct"]);
+  });
+
+  it("an end replaces goesToZero on eBay; a Shopify store keeps goesToZero; an unconnected store says so", () => {
+    const result = withEnds({ deleteIds: [11], picked: [12], stores: [store(7, [listing(501, 11)], { status: "needs_reauth" }),
+      store(8, [listing(601, 11)], { platform: "shopify" })] });
+    expect(result.entries).toEqual([[7, 501, 11, "ends"], [8, 601, 11, "goesToZero"]]);
+    expect(result.stores).toEqual([counts(7, 0, 0, { ends: 1, storeConnected: false }),
+      counts(8, 1, 0, { platform: "shopify", storeName: "Store 8" })]);
+    expect(result.ends).toEqual({ listingIds: [501], hiddenRemovedIds: [], otherSizes: 0, stillEnding: 0, endReview: 0, endedReAdd: 0 });
+  });
+
+  it("ends an untouched sibling of a wholly removed product, and records each hidden pick removed at [0, 0, size]", () => {
+    const result = withEnds({ deleteIds: [11], picked: [13], candidates: [candidate(11), candidate(12), candidate(13, { requiresShipping: false })],
+      stores: [store(7, [listing(501, 11), listing(502, 12), listing(503, 13)])] });
+    expect(result.entries).toEqual([[0, 0, 13, "removedWithProduct"], [7, 501, 11, "ends"], [7, 502, 12, "ends"], [7, 503, 13, "ends"]]);
+    expect(result.ends).toMatchObject({ listingIds: [501, 502, 503], hiddenRemovedIds: [13], otherSizes: 2 });
+    // The ends and the hidden removals are hashed by their sets; nothing else is left.
+    expect(result.otherEntriesHash).toBe(selectionEffectsHash([]));
+    expect(result.effectsHash).toBe(combineSelectionEffectsHash(selectionEndsHash({ listingIds: [501, 502, 503], hiddenRemovedIds: [13] }),
+      selectionEffectsHash([])));
+  });
+
+  it("a re-picked size whose pending end the save supersedes starts selling; an ending or failed one does not", () => {
+    const pendingRow = listing(501, 11, { openEndId: 5, openEndState: "pending" });
+    const pending = withEnds({ insertIds: [11], pendingEnds: [{ id: 5, listingId: 501, productId: 1_001, productVariantId: 11, reason: "size_removed" }],
+      stores: [store(7, [pendingRow])] });
+    expect(pending.entries).toEqual([[7, 501, 11, "startsSelling"]]);
+    const ending = withEnds({ insertIds: [11], stores: [store(7, [listing(501, 11, { openEndId: 5, openEndState: "ending" })])] });
+    expect(ending.entries).toEqual([[7, 501, 11, "stillEnding"]]);
+    expect(ending.ends.stillEnding).toBe(1);
+    const failed = withEnds({ insertIds: [11], stores: [store(7, [listing(501, 11, { openEndId: 5, openEndState: "failed" })])] });
+    expect(failed.entries).toEqual([[7, 501, 11, "endReview"]]);
+    expect(failed.ends.endReview).toBe(1);
+    // The hash moves when the end goes pending → ending (the kind changes), so a save on the other confirms again.
+    expect(ending.effectsHash).not.toBe(pending.effectsHash);
+  });
+
+  it("(C6) counts the re-add reports by size: a size still being ended on two eBay stores is one item, with an entry per listing", () => {
+    const twoStores = withEnds({ insertIds: [11, 12], stores: [
+      store(7, [listing(501, 11, { openEndId: 5, openEndState: "ending" }), listing(502, 12, { openEndId: 6, openEndState: "failed" })]),
+      store(8, [listing(601, 11, { openEndId: 7, openEndState: "ending" }), listing(602, 12, { openEndId: 8, openEndState: "failed" })]),
+    ] });
+    expect(twoStores.entries).toEqual([[7, 501, 11, "stillEnding"], [7, 502, 12, "endReview"], [8, 601, 11, "stillEnding"],
+      [8, 602, 12, "endReview"]]);
+    expect(twoStores.ends).toMatchObject({ stillEnding: 1, endReview: 1, endedReAdd: 0 });
+  });
+
+  it("a re-added size Card Shellz ended is endedReAdd; a vendor's own eBay end is nothing", () => {
+    const cardShellz = withEnds({ insertIds: [11], stores: [store(7, [listing(501, 11, { status: "ended" })])] });
+    expect(cardShellz.entries).toEqual([[7, 501, 11, "endedReAdd"]]);
+    expect(cardShellz.ends.endedReAdd).toBe(1);
+    expect(withEnds({ insertIds: [11], stores: [store(7, [listing(501, 11, { status: "ended", marketplaceEndedAt: NOW })])] }).entries)
+      .toEqual([]);
+  });
+});
+
+describe("the drift rule with ends (§4.6, D41, FID-11)", () => {
+  const removal = (listings: SelectionEffectsListing[]) => withEnds({ deleteIds: [11, 12], stores: [store(7, listings)] });
+
+  it("binds the echo to the confirmed hash: the right sets and other hash match, anything else does not", () => {
+    const preview = removal([listing(501, 11), listing(502, 12)]);
+    const echo = { listingIds: [...preview.ends.listingIds], hiddenRemovedIds: [...preview.ends.hiddenRemovedIds] };
+    expect(selectionEndsEchoMatches({ expectedEffectsHash: preview.effectsHash, expectedEnds: echo,
+      expectedOtherEntriesHash: preview.otherEntriesHash })).toBe(true);
+    // In another order the sets are the same sets.
+    expect(selectionEndsEchoMatches({ expectedEffectsHash: preview.effectsHash, expectedEnds: { listingIds: [502, 501], hiddenRemovedIds: [] },
+      expectedOtherEntriesHash: preview.otherEntriesHash })).toBe(true);
+    for (const expectedEnds of [{ listingIds: [501, 502, 503], hiddenRemovedIds: [] }, { listingIds: [501], hiddenRemovedIds: [] },
+      { listingIds: [501, 502], hiddenRemovedIds: [13] }]) {
+      expect(selectionEndsEchoMatches({ expectedEffectsHash: preview.effectsHash, expectedEnds,
+        expectedOtherEntriesHash: preview.otherEntriesHash })).toBe(false);
+    }
+    expect(selectionEndsEchoMatches({ expectedEffectsHash: preview.effectsHash, expectedEnds: echo, expectedOtherEntriesHash: "f".repeat(64) }))
+      .toBe(false);
+    expect(selectionEndsEchoMatches({ expectedEffectsHash: preview.effectsHash, expectedEnds: echo, expectedOtherEntriesHash: "nope" })).toBe(false);
+  });
+
+  it("no adds and fewer ends than confirmed: drifted (proceeds)", () => {
+    const preview = removal([listing(501, 11), listing(502, 12)]);
+    // 502 ended on eBay meanwhile: one end fewer.
+    const save = removal([listing(501, 11), listing(502, 12, { marketplaceEndedAt: NOW })]);
+    expect(compareSelectionEffects({ expectedEffectsHash: preview.effectsHash, actualEffectsHash: save.effectsHash, addIds: [],
+      expectedEnds: preview.ends, actualEnds: save.ends }).outcome).toBe("drifted");
+  });
+
+  it("no adds and the same count of ends but another listing: changed (B's count would have let it end a listing never confirmed)", () => {
+    // Confirmed: 501 ends and 502 had nothing on eBay. Saved: 501 ended on eBay meanwhile, and a push put 502 on eBay.
+    const preview = removal([listing(501, 11), listing(502, 12, { externalListingId: null, externalOfferId: null })]);
+    const save = removal([listing(501, 11, { marketplaceEndedAt: NOW }), listing(502, 12)]);
+    expect(preview.ends.listingIds).toEqual([501]);
+    expect(save.ends.listingIds).toEqual([502]);
+    expect(compareSelectionEffects({ expectedEffectsHash: preview.effectsHash, actualEffectsHash: save.effectsHash, addIds: [],
+      expectedEnds: preview.ends, actualEnds: save.ends }).outcome).toBe("changed");
+  });
+
+  it("no adds and a hidden removal not confirmed: changed", () => {
+    const expectedEnds = { listingIds: [501], hiddenRemovedIds: [] };
+    expect(compareSelectionEffects({ expectedEffectsHash: "a".repeat(64), actualEffectsHash: "b".repeat(64), addIds: [],
+      expectedEnds, actualEnds: { listingIds: [501], hiddenRemovedIds: [13] } }).outcome).toBe("changed");
+    expect(compareSelectionEffects({ expectedEffectsHash: "a".repeat(64), actualEffectsHash: "b".repeat(64), addIds: [],
+      expectedEnds: { listingIds: [501], hiddenRemovedIds: [13, 14] }, actualEnds: { listingIds: [], hiddenRemovedIds: [14] } }).outcome)
+      .toBe("drifted");
+  });
+
+  it("adds and any change: changed, even when the ends are a subset", () => {
+    expect(compareSelectionEffects({ expectedEffectsHash: "a".repeat(64), actualEffectsHash: "b".repeat(64), addIds: [5],
+      expectedEnds: { listingIds: [501], hiddenRemovedIds: [] }, actualEnds: { listingIds: [], hiddenRemovedIds: [] } }).outcome).toBe("changed");
   });
 });

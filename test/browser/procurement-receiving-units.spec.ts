@@ -483,7 +483,7 @@ test("partial-carton shipment preflight shows the exact piece receipt before cre
   });
   await page.goto("/shipments/42?tab=lines");
   await page.getByRole("button", { name: "Create Receipt", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Shipment receipt pack check" });
+  const dialog = page.getByRole("dialog", { name: "Receive shipment items" });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("501 pieces");
   await expect(dialog).toContainText("Cartons (reference)");
@@ -729,7 +729,7 @@ for (const scenario of [
     state.singlePo = true;
     await page.goto("/shipments/42");
     await page.getByRole("button", { name: "Create Receipt", exact: true }).click();
-    const packDialog = page.getByRole("dialog", { name: "Shipment receipt pack check", exact: true });
+    const packDialog = page.getByRole("dialog", { name: "Receive shipment items", exact: true });
     await assertCoverage(packDialog);
     await expectModalFits(page, packDialog);
     await page.screenshot({ path: testInfo.outputPath(`custody-${scenario.name.replaceAll(" ", "-")}.png`), animations: "disabled" });

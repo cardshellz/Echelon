@@ -300,6 +300,11 @@ test("unknown shipment status keeps known counts visible with a direct review pa
 test("departing a planned shipment refreshes PO line progress on return without a page reload", async ({ page }) => {
   const failures = await setup(page); const controls = await installPoLineProgress(page);
   let status = "booked"; let departures = 0;
+  await page.route("**/api/inbound-shipments/43/receiving-setup", route => route.fulfill({ json: {
+    shipmentId: 43, ready: true, issueCount: 0, lines: [{ lineId: 203, purchaseOrderId: 17, sku: "SAME-SKU", name: "Sleeves", pieces: 100000, count: 100, issue: null,
+      units: { productId: 10, selectedVariantId: 20, unitsPerVariantSnapshot: 1000, issue: null,
+        variants: [{ id: 20, sku: "SAME-SKU-CASE", name: "Case of 1000", unitsPerVariant: 1000 }] } }],
+  } }));
   await page.route("**/api/inbound-shipments/43", route => route.fulfill({ json: {
     id: 43, shipmentNumber: "TEST-SHIP-43", status, mode: "air", createdAt: "2026-10-01T12:00:00Z",
     estimatedTotalCostCents: 500, actualTotalCostCents: 500, totalCartons: 100, totalWeightKg: "120", totalVolumeCbm: "1.5",

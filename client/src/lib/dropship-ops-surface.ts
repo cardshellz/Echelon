@@ -1,6 +1,6 @@
 import type { DropshipListingPresentation, DropshipListingEconomics } from "@shared/dropship/listing-presentation";
 import type { EbayCategorySource } from "@shared/dropship/ebay-category-rules";
-import type { ZodType } from "zod";
+import type { ZodType, ZodTypeDef } from "zod";
 
 export type DropshipSectionStatus =
   "ready" | "attention_required" | "coming_soon";
@@ -2808,7 +2808,8 @@ export async function readDropshipJson(response: Response): Promise<unknown> {
  * server answers without the field the newer page requires): the same
  * transient `DROPSHIP_SITE_UPDATING` (§4.8, CHK7).
  */
-export async function readDropshipAnswer<T>(response: Response, schema: ZodType<T>): Promise<T> {
+/** `schema` may take defaults (its input differs from its output, PR C's answer fields); the answer is its output. */
+export async function readDropshipAnswer<T>(response: Response, schema: ZodType<T, ZodTypeDef, unknown>): Promise<T> {
   const parsed = schema.safeParse(await readDropshipJson(response));
   if (!parsed.success) throw siteUpdatingError({ reason: "answer_shape", status: response.status });
   return parsed.data;

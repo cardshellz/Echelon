@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Pool } from "pg";
 import { PICKS_SELECTION_TRIGGERS_SQL } from "../../../dropship/infrastructure/dropship-selection-conversion.sql";
+import { LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL } from "../../../dropship/__tests__/fixtures/listing-end-reduced.fixture";
 import { installStockSelectionFixture } from "./stock-selection.fixture";
 
 /** Installs missing owner metadata in reduced inventory fixtures, then the real
@@ -27,7 +28,9 @@ export async function installPublicationSelectionWorkFixture(pool: Pick<Pool, "q
       ADD COLUMN IF NOT EXISTS marketplace_issue_codes text[] NOT NULL DEFAULT '{}';
     CREATE TABLE IF NOT EXISTS dropship.dropship_listing_push_jobs(id integer,vendor_id integer,store_connection_id integer,job_type text,status text);
     CREATE TABLE IF NOT EXISTS dropship.dropship_listing_push_job_items(id integer,job_id integer,listing_id integer,product_variant_id integer,
-      action text,status text,result jsonb,created_at timestamptz);`);
+      action text,status text,result jsonb,created_at timestamptz);
+    -- PR C's end requests (*_dropship_listing_end_requests.sql), reduced: the shared stock listing SQL reads each listing's open end.
+    ${LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL}`);
   await pool.query(readFileSync(resolve("migrations/0743_publication_selection_work.sql"), "utf8"));
   // The vendor's one-time picks (*_dropship_vendor_selected_variants.sql), reduced: key and columns, no foreign keys.
   // Its triggers use 0743's functions, so they follow 0743, as in the picks migration (§6 step 7).
