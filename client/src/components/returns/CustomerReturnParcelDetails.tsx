@@ -45,10 +45,11 @@ export function CustomerReturnParcelDetails({
       )}
       {original && parcel.size.kind === "original" ? (
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="min-w-0 text-sm">
-            <span className="text-muted-foreground">Original box size · </span>
-            {formatPreviewDimensions(original.dimensions)}
-          </p>
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm font-medium">Using your original shipping box</p>
+            <p className="text-sm">{formatPreviewDimensions(original.dimensions)}</p>
+            <p className="text-xs text-muted-foreground">Reusing that box? You’re ready to continue. Using another box? Change its size below.</p>
+          </div>
           <Button
             variant="ghost"
             size="sm"
@@ -62,7 +63,7 @@ export function CustomerReturnParcelDetails({
               })
             }
           >
-            Change
+            Change box
           </Button>
         </div>
       ) : (
@@ -110,6 +111,9 @@ export function CustomerReturnParcelDetails({
               <legend className="text-sm font-medium">
                 Box dimensions (inches)
               </legend>
+              {order.boxOptions.length === 0 && !parcel.size.originalDimensions && (
+                <p className="text-sm text-muted-foreground">We don’t have verified dimensions for your original shipping box. Enter the size of the box you’ll use.</p>
+              )}
               <div className="grid grid-cols-3 gap-2">
                 {dimensionFields.map((field) => {
                   const fieldId = `return-box-${parcel.key}-${field.key}`;

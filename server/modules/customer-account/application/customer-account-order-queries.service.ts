@@ -18,6 +18,7 @@ import type {
   CustomerAccountOrderSummaries,
   CustomerAccountOrderDetails,
 } from "@shared/customer-account/customer-account-orders";
+import type { OrderActionProjectionReader } from "./order-action-projection.ports";
 
 export interface CustomerAccountOrderContext {
   externalOrderId: string;
@@ -42,6 +43,8 @@ export class CustomerAccountOrderQueriesService {
       connection(): Promise<OrderEditConnection>;
       edits: Pick<OrderEditService, "orderSummaries" | "customerOrderDetails">;
       context: CustomerAccountOrderContextReader;
+      actions?: OrderActionProjectionReader;
+      now?: () => Date;
       report(event: { code: string; causeCode?: string }): void;
     },
   ) {}
@@ -59,6 +62,15 @@ export class CustomerAccountOrderQueriesService {
         503,
       );
     return connection;
+  }
+
+  async actions(raw: unknown) {
+    const input = customerAccountOrderSummariesInputSchema.parse(raw);
+    if (!this.dependencies.actions || !this.dependencies.now) throw new OrderEditError(
+      "CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE", "Order options are temporarily unavailable. Please try again.", 503);
+    const principal = this.dependencies.principal;
+    return this.dependencies.actions.read({ ...input, channelId: principal.channelId,
+      externalCustomerId: principal.externalCustomerId }, this.dependencies.now());
   }
 
   async summaries(raw: unknown): Promise<CustomerAccountOrderSummaries> {

@@ -2,20 +2,25 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { CustomerReturnPreviewService } from "../../server/modules/returns/application/customer-return-preview.service";
+import { validateCustomerReturnBoxPlan } from "../../server/modules/returns/application/customer-return-box-plan";
 import type { CustomerAccountRequest } from "../../shared/customer-account/customer-account.contract";
 import { customerReturnFlowReviewInputSchema } from "../../shared/returns/customer-return-flow.contract";
 
 // Exercise the actual shipped IIFE and scoped stylesheet, not a component with
 // the staff app's global CSS. All transport is fictional and intercepted.
-async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?: boolean; holdReview?: Promise<void> } = {}) {
+async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?: boolean; holdReview?: Promise<void>; originalBox?: boolean; openReturn?: boolean } = {}) {
   const service = new CustomerReturnPreviewService();
   const { mode: _mode, scenarioId: _scenario, ...fields } = service.lookup({ scenarioId: "split_delivered", orderReference: "TEST-1001" });
   const order = { ...fields, sourceRevision: "a".repeat(64), lines: [
     { ...fields.lines[0], title: '3"x4" Toploader 35PT Clear Essentials + Easy Glide Combo Pack' },
     ...fields.lines.slice(1),
     { ...fields.lines[1], id: "membership", title: "Shellz Wholesale Club - Annual Membership", sku: "CLUB-ANNUAL", purchasedQuantity: 1, deliveredQuantity: 0, eligibleQuantity: 0, message: "This item does not require a return shipment." },
-  ] };
+  ], boxOptions: options.originalBox ? [{ id: `box-${"b".repeat(64)}`, dimensions: { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 },
+    items: [{ lineId: fields.lines[0].id, quantity: fields.lines[0].eligibleQuantity }] }] : fields.boxOptions };
   const detail = { omsOrderId: 10, order, settingsVersion: 2 };
+  const actionOrder = { connectionId: 4, omsOrderId: 10, orderNumber: "#TEST-1001", customerName: "Synthetic customer", customerEmail: null,
+    activeOperationId: null, revision: "fixture", currency: "USD", eligibility: { editable: false, reasons: ["Picking or fulfillment has already started."] },
+    lines: [], totalCents: 741, financialStatus: "Paid", warehouseStatus: "shipped", fulfillment: { code: "shipped", label: "Shipped" } };
   const status = { authorizationId: 20, authorizationNumber: "RMA-20", canProgress: false,
     parcels: [{ parcelId: 30, number: 1, status: "ready", trackingNumber: "FIXTURE-TRACK", downloadPath: "/api/returns/customer/returns/20/parcels/30/download" }] };
   const calls: CustomerAccountRequest[] = [];
@@ -39,6 +44,9 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10, currency: "USD", totalCents: 741, financialStatus: "Paid", cancelled: false, fulfillment: { code: "shipped", label: "Shipped" } }],
       unavailableExternalOrderIds: [], statusUnavailable: false,
     } });
+    if (input.path === "/account/order-actions") return route.fulfill({ json: { orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10,
+      state: "ready", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
+      snapshot: { order: actionOrder, returnOrder: detail, orderFailed: false, returnFailed: false } }] } });
     if (input.path === "/order-edits/orders/10") return route.fulfill({ json: {
       connectionId: 4, omsOrderId: 10, orderNumber: "#TEST-1001", customerName: "Synthetic customer", customerEmail: null, activeOperationId: null, revision: "fixture", currency: "USD",
       eligibility: { editable: false, reasons: ["Picking or fulfillment has already started."] }, lines: [], totalCents: 741, financialStatus: "Paid", warehouseStatus: "shipped", fulfillment: { code: "shipped", label: "Shipped" },
@@ -49,7 +57,8 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       if (options.holdReview) await options.holdReview;
       if (options.failReview && !reviewFailed) { reviewFailed = true; return route.fulfill({ status: 503, json: { error: { code: "FIXTURE_REVIEW_FAILED" } } }); }
       const body = customerReturnFlowReviewInputSchema.omit({ orderReference: true }).parse(input.body);
-      const { mode: _reviewMode, ...review } = service.review({ scenarioId: "split_delivered", orderReference: "TEST-1001", selections: body.selections, parcels: body.parcels });
+      const review = { effects: "none", orderReference: "TEST-1001", refundMethod: "manual_shopify",
+        ...validateCustomerReturnBoxPlan(order.lines, { selections: body.selections, parcels: body.parcels }, order.boxOptions) };
       return route.fulfill({ json: { ...review, sourceRevision: order.sourceRevision,
         parcels: review.parcels.map(parcel => ({ ...parcel, items: parcel.items.map(item => ({ ...item, title: order.lines.find(line => line.id === item.lineId)!.title })) })) } });
     }
@@ -62,14 +71,17 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     return route.fulfill({ status: 500, json: { error: { code: "UNEXPECTED_FIXTURE_ROUTE", message: input.path } } });
   });
   await page.route("**/__return-account-layout", (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <style>body{margin:0;background:#f7f8fa;font-size:10px}h1,h2,h3{font:700 32px Impact,fantasy;text-transform:uppercase;margin:24px 0}button{font-family:Impact,fantasy}ol,ul{padding-left:32px}main{padding:24px}*{box-sizing:border-box}</style>
+    <style>body{margin:0;background:#f7f8fa;font-size:10px}h1,h2,h3{font:700 32px Impact,fantasy;text-transform:uppercase;margin:24px 0}h1{font-family:Impact,fantasy!important}button{font-family:Impact,fantasy}ol,ul{padding-left:32px}main{padding:24px}*{box-sizing:border-box}</style>
     <link rel="stylesheet" href="/return-layout-assets/csz-customer-account.css"></head><body><main data-csz-customer-account>
     <h1>Your account</h1><div data-csz-account-tools-status></div><table><tbody><tr data-csz-account-order data-external-order-id="1001" data-order-reference="#TEST-1001" data-fulfillment="fulfilled" data-cancelled="false"><td>#TEST-1001</td><td data-csz-order-fulfillment-native>Shipped</td><td data-csz-order-financial-native>Paid</td><td data-csz-order-total></td><td data-csz-order-panel-trigger></td></tr></tbody></table>
     </main><div id="csz-customer-account-tools"></div><script type="application/json" id="csz-customer-account-config">${JSON.stringify({ themeId: "174740308127", customerId: "100", proxyPath: "/apps/echelon-returns", loginPath: "/account/login" })}</script><script src="/return-layout-assets/csz-customer-account.js"></script></body></html>` }));
   await page.goto("/__return-account-layout");
   await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
-  await page.getByRole("button", { name: "Return items", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled();
+  if (options.openReturn !== false) {
+    await page.getByRole("button", { name: "Return items", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
+  }
   return { calls, errors, submitCount: () => submitCount };
 }
 
@@ -118,6 +130,43 @@ test("compiled account returns use one frame, aligned controls and readable stor
   await expect(page.getByRole("spinbutton", { name: /^Return quantity for item 1:/ })).toHaveValue("1");
   expect(f.calls.some(call => call.commandKey)).toBe(false);
   expect(f.errors).toEqual([]);
+});
+
+test("an already-loaded order panel opens with its return action without workflow inspection", async ({ page }) => {
+  const f = await fixture(page, { openReturn: false });
+  await page.getByRole("button", { name: "Close order options" }).click();
+  const before = f.calls.length;
+  await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
+  await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled({ timeout: 250 });
+  expect(f.calls.slice(before)).toEqual([]);
+  expect(f.calls.filter(call => call.path.startsWith("/order-edits/") || /^\/returns\/orders\//.test(call.path))).toEqual([]);
+});
+
+test("verified original dimensions are the default and Change box reveals prefilled editable fields", async ({ page }, info) => {
+  const f = await fixture(page, { originalBox: true });
+  await page.getByRole("spinbutton", { name: /^Return quantity for item 1:/ }).fill("1");
+  await page.getByRole("button", { name: "Continue to packing" }).click();
+  await expect(page.getByText("Using your original shipping box", { exact: true })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Length of box 1 in inches" })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("original-box-default.png"), fullPage: true });
+  await page.getByRole("button", { name: "Review return", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
+  const firstReview = f.calls.find(call => call.path.endsWith("/review"))!;
+  expect((firstReview.body as { parcels: { originalBoxId: string; dimensions: unknown }[] }).parcels[0])
+    .toMatchObject({ originalBoxId: `box-${"b".repeat(64)}`, dimensions: { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 } });
+  await page.getByRole("button", { name: "Back to packing" }).click();
+  await page.getByRole("button", { name: "Change size for box 1" }).click();
+  await expect(page.getByRole("textbox", { name: "Length of box 1 in inches" })).toHaveValue("10");
+  await expect(page.getByRole("textbox", { name: "Width of box 1 in inches" })).toHaveValue("8");
+  await expect(page.getByRole("textbox", { name: "Height of box 1 in inches" })).toHaveValue("4");
+  await page.screenshot({ path: info.outputPath("original-box-change.png"), fullPage: true });
+  await page.getByRole("textbox", { name: "Length of box 1 in inches" }).fill("12");
+  await page.getByRole("button", { name: "Review return", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
+  const lastReview = f.calls.filter(call => call.path.endsWith("/review")).at(-1)!;
+  expect((lastReview.body as { parcels: { originalBoxId: null; dimensions: unknown }[] }).parcels[0])
+    .toMatchObject({ originalBoxId: null, dimensions: { lengthMm: 304.8, widthMm: 203.2, heightMm: 101.6 } });
+  expect(f.calls.some(call => call.commandKey)).toBe(false);
 });
 
 test("packing edits stay in the return window and restore focus without a second modal", async ({ page }) => {

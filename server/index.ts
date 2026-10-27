@@ -10,6 +10,9 @@ import { registerOrderEditRoutes } from "./modules/order-edits/interfaces/order-
 import { registerCustomerAccountRoutes } from "./modules/customer-account/interfaces/customer-account.routes";
 import { customerAccountServices } from "./modules/customer-account/infrastructure/customer-account.composition";
 import { startOrderEditScheduler } from "./modules/order-edits/infrastructure/order-edit-scheduler";
+import { createOrderActionProjectionWorker, startOrderActionProjectionScheduler } from "./modules/customer-account/infrastructure/order-action-projection.composition";
+import type { OrderActionProjectionReport } from "./modules/customer-account/infrastructure/order-action-projection.composition";
+import { logger } from "./platform/observability/logger";
 import { hasPermission } from "./modules/identity";
 import { startListingPublicationWorker } from "./modules/marketplace-listings/application/listing-publication-worker";
 import { startArchonOrderDelivery } from "./modules/oms/archon-order-delivery.worker";
@@ -736,6 +739,13 @@ function startEchelonSyncScheduler(
   }
 
   const orderEdits = createOrderEditService(dbPool, services);
+  if (!schedulersDisabled()) {
+    const reportActions: OrderActionProjectionReport = ({ action, code, ...event }) => {
+      const write = event.outcome === "failed" ? logger.error : logger.info;
+      write(action, { ...event, ...(code ? { error_code: code } : {}) });
+    };
+    httpServer.once("close", startOrderActionProjectionScheduler(createOrderActionProjectionWorker(dbPool, orderEdits, reportActions), reportActions));
+  }
   // Register the exact account suffix before the existing returns proxy's 404.
   // Its default-off gate does not change staff APIs or public return access.
   registerCustomerAccountRoutes(app, { services: customerAccountServices(dbPool, orderEdits),

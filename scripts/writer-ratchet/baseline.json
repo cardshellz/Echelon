@@ -1118,6 +1118,9 @@
   "oms.channel_fulfillment_receipts": [
     "modules/oms"
   ],
+  "oms.customer_order_actions": [
+    "modules/customer-account"
+  ],
   "oms.ebay_order_poll_checkpoints": [
     "modules/oms"
   ],
@@ -1498,6 +1501,9 @@
     "modules/returns"
   ],
   "returns.customer_return_authorizations": [
+    "modules/returns"
+  ],
+  "returns.customer_return_box_measurements": [
     "modules/returns"
   ],
   "returns.customer_return_case_links": [

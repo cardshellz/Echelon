@@ -35,6 +35,8 @@ describe("writer-ratchet (P2.1)", () => {
   });
 
   it.each([
+    ["oms.customer_order_actions", "modules/customer-account"],
+    ["returns.customer_return_box_measurements", "modules/returns"],
     ["wms.picking_commands", "modules/wms"],
     ["procurement.receiving_custody_fence", "modules/procurement"],
     ["procurement.receiving_quarantine_observations", "modules/procurement"],

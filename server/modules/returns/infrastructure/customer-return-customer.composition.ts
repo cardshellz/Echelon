@@ -25,10 +25,7 @@ export async function createCustomerReturnCustomerServices(session: CustomerRetu
         event: "return_customer_order_unavailable", code: "RETURN_ORDER_INSPECTION_UNAVAILABLE",
         channelId: context.channelId, omsOrderId: context.omsOrderId, reason: context.reason, causeCode: context.causeCode,
       })),
-      shippingVersion: async () => {
-        const [current, control] = await Promise.all([settings.read(principal.channelId), settings.readControl(principal.channelId)]);
-        return current?.enabled && !control.paused ? current.version : null;
-      } }),
+      shippingVersion: () => settings.customerVersion(principal.channelId) }),
     operations: new CustomerReturnCustomerOperationsService({ principal, orderAccess: access,
       ownership: new PostgresCustomerReturnCustomerOwnershipReader(pool),
       submissions: internal.submissions, labels: internal.labels }),
