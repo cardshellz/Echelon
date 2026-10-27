@@ -36,6 +36,7 @@ import { eq, and, inArray, sql, desc } from "drizzle-orm";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { computePurchaseOrderInvoiceMatchSourceFingerprint } from "./purchase-order-invoice-match";
+import { isRetiredReceiveExceptionKind } from "./receive-warning-policy";
 
 // ─── Error class ──────────────────────────────────────────────────────────────
 
@@ -134,12 +135,8 @@ export interface ReceiveValidationWarningInput {
 }
 
 const RECEIVE_WARNING_KIND_TO_EXCEPTION_KIND: Record<string, ExceptionKind> = {
-  uom_disagreement: "receive_uom_disagreement",
-  base_unit_pack_conflict: "receive_base_unit_pack_conflict",
   cost_variance_soft: "receive_cost_variance_soft",
   cost_variance_hard: "receive_cost_variance_hard",
-  variant_base_unit_misconfig: "receive_variant_base_unit_misconfig",
-  variant_missing_parent: "receive_variant_missing_parent",
 };
 
 export async function recordReceiveValidationWarnings(input: {
@@ -194,6 +191,12 @@ export async function recordReceiveValidationWarnings(input: {
 export async function upsertException(
   input: UpsertExceptionInput,
 ): Promise<PoException> {
+  if (isRetiredReceiveExceptionKind(input.kind)) {
+    throw new PoExceptionError(
+      "This obsolete receiving-pack warning is historical only. The saved receipt configuration owns its count unit.",
+      "RETIRED_RECEIVE_PACK_WARNING", 400, { kind: input.kind },
+    );
+  }
   const payload = input.payload ?? {};
   const hash = computePayloadHash(input.poId, input.kind, payload);
   const now = new Date();

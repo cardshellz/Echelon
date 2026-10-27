@@ -1,24 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 import {
   evaluateReceiveWarnings,
+  ReceiveValidationService,
   DEFAULT_COST_VARIANCE_WARN_PCT,
   __testing__,
 } from "../../receive-validation.service";
 
-/**
- * Spec D, Part 2 — receive-time validation warnings.
- *
- * Each detector is exercised on its trigger AND its non-trigger boundary:
- *   1. uom_disagreement (variant upv vs PO line UOM fields)
- *   2. base_unit_pack_conflict (is_base_unit variant vs PO pack > 1)
- *   3. cost_variance_soft (> ±25% default; configurable)
- *   4. cost_variance_hard (> 5× or < 0.2×)
- *   5. variant_base_unit_misconfig (upv > 1 && is_base_unit)
- *   6. Retired parent pointers never produce receiving warnings.
- *
- * Plus the dogfood case: case variant misconfigured as base unit posting
- * 360 cases as 360 pieces triggers both UOM and base-unit warnings.
- */
+/** Receipt commands validate and freeze the count configuration. Warnings
+ * compare per-piece costs only; PO preferences cannot override that receipt. */
 
 const baseInput = {
   receivingLineId: 1001,
@@ -26,83 +16,40 @@ const baseInput = {
   receivedQty: 360,
 };
 
-describe("evaluateReceiveWarnings — UOM disagreement", () => {
-  it("fires when variant upv disagrees with PO expected_receive_units_per_variant", () => {
+describe("saved receipt configuration owns the receive unit", () => {
+  it.each([
+    { receivePack: 10000, poPack: 1, legacyPack: 1 },
+    { receivePack: 5000, poPack: 1, legacyPack: 1 },
+    { receivePack: 1000, poPack: 1, legacyPack: 1 },
+    { receivePack: 800, poPack: 1, legacyPack: 1 },
+    { receivePack: 1, poPack: 750, legacyPack: 750 },
+    { receivePack: 50, poPack: 100, legacyPack: 24 },
+    { receivePack: 10000, poPack: null, legacyPack: 1 },
+    { receivePack: 50, poPack: null, legacyPack: null },
+  ])("accepts saved pack $receivePack with PO preference $poPack", ({ receivePack, poPack, legacyPack }) => {
     const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 1, isBaseUnit: true },
-      poLine: {
-        id: 5001,
-        orderQty: 270000,
-        expectedReceiveUnitsPerVariant: 750,
-        unitsPerUom: 750,
-      },
+      ...baseInput, unitCostMills: 10000,
+      variant: { id: 11, unitsPerVariant: receivePack, isBaseUnit: receivePack === 1 },
+      poLine: { id: 5001, orderQty: 800000, unitCostMills: 10000,
+        expectedReceiveUnitsPerVariant: poPack, unitsPerUom: legacyPack },
     });
-    const uom = warnings.find((w) => w.kind === "uom_disagreement");
-    expect(uom).toBeDefined();
-    expect(uom!.severity).toBe("warn");
-    expect(uom!.payload).toMatchObject({
-      variantUnitsPerVariant: 1,
-      poImpliedPackSize: 750,
-    });
+    expect(warnings).toEqual([]);
   });
 
-  it("falls back to legacy units_per_uom when expected_receive_units_per_variant is unset", () => {
-    const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 12 },
-      poLine: { id: 5001, orderQty: 1200, unitsPerUom: 24, expectedReceiveUnitsPerVariant: null },
-    });
-    expect(warnings.some((w) => w.kind === "uom_disagreement")).toBe(true);
+  it("does not turn catalog classification or parent metadata into a receipt warning", () => {
+    expect(evaluateReceiveWarnings({ ...baseInput,
+      variant: { id: 11, unitsPerVariant: 10000, isBaseUnit: true, parentVariantId: null, name: "Case of 10000" },
+      poLine: { id: 5001, expectedReceiveUnitsPerVariant: 1 }, siblingsHaveParent: true,
+    })).toEqual([]);
   });
 
-  it("does not fire when variant upv matches the PO line", () => {
-    const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 750 },
-      poLine: { id: 5001, orderQty: 270000, expectedReceiveUnitsPerVariant: 750 },
+  it("still reports a genuine per-piece price variance for a different receiving pack", () => {
+    const warnings = evaluateReceiveWarnings({ ...baseInput, unitCostMills: 13000,
+      variant: { id: 11, unitsPerVariant: 10000 },
+      poLine: { id: 5001, expectedReceiveUnitsPerVariant: 1, unitCostMills: 10000 },
     });
-    expect(warnings.some((w) => w.kind === "uom_disagreement")).toBe(false);
-  });
-
-  it("does not fire when the PO line implies pieces (pack size 1)", () => {
-    const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 1 },
-      poLine: { id: 5001, orderQty: 100, expectedReceiveUnitsPerVariant: 1, unitsPerUom: 1 },
-    });
-    expect(warnings.some((w) => w.kind === "uom_disagreement")).toBe(false);
-  });
-
-  it("fires base_unit_pack_conflict when a base-unit variant receives against a pack-sized PO line", () => {
-    const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 1, isBaseUnit: true },
-      poLine: { id: 5001, orderQty: 270000, expectedReceiveUnitsPerVariant: 750 },
-    });
-    const conflict = warnings.find((w) => w.kind === "base_unit_pack_conflict");
-    expect(conflict).toBeDefined();
-    expect(conflict!.detail).toContain("March 2026");
-  });
-
-  it("dogfood: case variant misconfigured as base unit triggers both UOM warnings", () => {
-    // PO-20260317-001 shape: orderQty 270,000 pieces, UOM 750/case; the
-    // receiving variant is the misconfigured base-unit "case".
-    const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 1, isBaseUnit: true, name: "Each" },
-      poLine: {
-        id: 5001,
-        orderQty: 270000,
-        expectedReceiveUnitsPerVariant: 750,
-        unitsPerUom: 750,
-        unitCostMills: 44,
-      },
-      unitCostMills: 44,
-    });
-    const kinds = warnings.map((w) => w.kind);
-    expect(kinds).toContain("uom_disagreement");
-    expect(kinds).toContain("base_unit_pack_conflict");
+    expect(warnings.map(warning => warning.kind)).toEqual(["cost_variance_soft"]);
+    expect(warnings[0].payload).toMatchObject({ actualUnitCostMills: 13000, poUnitCostMills: 10000 });
   });
 });
 
@@ -206,55 +153,8 @@ describe("evaluateReceiveWarnings — cost variance", () => {
   });
 });
 
-describe("evaluateReceiveWarnings — variant config sanity", () => {
-  it("flags a case-sized variant marked is_base_unit", () => {
-    const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 750, isBaseUnit: true, name: "Case of 750" },
-    });
-    const w = warnings.find((x) => x.kind === "variant_base_unit_misconfig");
-    expect(w).toBeDefined();
-    expect(w!.detail).toContain("750");
-  });
-
-  it("does not flag a base-unit variant with pack size 1", () => {
-    const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 1, isBaseUnit: true, name: "Each" },
-    });
-    expect(warnings.some((x) => x.kind === "variant_base_unit_misconfig")).toBe(false);
-  });
-
-  it("does not interpret missing legacy parents as missing conversion permission", () => {
-    const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 50, isBaseUnit: false, parentVariantId: null },
-      siblingsHaveParent: true,
-    });
-    expect(warnings.some((x) => x.kind === "variant_missing_parent")).toBe(false);
-  });
-
-  it("does not flag missing parent when no siblings have one", () => {
-    const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 50, parentVariantId: null },
-      siblingsHaveParent: false,
-    });
-    expect(warnings.some((x) => x.kind === "variant_missing_parent")).toBe(false);
-  });
-
-  it("does not flag when the variant has a parent", () => {
-    const warnings = evaluateReceiveWarnings({
-      ...baseInput,
-      variant: { id: 11, unitsPerVariant: 50, parentVariantId: 10 },
-      siblingsHaveParent: true,
-    });
-    expect(warnings.some((x) => x.kind === "variant_missing_parent")).toBe(false);
-  });
-});
-
 describe("receive-validation helpers (pure)", () => {
-  const { isHardVariance, isSoftVariance, resolvePoImpliedPackSize, normalizeWarnPct } = __testing__;
+  const { isHardVariance, isSoftVariance, resolvePerPieceMills, normalizeWarnPct } = __testing__;
 
   it("hard variance uses integer cross-multiplication (no float drift)", () => {
     expect(isHardVariance(50001, 10000)).toBe(true);  // just over 5×
@@ -268,10 +168,12 @@ describe("receive-validation helpers (pure)", () => {
     expect(isSoftVariance(12500, 10000, 25)).toBe(false);
   });
 
-  it("PO implied pack prefers expected_receive_units_per_variant", () => {
-    expect(resolvePoImpliedPackSize({ expectedReceiveUnitsPerVariant: 750, unitsPerUom: 24 })).toBe(750);
-    expect(resolvePoImpliedPackSize({ expectedReceiveUnitsPerVariant: null, unitsPerUom: 24 })).toBe(24);
-    expect(resolvePoImpliedPackSize({ expectedReceiveUnitsPerVariant: null, unitsPerUom: null })).toBeNull();
+  it("keeps maximum safe monetary values exact and rejects overflowing cents conversion", () => {
+    expect(isHardVariance(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)).toBe(false);
+    expect(isSoftVariance(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 25)).toBe(false);
+    expect(resolvePerPieceMills(null, Number.MAX_SAFE_INTEGER)).toBeNull();
+    expect(resolvePerPieceMills(0, 100)).toBe(0);
+    expect(resolvePerPieceMills(null, 100)).toBe(10000);
   });
 
   it("warn pct normalization falls back to default on garbage", () => {
@@ -279,5 +181,42 @@ describe("receive-validation helpers (pure)", () => {
     expect(normalizeWarnPct(NaN)).toBe(DEFAULT_COST_VARIANCE_WARN_PCT);
     expect(normalizeWarnPct(-5)).toBe(DEFAULT_COST_VARIANCE_WARN_PCT);
     expect(normalizeWarnPct(50)).toBe(50);
+  });
+});
+
+
+describe("ReceiveValidationService per-piece cost read", () => {
+  const row = (id: number, overrides: Record<string, unknown> = {}) => ({
+    receiving_line_id: id, purchase_order_line_id: 5000 + id, received_qty: 80,
+    unit_cost: null, unit_cost_mills: "10000", matched_po_line_id: 5000 + id,
+    po_unit_cost_cents: null, po_unit_cost_mills: "10000", ...overrides,
+  });
+
+  it("reads an entire multi-pack receipt without consulting catalog or PO pack preferences", async () => {
+    const execute = vi.fn().mockResolvedValue({ rows: Array.from({ length: 10 }, (_, index) => row(index + 1)) });
+    expect(await new ReceiveValidationService({ execute }).evaluateOrder(31)).toEqual([]);
+    expect(execute).toHaveBeenCalledTimes(1);
+    const query = new PgDialect().sqlToQuery(execute.mock.calls[0][0]);
+    expect(query.params).toEqual([31]);
+    expect(query.sql).not.toMatch(/catalog\.product_variants|units_per_variant|units_per_uom|expected_receive_units_per_variant/);
+  });
+
+  it("attributes a real cost warning to its receipt and purchase line", async () => {
+    const execute = vi.fn().mockResolvedValue({ rows: [row(7), row(8, { unit_cost_mills: "14000" })] });
+    const warnings = await new ReceiveValidationService({ execute }).evaluateOrder(31);
+    expect(warnings).toMatchObject([{ kind: "cost_variance_soft", receivingLineId: 8, purchaseOrderLineId: 5008 }]);
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("retains a configured threshold and accepts a blind receipt without a matching PO price", async () => {
+    const execute = vi.fn().mockResolvedValue({ rows: [row(7, { unit_cost_mills: "14000" }), row(8, { matched_po_line_id: null })] });
+    const getSetting = vi.fn().mockResolvedValue("50");
+    expect(await new ReceiveValidationService({ execute }, getSetting).evaluateOrder(31)).toEqual([]);
+    expect(getSetting).toHaveBeenCalledWith("receiving_cost_variance_warn_pct");
+  });
+
+  it("propagates an unavailable read instead of pretending there are no warnings", async () => {
+    const execute = vi.fn().mockRejectedValue(new Error("cost review read unavailable"));
+    await expect(new ReceiveValidationService({ execute }).evaluateOrder(31)).rejects.toThrow("cost review read unavailable");
   });
 });

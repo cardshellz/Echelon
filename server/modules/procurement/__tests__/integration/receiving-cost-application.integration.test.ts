@@ -36,6 +36,8 @@ import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
 import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
 import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
 import { registerHistoricalCostTimestampCases } from "./historical-cost-timestamps.cases";
+import { registerReceiptConfigurationAuthorityCases } from "./receipt-configuration-authority.cases";
+import type { ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../receiving.service";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -71,6 +73,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   let database: ReturnType<typeof drizzle<typeof schema>>;
   let storage: any;
   let receiving: import("../../receiving.service").ReceivingService;
+  let receivingWithWarnings: (evaluator: ReceiveWarningEvaluator, reporter: ReceiveWarningReporter) => import("../../receiving.service").ReceivingService;
   let purchasing: ReturnType<typeof import("../../purchasing.service").createPurchasingService>;
   let shipment: ReturnType<typeof import("../../shipment-tracking.service").createShipmentTrackingService>;
   let createShipment: typeof import("../../shipment-tracking.service").createShipmentTrackingService;
@@ -111,6 +114,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       )`);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/226_purchase_supplier_progress.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000035000019280001_retire_obsolete_receive_pack_warnings.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000017000018590001_receipt_shipment_quantity_amendments.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000007000018030001_shipment_cost_exception_decisions.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0751_exact_inventory_cost_totals.sql"), "utf8"));
@@ -191,6 +195,9 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       receiving = new receivingModule.ReceivingService(database, inventory,
         { queueSyncAfterInventoryChange: async () => undefined }, storage, purchasing, shipment, null,
         { reconcilePurchaseOrderLine: (id, tx, actor) => reconcile(id, tx, actor) }, null, null, () => NOW);
+      receivingWithWarnings = (evaluator, reporter) => new receivingModule.ReceivingService(database, inventory,
+        { queueSyncAfterInventoryChange: async () => undefined }, storage, purchasing, shipment, null,
+        { reconcilePurchaseOrderLine: (id, tx, actor) => reconcile(id, tx, actor) }, evaluator, reporter, () => NOW);
     } finally {
       if (priorDatabase === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = priorDatabase;
       if (priorExternal === undefined) delete process.env.EXTERNAL_DATABASE_URL; else process.env.EXTERNAL_DATABASE_URL = priorExternal;
@@ -1558,6 +1565,10 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await failAudit(async () => { await expect(approveEvidence()).rejects.toThrow(/cost audit injected AP audit failure/); });
     expect(await state()).toEqual(before);
   });
+  registerReceiptConfigurationAuthorityCases({ pool: () => pool, database: () => database,
+    purchasing: () => purchasing, shipments: () => shipment, actorId,
+    receivingLines: (id) => storage.getReceivingLines(id), receivingWithWarnings: (evaluator, reporter) => receivingWithWarnings(evaluator, reporter),
+    prepareReceipt, approveSupplier: approveEvidence });
   registerSupplierReturnStockCases({ pool: () => pool, database: () => database, at: NOW, actorId,
     receive, approveInvoice: approveEvidence, inventory: () => inventory, receiving: () => receiving, shipments: () => shipment,
     updateFreight: async () => { await shipment.finalizeAllocations(1, actorId); return shipment.pushLandedCostsToLots(1, actorId); } });
