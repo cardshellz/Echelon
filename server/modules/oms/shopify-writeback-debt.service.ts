@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import { sqlIntegerArray } from "../../infrastructure/postgres-array";
+import { currentChannelPackageEvidenceSql, currentPushedShipmentItemQuantitySql } from "./channel-fulfillment-package-coverage.sql";
 import {
   evaluateShopifyWritebackDebt,
   type ShopifyAggregateFulfillmentEvidence,
@@ -361,16 +362,9 @@ async function resolveWithExecutor(
       COALESCE((
         SELECT MAX(evidence.quantity)::int
         FROM (
-          SELECT push_item.quantity_pushed::int AS quantity
-          FROM wms.physical_shipment_items physical_item
-          JOIN oms.channel_fulfillment_push_items push_item
-            ON push_item.physical_shipment_item_id = physical_item.id
-          JOIN oms.channel_fulfillment_pushes push
-            ON push.id = push_item.channel_fulfillment_push_id
-          WHERE physical_item.legacy_wms_shipment_item_id = shipment_item.id
-            AND push.oms_order_id = ${input.omsOrderId}
-            AND push.channel_provider = 'shopify'
-            AND push.push_status IN ('success', 'ignored')
+          SELECT ${currentPushedShipmentItemQuantitySql({
+            shipmentItemId: sql`shipment_item.id`, omsOrderId: sql`${input.omsOrderId}`, provider: sql`'shopify'`,
+          })} AS quantity
           UNION ALL
           SELECT receipt_item.quantity::int AS quantity
           FROM oms.channel_fulfillment_receipt_items receipt_item
@@ -380,6 +374,10 @@ async function resolveWithExecutor(
             AND receipt.oms_order_id = ${input.omsOrderId}
             AND receipt.source_provider = 'shopify'
             AND receipt.processing_status IN ('processed', 'ignored')
+            AND ${currentChannelPackageEvidenceSql({
+              physicalShipmentId: sql`receipt.physical_shipment_id`, omsOrderId: sql`${input.omsOrderId}`,
+            })}
+            AND LOWER(COALESCE(receipt.raw_payload->>'status', '')) NOT IN ('cancelled', 'canceled', 'failure', 'error')
         ) evidence
       ), 0)::int AS direct_evidence_quantity
     FROM wms.outbound_shipment_items shipment_item

@@ -36,6 +36,9 @@ import {
 import { createFulfillmentPushService } from "../../../oms/fulfillment-push.service";
 import { createShopifyLabelLifecycleRepository } from "../../../oms/shopify-label-lifecycle.repository";
 import { createShopifyLabelLifecycleService } from "../../../oms/shopify-label-lifecycle.service";
+import { findChannelWritebackCandidates } from "../../../oms/channel-writeback.service";
+import { sql } from "drizzle-orm";
+import { currentPushedShipmentItemQuantitySql } from "../../../oms/channel-fulfillment-package-coverage.sql";
 import { createChannelFulfillmentProjector } from "../../../oms/channel-fulfillment-projection.repository";
 import { createShipStationService } from "../../../oms/shipstation.service";
 import { createShipStationLabelReconciliationRepository } from "../../../oms/shipstation-label-reconciliation.repository";
@@ -96,6 +99,7 @@ import { HistoricalShipStationContentsAttestationService } from "../../historica
 import {
   buildHistoricalShipStationContentsRecoveryEvidence,
   buildHistoricalShipStationContentsSystemRecoveryEvent,
+  buildHistoricalShipStationWmsConfirmationEvidence,
   historicalShipStationRecoverableCaseEvidenceHash,
 } from "../../historical-shipstation-contents-recovery.domain";
 import { PgHistoricalShipStationContentsSystemRecoveryRepository } from "../../historical-shipstation-contents-system-recovery.repository";
@@ -967,7 +971,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         providerExecutor: { execute: vi.fn().mockRejectedValue(new Error("Provider must remain blocked")) },
       });
       expect(await worker.runDueBatch({ limit: 25 })).toMatchObject({ claimed: 0 });
-      expect(await workerRepository.findWaitingEbayLabelReplacements!(25)).toEqual([replacement.id]);
+      expect(await workerRepository.findWaitingEbayLabelReplacements!(25, clock.now())).toEqual([replacement.id]);
     }
     const results = mode === "concurrent"
       ? await Promise.all([replacement.receive(), replacement.receive()]) : [await replacement.receive()];
@@ -1041,17 +1045,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect((await pool.query("SELECT SUM(quantity_shipped)::int AS qty FROM wms.effective_physical_shipment_items")).rows).toEqual([{ qty: 3 }]);
 
     if (mode === "health") {
-      const { findChannelWritebackCandidates } = await import("../../../oms/channel-writeback.service");
-      await pool.query("ALTER TABLE wms.orders ADD COLUMN source_table_id VARCHAR(100)");
       await pool.query("UPDATE wms.orders SET source = 'oms'");
-      await pool.query(`CREATE TABLE oms.webhook_retry_queue (
-        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, provider TEXT NOT NULL,
-        status TEXT NOT NULL, topic TEXT NOT NULL, payload JSONB NOT NULL)`);
-      // Empty inbound receipt relations complete the health reader's schema;
-      // this scenario only produces outbound canonical commands.
-      await pool.query(`CREATE TABLE oms.channel_fulfillment_receipt_items (
-        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, receipt_id BIGINT NOT NULL,
-        legacy_wms_shipment_item_id INTEGER, quantity INTEGER NOT NULL)`);
       await pool.query("UPDATE wms.outbound_shipments SET shipped_at = NOW() - INTERVAL '2 hours'");
       await pool.query(`INSERT INTO oms.oms_order_events(order_id, event_type, details)
         SELECT orders.oms_fulfillment_order_id::bigint, 'tracking_pushed',
@@ -1248,7 +1242,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         expect((await pool.query("SELECT COUNT(DISTINCT replacement_batch_id)::int AS batches FROM wms.ebay_label_replacement_work WHERE state = 'applied'")).rows).toEqual([{ batches: 1 }]);
         await worker.runDueBatch();
         expect(packages.filter(pkg => pkg.status === 'SUCCESS').map(pkg => pkg.tracking).sort())
-          .toEqual(replacements.slice(0, 4).map(pkg => `TRACK${pkg.providerLabelId}`).sort());
+          .toEqual(replacements.map(pkg => `TRACK${pkg.providerLabelId}`).sort());
+        // The existing worker now also recovers the independent fifth label
+        // from its completed void; it does not require another webhook.
         expect(await replacements[4].receive()).toMatchObject({ outcome: 'replaced' });
         await worker.runDueBatch();
         expect(packages.filter(pkg => pkg.status === 'SUCCESS').map(pkg => pkg.tracking).sort())
@@ -1321,9 +1317,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       expect((await pool.query('SELECT qty FROM wms.outbound_shipment_items ORDER BY id')).rows).toEqual([{ qty: 4 }, { qty: 1 }]);
     }, 30_000);
 
-  it.each(['unsent', 'sent', 'late_void', 'missed_void_poll', 'missed_void_webhook', 'split', 'lost_cancel_response', 'claimed_before_void', 'concurrent', 'receipt_rollback', 'contents_changed'])(
+  it.each(['unsent', 'sent', 'late_void', 'missed_void_poll', 'missed_void_webhook', 'split', 'repair_only', 'split_repair_only', 'historical_repair', 'historical_void_repair', 'repair_concurrent', 'repair_after_contents_resolution', 'repair_after_review_resolution', 'replacement_evidence_review', 'lost_cancel_response', 'claimed_before_void', 'concurrent', 'receipt_rollback', 'contents_changed'])(
     'corrects Shopify void/relabel end to end without changing a sibling: %s', async mode => {
-      const split = mode === 'split';
+      const split = mode === 'split' || mode === 'split_repair_only';
+      const repairOnly = ['repair_only', 'split_repair_only', 'historical_repair', 'historical_void_repair', 'repair_concurrent', 'repair_after_contents_resolution', 'repair_after_review_resolution'].includes(mode);
       const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, 'SHOPIFY-RELABEL', split ? 2 : 1);
       const channelId = Number((await pool.query('SELECT channel_id FROM oms.oms_orders')).rows[0].channel_id);
       const warehouse = (await pool.query(`INSERT INTO warehouse.warehouses(code, name, shopify_location_id)
@@ -1435,6 +1432,22 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         expect(await worker.runDueBatch(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ succeeded: split ? 2 : 1, reviewRequired: 0, retryScheduled: 0 });
       }
       const replacement = await label('44011');
+      async function recordContentsResolution() {
+        const observations = (await pool.query("SELECT id FROM wms.shipping_provider_label_events WHERE shipping_provider_label_id=$1 ORDER BY id",[replacement.id])).rows;
+        const correction = buildHistoricalShipStationContentsSystemRecoveryEvent({ shippingProviderLabelId:String(replacement.id),
+          providerShipmentId:44011,trackingNumber:'TRACK44011',labelStatus:'active',resolvedLabelEventIds:observations.map(row=>Number(row.id)),
+          recoveryEvidence:buildHistoricalShipStationWmsConfirmationEvidence({providerObservationHash:'a'.repeat(64),
+            expectedContents:{kind:'available',source:'legacy_wms_shipment',lines:[{wmsShipmentItemId:sourceId,sku:'SHOPIFY-RELABEL',quantity:1}]}}),
+          authorization:{actorUserId:'test-admin',actorRole:'admin',reason:'Resolve stored contents before replacement recovery'},
+        });
+        await pool.query(`INSERT INTO wms.shipping_provider_label_events(shipping_provider_label_id,event_hash,event_type,label_status,
+          tracking_number,provider_occurred_at,received_at,sanitized_payload) VALUES($1,$2,$3,$4,$5,NULL,$6,$7::jsonb)`,
+          [replacement.id,correction.eventHash,correction.eventType,correction.labelStatus,correction.trackingNumber,clock.now(),JSON.stringify(correction.sanitizedPayload)]);
+      }
+      if (mode === 'repair_after_contents_resolution') await recordContentsResolution();
+      if (mode === 'replacement_evidence_review' || mode === 'repair_after_review_resolution') {
+        await pool.query("UPDATE wms.shipping_provider_labels SET tracking_number='UNPROVEN-CURRENT-TRACKING' WHERE id=$1", [replacement.id]);
+      }
       if (mode === 'late_void') expect(await replacement.receive()).toMatchObject({ outcome: 'waiting', reason: 'awaiting_replaced_label_void' });
       const oldPayload = (await pool.query('SELECT sanitized_payload FROM wms.shipping_provider_label_events WHERE shipping_provider_label_id = $1 ORDER BY id LIMIT 1', [old.id])).rows[0].sanitized_payload;
       const payload = { ...oldPayload, voidDate: '2026-09-17T13:00:00Z' };
@@ -1471,14 +1484,15 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         label_status, tracking_number, provider_occurred_at, received_at, sanitized_payload)
         VALUES ($1, $2, 'label_voided', 'voided', $3, '2026-09-17T13:00:00Z', '2026-09-17T13:00:00Z', $4)`, [old.id, hash, payload.trackingNumber, payload]);
       await pool.query("UPDATE wms.shipping_provider_labels SET label_status = 'voided', last_observed_at = '2026-09-17T13:00:00Z' WHERE id = $1", [old.id]);
-      await lifecycle.observe(old.id); await lifecycle.observe(old.id);
+      if (mode === 'historical_void_repair') expect((await pool.query('SELECT id FROM oms.shopify_label_void_work')).rowCount).toBe(0);
+      else { await lifecycle.observe(old.id); await lifecycle.observe(old.id); }
       }
       if (claimed.length) {
         await expect(executor.execute(claimed[0])).rejects.toMatchObject({ code: 'PACKAGE_LABEL_INACTIVE' });
         await repository.completeAttempt({ commandId: claimed[0].id, leaseToken: claimed[0].leaseToken,
           outcome: 'review_required', errorCode: 'PACKAGE_LABEL_INACTIVE', startedAt: clock.now(), completedAt: clock.now() });
       }
-      expect(await replacement.receive()).toMatchObject({ outcome: 'waiting', reason: 'shopify_predecessor_void_pending' });
+      if (mode !== 'replacement_evidence_review' && mode !== 'repair_after_review_resolution' && mode !== 'historical_void_repair') expect(await replacement.receive()).toMatchObject({ outcome: 'waiting', reason: 'shopify_predecessor_void_pending' });
       if (mode === 'contents_changed') {
         packages[0].quantity = 2;
         await lifecycle.runDueBatch();
@@ -1501,17 +1515,60 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       }
       if (mode === 'concurrent') await Promise.all([worker.runLabelLifecycleBatch!(), worker.runLabelLifecycleBatch!()]);
       else await worker.runLabelLifecycleBatch!();
-      await worker.runDueBatch();
+      if (repairOnly) {
+        // Stale order summaries and old shipment dates must not hide durable
+        // correction work. Reproduce a completed cancellation with no webhook.
+        await pool.query("UPDATE oms.oms_orders SET fulfillment_status = 'fulfilled'");
+        await pool.query("UPDATE wms.outbound_shipments SET status = 'shipped', shipped_at = now() - interval '40 days', created_at = now() - interval '41 days'");
+        const candidates = await findChannelWritebackCandidates(getTestDb(), { maxAgeDays: null, limit: 25 });
+        expect(candidates).toHaveLength(1);
+        if (mode === 'historical_repair') {
+          await pool.query("DELETE FROM wms.ebay_label_replacement_work WHERE state = 'waiting'");
+          expect((await pool.query('SELECT * FROM wms.ebay_label_replacement_work')).rowCount).toBe(0);
+        }
+      }
+      if (mode === 'repair_concurrent') await Promise.all([worker.runDueBatch(), worker.runDueBatch()]);
+      else await worker.runDueBatch();
       if (mode === 'lost_cancel_response') {
         expect((await pool.query('SELECT state FROM oms.shopify_label_void_work')).rows).toEqual([{ state: 'pending' }]);
         currentTime = new Date(currentTime.getTime() + 61_000); await worker.runLabelLifecycleBatch!(); await worker.runDueBatch();
       }
       expect((await pool.query('SELECT state FROM oms.shopify_label_void_work')).rows, JSON.stringify(logger.error.mock.calls)).toEqual([{ state: 'complete' }]);
-      expect(await replacement.receive(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ outcome: 'replaced' });
+      if (mode === 'replacement_evidence_review' || mode === 'repair_after_review_resolution') {
+        expect((await pool.query('SELECT state,reason FROM wms.ebay_label_replacement_work WHERE shipping_provider_label_id=$1', [replacement.id])).rows)
+          .toEqual([{ state: 'review', reason: 'replacement_contents_evidence_unproven' }]);
+        expect((await pool.query("SELECT details->>'reasonCode' AS reason FROM wms.reconciliation_exceptions WHERE details->>'shippingProviderLabelId'=$1", [String(replacement.id)])).rows)
+          .toEqual([{ reason: 'replacement_contents_evidence_unproven' }]);
+        expect(providerCalls.filter(call => call.operation === 'create')).toHaveLength(1);
+        expect((await pool.query('SELECT id FROM inventory.inventory_transactions')).rowCount).toBe(0);
+        if (mode === 'replacement_evidence_review') return;
+        await pool.query("UPDATE wms.shipping_provider_labels SET tracking_number='TRACK44011' WHERE id=$1", [replacement.id]);
+        currentTime = new Date(currentTime.getTime() + 1000);
+        await recordContentsResolution();
+        await worker.runDueBatch();
+      }
+      if (!repairOnly) expect(await replacement.receive(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ outcome: 'replaced' });
       const active = packages.filter(pkg => pkg.status === 'SUCCESS');
       expect(active.map(pkg => pkg.tracking).sort(), JSON.stringify(logger.error.mock.calls)).toEqual(split ? ['TRACK44011', 'TRACK44012'] : ['TRACK44011']);
       expect(providerCalls.filter(call => call.operation === 'cancel')).toHaveLength(mode === 'unsent' || mode === 'claimed_before_void' ? 0 : 1);
       const calls = providerCalls.length; await worker.runDueBatch(); expect(providerCalls).toHaveLength(calls);
+      if (repairOnly) {
+        const after = await findChannelWritebackCandidates(getTestDb(), { maxAgeDays: null, limit: 25 });
+        if (split) {
+          // The unrelated extra demand above must remain missing, while both
+          // current portions of the original source line count exactly once.
+          expect(after).toHaveLength(1);
+          const orderId = (await pool.query('SELECT id FROM oms.oms_orders')).rows[0].id;
+          const coverage = await getTestDb().execute(sql`SELECT ${currentPushedShipmentItemQuantitySql({
+            shipmentItemId: sql`${sourceId}`, omsOrderId: sql`${orderId}`, provider: sql`'shopify'`,
+          })} AS quantity`);
+          expect(coverage.rows).toEqual([{ quantity: 2 }]);
+        } else expect(after).toEqual([]);
+        expect((await pool.query("SELECT metadata->>'notifyCustomer' AS notify FROM oms.channel_fulfillment_pushes WHERE tracking_number = 'TRACK44011'")).rows)
+          .toEqual([{ notify: 'false' }]);
+        expect((await pool.query("SELECT push_status FROM oms.channel_fulfillment_pushes WHERE tracking_number = 'TRACK44010'")).rows)
+          .toEqual([{ push_status: 'success' }]); // Preserve the original audit fact.
+      }
       if (split) {
         await pool.query("UPDATE wms.outbound_shipments SET status = 'shipped', tracking_number = 'TRACK44011'");
         const shipmentIds = (await pool.query('SELECT id FROM wms.outbound_shipments')).rows.map(row => row.id);
