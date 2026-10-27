@@ -1,3 +1,4 @@
+import { useAuth } from "@/lib/auth";
 import { usePurchaseOrderEntry } from "@/hooks/use-purchase-order-entry";
 import { PurchaseOrderEntryRecoveryNotice } from "@/features/purchasing/PurchaseOrderEntryRecovery";
 import { PurchaseOrderStatusBadge } from "@/features/purchasing/PurchaseOrderStatusBadge";
@@ -199,6 +200,7 @@ function formatCentsShort(cents: number | null | undefined): string {
 export default function PurchaseOrders() {
   const { toast } = useToast();
   const purchaseEntry = usePurchaseOrderEntry();
+  const { hasPermission } = useAuth();
   const entryBlocked = !purchaseEntry.ready || !purchaseEntry.allowed("create") || purchaseEntry.pending || Boolean(purchaseEntry.recovery || purchaseEntry.error);
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
@@ -241,7 +243,7 @@ export default function PurchaseOrders() {
   // existing detail page where receipts/invoices/shipments/history tabs
   // still live.
   function poHref(po: PurchaseOrder): string {
-    if (useNewPoEditor && canUseFullPurchaseOrderEditor(po)) {
+    if (useNewPoEditor && hasPermission("purchasing", "edit") && canUseFullPurchaseOrderEditor(po)) {
       return `/purchase-orders/${po.id}/edit`;
     }
     return `/purchase-orders/${po.id}`;

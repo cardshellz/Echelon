@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installFixtures, receipt } from "./procurement-fixtures";
-import { openReceivingMoreActions, openReceivingPackSelector, openReceivingSetup } from "./procurement-receiving-helpers";
+import { openReceivingLineOptions, openReceivingMoreActions, openReceivingPackSelector, openReceivingSetup } from "./procurement-receiving-helpers";
 import { evaluateReceiveWarnings } from "../../server/modules/procurement/receive-validation.service";
 
 const initialVersion = "a".repeat(64);
@@ -19,8 +19,8 @@ const products = [
   ["GLV-TOP-260PT", "Glove-Fit Toploader 260PT", 500, 10],
 ] as const;
 
-async function setupWorkspace(page: Page, status: "draft" | "open" = "draft") {
-  const failures = await installFixtures(page);
+async function setupWorkspace(page: Page, status: "draft" | "open" = "draft", permissions?: readonly string[]) {
+  const failures = await installFixtures(page, { permissions });
   const variants = products.flatMap(([sku, name, factor], index) => [
     { id: 100 + index, sku: `${sku}-C${factor}`, name: `${name} case`, productId: 1000 + index, unitsPerVariant: factor },
     { id: 200 + index, sku: `${sku}-P${factor / 2}`, name: `${name} half case`, productId: 1000 + index, unitsPerVariant: factor / 2 },
@@ -277,3 +277,32 @@ test("retiring pack comparisons does not hide a genuine per-piece cost warning",
   expect(state.writes).toEqual([]);
   expect(failures).toEqual([]);
 });
+
+for (const status of ["draft", "open"] as const) {
+  test(`read-only users retain the compact ${status} workspace without quantity or location authority`, async ({ page }) => {
+    const { state, failures } = await setupWorkspace(page, status, ["inventory:view"]);
+    const workspace = page.getByTestId("receipt-workspace");
+    await expect(workspace.getByRole("status").filter({ hasText: "Receiving is read-only" })).toBeVisible();
+    await expect(page.getByTestId("btn-add-line")).toBeDisabled();
+    if (status === "draft") {
+      await expect(page.getByTestId("btn-open-receipt")).toBeDisabled();
+      await openReceivingMoreActions(page);
+      await expect(page.getByTestId("btn-import-csv")).toBeDisabled();
+      await expect(page.getByTestId("btn-discard-receipt")).toBeDisabled();
+      await workspace.locator("summary").filter({ hasText: /^More actions$/ }).click();
+    } else {
+      await expect(count(page)).toBeDisabled();
+      await expect(confirm(page)).toBeDisabled();
+      await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
+      await openReceivingLineOptions(page, 7);
+      await expect(page.getByRole("combobox", { name: "Location for line 7", exact: true })).toBeDisabled();
+    }
+    await openReceivingPackSelector(page, 7);
+    await expect(page.getByRole("combobox", { name: "Receive variant for line 7", exact: true })).toBeDisabled();
+    await openReceivingSetup(page);
+    await expect(page.getByRole("combobox", { name: "Receiving warehouse", exact: true })).toBeDisabled();
+    await expect(page.getByRole("combobox", { name: "Default receiving location", exact: true })).toBeDisabled();
+    expect(state.writes).toEqual([]);
+    expect(failures).toEqual([]);
+  });
+}

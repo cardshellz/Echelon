@@ -251,3 +251,58 @@ test("manual supplier override captures an explained RFQ with exact supplier ide
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(failures).toEqual([]);
 });
+
+
+for (const capability of ["read", "adjust", "edit"] as const) {
+  test(`planning keeps ${capability} access within its owning mutation grants`, async ({ page }) => {
+    const { failures, policy } = await setup(page);
+    const permissions = ["purchasing:view", "inventory:view",
+      ...(capability === "adjust" ? ["inventory:adjust"] : []),
+      ...(capability === "edit" ? ["purchasing:edit"] : [])];
+    await page.route("**/api/auth/me", route => route.fulfill({ json: {
+      user: { id: "test-user", username: "test", role: "lead" }, permissions, roles: ["lead"],
+    } }));
+    await page.route("**/api/purchasing/exclusion-rules", route => route.fulfill({ json: {
+      rules: [{ id: 1, field: "tag", value: "fixture-exclusion", matchCount: 2, createdAt: "2026-09-07T12:00:00Z" }], totalExcluded: 2,
+    } }));
+    const mutations: string[] = [];
+    await page.route("**/api/purchasing/exclusion-rules/1", route => {
+      mutations.push(`${route.request().method()} exclusion`);
+      return route.fulfill({ json: {} });
+    });
+    await page.route("**/api/purchasing/planning-policy", route => {
+      if (route.request().method() === "GET") return route.fulfill({ json: { revision: 3, policy } });
+      mutations.push(`${route.request().method()} policy`);
+      return route.fulfill({ json: { revision: 4, policy: route.request().postDataJSON().policy } });
+    });
+    await page.goto("/reorder-analysis");
+    await page.getByRole("button", { name: "Planning Policy", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    const growth = dialog.getByLabel("Uniform growth adjustment (%)", { exact: true });
+    const save = dialog.getByRole("button", { name: "Save stock and growth policy", exact: true });
+    const remove = dialog.getByRole("button", { name: "Delete exclusion rule fixture-exclusion", exact: true });
+    if (capability === "edit") {
+      await expect(growth).toBeEnabled();
+      await growth.fill("30");
+      await expect(save).toBeEnabled();
+      await save.click();
+      await expect.poll(() => mutations).toEqual(["PUT policy"]);
+    } else {
+      await expect(growth).toBeDisabled();
+      await expect(save).toBeDisabled();
+    }
+    if (capability === "adjust") {
+      await expect(remove).toBeEnabled();
+      await remove.click();
+      await expect.poll(() => mutations).toEqual(["DELETE exclusion"]);
+      await expect(dialog.getByRole("button", { name: "Save forecast policy", exact: true })).toBeEnabled();
+    } else {
+      await expect(remove).toBeDisabled();
+      await expect(dialog.getByRole("button", { name: "Save forecast policy", exact: true })).toBeDisabled();
+    }
+    await expect(dialog.getByRole("button", { name: "Reload current policy", exact: true })).toBeEnabled();
+    await expect(dialog.getByText("Policy history", { exact: true })).toBeVisible();
+    expect(mutations).toEqual(capability === "edit" ? ["PUT policy"] : capability === "adjust" ? ["DELETE exclusion"] : []);
+    expect(failures).toEqual([]);
+  });
+}

@@ -189,10 +189,10 @@ describe("reorder engine UI contract", () => {
     expect(appShell).toContain("useNewReorderCockpit");
     // Fail-safe is STRICT: only an explicit `true` from the settings payload
     // flips the label — undefined data (fetch pending, 401/403, 500, or the
-    // query disabled for roles that can't see Procurement) stays legacy. And
-    // the fetch never fires at all for roles the endpoint would 403.
+    // query disabled for roles that cannot see Reorder Analysis) stays legacy.
+    // Grant-based access to other procurement links does not enable this query.
     expect(appShell).toContain("procurementSettings?.useNewReorderCockpit === true");
-    expect(appShell).toContain("enabled: canSeeProcurementNav");
+    expect(appShell).toContain("enabled: canSeeReorderLink");
     expect(appShell).toContain("retry: false");
     // Flag OFF (or settings load error) → the base structure's legacy label,
     // byte-identical to the pre-flag nav.

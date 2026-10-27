@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth";
 import {
   Select,
   SelectContent,
@@ -152,6 +153,8 @@ interface Props {
 export function ExclusionRulesModal({ open, onOpenChange }: Props) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
+  const canAdjustPlanning = hasPermission("inventory", "adjust");
   const [newField, setNewField] = useState("category");
   const [newValue, setNewValue] = useState("");
   const [candidateScoreStrongThreshold, setCandidateScoreStrongThreshold] = useState("80");
@@ -181,6 +184,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
 
   const addRuleMutation = useMutation({
     mutationFn: async ({ field, value }: { field: string; value: string }) => {
+      if (!canAdjustPlanning) throw new Error("Inventory adjustment permission is required to change exclusions.");
       const res = await fetch("/api/purchasing/exclusion-rules", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -206,6 +210,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
 
   const deleteRuleMutation = useMutation({
     mutationFn: async (id: number) => {
+      if (!canAdjustPlanning) throw new Error("Inventory adjustment permission is required to change exclusions.");
       const res = await fetch(`/api/purchasing/exclusion-rules/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error("Failed to delete rule");
       return res.json();
@@ -215,10 +220,14 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
       toast({ title: "Rule deleted" });
     },
+    onError: (err: Error) => {
+      toast({ title: "Failed to delete rule", description: err.message, variant: "destructive" });
+    },
   });
 
   const updateSettingsMutation = useMutation({
     mutationFn: async (updates: Partial<AutoDraftSettings>) => {
+      if (!canAdjustPlanning) throw new Error("Inventory adjustment permission is required to change automation settings.");
       const res = await fetch("/api/purchasing/auto-draft-settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -347,6 +356,8 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
 
         <div className="space-y-5 py-2">
           <PurchasePlanningPolicyEditor />
+          {!canAdjustPlanning && <p className="text-sm text-muted-foreground">Inventory adjustment permission is required to change exclusions and automation settings.</p>}
+          <fieldset disabled={!canAdjustPlanning} className="space-y-5">
           {/* Active Rules */}
           <div>
             <div className="flex items-center gap-2 mb-2">
@@ -369,6 +380,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
                     variant="ghost"
                     size="sm"
                     className="h-6 w-6 p-0 text-muted-foreground hover:text-red-500 hover:bg-red-50"
+                    aria-label={`Delete exclusion rule ${rule.value}`}
                     onClick={() => deleteRuleMutation.mutate(rule.id)}
                     disabled={deleteRuleMutation.isPending}
                   >
@@ -850,6 +862,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
               </div>
             </div>
           </div>
+          </fieldset>
         </div>
       </DialogContent>
     </Dialog>

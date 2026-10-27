@@ -24,7 +24,7 @@ import { readCustomerReturnLiveClaims } from "./customer-return-live-claims";
 import { projectCustomerReturnLiveDelivery } from "./customer-return-live-delivery";
 import { customerReturnProviderGid as gid } from "./customer-return-live-identity";
 import { customerReturnPublicLineId, readCustomerReturnOriginalBoxes, type ReturnBoxReporter } from "./customer-return-live-packaging";
-import type { CustomerReturnPackageDimensionsReader } from "./customer-return-package-dimensions.ports";
+import type { CustomerReturnPackageDimensionsReader, CustomerReturnStoredPackageDimensionsReader } from "./customer-return-package-dimensions.ports";
 import { CustomerReturnLocalInspectionError, customerReturnInspectionShopSchema, customerReturnLocalInspectionSnapshotSchema,
   type CustomerReturnLocalInspectionReader, type CustomerReturnLocalInspectionSnapshot } from "./customer-return-local-inspection.ports";
 import { CustomerReturnShopifySnapshotError, customerReturnShopifySnapshotSchema,
@@ -37,6 +37,7 @@ export interface CustomerReturnLiveDependencies {
   local: CustomerReturnLocalInspectionReader;
   shopify: CustomerReturnShopifySnapshotReader;
   dimensions: CustomerReturnPackageDimensionsReader;
+  storedDimensions?: CustomerReturnStoredPackageDimensionsReader;
   measurements?: CustomerReturnBoxMeasurements;
   policies: CustomerReturnPortalPolicyReader;
   reportBoxDiagnostic?: ReturnBoxReporter;
@@ -146,7 +147,8 @@ export class CustomerReturnLiveService {
     }));
     if (canonicalScope) verifyProviderOwnership(provider, canonicalScope);
     verifyIdentity(first, provider, reference);
-    const boxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic, this.dependencies.measurements);
+    const boxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic,
+      this.dependencies.measurements, this.dependencies.storedDimensions);
     const finalRaw = await this.dependencies.local.read(lookup);
     if (finalRaw === null) throw changed();
     const local = customerReturnLocalInspectionSnapshotSchema.parse(finalRaw);

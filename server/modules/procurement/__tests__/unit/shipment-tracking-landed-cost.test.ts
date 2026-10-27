@@ -1,4 +1,6 @@
 import { readShipmentCostReviewInTransaction } from "../../shipment-cost-review.repository";
+import { readShipmentHealthEvidence, type ShipmentHealthReadEvidence } from "../../shipment-health-evidence.repository";
+vi.mock("../../shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn() }));
 import { shipmentCostReviewSchema, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import { landedCostHealthSchema } from "@shared/procurement/landed-cost-health";
 vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn() }));
@@ -43,7 +45,7 @@ function buildTransactionalCogs() {
 }
 
 function buildStorage(overrides: Record<string, any> = {}) {
-  return {
+  const storage = {
     db: { execute: vi.fn().mockResolvedValue({}) },
     getInboundShipments: vi.fn().mockResolvedValue([]),
     getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing" }),
@@ -72,6 +74,23 @@ function buildStorage(overrides: Record<string, any> = {}) {
     getProductVariantById: vi.fn().mockResolvedValue({ id: 10, unitsPerVariant: 1 }),
     ...overrides,
   } as any;
+  // Preserve the existing scenarios at the raw evidence boundary. The real
+  // batched SQL/grouping is covered by repository and PostgreSQL tests.
+  vi.mocked(readShipmentHealthEvidence).mockImplementation(async (tx, ids) => {
+    const result = new Map<number, ShipmentHealthReadEvidence>();
+    for (const id of ids) {
+      const lines = await storage.getInboundShipmentLines(id, tx);
+      const costs = await storage.getInboundFreightCosts(id, tx);
+      result.set(id, { lines, costs, provisionalLots: await storage.getProvisionalLotsByShipment(id, tx),
+        allocationsByCostId: new Map(await Promise.all(costs.map(async (cost: any) => [cost.id, await storage.getInboundFreightCostAllocations(cost.id, tx)]))),
+        snapshotsByLineId: new Map((await Promise.all(lines.map((line: any) => storage.getLandedCostSnapshots(line.id, tx)))).flat().map((snapshot: any) => [snapshot.inboundShipmentLineId, snapshot])),
+        purchaseLinesById: new Map((await Promise.all(lines.filter((line: any) => line.purchaseOrderLineId != null).map((line: any) => storage.getPurchaseOrderLineById(line.purchaseOrderLineId, tx)))).filter(Boolean).map((line: any) => [line.id, line])),
+        purchaseOrdersById: new Map((await Promise.all(lines.filter((line: any) => line.purchaseOrderId != null).map((line: any) => storage.getPurchaseOrderById(line.purchaseOrderId, tx)))).filter(Boolean).map((order: any) => [order.id, order])),
+      });
+    }
+    return result;
+  });
+  return storage;
 }
 
 function productValueEvidence(totalProductCostCents: number, orderQty = 5, qtyShipped = 5) {
@@ -316,6 +335,57 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
 });
 
 describe("ShipmentTrackingService.getEnrichedLines", () => {
+  function unallocatedProductStorage(allocatedCostCents: unknown) {
+    return buildStorage({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{
+        id: 11, purchaseOrderId: 1, purchaseOrderLineId: 21, productVariantId: null,
+        qtyShipped: 5, allocatedCostCents,
+      }]),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({
+        id: 21, purchaseOrderId: 1, lineType: "product", orderQty: 5,
+        totalProductCostCents: 500, unitCostCents: 100, unitCostMills: 10000,
+      }),
+    });
+  }
+
+  it.each([null, undefined])("keeps an unallocated product line readable without inventing zero costs (%s)", async amount => {
+    const storage = unallocatedProductStorage(amount);
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getEnrichedLines(1);
+
+    expect(result[0]).toMatchObject({
+      allocatedCostCents: null,
+      freightAllocatedCents: null, dutyAllocatedCents: null,
+      insuranceAllocatedCents: null, otherAllocatedCents: null,
+      freightAllocatedMillsPerUnit: null, dutyAllocatedMillsPerUnit: null,
+      insuranceAllocatedMillsPerUnit: null, otherAllocatedMillsPerUnit: null,
+      totalAllocatedMillsPerUnit: null, landedUnitCostMills: null,
+      poUnitCostMills: 10000, productValueIssue: null,
+    });
+    expect(storage.updateInboundShipmentLine).not.toHaveBeenCalled();
+    expect(storage.bulkCreateInboundFreightCostAllocations).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicitly recorded zero allocation distinct from missing allocation evidence", async () => {
+    const service = createShipmentTrackingService({} as any, unallocatedProductStorage(0));
+
+    const result = await service.getEnrichedLines(1);
+
+    expect(result[0]).toMatchObject({ allocatedCostCents: 0, totalAllocatedMillsPerUnit: 0,
+      landedUnitCostMills: 10000, freightAllocatedCents: null, freightAllocatedMillsPerUnit: null });
+  });
+
+  it.each(["invalid", "", "1.2", Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects a present malformed or unsafe allocation instead of returning an unknown or zero amount (%s)", async amount => {
+      const service = createShipmentTrackingService({} as any, unallocatedProductStorage(amount));
+
+      await expect(service.getEnrichedLines(1)).rejects.toMatchObject({
+        name: "MoneyInputError", context: { field: "allocatedCents", unit: "cents" },
+      });
+    },
+  );
+
   it("returns PO SKU, mills unit costs, and allocation category breakdowns for the allocation tab", async () => {
     const storage = buildStorage({
       getInboundShipmentLines: vi.fn().mockResolvedValue([
@@ -395,7 +465,7 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
     const [line] = await service.getEnrichedLines(1);
 
     expect(line).toEqual(expect.objectContaining({ allocatedCostCents: null, freightAllocatedCents: null,
-      freightAllocatedMillsPerUnit: 0, totalAllocatedMillsPerUnit: 0, poUnitCostMills: 10000, landedUnitCostMills: 10000 }));
+      freightAllocatedMillsPerUnit: null, totalAllocatedMillsPerUnit: null, poUnitCostMills: 10000, landedUnitCostMills: null }));
   });
 
   it("still rejects a present allocation that is not exact integer cents", async () => {
@@ -724,7 +794,7 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
     expect(result.items[0].detail).toContain("1 lot retains a provisional flag");
     expect(result.items[0].detail).toContain("this flag alone does not mean freight is unposted");
     expect(db.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "repeatable read", accessMode: "read only" });
-    expect(readShipmentCostReviewInTransaction).toHaveBeenCalledWith(tx, 1);
+    expect(readShipmentCostReviewInTransaction).toHaveBeenCalledWith(tx, 1, expect.objectContaining({ read: expect.any(Function) }));
     expect(storage.getProvisionalLotsByShipment).toHaveBeenCalledWith(1, tx);
     expect(storage.getLandedCostSnapshots).toHaveBeenCalledWith(11, tx);
   });

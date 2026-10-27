@@ -46,6 +46,7 @@ import { receivingImportRowSchema } from "@shared/procurement/receiving-import";
 import { planReceivingImportIdentities } from "./domain/receiving-import-identity";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { convertReceiptCounts, receiptInteger, receivingUnitVersion, withReceivingUnitVersion } from "./receiving-unit-contract";
+import { toBasePieces, UnitQuantityError } from "@shared/procurement/unit-quantity";
 import { Decimal } from "decimal.js";
 import { resolveReceiptCostEvidence } from "./receipt-cost-evidence.service";
 import {
@@ -187,9 +188,9 @@ interface Storage {
   getProductVariantById(id: number, tx?: any): Promise<any>;
   getProductVariantsByProductId(productId: number): Promise<any[]>;
   getAllProductVariants(): Promise<any[]>;
-  getProductBySku(sku: string): Promise<any>;
-  createProduct(data: any): Promise<any>;
-  createProductVariant(data: any): Promise<any>;
+  getProductBySku(sku: string, tx?: any): Promise<any>;
+  createProduct(data: any, tx?: any): Promise<any>;
+  createProductVariant(data: any, tx?: any): Promise<any>;
   // Location lookups
   getAllWarehouseLocations(): Promise<any[]>;
   getAllProductLocations(): Promise<any[]>;
@@ -1902,74 +1903,81 @@ export class ReceivingService {
   }
 
   async createVariantFromLine(lineId: number) {
-    const line = await this.db.transaction(async (tx) => {
-      const locked = await this.lockReceivingLineAndOrder(tx, lineId);
-      return locked.line;
-    });
-    if (!line) throw new ReceivingError("Receiving line not found", 404);
-    if (!line.sku) throw new ReceivingError("Line has no SKU");
-    if (line.productVariantId) throw new ReceivingError("Line already has a linked product variant");
+    return this.db.transaction(async (tx) => {
+      const { line } = await this.lockReceivingLineAndOrder(tx, lineId);
+      if (!line) throw new ReceivingError("Receiving line not found", 404);
+      if (!line.sku) throw new ReceivingError("Line has no SKU");
+      if (line.productVariantId) throw new ReceivingError("Line already has a linked product variant");
 
-    const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
-    const match = line.sku.match(variantPattern);
+      const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
+      const match = line.sku.match(variantPattern);
 
-    let baseSku: string;
-    let variantType: string;
-    let unitsPerVariant: number;
-    let hierarchyLevel: number;
-    let variantName: string;
+      let baseSku: string;
+      let variantType: string;
+      let unitsPerVariant: number;
+      let hierarchyLevel: number;
+      let variantName: string;
 
-    if (match) {
-      baseSku = match[1].toUpperCase();
-      variantType = match[2].toUpperCase();
-      unitsPerVariant = parseInt(match[3], 10);
-      hierarchyLevel = variantType === "P" ? 1 : variantType === "B" ? 2 : 3;
-      const typeName = variantType === "P" ? "Pack" : variantType === "B" ? "Box" : "Case";
-      variantName = `${typeName} of ${unitsPerVariant}`;
-    } else {
-      // Standalone SKU — single unit
-      baseSku = line.sku.toUpperCase();
-      variantType = "EA";
-      unitsPerVariant = 1;
-      hierarchyLevel = 1;
-      variantName = "Each";
-    }
-
-    // Find or create the parent product
-    let product = await this.storage.getProductBySku(baseSku);
-    if (!product) {
-      product = await this.storage.createProduct({
-        sku: baseSku,
-        name: baseSku,
-        baseUnit: "EA",
-      });
-    }
-
-    // Create the variant
-    let variant;
-    try {
-      variant = await this.storage.createProductVariant({
-        productId: product.id,
-        sku: line.sku.toUpperCase(),
-        name: variantName,
-        unitsPerVariant,
-        hierarchyLevel,
-      });
-    } catch (error: any) {
-      if (error.code === "23505" || error.message?.includes("unique")) {
-        throw new ReceivingError("A variant with this SKU already exists. Use the search to link it instead.", 409);
+      if (match) {
+        baseSku = match[1].toUpperCase();
+        variantType = match[2].toUpperCase();
+        unitsPerVariant = parseInt(match[3], 10);
+        hierarchyLevel = variantType === "P" ? 1 : variantType === "B" ? 2 : 3;
+        const typeName = variantType === "P" ? "Pack" : variantType === "B" ? "Box" : "Case";
+        variantName = `${typeName} of ${unitsPerVariant}`;
+      } else {
+        // Standalone SKU — single unit
+        baseSku = line.sku.toUpperCase();
+        variantType = "EA";
+        unitsPerVariant = 1;
+        hierarchyLevel = 1;
+        variantName = "Each";
       }
-      throw error;
-    }
 
-    // Catalog creation does not establish the count unit of a legacy line.
-    // The caller explicitly confirms/converts units with its content version.
-    return {
-      line: withReceivingUnitVersion(line),
-      requiresUnitConfirmation: true,
-      product: { id: product.id, sku: product.sku, name: product.name },
-      variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
-    };
+      // Reuse the quantity owner before creating either catalog record. A zero
+      // or oversized SKU suffix must not create an unusable pack or orphan parent.
+      try { toBasePieces(1, unitsPerVariant); }
+      catch (error) {
+        if (error instanceof UnitQuantityError) throw new ReceivingError(error.message, 400, { code: error.code });
+        throw error;
+      }
+
+      // Keep the parent and variant under the receipt lock and one transaction:
+      // a failed variant insert must roll back a newly created parent as well.
+      let product = await this.storage.getProductBySku(baseSku, tx);
+      if (!product) {
+        product = await this.storage.createProduct({
+          sku: baseSku,
+          name: baseSku,
+          baseUnit: "EA",
+        }, tx);
+      }
+
+      let variant;
+      try {
+        variant = await this.storage.createProductVariant({
+          productId: product.id,
+          sku: line.sku.toUpperCase(),
+          name: variantName,
+          unitsPerVariant,
+          hierarchyLevel,
+        }, tx);
+      } catch (error: any) {
+        if (error.code === "23505" || error.message?.includes("unique")) {
+          throw new ReceivingError("A variant with this SKU already exists. Use the search to link it instead.", 409);
+        }
+        throw error;
+      }
+
+      // Catalog creation does not establish the count unit of a legacy line.
+      // The caller explicitly confirms/converts units with its content version.
+      return {
+        line: withReceivingUnitVersion(line),
+        requiresUnitConfirmation: true,
+        product: { id: product.id, sku: product.sku, name: product.name },
+        variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
+      };
+    });
   }
 
   // ─── Bulk Import Lines (CSV) ──────────────────────────────────

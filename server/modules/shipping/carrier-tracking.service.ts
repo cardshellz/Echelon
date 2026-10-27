@@ -9,6 +9,7 @@ import {
   type NormalizedCarrierTrackingEvent,
   type VerifiedCarrierWebhookReceipt,
 } from "./carrier-tracking.domain";
+import { shippingPackageDimensionObservationSchema } from "@shared/shipping/package-dimensions";
 import type {
   CarrierTrackingRepository,
   ClaimedCarrierTrackingLabelPoll,
@@ -234,6 +235,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       this.dependencies.clock.now(),
     );
     const result = await this.dependencies.repository.observeProviderLabel(observation);
+    const dimensions = shippingPackageDimensionObservationSchema.safeParse(observation.sanitizedPayload.packageDimensions);
     if (observation.labelStatus === "voided" && observation.labelDirection === "outbound") {
       // Also runs for replayed observations: a crash between evidence commit
       // and intake must be recoverable by the webhook/poll retry.
@@ -250,6 +252,8 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         labelDirection: observation.labelDirection,
         labelInserted: result.labelInserted,
         eventInserted: result.eventInserted,
+        observedPackageDimensionsStatus: dimensions.success ? dimensions.data.status : "not_provided",
+        ...(dimensions.success && dimensions.data.status === "invalid" ? { errorCode: dimensions.data.code } : {}),
       },
     });
     return result;

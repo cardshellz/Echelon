@@ -7,6 +7,7 @@ import { projectPurchaseLineShipping, type PurchaseLineShipping } from "@shared/
 import { PoLineShipmentLinks, PoLineShippingQuantity } from "@/features/purchasing/PoLineShipping";
 import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
+import { evaluateDollarInput } from "@/lib/exact-money-input";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
 import { ShipmentQuantityControl } from "@/components/purchasing/ShipmentQuantityControl";
@@ -39,7 +40,6 @@ import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateReco
 import { shipmentCreateSchema, type ShipmentCreateInput } from "@shared/procurement/shipment-create-command";
 import type { ShipmentCreateRecovery as ShipmentRecovery } from "@/lib/shipment-create-command";
 import {
-  dollarsToCents,
   formatMills,
   centsToMills,
 } from "@shared/utils/money";
@@ -1260,6 +1260,7 @@ export default function PurchaseOrderDetail() {
   useEffect(() => {
     if (
       procurementSettings?.useNewPoEditor === true &&
+      hasPermission("purchasing", "edit") &&
       po?.id &&
       po?.status === "draft" &&
       !immutableRecommendationPo &&
@@ -1268,7 +1269,7 @@ export default function PurchaseOrderDetail() {
     ) {
       navigate(`/purchase-orders/${po.id}/edit`, { replace: true });
     }
-  }, [procurementSettings?.useNewPoEditor, po?.id, po?.status, immutableRecommendationPo, navigate, procurementNavigation.purchaseHref, hasExplicitLifecycleTab]);
+  }, [procurementSettings?.useNewPoEditor, hasPermission, po?.id, po?.status, immutableRecommendationPo, navigate, procurementNavigation.purchaseHref, hasExplicitLifecycleTab]);
 
   // Committed purchases open on their connected lifecycle. Explicit bookmarks
   // and the existing draft editor retain their selected view.
@@ -1382,14 +1383,14 @@ export default function PurchaseOrderDetail() {
   const isDraft = po?.status === "draft";
   // Economics and receiving identity are mutable only while the PO is a draft.
   // Post-draft corrections belong in the audited amendment workflow.
-  const canEditLines = Boolean(isDraft && !immutableRecommendationPo);
+  const canEditLines = Boolean(hasPermission("purchasing", "edit") && isDraft && !immutableRecommendationPo);
   const canEditLine = (line: any) => canEditLines &&
     (line.lineType ?? "product") === "product" &&
     (line.status ?? "open") === "open" &&
     [line.receivedQty, line.damagedQty, line.returnedQty, line.cancelledQty]
       .every((quantity) => Number(quantity ?? 0) === 0);
   const isNotCancelled = po && !["cancelled"].includes(po.status);
-  const canEditHeader = Boolean(isNotCancelled && !immutableRecommendationPo);
+  const canEditHeader = Boolean(hasPermission("purchasing", "edit") && isNotCancelled && !immutableRecommendationPo);
   const canSubmitPo = canLifecycleAction("submit", po?.status === "draft");
   const canReturnPoToDraft = canLifecycleAction("return_to_draft", po?.status === "pending_approval");
   const canApprovePo = canLifecycleAction("approve", po?.status === "pending_approval");
@@ -1987,6 +1988,7 @@ export default function PurchaseOrderDetail() {
   const createInvoiceMutation = useMutation({
     onMutate: captureNavigation,
     mutationFn: async () => {
+      if (!hasPermission("purchasing", "create")) throw new Error("Purchasing create permission is required to create an invoice.");
       const idempotencyKey = (
         typeof crypto !== "undefined" && "randomUUID" in crypto
           ? (crypto as any).randomUUID()
@@ -2501,6 +2503,7 @@ export default function PurchaseOrderDetail() {
 
   const updateChargesMutation = useMutation({
     mutationFn: async (data: { incoterms?: string; discountCents?: number; taxCents?: number; shippingCostCents?: number }) => {
+      if (!hasPermission("purchasing", "edit")) throw new Error("Purchasing edit permission is required to update purchase order charges.");
       const res = await fetch(`/api/purchase-orders/${poId}/incoterms-charges`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -2523,6 +2526,15 @@ export default function PurchaseOrderDetail() {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
+
+  function submitDollarCharge(field: "discountCents" | "taxCents" | "shippingCostCents", raw: string, label: string) {
+    const amount = evaluateDollarInput(raw || "0");
+    if (!amount.valid) {
+      toast({ title: "Invalid " + label.toLowerCase(), description: amount.message, variant: "destructive" });
+      return;
+    }
+    updateChargesMutation.mutate({ [field]: amount.cents });
+  }
 
   type ShipmentCreateSubmission = { body: ShipmentCreateInput; recovery?: ShipmentRecovery; navigation: NavigationSnapshot; visit: ReturnType<typeof shipmentCreation.captureVisit> };
   const createShipmentMutation = useMutation({
@@ -2572,6 +2584,7 @@ export default function PurchaseOrderDetail() {
   };
 
   const openCreateInvoiceDialogFromPo = async () => {
+    if (!hasPermission("purchasing", "create")) return;
     let invoiceNumber = "";
     try {
       const res = await fetch("/api/vendor-invoices/next-number");
@@ -2965,25 +2978,8 @@ export default function PurchaseOrderDetail() {
               View / Print
             </Button>
           )}
-          {["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
-            <Button variant="outline" onClick={async () => {
-              let invoiceNumber = "";
-              try {
-                const res = await fetch("/api/vendor-invoices/next-number");
-                if (res.ok) {
-                  const data = await res.json();
-                  invoiceNumber = data.invoiceNumber;
-                }
-              } catch {}
-              setInvoiceForm({
-                invoiceNumber,
-                amountDollars: ((Number(po.totalCents) || 0) / 100).toString(),
-                invoiceDate: new Date().toISOString().slice(0, 10),
-                dueDate: "",
-                notes: "",
-              });
-              setShowCreateInvoiceDialog(true);
-            }} className="flex-1 sm:flex-none min-h-[44px]">
+          {hasPermission("purchasing", "create") && ["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
+            <Button variant="outline" onClick={() => void openCreateInvoiceDialogFromPo()} className="flex-1 sm:flex-none min-h-[44px]">
               <FileText className="h-4 w-4 mr-2" />
               Create Invoice
             </Button>
@@ -3156,6 +3152,7 @@ export default function PurchaseOrderDetail() {
               <div className="text-xs text-muted-foreground">Discount</div>
               {canEditLines && !editingDiscount && (
                 <Button variant="ghost" size="icon" className="h-5 w-5"
+                  aria-label="Edit discount"
                   onClick={() => { setDiscountDollars(((Number(po.discountCents) || 0) / 100).toFixed(2)); setEditingDiscount(true); }}
                 >
                   <Pencil className="h-3 w-3" />
@@ -3164,13 +3161,14 @@ export default function PurchaseOrderDetail() {
             </div>
             {editingDiscount ? (
               <div className="flex gap-1 mt-1">
-                <Input type="number" min="0" step="0.01" value={discountDollars}
+                <Input aria-label="Discount" type="number" min="0" step="0.01" value={discountDollars}
                   onChange={e => setDiscountDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
-                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ discountCents: dollarsToCents(discountDollars || "0") }); if (e.key === "Escape") setEditingDiscount(false); }}
+                  onKeyDown={e => { if (e.key === "Enter") submitDollarCharge("discountCents", discountDollars, "Discount"); if (e.key === "Escape") setEditingDiscount(false); }}
                 />
                 <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
-                  onClick={() => updateChargesMutation.mutate({ discountCents: dollarsToCents(discountDollars || "0") })}
+                  aria-label="Save discount"
+                  onClick={() => submitDollarCharge("discountCents", discountDollars, "Discount")}
                 >
                   <Check className="h-3 w-3" />
                 </Button>
@@ -3202,10 +3200,11 @@ export default function PurchaseOrderDetail() {
                 <Input aria-label="Supplier tax / duties" type="number" min="0" step="0.01" value={taxDollars}
                   onChange={e => setTaxDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
-                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ taxCents: dollarsToCents(taxDollars || "0") }); if (e.key === "Escape") setEditingTax(false); }}
+                  onKeyDown={e => { if (e.key === "Enter") submitDollarCharge("taxCents", taxDollars, "Supplier tax / duties"); if (e.key === "Escape") setEditingTax(false); }}
                 />
                 <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
-                  onClick={() => updateChargesMutation.mutate({ taxCents: dollarsToCents(taxDollars || "0") })}
+                  aria-label="Save supplier tax / duties"
+                  onClick={() => submitDollarCharge("taxCents", taxDollars, "Supplier tax / duties")}
                 >
                   <Check className="h-3 w-3" />
                 </Button>
@@ -3244,10 +3243,11 @@ export default function PurchaseOrderDetail() {
                 <Input aria-label="Supplier freight" type="number" min="0" step="0.01" value={shippingDollars}
                   onChange={e => setShippingDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
-                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ shippingCostCents: dollarsToCents(shippingDollars || "0") }); if (e.key === "Escape") setEditingShipping(false); }}
+                  onKeyDown={e => { if (e.key === "Enter") submitDollarCharge("shippingCostCents", shippingDollars, "Supplier freight"); if (e.key === "Escape") setEditingShipping(false); }}
                 />
                 <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
-                  onClick={() => updateChargesMutation.mutate({ shippingCostCents: dollarsToCents(shippingDollars || "0") })}
+                  aria-label="Save supplier freight"
+                  onClick={() => submitDollarCharge("shippingCostCents", shippingDollars, "Supplier freight")}
                 >
                   <Check className="h-3 w-3" />
                 </Button>
@@ -5269,7 +5269,7 @@ export default function PurchaseOrderDetail() {
               <Button variant="outline" onClick={() => setShowCreateInvoiceDialog(false)}>Cancel</Button>
               <Button
                 onClick={() => createInvoiceMutation.mutate()}
-                disabled={createInvoiceMutation.isPending || !invoiceForm.invoiceNumber.trim()}
+                disabled={!hasPermission("purchasing", "create") || createInvoiceMutation.isPending || !invoiceForm.invoiceNumber.trim()}
               >
                 {createInvoiceMutation.isPending ? "Creating..." : "Create Invoice"}
               </Button>

@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { readPurchaseCostStatus } from "./purchase-cost-status.repository";
+import type { PurchaseCostStatusSnapshotReader } from "./purchase-cost-status-snapshot.repository";
 import { shipmentCostWorkflowIdSchema, shipmentCostReviewSchema, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import type { PoShipmentCostSummaryDatabase } from "./po-shipment-cost-summary.repository";
 import { costInteger } from "../inventory/infrastructure/cost-evidence-values";
@@ -15,7 +16,8 @@ export async function readShipmentCostReview(db: PoShipmentCostSummaryDatabase, 
 }
 
 /** Allows health and other projections to share the same repeatable-read snapshot. */
-export async function readShipmentCostReviewInTransaction(tx: ShipmentExceptionReader, shipmentId: number): Promise<ShipmentCostReview | null> {
+export async function readShipmentCostReviewInTransaction(tx: ShipmentExceptionReader, shipmentId: number,
+  supplierSnapshot?: PurchaseCostStatusSnapshotReader): Promise<ShipmentCostReview | null> {
   shipmentCostWorkflowIdSchema.parse(shipmentId);
   const shipment = await tx.execute(sql`SELECT id FROM procurement.inbound_shipments WHERE id=${shipmentId}`);
   if (!shipment.rows.length) return null;
@@ -31,8 +33,11 @@ export async function readShipmentCostReviewInTransaction(tx: ShipmentExceptionR
   const { exceptions, sourceIssues } = await readShipmentCostPostingEvidence(tx, result.rows.map(row => ({
     lineId: costInteger(row.id, "line.id", 1), shipmentId, contract: row.contract,
   })));
-  return shipmentCostReviewSchema.parse({ shipmentId,
-    supplierCosts: await readPurchaseCostStatus(tx, result.rows.flatMap(row => row.purchase_order_line_id == null ? [] : [costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1)])),
+  const purchaseLineIds = result.rows.flatMap(row => row.purchase_order_line_id == null
+    ? [] : [costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1)]);
+  const supplierCosts = supplierSnapshot ? await supplierSnapshot.read(tx, purchaseLineIds)
+    : await readPurchaseCostStatus(tx, purchaseLineIds);
+  return shipmentCostReviewSchema.parse({ shipmentId, supplierCosts,
     lines: result.rows.map(row => {
     const outcome = row.result as Record<string, unknown> | null;
     return {

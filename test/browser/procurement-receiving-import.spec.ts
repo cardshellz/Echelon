@@ -4,7 +4,7 @@ import { openReceivingMoreActions } from "./procurement-receiving-helpers";
 
 type ImportMode = "ambiguous" | "existing" | "changed" | "malformed" | "lost" | "invalid_count" | "partial" | "success";
 async function setup(page: Page, mode: ImportMode, options: { beforeResponse?: () => Promise<void>; startFromList?: boolean } = {}) {
-  const failures = await installFixtures(page);
+  const failures = await installFixtures(page, { permissions: ["inventory:view", "inventory:adjust", "purchasing:view"] });
   const requests: Array<{ lines: Array<Record<string, unknown>> }> = [];
   const order = { ...receipt(31), sourceType: "blind", purchaseOrderId: null, inboundShipmentId: null,
     status: "draft", warehouseId: 1, receivingLocationId: null, lines: [] };
