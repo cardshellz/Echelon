@@ -103,6 +103,13 @@ integration("durable customer action lookup and transactional source invalidatio
     const enabled = new PostgresOrderActionProjectionStore(pool, ["test-shop.myshopify.com"]);
     expect((await enabled.claim(2, NOW, LEASE)).map(scope => scope.omsOrderId)).toEqual([100]);
   });
+  it("catalog metadata changes do not fan out but changed return weights invalidate evidence", async () => {
+    const scope = await claim(); await store.complete(scope, SNAPSHOT, NOW, new Date(NOW.getTime() + 60_000));
+    await pool.query("UPDATE catalog.product_variants SET name=name || ' revised' WHERE id IN (SELECT product_variant_id FROM oms.oms_order_lines WHERE order_id=100)");
+    expect((await read()).orders[0].state).toBe("ready");
+    await pool.query("UPDATE catalog.product_variants SET weight_grams=weight_grams+1 WHERE id IN (SELECT product_variant_id FROM oms.oms_order_lines WHERE order_id=100)");
+    expect((await read()).orders[0].state).toBe("refreshing");
+  });
   it("does not let an old failed worker postpone newer dirty work", async () => {
     const scope = await claim(); await pool.query("UPDATE oms.oms_order_lines SET quantity=2 WHERE id=101");
     await store.fail(scope, NOW, new Date(NOW.getTime() + 1_800_000), "ORDER_ACTION_INSPECTION_FAILED");

@@ -173,7 +173,9 @@ CREATE TRIGGER customer_actions_label_link AFTER INSERT OR UPDATE OR DELETE ON w
 CREATE TRIGGER customer_actions_carrier_match AFTER INSERT OR UPDATE OR DELETE ON wms.carrier_tracking_event_matches FOR EACH ROW EXECUTE FUNCTION oms.customer_order_actions_source_changed('carrier_match');
 CREATE TRIGGER customer_actions_carrier_state AFTER INSERT OR UPDATE OR DELETE ON wms.carrier_tracking_reconciliation_state FOR EACH ROW EXECUTE FUNCTION oms.customer_order_actions_source_changed('carrier_state');
 CREATE TRIGGER customer_actions_carrier_event AFTER UPDATE OR DELETE ON wms.carrier_tracking_events FOR EACH ROW EXECUTE FUNCTION oms.customer_order_actions_source_changed('carrier_event');
-CREATE TRIGGER customer_actions_variant AFTER INSERT OR UPDATE OR DELETE ON catalog.product_variants FOR EACH ROW EXECUTE FUNCTION oms.customer_order_actions_source_changed('catalog_variant');
+-- The returns inspection reads only weight_grams from the catalog variant.
+-- Inventory/publication/catalog metadata updates must not fan out across old orders.
+CREATE TRIGGER customer_actions_variant AFTER INSERT OR UPDATE OF weight_grams OR DELETE ON catalog.product_variants FOR EACH ROW EXECUTE FUNCTION oms.customer_order_actions_source_changed('catalog_variant');
 CREATE TRIGGER customer_actions_inventory_return AFTER INSERT OR UPDATE OR DELETE ON inventory.inventory_transactions FOR EACH ROW EXECUTE FUNCTION oms.customer_order_actions_source_changed('inventory_return');
 CREATE TRIGGER customer_actions_channel AFTER UPDATE ON channels.channels FOR EACH ROW EXECUTE FUNCTION oms.customer_order_actions_source_changed('channel_record');
 CREATE TRIGGER customer_actions_connection AFTER INSERT OR UPDATE OR DELETE ON channels.channel_connections FOR EACH ROW EXECUTE FUNCTION oms.customer_order_actions_source_changed('channel');
