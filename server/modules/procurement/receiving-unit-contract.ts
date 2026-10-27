@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { convertUnitQuantity, UnitQuantityError } from "@shared/procurement/unit-quantity";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { reviewReceivingConfiguration } from "@shared/procurement/receiving-configuration";
 
 export const MAX_RECEIVING_QUANTITY = 2_147_483_647;
 
@@ -59,16 +60,13 @@ export function planReceiptUnits(input: {
   if (input.selection) {
     receiptInteger(input.selection.productVariantId, "Selected receive variant", true);
     receiptInteger(input.selection.unitsPerVariant, "Reviewed pieces per receiving unit", true);
-    const selected = variants.find(variant => variant.id === input.selection!.productVariantId);
-    if (!selected) throw new ReceivingUnitError("The chosen receiving unit is inactive, missing, or belongs to another product. Choose an active unit for this product.", 409,
-      { code: "RECEIVING_VARIANT_REVIEW_REQUIRED", productId: input.productId, productVariantId: input.selection.productVariantId });
-    const units = receiptInteger(selected.unitsPerVariant, "Pieces per receiving unit", true);
-    if (units !== input.selection.unitsPerVariant) throw new ReceivingUnitError("The chosen unit's pack size changed. Refresh and review its current piece count.", 409,
-      { code: "RECEIVING_UNIT_SOURCE_CHANGED", productId: input.productId, productVariantId: selected.id });
-    if (baseQty % units !== 0) throw new ReceivingUnitError("The chosen receiving unit cannot represent these pieces as a whole count. Choose a smaller pack or a piece unit.", 409,
-      { code: "RECEIVING_UNIT_SELECTION_INEXACT", productId: input.productId, productVariantId: selected.id, expectedBaseQty: baseQty });
-    return { productVariantId: selected.id, unitsPerVariant: units, expectedQty: baseQty / units,
-      countsAsPieces: units === 1, preferredVariantId: preferred?.id ?? null,
+    const review = reviewReceivingConfiguration({ pieces: baseQty, variantId: input.selection.productVariantId,
+      recordedUnits: input.selection.unitsPerVariant, activeVariants: variants });
+    if (review.issue) throw new ReceivingUnitError(review.issue.message, 409, { code: review.issue.code,
+      productId: input.productId, productVariantId: input.selection.productVariantId, expectedBaseQty: baseQty });
+    const selected = variants.find(variant => variant.id === input.selection!.productVariantId)!;
+    return { productVariantId: selected.id, unitsPerVariant: selected.unitsPerVariant, expectedQty: review.count!,
+      countsAsPieces: selected.unitsPerVariant === 1, preferredVariantId: preferred?.id ?? null,
       preferredUnitsPerVariant: preferred?.unitsPerVariant ?? null, selectedVariantSku: selected.sku ?? null };
   }
   if (input.preferredVariantId !== null && !preferred) {

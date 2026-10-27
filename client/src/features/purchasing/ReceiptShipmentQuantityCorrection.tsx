@@ -71,6 +71,7 @@ export function ReceiptShipmentQuantityCorrection(props: {
 export function ShipmentQuantityEditor(props: {
   shipmentId?: number;
   shipmentStatus?: string;
+  buttonLabel?: string;
   shipmentLines: readonly {
     id: number;
     sku: string | null;
@@ -94,7 +95,7 @@ export function ShipmentQuantityEditor(props: {
   );
 }
 function QuantityCorrectionDialog(
-  props: Entry & { onSaved?: () => void; repairLineId?: number },
+  props: Entry & { onSaved?: () => void; repairLineId?: number; buttonLabel?: string },
 ) {
   const purpose = props.receiptLineId === undefined ? "shipment" : "receipt";
   const [open, setOpen] = useState(props.repairLineId !== undefined);
@@ -110,9 +111,9 @@ function QuantityCorrectionDialog(
         className="whitespace-normal"
         onClick={() => setOpen(true)}
       >
-        {purpose === "shipment"
+        {props.buttonLabel ?? (purpose === "shipment"
           ? "Edit shipment"
-          : "Correct received quantities"}
+          : "Correct received quantities")}
       </Button>
       <Dialog
         open={open}

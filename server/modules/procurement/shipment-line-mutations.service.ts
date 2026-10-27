@@ -34,6 +34,7 @@ interface Dependencies {
   resolveDimensions(variantId: number, vendorId: number | undefined, tx: any): Promise<Dimensions>;
   recomputeTotals(id: number, tx: any, now?: Date): Promise<void>;
   refreshAllocations(tx: any, id: number, shipment: InboundShipment, now?: Date): Promise<unknown>;
+  checkReceivingSetup(tx: any, shipmentId: number, required: boolean): Promise<unknown>;
 }
 
 function reject(message: string, code: string, status = 409): never {
@@ -325,6 +326,9 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
       } else reject("Unsupported shipment line command.", "SHIPMENT_LINE_OPERATION_INVALID", 400);
     }
     if (affectsPhysical && !deferDerivedUpdates) {
+      // Drafts may be incomplete. Do not retroactively prevent corrections to
+      // delivered history; the operational booking/departure gates own readiness.
+      await dependencies.checkReceivingSetup(tx, shipmentId, shipment.status === "booked" || shipment.status === "in_transit");
       validateShipmentPhysicalTotals(await storage.getInboundShipmentLines(shipmentId, tx));
       await dependencies.recomputeTotals(shipmentId, tx, now);
       await dependencies.refreshAllocations(tx, shipmentId, shipment, now);
@@ -356,6 +360,7 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     }
     const lines = await storage.getInboundShipmentLines(shipmentId, tx);
     if (!lines.length) reject("A shipment needs at least one line. Cancel the shipment to remove the whole delivery.", "SHIPMENT_EDITOR_EMPTY");
+    await dependencies.checkReceivingSetup(tx, shipmentId, shipment.status === "booked" || shipment.status === "in_transit");
     validateShipmentPhysicalTotals(lines);
     await dependencies.recomputeTotals(shipmentId, tx, now);
     await dependencies.refreshAllocations(tx, shipmentId, shipment, now);

@@ -5624,7 +5624,7 @@ export default function PurchaseOrderDetail() {
                         <span className="break-all">{line.sku ?? `PO line ${line.id}`}</span>
                       </label>
                       <p className="text-xs text-muted-foreground">{line.productName || line.description || "Product"} · Ordered {line.orderQty.toLocaleString("en-US")} pieces · Shipped {line.alreadyShippedQty.toLocaleString("en-US")} pieces</p>
-                      <ShipmentQuantityControl id={`create-shipment-line-${line.id}`} value={selected.quantity}
+                      <ShipmentQuantityControl id={`create-shipment-line-${line.id}`} value={selected.quantity} productName={line.productName ?? line.sku ?? "Product"}
                         units={parseShipmentUnits(line.shipmentUnits)} maximumPieces={line.remainingQty} disabled={!selected.checked}
                         onChange={(quantity) => setLineSelections((previous) => ({ ...previous, [line.id]: { ...selected, quantity } }))} />
                     </div>;

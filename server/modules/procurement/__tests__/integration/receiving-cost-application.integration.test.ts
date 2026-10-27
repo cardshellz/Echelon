@@ -17,6 +17,7 @@ import { projectPoLineLandedCosts } from "@shared/procurement/po-line-landed-cos
 import { readPoShipmentCostSummary, readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
 import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
+import { shipmentLineVersion } from "../../shipment-line-version";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 import { resetFixtureWithEmptyReceivingCustody } from "./receiving-custody-fixture";
 import { createShipmentCostExceptionService, shipmentExceptionScope } from "../../shipment-cost-exception.service";
@@ -321,9 +322,18 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1 AND action='procurement.shipment_receipt.receiving_configuration_selected'", [actorId])).rows[0].count).toBe(1);
   });
 
-  it("uses a newly added product configuration through receiving and posts exactly the shipment's original pieces", async () => {
+  it("carries a new configuration through shipment editing, booking, departure, receiving and exact inventory costing", async () => {
     await pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit)
       VALUES(202,100,'AUDIT-NEW-CASE','Case of 100',100,'case',false)`);
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    const [original] = await storage.getInboundShipmentLines(1);
+    await database.transaction(tx => shipment.executeLineCommandInTransaction(tx, { operation: "update", resourceId: original.id,
+      body: { expectedVersion: shipmentLineVersion(original), unitSelection: { productVariantId: 202, unitsPerVariant: 100, quantity: 1 } } }, actorId, NOW));
+    expect(await shipment.getReceivingSetup(1)).toMatchObject({ ready: true, lines: [{ pieces: 100, count: 1 }] });
+    await shipment.book(1, actorId);
+    await shipment.markInTransit(1, actorId);
+    await shipment.markDelivered(1, actorId);
+    await shipment.startCosting(1, actorId);
     const receiptUnitSelections = [{ shipmentLineId: 11, productVariantId: 202, unitsPerVariant: 100, expectedBaseQty: 100 }];
     const receipt = await purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10, receiptUnitSelections });
     const [line] = await storage.getReceivingLines(receipt.id);
@@ -336,8 +346,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await pool.query("SELECT product_variant_id,qty_received FROM inventory.inventory_lots WHERE receiving_order_id=$1", [receipt.id])).rows).toEqual([{ product_variant_id: 202, qty_received: 1 }]);
     expect(await lot()).toMatchObject({ product: "1000000", packaging: "100000", freight: "0", total: "1100000" });
     await approveEvidence();
-    await shipment.finalizeAllocations(1, actorId);
-    await shipment.pushLandedCostsToLots(1, actorId);
+    await shipment.close(1, actorId);
     // One 100-piece configuration carries the same extended value as two
     // 50-piece configurations: $120 product + $10 packaging + $50 freight.
     expect(await lot()).toMatchObject({ product: "1200000", packaging: "100000", freight: "500000", total: "1800000" });

@@ -27,7 +27,8 @@ export function createShipmentEditorService(database: AmendmentDatabase, owner: 
       return value;
     };
     for (const id of request.removals) commands.push({ operation: "delete", resourceId: id, body: { expectedVersion: version(id) } });
-    for (const change of request.changes) commands.push({ operation: "update", resourceId: change.lineId, body: { ...change.fields, expectedVersion: version(change.lineId) } });
+    for (const change of request.changes) commands.push({ operation: "update", resourceId: change.lineId, body: { ...change.fields,
+      ...(change.unitSelection ? { unitSelection: change.unitSelection } : {}), expectedVersion: version(change.lineId) } });
     for (const addition of request.additions) commands.push({ operation: "add-from-po", resourceId: source.context.shipmentId,
       body: { purchaseOrderId: addition.purchaseOrderId, lineSelections: [{ poLineId: addition.purchaseOrderLineId, qty: addition.quantityPieces, unitSelection: addition.unitSelection, packing: addition.packing }] } });
     const at = clock();

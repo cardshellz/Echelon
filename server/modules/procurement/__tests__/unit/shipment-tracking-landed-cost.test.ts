@@ -24,7 +24,7 @@ beforeEach(() => {
 function buildTransactionalDb() {
   const tx = {
     insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
-    execute: vi.fn().mockResolvedValue({ rows: [{ id: 1 }] }),
+    execute: vi.fn(async query => ({ rows: new PgDialect().sqlToQuery(query).sql.includes("FROM procurement.purchase_order_lines") ? [] : [{ id: 1 }] })),
   };
   const db = {
     execute: vi.fn().mockResolvedValue({ rows: [] }),

@@ -1163,6 +1163,127 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     expect(await execute(fromPo())).toMatchObject([{ purchaseOrderLineId: 22, qtyShipped: 40 }]);
   });
 
+  it("allows an incomplete draft, then books and ships only after the reviewed configuration is saved", async () => {
+    await pool.query("UPDATE procurement.purchase_order_lines SET expected_receive_variant_id=NULL,product_variant_id=NULL WHERE id=22");
+    const [added] = await execute(fromPo(2, 40, 22)) as Array<{ id: number }>;
+    expect(await service.getReceivingSetup(2)).toMatchObject({ ready: false, issueCount: 1 });
+    const before = await state();
+    await expect(service.book(2, actorId)).rejects.toMatchObject({ statusCode: 409, details: { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED" } });
+    expect(await state()).toEqual(before);
+    await pool.query("INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit) VALUES(900,100,'TEST-RECEIVE-10','Pack of ten',10,'pack',false)");
+    await execute(await patch({ qtyShipped: 40, unitSelection: { productVariantId: 900, unitsPerVariant: 10, quantity: 4 } }, added.id));
+    expect(await service.getReceivingSetup(2)).toMatchObject({ ready: true, lines: [{ pieces: 40, count: 4 }] });
+    await service.book(2, actorId); await service.markInTransit(2, actorId);
+    expect((await pool.query("SELECT status FROM procurement.inbound_shipments WHERE id=2")).rows[0].status).toBe("in_transit");
+    expect(await readLine(added.id)).toMatchObject({ qtyShipped: 40, productVariantId: 900, unitsPerVariantSnapshot: 10 });
+    expect((await pool.query("SELECT to_status FROM procurement.inbound_shipment_status_history WHERE inbound_shipment_id=2 ORDER BY id")).rows)
+      .toEqual([{ to_status: "booked" }, { to_status: "in_transit" }]);
+  });
+
+  it("rejects an edit that would invalidate a booked shipment and preserves its prior costs and quantities", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='booked' WHERE id=1");
+    const before = await state();
+    await expect(execute(await patch({ qtyShipped: 501 }))).rejects.toMatchObject({ details: { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED" } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("rechecks catalog changes at departure without changing the saved shipment or charge", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    await service.book(1, actorId);
+    await pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=200");
+    const before = await state();
+    await expect(service.markInTransit(1, actorId)).rejects.toMatchObject({ details: { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED" } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("includes every PO on a multi-PO shipment in its receiving readiness check", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    await execute({ operation: "add-from-po", resourceId: 1, body: { purchaseOrderId: 19, lineSelections: [{ poLineId: 29, qty: 20,
+      unitSelection: { productVariantId: 300, unitsPerVariant: 10, quantity: 2 } }] } });
+    const setup = await service.getReceivingSetup(1);
+    expect(setup.ready).toBe(true);
+    expect(setup.lines.map(line => line.purchaseOrderId).sort((left, right) => left! - right!)).toEqual([10, 19]);
+    await pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=300");
+    const before = await state();
+    await expect(service.book(1, actorId)).rejects.toMatchObject({ details: { receivingSetup: { issueCount: 1 } } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("previews a configuration-only admin edit, posts it once, and preserves the physical piece and charge totals", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='booked' WHERE id=1");
+    await pool.query("UPDATE procurement.inbound_shipment_lines SET product_variant_id=NULL,units_per_variant_snapshot=NULL WHERE id=11");
+    await pool.query("UPDATE procurement.purchase_order_lines SET product_variant_id=NULL,expected_receive_variant_id=NULL WHERE id=21");
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const context = await editor.context(1, actorId);
+    const request: ShipmentEditorRequest = { sourceVersion: context.sourceVersion, reason: "Verified case configuration against supplier packing list",
+      changes: [{ lineId: 11, fields: {}, unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 } }], removals: [], additions: [] };
+    const before = await state();
+    const preview = await editor.preview(1, request, actorId);
+    expect(await state()).toEqual(before);
+    expect(preview.review.before[0].shipmentUnits?.selectedVariantId).toBeNull();
+    expect(preview.review.after[0].shipmentUnits).toMatchObject({ selectedVariantId: 200, unitsPerVariantSnapshot: 250 });
+    expect(preview.review.before[0].fields.qtyShipped).toBe(preview.review.after[0].fields.qtyShipped);
+    expect(preview.review.charges).toEqual([{ currency: "USD", cents: 500 }]);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    const descriptor = editorDescriptor(body);
+    const saved = await editor.approve(1, body, actorId, descriptor);
+    expect(saved.httpStatus).toBe(200);
+    expect(await editor.approve(1, body, actorId, descriptor)).toMatchObject({ replayed: true });
+    expect(await service.getReceivingSetup(1)).toMatchObject({ ready: true });
+    expect(await readLine()).toMatchObject({ qtyShipped: 500, cartonCount: 2, unitsPerVariantSnapshot: 250 });
+    expect((await pool.query("SELECT actual_cents FROM procurement.inbound_freight_costs WHERE id=31")).rows).toEqual([{ actual_cents: "500" }]);
+  });
+
+  it("allows an administrator to add an unconfigured line to a draft and makes its remaining setup explicit", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    await pool.query("UPDATE procurement.purchase_order_lines SET product_variant_id=NULL,expected_receive_variant_id=NULL WHERE id=22");
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request: ShipmentEditorRequest = { sourceVersion: (await editor.context(1, actorId)).sourceVersion,
+      reason: "Save the supplier's draft manifest while receiving configuration is completed", changes: [], removals: [],
+      additions: [{ clientKey: "4c26d134-3a6e-4bf1-b2dc-5820013e56ba", purchaseOrderId: 10, purchaseOrderLineId: 22, quantityPieces: 40 }] };
+    const preview = await editor.preview(1, request, actorId);
+    expect(preview.review.after.find(line => line.purchaseOrderLineId === 22)?.shipmentUnits?.selectedVariantId).toBeNull();
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    expect(await editor.approve(1, body, actorId, editorDescriptor(body))).toMatchObject({ httpStatus: 200 });
+    expect(await service.getReceivingSetup(1)).toMatchObject({ ready: false, issueCount: 1 });
+    await expect(service.book(1, actorId)).rejects.toMatchObject({ details: { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED" } });
+  });
+
+  it("holds catalog evidence stable until booking and its history commit", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    let releaseBooking!: () => void, enteredHistory!: () => void;
+    const held = new Promise<void>(resolve => { releaseBooking = resolve; });
+    const entered = new Promise<void>(resolve => { enteredHistory = resolve; });
+    const gated = createService(database, { ...storage, createInboundShipmentStatusHistory: async (entry: any, executor: any) => {
+      enteredHistory(); await held; return storage.createInboundShipmentStatusHistory(entry, executor);
+    } } as Parameters<typeof createService>[1], undefined, () => NOW);
+    const booking = gated.book(1, actorId);
+    await entered;
+    const catalogWriter = await pool.connect();
+    try {
+      await catalogWriter.query("BEGIN");
+      // Deliberately fail rather than allowing a racing catalog change to wait
+      // for the test's booking gate. The share lock must be owned already.
+      await catalogWriter.query("SET LOCAL lock_timeout='100ms'");
+      await expect(catalogWriter.query("UPDATE catalog.product_variants SET is_active=false WHERE id=200"))
+        .rejects.toMatchObject({ code: "55P03" });
+    } finally {
+      await catalogWriter.query("ROLLBACK"); catalogWriter.release(); releaseBooking();
+    }
+    await booking;
+    expect((await pool.query("SELECT status FROM procurement.inbound_shipments WHERE id=1")).rows[0].status).toBe("booked");
+    expect((await pool.query("SELECT is_active FROM catalog.product_variants WHERE id=200")).rows[0].is_active).toBe(true);
+  });
+
+  it("serializes duplicate booking attempts into one committed status history entry", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    const outcomes = await Promise.all([outcome(service.book(1, actorId)), outcome(service.book(1, actorId))]);
+    expect(outcomes.filter(result => result.ok)).toHaveLength(1);
+    expect((await pool.query("SELECT to_status FROM procurement.inbound_shipment_status_history WHERE inbound_shipment_id=1")).rows)
+      .toEqual([{ to_status: "booked" }]);
+    expect(await readLine()).toMatchObject({ qtyShipped: 500, cartonCount: 2, allocatedCostCents: 500 });
+  });
+
   it("uses the PO SKU as identity evidence when the source has no receive variant", async () => {
     await pool.query("UPDATE procurement.purchase_order_lines SET expected_receive_variant_id=NULL,product_variant_id=NULL,sku='TEST-PO-ONLY' WHERE id=22");
     expect(await execute({ operation: "import", resourceId: 2, body: { rows: [

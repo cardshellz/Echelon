@@ -7,6 +7,7 @@ import { ShipmentQuantityEditor } from "@/features/purchasing/ReceiptShipmentQua
 import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
 import { clearReceiptUnitDraft, fetchShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
 import type { ShipmentReceiptUnitSelection } from "@shared/procurement/shipment-receipt-plan";
+import { shipmentReceivingSetupSchema } from "@shared/procurement/shipment-receiving-setup";
 import { ShipmentCustodyReceiptLinks } from "@/components/purchasing/ShipmentCustodyReceiptLinks";
 import { formatMills } from "@shared/utils/money";
 import { useEffect, useMemo, useState, useRef } from "react";
@@ -496,6 +497,13 @@ export default function InboundShipmentDetail() {
   });
 
   const costReview = useShipmentCostReview(shipmentId, !!shipment && ["costing", "closed"].includes(shipment.status));
+  const receivingSetup = useQuery({ queryKey: [`/api/inbound-shipments/${shipmentId}/receiving-setup`],
+    enabled: !!shipmentId && ["draft", "booked"].includes(shipment?.status), staleTime: 0, retry: false,
+    queryFn: async () => {
+      const result = shipmentReceivingSetupSchema.parse(await financialCommandFetchJson(`/api/inbound-shipments/${shipmentId}/receiving-setup`, { credentials: "include" }));
+      if (result.shipmentId !== shipmentId) throw new Error("Receiving setup belongs to a different shipment. Reload before continuing.");
+      return result;
+    } });
   const costsPosted = costReview.isSuccess && costReview.data.lines.length > 0
     && costReview.data.lines.every(isShipmentCostLinePosted) && allocationStatus?.blockerCount === 0;
 
@@ -568,7 +576,7 @@ export default function InboundShipmentDetail() {
   const allocationChecksumDeltaCents = allocatableCostTotalCents - lineAllocatedTotalCents;
 
   const isEditable = !["closed", "cancelled"].includes(shipment?.status || "");
-  const lineActions = useShipmentLineActions({ shipmentId, navigationIdentity, lines, editable: isEditable });
+  const lineActions = useShipmentLineActions({ shipmentId, navigationIdentity, lines, editable: isEditable, draftAllowed: shipment?.status === "draft" });
   const isPreClosed = !["closed", "cancelled"].includes(shipment?.status || "");
 
   // Container utilization
@@ -769,6 +777,8 @@ export default function InboundShipmentDetail() {
   function createTransitionMutation(endpoint: string) {
     return useMutation({
       mutationFn: async (body: any = {}) => {
+        if (endpoint === "book" || endpoint === "in-transit") return financialCommandFetchJson(`/api/inbound-shipments/${shipmentId}/${endpoint}`,
+          { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/${endpoint}`, body || undefined);
         return res.json();
       },
@@ -792,6 +802,7 @@ export default function InboundShipmentDetail() {
         toast({ title: "Success", description: `Shipment ${endpoint.replace(/-/g, " ")} completed` });
       },
       onError: (err: Error) => {
+        if (endpoint === "book" || endpoint === "in-transit") void receivingSetup.refetch();
         toast({ title: "Error", description: err.message, variant: "destructive" });
       },
     });
@@ -1238,14 +1249,14 @@ export default function InboundShipmentDetail() {
           )}
 
           {shipment.status === "draft" && (
-            <Button onClick={() => bookMutation.mutate({})} disabled={bookMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+            <Button onClick={() => bookMutation.mutate({})} disabled={bookMutation.isPending || receivingSetup.isFetching || !receivingSetup.data?.ready || receivingSetup.isError} className="flex-1 sm:flex-none min-h-[44px]">
               <CheckCircle className="h-4 w-4 mr-2" />
               Confirm
             </Button>
           )}
 
           {shipment.status === "booked" && (
-            <Button onClick={() => inTransitMutation.mutate({})} disabled={inTransitMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+            <Button onClick={() => inTransitMutation.mutate({})} disabled={inTransitMutation.isPending || receivingSetup.isFetching || !receivingSetup.data?.ready || receivingSetup.isError} className="flex-1 sm:flex-none min-h-[44px]">
               <Ship className="h-4 w-4 mr-2" />
               Mark In Transit
             </Button>
@@ -1345,6 +1356,21 @@ export default function InboundShipmentDetail() {
           )}
         </div>
       </div>
+
+      {["draft", "booked"].includes(shipment.status) && <section aria-label="Shipment receiving setup" className="rounded-lg border p-4 space-y-2">
+        <h2 className="font-semibold">Receiving setup</h2>
+        {receivingSetup.isFetching && <p className="text-sm">Checking configurations before booking or shipping…</p>}
+        {receivingSetup.isError && <p role="alert" className="text-sm">Receiving setup could not be verified. Booking and shipping are unavailable until it is checked. <Button size="sm" variant="outline" onClick={() => void receivingSetup.refetch()}>Retry receiving setup</Button></p>}
+        {!receivingSetup.isError && receivingSetup.data?.ready && <p className="text-sm text-green-700">Every item has a valid receiving configuration.</p>}
+        {!receivingSetup.isError && receivingSetup.data && !receivingSetup.data.ready && <>
+          <p className="text-sm">{receivingSetup.data.lines.length ? "Choose or add the configurations below before booking or shipping. Your draft is saved." : "Add shipment items and their receiving configurations before booking or shipping."}</p>
+          {receivingSetup.data.lines.filter(line => line.issue).map(line => <div key={line.lineId} className="rounded border p-3 text-sm">
+            <p className="font-medium">{line.sku ?? line.name}</p><p>{line.issue?.message}</p>
+          </div>)}
+        </>}
+        {receivingSetup.data && receivingSetup.data.lines.length > 0 && <ShipmentQuantityEditor shipmentId={shipment.id} shipmentStatus={shipment.status}
+          shipmentLines={lines} buttonLabel={receivingSetup.data.ready ? "Edit receiving setup" : "Set up receiving"} onSaved={() => void receivingSetup.refetch()} />}
+      </section>}
 
       {/* ═══════ Summary Cards ═══════ */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2 md:gap-4">

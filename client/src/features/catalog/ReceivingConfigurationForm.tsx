@@ -44,7 +44,7 @@ export function ReceivingConfigurationForm({ productId, productName, onCreated, 
       if (result.productId !== productId || result.unitsPerVariant !== value.unitsPerVariant) {
         throw new Error("The saved configuration could not be verified. Refresh the product configurations before trying again.");
       }
-      // A receipt refresh failure must not submit a second catalog creation.
+      // A source refresh failure must not submit a second catalog creation.
       setCreated(result);
       void queryClient.invalidateQueries({ predicate: query => typeof query.queryKey[0] === "string" && (
         query.queryKey[0] === "/api/products" || query.queryKey[0] === `/api/products/${productId}` || query.queryKey[0].startsWith(`/api/products/${productId}/`)
