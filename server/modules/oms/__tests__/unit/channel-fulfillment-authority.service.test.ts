@@ -377,6 +377,19 @@ describe("channel fulfillment authority service", () => {
     }));
   });
 
+  it("continues authorized commands when replacement recovery discovery fails", async () => {
+    const repository = repositoryMock([command()]);
+    repository.findWaitingEbayLabelReplacements = vi.fn().mockRejectedValue(new Error("Correction discovery unavailable"));
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const execute = vi.fn().mockResolvedValue({ outcome: "success", providerResponseId: "gid://shopify/Fulfillment/1" });
+    const service = createChannelFulfillmentAuthorityService({ repository, providerExecutor: { execute }, logger,
+      clock: { now: () => new Date("2026-07-22T12:00:00Z") } });
+    expect(await service.runDueBatch()).toMatchObject({ claimed: 1, succeeded: 1 });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(logger.error).toHaveBeenCalledWith({ code: "LABEL_REPLACEMENT_RECOVERY_DISCOVERY_FAILED",
+      error: "Correction discovery unavailable" });
+  });
+
   it("schedules deterministic exponential retry after a transient failure", async () => {
     const repository = repositoryMock([command({ attemptNumber: 3 })]);
     const providerExecutor = {
