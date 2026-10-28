@@ -171,7 +171,11 @@ integration("durable per-product Shopify connections with real mapping and price
   it("does not overwrite a price changed after review and rolls back its new mapping", async () => {
     const product = await seed(); const f = fixture(); const intent = await prepare(f, product.id);
     await f.service.submit(product.id, intent, "user:operator");
-    await database.pool.query(`INSERT INTO channels.channel_pricing(channel_id,product_variant_id,price,cost,currency) VALUES(7,$1,4567,123,'USD')`, [product.variants[0].id]);
+    const createVariants = f.provider.createVariants;
+    vi.spyOn(f.provider,"createVariants").mockImplementationOnce(async (...args) => {
+      await createVariants(...args);
+      await database.pool.query(`INSERT INTO channels.channel_pricing(channel_id,product_variant_id,price,cost,currency) VALUES(7,$1,4567,123,'USD')`, [product.variants[0].id]);
+    });
     await expect(f.service.execute(product.id, intent, "user:operator")).rejects.toMatchObject({ code: "CHANNEL_PRICING_CONFLICT" });
     expect((await database.pool.query("SELECT shopify_product_id FROM catalog.products WHERE id=$1", [product.id])).rows[0].shopify_product_id).toBeNull();
     expect((await database.pool.query("SELECT price::text,cost::text FROM channels.channel_pricing WHERE product_variant_id=$1", [product.variants[0].id])).rows).toEqual([{ price: "4567", cost: "123" }]);

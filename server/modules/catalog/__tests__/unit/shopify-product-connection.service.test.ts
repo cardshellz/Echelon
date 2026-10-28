@@ -106,6 +106,22 @@ function fixture(variantCount = 2) {
 }
 
 describe("product-scoped Shopify command recovery", () => {
+  it("rechecks a queued product before any external creation when it is archived or edited", async () => {
+    for (const change of [(f: ReturnType<typeof fixture>) => { f.local.product.isActive = false; },
+      (f: ReturnType<typeof fixture>) => { f.local.variants[0].priceCents = 9999; }]) {
+      const f = fixture(); const intent = await f.intent(); await f.service.submit(41,intent,CONNECTION_ACTOR); change(f);
+      await expect(f.service.execute(41,intent,CONNECTION_ACTOR)).rejects.toBeInstanceOf(ShopifyProductConnectionError);
+      expect(f.provider.create).not.toHaveBeenCalled(); expect(f.saved()?.state).toBe("rejected");
+    }
+  });
+  it("does not map or publish while Shopify is still processing a photo", async () => {
+    const f = fixture(); f.local.images = [{ url: "https://cdn.example.com/binder.png", alt: "Binder" }];
+    vi.mocked(f.provider.verifyMedia).mockRejectedValueOnce(new ShopifyProductConnectionError("SHOPIFY_MEDIA_PROCESSING", "Photo processing", 503,true));
+    const intent = await f.intent({ ...f.request(), publicationId: "777" });
+    await expect(f.service.execute(41,intent,CONNECTION_ACTOR)).rejects.toMatchObject({ code: "SHOPIFY_MEDIA_PROCESSING" });
+    expect(f.repair).not.toHaveBeenCalled(); expect(f.provider.publish).not.toHaveBeenCalled();
+    await f.service.execute(41,intent,CONNECTION_ACTOR); expect(f.provider.create).toHaveBeenCalledOnce(); expect(f.provider.publish).toHaveBeenCalledOnce();
+  });
   it("queues the frozen intent without provider writes and finishes through the worker", async () => {
     const f = fixture(); const intent = await f.intent();
     expect((await f.service.submit(41, intent, CONNECTION_ACTOR)).command.state).toBe("pending");

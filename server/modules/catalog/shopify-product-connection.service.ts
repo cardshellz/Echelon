@@ -43,7 +43,7 @@ function remoteFingerprint(remote: ShopifyConnectionRemoteProduct): string {
 }
 
 function localIdentity(source: ShopifyConnectionSource): string {
-  return connectionFingerprint({ productId: source.product.id, active: source.product.isActive, productTrackingDefault: source.product.trackInventory,
+  return connectionFingerprint({ productId: source.product.id, productSku: source.product.sku, active: source.product.isActive, productTrackingDefault: source.product.trackInventory,
     variants: eligibleConnectionVariants(source).map(variant => ({ id: variant.id, sku: variant.sku,
       requiresShipping: variant.requiresShipping, trackInventory: variant.trackInventory })) });
 }
@@ -227,6 +227,13 @@ export function createShopifyProductConnectionService(input: {
     };
     const heartbeat = async () => { await step({ actor, state: command.state, eventType: "verification_progress" }); };
     try {
+      const admittedSource = await repository.source(productId, command.channelId);
+      assertProductConnectionAllowed(admittedSource);
+      if (localIdentity(admittedSource) !== localIdentity(command.source)
+        || command.mode === "create" && !command.createRequested
+          && connectionFingerprint(admittedSource) !== connectionFingerprint(command.source)) {
+        throw new ShopifyProductConnectionError("SHOPIFY_CATALOG_IDENTITY_CHANGED", "The catalog changed while this Shopify command was queued. Review the current product before continuing.");
+      }
       const live = await account(command.source, command.request);
       let remote: ShopifyConnectionRemoteProduct;
       if (command.mode === "link") {
