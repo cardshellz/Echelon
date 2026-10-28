@@ -1,5 +1,6 @@
 import { Decimal } from "decimal.js";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { shipmentPhysicalAllocationValue, type ShipmentPhysicalSource } from "@shared/procurement/shipment-physical-values";
 import {
   shipmentAllocationEvidenceSchema,
   SHIPMENT_ALLOCATION_MAX_RATIO_DIGITS,
@@ -23,6 +24,9 @@ export type ShipmentAllocationBasisLine = {
   totalVolumeCbm: string | number | null;
   totalWeightKg: string | number | null;
   chargeableWeightKg: string | number | null;
+  /** Live shipment callers supply measurements. Total-only inputs remain the
+   * compatibility boundary for explicit numeric and frozen evidence callers. */
+  physicalSource?: ShipmentPhysicalSource;
   poLineId?: number | null;
   poOrderQty?: string | number | null;
   poTotalProductCostCents?: string | number | null;
@@ -193,7 +197,9 @@ export function buildShipmentAllocationBasis(lines: ShipmentAllocationBasisLine[
       exact = parseRatio(value.ratio); source = value.source;
     } else if (DIMENSIONAL_ALLOCATION_METHODS.has(method)) {
       const field = method === "by_volume" ? "totalVolumeCbm" : method === "by_weight" ? "totalWeightKg" : "chargeableWeightKg";
-      const value = dimensionRatio(line[field], line.lineId);
+      const measurement = line.physicalSource
+        ? shipmentPhysicalAllocationValue(line.physicalSource, method as "by_volume" | "by_weight" | "by_chargeable_weight") : line[field];
+      const value = dimensionRatio(measurement, line.lineId);
       exact = value.ratio; source = { kind: "dimension", field, value: value.normalized };
       if (exact.numerator === BigInt(0)) missingDimensionLineIds.push(line.lineId);
     }
@@ -207,7 +213,9 @@ export function buildShipmentAllocationBasis(lines: ShipmentAllocationBasisLine[
       throw new Error("Allocation basis cannot be represented exactly by the supported DTO");
     }
   }
-  const usedFallback = rawTotal.numerator === BigInt(0) && lines.length > 0;
+  // Missing physical measurements are not an allocation policy. Keep their
+  // basis at zero so neither a preview nor posting can invent an equal split.
+  const usedFallback = method === "by_value" && rawTotal.numerator === BigInt(0) && lines.length > 0;
   const total = usedFallback ? reduceRatio(BigInt(lines.length), BigInt(1)) : rawTotal;
   return {
     method: method as ShipmentAllocationEvidence["method"],
@@ -224,6 +232,7 @@ export function allocateShipmentCents(amountCents: number, basis: ShipmentAlloca
 }> {
   if (!Number.isSafeInteger(amountCents) || amountCents < 0) throw new Error("Allocation amount must be a nonnegative safe integer cents value");
   if (basis.values.length === 0) return [];
+  if (basis.missingDimensionLineIds.length > 0) throw new Error("Every shipment line needs a positive physical allocation basis before splitting this charge");
   const total = parseRatio(basis.totalRatio);
   if (total.numerator === BigInt(0)) throw new Error("Allocation basis total must be positive");
   const seen = new Set<number>();
@@ -258,8 +267,12 @@ export function allocateShipmentCents(amountCents: number, basis: ShipmentAlloca
 export function allocateCentsFromNumericBasis(amountCents: number, values: Array<{ lineId: number; basis: number }>) {
   const basis = buildShipmentAllocationBasis(values.map((value) => ({ lineId: value.lineId, qtyShipped: 1,
     totalVolumeCbm: value.basis, totalWeightKg: null, chargeableWeightKg: null })), "by_volume");
-  if (basis.usedFallback) throw new Error("Allocation basis total must be positive");
-  return allocateShipmentCents(amountCents, basis);
+  if (values.length === 0) return allocateShipmentCents(amountCents, basis);
+  if (basis.totalRatio.numerator === "0") throw new Error("Allocation basis total must be positive");
+  // This compatibility API receives deliberate numeric weights, where an
+  // explicit zero share is valid. Live physical shipment allocation never
+  // enters through this adapter and still requires each line's measurements.
+  return allocateShipmentCents(amountCents, { ...basis, missingDimensionLineIds: [] });
 }
 
 export function buildShipmentAllocationEvidence(basis: ShipmentAllocationBasis, lineId: number): ShipmentAllocationEvidence {

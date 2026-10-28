@@ -6,6 +6,8 @@ import { shipmentWorkListQuerySchema, shipmentWorkListPageSchema, matchesShipmen
 import { createShipmentTrackingService } from "../../shipment-tracking.service";
 import { readShipmentCostReviewInTransaction, readShipmentCostReviewProjectionsInTransaction } from "../../shipment-cost-review.repository";
 import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts } from "../../shipment-health-evidence.repository";
+vi.mock("../../shipment-physical-read.repository", () => ({ readShipmentPhysicalLines: vi.fn(async (_tx: unknown, ids: number[]) =>
+  new Map(ids.map(id => [id, [{ id: id * 10, inboundShipmentId: id, qtyShipped: 1, cartonCount: null }]]))) }));
 vi.mock("../../shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn(), readShipmentProvisionalLotCounts: vi.fn() }));
 vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn(), readShipmentCostReviewProjectionsInTransaction: vi.fn() }));
 

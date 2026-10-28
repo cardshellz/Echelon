@@ -3,6 +3,7 @@ import { costInteger, CostEvidenceError, type CostEvidenceTransaction } from "..
 import type { ShipmentCostRevisionReadEvidence } from "./shipment-cost-revision-proposals";
 import { readShipmentSupplierCreditCostRows } from "./supplier-credit-source.repository";
 import { shipmentCostReadPageSchema } from "./shipment-cost-read-scope";
+import type { ShipmentPhysicalSource } from "@shared/procurement/shipment-physical-values";
 export { shipmentCostReadBatches } from "./shipment-cost-read-scope";
 
 type ReadRows = Awaited<ReturnType<CostEvidenceTransaction["execute"]>>["rows"];
@@ -50,6 +51,8 @@ export async function readShipmentCostRevisionEvidence(tx: CostEvidenceTransacti
   const lines = partition((await tx.execute(sql`
     SELECT line.inbound_shipment_id AS __shipment_id,line.id,line.purchase_order_id,line.purchase_order_line_id,line.qty_shipped,snapshot.qty,
       line.total_volume_cbm,line.total_weight_kg,line.chargeable_weight_kg,
+      line.carton_count AS __physical_cartons,line.dimension_basis AS __physical_basis,
+      line.weight_kg AS __physical_weight,line.length_cm AS __physical_length,line.width_cm AS __physical_width,line.height_cm AS __physical_height,
       po_line.id AS allocation_po_line_id,po_line.purchase_order_id AS allocation_po_id,po_line.line_type AS allocation_po_line_type,
       po_line.order_qty AS allocation_po_order_qty,po_line.total_product_cost_cents AS allocation_po_product_total_cents,
       po.currency AS allocation_po_currency,
@@ -63,6 +66,22 @@ export async function readShipmentCostRevisionEvidence(tx: CostEvidenceTransacti
     LEFT JOIN procurement.landed_cost_snapshots snapshot ON snapshot.inbound_shipment_line_id=line.id
     WHERE line.inbound_shipment_id=ANY(${sql.param(ids)}::int[]) ORDER BY line.id
   `)).rows, ids);
+  const physicalSources = new Map<number, Map<number, ShipmentPhysicalSource>>();
+  for (const [shipmentId, shipmentLines] of lines) {
+    const sources = new Map<number, ShipmentPhysicalSource>();
+    lines.set(shipmentId, shipmentLines.map(row => {
+      // Keep the existing immutable economic evidence byte-for-byte. Physical
+      // inputs are current validation evidence, not new fingerprint fields.
+      const { __physical_cartons: cartons, __physical_basis: basis, __physical_weight: weight,
+        __physical_length: length, __physical_width: width, __physical_height: height, ...economicRow } = row;
+      const text = (value: unknown) => value == null ? null : String(value);
+      sources.set(costInteger(row.id, "shipmentLineId", 1), { qtyShipped: costInteger(row.qty_shipped, "qtyShipped", 1),
+        cartonCount: cartons == null ? null : costInteger(cartons, "cartonCount", 0), dimensionBasis: text(basis),
+        weightKg: text(weight), lengthCm: text(length), widthCm: text(width), heightCm: text(height) });
+      return economicRow;
+    }));
+    physicalSources.set(shipmentId, sources);
+  }
   const charges = partition((await tx.execute(sql`
     SELECT inbound_shipment_id AS __shipment_id,id,cost_type,actual_cents,estimated_cents,currency,cost_status,allocation_method,vendor_id,vendor_invoice_id
     FROM procurement.inbound_freight_costs WHERE inbound_shipment_id=ANY(${sql.param(ids)}::int[]) ORDER BY id
@@ -111,5 +130,6 @@ export async function readShipmentCostRevisionEvidence(tx: CostEvidenceTransacti
     ) confirmed ON true
   `)).rows, ids);
   return new Map(ids.map(id => [id, { lines: lines.get(id)!, charges: charges.get(id)!, invoiceRows: invoiceRows.get(id)!,
-    allocationRows: allocationRows.get(id)!, previous: previous.get(id)!, supplierCredits: supplierCredits.get(id) ?? [] }]));
+    allocationRows: allocationRows.get(id)!, previous: previous.get(id)!, supplierCredits: supplierCredits.get(id) ?? [],
+    physicalSourcesByLineId: physicalSources.get(id)! }]));
 }

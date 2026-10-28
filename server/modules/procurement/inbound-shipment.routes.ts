@@ -496,7 +496,7 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   app.post("/api/inbound-shipments/:id/allocate", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const result = await shipmentTracking.runAllocation(Number(req.params.id));
+      const result = await shipmentTracking.runAllocation(Number(req.params.id), req.session.user?.id);
       res.json(result);
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });

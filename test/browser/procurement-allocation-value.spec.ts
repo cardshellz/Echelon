@@ -124,3 +124,33 @@ for (const mode of ["missing", "invalid_basis"] as const) test(`${mode} allocati
   await expect(page.getByRole("region", { name: "Allocation status", exact: true }).getByText(invalidMessage, { exact: true })).toBeVisible();
   expect(state.closes).toBe(1); expect(state.allocations).toBe(0); expect(failures).toEqual([]);
 });
+
+test("missing physical measurements show a saved charge without pretending its freight share is allocated", async ({ page }, info) => {
+  const { state, failures } = await setup(page, "current");
+  await page.route("**/api/inbound-shipments/42", route => route.fulfill({ json: {
+    id: 42, shipmentNumber: "MEASUREMENT-TEST-42", status: "costing", mode: "sea_fcl", allocationMethodDefault: "by_volume", statusHistory: [],
+    totalWeightKg: "0.000", totalVolumeCbm: "0.000000", actualTotalCostCents: 1000,
+    lines: [{ id: 1, purchaseOrderId: 17, purchaseOrderLineId: 101, sku: "MEASUREMENT-PRODUCT", productName: "Test product",
+      qtyShipped: 800000, cartonCount: 80, dimensionBasis: "carton", weightKg: null, lengthCm: null, widthCm: null, heightCm: null,
+      totalWeightKg: "0.000", totalVolumeCbm: "0.000000", poUnitCostMills: 100, allocatedCostCents: null,
+      freightAllocatedCents: null, totalAllocatedMillsPerUnit: null, landedUnitCostMills: null, allocationPending: true, freightAllocationPending: true }],
+    costs: [{ id: 71, costType: "freight", actualCents: 1000, estimatedCents: 1000, allocationMethod: "by_volume", currency: "USD", costStatus: "estimated" }],
+  } }));
+  await page.route("**/api/inbound-shipments/42/allocation-status", route => route.fulfill({ json: {
+    shipmentId: 42, status: "needs_allocation", lineCount: 1, costCount: 1, allocatableCostCount: 1,
+    effectiveCostCents: 1000, allocatedCostCents: 0, unallocatedCents: 1000, issueCount: 1, blockerCount: 1, warningCount: 0,
+    costs: [{ costId: 71, costType: "freight", effectiveCents: 1000, allocatedCents: 0, allocationCount: 0,
+      method: "by_volume", methodSource: "cost_row", rawBasisTotal: 0, basisTotal: 0, usedFallback: false, status: "missing_dimensions" }],
+    issues: [{ severity: "blocker", code: "missing_dimensions", costId: 71, message: "The saved shipment line needs its box dimensions before freight can be split." }],
+  } }));
+  await page.reload();
+  const status = page.getByRole("region", { name: "Allocation status", exact: true });
+  await expect(status.getByText("Measurements needed", { exact: true })).toBeVisible();
+  await expect(status).toContainText("$10.00");
+  const product = page.getByRole("row").filter({ hasText: "MEASUREMENT-PRODUCT" });
+  await expect(product.getByRole("cell").nth(2)).toHaveText("Awaiting measurements");
+  await expect(product.getByRole("cell").nth(6)).toHaveText("Awaiting measurements");
+  await expect(product.getByRole("cell").nth(7)).toHaveText("—");
+  expect(state.writes).toEqual([]); expect(failures).toEqual([]);
+  await page.screenshot({ path: info.outputPath("shipment-measurements-pending.png"), fullPage: true });
+});

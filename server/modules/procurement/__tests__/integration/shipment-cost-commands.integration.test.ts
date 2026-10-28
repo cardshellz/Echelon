@@ -378,7 +378,13 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     expect(result).toMatchObject({ inboundShipmentId: 1, actualCents: 125, estimatedCents: null, currency: "USD", costStatus: "finalized", createdAt: NOW, updatedAt: NOW, version: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect((await pool.query("SELECT actual_total_cost_cents FROM procurement.inbound_shipments WHERE id=1")).rows[0]).toEqual({ actual_total_cost_cents: "625" });
     expect((await pool.query("SELECT SUM(allocated_cents)::text AS total FROM procurement.inbound_freight_allocations")).rows[0].total).toBe("625");
-    const audit = (await pool.query("SELECT * FROM public.audit_events WHERE actor=$1", [actorId])).rows[0];
+    const audits = (await state())[4];
+    expect(audits.map(event => event.action)).toEqual(["procurement.shipment.allocation_refreshed", "procurement.shipment_cost.created"]);
+    expect(audits[0]).toMatchObject({ actor: actorId, timestamp: NOW, changes: {
+      before: [expect.objectContaining({ shipmentCostId: 31, allocatedCents: 500 })],
+      after: expect.arrayContaining([expect.objectContaining({ inboundShipmentLineId: 11, allocatedCents: 125 })]),
+    } });
+    const audit = audits[1];
     expect(audit).toMatchObject({ action: "procurement.shipment_cost.created", actor: actorId, timestamp: NOW, changes: { before: null, after: expect.objectContaining({ actualCents: 125, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() }) }, context: { shipmentId: 1, reason: "Insurance quote" } });
   });
 
@@ -439,7 +445,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       vendorId: 5, performedByVendorId: 6, performedByName: "Supplier B", actualCents: 125,
     });
     expect(body).toEqual(input);
-    const audit = (await state())[4][0];
+    const audit = (await state())[4].find(event => event.action === "procurement.shipment_cost.created");
     expect(audit).toMatchObject({ actor: actorId, changes: { before: null, after: { vendorId: 5, performedByVendorId: 6, performedByName: "Supplier B" } } });
   });
 
@@ -548,7 +554,12 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     expect((await pool.query("SELECT * FROM procurement.inbound_freight_costs")).rows).toEqual([]);
     expect((await pool.query("SELECT * FROM procurement.inbound_freight_allocations")).rows).toEqual([]);
     expect((await pool.query("SELECT allocated_cost_cents FROM procurement.inbound_shipment_lines WHERE id=11")).rows[0].allocated_cost_cents).toBe("0");
-    expect((await pool.query("SELECT changes FROM public.audit_events WHERE actor=$1", [actorId])).rows[0].changes).toMatchObject({ before: { id: 31 }, after: null });
+    const audits = (await state())[4];
+    expect(audits.map(event => event.action)).toEqual(["procurement.shipment.allocation_refreshed", "procurement.shipment_cost.deleted"]);
+    expect(audits[0]).toMatchObject({ actor: actorId, timestamp: NOW, changes: { after: [], lines: [
+      { lineId: 11, before: { allocatedCostCents: 500 }, after: { allocatedCostCents: 0 } },
+    ] } });
+    expect(audits[1].changes).toMatchObject({ before: { id: 31 }, after: null });
   });
 
   it("rolls back the cost and totals when the allocation write fails", async () => {
@@ -787,12 +798,17 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     const request = descriptor("delegated-replay", command);
     const commands = commandFactory(service, repositoryFactory(database), () => NOW);
     const first = await commands.execute(command, actorId, request);
+    const committed = await state();
     const replay = await commands.execute(command, delegateId, request);
     expect(first).toMatchObject({ httpStatus: 201, terminalState: "succeeded", replayed: false,
       body: { vendorId: 5, performedByVendorId: 6, performedByName: "Supplier B" } });
     expect(replay).toMatchObject({ httpStatus: 201, replayed: true, body: JSON.parse(JSON.stringify(first.body)) });
     expect((await pool.query("SELECT * FROM procurement.inbound_freight_costs")).rows).toHaveLength(2);
-    expect((await pool.query("SELECT actor FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]])).rows).toEqual([{ actor: actorId }]);
+    expect(await state()).toEqual(committed);
+    expect(committed[4].map(event => ({ actor: event.actor, action: event.action }))).toEqual([
+      { actor: actorId, action: "procurement.shipment.allocation_refreshed" },
+      { actor: actorId, action: "procurement.shipment_cost.created" },
+    ]);
     const changed = { ...command, body: { costType: "insurance", actualCents: 126 } };
     await expect(commands.execute(changed, delegateId, { ...request, requestHash: descriptor("delegated-replay", changed).requestHash })).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
   });

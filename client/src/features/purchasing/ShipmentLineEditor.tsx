@@ -46,6 +46,7 @@ function changedFields(line: Line, draft: Draft) {
 
 export function ShipmentEditSummary({ preview }: { preview: ShipmentEditorPreview }) {
   const { review } = preview;
+  const costShare = (cents: number | null) => cents === null ? "Not allocated" : exactMoneyAsInput(cents, 2);
   const keys = [...new Set([...review.before, ...review.after].map(line => line.key))];
   const displayField = (line: Line | undefined, field: Field) => {
     if (!line || line.fields[field] == null) return "—";
@@ -57,7 +58,7 @@ export function ShipmentEditSummary({ preview }: { preview: ShipmentEditorPrevie
     return selected && units?.unitsPerVariantSnapshot ? `${selected.sku ?? selected.name ?? "Configuration"} · ${units.unitsPerVariantSnapshot.toLocaleString()} pieces per unit` : "Not recorded";
   };
   return <div className="space-y-4 text-sm">
-    <div><h4 className="font-semibold">Shipment cost shares</h4>{review.costShares.map(share => <p key={share.purchaseOrderId ?? "unlinked"}>{share.poNumber ?? "Unlinked lines"}: {exactMoneyAsInput(share.beforeCents, 2)} → {exactMoneyAsInput(share.afterCents, 2)}</p>)}</div>
+    <div><h4 className="font-semibold">Shipment cost shares</h4>{review.costShares.map(share => <p key={share.purchaseOrderId ?? "unlinked"}>{share.poNumber ?? "Unlinked lines"}: {costShare(share.beforeCents)} → {costShare(share.afterCents)}</p>)}</div>
     <p>Shipment charges: {review.charges.length ? review.charges.map(charge => `${exactMoneyAsInput(charge.cents, 2)} ${charge.currency}`).join(", ") : "No charges recorded"}. The charge amounts stay the same; their allocation follows the edited lines.</p>
     <h3 className="font-semibold">Before and after</h3>
     {keys.map(key => {
@@ -76,7 +77,7 @@ export function ShipmentEditSummary({ preview }: { preview: ShipmentEditorPrevie
             <tr><td className="py-1">Pieces</td><td className="text-right">{before?.fields.qtyShipped?.toLocaleString() ?? "—"}</td><td className="text-right font-medium">{after?.fields.qtyShipped?.toLocaleString() ?? "—"}</td></tr>
             <tr><td className="py-1">Shipping cartons</td><td className="text-right">{displayField(before, "cartonCount")}</td><td className="text-right">{displayField(after, "cartonCount")}</td></tr>
             <tr><td className="py-1">Receiving configuration</td><td className="text-right">{configuration(before)}</td><td className="text-right">{configuration(after)}</td></tr>
-            <tr><td className="py-1">Cost share (USD)</td><td className="text-right">{before ? exactMoneyAsInput(before.allocatedCostCents, 2) : "—"}</td><td className="text-right font-medium">{after ? exactMoneyAsInput(after.allocatedCostCents, 2) : "—"}</td></tr>
+            <tr><td className="py-1">Cost share (USD)</td><td className="text-right">{before ? costShare(before.allocatedCostCents) : "—"}</td><td className="text-right font-medium">{after ? costShare(after.allocatedCostCents) : "—"}</td></tr>
           </tbody>
         </table>
         {setup?.issue && <p className="mt-2 text-amber-800">Receiving setup still needed: {setup.issue.message} Booking and shipping stay unavailable until it is complete.</p>}
