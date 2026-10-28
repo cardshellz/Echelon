@@ -155,11 +155,15 @@ export class CustomerReturnLiveService {
       this.dependencies.measurements, this.dependencies.storedDimensions);
     if (this.dependencies.packageHistory) {
       try {
-        const history = await this.dependencies.packageHistory.read({ omsOrderId: first.order.omsOrderId,
-          channelId: shop.channelId, externalOrderId: first.order.externalOrderId });
+        const history = await this.dependencies.packageHistory.read({
+          omsOrderId: first.order.omsOrderId,
+          channelId: shop.channelId,
+          externalOrderId: first.order.externalOrderId,
+        });
         if (history) {
-          const originalBoxes=projectHistoricalReturnBoxes(first,provider,history);
-          if(originalBoxes.length+boxOptions.length>MAX_RETURN_ORIGINAL_BOXES)throw new Error("RETURN_BOX_HISTORY_LIMIT");
+          const originalBoxes = projectHistoricalReturnBoxes(first, provider, history);
+          if (originalBoxes.length + boxOptions.length > MAX_RETURN_ORIGINAL_BOXES)
+            throw new Error("RETURN_BOX_HISTORY_LIMIT");
           boxOptions.push(...originalBoxes);
         }
       } catch {

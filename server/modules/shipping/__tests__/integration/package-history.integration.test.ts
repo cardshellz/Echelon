@@ -31,7 +31,7 @@ import { buildPackageHistory } from "../../package-history.domain";
 const url = resolveReturnsTestDatabase(process.env, "inspection");
 const integration = url ? describe.sequential : describe.skip;
 const migration =
-  "migrations/900000035000019280001_shipping_package_history.sql";
+  "migrations/900000036000019300001_shipping_package_history.sql";
 function priorFunction(name: string): string {
   const sql = readFileSync(
     "migrations/900000033000019220001_customer_order_action_projection.sql",
@@ -408,7 +408,15 @@ integration("historical package capture and resumable backfill", () => {
         orderIds: [100],
       })
     )[0];
+    expect(
+      (await backfill.status({ channelId: 36, runKey: "fixture-history" }, now))
+        .coverage?.leased_orders,
+    ).toBe(1);
     now = new Date(now.getTime() + 5 * 60_000 + 1);
+    expect(
+      (await backfill.status({ channelId: 36, runKey: "fixture-history" }, now))
+        .coverage?.leased_orders,
+    ).toBe(0);
     const second = (
       await store.claim(1, now, "00000000-0000-4000-8000-000000000098", {
         orderIds: [100],
@@ -605,6 +613,27 @@ integration("historical package capture and resumable backfill", () => {
         externalOrderId: "1001",
       }),
     ).not.toBeNull();
+  });
+  it("reports an unstarted run consistently without creating a cursor or changing source data", async () => {
+    const before = await fingerprint();
+    await guard(true);
+    expect(
+      await backfill.status({ channelId: 36, runKey: "not-started" }, now),
+    ).toEqual({
+      cursor: null,
+      states: [],
+      errors: [],
+      coverage: null,
+      measurements: [],
+    });
+    expect(await fingerprint()).toBe(before);
+    expect(
+      (
+        await pool.query(
+          "SELECT count(*)::int AS count FROM wms.shipping_package_history_backfills",
+        )
+      ).rows[0].count,
+    ).toBe(0);
   });
   it("does not call a seeded cursor or stale snapshot complete package coverage", async () => {
     await seed();

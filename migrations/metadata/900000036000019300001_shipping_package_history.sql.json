@@ -1,0 +1,1 @@
+{"version":1,"migration":"900000036000019300001_shipping_package_history.sql","generation":36,"pr":1930,"ordinal":1,"after":["900000035000019280001_retire_obsolete_receive_pack_warnings.sql","900000035000019290001_legacy_maintenance_replacement.sql"]}

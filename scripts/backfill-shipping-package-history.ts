@@ -1,7 +1,12 @@
 import { parsePackageHistoryBackfillOptions } from "./lib/package-history-backfill-options";
 
 async function main() {
-  const options = parsePackageHistoryBackfillOptions(process.argv.slice(2));
+  let options: ReturnType<typeof parsePackageHistoryBackfillOptions>;
+  try {
+    options = parsePackageHistoryBackfillOptions(process.argv.slice(2));
+  } catch {
+    throw new Error("PACKAGE_HISTORY_ARGUMENTS_INVALID");
+  }
   const scope = {
     action: "shipping_package_history_backfill",
     actor: options.actor,
@@ -81,12 +86,18 @@ async function main() {
     await pool.end();
   }
 }
-main().catch(() => {
+main().catch((cause: unknown) => {
+  // Publish classified internal codes only, never provider bodies, SQL or secrets.
+  const code =
+    cause instanceof Error &&
+    /^PACKAGE_HISTORY_[A-Z_]{1,75}$/.test(cause.message)
+      ? cause.message
+      : "PACKAGE_HISTORY_BACKFILL_FAILED";
   console.error(
     JSON.stringify({
       action: "shipping_package_history_backfill",
       outcome: "failed",
-      code: "PACKAGE_HISTORY_BACKFILL_FAILED",
+      code,
     }),
   );
   process.exitCode = 1;

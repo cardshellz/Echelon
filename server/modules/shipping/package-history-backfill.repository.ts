@@ -182,7 +182,13 @@ export class PackageHistoryBackfillRepository {
         ).rows[0] ?? null;
       if (!cursor) {
         await client.query("COMMIT");
-        return { cursor: null, states: [], errors: [] };
+        return {
+          cursor: null,
+          states: [],
+          errors: [],
+          coverage: null,
+          measurements: [],
+        };
       }
       const values = [input.channelId, cursor.through_order_id];
       const states = (

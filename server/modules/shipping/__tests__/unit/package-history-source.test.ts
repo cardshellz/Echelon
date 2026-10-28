@@ -29,7 +29,13 @@ describe("package history provider boundary", () => {
   it("reuses retained verified measurements only when a provider response omits them", async () => {
     const dimensions = { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 },
       observation = { version: 1, status: "verified", dimensions };
-    const query = vi.fn(async () => ({
+    // This test supplies only a resolved query result; it opens no connection.
+    const query = vi.fn();
+    query.mockResolvedValue({
+      command: "SELECT",
+      rowCount: 1,
+      oid: 0,
+      fields: [],
       rows: [
         {
           labelStatus: "active",
@@ -44,9 +50,10 @@ describe("package history provider boundary", () => {
           evidence: observation,
         },
       ],
-    }));
+    });
+    const pool = { query };
     const source = createPackageHistorySource({
-      pool: { query },
+      pool,
       shopify: { read: vi.fn() },
       now: () => now,
       shipstation: fixtureRequester(async () => ({
@@ -61,7 +68,7 @@ describe("package history provider boundary", () => {
     );
     expect(query).toHaveBeenCalledOnce();
     const invalid = createPackageHistorySource({
-      pool: { query },
+      pool,
       shopify: { read: vi.fn() },
       now: () => now,
       shipstation: fixtureRequester(async () => ({
