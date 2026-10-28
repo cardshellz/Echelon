@@ -83,7 +83,8 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
   const context = contextQuery.data;
 
   useEffect(() => {
-    if (open && context?.pendingCommand && submitted === null) {
+    if (open && context?.pendingCommand && submitted === null
+      && context.pendingCommand.commandKey !== handledTerminal.current) {
       const pending = context.pendingCommand;
       setSubmitted({ commandKey: pending.commandKey, request: pending.request, previewHash: pending.previewHash });
     }
@@ -149,7 +150,7 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
       await queryClient.invalidateQueries({ queryKey: [contextUrl] });
       try {
         const command = await shopifyProductFetch(`${base}/commands/${intent.commandKey}`, undefined, shopifyProductConnectionCommandSchema);
-        if (command.state === "rejected") { setSubmitted(null); setDirty(true); }
+        if (command.state === "rejected") { handledTerminal.current = command.commandKey; setSubmitted(null); setDirty(true); }
       } catch (statusError) {
         if (statusError instanceof ShopifyProductRequestError && statusError.code === "SHOPIFY_COMMAND_NOT_FOUND"
           && failure instanceof ShopifyProductRequestError && !failure.retryable) {
@@ -189,7 +190,7 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
   const locked = Boolean(pending || submitted || executeMutation.isPending);
   const change = () => { setDirty(true); setError(null); };
   const start = (nextMode: "create" | "link") => {
-    initialized.current = null; handledTerminal.current = null; setMode(nextMode); setChannelId(undefined); setTarget(""); setReview(null); setReviewRequest(null);
+    initialized.current = null; setMode(nextMode); setChannelId(undefined); setTarget(""); setReview(null); setReviewRequest(null);
     setSubmitted(null); setError(null); setPage(0); setOpen(true);
   };
   const resume = () => {

@@ -15,7 +15,7 @@ async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boo
     matchingProducts: [{ id: "900", title: "Existing draft binder", status: "DRAFT" }], lookupIssue: null, pendingCommand: null,
   };
   const state = { requests: [] as ShopifyProductConnectionExecute[], reviews: [] as ShopifyProductConnectionRequest[],
-    errors: [] as string[], pending: null as ShopifyProductConnectionCommand | null, loseResponse: false, finish: false, ambiguous: false, stale: false };
+    errors: [] as string[], pending: null as ShopifyProductConnectionCommand | null, loseResponse: false, finish: false, ambiguous: false, stale: false, reject: false };
   const command = (intent: ShopifyProductConnectionExecute): ShopifyProductConnectionCommand => ({
     commandKey: intent.commandKey, previewHash: intent.previewHash, request: intent.request, productId: 41, channelId: 7,
     mode: intent.request.mode, state: "pending", remoteProductId: "900", lastErrorCode: null, lastErrorMessage: null, retryable: true, completedAt: null,
@@ -27,7 +27,10 @@ async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boo
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "staff" }, roles: [],
       permissions: ["inventory:view", "channels:view", ...(options.canEdit === false ? [] : ["inventory:edit", "channels:edit"])] } });
-    if (path === base) return route.fulfill({ json: { ...context, pendingCommand: state.pending } });
+    if (path === base) {
+      if (state.reject) await new Promise(resolve => setTimeout(resolve,250));
+      return route.fulfill({ json: { ...context, pendingCommand: state.pending && !["complete","rejected"].includes(state.pending.state) ? state.pending : null } });
+    }
     if (path === `${base}/preview`) {
       const input = request.postDataJSON() as ShopifyProductConnectionRequest; state.reviews.push(input);
       const preview: ShopifyConnectionPreview = {
@@ -54,6 +57,7 @@ async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boo
     if (path.startsWith(`${base}/commands/`)) {
       if (!state.pending) return route.fulfill({ status: 404, json: { code: "SHOPIFY_COMMAND_NOT_FOUND", error: "No saved command.", retryable: false } });
       if (state.finish) state.pending = { ...state.pending, state: "complete", completedAt: "2026-10-28T12:00:00.000Z" };
+      if (state.reject) state.pending = { ...state.pending, state: "rejected", lastErrorCode: "SHOPIFY_CATALOG_IDENTITY_CHANGED", lastErrorMessage: "The queued product changed. Review a new request.", retryable: false, completedAt: "2026-10-28T12:00:00.000Z" };
       return route.fulfill({ json: state.pending });
     }
     state.errors.push(`Unexpected ${request.method()} ${path}`);
@@ -140,5 +144,32 @@ test("a stale preview returns to review without leaving a phantom pending comman
   await expect(page.getByRole("alert")).toContainText("The product changed");
   await expect(page.getByRole("button", { name: "Refresh review", exact: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeDisabled();
+  expect(state.errors).toEqual([]);
+});
+
+test("a background rejection returns to editing even while cached pending context is refreshing", async ({ page }) => {
+  const state = await setup(page, { saved: true });
+  await page.getByRole("button", { name: "Link existing Shopify product", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Resume saved Shopify command", exact: true })).toBeVisible();
+  state.reject = true;
+  await expect(page.getByRole("alert")).toContainText("The queued product changed");
+  await expect(page.getByRole("button", { name: "Review Shopify connection", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Resume saved Shopify command", exact: true })).toHaveCount(0);
+  expect(state.errors).toEqual([]);
+});
+
+test("requires a fresh review after explicitly resolving ambiguous variant identities", async ({ page }) => {
+  const state = await setup(page); state.ambiguous = true;
+  await page.getByRole("button", { name: "Link existing Shopify product", exact: true }).click();
+  await page.getByRole("button", { name: "Review Shopify connection", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeDisabled();
+  for (const [sku,id] of [["BINDER-P1","901"],["BINDER-C5","902"]]) {
+    await page.getByRole("button", { name: `Select Shopify variant for ${sku}`, exact: true }).click();
+    await page.getByRole("button").filter({ hasText: `${sku} · ${id}` }).click();
+  }
+  await page.getByRole("button", { name: "Refresh review", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm Shopify link", exact: true }).click();
+  await expect.poll(() => state.requests.length).toBe(1);
+  expect(state.requests[0].request.bindings).toEqual([{ variantId: 51, remoteVariantId: "901" }, { variantId: 52, remoteVariantId: "902" }]);
   expect(state.errors).toEqual([]);
 });
