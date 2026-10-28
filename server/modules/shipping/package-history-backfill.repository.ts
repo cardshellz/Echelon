@@ -101,7 +101,9 @@ export class PackageHistoryBackfillRepository {
       ).rows[0];
       const page = (
         await client.query(
-          `SELECT id::text FROM oms.oms_orders WHERE channel_id=$1 AND id>$2::bigint AND id<=$3::bigint ORDER BY id LIMIT $4`,
+          // Qualify the source column: ORDER BY the output alias "id" would
+          // sort its text representation, while the cursor compares bigint IDs.
+          `SELECT o.id::text AS id FROM oms.oms_orders o WHERE o.channel_id=$1 AND o.id>$2::bigint AND o.id<=$3::bigint ORDER BY o.id LIMIT $4`,
           [
             input.channelId,
             cursor.after_order_id,
