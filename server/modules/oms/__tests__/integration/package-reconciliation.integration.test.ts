@@ -131,6 +131,18 @@ describeWithDisposableDb("current package reconciliation owner", () => {
     await repository.reconcilePackages!(request,now);
     await expect(repository.reconcilePackages!({...request,reason:"Different operation"},now)).rejects.toMatchObject({code:"RECONCILIATION_REPLAY_CONFLICT"});
   });
+  it('rejects unsupported historical channel adoption before reserving a receipt or changing quantities', async () => {
+    const { source } = await splitFixture();
+    await pool.query("UPDATE channels.channels SET provider='ebay'");
+    const request = await command([source]);
+    const before = (await pool.query('SELECT * FROM inventory.inventory_transactions ORDER BY id')).rows;
+    await expect(createChannelFulfillmentAuthorityRepository(getTestDb()).reconcilePackages!(request, now))
+      .rejects.toMatchObject({ code: 'CHANNEL_SCOPE_UNSUPPORTED' });
+    expect((await pool.query('SELECT COUNT(*)::int AS count FROM oms.package_reconciliation_commands')).rows).toEqual([{ count: 0 }]);
+    expect((await pool.query('SELECT COUNT(*)::int AS count FROM wms.physical_shipment_item_quantity_adjustments')).rows).toEqual([{ count: 0 }]);
+    expect((await pool.query('SELECT SUM(quantity_shipped)::int AS quantity FROM wms.effective_physical_shipment_items')).rows).toEqual([{ quantity: 2 }]);
+    expect((await pool.query('SELECT * FROM inventory.inventory_transactions ORDER BY id')).rows).toEqual(before);
+  });
   it("database guards reject a negative-only correction without an applied conserving receipt", async () => {
     const { source } = await splitFixture();
     const item = (await pool.query("SELECT id FROM wms.physical_shipment_items ORDER BY id LIMIT 1")).rows[0].id;

@@ -56,6 +56,9 @@ export class PackageReconciliationService {
   async preview(rawRequest: PackageReconciliationRequest) {
     const request = requestSchema.parse(rawRequest);
     const snapshot = await this.dependencies.repository.loadPackageReconciliationSnapshot(request.sourceItemIds);
+    if (snapshot.sources.some(source => source.provider !== 'shopify')) {
+      throw new PackageReconciliationError('CHANNEL_SCOPE_UNSUPPORTED', 'Historical adoption requires originating Shopify orders');
+    }
     const proof = await this.dependencies.provider.load(snapshot);
     const correction = request.correctedPreviousLabelIds.length ? { kind: "confirmed_package_contents_correction" as const,
       actorId: request.actor, reason: request.reason, previousLabelIds: request.correctedPreviousLabelIds } : null;

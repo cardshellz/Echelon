@@ -177,6 +177,9 @@ export async function applyPackageReconciliation(tx: Transaction, rawCommand: Pa
   }
   const snapshot = await loadPackageReconciliationSnapshot(tx, command.sourceItemIds, true);
   if (snapshot.hash !== command.expectedSnapshotHash) throw new PackageReconciliationError("STALE_PACKAGE_SNAPSHOT", "Package allocations changed after the reviewed preview");
+  if (command.mode === 'adopt_existing' && snapshot.sources.some(source => source.provider !== 'shopify')) {
+    throw new PackageReconciliationError('CHANNEL_SCOPE_UNSUPPORTED', 'Historical adoption requires originating Shopify orders; no allocation changes were made');
+  }
   const input = packageReconciliationInputFromProof(snapshot, command.providerProof, command.correction);
   const plan = planPackageReconciliation(input);
   if ((plan.outcome !== "ready" && plan.outcome !== "unchanged") || plan.evidenceHash !== command.expectedPlanHash) {

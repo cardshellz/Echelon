@@ -31,6 +31,13 @@ function fixture(options:{tracking?:string;quantity?:number;duplicate?:boolean;f
   return{service,repository,native,projector,intent,updateTracking,channels,provider,logger};
 }
 describe('package reconciliation channel adoption',()=>{
+  it('rejects unsupported historical channels before reading the provider or changing allocations', async () => {
+    const f = fixture();
+    f.repository.loadPackageReconciliationSnapshot.mockResolvedValue({ sources: [{ provider: 'ebay' }] });
+    await expect(f.service.preview(request)).rejects.toMatchObject({ code: 'CHANNEL_SCOPE_UNSUPPORTED' });
+    expect(f.provider.load).not.toHaveBeenCalled();
+    expect(f.repository.reconcilePackages).not.toHaveBeenCalled();
+  });
   it('updates only tracking on a uniquely matched earlier fulfillment, with notifications disabled',async()=>{
     const f=fixture();const result=await f.service.execute(request);
     expect(f.updateTracking).toHaveBeenCalledWith(f.native,'gid://shopify/Fulfillment/1',{number:'NEW',company:'UPS'},false);
