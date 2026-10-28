@@ -38,6 +38,12 @@ describe("inventory channel exposure routes", () => {
     hold: ReturnType<typeof vi.fn>;
     release: ReturnType<typeof vi.fn>;
   };
+  let stockLinkControls: {
+    status: ReturnType<typeof vi.fn>;
+    setSwitch: ReturnType<typeof vi.fn>;
+    continue: ReturnType<typeof vi.fn>;
+    checkAgain: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(async () => {
     requirePermissionMock.mockClear();
@@ -69,13 +75,21 @@ describe("inventory channel exposure routes", () => {
       hold: vi.fn(async (request) => holdResult(request, "hold")),
       release: vi.fn(async (request) => holdResult(request, "release")),
     };
+    const stockLinkStatus = { supported: true, publicationTargetId: 5, autoLinkEnabled: true, revision: "2",
+      counts: { linked: 1, waiting: 0, flagged: 0, error: 0 }, paused: null, halted: null, retiresHeld: null };
+    stockLinkControls = {
+      status: vi.fn(async () => stockLinkStatus),
+      setSwitch: vi.fn(async () => ({ ...stockLinkStatus, autoLinkEnabled: false, revision: "3" })),
+      continue: vi.fn(async () => stockLinkStatus),
+      checkAgain: vi.fn(async () => ({ ...stockLinkStatus, revision: "3" })),
+    };
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
       Object.defineProperty(req, "session", { value: { user: { id: "operator-1" } } });
       next();
     });
-    registerInventoryChannelExposureRoutes(app, { service, targetEnableService, targetStopService, targetResumeService, targetHoldService, publicationStatusService });
+    registerInventoryChannelExposureRoutes(app, { service, targetEnableService, targetStopService, targetResumeService, targetHoldService, publicationStatusService, stockLinkControls });
     server = await startServer(app);
   });
 
@@ -139,6 +153,43 @@ describe("inventory channel exposure routes", () => {
     expect(response.status).toBe(400);
     expect(response.body).toMatchObject({ error: { code: "INVENTORY_CHANNEL_EXPOSURE_INVALID_REQUEST" } });
     expect(targetHoldService.hold).not.toHaveBeenCalled();
+  });
+
+  it("reads stock-link status with view permission, uncached, passing the raw query id to the service", async () => {
+    const result = await jsonRequest(`${server.url}/api/inventory-planning/admin/channel-exposure/stock-link-status?publicationTargetId=5`);
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ supported: true, revision: "2" });
+    expect(stockLinkControls.status).toHaveBeenCalledWith({ publicationTargetId: "5" });
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "view");
+  });
+
+  it("runs the switch, Continue and Check again with activation permission and the session actor", async () => {
+    const base = `${server.url}/api/inventory-planning/admin/channel-exposure`;
+    const switchBody = { publicationTargetId: 5, enabled: false, expectedRevision: "2", reason: "Store migration" };
+    const switched = await jsonRequest(`${base}/stock-link-switch`, { method: "POST", body: switchBody });
+    expect(switched.status).toBe(200);
+    expect(switched.body).toMatchObject({ autoLinkEnabled: false, revision: "3" });
+    expect(stockLinkControls.setSwitch).toHaveBeenCalledWith(switchBody, "operator-1");
+    const continued = await jsonRequest(`${base}/stock-link-continue`, { method: "POST", body: { publicationTargetId: 5, expectedRevision: "2" } });
+    expect(continued.status).toBe(200);
+    expect(stockLinkControls.continue).toHaveBeenCalledWith({ publicationTargetId: 5, expectedRevision: "2" }, "operator-1");
+    const checked = await jsonRequest(`${base}/stock-link-check-again`, { method: "POST", body: { publicationTargetId: 5, expectedRevision: "2" } });
+    expect(checked.status).toBe(200);
+    expect(stockLinkControls.checkAgain).toHaveBeenCalledWith({ publicationTargetId: 5, expectedRevision: "2" }, "operator-1");
+    const permissions = requirePermissionMock.mock.calls.map((call) => call.join(":"));
+    expect(permissions.filter((entry) => entry === "inventory_planning:activate").length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("answers a stock-link refusal with its own status and code", async () => {
+    const { InventoryAvailabilityMasterDataError } = await import("../../domain/inventory-availability-master-data.contracts");
+    stockLinkControls.setSwitch.mockRejectedValueOnce(new InventoryAvailabilityMasterDataError(409, "STOCK_LINK_DESTINATION_STALE", "Reload."));
+    const stale = await jsonRequest(`${server.url}/api/inventory-planning/admin/channel-exposure/stock-link-switch`,
+      { method: "POST", body: { publicationTargetId: 5, enabled: true, expectedRevision: "1" } });
+    expect(stale.status).toBe(409);
+    expect(stale.body).toMatchObject({ error: { code: "STOCK_LINK_DESTINATION_STALE" } });
+    stockLinkControls.status.mockRejectedValueOnce(new InventoryAvailabilityMasterDataError(404, "STOCK_LINK_DESTINATION_NOT_FOUND", "Missing."));
+    const missing = await jsonRequest(`${server.url}/api/inventory-planning/admin/channel-exposure/stock-link-status?publicationTargetId=9`);
+    expect(missing.status).toBe(404);
   });
 
   it("gates the view with inventory-planning view permission", async () => {

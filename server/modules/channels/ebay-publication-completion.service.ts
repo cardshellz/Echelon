@@ -19,6 +19,25 @@ export interface PreparedEbayPublication extends PreparedEbayListingSync {
   assertInventoryReady(context?: { commandKey: string; actor: string }): Promise<void>;
   resolvePublishedIdentity: EbayPublishedListingIdentityResolver;
 }
+
+/** Ordinary Sync and restarted jobs use the same read-only preparation path.
+ * Existing unpublished offers are reusable resources, not a reason to demand
+ * an already-created group. The inspector verifies any proposed group before
+ * the saved execution owner binds it and checks canonical ownership. */
+export async function inspectEbayPublicationPreparation(input: {
+  source: EbayListingSyncIdentity;
+  savedTarget: EbayListingSyncIdentity | null;
+  newGroupKey: string;
+  inspect(plannedGroupKey?: string | null): Promise<EbayListingInspection>;
+}): Promise<EbayListingInspection> {
+  const inspection = await input.inspect();
+  if (inspection.publication || inspection.unpublishedTarget || inspection.skus.some(member => member.issue !== null)
+    || inspection.publicationIssue?.providerRead) return inspection;
+  const groupKey = input.savedTarget ? input.savedTarget.groupKey
+    : input.source.groupKey ?? (input.source.variants.length > 1 ? input.newGroupKey : null);
+  return input.inspect(groupKey);
+}
+
 /** Publication is an operation of the existing saved sync queue. The connector
  * owns provider primitives; inventory admission continues to own every write. */
 export class EbayPublicationCompletionExecution implements EbayListingSyncExecution {

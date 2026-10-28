@@ -127,6 +127,8 @@ import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shi
 import { createShipStationPhysicalRecoveryService } from "../modules/oms/shipstation-physical-recovery.service";
 import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
 import { ChannelIdentityService } from "../modules/channels/channel-identity.service";
+import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../modules/channels/shopify-stock-link-source";
+import { createStockLinkService } from "../modules/inventory-planning/infrastructure/stock-link.factory";
 import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../modules/channels/channel-fulfillment-provider-clients.service";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
@@ -179,7 +181,12 @@ import { refreshRecoveredEbayListing } from "../modules/channels/ebay-listing-sy
 import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
 import { InventoryPublicationTransportRegistry } from "../modules/inventory-planning/application/inventory-publication-transport";
-import { createEbayDropshipInventoryPublicationTransportAdapterFromEnv } from "../modules/dropship/infrastructure/dropship-ebay-inventory-publication.adapter";
+import {
+  createEbayDropshipInventoryPublicationTransportAdapterFromEnv, PgDropshipInventoryPublicationDestinationReader,
+} from "../modules/dropship/infrastructure/dropship-ebay-inventory-publication.adapter";
+import { createDropshipEbayStockLinkAdapter } from "../modules/dropship/infrastructure/dropship-ebay-stock-link.adapter";
+import { createDropshipEbayStockLinkSource } from "../modules/dropship/infrastructure/dropship-ebay-stock-link-source";
+import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "../modules/dropship/infrastructure/dropship-ebay-registration-credentials";
 import { createDropshipOmsChannelResolver } from "../modules/dropship/infrastructure/dropship-oms-warehouse-assignments.reader";
 import { createMemberResolver } from "../modules/membership";
 import { InventoryAvailabilityClaimService } from "../modules/inventory-planning/application/inventory-availability-claim.service";
@@ -209,7 +216,7 @@ const systemCanonicalClaimClock = (): Date => new Date();
 
 export function createServices(
   db: any,
-  databasePool: Pick<Pool, "connect">,
+  databasePool: Pick<Pool, "connect" | "query">,
 ) {
   // Foundation
   const inventoryLots = createInventoryLotService(db);
@@ -447,6 +454,26 @@ export function createServices(
     createEbayDropshipInventoryPublicationTransportAdapterFromEnv(),
   );
   inventoryPublicationTransports.register(new ChannelInventoryPublicationTransportAdapter(walmartAdapter));
+  // Channels PR2 (PLAN-CH2 v4.1 §7.1): the stock-link engine's tick (started by server/index.ts). Each binding is the
+  // owner module's read-only provider adapter and SQL source for one destination kind and provider; today Card Shellz's
+  // own Shopify stores, each read with its own login. Real time and jitter are chosen here and injected.
+  const stockLink = createStockLinkService({
+    pool: databasePool,
+    bindings: [{
+      adapter: createShopifyStockLinkAdapter({ connections: new ChannelIdentityService(db), clock: () => new Date() }),
+      source: createShopifyStockLinkSource(),
+    }, {
+      // Channels PR3: Dropship eBay listings that were live before stock links existed, linked by SKU through the
+      // existing Dropship writer (origin live_listing_enrollment). Read-only eBay offer lookups with the store's login.
+      kind: "listing_enrollment",
+      adapter: createDropshipEbayStockLinkAdapter({ destinations: new PgDropshipInventoryPublicationDestinationReader(databasePool),
+        credentials: createDropshipEbayRegistrationCredentialProviderFromEnv(), clock: () => new Date() }),
+      source: createDropshipEbayStockLinkSource(),
+    }],
+    clock: () => new Date(),
+    monotonicNow: () => performance.now(),
+    random: Math.random,
+  });
   const channelShippingCapabilities = new ChannelShippingCapabilityRegistry();
   channelShippingCapabilities.register(shopifyAdapter);
   channelShippingCapabilities.register(ebayAdapter);
@@ -751,6 +778,7 @@ export function createServices(
     quantityPublicationCatchup,
     ebayPublicationReconciliation,
     inventoryPublicationReadback,
+    stockLink,
     inventoryAvailabilityClaims,
     assemblyWork,
     assemblyExecution,

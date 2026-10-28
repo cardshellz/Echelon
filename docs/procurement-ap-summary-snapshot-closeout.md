@@ -1,5 +1,7 @@
 # AP summary snapshot and current-main procurement verification
 
+Final PR #1925 workflow/release observations and the follow-up performance measurements are recorded in [the cost-read closeout](procurement-cost-read-performance-closeout.md). The evidence below retains its original source and timing attribution.
+
 ## Scope and result
 
 This continues the unpublished `891a397e2` package. Current main `bdf711be2c23ad6e992df947b08202e495779db1` is included through merge `880758b69`; the AP correction is code commit `b340d5b45037c0362ab41b5d0065f872f04af38f`. Documentation/evidence updates on top of that code commit do not change runtime inputs. No SQL migration, production role assignment or live/historical business-record repair is included.

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000036000019340001_stock_links.sql",
+  "generation": 36,
+  "pr": 1934,
+  "ordinal": 1,
+  "after": [
+    "900000035000019290001_legacy_maintenance_replacement.sql"
+  ]
+}

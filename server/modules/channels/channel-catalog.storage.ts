@@ -1,5 +1,6 @@
 import { createChannelPricingService } from "./channel-pricing.service";
 import { parsePricingId } from "./channel-pricing.domain";
+import { channelVariantOverrideLockKey } from "./infrastructure/channel-variant-override-lock";
 import {
   db,
   channelProductOverrides,
@@ -126,21 +127,26 @@ export const channelCatalogMethods: IChannelCatalogStorage = {
   },
 
   async upsertChannelVariantOverride(data: InsertChannelVariantOverride): Promise<ChannelVariantOverride> {
-    const result = await db.insert(channelVariantOverrides)
-      .values(data)
-      .onConflictDoUpdate({
-        target: [channelVariantOverrides.channelId, channelVariantOverrides.productVariantId],
-        set: {
-          nameOverride: data.nameOverride,
-          skuOverride: data.skuOverride,
-          barcodeOverride: data.barcodeOverride,
-          weightOverride: data.weightOverride,
-          isListed: data.isListed,
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
-    return result[0];
+    // The override lock first, in the same transaction: a stock-link command confirming this size's SKU either sees
+    // this write or makes it wait for its commit, a first override (an INSERT) included (channel-variant-override-lock.ts).
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${channelVariantOverrideLockKey(Number(data.channelId), Number(data.productVariantId))}, 0))`);
+      const result = await tx.insert(channelVariantOverrides)
+        .values(data)
+        .onConflictDoUpdate({
+          target: [channelVariantOverrides.channelId, channelVariantOverrides.productVariantId],
+          set: {
+            nameOverride: data.nameOverride,
+            skuOverride: data.skuOverride,
+            barcodeOverride: data.barcodeOverride,
+            weightOverride: data.weightOverride,
+            isListed: data.isListed,
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+      return result[0];
+    });
   },
 
   async deleteChannelVariantOverride(channelId: number, productVariantId: number): Promise<boolean> {

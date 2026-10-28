@@ -305,6 +305,10 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/__tests__/inventory-history-shipment-quantity.test.ts",
       "client/src/features/channel-listing-publication/__tests__/api.test.ts",
       "client/src/features/channel-listing-publication/__tests__/model.test.ts",
+      // PLAN-CH2 v4.1 §11.5: Channel Inventory stock-link controls (presenter, API, components).
+      "client/src/features/channel-inventory/__tests__/stock-link-presentation.test.ts",
+      "client/src/features/channel-inventory/__tests__/stock-link-api.test.ts",
+      "client/src/features/channel-inventory/__tests__/stock-link-controls.test.ts",
       "client/src/pages/dropship/__tests__/DropshipPortalCatalog.test.ts",
       "client/src/lib/__tests__/dropship-listing-preview.test.ts",
       "client/src/lib/__tests__/dropship-listing-price.test.ts",

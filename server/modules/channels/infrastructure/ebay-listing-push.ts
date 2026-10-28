@@ -15,7 +15,7 @@ import { readExistingEbayListingIdentityForProduct } from "../ebay-listing-sync"
 import { createEbayMarketplaceRegistrationAdapters } from "../adapters/ebay/ebay-marketplace-registration.factory";
 import { observeExistingEbayPublication, assertEbayListingSourceIdentityUnchanged } from "../ebay-existing-listing-identity";
 import { resolveEbayPublicationTarget, assertEbayPublicationTargetUnchanged } from "../ebay-publication-completion.domain";
-import type { PreparedEbayPublication } from "../ebay-publication-completion.service";
+import { inspectEbayPublicationPreparation, type PreparedEbayPublication } from "../ebay-publication-completion.service";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -159,15 +159,11 @@ export async function prepareEbayPublicationCompletion(source: EbayListingSyncId
     memberCandidates: source.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku,
       isActive: true, availableQuantity: quantityByVariant.get(member.variantId) ?? 0 })) };
   const inspect = () => observer.inspectExistingPublication(observationInput);
-  let inspection = await inspect();
-  // A first publication can stop between inventory/offer/group writes. Its
-  // recorded target then authorizes checking that same incomplete preparation.
-  // Existing saved offers without a recorded target require complete topology.
-  if (!inspection.publication && !inspection.unpublishedTarget
-    && (savedTarget !== null || source.variants.every(member => member.offerId === null))) {
-    inspection = await observer.inspectExistingPublication({ ...observationInput,
-      unpublishedGroupKey: savedTarget ? savedTarget.groupKey : variants.length > 1 ? product.sku || `PROD-${product.id}` : null });
-  }
+  const inspection = await inspectEbayPublicationPreparation({ source, savedTarget,
+    newGroupKey: product.sku || `PROD-${product.id}`,
+    inspect: unpublishedGroupKey => observer.inspectExistingPublication({ ...observationInput,
+      ...(unpublishedGroupKey !== undefined ? { unpublishedGroupKey } : {}) }),
+  });
   const identity = resolveEbayPublicationTarget(source, inspection);
   if (savedTarget) assertEbayPublicationTargetUnchanged(savedTarget, identity);
   const { draft, clientInput, prices, resolvePublishedIdentity } = await preparePushDraft({ ctx, product, category,

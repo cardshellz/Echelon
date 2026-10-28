@@ -32,6 +32,7 @@ import {
   channelStockUpdateDeadLetterDestinationSampleSql,
 } from "../inventory-planning/channel-stock-update-dead-letters";
 import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../dropship/marketplace-sync-health";
+import { stockLinkHealthChecksForProcess } from "../inventory-planning/stock-link-health";
 import {
   HELD_LINE_AGING_DAYS,
   allLinesHeldCountQuery,
@@ -927,6 +928,15 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     message: check.message,
     ...(await countAndSample(db, check.countSql, check.sampleSql)),
   })));
+  // Channels PR2 stock links (Card Shellz's own Shopify stores), through inventory planning's published read port
+  // (inventory-planning/stock-link-health.ts): one count and sample each. STOCK_LINK_UNLINKED is info: it never alerts.
+  // With the runner's kill switch on, the checks a stopped runner can never clear are left out (review CMP-1).
+  const stockLinkIssues = await Promise.all(stockLinkHealthChecksForProcess().map(async (check) => issue({
+    code: check.code,
+    severity: check.severity,
+    message: check.message,
+    ...(await countAndSample(db, check.countSql, check.sampleSql)),
+  })));
   const channelWriteback = await getChannelWritebackHealth(db, {
     windowDays: 14,
     sampleLimit: 50,
@@ -1184,6 +1194,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       sample: channelStockUpdateDeadLetter.sample,
     }),
     ...marketplaceSyncIssues,
+    ...stockLinkIssues,
     issue({
       code: "CHANNEL_WRITEBACK_MASKED_SPLIT",
       severity: "critical",

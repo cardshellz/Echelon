@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
-import { inboundShipmentLines, inboundFreightCosts, inboundFreightAllocations, inventoryLots,
+import { inboundShipmentLines, inboundFreightCosts, inboundFreightAllocations,
   landedCostSnapshots, purchaseOrderLines, purchaseOrders } from "@shared/schema";
 import { readShipmentHealthEvidence } from "../../shipment-health-evidence.repository";
 
@@ -17,7 +17,6 @@ function fixture() {
     [inboundFreightAllocations, [{ id: 41, shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 101 },
       // Stale allocations are deliberately retained for the existing owner to classify.
       { id: 42, shipmentCostId: 32, inboundShipmentLineId: 999, allocatedCents: 999 }]],
-    [inventoryLots, [{ id: 51, inboundShipmentId: 2, costProvisional: 1 }]],
     [landedCostSnapshots, [{ id: 61, inboundShipmentLineId: 11, landedUnitCostCents: 34 }]],
     [purchaseOrderLines, [{ id: 111, purchaseOrderId: 101, totalProductCostCents: 300 }, { id: 211, purchaseOrderId: 201, totalProductCostCents: 700 }]],
     [purchaseOrders, [{ id: 101, currency: "USD" }, { id: 201, currency: "CAD" }]],
@@ -35,16 +34,14 @@ function fixture() {
 }
 
 describe("bounded shipment health raw evidence", () => {
-  it("reads seven batches for two shipments, preserving distinct sources, exact values, order and stale allocation evidence", async () => {
+  it("reads six batches for two shipments, preserving distinct sources, exact values, order and stale allocation evidence", async () => {
     const { tx, rows, queries, select } = fixture();
     const before = JSON.stringify([...rows.values()]);
     const result = await readShipmentHealthEvidence(tx, [1, 2]);
-    expect(select).toHaveBeenCalledTimes(7);
+    expect(select).toHaveBeenCalledTimes(6);
     expect(result.get(1)?.lines.map(line => line.id)).toEqual([11, 12]);
     expect(result.get(2)?.lines.map(line => line.id)).toEqual([21]);
     expect(result.get(1)?.costs).toEqual([{ id: 31, inboundShipmentId: 1, actualCents: 101 }]);
-    expect(result.get(1)?.provisionalLots).toEqual([]);
-    expect(result.get(2)?.provisionalLots.map(lot => lot.id)).toEqual([51]);
     expect(result.get(1)?.snapshotsByLineId.get(11)?.landedUnitCostCents).toBe(34);
     expect(result.get(2)?.snapshotsByLineId.has(21)).toBe(false);
     expect(result.get(2)?.allocationsByCostId.get(32)?.[0].inboundShipmentLineId).toBe(999);
@@ -71,13 +68,13 @@ describe("bounded shipment health raw evidence", () => {
     const evidence = (await readShipmentHealthEvidence(tx, [1, 2])).get(1)!;
     expect(evidence.lines).toHaveLength(70_002);
     expect(evidence.lines.at(-1)?.id).toBe(70_999);
-    expect(select).toHaveBeenCalledTimes(7);
+    expect(select).toHaveBeenCalledTimes(6);
     const query = new PgDialect().sqlToQuery(queries.find(query => query.table === landedCostSnapshots)!.where);
     expect(query.params).toHaveLength(1);
     expect(query.params[0]).toHaveLength(70_003);
     expect(query.sql).toContain("ANY($1::int[])");
   });
-  it.each([inboundShipmentLines, inboundFreightCosts, inboundFreightAllocations, inventoryLots,
+  it.each([inboundShipmentLines, inboundFreightCosts, inboundFreightAllocations,
     landedCostSnapshots, purchaseOrderLines, purchaseOrders])("rejects duplicate raw identities", async table => {
     const { tx, rows } = fixture();
     rows.get(table)!.push({ ...rows.get(table)![0] });
@@ -90,7 +87,7 @@ describe("bounded shipment health raw evidence", () => {
   });
   it.each([
     [inboundShipmentLines, "inboundShipmentId"], [inboundFreightCosts, "inboundShipmentId"],
-    [inboundFreightAllocations, "shipmentCostId"], [inventoryLots, "inboundShipmentId"],
+    [inboundFreightAllocations, "shipmentCostId"],
     [landedCostSnapshots, "inboundShipmentLineId"], [purchaseOrderLines, "id"], [purchaseOrders, "id"],
   ] as const)("rejects unexpected source identities", async (table, column) => {
     const { tx, rows } = fixture();

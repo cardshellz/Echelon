@@ -164,6 +164,14 @@ jobs:
           client/src/features/channel-listing-publication/__tests__/model.test.ts
           client/src/features/channel-listing-publication/__tests__/listing-update-model.test.ts
           client/src/features/channel-listing-publication/__tests__/listing-intent-change-presentation.test.ts
+      # PLAN-CH2 v4.1 §11.5: Channel Inventory stock-link controls. These paths have no "unit" in them,
+      # so test:unit never selects them.
+      - name: Channel Inventory stock-link UI contracts
+        run: >-
+          npx vitest run
+          client/src/features/channel-inventory/__tests__/stock-link-presentation.test.ts
+          client/src/features/channel-inventory/__tests__/stock-link-api.test.ts
+          client/src/features/channel-inventory/__tests__/stock-link-controls.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run

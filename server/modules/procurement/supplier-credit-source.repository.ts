@@ -1,3 +1,4 @@
+import { shipmentCostReadPageSchema } from "./shipment-cost-read-scope";
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { costInteger, CostEvidenceError, type CostEvidenceTransaction } from "../inventory/infrastructure/cost-evidence.repository";
@@ -7,6 +8,8 @@ import type { CostIssue } from "@shared/procurement/cost-source-contracts";
 export type SupplierCreditSourceRow = SupplierCreditCostRow & {
   purchase_order_line_id: unknown; freight_cost_id: unknown;
 };
+
+const SUPPLIER_CREDIT_COST_ROW_LIMIT = 10_000;
 
 export async function readSupplierCreditCostRows(tx: CostEvidenceTransaction, scope: {
   purchaseOrderLineIds?: readonly number[]; freightCostIds?: readonly number[]; creditId?: number;
@@ -25,10 +28,42 @@ export async function readSupplierCreditCostRows(tx: CostEvidenceTransaction, sc
       AND (invoice_line.purchase_order_line_id=ANY(${sql.param(poIds)}::int[])
         OR invoice_line.freight_cost_id=ANY(${sql.param(freightIds)}::int[])
         OR credit.id=${scope.creditId ?? null})
-    ORDER BY line.id LIMIT 10001
+    ORDER BY line.id LIMIT ${SUPPLIER_CREDIT_COST_ROW_LIMIT + 1}
   `)).rows;
-  if (rows.length > 10000) throw new CostEvidenceError("CREDIT_SOURCE_LIMIT", "Supplier credit source review exceeds 10000 lines.");
+  if (rows.length > SUPPLIER_CREDIT_COST_ROW_LIMIT) throw new CostEvidenceError("CREDIT_SOURCE_LIMIT", "Supplier credit source review exceeds 10000 lines.");
   return rows as SupplierCreditSourceRow[];
+}
+
+/** Preserve the existing 10,000-row limit for each shipment independently.
+ * One shipment cannot consume another's credit evidence or change its limit. */
+export async function readShipmentSupplierCreditCostRows(tx: CostEvidenceTransaction, shipmentIds: readonly number[]): Promise<Map<number, SupplierCreditSourceRow[]>> {
+  const ids = [...new Set(shipmentCostReadPageSchema.parse(shipmentIds))];
+  const result = new Map(ids.map(id => [id, [] as SupplierCreditSourceRow[]]));
+  if (!ids.length) return result;
+  const rows = (await tx.execute(sql`
+    WITH scoped AS (
+      SELECT cost.inbound_shipment_id AS __shipment_id,
+        row_number() OVER (PARTITION BY cost.inbound_shipment_id ORDER BY line.id) AS __source_row,
+        line.id,line.supplier_credit_id,line.invoice_line_id,line.amount_cents,line.disposition,line.source_evidence,credit.status,
+        invoice_line.purchase_order_line_id,invoice_line.freight_cost_id
+      FROM procurement.supplier_credit_lines line
+      JOIN procurement.supplier_credits credit ON credit.id=line.supplier_credit_id
+      JOIN procurement.vendor_invoice_lines invoice_line ON invoice_line.id=line.invoice_line_id
+      JOIN procurement.inbound_freight_costs cost ON cost.id=invoice_line.freight_cost_id
+      WHERE (credit.status='approved' OR (credit.status='voided' AND credit.approved_at IS NOT NULL))
+        AND line.disposition->>'kind' IS DISTINCT FROM 'accepted_stock_return'
+        AND cost.inbound_shipment_id=ANY(${sql.param(ids)}::int[])
+    ) SELECT * FROM scoped WHERE __source_row<=${SUPPLIER_CREDIT_COST_ROW_LIMIT + 1} ORDER BY __shipment_id,id
+  `)).rows;
+  for (const row of rows) {
+    const { __shipment_id, __source_row, ...evidence } = row;
+    const shipmentId = costInteger(__shipment_id, "shipmentId", 1);
+    const scoped = result.get(shipmentId);
+    if (!scoped) throw new CostEvidenceError("SHIPMENT_COST_READ_EVIDENCE_INCOMPLETE", "Supplier credit evidence escaped its shipment scope.", { shipmentId });
+    if (costInteger(__source_row, "supplierCreditSourceRow", 1) > SUPPLIER_CREDIT_COST_ROW_LIMIT) throw new CostEvidenceError("CREDIT_SOURCE_LIMIT", "Supplier credit source review exceeds 10000 lines.");
+    scoped.push(evidence as SupplierCreditSourceRow);
+  }
+  return result;
 }
 
 export async function readSupplierCreditInvoiceLines(tx: CostEvidenceTransaction, invoiceId: number, lock: boolean) {

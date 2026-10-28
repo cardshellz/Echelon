@@ -33,6 +33,14 @@ import { sql, type SQL } from "drizzle-orm";
  * not load the publication runtime or its pool. The dead-letter state is reached
  * through the outbox dispatch index (state, available_at, id); the newer-revision test
  * uses the (target, variant, revision) unique key.
+ *
+ * N9 (channels PR2, PLAN-CH2 v4.1 §8, SAF-12): a refused item the stock-link engine has since retired is not an
+ * open refusal any more. When the size's head has no active link and a version retired by the engine names the
+ * dead letter's item, the size waits for a new store item (Ops Health STOCK_LINK_UNLINKED, info) instead of
+ * alerting here. Only the engine retires, so no pair of PR1 is affected; a retire by anyone else, or a later link,
+ * leaves the dead letter counted until a newer update reaches the store. `'system:stock-link'` is the engine's
+ * actor (IP/domain/stock-link.ts STOCK_LINK_ACTOR), written as a literal so this file stays dependency-free and the
+ * rendered SQL keeps its parameter list; a unit test pins the two equal.
  */
 function unresolvedChannelStockDeadLetters(): SQL {
   return sql`
@@ -49,6 +57,16 @@ function unresolvedChannelStockDeadLetters(): SQL {
           AND accepted.product_variant_id = o.product_variant_id
           AND accepted.desired_revision > o.desired_revision
           AND accepted.acknowledged_at IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM inventory.publication_variant_mapping_heads h
+        JOIN inventory.publication_variant_mapping_versions retired
+          ON retired.publication_target_id = h.publication_target_id
+         AND retired.product_variant_id = h.product_variant_id
+        WHERE h.publication_target_id = o.publication_target_id
+          AND h.product_variant_id = o.product_variant_id
+          AND h.active_mapping_id IS NULL
+          AND retired.lifecycle_status = 'retired'
+          AND retired.retired_by = 'system:stock-link'
+          AND btrim(retired.external_inventory_item_id) = btrim(o.external_inventory_item_id_snapshot))
   `;
 }
 
