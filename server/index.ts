@@ -11,6 +11,7 @@ import { registerCustomerAccountRoutes } from "./modules/customer-account/interf
 import { customerAccountServices } from "./modules/customer-account/infrastructure/customer-account.composition";
 import { startOrderEditScheduler } from "./modules/order-edits/infrastructure/order-edit-scheduler";
 import { createOrderActionProjectionWorker, startOrderActionProjectionScheduler } from "./modules/customer-account/infrastructure/order-action-projection.composition";
+import { createPackageHistoryWorker, startPackageHistoryScheduler } from "./modules/shipping/package-history.composition";
 import type { OrderActionProjectionReport } from "./modules/customer-account/infrastructure/order-action-projection.composition";
 import { logger } from "./platform/observability/logger";
 import { hasPermission } from "./modules/identity";
@@ -741,6 +742,18 @@ function startEchelonSyncScheduler(
 
   const orderEdits = createOrderEditService(dbPool, services);
   if (!schedulersDisabled()) {
+    try {
+      const packages = createPackageHistoryWorker(dbPool, db, event => {
+        const { action, code, ...fields } = event;
+        logger.info(action, { ...fields, ...(code ? { error_code: code } : {}) });
+      });
+      if (packages) httpServer.once("close", startPackageHistoryScheduler(packages, () => {
+        logger.error("shipping_package_history_sweep", { outcome: "failed", error_code: "PACKAGE_HISTORY_SWEEP_FAILED" });
+      }));
+      else logger.warn("shipping_package_history_start", { outcome: "unconfigured", error_code: "PACKAGE_HISTORY_PROVIDER_NOT_CONFIGURED" });
+    } catch {
+      logger.error("shipping_package_history_start", { outcome: "failed", error_code: "PACKAGE_HISTORY_CONFIGURATION_INVALID" });
+    }
     const reportActions: OrderActionProjectionReport = ({ action, code, ...event }) => {
       const write = event.outcome === "failed" ? logger.error : logger.info;
       write(action, { ...event, ...(code ? { error_code: code } : {}) });
