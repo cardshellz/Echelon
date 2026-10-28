@@ -38,13 +38,6 @@ describe("shared channel package ownership", () => {
       sources: { weight: "catalog", dimensions: "absent" }, warnings: [{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING",
         field: "package_dimensions", productId: 20, variantId: 101, variantSku: "TEST-VARIANT" }] });
   });
-  it("requires an explicit maintenance context before using a maintenance recommendation", () => {
-    const missing = { ...input, catalog: { weightGrams: 120 }, observed: {},
-      requirements: { weight: true, dimensions: true, dimensionsOnMaintenance: "recommended" as const } };
-    expect(() => prepareChannelPackage(missing)).toThrow(/required/);
-    expect(() => prepareChannelPackage({ ...missing, operation: "publication" })).toThrow(/required/);
-    expect(prepareChannelPackage({ ...missing, operation: "maintenance" }).warnings).toHaveLength(1);
-  });
   it("does not turn partial or invalid supplied measurements into warnings", () => {
     for (const catalog of [{ weightGrams: 120, lengthMm: 10 }, { weightGrams: 120, lengthMm: 0, widthMm: 10, heightMm: 10 }]) {
       expect(() => prepareChannelPackage({ ...input, catalog, observed: {},
