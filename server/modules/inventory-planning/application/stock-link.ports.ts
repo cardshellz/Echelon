@@ -1,9 +1,11 @@
 import type {
   StockLinkDestination,
   StockLinkItemObservation,
+  StockLinkOfferLookup,
   StockLinkSkuLookup,
 } from "@shared/types/stock-link";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
+import type { StockLinkEnrollmentListing } from "../domain/stock-link-enrollment";
 
 /**
  * The stock-link engine's ports (channels PR2, PLAN-CH2 v4.1 §4.1, §6). The engine (inventory planning) owns the
@@ -122,13 +124,59 @@ export interface StockLinkSource {
     productVariantIds: readonly number[]): Promise<StockLinkConfirmation>;
 }
 
-/** The adapter and source of one destination kind and provider. */
+/** The adapter and source of one destination kind and provider whose link is a store item id (Shopify). */
 export interface StockLinkPolicyBinding {
+  readonly kind?: "store_item";
   readonly adapter: StockLinkAdapter;
   readonly source: StockLinkSource;
 }
 
+// ---------------------------------------------------------------------------
+// Listing enrollment (channels PR3): Dropship eBay listings that were live before stock links existed
+// ---------------------------------------------------------------------------
+
+export type { StockLinkEnrollmentListing, StockLinkEnrollmentSkip } from "../domain/stock-link-enrollment";
+
+/** The owner module's read-only SQL for enrollment (run on the engine's client, never a write). */
+export interface StockLinkEnrollmentSource {
+  readonly destinationKind: StockLinkDestination["destinationKind"];
+  readonly providerKey: string;
+  /** One sweep page of the store's already-live listings' sizes (see the source for the exact rule). */
+  listCandidates: StockLinkSource["listCandidates"];
+  /** Changed listings since the cursor; a source without a change feed returns none (the sweep finds every size). */
+  listRecentlyChanged: StockLinkSource["listRecentlyChanged"];
+  /** Every candidate size's Card Shellz SKU (N6 mirror: two sizes with one SKU are flagged, never linked). */
+  listCarriedSkus: StockLinkSource["listCarriedSkus"];
+  /** The listing of each asked size that has one on this store (a size without a listing is absent). */
+  readListings(client: StockSelectionQueryClient, destination: StockLinkDestination,
+    productVariantIds: readonly number[]): Promise<readonly StockLinkEnrollmentListing[]>;
+}
+
+/** Provider I/O for enrollment: one SKU's offers, read-only, the store's own login, complete or thrown (classified). */
+export interface StockLinkOfferAdapter {
+  readonly destinationKind: StockLinkDestination["destinationKind"];
+  readonly providerKey: string;
+  findOffersBySku(destination: StockLinkDestination, sku: string, options: StockLinkProviderCallOptions): Promise<StockLinkOfferLookup>;
+}
+
+/**
+ * A destination whose link is the SKU and whose link writer is an existing wrapper (Dropship eBay:
+ * ensureDropshipEbayStockReady with origin live_listing_enrollment). The tick keeps the check rows, the budgets and
+ * Ops Health; the decision is domain/stock-link-enrollment.ts.
+ */
+export interface StockLinkEnrollmentBinding {
+  readonly kind: "listing_enrollment";
+  readonly adapter: StockLinkOfferAdapter;
+  readonly source: StockLinkEnrollmentSource;
+}
+
+export type StockLinkBinding = StockLinkPolicyBinding | StockLinkEnrollmentBinding;
+
+export function isStockLinkEnrollmentBinding(binding: StockLinkBinding): binding is StockLinkEnrollmentBinding {
+  return binding.kind === "listing_enrollment";
+}
+
 /** Resolves a destination's binding; null = no policy (the tick skips it at DEBUG, the status says unsupported). */
 export interface StockLinkRegistry {
-  resolve(destinationKind: StockLinkDestination["destinationKind"], providerKey: string): StockLinkPolicyBinding | null;
+  resolve(destinationKind: StockLinkDestination["destinationKind"], providerKey: string): StockLinkBinding | null;
 }

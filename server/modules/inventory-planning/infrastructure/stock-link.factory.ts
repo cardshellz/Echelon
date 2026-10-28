@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import type { StockLinkDestination } from "@shared/types/stock-link";
 import { STOCK_LINK_ACTOR } from "../domain/stock-link";
-import type { StockLinkPolicyBinding } from "../application/stock-link.ports";
+import type { StockLinkBinding } from "../application/stock-link.ports";
+import { STOCK_LINK_ENROLLMENT_ACTOR } from "../domain/stock-link-enrollment";
+import { ensureDropshipEbayStockReady } from "./dropship-ebay-stock-readiness.repository";
 import {
   StockLinkService, createStockLinkRegistry, type StockLinkLogger, type StockLinkSelectionFact, type StockLinkTickStore,
 } from "../application/stock-link.service";
@@ -65,8 +67,9 @@ async function readStockLinkSelection(pool: StockLinkPool, destination: StockLin
 
 export interface StockLinkServiceComposition {
   readonly pool: StockLinkPool;
-  /** One adapter + source per destination kind and provider (today: Card Shellz's own Shopify stores). */
-  readonly bindings: readonly StockLinkPolicyBinding[];
+  /** One adapter + source per destination kind and provider (Card Shellz's own Shopify stores; Dropship eBay stores'
+   * listing enrollment, channels PR3). */
+  readonly bindings: readonly StockLinkBinding[];
   readonly clock: () => Date;
   readonly monotonicNow: () => number;
   readonly random: () => number;
@@ -82,6 +85,9 @@ export function createStockLinkService(composition: StockLinkServiceComposition)
     registry: createStockLinkRegistry(composition.bindings),
     // The only command policy PR2 runs; it refuses any other destination (fatal STOCK_LINK_POLICY_MISSING).
     runCommand: (request, source) => runShopifyStockLinkCommand(pool, request, { source, clock, monotonicNow, random, logger }),
+    // Channels PR3: Dropship eBay listing enrollment links through the existing Dropship writer, unchanged (its keys,
+    // receipts, fence and audit), as the one background actor its allow-list names.
+    runEnrollment: input => ensureDropshipEbayStockReady(pool, input, { actor: STOCK_LINK_ENROLLMENT_ACTOR, now: clock(), monotonicNow }),
     db: pool,
     clock,
     monotonicNow,

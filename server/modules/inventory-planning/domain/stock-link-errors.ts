@@ -58,6 +58,8 @@ export const STOCK_LINK_ERROR_CODES = Object.freeze({
   storeNotAnswering: "STOCK_LINK_STORE_NOT_ANSWERING",
   // Permanent (row).
   checkViolation: "STOCK_LINK_CHECK_VIOLATION",
+  /** The store refused one SKU's lookup itself (a 4xx naming that request; channels PR3, eBay looks up one SKU a call). */
+  lookupRejected: "STOCK_LINK_LOOKUP_REJECTED",
   // Fatal (destination halt).
   adapterContract: "STOCK_LINK_ADAPTER_CONTRACT",
   idInvalid: "STOCK_LINK_ID_INVALID",
@@ -118,7 +120,7 @@ export const STOCK_LINK_PAUSE_CODES: ReadonlySet<string> = new Set([C.storeAuthR
  * hash), so it is classified like STOCK_MAPPING_COMMAND_CONFLICT (BUILD-NOTES D-P2-6).
  */
 export const STOCK_LINK_PERMANENT_CODES: ReadonlySet<string> = new Set([
-  U.mappingCommandConflict, U.mappingLinkChangedAfterApply, C.checkViolation, U.draftHistoryInvalid,
+  U.mappingCommandConflict, U.mappingLinkChangedAfterApply, C.checkViolation, C.lookupRejected, U.draftHistoryInvalid,
   U.draftIdempotencyConflict,
 ]);
 

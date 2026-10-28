@@ -116,6 +116,36 @@ export const stockLinkItemObservationSchema = z.object({
 });
 export type StockLinkItemObservation = z.infer<typeof stockLinkItemObservationSchema>;
 
+/**
+ * Dropship eBay (channels PR3): the link is the SKU itself (identity = sku, PLAN-CH-v3 §2 policy table), so the engine
+ * asks for every offer eBay holds for one Card Shellz SKU on the store's marketplace, complete or not at all (eBay's
+ * getOffers takes one SKU per call). Only the engine decides what the offers mean (on sale = PUBLISHED, duplicate =
+ * two or more PUBLISHED, the listing's own = the offer its push recorded).
+ */
+export const STOCK_LINK_OFFER_STATUSES = ["PUBLISHED", "UNPUBLISHED"] as const;
+/** eBay's discovery bound (channels ebay-inventory-quantity.ts MAX_OFFERS): more is never a complete answer. */
+export const STOCK_LINK_OFFERS_MAX = 1_000;
+/** dropship_vendor_listings.external_offer_id / external_listing_id are varchar(255). */
+const offerIdentity = z.string().min(1).max(255).refine(value => value === value.trim(), "eBay identities are trimmed.");
+
+export const stockLinkOfferLookupSchema = z.object({
+  observedAt: instant,
+  sku: z.string().trim().min(1).max(STOCK_LINK_SKU_MAX_LENGTH),
+  marketplaceId: z.string().regex(/^EBAY_[A-Z]{2,8}$/),
+  offers: z.array(z.object({
+    offerId: offerIdentity,
+    sku: z.string().min(1).max(STOCK_LINK_STORE_SKU_READ_MAX_LENGTH),
+    status: z.enum(STOCK_LINK_OFFER_STATUSES),
+    listingId: offerIdentity.nullable(),
+  }).strict()).max(STOCK_LINK_OFFERS_MAX),
+}).strict().superRefine((value, context) => {
+  if (value.offers.some(offer => offer.sku !== value.sku))
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["offers"], message: "Every offer carries exactly the looked-up SKU." });
+  if (new Set(value.offers.map(offer => offer.offerId)).size !== value.offers.length)
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["offers"], message: "Each offer appears once." });
+});
+export type StockLinkOfferLookup = z.infer<typeof stockLinkOfferLookupSchema>;
+
 /** A failure as a check row records it (M1 reason_code, error_class, message). */
 export const stockLinkRecordedFailureSchema = z.object({
   code: reasonCode,
