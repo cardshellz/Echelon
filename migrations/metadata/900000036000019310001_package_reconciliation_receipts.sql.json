@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000036000019310001_package_reconciliation_receipts.sql",
+  "generation": 36,
+  "pr": 1931,
+  "ordinal": 1,
+  "after": [
+    "0698_shipping_repack_recovery.sql",
+    "900000035000019290001_legacy_maintenance_replacement.sql"
+  ]
+}

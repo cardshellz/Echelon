@@ -52,6 +52,7 @@ export const CHANNEL_FULFILLMENT_REPAIR_SOURCES = Object.freeze({
   shopifyReconciler: "shopify_fulfillment_reconciler",
   shippedPackageRepair: "oms_flow_reconcile_shipped_package",
   legacyReconciliation: "legacy_fulfillment_reconciliation",
+  packageReconciliation: "shipstation_package_reconciliation",
 } as const);
 
 export const CHANNEL_FULFILLMENT_OPERATOR_REPAIR_PREFIX = "oms_flow_operator_remediation:";

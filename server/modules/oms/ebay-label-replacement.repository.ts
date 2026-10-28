@@ -25,6 +25,7 @@ export interface AuthorizedLabelReplacement {
   readonly labelId: number;
   readonly sourceItemIds: readonly number[];
   readonly sourceItems: readonly { readonly sourceShipmentItemId: number; readonly quantity: number }[];
+  readonly sourceCapacities?: readonly { readonly sourceItemId: number; readonly quantity: number }[];
 }
 
 function rows<T>(result: unknown): T[] {
@@ -33,7 +34,7 @@ function rows<T>(result: unknown): T[] {
   return value.rows;
 }
 
-interface PreviousItem {
+export interface PreviousItem {
   id: string; physical_shipment_id: string; source_id: number; quantity_shipped: number;
   label_id: string;
   label_status: "active" | "voided" | "superseded" | "unknown";
@@ -41,13 +42,15 @@ interface PreviousItem {
   provider_order_id: string | null;
 }
 
-interface SourceItem { id: number; shipment_id: number; qty: number; provider: string; purpose: string }
+export interface SourceItem { id: number; shipment_id: number; qty: number; provider: string; purpose: string; sku: string | null;
+  order_item_id: number; product_variant_id: number | null; oms_order_line_id: string; oms_order_id: string; channel_id: number }
 // A pathological graph must not hold the web pool indefinitely. Every normal
 // repack converges in a few expansions; no partial graph is admitted at this cap.
 const MAX_REPACK_DISCOVERY_ROUNDS = 20;
-async function readSources(tx: Transaction, sourceIds: readonly number[]): Promise<SourceItem[]> {
+export async function readSources(tx: Transaction, sourceIds: readonly number[]): Promise<SourceItem[]> {
   const sourceRows = rows<Omit<SourceItem, "qty">>(await tx.execute(sql`
-    SELECT item.id, item.shipment_id, channel.provider, item.shipment_item_purpose AS purpose
+    SELECT item.id, item.shipment_id, channel.provider, item.shipment_item_purpose AS purpose, order_item.sku,
+      item.order_item_id,item.product_variant_id,line.id::text AS oms_order_line_id,line.order_id::text AS oms_order_id,orders.channel_id
     FROM wms.outbound_shipment_items item
     JOIN wms.order_items order_item ON order_item.id = item.order_item_id
     JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id
@@ -68,7 +71,7 @@ async function readSources(tx: Transaction, sourceIds: readonly number[]): Promi
   });
 }
 
-async function readPreviousItems(tx: Transaction, sourceIds: readonly number[], currentProviderLabelId: string): Promise<PreviousItem[]> {
+export async function readPreviousItems(tx: Transaction, sourceIds: readonly number[], currentProviderLabelId: string): Promise<PreviousItem[]> {
   // Expand to complete physical packages. A repack can move one old package's
   // distinct source lines into different labels, even across WMS headers.
   return rows<PreviousItem>(await tx.execute(sql`
