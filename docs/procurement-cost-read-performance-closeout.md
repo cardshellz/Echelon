@@ -1,5 +1,7 @@
 # Procurement cost-read performance and deployed-1925 verification
 
+> October 28 follow-up: [supplier handoff, connected recovery and remaining supplier-read batching](procurement-supplier-handoff-connected-performance-closeout.md) closes the specifically identified follow-up gaps. The measurements and release attribution below retain their original scope.
+
 ## Scope and release verification
 
 Code commit `c310d6d47660714f0c1c1e20f511f2d772dd73a9` starts from pinned main `198543a220a790ab115c995fef203816d6b6e44c`. The subsequent evidence/reproduction files do not change tested runtime inputs. No SQL migration, new accounting rule, production permission assignment or historical repair is included.
