@@ -19,7 +19,7 @@ function fixture(options:{tracking?:string;quantity?:number;duplicate?:boolean;f
     completePackageReconciliation:vi.fn(async()=>({replayed:false,resolvedReviewIds:[700]})),readPackageReconciliationChannelScopes:vi.fn(async()=>[scope]),
     loadPackageReconciliationReplay:vi.fn(async()=>stored?{command,result,state:'applied'}:null),findPendingPackageReconciliations:vi.fn(async()=>[]),recordPackageReconciliationFailure:vi.fn()};
   Object.assign(repository,{markPackageReconciliationProjected:vi.fn()});
-  const projector={projectPhysicalShipment:vi.fn()};const intent=vi.fn();
+  const projector={projectReconciledPhysicalShipment:vi.fn()};const intent=vi.fn();
   const updateTracking=vi.fn(async()=>{tracking='NEW';if(options.failAfterTracking&&!failed){failed=true;throw new Error('timeout after provider accepted tracking');}});
   const channels={shopify:vi.fn(async()=>({channelId:36,connectionId:1,externalAccountId:'test.myshopify.com',client:native})),ebay:vi.fn()};
   const provider={load:vi.fn()};const logger={info:vi.fn(),error:vi.fn()};
@@ -49,6 +49,17 @@ describe('package reconciliation channel adoption',()=>{
     const f=fixture({tracking:'NEW'});await f.service.execute(request);
     expect(f.updateTracking).not.toHaveBeenCalled();expect(f.intent).not.toHaveBeenCalled();expect(f.repository.completePackageReconciliation).toHaveBeenCalledOnce();
   });
+  it('retains the applied receipt for retry if reconciliation header projection fails before channel adoption', async () => {
+    const f = fixture({ tracking: 'NEW' });
+    f.projector.projectReconciledPhysicalShipment.mockRejectedValueOnce(new Error('Header projection failed'));
+    await expect(f.service.execute(request)).rejects.toThrow('Header projection failed');
+    expect(f.channels.shopify).not.toHaveBeenCalled();
+    expect(f.repository.completePackageReconciliation).not.toHaveBeenCalled();
+    expect(f.repository.recordPackageReconciliationFailure).toHaveBeenCalledOnce();
+    await f.service.execute(request);
+    expect(f.repository.completePackageReconciliation).toHaveBeenCalledOnce();
+    expect(f.updateTracking).not.toHaveBeenCalled();
+  });
   it('resumes after a successful tracking update whose response was lost without updating again',async()=>{
     const f=fixture({failAfterTracking:true});await expect(f.service.execute(request)).rejects.toThrow('timeout');
     expect(f.repository.completePackageReconciliation).not.toHaveBeenCalled();
@@ -68,13 +79,13 @@ describe('package reconciliation channel adoption',()=>{
     const completed = await f.service.execute(request);
     const stored = await f.repository.loadPackageReconciliationReplay();
     f.repository.loadPackageReconciliationReplay.mockResolvedValue({ ...stored!, state: 'complete', readbacks: completed.readbacks } as never);
-    f.projector.projectPhysicalShipment.mockClear();
+    f.projector.projectReconciledPhysicalShipment.mockClear();
     f.native.request.mockClear();
     f.repository.completePackageReconciliation.mockClear();
     const replayed = await f.service.execute(request);
     expect(replayed.completion.replayed).toBe(true);
     expect(replayed.readbacks).toEqual(completed.readbacks);
-    expect(f.projector.projectPhysicalShipment).not.toHaveBeenCalled();
+    expect(f.projector.projectReconciledPhysicalShipment).not.toHaveBeenCalled();
     expect(f.native.request).not.toHaveBeenCalled();
     expect(f.repository.completePackageReconciliation).not.toHaveBeenCalled();
     await expect(f.service.execute(request, 'f'.repeat(64))).rejects.toMatchObject({ code: 'RECONCILIATION_REPLAY_CONFLICT' });

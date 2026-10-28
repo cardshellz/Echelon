@@ -29,7 +29,7 @@ export function createPackageReconciliationService(dependencies: {
       recordPackageReconciliationFailure:(key,code,now)=>repository.recordPackageReconciliationFailure!(key,code,now)},
     provider:dependencies.provider??{load:snapshot=>createShipStationPackageReconciliationClient({apiKey:process.env.SHIPSTATION_API_KEY??"",
       apiSecret:process.env.SHIPSTATION_API_SECRET??"",clock:()=>clock.now()}).load(snapshot)},
-    channels:dependencies.channels,projector:createChannelFulfillmentProjector(dependencies.database),clock,logger,
+    channels:dependencies.channels,projector:createChannelFulfillmentProjector(dependencies.database,()=>clock.now()),clock,logger,
     runExclusive:dependencies.runExclusive,
     recordTrackingIntent:input=>repository.recordPackageReconciliationTrackingIntent!(input,clock.now()),
     updateTracking:async(client,fulfillmentId,tracking,notifyCustomer)=>{

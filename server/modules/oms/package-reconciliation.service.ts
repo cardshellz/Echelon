@@ -4,7 +4,7 @@ import { knownCarrierCode } from "@shared/utils/carrier-identity";
 import type { ChannelFulfillmentProviderClients } from "../channels/channel-fulfillment-provider-clients.service";
 import type { ShipStationPackageReconciliationClient } from "../shipping/shipstation-package-reconciliation.client";
 import type { ChannelFulfillmentAuthorityRepository } from "./channel-fulfillment-authority.repository";
-import type { ChannelFulfillmentProjector } from "./channel-fulfillment-projection.repository";
+import type { PackageReconciliationProjector } from "./channel-fulfillment-projection.repository";
 import { packageReconciliationInputFromProof, PackageReconciliationError, type PackageReconciliationCommand,
   type PackageReconciliationResult, type PackageChannelReadback, type PackageReconciliationChannelScope } from "./package-reconciliation.repository";
 import { planPackageReconciliation } from "./package-reconciliation.domain";
@@ -45,7 +45,7 @@ export class PackageReconciliationService {
     repository: Repository;
     provider: ShipStationPackageReconciliationClient;
     channels: ChannelFulfillmentProviderClients;
-    projector: ChannelFulfillmentProjector;
+    projector: Pick<PackageReconciliationProjector, "projectReconciledPhysicalShipment">;
     updateTracking(client: ShopifyAdminGraphQLClient, fulfillmentId: string, tracking: { number: string; company: string }, notifyCustomer: false): Promise<void>;
     recordTrackingIntent(input: { commandId: number; omsOrderId: number; actor: string; before: ShopifyLabelPackage; trackingNumber: string }): Promise<void>;
     runExclusive<T>(key: number, work: () => Promise<T>): Promise<T | null>;
@@ -120,7 +120,7 @@ export class PackageReconciliationService {
       result = await this.dependencies.repository.reconcilePackages(command, this.dependencies.clock.now());
     }
     for (const physicalShipmentId of result.physicalShipmentIds) {
-      await this.dependencies.projector.projectPhysicalShipment(physicalShipmentId);
+      await this.dependencies.projector.projectReconciledPhysicalShipment(physicalShipmentId);
       await this.dependencies.repository.markPackageReconciliationProjected(result.commandId,physicalShipmentId,this.dependencies.clock.now());
     }
     const scopes = await this.dependencies.repository.readPackageReconciliationChannelScopes(result.commandId);

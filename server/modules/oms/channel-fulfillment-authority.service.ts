@@ -400,7 +400,11 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
     if (dependencies.labelReplacementEnabled === false) return null;
     const result = await dependencies.repository.reconcileEbayLabelReplacement?.(labelId, clock.now(), operation) ?? null;
     if (result?.outcome === "applied") {
-      await dependencies.projector.projectPhysicalShipment(result.materialized.physicalShipmentId);
+      if (dependencies.projector.projectReconciledPhysicalShipment) {
+        await dependencies.projector.projectReconciledPhysicalShipment(result.materialized.physicalShipmentId);
+      } else {
+        await dependencies.projector.projectPhysicalShipment(result.materialized.physicalShipmentId);
+      }
       await dependencies.repository.markEbayLabelReplacementProjected?.(labelId, clock.now());
     }
     if (result) logger.info({ code: "EBAY_LABEL_REPLACEMENT", labelId, outcome: result.outcome,

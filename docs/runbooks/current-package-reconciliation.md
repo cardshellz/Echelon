@@ -9,6 +9,10 @@ The application composes the pure complete-package planner, exact authenticated
 ShipStation reads, canonical package materializer, WMS/OMS projector, and existing
 Shopify tracking update and command lifecycle owners.
 
+Reconciliation explicitly selects the projector that updates WMS/OMS status and
+compatibility shipment headers in one transaction. Ordinary shipment projection
+uses the core path and does not query reconciliation work or receipt tables.
+
 ## Preview and apply
 
 Run with the target database and ShipStation credentials supplied through the

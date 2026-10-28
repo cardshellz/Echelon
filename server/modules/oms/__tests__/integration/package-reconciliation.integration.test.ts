@@ -159,7 +159,7 @@ describeWithDisposableDb("current package reconciliation owner", () => {
     expect(result.physicalShipmentIds).toHaveLength(1);expect(result.omsOrderIds).toHaveLength(2);
     expect((await pool.query('SELECT SUM(quantity_shipped)::int AS quantity FROM wms.effective_physical_shipment_items')).rows).toEqual([{quantity:27}]);
     expect((await pool.query('SELECT quantity_requested FROM wms.shipment_request_items WHERE legacy_wms_shipment_item_id=$1',[b])).rows).toEqual([{quantity_requested:12}]);
-    await createChannelFulfillmentProjector(getTestDb()).projectPhysicalShipment(result.physicalShipmentIds[0]);
+    await createChannelFulfillmentProjector(getTestDb()).projectReconciledPhysicalShipment(result.physicalShipmentIds[0]);
     expect((await pool.query('SELECT status,tracking_number,external_fulfillment_id FROM wms.outbound_shipments ORDER BY id')).rows)
       .toEqual(Array(2).fill({ status: 'shipped', tracking_number: 'PKG82003', external_fulfillment_id: null }));
     expect((await pool.query('SELECT * FROM inventory.inventory_transactions ORDER BY id')).rows).toEqual(before);
@@ -176,6 +176,31 @@ describeWithDisposableDb("current package reconciliation owner", () => {
     expect((await pool.query('SELECT * FROM wms.carrier_tracking_events ORDER BY id')).rows).toEqual(beforeCarrier);
     expect((await pool.query('SELECT id,quantity_shipped FROM wms.physical_shipment_items WHERE id=ANY($1::bigint[]) ORDER BY id',[beforeItems.map(item=>item.id)])).rows).toEqual(beforeItems);
     expect((await pool.query('SELECT COUNT(*)::int AS count FROM inventory.inventory_transactions')).rows).toEqual([{count:2}]);
+  });
+  it('rolls back WMS and OMS projection if a reconciled header update fails', async () => {
+    const { a, proof } = await mergeFixture(false);
+    const result = await createChannelFulfillmentAuthorityRepository(getTestDb()).reconcilePackages!(await command([a], proof), now);
+    const snapshot = async () => ({
+      orders: (await pool.query('SELECT * FROM wms.orders ORDER BY id')).rows,
+      items: (await pool.query('SELECT * FROM wms.order_items ORDER BY id')).rows,
+      omsOrders: (await pool.query('SELECT * FROM oms.oms_orders ORDER BY id')).rows,
+      omsLines: (await pool.query('SELECT * FROM oms.oms_order_lines ORDER BY id')).rows,
+      headers: (await pool.query('SELECT * FROM wms.outbound_shipments ORDER BY id')).rows,
+      inventory: (await pool.query('SELECT * FROM inventory.inventory_transactions ORDER BY id')).rows,
+    });
+    const before = await snapshot();
+    await pool.query(`CREATE FUNCTION wms.fail_reconciled_header_projection() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'injected reconciliation header failure'; END; $$;
+      CREATE TRIGGER fail_reconciled_header_projection BEFORE UPDATE ON wms.outbound_shipments
+      FOR EACH ROW EXECUTE FUNCTION wms.fail_reconciled_header_projection()`);
+    try {
+      await expect(createChannelFulfillmentProjector(getTestDb(), () => now)
+        .projectReconciledPhysicalShipment(result.physicalShipmentIds[0])).rejects.toThrow('injected reconciliation header failure');
+    } finally {
+      await pool.query('DROP TRIGGER fail_reconciled_header_projection ON wms.outbound_shipments; DROP FUNCTION wms.fail_reconciled_header_projection()');
+    }
+    expect(await snapshot()).toEqual(before);
+    expect((await pool.query('SELECT state FROM oms.package_reconciliation_commands')).rows).toEqual([{ state: 'applied' }]);
   });
   it("serializes concurrent identical reconciliation commands and replays the committed result",async()=>{
     const{source}=await splitFixture();const request=await command([source]);
@@ -210,7 +235,7 @@ describeWithDisposableDb("current package reconciliation owner", () => {
   it("adopts exact native readbacks, refuses wrong quantities, and replays completion without extra attempts",async()=>{
     const{source}=await splitFixture();const request=await command([source]);const repository=createChannelFulfillmentAuthorityRepository(getTestDb());
     const result=await repository.reconcilePackages!(request,now);
-    for(const physicalId of result.physicalShipmentIds){await createChannelFulfillmentProjector(getTestDb()).projectPhysicalShipment(physicalId);await repository.markPackageReconciliationProjected!(result.commandId,physicalId,now);}
+    for(const physicalId of result.physicalShipmentIds){await createChannelFulfillmentProjector(getTestDb()).projectReconciledPhysicalShipment(physicalId);await repository.markPackageReconciliationProjected!(result.commandId,physicalId,now);}
     const scopes=await repository.readPackageReconciliationChannelScopes!(result.commandId);
     const readbacks=scopes.map((scope,index)=>({physicalShipmentId:scope.physicalShipmentId,omsOrderId:scope.omsOrderId,channelId:scope.channelId,
       fulfillmentId:`gid://shopify/Fulfillment/${9000+index}`,trackingNumber:scope.trackingNumber,items:[...scope.items],observedAt:now.toISOString()}));

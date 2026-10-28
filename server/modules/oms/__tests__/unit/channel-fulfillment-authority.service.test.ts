@@ -60,6 +60,20 @@ function repositoryMock(
 }
 
 describe("channel fulfillment authority service", () => {
+  it("uses the reconciliation projector for automatic relabel recovery", async () => {
+    const repository = { ...repositoryMock([]),
+      reconcileEbayLabelReplacement: vi.fn().mockResolvedValue({ outcome: "applied", materialized: { physicalShipmentId: 9001 } }),
+      markEbayLabelReplacementProjected: vi.fn() };
+    const projector = { projectPhysicalShipment: vi.fn(), projectReconciledPhysicalShipment: vi.fn() };
+    const now = new Date("2026-10-28T12:00:00Z");
+    const service = createChannelFulfillmentAuthorityService({ repository, projector,
+      providerExecutor: { execute: vi.fn() }, clock: { now: () => now } });
+    await service.reconcileEbayLabelReplacement!(123);
+    expect(projector.projectReconciledPhysicalShipment).toHaveBeenCalledWith(9001);
+    expect(projector.projectPhysicalShipment).not.toHaveBeenCalled();
+    expect(repository.markEbayLabelReplacementProjected).toHaveBeenCalledWith(123, now);
+  });
+
   it("uses a request-bound audited suppression and retains its provenance in the attempt", async () => {
     const notificationSuppression = { requeueId: 11, requestHash: command().requestHash,
       operator: "user:7", reason: "Silent historical recovery", notifyCustomer: false as const };
