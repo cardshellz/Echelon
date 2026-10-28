@@ -19,6 +19,7 @@ import {
 } from "../../../returns/__tests__/support/live-inspection-fixtures";
 import { labelActivePolicy } from "../../../returns/__tests__/support/label-fixtures";
 import { CustomerReturnLiveService } from "../../../returns/application/customer-return-live.service";
+import { PostgresCustomerReturnBoxMeasurements } from "../../../returns/infrastructure/customer-return-box-measurements.repository";
 import {
   createPackageHistorySource,
   createPackageHistoryShipStationRequester,
@@ -372,6 +373,21 @@ integration("historical package capture and resumable backfill", () => {
     expect(order.boxOptions[0].items).toEqual([
       { lineId: order.lines[0].id, quantity: 1 },
     ]);
+    const inspection = await service.inspectCanonicalForIntake({
+      channelId: 36,
+      omsOrderId: 100,
+      externalOrderId: "1001",
+      externalCustomerId: "901",
+    });
+    // Execute the real background retention boundary too: historical boxes have
+    // durable shipping proof but intentionally have no operational WMS package.
+    await new PostgresCustomerReturnBoxMeasurements(pool).retain(
+      inspection.local,
+      inspection.canonicalBoxOptions ?? inspection.order.boxOptions,
+      now,
+    );
+    expect(inspection.canonicalBoxOptions).toEqual([]);
+    expect(inspection.order.boxOptions).toEqual(order.boxOptions);
     expect(dimensions.read).not.toHaveBeenCalled();
     expect(await fingerprint()).toBe(before);
     expect(new Set(requests)).toEqual(new Set(["/shipments"]));

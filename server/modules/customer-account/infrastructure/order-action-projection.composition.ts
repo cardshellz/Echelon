@@ -51,7 +51,7 @@ export function createOrderActionProjectionWorker(pool: Pool, edits: OrderEditSe
       const { db } = await import("../../../db");
       const settingsVersion = await new PostgresCustomerReturnSettingsStore(db).customerVersion(scope.channelId);
       const result = customerReturnCustomerOrderSchema.parse({ omsOrderId: scope.omsOrderId, order: fields, settingsVersion });
-      await measurements.retain(inspection.local, fields.boxOptions, now());
+      await measurements.retain(inspection.local, inspection.canonicalBoxOptions ?? fields.boxOptions, now());
       return result;
     },
   });
