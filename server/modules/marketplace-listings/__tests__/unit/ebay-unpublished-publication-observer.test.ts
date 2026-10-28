@@ -89,6 +89,30 @@ describe("canonical unpublished eBay publication target", () => {
     expect(result.unpublishedTarget).toEqual({ groupKey: "NEW-GROUP", skus: ["C500", "P10"] });
     expect(f.get.mock.calls.some(([request]) => request.path.endsWith("inventory_item_group/NEW-GROUP"))).toBe(true);
   });
+  it("continues exact existing unpublished offers when their checked group has not been created", async () => {
+    const f = fixture(); Object.assign(f.state, { groupIds: [], groupExists: false });
+    const before = await f.observer.inspectExistingPublication(input);
+    expect(before.publicationIssue?.code).toBe("EBAY_REGISTRATION_UNPUBLISHED_GROUP_AMBIGUOUS");
+    const result = await f.observer.inspectExistingPublication({ ...input, unpublishedGroupKey: "NEW-GROUP" });
+    expect(result.unpublishedTarget).toEqual({ groupKey: "NEW-GROUP", skus: ["C500", "P10"] });
+    expect(result.skus.map(member => member.offers[0].offerId)).toEqual(["P10-offer", "C500-offer"]);
+    expect(result.publication).toBeNull();
+  });
+  it("rejects an offer identity shared by multiple ungrouped SKUs before considering group creation", async () => {
+    const f = fixture(); Object.assign(f.state, { groupIds: [], groupExists: false });
+    const original = f.get.getMockImplementation()!;
+    f.get.mockImplementation(async request => {
+      if (request.path.startsWith("/sell/inventory/v1/offer?")) {
+        const sku = new URL(request.path, "https://example.invalid").searchParams.get("sku");
+        return { status: 200, body: { total: 1, offers: [{ sku, offerId: "same-offer", marketplaceId: "EBAY_US", status: "UNPUBLISHED" }] } };
+      }
+      return original(request);
+    });
+    const result = await f.observer.inspectExistingPublication({ ...input, unpublishedGroupKey: "NEW-GROUP" });
+    expect(result.unpublishedTarget).toBeNull();
+    expect(result.publicationIssue?.code).toBe("EBAY_REGISTRATION_MEMBER_IDENTITY_DUPLICATE");
+    expect(f.get.mock.calls.some(([request]) => request.path.includes("/inventory_item_group/"))).toBe(false);
+  });
   it("probes a planned group for collision before permitting preparation", async () => {
     const f = fixture(); Object.assign(f.state, { groupIds: [], missingOffers: true, missingItems: true, groupSkus: ["FOREIGN"] });
     const result = await f.observer.inspectExistingPublication({ ...input, unpublishedGroupKey: "NEW-GROUP" });

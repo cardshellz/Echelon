@@ -290,6 +290,40 @@ test("an incomplete publication uses normal Sync to resume the saved workflow wi
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
+test("normal Sync finishes ungrouped unpublished offers, survives reload and shows the verified listing without a recovery warning", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  state.feedStatus = "publication_incomplete"; state.externalListingId = null;
+  const issue = resolveEbayListingIssue({ code: "EBAY_REGISTRATION_UNPUBLISHED_GROUP_AMBIGUOUS", productId: 1, jobId: job.id });
+  state.jobs = [{ ...job, operation: "publish", state: "needs_attention", code: issue.code, message: issue.message }];
+  state.response = { ...pending, jobs: [{ ...job, operation: "publish", state: "queued" }] };
+  await page.reload();
+  await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Queued for eBay");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("checkbox", { name: /unknown|authorize/i })).toHaveCount(0);
+
+  state.jobs = [{ ...job, operation: "publish", state: "running", progress: {
+    ...recordedProgress, phase: "prepare_listing", phaseState: "started", queuedAhead: null,
+  } }];
+  await page.reload();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Checking the existing listing and preparing current content");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("unpublished-offers-normal-sync.png"), fullPage: true });
+
+  state.jobs = [{ ...job, operation: "publish", state: "completed" }];
+  state.feedStatus = "listed"; state.externalListingId = "verified-listing";
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Listed (1)", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Errors (0)", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sync", exact: true }).filter({ visible: true })).toBeEnabled();
+  if (info.project.name === "desktop")
+    await expect(page.getByTitle("View on eBay", { exact: true }).filter({ visible: true })).toHaveAttribute("href", "https://www.ebay.com/itm/verified-listing");
+  await expect(page.getByRole("button", { name: "Review listing mapping", exact: true })).toHaveCount(0);
+  expect(state.requests).toEqual(["/api/ebay/listings/sync-product/1"]);
+  expect(state.commands).toHaveLength(1);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("an existing listing can request normal Sync while its old response needs checking", async ({ page }) => {
   const state = await setupEbayChannelPage(page);
   state.jobs = [{ ...job, operation: "sync", state: "awaiting_evidence", code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
