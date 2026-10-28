@@ -206,6 +206,7 @@ describeWithDisposableDb("current package reconciliation owner", () => {
     expect(await repository.completePackageReconciliation!(result.commandId,readbacks,now)).toMatchObject({replayed:false});
     const before=(await pool.query('SELECT * FROM oms.channel_fulfillment_push_attempts ORDER BY id')).rows;
     expect(await repository.completePackageReconciliation!(result.commandId,readbacks,now)).toMatchObject({replayed:true});
+    expect(await repository.completePackageReconciliation!(result.commandId,readbacks,new Date(now.getTime()+86_400_000))).toMatchObject({replayed:true});
     expect((await pool.query('SELECT * FROM oms.channel_fulfillment_push_attempts ORDER BY id')).rows).toEqual(before);
     expect((await pool.query('SELECT push_status FROM oms.channel_fulfillment_pushes WHERE id=ANY($1::bigint[])',[result.channelCommandIds])).rows).toEqual(Array(2).fill({push_status:'success'}));
   });

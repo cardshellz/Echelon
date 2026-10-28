@@ -265,11 +265,12 @@ export async function readReconciliationCommand(tx: Transaction, commandKey: str
 }
 
 export async function loadReconciliationReplay(tx: Transaction, commandKey: string): Promise<Readonly<{
-  command: PackageReconciliationCommand; result: PackageReconciliationResult; state: string;
+  command: PackageReconciliationCommand; result: PackageReconciliationResult; state: string; readbacks: readonly PackageChannelReadback[] | null;
 }> | null> {
-  const found = rows<{ evidence: { command: PackageReconciliationCommand }; result: PackageReconciliationResult; state: string }>(await tx.execute(sql`
-    SELECT evidence, result, state FROM oms.package_reconciliation_commands WHERE command_key = ${z.string().trim().min(1).max(200).parse(commandKey)}`))[0];
-  return found?.result ? { command: packageReconciliationCommandSchema.parse(found.evidence.command), result: found.result, state: found.state } : null;
+  const found = rows<{ evidence: { command: PackageReconciliationCommand }; result: PackageReconciliationResult; state: string; channel_readbacks: unknown }>(await tx.execute(sql`
+    SELECT evidence, result, state, channel_readbacks FROM oms.package_reconciliation_commands WHERE command_key = ${z.string().trim().min(1).max(200).parse(commandKey)}`))[0];
+  return found?.result ? { command: packageReconciliationCommandSchema.parse(found.evidence.command), result: found.result, state: found.state,
+    readbacks: found.channel_readbacks === null ? null : z.array(packageChannelReadbackSchema).min(1).max(500).parse(found.channel_readbacks) } : null;
 }
 
 export async function findPendingPackageReconciliations(tx: Transaction, limit: number, now: Date): Promise<readonly PackageReconciliationCommand[]> {
@@ -364,11 +365,8 @@ export async function completePackageReconciliation(tx: Transaction, commandId: 
   adoptCommand: (commandId: number, readback: PackageChannelReadback) => Promise<void>,
 ): Promise<Readonly<{ replayed: boolean; resolvedReviewIds: readonly number[] }>> {
   integer.parse(commandId);
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new PackageReconciliationError('INVALID_CLOCK', 'Package reconciliation requires a valid injected clock');
   const readbacks = z.array(packageChannelReadbackSchema).min(1).max(500).parse(rawReadbacks);
-  for (const readback of readbacks) {
-    const age = now.getTime() - Date.parse(readback.observedAt);
-    if (!Number.isFinite(age) || age < -30_000 || age > 5 * 60_000) throw new PackageReconciliationError("CHANNEL_READBACK_EXPIRED", "Refresh the channel package readback before completing reconciliation");
-  }
   const receipt = rows<{ state: string; actor: string; reason: string; evidence: PackageReconciliationInput;
     result: PackageReconciliationResult; channel_readbacks: PackageChannelReadback[] | null }>(await tx.execute(sql`
     SELECT state, actor, reason, evidence, result, channel_readbacks FROM oms.package_reconciliation_commands WHERE id = ${commandId} FOR UPDATE`))[0];
@@ -381,6 +379,10 @@ export async function completePackageReconciliation(tx: Transaction, commandId: 
       throw new PackageReconciliationError("CHANNEL_READBACK_REPLAY_CONFLICT", "Completed reconciliation cannot adopt different channel packages");
     }
     return { replayed: true, resolvedReviewIds: [] };
+  }
+  for (const readback of readbacks) {
+    const age = now.getTime() - Date.parse(readback.observedAt);
+    if (!Number.isFinite(age) || age < -30_000 || age > 5 * 60_000) throw new PackageReconciliationError("CHANNEL_READBACK_EXPIRED", "Refresh the channel package readback before completing reconciliation");
   }
   const expectedRows = rows<{ physical_shipment_id: string; oms_order_id: string; channel_id: number; channel_order_line_id: string;
     tracking_number: string; quantity: number }>(await tx.execute(sql`

@@ -56,4 +56,20 @@ describe('package reconciliation channel adoption',()=>{
     const f=fixture({tracking:'NEW'});await f.service.execute(request);expect(f.channels.shopify).toHaveBeenCalledWith(36);
     await expect(f.service.execute({...request,sourceItemIds:[99]})).rejects.toMatchObject({code:'RECONCILIATION_REPLAY_CONFLICT'});
   });
+  it('replays completed historical evidence without re-projecting parcels or depending on newer provider state', async () => {
+    const f = fixture({ tracking: 'NEW' });
+    const completed = await f.service.execute(request);
+    const stored = await f.repository.loadPackageReconciliationReplay();
+    f.repository.loadPackageReconciliationReplay.mockResolvedValue({ ...stored!, state: 'complete', readbacks: completed.readbacks } as never);
+    f.projector.projectPhysicalShipment.mockClear();
+    f.native.request.mockClear();
+    f.repository.completePackageReconciliation.mockClear();
+    const replayed = await f.service.execute(request);
+    expect(replayed.completion.replayed).toBe(true);
+    expect(replayed.readbacks).toEqual(completed.readbacks);
+    expect(f.projector.projectPhysicalShipment).not.toHaveBeenCalled();
+    expect(f.native.request).not.toHaveBeenCalled();
+    expect(f.repository.completePackageReconciliation).not.toHaveBeenCalled();
+    await expect(f.service.execute(request, 'f'.repeat(64))).rejects.toMatchObject({ code: 'RECONCILIATION_REPLAY_CONFLICT' });
+  });
 });

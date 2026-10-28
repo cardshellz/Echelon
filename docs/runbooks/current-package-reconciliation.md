@@ -41,6 +41,9 @@ order's list can display the new contents against an older voided shipment.
 ## Retry and failure handling
 
 Repeat the original command and intent with the same command key after a timeout.
+Completed commands return their immutable result and readback without projecting
+old parcels again. Later relabels or provider changes cannot reinterpret that
+completed historical command; a new correction requires a new reviewed command.
 An applied receipt holds its new channel commands in review while the application
 projects packages and checks every existing native fulfillment. A uniquely matched
 earlier fulfillment may receive a tracking-only update with customer notification

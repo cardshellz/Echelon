@@ -93,11 +93,18 @@ export class PackageReconciliationService {
     if (existing) {
       const previous = existing.command;
       if (previous.actor !== request.actor || previous.reason !== request.reason
+        || (expectedPlanHash !== undefined && expectedPlanHash !== previous.expectedPlanHash)
         || canonicalJson([...previous.sourceItemIds].sort((a, b) => a - b)) !== canonicalJson([...request.sourceItemIds].sort((a, b) => a - b))
         || canonicalJson([...(previous.correction?.previousLabelIds ?? [])].sort((a, b) => a - b)) !== canonicalJson([...request.correctedPreviousLabelIds].sort((a, b) => a - b))) {
         throw new PackageReconciliationError("RECONCILIATION_REPLAY_CONFLICT", "The command key belongs to different package correction intent");
       }
       result = await this.dependencies.repository.reconcilePackages(previous, this.dependencies.clock.now());
+      if (existing.state === 'complete') {
+        if (!existing.readbacks) throw new PackageReconciliationError('RECEIPT_READBACK_MISSING', 'Completed reconciliation lacks its immutable channel readback');
+        // A completed command replays its receipt. Re-projecting its old parcels
+        // after a later relabel could reinterpret history or fail on newer state.
+        return { ...result, completion: { replayed: true, resolvedReviewIds: [] as readonly number[] }, readbacks: existing.readbacks };
+      }
     } else {
       const preview = await this.preview(request);
       if (preview.plan.outcome !== "ready" && preview.plan.outcome !== "unchanged") {
