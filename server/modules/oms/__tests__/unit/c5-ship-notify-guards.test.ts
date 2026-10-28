@@ -11,6 +11,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const SHIPSTATION_SRC = readFileSync(
   fileURLToPath(new URL("../../shipstation.service.ts", import.meta.url)),
@@ -20,6 +21,15 @@ const PROJECTION_SRC = readFileSync(
   fileURLToPath(new URL("../../../wms/channel-fulfillment-projection.repository.ts", import.meta.url)),
   "utf8",
 );
+const quantityProjectionSql: string[] = [];
+function collectQuantityProjection(node: ts.Node): void {
+  if (ts.isTaggedTemplateExpression(node) && node.tag.getText() === "sql"
+    && /UPDATE\s+wms\.order_items\b/.test(node.template.getText())) {
+    quantityProjectionSql.push(node.template.getText());
+  }
+  ts.forEachChild(node, collectQuantityProjection);
+}
+collectQuantityProjection(ts.createSourceFile("projection.ts", PROJECTION_SRC, ts.ScriptTarget.Latest, true));
 
 // ─── D-DUPEVENT structural checks ──────────────────────────────────
 
@@ -119,28 +129,31 @@ describe("D-NOMATCH: no-match SHIP_NOTIFY surfacing", () => {
 
 describe("D-FULLQTY: canonical idempotent quantity projection", () => {
   it("derives fulfilled_quantity from canonical physical shipment items", () => {
-    expect(PROJECTION_SRC).toContain("FROM wms.effective_physical_shipment_items item");
-    expect(PROJECTION_SRC).toContain("SUM(item.quantity_shipped)::int AS shipped_quantity");
-    expect(PROJECTION_SRC).not.toContain("FROM wms.outbound_shipment_items");
-    expect(PROJECTION_SRC).not.toContain("COALESCE(fulfilled_quantity, 0) +");
+    // Header identity projection may read original source identities. Enforce
+    // quantity ownership on the actual order-item write, not unrelated reads.
+    expect(quantityProjectionSql).toHaveLength(1);
+    expect(quantityProjectionSql[0]).toContain("FROM wms.effective_physical_shipment_items item");
+    expect(quantityProjectionSql[0]).toContain("SUM(item.quantity_shipped)::int AS shipped_quantity");
+    expect(quantityProjectionSql[0]).not.toContain("FROM wms.outbound_shipment_items");
+    expect(quantityProjectionSql[0]).not.toContain("COALESCE(fulfilled_quantity, 0) +");
   });
 
   it("uses LEAST to cap at order item quantity", () => {
-    expect(PROJECTION_SRC).toContain(
+    expect(quantityProjectionSql[0]).toContain(
       "SET fulfilled_quantity = LEAST(order_item.quantity, shipped.shipped_quantity)",
     );
   });
 
   it("counts shipped and subsequently returned packages, never unshipped labels", () => {
-    expect(PROJECTION_SRC).toContain("AND package.status IN ('shipped', 'returned')");
-    expect(PROJECTION_SRC).not.toMatch(/package\.status\s+IN\s*\([^)]*'queued'/);
-    expect(PROJECTION_SRC).not.toMatch(/package\.status\s+IN\s*\([^)]*'labeled'/);
-    expect(PROJECTION_SRC).not.toMatch(/package\.status\s+IN\s*\([^)]*'voided'/);
+    expect(quantityProjectionSql[0]).toContain("AND package.status IN ('shipped', 'returned')");
+    expect(quantityProjectionSql[0]).not.toMatch(/package\.status\s+IN\s*\([^)]*'queued'/);
+    expect(quantityProjectionSql[0]).not.toMatch(/package\.status\s+IN\s*\([^)]*'labeled'/);
+    expect(quantityProjectionSql[0]).not.toMatch(/package\.status\s+IN\s*\([^)]*'voided'/);
   });
 
   it("projects each affected WMS line by canonical line identity", () => {
-    expect(PROJECTION_SRC).toContain("SELECT DISTINCT item.wms_order_item_id");
-    expect(PROJECTION_SRC).toContain("WHERE order_item.id = shipped.wms_order_item_id");
+    expect(quantityProjectionSql[0]).toContain("SELECT DISTINCT item.wms_order_item_id");
+    expect(quantityProjectionSql[0]).toContain("WHERE order_item.id = shipped.wms_order_item_id");
     expect(SHIPSTATION_SRC).not.toContain("UPDATE wms.order_items");
   });
 });
