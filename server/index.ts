@@ -70,6 +70,7 @@ import {
 } from "./modules/channels/inventory-publication-sweep.scheduler";
 import { startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
 import { startQuantityPublicationCatchupWorker } from "./modules/inventory-planning/application/quantity-publication-catchup.worker";
+import { startStockLinkRunner } from "./modules/inventory-planning/infrastructure/stock-link-runner";
 import { startFinancialCommandRetentionWorker } from "./platform/commands/financial-command-retention.worker";
 import {
   startWebhookRetryWorker,
@@ -918,6 +919,15 @@ function startEchelonSyncScheduler(
           "Inventory publication outbox worker",
           "INVENTORY_PUBLICATION_WORKER_DISABLED",
         );
+      }
+
+      // Channels PR2 (PLAN-CH2 v4.1 §7.1): link each Shopify size to its store item by SKU, one tick a minute, one
+      // process of the cluster at a time (advisory lock STOCK_LINK_LOCK_ID). STOCK_LINK_AUTO_DISABLED stops it for every store.
+      if (!schedulersDisabled("STOCK_LINK_AUTO_DISABLED")) {
+        const stockLinkRunner = startStockLinkRunner(services.stockLink);
+        if (stockLinkRunner) httpServer.once("close", () => stockLinkRunner.stop());
+      } else {
+        logSchedulerDisabled("scheduler", "Stock link runner", "STOCK_LINK_AUTO_DISABLED");
       }
 
       if (!schedulersDisabled("PO_EMAIL_OUTBOX_WORKER_DISABLED")) {

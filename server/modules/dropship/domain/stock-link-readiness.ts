@@ -101,7 +101,7 @@ export const TRANSIENT_STOCK_LINK_CODES: ReadonlySet<string> = new Set([
   "CUTOVER_REVIEWED_HEAD_CHANGED",
 ]);
 /** PostgreSQL SQLSTATEs that a retry clears: serialization, deadlock, lock or statement timeout. */
-const TRANSIENT_SQLSTATES = new Set(["40001", "40P01", "55P03", "57014"]);
+export const TRANSIENT_SQLSTATES: ReadonlySet<string> = new Set(["40001", "40P01", "55P03", "57014"]);
 /**
  * The inventory code recorded for a lost or unavailable database connection that
  * carries no code of its own (node-postgres's pool timeout and dropped-socket
@@ -110,7 +110,7 @@ const TRANSIENT_SQLSTATES = new Set(["40001", "40P01", "55P03", "57014"]);
  */
 export const DATABASE_UNAVAILABLE_INVENTORY_CODE = "DATABASE_UNAVAILABLE";
 /** The cutover fence raises these as SQLSTATE 55000 when admission moved under it (migration 236). */
-const TRANSIENT_FENCE_MESSAGES = new Set(["CUTOVER_CONFIGURATION_FREEZE_CHANGED", "CUTOVER_AUTHORITY_CHANGED"]);
+export const TRANSIENT_FENCE_MESSAGES: ReadonlySet<string> = new Set(["CUTOVER_CONFIGURATION_FREEZE_CHANGED", "CUTOVER_AUTHORITY_CHANGED"]);
 
 export interface StockLinkBlocker {
   readonly code: string;

@@ -126,6 +126,8 @@ import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shi
 import { createShipStationPhysicalRecoveryService } from "../modules/oms/shipstation-physical-recovery.service";
 import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
 import { ChannelIdentityService } from "../modules/channels/channel-identity.service";
+import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../modules/channels/shopify-stock-link-source";
+import { createStockLinkService } from "../modules/inventory-planning/infrastructure/stock-link.factory";
 import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../modules/channels/channel-fulfillment-provider-clients.service";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
@@ -208,7 +210,7 @@ const systemCanonicalClaimClock = (): Date => new Date();
 
 export function createServices(
   db: any,
-  databasePool: Pick<Pool, "connect">,
+  databasePool: Pick<Pool, "connect" | "query">,
 ) {
   // Foundation
   const inventoryLots = createInventoryLotService(db);
@@ -446,6 +448,19 @@ export function createServices(
     createEbayDropshipInventoryPublicationTransportAdapterFromEnv(),
   );
   inventoryPublicationTransports.register(new ChannelInventoryPublicationTransportAdapter(walmartAdapter));
+  // Channels PR2 (PLAN-CH2 v4.1 §7.1): the stock-link engine's tick (started by server/index.ts). Each binding is the
+  // owner module's read-only provider adapter and SQL source for one destination kind and provider; today Card Shellz's
+  // own Shopify stores, each read with its own login. Real time and jitter are chosen here and injected.
+  const stockLink = createStockLinkService({
+    pool: databasePool,
+    bindings: [{
+      adapter: createShopifyStockLinkAdapter({ connections: new ChannelIdentityService(db), clock: () => new Date() }),
+      source: createShopifyStockLinkSource(),
+    }],
+    clock: () => new Date(),
+    monotonicNow: () => performance.now(),
+    random: Math.random,
+  });
   const channelShippingCapabilities = new ChannelShippingCapabilityRegistry();
   channelShippingCapabilities.register(shopifyAdapter);
   channelShippingCapabilities.register(ebayAdapter);
@@ -748,6 +763,7 @@ export function createServices(
     quantityPublicationCatchup,
     ebayPublicationReconciliation,
     inventoryPublicationReadback,
+    stockLink,
     inventoryAvailabilityClaims,
     assemblyWork,
     assemblyExecution,

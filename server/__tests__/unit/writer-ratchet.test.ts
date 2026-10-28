@@ -93,6 +93,14 @@ describe("writer-ratchet (P2.1)", () => {
       expect(baseline[table]).toEqual([owner]);
     });
 
+  it.each(["inventory.stock_link_checks", "inventory.stock_link_destinations"])(
+    "%s has only the inventory-planning engine as writer, including scripts (PLAN-CH2 §3)", (table) => {
+      // The check rows gained their writer with the command (P4), the destination rows with the tick (P7).
+      expect(current[table]).toEqual(["modules/inventory-planning"]);
+      expect(currentIncludingScripts[table]).toEqual(["modules/inventory-planning"]);
+      expect(baseline[table]).toEqual(["modules/inventory-planning"]);
+    });
+
   it("wms.order_items has exactly one owning writer across runtime and operational scripts", () => {
     expect(current["wms.order_items"]).toEqual(["modules/wms"]);
     expect(currentIncludingScripts["wms.order_items"]).toEqual(["modules/wms"]);

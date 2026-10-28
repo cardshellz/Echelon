@@ -233,12 +233,15 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
             fail("STOCK_MAPPING_PROVIDER_BUSY", "A provider request is in flight. The saved listing will retry after it finishes.");
         scopeKeys.push(key);
     }
-    // Both callers only add exact missing mappings or seal an unchanged SKU
-    // identity. Promotion fences the mapping head's revision; no destination,
-    // source, policy or existing provider identity changes. Bumping the target
+    // Callers add exact missing mappings, seal an unchanged SKU identity, or (the
+    // stock-link engine, PLAN-CH2 v4.1 §4.3) seal a new item for a size whose old
+    // link it retired earlier in the same transaction. Promotion fences the mapping
+    // head's revision; no destination, source or policy changes. Bumping the target
     // revision would invalidate unrelated products and make their mapping gaps
     // roll back this preparation. The canonical owner below locks each affected
-    // target/variant pair and supersedes only a changed desired revision.
+    // target/variant pair and supersedes only a changed desired revision; rows of a
+    // retired item were superseded by the retire, and any enqueued later by a stale
+    // publisher are stopped by the outbox worker's identity check (§4.8, N5).
     const publisher = createTransactionScopedInventoryPublicationService(client, { channelId: target.channel_id,
         replacementListings: replacementListingVariantIds.map(productVariantId => ({ publicationTargetId: target.id, productVariantId })) });
     const result = await publisher.publishProduct({ productId: input.productId, publicationTargetId: target.id,
