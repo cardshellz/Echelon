@@ -932,6 +932,12 @@
   "inventory.safety_definition_applications": [
     "modules/inventory-planning"
   ],
+  "inventory.stock_link_checks": [
+    "modules/inventory-planning"
+  ],
+  "inventory.stock_link_destinations": [
+    "modules/inventory-planning"
+  ],
   "inventory.supplier_return_allocations": [
     "modules/inventory"
   ],

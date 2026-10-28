@@ -98,16 +98,21 @@ describe("inventory channel exposure inactive foundation", () => {
   });
 
   it("gates configuration, preview, stop, and evidence-bound resume with the intended roles", () => {
-    // Workspace, quantity preview, and persisted delivery evidence are read-only.
-    expect(routes.match(/requirePermission\("inventory_planning", "view"\)/g)).toHaveLength(3);
+    // Workspace, quantity preview, persisted delivery evidence and the stock-link status are read-only.
+    expect(routes.match(/requirePermission\("inventory_planning", "view"\)/g)).toHaveLength(4);
+    expect(routes).toMatch(/stock-link-status"[\s\S]{0,150}?requirePermission\("inventory_planning", "view"\)/);
     expect(routes).toMatch(/publication-status"[\s\S]{0,150}?requirePermission\("inventory_planning", "view"\)/);
     // Setup routes (three drafts, single destination registration, and bulk
     // channel destination setup) are edit-gated; everything that can move a
     // target toward publishing stays activate-gated.
     expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(5);
     // Stop, resume review, resume, and the hold/release pair: each changes what
-    // a marketplace sells, so all seven carry the activation permission.
-    expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(7);
+    // a marketplace sells, so all seven carry the activation permission. So do the
+    // three stock-link controls (channels PR2): they change what is linked and sent.
+    expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(10);
+    for (const control of ["stock-link-switch", "stock-link-continue", "stock-link-check-again"]) {
+      expect(routes).toMatch(new RegExp(`${control}"[\\s\\S]{0,150}?requirePermission\\("inventory_planning", "activate"\\)`));
+    }
     // Bulk setup creates disabled targets only, so it must never be activate-gated
     // nor slip into the activation surface.
     expect(routes).toContain("channel-destinations");

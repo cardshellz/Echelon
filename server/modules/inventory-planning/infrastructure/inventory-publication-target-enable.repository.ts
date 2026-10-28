@@ -85,17 +85,34 @@ export class PostgresInventoryPublicationTargetEnableStore implements InventoryP
          WHERE id=$1 AND revision=$2::bigint AND state IN ('disabled','preview') RETURNING revision::text`,
         [target.id, command.expectedRevision, command.actorId, command.occurredAt]);
       if (updated.rowCount !== 1) throw failure("STALE", "This account changed. Reload its status and try again.");
-      const publisher = createTransactionScopedInventoryPublicationService(client);
+      // N1 (PLAN-CH2 v4.1 §4.5, DV4-6): a channel Shopify destination, the only kind the stock-link engine retires and
+      // relinks, may restart while some sizes still wait for a store item: the publisher withholds exactly the rows
+      // fan-out row isolation withholds (blocked solely by a missing stock link) and refuses everything else as before.
+      // Walmart, channel eBay, Dropship and other destinations keep publishing each product whole.
+      const isolateMissingStockLinks = target.destination_kind === "channel_connection" && target.provider_key === "shopify";
+      const publisher = createTransactionScopedInventoryPublicationService(client,
+        isolateMissingStockLinks ? { isolateMissingStockLinks: true } : {});
       let publicationRows = 0;
+      const withheldVariantIds: number[] = [];
       for (const productId of products) {
         const published = await publisher.publishProduct({ productId, publicationTargetId: target.id, dryRun: false,
           triggeredBy: "stock_updates_enabled" }, async () => { throw failure("SETUP_REQUIRED", "Channel Inventory setup is required."); });
-        if (published.authority !== "canonical" || published.publication.rows.length === 0
+        const withheld = published.authority === "canonical" && isolateMissingStockLinks
+          ? (published.publication.blockedTargets ?? []).flatMap(blocked => blocked.productVariantIds) : [];
+        if (published.authority !== "canonical"
+          || (published.publication.rows.length === 0 && withheld.length === 0)
           || published.publication.rows.some(row => row.publicationTargetId !== target.id || row.blockerCodes.length > 0)
           || published.publication.enqueuedRows + published.publication.coalescedRows !== published.publication.rows.length) {
           throw failure("PUBLICATION_INCOMPLETE", "Stock could not be prepared for every included item. Check the stock preview before trying again.");
         }
+        // A product whose every row waits for its link is skipped, not incomplete.
         publicationRows += published.publication.rows.length;
+        withheldVariantIds.push(...withheld);
+      }
+      // A destination with no linked required size never goes live.
+      if (publicationRows === 0 && withheldVariantIds.length > 0) {
+        throw failure("STOCK_NOT_READY", "Stock updates are still off. Check the account's stock preview for missing listing links or stock settings.",
+          [`PUBLICATION_TARGET_VARIANT_MAPPING_MISSING: ${[...new Set(withheldVariantIds)].sort((a, b) => a - b).join(", ")}`]);
       }
       const result = inventoryPublicationTargetEnableResultSchema.parse({ publicationTargetId: target.id,
         revision: updated.rows[0].revision, state: "live", publicationRows, initialDefinitionsApplied,
@@ -106,7 +123,9 @@ export class PostgresInventoryPublicationTargetEnableStore implements InventoryP
         [command.occurredAt, command.actorId, `inventory.inventory_publication_target:${target.id}`,
           JSON.stringify({ before: { state: target.state, revision: target.revision }, after: { state: "live", revision: result.revision } }),
           JSON.stringify({ idempotencyKey: command.idempotencyKey, requestHash: command.requestHash,
-            initialDefinitions: selections, publicationRows, productIds: products })]);
+            initialDefinitions: selections, publicationRows, productIds: products,
+            ...(withheldVariantIds.length > 0
+              ? { withheldUnlinkedVariantIds: [...new Set(withheldVariantIds)].sort((a, b) => a - b) } : {}) })]);
       await client.query(
         "INSERT INTO public.idempotency_keys(key,request_hash,response_body,created_at,expires_at) VALUES($1,$2,$3::jsonb,$4,NULL)",
         [receiptKey, command.requestHash, JSON.stringify(result), command.occurredAt]);
@@ -181,6 +200,8 @@ async function initialSetup(client: PoolClient, target: Target): Promise<Invento
 async function publicationProducts(client: PoolClient, target: Target, now: Date): Promise<number[]> {
   // Pausing does not retire identities. Refuse to silently abandon a previously
   // published identity. A retired inventory checkbox is never removal evidence.
+  // A sealed link that was retired for this exact item (the stock-link engine's relink or retire, PLAN-CH2 v4.1
+  // §4.5) is the evidence: that item is no longer the size's, on purpose. Any other mismatch still refuses.
   const orphan = (await client.query(
     `WITH history AS (
        SELECT publication_target_id,product_variant_id,external_inventory_item_id_snapshot FROM inventory.inventory_publication_outbox WHERE publication_target_id=$1
@@ -188,7 +209,10 @@ async function publicationProducts(client: PoolClient, target: Target, now: Date
      ) SELECT 1 FROM history o
      LEFT JOIN inventory.publication_variant_mapping_heads h ON h.publication_target_id=o.publication_target_id AND h.product_variant_id=o.product_variant_id
      LEFT JOIN inventory.publication_variant_mapping_versions m ON m.id=h.active_mapping_id AND m.lifecycle_status='sealed'
-     WHERE o.publication_target_id=$1 AND (m.id IS NULL OR m.external_inventory_item_id<>o.external_inventory_item_id_snapshot) LIMIT 1`,
+     WHERE o.publication_target_id=$1 AND (m.id IS NULL OR m.external_inventory_item_id<>o.external_inventory_item_id_snapshot)
+       AND NOT EXISTS (SELECT 1 FROM inventory.publication_variant_mapping_versions retired
+         WHERE retired.publication_target_id=o.publication_target_id AND retired.product_variant_id=o.product_variant_id
+           AND retired.lifecycle_status='retired' AND retired.external_inventory_item_id=o.external_inventory_item_id_snapshot) LIMIT 1`,
     [target.id])).rowCount;
   if (orphan) throw failure("LISTING_LINK_CHANGED", "A previously updated listing no longer matches its saved item link. Fix its listing link before restarting stock updates.");
   // Include invalid/inactive identities in the census. The canonical planner must

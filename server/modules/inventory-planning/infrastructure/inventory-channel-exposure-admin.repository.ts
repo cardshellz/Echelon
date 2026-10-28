@@ -84,7 +84,9 @@ const IDEMPOTENCY_LOCK_NAMESPACE = 918420;
 const POLICY_LOCK_NAMESPACE = 918425;
 const SOURCE_BINDING_LOCK_NAMESPACE = 918426;
 const PUBLICATION_TARGET_LOCK_NAMESPACE = 918427;
-const VARIANT_MAPPING_LOCK_NAMESPACE = 918428;
+/** The draft writer's per-destination lock, pg_advisory_xact_lock(918428, targetId). The stock-link engine takes it
+ * before it locks mapping heads (PLAN-CH2 v4.1 §4.3 step 6, N3), the order this writer uses. */
+export const VARIANT_MAPPING_LOCK_NAMESPACE = 918428;
 const POLICY_RECEIPT_PREFIX = "inventory-channel-exposure-policy:";
 const SOURCE_RECEIPT_PREFIX = "inventory-publication-source-binding:";
 const TARGET_RECEIPT_PREFIX = "inventory-publication-target:";
@@ -723,12 +725,12 @@ implements InventoryChannelExposureAdminStore {
           updatedAt: command.occurredAt,
         }).where(eq(publicationVariantMappingVersions.id, definitionId));
       } else {
-        const predecessorId = head?.active_mapping_id == null
+        const activeMappingId = head?.active_mapping_id == null
           ? null
           : positiveInteger(head.active_mapping_id, "variantMappingHead.activeMappingId");
-        before = predecessorId === null
+        before = activeMappingId === null
           ? null
-          : await loadVariantMappingAuditSnapshot(tx, predecessorId, "active");
+          : await loadVariantMappingAuditSnapshot(tx, activeMappingId, "active");
         const versionRows = rows(await tx.execute(sql`
           SELECT COALESCE(max(version), 0) + 1 AS next_version
           FROM inventory.publication_variant_mapping_versions
@@ -736,6 +738,7 @@ implements InventoryChannelExposureAdminStore {
             AND product_variant_id = ${command.productVariantId}
         `));
         version = positiveInteger(versionRows[0]?.next_version, "variantMapping.nextVersion");
+        const predecessorId = activeMappingId ?? (version > 1 ? await retiredVariantMappingPredecessor(tx, command) : null);
         const inserted = await tx.insert(publicationVariantMappingVersions).values({
           publicationTargetId: command.publicationTargetId,
           productVariantId: command.productVariantId,
@@ -1731,6 +1734,42 @@ function assertExpectedSourceHead(
   if (revision !== command.expectedHeadRevision || draftId !== command.expectedDraftBindingId) {
     throw staleSourceBinding();
   }
+}
+
+/**
+ * The predecessor of a new version when the head has no active version but the pair has history: the stock-link
+ * engine retired its last link (channels PR2, PLAN-CH2 v4.1 §4.4, §4.3 step 7). The new version continues that
+ * history, so it must supersede the pair's highest version, which must be retired and not superseded already
+ * (migrations/0633_inventory_publication_readiness.sql predecessor_chk needs a predecessor for every version > 1;
+ * successor_uq allows one successor). Anything else is a history this writer will not guess at: 409, permanent for
+ * the engine (IP/domain/stock-link-errors.ts). Runs after the head row lock and the per-target 918428 lock, so the
+ * history cannot move underneath it. Applies to the manual save too; before any retire existed no pair reached it.
+ */
+async function retiredVariantMappingPredecessor(
+  tx: Transaction,
+  command: SavePublicationVariantMappingDraftCommand,
+): Promise<number> {
+  const latest = rows(await tx.execute(sql`
+    SELECT mapping.id, mapping.version, mapping.lifecycle_status,
+           EXISTS (SELECT 1 FROM inventory.publication_variant_mapping_versions AS successor
+             WHERE successor.supersedes_mapping_id = mapping.id) AS superseded
+    FROM inventory.publication_variant_mapping_versions AS mapping
+    WHERE mapping.publication_target_id = ${command.publicationTargetId}
+      AND mapping.product_variant_id = ${command.productVariantId}
+    ORDER BY mapping.version DESC
+    LIMIT 1
+  `))[0];
+  if (latest && latest.lifecycle_status === "retired" && latest.superseded === false) {
+    return positiveInteger(latest.id, "variantMapping.retiredPredecessorId");
+  }
+  throw new InventoryAvailabilityMasterDataError(
+    409,
+    "INVENTORY_PUBLICATION_VARIANT_MAPPING_HISTORY_INVALID",
+    // PROPOSED: owner wording (PLAN-CH2 v4.1 §4.4 names only the code).
+    "This SKU's saved item-link history is not in a state a new link can follow. Review its link history before saving.",
+    [`productVariantId: ${command.productVariantId}`,
+      `latestVersion: ${latest ? `${String(latest.version)} (${String(latest.lifecycle_status)})` : "none"}`],
+  );
 }
 
 function assertExpectedVariantMappingHead(

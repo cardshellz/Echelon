@@ -10,6 +10,7 @@ import {
   pgSchema,
   primaryKey,
   timestamp,
+  unique,
   uniqueIndex,
   varchar,
   uuid,
@@ -2043,6 +2044,104 @@ export const inventoryPublicationTargetResumeReviews = inventoryPlanningSchema.t
   }),
 );
 
+/**
+ * Stock-link engine state (Channels PR2, migration *_stock_links.sql). One check
+ * row per (destination, size) the engine looks after: linked, waiting for a store
+ * item, flagged for a person, or stopped on an error; when to look again; the
+ * lease of the tick that holds it. Operational state, not history (the audit rows
+ * and the append-only mapping versions are the history), so deleting a size
+ * deletes its check rows. Only inventory-planning writes these tables.
+ */
+export const stockLinkChecks = inventoryPlanningSchema.table(
+  "stock_link_checks",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    publicationTargetId: integer("publication_target_id").notNull(),
+    productVariantId: integer("product_variant_id").notNull(),
+    status: varchar("status", { length: 16 }).notNull(),
+    reasonCode: varchar("reason_code", { length: 120 }),
+    errorClass: varchar("error_class", { length: 16 }),
+    message: varchar("message", { length: 1000 }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    firstFailureAt: timestamp("first_failure_at", { withTimezone: true }),
+    busySince: timestamp("busy_since", { withTimezone: true }),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }),
+    leaseToken: uuid("lease_token"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    waitingItemId: varchar("waiting_item_id", { length: 240 }),
+    observedSku: varchar("observed_sku", { length: 100 }),
+    revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
+    // Written from the engine's injected clock; no database default.
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    targetForeignKey: foreignKey({ name: "stock_link_checks_target_fk", columns: [table.publicationTargetId],
+      foreignColumns: [inventoryPublicationTargets.id] }).onDelete("restrict"),
+    variantForeignKey: foreignKey({ name: "stock_link_checks_variant_fk", columns: [table.productVariantId],
+      foreignColumns: [productVariants.id] }).onDelete("cascade"),
+    pairUnique: unique("stock_link_checks_pair_uq").on(table.publicationTargetId, table.productVariantId),
+    dueIndex: index("stock_link_checks_due_idx").on(table.publicationTargetId, table.nextCheckAt, table.id)
+      .where(sql`status <> 'error'`),
+    waitingItemIndex: index("stock_link_checks_waiting_item_idx").on(table.publicationTargetId, table.waitingItemId)
+      .where(sql`waiting_item_id IS NOT NULL`),
+    variantIndex: index("stock_link_checks_variant_idx").on(table.productVariantId),
+    statusValid: check("stock_link_checks_status_chk", sql`${table.status} IN ('waiting', 'linked', 'flagged', 'error')`),
+    reasonCodeValid: check("stock_link_checks_reason_code_chk",
+      sql`${table.reasonCode} IS NULL OR (${table.reasonCode} = btrim(${table.reasonCode}) AND ${table.reasonCode} <> '')`),
+    errorClassValid: check("stock_link_checks_error_class_chk", sql`${table.errorClass} IN ('transient', 'permanent', 'fatal')`),
+    attemptCountValid: check("stock_link_checks_attempt_count_chk", sql`${table.attemptCount} >= 0`),
+    revisionValid: check("stock_link_checks_revision_chk", sql`${table.revision} >= 1`),
+    leaseValid: check("stock_link_checks_lease_chk", sql`(${table.leaseToken} IS NULL) = (${table.leaseExpiresAt} IS NULL)`),
+    nextCheckValid: check("stock_link_checks_next_chk", sql`(${table.status} = 'error') = (${table.nextCheckAt} IS NULL)`),
+    reasonRequired: check("stock_link_checks_reason_chk",
+      sql`${table.status} NOT IN ('flagged', 'error') OR ${table.reasonCode} IS NOT NULL`),
+  }),
+);
+
+/**
+ * Per-destination stock-link state: the audited automatic-link switch, the pause /
+ * halt / retire-hold state, the discovery cursors and the runner heartbeat.
+ * `recentCursorRaw` is the zone-less channel_feeds.updated_at value exactly as read
+ * (string mode keeps its microseconds); it is compared only with that column.
+ */
+export const stockLinkDestinations = inventoryPlanningSchema.table(
+  "stock_link_destinations",
+  {
+    publicationTargetId: integer("publication_target_id").primaryKey(),
+    autoLinkEnabled: boolean("auto_link_enabled").notNull().default(true),
+    pausedUntil: timestamp("paused_until", { withTimezone: true }),
+    pausedCode: varchar("paused_code", { length: 120 }),
+    pausedSince: timestamp("paused_since", { withTimezone: true }),
+    haltedAt: timestamp("halted_at", { withTimezone: true }),
+    haltedCode: varchar("halted_code", { length: 120 }),
+    retiresReleasedAt: timestamp("retires_released_at", { withTimezone: true }),
+    retiresReleasedBy: varchar("retires_released_by", { length: 100 }),
+    recentCursorRaw: timestamp("recent_cursor_raw", { mode: "string" }),
+    recentCursorId: bigint("recent_cursor_id", { mode: "bigint" }),
+    sweepCursorVariantId: integer("sweep_cursor_variant_id"),
+    deadLetterCursorAt: timestamp("dead_letter_cursor_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    targetForeignKey: foreignKey({ name: "stock_link_destinations_target_fk", columns: [table.publicationTargetId],
+      foreignColumns: [inventoryPublicationTargets.id] }).onDelete("restrict"),
+    revisionValid: check("stock_link_destinations_revision_chk", sql`${table.revision} >= 1`),
+    pauseValid: check("stock_link_destinations_pause_chk", sql`(${table.pausedUntil} IS NULL AND ${table.pausedCode} IS NULL AND ${table.pausedSince} IS NULL)
+      OR (${table.pausedUntil} IS NOT NULL AND ${table.pausedCode} IS NOT NULL AND ${table.pausedCode} = btrim(${table.pausedCode})
+        AND ${table.pausedCode} <> '' AND ${table.pausedSince} IS NOT NULL)`),
+    haltValid: check("stock_link_destinations_halt_chk", sql`(${table.haltedAt} IS NULL AND ${table.haltedCode} IS NULL)
+      OR (${table.haltedAt} IS NOT NULL AND ${table.haltedCode} IS NOT NULL AND ${table.haltedCode} = btrim(${table.haltedCode})
+        AND ${table.haltedCode} <> '')`),
+    releaseValid: check("stock_link_destinations_release_chk", sql`(${table.retiresReleasedAt} IS NULL AND ${table.retiresReleasedBy} IS NULL)
+      OR (${table.retiresReleasedAt} IS NOT NULL AND ${table.retiresReleasedBy} IS NOT NULL
+        AND ${table.retiresReleasedBy} = btrim(${table.retiresReleasedBy}) AND ${table.retiresReleasedBy} <> '')`),
+  }),
+);
+
 export const channelExposurePolicyVersions = inventoryPlanningSchema.table(
   "channel_exposure_policy_versions",
   {
@@ -2918,6 +3017,8 @@ export type InventoryAvailabilityActivationFreeze = typeof inventoryAvailability
 export type InventoryAvailabilityActivationProductEvidence =
   typeof inventoryAvailabilityActivationProductEvidence.$inferSelect;
 export type InventoryPublicationTarget = typeof inventoryPublicationTargets.$inferSelect;
+export type StockLinkCheck = typeof stockLinkChecks.$inferSelect;
+export type StockLinkDestination = typeof stockLinkDestinations.$inferSelect;
 export type InventoryPublicationTargetResumeReview =
   typeof inventoryPublicationTargetResumeReviews.$inferSelect;
 export type ChannelExposurePolicyVersion = typeof channelExposurePolicyVersions.$inferSelect;

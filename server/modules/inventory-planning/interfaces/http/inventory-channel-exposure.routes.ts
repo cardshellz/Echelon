@@ -46,6 +46,10 @@ import { PostgresChannelPublicationStatusReader } from "../../infrastructure/inv
 import { enableInventoryPublicationTargetRequestSchema, inventoryPublicationTargetEnableResultSchema } from "@shared/types/inventory-publication-target-enable";
 import { InventoryPublicationTargetEnableService } from "../../application/inventory-publication-target-enable.service";
 import { PostgresInventoryPublicationTargetEnableStore } from "../../infrastructure/inventory-publication-target-enable.repository";
+import { StockLinkControlsService } from "../../application/stock-link-controls.service";
+import { PostgresStockLinkControlsStore } from "../../infrastructure/stock-link-controls.repository";
+import { stockLinkRunnerDisableReason } from "../../infrastructure/stock-link-runner-switch";
+import { logger } from "../../../../platform/observability/logger";
 
 const positiveId = z.coerce.number().int().positive().max(2_147_483_647);
 type ChannelExposureService = Pick<
@@ -64,6 +68,7 @@ export interface InventoryChannelExposureRouteDependencies {
   targetHoldService?: Pick<InventoryPublicationTargetHoldService, "hold" | "release">;
   dropshipChannel?: DropshipDestinationChannelResolver;
   publicationStatusService?: Pick<ChannelPublicationStatusService, "read">;
+  stockLinkControls?: Pick<StockLinkControlsService, "status" | "setSwitch" | "continue" | "checkAgain">;
 }
 
 export function registerInventoryChannelExposureRoutes(
@@ -87,6 +92,9 @@ export function registerInventoryChannelExposureRoutes(
     ?? new InventoryPublicationTargetHoldService(new PostgresInventoryPublicationTargetHoldStore());
   const publicationStatusService = dependencies.publicationStatusService
     ?? new ChannelPublicationStatusService(new PostgresChannelPublicationStatusReader(pool));
+  const stockLinkControls = dependencies.stockLinkControls
+    ?? new StockLinkControlsService(new PostgresStockLinkControlsStore(pool), () => new Date(), logger,
+      () => stockLinkRunnerDisableReason() !== null);
 
   app.put(
     "/api/inventory-planning/admin/channel-exposure/publication-target-enable",
@@ -113,6 +121,49 @@ export function registerInventoryChannelExposureRoutes(
       } catch (error) {
         return sendError(res, error, "read recorded publication status");
       }
+    },
+  );
+
+  // Channels PR2 stock links (PLAN-CH2 v4.1 §7.3): the per-store automatic-link switch, Continue and Check again
+  // change what is linked and sent to a store, so they carry the activation permission like stop and resume.
+  app.get(
+    "/api/inventory-planning/admin/channel-exposure/stock-link-status",
+    requirePermission("inventory_planning", "view"),
+    async (req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      try {
+        return res.json(await stockLinkControls.status({ publicationTargetId: req.query.publicationTargetId }));
+      } catch (error) { return sendError(res, error, "read stock-link status"); }
+    },
+  );
+
+  app.post(
+    "/api/inventory-planning/admin/channel-exposure/stock-link-switch",
+    requirePermission("inventory_planning", "activate"),
+    async (req, res) => {
+      try {
+        return res.json(await stockLinkControls.setSwitch(req.body, auditActor(req)));
+      } catch (error) { return sendError(res, error, "change the stock-link switch"); }
+    },
+  );
+
+  app.post(
+    "/api/inventory-planning/admin/channel-exposure/stock-link-continue",
+    requirePermission("inventory_planning", "activate"),
+    async (req, res) => {
+      try {
+        return res.json(await stockLinkControls.continue(req.body, auditActor(req)));
+      } catch (error) { return sendError(res, error, "continue stock linking"); }
+    },
+  );
+
+  app.post(
+    "/api/inventory-planning/admin/channel-exposure/stock-link-check-again",
+    requirePermission("inventory_planning", "activate"),
+    async (req, res) => {
+      try {
+        return res.json(await stockLinkControls.checkAgain(req.body, auditActor(req)));
+      } catch (error) { return sendError(res, error, "check stock links again"); }
     },
   );
 
