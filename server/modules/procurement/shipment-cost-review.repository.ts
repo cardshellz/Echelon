@@ -63,8 +63,8 @@ async function projectShipmentCostReview(tx: ShipmentExceptionReader, shipmentId
 }
 
 /** The same projection and supplier boundaries for one bounded header page. */
-export async function readShipmentCostReviewsInTransaction(tx: ShipmentExceptionReader, shipmentIds: readonly number[],
-  supplierSnapshot?: PurchaseCostStatusSnapshotReader): Promise<Map<number, ShipmentCostReview>> {
+export async function readShipmentCostReviewProjectionsInTransaction<T>(tx: ShipmentExceptionReader, shipmentIds: readonly number[],
+  project: (review: ShipmentCostReview) => T, supplierSnapshot?: PurchaseCostStatusSnapshotReader): Promise<Map<number, T>> {
   const ids = [...new Set(shipmentCostReadPageSchema.parse(shipmentIds))];
   if (!ids.length) return new Map();
   const headers = await tx.execute(sql`SELECT id FROM procurement.inbound_shipments WHERE id=ANY(${sql.param(ids)}::int[]) ORDER BY id`);
@@ -93,10 +93,17 @@ export async function readShipmentCostReviewsInTransaction(tx: ShipmentException
   const posting = await readShipmentCostPostingEvidence(tx, result.rows.map(row => ({
     lineId: costInteger(row.id, "line.id", 1), shipmentId: costInteger(row.shipment_id, "shipmentId", 1), contract: row.contract,
   })));
-  const reviews = new Map<number, ShipmentCostReview>();
+  const reviews = new Map<number, T>();
   for (const id of ids) {
     const rows = rowsByShipment.get(id);
-    if (rows) reviews.set(id, await projectShipmentCostReview(tx, id, rows, posting, supplierSnapshot));
+    // Project immediately so health pages do not retain every full supplier-lot graph.
+    if (rows) reviews.set(id, project(await projectShipmentCostReview(tx, id, rows, posting, supplierSnapshot)));
   }
   return reviews;
+}
+
+/** Full review consumers retain the same validated public DTO. */
+export async function readShipmentCostReviewsInTransaction(tx: ShipmentExceptionReader, shipmentIds: readonly number[],
+  supplierSnapshot?: PurchaseCostStatusSnapshotReader): Promise<Map<number, ShipmentCostReview>> {
+  return readShipmentCostReviewProjectionsInTransaction(tx, shipmentIds, review => review, supplierSnapshot);
 }

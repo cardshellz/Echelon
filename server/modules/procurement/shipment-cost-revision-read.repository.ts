@@ -21,9 +21,29 @@ function partition(rows: ReadRows, ids: readonly number[]): Map<number, ReadRows
   return result;
 }
 
-/** Complete rows for at most one header page, within the caller's snapshot.
- * Shared invoice documents are repeated per shipment, with their complete totals
- * computed independently. No source rows, scalar types or ledger limits change. */
+/** A shared invoice is fetched once and routed to every linked shipment.
+ * Each array keeps the original document order and native scalar values. */
+function partitionInvoices(rows: ReadRows, ids: readonly number[]): Map<number, ReadRows> {
+  const result = new Map(ids.map(id => [id, [] as ReadRows]));
+  for (const row of rows) {
+    const { __shipment_ids: routing, ...evidence } = row;
+    if (!Array.isArray(routing) || routing.length === 0 || routing.length > ids.length) {
+      throw new CostEvidenceError("SHIPMENT_COST_READ_EVIDENCE_INCOMPLETE", "Current invoice evidence has invalid shipment identities.");
+    }
+    const routed = new Set<number>();
+    for (const value of routing) {
+      const id = costInteger(value, "shipmentCostRead.shipmentId", 1);
+      const scoped = result.get(id);
+      if (!scoped || routed.has(id)) throw new CostEvidenceError("SHIPMENT_COST_READ_EVIDENCE_INCOMPLETE", "Current invoice evidence escaped its shipment scope.");
+      routed.add(id);
+      scoped.push(evidence);
+    }
+  }
+  return result;
+}
+
+/** Complete evidence for one bounded header page in the caller's snapshot.
+ * No source rows, scalar types or per-shipment ledger limits change. */
 export async function readShipmentCostRevisionEvidence(tx: CostEvidenceTransaction, shipmentIds: readonly number[]): Promise<Map<number, ShipmentCostRevisionReadEvidence>> {
   const ids = [...new Set(shipmentCostReadPageSchema.parse(shipmentIds))];
   if (!ids.length) return new Map();
@@ -47,7 +67,7 @@ export async function readShipmentCostRevisionEvidence(tx: CostEvidenceTransacti
     SELECT inbound_shipment_id AS __shipment_id,id,cost_type,actual_cents,estimated_cents,currency,cost_status,allocation_method,vendor_id,vendor_invoice_id
     FROM procurement.inbound_freight_costs WHERE inbound_shipment_id=ANY(${sql.param(ids)}::int[]) ORDER BY id
   `)).rows, ids);
-  const invoiceRows = partition((await tx.execute(sql`
+  const invoiceRows = partitionInvoices((await tx.execute(sql`
     WITH linked_invoices AS (
       SELECT inbound_shipment_id AS shipment_id,vendor_invoice_id AS id FROM procurement.inbound_freight_costs
       WHERE inbound_shipment_id=ANY(${sql.param(ids)}::int[]) AND vendor_invoice_id IS NOT NULL
@@ -55,15 +75,17 @@ export async function readShipmentCostRevisionEvidence(tx: CostEvidenceTransacti
       SELECT charge.inbound_shipment_id AS shipment_id,invoice_line.vendor_invoice_id FROM procurement.vendor_invoice_lines invoice_line
       JOIN procurement.inbound_freight_costs charge ON charge.id=invoice_line.freight_cost_id
       WHERE charge.inbound_shipment_id=ANY(${sql.param(ids)}::int[])
+    ), selected_invoices AS (
+      SELECT id,array_agg(shipment_id ORDER BY shipment_id) AS shipment_ids FROM linked_invoices GROUP BY id
     )
-    SELECT selected.shipment_id AS __shipment_id,invoice_line.id,invoice.id AS vendor_invoice_id,invoice_line.freight_cost_id,invoice_line.purchase_order_line_id,invoice_line.product_variant_id,
+    SELECT selected.shipment_ids AS __shipment_ids,invoice_line.id,invoice.id AS vendor_invoice_id,invoice_line.freight_cost_id,invoice_line.purchase_order_line_id,invoice_line.product_variant_id,
       invoice_line.qty_invoiced,invoice_line.unit_cost_mills,invoice_line.unit_cost_cents,invoice_line.line_total_cents,
       invoice.vendor_id,invoice.inbound_shipment_id,invoice.currency,invoice.status,invoice.invoiced_amount_cents,
       invoice.invoice_number,invoice.replaces_invoice_id,
-      SUM(invoice_line.line_total_cents) OVER (PARTITION BY selected.shipment_id,invoice.id)::text AS document_lines_total_cents
-    FROM linked_invoices selected JOIN procurement.vendor_invoices invoice ON invoice.id=selected.id
+      SUM(invoice_line.line_total_cents) OVER (PARTITION BY invoice.id)::text AS document_lines_total_cents
+    FROM selected_invoices selected JOIN procurement.vendor_invoices invoice ON invoice.id=selected.id
     LEFT JOIN procurement.vendor_invoice_lines invoice_line ON invoice_line.vendor_invoice_id=invoice.id
-    ORDER BY selected.shipment_id,invoice.id,invoice_line.id
+    ORDER BY invoice.id,invoice_line.id
   `)).rows, ids);
   const allocationRows = partition((await tx.execute(sql`
     SELECT charge.inbound_shipment_id AS __shipment_id,allocation.* FROM procurement.inbound_freight_allocations allocation

@@ -9,6 +9,7 @@ import type { PurchaseApprovalActor } from "../identity/domain/purchase-approval
 import { readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
 import { costFingerprint, costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import { dateValues } from "./purchase-workspace-read";
+import { shipmentCostReadBatches } from "./shipment-cost-read-scope";
 import { prepareShipmentCostRevisions, prepareShipmentCostRevisionBatch } from "./shipment-cost-application.service";
 import { buildShipmentCostException, shipmentExceptionFactsSchema, type ShipmentExceptionFacts } from "./shipment-cost-exception.policy";
 
@@ -45,9 +46,14 @@ export async function readCurrentShipmentSourceFingerprints(tx: ShipmentExceptio
 }
 
 export async function readCurrentShipmentSourceFingerprintBatch(tx: ShipmentExceptionReader, shipmentIds: readonly number[]): Promise<Map<number, Map<number, string>>> {
-  const prepared = await prepareShipmentCostRevisionBatch(tx, shipmentIds);
-  return new Map([...prepared].map(([id, result]) => [id, new Map(result.proposals.flatMap(proposal => proposal.input.scope.kind === "shipment_line"
-    ? [[proposal.input.scope.inboundShipmentLineId, costFingerprint(proposal)] as const] : []))]));
+  const fingerprints = new Map<number, Map<number, string>>();
+  // Release complete economic graphs after each page; retain only their hashes.
+  for (const ids of shipmentCostReadBatches(shipmentIds)) {
+    const prepared = await prepareShipmentCostRevisionBatch(tx, ids);
+    for (const [id, result] of prepared) fingerprints.set(id, new Map(result.proposals.flatMap(proposal => proposal.input.scope.kind === "shipment_line"
+      ? [[proposal.input.scope.inboundShipmentLineId, costFingerprint(proposal)] as const] : [])));
+  }
+  return fingerprints;
 }
 
 export async function readShipmentExceptionHistory(tx: ShipmentExceptionReader, lineId: number) {

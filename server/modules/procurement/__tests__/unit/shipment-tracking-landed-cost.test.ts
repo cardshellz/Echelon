@@ -1,9 +1,11 @@
-import { readShipmentCostReviewInTransaction, readShipmentCostReviewsInTransaction } from "../../shipment-cost-review.repository";
+import type { ShipmentExceptionReader } from "../../shipment-cost-exception.repository";
+import type { PurchaseCostStatusSnapshotReader } from "../../purchase-cost-status-snapshot.repository";
+import { readShipmentCostReviewInTransaction, readShipmentCostReviewProjectionsInTransaction } from "../../shipment-cost-review.repository";
 import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts, type ShipmentHealthReadEvidence } from "../../shipment-health-evidence.repository";
 vi.mock("../../shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn(), readShipmentProvisionalLotCounts: vi.fn() }));
 import { shipmentCostReviewSchema, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import { landedCostHealthSchema } from "@shared/procurement/landed-cost-health";
-vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn(), readShipmentCostReviewsInTransaction: vi.fn() }));
+vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn(), readShipmentCostReviewProjectionsInTransaction: vi.fn() }));
 import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../shipment-cost-application.service";
 vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
 import { shipmentLineVersion } from "../../shipment-line-version";
@@ -17,11 +19,12 @@ import {
 } from "../../shipment-tracking.service";
 
 beforeEach(() => {
-  vi.mocked(readShipmentCostReviewsInTransaction).mockReset().mockImplementation(async (tx, ids, reader) => {
-    const result = new Map<number, NonNullable<Awaited<ReturnType<typeof readShipmentCostReviewInTransaction>>>>();
+  vi.mocked(readShipmentCostReviewProjectionsInTransaction).mockReset().mockImplementation(async <T>(tx: ShipmentExceptionReader, ids: readonly number[],
+    project: (review: ShipmentCostReview) => T, reader?: PurchaseCostStatusSnapshotReader): Promise<Map<number, T>> => {
+    const result = new Map<number, T>();
     for (const id of ids) {
       const review = await readShipmentCostReviewInTransaction(tx, id, reader);
-      if (review) result.set(id, review);
+      if (review) result.set(id, project(review));
     }
     return result;
   });

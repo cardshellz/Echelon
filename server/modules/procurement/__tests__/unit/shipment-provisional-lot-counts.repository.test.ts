@@ -37,8 +37,8 @@ describe("complete provisional-lot counts", () => {
     const row = { shipment_id: 1, provisional_count: "1", untraced_count: "0" };
     await expect(readShipmentProvisionalLotCounts(fixture([row, row]).tx, [{ shipmentId: 1, tracedLotIds: [] }])).rejects.toThrow();
   });
-  it.each([[{ shipmentId: 0, tracedLotIds: [] }], [{ shipmentId: 1, tracedLotIds: [0] }],
-    [{ shipmentId: 1, tracedLotIds: [] }, { shipmentId: 1, tracedLotIds: [] }]])("validates complete scope before querying", async scopes => {
+  it.each([{ scopes: [{ shipmentId: 0, tracedLotIds: [] }] }, { scopes: [{ shipmentId: 1, tracedLotIds: [0] }] },
+    { scopes: [{ shipmentId: 1, tracedLotIds: [] }, { shipmentId: 1, tracedLotIds: [] }] }])("validates complete scope before querying", async ({ scopes }) => {
     const { tx, execute } = fixture();
     await expect(readShipmentProvisionalLotCounts(tx, scopes)).rejects.toThrow(); expect(execute).not.toHaveBeenCalled();
   });

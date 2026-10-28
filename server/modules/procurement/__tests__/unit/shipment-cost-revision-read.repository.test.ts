@@ -8,7 +8,7 @@ function fixture() {
   const sets = [
     [{ __shipment_id: 1, id: 11, qty_shipped: 3 }, { __shipment_id: 2, id: 21, qty_shipped: 7 }],
     [{ __shipment_id: 1, id: 31, actual_cents: 101 }, { __shipment_id: 2, id: 32, estimated_cents: 999 }],
-    [{ __shipment_id: 1, id: 41, vendor_invoice_id: 5, document_lines_total_cents: "1100" }, { __shipment_id: 2, id: 41, vendor_invoice_id: 5, document_lines_total_cents: "1100" }],
+    [{ __shipment_ids: [1, 2], id: 41, vendor_invoice_id: 5, document_lines_total_cents: "1100" }],
     [{ __shipment_id: 1, id: 51, allocated_cents: 101 }, { __shipment_id: 2, id: 52, allocated_cents: 999 }],
     [{ __shipment_id: 2, __source_row: "1", id: 61, freight_cost_id: 32, amount_cents: 11 }],
     [{ __shipment_id: 1, inbound_shipment_line_id: 11, contract: { fingerprint: "a".repeat(64) } }],
@@ -30,14 +30,23 @@ describe("bounded shipment economic evidence", () => {
     expect(result.get(2)?.supplierCredits).toEqual([{ id: 61, freight_cost_id: 32, amount_cents: 11 }]);
     expect(sets).toEqual(before);
     const query = new PgDialect().sqlToQuery(execute.mock.calls[2][0]);
-    expect(query.sql).toContain("PARTITION BY selected.shipment_id,invoice.id");
+    expect(query.sql).toContain("PARTITION BY invoice.id");
+    expect(query.sql).toContain("array_agg(shipment_id ORDER BY shipment_id)");
     expect(query.params.every(value => Array.isArray(value) && JSON.stringify(value) === "[1,2]")).toBe(true);
   });
+  it.each([{ routing: null }, { routing: [] }, { routing: [1, 1] }, { routing: [99] }, { routing: [1, 2, 3] }])(
+    "rejects incomplete shared-document routing %j", async ({ routing }) => {
+      const { tx, execute } = fixture();
+      execute.mockReset().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ __shipment_ids: routing, id: 41 }] });
+      await expect(readShipmentCostRevisionEvidence(tx, [1, 2])).rejects.toMatchObject({ code: "SHIPMENT_COST_READ_EVIDENCE_INCOMPLETE" });
+      expect(execute).toHaveBeenCalledTimes(3);
+    });
   it("rejects a foreign routing identity instead of treating another shipment as current", async () => {
     const { tx, execute } = fixture(); execute.mockReset().mockResolvedValue({ rows: [{ __shipment_id: 99, id: 11 }] });
     await expect(readShipmentCostRevisionEvidence(tx, [1, 2])).rejects.toMatchObject({ code: "SHIPMENT_COST_READ_EVIDENCE_INCOMPLETE" });
   });
-  it.each([[0], [1.5], Array.from({ length: 101 }, (_, i) => i + 1)])("rejects invalid direct pages before SQL", async ids => {
+  it.each([{ ids: [0] }, { ids: [1.5] }, { ids: Array.from({ length: 101 }, (_, i) => i + 1) }])("rejects invalid direct pages before SQL", async ({ ids }) => {
     const { tx, execute } = fixture(); await expect(readShipmentCostRevisionEvidence(tx, ids)).rejects.toThrow(); expect(execute).not.toHaveBeenCalled();
   });
   it("validates every batch identity before returning bounded deduplicated pages", () => {
