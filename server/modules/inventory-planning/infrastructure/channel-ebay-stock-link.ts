@@ -48,7 +48,7 @@ export async function linkChannelEbayStock(pool: Pick<Pool, "connect">, raw: Cha
   try {
     const ready = await ensureEbayPublicationReady(pool, { channelId: input.channelId, connectionId: input.connectionId,
       accountId: input.accountId, environment: input.environment, productId: input.productId, purpose: input.purpose,
-      variants: input.variants }, { commandKey, actor: input.actor, now: deps.now });
+      variants: input.variants }, { commandKey, actor: input.actor, now: deps.now, fastPath: true });
     // The readiness owner reports no fence hold; its whole duration bounds it (the engine's fence budget counts it).
     return { status: "ready", commandKey, alreadyLinked: ready.alreadyReady,
       fenceHoldMs: ready.alreadyReady ? null : Math.max(0, Math.round(deps.monotonicNow() - startedAt)) };

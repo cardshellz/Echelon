@@ -453,13 +453,18 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     await expect(assertEbayPublicationReady(database.pool, source())).resolves.toBeUndefined();
   });
   // Channels PR4: the no-fence fast path, the update/rebuild hooks' gap read and the Card Shellz eBay link writer.
-  it("ensure: an already exactly linked product takes the fast path (no new receipt, fence-free), a new one links", async () => {
+  it("ensure: only an opted-in caller takes the fast path; a publication command always gets its receipt", async () => {
     expect(await ensureEbayPublicationReady(database.pool, source(), { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW }))
       .toEqual({ alreadyReady: false });
     expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 0 });
+    // Already linked exactly, fast path opted in: no fence, no new receipt.
+    expect(await ensureEbayPublicationReady(database.pool, source(), { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW,
+      fastPath: true })).toEqual({ alreadyReady: true });
+    expect((await counts()).receipts).toBe(1);
+    // A publication command (no opt-in) keeps its immutable receipt even when nothing needs linking.
     expect(await ensureEbayPublicationReady(database.pool, source(), { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW }))
-      .toEqual({ alreadyReady: true });
-    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 0 });
+      .toEqual({ alreadyReady: false });
+    expect((await counts()).receipts).toBe(2);
   });
   it("hook gaps: an unlinked size is a gap; a linked or held size is not; another account has no destination", async () => {
     const gaps = () => readEbayStockLinkGaps(database.pool, { channelId: 67, connectionId: 9, accountId: "seller-36", variants: source().variants });

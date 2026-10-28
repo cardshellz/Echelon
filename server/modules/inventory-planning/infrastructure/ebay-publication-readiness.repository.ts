@@ -39,14 +39,18 @@ export async function assertEbayPublicationReady(pool: ConnectionPool, input: In
 /** Normal publication already has durable listing intent and verified provider
  * identities. Prepare its exact mappings automatically; selection, holds, ATP,
  * source/model/policy and provider admission remain with their existing owners.
- * Channels PR4 (PLAN-CH-v3 §5 "New listing"): a no-fence fast path. When the
- * read-only review finds every member already linked exactly (currentlyReady:
- * nothing to seal, promote or enqueue), no configuration transaction, fence,
- * receipt or audit row is written. `alreadyReady` = this call changed nothing
- * (the fast path, or a replay of this command's saved receipt). A saved receipt of
- * this command is still honoured (and checked) first, as before. */
+ * Channels PR4 (PLAN-CH-v3 §5 "New listing"): an opt-in no-fence fast path
+ * (`fastPath: true`, used only by the stock-link engine's own callers,
+ * channel-ebay-stock-link.ts). When the read-only review finds every member
+ * already linked exactly (currentlyReady: nothing to seal, promote or enqueue),
+ * no configuration transaction, fence, receipt or audit row is written.
+ * Publication and maintenance callers do not opt in: their saved job's command
+ * always gets its immutable receipt (and verified-scope proof), as before.
+ * `alreadyReady` = this call changed nothing (the fast path, or a replay of this
+ * command's saved receipt). A saved receipt is still honoured (and checked) first. */
 export async function ensureEbayPublicationReady(pool: ConnectionPool, input: InventoryEbayPublicationReadinessInput,
-  context: { commandKey: string; actor: string; now: Date; verifiedListing?: VerifiedEbayListingPreparation }): Promise<{ alreadyReady: boolean }> {
+  context: { commandKey: string; actor: string; now: Date; verifiedListing?: VerifiedEbayListingPreparation; fastPath?: boolean }):
+  Promise<{ alreadyReady: boolean }> {
   const source = normalize(input);
   const verifiedScope = context.verifiedListing ? validateEbayListingPreparationScope(source, context.verifiedListing) : null;
   const legacyContextHash = readinessDigest(source);
@@ -63,7 +67,7 @@ export async function ensureEbayPublicationReady(pool: ConnectionPool, input: In
   const previous = await findCompatibleReceipt();
   if (!previous) {
     const review = await reviewEbayPublicationReadiness(pool, source, context.verifiedListing);
-    if (review.currentlyReady) return { alreadyReady: true };
+    if (context.fastPath === true && review.currentlyReady) return { alreadyReady: true };
     if (!review.ready) fail(review.blockers[0]?.code ?? "STOCK_MAPPING_NOT_READY", review.blockers.map(row => row.message).join(" "));
     try {
       await withEbayPublicationReadinessApplied(pool, { source, commandKey: context.commandKey, contextHash,
