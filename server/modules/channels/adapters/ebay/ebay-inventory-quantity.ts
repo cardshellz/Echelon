@@ -10,6 +10,8 @@ const offerSchema = z.object({
   marketplaceId: identitySchema,
   status: z.enum(["PUBLISHED", "UNPUBLISHED"]),
   availableQuantity: z.unknown(),
+  /** Read only for evidence (discoverEbayInventoryOffers); never validated, so its shape can never refuse a write. */
+  listing: z.unknown().optional(),
 });
 const pageSchema = z.object({ total: quantitySchema, offers: z.array(offerSchema) });
 const PAGE_SIZE = 200;
@@ -55,12 +57,35 @@ export function ebayInventoryOffersPath(sku: string, marketplaceId: string, offs
   })}`;
 }
 
-async function publishedOffer(client: EbayInventoryQuantityClient, sku: string, marketplaceId: string) {
+type EbayInventoryOffer = z.infer<typeof offerSchema>;
+
+/** One offer of a SKU as complete discovery found it; `listingId` only when eBay sent one (evidence, never identity). */
+export interface EbayDiscoveredOffer {
+  readonly offerId: string;
+  readonly sku: string;
+  readonly marketplaceId: string;
+  readonly status: "PUBLISHED" | "UNPUBLISHED";
+  readonly listingId: string | null;
+}
+
+/**
+ * Every offer eBay holds for the exact SKU on the marketplace, read completely and validated, or thrown. Read-only;
+ * shared by the quantity write (exactly one PUBLISHED offer) and the Dropship stock-link lookup (channels PR3), so
+ * both apply the same page bound, pagination checks and exact SKU/marketplace scope.
+ */
+export async function discoverEbayInventoryOffers(client: Pick<EbayInventoryQuantityClient, "getInventoryOffersPage">,
+  sku: string, marketplaceId: string): Promise<EbayDiscoveredOffer[]> {
+  return (await discoverOffers(client, sku, marketplaceId)).map(offer => ({ offerId: offer.offerId, sku: offer.sku,
+    marketplaceId: offer.marketplaceId, status: offer.status, listingId: offerListingId(offer.listing) }));
+}
+
+async function discoverOffers(client: Pick<EbayInventoryQuantityClient, "getInventoryOffersPage">, sku: string,
+  marketplaceId: string): Promise<EbayInventoryOffer[]> {
   if (!identitySchema.safeParse(sku).success) {
     throw new EbayInventoryQuantityError("EBAY_INVENTORY_ID_REQUIRED", "An exact eBay inventory SKU is required.");
   }
   const seen = new Set<string>();
-  const published: z.infer<typeof offerSchema>[] = [];
+  const offers: EbayInventoryOffer[] = [];
   let total: number | undefined;
   do {
     const parsed = pageSchema.safeParse(await client.getInventoryOffersPage(sku, marketplaceId, seen.size, PAGE_SIZE));
@@ -77,9 +102,21 @@ async function publishedOffer(client: EbayInventoryQuantityClient, sku: string, 
         throw new EbayInventoryQuantityError("EBAY_INVENTORY_OFFER_SCOPE_INVALID", "eBay returned another SKU, marketplace, or a duplicate offer.");
       }
       seen.add(offer.offerId);
-      if (offer.status === "PUBLISHED") published.push(offer);
+      offers.push(offer);
     }
   } while (seen.size < total);
+  return offers;
+}
+
+/** eBay's offer.listing.listingId when it is a trimmed non-empty string; anything else is "not sent". */
+function offerListingId(listing: unknown): string | null {
+  if (!listing || typeof listing !== "object" || !("listingId" in listing)) return null;
+  const value = (listing as { listingId: unknown }).listingId;
+  return typeof value === "string" && value.length > 0 && value === value.trim() ? value : null;
+}
+
+async function publishedOffer(client: EbayInventoryQuantityClient, sku: string, marketplaceId: string) {
+  const published = (await discoverOffers(client, sku, marketplaceId)).filter(offer => offer.status === "PUBLISHED");
   if (published.length !== 1) {
     throw new EbayInventoryQuantityError("EBAY_INVENTORY_OFFER_AMBIGUOUS", "Exactly one published offer must resolve for the selected eBay SKU and marketplace; no listing is created or guessed.");
   }
@@ -115,7 +152,7 @@ export interface EbayInventoryQuantityOptions {
   readonly expectOffer?: (offer: EbayResolvedPublishedOffer) => void;
 }
 
-function checkExpectedOffer(offer: z.infer<typeof offerSchema>, options: EbayInventoryQuantityOptions): void {
+function checkExpectedOffer(offer: EbayInventoryOffer, options: EbayInventoryQuantityOptions): void {
   const availableQuantity = quantitySchema.safeParse(offer.availableQuantity);
   options.expectOffer?.({ offerId: offer.offerId, sku: offer.sku, marketplaceId: offer.marketplaceId,
     availableQuantity: availableQuantity.success ? availableQuantity.data : null });

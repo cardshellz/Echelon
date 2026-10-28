@@ -22,7 +22,12 @@ import type {
   StockLinkTargetRow,
 } from "../infrastructure/stock-link-checks.repository";
 import type { StockLinkCommandRequest, StockLinkCommandResult } from "../infrastructure/stock-link-shopify-command";
-import type { StockLinkPolicyBinding, StockLinkRegistry, StockLinkSource } from "./stock-link.ports";
+import type { DropshipEbayStockReadinessInput, DropshipEbayStockReadinessResult } from "@shared/types/dropship-ebay-stock-readiness";
+import {
+  isStockLinkEnrollmentBinding, type StockLinkBinding, type StockLinkEnrollmentBinding, type StockLinkPolicyBinding,
+  type StockLinkRegistry, type StockLinkSource,
+} from "./stock-link.ports";
+import { runStockLinkEnrollment } from "./stock-link-enrollment.run";
 
 /**
  * The stock-link engine's background tick (channels PR2, PLAN-CH2 v4.1 §7.2): one cluster-wide runner
@@ -93,7 +98,16 @@ export interface StockLinkServiceDeps {
   readonly logger?: StockLinkLogger;
   /** A signal that aborts after `ms` (the provider calls' hard stop); tests pass their own. */
   readonly deadline?: (ms: number) => AbortSignal;
+  /**
+   * Channels PR3: the Dropship eBay link writer for listing enrollment (ensureDropshipEbayStockReady bound to the pool,
+   * actor system:dropship-stock-enrollment, the injected clock). Absent: an enrollment destination halts with
+   * STOCK_LINK_POLICY_MISSING (never a guess).
+   */
+  readonly runEnrollment?: StockLinkEnrollmentRunner;
 }
+
+/** One Dropship eBay enrollment link (the existing writer; channels PR3). */
+export type StockLinkEnrollmentRunner = (input: DropshipEbayStockReadinessInput) => Promise<DropshipEbayStockReadinessResult>;
 
 /** The tick's bounds (§4.7, §7.2; C27). */
 export const STOCK_LINK_TICK_LIMITS = Object.freeze({
@@ -142,7 +156,7 @@ export interface StockLinkTickSummary {
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 /** One tick's counters and budgets (explicit, per-call state; nothing survives the tick). */
-class TickRun {
+export class TickRun {
   readonly summary: Mutable<StockLinkTickSummary> = { outcome: "completed", destinations: 0, claimed: 0, providerCalls: 0,
     observations: 0, lookups: 0, applies: 0, links: 0, relinks: 0, retires: 0, flags: 0, fenceHoldMsTotal: 0,
     fenceHoldMsMax: 0, elapsedMs: 0 };
@@ -173,19 +187,19 @@ class TickRun {
 }
 
 /** One destination's tick context. */
-interface DestinationRun {
+export interface DestinationRun<B extends StockLinkBinding = StockLinkPolicyBinding> {
   readonly tick: TickRun;
   readonly destination: StockLinkDestination;
-  readonly binding: StockLinkPolicyBinding;
+  readonly binding: B;
   readonly state: StockLinkDestinationState;
   readonly correlation: Readonly<Record<string, unknown>>;
 }
 
-type StepResult<T> = { readonly ok: true; readonly value: T }
+export type StepResult<T> = { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly failure: StockLinkFailureClassification; readonly action: StockLinkTickFailureAction;
       readonly message: string };
 
-type Flow = "continue" | "stop_tick";
+export type Flow = "continue" | "stop_tick";
 
 /** The reads one destination's tick made (§7.2 step 5). */
 interface StoreReads {
@@ -265,7 +279,7 @@ export class StockLinkService {
     if (!targets.ok) return this.tickLevelFailure(tick, targets);
 
     // Every supported destination beats first, so a long tick never leaves a later one looking stalled (TST-9).
-    const beaten: { target: StockLinkTargetRow; binding: StockLinkPolicyBinding; state: StockLinkDestinationState }[] = [];
+    const beaten: { target: StockLinkTargetRow; binding: StockLinkBinding; state: StockLinkDestinationState }[] = [];
     for (const target of targets.value) {
       const binding = target.destination === null ? null
         : this.deps.registry.resolve(target.destination.destinationKind, target.destination.providerKey);
@@ -287,16 +301,20 @@ export class StockLinkService {
     }
     for (const { target, binding, state } of beaten) {
       const destination = target.destination!;
-      const run: DestinationRun = { tick, destination, binding, state, correlation: {
+      const run: DestinationRun<StockLinkBinding> = { tick, destination, binding, state, correlation: {
         publication_target_id: destination.publicationTargetId, destination_kind: destination.destinationKind,
-        provider_key: destination.providerKey, connection_id: destination.channelConnectionId, actor: STOCK_LINK_ACTOR } };
+        provider_key: destination.providerKey, connection_id: destination.channelConnectionId ?? destination.dropshipStoreConnectionId,
+        actor: STOCK_LINK_ACTOR } };
       const skip = skipReason(target, state, this.now(), tick);
       if (skip !== null) {
         this.log.debug(ACTION, { ...run.correlation, outcome: "skipped", reason: skip });
         continue;
       }
       tick.summary.destinations += 1;
-      if (await this.processDestination(run) === "stop_tick") {
+      const flow = isStockLinkEnrollmentBinding(binding)
+        ? await runStockLinkEnrollment(this.enrollmentContext(), { ...run, binding })
+        : await this.processDestination({ ...run, binding });
+      if (flow === "stop_tick") {
         tick.summary.outcome = "database_unavailable";
         return;
       }
@@ -314,7 +332,7 @@ export class StockLinkService {
    * A destination-level failure: a halt (one ERROR, never retried), a pause (the claimed rows expire), or the end of
    * the tick. Busy and transient failures here only end this destination's tick (its rows were released by the caller).
    */
-  private async failDestination(run: DestinationRun, result: StepResult<unknown> & { ok: false }, phase: string): Promise<Flow> {
+  private async failDestination(run: DestinationRun<StockLinkBinding>, result: StepResult<unknown> & { ok: false }, phase: string): Promise<Flow> {
     const { failure } = result;
     const targetId = run.destination.publicationTargetId;
     const event = { ...run.correlation, phase, error_code: failure.code, error_class: failure.errorClass, cause_code: failure.causeCode };
@@ -342,7 +360,7 @@ export class StockLinkService {
   }
 
   /** A pause, halt or record write that itself failed: the database is gone, or this destination waits for next tick. */
-  private writeFailed(run: DestinationRun, result: StepResult<unknown> & { ok: false }, phase: string): Flow {
+  private writeFailed(run: DestinationRun<StockLinkBinding>, result: StepResult<unknown> & { ok: false }, phase: string): Flow {
     const event = { ...run.correlation, phase, error_code: result.failure.code, error_class: result.failure.errorClass,
       cause_code: result.failure.causeCode };
     if (result.action === "stop_tick") {
@@ -415,7 +433,7 @@ export class StockLinkService {
   }
 
   /** §7.2 steps 2-3, database only. */
-  private async discover(run: DestinationRun): Promise<void> {
+  private async discover(run: DestinationRun<StockLinkBinding>): Promise<void> {
     const { store, db, random } = this.deps;
     const { destination, state } = run;
     const source = run.binding.source;
@@ -695,9 +713,27 @@ export class StockLinkService {
     return "continue";
   }
 
+  /**
+   * What the listing-enrollment pass (stock-link-enrollment.run.ts) shares with the store-item pass: the steps, the
+   * destination failures and the discovery, never a second copy of them.
+   */
+  private enrollmentContext() {
+    return {
+      deps: this.deps, log: this.log, now: () => this.now(), limits: L, providerPauseCodes: PROVIDER_PAUSE_CODES,
+      step: <T>(work: () => Promise<T>) => this.step(work),
+      discover: (run: DestinationRun<StockLinkBinding>) => this.discover(run),
+      failDestination: (run: DestinationRun<StockLinkBinding>, result: StepResult<unknown> & { ok: false }, phase: string) =>
+        this.failDestination(run, result, phase),
+      writeFailed: (run: DestinationRun<StockLinkBinding>, result: StepResult<unknown> & { ok: false }, phase: string) =>
+        this.writeFailed(run, result, phase),
+      releaseAndFail: (run: DestinationRun<StockLinkBinding>, claims: readonly StockLinkClaimedCheck[],
+        result: StepResult<unknown> & { ok: false }, phase: string) => this.releaseAndFail(run, claims, result, phase),
+    };
+  }
+
   /** A failure after the claim and before any decision: the claimed rows are released (busy or transient), or left
    * to expire under a pause or halt. */
-  private async releaseAndFail(run: DestinationRun, claims: readonly StockLinkClaimedCheck[],
+  private async releaseAndFail(run: DestinationRun<StockLinkBinding>, claims: readonly StockLinkClaimedCheck[],
     result: StepResult<unknown> & { ok: false }, phase: string): Promise<Flow> {
     if (result.action === "release_busy" || result.action === "release_transient") {
       const now = this.now();
@@ -731,8 +767,8 @@ function batchReadsOf(reads: StoreReads, controlReadDone: boolean): StockLinkBat
 }
 
 /** The destinations' bindings by kind and provider (one per pair). */
-export function createStockLinkRegistry(bindings: readonly StockLinkPolicyBinding[]): StockLinkRegistry {
-  const byKey = new Map<string, StockLinkPolicyBinding>();
+export function createStockLinkRegistry(bindings: readonly StockLinkBinding[]): StockLinkRegistry {
+  const byKey = new Map<string, StockLinkBinding>();
   for (const binding of bindings) {
     const { adapter, source } = binding;
     if (adapter.destinationKind !== source.destinationKind || adapter.providerKey !== source.providerKey) {
