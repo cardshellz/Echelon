@@ -9,7 +9,7 @@ import type { PurchaseApprovalActor } from "../identity/domain/purchase-approval
 import { readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
 import { costFingerprint, costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import { dateValues } from "./purchase-workspace-read";
-import { prepareShipmentCostRevisions } from "./shipment-cost-application.service";
+import { prepareShipmentCostRevisions, prepareShipmentCostRevisionBatch } from "./shipment-cost-application.service";
 import { buildShipmentCostException, shipmentExceptionFactsSchema, type ShipmentExceptionFacts } from "./shipment-cost-exception.policy";
 
 export interface ShipmentExceptionReader { execute(query: SQL): Promise<{ rows: Record<string, unknown>[] }> }
@@ -44,6 +44,12 @@ export async function readCurrentShipmentSourceFingerprints(tx: ShipmentExceptio
     ? [[proposal.input.scope.inboundShipmentLineId, costFingerprint(proposal)] as const] : []));
 }
 
+export async function readCurrentShipmentSourceFingerprintBatch(tx: ShipmentExceptionReader, shipmentIds: readonly number[]): Promise<Map<number, Map<number, string>>> {
+  const prepared = await prepareShipmentCostRevisionBatch(tx, shipmentIds);
+  return new Map([...prepared].map(([id, result]) => [id, new Map(result.proposals.flatMap(proposal => proposal.input.scope.kind === "shipment_line"
+    ? [[proposal.input.scope.inboundShipmentLineId, costFingerprint(proposal)] as const] : []))]));
+}
+
 export async function readShipmentExceptionHistory(tx: ShipmentExceptionReader, lineId: number) {
   const rows = await tx.execute(sql`SELECT id,action,exception_fingerprint,reason,actor_id,actor_name,recorded_at,amount_mills,currency
     FROM procurement.shipment_cost_exception_decisions WHERE inbound_shipment_line_id=${lineId} ORDER BY id DESC LIMIT 20`);
@@ -61,21 +67,25 @@ export async function readShipmentCostExceptions(tx: ShipmentExceptionReader, li
   const facts = await readShipmentExceptionFacts(tx, lineIds);
   const reviews = new Map<number, ShipmentCostException>();
   const current = new Map(currentSources);
+  const freshness = new Map<number, { shipmentId: number; fingerprint: string }>();
   for (const fact of facts) {
     const review = buildShipmentCostException(fact);
     if (!review) continue;
-    const source=costSourceRevisionSchema.parse(fact.contract);
-    const records=await readReconciliationRecords(tx,source,review.issues);
-    review.reconciliation = reconciliationState(reconciliationEligibility(source,review.issues,records),await readReconciliationLedger(tx,fact.lineId));
+    const source = costSourceRevisionSchema.parse(fact.contract);
+    const records = await readReconciliationRecords(tx, source, review.issues);
+    review.reconciliation = reconciliationState(reconciliationEligibility(source, review.issues, records), await readReconciliationLedger(tx, fact.lineId));
     if (review.state === "accepted" || review.reconciliation.status === "posted") {
-      if (!current.has(fact.shipmentId)) current.set(fact.shipmentId, await readCurrentShipmentSourceFingerprints(tx, fact.shipmentId));
-      const contract = fact.contract as { fingerprint: string };
-      if (current.get(fact.shipmentId)!.get(fact.lineId) !== contract.fingerprint) {
-        reviews.set(fact.lineId, { ...review, state: "open", reconciliation:{...review.reconciliation,status:"review_required"} });
-        continue;
-      }
+      freshness.set(fact.lineId, { shipmentId: fact.shipmentId, fingerprint: source.fingerprint });
     }
     reviews.set(fact.lineId, review);
+  }
+  const missing = [...new Set([...freshness.values()].map(value => value.shipmentId))].filter(id => !current.has(id));
+  if (missing.length) for (const [id, fingerprints] of await readCurrentShipmentSourceFingerprintBatch(tx, missing)) current.set(id, fingerprints);
+  for (const [lineId, source] of freshness) {
+    if (current.get(source.shipmentId)?.get(lineId) !== source.fingerprint) {
+      const review = reviews.get(lineId)!;
+      reviews.set(lineId, { ...review, state: "open", reconciliation: { ...review.reconciliation!, status: "review_required" } });
+    }
   }
   return reviews;
 }

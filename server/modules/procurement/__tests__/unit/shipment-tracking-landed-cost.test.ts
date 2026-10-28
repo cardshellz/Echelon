@@ -1,9 +1,9 @@
-import { readShipmentCostReviewInTransaction } from "../../shipment-cost-review.repository";
-import { readShipmentHealthEvidence, type ShipmentHealthReadEvidence } from "../../shipment-health-evidence.repository";
-vi.mock("../../shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn() }));
+import { readShipmentCostReviewInTransaction, readShipmentCostReviewsInTransaction } from "../../shipment-cost-review.repository";
+import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts, type ShipmentHealthReadEvidence } from "../../shipment-health-evidence.repository";
+vi.mock("../../shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn(), readShipmentProvisionalLotCounts: vi.fn() }));
 import { shipmentCostReviewSchema, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import { landedCostHealthSchema } from "@shared/procurement/landed-cost-health";
-vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn() }));
+vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn(), readShipmentCostReviewsInTransaction: vi.fn() }));
 import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../shipment-cost-application.service";
 vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
 import { shipmentLineVersion } from "../../shipment-line-version";
@@ -17,6 +17,14 @@ import {
 } from "../../shipment-tracking.service";
 
 beforeEach(() => {
+  vi.mocked(readShipmentCostReviewsInTransaction).mockReset().mockImplementation(async (tx, ids, reader) => {
+    const result = new Map<number, NonNullable<Awaited<ReturnType<typeof readShipmentCostReviewInTransaction>>>>();
+    for (const id of ids) {
+      const review = await readShipmentCostReviewInTransaction(tx, id, reader);
+      if (review) result.set(id, review);
+    }
+    return result;
+  });
   vi.mocked(readShipmentCostReviewInTransaction).mockReset().mockResolvedValue({ shipmentId: 1,
     lines: [{ lineId: 11, sku: "SKU-1", sourceIssue: null, exceptionReview: null, application: null }] });
   vi.mocked(recordShipmentCostRevisions).mockReset().mockResolvedValue({ revisions: [], issues: [] } as any);
@@ -81,12 +89,21 @@ function buildStorage(overrides: Record<string, any> = {}) {
     for (const id of ids) {
       const lines = await storage.getInboundShipmentLines(id, tx);
       const costs = await storage.getInboundFreightCosts(id, tx);
-      result.set(id, { lines, costs, provisionalLots: await storage.getProvisionalLotsByShipment(id, tx),
+      result.set(id, { lines, costs,
         allocationsByCostId: new Map(await Promise.all(costs.map(async (cost: any) => [cost.id, await storage.getInboundFreightCostAllocations(cost.id, tx)]))),
         snapshotsByLineId: new Map((await Promise.all(lines.map((line: any) => storage.getLandedCostSnapshots(line.id, tx)))).flat().map((snapshot: any) => [snapshot.inboundShipmentLineId, snapshot])),
         purchaseLinesById: new Map((await Promise.all(lines.filter((line: any) => line.purchaseOrderLineId != null).map((line: any) => storage.getPurchaseOrderLineById(line.purchaseOrderLineId, tx)))).filter(Boolean).map((line: any) => [line.id, line])),
         purchaseOrdersById: new Map((await Promise.all(lines.filter((line: any) => line.purchaseOrderId != null).map((line: any) => storage.getPurchaseOrderById(line.purchaseOrderId, tx)))).filter(Boolean).map((order: any) => [order.id, order])),
       });
+    }
+    return result;
+  });
+  vi.mocked(readShipmentProvisionalLotCounts).mockImplementation(async (tx, scopes) => {
+    const result = new Map<number, { provisionalLotCount: number; untracedProvisionalLotCount: number }>();
+    for (const scope of scopes) {
+      const lots = await storage.getProvisionalLotsByShipment(scope.shipmentId, tx);
+      const traced = new Set(scope.tracedLotIds);
+      result.set(scope.shipmentId, { provisionalLotCount: lots.length, untracedProvisionalLotCount: lots.filter((lot: { id: number }) => !traced.has(lot.id)).length });
     }
     return result;
   });

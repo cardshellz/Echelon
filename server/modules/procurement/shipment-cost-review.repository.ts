@@ -1,3 +1,5 @@
+import { shipmentCostReadPageSchema } from "./shipment-cost-read-scope";
+import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
 import { sql } from "drizzle-orm";
 import { readPurchaseCostStatus } from "./purchase-cost-status.repository";
 import type { PurchaseCostStatusSnapshotReader } from "./purchase-cost-status-snapshot.repository";
@@ -33,12 +35,18 @@ export async function readShipmentCostReviewInTransaction(tx: ShipmentExceptionR
   const { exceptions, sourceIssues } = await readShipmentCostPostingEvidence(tx, result.rows.map(row => ({
     lineId: costInteger(row.id, "line.id", 1), shipmentId, contract: row.contract,
   })));
-  const purchaseLineIds = result.rows.flatMap(row => row.purchase_order_line_id == null
+  return projectShipmentCostReview(tx, shipmentId, result.rows, { exceptions, sourceIssues }, supplierSnapshot);
+}
+
+async function projectShipmentCostReview(tx: ShipmentExceptionReader, shipmentId: number, rows: Record<string, unknown>[],
+  posting: Awaited<ReturnType<typeof readShipmentCostPostingEvidence>>, supplierSnapshot?: PurchaseCostStatusSnapshotReader): Promise<ShipmentCostReview> {
+  const { exceptions, sourceIssues } = posting;
+  const purchaseLineIds = rows.flatMap(row => row.purchase_order_line_id == null
     ? [] : [costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1)]);
   const supplierCosts = supplierSnapshot ? await supplierSnapshot.read(tx, purchaseLineIds)
     : await readPurchaseCostStatus(tx, purchaseLineIds);
   return shipmentCostReviewSchema.parse({ shipmentId, supplierCosts,
-    lines: result.rows.map(row => {
+    lines: rows.map(row => {
     const outcome = row.result as Record<string, unknown> | null;
     return {
       lineId: costInteger(row.id, "line.id", 1), sku: row.sku == null ? null : String(row.sku),
@@ -52,4 +60,43 @@ export async function readShipmentCostReviewInTransaction(tx: ShipmentExceptionR
       },
     };
   }) });
+}
+
+/** The same projection and supplier boundaries for one bounded header page. */
+export async function readShipmentCostReviewsInTransaction(tx: ShipmentExceptionReader, shipmentIds: readonly number[],
+  supplierSnapshot?: PurchaseCostStatusSnapshotReader): Promise<Map<number, ShipmentCostReview>> {
+  const ids = [...new Set(shipmentCostReadPageSchema.parse(shipmentIds))];
+  if (!ids.length) return new Map();
+  const headers = await tx.execute(sql`SELECT id FROM procurement.inbound_shipments WHERE id=ANY(${sql.param(ids)}::int[]) ORDER BY id`);
+  const selected = new Set(ids);
+  const rowsByShipment = new Map<number, Record<string, unknown>[]>();
+  for (const header of headers.rows) {
+    const id = costInteger(header.id, "shipmentId", 1);
+    if (!selected.has(id) || rowsByShipment.has(id)) throw new CostEvidenceError("SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE", "Current shipment review headers are inconsistent.");
+    rowsByShipment.set(id, []);
+  }
+  if (!rowsByShipment.size) return new Map();
+  const result = await tx.execute(sql`SELECT line.inbound_shipment_id AS shipment_id,line.id,line.sku,line.purchase_order_line_id,revision.contract,
+    application.id AS application_id,application.status,application.recorded_at,application.evidence->'result' AS result
+    FROM procurement.inbound_shipment_lines line
+    LEFT JOIN LATERAL (SELECT id,contract FROM procurement.cost_source_revisions revision
+      WHERE revision.inbound_shipment_line_id=line.id AND revision.component='landed'
+      ORDER BY revision.revision DESC,revision.id DESC LIMIT 1) revision ON true
+    LEFT JOIN LATERAL (SELECT id,status,recorded_at,evidence FROM inventory.cost_applications application
+      WHERE application.source_revision_id=revision.id ORDER BY application.id DESC LIMIT 1) application ON true
+    WHERE line.inbound_shipment_id=ANY(${sql.param([...rowsByShipment.keys()])}::int[]) ORDER BY line.id`);
+  for (const row of result.rows) {
+    const scoped = rowsByShipment.get(costInteger(row.shipment_id, "shipmentId", 1));
+    if (!scoped) throw new CostEvidenceError("SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE", "Current shipment review lines escaped their scope.");
+    scoped.push(row);
+  }
+  const posting = await readShipmentCostPostingEvidence(tx, result.rows.map(row => ({
+    lineId: costInteger(row.id, "line.id", 1), shipmentId: costInteger(row.shipment_id, "shipmentId", 1), contract: row.contract,
+  })));
+  const reviews = new Map<number, ShipmentCostReview>();
+  for (const id of ids) {
+    const rows = rowsByShipment.get(id);
+    if (rows) reviews.set(id, await projectShipmentCostReview(tx, id, rows, posting, supplierSnapshot));
+  }
+  return reviews;
 }

@@ -53,17 +53,17 @@ import { eq, sql as sqlTag } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { shipmentAllocationEvidenceSchema } from "@shared/procurement/shipment-allocation";
 import { shipmentCostWorkflowIdSchema, shipmentCostUpdateInputSchema, shipmentCostUpdateResultSchema } from "@shared/procurement/shipment-cost-workflow";
-import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
+import { isShipmentCostLinePosted, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import { shipmentWorkListQuerySchema, shipmentWorkListPageSchema, matchesShipmentCostFilter, SHIPMENT_SCAN_PAGE_SIZE, type ShipmentWorkListPage } from "@shared/procurement/shipment-work-list";
 import type { ShipmentListFilters } from "./shipment-work-list.repository";
 import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
-import { readShipmentCostReview, readShipmentCostReviewInTransaction } from "./shipment-cost-review.repository";
-import { createPurchaseCostStatusSnapshotReader, type PurchaseCostStatusSnapshotReader } from "./purchase-cost-status-snapshot.repository";
+import { readShipmentCostReview, readShipmentCostReviewsInTransaction } from "./shipment-cost-review.repository";
+import { createPurchaseCostStatusSnapshotReader } from "./purchase-cost-status-snapshot.repository";
 import { purchaseLineNeedsCostReview, purchaseCostNextAction } from "@shared/procurement/purchase-cost-status";
 import { shipmentAllocationsEqual } from "./domain/shipment-allocation-equality";
 import { shipmentCancellationBlockers, SHIPMENT_CANCELLATION_REASON_MAX_LENGTH } from "./domain/shipment-cancellation";
 import { readShipmentCancellationEvidence } from "./shipment-cancellation.repository";
-import { readShipmentHealthEvidence, type ShipmentAllocationReadEvidence, type ShipmentHealthReadEvidence } from "./shipment-health-evidence.repository";
+import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts, type ShipmentProvisionalLotCounts, type ShipmentAllocationReadEvidence, type ShipmentHealthReadEvidence } from "./shipment-health-evidence.repository";
 import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
 
 /**
@@ -1297,12 +1297,12 @@ export function createShipmentTrackingService(
 
   /** Both list membership and overview consume this current posting/reconciliation evidence. */
   async function readShipmentHealthIssues(shipment: InboundShipment, tx: any, evidence: ShipmentHealthReadEvidence,
-    supplierSnapshot: PurchaseCostStatusSnapshotReader): Promise<LandedCostHealth["items"]> {
+    review: ShipmentCostReview | null, provisionalCounts: ShipmentProvisionalLotCounts): Promise<LandedCostHealth["items"]> {
     const items: LandedCostHealth["items"] = [];
     if (shipment.status !== "costing" && shipment.status !== "closed") return items;
-    const { lines, provisionalLots } = evidence;
+    const { lines } = evidence;
+    const { provisionalLotCount, untracedProvisionalLotCount } = provisionalCounts;
     const allocation = await evaluateAllocationStatus(shipment, lines, evidence.costs, tx, evidence);
-    const review = await readShipmentCostReviewInTransaction(tx, shipment.id, supplierSnapshot);
     const lineIds = new Set(lines.map(line => line.id));
     if (!review || review.shipmentId !== shipment.id || review.lines.length !== lines.length
       || lineIds.size !== lines.length
@@ -1371,9 +1371,7 @@ export function createShipmentTrackingService(
     }
 
     const supplierReview = review.supplierCosts?.lines.filter(purchaseLineNeedsCostReview) ?? [];
-    const tracedLotIds = new Set(review.supplierCosts?.lines.flatMap(line => line.lots.map(lot => lot.id)) ?? []);
-    const unverifiedFlags = provisionalLots.filter(lot => !tracedLotIds.has(lot.id));
-    if (lines.length > 0 && (supplierReview.length > 0 || (unverifiedFlags.length > 0 && unpostedLines.length === 0))) {
+    if (lines.length > 0 && (supplierReview.length > 0 || (untracedProvisionalLotCount > 0 && unpostedLines.length === 0))) {
       // A flag alone cannot contradict verified current component postings.
       // Untraced flagged lots remain actionable; estimates and genuine source
       // issues are independently projected even when the legacy flag is 0.
@@ -1382,15 +1380,15 @@ export function createShipmentTrackingService(
         id: `provisional_other_costs-${shipment.id}`, type: "provisional_other_costs", severity: "warning",
         shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber ?? null, shipmentStatus: shipment.status,
         detail: `${unpostedLines.length === 0 ? "Landed costs are posted. " : ""}${supplierReview.length > 0
-          ? `${supplierReview.length} PO lines need product / packaging cost review (${provisionalLots.length} provisional lots on this shipment). ${supplierReview.some(line => purchaseCostNextAction(line) === "invoice") ? "Confirm the supplier invoice amounts in cost review." : "Open cost review for the affected receipts and lot history."}`
-          : `${unverifiedFlags.length} lot${unverifiedFlags.length === 1 ? " retains" : "s retain"} a provisional flag without verified supplier-cost coverage. Open cost review to compare their current component evidence; this flag alone does not mean freight is unposted.`}`,
-        action: "review_cost_evidence", provisionalLotCount: provisionalLots.length,
+          ? `${supplierReview.length} PO lines need product / packaging cost review (${provisionalLotCount} provisional lots on this shipment). ${supplierReview.some(line => purchaseCostNextAction(line) === "invoice") ? "Confirm the supplier invoice amounts in cost review." : "Open cost review for the affected receipts and lot history."}`
+          : `${untracedProvisionalLotCount} lot${untracedProvisionalLotCount === 1 ? " retains" : "s retain"} a provisional flag without verified supplier-cost coverage. Open cost review to compare their current component evidence; this flag alone does not mean freight is unposted.`}`,
+        action: "review_cost_evidence", provisionalLotCount: provisionalLotCount,
       });
     }
-    if (unpostedLines.length > 0 && (provisionalLots.length > 0
+    if (unpostedLines.length > 0 && (provisionalLotCount > 0
       || allocation.allocatableCostCount > 0 || needsSourceReview)) {
       const fullyFinalized = finalizedLineCount === lines.length && lines.length > 0;
-      const closedProvisional = shipment.status === "closed" && provisionalLots.length > 0;
+      const closedProvisional = shipment.status === "closed" && provisionalLotCount > 0;
       const readyToPush = !needsSourceReview && fullyFinalized && !closedProvisional;
       const type = closedProvisional ? "stale_provisional_lots"
         : readyToPush ? "finalized_not_pushed" : "posting_review_required";
@@ -1402,7 +1400,7 @@ export function createShipmentTrackingService(
           ? "Review the current source or reconciliation evidence before updating costs."
           : "Update shipment costs to apply the current source to inventory and sold costs."}`,
         action: needsSourceReview ? "review_cost_evidence" : fullyFinalized ? "push_costs_to_lots" : "finalize_landed_cost",
-        provisionalLotCount: provisionalLots.length,
+        provisionalLotCount: provisionalLotCount,
       });
     }
     return items;
@@ -1414,17 +1412,27 @@ export function createShipmentTrackingService(
     for (let offset = 0; offset < eligible.length; offset += SHIPMENT_SCAN_PAGE_SIZE) {
       const page = eligible.slice(offset, offset + SHIPMENT_SCAN_PAGE_SIZE);
       let evidence: Map<number, ShipmentHealthReadEvidence>;
-      try { evidence = await readShipmentHealthEvidence(tx, page.map(shipment => shipment.id)); }
-      catch (error) {
+      let reviews: Map<number, ShipmentCostReview>;
+      let provisionalCounts: Map<number, ShipmentProvisionalLotCounts>;
+      const supplierSnapshot = createPurchaseCostStatusSnapshotReader(tx);
+      try {
+        evidence = await readShipmentHealthEvidence(tx, page.map(shipment => shipment.id));
+        reviews = await readShipmentCostReviewsInTransaction(tx, page.map(shipment => shipment.id), supplierSnapshot);
+        provisionalCounts = await readShipmentProvisionalLotCounts(tx, page.map(shipment => ({ shipmentId: shipment.id,
+          tracedLotIds: reviews.get(shipment.id)?.supplierCosts?.lines.flatMap(line => line.lots.map(lot => lot.id)) ?? [],
+        })));
+      } catch (error) {
         if (!(error instanceof CostEvidenceError) || error.code !== "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE") throw error;
         throw new ShipmentTrackingError(error.message, 503, { code: error.code });
       }
-      const supplierSnapshot = createPurchaseCostStatusSnapshotReader(tx);
       for (const shipment of page) {
         const current = evidence.get(shipment.id);
         if (!current) throw new ShipmentTrackingError("Current shipment cost evidence is incomplete. Reload cost health.", 503,
           { code: "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE", shipmentId: shipment.id });
-        result.set(shipment.id, await readShipmentHealthIssues(shipment, tx, current, supplierSnapshot));
+        const counts = provisionalCounts.get(shipment.id);
+        if (!counts) throw new ShipmentTrackingError("Current provisional-lot counts are incomplete. Reload cost health.", 503,
+          { code: "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE", shipmentId: shipment.id });
+        result.set(shipment.id, await readShipmentHealthIssues(shipment, tx, current, reviews.get(shipment.id) ?? null, counts));
       }
     }
     return result;
