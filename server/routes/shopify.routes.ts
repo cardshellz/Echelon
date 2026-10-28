@@ -24,6 +24,7 @@ import {
   type ShopifyFulfillmentWebhookTopic,
 } from "../modules/oms/shopify-fulfillment-webhook-retry";
 import { retireDeletedShopifyProduct } from "../modules/catalog/shopify-product-retirement.service";
+import { sendShopifyProductSyncFailure } from "./shopify-product-sync.response";
 
 // ---------------------------------------------------------------------------
 // Shopify carrier-name → canonical carrier code mapping (§6 Commit 26).
@@ -235,12 +236,8 @@ export function registerShopifyRoutes(app: Express) {
   app.post("/api/shopify/sync-products", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       res.json(await productImport.syncProductsAndContent());
-    } catch (error: any) {
-      console.error("Shopify product sync error:", error);
-      res.status(500).json({
-        error: "Failed to sync products from Shopify",
-        message: error.message
-      });
+    } catch (error: unknown) {
+      sendShopifyProductSyncFailure(res, error);
     }
   });
 
