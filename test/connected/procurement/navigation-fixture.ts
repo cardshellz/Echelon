@@ -44,8 +44,7 @@ export async function installConnectedNavigationFixture(pool: Pool): Promise<voi
   }
   await pool.query(`CREATE UNIQUE INDEX connected_po_number_identity ON procurement.purchase_orders(po_number);
     CREATE UNIQUE INDEX connected_po_line_identity ON procurement.purchase_order_lines(purchase_order_id,id);
-    CREATE UNIQUE INDEX connected_invoice_po_identity ON procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id);
-    CREATE UNIQUE INDEX connected_payment_invoice_identity ON procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id)`);
+    CREATE UNIQUE INDEX connected_invoice_po_identity ON procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id)`);
 
   // Purchase workspaces read the exact RFQ origin even when no quote links
   // exist. Install those immutable evidence owners from the real migration;

@@ -36,6 +36,7 @@ import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
 import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
 import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
 import { registerHistoricalCostTimestampCases } from "./historical-cost-timestamps.cases";
+import { registerPurchaseCostStatusBatchCases } from "./purchase-cost-status-batch.cases";
 import { registerReceiptConfigurationAuthorityCases } from "./receipt-configuration-authority.cases";
 import type { ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../receiving.service";
 
@@ -260,6 +261,8 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       INSERT INTO wms.order_items(id,order_id,sku,name,quantity) VALUES(1,1,'AUDIT-CASE','Synthetic case',1)`);
     await pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,1)", [actorId]);
   });
+
+  registerPurchaseCostStatusBatchCases({ pool: () => pool, database: () => database });
 
   afterAll(async () => {
     try {

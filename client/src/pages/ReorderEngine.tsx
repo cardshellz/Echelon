@@ -1,4 +1,6 @@
 import { SupplierSelectionEvidence } from "@/features/purchasing/SupplierSelectionEvidence";
+import { useOrderSupplierHandoff } from "@/features/purchasing/use-order-supplier-handoff";
+import { captureOrderSupplierHandoff, orderSupplierSetupHref, restoreOrderSupplierHandoff } from "@/lib/order-supplier-handoff";
 import { useRfqCommands } from "@/features/purchasing/use-rfq-commands";
 import { RfqCommandRecovery } from "@/features/purchasing/RfqCommandRecovery";
 import type { RfqCreateIntent, RfqCreatePayload } from "@shared/procurement/rfq-create-command";
@@ -1045,6 +1047,9 @@ function matchesSearch(item: CockpitItem, query: string): boolean {
 export default function ReorderEngine() {
   const [location, navigate] = useLocation();
   const rfqCommands = useRfqCommands();
+  const supplierHandoff = useOrderSupplierHandoff(rfqCommands.userId);
+  const [supplierHandoffError, setSupplierHandoffError] = useState<string | null>(null);
+  const [restoringSupplierOrder, setRestoringSupplierOrder] = useState(false);
   const submissionContext = useRef({ actorId: rfqCommands.userId, location });
   submissionContext.current = { actorId: rfqCommands.userId, location };
   const queryClient = useQueryClient();
@@ -1276,6 +1281,7 @@ export default function ReorderEngine() {
     setBuilderOpen(false); setOrderSelection(new Map()); setSubmitResult(null);
     setSupplierOverrides({}); setVendorMode({}); setDecisionNote("");
     setApprovedExceptions(new Set()); setAckedControls(new Set());
+    setSupplierHandoffError(null); setRestoringSupplierOrder(false);
   }, [rfqCommands.userId]);
   useEffect(() => {
     const original = submittedRfq.current;
@@ -1416,6 +1422,56 @@ export default function ReorderEngine() {
     setRoundedHints({});
     setBuilderOpen(true);
   };
+
+  function openSupplierSetup(item: CockpitItem) {
+    if (!supplierHandoff.isCurrent() || !supplierHandoff.store || !rfqCommands.canEdit
+      || isSubmitting || isAnalysisError || isLoadingAnalysis || !supplierHandoff.ready) return;
+    try {
+      const body = captureOrderSupplierHandoff(item.recommendationId, orderableItems, orderSelection,
+        supplierOverrides, vendorMode, decisionNote);
+      supplierHandoff.store.acquire(body, () => "supplier-handoff-" + crypto.randomUUID());
+      // Navigation happens only after the exact selected draft is retained.
+      navigate(orderSupplierSetupHref(body));
+    } catch (error) {
+      setSupplierHandoffError(error instanceof Error ? error.message : "The order could not be saved for supplier setup.");
+      supplierHandoff.refresh();
+    }
+  }
+
+  async function restoreSupplierOrder() {
+    const saved = supplierHandoff.record;
+    if (!saved || !supplierHandoff.store || restoringSupplierOrder || isSubmitting) return;
+    setRestoringSupplierOrder(true); setSupplierHandoffError(null);
+    try {
+      const refreshed = await refetchAnalysis();
+      if (!supplierHandoff.isCurrent()) return;
+      if (refreshed.error || !refreshed.data) throw new Error("Current recommendations could not be verified. The saved order is retained; retry after the analysis loads.");
+      const current = new Map<string, CockpitItem>();
+      for (const item of [...refreshed.data.items, ...refreshed.data.skippedItems]) {
+        if (!current.has(item.recommendationId)) current.set(item.recommendationId, item);
+      }
+      const restored = restoreOrderSupplierHandoff(saved.body, [...current.values()]);
+      if (supplierHandoff.store.read()?.key !== saved.key) throw new Error("The saved order changed. Reload its recovery before continuing.");
+      supplierHandoff.store.complete(saved.key);
+      setOrderSelection(restored.selection); setSupplierOverrides(restored.supplierOverrides);
+      setVendorMode(restored.vendorModes); setDecisionNote(restored.decisionNote);
+      // Current quotes can differ after setup. Never restore old approvals or
+      // an old confirmation/result stage alongside the operator's quantities.
+      setAckedControls(new Set()); setApprovedExceptions(new Set()); setSubmitResult(null);
+      setPieceDrafts({}); setRoundedHints({}); setBuilderStage("edit"); setBuilderOpen(true);
+      supplierHandoff.refresh();
+    } catch (error) {
+      if (supplierHandoff.isCurrent()) setSupplierHandoffError(error instanceof Error ? error.message : "The saved order could not be restored.");
+    } finally {
+      if (supplierHandoff.isCurrent()) setRestoringSupplierOrder(false);
+    }
+  }
+
+  function discardSupplierOrder() {
+    if (!supplierHandoff.isCurrent() || !supplierHandoff.store || restoringSupplierOrder) return;
+    try { supplierHandoff.store.discard(); setSupplierHandoffError(null); supplierHandoff.refresh(); }
+    catch (error) { setSupplierHandoffError(error instanceof Error ? error.message : "The saved order could not be discarded."); }
+  }
 
   const toggleOrder = (item: CockpitItem) => {
     setOrderSelection((current) => toggleOrderLine(current, item.recommendationId, item.suggestedOrderPieces));
@@ -1818,7 +1874,8 @@ export default function ReorderEngine() {
   // missing exceed/change reason (the only stage-1 gate — approvals and the
   // decision note belong to stage 2, per the approved mock).
   const stage1 = useMemo(() => {
-    let missingReason: string | null = null;
+    let missingReason: string | null = builderGroups.needsSupplier.some(item => (orderSelection.get(item.recommendationId)?.pieces ?? 0) > 0)
+      ? "Set up a supplier or remove each supplier-needed line before continuing." : null;
     let poVendorCount = 0;
     let rfqVendorCount = 0;
     let itemCount = 0;
@@ -1910,6 +1967,12 @@ export default function ReorderEngine() {
         </div>
       </div>
 
+      {(supplierHandoff.record || supplierHandoff.error || supplierHandoffError) && <section aria-label="Supplier setup order recovery" className="mb-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm">
+        {supplierHandoff.record && <><p>Your order selection was saved for supplier setup. Review it with current recommendations before continuing. Supplier prices and approvals require fresh review.</p>
+          <Button variant="outline" size="sm" onClick={() => void restoreSupplierOrder()} disabled={restoringSupplierOrder || isSubmitting}>{restoringSupplierOrder ? "Loading current recommendations…" : "Review saved order"}</Button></>}
+        {(supplierHandoff.error || supplierHandoffError) && <p role="alert">{supplierHandoffError ?? supplierHandoff.error}</p>}
+        <Button variant="ghost" size="sm" onClick={discardSupplierOrder} disabled={restoringSupplierOrder || isSubmitting}>Discard saved order</Button>
+      </section>}
       {/* ---------------- Engine tab strip ---------------- */}
       {/* Outer div owns horizontal scrolling so narrow viewports scroll the
           strip instead of squashing/wrapping tab labels; the nav keeps
@@ -2322,6 +2385,7 @@ export default function ReorderEngine() {
 
           <div className="flex-1 space-y-4 px-5 py-4">
             <RfqCommandRecovery commands={rfqCommands} />
+            {(supplierHandoffError || supplierHandoff.error) && <p role="alert" className="rounded border border-destructive p-3 text-sm">{supplierHandoffError ?? supplierHandoff.error}</p>}
             {/* ---------------- Stage 1: edit ---------------- */}
             {builderStage === "edit" && (
               <>
@@ -2523,7 +2587,7 @@ export default function ReorderEngine() {
                 {builderGroups.needsSupplier.length > 0 && (
                   <div className="overflow-hidden rounded-md border border-amber-200">
                     <div className="border-b border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">
-                      Needs supplier — cannot be submitted
+                      Set up a supplier before submitting
                     </div>
                     {builderGroups.needsSupplier.map((item) => (
                       <div
@@ -2538,6 +2602,9 @@ export default function ReorderEngine() {
                           <span className="tabular-nums text-zinc-500">
                             {(orderSelection.get(item.recommendationId)?.pieces ?? 0).toLocaleString()} pc
                           </span>
+                          <Button type="button" variant="outline" size="sm" aria-label={`Set up supplier for ${item.sku}`}
+                            disabled={!rfqCommands.canEdit || !supplierHandoff.ready || isSubmitting || isAnalysisError || isLoadingAnalysis}
+                            onClick={() => openSupplierSetup(item)}>Set up supplier</Button>
                           <button
                             type="button"
                             className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
@@ -2551,14 +2618,8 @@ export default function ReorderEngine() {
                       </div>
                     ))}
                     <div className="px-3 py-2 text-xs text-amber-700">
-                      These SKUs have no preferred supplier, so neither a PO nor a quote request can be created.{" "}
-                      <button
-                        type="button"
-                        className="font-semibold underline"
-                        onClick={() => navigate("/suppliers")}
-                      >
-                        Assign a supplier →
-                      </button>
+                      Set up the exact product and receive unit in the supplier catalog, then return to review this saved order. No PO or quote request is sent during setup.
+                      {!rfqCommands.canEdit && <p>Purchasing edit permission is required to set up a supplier.</p>}
                     </div>
                   </div>
                 )}

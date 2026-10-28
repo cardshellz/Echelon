@@ -9,6 +9,7 @@ import type { InventoryCutoverTestDatabase } from "../../../server/modules/inven
 import { fixtureColumnDefinitions, fixtureForeignKeys, fixtureTable, qualifiedTable } from "../../../server/modules/procurement/__tests__/integration/shipment-line-fixture";
 import { installQuantityAmendmentFixture } from "../../../server/modules/procurement/__tests__/integration/quantity-amendment-fixture";
 import { installConnectedNavigationFixture } from "./navigation-fixture";
+import { installConnectedWorkflowFixture } from "./workflow-fixture";
 import { acquireInventoryCutoverFenceInsideTransaction } from "../../../server/modules/inventory-planning/infrastructure/inventory-cutover-admission-fence.repository";
 
 export const CONNECTED_TIME = new Date("2026-10-25T12:00:00.000Z");
@@ -22,6 +23,7 @@ export const CONNECTED_ACTORS = [
   { id: "connected-catalog-creator", username: "connected-catalog-creator", role: "lead", roleId: 6 },
   { id: "connected-creator", username: "connected-creator", role: "picker", roleId: 7 },
   { id: "connected-editor", username: "connected-editor", role: "picker", roleId: 8 },
+  { id: "connected-financial", username: "connected-financial", role: "picker", roleId: 9 },
 ] as const;
 
 /** The ledger fixture intentionally has reduced catalog/warehouse prerequisites.
@@ -94,13 +96,13 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
     for (const statement of fixtureForeignKeys([...identityTables, ...receivingTables])) await pool.query(statement);
     const passwordHash = await bcrypt.hash(CONNECTED_PASSWORD, 10);
     await pool.query(`INSERT INTO identity.auth_roles(id,name) VALUES(1,'connected-receiver'),(2,'connected-viewer'),(3,'connected-admin'),
-      (4,'connected-picker'),(5,'connected-second-receiver'),(6,'connected-catalog-creator'),(7,'connected-creator'),(8,'connected-editor');
+      (4,'connected-picker'),(5,'connected-second-receiver'),(6,'connected-catalog-creator'),(7,'connected-creator'),(8,'connected-editor'),(9,'connected-financial');
       INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES
       (1,'inventory','adjust','inventory'),(2,'inventory','view','inventory'),(3,'purchasing','view','purchasing'),
       (4,'roles','edit','identity'),(5,'users','manage_roles','identity'),(6,'users','edit','identity'),
       (7,'purchasing','create','purchasing'),(8,'inventory','create','inventory'),(9,'purchasing','edit','purchasing');
       INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES
-      (1,1),(1,2),(1,3),(2,2),(2,3),(3,1),(3,2),(3,3),(3,4),(3,5),(3,6),(3,7),(4,1),(4,2),(4,3),(5,1),(5,2),(5,3),(6,2),(6,8),(7,3),(7,7),(8,3),(8,9)`);
+      (1,1),(1,2),(1,3),(2,2),(2,3),(3,1),(3,2),(3,3),(3,4),(3,5),(3,6),(3,7),(4,1),(4,2),(4,3),(5,1),(5,2),(5,3),(6,2),(6,8),(7,3),(7,7),(8,3),(8,9),(9,1),(9,2),(9,3),(9,7),(9,9)`);
     for (const actor of CONNECTED_ACTORS) {
       await pool.query("INSERT INTO identity.users(id,username,password,role,display_name,active) VALUES($1,$2,$3,$4,$2,1)",
         [actor.id, actor.username, passwordHash, actor.role]);
@@ -147,6 +149,7 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
     for (const name of ["0085_idempotency_keys.sql", "136_financial_command_results.sql", "140_financial_command_operations.sql",
       "900000001000017770001_receiving_integrity_audit_guard.sql", "900000010000018200001_receiving_discard_audit_guard.sql",
       "900000027000019030001_receiving_entry_audit_guard.sql"]) await pool.query(migration(name));
+    await installConnectedWorkflowFixture(pool);
     const authority = await pool.query("SELECT authority FROM inventory.availability_runtime_authority WHERE singleton_key=true");
     if (authority.rows[0]?.authority !== "canonical") throw new Error("Connected fixture failed to activate the quantity ledger");
     return context;

@@ -87,6 +87,7 @@ async function main(): Promise<void> {
     const { createPurchasingService } = await import("../../../server/modules/procurement/purchasing.service");
     const { createShipmentTrackingService } = await import("../../../server/modules/procurement/shipment-tracking.service");
     const navigation = await import("./navigation-fixture");
+    const workflow = await import("./workflow-fixture");
     const { procurementStorage } = await import("../../../server/modules/procurement");
     const { catalogStorage } = await import("../../../server/modules/catalog");
     const { warehouseStorage } = await import("../../../server/modules/warehouse");
@@ -95,6 +96,7 @@ async function main(): Promise<void> {
     const { InventoryLotService } = await import("../../../server/modules/inventory/lots.service");
     const { ReceiptReversalService } = await import("../../../server/modules/procurement/receipt-reversal.service");
     const { ReceiveValidationService } = await import("../../../server/modules/procurement/receive-validation.service");
+    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../../server/modules/procurement/ap-ledger.service");
     const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage };
     const inventory = new InventoryUseCases(db as unknown as ConstructorParameters<typeof InventoryUseCases>[0],
       createInventoryMethods(db), new InventoryLotService(db));
@@ -107,7 +109,9 @@ async function main(): Promise<void> {
     const receiving = new ReceivingService(db, inventory, {
       queueSyncAfterInventoryChange: async variantId => { channelRequests.push(variantId); },
     }, storage as unknown as ConstructorParameters<typeof ReceivingService>[3], purchasing,
-    null, null, null, receiveValidation, null, () => new Date(fixture.CONNECTED_TIME));
+    null, null, { reconcilePurchaseOrderLine: (lineId, tx, actorId) =>
+      reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(lineId, tx, actorId) },
+    receiveValidation, null, () => new Date(fixture.CONNECTED_TIME));
     const shipmentTracking = createShipmentTrackingService(db, storage as unknown as Parameters<typeof createShipmentTrackingService>[1],
       undefined, () => new Date(fixture.CONNECTED_TIME));
     const services = { receiving, purchasing, shipmentTracking, receiveValidation, receiptReversal: new ReceiptReversalService(db, inventory) };
@@ -153,6 +157,10 @@ async function main(): Promise<void> {
       try { res.json(await navigation.readConnectedNavigationState(context.pool)); }
       catch (error) { next(error); }
     });
+    app.get("/__test/workflow-state", async (_req, res, next) => {
+      try { res.json(await workflow.readConnectedWorkflowState(context.pool)); }
+      catch (error) { next(error); }
+    });
     app.post("/__test/expire-sessions", async (_req, res, next) => {
       try { await pool.query("DELETE FROM identity.session"); res.json({ expired: true }); }
       catch (error) { next(error); }
@@ -173,6 +181,16 @@ async function main(): Promise<void> {
           await pool.query("DELETE FROM identity.auth_role_permissions WHERE role_id=$1 AND permission_id=1", [actor.roleId]);
         }
         res.json({ actorId: actor.id, permission: "inventory:adjust", allowed: parsed.data.allowed });
+      } catch (error) { next(error); }
+    });
+    app.post("/__test/financial-grant", async (req, res, next) => {
+      const parsed = z.object({ allowed: z.boolean() }).strict().safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "Specify the seeded financial operator's approval grant" });
+      try {
+        if (parsed.data.allowed) await pool.query(`INSERT INTO identity.auth_role_permissions(role_id,permission_id)
+          SELECT 9,10 WHERE NOT EXISTS(SELECT 1 FROM identity.auth_role_permissions WHERE role_id=9 AND permission_id=10)`);
+        else await pool.query("DELETE FROM identity.auth_role_permissions WHERE role_id=9 AND permission_id=10");
+        res.json({ actorId: "connected-financial", permission: "purchasing:approve", allowed: parsed.data.allowed });
       } catch (error) { next(error); }
     });
     app.post("/__test/shutdown", (_req, res) => {

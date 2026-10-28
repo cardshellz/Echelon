@@ -2,6 +2,8 @@ import { shipmentCostReadPageSchema } from "./shipment-cost-read-scope";
 import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
 import { sql } from "drizzle-orm";
 import { readPurchaseCostStatus } from "./purchase-cost-status.repository";
+import { visitPurchaseCostStatusScopes } from "./purchase-cost-status-batch.repository";
+import type { PurchaseCostStatus } from "@shared/procurement/purchase-cost-status";
 import type { PurchaseCostStatusSnapshotReader } from "./purchase-cost-status-snapshot.repository";
 import { shipmentCostWorkflowIdSchema, shipmentCostReviewSchema, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import type { PoShipmentCostSummaryDatabase } from "./po-shipment-cost-summary.repository";
@@ -35,16 +37,20 @@ export async function readShipmentCostReviewInTransaction(tx: ShipmentExceptionR
   const { exceptions, sourceIssues } = await readShipmentCostPostingEvidence(tx, result.rows.map(row => ({
     lineId: costInteger(row.id, "line.id", 1), shipmentId, contract: row.contract,
   })));
-  return projectShipmentCostReview(tx, shipmentId, result.rows, { exceptions, sourceIssues }, supplierSnapshot);
-}
-
-async function projectShipmentCostReview(tx: ShipmentExceptionReader, shipmentId: number, rows: Record<string, unknown>[],
-  posting: Awaited<ReturnType<typeof readShipmentCostPostingEvidence>>, supplierSnapshot?: PurchaseCostStatusSnapshotReader): Promise<ShipmentCostReview> {
-  const { exceptions, sourceIssues } = posting;
-  const purchaseLineIds = rows.flatMap(row => row.purchase_order_line_id == null
-    ? [] : [costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1)]);
+  const purchaseLineIds = shipmentPurchaseLineIds(result.rows);
   const supplierCosts = supplierSnapshot ? await supplierSnapshot.read(tx, purchaseLineIds)
     : await readPurchaseCostStatus(tx, purchaseLineIds);
+  return projectShipmentCostReview(shipmentId, result.rows, { exceptions, sourceIssues }, supplierCosts);
+}
+
+function shipmentPurchaseLineIds(rows: Record<string, unknown>[]): number[] {
+  return rows.flatMap(row => row.purchase_order_line_id == null
+    ? [] : [costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1)]);
+}
+
+function projectShipmentCostReview(shipmentId: number, rows: Record<string, unknown>[],
+  posting: Awaited<ReturnType<typeof readShipmentCostPostingEvidence>>, supplierCosts: PurchaseCostStatus): ShipmentCostReview {
+  const { exceptions, sourceIssues } = posting;
   return shipmentCostReviewSchema.parse({ shipmentId, supplierCosts,
     lines: rows.map(row => {
     const outcome = row.result as Record<string, unknown> | null;
@@ -94,11 +100,13 @@ export async function readShipmentCostReviewProjectionsInTransaction<T>(tx: Ship
     lineId: costInteger(row.id, "line.id", 1), shipmentId: costInteger(row.shipment_id, "shipmentId", 1), contract: row.contract,
   })));
   const reviews = new Map<number, T>();
-  for (const id of ids) {
+  const supplierScopes = new Map(ids.flatMap(id => {
     const rows = rowsByShipment.get(id);
-    // Project immediately so health pages do not retain every full supplier-lot graph.
-    if (rows) reviews.set(id, project(await projectShipmentCostReview(tx, id, rows, posting, supplierSnapshot)));
-  }
+    return rows ? [[id, shipmentPurchaseLineIds(rows)] as const] : [];
+  }));
+  await visitPurchaseCostStatusScopes(tx, supplierScopes, (id, supplierCosts) => {
+    reviews.set(id, project(projectShipmentCostReview(id, rowsByShipment.get(id)!, posting, supplierCosts)));
+  }, supplierSnapshot);
   return reviews;
 }
 
