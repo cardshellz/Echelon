@@ -180,7 +180,12 @@ import { refreshRecoveredEbayListing } from "../modules/channels/ebay-listing-sy
 import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
 import { InventoryPublicationTransportRegistry } from "../modules/inventory-planning/application/inventory-publication-transport";
-import { createEbayDropshipInventoryPublicationTransportAdapterFromEnv } from "../modules/dropship/infrastructure/dropship-ebay-inventory-publication.adapter";
+import {
+  createEbayDropshipInventoryPublicationTransportAdapterFromEnv, PgDropshipInventoryPublicationDestinationReader,
+} from "../modules/dropship/infrastructure/dropship-ebay-inventory-publication.adapter";
+import { createDropshipEbayStockLinkAdapter } from "../modules/dropship/infrastructure/dropship-ebay-stock-link.adapter";
+import { createDropshipEbayStockLinkSource } from "../modules/dropship/infrastructure/dropship-ebay-stock-link-source";
+import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "../modules/dropship/infrastructure/dropship-ebay-registration-credentials";
 import { createDropshipOmsChannelResolver } from "../modules/dropship/infrastructure/dropship-oms-warehouse-assignments.reader";
 import { createMemberResolver } from "../modules/membership";
 import { InventoryAvailabilityClaimService } from "../modules/inventory-planning/application/inventory-availability-claim.service";
@@ -456,6 +461,13 @@ export function createServices(
     bindings: [{
       adapter: createShopifyStockLinkAdapter({ connections: new ChannelIdentityService(db), clock: () => new Date() }),
       source: createShopifyStockLinkSource(),
+    }, {
+      // Channels PR3: Dropship eBay listings that were live before stock links existed, linked by SKU through the
+      // existing Dropship writer (origin live_listing_enrollment). Read-only eBay offer lookups with the store's login.
+      kind: "listing_enrollment",
+      adapter: createDropshipEbayStockLinkAdapter({ destinations: new PgDropshipInventoryPublicationDestinationReader(databasePool),
+        credentials: createDropshipEbayRegistrationCredentialProviderFromEnv(), clock: () => new Date() }),
+      source: createDropshipEbayStockLinkSource(),
     }],
     clock: () => new Date(),
     monotonicNow: () => performance.now(),

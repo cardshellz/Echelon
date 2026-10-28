@@ -11,6 +11,8 @@ import {
 import { STOCK_LINK_CONTROLLED_DESTINATIONS } from "../../infrastructure/stock-link-controls.repository";
 import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-availability-master-data.contracts";
 import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source";
+import { createDropshipEbayStockLinkAdapter } from "../../../dropship/infrastructure/dropship-ebay-stock-link.adapter";
+import { createDropshipEbayStockLinkSource } from "../../../dropship/infrastructure/dropship-ebay-stock-link-source";
 import type { StockLinkSupportedStatus } from "@shared/types/stock-link";
 
 // Channels PR2 (PLAN-CH2 v4.1 §7.3): what each Channel Inventory stock-link control changes (pure), and the service
@@ -67,13 +69,17 @@ describe("planStockLinkControl", () => {
 });
 
 describe("the controlled destinations", () => {
-  it("are exactly the destinations the composition registers a binding for (the Shopify adapter and source)", () => {
+  it("are exactly the destinations the composition registers a binding for (Shopify; Dropship eBay enrollment, PR3)", () => {
     const adapter = createShopifyStockLinkAdapter({ connections: {} as never, clock: () => NOW });
     const source = createShopifyStockLinkSource();
+    const dropshipAdapter = createDropshipEbayStockLinkAdapter({ destinations: {} as never, credentials: {} as never, clock: () => NOW });
+    const dropshipSource = createDropshipEbayStockLinkSource();
     expect(STOCK_LINK_CONTROLLED_DESTINATIONS).toEqual([
       { destinationKind: adapter.destinationKind, providerKey: adapter.providerKey },
+      { destinationKind: dropshipAdapter.destinationKind, providerKey: dropshipAdapter.providerKey },
     ]);
     expect([source.destinationKind, source.providerKey]).toEqual([adapter.destinationKind, adapter.providerKey]);
+    expect([dropshipSource.destinationKind, dropshipSource.providerKey]).toEqual([dropshipAdapter.destinationKind, dropshipAdapter.providerKey]);
   });
 });
 

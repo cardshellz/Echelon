@@ -27,10 +27,12 @@ import { stockLinkRetiresHeldCountText } from "./stock-link-health.sql";
 
 type Queryable = Pick<Pool, "query">;
 
-/** The engine runs for these destinations (today: Card Shellz's own Shopify stores; the registry's only binding,
- * server/services/index.ts). A unit test pins it to the Shopify adapter's own kind and provider. */
+/** The engine runs for these destinations (the registry's bindings, server/services/index.ts): Card Shellz's own
+ * Shopify stores, and Dropship eBay stores' listing enrollment (channels PR3; no Channel Inventory controls, but Check
+ * again and the switch answer through the routes). A unit test pins it to the adapters' own kinds and providers. */
 export const STOCK_LINK_CONTROLLED_DESTINATIONS = Object.freeze([
   Object.freeze({ destinationKind: "channel_connection", providerKey: "shopify" }),
+  Object.freeze({ destinationKind: "dropship_store_connection", providerKey: "ebay" }),
 ]);
 
 const CONTROL_LOCK_TIMEOUT = "5s";
