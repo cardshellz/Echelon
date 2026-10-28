@@ -1,5 +1,7 @@
 # PR 1925: current-main reconciliation and CI recovery
 
+Final PR #1925 workflow/release observations and the follow-up performance measurements are recorded in [the cost-read closeout](procurement-cost-read-performance-closeout.md). The evidence below retains its original source and timing attribution.
+
 ## Changes and authority
 
 Merge main `b8379059706a8bc0bd976bf8a1864364e80a3354` into the procurement verification branch. The only textual conflicts were `client/src/pages/Receiving.tsx` and `test/browser/procurement-receiving-units.spec.ts`.
