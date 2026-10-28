@@ -37,6 +37,10 @@ describe("writer-ratchet (P2.1)", () => {
   it.each([
     ["oms.customer_order_actions", "modules/customer-account"],
     ["oms.customer_order_action_invalidations", "modules/customer-account"],
+    ["wms.shipping_package_history_jobs", "modules/shipping"],
+    ["wms.shipping_package_history_events", "modules/shipping"],
+    ["wms.shipping_package_history_invalidations", "modules/shipping"],
+    ["wms.shipping_package_history_backfills", "modules/shipping"],
     ["returns.customer_return_box_measurements", "modules/returns"],
     ["wms.picking_commands", "modules/wms"],
     ["procurement.receiving_custody_fence", "modules/procurement"],
@@ -91,6 +95,14 @@ describe("writer-ratchet (P2.1)", () => {
       expect(current[table]).toEqual([owner]);
       expect(currentIncludingScripts[table]).toEqual([owner]);
       expect(baseline[table]).toEqual([owner]);
+    });
+
+  it.each(["inventory.stock_link_checks", "inventory.stock_link_destinations"])(
+    "%s has only the inventory-planning engine as writer, including scripts (PLAN-CH2 §3)", (table) => {
+      // The check rows gained their writer with the command (P4), the destination rows with the tick (P7).
+      expect(current[table]).toEqual(["modules/inventory-planning"]);
+      expect(currentIncludingScripts[table]).toEqual(["modules/inventory-planning"]);
+      expect(baseline[table]).toEqual(["modules/inventory-planning"]);
     });
 
   it("wms.order_items has exactly one owning writer across runtime and operational scripts", () => {

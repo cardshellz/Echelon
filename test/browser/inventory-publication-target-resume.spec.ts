@@ -81,6 +81,10 @@ async function setup(page: Page) {
       return route.fulfill({ json: { publicationTargetId: 5, revision: "4", state: "live", publicationRows: 1,
         initialDefinitionsApplied: 0, alreadyApplied: false, runtimeAuthorityChanged: false, providerWriteAttempted: false } });
     }
+    // Stock linking is not under test here; a 404 is the server-side "not supported" answer, which hides its controls.
+    if (request.method() === "GET" && path === "/api/inventory-planning/admin/channel-exposure/stock-link-status") {
+      return route.fulfill({ status: 404, json: { error: { message: "Not found" } } });
+    }
     state.unexpected.push(`${request.method()} ${path}`);
     return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });
   });

@@ -932,6 +932,12 @@
   "inventory.safety_definition_applications": [
     "modules/inventory-planning"
   ],
+  "inventory.stock_link_checks": [
+    "modules/inventory-planning"
+  ],
+  "inventory.stock_link_destinations": [
+    "modules/inventory-planning"
+  ],
   "inventory.supplier_return_allocations": [
     "modules/inventory"
   ],
@@ -1940,6 +1946,18 @@
   ],
   "wms.shipping_engine_orders": [
     "modules/oms"
+  ],
+  "wms.shipping_package_history_backfills": [
+    "modules/shipping"
+  ],
+  "wms.shipping_package_history_events": [
+    "modules/shipping"
+  ],
+  "wms.shipping_package_history_invalidations": [
+    "modules/shipping"
+  ],
+  "wms.shipping_package_history_jobs": [
+    "modules/shipping"
   ],
   "wms.shipping_provider_label_content_attestation_resolutions": [
     "modules/shipping"

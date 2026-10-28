@@ -60,6 +60,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
     const addedSuites = [
       "server/modules/procurement/__tests__/integration/shipment-cost-read-batching.integration.test.ts",
       "server/modules/shipping/__tests__/integration/package-dimensions.integration.test.ts",
+      "server/modules/shipping/__tests__/integration/package-history.integration.test.ts",
       "server/modules/customer-account/__tests__/integration/order-action-projection.repository.test.ts",
       "server/modules/procurement/__tests__/integration/document-relationships.integration.test.ts",
       "server/modules/customer-account/__tests__/integration/customer-account-order-context.integration.test.ts",
@@ -232,6 +233,12 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-listing-end.integration.test.ts",
       // Listing ends (PR C, C2): the push fence, the four writers that keep ended, stock, sync-back and catch-up interplay.
       "server/modules/dropship/__tests__/integration/dropship-listing-end-interplay.integration.test.ts",
+      // Channels PR2 (P0): the Dropship eBay stock link's command lock and receipts, pinned on main before its wrapper conversion.
+      "server/modules/inventory-planning/__tests__/integration/dropship-ebay-stock-command-lock.integration.test.ts",
+      // Channels PR2 (P1+): the shared stock-link engine over real PostgreSQL, starting with migration M1 through the release executor.
+      "server/modules/inventory-planning/__tests__/integration/stock-link.integration.test.ts",
+      // Channels PR2 (P6): Channels' read-only SQL for the stock-link engine's Shopify destinations.
+      "server/modules/channels/__tests__/integration/shopify-stock-link-source.integration.test.ts",
     ];
     addedSuites.push(
       "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",

@@ -24,6 +24,9 @@ export class AutomaticSyncEbayProvider {
   private fault: { path: string; applyBeforeFailure: boolean; publicationOnly?: boolean } | null = null;
   private failPublicationPreflight: { read: "offer" | "group"; sku?: string } | null = null;
   private publicationGroupPrepared = false;
+  private groupExists = true;
+  private groupAttached = true;
+  private nextReadFailure: { path: string; status: number } | null = null;
   private heldPreflightRead: { entered: () => void; gate: Promise<void> } | null = null;
   private held: { path: string; entered: () => void; gate: Promise<void> } | null = null;
   private readonly members = new Map<string, { item: EbayInventoryItem; offer: EbayObservedOffer }>();
@@ -53,6 +56,16 @@ export class AutomaticSyncEbayProvider {
   }
 
   failNextPublicationPreflight(read: "offer" | "group" = "offer", sku?: string): void { this.failPublicationPreflight = { read, sku }; }
+
+  detachUnpublishedGroup(existingSkus: readonly string[] | null = null): void {
+    if (!this.publicationEnabled || [...this.members.values()].some(member => member.offer.status !== "UNPUBLISHED"))
+      throw new Error("Only unpublished fixture resources can be detached.");
+    this.groupAttached = false;
+    this.groupExists = existingSkus !== null;
+    if (existingSkus !== null) this.group.variantSKUs = [...existingSkus];
+  }
+
+  failNextRead(path: string, status = 503): void { this.nextReadFailure = { path, status }; }
 
   holdNextPublicationPreflightRead(): { entered: Promise<void>; release(): void } {
     if (this.heldPreflightRead) throw new Error("Only one publication read may be held at a time.");
@@ -103,6 +116,12 @@ export class AutomaticSyncEbayProvider {
         throw new EbayApiRequestError(status, `eBay API GET ${request.path} failed (${status}): ${body}`, body);
       } : undefined,
       request: async () => {
+        if (request.method === "GET" && this.nextReadFailure?.path === request.path) {
+          const failure = this.nextReadFailure; this.nextReadFailure = null;
+          return new Response(JSON.stringify({ errors: [{ errorId: 25001, message: "Injected read failure" }] }), { status: failure.status });
+        }
+        if (request.method === "GET" && request.path === "/sell/inventory/v1/inventory_item_group/PACK" && !this.groupExists)
+          return new Response(JSON.stringify({ errors: [{ errorId: 25705, message: "Inventory item group not found" }] }), { status: 404 });
         if (request.method === "GET" && this.heldPreflightRead && this.publicationGroupPrepared
           && request.path === "/sell/inventory/v1/inventory_item_group/PACK") {
           const held = this.heldPreflightRead;
@@ -146,7 +165,7 @@ export class AutomaticSyncEbayProvider {
     const url = new URL(path, "https://example.test");
     if (url.pathname === "/commerce/identity/v1/user/") return { userId: "seller-36" };
     const sku = url.pathname.match(/^\/sell\/inventory\/v1\/inventory_item\/([^/]+)$/)?.[1];
-    if (sku) return { ...structuredClone(this.member(decodeURIComponent(sku)).item), groupIds: this.listingShape === "group" ? ["PACK"] : [] };
+    if (sku) return { ...structuredClone(this.member(decodeURIComponent(sku)).item), groupIds: this.listingShape === "group" && this.groupAttached ? ["PACK"] : [] };
     if (url.pathname === "/sell/inventory/v1/inventory_item_group/PACK") return structuredClone(this.group);
     const offer = [...this.members.values()].find(member => url.pathname === `/sell/inventory/v1/offer/${member.offer.offerId}`)?.offer;
     if (offer) return structuredClone(offer);
@@ -173,6 +192,8 @@ export class AutomaticSyncEbayProvider {
     if (request.method === "PUT" && request.path === "/sell/inventory/v1/inventory_item_group/PACK") {
       const { inventoryItemGroupKey: _requestIdentity, ...body } = structuredClone(request.body as EbayInventoryItemGroup);
       this.group = body;
+      this.groupExists = true;
+      this.groupAttached = true;
       this.publicationGroupPrepared = true;
       return;
     }

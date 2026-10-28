@@ -42,6 +42,18 @@ import {
   type InventoryPublicationTargetResumeResult,
   type InventoryPublicationTargetResumeReview,
 } from "@shared/types/inventory-publication-target-resume";
+import {
+  stockLinkCheckAgainRequestSchema,
+  stockLinkContinueRequestSchema,
+  stockLinkControlResultSchema,
+  stockLinkStatusSchema,
+  stockLinkSwitchRequestSchema,
+  type StockLinkCheckAgainRequest,
+  type StockLinkContinueRequest,
+  type StockLinkControlResult,
+  type StockLinkStatus,
+  type StockLinkSwitchRequest,
+} from "@shared/types/stock-link";
 
 /**
  * HTTP boundary for the Channel Inventory workspace. Every response is parsed
@@ -65,6 +77,10 @@ export const ENDPOINTS = {
   targetStop: `${ADMIN_BASE}/publication-target-stop`,
   targetResumeReview: `${ADMIN_BASE}/publication-target-resume-review`,
   targetResume: `${ADMIN_BASE}/publication-target-resume`,
+  stockLinkStatus: `${ADMIN_BASE}/stock-link-status`,
+  stockLinkSwitch: `${ADMIN_BASE}/stock-link-switch`,
+  stockLinkContinue: `${ADMIN_BASE}/stock-link-continue`,
+  stockLinkCheckAgain: `${ADMIN_BASE}/stock-link-check-again`,
   globalControl: "/api/inventory-planning/admin/publication-global-control",
   syncStatus: "/api/sync/status",
   shopifyLocations: (channelId: number) => `/api/channels/${channelId}/shopify-locations`,
@@ -243,6 +259,30 @@ export function fetchShopifyLocations(channelId: number): Promise<ShopifyLocatio
   return requestJson(ENDPOINTS.shopifyLocations(channelId), shopifyLocationsSchema).then((body) => body.locations);
 }
 
+/**
+ * A 404, a network error or an unparseable answer reads as `supported: false` (PLAN-CH2 v4.1 §9, TST-14): during a
+ * deploy an older web process can answer the new route with 404, and the controls must then stay hidden without an
+ * error. Any other HTTP failure (5xx, 403, 400) is a real failure and is rethrown for the caller to show.
+ *
+ * `previous` is the cached answer. Once the server has said `supported`, a failed refresh is never read as
+ * unsupported (review TST-1): every failure is rethrown, so the query keeps that last status and the switch and an
+ * open turn-off confirm keep working through a short drop; the screen says the status is not current.
+ */
+export function stockLinkStatusReadsAsUnsupported(error: unknown): boolean {
+  if (error instanceof ChannelInventoryApiError) return error.status === 404;
+  // requestJson throws only ChannelInventoryApiError, ZodError (unparseable body) or fetch's own network TypeError.
+  return true;
+}
+
+export async function fetchStockLinkStatus(publicationTargetId: number, previous?: StockLinkStatus): Promise<StockLinkStatus> {
+  try {
+    return await requestJson(`${ENDPOINTS.stockLinkStatus}?publicationTargetId=${publicationTargetId}`, stockLinkStatusSchema);
+  } catch (error) {
+    if (previous?.supported !== true && stockLinkStatusReadsAsUnsupported(error)) return { supported: false, publicationTargetId };
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Request builders (pure; unit-tested)
 // ---------------------------------------------------------------------------
@@ -381,6 +421,21 @@ export function resumeDestination(
 ): Promise<InventoryPublicationTargetResumeResult> {
   const parsed = resumeInventoryPublicationTargetRequestSchema.parse(request);
   return requestJson(ENDPOINTS.targetResume, inventoryPublicationTargetResumeResultSchema, jsonInit("POST", parsed));
+}
+
+export function setStockLinkSwitch(request: StockLinkSwitchRequest): Promise<StockLinkControlResult> {
+  return requestJson(ENDPOINTS.stockLinkSwitch, stockLinkControlResultSchema,
+    jsonInit("POST", stockLinkSwitchRequestSchema.parse(request)));
+}
+
+export function continueStockLinking(request: StockLinkContinueRequest): Promise<StockLinkControlResult> {
+  return requestJson(ENDPOINTS.stockLinkContinue, stockLinkControlResultSchema,
+    jsonInit("POST", stockLinkContinueRequestSchema.parse(request)));
+}
+
+export function checkStockLinksAgain(request: StockLinkCheckAgainRequest): Promise<StockLinkControlResult> {
+  return requestJson(ENDPOINTS.stockLinkCheckAgain, stockLinkControlResultSchema,
+    jsonInit("POST", stockLinkCheckAgainRequestSchema.parse(request)));
 }
 
 export function changeGlobalPublishing(

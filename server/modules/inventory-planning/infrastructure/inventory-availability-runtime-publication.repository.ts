@@ -247,6 +247,9 @@ export function createTransactionScopedInventoryPublicationService(
     /** Immutable current-revision drift observations permit a fresh desired
      * revision even when the newly calculated quantity equals a prior receipt. */
     reconciliationObservationIds?: readonly string[];
+    /** N1 (PLAN-CH2 v4.1 §4.5): reject mode that still withholds rows blocked solely by a missing stock link
+     * (InventoryPublicationServiceOptions). Only channel Shopify target enable sets it. */
+    isolateMissingStockLinks?: boolean;
   } = {},
 ): AuthorityAwareInventoryPublicationService {
   // The enclosing command may still fail after this callback. Never present
@@ -263,6 +266,7 @@ export function createTransactionScopedInventoryPublicationService(
     new PostgresTransactionScopedInventoryPublicationExecutor(client, logger, options.replacementListings, options.reconciliationObservationIds),
     options.channelId,
     logger,
+    { isolateMissingStockLinks: options.isolateMissingStockLinks === true },
   );
 }
 
