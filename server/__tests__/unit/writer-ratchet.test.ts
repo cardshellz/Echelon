@@ -37,6 +37,10 @@ describe("writer-ratchet (P2.1)", () => {
   it.each([
     ["oms.customer_order_actions", "modules/customer-account"],
     ["oms.customer_order_action_invalidations", "modules/customer-account"],
+    ["wms.shipping_package_history_jobs", "modules/shipping"],
+    ["wms.shipping_package_history_events", "modules/shipping"],
+    ["wms.shipping_package_history_invalidations", "modules/shipping"],
+    ["wms.shipping_package_history_backfills", "modules/shipping"],
     ["returns.customer_return_box_measurements", "modules/returns"],
     ["wms.picking_commands", "modules/wms"],
     ["procurement.receiving_custody_fence", "modules/procurement"],
