@@ -46,7 +46,9 @@ async function proveReadAccess(page: Page, backend: Backend, documents: Array<{ 
   for (const document of documents) {
     await page.goto(backend.url + document.path);
     try {
-      await expect(page.getByRole("heading", { name: document.heading, exact: true })).toBeVisible({ timeout: 5_000 });
+      // Workspace records can repeat the document name in an h3. Verify the
+      // primary page title rather than whichever duplicate renders first.
+      await expect(page.getByRole("heading", { name: document.heading, exact: true, level: 1 })).toBeVisible({ timeout: 5_000 });
       if (document.create) await expect.soft(page.getByRole("button", { name: document.create.label, exact: true })).toBeDisabled();
       if (document.path.startsWith("/purchase-orders/")) {
         await expect.soft(page.getByRole("button", { name: "Create Invoice", exact: true })).toHaveCount(0);
@@ -164,11 +166,11 @@ for (const actorId of ["connected-viewer", "connected-picker"] as const) {
       await expectPurchaseAnchor(page, purchaseId);
       await expect(page.getByText("$75.00", { exact: true }).first()).toBeVisible();
       await page.getByRole("link", { name: "CONNECTED-PO-B", exact: true }).click();
-      await expect(page.getByRole("heading", { name: "CONNECTED-PO-B", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "CONNECTED-PO-B", exact: true, level: 1 })).toBeVisible();
       const otherPurchaseUrl = page.url();
       await expectPurchaseAnchor(page, purchaseId);
       await page.reload();
-      await expect(page.getByRole("heading", { name: "CONNECTED-PO-B", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "CONNECTED-PO-B", exact: true, level: 1 })).toBeVisible();
       await expectPurchaseAnchor(page, purchaseId);
       await page.goBack();
       await expect(page).toHaveURL(invoiceUrl);
@@ -180,7 +182,7 @@ for (const actorId of ["connected-viewer", "connected-picker"] as const) {
       const anchoredPurchaseUrl = new URL(purchaseUrl);
       anchoredPurchaseUrl.searchParams.set("purchase", "purchase:" + purchaseId + ":invoices");
       await followBack(page, anchoredPurchaseUrl.href);
-      await expect(page.getByRole("heading", { name: "CONNECTED-PO-A", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "CONNECTED-PO-A", exact: true, level: 1 })).toBeVisible();
     });
   });
 }
@@ -239,7 +241,7 @@ test("a non-lead creator saves a fee-only purchase and keeps existing drafts rea
     actor_type: "service", actor_id: "procurement.purchase-order-entry", status: "succeeded", http_status: 201, response_body: result }] });
   const purchaseId = result.po.id;
   await expect(page).toHaveURL(backend.url + "/purchase-orders/" + purchaseId);
-  await expect(page.getByRole("heading", { name: result.po.poNumber, exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: result.po.poNumber, exact: true, level: 1 })).toBeVisible();
   await expect(page.getByRole("button", { name: "Add Line", exact: true })).toHaveCount(0);
   const readback = await page.request.get(backend.url + "/api/purchase-orders/" + purchaseId);
   expect(readback.status(), await readback.text()).toBe(200);
@@ -295,11 +297,11 @@ test("a non-lead read-only purchaser keeps draft detail and cannot enter or muta
     await expect(page.getByRole("button", { name: "Add Line", exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Save draft", exact: true })).toHaveCount(0);
     await page.reload();
-    await expect(page.getByRole("heading", { name: "CONNECTED-DRAFT-PO", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "CONNECTED-DRAFT-PO", exact: true, level: 1 })).toBeVisible();
     await expect(page).toHaveURL(backend.url + "/purchase-orders/" + draftId);
     await page.goto(backend.url + "/purchase-orders");
     await page.getByText("CONNECTED-DRAFT-PO", { exact: true }).filter({ visible: true }).click();
-    await expect(page.getByRole("heading", { name: "CONNECTED-DRAFT-PO", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "CONNECTED-DRAFT-PO", exact: true, level: 1 })).toBeVisible();
     await expect(page).toHaveURL(backend.url + "/purchase-orders/" + draftId);
     for (const [method, path] of [["PATCH", "/api/purchase-orders/" + draftId], ["PUT", "/api/purchase-orders/" + draftId + "/draft"], ["POST", "/api/purchase-orders/" + draftId + "/lines"]]) {
       const denied = await page.request.fetch(backend.url + path, { method, headers: { "Idempotency-Key": "connected-reader-draft-denied-" + method }, data: {} });
