@@ -64,6 +64,7 @@ import { assertEbayPublicationCompatibility } from "./ebay-publication-compatibi
 import { EbayListingWithdrawalExecution,EbayWithdrawalOperationExecution } from "../ebay-listing-withdrawal.service";
 import { prepareEbayWithdrawal } from "./ebay-listing-withdrawal";
 import { ensureEbayListingInventoryReady } from "./ebay-listing-inventory-readiness";
+import { requestStockLinkChecks } from "../../inventory-planning/quantity-publication";
 export interface SyncFilter {
   productIds?: number[];
   productTypeSlugs?: string[];
@@ -480,6 +481,9 @@ async function prepareActiveEbayListingSync(
       variants: boundIdentity.variants.filter(member => !member.catalogArchived)
         .map(member => ({ productVariantId: member.variantId, sku: member.sku })),
     }, execution, new Date(), { sourceIdentity, observation: providerObservation }),
+    // Channels PR4: a finished read-only Sync asks the stock-link engine to check these sizes now.
+    requestStockLinkCheck: async () => { await requestStockLinkChecks(pool, { channelConnectionId: boundIdentity.connectionId,
+      productVariantIds: boundIdentity.variants.map(member => member.variantId) }, new Date()); },
     variants: variants
       .filter((variant) =>
         routeDraft.offers.some(

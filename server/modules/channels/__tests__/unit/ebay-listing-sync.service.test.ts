@@ -316,6 +316,20 @@ describe("existing eBay listing sync execution", () => {
     expect(fixture.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
     expect(fixture.client.createOrReplaceInventoryItemGroup).not.toHaveBeenCalled();
   });
+  // Channels PR4: a read-only Sync nudges the stock-link engine, and a failed nudge never fails the Sync.
+  it.each([["succeeds", null], ["fails", Object.assign(new Error("db down"), { code: "57P01" })]] as const)(
+    "a read-only Sync completes when its stock-link nudge %s, with no new eBay write", async (_label, failure) => {
+    const fixture = syncProviderFixture();
+    const nudge = vi.fn(async () => { if (failure) throw failure; });
+    const prepare = async () => ({ ...(await fixture.prepare()), requestStockLinkCheck: nudge });
+    const executor = new EbayExistingListingSyncExecution(prepare, recovered(), new EbayMarketplaceListingConnector());
+    await executor.execute(syncIdentity, async (_key, _hash, work) => work());
+    nudge.mockClear();
+    vi.mocked(fixture.client.updateOffer).mockClear();
+    await expect(executor.execute(syncIdentity, async (_key, _hash, work) => work())).resolves.toMatchObject({ synced: 1 });
+    expect(nudge).toHaveBeenCalledTimes(1);
+    expect(fixture.client.updateOffer).not.toHaveBeenCalled();
+  });
   it("recovers a saved listing with no local offer ID through its unique exact published SKU and listing", async () => {
     const fixture = syncProviderFixture();
     const identity = structuredClone(syncIdentity);

@@ -29,6 +29,11 @@ import { createReservedInventoryTransferOwner } from "../modules/inventory-plann
 import { createListingPublicationService } from "../listing-publication.composition";
 import { VerifiedListingStockService } from "../modules/inventory-planning/application/verified-listing-stock.service";
 import { WalmartStockConnectionService } from "../modules/channels/adapters/walmart/walmart-stock-connection.service";
+import { createWalmartStockLinkAdapter } from "../modules/channels/adapters/walmart/walmart-stock-link.adapter";
+import { createWalmartStockLinkSource, createWalmartStockLinkWriter } from "../modules/channels/infrastructure/walmart-stock-link-source";
+import { createChannelEbayStockLinkAdapter } from "../modules/channels/adapters/ebay/ebay-stock-link.adapter";
+import { createChannelEbayStockLinkSource, createChannelEbayStockLinkWriter } from "../modules/channels/infrastructure/ebay-stock-link-source";
+import { requestStockLinkChecks } from "../modules/inventory-planning/quantity-publication";
 import { createListingUpdateService } from "../listing-update.composition";
 import { InventoryPublicationInitialScopeService } from "../modules/inventory-planning/application/inventory-publication-initial-scope.service";
 import { PostgresInitialPublicationScopeStore } from "../modules/inventory-planning/infrastructure/inventory-publication-initial-scope.repository";
@@ -435,8 +440,9 @@ export function createServices(
   const listingPublication = createListingPublicationService({pool: databasePool, walmart, channelCatalog, quantityAdmission: quantityPublicationAdmission, verifiedStock: walmartVerifiedStock});
   const listingUpdates = createListingUpdateService(databasePool, walmart);
   const listingLifecycle = createListingLifecycleService(databasePool, walmart, listingLifecycleStore, db);
-  const walmartStockConnection = new WalmartStockConnectionService(walmart,
-    walmartVerifiedStock);
+  // Channels PR4: the 60 s Walmart scan keeps presence and PUBLISHED detection; it nudges the stock-link engine, which links.
+  const walmartStockConnection = new WalmartStockConnectionService(walmart, walmartVerifiedStock,
+    input => requestStockLinkChecks(databasePool, input, new Date()));
   const inventoryPublicationInitialScope = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(databasePool));
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
@@ -468,6 +474,20 @@ export function createServices(
       adapter: createDropshipEbayStockLinkAdapter({ destinations: new PgDropshipInventoryPublicationDestinationReader(databasePool),
         credentials: createDropshipEbayRegistrationCredentialProviderFromEnv(), clock: () => new Date() }),
       source: createDropshipEbayStockLinkSource(),
+    }, {
+      // Channels PR4: Walmart sizes link by SKU once Walmart reports the item ACTIVE + PUBLISHED, through the verified
+      // Walmart link writer under the listing-write guard; a Card Shellz SKU change moves the link (PLAN-CH-v3 §3.5).
+      kind: "listing_enrollment",
+      adapter: createWalmartStockLinkAdapter({ channels: walmart, clock: () => new Date() }),
+      source: createWalmartStockLinkSource(),
+      writer: createWalmartStockLinkWriter({ channels: walmart, verifiedStock: walmartVerifiedStock, monotonicNow: () => performance.now() }),
+      followsSkuChange: true,
+    }, {
+      // Channels PR4: Card Shellz eBay listings that are already live link by SKU through the eBay readiness owner.
+      kind: "listing_enrollment",
+      adapter: createChannelEbayStockLinkAdapter({ ebay: ebayAdapter, clock: () => new Date() }),
+      source: createChannelEbayStockLinkSource(),
+      writer: createChannelEbayStockLinkWriter({ pool: databasePool, clock: () => new Date(), monotonicNow: () => performance.now() }),
     }],
     clock: () => new Date(),
     monotonicNow: () => performance.now(),

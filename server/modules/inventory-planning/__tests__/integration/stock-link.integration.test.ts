@@ -1773,12 +1773,13 @@ dbDescribe.sequential("stock-link controls, Ops Health and two stores, real Post
     expect(await controls().setSwitch({ publicationTargetId: targetId, enabled: true, expectedRevision: "2" }, "operator-1"))
       .toMatchObject({ autoLinkEnabled: true, revision: "3" });
 
-    // A destination the engine has no policy for: unsupported for the status, refused for a write; an unknown id is 404.
+    // Channels PR4: Walmart is a controlled destination now (the engine links it): its status answers before the tick
+    // created its destination row, and reading it writes nothing. A destination of a provider with no policy is
+    // unsupported (unit-pinned, stock-link-controls.test.ts); an unknown id is 404.
     const walmart = (await database.pool.query<{ id: number }>(`SELECT t.id FROM inventory.inventory_publication_targets t
       JOIN channels.channels c ON c.id=t.channel_id WHERE c.provider='walmart' ORDER BY t.id LIMIT 1`)).rows[0]!.id;
-    expect(await controls().status({ publicationTargetId: String(walmart) })).toEqual({ supported: false, publicationTargetId: walmart });
-    await expect(controls().checkAgain({ publicationTargetId: walmart, expectedRevision: "0" }, "operator-1"))
-      .rejects.toMatchObject({ status: 409, code: "STOCK_LINK_DESTINATION_UNSUPPORTED" });
+    expect(await controls().status({ publicationTargetId: String(walmart) })).toMatchObject({ supported: true, publicationTargetId: walmart,
+      revision: "0", counts: { linked: 0, waiting: 0, flagged: 0, error: 0 } });
     await expect(controls().status({ publicationTargetId: "999999" })).rejects.toMatchObject({ status: 404 });
     expect(await destination(walmart)).toBeNull();
   }, CASE_TIMEOUT_MS);

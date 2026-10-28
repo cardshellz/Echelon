@@ -29,8 +29,14 @@ export { InventoryPublicationSelectionError } from "./infrastructure/inventory-p
 export { PostgresEbayPublicationRecoveryRepository } from "./infrastructure/ebay-publication-recovery.repository";
 export { reviewEbayPublicationReadiness, assertEbayPublicationReady, ensureEbayPublicationReady,
   withEbayPublicationReadinessApplied, findEbayPublicationReadinessReceipt,
-  rejectEbayPublicationReadinessCommand,
+  rejectEbayPublicationReadinessCommand, readEbayStockLinkGaps,
 } from "./infrastructure/ebay-publication-readiness.repository";
+// Channels PR4: the Card Shellz eBay stock link the engine's background pass and the listing update/rebuild hooks use.
+export { linkChannelEbayStock, channelEbayStockLinkCommandKey } from "./infrastructure/channel-ebay-stock-link";
+export type { ChannelEbayStockLinkInput, ChannelEbayStockLinkResult } from "./infrastructure/channel-ebay-stock-link";
+// Channels PR4: a channel owner asks the stock-link engine to check these sizes now (no fence, no provider I/O).
+export { requestStockLinkChecks } from "./infrastructure/stock-link-nudge";
+export type { StockLinkNudge } from "./infrastructure/stock-link-nudge";
 // Dropship eBay store stock link (exact SKU mapping on the store's one live
 // Card Shellz destination). Dropship calls these only through this file.
 export { ensureDropshipEbayStockReady, reviewDropshipEbayStockReadiness, readDropshipEbayStockAuthority } from "./infrastructure/dropship-ebay-stock-readiness.repository";

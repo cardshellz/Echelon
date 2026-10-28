@@ -19,6 +19,9 @@ import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../infrastructure/invento
 import { EbayExistingListingSyncExecution, type EbayListingExecutionContext, type PreparedEbayListingSync } from "../../../channels/ebay-listing-sync.service";
 import { EbayMarketplaceListingConnector, type EbayObservedOffer } from "../../../channels/listing-connectors/ebay-listing.connector";
 import { ensureEbayListingInventoryReady } from "../../../channels/infrastructure/ebay-listing-inventory-readiness";
+import { readEbayStockLinkGaps } from "../../infrastructure/ebay-publication-readiness.repository";
+import { linkChannelEbayStock } from "../../infrastructure/channel-ebay-stock-link";
+import { createChannelEbayStockLinkSource } from "../../../channels/infrastructure/ebay-stock-link-source";
 import type { EbayInventoryItem, EbayInventoryItemGroup, EbayBulkPriceQuantityRequest, EbayOffer } from "../../../channels/adapters/ebay/ebay-types";
 
 const runtime = vi.hoisted(() => ({ pool: null as Pool | null, api: vi.fn() }));
@@ -448,6 +451,62 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect((await database.pool.query("SELECT desired_quantity::text,external_inventory_item_id_snapshot FROM inventory.inventory_publication_outbox WHERE publication_target_id=3")).rows)
       .toEqual([{ desired_quantity: "17", external_inventory_item_id_snapshot: "P5" }]);
     await expect(assertEbayPublicationReady(database.pool, source())).resolves.toBeUndefined();
+  });
+  // Channels PR4: the no-fence fast path, the update/rebuild hooks' gap read and the Card Shellz eBay link writer.
+  it("ensure: an already exactly linked product takes the fast path (no new receipt, fence-free), a new one links", async () => {
+    expect(await ensureEbayPublicationReady(database.pool, source(), { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW }))
+      .toEqual({ alreadyReady: false });
+    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 0 });
+    expect(await ensureEbayPublicationReady(database.pool, source(), { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW }))
+      .toEqual({ alreadyReady: true });
+    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 0 });
+  });
+  it("hook gaps: an unlinked size is a gap; a linked or held size is not; another account has no destination", async () => {
+    const gaps = () => readEbayStockLinkGaps(database.pool, { channelId: 67, connectionId: 9, accountId: "seller-36", variants: source().variants });
+    expect(await gaps()).toEqual({ publicationTargetId: 3, productVariantIds: [101] });
+    await database.pool.query(`INSERT INTO inventory.inventory_publication_target_variant_holds(publication_target_id,product_variant_id,hold_reason,held_at,held_by)
+      VALUES(3,101,'Price update with a held size',now(),'operator')`);
+    expect(await gaps()).toEqual({ publicationTargetId: 3, productVariantIds: [] });
+    await database.pool.query("DELETE FROM inventory.inventory_publication_target_variant_holds");
+    await linkChannelEbayStock(database.pool, { publicationTargetId: 3, channelId: 67, connectionId: 9, accountId: "seller-36",
+      environment: "production", productId: 20, purpose: "publish", variants: source().variants,
+      origin: { kind: "listing_update", key: "review-1" }, actor: "system:ebay-listing-change" }, { now: WALMART_INVENTORY_NOW, monotonicNow: () => 0 });
+    expect(await gaps()).toEqual({ publicationTargetId: 3, productVariantIds: [] });
+    expect(await readEbayStockLinkGaps(database.pool, { channelId: 67, connectionId: 9, accountId: "other", variants: source().variants }))
+      .toEqual({ publicationTargetId: null, productVariantIds: [] });
+  });
+  it("link writer: links once by evidence key, replays as already linked, and returns a classified refusal as blocked", async () => {
+    const request = { publicationTargetId: 3, channelId: 67, connectionId: 9, accountId: "seller-36", environment: "production" as const,
+      productId: 20, purpose: "sync" as const, variants: source().variants, origin: { kind: "background" as const, key: "101:evidence" },
+      actor: "system:stock-link" };
+    const first = await linkChannelEbayStock(database.pool, request, { now: WALMART_INVENTORY_NOW, monotonicNow: () => 0 });
+    expect(first).toMatchObject({ status: "ready", alreadyLinked: false, commandKey: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+    expect(await linkChannelEbayStock(database.pool, request, { now: WALMART_INVENTORY_NOW, monotonicNow: () => 0 }))
+      .toMatchObject({ status: "ready", alreadyLinked: true, commandKey: first.commandKey });
+    await database.pool.query("UPDATE channels.sync_settings SET global_enabled=false");
+    expect(await linkChannelEbayStock(database.pool, { ...request, origin: { kind: "background", key: "101:other" },
+      variants: [{ productVariantId: 101, sku: "OTHER" }] }, { now: WALMART_INVENTORY_NOW, monotonicNow: () => 0 }))
+      .toMatchObject({ status: "blocked" });
+    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 0 });
+  });
+  it("Card Shellz eBay source SQL: live listings of the verified account, their eBay SKU, and outstanding listing work as a wait", async () => {
+    const source = createChannelEbayStockLinkSource();
+    const destination = { publicationTargetId: 3, destinationKind: "channel_connection" as const, providerKey: "ebay", channelId: 67,
+      channelConnectionId: 9, dropshipStoreConnectionId: null, providerScopeType: "account" as const, externalScopeId: "seller-36", targetRevision: "1" };
+    await database.pool.query(readFileSync(resolve("migrations/900000023000018880003_listing_work_settlement.sql"), "utf8"));
+    expect(await source.listCandidates(database.pool, destination, 0, 500)).toEqual({ candidates: [], nextAfterVariantId: null });
+    await database.pool.query("UPDATE channels.channel_listings SET external_product_id='listing-20' WHERE id=1");
+    expect(await source.listCandidates(database.pool, destination, 0, 500)).toEqual({ candidates: [{ productVariantId: 101, productId: 20 }], nextAfterVariantId: null });
+    expect(await source.listCarriedSkus(database.pool, destination)).toEqual([{ productVariantId: 101, sku: "P5" }]);
+    expect(await source.readListings(database.pool, destination, [101, 102])).toEqual([{ productVariantId: 101, productId: 20, listingId: 1,
+      vendorId: null, cardShellzSku: "P5", recordedOfferId: null, environment: "production", managed: true, skipReason: null, requireRecordedOffer: false }]);
+    expect(await source.listCandidates(database.pool, { ...destination, externalScopeId: "other-seller" }, 0, 500))
+      .toEqual({ candidates: [], nextAfterVariantId: null });
+    // A queued Sync job of the product is listing work still owed: the size waits (never linked meanwhile).
+    await database.pool.query(`INSERT INTO channels.ebay_listing_sync_jobs(id,channel_id,connection_id,product_id,operation,identity,identity_hash,
+        state,requested_by,next_attempt_at,created_at,updated_at)
+      VALUES('00000000-0000-4000-8000-000000000123',67,9,20,'sync','{}',repeat('a',64),'queued','operator',now(),now(),now())`);
+    expect(await source.readListings(database.pool, destination, [101])).toEqual([expect.objectContaining({ productVariantId: 101, skipReason: "push_open" })]);
   });
   it("promotes the existing exact draft unchanged and replays one receipt/job under concurrent retries", async () => {
     const mappingId = await draft();
