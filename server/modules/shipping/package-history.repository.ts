@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
+import { invalidateCustomerOrderActions } from "../customer-account/order-action-invalidation";
 import { type PackageHistoryDocument } from "@shared/shipping/package-history";
 import {
   packageHistoryHash,
@@ -183,10 +184,7 @@ export class PostgresPackageHistoryStore implements PackageHistoryStore {
         [claim.omsOrderId, JSON.stringify(document), hash, now],
       );
       if (previous[0].evidence_hash !== hash)
-        await client.query(
-          `INSERT INTO oms.customer_order_action_invalidations(oms_order_id) VALUES($1)`,
-          [claim.omsOrderId],
-        );
+        await invalidateCustomerOrderActions(client, claim.omsOrderId);
       return true;
     });
   }

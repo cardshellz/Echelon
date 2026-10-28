@@ -31,7 +31,10 @@ as verified measurements.
    generations and pending source events prevent a superseded result publishing.
 4. `complete` atomically writes an immutable evidence event and current pointer.
    Repeated identical evidence reuses the same unique event. A failed publication
-   rolls back the event and pointer together.
+   rolls back the event and pointer together. Cache invalidation calls the
+   customer-account module's published `invalidateCustomerOrderActions` API with
+   the same transaction, so the owning module remains the only queue writer and
+   invalidation failure rolls back the shipping publication too.
 5. `projectHistoricalReturnBoxes` verifies that saved evidence still matches the
    current native package facts and local line ownership. It supplies the existing
    return box-options contract. Existing canonical packages retain precedence.

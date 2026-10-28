@@ -377,6 +377,13 @@ integration("historical package capture and resumable backfill", () => {
       ).rows[0].count,
     ).toBe(1);
     expect(
+      (
+        await pool.query(
+          "SELECT count(*)::int AS count FROM oms.customer_order_action_invalidations WHERE oms_order_id=100",
+        )
+      ).rows[0].count,
+    ).toBe(1);
+    expect(
       await store.read({
         omsOrderId: 100,
         channelId: 36,
@@ -579,6 +586,61 @@ integration("historical package capture and resumable backfill", () => {
         "DROP TRIGGER reject_ready ON wms.shipping_package_history_jobs; DROP FUNCTION test_guard.reject_ready()",
       );
     }
+  });
+  it("rolls shipping evidence back when the customer-account invalidation owner fails", async () => {
+    await seed();
+    const before = await fingerprint();
+    await guard(true);
+    await pool.query(`CREATE FUNCTION test_guard.reject_account_invalidation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      RAISE EXCEPTION 'Synthetic customer-account invalidation failure'; END; $$;
+      CREATE TRIGGER reject_account_invalidation BEFORE INSERT ON oms.customer_order_action_invalidations
+      FOR EACH ROW EXECUTE FUNCTION test_guard.reject_account_invalidation()`);
+    try {
+      await makeWorker().run({ orderIds: [100] });
+      expect(
+        (
+          await pool.query(
+            "SELECT count(*)::int AS count FROM wms.shipping_package_history_events",
+          )
+        ).rows[0].count,
+      ).toBe(0);
+      expect(
+        (
+          await pool.query(
+            "SELECT state,document FROM wms.shipping_package_history_jobs WHERE oms_order_id=100",
+          )
+        ).rows[0],
+      ).toEqual({ state: "retry", document: null });
+      expect(
+        (
+          await pool.query(
+            "SELECT count(*)::int AS count FROM oms.customer_order_action_invalidations",
+          )
+        ).rows[0].count,
+      ).toBe(0);
+      expect(await fingerprint()).toBe(before);
+    } finally {
+      await pool.query(
+        "DROP TRIGGER reject_account_invalidation ON oms.customer_order_action_invalidations; DROP FUNCTION test_guard.reject_account_invalidation()",
+      );
+    }
+    now = new Date(now.getTime() + 61_000);
+    await makeWorker().run({ orderIds: [100] });
+    expect(
+      (
+        await pool.query(
+          "SELECT count(*)::int AS count FROM wms.shipping_package_history_events",
+        )
+      ).rows[0].count,
+    ).toBe(1);
+    expect(
+      (
+        await pool.query(
+          "SELECT count(*)::int AS count FROM oms.customer_order_action_invalidations",
+        )
+      ).rows[0].count,
+    ).toBe(1);
+    expect(await fingerprint()).toBe(before);
   });
   it("does not publish an observation superseded by an incoming source event", async () => {
     await seed();
