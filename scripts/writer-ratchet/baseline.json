@@ -1186,6 +1186,9 @@
   "oms.package_allocation_commercial_fulfillment_activations": [
     "modules/oms"
   ],
+  "oms.package_reconciliation_commands": [
+    "modules/oms"
+  ],
   "oms.shipstation_label_reconciliation_checkpoint": [
     "modules/oms"
   ],

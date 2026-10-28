@@ -389,6 +389,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
   leaseDurationMs?: number;
   labelReplacementEnabled?: boolean;
   shopifyLabelLifecycle?: Pick<ShopifyLabelLifecycleService, "runDueBatch">;
+  packageReconciliation?: { resumeDue(limit?: number): Promise<unknown> };
 }): ChannelFulfillmentAuthorityService {
   const clock = dependencies.clock ?? { now: () => new Date() };
   const logger = dependencies.logger ?? defaultLogger();
@@ -412,6 +413,10 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
     limit?: number;
   } = {}): Promise<ChannelFulfillmentBatchResult> {
     const limit = options.limit ?? DEFAULT_BATCH_SIZE;
+    if (!options.commandIds && dependencies.packageReconciliation) {
+      try { await dependencies.packageReconciliation.resumeDue(Math.min(limit,5)); }
+      catch (error) { logger.error({code:"PACKAGE_RECONCILIATION_RECOVERY_FAILED",error:errorMessage(error)}); }
+    }
     if (dependencies.labelReplacementEnabled !== false && !options.commandIds && dependencies.repository.findWaitingEbayLabelReplacements) {
       try {
         for (const labelId of await dependencies.repository.findWaitingEbayLabelReplacements(Math.min(limit, 25), clock.now())) {

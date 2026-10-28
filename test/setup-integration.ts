@@ -110,6 +110,7 @@ export async function runMigrations(): Promise<void> {
     "migrations/0693_shipstation_label_reconciliation.sql",
     "migrations/0698_shipping_repack_recovery.sql",
     "migrations/0703_corrective_picking.sql",
+    "migrations/900000036000019310001_package_reconciliation_receipts.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;
@@ -139,6 +140,7 @@ export async function runMigrations(): Promise<void> {
 }
 
 const TRUNCATE_TABLES = [
+  "oms.package_reconciliation_commands",
   "oms.shipstation_label_reconciliation_checkpoint",
   "oms.shipstation_label_recovery_attempts",
   "oms.shipstation_label_recovery_work",

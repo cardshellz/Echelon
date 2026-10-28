@@ -67,8 +67,8 @@ function unique<T>(values: readonly T[], key: (value: T) => number | string): bo
   return new Set(values.map(key)).size === values.length;
 }
 function total(lines: readonly z.output<typeof line>[], sourceId: number): number {
-  const value = lines.filter(item => item.sourceItemId === sourceId).reduce((sum, item) => sum + BigInt(item.quantity), 0n);
-  if (value > 2_147_483_647n) throw new RangeError("Package quantity exceeds the PostgreSQL integer bound");
+  const value = lines.filter(item => item.sourceItemId === sourceId).reduce((sum, item) => sum + BigInt(item.quantity), BigInt(0));
+  if (value > BigInt(2_147_483_647)) throw new RangeError("Package quantity exceeds the PostgreSQL integer bound");
   return Number(value);
 }
 function canonicalLines(lines: readonly z.output<typeof line>[]): string {
