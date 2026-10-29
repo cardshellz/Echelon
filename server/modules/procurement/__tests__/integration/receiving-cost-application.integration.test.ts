@@ -554,7 +554,9 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   it("requires renewed finalization when the effective shipment default changes even with equal numeric basis", async () => {
     await pool.query("UPDATE procurement.inbound_freight_costs SET allocation_method=NULL WHERE id=31");
-    await pool.query("UPDATE procurement.inbound_shipment_lines SET total_weight_kg=1 WHERE id=11");
+    // Two saved cartons at 0.5 kg establish the same numeric basis as line count.
+    // A cached total alone is not physical measurement evidence.
+    await pool.query("UPDATE procurement.inbound_shipment_lines SET weight_kg=0.5,dimension_basis='carton',total_weight_kg=1,chargeable_weight_kg=1 WHERE id=11");
     await shipment.finalizeAllocations(1, actorId);
     await pool.query("UPDATE procurement.inbound_shipments SET allocation_method_default='by_weight' WHERE id=1");
     const { recordShipmentCostRevisions } = await import("../../shipment-cost-application.service");

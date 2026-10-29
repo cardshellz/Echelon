@@ -3,6 +3,19 @@ import { projectDocumentRelationshipCosts } from "../../domain/document-relation
 import { evaluateSupplierCreditSource } from "../../domain/supplier-credit-source";
 
 describe("relationship cost shares use the financial credit owner", () => {
+  it("preserves the charge but marks historical physical fallback shares as unresolved", () => {
+    const evidence = { charges: [{ id: 401, inbound_shipment_id: 42, currency: "USD", actual_cents: 428924 }],
+      allocations: [{ shipment_cost_id: 401, inbound_shipment_line_id: 201, allocated_cents: 38993,
+        basis_evidence: { version: 2, lineId: 201, method: "by_volume", source: { kind: "dimension", field: "totalVolumeCbm", value: "0" },
+          rawRatio: { numerator: "0", denominator: "1" }, ratio: { numerator: "1", denominator: "1" },
+          totalRatio: { numerator: "11", denominator: "1" }, usedFallback: true } }], invoices: [], credits: [] };
+    const before = structuredClone(evidence);
+    const result = projectDocumentRelationshipCosts(evidence);
+    expect(result.charges[0].cents).toBe(428924);
+    expect(result.allocations[0].cents).toBeNull();
+    expect(result.costIssues).toEqual(["Shipment charges are saved, but the physical measurements do not yet establish their allocation."]);
+    expect(evidence).toEqual(before);
+  });
   it("applies an approved one-cent credit exactly once and leaves the saved charge intact", () => {
     const invoice = { id: 72, vendor_invoice_id: 71, purchase_order_line_id: null, freight_cost_id: 401,
       currency: "USD", qty_invoiced: 1, line_total_cents: 10001, cost_component_evidence: null };

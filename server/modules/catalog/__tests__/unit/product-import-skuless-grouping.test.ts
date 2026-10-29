@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("../../shopify-import-connection-guard", () => ({ filterConnectionOwnedShopifyProducts: async (products: unknown) => products }));
+
 const mocks = vi.hoisted(() => ({
   getProductVariantBySku: vi.fn(),
   getProductBySku: vi.fn(),
@@ -424,5 +426,14 @@ describe("Shopify import — requires_shipping", () => {
     expect(mocks.createProductVariant).toHaveBeenCalledWith(
       expect.objectContaining({ requiresShipping: true }),
     );
+  });
+  it("retries only a rolled-back catalog write without refetching or repeating the import", async () => {
+    mocks.fetchShopifyCatalogProducts.mockResolvedValue([{ ...skuLessVariant(502,7003,"Default Title"), sku: "TEST-BINDER" }]);
+    mocks.createProduct.mockRejectedValueOnce(Object.assign(new Error("PUBLICATION_SELECTION_BUSY"), { code: "55P03" }))
+      .mockResolvedValueOnce({ id: 901 });
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    await createProductImportService({ mappingOwner: { repair: mocks.repairShopifyProductMapping }, sleep }).syncProductsWithMultiUOM();
+    expect(mocks.fetchShopifyCatalogProducts).toHaveBeenCalledOnce(); expect(mocks.createProduct).toHaveBeenCalledTimes(2);
+    expect(mocks.createProductVariant).toHaveBeenCalledOnce(); expect(sleep).toHaveBeenCalledWith(50);
   });
 });

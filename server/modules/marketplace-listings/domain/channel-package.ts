@@ -1,5 +1,5 @@
 import { ChannelListingValidationError, channelListingWarningSchema, type ChannelListingWarning } from "@shared/channel-listing-validation";
-import type { ChannelPackageRequirements, ChannelPackageOperation } from "@shared/catalog/shipping-package";
+import type { ChannelPackageRequirements } from "@shared/catalog/shipping-package";
 
 export interface ListingPackageValues {
   weightGrams?: number | string | null;
@@ -21,8 +21,6 @@ export function prepareChannelPackage(input: {
   productId: number; variantId: number; sku: string;
   catalog: ListingPackageValues; observed: ListingPackageValues;
   requirements: ChannelPackageRequirements;
-  /** Unspecified/legacy callers retain the publication requirement. */
-  operation?: ChannelPackageOperation;
 }): ChannelPackagePlan {
   const fail = (field: "package_weight" | "package_dimensions", reason: "required" | "invalid"): never => {
     throw new ChannelListingValidationError({ field, reason, productId: input.productId,
@@ -42,8 +40,7 @@ export function prepareChannelPackage(input: {
   const dimensionSource = sourceFor(dimensions.some(key => input.catalog[key] != null), dimensions.some(key => input.observed[key] != null));
   const dimensionValues = dimensionSource === "catalog" ? input.catalog : input.observed;
   const [lengthMm, widthMm, heightMm] = dimensions.map(key => positive(dimensionValues[key], "package_dimensions"));
-  const dimensionRequirement = input.operation === "maintenance"
-    ? input.requirements.dimensionsOnMaintenance ?? input.requirements.dimensions : input.requirements.dimensions;
+  const dimensionRequirement = input.requirements.dimensions;
   if ((dimensionSource !== "absent" || dimensionRequirement === true) && [lengthMm, widthMm, heightMm].some(value => value === null))
     fail("package_dimensions", "required");
   const warnings = dimensionSource === "absent" && dimensionRequirement === "recommended"

@@ -7,6 +7,7 @@ import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence
 import { retainEquivalentShipmentCostSource, type ShipmentCostProposal } from "./shipment-cost-source-identity";
 import type { SupplierCreditSourceRow } from "./supplier-credit-source.repository";
 import { resolveShipmentSupplierCredits } from "./domain/shipment-supplier-credits";
+import type { ShipmentPhysicalSource } from "@shared/procurement/shipment-physical-values";
 
 type ReadRows = Awaited<ReturnType<CostEvidenceTransaction["execute"]>>["rows"];
 export type ShipmentRevisionOptions = { allocationJustFinalized?: boolean; inboundShipmentLineId?: number };
@@ -17,6 +18,8 @@ export interface ShipmentCostRevisionReadEvidence {
   allocationRows: ReadRows;
   previous: ReadRows;
   supplierCredits: SupplierCreditSourceRow[];
+  /** Present on live repository reads; separate from immutable source rows. */
+  physicalSourcesByLineId?: ReadonlyMap<number, ShipmentPhysicalSource>;
 }
 
 /** Pure preparation shared by posting and batched freshness reads. Row objects,
@@ -62,6 +65,7 @@ export function buildShipmentCostRevisionProposals(shipmentId: number, evidence:
         throw new Error("Shipment product value requires the original product PO source");
       }
       const basis = buildShipmentAllocationBasis(lines.rows.map((line) => ({ lineId: costInteger(line.id, "lineId", 1),
+        physicalSource: evidence.physicalSourcesByLineId?.get(costInteger(line.id, "lineId", 1)),
         qtyShipped: costInteger(line.qty_shipped, "qtyShipped", 1), totalVolumeCbm: line.total_volume_cbm,
         totalWeightKg: line.total_weight_kg, chargeableWeightKg: line.chargeable_weight_kg,
         poLineId: line.allocation_po_line_id, poOrderQty: line.allocation_po_order_qty,

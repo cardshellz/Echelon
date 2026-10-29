@@ -46,3 +46,13 @@ export const shipmentAllocationEvidenceSchema = z.object({
   usedFallback: z.boolean(),
 }).strict();
 export type ShipmentAllocationEvidence = z.infer<typeof shipmentAllocationEvidenceSchema>;
+
+/** Old provisional equal-split rows are retained as history, never current
+ * evidence that weight/volume allocation has been completed. */
+export function isUnresolvedPhysicalAllocation(evidence: unknown): boolean {
+  if (evidence == null) return false; // Pre-evidence rows require their existing source checks.
+  const parsed = shipmentAllocationEvidenceSchema.safeParse(evidence);
+  if (!parsed.success) return true;
+  return ["by_volume", "by_weight", "by_chargeable_weight"].includes(parsed.data.method)
+    && (parsed.data.usedFallback || parsed.data.rawRatio.numerator === "0");
+}

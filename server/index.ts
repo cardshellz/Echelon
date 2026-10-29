@@ -5,6 +5,8 @@ import { registerListingIntentPropagationRoutes } from "./modules/marketplace-li
 import { ebayListingSyncService } from './modules/channels/ebay-listing-sync';
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
 import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
+import { startShopifyProductConnectionWorker } from "./modules/catalog/shopify-product-connection.worker";
+import { createDefaultShopifyProductConnectionService } from "./services/shopify-product-connection";
 import { createOrderEditService } from "./modules/order-edits/order-edit.composition";
 import { registerOrderEditRoutes } from "./modules/order-edits/interfaces/order-edit.routes";
 import { registerCustomerAccountRoutes } from "./modules/customer-account/interfaces/customer-account.routes";
@@ -536,6 +538,11 @@ function startEchelonSyncScheduler(
   startListingPublicationWorker(services.listingUpdates, "listing_update_worker");
   startListingPublicationWorker(services.listingLifecycle, "listing_lifecycle_worker");
   startWalmartStockConnectionWorker(services.walmartStockConnection);
+  startShopifyProductConnectionWorker(createDefaultShopifyProductConnectionService({
+    onConnected: async (_productId, variantIds) => {
+      for (const variantId of variantIds) services.inventoryCore.triggerNotifyChange(variantId, "shopify_product_connection");
+    },
+  }));
 
   if (process.env.WALMART_ORDER_POLLING_ENABLED !== "false" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
     startWalmartOrderPolling(services.walmartOrderPoll, services.walmart);

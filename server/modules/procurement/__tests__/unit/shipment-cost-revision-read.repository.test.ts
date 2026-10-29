@@ -17,6 +17,19 @@ function fixture() {
   return { sets, execute, tx: { execute } };
 }
 describe("bounded shipment economic evidence", () => {
+  it("keeps live measurement inputs outside the existing economic fingerprint", async () => {
+    const { sets, execute, tx } = fixture();
+    execute.mockReset();
+    const physical = [{ __shipment_id: 1, id: 11, qty_shipped: 3, __physical_cartons: 2, __physical_basis: "carton",
+      __physical_weight: "3.000", __physical_length: "50.00", __physical_width: "40.00", __physical_height: "30.00" }];
+    for (const [index, rows] of sets.entries()) execute.mockResolvedValueOnce({ rows: index === 0 ? physical : rows });
+    const result = await readShipmentCostRevisionEvidence(tx, [1, 2]);
+    const originalEconomicRows = [{ id: 11, qty_shipped: 3 }];
+    expect(result.get(1)?.lines).toEqual(originalEconomicRows);
+    expect(costFingerprint(result.get(1)?.lines)).toBe(costFingerprint(originalEconomicRows));
+    expect(result.get(1)?.physicalSourcesByLineId?.get(11)).toEqual({ qtyShipped: 3, cartonCount: 2, dimensionBasis: "carton",
+      weightKg: "3.000", lengthCm: "50.00", widthCm: "40.00", heightCm: "30.00" });
+  });
   it("routes complete source rows without changing any fingerprint field or scalar type", async () => {
     const { sets, execute, tx } = fixture(); const before = structuredClone(sets);
     const result = await readShipmentCostRevisionEvidence(tx, [1, 2]);

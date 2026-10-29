@@ -224,6 +224,7 @@ const ALLOCATION_COST_STATUS_LABELS: Record<string, string> = {
   stale_allocation_basis: "Update needed",
   invalid_value_basis: "Data needs review",
   invalid_allocation_basis: "Data needs review",
+  missing_dimensions: "Measurements needed",
   allocation_mismatch: "Totals differ",
   allocated_with_fallback: "Even Split",
   allocated: "Split recorded",
@@ -305,12 +306,14 @@ function AllocationAmountCell({
   cents,
   millsPerUnit,
   strong = false,
+  pending = false,
 }: {
   cents: number | string | null | undefined;
   millsPerUnit?: number | null;
   strong?: boolean;
+  pending?: boolean;
 }) {
-  if (cents === null || cents === undefined) return <>—</>;
+  if (cents === null || cents === undefined) return pending ? <span className="text-xs text-muted-foreground">Awaiting measurements</span> : <>—</>;
   return (
     <div className={`font-mono ${strong ? "font-medium" : ""}`}>
       <div>{formatCents(Number(cents))}</div>
@@ -1577,7 +1580,7 @@ export default function InboundShipmentDetail() {
                         <TableCell className="text-right">{formatNumber(line.totalWeightKg, 1)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalVolumeCbm, 4)}</TableCell>
                         <TableCell className="text-right">
-                          <AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} />
+                          <AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} pending={line.allocationPending} />
                         </TableCell>
                         <TableCell className="text-right font-mono">{formatMillsOrDash(line.landedUnitCostMills)}</TableCell>
                         {isEditable && (
@@ -1965,7 +1968,7 @@ export default function InboundShipmentDetail() {
                           </TableCell>
                           <TableCell>
                             <Badge
-                              variant={["needs_allocation", "stale_allocation", "stale_allocation_basis", "invalid_value_basis", "invalid_allocation_basis", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
+                              variant={["needs_allocation", "missing_dimensions", "stale_allocation", "stale_allocation_basis", "invalid_value_basis", "invalid_allocation_basis", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
                               className={cost.status === "allocated_with_fallback" ? "border-amber-500 text-amber-700" : undefined}
                             >
                               {ALLOCATION_COST_STATUS_LABELS[cost.status] || cost.status.replace(/_/g, " ")}
@@ -2008,11 +2011,11 @@ export default function InboundShipmentDetail() {
                     <TableRow key={line.id}>
                       <TableCell className="font-mono">{line.sku || "—"}</TableCell>
                       <TableCell className="text-right font-mono">{formatMillsOrDash(line.poUnitCostMills)}</TableCell>
-                      <TableCell className="text-right"><AllocationAmountCell cents={line.freightAllocatedCents} millsPerUnit={line.freightAllocatedMillsPerUnit} /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.freightAllocatedCents} millsPerUnit={line.freightAllocatedMillsPerUnit} pending={line.freightAllocationPending} /></TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.dutyAllocatedCents} millsPerUnit={line.dutyAllocatedMillsPerUnit} /></TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.insuranceAllocatedCents} millsPerUnit={line.insuranceAllocatedMillsPerUnit} /></TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.otherAllocatedCents} millsPerUnit={line.otherAllocatedMillsPerUnit} /></TableCell>
-                      <TableCell className="text-right"><AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} strong /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} pending={line.allocationPending} strong /></TableCell>
                       <TableCell className="text-right font-mono font-medium">{formatMillsOrDash(line.landedUnitCostMills)}</TableCell>
                     </TableRow>
                   ))

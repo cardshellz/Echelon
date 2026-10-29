@@ -8,22 +8,27 @@ const commandTime = new Date("2026-09-06T12:00:00.000Z");
 
 function harness() {
   const state = {
-    shipment: { id: 1, status: "costing", closedAt: null, closedBy: null } as any,
-    lines: [{ id: 11, inboundShipmentId: 1, purchaseOrderId: 1, purchaseOrderLineId: 21, productVariantId: 10, qtyShipped: 5 }] as any[],
+    shipment: { id: 1, status: "costing", closedAt: null, closedBy: null,
+      totalWeightKg: "0.000", totalVolumeCbm: "0.000000", totalPieces: 5, totalCartons: 0 } as any,
+    lines: [{ id: 11, inboundShipmentId: 1, purchaseOrderId: 1, purchaseOrderLineId: 21, productVariantId: 10, qtyShipped: 5,
+      cartonCount: null, dimensionBasis: "piece", totalWeightKg: "0.000", totalVolumeCbm: "0.000000", chargeableWeightKg: "0.000" }] as any[],
     snapshots: [] as any[],
     history: [] as any[],
+    audits: [] as unknown[],
   };
   const events: string[] = [];
   const transactions: any[] = [];
   const db = {
     transaction: vi.fn(async (work: (tx: any) => Promise<unknown>) => {
-      const tx = { execute: vi.fn(async query => {
+      const transactionState = structuredClone(state);
+      const tx = { insert: vi.fn(() => ({ values: vi.fn(async (value: unknown) => { transactionState.audits.push(structuredClone(value)); }) })),
+        execute: vi.fn(async query => {
         const text = new PgDialect().sqlToQuery(query).sql;
         return { rows: text.includes("FROM catalog.product_variants")
           ? [{ id: 10, productId: 100, sku: "TEST-PIECE", name: "Piece", unitsPerVariant: 1, isActive: true }]
           : text.includes("FROM procurement.purchase_order_lines") ? [{ id: 21, purchaseOrderId: 1, productId: 100,
             productVariantId: 10, expectedReceiveVariantId: 10, expectedReceiveUnitsPerVariant: 1, lineType: "product" }] : [{ id: 1 }] };
-      }), state: structuredClone(state) };
+      }), state: transactionState };
       transactions.push(tx);
       try {
         const result = await work(tx);

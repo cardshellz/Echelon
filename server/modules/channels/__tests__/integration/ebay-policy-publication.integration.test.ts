@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+import { ChannelListingValidationError } from "@shared/channel-listing-validation";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Pool } from "pg";
@@ -53,6 +54,7 @@ import { EbayPublicationCompletionExecution } from "../../ebay-publication-compl
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
 import { PgMarketplaceListingRegistrationRepository } from "../../../marketplace-listings/infrastructure/pg-listing-registration.repository";
 import { PostgresQuantityProviderResponseRecovery } from "../../../inventory-planning/infrastructure/quantity-provider-response-recovery.repository";
+import { PostgresEbayPublicationRejectionReader } from "../../../inventory-planning/infrastructure/ebay-publication-rejection.reader";
 import { ensureEbayPublicationReady } from "../../../inventory-planning/infrastructure/ebay-publication-readiness.repository";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -115,7 +117,26 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       productId: 20, purpose: "publish", variants: [{ productVariantId: 101, sku: "P5" }] },
     { commandKey: randomUUID(), actor: "test-stock-setup", now: new Date() });
   }, 60_000);
-  afterEach(async () => { await database?.close(); runtime.pool = null; runtime.provider = null; vi.unstubAllGlobals(); });
+  afterEach(async () => { await database?.close(); runtime.pool = null; runtime.provider = null; vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+  async function publicationOwner(clock: () => Date, prepare = prepareEbayPublicationCompletion) {
+    const source = await readEbayPublicationSource(20);
+    const store = new PostgresEbayListingSyncRepository(database.pool, new PostgresEbayPublicationRejectionReader(database.pool));
+    const registration = new PgMarketplaceListingRegistrationRepository(database.pool);
+    const owner = { kind: "channel" as const, channelId: 67, productId: 20, provider: "ebay" as const, marketplaceId: "EBAY_US" };
+    const execution = new EbayPublicationCompletionExecution(prepare,
+      new PostgresQuantityProviderResponseRecovery(database.pool, clock),
+      new EbayMarketplaceListingConnector({ delay: async () => {}, inventoryDelayMs: 0, offerDelayMs: 0 }),
+      async (_source, inspection, target) => {
+        if (inspection.publication) await registration.assertCompatiblePublication({ owner, observation: inspection.publication,
+          memberCandidates: [{ productVariantId: 101, sku: "P5", isActive: true, availableQuantity: 17 }] });
+        else await registration.assertCompatibleUnpublishedPublication({ owner,
+          providerAccount: { provider: "ebay", accountNamespace: "production", externalAccountId: "seller-36" }, groupKey: target.groupKey,
+          members: target.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku, offerId: member.offerId })) });
+      });
+    const service = new EbayListingSyncService(store, execution, clock, randomUUID);
+    return { source, store, service, execution };
+  }
 
   it.each(["price_cents", "compare_at_price_cents"] as const)("rejects unsafe bigint %s before policy or provider requests", async column => {
     const catalog = new EbayPolicyCatalogHttp(); vi.stubGlobal("fetch", catalog.fetch);
@@ -138,21 +159,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     let timestamp = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now.getTime() + 1_000;
     const clock = () => new Date(timestamp++);
     runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"], grouped ? "group" : "single");
-    const source = await readEbayPublicationSource(20);
-    const store = new PostgresEbayListingSyncRepository(database.pool);
-    const registration = new PgMarketplaceListingRegistrationRepository(database.pool);
-    const owner = { kind: "channel" as const, channelId: 67, productId: 20, provider: "ebay" as const, marketplaceId: "EBAY_US" };
-    const execution = new EbayPublicationCompletionExecution(prepareEbayPublicationCompletion,
-      new PostgresQuantityProviderResponseRecovery(database.pool, clock),
-      new EbayMarketplaceListingConnector({ delay: async () => {}, inventoryDelayMs: 0, offerDelayMs: 0 }),
-      async (_source, inspection, target) => {
-        if (inspection.publication) await registration.assertCompatiblePublication({ owner, observation: inspection.publication,
-          memberCandidates: [{ productVariantId: 101, sku: "P5", isActive: true, availableQuantity: 17 }] });
-        else await registration.assertCompatibleUnpublishedPublication({ owner,
-          providerAccount: { provider: "ebay", accountNamespace: "production", externalAccountId: "seller-36" }, groupKey: target.groupKey,
-          members: target.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku, offerId: member.offerId })) });
-      });
-    const service = new EbayListingSyncService(store, execution, clock, randomUUID);
+    const { source, store, service, execution } = await publicationOwner(clock);
     const job = await service.enqueue(source, "user:policy-reviewer", randomUUID(), "publish");
     await service.processDue(1, job.id);
     const blocked = await store.get(job.id);
@@ -164,32 +171,21 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     await ebayBusinessPolicies.patchPolicies({ target: { kind: "product", productId: 20 }, patch: { fulfillmentPolicyId: null }, actor: "user:policy-reviewer" });
     timestamp += 60_000;
     // The existing Sync command resumes the saved publication after correction.
-    const retried = await service.enqueue(source, "user:policy-reviewer", randomUUID(), "sync");
-    expect(retried.id).toBe(job.id);
-    await service.processDue(1, job.id);
-    if (costType === "CALCULATED") {
-      expect(await store.get(job.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED" });
-      expect((await service.get(job.id)).issue?.action?.href).toBe("/products/20?tab=variants&variantId=101");
-      expect(runtime.provider.writes).toEqual([]);
-      expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_provider_requests")).rows[0].count).toBe(0);
-      // Explicit fixture measurements, never defaults inferred from a SKU.
-      await database.pool.query(`UPDATE catalog.product_variants SET length_mm=254,width_mm=177.8,height_mm=50.8 WHERE id=101`);
-      timestamp += 60_000;
-      expect((await service.enqueue(source, "user:package-reviewer", randomUUID(), "sync")).id).toBe(job.id);
-      await service.processDue(1, job.id);
-    }
+    const command = randomUUID();
+    const retried = await Promise.all([service.enqueue(source, "user:policy-reviewer", command, "sync"),
+      service.enqueue(source, "user:policy-reviewer", command, "sync")]);
+    expect(retried.map(row => row.id)).toEqual([job.id, job.id]);
+    const restarted = new EbayListingSyncService(store, execution, clock, randomUUID);
+    await Promise.all([service.processDue(1, job.id), restarted.processDue(1, job.id)]);
     const completed = await store.get(job.id);
     expect(completed, `${completed.code}: ${completed.message}`).toMatchObject({ state: "completed", code: null, operation: "publish" });
     expect(runtime.provider.snapshot().offer).toMatchObject({ status: "PUBLISHED", listingId: "listing-20", availableQuantity: 17,
       listingPolicies: { fulfillmentPolicyId: "store-shipping", returnPolicyId: "product-returns", paymentPolicyId: "product-payment" } });
-    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 100, unit: "GRAM" },
-      ...(costType === "CALCULATED" ? { dimensions: { length: 25.4, width: 17.78, height: 5.08, unit: "CENTIMETER" } } : {}) });
-    if (costType === "FLAT_RATE") {
-      expect(completed.warnings).toEqual([{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
-        productId: 20, variantId: 101, variantSku: "P5" }]);
-      expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
-        .toEqual({ length_mm: null, width_mm: null, height_mm: null });
-    }
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 100, unit: "GRAM" } });
+    expect(completed.warnings).toEqual([{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
+      productId: 20, variantId: 101, variantSku: "P5" }]);
+    expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+      .toEqual({ length_mm: null, width_mm: null, height_mm: null });
     expect(runtime.provider.snapshot().item.packageWeightAndSize).not.toHaveProperty("packageType");
     const publishPath = grouped ? "/sell/inventory/v1/offer/publish_by_inventory_item_group"
       : `/sell/inventory/v1/offer/${runtime.provider.snapshot().offer.offerId}/publish`;
@@ -201,4 +197,90 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(runtime.provider.snapshot().item.packageWeightAndSize).not.toHaveProperty("packageType");
     expect(runtime.provider.writes.filter(write => write.path === publishPath)).toHaveLength(1);
   }, 30_000);
+  it("normal Sync retries a legacy required-dimensions failure without changing measurements or rewriting its receipt", async () => {
+    const catalog = new EbayPolicyCatalogHttp(); vi.stubGlobal("fetch", catalog.fetch);
+    catalog.catalog.set("fulfillment", { fulfillmentPolicies: providerPolicyCatalog("fulfillment").fulfillmentPolicies.map(policy => ({
+      ...policy, shippingOptions: [{ costType: "CALCULATED" }],
+    })) });
+    await ebayBusinessPolicies.patchPolicies({ target: { kind: "product", productId: 20 }, patch: { fulfillmentPolicyId: null }, actor: "operator" });
+    let timestamp = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now.getTime() + 1_000;
+    const clock = () => new Date(timestamp++);
+    runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"], "group");
+    let historicalFailure = true;
+    const { source, store, service } = await publicationOwner(clock, async (...args) => {
+      // Reproduce the retired preparation refusal as a real saved failed job.
+      // The retry delegates to the current policy reader and publication owner.
+      if (historicalFailure) throw new ChannelListingValidationError({ field: "package_dimensions", reason: "required",
+        productId: 20, variantId: 101, variantSku: "P5" });
+      return prepareEbayPublicationCompletion(...args);
+    });
+    const saved = await service.enqueue(source, "operator", randomUUID(), "publish");
+    await service.processDue(1, saved.id);
+    expect(await store.get(saved.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED" });
+    expect(runtime.provider.writes).toEqual([]);
+    const receipt = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows;
+    expect(receipt).toHaveLength(1);
+    historicalFailure = false; timestamp += 60_000;
+    const resumed = await service.enqueue(source, "operator", randomUUID(), "sync");
+    expect(resumed.id).toBe(saved.id);
+    await service.processDue(1, resumed.id);
+    expect(await store.get(resumed.id)).toMatchObject({ state: "completed", warnings: [{ variantSku: "P5" }] });
+    expect(runtime.provider.snapshot().offer.status).toBe("PUBLISHED");
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 100, unit: "GRAM" } });
+    expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+      .toEqual({ length_mm: null, width_mm: null, height_mm: null });
+    expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(receipt);
+  }, 30_000);
+
+  it.each([
+    { grouped: false, boundary: "item" }, { grouped: true, boundary: "item" },
+    { grouped: false, boundary: "publish" }, { grouped: true, boundary: "publish" },
+  ] as const)("preserves a real dimension refusal at $boundary (grouped=$grouped) and recovers through normal Sync", async ({ grouped, boundary }) => {
+    const catalog = new EbayPolicyCatalogHttp(); vi.stubGlobal("fetch", catalog.fetch);
+    catalog.catalog.set("fulfillment", { fulfillmentPolicies: providerPolicyCatalog("fulfillment").fulfillmentPolicies.map(policy => ({
+      ...policy, shippingOptions: [{ costType: "CALCULATED" }],
+    })) });
+    await ebayBusinessPolicies.patchPolicies({ target: { kind: "product", productId: 20 }, patch: { fulfillmentPolicyId: null }, actor: "operator" });
+    let timestamp = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now.getTime() + 1_000;
+    const clock = () => new Date(timestamp++);
+    runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"], grouped ? "group" : "single");
+    const publishPath = grouped ? "/sell/inventory/v1/offer/publish_by_inventory_item_group" : "/sell/inventory/v1/offer/offer-P5/publish";
+    const refusedPath = boundary === "item" ? "/sell/inventory/v1/inventory_item/P5" : publishPath;
+    const message = "Package dimensions are required by the selected shipping service.";
+    runtime.provider.rejectNextWrite(refusedPath, message);
+    // The route's production admission factory uses Date; keep it on the same
+    // injected clock as the saved job and HTTP receipt when testing cooldowns.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(timestamp);
+    const { source, store, service } = await publicationOwner(clock);
+    const saved = await service.enqueue(source, "operator", randomUUID(), "publish");
+    await service.processDue(1, saved.id);
+    const refused = await store.get(saved.id);
+    const stoppedState = "needs_attention";
+    expect(refused).toMatchObject({ state: stoppedState, code: "EBAY_QUANTITY_REJECTED" });
+    expect(refused.message).toContain(message);
+    expect(refused.publicationAccepted).toBeNull();
+    expect(runtime.provider.snapshot().offer.status).toBe("UNPUBLISHED");
+    const receipt = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event=$2", [saved.id, stoppedState])).rows;
+    expect(receipt).toHaveLength(1);
+    expect(receipt[0].evidence.diagnostic.context.providerWrite).toEqual({ provider: "ebay", kind: "validation", httpStatus: 400, errorCodes: ["25002"] });
+    expect(runtime.provider.writes.filter(write => write.path === refusedPath)).toHaveLength(1);
+    // Only explicitly measured fixture data changes; no per-listing defaults.
+    await database.pool.query("UPDATE catalog.product_variants SET length_mm=152.4,width_mm=101.6,height_mm=25.4 WHERE id=101");
+    // Respect the publication owner's provider-refusal cooldown; do not bypass
+    // its fence just because the optional local dimension warning permits work.
+    timestamp += 20 * 60_000;
+    vi.setSystemTime(timestamp);
+    const resumed = await service.enqueue(source, "operator", randomUUID(), "sync");
+    expect(resumed.id).toBe(saved.id);
+    await service.processDue(1, resumed.id);
+    expect(await store.get(resumed.id)).toMatchObject({ state: "completed", code: null });
+    expect(runtime.provider.snapshot().offer.status).toBe("PUBLISHED");
+    expect(runtime.provider.snapshot().item.packageWeightAndSize?.dimensions).toEqual({ length: 15.24, width: 10.16, height: 2.54, unit: "CENTIMETER" });
+    expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event=$2", [saved.id, stoppedState])).rows).toEqual(receipt);
+    const count = runtime.provider.writes.length;
+    await service.processDue(1, resumed.id);
+    expect(runtime.provider.writes).toHaveLength(count);
+  }, 30_000);
+
 });
