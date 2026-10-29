@@ -122,6 +122,31 @@ function isPaidFinancialStatus(status: string | null | undefined): boolean {
   return PAID_FINANCIAL_STATUSES.has(String(status ?? "").toLowerCase());
 }
 
+/**
+ * A line added to an already-paid order by a Shopify order edit arrives only
+ * via orders/updated: an equal-price swap creates no new payment, so no
+ * orders/paid follows. #64592 (2026-10-21) left such a line 'seen' with zero
+ * authority; nothing ever shipped it and the empty order was later cancelled.
+ *
+ * A readiness refresh may grant FIRST authority only when Shopify reports the
+ * whole order fully paid ("paid", not partially_paid: an edit that raised the
+ * total waits for that payment) and the line has never been paid or given any
+ * disposition. Refunded, cancelled and review lines keep their owning decision.
+ */
+function canGrantFirstAuthorityFromPaidRefresh(input: OmsLineAuthorityInput): boolean {
+  // The edit itself arrives as orders/updated; the shopify/reconcile poll does
+  // not grant first authority, so it never revives historical unpaid lines.
+  if (input.sourceTopic !== "orders/updated") return false;
+  if (String(input.financialStatus ?? "").toLowerCase() !== "paid") return false;
+  const previous = input.previous;
+  if (!previous) return true;
+  return Number(previous.paidQuantity ?? 0) === 0
+    && Number(previous.authorityFulfillableQuantity ?? 0) === 0
+    && Number(previous.cancelledQuantity ?? 0) === 0
+    && Number(previous.refundedQuantity ?? 0) === 0
+    && String(previous.authorizationStatus ?? "seen") === "seen";
+}
+
 export function canSourceTopicAuthorizeOmsLine(sourceTopic: string): boolean {
   return AUTHORIZING_TOPICS.has(sourceTopic);
 }
@@ -218,8 +243,9 @@ export function deriveOmsLineAuthority(
     authoritySourceInboxId: input.sourceInboxId ?? null,
   };
   const eventCanAuthorize =
-    canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
-    isPaidFinancialStatus(input.financialStatus);
+    (canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
+      isPaidFinancialStatus(input.financialStatus))
+    || canGrantFirstAuthorityFromPaidRefresh(input);
   const incomingCurrentQuantity = finiteNonNegativeIntegerOrNull(
     merchandise.channelCurrentQuantity ?? input.currentQuantity,
     "currentQuantity",
