@@ -32,7 +32,7 @@ Unrelated warehouse/delivery/refund observations no longer invalidate a purchase
 | Stable decision revision independent of warehouse/refund observations | `server/modules/returns/application/customer-return-live.service.ts`, `purchasedReturnSource` |
 | Locked purchased capacity and exactly-once authorization | `server/modules/returns/infrastructure/customer-return-authorization.repository.ts`, `lockSource`, `assertCapacity`, `persist` |
 | New inbound work from the RMA | `server/modules/returns/infrastructure/customer-return-intake.repository.ts`, `materializePurchasedReturnCase`; `server/modules/wms/expected-return-commands.ts`, `createExpectedWmsReturn` |
-| Nullable outbound provenance with exact parent/line guards | `migrations/999999998_pending_purchase_return_receiving.sql` |
+| Nullable outbound provenance with exact parent/line guards | `migrations/900000040000019450002_purchase_return_receiving.sql` |
 | Shared measured-weight validation | `shared/returns/customer-return-parcel.ts`, `resolveCustomerReturnParcelWeight`; `server/modules/returns/application/customer-return-box-plan.ts`, `validateCustomerReturnBoxPlan` |
 | Useful saved rejection reasons | `server/modules/returns/application/customer-return-submission.service.ts`, `execute`, `completed`, `definitiveFailureCode`; `shared/returns/customer-return-errors.ts`, `customerReturnRejectionMessage` |
 | Mixed-box receipt owner | `server/modules/returns/application/return-parcel-receiving.service.ts`, `receive`; `server/modules/returns/infrastructure/return-parcel-receiving.repository.ts`, `load`, `save` |
@@ -62,10 +62,10 @@ Validation on the current implementation:
 
 - 31 connected complex PostgreSQL scenarios passed.
 - 138 existing PostgreSQL authorization, inspection, intake and label regressions passed.
-- 1,725 affected unit/contract/HTTP checks passed across the final run and an unchanged 76-case HTTP rerun. One run hit Node fetch's blocked ephemeral-port list before application handling; the unchanged suite passed on rerun.
+- 1,725 affected unit/contract/HTTP checks passed in one final current-main run. Earlier development encountered a Node fetch blocked ephemeral port before application handling; no application assertion was weakened.
 - Ten desktop/mobile browser cases passed; the two measured-weight cases also passed again with packing-form screenshots. Visual inspection confirmed the desktop/mobile form fits its viewport.
 - Both server and client TypeScript checks passed on the final source.
-- Architecture/CI guards: 431 passed; one migration-registration guard remains pending actual draft PR allocation. It has not been bypassed.
+- All 432 architecture/CI guards passed after allocating the migrations to draft PR #1945. No migration guard was bypassed.
 
 Synthetic tests assert that original OMS orders/lines, outbound warehouse orders/items and shipments do not change. Customer acceptance/receiving tests assert no financial or inventory posting. One scenario seeds an existing synthetic physical-return journal row solely to prove correct remaining quantity; the application does not post another row. The stock-owner unit tests separately prove null outbound provenance, unresolved-cost follow-up and no second stock delta on replay.
 
@@ -75,7 +75,7 @@ Actual ownership mismatch, excess/duplicate quantities and configured policy exc
 
 The new receiving records explicitly allow missing original monetary snapshots; admin UI says they are reviewed in Shopify. No automatic refund derives a zero price from absent evidence. No real order, points, payment, refund, inventory balance, return or label command was submitted during validation.
 
-These are local staging tests, not hosted deployment or live acceptance. Three explicitly unallocated `pending_` migrations must receive actual PR-owned identifiers and dependency metadata before hosted CI or release. Publication is authorized; the draft PR supplies the allocation identity. No PR number, hosted CI success, merge or deployment is claimed. Private customer diagnostics and logs under `.codex-artifacts` are excluded from publication.
+These are local staging tests, not hosted deployment or live acceptance. Draft PR #1945 owns three forward-only migrations with explicit dependencies, allocated through the repository tool: historical purchased-line resolution, purchase-based inbound receiving, and parcel receipt evidence. Migration policy validates all 570 migration files against current main. Hosted CI is reported separately against the final published commit; no merge or deployment is included. Private customer diagnostics and logs under `.codex-artifacts` are excluded from publication.
 
 ## Reproduce
 

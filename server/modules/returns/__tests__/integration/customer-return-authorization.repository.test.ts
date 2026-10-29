@@ -73,7 +73,7 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
     // executes verbatim. No persistence SQL or PostgreSQL operation is mocked.
     await pool.query(readFileSync("migrations/0699_customer_return_authorizations.sql", "utf8"));
     await addHistoricalReturnSourceColumns(pool);
-    await pool.query(readFileSync("migrations/999999997_pending_historical_return_sources.sql", "utf8"));
+    await pool.query(readFileSync("migrations/900000039000019450001_historical_return_sources.sql", "utf8"));
     await pool.query("CREATE SCHEMA dropship; CREATE TABLE dropship.dropship_vendors(id integer PRIMARY KEY); CREATE TABLE dropship.dropship_store_connections(id integer PRIMARY KEY)");
     await createIntakeOwnerTables(pool);
     store = new PostgresCustomerReturnAuthorizationStore(drizzle(pool));

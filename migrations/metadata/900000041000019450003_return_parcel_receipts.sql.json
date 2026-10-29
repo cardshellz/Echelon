@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000041000019450003_return_parcel_receipts.sql",
+  "generation": 41,
+  "pr": 1945,
+  "ordinal": 3,
+  "after": [
+    "900000040000019450002_purchase_return_receiving.sql"
+  ]
+}

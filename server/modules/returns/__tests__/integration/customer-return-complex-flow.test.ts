@@ -114,7 +114,7 @@ integration(
       );
       await pool.query(
         readFileSync(
-          "migrations/999999999_pending_return_parcel_receipts.sql",
+          "migrations/900000041000019450003_return_parcel_receipts.sql",
           "utf8",
         ),
       );

@@ -96,7 +96,7 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
   await pool.query(readFileSync("migrations/062_returns.sql", "utf8"));
   await pool.query(readFileSync("migrations/131_refund_line_disposition_authority.sql", "utf8"));
   await pool.query(readFileSync("migrations/0699_customer_return_authorizations.sql", "utf8"));
-  await pool.query(readFileSync("migrations/999999997_pending_historical_return_sources.sql", "utf8"));
+  await pool.query(readFileSync("migrations/900000039000019450001_historical_return_sources.sql", "utf8"));
   await createIntakeOwnerTables(pool);
   // Only the evidence relations read by the mirror predicate are needed here;
   // their definitions are extracted verbatim from the canonical migrations.
@@ -120,7 +120,7 @@ export async function createIntakeOwnerTables(pool: Pool): Promise<void> {
   await pool.query(readFileSync("migrations/0613_return_cases.sql", "utf8"));
   await pool.query(table("migrations/207_return_case_financial_actions.sql", "CREATE TABLE returns.return_case_customer_refunds ("));
   await pool.query(readFileSync("migrations/250_customer_return_private_intake.sql", "utf8"));
-  await pool.query(readFileSync("migrations/999999998_pending_purchase_return_receiving.sql", "utf8"));
+  await pool.query(readFileSync("migrations/900000040000019450002_purchase_return_receiving.sql", "utf8"));
 }
 
 export async function seedInspectionTestSchema(pool: Pool): Promise<void> {
