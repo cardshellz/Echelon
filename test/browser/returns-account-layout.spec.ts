@@ -5,10 +5,14 @@ import { CustomerReturnPreviewService } from "../../server/modules/returns/appli
 import { validateCustomerReturnBoxPlan } from "../../server/modules/returns/application/customer-return-box-plan";
 import type { CustomerAccountRequest } from "../../shared/customer-account/customer-account.contract";
 import { customerReturnFlowReviewInputSchema } from "../../shared/returns/customer-return-flow.contract";
+import { customerReturnSavedRequestSchema } from "../../client/src/lib/customer-return-customer";
 
 // Exercise the actual shipped IIFE and scoped stylesheet, not a component with
 // the staff app's global CSS. All transport is fictional and intercepted.
-async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?: boolean; holdReview?: Promise<void>; originalBox?: boolean; openReturn?: boolean; invalidateAfterFirstLookup?: boolean } = {}) {
+async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?: boolean; holdReview?: Promise<void>; originalBox?: boolean; openReturn?: boolean; invalidateAfterFirstLookup?: boolean;
+  actionState?: "refreshing" | "failed"; failReturnLookup?: boolean; holdReturnLookup?: Promise<void>; returnLookupOrderId?: number; noReturnQuantity?: boolean;
+  savedRequestOutcome?: "rejected" | "unknown";
+} = {}) {
   const service = new CustomerReturnPreviewService();
   const { mode: _mode, scenarioId: _scenario, ...fields } = service.lookup({ scenarioId: "split_delivered", orderReference: "TEST-1001" });
   const order = { ...fields, sourceRevision: "a".repeat(64), lines: [
@@ -17,15 +21,25 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     { ...fields.lines[1], id: "membership", title: "Shellz Wholesale Club - Annual Membership", sku: "CLUB-ANNUAL", purchasedQuantity: 1, deliveredQuantity: 0, eligibleQuantity: 0, message: "This item does not require a return shipment." },
   ], boxOptions: options.originalBox ? [{ id: `box-${"b".repeat(64)}`, dimensions: { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 },
     items: [{ lineId: fields.lines[0].id, quantity: fields.lines[0].eligibleQuantity }] }] : fields.boxOptions };
-  const detail = { omsOrderId: 10, order, settingsVersion: 2 };
+  const detail = { omsOrderId: options.returnLookupOrderId ?? 10,
+    order: options.noReturnQuantity ? { ...order, lines: order.lines.map(line => ({ ...line, eligibleQuantity: 0,
+      message: "The 365-day return window has ended." })) } : order, settingsVersion: 2 };
   const actionOrder = { connectionId: 4, omsOrderId: 10, orderNumber: "#TEST-1001", customerName: "Synthetic customer", customerEmail: null,
     activeOperationId: null, revision: "fixture", currency: "USD", eligibility: { editable: false, reasons: ["Picking or fulfillment has already started."] },
     lines: [], totalCents: 741, financialStatus: "Paid", warehouseStatus: "shipped", fulfillment: { code: "shipped", label: "Shipped" } };
   const status = { authorizationId: 20, authorizationNumber: "RMA-20", canProgress: false,
     parcels: [{ parcelId: 30, number: 1, status: "ready", trackingNumber: "FIXTURE-TRACK", downloadPath: "/api/returns/customer/returns/20/parcels/30/download" }] };
+  if (options.savedRequestOutcome) {
+    const saved = customerReturnSavedRequestSchema.parse({ version: 1, sessionKey: "a".repeat(43), omsOrderId: 10,
+      authorizationId: null, input: { idempotencyKey: "20000000-0000-4000-8000-000000000001", sourceRevision: "b".repeat(64),
+        settingsVersion: 2, selections: [{ lineId: fields.lines[0].id, quantity: 1, reasonCode: null }],
+        parcels: [{ dimensions: { lengthMm: 254, widthMm: 203.2, heightMm: 152.4 }, originalBoxId: null,
+          items: [{ lineId: fields.lines[0].id, quantity: 1 }] }] } });
+    await page.addInitScript(record => sessionStorage.setItem(`customer-return-request:${record.sessionKey}`, JSON.stringify(record)), saved);
+  }
   const calls: CustomerAccountRequest[] = [];
   const errors: string[] = [];
-  let reviewFailed = false, submitCount = 0, actionReads = 0;
+  let reviewFailed = false, returnLookupFailed = false, submitCount = 0, actionReads = 0;
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/return-layout-assets/*", async (route) => {
@@ -46,16 +60,23 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     } });
     if (input.path === "/account/order-actions") {
       actionReads++;
-      const ready = !options.invalidateAfterFirstLookup || actionReads===1;
+      const ready = !options.actionState && (!options.invalidateAfterFirstLookup || actionReads===1);
       return route.fulfill({ json: { orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10,
-        state: ready ? "ready" : "refreshing", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
+        state: ready ? "ready" : options.actionState ?? "refreshing", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
         snapshot: ready ? { order: actionOrder, returnOrder: detail, orderFailed: false, returnFailed: false } : null }] } });
     }
     if (input.path === "/order-edits/orders/10") return route.fulfill({ json: {
       connectionId: 4, omsOrderId: 10, orderNumber: "#TEST-1001", customerName: "Synthetic customer", customerEmail: null, activeOperationId: null, revision: "fixture", currency: "USD",
       eligibility: { editable: false, reasons: ["Picking or fulfillment has already started."] }, lines: [], totalCents: 741, financialStatus: "Paid", warehouseStatus: "shipped", fulfillment: { code: "shipped", label: "Shipped" },
     } });
-    if (input.path === "/returns/orders/10") return route.fulfill({ json: detail });
+    if (input.path === "/returns/orders/10") {
+      if (options.holdReturnLookup) await options.holdReturnLookup;
+      if (options.failReturnLookup && !returnLookupFailed) {
+        returnLookupFailed = true;
+        return route.fulfill({ status: 503, json: { error: { code: "FIXTURE_RETURN_LOOKUP_FAILED" } } });
+      }
+      return route.fulfill({ json: detail });
+    }
     if (input.path === "/returns/returns") return route.fulfill({ json: { returns: [], nextBeforeAuthorizationId: null } });
     if (input.path === "/returns/orders/10/review") {
       if (options.holdReview) await options.holdReview;
@@ -71,7 +92,13 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       if (options.lostSubmit && submitCount === 1) return route.abort("failed");
       return route.fulfill({ json: status });
     }
-    if (input.path.startsWith("/returns/commands/")) return route.fulfill({ json: status });
+    if (input.path.startsWith("/returns/commands/")) {
+      if (options.savedRequestOutcome) return route.fulfill({ status: options.savedRequestOutcome === "rejected" ? 409 : 503,
+        json: { error: options.savedRequestOutcome === "rejected"
+          ? { code: "RETURN_LABEL_SUBMISSION_REJECTED", reasonCode: "RETURN_LABEL_ALLOCATION_UNVERIFIED" }
+          : { code: "FIXTURE_COMMAND_STATUS_UNAVAILABLE" } } });
+      return route.fulfill({ json: status });
+    }
     return route.fulfill({ status: 500, json: { error: { code: "UNEXPECTED_FIXTURE_ROUTE", message: input.path } } });
   });
   await page.route("**/__return-account-layout", (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -146,16 +173,96 @@ test("an already-loaded order panel opens with its return action without workflo
   expect(f.calls.filter(call => call.path.startsWith("/order-edits/") || /^\/returns\/orders\//.test(call.path))).toEqual([]);
 });
 
-test("a visible account observes local invalidation while the panel is closed without provider inspection", async ({ page }) => {
+test("local invalidation keeps return navigation available without inspecting providers on panel open", async ({ page }) => {
   await page.clock.install({ time: new Date() });
   const f = await fixture(page, { openReturn: false, invalidateAfterFirstLookup: true });
   await page.getByRole("button", { name: "Close order options" }).click();
   await page.clock.fastForward(30_000);
   await expect.poll(f.actionReads).toBe(2);
   await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
-  await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeDisabled();
-  await expect(page.getByText("Order options are being refreshed. Your order has not changed.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled({ timeout: 250 });
+  await expect(page.getByText("Order options are being refreshed. Your order has not changed.", { exact: true })).toHaveCount(0);
   expect(f.calls.filter(call => call.path.startsWith("/order-edits/") || /^\/returns\/orders\//.test(call.path))).toEqual([]);
+  await page.getByRole("button", { name: "Return items", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
+  expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(1);
+  expect(f.submitCount()).toBe(0);
+  expect(f.errors).toEqual([]);
+});
+
+for (const actionState of ["refreshing", "failed"] as const) {
+  test(`${actionState} options open the return flow immediately and a failed lookup can retry`, async ({ page }, info) => {
+    let release!: () => void;
+    const holdReturnLookup = new Promise<void>(resolve => { release = resolve; });
+    const f = await fixture(page, { openReturn: false, actionState, failReturnLookup: true, holdReturnLookup });
+    expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(0);
+    await page.getByRole("button", { name: "Return items", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Return items", exact: true })).toBeVisible({ timeout: 250 });
+    await expect(page.getByText("Loading return items…", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Try again", exact: true })).toHaveCount(0);
+    release();
+    await expect(page.getByRole("alert")).toBeVisible();
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
+    await page.screenshot({ path: info.outputPath(`return-cache-${actionState}-recovered.png`), fullPage: true });
+    await pack(page);
+    await page.getByRole("button", { name: "Review return", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
+    expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(2);
+    expect(f.calls.filter(call => call.path.endsWith("/review"))).toHaveLength(1);
+    expect(f.submitCount()).toBe(0);
+    expect(f.calls.some(call => call.commandKey)).toBe(false);
+    expect(f.errors).toEqual([]);
+  });
+}
+
+test("a fresh return lookup still enforces policy exclusions during a cache refresh", async ({ page }) => {
+  const f = await fixture(page, { actionState: "refreshing", noReturnQuantity: true });
+  await expect(page.getByRole("spinbutton", { name: /^Return quantity for item 1:/ })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Continue to packing", exact: true })).toBeDisabled();
+  await expect(page.getByTestId("preview-line-sample-line-1").getByText("The 365-day return window has ended.", { exact: true })).toBeVisible();
+  expect(f.submitCount()).toBe(0);
+  expect(f.calls.some(call => call.path.endsWith("/review"))).toBe(false);
+  expect(f.errors).toEqual([]);
+});
+
+test("a mismatched fresh return response cannot expose another order's items", async ({ page }) => {
+  const f = await fixture(page, { openReturn: false, actionState: "refreshing", returnLookupOrderId: 11 });
+  await page.getByRole("button", { name: "Return items", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Choose it again");
+  await expect(page.getByRole("heading", { name: "What would you like to return?" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeEnabled();
+  expect(f.submitCount()).toBe(0);
+  expect(f.errors).toEqual([]);
+});
+
+test("an old definitively rejected request can be left and restarted while cached options remain refreshing", async ({ page }) => {
+  const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "rejected" });
+  await page.getByRole("button", { name: "Return items", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Return not accepted", exact: true })).toBeVisible();
+  expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(0);
+  await page.getByRole("button", { name: "Back to your orders", exact: true }).click();
+  expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).toBeNull();
+  await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
+  await page.getByRole("button", { name: "Return items", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
+  await pack(page);
+  await page.getByRole("button", { name: "Review return", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
+  expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(1);
+  expect(f.submitCount()).toBe(0);
+  expect(f.errors).toEqual([]);
+});
+
+test("an unknown prior request remains recoverable and cannot be discarded to bypass its outcome", async ({ page }) => {
+  const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "unknown" });
+  await page.getByRole("button", { name: "Return items", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Checking your return", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry saved request", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Back to your orders", exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).not.toBeNull();
+  expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(0);
+  expect(f.submitCount()).toBe(0);
   expect(f.errors).toEqual([]);
 });
 

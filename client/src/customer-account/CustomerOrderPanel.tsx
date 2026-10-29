@@ -16,6 +16,7 @@ export interface CustomerOrderPanelState {
   order: OrderEditOrder | null;
   omsOrderId: number | null;
   returnOrder: CustomerReturnCustomerOrder | null;
+  returnLookupAvailable: boolean;
 }
 export const loadingOrderPanelState: CustomerOrderPanelState = {
   loading: true,
@@ -23,6 +24,7 @@ export const loadingOrderPanelState: CustomerOrderPanelState = {
   order: null,
   omsOrderId: null,
   returnOrder: null,
+  returnLookupAvailable: false,
 };
 type ReturnHistory = Awaited<
   ReturnType<ReturnType<CustomerAccountTransport["returns"]>["history"]>
@@ -56,6 +58,7 @@ export function CustomerOrderPanel({
   onRetry,
   onEdit,
   onReturn,
+  onStartReturn,
   onLabel,
   summary,
   onChanged,
@@ -76,6 +79,7 @@ export function CustomerOrderPanel({
   onRetry(): void;
   onEdit(omsOrderId: number): void;
   onReturn(order: CustomerReturnCustomerOrder): void;
+  onStartReturn(omsOrderId: number): void;
   onLabel(authorizationId: number, omsOrderId: number): Promise<boolean>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -303,7 +307,7 @@ export function CustomerOrderPanel({
                 )}
               </div>
             )}
-            {!accessNotice && state.loading && (
+            {!accessNotice && state.loading && showChangeActions && (
               <p role="status">Order options are being refreshed. Your order has not changed.</p>
             )}
             {!accessNotice && state.error && (
@@ -423,7 +427,7 @@ export function CustomerOrderPanel({
             {restriction && (
               <p className="csz-panel-explanation">{restriction}</p>
             )}
-            {(trackUrl || state.returnOrder || returns.length > 0) && (
+            {(trackUrl || state.returnOrder || state.returnLookupAvailable || returns.length > 0) && (
               <h3 className="csz-panel-group">Delivery and returns</h3>
             )}
             {trackUrl && (
@@ -435,9 +439,8 @@ export function CustomerOrderPanel({
             {state.returnOrder?.order.lines.some(
               (line) => line.eligibleQuantity > 0,
             ) && option("Return items", () => onReturn(state.returnOrder!))}
-            {state.loading && ["fulfilled", "partial"].includes(row.dataset.fulfillment ?? "") && row.dataset.cancelled !== "true" && (
-              <button type="button" className="csz-panel-option" disabled>Return items</button>
-            )}
+            {!state.returnOrder && state.returnLookupAvailable && state.omsOrderId !== null
+              && option("Return items", () => onStartReturn(state.omsOrderId!))}
             {returns.map((item) => (
               <button
                 type="button"

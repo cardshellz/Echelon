@@ -136,11 +136,11 @@ function AccountModal({
                 }}
               />
             ) : (
-              (choice.returnOrder || choice.returnStatus) && (
                 <CustomerWorkspace
                   embedded
                   onBusy={setBusy}
                   initialOrder={choice.returnOrder}
+                  initialOrderId={choice.kind === "return" ? choice.omsOrderId : undefined}
                   initialStatus={choice.returnStatus}
                   sessionKey={session.session.sessionKey!}
                   transport={returnApi.current}
@@ -148,7 +148,6 @@ function AccountModal({
                   onDenied={setError}
                   onSignedOut={onClose}
                 />
-              )
             )}
           </DialogPortalContainerContext.Provider>
         </div>
@@ -520,6 +519,10 @@ function CustomerAccount({
               omsOrderId: returnOrder.omsOrderId,
               returnOrder,
             });
+          }}
+          onStartReturn={(omsOrderId) => {
+            setManaged(null);
+            setChoice({ kind: "return", omsOrderId });
           }}
           onLabel={showReturn}
         />
