@@ -18,6 +18,7 @@ import { ShipmentPurchaseOrderLinks } from "@/features/purchasing/ShipmentPurcha
 import { ShipmentCostUpdateAction } from "@/features/purchasing/ShipmentCostUpdateAction";
 import { ShipmentCostApplicationReview } from "@/features/purchasing/ShipmentCostApplicationReview";
 import { useShipmentCostReview } from "@/features/purchasing/use-shipment-cost-review";
+import { ShipmentMeasurementCorrection } from "@/features/purchasing/ShipmentMeasurementCorrection";
 import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
 import { shipmentCostWorkflowError } from "@/lib/shipment-cost-workflow";
 import { Decimal } from "decimal.js";
@@ -375,6 +376,7 @@ export default function InboundShipmentDetail() {
   // Dialog states
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [showCancelDialog, setShowCancelDialog] = useState(false);
+  const [showMeasurementCorrection, setShowMeasurementCorrection] = useState(false);
 
 
   const [showAddCostDialog, setShowAddCostDialog] = useState(false);
@@ -383,6 +385,7 @@ export default function InboundShipmentDetail() {
   const [cancelError, setCancelError] = useState<string | null>(null);
   useEffect(() => {
     setShowCancelDialog(false);
+    setShowMeasurementCorrection(false);
     setCancelReason("");
     setCancelError(null);
   }, [shipmentId]);
@@ -779,16 +782,18 @@ export default function InboundShipmentDetail() {
 
   function createTransitionMutation(endpoint: string) {
     return useMutation({
+      onMutate: () => captureNavigation(),
       mutationFn: async (body: any = {}) => {
-        if (endpoint === "book" || endpoint === "in-transit") return financialCommandFetchJson(`/api/inbound-shipments/${shipmentId}/${endpoint}`,
+        if (endpoint === "book" || endpoint === "in-transit" || endpoint === "close") return financialCommandFetchJson(`/api/inbound-shipments/${shipmentId}/${endpoint}`,
           { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/${endpoint}`, body || undefined);
         return res.json();
       },
-      onSuccess: (result: { costApplication?: LandedCostPushResult | { status: "retry_required"; code: string } }) => {
+      onSuccess: (result: { costApplication?: LandedCostPushResult | { status: "retry_required"; code: string } }, _body, context) => {
         queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
         queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
         invalidatePoViews();
+        if (!context?.isCurrent()) return;
         const costResult = result.costApplication;
         if (costResult) {
           void queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/cost-review`] });
@@ -804,8 +809,13 @@ export default function InboundShipmentDetail() {
         }
         toast({ title: "Success", description: `Shipment ${endpoint.replace(/-/g, " ")} completed` });
       },
-      onError: (err: Error) => {
+      onError: (err: Error, _body, context) => {
+        if (!context?.isCurrent()) return;
         if (endpoint === "book" || endpoint === "in-transit") void receivingSetup.refetch();
+        if (endpoint === "close" && err instanceof FinancialCommandRequestError && err.code === "MISSING_ALLOCATION_DIMENSIONS") {
+          setActiveTab("allocation"); setShowMeasurementCorrection(true);
+          return;
+        }
         toast({ title: "Error", description: err.message, variant: "destructive" });
       },
     });
@@ -1338,7 +1348,7 @@ export default function InboundShipmentDetail() {
 
           {shipment.status === "costing" && (
             <Button
-              onClick={() => closeMutation.mutate({}, { onError: (e: any) => { if (/dimension/i.test(e?.message || "")) lineActions.openDimensions(); } })}
+              onClick={() => closeMutation.mutate({})}
               disabled={closeMutation.isPending}
               className="flex-1 sm:flex-none min-h-[44px]"
             >
@@ -1436,17 +1446,18 @@ export default function InboundShipmentDetail() {
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-red-600" />
                   <div className="flex-1 min-w-0">
-                    <div className="font-medium text-red-800">Missing dimensions — this shipment can't be closed</div>
+                    <div className="font-medium text-red-800">{shipment.status === "closed" ? "Saved measurements need a cost update" : "Measurements are needed before shipment costs can be finalized"}</div>
                     <ul className="mt-1 list-disc pl-4 text-red-700 space-y-0.5">
                       {dimIssues.map((issue, i) => (
                         <li key={i}>{issue.message}</li>
                       ))}
                     </ul>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <Button size="sm" className="bg-red-600 hover:bg-red-700" onClick={lineActions.openDimensions} disabled={!isEditable || lineActions.busy}>
-                        Enter dimensions
+                      <Button size="sm" className="bg-red-600 hover:bg-red-700" onClick={() => ["costing", "closed"].includes(shipment.status) ? setShowMeasurementCorrection(true) : lineActions.openDimensions()}
+                        disabled={["costing", "closed"].includes(shipment.status) ? false : !isEditable || lineActions.busy}>
+                        {["costing", "closed"].includes(shipment.status) ? "Correct measurements and costs" : "Enter dimensions"}
                       </Button>
-                      <Button
+                      {!["costing", "closed"].includes(shipment.status) && <Button
                         size="sm"
                         variant="outline"
                         className="border-red-300"
@@ -1455,7 +1466,7 @@ export default function InboundShipmentDetail() {
                       >
                         <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${lineActions.busy ? "animate-spin" : ""}`} />
                         Resolve from product data
-                      </Button>
+                      </Button>}
                     </div>
                   </div>
                 </div>
@@ -1921,16 +1932,20 @@ export default function InboundShipmentDetail() {
                     ))}
                   </div>
                 )}
+                {["costing", "closed"].includes(shipment.status) && <div className="space-y-2">
+                  <Button variant="outline" className="min-h-[44px]" onClick={() => setShowMeasurementCorrection(true)}>Measurements and approvals</Button>
+                  <p className="text-xs text-muted-foreground">Correct saved box dimensions or weights here, then approve their cost impact. Existing receiving history stays unchanged.</p>
+                </div>}
                 {["costing", "closed"].includes(shipment.status) ? costsPosted ? <div className="space-y-2 rounded-md bg-green-50 p-3 dark:bg-green-950/30">
                   <p className="text-sm font-medium text-green-800 dark:text-green-300">Costs posted. No update or approval is needed for the saved charges.</p>
                   <details className="text-sm">
                     <summary className="cursor-pointer">Reapply costs (optional)</summary>
                     <p className="my-2 text-muted-foreground">Use this only to refresh costs after a change. The recorded postings remain in the audit.</p>
-                    <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} />
+                    <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} onMeasurementsNeeded={() => setShowMeasurementCorrection(true)} />
                   </details>
                 </div> : <div className="space-y-2 rounded-md bg-muted/40 p-3">
                   <p className="text-sm">Update shipment costs recalculates this split and updates stock and sold-order costs. {shipment.status === "closed" && "This shipment stays closed; cost adjustments are recorded automatically."}</p>
-                  <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} disabled={allocationStatusError || lines.length === 0} />
+                  <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} disabled={allocationStatusError || lines.length === 0} onMeasurementsNeeded={() => setShowMeasurementCorrection(true)} />
                 </div> : shipment.status !== "cancelled" && <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">The charge split updates when charges change. Stock and sold-order costs are updated when the shipment closes.</p>
                   {hasPermission("purchasing", "edit") && <Button variant="outline" className="min-h-[44px]" disabled={runAllocationMutation.isPending || lines.length === 0 || allocationStatusError} onClick={() => runAllocationMutation.mutate()}>
@@ -2109,6 +2124,7 @@ export default function InboundShipmentDetail() {
         {/* ══ Tab 5: Timeline ══ */}
         <TabsContent value="timeline" className="space-y-4">
           <ShipmentHistoryCorrection shipmentId={shipment.id} buttonLabel="View history corrections and approvals" />
+          {["costing", "closed"].includes(shipment.status) && <Button variant="outline" onClick={() => setShowMeasurementCorrection(true)}>View measurement changes and approvals</Button>}
           {statusHistory.length === 0 ? (
             <Card>
               <CardContent className="p-4 text-center text-muted-foreground">
@@ -2802,6 +2818,8 @@ export default function InboundShipmentDetail() {
       </Dialog>
 
       {lineActions.dialogs}
+      {["costing", "closed"].includes(shipment.status) && <ShipmentMeasurementCorrection key={`measurements-${shipment.id}`} shipmentId={shipment.id}
+        hideTrigger open={showMeasurementCorrection} onOpenChange={setShowMeasurementCorrection} />}
       <ShipmentReceiptPackResolutionDialog
         open={!!shipmentReceiptPackResolution}
         onOpenChange={(open) => {

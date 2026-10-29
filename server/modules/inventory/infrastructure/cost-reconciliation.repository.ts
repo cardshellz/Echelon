@@ -1,7 +1,7 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import type { CostIssue, CostSourceRevision } from "@shared/procurement/cost-source-contracts";
+import { costIssueSchema, costSourceRevisionSchema, type CostIssue, type CostSourceRevision } from "@shared/procurement/cost-source-contracts";
 import {
   reconciliationDestinationSchema,
   reconciliationHistorySchema,
@@ -48,7 +48,10 @@ export async function readReconciliationLedger(
     FROM inventory.cost_reconciliation_approvals WHERE ${scopePredicate(lineId)} ORDER BY id DESC LIMIT 1`);
   const postings = await tx.execute(sql`SELECT DISTINCT ON(destination) id,destination,after_mills
     FROM inventory.cost_reconciliation_postings WHERE ${scopePredicate(lineId)} ORDER BY destination,id DESC`);
-  const row = approvals.rows[0];
+  return projectReconciliationLedger(approvals.rows[0], postings.rows);
+}
+
+function projectReconciliationLedger(row: Record<string, unknown> | undefined, postings: Record<string, unknown>[]): ReconciliationLedger {
   const approval = row
     ? approvalSchema.parse({
         id: costInteger(row.id, "approvalId", 1),
@@ -60,7 +63,7 @@ export async function readReconciliationLedger(
     : null;
   const balances: ReconciliationBalance = { historical_cogs: 0, inventory_variance: 0 };
   const lastIds: ReconciliationLedger["lastIds"] = {};
-  for (const posting of postings.rows) {
+  for (const posting of postings) {
     const destination = reconciliationDestinationSchema.parse(posting.destination);
     balances[destination] = costInteger(posting.after_mills, "reconciliationBalance");
     lastIds[destination] = costInteger(posting.id, "postingId", 1);
@@ -75,8 +78,27 @@ export async function readReconciliationRecords(
 ) {
   const ids = issues.flatMap((issue) => (issue.unresolvedQuantity ? [issue.unresolvedQuantity.inventoryLotId] : []));
   const missingOrigin = issues.some((issue) => issue.code === "COST_HISTORICAL_LINEAGE_MISSING");
-  const rows =
-    await tx.execute(sql`SELECT lot.id,lot.lot_number,lot.qty_received,lot.qty_on_hand,lot.receiving_order_id,
+  const rows = await tx.execute(reconciliationRecordsQuery({
+    missingOrigin, purchaseOrderLineId: source.scope.purchaseOrderLineId,
+    purchaseOrderScoped: source.scope.kind === "purchase_order_line",
+    shipmentId: source.scope.kind === "shipment_line" ? source.scope.inboundShipmentId : null,
+    lotIdsJson: JSON.stringify(ids),
+  }));
+  return projectReconciliationRecords(rows.rows, issues, missingOrigin);
+}
+
+interface ReconciliationRecordReadScope {
+  missingOrigin: boolean | SQL;
+  purchaseOrderLineId: number | SQL;
+  purchaseOrderScoped: boolean | SQL;
+  shipmentId: number | null | SQL;
+  lotIdsJson: string | SQL;
+}
+
+// Both direct command reads and batched read projections use this exact lot
+// predicate, receipt identity and per-scope limit. Never cap the combined page.
+function reconciliationRecordsQuery(scope: ReconciliationRecordReadScope): SQL {
+  return sql`SELECT lot.id,lot.lot_number,lot.qty_received,lot.qty_on_hand,lot.receiving_order_id,
       (SELECT CASE WHEN COUNT(*)=1 THEN MIN(line.id) END FROM procurement.receiving_lines line WHERE line.receiving_order_id=lot.receiving_order_id
         AND line.purchase_order_line_id=lot.po_line_id AND line.product_variant_id=lot.product_variant_id) AS receipt_line_id,
       EXISTS(SELECT 1 FROM oms.order_item_costs c WHERE c.inventory_lot_id=lot.id) AS has_cogs,
@@ -85,13 +107,16 @@ export async function readReconciliationRecords(
       EXISTS(SELECT 1 FROM inventory.lot_cost_contributions c WHERE c.source_lot_id=lot.id OR c.output_lot_id=lot.id) AS has_contribution,
       COALESCE(lot.landed_total_cost_mills,lot.landed_cost_mills::bigint*lot.qty_received) AS existing_landed_mills
     FROM inventory.inventory_lots lot WHERE
-      (${missingOrigin} AND lot.po_line_id=${source.scope.purchaseOrderLineId}
-        AND (${source.scope.kind === "purchase_order_line"} OR lot.inbound_shipment_id=${source.scope.kind === "shipment_line" ? source.scope.inboundShipmentId : null})
+      (${scope.missingOrigin} AND lot.po_line_id=${scope.purchaseOrderLineId}
+        AND (${scope.purchaseOrderScoped} OR lot.inbound_shipment_id=${scope.shipmentId})
         AND NOT EXISTS(SELECT 1 FROM inventory.lot_cost_origins o WHERE o.inventory_lot_id=lot.id))
-      OR lot.id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)) ORDER BY lot.id LIMIT 1001`);
-  if (rows.rows.length > 1000)
+      OR lot.id IN (SELECT value::integer FROM jsonb_array_elements_text(${scope.lotIdsJson}::jsonb)) ORDER BY lot.id LIMIT 1001`;
+}
+
+function projectReconciliationRecords(rows: Record<string, unknown>[], issues: CostIssue[], missingOrigin: boolean) {
+  if (rows.length > 1000)
     throw new CostEvidenceError("COST_RECONCILIATION_LIMIT", "This history needs a bounded reconciliation.");
-  return rows.rows.map((row) => ({
+  return rows.map((row) => ({
     record: reconciliationRecordSchema.parse({
       lotId: costInteger(row.id, "lotId", 1),
       lotNumber: row.lot_number,
@@ -114,6 +139,85 @@ export async function readReconciliationRecords(
     hasPhysicalCommitments: row.has_physical_commitments === true,
     existingLandedMills: costInteger(row.existing_landed_mills ?? 0, "existingLandedMills"),
   }));
+}
+
+export interface ShipmentReconciliationReadRequest {
+  source: CostSourceRevision;
+  issues: CostIssue[];
+}
+interface ShipmentReconciliationEvidence {
+  ledger: ReconciliationLedger;
+  records: ReturnType<typeof projectReconciliationRecords>;
+}
+// One bounded page can carry at most 100 * 1,001 lot rows. Release its complete
+// evidence after projection; retain no graph across pages or requests.
+const RECONCILIATION_READ_PAGE_SIZE = 100;
+
+/** Read projections only. Approval/posting commands retain their existing
+ * scalar reader, graph lock and transaction. The caller owns the snapshot. */
+export async function visitShipmentReconciliationEvidence(
+  tx: CostEvidenceTransaction,
+  requests: readonly ShipmentReconciliationReadRequest[],
+  project: (lineId: number, evidence: ShipmentReconciliationEvidence) => void,
+): Promise<void> {
+  const scopes = requests.map(request => {
+    const source = costSourceRevisionSchema.parse(request.source);
+    const issues = z.array(costIssueSchema).parse(request.issues);
+    if (source.scope.kind !== "shipment_line" || source.component !== "landed") {
+      throw new CostEvidenceError("COST_RECONCILIATION_SCOPE", "Expected shipment-line landed cost evidence.");
+    }
+    return { lineId: source.scope.inboundShipmentLineId, purchaseOrderLineId: source.scope.purchaseOrderLineId,
+      shipmentId: source.scope.inboundShipmentId, issues,
+      missingOrigin: issues.some(issue => issue.code === "COST_HISTORICAL_LINEAGE_MISSING"),
+      lotIds: issues.flatMap(issue => issue.unresolvedQuantity ? [issue.unresolvedQuantity.inventoryLotId] : []) };
+  });
+  if (new Set(scopes.map(scope => scope.lineId)).size !== scopes.length) {
+    throw new CostEvidenceError("COST_RECONCILIATION_SCOPE", "Duplicate shipment-line reconciliation scopes.");
+  }
+  for (let offset = 0; offset < scopes.length; offset += RECONCILIATION_READ_PAGE_SIZE) {
+    const page = scopes.slice(offset, offset + RECONCILIATION_READ_PAGE_SIZE);
+    const ids = page.map(scope => scope.lineId);
+    const approvals = await tx.execute(sql`SELECT DISTINCT ON(inbound_shipment_line_id)
+      inbound_shipment_line_id AS scope_line_id,id,destination,evidence_fingerprint,actor_name,reason
+      FROM inventory.cost_reconciliation_approvals
+      WHERE inbound_shipment_line_id=ANY(${sql.param(ids)}::int[]) ORDER BY inbound_shipment_line_id,id DESC`);
+    const postings = await tx.execute(sql`SELECT DISTINCT ON(inbound_shipment_line_id,destination)
+      inbound_shipment_line_id AS scope_line_id,id,destination,after_mills
+      FROM inventory.cost_reconciliation_postings WHERE inbound_shipment_line_id=ANY(${sql.param(ids)}::int[])
+      ORDER BY inbound_shipment_line_id,destination,id DESC`);
+    const encoded = page.map(scope => ({ line_id: scope.lineId,po_line_id: scope.purchaseOrderLineId,
+      shipment_id: scope.shipmentId,missing_origin: scope.missingOrigin,lot_ids: scope.lotIds }));
+    const records = await tx.execute(sql`SELECT scope.line_id AS scope_line_id,record.*
+      FROM jsonb_to_recordset(${JSON.stringify(encoded)}::jsonb)
+        AS scope(line_id integer,po_line_id integer,shipment_id integer,missing_origin boolean,lot_ids jsonb)
+      CROSS JOIN LATERAL (${reconciliationRecordsQuery({ missingOrigin: sql`scope.missing_origin`,
+        purchaseOrderLineId: sql`scope.po_line_id`, purchaseOrderScoped: false,
+        shipmentId: sql`scope.shipment_id`, lotIdsJson: sql`scope.lot_ids` })}) record
+      ORDER BY scope.line_id,record.id`);
+    const approvalRows = groupReconciliationRows(approvals.rows, ids);
+    const postingRows = groupReconciliationRows(postings.rows, ids);
+    const recordRows = groupReconciliationRows(records.rows, ids);
+    for (const scope of page) {
+      const approved = approvalRows.get(scope.lineId) ?? [];
+      const posted = postingRows.get(scope.lineId) ?? [];
+      if (approved.length > 1 || new Set(posted.map(row => row.destination)).size !== posted.length) {
+        throw new CostEvidenceError("COST_RECONCILIATION_SCOPE", "Contradictory current reconciliation evidence.");
+      }
+      project(scope.lineId, { ledger: projectReconciliationLedger(approved[0], posted),
+        records: projectReconciliationRecords(recordRows.get(scope.lineId) ?? [], scope.issues, scope.missingOrigin) });
+    }
+  }
+}
+
+function groupReconciliationRows(rows: Record<string, unknown>[], lineIds: readonly number[]) {
+  const allowed = new Set(lineIds), groups = new Map<number, Record<string, unknown>[]>();
+  for (const row of rows) {
+    const lineId = costInteger(row.scope_line_id, "reconciliationLineId", 1);
+    if (!allowed.has(lineId)) throw new CostEvidenceError("COST_RECONCILIATION_SCOPE", "Reconciliation evidence escaped its requested shipment lines.");
+    const group = groups.get(lineId) ?? [];
+    group.push(row); groups.set(lineId, group);
+  }
+  return groups;
 }
 export async function hasReconciliationRoots(
   tx: CostEvidenceTransaction,

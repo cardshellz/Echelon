@@ -4,14 +4,16 @@ import { isCostReconciliationPosted, resolveCostPostingStatus } from "./cost-pos
 import { costIssueSchema } from "./cost-source-contracts";
 import { shipmentCostPushResultSchema } from "./po-shipment-costs";
 import { shipmentCostExceptionSchema } from "./shipment-cost-exception";
+import { shipmentMeasurementApprovalSchema, shipmentMeasurementApprovalResultSchema } from "./shipment-measurement-correction";
 
 export const shipmentCostWorkflowIdSchema = z.number().int().positive().max(2_147_483_647);
-export const shipmentCostUpdateInputSchema = z.object({}).strict();
+export const shipmentCostUpdateInputSchema = z.object({ measurementCorrection: shipmentMeasurementApprovalSchema.optional() }).strict();
 const count = z.number().int().nonnegative().safe();
 export const shipmentCostUpdateResultSchema = shipmentCostPushResultSchema.extend({
   shipmentId: shipmentCostWorkflowIdSchema,
   finalizedLines: count,
   adjustments: count,
+  measurementCorrection: shipmentMeasurementApprovalResultSchema.optional(),
 });
 export type ShipmentCostUpdateResult = z.infer<typeof shipmentCostUpdateResultSchema>;
 

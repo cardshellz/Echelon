@@ -1,5 +1,7 @@
 # Supplier handoff, connected recovery and supplier-cost read performance
 
+> October 29 follow-up: [exception-read performance](procurement-exception-read-performance-closeout.md) measures and removes per-exception reconciliation query fanout, retaining complete evidence and original line limits. Wider transformed-graph and sales-history capacity remain separate measurement boundaries.
+
 ## Scope and source identity
 
 Implementation commit `fb6c97565` is verified at merged runtime commit `dbbce1f13969c20d04192cedef554eb11728f3a7`, including pinned main `f133fb9d4f2725190162323fc53651b65340ac19`. Main still pointed to that commit at the final remote check. All 17 implementation/test/helper files have identical Git blobs before and after that main merge. The later report, evidence and comparison-tool commit changes no application runtime code.

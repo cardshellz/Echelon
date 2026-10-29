@@ -1,0 +1,356 @@
+{
+  "version": 1,
+  "verifiedAt": "2026-10-29T12:04:46.535Z",
+  "validatedBase": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+  "validatedPatchSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+  "codeFiles": [
+    {
+      "file": "server/modules/inventory/infrastructure/cost-reconciliation.repository.ts",
+      "sha256": "1554a3b0b7e09c9d1642b224e2cf47e0a51149170ab13734113b9523b027a5ab",
+      "gitBlob": "87c773491841969ada842dd86e08d1a5fa280ed5"
+    },
+    {
+      "file": "server/modules/procurement/shipment-cost-exception.repository.ts",
+      "sha256": "668fdcc79f7b31fbd1eef40b96062d91d542de2ae08b9ef3bbf8b1528d0f16db",
+      "gitBlob": "482e2675c78d87bac6b4b7bf18e6abe5f5a0c8ea"
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/shipment-cost-reconciliation.cases.ts",
+      "sha256": "c7c5dab2186bc84cc51ec17eff1af3db3099f872f87c3debf918418e26b8034b",
+      "gitBlob": "ec9d46bfb7f9ee6d2e35efec259beaa44f294bfe"
+    },
+    {
+      "file": "server/modules/inventory/__tests__/unit/shipment-reconciliation-evidence-read.test.ts",
+      "sha256": "5a048d3aaa353c54a5e60863b38d7c0ce4fb2a6da382e9c920f68e3d1dd128e8",
+      "gitBlob": "54392d74ce56cbd22002fcd5d61732842edbbd8c"
+    },
+    {
+      "file": "test/performance/procurement/run-exception-cost.mjs",
+      "sha256": "aaa4009b945e0b03ba9dac10ff1a853b6681f8f013558041a44650cb85bf9b8f",
+      "gitBlob": "a20b6d689855b63706ef1aeca6926413854fc2b8"
+    },
+    {
+      "file": "test/performance/procurement/compare-exception-cost.mjs",
+      "sha256": "b41a634b067933b4d4df5713374a81ba27193c922704f020928c993385b5958f",
+      "gitBlob": "3f2e6cc162d3583b28ae6db9ebf900d4c1e15a2f"
+    }
+  ],
+  "unchangedWriteOwners": [
+    "hasReconciliationRoots",
+    "postCostReconciliation",
+    "recordReconciliationApproval",
+    "readReconciliationHistory",
+    "persistShipmentExceptionDecision"
+  ],
+  "validations": [
+    {
+      "mode": "unit",
+      "wrapper": "unit-1793274433981-2732-wrapper.json",
+      "wrapperSha256": "4be8c90d424de151f244ec1f3127332dad6872ddadf22a7c8cf425f2d3f4a06f",
+      "exitCode": 0,
+      "codeStable": true,
+      "sourceBefore": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      },
+      "sourceAfter": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      },
+      "report": "unit-1793274433981-2732.json",
+      "reportSha256": "be399c5709c767a9d38e980460f06d2ee612f87d4d6ebd86cf9fed86363ce3da",
+      "passed": 6107,
+      "failed": 0,
+      "skipped": 0,
+      "files": 391
+    },
+    {
+      "mode": "pg",
+      "wrapper": "pg-1793274432649-31684-wrapper.json",
+      "wrapperSha256": "45260b786141685d12e23a086a7648ce419f0e141a794b6e3f7b590406c85b5e",
+      "exitCode": 0,
+      "codeStable": true,
+      "sourceBefore": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      },
+      "sourceAfter": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      },
+      "report": "pg-1793274432649-31684.json",
+      "reportSha256": "c838dc36ab6212278bc8b6a9cdcafd786a05846f51cf2e1b55bd553288183ffe",
+      "passed": 231,
+      "failed": 0,
+      "skipped": 0,
+      "files": 2
+    },
+    {
+      "mode": "guards",
+      "wrapper": "guards-1793274542192-22320-wrapper.json",
+      "wrapperSha256": "e5f8612a44506a3580e7738fdf0b2844230e25e35b2d2f626bcb0f192c85f82e",
+      "exitCode": 0,
+      "codeStable": true,
+      "sourceBefore": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      },
+      "sourceAfter": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      },
+      "report": "guards-1793274542192-22320.json",
+      "reportSha256": "624a0ad3f0c90ef88d67518f0821869cd453722ba2dcb78d79fdcc001ddc92cd",
+      "passed": 430,
+      "failed": 0,
+      "skipped": 0,
+      "files": 11
+    },
+    {
+      "mode": "build",
+      "wrapper": "build-1793274743268-38012-wrapper.json",
+      "wrapperSha256": "184be88640fa1a7f57853fcbe32ad2a8cf8060b94dc6cc5b32d56224b724a9ad",
+      "exitCode": 0,
+      "codeStable": true,
+      "sourceBefore": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      },
+      "sourceAfter": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "af372706513c1388e05d7540049db2c462c30156882c6d6473da92997a53b938"
+      }
+    },
+    {
+      "mode": "connected",
+      "wrapper": "connected-1793274803988-6140-wrapper.json",
+      "wrapperSha256": "6422238ce7d95d347979de62963a53c5a9425dedd8850021f3ab135ae222682b",
+      "exitCode": 0,
+      "codeStable": true,
+      "sourceBefore": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "af372706513c1388e05d7540049db2c462c30156882c6d6473da92997a53b938"
+      },
+      "sourceAfter": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "af372706513c1388e05d7540049db2c462c30156882c6d6473da92997a53b938"
+      },
+      "report": "connected-1793274803988-6140.json",
+      "reportSha256": "cfb89af2dfcc24e66da3d4caf4484001dff4cc99d28c15fdffe7902f51aba46f",
+      "stats": {
+        "startTime": "2026-10-29T11:53:25.511Z",
+        "duration": 610699.015,
+        "expected": 52,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      }
+    },
+    {
+      "mode": "type",
+      "wrapper": "type-1793274433331-7232-wrapper.json",
+      "wrapperSha256": "e638cc89c0f126dc38b75bd283d7f0295244218f2535241c18497c41344a2c09",
+      "exitCode": 0,
+      "codeStable": true,
+      "sourceBefore": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      },
+      "sourceAfter": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    },
+    {
+      "mode": "type",
+      "wrapper": "type-1793274579595-48432-wrapper.json",
+      "wrapperSha256": "358a2713c0c55137e3eb504181ff6b6d257a78327dfeb504ae23880f4502c9b5",
+      "exitCode": 0,
+      "codeStable": true,
+      "sourceBefore": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      },
+      "sourceAfter": {
+        "head": "7b28119a3ec9bb0c96723ff3084b9eead6a5f319",
+        "sourceSha256": "78a59e2c25ef9121504adbe652059e2750d592c45d01a4af5618eadabef344c3",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    }
+  ],
+  "performance": {
+    "status": "passed",
+    "comparisons": 6,
+    "compared": [
+      {
+        "tier": 10,
+        "owner": "exceptions",
+        "completeOutputsEqual": true,
+        "beforeQueries": [
+          153,
+          153,
+          153
+        ],
+        "afterQueries": [
+          6,
+          6,
+          6
+        ],
+        "medianMsBefore": 63.22280000000046,
+        "medianMsAfter": 8.3166999999994
+      },
+      {
+        "tier": 10,
+        "owner": "landed-health",
+        "completeOutputsEqual": true,
+        "beforeQueries": [
+          178,
+          178,
+          178
+        ],
+        "afterQueries": [
+          31,
+          31,
+          31
+        ],
+        "medianMsBefore": 120.21679999999924,
+        "medianMsAfter": 60.95930000000044
+      },
+      {
+        "tier": 10,
+        "owner": "filtered-shipments",
+        "completeOutputsEqual": true,
+        "beforeQueries": [
+          180,
+          180,
+          180
+        ],
+        "afterQueries": [
+          33,
+          33,
+          33
+        ],
+        "medianMsBefore": 121.59560000000056,
+        "medianMsAfter": 59.556400000000394
+      },
+      {
+        "tier": 100,
+        "owner": "exceptions",
+        "completeOutputsEqual": true,
+        "beforeQueries": [
+          1503,
+          1503,
+          1503
+        ],
+        "afterQueries": [
+          18,
+          18,
+          18
+        ],
+        "medianMsBefore": 569.9687000000013,
+        "medianMsAfter": 89.8768
+      },
+      {
+        "tier": 100,
+        "owner": "landed-health",
+        "completeOutputsEqual": true,
+        "beforeQueries": [
+          1529,
+          1529,
+          1529
+        ],
+        "afterQueries": [
+          44,
+          44,
+          44
+        ],
+        "medianMsBefore": 1147.8558000000012,
+        "medianMsAfter": 691.5208999999995
+      },
+      {
+        "tier": 100,
+        "owner": "filtered-shipments",
+        "completeOutputsEqual": true,
+        "beforeQueries": [
+          1531,
+          1531,
+          1531
+        ],
+        "afterQueries": [
+          46,
+          46,
+          46
+        ],
+        "medianMsBefore": 1176.0865000000013,
+        "medianMsAfter": 709.4474000000009
+      }
+    ],
+    "limitations": [
+      "Local timings are diagnostic, not production SLOs.",
+      "Unresolved historical-gap profile; approved and stale cases are separate correctness tests."
+    ]
+  },
+  "performanceReports": [
+    {
+      "file": "deterministic/baseline-exceptions.json",
+      "sha256": "a902b83556a50635b804a7a6966e1d606f9b63c4fc345596850d3d3fd0d6fd7f"
+    },
+    {
+      "file": "deterministic/candidate-exceptions.json",
+      "sha256": "5a70157a6f31740f9d3837019f7f6e9e7179b4dfae5d82be5d4b52843c86a98f"
+    }
+  ],
+  "performanceWrappers": [
+    {
+      "file": "depth-1793274316897-73608-wrapper.json",
+      "sha256": "5fc2154e90cae663eb4dda1d65ce4aca40ebd25a64ee099f6764e2b3bfaa5cd3"
+    },
+    {
+      "file": "depth-1793274359031-18576-wrapper.json",
+      "sha256": "4ba54f4054de785b02aa7159f090b0ecc47c5c114fcac3cbf61391463c97e0f6"
+    }
+  ],
+  "cleanup": {
+    "verifiedAt": "2026-10-29T12:04:14.315Z",
+    "identity": {
+      "role": "review_procurement_supplier_flow",
+      "directory": "C:/Users/owner/Echelon/outputs/procurement-supplier-connected-performance-20261028/pgdata",
+      "port": 62876
+    },
+    "databases": [
+      {
+        "datname": "postgres",
+        "owner": "review_procurement_supplier_flow"
+      }
+    ],
+    "otherClients": 0,
+    "userDatabasesRemoved": true,
+    "stopped": true,
+    "stopExitCode": 0,
+    "stoppedStatusExitCode": 3,
+    "stoppedAt": "2026-10-29T12:04:14.585Z"
+  },
+  "sqlMigrations": 0,
+  "liveRecordsChanged": false,
+  "historicalCleanupIncluded": false,
+  "limitations": [
+    "Local synthetic PostgreSQL 17 measurements are not production SLOs.",
+    "The 10/100-shipment profile has 50/500 unresolved historical-gap lines; approved and stale states have separate correctness coverage.",
+    "Each requested line retains its existing 1000-record evidence boundary. Header scans, supplier-lot graph bounds and large sales-history planning capacity remain.",
+    "The client build retains a 15189.43 kB JavaScript chunk (2480.46 kB gzip); app-wide startup performance was not changed.",
+    "Hosted CI, deployment and live operator acceptance have not been performed for this new patch."
+  ]
+}

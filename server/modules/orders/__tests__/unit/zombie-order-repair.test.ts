@@ -10,10 +10,12 @@ import { logger } from "../../../../platform/observability/logger";
 import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "../../cancel-wms-order";
 import {
   decideZombieRepairAction,
+  OMS_ORDER_STILL_OPEN_FOR_WMS_ORDER_O,
   OMS_STILL_OWES_UNCARRIED_UNITS_FOR_WMS_ORDER_O,
   runStartupZombieOrderRepair,
   ZOMBIE_REPAIR_REASON,
   ZOMBIE_REPAIR_SKIPPED_CODE,
+  ZOMBIE_REPAIR_SKIPPED_OPEN_ORDER_CODE,
 } from "../../zombie-order-repair";
 
 const reservation = { releaseOrderReservation: vi.fn() } as any;
@@ -34,6 +36,29 @@ describe("startup zombie-order repair", () => {
     expect(decideZombieRepairAction({ targetStatus: "completed", omsStillOwesUncarriedUnits: false })).toBe("complete");
     expect(decideZombieRepairAction({ targetStatus: "cancelled", omsStillOwesUncarriedUnits: true })).toBe("skip_oms_still_owes");
     expect(decideZombieRepairAction({ targetStatus: "completed", omsStillOwesUncarriedUnits: true })).toBe("skip_oms_still_owes");
+  });
+
+  // #64592 (2026-10-21): an order-edit swap removed the only line while the
+  // added line was still being authorized; the next boot cancelled the open order.
+  it("never cancels an order the channel has not cancelled, but still completes finished work", () => {
+    expect(decideZombieRepairAction({ targetStatus: "cancelled", omsStillOwesUncarriedUnits: false, omsOrderStillOpen: true }))
+      .toBe("skip_oms_order_open");
+    expect(decideZombieRepairAction({ targetStatus: "completed", omsStillOwesUncarriedUnits: false, omsOrderStillOpen: true }))
+      .toBe("complete");
+    expect(decideZombieRepairAction({ targetStatus: "cancelled", omsStillOwesUncarriedUnits: false, omsOrderStillOpen: false }))
+      .toBe("cancel");
+  });
+
+  it("skips and warns for the #64592 shape: every line removed, channel order still open", async () => {
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const db = fakeDb([{ id: 210059, order_number: "#64592", target_status: "cancelled",
+      oms_still_owes_uncarried_units: false, oms_order_still_open: true }]);
+    const summary = await runStartupZombieOrderRepair({ db, reservation });
+    expect(cancelWmsOrderAndRelease).not.toHaveBeenCalled();
+    expect(summary.transitioned).toEqual([]);
+    expect(summary.skipped.map(candidate => candidate.wmsOrderId)).toEqual([210059]);
+    expect(warnSpy).toHaveBeenCalledWith("wms_zombie_order_repair", expect.objectContaining({
+      outcome: "skipped", error_code: ZOMBIE_REPAIR_SKIPPED_OPEN_ORDER_CODE, wms_order_id: 210059 }));
   });
 
   it("cancels or completes finished orders through the reservation-releasing helpers", async () => {
@@ -118,5 +143,17 @@ describe("live-OMS-demand guard SQL", () => {
     expect(rendered).toMatch(
       /COALESCE\(ol\.authority_fulfillable_quantity, 0\) > COALESCE\(\(\s*SELECT SUM\(wi\.quantity\)\s*FROM wms\.order_items wi\s*WHERE wi\.oms_order_line_id = ol\.id\s*AND wi\.status <> 'cancelled'/,
     );
+  });
+});
+
+describe("open-channel-order guard SQL", () => {
+  const rendered = new PgDialect().sqlToQuery(OMS_ORDER_STILL_OPEN_FOR_WMS_ORDER_O).sql;
+
+  it("uses the channel's cancel signal and finished states, not line emptiness", () => {
+    expect(rendered).toContain("WHEN o.source = 'oms'");
+    expect(rendered).toContain(`"oo".status='cancelled'`);
+    expect(rendered).toContain(`"oo".status='shipped'`);
+    expect(rendered).toContain("COALESCE(oo.fulfillment_status, '') <> 'fulfilled'");
+    expect(rendered).not.toContain("order_items");
   });
 });
