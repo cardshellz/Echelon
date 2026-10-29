@@ -20,7 +20,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer REFERENCES catalog.products,sku text,name text,
         option1_name text,option1_value text,option2_name text,option2_value text,price_cents integer,compare_at_price_cents integer,
         weight_grams numeric,length_mm numeric,width_mm numeric,height_mm numeric,shipping_package_type varchar(30),
-        barcode text,ebay_fulfillment_policy_override text,ebay_return_policy_override text,
+        barcode text,mpn varchar(100),ebay_fulfillment_policy_override text,ebay_return_policy_override text,
         ebay_payment_policy_override text,is_active boolean,sales_eligibility text,ebay_listing_excluded boolean,position integer);
       CREATE TABLE channels.channel_variant_overrides(product_variant_id integer,channel_id integer,weight_override numeric,is_listed integer);
       CREATE TABLE channels.channel_listings(channel_id integer,product_variant_id integer REFERENCES catalog.product_variants,
@@ -54,6 +54,18 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     expect(await repository.readCategory("pack")).toMatchObject({ ebay_browse_category_id: "123" });
     await database.pool.query("UPDATE ebay.ebay_category_mappings SET listing_enabled=false");
     await expect(repository.readCategory("pack")).rejects.toThrow("product type is disabled");
+  });
+
+  it("reads each variant's actual MPN without substituting its catalog or provider SKU", async () => {
+    await database.pool.query("UPDATE catalog.product_variants SET mpn=CASE id WHEN 101 THEN 'MANUFACTURER-PART' ELSE NULL END WHERE product_id=20");
+    try {
+      expect(await repository.readVariants(20)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 101, sku: "PACK-OLD", catalog_sku: "PACK-CURRENT", mpn: "MANUFACTURER-PART" }),
+        expect.objectContaining({ id: 102, sku: "CASE", mpn: null }),
+      ]));
+    } finally {
+      await database.pool.query("UPDATE catalog.product_variants SET mpn=NULL WHERE product_id=20");
+    }
   });
 
   it("shares the maintenance lock, refuses concurrency, and releases it after failure", async () => {

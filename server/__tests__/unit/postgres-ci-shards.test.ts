@@ -260,6 +260,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/procurement-lifecycle-quarantine.integration.test.ts",
       "server/modules/inventory/__tests__/integration/receiving-custody-count-guard.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/channel-package-propagation.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/channel-identifiers-propagation.integration.test.ts",
       "server/modules/oms/__tests__/integration/channel-merchandise-quantity.integration.test.ts",
       "server/modules/oms/__tests__/integration/shopify-merchandise-refund.integration.test.ts",
     );

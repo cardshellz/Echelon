@@ -112,6 +112,7 @@ async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers
       variant_id: productVariants.id,
       variant_sku: productVariants.sku,
       variant_name: productVariants.name,
+      variant_mpn: productVariants.mpn,
       price_cents: productVariants.priceCents,
       variant_weight_grams: productVariants.weightGrams,
       length_mm: productVariants.lengthMm, width_mm: productVariants.widthMm, height_mm: productVariants.heightMm,
@@ -374,6 +375,7 @@ async function prepareActiveEbayListingSync(
     id: variant.variant_id,
     sku: boundIdentity.variants.find(member => member.variantId === variant.variant_id)!.sku,
     name: variant.variant_name,
+    mpn: variant.variant_mpn,
     option1_value: variant.option1_value,
     price_cents: variant.price_cents,
     ebay_weight_grams:
