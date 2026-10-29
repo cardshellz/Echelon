@@ -12,6 +12,7 @@ import { customerReturnSavedRequestSchema } from "../../client/src/lib/customer-
 async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?: boolean; holdReview?: Promise<void>; originalBox?: boolean; openReturn?: boolean; invalidateAfterFirstLookup?: boolean;
   actionState?: "refreshing" | "failed"; failReturnLookup?: boolean; holdReturnLookup?: Promise<void>; returnLookupOrderId?: number; noReturnQuantity?: boolean;
   savedRequestOutcome?: "rejected" | "unknown";
+  blockRecoveryClear?: boolean;
 } = {}) {
   const service = new CustomerReturnPreviewService();
   const { mode: _mode, scenarioId: _scenario, ...fields } = service.lookup({ scenarioId: "split_delivered", orderReference: "TEST-1001" });
@@ -37,6 +38,13 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
           items: [{ lineId: fields.lines[0].id, quantity: 1 }] }] } });
     await page.addInitScript(record => sessionStorage.setItem(`customer-return-request:${record.sessionKey}`, JSON.stringify(record)), saved);
   }
+  if (options.blockRecoveryClear) await page.addInitScript(() => {
+    const original = Storage.prototype.removeItem;
+    Storage.prototype.removeItem = function (key: string) {
+      if (key.startsWith("customer-return-request:")) throw new Error("Synthetic storage failure");
+      return original.call(this, key);
+    };
+  });
   const calls: CustomerAccountRequest[] = [];
   const errors: string[] = [];
   let reviewFailed = false, returnLookupFailed = false, submitCount = 0, actionReads = 0;
@@ -254,11 +262,64 @@ test("an old definitively rejected request can be left and restarted while cache
   expect(f.errors).toEqual([]);
 });
 
+for (const cache of ["ready", "refreshing"] as const) {
+  test(`a saved rejection offers direct fresh review and a new explicit request with ${cache} options`, async ({ page }, info) => {
+    const f = await fixture(page, { openReturn: false, actionState: cache === "ready" ? undefined : cache,
+      savedRequestOutcome: "rejected" });
+    await page.getByRole("button", { name: "Return items", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Return not accepted", exact: true })).toBeVisible();
+    await expect(page.getByText(/saved result of an earlier attempt/)).toBeVisible();
+    await expect(page.getByText(/original shipment/)).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Check status", exact: true })).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath(`saved-rejection-${cache}.png`), fullPage: true });
+    await page.getByRole("button", { name: "Review return items", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
+    expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(1);
+    expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).toBeNull();
+    await pack(page);
+    await page.getByRole("button", { name: "Review return", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
+    expect(f.submitCount()).toBe(0);
+    await page.getByRole("button", { name: "Get return labels", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Return RMA-20", exact: true })).toBeVisible();
+    const submissions = f.calls.filter(call => call.path === "/returns/orders/10/returns");
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].body).toMatchObject({ sourceRevision: "a".repeat(64), settingsVersion: 2 });
+    expect((submissions[0].body as { idempotencyKey: string }).idempotencyKey).not.toBe("20000000-0000-4000-8000-000000000001");
+    expect(f.calls.some(call => /\/commands\/.+\/resume$/.test(call.path))).toBe(false);
+    expect(f.errors).toEqual([]);
+  });
+}
+
+test("fresh review after a saved rejection can retry an unavailable order lookup", async ({ page }) => {
+  const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "rejected", failReturnLookup: true });
+  await page.getByRole("button", { name: "Return items", exact: true }).click();
+  await page.getByRole("button", { name: "Review return items", exact: true }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
+  expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(2);
+  expect(f.submitCount()).toBe(0);
+  expect(f.errors).toEqual([]);
+});
+
+test("failed local recovery clearing cannot discard a saved request or start a fresh one", async ({ page }) => {
+  const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "rejected", blockRecoveryClear: true });
+  await page.getByRole("button", { name: "Return items", exact: true }).click();
+  await page.getByRole("button", { name: "Review return items", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("could not be cleared");
+  expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).not.toBeNull();
+  expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(0);
+  expect(f.submitCount()).toBe(0);
+  expect(f.errors).toEqual([]);
+});
+
 test("an unknown prior request remains recoverable and cannot be discarded to bypass its outcome", async ({ page }) => {
   const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "unknown" });
   await page.getByRole("button", { name: "Return items", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Checking your return", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry saved request", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Review return items", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Back to your orders", exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).not.toBeNull();
   expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(0);
