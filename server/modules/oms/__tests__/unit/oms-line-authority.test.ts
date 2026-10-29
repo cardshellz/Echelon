@@ -10,12 +10,12 @@ import {
 const NOW = new Date("2026-06-25T12:00:00.000Z");
 
 describe("OMS line authority", () => {
-  it("records Shopify update-only lines as seen but not WMS-materializable", () => {
+  it("records Shopify update-only lines on an unpaid order as seen but not WMS-materializable", () => {
     const authority = deriveOmsLineAuthority({
       sourceTopic: "orders/updated",
       sourceEventId: "webhook_inbox:1",
       sourceInboxId: 1,
-      financialStatus: "paid",
+      financialStatus: "pending",
       quantity: 2,
       fulfillableQuantity: 2,
       now: NOW,
@@ -228,6 +228,69 @@ describe("OMS line authority", () => {
         quantity: 1.5,
       }),
     ).toThrow(/quantity must be a non-negative integer/);
+  });
+
+  it("authorizes payment without replacing a newer Shopify quantity observation", () => {
+    const authority = deriveOmsLineAuthority({
+      sourceTopic: "orders/paid",
+      sourceEventId: "webhook_inbox:207287",
+      sourceInboxId: 207287,
+      financialStatus: "paid",
+      quantity: 20,
+      currentQuantity: 20,
+      fulfillableQuantity: 20,
+      channelUpdatedAt: "2026-10-28T18:26:56-04:00",
+      previous: {
+        channelObservedQuantity: 20,
+        channelCurrentQuantity: 20,
+        channelQuantityUpdatedAt: "2026-10-28T18:26:58-04:00",
+        paidQuantity: 0,
+        authorityFulfillableQuantity: 0,
+        authorizationStatus: "seen",
+      },
+      now: NOW,
+    });
+
+    expect(authority).toMatchObject({
+      channelObservedQuantity: 20,
+      channelCurrentQuantity: 20,
+      channelQuantityUpdatedAt: new Date("2026-10-28T18:26:58-04:00"),
+      paidQuantity: 20,
+      authorityFulfillableQuantity: 20,
+      authorizationStatus: "authorized",
+      authorizedAt: NOW,
+      authorizedByEventId: "webhook_inbox:207287",
+      authoritySourceTopic: "orders/paid",
+      authoritySourceInboxId: 207287,
+    });
+    expect(authority.staleChannelObservation).toBeUndefined();
+  });
+
+  it("caps a stale paid event at a newer reduced channel quantity", () => {
+    const authority = deriveOmsLineAuthority({
+      sourceTopic: "orders/paid",
+      sourceEventId: "webhook_inbox:paid",
+      financialStatus: "paid",
+      quantity: 20,
+      currentQuantity: 20,
+      fulfillableQuantity: 20,
+      channelUpdatedAt: "2026-10-28T18:26:56-04:00",
+      previous: {
+        channelObservedQuantity: 5,
+        channelCurrentQuantity: 5,
+        channelQuantityUpdatedAt: "2026-10-28T18:27:00-04:00",
+        paidQuantity: 0,
+        authorityFulfillableQuantity: 0,
+        authorizationStatus: "seen",
+      },
+    });
+
+    expect(authority).toMatchObject({
+      channelCurrentQuantity: 5,
+      paidQuantity: 20,
+      authorityFulfillableQuantity: 5,
+      authorizationStatus: "partially_cancelled",
+    });
   });
 
   it("falls back to legacy raw quantity only when authority columns are absent", () => {
