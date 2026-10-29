@@ -288,13 +288,14 @@ export class EbayListingBuilder {
 
     // Add variant-specific aspects
     const variantAspects = { ...aspects };
+    const mpn = variant.mpn?.trim() || null;
 
     // Add UPC/EAN/MPN if available
     if (variant.gtin) {
       variantAspects["UPC"] = [variant.gtin];
     }
-    if (variant.mpn) {
-      variantAspects["MPN"] = [variant.mpn];
+    if (mpn) {
+      variantAspects["MPN"] = [mpn];
     }
 
     if (options.variationAspectName) {
@@ -315,9 +316,15 @@ export class EbayListingBuilder {
       imageUrls,
     };
 
-    // Set brand/mpn/upc on product level too
-    if (aspects["Brand"]?.[0]) product.brand = aspects["Brand"][0];
-    if (variant.mpn) product.mpn = variant.mpn;
+    // Native brand/mpn represents eBay's combined BrandMPN identifier. Sending
+    // only one member rejects standalone listings; descriptive item specifics
+    // remain valid independently. Use a complete real pair for every shape.
+    // https://developer.ebay.com/devzone/xml/docs/reference/ebay/types/BrandMPNType.html
+    const brand = aspects["Brand"]?.[0]?.trim();
+    if (brand && mpn) {
+      product.brand = brand;
+      product.mpn = mpn;
+    }
     if (variant.gtin) product.upc = [variant.gtin];
 
     const condition = options.conditionOverride ?? this.mapCondition(

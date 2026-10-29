@@ -31,11 +31,43 @@ async function scopedInventoryFeed(page: Page, state: Awaited<ReturnType<typeof 
   const response = page.waitForResponse(response => new URL(response.url()).pathname === "/api/ebay/listing-feed");
   await page.reload();
   const payload = await (await response).json();
-  state.feedProducts = [{ ...payload.feed[0], inventoryReadState: "not_requested", inventoryIssue: null,
+  state.feedProducts = [{ ...payload.feed[0], variantCount: 1, includedVariantCount: 1,
+    inventoryReadState: "not_requested", inventoryIssue: null,
     variants: [{ id: 101, sku: "PACK-1", name: "Each", priceCents: 500, ebayListingExcluded: false,
       explicitlyExcluded: false, excludedByProduct: false, effectivelyListed: true, inventoryQuantity: null,
       fulfillmentPolicyOverride: null, returnPolicyOverride: null, paymentPolicyOverride: null }] }];
 }
+
+test("a standalone listing retries a prior identifier rejection through normal Sync and reaches verified completion", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  await scopedInventoryFeed(page, state);
+  const single = state.feedProducts![0] as Record<string, unknown>;
+  const error = "eBay rejected this update (HTTP 400; codes 25002): BrandMPN is invalid or missing.";
+  // A rejected update does not remove the already published listing.
+  state.feedProducts = [{ ...single, status: "listed", syncError: error }];
+  state.jobs = [{ ...job, state: "needs_attention", code: "EBAY_QUANTITY_REJECTED", message: error }];
+  const next = { ...job, id: "6e4d8e03-3197-4d21-a6d7-aa1ddaecc776" };
+  state.response = { ...pending, jobs: [next] };
+  await page.reload();
+  await expect(page.getByText("1 variant", { exact: false }).filter({ visible: true })).toBeVisible();
+  const sync = page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true });
+  await expect(sync).toBeEnabled();
+  await sync.click();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Queued for eBay");
+  expect(state.requests).toEqual(["/api/ebay/listings/sync-product/1"]);
+  expect(state.commands).toHaveLength(1);
+  state.jobs = [{ ...next, state: "completed" }];
+  state.feedProducts = [{ ...single, status: "listed", syncError: null }];
+  await page.reload();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(sync).toBeEnabled();
+  await expect(page.getByText(error, { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Resume with current inventory", exact: true })).toHaveCount(0);
+  expect(state.requests).toHaveLength(1);
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  await page.screenshot({ path: info.outputPath("standalone-listing-sync-completed.png"), fullPage: true });
+});
 
 test("scoped inventory loading leaves listing controls and persistent Sync All progress usable", async ({ page }, info) => {
   const state = await setupEbayChannelPage(page);
