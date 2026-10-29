@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
 import { formatMills } from "@shared/utils/money";
+import { reconciliationDestinations } from "@shared/procurement/cost-reconciliation";
 
 const formatCents = (value: number) => formatIntegerCents(value, "USD");
 
@@ -23,6 +24,7 @@ const mills = (value: number | null) => value === null ? "Not recorded" : value 
 
 export function ShipmentMeasurementImpact({ preview }: { preview: ShipmentMeasurementPreview }) {
   const changedLines = preview.lines.filter(line => JSON.stringify(line.before) !== JSON.stringify(line.after));
+  const historicalChanges = preview.impact.historicalCosts.filter(row => row.totalMills.before !== row.totalMills.after);
   return <div className="space-y-4 text-sm">
     <p>Shipment charges: <strong>{formatCents(preview.chargeCents)}</strong>. Shipment stays <strong>{preview.status.replace(/_/g, " ")}</strong>. Shipped pieces, receipts and stock counts stay unchanged.</p>
     {changedLines.map(line => <div key={line.lineId} className="rounded-md border p-3">
@@ -51,12 +53,23 @@ export function ShipmentMeasurementImpact({ preview }: { preview: ShipmentMeasur
           <td>{amount(line.allocatedCents.before)}</td><td>{amount(line.allocatedCents.after)}</td><td>{amount(line.landedTotalCents.before)}</td><td>{amount(line.landedTotalCents.after)}</td></tr>)}</tbody>
       </table>
     </div>
+    {historicalChanges.length > 0 && <section aria-label="Approved historical cost changes" className="space-y-2 rounded-md border p-3">
+      <p className="font-medium">Previously approved costs</p>
+      <p className="text-xs text-muted-foreground">These changes use the recorded approval and cost destination.</p>
+      <div className="overflow-x-auto"><table className="w-full text-left text-xs">
+        <thead><tr><th>Cost destination</th><th className="text-right">Before</th><th className="text-right">After</th></tr></thead>
+        <tbody>{historicalChanges.map((row, index) => <tr key={index} className="border-t">
+          <td className="py-2">{reconciliationDestinations[row.destination]}<div className="text-muted-foreground">{preview.lines.find(line => line.lineId === row.shipmentLineId)?.sku ?? `Shipment line #${row.shipmentLineId}`}</div></td>
+          <td className="pl-2 text-right tabular-nums">{mills(row.totalMills.before)}</td><td className="pl-2 text-right tabular-nums">{mills(row.totalMills.after)}</td>
+        </tr>)}</tbody>
+      </table></div>
+    </section>}
     <details><summary className="cursor-pointer">Stock and sold-order cost changes</summary>
       <div className="mt-2 space-y-2">
         {preview.impact.lots.map(lot => <p key={lot.lotId}>{lot.lotNumber}: {lot.onHandUnits.toLocaleString()} units on hand. Cost per inventory unit: {mills(lot.unitCostMills.before)} → {mills(lot.unitCostMills.after)}.</p>)}
         {preview.impact.orderCosts.filter(row => row.totalMills.before !== row.totalMills.after).map(row => <p key={row.costId}>Order #{row.orderId}, cost row #{row.costId}: {mills(row.totalMills.before)} → {mills(row.totalMills.after)}.</p>)}
         {!preview.impact.lots.length && <p>No linked stock or order costs were updated. Any missing receipt history remains in the existing cost review.</p>}
-        {preview.impact.historicalCosts.map((row, index) => <p key={index}>Previously approved historical cost ({row.destination.replace(/_/g, " ")}): {mills(row.totalMills.before)} → {mills(row.totalMills.after)}.</p>)}
+        {preview.impact.historicalCosts.filter(row => row.totalMills.before === row.totalMills.after).map((row, index) => <p key={index}>{reconciliationDestinations[row.destination]}: {mills(row.totalMills.before)} → {mills(row.totalMills.after)}.</p>)}
         {preview.impact.applications.flatMap(application => (application.returnedCosts ?? []).map(row => <p key={`${row.returnAllocationId}-${row.component}`}>Supplier return #{row.returnId}, line #{row.returnLineId}: {mills(row.beforeMills)} → {mills(row.afterMills)}.</p>))}
         {preview.impact.applications.flatMap((application, index) => application.issues.map(issue => <p className="text-amber-700" key={`${index}-${issue.code}`}>{issue.message}</p>))}
       </div>

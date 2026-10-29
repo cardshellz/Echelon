@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { shipmentCostWorkflowIdSchema } from "@shared/procurement/shipment-cost-workflow";
 import { ShipmentPhysicalValuesError } from "@shared/procurement/shipment-physical-values";
+import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
 import { requirePermission } from "../../routes/middleware";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import { ShipmentMeasurementCorrectionError } from "./shipment-measurement-correction.repository";
@@ -18,6 +19,8 @@ export function registerShipmentMeasurementRoutes(app: Express, service: ReturnT
       return res.json(action === "context" ? await service.context(parsed.data, actor) : await service.preview(parsed.data, req.body, actor));
     } catch (error) {
       if (error instanceof ShipmentMeasurementCorrectionError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
+      if (error instanceof CostEvidenceError && error.code === "COST_RECONCILIATION_PARTIAL_HISTORY")
+        return res.status(409).json({ code: error.code, error: error.message });
       if (error instanceof ShipmentTrackingError || error instanceof ShipmentPhysicalValuesError)
         return res.status(error.statusCode).json({ code: error.details?.code, error: error.message });
       console.error(JSON.stringify({ event: "procurement.shipment.measurement_review_failed", shipmentId: parsed.data, actorId: actor,

@@ -10,6 +10,7 @@ vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: 
 } }));
 import { registerShipmentMeasurementRoutes } from "../../shipment-measurement-correction.routes";
 import { ShipmentMeasurementCorrectionError } from "../../shipment-measurement-correction.repository";
+import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
 
 describe("shipment measurement review HTTP boundary", () => {
   let server: http.Server, base: string;
@@ -52,5 +53,11 @@ describe("shipment measurement review HTTP boundary", () => {
     service.context.mockRejectedValueOnce(new Error("private database connection"));
     const failed = await call("GET"); expect(failed.status).toBe(503);
     expect(await failed.text()).not.toContain("private database"); expect(logged).toHaveBeenCalledWith(expect.not.stringContaining("private database"));
+  });
+  it("preserves the existing partial-history posting safeguard as an actionable preview conflict", async () => {
+    service.preview.mockRejectedValueOnce(new CostEvidenceError("COST_RECONCILIATION_PARTIAL_HISTORY", "Complete the receipt attribution before replacing the historical adjustment."));
+    const conflict = await call("POST");
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({ code: "COST_RECONCILIATION_PARTIAL_HISTORY", error: "Complete the receipt attribution before replacing the historical adjustment." });
   });
 });

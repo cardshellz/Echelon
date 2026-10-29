@@ -1680,8 +1680,11 @@ export function createShipmentTrackingService(
       throw new ShipmentTrackingError("Valid audit context is required to update shipment costs.", 500,
         { code: "SHIPMENT_COST_UPDATE_AUDIT_REQUIRED" });
     }
+    // Measurement corrections use the same posting owner as an ordinary cost
+    // update. It requires an existing historical destination approval and owns
+    // balanced revisions/reversals; the correction cannot invent a destination.
     if (input.measurementCorrection) return applyShipmentMeasurementCorrection(tx, shipmentId, input.measurementCorrection, actorId, now,
-      recordedAt => updateCostsInTransaction(tx, shipmentId, {}, actorId, recordedAt, { historicalReconciliation: "preserve" }));
+      recordedAt => updateCostsInTransaction(tx, shipmentId, {}, actorId, recordedAt));
     // Durable commands enter outside runInTransaction. Match its graph-before-
     // shipment lock order so receiving, PO edits and revaluation cannot deadlock.
     await lockInventoryCostGraph(tx);

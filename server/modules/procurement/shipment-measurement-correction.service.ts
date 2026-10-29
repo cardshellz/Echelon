@@ -119,7 +119,7 @@ export function createShipmentMeasurementCorrectionService(database: AmendmentDa
         try {
           const at = clock();
           return (await applyShipmentMeasurementCorrection(tx, shipmentId, parsed.data, actorId, at,
-            recordedAt => owner.updateCostsInTransaction(tx, shipmentId, {}, actorId, recordedAt, { historicalReconciliation: "preserve" }), false)).measurementCorrection.preview;
+            recordedAt => owner.updateCostsInTransaction(tx, shipmentId, {}, actorId, recordedAt), false)).measurementCorrection.preview;
         } finally {
           await tx.execute(sql`ROLLBACK TO SAVEPOINT shipment_measurement_preview`);
           await tx.execute(sql`RELEASE SAVEPOINT shipment_measurement_preview`);

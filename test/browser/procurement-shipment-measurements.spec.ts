@@ -1,8 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 import type { ShipmentMeasurementPreview } from "../../shared/procurement/shipment-measurement-correction";
+import { reconciliationDestinations, type ReconciliationDestination } from "../../shared/procurement/cost-reconciliation";
 
-async function setup(page: Page, options: { loseResponse?: boolean; cannotApprove?: boolean; stale?: boolean; costing?: boolean } = {}) {
+async function setup(page: Page, options: { loseResponse?: boolean; cannotApprove?: boolean; stale?: boolean; costing?: boolean; historicalDestination?: ReconciliationDestination } = {}) {
   const failures = await installFixtures(page);
   const state = { saved: false, keys: [] as string[], previews: 0, approvalCount: 0, closed: !options.costing, closes: 0 };
   const before = { cartonCount: 2, dimensionBasis: "carton" as const, weightKg: "5.000", lengthCm: "10.00", widthCm: "10.00", heightCm: "10.00" };
@@ -35,7 +36,9 @@ async function setup(page: Page, options: { loseResponse?: boolean; cannotApprov
             after: { totalWeightKg: "10.000", totalVolumeCbm: index === 0 ? "0.006000" : "0.002000", chargeableWeightKg: "10.000" } },
           allocatedCents: { before: 2500, after: index === 0 ? 3750 : 1250 }, landedTotalCents: { before: 13500, after: index === 0 ? 14750 : 12250 } })),
         impact: { lots: [{ lotId: 501, lotNumber: "TEST-LOT-501", onHandUnits: 1, unitCostMills: { before: 675000, after: 737500 } }],
-          orderCosts: [{ costId: 10, orderId: 1, quantity: 1, totalMills: { before: 675000, after: 737500 } }], historicalCosts: [], applications: [] } };
+          orderCosts: [{ costId: 10, orderId: 1, quantity: 1, totalMills: { before: 675000, after: 737500 } }],
+          historicalCosts: options.historicalDestination ? [{ purchaseOrderLineId: 101, shipmentLineId: 1, component: "landed",
+            destination: options.historicalDestination, totalMills: { before: 10000, after: 15000 } }] : [], applications: [] } };
       return route.fulfill({ json: approvedPreview });
     }
     if (path.endsWith("/42/close") && request.method() === "POST") {
@@ -128,6 +131,21 @@ test("server authority controls measurement corrections even for an apparent adm
   await expect(dialog.getByRole("button", { name: "Review changes", exact: true })).toHaveCount(0);
   expect(state.previews).toBe(0); expect(state.keys).toEqual([]);
 });
+for (const destination of ["historical_cogs", "inventory_variance"] as const) {
+  test(`shows the approved ${destination} before and after without requiring another destination choice`, async ({ page }, info) => {
+    const { dialog, state, failures } = await setup(page, { historicalDestination: destination });
+    await editAndReview(page);
+    const costs = dialog.getByRole("region", { name: "Approved historical cost changes" });
+    await expect(costs).toBeVisible();
+    await expect(costs).toContainText(reconciliationDestinations[destination]);
+    await expect(costs).toContainText("$1.0000"); await expect(costs).toContainText("$1.5000");
+    await expect(dialog.getByRole("radio")).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath("historical-posting-preview.png"), fullPage: true });
+    await dialog.getByRole("button", { name: "Approve and update costs" }).click();
+    await expect(dialog.getByRole("heading", { name: "Measurements and costs saved" })).toBeVisible();
+    expect(state.approvalCount).toBe(1); expect(state.keys).toHaveLength(1); expect(failures).toEqual([]);
+  });
+}
 test("a cost update blocked by missing measurements opens the same correction without leaving the shipment", async ({ page }) => {
   const { dialog, failures } = await setup(page);
   await dialog.getByRole("button", { name: "Close review", exact: true }).click();

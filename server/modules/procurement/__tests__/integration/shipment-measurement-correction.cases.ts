@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import type pg from "pg";
-import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
+import type { AmendmentDatabase, AmendmentTransaction } from "../../po-quantity-amendment.repository";
 import type { ShipmentTrackingService } from "../../shipment-tracking.service";
 import { createShipmentMeasurementCorrectionService } from "../../shipment-measurement-correction.service";
 import { createShipmentCostUpdateCommands, shipmentCostUpdateScope } from "../../shipment-cost-update.commands";
@@ -10,9 +10,11 @@ import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence
 import type { ShipmentMeasurementApproval, ShipmentMeasurementReviewRequest } from "@shared/procurement/shipment-measurement-correction";
 import { createShipmentCostReconciliationService, shipmentReconciliationScope } from "../../shipment-cost-reconciliation.service";
 import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
+import type { ReconciliationDestination } from "@shared/procurement/cost-reconciliation";
+import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
 
 export function registerShipmentMeasurementCorrectionCases(fixture: {
-  pool: () => pg.Pool; database: () => AmendmentDatabase; shipments: () => ShipmentTrackingService; at: Date;
+  pool: () => pg.Pool; database: () => AmendmentDatabase & Pick<AmendmentTransaction, "execute">; shipments: () => ShipmentTrackingService; at: Date;
   receive: () => Promise<unknown>; approveSupplier: () => Promise<unknown>; sell: () => Promise<unknown>;
   historicalGaps: () => Promise<void>;
 }) {
@@ -43,14 +45,17 @@ export function registerShipmentMeasurementCorrectionCases(fixture: {
       "SELECT * FROM procurement.inbound_freight_costs ORDER BY id",
     ].map(async sql => (await query(sql)).rows));
   }
-  async function prepare(status = "closed", secondPo = true) {
-    await fixture.receive(); await fixture.approveSupplier();
-    if (secondPo) await query(`INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status,warehouse_id) VALUES(20,'MEASUREMENT-SECOND-PO',5,'sent',1);
+  async function addSecondPo() {
+    await query(`INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status,warehouse_id) VALUES(20,'MEASUREMENT-SECOND-PO',5,'sent',1);
       INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,product_id,product_variant_id,expected_receive_variant_id,expected_receive_units_per_variant,sku,
         order_qty,unit_cost_cents,unit_cost_mills,total_product_cost_cents,packaging_cost_cents,line_total_cents,status)
         VALUES(22,20,1,100,200,200,50,'SECOND-PO-PRODUCT',100,100,10000,10000,1000,11000,'open');
       INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,product_variant_id,sku,qty_shipped,carton_count)
         VALUES(12,1,20,22,200,'SECOND-PO-PRODUCT',100,2)`);
+  }
+  async function prepare(status = "closed", secondPo = true) {
+    await fixture.receive(); await fixture.approveSupplier();
+    if (secondPo) await addSecondPo();
     await query(`UPDATE procurement.inbound_shipments SET status='${status}' WHERE id=1;
       UPDATE procurement.inbound_shipment_lines SET dimension_basis='carton',weight_kg=5,length_cm=10,width_cm=10,height_cm=10 WHERE inbound_shipment_id=1;
       UPDATE procurement.inbound_freight_costs SET allocation_method='by_volume' WHERE id=31`);
@@ -65,6 +70,23 @@ export function registerShipmentMeasurementCorrectionCases(fixture: {
     const input = requested ?? await request();
     const preview = await service().preview(1, input, "admin-user");
     return { input, preview, approval: { ...input, previewVersion: preview.previewVersion, evidenceConfirmed: true as const } };
+  }
+  async function approveHistoricalDestination(destination: ReconciliationDestination) {
+    const reconciliation = createShipmentCostReconciliationService(fixture.database(), () => fixture.at);
+    const context = await reconciliation.context(11, "admin-user");
+    const request = { sourceVersion: context.sourceVersion, destination,
+      reason: "Synthetic historical destination evidence was checked and approved" };
+    const response = await reconciliation.reconcile(11, request, "admin-user", { ...shipmentReconciliationScope(11), actorType: "user", actorId: "admin-user",
+      contractVersion: 1, idempotencyKey: randomUUID(), requestHash: costFingerprint(request) });
+    expect(response.httpStatus).toBe(200);
+    return reconciliation;
+  }
+  async function prepareHistoricalShares() {
+    await fixture.historicalGaps(); await addSecondPo();
+    await query(`UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1;
+      UPDATE procurement.inbound_shipment_lines SET dimension_basis='carton',weight_kg=5,length_cm=10,width_cm=10,height_cm=10 WHERE inbound_shipment_id=1;
+      UPDATE procurement.inbound_freight_costs SET allocation_method='by_volume' WHERE id=31`);
+    await fixture.database().transaction(tx => fixture.shipments().updateCostsInTransaction(tx, 1, {}, "admin-user", fixture.at));
   }
 
   it.each(["costing", "closed"])("corrects measurements after receiving in %s, updates multi-PO shares, and preserves physical and commercial facts", async status => {
@@ -108,19 +130,15 @@ export function registerShipmentMeasurementCorrectionCases(fixture: {
     expect((await approve(reviewed.approval)).httpStatus).toBe(200);
     expect((await query("SELECT * FROM inventory.cost_reconciliation_postings")).rows).toEqual([]);
   });
-  it("proves the unchanged deployed cost owner preserves prior approvals and postings after a nonfinancial measurement change", async () => {
+  it("reuses prior historical approvals without changing balanced postings or reopening resolved warnings", async () => {
     await fixture.historicalGaps();
     await query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1");
     await fixture.database().transaction(tx => fixture.shipments().updateCostsInTransaction(tx, 1, {}, "admin-user", fixture.at));
-    const reconciliation = createShipmentCostReconciliationService(fixture.database(), () => fixture.at);
-    const context = await reconciliation.context(11, "admin-user");
-    const request = { sourceVersion: context.sourceVersion, destination: "historical_cogs" as const, reason: "Synthetic historical sale evidence was checked and approved" };
-    expect((await reconciliation.reconcile(11, request, "admin-user", { ...shipmentReconciliationScope(11), actorType: "user", actorId: "admin-user",
-      contractVersion: 1, idempotencyKey: randomUUID(), requestHash: costFingerprint(request) })).httpStatus).toBe(200);
+    await approveHistoricalDestination("historical_cogs");
     const historical = (await query("SELECT * FROM inventory.cost_reconciliation_postings ORDER BY id")).rows;
     const approvals = (await query("SELECT * FROM inventory.cost_reconciliation_approvals ORDER BY id")).rows;
-    // Fixture setup only. This test deliberately exercises the existing empty
-    // cost-update command; it does not alter the new correction's preserve mode.
+    // Establish that the ordinary updater and approved measurement edit have
+    // the same posting semantics when this line-count charge stays unchanged.
     await query("UPDATE procurement.inbound_shipment_lines SET dimension_basis='carton',weight_kg=5,length_cm=30,width_cm=10,height_cm=10 WHERE id=11");
     for (let attempt = 0; attempt < 2; attempt++) {
       await fixture.database().transaction(tx => fixture.shipments().updateCostsInTransaction(tx, 1, {}, "admin-user", fixture.at));
@@ -128,6 +146,78 @@ export function registerShipmentMeasurementCorrectionCases(fixture: {
       expect((await query("SELECT * FROM inventory.cost_reconciliation_approvals ORDER BY id")).rows).toEqual(approvals);
       expect((await fixture.shipments().getCostReview(1))?.lines.every(isShipmentCostLinePosted)).toBe(true);
     }
+    const changed = await request(); changed.lines[0].measurements.lengthCm = "45";
+    const reviewed = await review(changed), before = await snapshot();
+    expect(reviewed.preview.impact.applications.every(row => row.status === "applied" && row.issues.length === 0)).toBe(true);
+    expect(await snapshot()).toEqual(before);
+    expect(await approve(reviewed.approval)).toMatchObject({ httpStatus: 200, body: { status: "applied" } });
+    expect((await query("SELECT * FROM inventory.cost_reconciliation_postings ORDER BY id")).rows).toEqual(historical);
+    expect((await query("SELECT * FROM inventory.cost_reconciliation_approvals ORDER BY id")).rows).toEqual(approvals);
+  });
+
+  it.each(["historical_cogs", "inventory_variance"] as const)("posts only the reviewed %s delta to its original approval when multi-PO cost shares change", async destination => {
+    await prepareHistoricalShares();
+    const reconciliation = await approveHistoricalDestination(destination);
+    const oldPostings = (await query("SELECT * FROM inventory.cost_reconciliation_postings ORDER BY id")).rows;
+    const oldApprovals = (await query("SELECT * FROM inventory.cost_reconciliation_approvals ORDER BY id")).rows;
+    expect(oldPostings).toHaveLength(1);
+    const before = await snapshot(), counts = await physical();
+    const reviewed = await review(), key = randomUUID();
+    expect(await snapshot()).toEqual(before);
+    const impact = reviewed.preview.impact.historicalCosts.find(row => row.destination === destination && row.shipmentLineId === 11)!;
+    expect(impact).toBeDefined();
+    expect(impact.totalMills.before).toBe(Number(oldPostings[0].after_mills));
+    expect(impact.totalMills.after).toBeGreaterThan(impact.totalMills.before);
+    expect(reviewed.preview.lines.reduce((sum, line) => sum + BigInt(line.allocatedCents.after!), BigInt(0))).toBe(BigInt(reviewed.preview.chargeCents));
+    expect(reviewed.preview.impact.applications.find(row => row.shipmentLineId === 11)).toMatchObject({ status: "applied", issues: [] });
+    expect((await approve(reviewed.approval, key)).httpStatus).toBe(200);
+    expect(await physical()).toEqual(counts);
+    const saved = (await query("SELECT * FROM inventory.cost_reconciliation_postings ORDER BY id")).rows;
+    expect(saved).toHaveLength(2);
+    expect(saved[0]).toEqual(oldPostings[0]);
+    expect(saved[1]).toMatchObject({ destination, previous_posting_id: oldPostings[0].id, approval_id: oldPostings[0].approval_id });
+    expect(BigInt(saved[1].before_mills)).toBe(BigInt(impact.totalMills.before));
+    expect(BigInt(saved[1].after_mills)).toBe(BigInt(impact.totalMills.after));
+    expect(BigInt(saved[1].delta_mills)).toBe(BigInt(impact.totalMills.after) - BigInt(impact.totalMills.before));
+    expect(BigInt(saved[1].delta_mills) + BigInt(saved[1].unassigned_delta_mills)).toBe(BigInt(0));
+    expect((await query("SELECT * FROM inventory.cost_reconciliation_approvals ORDER BY id")).rows).toEqual(oldApprovals);
+    expect(await approve(reviewed.approval, key)).toMatchObject({ httpStatus: 200, replayed: true });
+    await fixture.database().transaction(tx => fixture.shipments().updateCostsInTransaction(tx, 1, {}, "admin-user", fixture.at));
+    expect((await query("SELECT * FROM inventory.cost_reconciliation_postings ORDER BY id")).rows).toEqual(saved);
+    expect((await fixture.shipments().getCostReview(1))?.lines.find(line => line.lineId === 11)).toSatisfy(isShipmentCostLinePosted);
+    expect((await readPoShipmentCosts(fixture.database(), 10))?.lines.find(line => line.lineId === 11)?.status).toBe("applied");
+    expect((await reconciliation.context(11, "admin-user")).state).toMatchObject({ status: "posted", unassignedMills: 0, destination, postedMills: impact.totalMills.after });
+  });
+
+  it("retains unresolved history without creating an unapproved historical expense", async () => {
+    await prepareHistoricalShares();
+    const reviewed = await review();
+    expect(reviewed.preview.impact.historicalCosts).toEqual([]);
+    expect(reviewed.preview.impact.applications.find(row => row.shipmentLineId === 11)?.status).toBe("review_required");
+    expect((await approve(reviewed.approval)).httpStatus).toBe(200);
+    expect((await query("SELECT * FROM inventory.cost_reconciliation_approvals")).rows).toEqual([]);
+    expect((await query("SELECT * FROM inventory.cost_reconciliation_postings")).rows).toEqual([]);
+    expect((await fixture.shipments().getCostReview(1))?.lines.find(line => line.lineId === 11)).not.toSatisfy(isShipmentCostLinePosted);
+  });
+
+  it("invalidates a measurement approval when the historical destination changes after preview", async () => {
+    await prepareHistoricalShares(); await approveHistoricalDestination("historical_cogs");
+    const reviewed = await review();
+    await approveHistoricalDestination("inventory_variance");
+    const before = await snapshot();
+    expect(await approve(reviewed.approval)).toMatchObject({ httpStatus: 409, body: { code: "SHIPMENT_MEASUREMENTS_STALE" } });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("rolls back historical posting deltas with measurement, snapshot and inventory writes when the approval audit fails", async () => {
+    await prepareHistoricalShares(); await approveHistoricalDestination("historical_cogs");
+    const reviewed = await review(), before = await snapshot();
+    await query(`CREATE FUNCTION procurement.reject_historical_measurement_approval() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.action='procurement.shipment.measurements_corrected' THEN RAISE EXCEPTION 'injected historical approval failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER reject_historical_measurement_approval BEFORE INSERT ON public.audit_events FOR EACH ROW EXECUTE FUNCTION procurement.reject_historical_measurement_approval()`);
+    try { await expect(approve(reviewed.approval)).rejects.toThrow(); }
+    finally { await query("DROP TRIGGER reject_historical_measurement_approval ON public.audit_events; DROP FUNCTION procurement.reject_historical_measurement_approval()"); }
+    expect(await snapshot()).toEqual(before);
   });
 
   it.each(["lead-user", "custom-user", "scoped-user"])("rejects %s despite session role strings or scoped purchasing grants", async actor => {
