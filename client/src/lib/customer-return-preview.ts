@@ -13,6 +13,7 @@ import { sameCustomerReturnDimensions } from "@shared/returns/customer-return-pa
 import {
   initialPreviewParcelSize,
   previewParcelProductWeight,
+  previewParcelLabelWeight,
   readPreviewParcelDimensions,
   readPreviewQuantity,
   type PreviewParcelDraft,
@@ -165,20 +166,21 @@ export function buildPreviewReviewInput(
     }
     if (!items.length)
       return invalid(`Add an item to box ${index + 1}, or remove that box.`);
-    if (previewParcelProductWeight(order, parcel).status !== "ready") {
+    if (previewParcelLabelWeight(order, parcel).status !== "ready") {
       return invalid(
-        `We need to verify the product weight for box ${index + 1} before continuing.`,
+        `Enter the measured packed weight for box ${index + 1} before continuing.`,
       );
     }
     try {
       const measured = readPreviewParcelDimensions(order, parcel);
-      const weight = previewParcelProductWeight(order, parcel);
+      const weight = previewParcelLabelWeight(order, parcel);
       const issue = weight.status === "ready" ? customerReturnPackingIssue(order.packingLimits, weight.weightGrams, measured.dimensions) : null;
       if (issue !== null) return invalid(issue === "weight"
         ? `Box ${index + 1} is too heavy. Split its items into separate boxes or contact us for help.`
         : `Box ${index + 1} cannot use prepaid shipping with this size. Use a smaller box or contact us for help.`);
       parcelInputs.push({
         items,
+        ...(previewParcelProductWeight(order, parcel).status === "unverified" && weight.status === "ready" ? { packedWeightGrams: weight.weightGrams } : {}),
         ...measured,
       });
     } catch (cause) {
@@ -281,8 +283,8 @@ export function assertPreviewReviewMatches(
     if (
       parcel.number !== index + 1 ||
       !sameCustomerReturnDimensions(parcel.dimensions, expected.dimensions) ||
-      weight.status !== "ready" ||
-      parcel.weightGrams !== weight.weightGrams ||
+      (expected.packedWeightGrams === undefined ? weight.status !== "ready" || parcel.weightGrams !== weight.weightGrams
+        : weight.status !== "unverified" || parcel.weightGrams !== expected.packedWeightGrams) ||
       parcel.items.length !== expected.items.length ||
       new Set(parcel.items.map((item) => item.lineId)).size !==
         parcel.items.length ||

@@ -326,8 +326,8 @@ export const returnCaseDetailItemSchema = z.object({
   receivedQuantity: nonNegativeSafeIntegerSchema,
   remainingQuantity: nonNegativeSafeIntegerSchema,
   receiptStatus: returnCaseReceiptStatusSchema,
-  unitPaidPriceCents: nonNegativeSafeIntegerSchema,
-  sourceLineTotalCents: nonNegativeSafeIntegerSchema,
+  unitPaidPriceCents: nonNegativeSafeIntegerSchema.nullable(),
+  sourceLineTotalCents: nonNegativeSafeIntegerSchema.nullable(),
   createdAt: dateTimeSchema,
 }).strict().superRefine((item, context) => {
   if (!Number.isSafeInteger(item.receivedQuantity + item.remainingQuantity)

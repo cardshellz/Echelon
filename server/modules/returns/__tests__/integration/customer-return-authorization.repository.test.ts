@@ -9,7 +9,7 @@ import {
 import { CustomerReturnAuthorizationService, type CustomerReturnTrustedSource } from "../../application/customer-return-authorization.service";
 import { PostgresCustomerReturnAuthorizationStore } from "../../infrastructure/customer-return-authorization.repository";
 import { resolveReturnsTestDatabase } from "../support/disposable-database";
-import { createIntakeOwnerTables } from "../support/customer-return-inspection-database";
+import { createIntakeOwnerTables, addHistoricalReturnSourceColumns } from "../support/customer-return-inspection-database";
 
 const connectionString = resolveReturnsTestDatabase(process.env, "authorization");
 const integration = connectionString ? describe.sequential : describe.skip;
@@ -72,6 +72,8 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
     // The complete new migration, including deferred constraints and triggers,
     // executes verbatim. No persistence SQL or PostgreSQL operation is mocked.
     await pool.query(readFileSync("migrations/0699_customer_return_authorizations.sql", "utf8"));
+    await addHistoricalReturnSourceColumns(pool);
+    await pool.query(readFileSync("migrations/999999997_pending_historical_return_sources.sql", "utf8"));
     await pool.query("CREATE SCHEMA dropship; CREATE TABLE dropship.dropship_vendors(id integer PRIMARY KEY); CREATE TABLE dropship.dropship_store_connections(id integer PRIMARY KEY)");
     await createIntakeOwnerTables(pool);
     store = new PostgresCustomerReturnAuthorizationStore(drizzle(pool));
@@ -211,7 +213,7 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
     await authorize({ ...secondPart, lines: [{ ...secondPart.lines[0], quantity: 1, allocations: [{ ...secondPart.lines[0].allocations[0], quantity: 1 }] }] });
     const locked = await store.transaction(tx => tx.lockSource({ channelId: 36, omsOrderId: 100, omsOrderLineIds: [10001] }));
     expect(locked?.lines[0].claimedQuantity).toBe(2);
-    expect(locked?.allocationClaims.sort((a, b) => a.wmsOrderItemId - b.wmsOrderItemId)).toEqual([
+    expect(locked?.allocationClaims.sort((a, b) => (a.wmsOrderItemId ?? 0) - (b.wmsOrderItemId ?? 0))).toEqual([
       { omsOrderLineId: 10001, wmsOrderItemId: 1001, fulfillmentId: "fulfillment-1", fulfillmentLineItemId: "fulfillment-line-1", quantity: 1 },
       { omsOrderLineId: 10001, wmsOrderItemId: 1002, fulfillmentId: "fulfillment-1", fulfillmentLineItemId: "fulfillment-line-1", quantity: 1 },
     ]);

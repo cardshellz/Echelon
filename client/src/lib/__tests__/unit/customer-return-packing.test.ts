@@ -58,6 +58,13 @@ const selected = [
 ];
 
 describe("packing totals and purchased-unit limits", () => {
+  it("requires a fresh scale measurement after changing a box's contents", () => {
+    const measured = { ...box(1, { a: "2", b: "1" }), packedWeightOunces: "40" };
+    const changed = changePreviewPackingQuantity(order, selected, [measured], 1, "a", "1");
+    expect(changed.kind).toBe("updated");
+    if (changed.kind === "updated") expect(changed.parcels[0].packedWeightOunces).toBeUndefined();
+    expect(measured.packedWeightOunces).toBe("40");
+  });
   it("limits boxes by selected units, not distinct product lines, and retains the shared maximum", () => {
     expect(
       summarizePreviewPacking(

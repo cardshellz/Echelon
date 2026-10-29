@@ -1,8 +1,13 @@
+import { CustomerReturnAuthorizationPersistenceError } from "./customer-return-authorization.ports";
+import { customerReturnRejectionMessage } from "@shared/returns/customer-return-errors";
 import {
   customerReturnLabelSubmitInputSchema,
   type CustomerReturnLabelSubmitInput,
 } from "@shared/returns/customer-return-label.contract";
-import { customerReturnCanonicalOrderScopeSchema, type CustomerReturnCanonicalOrderScope } from "./customer-return-order-access.service";
+import {
+  customerReturnCanonicalOrderScopeSchema,
+  type CustomerReturnCanonicalOrderScope,
+} from "./customer-return-order-access.service";
 import {
   CustomerReturnIntakeError,
   type CustomerReturnIntakeStore,
@@ -25,6 +30,7 @@ export interface ReturnSubmissionCommand {
   leaseToken: string;
   status: "preparing" | "accepted" | "rejected";
   authorizationId: number | null;
+  errorCode?: string | null;
 }
 export interface CustomerReturnSubmissionStore {
   read(channelId: number, key: string): Promise<ReturnSubmissionCommand | null>;
@@ -50,9 +56,11 @@ export interface CustomerReturnSubmissionStore {
 export interface CustomerReturnSubmissionDependencies {
   commands: CustomerReturnSubmissionStore;
   intake: CustomerReturnIntakeStore;
-  live: Pick<CustomerReturnLiveService, "inspectForIntake"> & Partial<Pick<CustomerReturnLiveService, "inspectCanonicalForIntake">>;
+  live: Pick<CustomerReturnLiveService, "inspectForIntake"> &
+    Partial<Pick<CustomerReturnLiveService, "inspectCanonicalForIntake">>;
   settings: Pick<CustomerReturnLabelSettingsService, "requireEnabled">;
-  labels: Pick<CustomerReturnLabelsService, "status"> & Partial<Pick<CustomerReturnLabelsService, "preflight">>;
+  labels: Pick<CustomerReturnLabelsService, "status"> &
+    Partial<Pick<CustomerReturnLabelsService, "preflight">>;
   authorizeChannel: (channelId: number) => Promise<void>;
   now: () => Date;
   newToken: () => string;
@@ -66,10 +74,22 @@ export class CustomerReturnSubmissionService {
     return this.submitInternal(raw, actor);
   }
   /** Trusted application entry point; customer ownership must be verified first. */
-  async submitForOrder(raw: unknown, actor: string, scope: CustomerReturnCanonicalOrderScope) {
-    return this.submitInternal(raw, actor, customerReturnCanonicalOrderScopeSchema.parse(scope));
+  async submitForOrder(
+    raw: unknown,
+    actor: string,
+    scope: CustomerReturnCanonicalOrderScope,
+  ) {
+    return this.submitInternal(
+      raw,
+      actor,
+      customerReturnCanonicalOrderScopeSchema.parse(scope),
+    );
   }
-  private async submitInternal(raw: unknown, actor: string, scope?: CustomerReturnCanonicalOrderScope) {
+  private async submitInternal(
+    raw: unknown,
+    actor: string,
+    scope?: CustomerReturnCanonicalOrderScope,
+  ) {
     const parsed = customerReturnLabelSubmitInputSchema.safeParse(raw);
     if (!parsed.success)
       throw new CustomerReturnIntakeError(
@@ -97,12 +117,22 @@ export class CustomerReturnSubmissionService {
   async resume(channelId: number, key: string, actor: string) {
     return this.resumeInternal(channelId, key, actor);
   }
-  async resumeForOrder(channelId: number, key: string, actor: string, scope: CustomerReturnCanonicalOrderScope) {
+  async resumeForOrder(
+    channelId: number,
+    key: string,
+    actor: string,
+    scope: CustomerReturnCanonicalOrderScope,
+  ) {
     const checked = customerReturnCanonicalOrderScopeSchema.parse(scope);
     if (checked.channelId !== channelId) throw commandConflict();
     return this.resumeInternal(channelId, key, actor, checked);
   }
-  private async resumeInternal(channelId: number, key: string, actor: string, scope?: CustomerReturnCanonicalOrderScope) {
+  private async resumeInternal(
+    channelId: number,
+    key: string,
+    actor: string,
+    scope?: CustomerReturnCanonicalOrderScope,
+  ) {
     const omsOrderId = scope?.omsOrderId;
     await this.dependencies.authorizeChannel(channelId);
     const command = await this.dependencies.commands.acquire({
@@ -122,7 +152,10 @@ export class CustomerReturnSubmissionService {
     if (!command) throw submissionNotFound();
     return this.completed(command);
   }
-  private async execute(command: ReturnSubmissionCommand, scope?: CustomerReturnCanonicalOrderScope) {
+  private async execute(
+    command: ReturnSubmissionCommand,
+    scope?: CustomerReturnCanonicalOrderScope,
+  ) {
     if (command.status !== "preparing") return this.completed(command);
     const { request } = command;
     try {
@@ -131,9 +164,13 @@ export class CustomerReturnSubmissionService {
           request.channelId,
           request.settingsVersion,
         );
-      const inspection = command.omsOrderId === null
-        ? await this.dependencies.live.inspectForIntake({ channelId: request.channelId, orderReference: request.orderReference })
-        : await this.inspectCanonical(command, scope);
+      const inspection =
+        command.omsOrderId === null
+          ? await this.dependencies.live.inspectForIntake({
+              channelId: request.channelId,
+              orderReference: request.orderReference,
+            })
+          : await this.inspectCanonical(command, scope);
       const prepared = prepareCustomerReturnIntake(
         request,
         inspection,
@@ -144,31 +181,27 @@ export class CustomerReturnSubmissionService {
         command.omsOrderId ?? undefined,
       );
       if (settings.parcelGuardrails != null) {
-        if (!this.dependencies.labels.preflight) throw new CustomerReturnIntakeError(
-          "RETURN_RATE_UNAVAILABLE", "Prepaid shipping could not be verified before creating this return.", 503);
+        if (!this.dependencies.labels.preflight)
+          throw new CustomerReturnIntakeError(
+            "RETURN_RATE_UNAVAILABLE",
+            "Prepaid shipping could not be verified before creating this return.",
+            503,
+          );
         await this.dependencies.labels.preflight(prepared, settings);
       }
       const result = await this.dependencies.intake.persist({
         ...prepared,
         now: this.dependencies.now(),
       });
-      return this.dependencies.labels.status(
+      return await this.dependencies.labels.status(
         request.channelId,
         result.authorizationId,
       );
     } catch (error) {
       // Only known validation failures prove preparation did not authorize a return.
       // Unknown database/transport failures retain the original durable intent.
-      const definitive =
-        error instanceof CustomerReturnBoxPlanError ||
-        ((error instanceof CustomerReturnIntakeError ||
-          error instanceof CustomerReturnLiveError) &&
-          error.status < 500);
-      if (definitive) {
-        const code =
-          error instanceof CustomerReturnBoxPlanError
-            ? "RETURN_LABEL_BOX_PLAN_INVALID"
-            : error.code;
+      const code = definitiveFailureCode(error);
+      if (code !== null) {
         await this.dependencies.commands.reject(
           request.channelId,
           request.idempotencyKey,
@@ -184,18 +217,25 @@ export class CustomerReturnSubmissionService {
         if (latest?.status === "rejected")
           throw new CustomerReturnIntakeError(
             "RETURN_LABEL_SUBMISSION_REJECTED",
-            error.message,
+            customerReturnRejectionMessage(latest.errorCode ?? code),
             410,
+            latest.errorCode ?? code,
           );
       }
       throw processing();
     }
   }
-  private inspectCanonical(command: ReturnSubmissionCommand, scope?: CustomerReturnCanonicalOrderScope) {
+  private inspectCanonical(
+    command: ReturnSubmissionCommand,
+    scope?: CustomerReturnCanonicalOrderScope,
+  ) {
     const inspect = this.dependencies.live.inspectCanonicalForIntake;
-    if (!inspect || !scope) throw new CustomerReturnIntakeError(
-      "RETURN_CUSTOMER_INTAKE_UNAVAILABLE", "This return is temporarily unavailable. Check its saved status before retrying.", 503,
-    );
+    if (!inspect || !scope)
+      throw new CustomerReturnIntakeError(
+        "RETURN_CUSTOMER_INTAKE_UNAVAILABLE",
+        "This return is temporarily unavailable. Check its saved status before retrying.",
+        503,
+      );
     assertBoundOrder(command, scope.omsOrderId);
     if (command.request.channelId !== scope.channelId) throw commandConflict();
     return inspect.call(this.dependencies.live, scope);
@@ -204,8 +244,9 @@ export class CustomerReturnSubmissionService {
     if (command.status === "rejected")
       throw new CustomerReturnIntakeError(
         "RETURN_LABEL_SUBMISSION_REJECTED",
-        "This request was not accepted. Reload the order to review it again.",
+        customerReturnRejectionMessage(command.errorCode),
         410,
+        command.errorCode ?? undefined,
       );
     if (command.status !== "accepted" || command.authorizationId === null)
       throw processing();
@@ -215,12 +256,18 @@ export class CustomerReturnSubmissionService {
     );
   }
 }
-function assertBoundOrder(command: ReturnSubmissionCommand, omsOrderId: number | undefined): void {
-  if (omsOrderId !== undefined && command.omsOrderId !== omsOrderId) throw commandConflict();
+function assertBoundOrder(
+  command: ReturnSubmissionCommand,
+  omsOrderId: number | undefined,
+): void {
+  if (omsOrderId !== undefined && command.omsOrderId !== omsOrderId)
+    throw commandConflict();
 }
 function commandConflict(): CustomerReturnIntakeError {
   return new CustomerReturnIntakeError(
-    "RETURN_LABEL_COMMAND_CONFLICT", "This request belongs to different return details.", 409,
+    "RETURN_LABEL_COMMAND_CONFLICT",
+    "This request belongs to different return details.",
+    409,
   );
 }
 export function processing(): CustomerReturnIntakeError {
@@ -236,4 +283,12 @@ export function submissionNotFound(): CustomerReturnIntakeError {
     "This request has not been recorded yet. Check again before starting another return.",
     404,
   );
+}
+
+function definitiveFailureCode(error: unknown): string | null {
+  if (error instanceof CustomerReturnBoxPlanError) return "RETURN_LABEL_BOX_PLAN_INVALID";
+  if ((error instanceof CustomerReturnIntakeError || error instanceof CustomerReturnLiveError) && error.status < 500) return error.code;
+  if (error instanceof CustomerReturnAuthorizationPersistenceError
+    && (error.code === "RETURN_AUTHORIZATION_SOURCE_CONFLICT" || error.code === "RETURN_AUTHORIZATION_QUANTITY_EXCEEDED")) return error.code;
+  return null;
 }
