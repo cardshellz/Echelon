@@ -43,6 +43,12 @@
   "catalog.shipping_groups": [
     "modules/catalog"
   ],
+  "catalog.shopify_product_connection_commands": [
+    "modules/catalog"
+  ],
+  "catalog.shopify_product_connection_events": [
+    "modules/catalog"
+  ],
   "channels.allocation_audit_log": [
     "modules/channels"
   ],
