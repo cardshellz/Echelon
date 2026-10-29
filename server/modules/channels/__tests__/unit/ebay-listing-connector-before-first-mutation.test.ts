@@ -56,7 +56,7 @@ describe("EbayMarketplaceListingConnector beforeFirstMutation", () => {
   it("passes the proven published listing after the identity check", async () => {
     const f = await fixture("PUBLISHED");
     f.draft.inventoryItems[0].packageSource = { productId: 20, variantId: 101, facts: { weightGrams: 120.25 },
-      requirements: { weight: true, dimensions: true, dimensionsOnMaintenance: "recommended" } };
+      requirements: { weight: true, dimensions: "recommended" } };
     const hook = vi.fn(async () => {});
     const identity = (externalId: string) => ({ externalId, identityNamespace: "ebay:production" });
     const resolvePublishedIdentity = vi.fn(async () => ({
@@ -95,7 +95,7 @@ describe("EbayMarketplaceListingConnector beforeFirstMutation", () => {
     const f = await fixture();
     if (grouped) f.draft.itemGroup = (await syncProviderFixture().prepare()).draft.itemGroup;
     f.draft.inventoryItems[0].packageSource = { productId: 20, variantId: 101, facts: { weightGrams: 120.25 },
-      requirements: { weight: true, dimensions: true, dimensionsOnMaintenance: "recommended" } };
+      requirements: { weight: true, dimensions: true } };
     await expect(f.connector.pushListing(f)).rejects.toMatchObject({ code: "CHANNEL_LISTING_VALIDATION_FAILED" });
     for (const write of writes(f.client)) expect(write).not.toHaveBeenCalled();
   });

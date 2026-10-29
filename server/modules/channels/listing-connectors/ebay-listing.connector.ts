@@ -1,6 +1,6 @@
 import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
 import { assertEbayPreparedIntent } from "../ebay-prepared-intent";
-import { prepareEbayListingPackages, assertEbayPackagePreservation, assertEbayPublicationPackages, type EbayPackageMaintenanceScope } from "../adapters/ebay/ebay-listing-package";
+import { prepareEbayListingPackages, assertEbayPackagePreservation } from "../adapters/ebay/ebay-listing-package";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
@@ -209,12 +209,12 @@ async function runSyncStage(
   await work();
 }
 async function ensurePreparedPackages<T extends Pick<EbayListingConnectorDraft, "productId" | "inventoryItems" | "offers" | "preparedIntent">>(
-  client: EbayListingConnectorClient, draft: T, maintenance?: EbayPackageMaintenanceScope,
+  client: EbayListingConnectorClient, draft: T,
 ): Promise<T> {
   if (draft.inventoryItems.every(item => item.packagePlan)) return draft;
   if (draft.preparedIntent) throw new EbayListingSyncError("EBAY_SYNC_DRAFT_SCOPE_INVALID",
     "Package data must be prepared before the listing intent is sealed. Prepare this update again.");
-  return prepareEbayListingPackages(client, draft, maintenance);
+  return prepareEbayListingPackages(client, draft);
 }
 function readbackPending(resource: string, field: string): EbayListingSyncError {
   return new EbayListingSyncError(
@@ -282,7 +282,6 @@ export class EbayMarketplaceListingConnector {
     let verifiedPublishedListingId: string | undefined;
 
     let draft = input.draft;
-    let maintenance: EbayPackageMaintenanceScope | undefined;
     if (hasPublishedOffer) {
       if (!input.resolvePublishedIdentity || !firstListingId || resolvedOffers.some(member => !member.existingOfferId)) {
         throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", "Existing published eBay offers require a complete provider listing identity check before any further write. Use the listing's Sync or reviewed recovery action.");
@@ -307,14 +306,11 @@ export class EbayMarketplaceListingConnector {
       draft = { ...draft, existingExternalProductId: firstListingId,
         itemGroup: draft.itemGroup ? { ...draft.itemGroup, groupKey: groupKey! } : null };
       verifiedPublishedListingId = firstListingId;
-      maintenance = { marketplaceId: draft.marketplaceId, variants: resolvedOffers.map(member => ({
-        variantId: member.offer.variantId, sku: member.offer.sku, offerId: member.existingOfferId!, listingId: firstListingId })) };
     }
 
-    // Publication discovery is read-only. It must establish the operation before
-    // package requirements can distinguish existing maintenance from publication.
-    draft = await ensurePreparedPackages(input.client, draft, maintenance);
-    if (!hasPublishedOffer) assertEbayPublicationPackages(draft.inventoryItems);
+    // Discovery proves provider identity; package requirements are the same for
+    // new publication, existing updates and reviewed rebuilds.
+    draft = await ensurePreparedPackages(input.client, draft);
     input = { ...input, draft };
 
     // Every discovery and identity refusal above has already run; nothing below
@@ -449,7 +445,6 @@ export class EbayMarketplaceListingConnector {
     validateRebuildInput(input.draft, input.preview.currentExternalListingId);
     validateConfirmedPreview(input.draft, input.preview);
     input = { ...input, draft: await ensurePreparedPackages(input.client, input.draft) };
-    assertEbayPublicationPackages(input.draft.inventoryItems);
     await assertEbayPackagePreservation(input.client, input.draft.inventoryItems);
     if (!input.preview.rebuildRequired) {
       throw new EbayListingSyncError("EBAY_LISTING_REVIEW_CHANGED", "The confirmed eBay listing does not require a rebuild. Analyze it again and use the current available update action.");
@@ -556,7 +551,6 @@ export class EbayMarketplaceListingConnector {
   }): Promise<EbayListingConnectorResult & { removedSkus: string[]; previousExternalListingId: string }> {
     validateRebuildInput(input.draft, input.preview.currentExternalListingId);
     input = { ...input, draft: await ensurePreparedPackages(input.client, input.draft) };
-    assertEbayPublicationPackages(input.draft.inventoryItems);
 
     const currentPreview = await this.previewListingRebuild({
       client: input.client,
@@ -907,7 +901,7 @@ export class EbayMarketplaceListingConnector {
         ]) } } } };
     }
     this.validateExistingListingSyncDraft(input);
-    input = { ...input, draft: await prepareEbayListingPackages(input.client, input.draft, input.identity) };
+    input = { ...input, draft: await prepareEbayListingPackages(input.client, input.draft) };
     const retainedSkus = [...input.identity.variants.filter(member => member.contentSyncEnabled === false).map(member => member.sku),
       ...input.identity.retainedGroupSkus ?? []];
     if (!retainedSkus.length || !input.draft.itemGroup) return input.draft;
@@ -962,7 +956,7 @@ export class EbayMarketplaceListingConnector {
     ) => Promise<void>;
   }): Promise<EbayExistingListingSyncResult> {
     this.validateExistingListingSyncDraft(input);
-    input = { ...input, draft: await ensurePreparedPackages(input.client, input.draft, input.identity) };
+    input = { ...input, draft: await ensurePreparedPackages(input.client, input.draft) };
     await this.verifyRetainedSyncMembers(input);
 
     const updatedInventorySkus: string[] = [];
@@ -970,7 +964,6 @@ export class EbayMarketplaceListingConnector {
     const missingOfferVariantIds: number[] = [];
     const policyChangedVariantIds: number[] = [];
     const resolvedOffers: Array<{ offerId: string; variantId: number; payload: EbayOffer }> = [];
-    const offerReads = new Map<string, { offers: EbayObservedOffer[] }>();
     let itemGroupUpdated = false;
 
     for (const offer of input.draft.offers) {
@@ -978,7 +971,6 @@ export class EbayMarketplaceListingConnector {
         offer.sku,
         input.draft.marketplaceId,
       );
-      offerReads.set(offer.sku, existingOffers);
       const expected = input.identity?.variants.find(
         (member) =>
           member.variantId === offer.variantId && member.sku === offer.sku,
@@ -1009,9 +1001,7 @@ export class EbayMarketplaceListingConnector {
       resolvedOffers.push({ offerId: existingOffer.offerId, variantId: offer.variantId, payload });
     }
 
-    // Reuse the exact offer reads just resolved by this owner; checking package
-    // requirements must not repeat one identical network lookup per variant.
-    await assertEbayPackagePreservation(input.client, input.draft.inventoryItems, offerReads);
+    await assertEbayPackagePreservation(input.client, input.draft.inventoryItems);
     // Resolve every offer identity before the first write. eBay validates the
     // current inventory content when replacing an active offer, so repair item
     // content first. The durable stage owner still fences and journals each

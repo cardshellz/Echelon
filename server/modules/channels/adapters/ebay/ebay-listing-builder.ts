@@ -61,6 +61,7 @@ export interface BuiltInventoryItem {
   sku: string;
   packageSource?: EbayPackageSource;
   packagePlan?: ChannelPackagePlan;
+  /** Legacy audit/hash compatibility only; fresh preparation removes this proof. */
   packageMaintenance?: EbayPackageMaintenanceProof;
   payload: Omit<EbayInventoryItem, "sku">;
 }

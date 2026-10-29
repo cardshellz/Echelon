@@ -105,6 +105,67 @@ test("a completed update retains its optional dimensions warning in the feed and
   expect(state.errors).toEqual([]);
 });
 
+for (const operation of ["publish", "sync"] as const) {
+  test(`normal Sync completes ${operation} with missing dimensions as a persistent warning`, async ({ page }, info) => {
+    const state = await setupEbayChannelPage(page);
+    const id = "6e4d8e03-3197-4d21-a6d7-aa1ddaecc775";
+    const issue = resolveEbayListingIssue({ code: "CHANNEL_LISTING_VALIDATION_FAILED", productId: 1, jobId: id,
+      validation: { field: "package_dimensions", reason: "required", productId: 1, variantId: 101, variantSku: "PACKAGE-TEST" } });
+    const failed = { id, productId: 1, operation, state: "needs_attention", code: issue.code, message: issue.message, issue,
+      nextAttemptAt: "2026-10-28T12:00:00Z", updatedAt: "2026-10-28T12:00:00Z" };
+    state.jobs = [failed];
+    if (operation === "publish") { state.feedStatus = "publication_incomplete"; state.externalListingId = null; }
+    await page.reload();
+    const queued = { id, productId: 1, operation, state: "queued", code: null, message: null,
+      nextAttemptAt: "2026-10-28T12:01:00Z", updatedAt: "2026-10-28T12:01:00Z" };
+    state.response = { synced: 0, errors: 0, pending: 1, priceChanges: 0, qtyChanges: 0, policyChanges: 0, details: [], jobs: [queued] };
+    await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
+    await expect(page.getByRole("status", { name: "Sync status for 55PT Toploader Combo Pack" })).toContainText("Queued for eBay");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    state.jobs = [{ ...queued, state: "completed", warnings: [{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
+      productId: 1, variantId: 101, variantSku: "PACKAGE-TEST" }] }];
+    state.feedStatus = "listed"; state.externalListingId = "verified-listing";
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Errors (0)", exact: true })).toBeVisible();
+    const warning = page.getByRole("region", { name: "Listing warnings" });
+    await expect(warning).toContainText("PACKAGE-TEST: package dimensions are missing. Shipping estimates may be inaccurate.");
+    await expect(warning.getByRole("link", { name: "Edit package dimensions", exact: true }))
+      .toHaveAttribute("href", "/products/1?tab=variants&variantId=101");
+    await expect(page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true })).toBeEnabled();
+    if (operation === "sync") {
+      await page.getByRole("button", { name: "View update status", exact: true }).click();
+      await expect(page.getByRole("dialog").getByRole("region", { name: "Listing warnings" })).toContainText("PACKAGE-TEST");
+    }
+    await page.screenshot({ path: info.outputPath(`optional-dimensions-${operation}.png`), fullPage: true });
+    expect(state.requests).toEqual(["/api/ebay/listings/sync-product/1"]);
+    expect(state.commands).toHaveLength(1);
+    expect(failed).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED" });
+    expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  });
+}
+
+test("an actual provider dimension refusal stays visible and normal Sync can retry after correction", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  const id = "6e4d8e03-3197-4d21-a6d7-aa1ddaecc775";
+  const message = "eBay rejected this update (HTTP 400; codes 25002). Package dimensions are required by the selected shipping service.";
+  const issue = resolveEbayListingIssue({ code: "EBAY_QUANTITY_REJECTED", message, productId: 1, jobId: id });
+  const refused = { id, productId: 1, operation: "publish", state: "needs_attention", code: issue.code, message, issue,
+    nextAttemptAt: "2026-10-28T12:00:00Z", updatedAt: "2026-10-28T12:00:00Z" };
+  state.feedStatus = "publication_incomplete"; state.externalListingId = null; state.jobs = [refused];
+  await page.reload();
+  await expect(page.getByText(message, { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open listing settings", exact: true })).toHaveAttribute("href", "/products/1?tab=channels");
+  expect(state.requests).toEqual([]);
+  state.response = { synced: 0, errors: 0, pending: 1, priceChanges: 0, qtyChanges: 0, policyChanges: 0, details: [],
+    jobs: [{ ...refused, state: "queued", code: null, message: null, issue: undefined }] };
+  await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
+  await expect(page.getByRole("status", { name: "Sync status for 55PT Toploader Combo Pack" })).toContainText("Queued for eBay");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.requests).toEqual(["/api/ebay/listings/sync-product/1"]);
+  expect(refused.message).toBe(message);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("a historical package-type failure offers the normal sync action instead of a removed editor", async ({ page }) => {
   const feed = await setupEbayChannelPage(page);
   const id = "6e4d8e03-3197-4d21-a6d7-aa1ddaecc775";

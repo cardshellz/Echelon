@@ -27,6 +27,7 @@ export class AutomaticSyncEbayProvider {
   private groupExists = true;
   private groupAttached = true;
   private nextReadFailure: { path: string; status: number } | null = null;
+  private nextWriteRejection: { path: string; message: string } | null = null;
   private heldPreflightRead: { entered: () => void; gate: Promise<void> } | null = null;
   private held: { path: string; entered: () => void; gate: Promise<void> } | null = null;
   private readonly members = new Map<string, { item: EbayInventoryItem; offer: EbayObservedOffer }>();
@@ -66,6 +67,11 @@ export class AutomaticSyncEbayProvider {
   }
 
   failNextRead(path: string, status = 503): void { this.nextReadFailure = { path, status }; }
+
+  rejectNextWrite(path: string, message: string): void {
+    if (this.nextWriteRejection) throw new Error("Only one provider rejection may be armed at a time.");
+    this.nextWriteRejection = { path, message };
+  }
 
   holdNextPublicationPreflightRead(): { entered: Promise<void>; release(): void } {
     if (this.heldPreflightRead) throw new Error("Only one publication read may be held at a time.");
@@ -138,6 +144,11 @@ export class AutomaticSyncEbayProvider {
         }
         if (request.method === "GET") return this.response(this.read(request.path));
         this.writes.push(request);
+        if (this.nextWriteRejection?.path === request.path) {
+          const rejection = this.nextWriteRejection;
+          this.nextWriteRejection = null;
+          return new Response(JSON.stringify({ errors: [{ errorId: 25002, category: "REQUEST", message: rejection.message }] }), { status: 400 });
+        }
         if (this.held?.path === request.path) {
           const held = this.held;
           this.held = null;
