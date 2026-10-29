@@ -313,8 +313,8 @@ const configured =
     });
     const galleryPhotos = ["https://example.com/current-front.jpg", "https://example.com/current-back.jpg"];
 
-    async function prepareFromCatalog(f: ReturnType<typeof fixture>, weight: number | null = 120, calculated = false,
-      maintenanceRecommended = false) {
+    async function prepareFromCatalog(f: ReturnType<typeof fixture>, weight: number | null = 120,
+      dimensions: boolean | "recommended" = false) {
       // Catalog read dependencies are fixtures; all queue/receipt/audit indexes
       // and constraints above come from the unchanged production migrations.
       await database.pool.query(`ALTER TABLE catalog.product_variants ADD COLUMN IF NOT EXISTS weight_grams numeric(10,2);
@@ -333,12 +333,10 @@ const configured =
           variantPrices: new Map([[101, 1149]]), atpByVariantId: new Map([[101, 7]]),
           marketplaceId: "EBAY_US", ebayBrowseCategoryId: "183454",
           resolvedPoliciesByVariantId: new Map([[101, { fulfillmentPolicyId: "fulfillment", returnPolicyId: "return", paymentPolicyId: "payment" }]]),
-          packageRequirementsByVariantId: new Map([[101, { weight: true, dimensions: calculated,
-            ...(maintenanceRecommended ? { dimensionsOnMaintenance: "recommended" as const } : {}) }]]),
+          packageRequirementsByVariantId: new Map([[101, { weight: true, dimensions }]]),
           storeCategoryNames: [], merchantLocationKey: "HQ", existingGroupKey: identity.groupKey });
         return { ...await f.provider.prepare(), identity: structuredClone(identity), client: f.client,
-          draft: await prepareEbayListingPackages(f.client, { ...draft, productId: 20, marketplaceId: "EBAY_US" },
-            maintenanceRecommended ? identity : undefined) };
+          draft: await prepareEbayListingPackages(f.client, { ...draft, productId: 20, marketplaceId: "EBAY_US" }) };
       });
     }
 
@@ -474,9 +472,10 @@ const configured =
       expect(f.mutations).toHaveLength(writes);
     });
 
-    it("blocks incomplete calculated packages before any write and completes after an exact catalog correction", async () => {
+    it("blocks partial supplied measurements before any write and completes after an exact catalog correction", async () => {
       const f = fixture();
-      await prepareFromCatalog(f, 120.25, true);
+      await prepareFromCatalog(f, 120.25, "recommended");
+      await database.pool.query("UPDATE catalog.product_variants SET length_mm=152.40 WHERE id=101");
       const saved = await f.service.enqueue(identity, "operator");
       await f.service.processDue(1, saved.id);
       expect(await f.store.get(saved.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED",
@@ -496,7 +495,7 @@ const configured =
     });
 
     it("persists optional-dimension warnings through concurrent maintenance, readback and idempotent replay", async () => {
-      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      const f = fixture(); await prepareFromCatalog(f, 120.25, "recommended");
       const key = randomUUID();
       const saved = await Promise.all([f.service.enqueue(identity, "operator", key), f.service.enqueue(identity, "operator", key)]);
       expect(saved[0].id).toBe(saved[1].id);
@@ -516,25 +515,28 @@ const configured =
       expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
     });
 
-    it.each(["reviewed-update", "rebuild"] as const)("does not reuse a Catalog-backed maintenance warning for %s publication", async operation => {
-      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+    it.each(["reviewed-update", "rebuild"] as const)("keeps optional dimensions as warnings during %s preparation", async operation => {
+      const f = fixture(); await prepareFromCatalog(f, 120.25, "recommended");
       const current = await f.prepare();
       expect(current.draft.inventoryItems[0].packagePlan?.warnings).toHaveLength(1);
       const draft = { ...current.draft, publishMode: "publish" as const, hasExistingExternalIds: true,
         itemGroup: (await f.provider.prepare()).draft.itemGroup };
       const connector = new EbayMarketplaceListingConnector();
       const preview = await connector.previewListingRebuild({ client: f.client, draft, currentExternalListingId: "listing-20" });
+      // Stop at the first provider boundary: this regression targets the removed
+      // local publication guard, not the unrelated topology/rebuild state machine.
+      const reachedProvider = new Error("provider boundary reached");
+      vi.spyOn(f.client, "getInventoryItem").mockRejectedValueOnce(reachedProvider);
       const input = { client: f.client, draft, preview };
       await expect(operation === "reviewed-update" ? connector.updateExistingListing(input) : connector.executeListingRebuild(input))
-        .rejects.toMatchObject({ code: "CHANNEL_LISTING_VALIDATION_FAILED" });
+        .rejects.toBe(reachedProvider);
       expect(f.mutations).toHaveLength(0);
-      expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
       expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
         .toEqual({ length_mm: null, width_mm: null, height_mm: null });
     });
 
     it("finishes already-current maintenance read-only while retaining the dimension warning", async () => {
-      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      const f = fixture(); await prepareFromCatalog(f, 120.25, "recommended");
       // Prepare once to set exact desired content on the provider; the worker
       // must then use inspection, not write an unchanged listing again.
       const current = await f.prepare();
@@ -549,18 +551,18 @@ const configured =
       expect(f.mutations).toHaveLength(0);
     });
 
-    it("keeps dimensions required when an existing offer would change fulfillment policies", async () => {
-      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+    it("keeps the dimension warning when an existing offer changes fulfillment policies", async () => {
+      const f = fixture(); await prepareFromCatalog(f, 120.25, "recommended");
       f.provider.currentOffer().listingPolicies.fulfillmentPolicyId = "previous-shipping-policy";
       const saved = await f.service.enqueue(identity, "operator");
       await processConcurrently(f, saved.id);
-      expect(await f.store.get(saved.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED",
-        issue: { action: { href: "/products/20?tab=variants&variantId=101" } } });
-      expect(f.mutations).toHaveLength(0);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed", warnings: [{ variantSku: "P5" }] });
+      expect(f.provider.currentOffer().listingPolicies.fulfillmentPolicyId).toBe("fulfillment");
+      expect(f.mutations.length).toBeGreaterThan(0);
     });
 
     it("does not soften partial dimensions during maintenance and clears a warning after a real correction", async () => {
-      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      const f = fixture(); await prepareFromCatalog(f, 120.25, "recommended");
       await database.pool.query("UPDATE catalog.product_variants SET length_mm=152.40 WHERE id=101");
       const partial = await f.service.enqueue(identity, "operator"); await f.service.processDue(1, partial.id);
       expect(await f.store.get(partial.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED" });
@@ -579,7 +581,7 @@ const configured =
         && !(request.body as { packageWeightAndSize?: { dimensions?: unknown } }).packageWeightAndSize?.dimensions
         ? new Response(JSON.stringify({ errors: [{ errorId: 25002, category: "REQUEST",
           message: "Package dimensions are required by the selected shipping service." }] }), { status: 400 }) : undefined });
-      await prepareFromCatalog(f, 120.25, true, true);
+      await prepareFromCatalog(f, 120.25, "recommended");
       const saved = await f.service.enqueue(identity, "operator"); await processConcurrently(f, saved.id);
       expect(await f.store.get(saved.id)).toMatchObject({ state: "needs_attention", code: "EBAY_QUANTITY_REJECTED" });
       expect((await f.store.get(saved.id)).message).toContain("Package dimensions are required");
@@ -594,8 +596,8 @@ const configured =
       expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(evidence);
     });
 
-    it("fences a shipping-policy edit between package preparation and mutation", async () => {
-      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+    it("does not turn a changed provider policy into a local missing-dimensions blocker", async () => {
+      const f = fixture(); await prepareFromCatalog(f, 120.25, "recommended");
       const prepare = f.prepare.getMockImplementation()!;
       f.prepare.mockImplementation(async () => {
         const result = await prepare();
@@ -603,12 +605,12 @@ const configured =
         return result;
       });
       const saved = await f.service.enqueue(identity, "operator"); await processConcurrently(f, saved.id);
-      expect(await f.store.get(saved.id)).toMatchObject({ state: "recovering", code: "EBAY_SYNC_PACKAGE_CHANGED" });
-      expect(f.mutations).toHaveLength(0);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed", warnings: [{ variantSku: "P5" }] });
+      expect(f.provider.currentOffer().listingPolicies.fulfillmentPolicyId).toBe("fulfillment");
     });
 
     it("rejects a warning that belongs to another product instead of projecting it onto this listing", async () => {
-      const f = fixture(); await prepareFromCatalog(f, 120.25, true, true);
+      const f = fixture(); await prepareFromCatalog(f, 120.25, "recommended");
       const execute = f.executor.execute.bind(f.executor);
       vi.spyOn(f.executor, "execute").mockImplementation(async (...args) => ({ ...await execute(...args),
         warnings: [{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
