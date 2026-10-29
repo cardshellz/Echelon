@@ -123,7 +123,7 @@ describe("private return submission and exact-intent recovery", () => {
     s.requireEnabled.mockResolvedValue({ settings: { ...labelSettings, parcelGuardrails: defaultCustomerReturnShippingGuardrails() },
       operationalPolicy: { id: 1, version: 1, snapshot: labelPolicy } });
     s.preflight.mockRejectedValue(new CustomerReturnIntakeError("RETURN_RATE_COST_LIMIT", "Repack this box.", 409));
-    await expect(s.service.submit(s.input, "admin")).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_REJECTED", message: "Repack this box." });
+    await expect(s.service.submit(s.input, "admin")).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_REJECTED", reasonCode: "RETURN_RATE_COST_LIMIT", message: expect.stringContaining("Use a smaller box") });
     expect(s.preflight).toHaveBeenCalledTimes(1);
     expect(s.persist).not.toHaveBeenCalled();
     expect(s.status).not.toHaveBeenCalled();

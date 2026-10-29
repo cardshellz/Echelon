@@ -272,7 +272,7 @@ export class CustomerReturnAuthorizationService {
       if (current.legacyExpectedQuantity > 0) claims.push({ claimId: `legacy:${mapping.omsOrderLineId}`, allocationId: null, quantity: current.legacyExpectedQuantity });
       for (const claim of localClaims) {
         const allocation = line.allocations.find(candidate => candidate.fulfillmentId === claim.fulfillmentId && candidate.fulfillmentLineItemId === claim.fulfillmentLineItemId);
-        if (allocation?.status === "active") {
+        if (allocation?.status === "active" && claim.wmsOrderItemId !== null) {
           const mapped = mapping.allocations.find(candidate => candidate.allocationId === allocation.allocationId)!;
           if (!mapped.wmsAllocations.some(item => item.wmsOrderItemId === claim.wmsOrderItemId)) {
             throw failure("RETURN_SOURCE_MISMATCH", "A current return claim no longer has its original WMS allocation.");

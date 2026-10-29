@@ -4,7 +4,7 @@ import { CustomerReturnPreviewService } from "../../application/customer-return-
 import { CustomerReturnLiveError } from "../../application/customer-return-live-error";
 import { CustomerReturnLiveService } from "../../application/customer-return-live.service";
 import { LIVE_NOW, liveGid, liveLocalFixture, liveShop, liveShopifyFixture } from "../support/live-inspection-fixtures";
-import { labelActivePolicy } from "../support/label-fixtures";
+import { labelActivePolicy, labelSources } from "../support/label-fixtures";
 
 function setup() {
   const samples = new CustomerReturnPreviewService();
@@ -21,8 +21,8 @@ function setup() {
 }
 
 function setupLiveInspection() {
-  const localFacts = liveLocalFixture();
-  const shopifyFacts = liveShopifyFixture();
+  const {local:localFacts,shopify:shopifyFacts} = labelSources();
+
   localFacts.order.externalCustomerId = "123";
   localFacts.order.shipToCountry = "United States";
   shopifyFacts.order.customerId = liveGid("Customer", "123");
@@ -126,7 +126,7 @@ describe("customer eligible-order list", () => {
     const s = setupLiveInspection();
     const result = await s.service.list({});
     expect(result.orders.map(order => order.omsOrderId)).toEqual([100]);
-    expect(result.orders[0].order.lines.map(line => line.eligibleQuantity)).toEqual([2, 1]);
+    expect(result.orders[0].order.lines.map(line => line.eligibleQuantity)).toEqual([3, 1]);
     expect(result.unavailableOrderCount).toBe(0);
     expect(s.reportUnavailableOrder).not.toHaveBeenCalled();
   });

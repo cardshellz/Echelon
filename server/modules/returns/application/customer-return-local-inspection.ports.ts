@@ -44,7 +44,7 @@ export const customerReturnLocalWmsItemSchema = z.object({
 export const customerReturnLocalRootClaimSchema = z.object({
   claimId: id, authorizationId: id, authorizationLineId: id,
   channelId: id, omsOrderId: id, omsOrderLineId: id, externalLineItemId: identity,
-  wmsOrderItemId: id, fulfillmentId: identity, fulfillmentLineItemId: identity,
+  wmsOrderItemId: id.nullable(), fulfillmentId: identity.nullable(), fulfillmentLineItemId: identity.nullable(),
   quantity: quantity.refine(value => value > 0),
 }).strict();
 export const customerReturnLocalLegacyClaimSchema = z.object({

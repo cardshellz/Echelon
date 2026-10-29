@@ -47,14 +47,15 @@ export const inspectionQueries = Object.freeze({
     FROM oms.oms_order_lines line LEFT JOIN catalog.product_variants variant ON variant.id = line.product_variant_id
     WHERE line.order_id = $1 ORDER BY line.id LIMIT $2`,
 
-  wmsItems: `SELECT wi.id AS "wmsOrderItemId", wo.id AS "wmsOrderId", wi.oms_order_line_id AS "omsOrderLineId",
+  wmsItems: `SELECT wi.id AS "wmsOrderItemId", wo.id AS "wmsOrderId", COALESCE(wi.oms_order_line_id, resolved.oms_order_line_id) AS "omsOrderLineId",
     wo.channel_id AS "channelId", wo.source, wo.oms_fulfillment_order_id AS "omsOrderReference",
     wo.source_table_id AS "legacyOrderReference", wo.external_order_id AS "externalOrderId",
-    wi.source_item_id AS "externalLineItemId", wi.quantity, wi.fulfilled_quantity AS "fulfilledQuantity",
+    COALESCE(wi.shopify_line_item_id, CASE WHEN wi.source_item_id ~ '^(gid://shopify/LineItem/)?[1-9][0-9]*$' THEN wi.source_item_id ELSE NULL END) AS "externalLineItemId", wi.quantity, wi.fulfilled_quantity AS "fulfilledQuantity",
     wo.warehouse_status AS "warehouseStatus"
     FROM wms.order_items wi JOIN wms.orders wo ON wo.id = wi.order_id
     LEFT JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
-    WHERE ol.order_id = $1 OR wo.oms_fulfillment_order_id = $2
+    LEFT JOIN returns.customer_return_source_items resolved ON resolved.wms_order_item_id=wi.id AND resolved.oms_order_id=$1
+    WHERE resolved.oms_order_id=$1 OR ol.order_id = $1 OR wo.oms_fulfillment_order_id = $2
       OR wo.source_table_id = $2
     ORDER BY wo.id, wi.id LIMIT $3`,
 
@@ -96,7 +97,7 @@ export const inspectionQueries = Object.freeze({
   inventoryReturns: `SELECT it.id AS "transactionId", it.order_id AS "wmsOrderId", it.order_item_id AS "wmsOrderItemId",
     it.variant_qty_delta AS "quantityDelta", it.created_at AT TIME ZONE 'UTC' AS "occurredAt"
     FROM inventory.inventory_transactions it LEFT JOIN wms.orders wo ON wo.id = it.order_id
-    WHERE it.transaction_type = 'return'
+    WHERE it.transaction_type = 'return' AND it.voided_at IS NULL
       AND (it.order_id = ANY($1::int[]) OR it.order_item_id = ANY($2::int[])
         OR wo.oms_fulfillment_order_id = $3 OR wo.source_table_id = $3)
       AND NOT (${portalInventoryReturnMirrorSql})

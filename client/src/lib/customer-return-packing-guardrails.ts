@@ -2,11 +2,11 @@ import type { CustomerReturnFlowOrder } from "@shared/returns/customer-return-fl
 import { MAX_RETURN_FLOW_PARCELS } from "@shared/returns/customer-return-flow.contract";
 import { customerReturnPackingIssue } from "@shared/returns/customer-return-shipping-guardrails";
 import { splitCustomerReturnItemsByWeight } from "@shared/returns/customer-return-weight-split";
-import { initialPreviewParcelSize, previewParcelProductWeight, readPreviewParcelDimensions, readPreviewQuantity,
+import { initialPreviewParcelSize, previewParcelLabelWeight, readPreviewParcelDimensions, readPreviewQuantity,
   type PreviewParcelDraft } from "./customer-return-parcels";
 
 export function previewPackingGuardrailIssue(order: CustomerReturnFlowOrder, parcel: PreviewParcelDraft): "weight" | "size" | "unsupported" | null {
-  const weight = previewParcelProductWeight(order, parcel);
+  const weight = previewParcelLabelWeight(order, parcel);
   if (weight.status !== "ready" || order.packingLimits == null) return null;
   // Weight feedback does not wait for the customer to finish entering dimensions.
   if (!order.packingLimits.length) return "unsupported";

@@ -1,3 +1,4 @@
+import { ReturnParcelReceivingCard } from "@/components/returns/ReturnParcelReceivingCard";
 import { useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { ReturnCaseAdminPanel } from "@/components/returns/ReturnCaseAdminPanel";
@@ -29,7 +30,9 @@ export default function ReturnCases() {
       >
         <TabsList>
           <TabsTrigger value="rmas">RMAs</TabsTrigger>
-          <TabsTrigger value="receiving">Receiving &amp; inspection</TabsTrigger>
+          <TabsTrigger value="receiving">
+            Receiving &amp; inspection
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="rmas">
           <ReturnCaseAdminPanel
@@ -39,7 +42,8 @@ export default function ReturnCases() {
             }}
           />
         </TabsContent>
-        <TabsContent value="receiving">
+        <TabsContent value="receiving" className="space-y-4">
+          <ReturnParcelReceivingCard />
           <ReturnOpsTab
             showCreatePanel={false}
             showLegacyPolicyPanel={false}

@@ -1,7 +1,7 @@
 import { customerReturnFlowReviewInputSchema } from "../../../../shared/returns/customer-return-flow.contract";
 import { customerReturnPackingIssue, type CustomerReturnPackingLimit } from "@shared/returns/customer-return-shipping-guardrails";
 import {
-  calculateCustomerReturnProductWeight, sameCustomerReturnDimensions,
+  resolveCustomerReturnParcelWeight, sameCustomerReturnDimensions,
   type CustomerReturnBoxOption,
 } from "../../../../shared/returns/customer-return-parcel";
 
@@ -63,11 +63,11 @@ export function validateCustomerReturnBoxPlan(
       packedQuantities.set(item.lineId, packed + item.quantity);
       return { lineId: item.lineId, title: selection.title, quantity: item.quantity };
     });
-    const weightGrams = calculateCustomerReturnProductWeight(items.map(item => ({
+    const weightGrams = resolveCustomerReturnParcelWeight(items.map(item => ({
       quantity: item.quantity, unitWeightGrams: available.get(item.lineId)!.unitWeightGrams,
-    })));
+    })), parcel.packedWeightGrams);
     if (weightGrams === null) {
-      throw new CustomerReturnBoxPlanError("weight", `The product weight for box ${index + 1} needs verification. Contact us for help with your return.`);
+      throw new CustomerReturnBoxPlanError("weight", `Enter the measured packed weight for box ${index + 1} to create its shipping label.`);
     }
     const issue = customerReturnPackingIssue(packingLimits, weightGrams, parcel.dimensions);
     if (issue !== null) throw new CustomerReturnBoxPlanError(issue === "weight" ? "weight" : "parcels",

@@ -79,6 +79,7 @@ function harness(options: {
       qty_received: 4,cost_provisional: 0,cost_precision_version: 1,unit_cost_mills: (options.costCents ?? 275)*100,
       total_unit_cost_mills: (options.costCents ?? 275)*100,po_unit_cost_mills: (options.costCents ?? 275)*100,
       packaging_cost_mills: 0,landed_cost_mills: 0 }] };
+    if (text.includes("INSERT INTO inventory.lot_cost_follow_ups")) return { rows: [{ id: 701 }] };
     if (text.includes("inventory.lot_cost_contributions") || text.startsWith("INSERT INTO inventory.return_cost_allocations")) return { rows: [] };
     if (text.startsWith("INSERT INTO inventory.inventory_lots")) return { rows: [{ id: 501 }] };
     if (text.startsWith("UPDATE inventory.inventory_levels")) return { rows: [] };
@@ -119,6 +120,25 @@ describe("applyReturnRestock", () => {
     ]);
     expect(queries.find((query) => query.sql.includes("FROM catalog.product_variants"))?.sql)
       .toContain("FOR UPDATE");
+  });
+
+  it("receives a purchased-line disposition without outbound history and retains an unresolved cost obligation", async () => {
+    const { executor, queries } = harness();
+    const result = await applyReturnRestock(executor, input({ wmsOrderId: null, wmsOrderItemId: null }));
+    expect(result).toMatchObject({ quantity: 2, replayed: false });
+    expect(queries.some(query => query.sql.includes("FROM oms.order_item_costs"))).toBe(false);
+    const cost = queries.find(query => query.sql.startsWith("INSERT INTO inventory.return_cost_allocations"));
+    expect(cost?.params.slice(0,7)).toEqual([501,"return_inventory_treatment:91",null,null,null,301,2]);
+    expect(queries.some(query => query.sql.includes("lot_cost_follow_ups"))).toBe(true);
+    const ledger = queries.find(query => query.sql.startsWith("INSERT INTO inventory.inventory_transactions"));
+    expect(ledger?.params).toEqual(expect.arrayContaining(["return_inventory_treatment","91"]));
+  });
+
+  it("replays a purchased return without creating additional stock", async () => {
+    const { executor, queries } = harness({ existing: { id: 601, order_id: null, order_item_id: null,
+      product_variant_id: 301, to_location_id: 17, variant_qty_delta: 2, inventory_lot_id: 501, target_state: "on_hand" } });
+    expect((await applyReturnRestock(executor, input({ wmsOrderId: null, wmsOrderItemId: null }))).replayed).toBe(true);
+    expect(queries.some(query => query.sql.startsWith("INSERT INTO"))).toBe(false);
   });
 
   it("replays matching durable ledger evidence before validating mutable location or variant state", async () => {

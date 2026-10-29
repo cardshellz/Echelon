@@ -51,6 +51,7 @@ interface SqlExecutor {
 interface CaseRow {
   id: unknown;
   case_number: unknown;
+  source_provider: unknown;
   oms_order_id: unknown;
   wms_order_id: unknown;
   wms_return_id: unknown;
@@ -135,7 +136,7 @@ interface InventoryTreatmentItemRow {
 interface InsertedDispositionRow { id: unknown }
 
 
-const RETURN_QUANTITY_LOCK_NAMESPACE = 918413;
+export const RETURN_QUANTITY_LOCK_NAMESPACE = 918413;
 
 export class PostgresReturnCaseOperationStore implements ReturnCaseOperationStore {
   transaction<T>(work: (tx: ReturnCaseOperationTransaction) => Promise<T>, options?: { inventoryCosting: boolean }): Promise<T> {
@@ -146,7 +147,7 @@ export class PostgresReturnCaseOperationStore implements ReturnCaseOperationStor
   }
 }
 
-class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTransaction {
+export class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTransaction {
   constructor(private readonly tx: Transaction) {}
 
   async lockCommand(idempotencyKey: string): Promise<void> {
@@ -188,7 +189,7 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
 
     const caseResult = await this.tx.execute(sql`
       SELECT
-        return_case.id, return_case.case_number, return_case.oms_order_id,
+        return_case.id, return_case.case_number, return_case.source_provider, return_case.oms_order_id,
         return_case.wms_order_id, return_case.wms_return_id, return_case.business_context,
         channel.provider AS channel_provider, return_case.vendor_id, return_case.case_status,
         return_case.approval_status, return_case.logistics_status, return_case.inspection_status,
@@ -348,10 +349,11 @@ class PostgresReturnCaseOperationTransaction implements ReturnCaseOperationTrans
       caseId: readPositiveInteger(row.id, "return case id"),
       caseNumber: readText(row.case_number, "return case number"),
       omsOrderId,
-      wmsOrderId: readPositiveInteger(row.wms_order_id, "WMS order id"),
+      wmsOrderId: row.wms_order_id == null ? null : readPositiveInteger(row.wms_order_id, "WMS order id"),
       wmsReturnId,
       items: operationItems,
       actionContext: {
+        ...(row.source_provider === "customer_portal" ? { customerRefundExecutionAuthority: "manual_shopify" as const } : {}),
         businessContext: readBusinessContext(row.business_context),
         channelProvider: readNullableText(row.channel_provider),
         vendorId: readNullablePositiveInteger(row.vendor_id, "return case vendor id"),

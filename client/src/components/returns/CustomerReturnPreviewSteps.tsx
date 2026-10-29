@@ -125,7 +125,6 @@ export function PreviewItems({
           // additional counts visible when they explain a restricted quantity.
           const showDetails =
             line.eligibleQuantity !== line.purchasedQuantity ||
-            line.deliveredQuantity !== line.purchasedQuantity ||
             line.alreadyReturningQuantity !== 0 ||
             Boolean(line.message);
           return (
@@ -164,8 +163,7 @@ export function PreviewItems({
                         : "sr-only"
                     }
                   >
-                    {line.purchasedQuantity} ordered · {line.deliveredQuantity}{" "}
-                    confirmed delivered
+                    {line.purchasedQuantity} purchased
                     {line.alreadyReturningQuantity !== null &&
                       line.alreadyReturningQuantity > 0 &&
                       ` · ${line.alreadyReturningQuantity} already in a return`}

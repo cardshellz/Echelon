@@ -22,11 +22,12 @@ export const preparedCustomerReturnIntakeSchema = z.object({
   lines: z.array(z.object({
     omsOrderLineId: id, externalLineItemId: text(100), quantity, reasonCode: text(100).nullable(),
     allocations: z.array(z.object({
-      wmsOrderItemId: id, fulfillmentId: text(200), fulfillmentLineItemId: text(200),
+      sourceKind: z.enum(["shopify_fulfillment", "shopify_purchase"]).optional(),
+      wmsOrderItemId: id.nullable(), fulfillmentId: text(200).nullable(), fulfillmentLineItemId: text(200).nullable(),
       quantity, originalQuantity: quantity, eligibleQuantity: quantity, deliveryEvidence: snapshot,
     }).strict()).min(1).max(200),
   }).strict()).min(1).max(200),
-  expectedClaims: z.array(z.object({ wmsOrderItemId: id, legacyExpectedQuantity: nonnegative, claimedQuantity: nonnegative }).strict()).min(1).max(40_000),
+  expectedClaims: z.array(z.object({ wmsOrderItemId: id, legacyExpectedQuantity: nonnegative, claimedQuantity: nonnegative }).strict()).max(40_000),
   parcels: z.array(z.object({
     parcelKey: text(64), dimensions: customerReturnDimensionsSchema, weightGrams: customerReturnParcelWeightSchema,
     originAddress: customerReturnIntakeAddressSchema, destinationAddress: customerReturnIntakeAddressSchema,
@@ -57,6 +58,11 @@ export function validatePreparedCustomerReturnIntake(raw: unknown): PreparedCust
     }
   }
   for (const line of input.lines) {
+    for (const allocation of line.allocations) {
+      const purchase = allocation.sourceKind === "shopify_purchase";
+      if (purchase ? allocation.wmsOrderItemId !== null || allocation.fulfillmentId !== null || allocation.fulfillmentLineItemId !== null
+        : allocation.wmsOrderItemId === null || allocation.fulfillmentId === null || allocation.fulfillmentLineItemId === null) invalid();
+    }
     if (totals.get(line.omsOrderLineId) !== line.quantity
       || line.allocations.reduce((sum, item) => checkedAdd(sum, item.quantity), 0) !== line.quantity
       || new Set(line.allocations.map(item => JSON.stringify([item.wmsOrderItemId, item.fulfillmentId, item.fulfillmentLineItemId]))).size !== line.allocations.length) invalid();
