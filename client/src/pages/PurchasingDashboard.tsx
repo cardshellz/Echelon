@@ -1,4 +1,5 @@
-import { landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { costHealthTitle, landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { CostReviewTaskSummary } from "@/features/purchasing/CostReviewTaskSummary";
 import { DailyBuyingReview } from "@/features/purchasing/DailyBuyingReview";
 import { PurchasePipeline } from "@/features/purchasing/PurchasePipeline";
 import { useState } from "react";
@@ -466,7 +467,7 @@ function formatRelativeTime(dateStr: string): string {
 }
 
 function formatHealthType(type: string): string {
-  return type.replace(/_/g, " ");
+  return costHealthTitle(type);
 }
 
 function formatForecastMethod(method?: string | null): string {
@@ -1070,10 +1071,10 @@ export default function PurchasingDashboard() {
                         </span>
                         <span className="text-[10px] text-muted-foreground">{item.shipmentStatus}</span>
                       </div>
-                      <div className="text-xs text-muted-foreground mt-1 break-words">{item.detail}</div>
+                      <div className="text-xs text-muted-foreground mt-1 break-words"><CostReviewTaskSummary item={item} /></div>
                     </div>
                     <Button size="sm" variant="outline" className="text-[11px] h-7 flex-shrink-0" onClick={() => navigate(landedCostHealthHref(item))}>
-                      Review
+                      Review costs
                     </Button>
                   </div>
                 ))}

@@ -3,6 +3,7 @@ import { purchaseCostTraceFixture } from "../fixtures/purchase-cost-trace";
 import { expect, test, type Page } from "@playwright/test";
 import type { PurchaseWorkspace } from "../../shared/procurement/purchase-workspace";
 import { installFixtures, po } from "./procurement-fixtures";
+import { openReceiptCostHistory } from "./procurement-cost-review-helpers";
 
 // Fictional shared/split documents exercise scope and navigation, never live data.
 function workspace(): PurchaseWorkspace {
@@ -243,6 +244,7 @@ test("recorded cost history shows exact lot lineage and COGS with a separate rec
   await expect(inspector(page).getByRole("heading", { name: "Invoice TEST-INV-71", exact: true })).toBeFocused();
   expect(new URL(page.url()).searchParams.get("inspect")).toBe("invoice:71");
   const request = trace.getByTestId("receipt-cost-request-61");
+  await openReceiptCostHistory(page);
   await expect(request).toContainText("Physical receipt: Closed");
   await expect(request).toContainText("The stock receipt is recorded separately from its costs");
   await request.getByRole("button", { name: "Apply current supplier costs", exact: true }).click();

@@ -25,6 +25,7 @@ export const landedCostHealthSchema = z.object({
     shipmentStatus: z.string().min(1),
     detail: z.string().min(1),
     action: z.string().min(1),
+    tasks: z.array(z.object({ id: z.string().min(1), sku: z.string().nullable(), title: z.string().min(1), explanation: z.string().min(1) }).strict()).optional(),
     provisionalLotCount: count.optional(),
     missingSnapshotLineIds: z.array(z.number().int().positive().safe()).optional(),
     blockerCount: count.optional(),
@@ -40,6 +41,16 @@ export const landedCostHealthSchema = z.object({
     message: "Cost health status conflicts with its evidence counts.", path: ["status"] });
 });
 export type LandedCostHealth = z.infer<typeof landedCostHealthSchema>;
+
+export function costHealthTitle(type: string): string {
+  const titles: Record<string, string> = {
+    allocation_blocked: "Missing cost inputs", allocation_warning: "Check the shipping cost split",
+    pending_finalization: "Calculate shipping costs", finalized_not_pushed: "Apply shipping costs",
+    stale_provisional_lots: "Update stock and sold-order costs", posting_review_required: "Check shipping costs",
+    provisional_other_costs: "Finish supplier costs",
+  };
+  return titles[type] ?? "Check the cost record";
+}
 
 /** Every cost-health action lands in the costing workspace, not shipment lines. */
 export function landedCostHealthHref(item: LandedCostHealth["items"][number]): string {

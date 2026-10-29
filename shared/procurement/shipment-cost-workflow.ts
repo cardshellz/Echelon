@@ -23,6 +23,10 @@ export const shipmentCostReviewSchema = z.object({
   supplierCosts: purchaseCostStatusSchema.optional(),
   lines: z.array(z.object({
     lineId: shipmentCostWorkflowIdSchema,
+    purchaseOrderId: shipmentCostWorkflowIdSchema.nullable().optional(),
+    purchaseOrderLineId: shipmentCostWorkflowIdSchema.nullable().optional(),
+    allocatedCents: z.number().int().safe().nullable().optional(),
+    currency: z.string().regex(/^[A-Z]{3}$/).nullable().optional(),
     sku: z.string().nullable(),
     sourceIssue: costIssueSchema.nullable(),
     exceptionReview: shipmentCostExceptionSchema.nullable().optional(),

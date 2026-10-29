@@ -211,11 +211,9 @@ test("identifies all five affected SKUs, recorded reasons and the next step", as
   const { failures } = await installCostFixtures(page);
   await page.goto("/purchase-orders/17?tab=lines");
   await page
-    .getByRole("button", { name: "Review 5 lines", exact: true })
+    .getByRole("button", { name: "Review costs", exact: true })
     .click();
-  const group = page.getByRole("group", {
-    name: "Cost review for shipment TEST-SEA-42",
-  });
+  const group = page.getByRole("region", { name: "Cost review", exact: true });
   for (let index = 1; index <= 5; index++)
     await expect(
       group.getByText(`TEST-SKU-${index}`, { exact: true }),
@@ -223,27 +221,27 @@ test("identifies all five affected SKUs, recorded reasons and the next step", as
   await expect(
     group
       .getByText(
-        "The earlier cost update could not distribute the charge exactly across the received units.",
+        "The current shipment costs still need to be applied to stock and verified sales. Recalculate using the saved shipment details.",
       )
       .first(),
   ).toBeVisible();
   await expect(
-    group.getByRole("button", {
+    group.getByTestId("cost-update-shipment-42").getByRole("button", {
       name: "Update shipment costs",
       exact: true,
     }),
   ).toBeVisible();
   await expect(
-    group.getByRole("link", { name: "View shipment cost details", exact: true }),
+    group.getByRole("link", { name: "View shipment cost details", exact: true }).first(),
   ).toHaveAttribute("href", "/shipments/42?tab=allocation&purchase=purchase%3A17%3Alines&via=purchase%3A17%3Alines");
-  await group
-    .getByText("Cost review details · line #101", { exact: true })
+  await page.getByTestId("cost-task-shipment:101")
+    .getByText("Saved records and technical details", { exact: true })
     .click();
   await expect(
     group.getByText(uniformIssue.message, { exact: false }).first(),
   ).toBeVisible();
-  await group
-    .getByText("Cost review details · line #101", { exact: true })
+  await page.getByTestId("cost-task-shipment:101")
+    .getByText("Saved records and technical details", { exact: true })
     .click();
   await page
     .getByTestId("po-total-cost-summary-card")
@@ -266,8 +264,8 @@ test("identifies all five affected SKUs, recorded reasons and the next step", as
 test("cost review links retain the PO and return to its selected tab", async ({ page }) => {
   const { failures } = await installCostFixtures(page);
   await page.goto("/purchase-orders/17?tab=lines");
-  await page.getByRole("button", { name: "Review 5 lines", exact: true }).click();
-  await page.getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })
+  await page.getByRole("button", { name: "Review costs", exact: true }).click();
+  await page.getByTestId("cost-task-shipment:101")
     .getByRole("link", { name: "View shipment cost details", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Cost review", exact: true })).toHaveAttribute("data-state", "active");
   await page.getByRole("link", { name: "Back to purchase #17", exact: true }).first().click();
@@ -282,7 +280,7 @@ test("allows viewers to inspect reasons but reserves retry for purchasing approv
   const { failures } = await installCostFixtures(page, false);
   await page.goto("/purchase-orders/17?tab=lines");
   await page
-    .getByRole("button", { name: "Review 5 lines", exact: true })
+    .getByRole("button", { name: "Review costs", exact: true })
     .click();
   await expect(page.getByText("TEST-SKU-1", { exact: true })).toBeVisible();
   await expect(
@@ -333,15 +331,15 @@ test("retries through the existing owner and replaces old warnings from persiste
   );
   await page.goto("/purchase-orders/17?tab=lines");
   await page
-    .getByRole("button", { name: "Review 5 lines", exact: true })
+    .getByRole("button", { name: "Review costs", exact: true })
     .click();
   expect(attempts).toBe(0);
   await page
-    .getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })
+    .getByTestId("cost-task-shipment:101")
     .getByRole("button", { name: "Update shipment costs", exact: true })
     .click();
-  await expect(page.getByText("TEST-SKU-1", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })).toHaveCount(0);
+  await expect(page.getByTestId("cost-task-shipment:101")).toHaveCount(0);
+  await expect(page.getByTestId("completed-costs")).toContainText("TEST-SKU-1");
   await expect(page.getByText("TEST-AIR-107", { exact: true })).toBeVisible();
   expect(attempts).toBe(1);
   expect(failures).toEqual([]);
@@ -389,15 +387,15 @@ test("shows the new remaining reason when a retry only fixes some lines", async 
   );
   await page.goto("/purchase-orders/17?tab=lines");
   await page
-    .getByRole("button", { name: "Review 5 lines", exact: true })
+    .getByRole("button", { name: "Review costs", exact: true })
     .click();
   await page
-    .getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })
+    .getByTestId("cost-task-shipment:101")
     .getByRole("button", { name: "Update shipment costs", exact: true })
     .click();
-  await expect(page.getByText(newIssue.message, { exact: true })).toBeVisible();
+  await expect(page.getByTestId("cost-task-shipment:101").getByRole("paragraph").filter({ hasText: newIssue.message }).first()).toBeVisible();
   await expect(
-    page.getByText(/1 shipment line has an inventory cost exception awaiting review/),
+    page.getByText("3 items need attention", { exact: true }).first(),
   ).toBeVisible();
   await expect(
     page.getByText(
@@ -424,9 +422,10 @@ test("keeps the exact unresolved portions visible after reloading the PO", async
   await page.goto("/purchase-orders/17?tab=lines");
   for (let visit=0;visit<2;visit++) {
     if (visit>0) await page.reload();
-    await page.getByRole("button",{name:"Review 1 line",exact:true}).click();
+    await page.getByRole("button",{name:"Review costs",exact:true}).click();
+    await page.getByTestId("cost-task-shipment:101").getByText("Saved records and technical details",{exact:true}).click();
     for (const message of messages) await expect(page.getByText(message,{exact:true})).toBeVisible();
-    await expect(page.getByText(/retrying will not resolve it or change stock counts/)).toBeVisible();
+    await expect(page.getByText(/Retrying costs cannot supply the missing movements/)).toBeVisible();
     await expect(page.getByText("All confirmed shipment costs have been applied to inventory.",{exact:true})).toHaveCount(0);
   }
 });
@@ -443,10 +442,10 @@ test("retains the recorded failures when a retry is denied", async ({
   );
   await page.goto("/purchase-orders/17?tab=lines");
   await page
-    .getByRole("button", { name: "Review 5 lines", exact: true })
+    .getByRole("button", { name: "Review costs", exact: true })
     .click();
   await page
-    .getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })
+    .getByTestId("cost-task-shipment:101")
     .getByRole("button", { name: "Update shipment costs", exact: true })
     .click();
   await expect(
@@ -482,13 +481,13 @@ test("re-reads a committed result when the retry response is lost", async ({
   );
   await page.goto("/purchase-orders/17?tab=lines");
   await page
-    .getByRole("button", { name: "Review 5 lines", exact: true })
+    .getByRole("button", { name: "Review costs", exact: true })
     .click();
   await page
-    .getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })
+    .getByTestId("cost-task-shipment:101")
     .getByRole("button", { name: "Update shipment costs", exact: true })
     .click();
-  await expect(page.getByText("TEST-SKU-1", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("cost-task-shipment:101")).toHaveCount(0);
   await expect(page.getByText("TEST-AIR-107", { exact: true })).toBeVisible();
   expect(attempts).toBe(1);
   expect(failures).toEqual([]);
@@ -554,11 +553,11 @@ for (const status of ["review_required", "retry_required"] as const) {
           ? "Use Update shipment costs in Cost review to retry the update."
           : "Recorded quantity history needs review.",
         { exact: true },
-      ),
+      ).first(),
     ).toBeVisible();
     await page.reload();
     await expect(page.getByRole("region", { name: "Inventory cost results" })).toContainText(
-      status === "review_required" ? "Recorded quantity history needs review." : "Not updated yet",
+      status === "review_required" ? "Recorded quantity history needs review." : "Update the shipping costs",
     );
   });
 }

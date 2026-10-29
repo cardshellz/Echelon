@@ -12,7 +12,7 @@ import {
   type CostEvidenceTransaction,
 } from "../inventory/infrastructure/cost-evidence.repository";
 import { readPurchaseCostSources } from "./purchase-cost-source.repository";
-import { resolvePurchaseCostSource } from "./domain/purchase-cost-source";
+import { purchaseCostReviewFacts, resolvePurchaseCostSource } from "./domain/purchase-cost-source";
 import { projectPurchaseComponentStatus } from "./domain/purchase-cost-status";
 import { costIssueSchema, costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import { originRepairApprovalSchema } from "@shared/procurement/cost-origin-repair";
@@ -49,8 +49,9 @@ export async function readPurchaseCostStatus(
   const ids = normalizePurchaseCostStatusLineIds(purchaseOrderLineIds);
   if (!ids.length) return { lines: [] };
   const lines = (
-    await tx.execute(sql`SELECT id,purchase_order_id,sku FROM procurement.purchase_order_lines
-    WHERE id=ANY(${sql.param(ids)}::int[]) AND line_type='product' ORDER BY id`)
+    await tx.execute(sql`SELECT line.id,line.purchase_order_id,line.sku,po.po_number FROM procurement.purchase_order_lines line
+    JOIN procurement.purchase_orders po ON po.id=line.purchase_order_id
+    WHERE line.id=ANY(${sql.param(ids)}::int[]) AND line.line_type='product' ORDER BY line.id`)
   ).rows;
   if (lines.length !== ids.length)
     throw new CostEvidenceError(
@@ -63,10 +64,12 @@ export async function readPurchaseCostStatus(
     .filter(([, inputs]) => inputs.some(input => input.inventoryEffect)).map(([id]) => id));
   const revisions = (
     await tx.execute(sql`SELECT revision.id,revision.purchase_order_line_id,revision.component,revision.contract,
-    application.id AS application_id,application.status,application.evidence,
+    application.id AS application_id,application.status,application.evidence,application.recorded_at,
+    COALESCE(NULLIF(btrim(actor.display_name),''),actor.username,application.recorded_by) AS actor_name,
     event.payload AS reporting_payload
     FROM procurement.cost_source_revisions revision
-    LEFT JOIN LATERAL (SELECT id,status,evidence FROM inventory.cost_applications WHERE source_revision_id=revision.id ORDER BY id DESC LIMIT 1) application ON true
+    LEFT JOIN LATERAL (SELECT id,status,evidence,recorded_by,recorded_at FROM inventory.cost_applications WHERE source_revision_id=revision.id ORDER BY id DESC LIMIT 1) application ON true
+    LEFT JOIN identity.users actor ON actor.id=application.recorded_by
     LEFT JOIN inventory.cost_reporting_events event ON event.application_id=application.id
     WHERE revision.purchase_order_line_id=ANY(${sql.param(ids)}::int[]) AND revision.component IN ('product','packaging')
       AND NOT EXISTS(SELECT 1 FROM procurement.cost_source_revisions newer WHERE newer.purchase_order_line_id=revision.purchase_order_line_id
@@ -189,7 +192,7 @@ export async function readPurchaseCostStatus(
                 canonicalJson(change.after),
           ),
         );
-      components.push(projectPurchaseComponentStatus({
+      const component = projectPurchaseComponentStatus({
         input,
         noInventoryEffectEvidence: noInventoryEffects.get(lineId),
         historicalPosting,
@@ -243,7 +246,12 @@ export async function readPurchaseCostStatus(
               String(lot[total]) === String(after?.allocatedMills),
           };
         }),
-      }));
+      });
+      components.push({ ...component,
+        ...(component.status === "applied" && row?.recorded_at != null && row.actor_name != null && input.totalMills !== null
+          ? { postingReceipt: { applicationId: costInteger(row.application_id, "applicationId", 1), actorName: String(row.actor_name),
+            recordedAt: new Date(row.recorded_at).toISOString(), amountMills: input.totalMills } } : {}),
+      });
     }
     result.lines.push({
       purchaseOrderId: costInteger(
@@ -253,6 +261,8 @@ export async function readPurchaseCostStatus(
       ),
       purchaseOrderLineId: lineId,
       sku: line.sku == null ? null : String(line.sku),
+      poNumber: line.po_number == null ? null : String(line.po_number),
+      reviewFacts: purchaseCostReviewFacts(source),
       components,
       originRepairs: repairs.filter(repair => Number(repair.purchase_order_line_id) === lineId).map(repair => ({
         ...originRepairApprovalSchema.parse({ id: costInteger(repair.id, "repairId", 1), actorName: repair.actor_name,

@@ -3,6 +3,7 @@ import { canonicalJson } from "../utils/canonical-json";
 import { costInventoryEffectSchema, costIssueSchema, type CostInventoryEffect } from "./cost-source-contracts";
 import { resolveCostPostingStatus } from "./cost-posting-status";
 import { originRepairApprovalSchema } from "./cost-origin-repair";
+import { costPostingReceiptSchema, supplierCostReviewFactsSchema } from "./cost-review-facts";
 
 function inventoryEffectIdentity(effect: CostInventoryEffect): string {
   return canonicalJson({ ...effect, returns: [...effect.returns].sort((a, b) => a.supplierCreditLineId - b.supplierCreditLineId) });
@@ -25,6 +26,7 @@ export const purchaseCostComponentStatusSchema = z
     issues: z.array(costIssueSchema),
     inventoryEffect: costInventoryEffectSchema.optional(),
     historicalPosting: z.object({ destination: z.enum(["historical_cogs", "inventory_variance"]), amountMills: z.number().int().nonnegative().safe() }).optional(),
+    postingReceipt: costPostingReceiptSchema.optional(),
   })
   .superRefine((value, context) => {
     if (value.inventoryEffect && (value.status !== "applied" || value.sourceEvidence !== "confirmed"
@@ -52,6 +54,8 @@ export const purchaseLineCostStatusSchema = z
     purchaseOrderId: id,
     purchaseOrderLineId: id,
     sku: z.string().nullable(),
+    poNumber: z.string().nullable().optional(),
+    reviewFacts: supplierCostReviewFactsSchema.optional(),
     components: z.array(purchaseCostComponentStatusSchema).length(2),
     invoices: z.array(
       z.object({

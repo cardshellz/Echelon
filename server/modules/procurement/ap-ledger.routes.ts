@@ -7,6 +7,8 @@ import { z } from "zod";
 import { invoiceWorkListQuerySchema, paymentWorkListQuerySchema } from "@shared/procurement/ap-work-list";
 import { registerPoFinancialEvidenceRoutes } from "./po-financial-evidence.routes";
 import { invoiceCostReviewCommands } from "./invoice-cost-review.service";
+import { previewInvoiceCostReview } from "./invoice-cost-review-preview.service";
+import { registerInvoiceCostReviewPreviewRoute } from "./invoice-cost-review-preview.routes";
 import { registerInvoiceQuantityCorrectionRoutes } from "./invoice-quantity-correction.routes";
 ﻿import type { Express } from "express";
 import { requirePermission, upload } from "../../routes/middleware";
@@ -49,6 +51,7 @@ function sendFinancialCommandError(res: any, error: FinancialCommandError): any 
 }
 
 export function registerApLedgerRoutes(app: Express) {
+  registerInvoiceCostReviewPreviewRoute(app, previewInvoiceCostReview);
   registerSupplierCreditRoutes(app);
   registerSupplierReturnRoutes(app);
   registerInvoiceQuantityCorrectionRoutes(app);

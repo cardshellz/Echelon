@@ -6,7 +6,8 @@ import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateReco
 import { shipmentCreateSchema, type ShipmentCreateInput } from "@shared/procurement/shipment-create-command";
 import type { ShipmentCreateRecovery as ShipmentRecovery } from "@/lib/shipment-create-command";
 import { shipmentWorkListPageSchema, SHIPMENT_LIST_PAGE_SIZE, type ShipmentWorkListItem, type ShipmentCostFilter } from "@shared/procurement/shipment-work-list";
-import { landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { costHealthTitle, landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { CostReviewTaskSummary } from "@/features/purchasing/CostReviewTaskSummary";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
@@ -273,7 +274,7 @@ export default function InboundShipments() {
   }
 
   function renderHealthType(type: string) {
-    return type.replace(/_/g, " ");
+    return costHealthTitle(type);
   }
 
   // Status filter buttons
@@ -477,7 +478,7 @@ export default function InboundShipments() {
                     <Badge variant={item.severity === "critical" ? "destructive" : "outline"}>{item.severity}</Badge>
                     <span className="font-mono">{item.shipmentNumber || `#${item.shipmentId}`}</span>
                     <span>{renderHealthType(item.type)}</span>
-                    <span className="text-muted-foreground flex-1 min-w-[220px]">{item.detail}</span>
+                    <div className="text-muted-foreground flex-1 min-w-0"><CostReviewTaskSummary item={item} /></div>
                     <div className="ml-auto flex gap-2">
                       {item.action === "push_costs_to_lots" && (
                         <Button
@@ -493,7 +494,7 @@ export default function InboundShipments() {
                         size="sm"
                         onClick={() => navigate(landedCostHealthHref(item))}
                       >
-                        Review
+                        Review costs
                       </Button>
                     </div>
                   </div>

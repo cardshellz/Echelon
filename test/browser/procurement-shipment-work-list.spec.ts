@@ -84,7 +84,7 @@ test("cost filters request complete server membership before paging and reset th
   await expect(nav).toContainText("Showing 1–2 of 2 matching shipments");
   expect(state.queries.at(-1)!.get("costFilter")).toBe("critical");
   expect(state.queries.at(-1)!.get("offset")).toBe("0");
-  await expect(page.getByRole("region",{name:"Shipment results"}).getByText("posting review required",{exact:true}).filter({visible:true})).toHaveCount(2);
+  await expect(page.getByRole("region",{name:"Shipment results"}).getByText("Check shipping costs",{exact:true}).filter({visible:true})).toHaveCount(2);
   expect(failures).toEqual([]);
 });
 

@@ -7,6 +7,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { usePoShipmentCosts } from "./use-po-shipment-costs";
 import { PoShipmentCostReview } from "./PoShipmentCostReview";
 import { purchaseLineNeedsCostReview, purchaseLineInventoryEffect } from "@shared/procurement/purchase-cost-status";
+import { buildCostReviewGroups, costReviewSummary } from "@shared/procurement/cost-review-tasks";
+import { poCostReviewShipments } from "@shared/procurement/cost-review-adapters";
 
 export function PoShipmentCostSummary({
   purchaseOrderId,
@@ -46,20 +48,20 @@ export function PoShipmentCostSummary({
     );
   const costs = query.data.summary;
   const supplierReturns = query.data.supplierCosts?.lines.filter(line => purchaseLineInventoryEffect(line) !== null).length ?? 0;
-  if (costs.shipmentCount === 0 && supplierReturns === 0) return null;
+  if (costs.shipmentCount === 0 && supplierReturns === 0 && !query.data.supplierCosts?.lines.length) return null;
   const money = (cents: number) => formatIntegerCents(cents, costs.currency);
   const posted = query.data.lines.filter(line => line.status === "applied" && line.exceptionReview?.reconciliation?.status === "posted").length;
-  const needsReview = costs.reviewLines;
   const supplierReviews = query.data.supplierCosts?.lines.filter(purchaseLineNeedsCostReview).length ?? 0;
+  const groups = buildCostReviewGroups(query.data.supplierCosts, poCostReviewShipments(query.data));
+  const taskCount = groups.reduce((sum, group) => sum + group.tasks.length, 0);
   return (
     <Card>
       <CardContent className="p-3 space-y-3">
         <div className="flex flex-wrap justify-between items-center gap-2">
           <div>
-            <h2 className="text-sm font-semibold">Shipment costs</h2>
+            <h2 className="text-sm font-semibold">Purchase costs</h2>
             <p className="text-xs text-muted-foreground">
-              Charges allocated to this PO from {costs.shipmentCount} shipment
-              {costs.shipmentCount === 1 ? "" : "s"}.
+              {costs.shipmentCount === 0 ? "Supplier costs for this PO. No shipment charges are recorded." : `Charges allocated to this PO from ${costs.shipmentCount} shipment${costs.shipmentCount === 1 ? "" : "s"}.`}
             </p>
           </div>
           <Button size="sm" variant="outline" onClick={onViewShipments}>
@@ -72,16 +74,7 @@ export function PoShipmentCostSummary({
             <p className="font-mono text-lg font-bold">{costs.combinedCostCents === null ? "Incomplete" : money(costs.combinedCostCents)}</p>
             <p className="text-xs text-muted-foreground">Supplier PO {money(costs.poAmountCents)} + shipment charges {money(costs.totalCents)}. Includes product, packaging and saved freight, duties and other charges.</p>
           </div>
-          <p>
-            Saved and allocated shipment charges:{" "}
-            <strong>{money(costs.totalCents)}</strong>
-          </p>
-          {costs.otherCents !== 0 && (
-            <p>
-              Other shipment charges included in total cost:{" "}
-              <strong>{money(costs.otherCents)}</strong>
-            </p>
-          )}
+          {costs.otherCents !== 0 && <p>Other shipping charges included in total: <strong>{money(costs.otherCents)}</strong></p>}
           {costs.estimatedCents !== 0 && (
             <p className="text-muted-foreground">
               <strong>Supplier confirmation:</strong> {money(costs.estimatedCents)} uses estimated or unconfirmed charges.
@@ -101,31 +94,12 @@ export function PoShipmentCostSummary({
               conversion before calculating the combined cost.
             </p>
           )}
-          {costs.inventoryCosting === "review_required" && (
-            <p className="text-destructive">
-              {needsReview > 0
-                ? `${needsReview} shipment line${needsReview === 1 ? " has" : "s have"} an inventory cost exception awaiting review. Saved shipment charges are included above.`
-                : "Shipment charge evidence needs review before inventory costs can be updated."}
-            </p>
-          )}
-          {posted > 0 && <p className="text-muted-foreground">
-            Approved historical cost postings: {posted} shipment line{posted === 1 ? "" : "s"}. Amounts and approval details are available below.
-          </p>}
-          {costs.inventoryCosting === "pending" && (
-            <p className="text-amber-700 dark:text-amber-400">
-              Inventory costing is awaiting receipt, allocation or a cost
-              update.
-            </p>
-          )}
-          {costs.inventoryCosting === "applied" && (
-            <p className="text-green-700 dark:text-green-400">
-              {supplierReviews > 0 ? "Shipment costs are posted. Supplier product and packaging costs still need review below." : "Shipment costs are posted. No shipment cost approval is outstanding."}
-            </p>
-          )}
+          <p className={taskCount > 0 ? "text-amber-800 dark:text-amber-300" : "text-green-800 dark:text-green-300"}>
+            {taskCount > 0 || costs.inventoryCosting === "applied" ? costReviewSummary(groups, query.data.supplierCosts ? "all" : "shipping") : "Open the cost details to check the recorded shipment costs."}
+          </p>
           {supplierReturns > 0 && <p className="text-green-700 dark:text-green-400">{supplierReturns} PO line{supplierReturns === 1 ? "" : "s"}: {noInventoryEffectLabel}.</p>}
-          {supplierReviews > 0 && <p className="text-amber-700 dark:text-amber-400">{supplierReviews} PO line{supplierReviews === 1 ? " needs" : "s need"} supplier cost review. Open the affected invoice lines below.</p>}
         </div>
-        {(costs.reviewLines > 0 || costs.pendingLines > 0 || posted > 0 || supplierReviews > 0 || supplierReturns > 0 || showReview) && (
+        {(groups.length > 0 || costs.reviewLines > 0 || costs.pendingLines > 0 || posted > 0 || supplierReviews > 0 || supplierReturns > 0 || showReview) && (
           <Button
             size="sm"
             variant="outline"
@@ -134,12 +108,8 @@ export function PoShipmentCostSummary({
           >
             {showReview
               ? "Hide cost details"
-              : needsReview > 0
-                ? `Review ${needsReview} line${needsReview === 1 ? "" : "s"}`
-                : supplierReviews > 0 ? "Review supplier costs"
-                : supplierReturns > 0 ? "View supplier cost result"
-                : costs.pendingLines === 0 && posted > 0 ? "View cost postings"
-                : "Review inventory costs"}
+              : taskCount > 0 ? "Review costs"
+                : "View completed costs"}
           </Button>
         )}
         {showReview && (

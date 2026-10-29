@@ -1,11 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { InvoiceCostReview, InvoiceCostReviewResult } from "../../shared/procurement/invoice-cost-review";
 import { installFixtures } from "./procurement-fixtures";
+import { approveSupplierCostReview, installInvoiceCostPreview } from "../fixtures/invoice-cost-preview";
 
 const version = "a".repeat(64), nextVersion = "b".repeat(64);
 
 async function setup(page: Page, options: { canApprove?: boolean; currency?: string; lostResponse?: boolean; stale?: boolean; needsReview?: boolean } = {}) {
   const failures = await installFixtures(page);
+  await installInvoiceCostPreview(page, 72, 11800);
   const invoice = { id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test supplier", status: "received", currency: options.currency ?? "USD",
     invoicedAmountCents: 11800, balanceCents: 11800, paidAmountCents: 0, poLinks: [], attachments: [], payments: [],
     lines: [{ id: 72, lineNumber: 1, sku: "REVIEW-SKU", productName: "Synthetic product", qtyInvoiced: 150, unitCostCents: 67,
@@ -52,8 +54,8 @@ test("reviews unknown amounts, retries a lost acknowledgement and preserves the 
   await expect(page.getByLabel(/^Other adjustments/)).toHaveValue("");
   await expect(page.getByText("The product and packaging amounts are missing.", { exact: false })).toBeVisible();
   await fill(page);
-  await page.getByRole("button", { name: "Save cost review", exact: true }).click();
-  await expect(page.getByText("Cost evidence saved. The invoice line total is unchanged.")).toBeVisible();
+  await approveSupplierCostReview(page);
+  await expect(page.getByText("Supplier amounts saved. The invoice total is unchanged.")).toBeVisible();
   expect(commands).toHaveLength(2);
   expect(commands[0]).toEqual(commands[1]);
   expect(commands[0].key).toBeTruthy();
@@ -67,13 +69,13 @@ test("reviews unknown amounts, retries a lost acknowledgement and preserves the 
 test("requires exact reconciliation and explicit packaging treatment before saving", async ({ page }) => {
   const { commands, failures } = await setup(page);
   await fill(page, { adjustment: "-0.0001" });
-  await page.getByRole("button", { name: "Save cost review", exact: true }).click();
+  await page.getByRole("button", { name: "Review cost changes", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("exactly");
   expect(commands).toEqual([]);
   await page.getByLabel(/^Other adjustments/).fill("0");
   await page.getByLabel("Is packaging included in the product price?", { exact: true }).click();
   await page.getByRole("option", { name: "Yes, packaging is included" }).click();
-  await page.getByRole("button", { name: "Save cost review", exact: true }).click();
+  await page.getByRole("button", { name: "Review cost changes", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("zero");
   expect(commands).toEqual([]);
   expect(failures).toEqual([]);
@@ -82,7 +84,7 @@ test("requires exact reconciliation and explicit packaging treatment before savi
 test("preserves signed adjustments and distinguishes evidence saved from application review", async ({ page }) => {
   const { commands, failures } = await setup(page, { needsReview: true });
   await fill(page, { product: "101.0375", packaging: "17.9625", adjustment: "-1" });
-  await page.getByRole("button", { name: "Save cost review", exact: true }).click();
+  await approveSupplierCostReview(page);
   await expect(page.getByText("Further cost review is required", { exact: false })).toBeVisible();
   await expect(page.getByText("The signed adjustment needs a supported cost disposition.")).toBeVisible();
   expect(commands[0].body).toMatchObject({ productMills: 1_010_375, packagingMills: 179_625, adjustmentMills: -10_000 });
@@ -92,16 +94,16 @@ test("preserves signed adjustments and distinguishes evidence saved from applica
 test("keeps the reviewed snapshot on a stale response and requires explicit reload", async ({ page }) => {
   const { commands, failures } = await setup(page, { stale: true });
   await fill(page);
-  await page.getByRole("button", { name: "Save cost review", exact: true }).click();
+  await approveSupplierCostReview(page);
   await expect(page.getByRole("alert")).toContainText("Invoice line changed");
-  await expect(page.getByLabel(/^Product total/)).toHaveValue("100.0000");
-  await expect(page.getByRole("button", { name: "Save cost review", exact: true })).toBeDisabled();
+  await expect(page.getByRole("region", { name: "Supplier cost changes" }).getByRole("row", { name: /Product amount/ })).toContainText("100.0000 USD");
+  await expect(page.getByRole("button", { name: "Approve and apply costs", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "Discard review and reload invoice" }).click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
   await page.getByRole("button", { name: "Review costs for REVIEW-SKU" }).click();
   await fill(page);
-  await page.getByRole("button", { name: "Save cost review", exact: true }).click();
-  await expect(page.getByText("Cost evidence saved. The invoice line total is unchanged.")).toBeVisible();
+  await approveSupplierCostReview(page);
+  await expect(page.getByText("Supplier amounts saved. The invoice total is unchanged.")).toBeVisible();
   expect(commands.map((command) => command.body.expectedVersion)).toEqual([version, nextVersion]);
   expect(commands[0].key).not.toBe(commands[1].key);
   expect(failures).toEqual([]);
@@ -111,7 +113,7 @@ test("view permission permits inspection and approval permission gates the comma
   const { commands, failures } = await setup(page, { canApprove: false });
   await expect(page.getByText("Purchasing approval permission is required", { exact: false })).toBeVisible();
   await expect(page.getByLabel(/^Product total/)).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Save cost review", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review cost changes", exact: true })).toHaveCount(0);
   expect(commands).toEqual([]); expect(failures).toEqual([]);
 });
 
@@ -119,6 +121,6 @@ test("keeps non-USD evidence read only with its actual currency", async ({ page 
   const { commands, failures } = await setup(page, { currency: "EUR" });
   await expect(page.getByRole("dialog")).toContainText("118.00 EUR");
   await expect(page.getByRole("dialog")).not.toContainText("$");
-  await expect(page.getByRole("button", { name: "Save cost review", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review cost changes", exact: true })).toHaveCount(0);
   expect(commands).toEqual([]); expect(failures).toEqual([]);
 });

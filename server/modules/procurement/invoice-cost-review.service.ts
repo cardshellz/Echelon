@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { invoiceCostReviewSchema, invoiceCostReviewResultSchema } from "@shared/procurement/invoice-cost-review";
+import { invoiceCostReviewSchema, invoiceCostReviewResultSchema, invoiceCostImpactPreviewSchema, invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-review";
 import { financialCommandRepository } from "../../platform/commands/command-results.repository";
 import { FinancialCommandError, runTransactionalFinancialCommand, type FinancialCommandDescriptor, type FinancialCommandRepository } from "../../platform/commands/transactional-command.service";
 import { COGSService } from "../inventory/cogs.service";
-import { costInteger, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
+import { costFingerprint, costInteger, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
+import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
+import { buildCostDestinationImpact } from "./cost-change-impact";
 import { ApLedgerError, invoiceCostReviewVersion } from "./ap-ledger.service";
 import { reconcilePurchaseCostEvidence } from "./purchase-cost-application.service";
 
@@ -13,7 +15,7 @@ import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
 
 /** Shared transactional component review. Origin repair defers application until
  * receipt evidence is reconstructed in the same transaction. */
-export async function reviewInvoiceCostComponentsInTransaction(tx: AmendmentTransaction, lineId: number, input: unknown, actorId: string, now: Date, applyCosts = true) {
+export async function reviewInvoiceCostComponentsInTransaction(tx: AmendmentTransaction, lineId: number, input: unknown, actorId: string, now: Date, applyCosts = true, includePreview = false) {
   const review = invoiceCostReviewSchema.parse(input);
   await lockInventoryCostGraph(tx);
   const result = await tx.execute(sql`
@@ -37,12 +39,24 @@ export async function reviewInvoiceCostComponentsInTransaction(tx: AmendmentTran
     throw new ApLedgerError("Product, packaging and adjustments must equal the recorded invoice line total exactly.", 422, { code: "INVOICE_COST_COMPONENT_TOTAL_MISMATCH" });
   }
   if (!Number.isFinite(now.getTime())) throw new Error("Invalid cost-review clock");
+  const captureImpact = includePreview || review.previewVersion !== undefined;
+  const purchaseLineId = line.purchase_order_line_id == null ? null : costInteger(line.purchase_order_line_id, "purchaseOrderLineId", 1);
+  const before = captureImpact && purchaseLineId !== null ? await readPoAmendmentDependencies(tx, [purchaseLineId]) : null;
   const after = { contractVersion: 1, packagingTreatment: review.packagingTreatment, productMills: review.productMills,
     packagingMills: review.packagingMills, adjustmentMills: review.adjustmentMills, source: "operator_review" };
   await tx.execute(sql`UPDATE procurement.vendor_invoice_lines SET cost_component_evidence=${canonicalJson(after)}::jsonb,updated_at=${now} WHERE id=${lineId}`);
   const application = !applyCosts || line.purchase_order_line_id === null ? null : await reconcilePurchaseCostEvidence(tx, Number(line.purchase_order_line_id), new COGSService(tx), actorId, now);
+  const afterDependencies = before && purchaseLineId !== null ? await readPoAmendmentDependencies(tx, [purchaseLineId]) : null;
+  const impact = before && afterDependencies ? buildCostDestinationImpact(before, afterDependencies) : { lots: [], orderCosts: [], historicalCosts: [] };
+  const prior = invoiceCostComponentEvidenceSchema.safeParse(line.cost_component_evidence);
+  const preview = captureImpact ? invoiceCostImpactPreviewSchema.parse({ lineId, lineTotalCents: versioned.lineTotalCents,
+    before: prior.success ? prior.data : null, after, impact,
+    previewVersion: costFingerprint({ expectedVersion: review.expectedVersion, after, before, impact }),
+  }) : undefined;
+  if (review.previewVersion !== undefined && review.previewVersion !== preview?.previewVersion)
+    throw new ApLedgerError("The stock or cost records changed. Review the current cost changes again before saving.", 409, { code: "INVOICE_COST_REVIEW_STALE" });
   const response = invoiceCostReviewResultSchema.safeParse({ id: lineId, costComponentEvidence: after,
-    costReviewVersion: invoiceCostReviewVersion({ ...versioned, costComponentEvidence: after }), application });
+    costReviewVersion: invoiceCostReviewVersion({ ...versioned, costComponentEvidence: after }), application, ...(preview ? { preview } : {}) });
   if (!response.success) throw new Error("Invoice cost-review owner produced an invalid result");
   await tx.execute(sql`
     INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
