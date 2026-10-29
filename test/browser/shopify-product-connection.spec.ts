@@ -14,8 +14,9 @@ async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boo
     publications: [{ id: "777", name: "Online Store" }], publicationIssue: null,
     matchingProducts: [{ id: "900", title: "Existing draft binder", status: "DRAFT" }], lookupIssue: null, pendingCommand: null,
   };
-  const state = { requests: [] as ShopifyProductConnectionExecute[], reviews: [] as ShopifyProductConnectionRequest[],
-    errors: [] as string[], pending: null as ShopifyProductConnectionCommand | null, loseResponse: false, finish: false, ambiguous: false, stale: false, reject: false };
+  const state = { context, requests: [] as ShopifyProductConnectionExecute[], reviews: [] as ShopifyProductConnectionRequest[],
+    errors: [] as string[], pending: null as ShopifyProductConnectionCommand | null, loseResponse: false, finish: false, ambiguous: false, stale: false, reject: false,
+    reviewGate: null as Promise<void> | null, reviewFailure: false };
   const command = (intent: ShopifyProductConnectionExecute): ShopifyProductConnectionCommand => ({
     commandKey: intent.commandKey, previewHash: intent.previewHash, request: intent.request, productId: 41, channelId: 7,
     mode: intent.request.mode, state: "pending", remoteProductId: "900", lastErrorCode: null, lastErrorMessage: null, retryable: true, completedAt: null,
@@ -33,18 +34,23 @@ async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boo
     }
     if (path === `${base}/preview`) {
       const input = request.postDataJSON() as ShopifyProductConnectionRequest; state.reviews.push(input);
+      if (state.reviewFailure) return route.fulfill({ status: 502, json: { code: "SHOPIFY_REQUEST_FAILED", error: "Shopify could not refresh the review. Retry the product review.", retryable: true } });
+      const targetId = input.targetProductRef ?? "900";
+      const remoteIds = [String(BigInt(targetId) + BigInt(1)), String(BigInt(targetId) + BigInt(2))];
       const preview: ShopifyConnectionPreview = {
         previewHash: HASH, mode: input.mode, productId: 41, productName: context.productName, channelId: 7, channelName: "Shopify",
         shopDomain: context.shopDomain, currency: "USD", ready: !state.ambiguous || input.bindings.length === 2,
         issues: state.ambiguous && input.bindings.length !== 2 ? ["Select one distinct Shopify variant for each SKU."] : [],
-        targetProductId: input.mode === "link" ? "900" : null, targetTitle: input.mode === "link" ? "Existing draft binder" : context.productName,
+        targetProductId: input.mode === "link" ? targetId : null,
+        targetTitle: input.mode === "link" ? context.matchingProducts.find(product => product.id === targetId)?.title ?? "Shopify target" : context.productName,
         variants: options.productOnly ? [{ variantId: null, sku: "BINDER", name: "Product", remoteVariantId: null, priceCents: input.prices[0]?.priceCents ?? null }]
           : context.variants.map((variant, index) => ({ variantId: variant.id, sku: variant.sku, name: variant.name,
-            remoteVariantId: input.mode === "link" ? input.bindings.find(binding => binding.variantId === variant.id)?.remoteVariantId ?? (state.ambiguous ? null : String(901 + index)) : null,
+            remoteVariantId: input.mode === "link" ? input.bindings.find(binding => binding.variantId === variant.id)?.remoteVariantId ?? (state.ambiguous ? null : remoteIds[index]) : null,
             priceCents: input.mode === "create" ? input.prices[index]?.priceCents ?? null : variant.priceCents })),
-        remoteVariants: [{ id: "901", sku: "BINDER-P1", title: "Each" }, { id: "902", sku: "BINDER-C5", title: "Case of 5" }],
+        remoteVariants: [{ id: remoteIds[0], sku: "BINDER-P1", title: "Each" }, { id: remoteIds[1], sku: "BINDER-C5", title: "Case of 5" }],
         publicationName: input.publicationId ? "Online Store" : null, warnings: ["Inventory quantities continue through Channel Inventory."],
       };
+      await state.reviewGate;
       return route.fulfill({ json: preview });
     }
     if (path === `${base}/execute`) {
@@ -72,9 +78,14 @@ async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boo
 test("links the existing native draft from a product with variants, without a store-wide sync", async ({ page }, info) => {
   const state = await setup(page);
   await page.getByRole("button", { name: "Link existing Shopify product", exact: true }).click();
-  await page.getByRole("button", { name: "Link this product", exact: true }).click();
-  await page.getByRole("button", { name: "Review Shopify connection", exact: true }).click();
+  await page.getByRole("button", { name: "Review this product", exact: true }).click();
   await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Reviewed", exact: true })).toBeDisabled();
+  expect(state.reviews).toHaveLength(1); expect(state.requests).toEqual([]);
+  // Re-clicking the already reviewed match must not clear the review.
+  await page.getByRole("button", { name: "Reviewed", exact: true }).dispatchEvent("click");
+  await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeEnabled();
+  expect(state.reviews).toHaveLength(1);
   await page.screenshot({ path: info.outputPath("shopify-link-review.png"), fullPage: true });
   await page.getByRole("button", { name: "Confirm Shopify link", exact: true }).click();
   await expect(page.getByText("This product has a saved Shopify command to finish.")).toBeVisible();
@@ -82,6 +93,70 @@ test("links the existing native draft from a product with variants, without a st
   state.finish = true;
   await expect(page.getByRole("dialog")).not.toBeVisible();
   expect(state.errors).toEqual([]);
+});
+
+test("preserves explicit variant choices when reviewing the same match and clears them for another product", async ({ page }) => {
+  const state = await setup(page); state.ambiguous = true;
+  state.context.matchingProducts.push({ id: "950", title: "Another Shopify binder", status: "DRAFT" });
+  await page.getByRole("button", { name: "Link existing Shopify product", exact: true }).click();
+  await page.getByRole("button", { name: "Review this product", exact: true }).first().click();
+  await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeDisabled();
+  for (const [sku,id] of [["BINDER-P1","901"],["BINDER-C5","902"]]) {
+    await page.getByRole("button", { name: `Select Shopify variant for ${sku}`, exact: true }).click();
+    await page.getByRole("button").filter({ hasText: `${sku} · ${id}` }).click();
+  }
+  await page.getByRole("button", { name: "Review this product", exact: true }).first().click();
+  await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeEnabled();
+  expect(state.reviews[1].bindings).toEqual([{ variantId: 51, remoteVariantId: "901" }, { variantId: 52, remoteVariantId: "902" }]);
+  await page.getByRole("button", { name: "Review this product", exact: true }).click();
+  await expect(page.locator("#shopify-product-reference")).toHaveValue("950");
+  await expect.poll(() => state.reviews.length).toBe(3);
+  expect(state.reviews[2]).toMatchObject({ targetProductRef: "950", bindings: [] });
+  await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeDisabled();
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("reviews a matching product directly from Create without requiring creation prices", async ({ page }) => {
+  const state = await setup(page, { productOnly: true });
+  await page.getByRole("button", { name: "Create on Shopify", exact: true }).click();
+  await expect(page.locator("#shopify-price-product")).toHaveValue("");
+  await page.getByRole("button", { name: "Review this product", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeEnabled();
+  expect(state.reviews[0]).toMatchObject({ mode: "link", targetProductRef: "900", prices: [], publicationId: null, bindings: [] });
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a review response cannot populate a different dialog after the original is closed", async ({ page }) => {
+  const state = await setup(page); let releaseReview: () => void = () => undefined;
+  state.reviewGate = new Promise<void>(resolve => { releaseReview = resolve; });
+  try {
+    await page.getByRole("button", { name: "Link existing Shopify product", exact: true }).click();
+    await page.getByRole("button", { name: "Review this product", exact: true }).click();
+    await expect.poll(() => state.reviews.length).toBe(1);
+    await expect(page.getByRole("button", { name: "Reviewing product…", exact: true })).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Create on Shopify", exact: true }).click();
+    releaseReview();
+    await expect(page.getByRole("button", { name: "Review Shopify connection", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Create draft and connect", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Refresh review", exact: true })).toHaveCount(0);
+    expect(state.requests).toEqual([]); expect(state.errors).toEqual([]);
+  } finally { releaseReview(); }
+});
+
+test("a failed refresh keeps confirmation disabled until a successful review", async ({ page }) => {
+  const state = await setup(page);
+  await page.getByRole("button", { name: "Link existing Shopify product", exact: true }).click();
+  await page.getByRole("button", { name: "Review this product", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeEnabled();
+  state.reviewFailure = true;
+  await page.getByRole("button", { name: "Refresh review", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("could not refresh the review");
+  await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeDisabled();
+  state.reviewFailure = false;
+  await page.getByRole("button", { name: "Review this product", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Confirm Shopify link", exact: true })).toBeEnabled();
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]);
 });
 
 test("creates a draft with reviewed integer prices and an explicit publication choice", async ({ page }) => {
