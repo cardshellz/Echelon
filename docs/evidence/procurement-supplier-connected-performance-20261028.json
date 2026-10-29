@@ -1,0 +1,1959 @@
+{
+  "version": 1,
+  "verifiedAt": "2026-10-28T19:55:52.042Z",
+  "runtimeCommit": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+  "implementationCommit": "fb6c9756576d2cc6b679a960c2acc401acdcb896",
+  "mainCommit": "f133fb9d4f2725190162323fc53651b65340ac19",
+  "codeFiles": [
+    {
+      "file": "client/src/features/purchasing/use-order-supplier-handoff.ts",
+      "gitBlob": "ca9c99afa325e12112d9b4bc519a00573526601e",
+      "sha256": "d58570c9f4d57e4548b16d44864447a132fd808261f097cb31554bd1af5e6bb8"
+    },
+    {
+      "file": "client/src/lib/__tests__/unit/order-supplier-handoff.test.ts",
+      "gitBlob": "2dad55785a00ee4190474e290972c5fb7c2ac9da",
+      "sha256": "d5262e1e04f3f380625600354a1c2b7f4416ad879c6409344805fd9ce9a6bfcb"
+    },
+    {
+      "file": "client/src/lib/order-supplier-handoff.ts",
+      "gitBlob": "1d699cb9bb6ce30a33e487cbee770aa31e1b854e",
+      "sha256": "086e3fce6a7197badbb0d227daf65fd051f18e46a2951848560258b12b96dfaa"
+    },
+    {
+      "file": "client/src/pages/ReorderEngine.tsx",
+      "gitBlob": "cf23bd67aeb1a1a434a0c1df18767146548a3272",
+      "sha256": "a2bd7f4e810837f80afa50334c1c486e074234ed1f1f8d2fb80ce7e3a3a86486"
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/purchase-cost-status-batch.cases.ts",
+      "gitBlob": "64dd870c17c1fc84a74149d0a63d4f266947f78e",
+      "sha256": "5405e63c54031c7787bdac4e5064e4da481a847be4f64437879566fdf83df87f"
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts",
+      "gitBlob": "8b71347433b8c069b109ac7a7be5ddb8e08260a5",
+      "sha256": "49779acebeef53e357ca85eaf5b6fec157dea583f8dd74091bf41290498f65b3"
+    },
+    {
+      "file": "server/modules/procurement/__tests__/unit/purchase-cost-status-batch.repository.test.ts",
+      "gitBlob": "3394c50424f46af422d2fc7c44220f2d8a1939d1",
+      "sha256": "7f4d53834afbe6109aefa608ed6b07da9a47c2ee9beca109c615c356db570d66"
+    },
+    {
+      "file": "server/modules/procurement/purchase-cost-status-batch.repository.ts",
+      "gitBlob": "b91a4e43b24d91e714d89226a7bfc906a234092d",
+      "sha256": "63266ccbd35931b01eb6cc3af21993f7d6dbbbd56d4575c0e1977ae0afa2e67c"
+    },
+    {
+      "file": "server/modules/procurement/shipment-cost-review.repository.ts",
+      "gitBlob": "153907ca8ca62d0885d8cdc0700f90082d958085",
+      "sha256": "22ef740177c43e034aa096ace617267451883830aae93142cd462b23d619ddbb"
+    },
+    {
+      "file": "test/browser/procurement-order-supplier-handoff.spec.ts",
+      "gitBlob": "19604865fe0895b8a37735c11284309a0bd573b5",
+      "sha256": "a1fb3766ee0783b6eb4b9400ce7abffec6e9c2784ecc90ddb5c606e6e2b4d80e"
+    },
+    {
+      "file": "test/connected/procurement/financial-workflow.spec.ts",
+      "gitBlob": "d43fb0b5dea931ada6e7f4bede5ed932f5db1ce9",
+      "sha256": "6a56acc28a6333b8723b29fd5199f7134963cb504493a2514bb8cbdd83412d00"
+    },
+    {
+      "file": "test/connected/procurement/navigation-fixture.ts",
+      "gitBlob": "9df20b11b8e206fa2e461a47d900fcd4998fd956",
+      "sha256": "511f648c1a2a01238ba7059e97a874339303f939c5bd078d39223374d3a27fc5"
+    },
+    {
+      "file": "test/connected/procurement/server-fixture.ts",
+      "gitBlob": "42442ee3bd25824223eb936b92382d077b8b34d7",
+      "sha256": "192dd8d542e873c36921093e95322d9498fa615497729bc402beccd798cc23b7"
+    },
+    {
+      "file": "test/connected/procurement/server.ts",
+      "gitBlob": "682905f914c6eec4928cf0da6a2f8371ddb35b85",
+      "sha256": "2249596a91ebaac050d08fdd04553079347db474417b5da59341cab343adb153"
+    },
+    {
+      "file": "test/connected/procurement/shipment-return-workflow.spec.ts",
+      "gitBlob": "29cc97e433a9891c82f816489cbe746478ef9163",
+      "sha256": "4e544403215ead73e22ed1a89ad57f4c5ac16dc8db581197eb65b3188cbe5b37"
+    },
+    {
+      "file": "test/connected/procurement/workflow-fixture.ts",
+      "gitBlob": "3d5427a593eb953a3b6347c6f257769430e18eb0",
+      "sha256": "6fe6b13b5a9745fcf493335f8250f58b2170ca4012a99862ba9d4484579ef677"
+    },
+    {
+      "file": "test/performance/procurement/run-health-cost.ts",
+      "gitBlob": "b61ee89013863cc1841468405b511b2f5b0d7667",
+      "sha256": "dac97755b7720108a5b254c822fba0402b2a8a152fa11c8a637cfff98bb453a4"
+    }
+  ],
+  "procurementFilesUnchangedThroughMainMerge": true,
+  "checks": [
+    {
+      "mode": "unit",
+      "passed": 4973,
+      "files": 287,
+      "wrapperSha256": "c468ddc5772e5ee1383afd6d09ed11a33103c1effde2563372092bb947c7a2f3",
+      "rawReportSha256": "d781bc6c7a93ddd8b89731df1d1db2b82546d12fbbcc67475a373ad917d1dcef",
+      "source": {
+        "head": "2c7882c76e91b70dd5dd770375f44c0c7efe3447",
+        "sourceSha256": "3a8174218fe506f980a8309d696f0ef7b8cb239e9a90fc7c3948bda5f36558b7",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    },
+    {
+      "mode": "pg",
+      "passed": 228,
+      "files": 2,
+      "wrapperSha256": "4256154b4c593ff7efdc709fc6c8498c0a4ff0f08902da0834aae6eca40ff574",
+      "rawReportSha256": "ed7ef2392142436da8fb8dab65053feb9c660c28843f2e0d432235eb8cd3565c",
+      "source": {
+        "head": "2c7882c76e91b70dd5dd770375f44c0c7efe3447",
+        "sourceSha256": "3a8174218fe506f980a8309d696f0ef7b8cb239e9a90fc7c3948bda5f36558b7",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    },
+    {
+      "mode": "guards",
+      "passed": 430,
+      "files": 11,
+      "wrapperSha256": "a04bf85699d3418af3d048c85500f7ee633725120987f6f46c1eded73e74e81c",
+      "rawReportSha256": "3922a5688573d2c011dbd798d039af733b809a44e0df727ba4a3708921df0821",
+      "source": {
+        "head": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+        "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    },
+    {
+      "mode": "browser",
+      "passed": 12,
+      "wrapperSha256": "8ca991a659d0591c49bb62ed9e466d753bdbd285172894e613b28affbbe77bdf",
+      "rawReportSha256": "8082499e244ec817a0c239710cbb530af8cdaef5b0447c36b67ae7ae6659e330",
+      "source": {
+        "head": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+        "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    },
+    {
+      "mode": "connected",
+      "passed": 52,
+      "wrapperSha256": "60499d24cf716b3b7bef708285f6323da1c5861e1879cb73b4f776367e2368d3",
+      "rawReportSha256": "daffcbe933593536ea028ddc11f2a765466ac4684f2d0e5b11c071f6097b8a19",
+      "source": {
+        "head": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+        "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    },
+    {
+      "mode": "type",
+      "config": "tsconfig.json",
+      "exitCode": 0,
+      "wrapperSha256": "2fbafc4570e786f3970eef65c0dac05c6c0f0331bc022645aa1b02f964cf67ef",
+      "source": {
+        "head": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+        "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    },
+    {
+      "mode": "type",
+      "config": "tsconfig.tests.server.json",
+      "exitCode": 0,
+      "wrapperSha256": "293b95d59fceed17dcaba22ea9082681b4a7c6731a9b48e48b31e50d84a63ce5",
+      "source": {
+        "head": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+        "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    },
+    {
+      "mode": "type",
+      "config": "tsconfig.tests.client.json",
+      "exitCode": 0,
+      "wrapperSha256": "bc45be4b3c9807a206b247954182879c1e3531db15cf743985b1eb886a3af72c",
+      "source": {
+        "head": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+        "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    },
+    {
+      "mode": "type",
+      "config": "tsconfig.tests.connected.json",
+      "exitCode": 0,
+      "wrapperSha256": "1b34f09bb09f71790da02af477a8dda0ac40a6e8b3e7057663730c0342515f7b",
+      "source": {
+        "head": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+        "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    },
+    {
+      "mode": "build",
+      "exitCode": 0,
+      "wrapperSha256": "b8c799d458261f104eb1e7724eb4cae924414823979ce9a12fd1c74618815869",
+      "source": {
+        "head": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+        "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "frontend": "e887b2a22c88f3c3b32e66f5ffc65456b32ccb58ff1b37a42313e57dfb762b07"
+      }
+    }
+  ],
+  "performanceComparison": {
+    "version": 1,
+    "status": "passed",
+    "profiles": [
+      {
+        "profile": "unresolved",
+        "allCompleteOutputsEqual": true,
+        "readOnlyFingerprintsUnchanged": true,
+        "databasesRemoved": true,
+        "schemaSha256": "54326210f3689d1359898c4102e244926d0fba972f0044fe8d63f773de0196e5",
+        "depthRunnerGitBlob": null,
+        "sources": [
+          {
+            "side": "baseline",
+            "head": "2c7882c76e91b70dd5dd770375f44c0c7efe3447",
+            "sourceSha256": "bd58868b0d9dcbc6644647ada0be83579d9d22cd1bfe788d0053c0da3aa9053b",
+            "measuredFiles": {
+              "server/modules/procurement/shipment-tracking.service.ts": "bf99588474e92476af75407e5d5d8768043b8b5c890767b99f150fc2fddf4e3d",
+              "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+              "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+              "server/modules/procurement/purchase-cost-status.repository.ts": "ad159b107a5230740c2d1695647aa70e600f52c3b4cab14b4a2a1663e7855d76",
+              "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "b222bef97c123e1efb8cca2fc52c101eae9792aabbfff0e0ce2b0523155a79cd",
+              "server/modules/procurement/purchase-cost-status-batch.repository.ts": null,
+              "server/modules/procurement/shipment-cost-review.repository.ts": "1567a045aa70ed9e186e63cd95937b3372e9dbd8b013aa0fc891f45be19432b3",
+              "server/modules/procurement/shipment-cost-posting-read.repository.ts": "4fc9f40e4fbb743550447f7306b63462f6173631869dc2d848ca0fd82bdbca62",
+              "server/modules/procurement/procurement.storage.ts": "4b18d58beb671c132ef4f77f7d5e016c889016084a19c2ebc35f86205d102cf0",
+              "server/modules/procurement/shipment-cost-exception.repository.ts": "8df6e7b9a07045de6c95ad455bd2a6beaca6e26ee127aa9ccaa85b7a9b7aa840",
+              "server/modules/inventory/infrastructure/cost-reconciliation.repository.ts": "d7b0beb1f822fec3077e23ba9359d9307f1d2dce2be8eff2592a584791e5afb6",
+              "server/modules/procurement/domain/current-shipment-cost-source.ts": "b61c1576859e993ee5fca216b7c030c305ded9ff1a166b75e7fec823db9c57dd",
+              "server/modules/procurement/shipment-health-evidence.repository.ts": "62f29b395885fcc4625da7d436965a6b0bf4f438b5f7325630e146eea37c6cfa",
+              "shared/money-read.ts": "4a6ee90f48118a7253c2c43334d46e0424b7a1a200dbe0bf6b7e4d9989c690da",
+              "shared/utils/money.ts": "310c562a68344afcc07ba5da3374d84ba4546547bd6ddfb07d49559b853454d3",
+              "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+              "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+              "test/performance/procurement/run-health-cost.ts": "dac97755b7720108a5b254c822fba0402b2a8a152fa11c8a637cfff98bb453a4"
+            },
+            "databaseName": "procurement_performance_s_5aab5342f50e4b4db2dc8a7fe1d05c94",
+            "rawReportSha256": "ef0f3109ad78d0b18d3a6bf9a465b2e0b4df8b71d54ce4bc99409d5d1a66bbbd"
+          },
+          {
+            "side": "candidate",
+            "head": "2c7882c76e91b70dd5dd770375f44c0c7efe3447",
+            "sourceSha256": "f66a1fc5858bbcbee2ff61de0d2e6ffffb1e0a6967ae510389f0e4b4f4af081c",
+            "measuredFiles": {
+              "server/modules/procurement/shipment-tracking.service.ts": "bf99588474e92476af75407e5d5d8768043b8b5c890767b99f150fc2fddf4e3d",
+              "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+              "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+              "server/modules/procurement/purchase-cost-status.repository.ts": "ad159b107a5230740c2d1695647aa70e600f52c3b4cab14b4a2a1663e7855d76",
+              "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "b222bef97c123e1efb8cca2fc52c101eae9792aabbfff0e0ce2b0523155a79cd",
+              "server/modules/procurement/purchase-cost-status-batch.repository.ts": "63266ccbd35931b01eb6cc3af21993f7d6dbbbd56d4575c0e1977ae0afa2e67c",
+              "server/modules/procurement/shipment-cost-review.repository.ts": "22ef740177c43e034aa096ace617267451883830aae93142cd462b23d619ddbb",
+              "server/modules/procurement/shipment-cost-posting-read.repository.ts": "4fc9f40e4fbb743550447f7306b63462f6173631869dc2d848ca0fd82bdbca62",
+              "server/modules/procurement/procurement.storage.ts": "4b18d58beb671c132ef4f77f7d5e016c889016084a19c2ebc35f86205d102cf0",
+              "server/modules/procurement/shipment-cost-exception.repository.ts": "8df6e7b9a07045de6c95ad455bd2a6beaca6e26ee127aa9ccaa85b7a9b7aa840",
+              "server/modules/inventory/infrastructure/cost-reconciliation.repository.ts": "d7b0beb1f822fec3077e23ba9359d9307f1d2dce2be8eff2592a584791e5afb6",
+              "server/modules/procurement/domain/current-shipment-cost-source.ts": "b61c1576859e993ee5fca216b7c030c305ded9ff1a166b75e7fec823db9c57dd",
+              "server/modules/procurement/shipment-health-evidence.repository.ts": "62f29b395885fcc4625da7d436965a6b0bf4f438b5f7325630e146eea37c6cfa",
+              "shared/money-read.ts": "4a6ee90f48118a7253c2c43334d46e0424b7a1a200dbe0bf6b7e4d9989c690da",
+              "shared/utils/money.ts": "310c562a68344afcc07ba5da3374d84ba4546547bd6ddfb07d49559b853454d3",
+              "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+              "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+              "test/performance/procurement/run-health-cost.ts": "dac97755b7720108a5b254c822fba0402b2a8a152fa11c8a637cfff98bb453a4"
+            },
+            "databaseName": "procurement_performance_s_7b6339bcb3574eb8ae03e6fce155c56b",
+            "rawReportSha256": "615c1801b06a35c6b1b6137525d1f93ca022ba77db0db7dd1fb59ebe6f99af0a"
+          }
+        ]
+      },
+      {
+        "profile": "posted",
+        "allCompleteOutputsEqual": true,
+        "readOnlyFingerprintsUnchanged": true,
+        "databasesRemoved": true,
+        "schemaSha256": "54326210f3689d1359898c4102e244926d0fba972f0044fe8d63f773de0196e5",
+        "depthRunnerGitBlob": null,
+        "sources": [
+          {
+            "side": "baseline",
+            "head": "2c7882c76e91b70dd5dd770375f44c0c7efe3447",
+            "sourceSha256": "bd58868b0d9dcbc6644647ada0be83579d9d22cd1bfe788d0053c0da3aa9053b",
+            "measuredFiles": {
+              "server/modules/procurement/shipment-tracking.service.ts": "bf99588474e92476af75407e5d5d8768043b8b5c890767b99f150fc2fddf4e3d",
+              "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+              "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+              "server/modules/procurement/purchase-cost-status.repository.ts": "ad159b107a5230740c2d1695647aa70e600f52c3b4cab14b4a2a1663e7855d76",
+              "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "b222bef97c123e1efb8cca2fc52c101eae9792aabbfff0e0ce2b0523155a79cd",
+              "server/modules/procurement/purchase-cost-status-batch.repository.ts": null,
+              "server/modules/procurement/shipment-cost-review.repository.ts": "1567a045aa70ed9e186e63cd95937b3372e9dbd8b013aa0fc891f45be19432b3",
+              "server/modules/procurement/shipment-cost-posting-read.repository.ts": "4fc9f40e4fbb743550447f7306b63462f6173631869dc2d848ca0fd82bdbca62",
+              "server/modules/procurement/procurement.storage.ts": "4b18d58beb671c132ef4f77f7d5e016c889016084a19c2ebc35f86205d102cf0",
+              "server/modules/procurement/shipment-cost-exception.repository.ts": "8df6e7b9a07045de6c95ad455bd2a6beaca6e26ee127aa9ccaa85b7a9b7aa840",
+              "server/modules/inventory/infrastructure/cost-reconciliation.repository.ts": "d7b0beb1f822fec3077e23ba9359d9307f1d2dce2be8eff2592a584791e5afb6",
+              "server/modules/procurement/domain/current-shipment-cost-source.ts": "b61c1576859e993ee5fca216b7c030c305ded9ff1a166b75e7fec823db9c57dd",
+              "server/modules/procurement/shipment-health-evidence.repository.ts": "62f29b395885fcc4625da7d436965a6b0bf4f438b5f7325630e146eea37c6cfa",
+              "shared/money-read.ts": "4a6ee90f48118a7253c2c43334d46e0424b7a1a200dbe0bf6b7e4d9989c690da",
+              "shared/utils/money.ts": "310c562a68344afcc07ba5da3374d84ba4546547bd6ddfb07d49559b853454d3",
+              "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+              "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+              "test/performance/procurement/run-health-cost.ts": "dac97755b7720108a5b254c822fba0402b2a8a152fa11c8a637cfff98bb453a4"
+            },
+            "databaseName": "procurement_performance_s_0085e6fd459846b9869913e4911f7d09",
+            "rawReportSha256": "2373370133e6876c21c0f3c60d555c963fd0eec833a365cf32cde857b384aec7"
+          },
+          {
+            "side": "candidate",
+            "head": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+            "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "measuredFiles": {
+              "server/modules/procurement/shipment-tracking.service.ts": "bf99588474e92476af75407e5d5d8768043b8b5c890767b99f150fc2fddf4e3d",
+              "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+              "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+              "server/modules/procurement/purchase-cost-status.repository.ts": "ad159b107a5230740c2d1695647aa70e600f52c3b4cab14b4a2a1663e7855d76",
+              "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "b222bef97c123e1efb8cca2fc52c101eae9792aabbfff0e0ce2b0523155a79cd",
+              "server/modules/procurement/purchase-cost-status-batch.repository.ts": "63266ccbd35931b01eb6cc3af21993f7d6dbbbd56d4575c0e1977ae0afa2e67c",
+              "server/modules/procurement/shipment-cost-review.repository.ts": "22ef740177c43e034aa096ace617267451883830aae93142cd462b23d619ddbb",
+              "server/modules/procurement/shipment-cost-posting-read.repository.ts": "4fc9f40e4fbb743550447f7306b63462f6173631869dc2d848ca0fd82bdbca62",
+              "server/modules/procurement/procurement.storage.ts": "4b18d58beb671c132ef4f77f7d5e016c889016084a19c2ebc35f86205d102cf0",
+              "server/modules/procurement/shipment-cost-exception.repository.ts": "8df6e7b9a07045de6c95ad455bd2a6beaca6e26ee127aa9ccaa85b7a9b7aa840",
+              "server/modules/inventory/infrastructure/cost-reconciliation.repository.ts": "d7b0beb1f822fec3077e23ba9359d9307f1d2dce2be8eff2592a584791e5afb6",
+              "server/modules/procurement/domain/current-shipment-cost-source.ts": "b61c1576859e993ee5fca216b7c030c305ded9ff1a166b75e7fec823db9c57dd",
+              "server/modules/procurement/shipment-health-evidence.repository.ts": "62f29b395885fcc4625da7d436965a6b0bf4f438b5f7325630e146eea37c6cfa",
+              "shared/money-read.ts": "4a6ee90f48118a7253c2c43334d46e0424b7a1a200dbe0bf6b7e4d9989c690da",
+              "shared/utils/money.ts": "310c562a68344afcc07ba5da3374d84ba4546547bd6ddfb07d49559b853454d3",
+              "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+              "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+              "test/performance/procurement/run-health-cost.ts": "dac97755b7720108a5b254c822fba0402b2a8a152fa11c8a637cfff98bb453a4"
+            },
+            "databaseName": "procurement_performance_s_f08deaf354cf4f5aa20563f103df5e95",
+            "rawReportSha256": "bc49b2bbc16634a9bae224da4dfb504f8e2652c2524f6ff1c4c3017cf0730560"
+          }
+        ]
+      },
+      {
+        "profile": "depth",
+        "allCompleteOutputsEqual": true,
+        "readOnlyFingerprintsUnchanged": true,
+        "databasesRemoved": true,
+        "schemaSha256": "54326210f3689d1359898c4102e244926d0fba972f0044fe8d63f773de0196e5",
+        "depthRunnerGitBlob": "65720e09950c901426473c29e8cb5ca513c92bcb",
+        "sources": [
+          {
+            "side": "baseline",
+            "head": "2c7882c76e91b70dd5dd770375f44c0c7efe3447",
+            "sourceSha256": "bd58868b0d9dcbc6644647ada0be83579d9d22cd1bfe788d0053c0da3aa9053b",
+            "measuredFiles": null,
+            "databaseName": "procurement_performance_s_6c7d245d4f624e099ed5fdb5477e59d7",
+            "rawReportSha256": "fbbc1241d4565b0ecbb5d988c132224c779073c6cffac0c691dcca7da9fb8d40"
+          },
+          {
+            "side": "candidate",
+            "head": "dbbce1f13969c20d04192cedef554eb11728f3a7",
+            "sourceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "measuredFiles": null,
+            "databaseName": "procurement_performance_s_9440210cf04c40b8928819792fb4d6f5",
+            "rawReportSha256": "281a6b99c8e4be7199034c9b6606d41d013ea641f2467b33bb13f0b99510b807"
+          }
+        ]
+      }
+    ],
+    "rows": [
+      {
+        "profile": "unresolved",
+        "tier": 10,
+        "owner": "landed-health",
+        "completeOutputSha256": "ced42b4feeed458b3d46f38aee84dde3560c3625d162ee68e8d14ca857d99b72",
+        "baseline": {
+          "queries": [
+            22,
+            22,
+            22
+          ],
+          "driverRows": [
+            196,
+            196,
+            196
+          ],
+          "medianElapsedMs": 16.949800000000323,
+          "elapsedMs": [
+            28.998999999999796,
+            16.949800000000323,
+            16.139599999999973
+          ],
+          "peakSampledRssBytes": [
+            324796416,
+            327794688,
+            337317888
+          ]
+        },
+        "candidate": {
+          "queries": [
+            22,
+            22,
+            22
+          ],
+          "driverRows": [
+            196,
+            196,
+            196
+          ],
+          "medianElapsedMs": 17.602199999999357,
+          "elapsedMs": [
+            33.978800000000774,
+            17.602199999999357,
+            17.559000000000196
+          ],
+          "peakSampledRssBytes": [
+            338251776,
+            338452480,
+            347303936
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 10,
+        "owner": "unfiltered-shipments",
+        "completeOutputSha256": "5e4360c8f5f0c09b33ceab5b27d35a0f56d452aa8394332e13c1e27c8e9bb562",
+        "baseline": {
+          "queries": [
+            24,
+            24,
+            24
+          ],
+          "driverRows": [
+            207,
+            207,
+            207
+          ],
+          "medianElapsedMs": 16.318199999999706,
+          "elapsedMs": [
+            19.404199999999946,
+            16.318199999999706,
+            15.303599999999733
+          ],
+          "peakSampledRssBytes": [
+            345481216,
+            350306304,
+            356388864
+          ]
+        },
+        "candidate": {
+          "queries": [
+            24,
+            24,
+            24
+          ],
+          "driverRows": [
+            207,
+            207,
+            207
+          ],
+          "medianElapsedMs": 17.136000000000422,
+          "elapsedMs": [
+            25.980400000000373,
+            16.481699999999364,
+            17.136000000000422
+          ],
+          "peakSampledRssBytes": [
+            356495360,
+            360140800,
+            365350912
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 10,
+        "owner": "filtered-shipments",
+        "completeOutputSha256": "5e4360c8f5f0c09b33ceab5b27d35a0f56d452aa8394332e13c1e27c8e9bb562",
+        "baseline": {
+          "queries": [
+            23,
+            23,
+            23
+          ],
+          "driverRows": [
+            206,
+            206,
+            206
+          ],
+          "medianElapsedMs": 14.861199999999826,
+          "elapsedMs": [
+            17.02469999999994,
+            14.861199999999826,
+            14.659200000000055
+          ],
+          "peakSampledRssBytes": [
+            366084096,
+            374628352,
+            382791680
+          ]
+        },
+        "candidate": {
+          "queries": [
+            23,
+            23,
+            23
+          ],
+          "driverRows": [
+            206,
+            206,
+            206
+          ],
+          "medianElapsedMs": 17.975999999999658,
+          "elapsedMs": [
+            17.9386999999997,
+            19.97019999999975,
+            17.975999999999658
+          ],
+          "peakSampledRssBytes": [
+            367484928,
+            376631296,
+            384737280
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 10,
+        "owner": "purchasing-health",
+        "completeOutputSha256": "87f7bcb70d728f97dfb414cd2f6c318410fefe91720e0bd3f480a46213608864",
+        "baseline": {
+          "queries": [
+            44,
+            44,
+            44
+          ],
+          "driverRows": [
+            215,
+            215,
+            215
+          ],
+          "medianElapsedMs": 26.458900000000085,
+          "elapsedMs": [
+            46.496399999999994,
+            26.458900000000085,
+            25.67369999999937
+          ],
+          "peakSampledRssBytes": [
+            392093696,
+            393633792,
+            394379264
+          ]
+        },
+        "candidate": {
+          "queries": [
+            44,
+            44,
+            44
+          ],
+          "driverRows": [
+            215,
+            215,
+            215
+          ],
+          "medianElapsedMs": 32.11319999999978,
+          "elapsedMs": [
+            50.9359000000004,
+            27.9992000000002,
+            32.11319999999978
+          ],
+          "peakSampledRssBytes": [
+            393695232,
+            394539008,
+            395059200
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 10,
+        "owner": "po-cost-fanout",
+        "completeOutputSha256": "57fcd8a4fbf530300b34babc53bae3c390e26cccab690005c4d8f9cfb6253e9f",
+        "baseline": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "driverRows": [
+            171,
+            171,
+            171
+          ],
+          "medianElapsedMs": 10.671899999999368,
+          "elapsedMs": [
+            11.801699999999983,
+            9.268499999999221,
+            10.671899999999368
+          ],
+          "peakSampledRssBytes": [
+            396611584,
+            396611584,
+            396013568
+          ]
+        },
+        "candidate": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "driverRows": [
+            171,
+            171,
+            171
+          ],
+          "medianElapsedMs": 12.288099999999758,
+          "elapsedMs": [
+            15.111899999999878,
+            10.59730000000036,
+            12.288099999999758
+          ],
+          "peakSampledRssBytes": [
+            397520896,
+            398061568,
+            398159872
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 100,
+        "owner": "landed-health",
+        "completeOutputSha256": "47cdc19d67233820e3582b82bd23843bbf1341a688fa9fd2e090e1d23d9cd929",
+        "baseline": {
+          "queries": [
+            23,
+            23,
+            23
+          ],
+          "driverRows": [
+            1816,
+            1816,
+            1816
+          ],
+          "medianElapsedMs": 48.10769999999957,
+          "elapsedMs": [
+            43.1878999999999,
+            50.68039999999928,
+            48.10769999999957
+          ],
+          "peakSampledRssBytes": [
+            411574272,
+            413466624,
+            413466624
+          ]
+        },
+        "candidate": {
+          "queries": [
+            23,
+            23,
+            23
+          ],
+          "driverRows": [
+            1816,
+            1816,
+            1816
+          ],
+          "medianElapsedMs": 60.25889999999981,
+          "elapsedMs": [
+            59.161299999999756,
+            60.381900000000314,
+            60.25889999999981
+          ],
+          "peakSampledRssBytes": [
+            415182848,
+            416272384,
+            416284672
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 100,
+        "owner": "unfiltered-shipments",
+        "completeOutputSha256": "fc67689d088338d8b751f715f8323848ddd9cd4c8e8042b0c23dd677b78a515e",
+        "baseline": {
+          "queries": [
+            24,
+            24,
+            24
+          ],
+          "driverRows": [
+            967,
+            967,
+            967
+          ],
+          "medianElapsedMs": 31.875600000000304,
+          "elapsedMs": [
+            33.96570000000065,
+            31.875600000000304,
+            29.58680000000004
+          ],
+          "peakSampledRssBytes": [
+            416423936,
+            416088064,
+            416157696
+          ]
+        },
+        "candidate": {
+          "queries": [
+            24,
+            24,
+            24
+          ],
+          "driverRows": [
+            967,
+            967,
+            967
+          ],
+          "medianElapsedMs": 34.53740000000016,
+          "elapsedMs": [
+            38.339600000000246,
+            34.53740000000016,
+            32.44329999999991
+          ],
+          "peakSampledRssBytes": [
+            419192832,
+            418615296,
+            418779136
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 100,
+        "owner": "filtered-shipments",
+        "completeOutputSha256": "fc67689d088338d8b751f715f8323848ddd9cd4c8e8042b0c23dd677b78a515e",
+        "baseline": {
+          "queries": [
+            24,
+            24,
+            24
+          ],
+          "driverRows": [
+            1866,
+            1866,
+            1866
+          ],
+          "medianElapsedMs": 51.74439999999959,
+          "elapsedMs": [
+            60.95899999999983,
+            51.74439999999959,
+            46.60850000000028
+          ],
+          "peakSampledRssBytes": [
+            430735360,
+            436977664,
+            444420096
+          ]
+        },
+        "candidate": {
+          "queries": [
+            24,
+            24,
+            24
+          ],
+          "driverRows": [
+            1866,
+            1866,
+            1866
+          ],
+          "medianElapsedMs": 50.96240000000034,
+          "elapsedMs": [
+            57.89840000000004,
+            50.794299999999566,
+            50.96240000000034
+          ],
+          "peakSampledRssBytes": [
+            434356224,
+            440463360,
+            447381504
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 100,
+        "owner": "purchasing-health",
+        "completeOutputSha256": "1c202dafe1f22392cae59134b8f8e82c8b4a9db3c60df2627f16bb5e06400aaa",
+        "baseline": {
+          "queries": [
+            45,
+            45,
+            45
+          ],
+          "driverRows": [
+            1835,
+            1835,
+            1835
+          ],
+          "medianElapsedMs": 58.47519999999986,
+          "elapsedMs": [
+            65.40949999999975,
+            56.24079999999958,
+            58.47519999999986
+          ],
+          "peakSampledRssBytes": [
+            451649536,
+            457265152,
+            464142336
+          ]
+        },
+        "candidate": {
+          "queries": [
+            45,
+            45,
+            45
+          ],
+          "driverRows": [
+            1835,
+            1835,
+            1835
+          ],
+          "medianElapsedMs": 55.84300000000076,
+          "elapsedMs": [
+            61.40149999999994,
+            55.84300000000076,
+            50.064800000000105
+          ],
+          "peakSampledRssBytes": [
+            455528448,
+            461819904,
+            467935232
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 100,
+        "owner": "po-cost-fanout",
+        "completeOutputSha256": "60e9f82a341533702c6c4fdab064b3b8a6dfd7f015618f0a3365c79140fa3451",
+        "baseline": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "driverRows": [
+            1611,
+            1611,
+            1611
+          ],
+          "medianElapsedMs": 24.77469999999994,
+          "elapsedMs": [
+            30.54110000000037,
+            24.77469999999994,
+            22.21309999999994
+          ],
+          "peakSampledRssBytes": [
+            471162880,
+            471162880,
+            471003136
+          ]
+        },
+        "candidate": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "driverRows": [
+            1611,
+            1611,
+            1611
+          ],
+          "medianElapsedMs": 21.181000000000495,
+          "elapsedMs": [
+            21.181000000000495,
+            24.60869999999977,
+            19.20469999999932
+          ],
+          "peakSampledRssBytes": [
+            475029504,
+            475348992,
+            475549696
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "landed-health",
+        "completeOutputSha256": "d744d835f110eddd2c224401f3a345b1c355e14b6b20f98355037efeecfe9b4a",
+        "baseline": {
+          "queries": [
+            3667,
+            3667,
+            3667
+          ],
+          "driverRows": [
+            15416,
+            15416,
+            15416
+          ],
+          "medianElapsedMs": 1565.4575999999997,
+          "elapsedMs": [
+            1706.3811999999998,
+            1538.5016000000005,
+            1565.4575999999997
+          ],
+          "peakSampledRssBytes": [
+            559607808,
+            646852608,
+            654450688
+          ]
+        },
+        "candidate": {
+          "queries": [
+            103,
+            103,
+            103
+          ],
+          "driverRows": [
+            15416,
+            15416,
+            15416
+          ],
+          "medianElapsedMs": 470.95730000000003,
+          "elapsedMs": [
+            443.35169999999925,
+            503.3678,
+            470.95730000000003
+          ],
+          "peakSampledRssBytes": [
+            566591488,
+            651743232,
+            652877824
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "unfiltered-shipments",
+        "completeOutputSha256": "476f43b5acf3fe2b56198dc5bfa1f469a354c4bf1229f016ece415f55d598e2a",
+        "baseline": {
+          "queries": [
+            465,
+            465,
+            465
+          ],
+          "driverRows": [
+            1751,
+            1751,
+            1751
+          ],
+          "medianElapsedMs": 176.5691999999999,
+          "elapsedMs": [
+            184.96919999999955,
+            173.6851999999999,
+            176.5691999999999
+          ],
+          "peakSampledRssBytes": [
+            535257088,
+            525811712,
+            523698176
+          ]
+        },
+        "candidate": {
+          "queries": [
+            24,
+            24,
+            24
+          ],
+          "driverRows": [
+            1751,
+            1751,
+            1751
+          ],
+          "medianElapsedMs": 51.95259999999962,
+          "elapsedMs": [
+            51.95259999999962,
+            49.357200000000375,
+            52.73699999999917
+          ],
+          "peakSampledRssBytes": [
+            662921216,
+            653778944,
+            653795328
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "filtered-shipments",
+        "completeOutputSha256": "476f43b5acf3fe2b56198dc5bfa1f469a354c4bf1229f016ece415f55d598e2a",
+        "baseline": {
+          "queries": [
+            3668,
+            3668,
+            3668
+          ],
+          "driverRows": [
+            15466,
+            15466,
+            15466
+          ],
+          "medianElapsedMs": 1414.9685000000009,
+          "elapsedMs": [
+            1401.8117999999995,
+            1414.9685000000009,
+            1462.1064999999999
+          ],
+          "peakSampledRssBytes": [
+            534528000,
+            532332544,
+            556269568
+          ]
+        },
+        "candidate": {
+          "queries": [
+            104,
+            104,
+            104
+          ],
+          "driverRows": [
+            15466,
+            15466,
+            15466
+          ],
+          "medianElapsedMs": 491.46279999999933,
+          "elapsedMs": [
+            428.2553000000007,
+            516.2614999999987,
+            491.46279999999933
+          ],
+          "peakSampledRssBytes": [
+            664633344,
+            683810816,
+            685334528
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "purchasing-health",
+        "completeOutputSha256": "cd02fd395640d0cae87fa932da6dcc12f7c55daa4192796afea7b968cff76044",
+        "baseline": {
+          "queries": [
+            3689,
+            3689,
+            3689
+          ],
+          "driverRows": [
+            17835,
+            17835,
+            17835
+          ],
+          "medianElapsedMs": 1534.9003999999986,
+          "elapsedMs": [
+            1636.1158000000014,
+            1534.9003999999986,
+            1377.2809000000016
+          ],
+          "peakSampledRssBytes": [
+            569049088,
+            556785664,
+            559497216
+          ]
+        },
+        "candidate": {
+          "queries": [
+            125,
+            125,
+            125
+          ],
+          "driverRows": [
+            17835,
+            17835,
+            17835
+          ],
+          "medianElapsedMs": 449.4236000000001,
+          "elapsedMs": [
+            440.78350000000137,
+            449.4236000000001,
+            534.4112000000005
+          ],
+          "peakSampledRssBytes": [
+            698306560,
+            699121664,
+            720728064
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "po-cost-fanout",
+        "completeOutputSha256": "60e9f82a341533702c6c4fdab064b3b8a6dfd7f015618f0a3365c79140fa3451",
+        "baseline": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "driverRows": [
+            1611,
+            1611,
+            1611
+          ],
+          "medianElapsedMs": 18.899999999997817,
+          "elapsedMs": [
+            18.899999999997817,
+            21.00090000000273,
+            16.83549999999741
+          ],
+          "peakSampledRssBytes": [
+            569430016,
+            569430016,
+            557113344
+          ]
+        },
+        "candidate": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "driverRows": [
+            1611,
+            1611,
+            1611
+          ],
+          "medianElapsedMs": 28.112699999999677,
+          "elapsedMs": [
+            27.385199999998804,
+            28.195400000000518,
+            28.112699999999677
+          ],
+          "peakSampledRssBytes": [
+            606769152,
+            606769152,
+            592166912
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "po-cost-single",
+        "completeOutputSha256": "7096d1ad5f73a42faca1d9ec8fcaba5d834f9c6127cc65a6a0698cb56224d70f",
+        "baseline": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "driverRows": [
+            27,
+            27,
+            27
+          ],
+          "medianElapsedMs": 6.685999999997875,
+          "elapsedMs": [
+            7.229600000002392,
+            6.685999999997875,
+            6.227699999999459
+          ],
+          "peakSampledRssBytes": [
+            572047360,
+            572047360,
+            572047360
+          ]
+        },
+        "candidate": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "driverRows": [
+            27,
+            27,
+            27
+          ],
+          "medianElapsedMs": 10.717100000001665,
+          "elapsedMs": [
+            10.717100000001665,
+            11.16610000000037,
+            10.12920000000122
+          ],
+          "peakSampledRssBytes": [
+            608112640,
+            608366592,
+            608366592
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 10,
+        "owner": "landed-health",
+        "completeOutputSha256": "3f7c3ed9dfbb34969d1e52067a903abdaeabf2e8fd3ab50d752f9def49165001",
+        "baseline": {
+          "queries": [
+            29,
+            29,
+            29
+          ],
+          "driverRows": [
+            676,
+            676,
+            676
+          ],
+          "medianElapsedMs": 33.954499999999825,
+          "elapsedMs": [
+            36.99229999999989,
+            33.312700000000405,
+            33.954499999999825
+          ],
+          "peakSampledRssBytes": [
+            450727936,
+            451866624,
+            453734400
+          ]
+        },
+        "candidate": {
+          "queries": [
+            29,
+            29,
+            29
+          ],
+          "driverRows": [
+            676,
+            676,
+            676
+          ],
+          "medianElapsedMs": 56.27490000000034,
+          "elapsedMs": [
+            62.70290000000023,
+            54.2531999999992,
+            56.27490000000034
+          ],
+          "peakSampledRssBytes": [
+            356495360,
+            357720064,
+            373182464
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 10,
+        "owner": "unfiltered-shipments",
+        "completeOutputSha256": "6d7acbf80e6d2d930e4e66c82a6b4e3fb9012ef2f04169acc224acddfef87bef",
+        "baseline": {
+          "queries": [
+            31,
+            31,
+            31
+          ],
+          "driverRows": [
+            687,
+            687,
+            687
+          ],
+          "medianElapsedMs": 33.33460000000014,
+          "elapsedMs": [
+            33.48309999999947,
+            33.33460000000014,
+            32.8216999999986
+          ],
+          "peakSampledRssBytes": [
+            456716288,
+            457277440,
+            460062720
+          ]
+        },
+        "candidate": {
+          "queries": [
+            31,
+            31,
+            31
+          ],
+          "driverRows": [
+            687,
+            687,
+            687
+          ],
+          "medianElapsedMs": 55.476300000000265,
+          "elapsedMs": [
+            56.2570999999989,
+            54.40860000000066,
+            55.476300000000265
+          ],
+          "peakSampledRssBytes": [
+            374411264,
+            376258560,
+            380956672
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 10,
+        "owner": "filtered-shipments",
+        "completeOutputSha256": "6d7acbf80e6d2d930e4e66c82a6b4e3fb9012ef2f04169acc224acddfef87bef",
+        "baseline": {
+          "queries": [
+            30,
+            30,
+            30
+          ],
+          "driverRows": [
+            686,
+            686,
+            686
+          ],
+          "medianElapsedMs": 31.20100000000093,
+          "elapsedMs": [
+            31.20100000000093,
+            30.429699999998775,
+            32.17820000000029
+          ],
+          "peakSampledRssBytes": [
+            462487552,
+            463822848,
+            466001920
+          ]
+        },
+        "candidate": {
+          "queries": [
+            30,
+            30,
+            30
+          ],
+          "driverRows": [
+            686,
+            686,
+            686
+          ],
+          "medianElapsedMs": 53.81660000000011,
+          "elapsedMs": [
+            53.81660000000011,
+            50.37460000000101,
+            54.225399999999354
+          ],
+          "peakSampledRssBytes": [
+            380907520,
+            382410752,
+            385028096
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 10,
+        "owner": "purchasing-health",
+        "completeOutputSha256": "8a9adf68c75d9a60229337d1e71d4768c76eabaa3dc00f224cfb3b294974e63c",
+        "baseline": {
+          "queries": [
+            54,
+            54,
+            54
+          ],
+          "driverRows": [
+            845,
+            845,
+            845
+          ],
+          "medianElapsedMs": 45.501900000001115,
+          "elapsedMs": [
+            55.69790000000103,
+            45.501900000001115,
+            41.39589999999953
+          ],
+          "peakSampledRssBytes": [
+            472276992,
+            475877376,
+            476332032
+          ]
+        },
+        "candidate": {
+          "queries": [
+            54,
+            54,
+            54
+          ],
+          "driverRows": [
+            845,
+            845,
+            845
+          ],
+          "medianElapsedMs": 72.89609999999993,
+          "elapsedMs": [
+            82.32799999999952,
+            70.32780000000093,
+            72.89609999999993
+          ],
+          "peakSampledRssBytes": [
+            389521408,
+            389967872,
+            393355264
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 10,
+        "owner": "po-cost-fanout",
+        "completeOutputSha256": "2b5e74a7198b01747a5726da0726f456163e01aac7b8ac886d67d8ca3a759e9b",
+        "baseline": {
+          "queries": [
+            26,
+            26,
+            26
+          ],
+          "driverRows": [
+            591,
+            591,
+            591
+          ],
+          "medianElapsedMs": 25.170499999998356,
+          "elapsedMs": [
+            29.283799999999246,
+            24.027100000001155,
+            25.170499999998356
+          ],
+          "peakSampledRssBytes": [
+            485638144,
+            485781504,
+            489660416
+          ]
+        },
+        "candidate": {
+          "queries": [
+            26,
+            26,
+            26
+          ],
+          "driverRows": [
+            591,
+            591,
+            591
+          ],
+          "medianElapsedMs": 45.43710000000101,
+          "elapsedMs": [
+            46.79449999999997,
+            45.43710000000101,
+            34.86479999999938
+          ],
+          "peakSampledRssBytes": [
+            397049856,
+            409210880,
+            409526272
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 100,
+        "owner": "landed-health",
+        "completeOutputSha256": "8933e6140e81e59300b7b52ef7f5fa41c6b1f64ecc49a18e807d1ba2739008f2",
+        "baseline": {
+          "queries": [
+            30,
+            30,
+            30
+          ],
+          "driverRows": [
+            6526,
+            6526,
+            6526
+          ],
+          "medianElapsedMs": 522.9654999999912,
+          "elapsedMs": [
+            522.9654999999912,
+            583.1609000000171,
+            489.41890000001877
+          ],
+          "peakSampledRssBytes": [
+            522993664,
+            524234752,
+            526254080
+          ]
+        },
+        "candidate": {
+          "queries": [
+            30,
+            30,
+            30
+          ],
+          "driverRows": [
+            6526,
+            6526,
+            6526
+          ],
+          "medianElapsedMs": 335.05489999998827,
+          "elapsedMs": [
+            344.020600000018,
+            329.44999999998254,
+            335.05489999998827
+          ],
+          "peakSampledRssBytes": [
+            535420928,
+            535179264,
+            535506944
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 100,
+        "owner": "unfiltered-shipments",
+        "completeOutputSha256": "1d45e51ea473811e07b4205c1b66b1193246e4217ec4cc993eabdd7f5ed61f1a",
+        "baseline": {
+          "queries": [
+            31,
+            31,
+            31
+          ],
+          "driverRows": [
+            4327,
+            4327,
+            4327
+          ],
+          "medianElapsedMs": 264.19899999999325,
+          "elapsedMs": [
+            251.2045999999973,
+            264.19899999999325,
+            276.7225000000035
+          ],
+          "peakSampledRssBytes": [
+            528244736,
+            524292096,
+            524931072
+          ]
+        },
+        "candidate": {
+          "queries": [
+            31,
+            31,
+            31
+          ],
+          "driverRows": [
+            4327,
+            4327,
+            4327
+          ],
+          "medianElapsedMs": 181.734300000011,
+          "elapsedMs": [
+            187.83929999999236,
+            181.734300000011,
+            180.44980000000214
+          ],
+          "peakSampledRssBytes": [
+            535797760,
+            534634496,
+            535388160
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 100,
+        "owner": "filtered-shipments",
+        "completeOutputSha256": "1d45e51ea473811e07b4205c1b66b1193246e4217ec4cc993eabdd7f5ed61f1a",
+        "baseline": {
+          "queries": [
+            31,
+            31,
+            31
+          ],
+          "driverRows": [
+            6576,
+            6576,
+            6576
+          ],
+          "medianElapsedMs": 466.3387999999686,
+          "elapsedMs": [
+            541.3470000000088,
+            462.26439999998547,
+            466.3387999999686
+          ],
+          "peakSampledRssBytes": [
+            529526784,
+            524578816,
+            526413824
+          ]
+        },
+        "candidate": {
+          "queries": [
+            31,
+            31,
+            31
+          ],
+          "driverRows": [
+            6576,
+            6576,
+            6576
+          ],
+          "medianElapsedMs": 329.98870000001625,
+          "elapsedMs": [
+            329.19289999999455,
+            329.98870000001625,
+            331.89830000000075
+          ],
+          "peakSampledRssBytes": [
+            540667904,
+            535744512,
+            536641536
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 100,
+        "owner": "purchasing-health",
+        "completeOutputSha256": "b4f4f0376a6bf5373c353ee143095bdbd494ab2bdc951da04463cdd92ef20d9c",
+        "baseline": {
+          "queries": [
+            51,
+            51,
+            51
+          ],
+          "driverRows": [
+            6539,
+            6539,
+            6539
+          ],
+          "medianElapsedMs": 539.5197000000044,
+          "elapsedMs": [
+            539.5197000000044,
+            547.4589000000269,
+            506.2049999999581
+          ],
+          "peakSampledRssBytes": [
+            530784256,
+            526331904,
+            526827520
+          ]
+        },
+        "candidate": {
+          "queries": [
+            51,
+            51,
+            51
+          ],
+          "driverRows": [
+            6539,
+            6539,
+            6539
+          ],
+          "medianElapsedMs": 341.2883000000147,
+          "elapsedMs": [
+            347.8791000000201,
+            336.06589999998687,
+            341.2883000000147
+          ],
+          "peakSampledRssBytes": [
+            540635136,
+            550043648,
+            550936576
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 100,
+        "owner": "po-cost-fanout",
+        "completeOutputSha256": "85acc032657c603599b51eaab769591136a809964b0057a2be05573ae88f783e",
+        "baseline": {
+          "queries": [
+            26,
+            26,
+            26
+          ],
+          "driverRows": [
+            5721,
+            5721,
+            5721
+          ],
+          "medianElapsedMs": 246.9084000000148,
+          "elapsedMs": [
+            291.25990000000456,
+            246.9084000000148,
+            237.48869999998715
+          ],
+          "peakSampledRssBytes": [
+            529600512,
+            525103104,
+            526036992
+          ]
+        },
+        "candidate": {
+          "queries": [
+            26,
+            26,
+            26
+          ],
+          "driverRows": [
+            5721,
+            5721,
+            5721
+          ],
+          "medianElapsedMs": 185.30359999998473,
+          "elapsedMs": [
+            185.30359999998473,
+            190.4378999999899,
+            184.1178999999829
+          ],
+          "peakSampledRssBytes": [
+            555532288,
+            550465536,
+            551096320
+          ]
+        }
+      },
+      {
+        "profile": "depth",
+        "tier": 10,
+        "owner": "landed-health",
+        "completeOutputSha256": "099b67327364018f0bd53c9acd766593b896e50d061ba7996396a8ef01762adb",
+        "baseline": {
+          "queries": [
+            22,
+            22,
+            22
+          ],
+          "driverRows": [
+            197,
+            197,
+            197
+          ],
+          "medianElapsedMs": 77.83990000000085,
+          "elapsedMs": [
+            91.49910000000091,
+            73.77250000000095,
+            77.83990000000085
+          ],
+          "peakSampledRssBytes": [
+            326049792,
+            328814592,
+            338284544
+          ]
+        },
+        "candidate": {
+          "queries": [
+            22,
+            22,
+            22
+          ],
+          "driverRows": [
+            197,
+            197,
+            197
+          ],
+          "medianElapsedMs": 70.87089999999989,
+          "elapsedMs": [
+            75.82709999999952,
+            58.46110000000044,
+            70.87089999999989
+          ],
+          "peakSampledRssBytes": [
+            330616832,
+            333828096,
+            343326720
+          ]
+        }
+      },
+      {
+        "profile": "depth",
+        "tier": 10,
+        "owner": "unfiltered-shipments",
+        "completeOutputSha256": "6a0253e6c415e8ad7c048c6dbb06518a0b52241bada98b199a03d0614f444df9",
+        "baseline": {
+          "queries": [
+            24,
+            24,
+            24
+          ],
+          "driverRows": [
+            208,
+            208,
+            208
+          ],
+          "medianElapsedMs": 69.7548999999999,
+          "elapsedMs": [
+            78.01840000000084,
+            68.22130000000107,
+            69.7548999999999
+          ],
+          "peakSampledRssBytes": [
+            346615808,
+            351436800,
+            357638144
+          ]
+        },
+        "candidate": {
+          "queries": [
+            24,
+            24,
+            24
+          ],
+          "driverRows": [
+            208,
+            208,
+            208
+          ],
+          "medianElapsedMs": 60.64059999999972,
+          "elapsedMs": [
+            65.22029999999995,
+            60.64059999999972,
+            56.344199999999546
+          ],
+          "peakSampledRssBytes": [
+            352960512,
+            356032512,
+            362459136
+          ]
+        }
+      },
+      {
+        "profile": "depth",
+        "tier": 10,
+        "owner": "filtered-shipments",
+        "completeOutputSha256": "6a0253e6c415e8ad7c048c6dbb06518a0b52241bada98b199a03d0614f444df9",
+        "baseline": {
+          "queries": [
+            23,
+            23,
+            23
+          ],
+          "driverRows": [
+            207,
+            207,
+            207
+          ],
+          "medianElapsedMs": 72.93019999999888,
+          "elapsedMs": [
+            67.60339999999997,
+            75.52909999999974,
+            72.93019999999888
+          ],
+          "peakSampledRssBytes": [
+            367325184,
+            376037376,
+            384118784
+          ]
+        },
+        "candidate": {
+          "queries": [
+            23,
+            23,
+            23
+          ],
+          "driverRows": [
+            207,
+            207,
+            207
+          ],
+          "medianElapsedMs": 55.32390000000032,
+          "elapsedMs": [
+            56.493499999999585,
+            55.10449999999946,
+            55.32390000000032
+          ],
+          "peakSampledRssBytes": [
+            372232192,
+            381177856,
+            389165056
+          ]
+        }
+      },
+      {
+        "profile": "depth",
+        "tier": 10,
+        "owner": "purchasing-health",
+        "completeOutputSha256": "87f7bcb70d728f97dfb414cd2f6c318410fefe91720e0bd3f480a46213608864",
+        "baseline": {
+          "queries": [
+            44,
+            44,
+            44
+          ],
+          "driverRows": [
+            216,
+            216,
+            216
+          ],
+          "medianElapsedMs": 116.78810000000158,
+          "elapsedMs": [
+            119.59360000000015,
+            113.21700000000055,
+            116.78810000000158
+          ],
+          "peakSampledRssBytes": [
+            393347072,
+            394137600,
+            394211328
+          ]
+        },
+        "candidate": {
+          "queries": [
+            44,
+            44,
+            44
+          ],
+          "driverRows": [
+            216,
+            216,
+            216
+          ],
+          "medianElapsedMs": 69.51320000000032,
+          "elapsedMs": [
+            85.41829999999936,
+            69.51320000000032,
+            62.5650999999998
+          ],
+          "peakSampledRssBytes": [
+            391376896,
+            392065024,
+            392294400
+          ]
+        }
+      }
+    ],
+    "limitations": [
+      "Synthetic loopback PostgreSQL experiments; no production rows or statistics were read.",
+      "Three serial samples per owner; elapsed time and sampled RSS are diagnostic, not production SLOs.",
+      "Per-scope limits, complete header scans and financial decisions remain in their existing owners.",
+      "No unbounded capacity claim for charge, exception, supplier-lineage or sales-history distributions."
+    ]
+  },
+  "cleanup": {
+    "stopped": true,
+    "userDatabasesRemoved": true,
+    "otherClients": 0,
+    "port": 62876,
+    "rawReportSha256": "368ba1511d46562aa2ce9b3ca165b0ad9a64091a95166fbdc97b7fc6defa431c"
+  },
+  "historicalCleanup": "Separate; no live database was queried or modified and no historical repair was run.",
+  "publication": "Not pushed; hosted CI and deployment unverified for this payload.",
+  "limitations": [
+    "Synthetic local schemas and selected real migrations, not a complete release/bootstrap replay.",
+    "External channel dispatch is an inert test boundary. Payments are recorded evidence, not executed bank transfers.",
+    "Browser-session draft recovery does not provide cross-device draft storage.",
+    "Performance timings and sampled RSS are diagnostic; complete scans and per-review safety limits remain.",
+    "Unit/database regressions precede the unrelated four-file main merge; all 17 implementation files have identical Git blobs after it. Final browser, connected, guard, type and build checks use the merged runtime commit."
+  ],
+  "verificationTools": {
+    "comparison": {
+      "path": "test/performance/procurement/compare-health-cost.mjs",
+      "sha256": "d9218096384de0a99b4060e2b40db9a50869d0bb69d26deac82f62d203cbb896"
+    }
+  }
+}

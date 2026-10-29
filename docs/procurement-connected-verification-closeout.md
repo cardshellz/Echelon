@@ -1,5 +1,7 @@
 # Connected procurement verification, permissions and cost-read performance
 
+> October 28 follow-up: [the new closeout](procurement-supplier-handoff-connected-performance-closeout.md) adds connected draft/booking/receiving and populated payment/credit/return recovery journeys, repairs the missing-supplier handoff, and verifies the remaining supplier-read performance work. Historical cleanup remains separate.
+
 > October 27 follow-up: the AP common-snapshot gap described below is now fixed and verified against current main. See [the new closeout](procurement-ap-summary-snapshot-closeout.md). The October 25 measurements and results retain their original source attribution.
 
 ## Scope and baseline
