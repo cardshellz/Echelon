@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useInventoryCommand } from "@/lib/inventory-command";
 import { InventoryTrackingHistory } from "@/components/catalog/InventoryTrackingHistory";
 import { ShopifyProductConnectionActions } from "@/components/catalog/ShopifyProductConnection";
+import { InventoryStockSendButton } from "@/features/channel-inventory/components/InventoryStockSend";
 import { ProductImageGallery } from "@/components/catalog/ProductImageGallery";
 import { invalidateCatalogImages } from "@/lib/catalog-image-queries";
 import { saveProductAssetScope, type ProductAssetScopeAttempt } from "@/lib/product-asset-scope";
@@ -834,7 +835,7 @@ const SHOPIFY_MAPPING_STATUS: Record<ShopifyProductMappingStatus, {
   },
 };
 
-function ShopifyProductMappingPanel({ productId, enabled }: { productId: number; enabled: boolean }) {
+export function ShopifyProductMappingPanel({ productId, enabled }: { productId: number; enabled: boolean }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [confirmTargetId, setConfirmTargetId] = useState<string | null>(null);
@@ -892,6 +893,7 @@ function ShopifyProductMappingPanel({ productId, enabled }: { productId: number;
             <div className="flex flex-wrap items-center gap-2">
               {status && <Badge variant="outline" className={status.className}>{status.label}</Badge>}
               <ShopifyProductConnectionActions productId={productId} />
+              <InventoryStockSendButton productId={productId} />
             </div>
           </div>
         </CardHeader>

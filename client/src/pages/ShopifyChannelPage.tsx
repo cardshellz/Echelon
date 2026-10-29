@@ -12,6 +12,7 @@ import React, { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { ShopifyOwnershipReview } from "@/components/ShopifyOwnershipReview";
+import { InventoryStockSendButton } from "@/features/channel-inventory/components/InventoryStockSend";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -858,7 +859,7 @@ export default function ShopifyChannelPage() {
               </CardTitle>
               <CardDescription>Products and their Shopify push status</CardDescription>
             </div>
-            <div className="flex flex-col sm:flex-row gap-2">
+            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
               <Button
                 variant="outline"
                 size="sm"
@@ -986,7 +987,7 @@ export default function ShopifyChannelPage() {
               </div>
 
               {/* Feed table */}
-              <div className="border rounded-lg overflow-hidden">
+              <div className="overflow-x-auto rounded-lg border">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -995,7 +996,7 @@ export default function ShopifyChannelPage() {
                       <TableHead className="w-[120px]">Shopify ID</TableHead>
                       <TableHead className="w-[110px] text-center">Status</TableHead>
                       <TableHead className="w-[120px]">Last Synced</TableHead>
-                      {/* Push action column disabled */}
+                      <TableHead className="w-[160px]">Inventory</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -1052,7 +1053,9 @@ export default function ShopifyChannelPage() {
                             <span className="text-xs text-muted-foreground">Never</span>
                           )}
                         </TableCell>
-                        {/* Push button removed — feature disabled */}
+                        <TableCell>
+                          <InventoryStockSendButton productId={item.productId} channelId={shopifyChannel.id} disabled={!item.isActive} />
+                        </TableCell>
                       </TableRow>
                     ))}
                     {filteredFeed.length === 0 && (
