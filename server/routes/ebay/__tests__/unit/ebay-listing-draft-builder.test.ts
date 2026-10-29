@@ -86,8 +86,8 @@ describe("buildEbayRouteListingDraft", () => {
       Type: ["Toploader"],
     });
     expect(draft.inventoryItems[0].payload.packageWeightAndSize?.weight).toEqual({
-      value: 120,
-      unit: "GRAM",
+      value: 5,
+      unit: "OUNCE",
     });
     expect(draft.inventoryItems[0].payload.availability.shipToLocationAvailability.quantity).toBe(10);
     expect(draft.offers[0].payload.availableQuantity).toBe(10);

@@ -38,6 +38,7 @@ import {
   priceFromWalmart,
   schemaIssues,
   validProductIdentifier,
+  walmartShippingWeightAttributes,
 } from "./walmart-listing-schema";
 
 const FEED = "MP_MAINTENANCE";
@@ -184,7 +185,7 @@ export class WalmartListingUpdateProvider implements ListingUpdateProvider {
       MPItem: [
         {
           Orderable: {
-            ...orderable,
+            ...walmartShippingWeightAttributes(orderable),
             sku: source.sku,
             productIdentifiers: {
               productIdType: source.identifier.type,
