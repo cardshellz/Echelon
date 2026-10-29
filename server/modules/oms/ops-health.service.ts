@@ -33,6 +33,7 @@ import {
 } from "../inventory-planning/channel-stock-update-dead-letters";
 import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../dropship/marketplace-sync-health";
 import { stockLinkHealthChecksForProcess } from "../inventory-planning/stock-link-health";
+import { QUANTITY_CATCHUP_HEALTH_CHECKS } from "../inventory-planning/quantity-catchup-health";
 import {
   HELD_LINE_AGING_DAYS,
   allLinesHeldCountQuery,
@@ -937,6 +938,14 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     message: check.message,
     ...(await countAndSample(db, check.countSql, check.sampleSql)),
   })));
+  // Channels PR5 catch-up parking, through inventory planning's published read port: stock updates waiting for a
+  // link over an hour (warning) and stock updates stopped for review (critical, reaches the alert).
+  const quantityCatchupIssues = await Promise.all(QUANTITY_CATCHUP_HEALTH_CHECKS.map(async (check) => issue({
+    code: check.code,
+    severity: check.severity,
+    message: check.message,
+    ...(await countAndSample(db, check.countSql, check.sampleSql)),
+  })));
   const channelWriteback = await getChannelWritebackHealth(db, {
     windowDays: 14,
     sampleLimit: 50,
@@ -1195,6 +1204,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     }),
     ...marketplaceSyncIssues,
     ...stockLinkIssues,
+    ...quantityCatchupIssues,
     issue({
       code: "CHANNEL_WRITEBACK_MASKED_SPLIT",
       severity: "critical",

@@ -7,7 +7,10 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { listingSetupInspectionInputSchema, listingSetupRequestSchema, type ListingSetupInspectionInput, type ListingSetupInspection, validateListingSetupIntent, runWithListingSetupAdmission, type ListingSetupIntent } from "../application/listing-setup-intent";
 import { admitListingSetupInsideTransaction, validateListingSetupReadinessInsideTransaction, resolveListingSetupQuantitiesInsideTransaction, type ListingSetupReadinessCache, type ListingSetupQuantityCache } from "./listing-setup-admission";
 import type { InventoryAvailabilityTransactionQueryClient as Client } from "../application/inventory-availability-transaction-query.port";
-import type { QuantityPublicationAdmission, QuantityPublicationCatchup, QuantityPublicationCatchupStore, QuantityPublicationOutboxClaim } from "../application/quantity-publication-admission.port";
+import type { QuantityPublicationAdmission, QuantityPublicationCatchup, QuantityPublicationCatchupParkOutcome, QuantityPublicationCatchupRetryClass,
+  QuantityPublicationCatchupStore, QuantityPublicationOutboxClaim } from "../application/quantity-publication-admission.port";
+import { parkCatchupInsideTransaction, recordCatchupFailure } from "./quantity-catchup-parking.repository";
+import { quantityCatchupPausedDelaySeconds } from "../domain/quantity-publication-catchup-parking";
 import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
 import { assertCurrentEbayQuantityRequestOwner, currentEbayQuantityRequestJournal, QuantityProviderEvidenceCollector } from "../application/quantity-provider-request-evidence";
 import { InventoryPublicationNotSentError } from "../application/inventory-publication-transport";
@@ -166,7 +169,19 @@ export async function retainCatchupScopes(client: Client, scopes: readonly Quant
     scope=EXCLUDED.scope,revision=quantity_publication_catchup.revision+1,
     last_activation_run_id=COALESCE(EXCLUDED.last_activation_run_id,quantity_publication_catchup.last_activation_run_id),
     reason=EXCLUDED.reason,next_attempt_at=EXCLUDED.next_attempt_at,updated_at=EXCLUDED.updated_at,
-    attempt_boundary_id=EXCLUDED.attempt_boundary_id`,
+    attempt_boundary_id=EXCLUDED.attempt_boundary_id,
+    -- A new revision is new work (Channels PR5): its attempts start at zero and a
+    -- review stop no longer applies. A pending row that was waiting for a link
+    -- keeps its parked-since time, so Ops Health reports the whole wait.
+    attempt_count=0,requires_review_at=NULL,
+    failure_class=CASE WHEN quantity_publication_catchup.failure_class='parked'
+      AND quantity_publication_catchup.completed_revision<quantity_publication_catchup.revision THEN 'parked' END,
+    parked_at=CASE WHEN quantity_publication_catchup.failure_class='parked'
+      AND quantity_publication_catchup.completed_revision<quantity_publication_catchup.revision
+      THEN quantity_publication_catchup.parked_at END,
+    parked_code=CASE WHEN quantity_publication_catchup.failure_class='parked'
+      AND quantity_publication_catchup.completed_revision<quantity_publication_catchup.revision
+      THEN quantity_publication_catchup.parked_code END`,
   [JSON.stringify(scopes.map(scope => ({ scope_key: key(scope), scope }))), runId, reason, now(timestamp)]);
 }
 
@@ -729,6 +744,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     const client = await this.pool.connect();
     try { return (await client.query<{ id: string; revision: string; attempt_boundary_id: string; scope: unknown }>(`SELECT id::text,revision::text,attempt_boundary_id::text,scope
       FROM inventory.quantity_publication_catchup catchup WHERE completed_revision<revision AND next_attempt_at<=$1
+      AND requires_review_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM inventory.quantity_publication_attempts unresolved
         WHERE unresolved.state IN ('running','uncertain')
           AND unresolved.affected_scope_keys @> ARRAY[catchup.scope_key])
@@ -844,27 +860,77 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     } finally { client.release(discard); }
   }
 
-  async fail(claim: QuantityPublicationCatchup, errorCode: string, message: string): Promise<void> {
+  /**
+   * Persists one failed pass by its class (Channels PR5; QuantityCatchupFailureClass): paused counts no attempt and
+   * waits 60-180 s; transient counts one and waits min(1 min x 2^n, 1 h); permanent stops the row for review. The
+   * update is guarded by the claim's revision: a newer producer event or a completion supersedes it (returns null).
+   * Returns the attempt count the row reached.
+   */
+  async fail(claim: QuantityPublicationCatchup, errorCode: string, message: string,
+    retryClass: QuantityPublicationCatchupRetryClass = "transient"): Promise<number | null> {
     const catchupId = id(claim.catchupId);
     const revision = id(claim.revision);
     const scopeKey = key(quantityPublicationScopeSchema.parse(claim.scope));
+    if (!["paused", "transient", "permanent"].includes(retryClass)) fail("PUBLICATION_CATCHUP_RETRY_CLASS_INVALID", "Unknown catch-up retry class.");
     const client = await this.pool.connect();
     try {
-      const updated = await client.query(`UPDATE inventory.quantity_publication_catchup
-      SET next_attempt_at=GREATEST(next_attempt_at,$3::timestamptz+interval '1 minute'),
-      last_error_code=$4,last_error_message=$5
-      WHERE id=$1 AND revision=$2 AND completed_revision<revision AND scope_key=$6`,
-      [catchupId,revision,now(this.clock()),errorCode.slice(0,200),message.slice(0,2000),scopeKey]);
-      if (updated.rowCount === 1) return;
+      const updated = await recordCatchupFailure(client, { catchupId, revision, scopeKey, errorCode, message, retryClass,
+        now: this.clock(), pausedDelaySeconds: quantityCatchupPausedDelaySeconds({ catchupId, revision }) });
+      if (updated !== null) return updated;
       const current = (await client.query<{ revision: string; completed_revision: string; scope_key: string }>(
         `SELECT revision::text,completed_revision::text,scope_key
          FROM inventory.quantity_publication_catchup WHERE id=$1`, [catchupId])).rows[0];
       // A newer producer event or another worker's completion supersedes this
       // claim. Any other miss means the promised backoff was not persisted.
-      if (updated.rowCount === 0 && current?.scope_key === scopeKey
-        && (BigInt(current.revision) > BigInt(revision) || BigInt(current.completed_revision) >= BigInt(revision))) return;
-      fail("PUBLICATION_CATCHUP_BACKOFF_CONFLICT", "Catch-up failure backoff could not be persisted.", { catchupId, revision });
+      if (current?.scope_key === scopeKey
+        && (BigInt(current.revision) > BigInt(revision) || BigInt(current.completed_revision) >= BigInt(revision))) return null;
+      return fail("PUBLICATION_CATCHUP_BACKOFF_CONFLICT", "Catch-up failure backoff could not be persisted.", { catchupId, revision });
     } finally { client.release(); }
+  }
+
+  /**
+   * A missing-link refusal (Channels PR5, PLAN-CH-v3 section 6). In one transaction, under the same gate and exact
+   * item lock as completion and the authority row FOR SHARE NOWAIT (so a link transaction, which holds it FOR UPDATE
+   * under the cutover fence, is either fully visible here or waits for this commit and then wakes the parked row):
+   * 1. the item has an exact active link after all: the refusal had another cause -> transient retry;
+   * 2. the item is a retired (or other-id-form) identity of exactly one size whose link now names another item ->
+   *    settled with an identity_retired receipt; the new link's outbox row carries the quantity;
+   * 3. otherwise parked: re-checked in 24 h, woken by a link of the item.
+   * Busy locks -> paused (no attempt). Legacy authority or a suppressed gate only parks.
+   */
+  async park(claim: QuantityPublicationCatchup, errorCode: string, message: string): Promise<QuantityPublicationCatchupParkOutcome> {
+    const catchupId = id(claim.catchupId); const revision = id(claim.revision);
+    if (!/^(0|[1-9][0-9]{0,18})$/.test(claim.attemptBoundaryId) || BigInt(claim.attemptBoundaryId) > BigInt("9223372036854775807")) {
+      fail("PUBLICATION_ID_INVALID", "Expected a nonnegative database attempt boundary.");
+    }
+    const scope = quantityPublicationScopeSchema.parse(claim.scope);
+    const scopeKey = key(scope);
+    const occurredAt = now(this.clock());
+    const client = await this.pool.connect();
+    let transactionOpen = false; let discard: Error | undefined;
+    let decision: "busy" | "linked" | "settled" | "parked" | "superseded";
+    try {
+      await client.query("BEGIN"); transactionOpen = true;
+      await client.query("SET LOCAL lock_timeout='2s'");
+      await client.query("SET LOCAL statement_timeout='10s'");
+      await client.query("SET LOCAL idle_in_transaction_session_timeout='15s'");
+      // TRY-only, as completion and archive settlement: never wait in reverse of an activation fence.
+      const gate = (await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock_shared($1,0) AS acquired", [QUANTITY_PUBLICATION_LOCK_NAMESPACE])).rows[0]?.acquired;
+      const scoped = gate && (await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1,918420)) AS acquired", [scopeKey])).rows[0]?.acquired;
+      decision = scoped ? await parkCatchupInsideTransaction(client, { ...claim, catchupId, revision, scope }, scopeKey,
+        { errorCode, message, occurredAt }) : "busy";
+      await client.query(decision === "parked" || decision === "settled" ? "COMMIT" : "ROLLBACK"); transactionOpen = false;
+    } catch (error) {
+      if (transactionOpen) try { await client.query("ROLLBACK"); transactionOpen = false; }
+      catch (rollbackError) { discard = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError)); }
+      if (!(error instanceof Error && "code" in error && error.code === "55P03") || discard) throw error;
+      decision = "busy";
+    } finally { client.release(discard); }
+    if (decision === "settled" || decision === "parked" || decision === "superseded") return decision;
+    const retryClass = decision === "busy" ? "paused" : "transient";
+    return (await this.fail(claim, errorCode, message, retryClass)) === null ? "superseded" : retryClass;
   }
 }
 

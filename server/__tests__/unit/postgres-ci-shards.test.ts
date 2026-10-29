@@ -243,6 +243,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/channels/__tests__/integration/shopify-stock-link-source.integration.test.ts",
       // Channels PR3: Dropship eBay listing enrollment (the Dropship source SQL, the tick and the Dropship writer).
       "server/modules/dropship/__tests__/integration/dropship-ebay-stock-enrollment.integration.test.ts",
+      // Channels PR5: catch-up parking (park, the sealer's wake, identity_retired settlement, retry classes, Ops Health SQL).
+      "server/modules/inventory-planning/__tests__/integration/quantity-publication-catchup-parking.integration.test.ts",
     ];
     addedSuites.push(
       "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",

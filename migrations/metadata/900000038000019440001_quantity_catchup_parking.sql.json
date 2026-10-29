@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000038000019440001_quantity_catchup_parking.sql",
+  "generation": 38,
+  "pr": 1944,
+  "ordinal": 1,
+  "after": [
+    "900000037000019410001_shopify_product_connections.sql"
+  ]
+}
