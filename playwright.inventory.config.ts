@@ -24,6 +24,7 @@ export default defineConfig({
     "walmart-channel-workspace.spec.ts",
     "catalog-images.spec.ts",
     "shopify-product-connection.spec.ts",
+    "shopify-inventory-send.spec.ts",
     "channel-package-data.spec.ts",
     "ebay-listing-photos.spec.ts",
     "ebay-listing-sync-recovery.spec.ts",

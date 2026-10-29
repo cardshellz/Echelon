@@ -26,6 +26,7 @@ export const BROWSER_FEATURES = Object.freeze({
         "test/browser/bulk-inventory-tracking.spec.ts",
         "test/browser/catalog-images.spec.ts",
         "test/browser/shopify-product-connection.spec.ts",
+        "test/browser/shopify-inventory-send.spec.ts",
         "test/browser/channel-package-data.spec.ts"
       ],
       "roots": []
