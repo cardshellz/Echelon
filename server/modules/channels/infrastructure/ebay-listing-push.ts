@@ -22,6 +22,11 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import { EbayAuthService, createEbayAuthConfig } from "../adapters/ebay/ebay-auth.service";
 import { ensureEbayListingInventoryReady } from "./ebay-listing-inventory-readiness";
+import { linkEbayListingStockBeforeChange } from "./ebay-listing-stock-link-hook";
+import { linkChannelEbayStock, readEbayStockLinkGaps } from "../../inventory-planning/quantity-publication";
+
+/** The actor of a stock link made by a reviewed listing update or rebuild (its receipt and audit row). */
+const EBAY_LISTING_CHANGE_STOCK_ACTOR = "system:ebay-listing-change";
 
 const repository = new PostgresEbayListingPushRepository(pool, EBAY_CHANNEL_ID, () => new Date(),
   () => getDatabasePoolSnapshot().maximumConnections);
@@ -204,6 +209,19 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
             throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", "eBay did not expose this product as a live listing. If a rebuild was interrupted, resume it using its saved review. If that review is unavailable, an administrator must recover its original eBay group and offer mapping before running Analyze again.", { cause: error });
           throw error;
         }
+      }
+      if (reviewedPreview && listingIds.length === 1 && (command.updateExisting || command.rebuild?.mode === "execute")) {
+        // Channels PR4: link the new sizes' stock before anything is prepared or sent to eBay (a refusal sends nothing).
+        const quantities = await atpService.getAtpPerVariant(productId);
+        const atp = new Map(quantities.map(row => [row.productVariantId, row.atpUnits]));
+        await linkEbayListingStockBeforeChange({ kind: command.updateExisting ? "listing_update" : "listing_rebuild",
+          channelId: EBAY_CHANNEL_ID, connectionId: ctx.connectionId, accountId: ctx.account.externalAccountId,
+          environment: ctx.auth.getEnvironment(), productId, listingId: listingIds[0]!, reviewToken: reviewedPreview.confirmationToken,
+          variants: variants.map(variant => ({ productVariantId: variant.id, sku: variant.sku, atpUnits: atp.get(variant.id) ?? 0 })),
+          actor: EBAY_LISTING_CHANGE_STOCK_ACTOR }, {
+          readGaps: input => readEbayStockLinkGaps(pool, input),
+          link: input => linkChannelEbayStock(pool, input, { now: new Date(), monotonicNow: () => performance.now() }),
+        });
       }
       const groupKey = existingIdentity?.groupKey ?? reviewedPreview?.groupKey ?? (product.sku || `PROD-${productId}`);
       if (reviewedPreview && existingIdentity && existingIdentity.groupKey !== reviewedPreview.groupKey)

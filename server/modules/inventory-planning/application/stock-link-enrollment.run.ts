@@ -3,7 +3,7 @@ import { STOCK_LINK_EVIDENCE_MAX_AGE_MS } from "../domain/stock-link";
 import {
   STOCK_LINK_ENROLLMENT_ACTOR, STOCK_LINK_ENROLLMENT_CODES, buildEnrollmentSkuIndex, decideEnrollmentBeforeLookup,
   decideEnrollmentFromOffers, enrollmentBlockedOutcome, enrollmentLinkInput, stockLinkCheckAfterEnrollment,
-  type StockLinkEnrollmentDecision, type StockLinkEnrollmentRowResult, type StockLinkEnrollmentSize,
+  type StockLinkEnrollmentDecision, type StockLinkEnrollmentLink, type StockLinkEnrollmentRowResult, type StockLinkEnrollmentSize,
 } from "../domain/stock-link-enrollment";
 import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../domain/stock-link-errors";
 import type { StockLinkClaimedCheck } from "../infrastructure/stock-link-checks.repository";
@@ -49,11 +49,13 @@ type Run = DestinationRun<StockLinkEnrollmentBinding>;
 export async function runStockLinkEnrollment(context: StockLinkEnrollmentContext, run: Run): Promise<Flow> {
   const { deps, limits: L } = context;
   const targetId = run.destination.publicationTargetId;
-  const storeConnectionId = run.destination.dropshipStoreConnectionId;
-  if (storeConnectionId === null || deps.runEnrollment === undefined) {
+  // The store connection the evidence names: the Dropship store, or (channels PR4) Card Shellz's own channel connection.
+  const storeConnectionId = run.binding.writer === undefined ? run.destination.dropshipStoreConnectionId
+    : run.destination.channelConnectionId;
+  if (storeConnectionId === null || (run.binding.writer === undefined && deps.runEnrollment === undefined)) {
     // A binding without its writer, or a destination that names no store: a configuration problem, never a guess.
     return context.failDestination(run, fatalOf(new StockLinkError(C.policyMissing,
-      "A listing-enrollment destination has no Dropship store or no link writer.", { publicationTargetId: targetId })), "policy");
+      "A listing-enrollment destination has no store connection or no link writer.", { publicationTargetId: targetId })), "policy");
   }
   const discovered = await context.step(() => context.discover(run));
   if (!discovered.ok) {
@@ -114,7 +116,8 @@ export async function runStockLinkEnrollment(context: StockLinkEnrollmentContext
     if (outcome.kind !== "lookup") decision = outcome;
     else {
       const lookup = lookups.get(outcome.sku);
-      decision = lookup === undefined ? null : decideEnrollmentFromOffers(size, outcome.sku, lookup, storeConnectionId);
+      decision = lookup === undefined ? null
+        : decideEnrollmentFromOffers(size, outcome.sku, lookup, storeConnectionId, outcome.replacesSku);
     }
     const refusal = outcome.kind === "lookup" ? rejected.get(outcome.sku) : undefined;
     if (refusal !== undefined) {
@@ -127,8 +130,20 @@ export async function runStockLinkEnrollment(context: StockLinkEnrollmentContext
         : { kind: "failure", failure: stoppedBy.failure, message: stoppedBy.message });
       continue;
     }
-    if (decision.kind === "uncarried") { uncarried.push(size.productVariantId); continue; }
-    if (decision.kind === "linked") { results.set(size.productVariantId, { kind: "linked" }); continue; }
+    if (decision.kind === "uncarried") {
+      // Channels PR4: a channel owner's listing whose size its selection does not carry stays a waiting row (backoff to
+      // 24 h). Removing it would make discovery, which lists every feed or listing, add it back due now every tick.
+      if (run.binding.writer !== undefined && size.listing !== null) {
+        results.set(size.productVariantId, { kind: "wait", code: STOCK_LINK_ENROLLMENT_CODES.notCarried,
+          message: `NOT_CARRIED: selection ${size.selection?.action ?? "none"}` });
+      } else uncarried.push(size.productVariantId);
+      continue;
+    }
+    if (decision.kind === "linked") {
+      results.set(size.productVariantId, decision.code === undefined ? { kind: "linked" }
+        : { kind: "linked", code: decision.code, message: decision.message ?? null });
+      continue;
+    }
     if (decision.kind === "wait" || decision.kind === "flag") {
       results.set(size.productVariantId, { kind: decision.kind, code: decision.code, message: decision.message });
       continue;
@@ -189,7 +204,9 @@ async function readEnrollmentFacts(context: StockLinkEnrollmentContext, run: Run
   const sizes: StockLinkEnrollmentSize[] = claims.map(claim => {
     const head = heads.get(claim.productVariantId) ?? null;
     return { productVariantId: claim.productVariantId, listing: listings.get(claim.productVariantId) ?? null,
-      selection: selection.get(claim.productVariantId) ?? null, linked: head?.active != null, headRevision: head?.revision ?? "0" };
+      selection: selection.get(claim.productVariantId) ?? null, linked: head?.active != null, headRevision: head?.revision ?? "0",
+      // §3.5 (Walmart): the SKU the link writes to, compared with the current SKU from the database only.
+      ...(run.binding.followsSkuChange === true ? { linkedSku: head?.active?.itemId ?? null } : {}) };
   });
   return { sizes, skuIndex: buildEnrollmentSkuIndex(carried) };
 }
@@ -210,7 +227,7 @@ function fatalOf(error: StockLinkError): StepResult<never> & { ok: false } {
 
 /** One link through the existing Dropship writer; a destination-level failure ends the destination's tick. */
 async function applyEnrollment(context: StockLinkEnrollmentContext, run: Run, size: StockLinkEnrollmentSize,
-  link: { sku: string; offerId: string; evidenceHash: string }, lookup: StockLinkOfferLookup, storeConnectionId: number):
+  link: StockLinkEnrollmentLink, lookup: StockLinkOfferLookup, storeConnectionId: number):
   Promise<{ kind: "result"; result: StockLinkEnrollmentRowResult } | { kind: "flow"; flow: Flow }> {
   const busy = (code: string): { kind: "result"; result: StockLinkEnrollmentRowResult } =>
     ({ kind: "result", result: { kind: "failure", failure: { kind: "busy", code, retryAfterMs: null }, message: null } });
@@ -222,6 +239,7 @@ async function applyEnrollment(context: StockLinkEnrollmentContext, run: Run, si
       message: "The store's offers were read more than 5 minutes ago." } };
   }
   const listing = size.listing!;
+  if (run.binding.writer !== undefined) return applyOwnerWrite(context, run, size, link, lookup);
   const input = enrollmentLinkInput({ storeConnectionId, accountId: run.destination.externalScopeId, listing,
     productVariantId: size.productVariantId, link });
   if (input === null) {
@@ -269,5 +287,63 @@ async function applyEnrollment(context: StockLinkEnrollmentContext, run: Run, si
   (result.alreadyLinked ? context.log.debug : context.log.info)("inventory_availability.stock_link.linked", { ...correlation,
     outcome: result.alreadyLinked ? "already_linked" : "linked", command_key: result.commandKey, fence_hold_ms: result.fenceHoldMs,
     before: { mappingActions: result.mappingActions }, after: { linkedProductVariantIds: result.linkedProductVariantIds } });
+  return { kind: "result", result: { kind: "linked" } };
+}
+
+/**
+ * Channels PR4: one link through the binding's own writer (Walmart: VerifiedListingStockService.connect under the
+ * listing-write guard, origin background; Card Shellz eBay: the eBay publication readiness writer). The same row and
+ * destination rules as the Dropship writer above; a writer refusal it understands comes back `blocked` with its codes.
+ */
+async function applyOwnerWrite(context: StockLinkEnrollmentContext, run: Run, size: StockLinkEnrollmentSize,
+  link: StockLinkEnrollmentLink, lookup: StockLinkOfferLookup):
+  Promise<{ kind: "result"; result: StockLinkEnrollmentRowResult } | { kind: "flow"; flow: Flow }> {
+  const listing = size.listing!;
+  const busy = (code: string): { kind: "result"; result: StockLinkEnrollmentRowResult } =>
+    ({ kind: "result", result: { kind: "failure", failure: { kind: "busy", code, retryAfterMs: null }, message: null } });
+  const correlation = { ...run.correlation, product_id: listing.productId, product_variant_ids: [size.productVariantId],
+    listing_id: listing.listingId, origin_kind: "background", origin_key: link.evidenceHash, external_offer_id: link.offerId,
+    ...(link.replacesSku !== undefined ? { replaces_sku: link.replacesSku } : {}) };
+  const ran = await context.step(() => run.binding.writer!({ destination: run.destination, listing,
+    productVariantId: size.productVariantId, observedAt: lookup.observedAt, replacesSku: link.replacesSku ?? null,
+    link: { sku: link.sku, offerId: link.offerId, listingId: link.listingId ?? null, evidenceHash: link.evidenceHash } }));
+  if (!ran.ok) {
+    if (ran.action === "stop_tick" || ran.action === "pause" || ran.failure.kind === "fatal")
+      return { kind: "flow", flow: await context.failDestination(run, ran, "command") };
+    context.log[ran.failure.kind === "permanent" ? "error" : "debug"](ACTION, { ...correlation, phase: "command",
+      outcome: ran.failure.kind === "permanent" ? "error" : "retry_scheduled", error_code: ran.failure.code,
+      error_class: ran.failure.errorClass });
+    return { kind: "result", result: { kind: "failure", failure: ran.failure, message: ran.message } };
+  }
+  const result = ran.value;
+  if (result.status === "not_applicable") return busy("CANONICAL_AUTHORITY_REQUIRED");
+  if (result.status === "blocked") {
+    const outcome = enrollmentBlockedOutcome(result.blockers.map(blocker => blocker.code));
+    context.log.debug(ACTION, { ...correlation, phase: "command", outcome: "blocked", command_key: result.commandKey,
+      inventory_codes: result.blockers.map(blocker => blocker.code), error_code: outcome.code });
+    if (outcome.kind === "busy") return busy(outcome.code);
+    if (outcome.kind === "transient") {
+      return { kind: "result", result: { kind: "failure", failure: { kind: "transient", code: outcome.code, retryAfterMs: null },
+        message: "The stock link met concurrent inventory work." } };
+    }
+    return { kind: "result", result: { kind: outcome.kind, code: outcome.code, message: outcome.message } };
+  }
+  run.tick.recordFenceHold(result.fenceHoldMs);
+  if (result.publicationTargetId !== run.destination.publicationTargetId) {
+    context.log.error(ACTION, { ...correlation, phase: "command", outcome: "target_mismatch", command_key: result.commandKey,
+      error_code: STOCK_LINK_ENROLLMENT_CODES.mappingReview, linked_publication_target_id: result.publicationTargetId });
+    return { kind: "result", result: { kind: "flag", code: STOCK_LINK_ENROLLMENT_CODES.mappingReview,
+      message: `TARGET_MISMATCH: linked on publication target ${result.publicationTargetId}` } };
+  }
+  const relinked = link.replacesSku !== undefined && !result.alreadyLinked;
+  if (!result.alreadyLinked) {
+    run.tick.summary.applies += 1;
+    if (relinked) run.tick.summary.relinks += 1;
+    else run.tick.summary.links += 1;
+  }
+  (result.alreadyLinked ? context.log.debug : context.log.info)(
+    relinked ? "inventory_availability.stock_link.relinked" : "inventory_availability.stock_link.linked", { ...correlation,
+      outcome: result.alreadyLinked ? "already_linked" : relinked ? "relinked" : "linked", command_key: result.commandKey,
+      fence_hold_ms: result.fenceHoldMs, before: { sku: link.replacesSku ?? null }, after: { sku: link.sku } });
   return { kind: "result", result: { kind: "linked" } };
 }

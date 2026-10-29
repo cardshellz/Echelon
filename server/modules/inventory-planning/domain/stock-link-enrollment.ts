@@ -27,6 +27,15 @@ import { STOCK_LINK_BUSY_CODES, STOCK_LINK_TRANSIENT_CODES, type StockLinkFailur
  *    PUBLISHED that is not the offer the listing's push recorded → wait (the transport writes only to the recorded
  *    offer, dropship-ebay-inventory-publication.adapter.ts assertRecordedOffer, so a link would only dead-letter);
  *    exactly the recorded offer → link (purpose sync: a removed size links at 0, allowRetainedZero).
+ *    Channels PR4: a listing whose owner's transport writes by SKU (Walmart, Card Shellz eBay) sets
+ *    `requireRecordedOffer: false`; then exactly one on-sale offer links.
+ *
+ * Card Shellz SKU changed on a linked size (channels PR4, PLAN-CH-v3 §3.5; Walmart only, the binding's
+ * `followsSkuChange`): the size's sealed SKU (`linkedSku`) differs from its current SKU, a database-only compare made
+ * on every re-check of the linked row (daily) and on every Walmart scan nudge. Only then is the new SKU looked up:
+ * exactly one on-sale item → relink (the writer retires the old SKU version and links the new one in one audited
+ * transaction); none → the old link is kept and stays writing (the item that still carries the old SKU is still this
+ * size's listing), the row records STOCK_LINK_SKU_CHANGED; two or more → the link is kept and the size is flagged F3.
  */
 
 /**
@@ -41,8 +50,11 @@ export type StockLinkEnrollmentSkip = "push_open" | "publish_run_open" | "end_op
 export interface StockLinkEnrollmentListing {
   readonly productVariantId: number;
   readonly productId: number;
+  /** The owner's listing row id (Dropship: the vendor listing; Walmart: the channel feed; Card Shellz eBay: the
+   * channel listing). Part of the evidence hash only. */
   readonly listingId: number;
-  readonly vendorId: number;
+  /** The Dropship vendor; null for Card Shellz's own channels. */
+  readonly vendorId: number | null;
   /** The SKU the owner writes to the store: COALESCE(v.sku, p.sku), as stored. */
   readonly cardShellzSku: string | null;
   /** The offer the listing's own completed push recorded (the only offer the Dropship transport writes to). */
@@ -53,6 +65,9 @@ export interface StockLinkEnrollmentListing {
    * listing that is not is never newly linked (its link would zero a quantity the vendor manages). */
   readonly managed: boolean;
   readonly skipReason: StockLinkEnrollmentSkip | null;
+  /** False when the owner's transport writes by SKU, not to one recorded offer (Walmart, Card Shellz eBay): then
+   * exactly one on-sale offer links. Absent = true (Dropship). */
+  readonly requireRecordedOffer?: boolean;
 }
 
 /** The only actor of a background Dropship link (the writer's allow-list, shared/types/dropship-ebay-stock-readiness.ts). */
@@ -70,6 +85,12 @@ export const STOCK_LINK_ENROLLMENT_CODES = Object.freeze({
   enrollmentBlocked: "STOCK_LINK_ENROLLMENT_BLOCKED",
   /** The writer found the SKU or the size already mapped another way: a person reviews it. */
   mappingReview: "STOCK_LINK_MAPPING_REVIEW_REQUIRED",
+  /** Channels PR4 (§3.5): the size's Card Shellz SKU changed, no on-sale item carries the new SKU yet; the old link is
+   * kept (it still writes to the item that carries the old SKU). Recorded on a `linked` row. */
+  skuChanged: "STOCK_LINK_SKU_CHANGED",
+  /** Channels PR4: an owner listing (a Walmart feed, a Card Shellz eBay listing) of a size its channel selection does
+   * not carry: re-checked with backoff, never linked (Dropship removes such rows instead). */
+  notCarried: "STOCK_LINK_NOT_CARRIED",
 });
 
 const D = STOCK_LINK_DECISION_CODES;
@@ -85,14 +106,16 @@ export interface StockLinkEnrollmentSize {
   readonly linked: boolean;
   /** The head's revision ("0" = no head): part of the evidence, so a re-link after a retire is a new command (SAF-2). */
   readonly headRevision: string;
+  /** The SKU the active link writes to, read only for a binding that follows a Card Shellz SKU change (§3.5). */
+  readonly linkedSku?: string | null;
 }
 
 export type StockLinkEnrollmentOutcome =
-  | { readonly kind: "linked" }
+  | { readonly kind: "linked"; readonly code?: string; readonly message?: string | null }
   | { readonly kind: "uncarried" }
   | { readonly kind: "wait"; readonly code: string; readonly message: string | null }
   | { readonly kind: "flag"; readonly code: string; readonly message: string }
-  | { readonly kind: "lookup"; readonly sku: string };
+  | { readonly kind: "lookup"; readonly sku: string; readonly replacesSku?: string };
 
 const SKU_CODE_SKIP: Readonly<Record<StockLinkEnrollmentSkip, string | null>> = Object.freeze({
   push_open: E.listingBusy, publish_run_open: E.listingBusy, end_open: E.listingEnding, ended: null,
@@ -122,7 +145,7 @@ export function buildEnrollmentSkuIndex(carried: readonly { productVariantId: nu
 /** Steps 1-5: what the database alone decides, or the SKU whose offers decide it. */
 export function decideEnrollmentBeforeLookup(size: StockLinkEnrollmentSize, skuIndex: ReadonlyMap<string, readonly number[]>):
   StockLinkEnrollmentOutcome {
-  if (size.linked) return { kind: "linked" };
+  if (size.linked) return decideLinkedSize(size, skuIndex);
   const listing = size.listing;
   const action = size.selection?.action ?? "none";
   if (listing === null || !listing.managed || listing.skipReason === "ended" || (action !== "publish" && action !== "zero"))
@@ -146,11 +169,32 @@ export function decideEnrollmentBeforeLookup(size: StockLinkEnrollmentSize, skuI
   return { kind: "lookup", sku };
 }
 
+/**
+ * A linked size: kept, unless its binding follows a Card Shellz SKU change and the current SKU differs from the
+ * linked one (§3.5), a database-only compare. A size whose listing is under change, not carried, blank or shared waits
+ * for that to clear with its link kept (nothing is moved on a guess).
+ */
+function decideLinkedSize(size: StockLinkEnrollmentSize, skuIndex: ReadonlyMap<string, readonly number[]>): StockLinkEnrollmentOutcome {
+  const linkedSku = enrollmentSku(size.linkedSku ?? null);
+  const listing = size.listing;
+  if (linkedSku === null || listing === null || !listing.managed || listing.skipReason !== null) return { kind: "linked" };
+  const sku = enrollmentSku(listing.cardShellzSku);
+  if (sku === null || sku === linkedSku || Array.from(sku).length > STOCK_LINK_SKU_MAX_LENGTH) return { kind: "linked" };
+  const action = size.selection?.action ?? "none";
+  if ((action !== "publish" && action !== "zero") || (size.selection?.blockerCodes.length ?? 0) > 0) return { kind: "linked" };
+  if ((skuIndex.get(sku) ?? []).some(id => id !== size.productVariantId)) return { kind: "linked" };
+  return { kind: "lookup", sku, replacesSku: linkedSku };
+}
+
 /** What the link command is built from (step 6, exactly the recorded PUBLISHED offer). */
 export interface StockLinkEnrollmentLink {
   readonly sku: string;
   readonly offerId: string;
   readonly evidenceHash: string;
+  /** The store's listing id of the offer (WPID / eBay listing id), evidence only. */
+  readonly listingId?: string | null;
+  /** §3.5 relink: the SKU of the sealed link this one replaces. */
+  readonly replacesSku?: string;
 }
 
 export type StockLinkEnrollmentDecision =
@@ -171,18 +215,29 @@ export function enrollmentEvidenceHash(input: { storeConnectionId: number; listi
 
 /** Step 6 from one complete lookup of the size's SKU. */
 export function decideEnrollmentFromOffers(size: StockLinkEnrollmentSize, sku: string, lookup: StockLinkOfferLookup,
-  storeConnectionId: number): StockLinkEnrollmentDecision {
+  storeConnectionId: number, replacesSku?: string): StockLinkEnrollmentDecision {
   const listing = size.listing!;
   if (lookup.sku !== sku) throw new Error("An enrollment decision was given another SKU's offers.");
   const offers = lookup.offers.filter(offer => offer.sku === sku);
-  if (offers.length === 0) return { kind: "wait", code: D.notListed, message: null };
   const published = offers.filter(offer => offer.status === "PUBLISHED");
+  if (replacesSku !== undefined && published.length === 0) {
+    // §3.5: nothing on sale carries the new SKU yet; the old link keeps writing to the item with the old SKU.
+    return { kind: "linked", code: E.skuChanged,
+      message: `SKU_CHANGED: linked ${replacesSku}, current ${sku}, no published item with the current SKU` };
+  }
+  if (offers.length === 0) return { kind: "wait", code: D.notListed, message: null };
   if (published.length === 0) return { kind: "wait", code: D.notOnSale, message: null };
   if (published.length >= 2) {
     return { kind: "flag", code: D.skuDuplicate,
       message: `SKU_DUPLICATE: published offers ${published.map(offer => offer.offerId).sort().join(", ")}` };
   }
   const offer = published[0]!;
+  if (listing.requireRecordedOffer === false) {
+    return { kind: "link", link: { sku, offerId: offer.offerId, listingId: offer.listingId,
+      ...(replacesSku !== undefined ? { replacesSku } : {}),
+      evidenceHash: enrollmentEvidenceHash({ storeConnectionId, listingId: listing.listingId, productVariantId: size.productVariantId,
+        sku, offerId: offer.offerId, ebayListingId: offer.listingId, headRevision: size.headRevision }) } };
+  }
   if (listing.recordedOfferId === null || offer.offerId !== listing.recordedOfferId) {
     return { kind: "wait", code: E.offerNotRecorded,
       message: `OFFER_NOT_RECORDED: published offer ${offer.offerId}, recorded ${listing.recordedOfferId ?? "none"}` };
@@ -196,7 +251,7 @@ export function decideEnrollmentFromOffers(size: StockLinkEnrollmentSize, sku: s
 export function enrollmentLinkInput(input: { storeConnectionId: number; accountId: string; listing: StockLinkEnrollmentListing;
   productVariantId: number; link: StockLinkEnrollmentLink }): DropshipEbayStockReadinessInput | null {
   const { listing } = input;
-  if (listing.environment === null) return null;
+  if (listing.environment === null || listing.vendorId === null) return null;
   return {
     vendorId: listing.vendorId, storeConnectionId: input.storeConnectionId, accountId: input.accountId,
     environment: listing.environment, productId: listing.productId, purpose: "sync",
@@ -209,12 +264,24 @@ export function enrollmentLinkInput(input: { storeConnectionId: number; accountI
 const MAPPING_REVIEW_BLOCKERS: ReadonlySet<string> = new Set(["STOCK_LISTING_MAPPING_CONFLICT",
   "INVENTORY_PUBLICATION_VARIANT_MAPPING_IDENTITY_CONFLICT", "STOCK_LISTING_MAPPING_REVIEW_REQUIRED"]);
 
+/**
+ * Channels PR4: an owner's listing guard is held, or the listing is between two steps the link must not cut into.
+ * Busy (released, no attempt, due again in 1-3 min), never linked meanwhile:
+ * LISTING_LIFECYCLE_BUSY = another Walmart listing request holds the SKU (an exclusive retirement among them);
+ * PUBLICATION_RECREATION_WAITING_FOR_ITEM = a recreated Walmart item has no stock receipt yet (its saved job links it);
+ * STOCK_LINK_LISTING_BUSY = the owner's own "listing under change" refusal (Card Shellz eBay outstanding listing work).
+ */
+export const STOCK_LINK_LISTING_BUSY_CODES: ReadonlySet<string> = new Set(["LISTING_LIFECYCLE_BUSY",
+  "PUBLICATION_RECREATION_WAITING_FOR_ITEM", E.listingBusy]);
+
 /** A `blocked` writer result as a row outcome: a race is busy or transient, a mapping conflict is flagged, the rest wait. */
 export function enrollmentBlockedOutcome(blockerCodes: readonly string[]):
   | { kind: "busy"; code: string } | { kind: "transient"; code: string }
   | { kind: "flag"; code: string; message: string } | { kind: "wait"; code: string; message: string } {
   const message = `ENROLLMENT_BLOCKED: ${[...new Set(blockerCodes)].join(", ")}`;
   if (blockerCodes.some(code => MAPPING_REVIEW_BLOCKERS.has(code))) return { kind: "flag", code: E.mappingReview, message };
+  const listingBusy = blockerCodes.find(code => STOCK_LINK_LISTING_BUSY_CODES.has(code));
+  if (listingBusy !== undefined) return { kind: "busy", code: listingBusy };
   if (blockerCodes.length > 0 && blockerCodes.every(code => STOCK_LINK_BUSY_CODES.has(code))) return { kind: "busy", code: blockerCodes[0]! };
   if (blockerCodes.length > 0 && blockerCodes.every(code => STOCK_LINK_BUSY_CODES.has(code) || STOCK_LINK_TRANSIENT_CODES.has(code)))
     return { kind: "transient", code: blockerCodes.find(code => STOCK_LINK_TRANSIENT_CODES.has(code))! };
@@ -223,7 +290,7 @@ export function enrollmentBlockedOutcome(blockerCodes: readonly string[]):
 
 /** What a claimed row became this tick (every claimed row except a removed one gets exactly one). */
 export type StockLinkEnrollmentRowResult =
-  | { readonly kind: "linked" }
+  | { readonly kind: "linked"; readonly code?: string; readonly message?: string | null }
   | { readonly kind: "wait" | "flag"; readonly code: string; readonly message: string | null }
   | { readonly kind: "failure"; readonly failure: Pick<StockLinkFailureClassification, "kind" | "code" | "retryAfterMs">;
       readonly message: string | null };
@@ -238,9 +305,10 @@ export function stockLinkCheckAfterEnrollment(productVariantId: number, result: 
   if (result.kind === "failure") return stockLinkCheckAfterFailure(result.failure, result.message, previous, now, random);
   const status = result.kind === "linked" ? "linked" as const : result.kind === "flag" ? "flagged" as const : "waiting" as const;
   const decision: StockLinkSizeDecision = { productVariantId, productId: 0, change: "none", status,
-    code: result.kind === "linked" ? null : result.code, retry: null, link: null, replacesMappingId: null,
+    code: result.kind === "linked" ? result.code ?? null : result.code, retry: null, link: null, replacesMappingId: null,
     expectedHeadRevision: "0", cardShellzSku: null, selectionAction: "none", waitingItemId: null, dueNextTick: false,
     recordObservedSku: null, detail: null, rule: `enrollment/${result.kind}` };
   const write = stockLinkCheckAfterDecision(decision, previous, now, random);
-  return result.kind === "linked" ? write : { ...write, message: boundedStockLinkMessage(result.message) };
+  return result.kind === "linked" && result.code === undefined ? write
+    : { ...write, message: boundedStockLinkMessage(result.message ?? null) };
 }

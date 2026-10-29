@@ -28,12 +28,15 @@ import { ebayListingFailureDiagnostic, type EbayListingFailureDiagnostic } from 
 import type { EbayAutomaticPublicationRecoveryService, EbayRequestJournalContract } from "../inventory-planning/quantity-publication";
 import { withEbayQuantityRequestJournalContract } from "../inventory-planning/quantity-publication";
 import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
+import { logger as platformLogger } from "../../platform/observability/logger";
 
 export interface PreparedEbayListingSync {
   sourceIdentity?: EbayListingSyncIdentity;
   providerObservation?: MarketplaceObservedListingPublication;
   identity: EbayListingSyncIdentity;
   assertInventoryReady?(context?: { commandKey: string; actor: string }): Promise<void>;
+  /** Channels PR4: ask the stock-link engine to check this listing's sizes now (best effort; see nudgeStockLink). */
+  requestStockLinkCheck?(): Promise<void>;
   client: EbayListingLifecycleClient;
   draft: Pick<
     EbayListingConnectorDraft,
@@ -47,6 +50,24 @@ export interface PreparedEbayListingSync {
     priceChanged: boolean;
   }>;
 }
+/**
+ * Channels PR4 (PLAN-CH-v3 §9 PR4, CH/ebay-listing-sync.service.ts read-only Sync): a Sync that finished without any
+ * eBay write asks the stock-link engine to check the listing's sizes now, so a live listing links without waiting for
+ * the background sweep. Deliberately best effort: the nudge only makes a check due sooner (the sweep finds every size
+ * anyway) and writes no stock, so its failure is logged at WARN and never fails or retries the read-only Sync.
+ */
+async function nudgeStockLink(prepared: Pick<PreparedEbayListingSync, "requestStockLinkCheck" | "identity">): Promise<void> {
+  if (!prepared.requestStockLinkCheck) return;
+  try {
+    await prepared.requestStockLinkCheck();
+  } catch (error) {
+    platformLogger.warn("channels.ebay_listing_sync.stock_link_nudge", { outcome: "failed",
+      product_id: prepared.identity.productId, connection_id: prepared.identity.connectionId,
+      error_code: error !== null && typeof error === "object" && "code" in error && typeof error.code === "string"
+        ? error.code : "STOCK_LINK_NUDGE_FAILED" });
+  }
+}
+
 export class EbayExistingListingSyncExecution
   implements EbayListingSyncExecution
 {
@@ -115,6 +136,7 @@ export class EbayExistingListingSyncExecution
     // changes do not invalidate it; new content or a new command revision does.
     if (verificationIntentHash === contentHash) {
       await stage("verification", contentHash, verify);
+      await nudgeStockLink(prepared);
       return completedEbayListingSyncResult(prepared, new Set());
     }
     // Also adopt already-current content after a lost checkpoint or final local
@@ -126,6 +148,7 @@ export class EbayExistingListingSyncExecution
       // it: a second failed read must not leave a pre-write checkpoint that
       // prevents retrying the required content writes.
       if (context?.operation === "publish") await stage("verification", contentHash, async () => {});
+      await nudgeStockLink(prepared);
       return completedEbayListingSyncResult(prepared, new Set());
     } catch (error) {
       if (

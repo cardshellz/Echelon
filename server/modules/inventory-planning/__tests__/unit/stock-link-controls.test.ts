@@ -8,6 +8,10 @@ import { stockLinkRunnerDisableReason } from "../../infrastructure/stock-link-ru
 import {
   StockLinkControlsService, type StockLinkControlCommand, type StockLinkControlOutcome, type StockLinkControlsStore,
 } from "../../application/stock-link-controls.service";
+import { createWalmartStockLinkAdapter } from "../../../channels/adapters/walmart/walmart-stock-link.adapter";
+import { createWalmartStockLinkSource } from "../../../channels/infrastructure/walmart-stock-link-source";
+import { createChannelEbayStockLinkAdapter } from "../../../channels/adapters/ebay/ebay-stock-link.adapter";
+import { createChannelEbayStockLinkSource } from "../../../channels/infrastructure/ebay-stock-link-source";
 import { STOCK_LINK_CONTROLLED_DESTINATIONS } from "../../infrastructure/stock-link-controls.repository";
 import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-availability-master-data.contracts";
 import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source";
@@ -69,15 +73,23 @@ describe("planStockLinkControl", () => {
 });
 
 describe("the controlled destinations", () => {
-  it("are exactly the destinations the composition registers a binding for (Shopify; Dropship eBay enrollment, PR3)", () => {
+  it("are exactly the destinations the composition registers a binding for (Shopify; Dropship eBay, PR3; Walmart and Card Shellz eBay, PR4)", () => {
     const adapter = createShopifyStockLinkAdapter({ connections: {} as never, clock: () => NOW });
     const source = createShopifyStockLinkSource();
     const dropshipAdapter = createDropshipEbayStockLinkAdapter({ destinations: {} as never, credentials: {} as never, clock: () => NOW });
     const dropshipSource = createDropshipEbayStockLinkSource();
+    const walmartAdapter = createWalmartStockLinkAdapter({ channels: {} as never, clock: () => NOW });
+    const walmartSource = createWalmartStockLinkSource();
+    const ebayAdapter = createChannelEbayStockLinkAdapter({ ebay: {} as never, clock: () => NOW });
+    const ebaySource = createChannelEbayStockLinkSource();
     expect(STOCK_LINK_CONTROLLED_DESTINATIONS).toEqual([
       { destinationKind: adapter.destinationKind, providerKey: adapter.providerKey },
       { destinationKind: dropshipAdapter.destinationKind, providerKey: dropshipAdapter.providerKey },
+      { destinationKind: walmartAdapter.destinationKind, providerKey: walmartAdapter.providerKey },
+      { destinationKind: ebayAdapter.destinationKind, providerKey: ebayAdapter.providerKey },
     ]);
+    expect([walmartSource.destinationKind, walmartSource.providerKey]).toEqual([walmartAdapter.destinationKind, walmartAdapter.providerKey]);
+    expect([ebaySource.destinationKind, ebaySource.providerKey]).toEqual([ebayAdapter.destinationKind, ebayAdapter.providerKey]);
     expect([source.destinationKind, source.providerKey]).toEqual([adapter.destinationKind, adapter.providerKey]);
     expect([dropshipSource.destinationKind, dropshipSource.providerKey]).toEqual([dropshipAdapter.destinationKind, dropshipAdapter.providerKey]);
   });

@@ -22,6 +22,9 @@ import { ListingLifecycleService } from "../../../marketplace-listings/applicati
 import { PostgresListingLifecycleRepository } from "../../../marketplace-listings/infrastructure/pg-listing-lifecycle.repository";
 import { InventoryPublicationTargetVariantHoldService } from "../../application/inventory-publication-target-variant-hold.service";
 import { PostgresInventoryPublicationTargetVariantHoldStore } from "../../infrastructure/inventory-publication-target-variant-hold.repository";
+import { calculatePublicationVariantMappingDefinitionHash } from "../../domain/inventory-channel-exposure";
+import { requestStockLinkChecks } from "../../infrastructure/stock-link-nudge";
+import { createWalmartStockLinkSource } from "../../../channels/infrastructure/walmart-stock-link-source";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -376,6 +379,83 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
       CREATE TRIGGER reject_stock_audit BEFORE INSERT ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.reject_stock_audit()`);
     await expect(service.connect(input())).rejects.toThrow("audit unavailable");
     expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0 });
+  });
+
+  // Channels PR4: the link is written by the engine's draft writer and sealer (prepareVerifiedStockMapping is gone). Parity:
+  // the same sealed version 1, identity, definition hash, head revision and single outbox row the old writer produced.
+  it("writes the same sealed mapping the old verified writer did, through the engine's draft writer, with a stock_link audit row", async () => {
+    await service.connect(input());
+    expect((await database.pool.query(`SELECT m.version,m.lifecycle_status,m.external_inventory_item_id,m.external_sku,m.definition_hash,
+        m.supersedes_mapping_id,h.revision::text AS revision,h.draft_mapping_id
+      FROM inventory.publication_variant_mapping_heads h JOIN inventory.publication_variant_mapping_versions m ON m.id=h.active_mapping_id
+      WHERE h.publication_target_id=2 AND h.product_variant_id=101`)).rows).toEqual([{ version: 1, lifecycle_status: "sealed",
+      external_inventory_item_id: "P5", external_sku: "P5", supersedes_mapping_id: null, revision: "2", draft_mapping_id: null,
+      definition_hash: calculatePublicationVariantMappingDefinitionHash({ publicationTargetId: 2, productVariantId: 101,
+        externalInventoryItemId: "P5", externalSku: "P5" }) }]);
+    expect((await database.pool.query(`SELECT action,context->>'origin' AS origin FROM public.audit_events
+      WHERE action LIKE 'inventory_availability.stock_link.%' ORDER BY id`)).rows)
+      .toEqual([{ action: "inventory_availability.stock_link.linked", origin: "background" }]);
+    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1 });
+  });
+
+  // Channels PR4 (PLAN-CH-v3 §3.5): the Card Shellz SKU of a linked Walmart size changed and exactly one published item
+  // carries the new SKU: the old SKU's version is retired and the new one linked in one audited transaction.
+  it("relinks a size whose Card Shellz SKU changed: retires the old SKU, links the new, supersedes the old queued stock", async () => {
+    await service.connect(input());
+    await database.pool.query(`UPDATE channels.channel_feeds SET channel_sku='P5-NEW',channel_inventory_item_id='P5-NEW',channel_product_id='WPID-P5N'
+      WHERE channel_id=36 AND product_variant_id=101`);
+    expect(await service.pending(36, 8, [101])).toEqual([101]);
+    const relinked = await service.connect({ ...input(), sku: "P5-NEW", externalProductId: "WPID-P5N", replacesSku: "P5" });
+    expect(relinked).toMatchObject({ state: "connected", quantities: [{ productVariantId: 101, desiredQuantity: "17" }] });
+    expect((await database.pool.query(`SELECT version,lifecycle_status,external_inventory_item_id,supersedes_mapping_id IS NOT NULL AS has_predecessor
+      FROM inventory.publication_variant_mapping_versions WHERE publication_target_id=2 AND product_variant_id=101 ORDER BY version`)).rows)
+      .toEqual([{ version: 1, lifecycle_status: "retired", external_inventory_item_id: "P5", has_predecessor: false },
+        { version: 2, lifecycle_status: "sealed", external_inventory_item_id: "P5-NEW", has_predecessor: true }]);
+    expect((await database.pool.query(`SELECT external_inventory_item_id_snapshot AS item,state FROM inventory.inventory_publication_outbox
+      WHERE publication_target_id=2 ORDER BY id`)).rows).toEqual([{ item: "P5", state: "superseded" }, { item: "P5-NEW", state: "queued" }]);
+    expect((await database.pool.query(`SELECT action,changes->'before'->>'sku' AS before,changes->'after'->>'sku' AS after FROM public.audit_events
+      WHERE action LIKE 'inventory_availability.stock_link.%' ORDER BY id`)).rows).toEqual([
+      { action: "inventory_availability.stock_link.linked", before: null, after: "P5" },
+      { action: "inventory_availability.stock_link.relinked", before: "P5", after: "P5-NEW" }]);
+    expect(await service.pending(36, 8, [101])).toEqual([]);
+    // A replay of the same relink is already linked.
+    expect(await service.connect({ ...input(), sku: "P5-NEW", externalProductId: "WPID-P5N", replacesSku: "P5" }))
+      .toMatchObject({ state: "already_connected" });
+  });
+
+  it("never moves a link to a new SKU without the matching old one (relink of another SKU, or no relink at all)", async () => {
+    await service.connect(input());
+    await database.pool.query(`UPDATE channels.channel_feeds SET channel_sku='P5-NEW',channel_inventory_item_id='P5-NEW',channel_product_id='WPID-P5N'
+      WHERE channel_id=36 AND product_variant_id=101`);
+    for (const replaces of [{ replacesSku: "SOMETHING-ELSE" }, {}]) {
+      await expect(service.connect({ ...input(), sku: "P5-NEW", externalProductId: "WPID-P5N", ...replaces }))
+        .rejects.toMatchObject({ code: "STOCK_LISTING_MAPPING_REVIEW_REQUIRED" });
+    }
+    expect((await database.pool.query(`SELECT count(*)::int AS versions FROM inventory.publication_variant_mapping_versions
+      WHERE publication_target_id=2`)).rows[0].versions).toBe(1);
+  });
+
+  // Channels PR4: the Walmart scan's nudge makes the size's check row due now (no fence, no link).
+  it("nudges the stock-link engine: adds a due row, wakes it again only once it is no longer due", async () => {
+    await database.pool.query(readFileSync(resolve("migrations/900000036000019340001_stock_links.sql"), "utf8"));
+    expect(await requestStockLinkChecks(database.pool, { channelConnectionId: 8, productVariantIds: [101] }, WALMART_INVENTORY_NOW)).toEqual([101]);
+    expect(await requestStockLinkChecks(database.pool, { channelConnectionId: 8, productVariantIds: [101] }, WALMART_INVENTORY_NOW)).toEqual([]);
+    expect((await database.pool.query("SELECT publication_target_id,status FROM inventory.stock_link_checks")).rows)
+      .toEqual([{ publication_target_id: 2, status: "waiting" }]);
+    expect(await requestStockLinkChecks(database.pool, { channelConnectionId: 999, productVariantIds: [101] }, WALMART_INVENTORY_NOW)).toEqual([]);
+    expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0 });
+  });
+
+  it("Walmart source SQL: active feeds of the destination's connection and ship node, with the feed SKU", async () => {
+    const source = createWalmartStockLinkSource();
+    const destination = { publicationTargetId: 2, destinationKind: "channel_connection" as const, providerKey: "walmart", channelId: 36,
+      channelConnectionId: 8, dropshipStoreConnectionId: null, providerScopeType: "location" as const, externalScopeId: "test-location", targetRevision: "3" };
+    expect(await source.listCandidates(database.pool, destination, 0, 500)).toEqual({ candidates: [{ productVariantId: 101, productId: 20 }], nextAfterVariantId: null });
+    expect(await source.listCarriedSkus(database.pool, destination)).toEqual([{ productVariantId: 101, sku: "P5" }]);
+    expect(await source.readListings(database.pool, destination, [101])).toEqual([expect.objectContaining({ productVariantId: 101, productId: 20,
+      cardShellzSku: "P5", environment: "production", managed: true, skipReason: null, requireRecordedOffer: false, vendorId: null })]);
+    expect(await source.readListings(database.pool, { ...destination, externalScopeId: "other-node" }, [101])).toEqual([]);
+    expect(await source.listCandidates(database.pool, { ...destination, channelConnectionId: 999 }, 0, 500)).toEqual({ candidates: [], nextAfterVariantId: null });
   });
 
   it("keeps concurrent delivery retries idempotent", async () => {

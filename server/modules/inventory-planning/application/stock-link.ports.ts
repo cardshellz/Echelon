@@ -159,15 +159,48 @@ export interface StockLinkOfferAdapter {
   findOffersBySku(destination: StockLinkDestination, sku: string, options: StockLinkProviderCallOptions): Promise<StockLinkOfferLookup>;
 }
 
+/** One link the enrollment pass asks an owner's writer for (channels PR4: Walmart, Card Shellz eBay). */
+export interface StockLinkEnrollmentWrite {
+  readonly destination: StockLinkDestination;
+  readonly listing: StockLinkEnrollmentListing;
+  readonly productVariantId: number;
+  /** The one on-sale store item: the SKU (the link), the offer or item id, the store's listing id (WPID / eBay listing). */
+  readonly link: { readonly sku: string; readonly offerId: string; readonly listingId: string | null; readonly evidenceHash: string };
+  /** When the store was read (the writer refuses evidence older than its own bound). */
+  readonly observedAt: string;
+  /** The SKU of the size's sealed link when the Card Shellz SKU changed (Walmart relink, PLAN-CH-v3 §3.5), else null. */
+  readonly replacesSku: string | null;
+}
+
 /**
- * A destination whose link is the SKU and whose link writer is an existing wrapper (Dropship eBay:
- * ensureDropshipEbayStockReady with origin live_listing_enrollment). The tick keeps the check rows, the budgets and
- * Ops Health; the decision is domain/stock-link-enrollment.ts.
+ * What an owner's writer answered. A refusal it understands is `blocked` with its codes (never thrown): the pass maps
+ * the codes to busy, transient, wait or flagged (domain/stock-link-enrollment.ts enrollmentBlockedOutcome). Anything
+ * thrown is classified by the engine's table (an unknown error halts the destination, never a silent retry).
+ */
+export type StockLinkEnrollmentWriteResult =
+  | { readonly status: "not_applicable" }
+  | { readonly status: "ready"; readonly commandKey: string; readonly publicationTargetId: number; readonly alreadyLinked: boolean;
+      readonly fenceHoldMs: number | null }
+  | { readonly status: "blocked"; readonly commandKey: string; readonly blockers: readonly { readonly code: string }[] };
+
+export type StockLinkEnrollmentWriter = (write: StockLinkEnrollmentWrite) => Promise<StockLinkEnrollmentWriteResult>;
+
+/**
+ * A destination whose link is the SKU and whose link writer is an existing owner writer: Dropship eBay
+ * (ensureDropshipEbayStockReady with origin live_listing_enrollment, the service's `runEnrollment`), or, since channels
+ * PR4, the binding's own `writer` (Walmart: VerifiedListingStockService.connect under the listing-write guard; Card
+ * Shellz eBay: the eBay publication readiness writer). The tick keeps the check rows, the budgets and Ops Health; the
+ * decision is domain/stock-link-enrollment.ts.
  */
 export interface StockLinkEnrollmentBinding {
   readonly kind: "listing_enrollment";
   readonly adapter: StockLinkOfferAdapter;
   readonly source: StockLinkEnrollmentSource;
+  /** The owner's writer; absent = the Dropship writer (StockLinkServiceDeps.runEnrollment). */
+  readonly writer?: StockLinkEnrollmentWriter;
+  /** Channels PR4 (PLAN-CH-v3 §3.5, Walmart only): a sealed link whose SKU differs from the size's current SKU is
+   * looked up again and moved once exactly one on-sale item carries the new SKU. Absent = links are never moved. */
+  readonly followsSkuChange?: boolean;
 }
 
 export type StockLinkBinding = StockLinkPolicyBinding | StockLinkEnrollmentBinding;

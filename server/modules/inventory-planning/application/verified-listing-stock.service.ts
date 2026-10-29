@@ -17,7 +17,11 @@ export const verifiedStockListingSchema = z.object({
   publishedStatus: z.literal("PUBLISHED"),
   observedAt: z.string().datetime(),
   setupOperationId: z.string().uuid().optional(),
-}).strict();
+  /** Channels PR4 (PLAN-CH-v3 §3.5): the SKU this size's sealed link carries, when the Card Shellz SKU changed and
+   * exactly one published Walmart item carries the new one. The link moves to the new SKU in one audited transaction. */
+  replacesSku: identity.optional(),
+}).strict().refine(value => value.replacesSku === undefined || (value.replacesSku !== value.sku && value.setupOperationId === undefined),
+  "A relink names another SKU and is never part of a listing recreation.");
 export type VerifiedStockListing = z.infer<typeof verifiedStockListingSchema>;
 const stockConnectionResultSchema = z.object({
   state: z.enum(["connected", "already_connected", "excluded"]), dryRun: z.boolean(),
@@ -33,7 +37,10 @@ export interface VerifiedListingStockStore {
 
 const MAX_OBSERVATION_AGE_MS = 5 * 60_000;
 /** Internal inventory-owner entry point. The channel supplies a fresh provider
- * observation; stock quantities always come from the active ATP planner. */
+ * observation; stock quantities always come from the active ATP planner.
+ * Channels PR4: this is the Walmart link writer of the stock-link engine. The engine's background pass (origin
+ * `background`) and the listing recreation handoff (origin `recreation`, a setupOperationId) both link through it;
+ * the link itself is the engine's draft writer and sealer (verified-listing-stock-mapping.repository.ts). */
 export class VerifiedListingStockService {
   constructor(private readonly store: VerifiedListingStockStore, private readonly now: () => Date = () => new Date()) {}
 

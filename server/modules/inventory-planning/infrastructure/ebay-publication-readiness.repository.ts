@@ -8,7 +8,7 @@ import {
 } from "@shared/types/ebay-publication-readiness";
 import { InventoryPublicationMembershipError } from "../application/inventory-publication-membership.service";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
-import { PublicationMappingPreparationStore } from "./publication-mapping-preparation.repository";
+import { PublicationMappingPreparationStore, readTargets } from "./publication-mapping-preparation.repository";
 import { applyExactEbaySkuMappingsInsideTransaction } from "./exact-ebay-sku-mapping.apply";
 import { captureEbayPublicationReadiness, readinessDigest } from "./ebay-publication-readiness.read";
 import { lockEbayListingPreparationScope, validateEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../channels/ebay-listing-preparation-scope";
@@ -38,9 +38,19 @@ export async function assertEbayPublicationReady(pool: ConnectionPool, input: In
 
 /** Normal publication already has durable listing intent and verified provider
  * identities. Prepare its exact mappings automatically; selection, holds, ATP,
- * source/model/policy and provider admission remain with their existing owners. */
+ * source/model/policy and provider admission remain with their existing owners.
+ * Channels PR4 (PLAN-CH-v3 §5 "New listing"): an opt-in no-fence fast path
+ * (`fastPath: true`, used only by the stock-link engine's own callers,
+ * channel-ebay-stock-link.ts). When the read-only review finds every member
+ * already linked exactly (currentlyReady: nothing to seal, promote or enqueue),
+ * no configuration transaction, fence, receipt or audit row is written.
+ * Publication and maintenance callers do not opt in: their saved job's command
+ * always gets its immutable receipt (and verified-scope proof), as before.
+ * `alreadyReady` = this call changed nothing (the fast path, or a replay of this
+ * command's saved receipt). A saved receipt is still honoured (and checked) first. */
 export async function ensureEbayPublicationReady(pool: ConnectionPool, input: InventoryEbayPublicationReadinessInput,
-  context: { commandKey: string; actor: string; now: Date; verifiedListing?: VerifiedEbayListingPreparation }): Promise<void> {
+  context: { commandKey: string; actor: string; now: Date; verifiedListing?: VerifiedEbayListingPreparation; fastPath?: boolean }):
+  Promise<{ alreadyReady: boolean }> {
   const source = normalize(input);
   const verifiedScope = context.verifiedListing ? validateEbayListingPreparationScope(source, context.verifiedListing) : null;
   const legacyContextHash = readinessDigest(source);
@@ -57,6 +67,7 @@ export async function ensureEbayPublicationReady(pool: ConnectionPool, input: In
   const previous = await findCompatibleReceipt();
   if (!previous) {
     const review = await reviewEbayPublicationReadiness(pool, source, context.verifiedListing);
+    if (context.fastPath === true && review.currentlyReady) return { alreadyReady: true };
     if (!review.ready) fail(review.blockers[0]?.code ?? "STOCK_MAPPING_NOT_READY", review.blockers.map(row => row.message).join(" "));
     try {
       await withEbayPublicationReadinessApplied(pool, { source, commandKey: context.commandKey, contextHash,
@@ -71,6 +82,41 @@ export async function ensureEbayPublicationReady(pool: ConnectionPool, input: In
     }
   }
   await assertEbayPublicationReady(pool, source, context.verifiedListing);
+  // A recorded receipt of this command means this call applied nothing new (a replay).
+  return { alreadyReady: previous !== null };
+}
+
+const gapQuerySchema = z.object({ channelId: z.number().int().positive(), connectionId: z.number().int().positive(),
+  accountId: z.string().trim().min(1).max(255),
+  variants: z.array(z.object({ productVariantId: z.number().int().positive(), sku: z.string().trim().min(1).max(100) }).strict()).max(500),
+}).strict();
+
+/**
+ * Channels PR4 (PLAN-CH-v3 §5 "Edit / rebuild / relist"): of these Card Shellz eBay sizes, the ones the listing
+ * change must link before its first eBay mutation: no sealed link to exactly this SKU on the account's one eBay stock
+ * destination, and not on hold (a held size gets no positive quantity, so it never blocks the change). Read-only; an
+ * account without one exact live eBay destination has nothing to link (no target, no sizes).
+ */
+export async function readEbayStockLinkGaps(pool: ConnectionPool, raw: z.infer<typeof gapQuerySchema>):
+  Promise<{ publicationTargetId: number | null; productVariantIds: number[] }> {
+  const input = gapQuerySchema.parse(raw);
+  const none = { publicationTargetId: null, productVariantIds: [] };
+  if (input.variants.length === 0) return none;
+  return new PublicationMappingPreparationStore(pool).transaction(false, async client => {
+    const targets = await readTargets(client, input.channelId, input.connectionId);
+    const target = targets.length === 1 ? targets[0]! : null;
+    if (!target || target.provider_key !== "ebay" || target.destination_kind !== "channel_connection"
+      || target.provider_scope_type !== "account" || target.external_scope_id !== input.accountId || target.state !== "live") return none;
+    const rows = await client.query<{ id: number }>(`SELECT c.id FROM unnest($2::integer[], $3::text[]) AS c(id, sku)
+      WHERE NOT EXISTS (SELECT 1 FROM inventory.publication_variant_mapping_heads h
+          JOIN inventory.publication_variant_mapping_versions m ON m.id = h.active_mapping_id
+          WHERE h.publication_target_id = $1 AND h.product_variant_id = c.id AND m.lifecycle_status = 'sealed'
+            AND m.external_inventory_item_id = c.sku)
+        AND NOT EXISTS (SELECT 1 FROM inventory.inventory_publication_target_variant_holds x
+          WHERE x.publication_target_id = $1 AND x.product_variant_id = c.id AND x.held_at IS NOT NULL)
+      ORDER BY c.id`, [target.id, input.variants.map(row => row.productVariantId), input.variants.map(row => row.sku)]);
+    return { publicationTargetId: target.id, productVariantIds: rows.rows.map(row => Number(row.id)) };
+  });
 }
 
 const receiptQuerySchema = z.object({ channelId: z.number().int().positive(), productId: z.number().int().positive(),

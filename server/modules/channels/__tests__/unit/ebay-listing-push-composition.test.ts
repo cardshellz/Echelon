@@ -147,6 +147,8 @@ describe("eBay publication application composition", () => {
 
   it("aligns reviewed in-place update content before creating its prepared envelope", async () => {
     fixture.repository.currentListingIds.mockResolvedValue(["listing-20"]);
+    // Channels PR4: the stock-link hook reads ATP first; at 0 it links nothing (its own suite covers linking).
+    fixture.quantities.mockResolvedValue([{ productVariantId: 101, atpUnits: 0 }]);
     const routeDraft = {inventoryItems:[{sku:"PROVIDER-PACK",payload:{condition:"NEW",product:{title:"Pack",imageUrls:[],aspects:{"Pack Size":["100"]}}}}],
       offers:[{variantId:101,sku:"PROVIDER-PACK",payload:{pricingSummary:{price:{currency:"USD",value:"9.99"}}}}],
       itemGroup:{groupKey:"PROVIDER-GROUP",payload:{title:"Pack",description:"Pack",aspects:{},imageUrls:[],variantSKUs:["PROVIDER-PACK"],variesBy:{specifications:[{name:"Pack Size",values:["100"]}]}}}};

@@ -131,7 +131,8 @@ const offerIdentity = z.string().min(1).max(255).refine(value => value === value
 export const stockLinkOfferLookupSchema = z.object({
   observedAt: instant,
   sku: z.string().trim().min(1).max(STOCK_LINK_SKU_MAX_LENGTH),
-  marketplaceId: z.string().regex(/^EBAY_[A-Z]{2,8}$/),
+  /** eBay's marketplace, or (channels PR4) WALMART_US: Walmart's catalog item read is one offer per seller SKU. */
+  marketplaceId: z.string().regex(/^(EBAY_[A-Z]{2,8}|WALMART_US)$/),
   offers: z.array(z.object({
     offerId: offerIdentity,
     sku: z.string().min(1).max(STOCK_LINK_STORE_SKU_READ_MAX_LENGTH),
