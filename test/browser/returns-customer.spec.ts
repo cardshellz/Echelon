@@ -16,6 +16,7 @@ async function fixtures(
     changedReview?: boolean;
     unverifiedOrders?: boolean;
     missingWeight?: boolean;
+    unconfirmedDelivery?: boolean;
   } = {},
 ) {
   const service = new CustomerReturnPreviewService();
@@ -27,7 +28,14 @@ async function fixtures(
     scenarioId: "split_delivered",
     orderReference: "TEST-1001",
   });
-  const order = { ...fields, sourceRevision: "a".repeat(64) };
+  const order = {
+    ...fields,
+    sourceRevision: "a".repeat(64),
+    lines: fields.lines.map(line => ({
+      ...line,
+      deliveredQuantity: options.unconfirmedDelivery ? 0 : line.deliveredQuantity,
+    })),
+  };
   if (options.missingWeight) order.lines[0].unitWeightGrams = null;
   const detail = { omsOrderId: 10, order, settingsVersion: 2 };
   const calls: { path: string; method: string; body: any }[] = [];
@@ -102,7 +110,7 @@ async function fixtures(
         });
       expect(body).not.toHaveProperty("orderReference");
       expect(body).not.toHaveProperty("channelId");
-      if (options.missingWeight) {
+      if (options.missingWeight || options.unconfirmedDelivery) {
         const plan = validateCustomerReturnBoxPlan(order.lines, { selections: body.selections, parcels: body.parcels }, order.boxOptions);
         return route.fulfill({ json: { ...plan, sourceRevision: order.sourceRevision, effects: "none",
           orderReference: order.orderReference, refundMethod: "manual_shopify" } });
@@ -255,6 +263,17 @@ test("owned selection skips Find order, reviews exact quantities and creates onl
   ).toBe(true);
 });
 
+test("verified purchases remain selectable and reviewable without delivery confirmation", async ({ page }) => {
+  const f = await fixtures(page, { unconfirmedDelivery: true });
+  await page.goto("/customer-returns");
+  await selectAndPack(page);
+  await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
+  const reviews = f.calls.filter(call => call.path.endsWith("/review"));
+  expect(reviews).toHaveLength(1);
+  expect(reviews[0].body.selections).toEqual([{ lineId: "sample-line-1", quantity: 1, reasonCode: null }]);
+  expect(f.calls.some(call => call.path.endsWith("/returns") && call.method === "POST")).toBe(false);
+});
+
 test("missing item weights use a measured package weight and preserve it through a lost-response retry", async ({ page }, testInfo) => {
   const f = await fixtures(page, { missingWeight: true, failSubmit: true });
   await page.goto("/customer-returns");
@@ -343,7 +362,7 @@ test("existing returns open through read-only history without current eligibilit
 }) => {
   const f = await fixtures(page, { history: true });
   await page.goto("/customer-returns");
-  await page.getByRole("button", { name: "RMA-20 Â· Order TEST-1001" }).click();
+  await page.getByRole("button", { name: "RMA-20 \u00b7 Order TEST-1001" }).click();
   await expect(
     page.getByRole("button", { name: "Download label for box 1" }),
   ).toBeVisible();
@@ -357,7 +376,7 @@ test("order load failure remains an error and never claims no eligible orders", 
   await page.goto("/customer-returns");
   await expect(page.getByRole("alert")).toContainText("could not confirm");
   await expect(page.getByText(/No eligible orders were found/)).toHaveCount(0);
-  await page.getByRole("button", { name: "RMA-20 Â· Order TEST-1001" }).click();
+  await page.getByRole("button", { name: "RMA-20 \u00b7 Order TEST-1001" }).click();
   await expect(
     page.getByRole("button", { name: "Download label for box 1" }),
   ).toBeVisible();

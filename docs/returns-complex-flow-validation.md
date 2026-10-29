@@ -63,11 +63,17 @@ Validation on the current implementation:
 - 31 connected complex PostgreSQL scenarios passed.
 - 138 existing PostgreSQL authorization, inspection, intake and label regressions passed.
 - 1,725 affected unit/contract/HTTP checks passed in one final current-main run. Earlier development encountered a Node fetch blocked ephemeral port before application handling; no application assertion was weakened.
-- Ten desktop/mobile browser cases passed; the two measured-weight cases also passed again with packing-form screenshots. Visual inspection confirmed the desktop/mobile form fits its viewport.
+- The full desktop/mobile returns browser suite passed: 157 passed and three existing device-specific skips (two desktop pointer cases on mobile, one mobile-touch case on desktop). The customer-account production bundle and client TypeScript check passed again during the CI repair. Earlier targeted measured-weight cases also produced packing/review screenshots; visual inspection confirmed the form fits its viewport.
 - Both server and client TypeScript checks passed on the final source.
 - All 432 architecture/CI guards passed after allocating the migrations to draft PR #1945. No migration guard was bypassed.
 
 Synthetic tests assert that original OMS orders/lines, outbound warehouse orders/items and shipments do not change. Customer acceptance/receiving tests assert no financial or inventory posting. One scenario seeds an existing synthetic physical-return journal row solely to prove correct remaining quantity; the application does not post another row. The stock-owner unit tests separately prove null outbound provenance, unresolved-cost follow-up and no second stock delta on replay.
+
+## Browser CI diagnosis and regression coverage
+
+The first published head passed the targeted customer journeys but failed four older browser scenarios on both desktop and mobile. `returns-portal-preview.spec.ts` still expected missing catalog weight to require support and still described availability using confirmed-delivery counts. `returns-customer.spec.ts` had two history button selectors containing a corrupted middle-dot separator. These were test failures; the remediation changes no production code or runtime policy.
+
+The weight scenario now validates blank, zero, negative and malformed measurements as unavailable for review, then exercises a real packed measurement through the shared box-plan validator and asserts the exact whole-gram request. The restriction scenario checks an actual return-window exclusion and purchased counts. A separate customer journey proves selection and review with zero delivery confirmations. History scenarios retain exact button-name assertions and read-only HTTP checks using the correct separator. The full desktop/mobile suite is now the documented browser validation command, rather than the earlier targeted subset.
 
 ## Failure modes and remaining release work
 
@@ -84,7 +90,8 @@ Use dedicated disposable local databases with `ECHELON_TEST_DATABASE_DISPOSABLE=
 ```text
 node node_modules/vitest/vitest.mjs run server/modules/returns/__tests__/integration/customer-return-complex-flow.test.ts
 node node_modules/vitest/vitest.mjs run server/modules/returns/__tests__/unit
-node node_modules/@playwright/test/cli.js test --config playwright.returns-preview.config.ts returns-customer.spec.ts --grep "mixed-box receiving|owned selection|uncertain creation|changed review|missing item weights"
+node node_modules/vite/bin/vite.js build --config vite.customer-account.config.ts
+node node_modules/@playwright/test/cli.js test --config playwright.returns-preview.config.ts --reporter=line
 node --max-old-space-size=8192 node_modules/typescript/bin/tsc -p tsconfig.tests.server.json --pretty false
 node --max-old-space-size=8192 node_modules/typescript/bin/tsc -p tsconfig.tests.client.json --pretty false
 node scripts/ci/run-test-lane.mjs guards
