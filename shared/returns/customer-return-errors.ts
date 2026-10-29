@@ -8,7 +8,7 @@ export function customerReturnRejectionMessage(
     case "RETURN_LABEL_ORIGIN_UNVERIFIED":
       return "The return shipping address needs verification. Contact us for help. No return or label was created.";
     case "RETURN_LABEL_ALLOCATION_UNVERIFIED":
-      return "We need to verify the original shipment's item records before creating this return. Contact us for help. No return or label was created.";
+      return "We couldn't verify the items for this return request. Review your return items and try again. No return or label was created.";
     case "RETURN_LIVE_REVIEW_CHANGED":
     case "RETURN_INTAKE_SOURCE_CHANGED":
     case "RETURN_AUTHORIZATION_QUANTITY_EXCEEDED":

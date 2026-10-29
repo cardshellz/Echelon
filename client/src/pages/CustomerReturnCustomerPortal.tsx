@@ -175,6 +175,9 @@ export function CustomerWorkspace({
   const [selected, setSelected] = useState<CustomerReturnCustomerOrder | null>(
     initialOrder ?? null,
   );
+  const [directOrderId, setDirectOrderId] = useState<number | null>(
+    embedded && !initialOrder && !initialStatus ? initialOrderId ?? null : null,
+  );
   const [historicalStatus, setHistoricalStatus] =
     useState<CustomerReturnCustomerLabelStatus | null>(initialStatus ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -221,7 +224,7 @@ export function CustomerWorkspace({
   );
 
   useEffect(() => {
-    if (command.record || embedded) return;
+    if (command.record || embedded || directOrderId !== null) return;
     void run(async (signal) => {
       const [page, prior] = await Promise.allSettled([
         api.orders(null, signal),
@@ -253,24 +256,43 @@ export function CustomerWorkspace({
       }
     });
     return () => operation.current?.abort();
-  }, [api, run, attempt, command.record !== null, embedded]);
+  }, [api, run, attempt, command.record !== null, embedded, directOrderId]);
 
   useEffect(() => {
-    if (!embedded || initialOrder || initialStatus || initialOrderId === undefined || command.record) return;
+    if (directOrderId === null || command.record) return;
     // Explicit return navigation uses the same authenticated owner as the normal
     // chooser. No review, submission or label command is executed during loading.
     void run(async (signal) => {
-      const order = await api.order(initialOrderId, signal);
+      const order = await api.order(directOrderId, signal);
       if (!signal.aborted) setSelected(order);
     });
     return () => operation.current?.abort();
-  }, [api, run, embedded, initialOrder, initialStatus, initialOrderId, attempt, command.record !== null]);
+  }, [api, run, directOrderId, attempt, command.record !== null]);
+
+  function reviewRejectedReturn(): void {
+    const previous = commands.getSnapshot();
+    if (!previous.record || !previous.rejected || previous.busy
+      || previous.record.authorizationId !== null) return;
+    const orderId = initialOrderId ?? initialOrder?.omsOrderId ?? previous.record.omsOrderId;
+    // Only an authoritative, definitive rejection permits a new intent. Keep the
+    // immutable server receipt; clear local recovery through its existing owner.
+    commands.finish();
+    if (commands.getSnapshot().record) return;
+    operation.current?.abort();
+    setSelected(null);
+    setHistoricalStatus(null);
+    setError(null);
+    setNotice(null);
+    setDirectOrderId(orderId);
+    setAttempt(value => value + 1);
+  }
 
   function chooseAnother(reason?: string) {
     if (embedded) { onSignedOut(); return; }
     operation.current?.abort();
     setBusy(false);
     setSelected(null);
+    setDirectOrderId(null);
     setHistoricalStatus(null);
     setError(null);
     setNotice(reason ?? null);
@@ -369,6 +391,12 @@ export function CustomerWorkspace({
                 : "Checking your return"}
           </h1>
           <PreviewError message={error ?? command.error ?? notice} />
+          {command.rejected && (
+            <p className="text-sm text-muted-foreground">
+              This is the saved result of an earlier attempt. Review your return
+              items to check what is available now.
+            </p>
+          )}
           {!status && !command.rejected && (
             <p className="text-sm text-muted-foreground">
               Your request is saved. Check its status or retry this same request
@@ -408,7 +436,7 @@ export function CustomerWorkspace({
             </section>
           ))}
           <div className="flex flex-wrap gap-3">
-            <Button
+            {!command.rejected && <Button
               variant="outline"
               disabled={inProgress}
               onClick={() => {
@@ -424,7 +452,12 @@ export function CustomerWorkspace({
               }}
             >
               Check status
-            </Button>
+            </Button>}
+            {command.rejected && command.record?.authorizationId === null && (
+              <Button disabled={inProgress} onClick={reviewRejectedReturn}>
+                Review return items
+              </Button>
+            )}
             {command.record && !status && !command.rejected && (
               <Button disabled={inProgress} onClick={() => void commands.retry()}>
                 Retry saved request
@@ -507,9 +540,9 @@ export function CustomerWorkspace({
       </>
     );
 
-  if (embedded && initialOrderId !== undefined)
+  if (directOrderId !== null)
     return (
-      <CustomerReturnSurface onClose={onSignedOut} closeDisabled={inProgress}>
+      <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={inProgress}>
         <div className="csz-return-status">
           <h1 className="text-2xl font-semibold">Return items</h1>
           <PreviewError message={error} />
@@ -519,7 +552,7 @@ export function CustomerWorkspace({
               Try again
             </Button>
           )}
-          <Button variant="ghost" disabled={inProgress} onClick={onSignedOut}>
+          <Button variant="ghost" disabled={inProgress} onClick={() => chooseAnother()}>
             Back to your orders
           </Button>
         </div>
