@@ -87,7 +87,7 @@ describe("legacy channel catch-up runtime boundary", () => {
     vi.spyOn(quantityPublicationAdmission, "listDue").mockResolvedValue([claim]);
     vi.spyOn(quantityPublicationAdmission, "settleArchived").mockResolvedValue(false);
     vi.spyOn(quantityPublicationAdmission, "complete").mockResolvedValueOnce(false).mockResolvedValue(true);
-    vi.spyOn(quantityPublicationAdmission, "fail").mockResolvedValue();
+    vi.spyOn(quantityPublicationAdmission, "fail").mockResolvedValue(1);
   });
 
   it("delegates the exact scope under a non-admitting constraint without a global SKU or historical mapping lookup", async () => {
@@ -117,7 +117,7 @@ describe("legacy channel catch-up runtime boundary", () => {
     await expect(createQuantityPublicationCatchupService({ refreshLegacyChannelScope: refresh }).processDue())
       .resolves.toEqual({ completed: 0, failed: 1 });
     expect(refresh).not.toHaveBeenCalled();
-    expect(quantityPublicationAdmission.fail).toHaveBeenCalledWith(claim, "PUBLICATION_AUTHORITY_CHANGED", "Authority changed");
+    expect(quantityPublicationAdmission.fail).toHaveBeenCalledWith(claim, "PUBLICATION_AUTHORITY_CHANGED", "Authority changed", "transient");
   });
 
   it("does not clear missing or failed scoped publication merely because a callback was attempted", async () => {
