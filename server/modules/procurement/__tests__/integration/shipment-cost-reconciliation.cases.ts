@@ -20,6 +20,10 @@ import { reconciliationPreview, reconciliationResultSchema, type ReconciliationR
 import { readUnallocatedLotCosts } from "../../../inventory/infrastructure/cost-quantity.repository";
 import { prepareShipmentCostRevisions, recordShipmentCostRevisions } from "../../shipment-cost-application.service";
 import { recordCostRevision } from "../../cost-source-revision.repository";
+import { readReconciliationLedger, readReconciliationRecords, visitShipmentReconciliationEvidence,
+  type ShipmentReconciliationReadRequest } from "../../../inventory/infrastructure/cost-reconciliation.repository";
+import { readShipmentExceptionFacts } from "../../shipment-cost-exception.repository";
+import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 
 /** Runs inside the real receiving/AP/freight fixture with synthetic records. */
 export function registerShipmentReconciliationCases(fixture: {
@@ -75,6 +79,92 @@ export function registerShipmentReconciliationCases(fixture: {
     };
   }
   const postings = async () => (await query("SELECT * FROM inventory.cost_reconciliation_postings ORDER BY id")).rows;
+
+  async function readRequest(): Promise<ShipmentReconciliationReadRequest> {
+    return fixture.database().transaction(async tx => {
+      const [facts] = await readShipmentExceptionFacts(tx, [11]);
+      const source = costSourceRevisionSchema.parse(facts.contract);
+      const review = await context();
+      return { source, issues: review.issues };
+    });
+  }
+  async function compareReconciliationReads(tx: AmendmentTransaction, requests: ShipmentReconciliationReadRequest[]) {
+    const expected = new Map<number, unknown>();
+    for (const request of requests) {
+      if (request.source.scope.kind !== "shipment_line") throw new Error("Expected shipment fixture scope");
+      const id = request.source.scope.inboundShipmentLineId;
+      expected.set(id, { ledger: await readReconciliationLedger(tx, id),
+        records: await readReconciliationRecords(tx, request.source, request.issues) });
+    }
+    const actual = new Map<number, unknown>();
+    await visitShipmentReconciliationEvidence(tx, requests, (id, value) => { actual.set(id, value); });
+    expect(actual).toEqual(expected);
+    return actual;
+  }
+
+  it("keeps batched exception evidence identical through real approval and destination replacement", async () => {
+    const { request: initial } = await prepare(true);
+    const inputs = [await readRequest()];
+    await fixture.database().transaction(tx => compareReconciliationReads(tx, inputs),
+      { isolationLevel: "repeatable read", accessMode: "read only" });
+    expect(await post(initial)).toMatchObject({ httpStatus: 200, body: { state: { status: "posted", destination: "inventory_variance" } } });
+    await fixture.database().transaction(tx => compareReconciliationReads(tx, inputs),
+      { isolationLevel: "repeatable read", accessMode: "read only" });
+    const current = await context();
+    expect(await post({ ...initial, sourceVersion: current.sourceVersion, destination: "historical_cogs" }))
+      .toMatchObject({ httpStatus: 200, body: { state: { status: "posted", destination: "historical_cogs" } } });
+    await fixture.database().transaction(tx => compareReconciliationReads(tx, inputs),
+      { isolationLevel: "repeatable read", accessMode: "read only" });
+    const review = await readShipmentCostReview(fixture.database(), 1);
+    expect(review?.lines[0].exceptionReview?.reconciliation).toMatchObject({ status: "posted", destination: "historical_cogs" });
+    await query("UPDATE procurement.inbound_freight_costs SET actual_cents=actual_cents+1 WHERE id=31");
+    const stale = await readShipmentCostReview(fixture.database(), 1);
+    expect(stale?.lines[0].exceptionReview?.reconciliation?.status).toBe("review_required");
+    expect(await shipmentLinePosted()).toBe(false);
+  });
+
+  it("retains two complete 1000-record scopes and fails a single 1001-record scope without truncation", async () => {
+    await prepare(true);
+    const first = await readRequest(), second = structuredClone(first);
+    if (second.source.scope.kind !== "shipment_line") throw new Error("Expected shipment fixture scope");
+    second.source.scope.inboundShipmentId = 2; second.source.scope.inboundShipmentLineId = 12;
+    await query(`INSERT INTO procurement.inbound_shipments(id,shipment_number,status) VALUES(2,'SECOND-RECONCILIATION-SCOPE','closed');
+      INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,
+        product_variant_id,sku,qty_shipped) VALUES(12,2,10,21,200,'AUDIT-PRODUCT',100);
+      INSERT INTO inventory.inventory_lots(id,lot_number,product_variant_id,warehouse_location_id,po_line_id,inbound_shipment_id,
+        qty_received,qty_on_hand,received_at)
+      SELECT 10000+n,'FIRST-RECONCILIATION-'||n,200,99,21,1,1,0,'2026-01-01' FROM generate_series(1,999) n;
+      INSERT INTO inventory.inventory_lots(id,lot_number,product_variant_id,warehouse_location_id,po_line_id,inbound_shipment_id,
+        qty_received,qty_on_hand,received_at)
+      SELECT 20000+n,'SECOND-RECONCILIATION-'||n,200,99,21,2,1,0,'2026-01-01' FROM generate_series(1,1000) n`);
+    await fixture.database().transaction(async tx => {
+      const evidence = await compareReconciliationReads(tx, [first, second]);
+      expect([...evidence.values()].map(value => (value as { records: unknown[] }).records.length)).toEqual([1000, 1000]);
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+    await query(`INSERT INTO inventory.inventory_lots(id,lot_number,product_variant_id,warehouse_location_id,po_line_id,inbound_shipment_id,
+      qty_received,qty_on_hand,received_at) VALUES(30000,'RECONCILIATION-OVER-LIMIT',200,99,21,1,1,0,'2026-01-01')`);
+    await expect(fixture.database().transaction(tx => readReconciliationRecords(tx, first.source, first.issues),
+      { isolationLevel: "repeatable read", accessMode: "read only" })).rejects.toMatchObject({ code: "COST_RECONCILIATION_LIMIT" });
+    await expect(fixture.database().transaction(tx => visitShipmentReconciliationEvidence(tx, [second, first], () => undefined),
+      { isolationLevel: "repeatable read", accessMode: "read only" })).rejects.toMatchObject({ code: "COST_RECONCILIATION_LIMIT" });
+  });
+
+  it("retains one read snapshot across a committed approval and sees it on the next read", async () => {
+    const { request: approvalRequest } = await prepare(true);
+    const request = await readRequest();
+    let prior: Awaited<ReturnType<typeof readReconciliationLedger>>;
+    await fixture.database().transaction(async tx => {
+      prior = await readReconciliationLedger(tx, 11);
+      expect(prior.approval).toBeNull();
+      expect(await post(approvalRequest)).toMatchObject({ httpStatus: 200, body: { state: { status: "posted" } } });
+      await visitShipmentReconciliationEvidence(tx, [request], (_id, value) => { expect(value.ledger).toEqual(prior); });
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+    await fixture.database().transaction(async tx => {
+      const values = await compareReconciliationReads(tx, [request]);
+      expect(values.get(11)).toMatchObject({ ledger: { approval: { destination: "inventory_variance" },
+        balances: { historical_cogs: 0, inventory_variance: 500000 } } });
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+  });
 
   it.each([false, true])("keeps pre-link-field approvals posted across every reader and retry (missing origin: %s)", async missing => {
     const amount = missing ? 5000 : 335007;
