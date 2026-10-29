@@ -109,7 +109,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer REFERENCES catalog.products,sku text,name text,
         option1_name text,option1_value text,option2_name text,option2_value text,price_cents integer,compare_at_price_cents integer,shopify_variant_id text,
         weight_grams numeric,length_mm numeric,width_mm numeric,height_mm numeric,shipping_package_type varchar(30),
-        barcode text,ebay_fulfillment_policy_override text,ebay_return_policy_override text,
+        barcode text,mpn varchar(100),ebay_fulfillment_policy_override text,ebay_return_policy_override text,
         ebay_payment_policy_override text,is_active boolean,sales_eligibility text,ebay_listing_excluded boolean,position integer,updated_at timestamptz DEFAULT now());
       CREATE TABLE channels.channel_variant_overrides(product_variant_id integer,channel_id integer,weight_override numeric,is_listed integer);
       CREATE TABLE channels.channel_listings(channel_id integer,product_variant_id integer REFERENCES catalog.product_variants,
@@ -143,6 +143,34 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     runtime.provider = new AutomaticSyncEbayProvider(() => new Date("2026-10-18T12:00:00Z"), true, ["P5", "P6"]);
   }, 60_000);
   afterEach(async () => { await database?.close(); runtime.pool = null; runtime.db = null; runtime.provider = null; vi.unstubAllGlobals(); });
+
+  it("reads the saved variant MPN into publication content and removes the native pair when it is cleared", async () => {
+    await ebayBusinessPolicies.patchPolicies({ target: { kind: "product", productId: 20 },
+      patch: { fulfillmentPolicyId: null }, actor: "user:policy-reviewer" });
+    await database.pool.query("UPDATE catalog.product_variants SET mpn='ACTUAL-PART-5' WHERE id=101");
+    const source = await readEbayPublicationSource(20);
+    const before = await prepareEbayPublicationCompletion(source, null);
+    expectPreparedOwnerContract(before.draft);
+    const firstItem = before.draft.inventoryItems.find(item => item.sku === "P5")!;
+    const otherItem = before.draft.inventoryItems.find(item => item.sku === "P6")!;
+    expect(firstItem.payload.product).toMatchObject({ brand: "Shellz", mpn: "ACTUAL-PART-5",
+      aspects: { Brand: ["Shellz"], MPN: ["ACTUAL-PART-5"] } });
+    expect(otherItem.payload.product.aspects?.Brand).toEqual(["Shellz"]);
+    expect(otherItem.payload.product).not.toHaveProperty("brand");
+    expect(otherItem.payload.product).not.toHaveProperty("mpn");
+
+    await database.pool.query("UPDATE catalog.product_variants SET mpn=NULL WHERE id=101");
+    const cleared = await prepareEbayPublicationCompletion(source, before.identity);
+    const clearedItem = cleared.draft.inventoryItems.find(item => item.sku === "P5")!;
+    expect(clearedItem.payload.product.aspects?.Brand).toEqual(["Shellz"]);
+    expect(clearedItem.payload.product.aspects).not.toHaveProperty("MPN");
+    expect(clearedItem.payload.product).not.toHaveProperty("brand");
+    expect(clearedItem.payload.product).not.toHaveProperty("mpn");
+    expect(cleared.identity).toEqual(before.identity);
+    expect(cleared.draft.offers).toEqual(before.draft.offers);
+    expect(syncContentIntentHash(cleared.draft)).not.toBe(syncContentIntentHash(before.draft));
+    expect(runtime.provider!.writes).toEqual([]);
+  });
 
   it("clears only the product shipping override and rebuilds both exact offers with a fresh content hash", async () => {
     const available = providerPolicyCatalog("fulfillment");
