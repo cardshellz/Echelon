@@ -92,7 +92,10 @@ describe("re-ingesting an existing order authorizes its lines atomically", () =>
     expect(transactionCount()).toBe(3);
     expect(committed).toHaveLength(4);
     expect(committed.every((line) => line.paidQuantity === 1 && line.authorityFulfillableQuantity === 1)).toBe(true);
-    expect(committed.every((line) => line.channelQuantityUpdatedAt?.toISOString() === "2026-10-28T22:26:58.000Z")).toBe(true);
+    expect(committed.every((line) =>
+      line.channelQuantityUpdatedAt instanceof Date &&
+      line.channelQuantityUpdatedAt.toISOString() === "2026-10-28T22:26:58.000Z",
+    )).toBe(true);
   });
 
   it("commits no line when a later line fails, so no sync can see a half-authorized order", async () => {
