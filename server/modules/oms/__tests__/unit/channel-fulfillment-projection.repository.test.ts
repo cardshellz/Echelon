@@ -8,13 +8,13 @@ function sqlText(query: any): string {
 }
 
 describe("canonical channel fulfillment projector", () => {
-  it("requires a positive physical shipment identity and a transaction", async () => {
+  it.each(["projectPhysicalShipment", "projectReconciledPhysicalShipment"] as const)("%s requires a positive physical shipment identity and a transaction", async method => {
     const projector = createChannelFulfillmentProjector({});
 
-    await expect(projector.projectPhysicalShipment(0)).rejects.toMatchObject({
+    await expect(projector[method](0)).rejects.toMatchObject({
       code: "INVALID_INPUT",
     });
-    await expect(projector.projectPhysicalShipment(1)).rejects.toMatchObject({
+    await expect(projector[method](1)).rejects.toMatchObject({
       code: "INVALID_INPUT",
     });
   });
@@ -44,6 +44,20 @@ describe("canonical channel fulfillment projector", () => {
     expect(statements[4]).toContain("merchandise_channel.provider=");
     expect(statements[2]).toContain("order_item.requires_shipping = 1");
     expect(statements[2]).toContain("NOT LIKE '%_fulfillment_receipt'");
+    expect(statements.join("\n")).not.toContain("ebay_label_replacement_work");
+    expect(statements.join("\n")).not.toContain("package_reconciliation_commands");
+  });
+
+  it("adds reconciliation header projection explicitly in the same transaction", async () => {
+    const execute = vi.fn().mockResolvedValueOnce({ rows: [{ id: 7001 }] }).mockResolvedValue({ rows: [] });
+    const transaction = vi.fn(async (callback: (tx: { execute: typeof execute }) => Promise<void>) => callback({ execute }));
+    const projector = createChannelFulfillmentProjector({ transaction }, () => new Date("2026-10-28T12:00:00Z"));
+    await projector.projectReconciledPhysicalShipment(7001);
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(6);
+    const statements = execute.mock.calls.map(([query]) => sqlText(query));
+    expect(statements[5]).toContain("wms.ebay_label_replacement_work");
+    expect(statements[5]).toContain("oms.package_reconciliation_commands");
   });
 
   it("fails closed when the canonical physical shipment does not exist", async () => {

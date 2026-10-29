@@ -366,7 +366,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     const [line] = await database.select().from(schema.inboundShipmentLines);
     expect(line.qtyShipped).toBe(501);
     expect(line.cartonCount).toBe(3);
-    expect((await pool.query("SELECT timestamp,actor FROM public.audit_events WHERE actor=$1", [actorId])).rows).toEqual([{ timestamp: NOW, actor: actorId }]);
+    expect((await pool.query("SELECT timestamp,actor FROM public.audit_events WHERE actor=$1 AND action='procurement.shipment_line.add-from-po'", [actorId])).rows).toEqual([{ timestamp: NOW, actor: actorId }]);
   });
 
   it("migrates legacy shipment rows without guessing units or dimensions and safely replays the migration", async () => {
@@ -977,6 +977,67 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     expect(audit[0].changes.after).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 11 })]));
   });
 
+  it("keeps a dimensional charge unallocated until saved box measurements exist, then closes using them", async () => {
+    await pool.query("UPDATE procurement.inbound_freight_costs SET allocation_method='by_volume' WHERE id=31");
+    const charges = (await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows;
+    expect(await service.runAllocation(1)).toMatchObject({ totalAllocated: 0, pendingCostIds: [31] });
+    expect((await pool.query("SELECT * FROM procurement.inbound_freight_allocations")).rows).toEqual([]);
+    expect(await readLine()).toMatchObject({ allocatedCostCents: null, landedUnitCostCents: null });
+    expect(await service.getAllocationStatus(1, database)).toMatchObject({ status: "needs_allocation", allocatedCostCents: 0, unallocatedCents: 500,
+      costs: [expect.objectContaining({ status: "missing_dimensions", usedFallback: false })] });
+    const pending = await state();
+    await expect(service.close(1, actorId)).rejects.toMatchObject({ details: { code: "MISSING_ALLOCATION_DIMENSIONS" } });
+    expect(await state()).toEqual(pending);
+    await execute(await patch({ cartonCount: 2, dimensionBasis: "carton", weightKg: "3.000", lengthCm: "50.00", widthCm: "40.00", heightCm: "30.00" }));
+    expect(await service.getShipment(1, database)).toMatchObject({ totalWeightKg: "6.000", totalVolumeCbm: "0.120000", totalPieces: 500, totalCartons: 2 });
+    expect(await service.getAllocationStatus(1, database)).toMatchObject({ status: "allocated", allocatedCostCents: 500, unallocatedCents: 0 });
+    const closing = createService(database, { ...storage, async getProvisionalLotsByShipment() { return []; } } as Parameters<typeof createService>[1], undefined, () => NOW);
+    expect(await closing.close(1, actorId)).toMatchObject({ status: "closed" });
+    expect((await pool.query("SELECT freight_allocated_cents,qty FROM procurement.landed_cost_snapshots")).rows).toEqual([{ freight_allocated_cents: "500", qty: 500 }]);
+    expect((await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows).toEqual(charges);
+  });
+
+  it("repairs derived totals from saved measurements after receiving and closes a multi-PO shipment without re-entry", async () => {
+    await pool.query(`UPDATE procurement.inbound_freight_costs SET allocation_method='by_volume' WHERE id=31;
+      UPDATE procurement.purchase_order_lines SET total_product_cost_cents=100000 WHERE id=21;
+      UPDATE procurement.purchase_order_lines SET total_product_cost_cents=10000 WHERE id=29;
+      UPDATE procurement.inbound_shipment_lines SET dimension_basis='carton',weight_kg=2,length_cm=50,width_cm=40,height_cm=30,
+        total_weight_kg=999,total_volume_cbm=0,chargeable_weight_kg=0 WHERE id=11;
+      INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,product_variant_id,sku,qty_shipped,carton_count,
+        dimension_basis,weight_kg,length_cm,width_cm,height_cm,total_weight_kg,total_volume_cbm,chargeable_weight_kg)
+        VALUES(12,1,19,29,300,'TEST-OTHER',20,1,'carton',3,50,40,30,0,0,0);
+      INSERT INTO procurement.receiving_orders(id,receipt_number,purchase_order_id,inbound_shipment_id,status) VALUES(51,'TEST-RECEIVED',10,1,'closed');
+      INSERT INTO procurement.receiving_lines(id,receiving_order_id,purchase_order_line_id,inbound_shipment_line_id,product_variant_id,received_qty,units_per_variant_snapshot)
+        VALUES(61,51,21,11,200,2,250);`);
+    const protectedBefore = (await pool.query("SELECT * FROM procurement.receiving_orders r JOIN procurement.receiving_lines l ON l.receiving_order_id=r.id")).rows;
+    const measurementsBefore = (await pool.query("SELECT id,qty_shipped,carton_count,dimension_basis,weight_kg,length_cm,width_cm,height_cm FROM procurement.inbound_shipment_lines ORDER BY id")).rows;
+    const chargesBefore = (await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows;
+    expect(await service.getShipment(1, database)).toMatchObject({ totalWeightKg: "7.000", totalVolumeCbm: "0.180000" });
+    expect(await service.getAllocationStatus(1, database)).toMatchObject({ costs: [expect.objectContaining({ rawBasisTotal: 0.18 })] });
+    const closing = createService(database, { ...storage, async getProvisionalLotsByShipment() { return []; } } as Parameters<typeof createService>[1], undefined, () => NOW);
+    expect(await closing.close(1, actorId)).toMatchObject({ status: "closed" });
+    expect((await pool.query("SELECT inbound_shipment_line_id,allocated_cents,basis_evidence->>'usedFallback' AS fallback FROM procurement.inbound_freight_allocations ORDER BY inbound_shipment_line_id")).rows)
+      .toEqual([{ inbound_shipment_line_id: 11, allocated_cents: "333", fallback: "false" }, { inbound_shipment_line_id: 12, allocated_cents: "167", fallback: "false" }]);
+    expect((await pool.query("SELECT inbound_shipment_line_id,freight_allocated_cents FROM procurement.landed_cost_snapshots ORDER BY inbound_shipment_line_id")).rows)
+      .toEqual([{ inbound_shipment_line_id: 11, freight_allocated_cents: "333" }, { inbound_shipment_line_id: 12, freight_allocated_cents: "167" }]);
+    expect((await pool.query("SELECT * FROM procurement.receiving_orders r JOIN procurement.receiving_lines l ON l.receiving_order_id=r.id")).rows).toEqual(protectedBefore);
+    expect((await pool.query("SELECT id,qty_shipped,carton_count,dimension_basis,weight_kg,length_cm,width_cm,height_cm FROM procurement.inbound_shipment_lines ORDER BY id")).rows).toEqual(measurementsBefore);
+    expect((await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows).toEqual(chargesBefore);
+    expect((await pool.query("SELECT changes FROM public.audit_events WHERE action='procurement.shipment.physical_totals_materialized' AND actor=$1",[actorId])).rows)
+      .toMatchObject([{ changes: { lines: [{ lineId: 11, before: { totalWeightKg: "999.000" }, after: { totalWeightKg: "4.000" } }, { lineId: 12, after: { totalWeightKg: "3.000" } }] } }]);
+    expect(await service.getAllocationStatus(1, database)).toMatchObject({ status: "allocated" });
+  });
+
+  it("rolls derived-total repairs, allocation, audit and snapshots back if closing fails", async () => {
+    await pool.query(`UPDATE procurement.inbound_shipment_lines SET weight_kg=2,length_cm=20,width_cm=10,height_cm=10,
+      total_weight_kg=999,total_volume_cbm=0,chargeable_weight_kg=0 WHERE id=11`);
+    const before = await state();
+    const closing = createService(database, { ...storage, async createInboundShipmentStatusHistory() { throw new Error("Injected close history failure"); }
+    } as Parameters<typeof createService>[1], undefined, () => NOW);
+    await expect(closing.close(1, actorId)).rejects.toThrow("Injected close history failure");
+    expect(await state()).toEqual(before);
+  });
+
   it("resolves only missing dimensions from real catalog data while preserving existing dimensions and pieces", async () => {
     await pool.query("UPDATE catalog.product_variants SET weight_grams=2000,length_mm=200,width_mm=100,height_mm=100 WHERE id=200");
     await pool.query("UPDATE procurement.inbound_shipment_lines SET weight_kg=7 WHERE id=11");
@@ -1129,38 +1190,32 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     expect(await state()).toEqual(afterCancellation);
   });
 
-  it("rejects a negative stored line basis even when another positive line masks the shipment aggregate", async () => {
+  it("rejects a negative saved measurement even when another positive line masks the shipment aggregate", async () => {
     const added = await execute(fromPo()) as Array<{ id: number }>;
     await pool.query("UPDATE procurement.inbound_shipment_lines SET weight_kg=1,carton_count=10,total_weight_kg=10,chargeable_weight_kg=10 WHERE id=$1", [added[0].id]);
-    await pool.query("UPDATE procurement.inbound_shipment_lines SET total_weight_kg=-5 WHERE id=11");
+    await pool.query("UPDATE procurement.inbound_shipment_lines SET weight_kg=-5,total_weight_kg=-5 WHERE id=11");
     expect((await pool.query("SELECT SUM(total_weight_kg)::text AS total FROM procurement.inbound_shipment_lines WHERE inbound_shipment_id=1")).rows).toEqual([{ total: "5.000" }]);
     const before = await state();
     await expect(execute({ operation: "import", resourceId: 1, body: { rows: [{ productVariantId: 300, qtyShipped: 1 }] } }))
-      .rejects.toMatchObject({ statusCode: 422, details: { code: "SHIPMENT_LINE_TOTAL_OVERFLOW" } });
+      .rejects.toMatchObject({ statusCode: 422, details: { code: "SHIPMENT_LINE_INPUT_INVALID" } });
     expect(await state()).toEqual(before);
   });
 
-  it("requires explicit repair of inconsistent positive line bases and resolves them without changing physical evidence", async () => {
+  it("refreshes stale derived caches during an edit without changing the saved measurement evidence", async () => {
     await pool.query("UPDATE procurement.inbound_shipment_lines SET weight_kg=2,length_cm=20,width_cm=10,height_cm=10,total_weight_kg=9,total_volume_cbm=0.004,chargeable_weight_kg=4 WHERE id=11");
-    const before = await state();
-    await expect(execute(fromPo())).rejects.toMatchObject({
-      statusCode: 409, details: { code: "SHIPMENT_LINE_TOTALS_REVIEW_REQUIRED", lineId: 11, field: "totalWeightKg" },
-    });
-    expect(await state()).toEqual(before);
-    expect(await execute({ operation: "resolve-dimensions", resourceId: 1, body: {} })).toEqual({ updated: 1, total: 1, reviewRequiredLines: [] });
+    expect(await execute(fromPo())).toMatchObject([{ purchaseOrderLineId: 22, qtyShipped: 40 }]);
     expect(await readLine()).toMatchObject({
       qtyShipped: 500, cartonCount: 2, weightKg: "2.000", lengthCm: "20.00", widthCm: "10.00", heightCm: "10.00",
       totalWeightKg: "4.000", totalVolumeCbm: "0.004000", chargeableWeightKg: "4.000", updatedAt: NOW,
     });
     expect((await pool.query("SELECT total_weight_kg,total_volume_cbm FROM procurement.inbound_shipments WHERE id=1")).rows)
       .toEqual([{ total_weight_kg: "4.000", total_volume_cbm: "0.004000" }]);
-    const audit = (await pool.query("SELECT timestamp,changes FROM public.audit_events WHERE actor=$1 AND action='procurement.shipment_line.resolve-dimensions'", [actorId])).rows;
+    const audit = (await pool.query("SELECT timestamp,changes FROM public.audit_events WHERE actor=$1 AND action='procurement.shipment.physical_totals_materialized'", [actorId])).rows;
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({
       timestamp: NOW,
-      changes: { before: [{ id: 11, totalWeightKg: "9.000" }], after: [{ id: 11, totalWeightKg: "4.000", qtyShipped: 500 }] },
+      changes: { lines: [{ lineId: 11, before: { totalWeightKg: "9.000" }, after: { totalWeightKg: "4.000" } }] },
     });
-    expect(await execute(fromPo())).toMatchObject([{ purchaseOrderLineId: 22, qtyShipped: 40 }]);
   });
 
   it("allows an incomplete draft, then books and ships only after the reviewed configuration is saved", async () => {

@@ -29,6 +29,7 @@ import {
   type ShopifyProductSyncResult,
 } from "@/lib/shopify-product-sync-result";
 import { useAuth } from "@/lib/auth";
+import { shopifyProductFetch } from "@/lib/shopify-product-connection";
 import { Checkbox } from "@/components/ui/checkbox";
 import { BulkInventoryTrackingDialog } from "@/components/catalog/BulkInventoryTrackingDialog";
 import { MAX_BULK_INVENTORY_TRACKING_PRODUCTS } from "@shared/catalog/bulk-inventory-tracking";
@@ -179,11 +180,7 @@ export default function Products() {
   });
 
   const syncMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/shopify/sync-products", { method: "POST" });
-      if (!res.ok) throw new Error("Sync failed");
-      return res.json() as Promise<ShopifyProductSyncResult>;
-    },
+    mutationFn: () => shopifyProductFetch<ShopifyProductSyncResult>("/api/shopify/sync-products", {}),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       const outcome = summarizeShopifyProductSync(data);
@@ -193,8 +190,8 @@ export default function Products() {
         variant: outcome.needsReview ? "destructive" : "default",
       });
     },
-    onError: () => {
-      toast({ title: "Sync Failed", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Sync Failed", description: error.message, variant: "destructive" });
     },
   });
 

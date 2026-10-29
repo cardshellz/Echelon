@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("../../shopify-import-connection-guard", () => ({ filterConnectionOwnedShopifyProducts: async (products: unknown) => products }));
+
 const mocks = vi.hoisted(() => ({
   getProductVariantBySku: vi.fn(),
   createProduct: vi.fn(),

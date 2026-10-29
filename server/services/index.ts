@@ -1,4 +1,5 @@
 import { createReservedInventoryTransferOwner } from "../modules/inventory-planning/infrastructure/reserved-inventory-transfer.repository";
+import { createPackageReconciliationService } from "./package-reconciliation";
 /**
  * Service wiring module for Echelon WMS.
  *
@@ -615,6 +616,7 @@ export function createServices(
     providerClients: fulfillmentProviderClients,
   });
   fulfillmentPush.setShopifyClient(createDefaultShopifyAdminClient());
+  const packageReconciliation=createPackageReconciliationService({database:db,channels:fulfillmentProviderClients,runExclusive:withAdvisoryLock});
   const channelFulfillmentAuthority = createChannelFulfillmentAuthorityService({
     labelReplacementEnabled: !envFlagEnabled("PACKAGE_ALLOCATION_COMMERCIAL_FULFILLMENT_DISABLED"),
     repository: createChannelFulfillmentAuthorityRepository(db),
@@ -622,6 +624,7 @@ export function createServices(
     providerExecutor: createWalmartFulfillmentExecutor(walmart, fulfillmentPush.prepareWalmartFulfillmentCommand,
       createCompatibilityChannelFulfillmentProviderExecutor(fulfillmentPush)),
     shopifyLabelLifecycle,
+    packageReconciliation,
   });
   const channelFulfillmentReviewRetry = createChannelFulfillmentReviewRetryService({
     repository: createChannelFulfillmentReviewRetryRepository(db),

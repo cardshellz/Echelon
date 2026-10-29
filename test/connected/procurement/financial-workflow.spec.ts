@@ -1,0 +1,126 @@
+import type { Page } from "@playwright/test";
+import { supplierCreditOptionsSchema } from "../../../shared/procurement/supplier-credit";
+import { test, expect, login, type Backend } from "./fixtures";
+
+type Row = Record<string, unknown>;
+interface FinancialState { payments: Row[]; paymentAllocations: Row[]; credits: Row[]; creditApplications: Row[];
+  invoices: Row[]; transactions: Row[]; lots: Row[]; quantityCommands: Row[]; commands: Row[] }
+const state = (backend: Backend) => backend.control<FinancialState>("workflow-state");
+function financialOperator(backend: Backend) {
+  const actor = backend.actors.find(candidate => candidate.id === "connected-financial");
+  if (!actor) throw new Error("Missing connected financial actor");
+  return actor;
+}
+async function loseCommittedResponse(page: Page, path: string | RegExp) {
+  const attempts: Array<{ body: string | null; key: string | undefined }> = [];
+  let lose = true;
+  await page.route(path, async route => {
+    if (route.request().method() !== "POST") return route.continue();
+    attempts.push({ body: route.request().postData(), key: route.request().headers()["idempotency-key"] });
+    if (!lose) return route.continue();
+    lose = false;
+    const response = await route.fetch({ maxRetries: 0 });
+    expect(response.ok(), response.status() + " " + await response.text()).toBe(true);
+    await route.abort("connectionreset");
+  });
+  return attempts;
+}
+
+test("non-admin cash receipt survives committed response loss, revoked authority and session expiry, then applies once", async ({ page, backend }, info) => {
+  const actor = financialOperator(backend);
+  await login(page, backend, actor);
+  const initial = await state(backend);
+  const attempts = await loseCommittedResponse(page, "**/api/ap-payments");
+  await page.goto(backend.url + "/ap-payments");
+  await page.getByRole("button", { name: "Record Payment", exact: true }).click();
+  const record = page.getByRole("dialog", { name: "Record Payment", exact: true });
+  await record.getByRole("combobox", { name: "Payment vendor", exact: true }).selectOption("5");
+  await record.getByLabel("Payment date", { exact: true }).fill("2026-10-25");
+  await record.getByPlaceholder("0.00", { exact: true }).first().fill("50.00");
+  await record.getByRole("button", { name: "Record Payment", exact: true }).click();
+  await expect(record.getByRole("region", { name: "Saved payment request" })).toBeVisible();
+  await expect.poll(async () => (await state(backend)).payments.length).toBe(1);
+  const committed = await state(backend);
+  expect(committed.payments).toHaveLength(1);
+  expect(Number(committed.payments[0].total_amount_cents)).toBe(5000);
+  expect(committed.paymentAllocations).toEqual([]);
+  expect(committed.transactions).toEqual(initial.transactions);
+  expect(committed.quantityCommands).toEqual(initial.quantityCommands);
+  await backend.control("financial-grant", { allowed: false });
+  await record.getByRole("button", { name: "Recover saved payment request", exact: true }).click();
+  await expect(record.getByRole("region", { name: "Saved payment request" }).getByRole("alert")).toBeVisible();
+  expect((await state(backend)).payments).toEqual(committed.payments);
+  await backend.control("expire-sessions", {});
+  await backend.control("financial-grant", { allowed: true });
+  await login(page, backend, actor);
+  await page.goto(backend.url + "/ap-payments");
+  await page.getByRole("button", { name: "Recover saved payment request", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Saved payment request" })).toHaveCount(0);
+  expect(attempts).toHaveLength(3);
+  expect(attempts.every(attempt => attempt.key === attempts[0].key && attempt.body === attempts[0].body)).toBe(true);
+  const recovered = await state(backend);
+  expect(recovered.payments).toEqual(committed.payments);
+  expect(recovered.commands).toEqual(committed.commands);
+  const paymentId = Number(recovered.payments[0].id);
+  await page.goto(backend.url + "/ap-payments?paymentId=" + paymentId);
+  const detail = page.getByRole("dialog");
+  await detail.getByLabel("Apply existing payment to CONNECTED-GOODS-INVOICE", { exact: true }).fill("10.00");
+  await detail.getByLabel("Application reason", { exact: true }).fill("Apply the connected supplier advance to its recorded invoice");
+  await detail.getByRole("button", { name: "Apply existing payment", exact: true }).click();
+  await expect(detail.getByRole("region", { name: "Payment application history" })).toContainText("$10.00");
+  const applied = await state(backend);
+  expect(applied.payments).toHaveLength(1); expect(applied.paymentAllocations).toHaveLength(1);
+  expect(Number(applied.paymentAllocations[0].applied_amount_cents)).toBe(1000);
+  expect(Number(applied.invoices.find(invoice => invoice.id === 71)?.balance_cents)).toBe(6500);
+  await page.reload();
+  await expect(page.getByRole("dialog").getByRole("region", { name: "Payment application history" })).toContainText("$10.00");
+  await info.attach("real-payment-recovery-evidence", { body: JSON.stringify({ initial, committed, recovered, applied }, null, 2), contentType: "application/json" });
+});
+
+test("supplier credit creates and approves through the UI, then recovers one committed application and retains its reversal", async ({ page, backend }, info) => {
+  await login(page, backend, financialOperator(backend));
+  const initial = await state(backend);
+  const sourceResponse = await page.request.get(backend.url + "/api/vendor-invoices/71/supplier-credit-options");
+  expect(sourceResponse.ok(), await sourceResponse.text()).toBe(true);
+  const source = supplierCreditOptionsSchema.parse(await sourceResponse.json());
+  await page.goto(backend.url + "/supplier-credits?new=1&sourceInvoiceId=71");
+  await page.getByLabel("Supplier credit reference", { exact: true }).fill("CONNECTED-CREDIT");
+  await page.getByLabel("Credit document date", { exact: true }).fill("2026-10-25");
+  await page.locator("#credit-amount-" + source.lines[0].invoiceLineId).fill("5.00");
+  await page.getByLabel("Credit reason and cost treatment", { exact: true }).first().selectOption("price:product");
+  await page.getByLabel("Credit reason / document evidence", { exact: true }).fill("Connected supplier document confirms a product price reduction");
+  await page.getByRole("button", { name: "Create credit draft", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Supplier credit CONNECTED-CREDIT", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Approve credit", exact: true }).click();
+  const approval = page.getByRole("dialog");
+  await approval.getByLabel("Reason for this credit action", { exact: true }).fill("Reviewed the original connected supplier credit document");
+  await approval.getByRole("button", { name: "Approve credit", exact: true }).click();
+  await expect(approval).toHaveCount(0);
+  const attempts = await loseCommittedResponse(page, /\/api\/supplier-credits\/\d+\/applications$/);
+  await page.getByLabel("Apply credit to CONNECTED-GOODS-INVOICE", { exact: true }).fill("5.00");
+  await page.getByLabel("Credit application reason", { exact: true }).fill("Apply the reviewed credit to the original payable");
+  await page.getByRole("button", { name: "Apply supplier credit", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Saved supplier credit request" })).toBeVisible();
+  await expect.poll(async () => (await state(backend)).creditApplications.length).toBe(1);
+  const committed = await state(backend);
+  expect(committed.credits).toHaveLength(1); expect(committed.creditApplications).toHaveLength(1);
+  expect(Number(committed.invoices.find(invoice => invoice.id === 71)?.credited_amount_cents)).toBe(500);
+  expect(committed.payments).toEqual([]); expect(committed.transactions).toEqual(initial.transactions);
+  await page.reload();
+  await page.getByRole("button", { name: "Recover saved credit request", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Saved supplier credit request" })).toHaveCount(0);
+  expect(attempts).toHaveLength(2); expect(attempts[1]).toEqual(attempts[0]);
+  expect((await state(backend)).creditApplications).toEqual(committed.creditApplications);
+  const applicationId = Number(committed.creditApplications[0].id);
+  await page.getByRole("button", { name: "Reverse application #" + applicationId, exact: true }).click();
+  const reverse = page.getByRole("dialog");
+  await reverse.getByLabel("Reason for this credit action", { exact: true }).fill("Reverse this connected credit application while preserving its original record");
+  await reverse.getByRole("button", { name: "Reverse credit application", exact: true }).click();
+  await expect(reverse).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Supplier credit application history" })).toContainText("Reversed");
+  const reversed = await state(backend);
+  expect(reversed.creditApplications).toEqual(committed.creditApplications);
+  expect(Number(reversed.invoices.find(invoice => invoice.id === 71)?.credited_amount_cents)).toBe(0);
+  expect(reversed.transactions).toEqual(initial.transactions); expect(reversed.quantityCommands).toEqual(initial.quantityCommands);
+  await info.attach("real-credit-recovery-evidence", { body: JSON.stringify({ initial, committed, reversed }, null, 2), contentType: "application/json" });
+});

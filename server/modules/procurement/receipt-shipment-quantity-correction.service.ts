@@ -219,25 +219,17 @@ async function executeCorrection(
   const target = source.evidence.shipmentLines.find(
     (line) => line.id === source.facts.shipmentLineId,
   )!;
-  // Pieces change physical totals only when measurements were recorded per piece.
-  // Carton measurements describe the same cartons after a piece-count correction.
-  const pieceDimensions =
-    target.dimension_basis === "piece" ||
-    (target.dimension_basis == null && target.carton_count == null);
-  const physicalTotals = pieceDimensions
-    ? computeShipmentLinePhysicalTotals({
-        qtyShipped: plan.shippedPieces,
-        cartonCount:
-          target.carton_count == null
-            ? null
-            : integer(target.carton_count, "cartons"),
-        dimensionBasis: "piece",
-        weightKg: target.weight_kg == null ? null : String(target.weight_kg),
-        lengthCm: target.length_cm == null ? null : String(target.length_cm),
-        widthCm: target.width_cm == null ? null : String(target.width_cm),
-        heightCm: target.height_cm == null ? null : String(target.height_cm),
-      })
-    : undefined;
+  // Use the same saved physical basis as allocation and display. A piece-count
+  // correction does not multiply carton measurements by received pack factors.
+  const physicalSource = { qtyShipped: source.facts.shippedPieces,
+    cartonCount: target.carton_count == null ? null : integer(target.carton_count, "cartons"),
+    dimensionBasis: target.dimension_basis == null ? null : String(target.dimension_basis),
+    weightKg: target.weight_kg == null ? null : String(target.weight_kg),
+    lengthCm: target.length_cm == null ? null : String(target.length_cm),
+    widthCm: target.width_cm == null ? null : String(target.width_cm),
+    heightCm: target.height_cm == null ? null : String(target.height_cm) };
+  const currentPhysicalTotals = computeShipmentLinePhysicalTotals(physicalSource);
+  const physicalTotals = computeShipmentLinePhysicalTotals({ ...physicalSource, qtyShipped: plan.shippedPieces });
   const costReviewBefore = await readQuantityCorrectionCostReview(
     tx,
     source.facts.shipmentLineId,
@@ -424,26 +416,12 @@ async function executeCorrection(
     pendingReceipts: plan.pendingReceipts,
     physicalTotals: {
       netWeightKg: {
-        before:
-          target.total_weight_kg == null
-            ? null
-            : String(target.total_weight_kg),
-        after:
-          physicalTotals?.totalWeightKg ??
-          (target.total_weight_kg == null
-            ? null
-            : String(target.total_weight_kg)),
+        before: currentPhysicalTotals.totalWeightKg,
+        after: physicalTotals.totalWeightKg,
       },
       volumeCbm: {
-        before:
-          target.total_volume_cbm == null
-            ? null
-            : String(target.total_volume_cbm),
-        after:
-          physicalTotals?.totalVolumeCbm ??
-          (target.total_volume_cbm == null
-            ? null
-            : String(target.total_volume_cbm)),
+        before: currentPhysicalTotals.totalVolumeCbm,
+        after: physicalTotals.totalVolumeCbm,
       },
     },
     shipmentPieces: {

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useInventoryCommand } from "@/lib/inventory-command";
 import { InventoryTrackingHistory } from "@/components/catalog/InventoryTrackingHistory";
+import { ShopifyProductConnectionActions } from "@/components/catalog/ShopifyProductConnection";
 import { ProductImageGallery } from "@/components/catalog/ProductImageGallery";
 import { invalidateCatalogImages } from "@/lib/catalog-image-queries";
 import { saveProductAssetScope, type ProductAssetScopeAttempt } from "@/lib/product-asset-scope";
@@ -888,7 +889,10 @@ function ShopifyProductMappingPanel({ productId, enabled }: { productId: number;
                 Parent identity used for product metafields and channel synchronization
               </CardDescription>
             </div>
-            {status && <Badge variant="outline" className={status.className}>{status.label}</Badge>}
+            <div className="flex flex-wrap items-center gap-2">
+              {status && <Badge variant="outline" className={status.className}>{status.label}</Badge>}
+              <ShopifyProductConnectionActions productId={productId} />
+            </div>
           </div>
         </CardHeader>
         <CardContent className="p-3 md:p-6 pt-0 md:pt-0">

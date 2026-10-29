@@ -33,7 +33,7 @@ import { customerReturnCanonicalOrderScopeSchema, type CustomerReturnCanonicalOr
 import type { CustomerReturnBoxMeasurements } from "./customer-return-box-measurements.ports";
 import type { PackageHistoryReadPort } from "@shared/shipping/package-history";
 import { projectHistoricalReturnBoxes } from "./customer-return-package-history";
-import { MAX_RETURN_ORIGINAL_BOXES } from "@shared/returns/customer-return-parcel";
+import { MAX_RETURN_ORIGINAL_BOXES, type CustomerReturnBoxOption } from "@shared/returns/customer-return-parcel";
 
 const MAX_OBSERVATION_AGE_MS = 120_000;
 export interface CustomerReturnLiveDependencies {
@@ -52,6 +52,9 @@ export interface CustomerReturnLiveDependencies {
 /** Trusted application evidence for the separately authorized private write service. */
 export interface CustomerReturnIntakeInspection {
   order: CustomerReturnLiveOrder;
+  /** Canonical boxes need returns-side measurement retention. Historical boxes
+   * already have immutable shipping evidence and must not be retained as WMS boxes. */
+  canonicalBoxOptions?: readonly CustomerReturnBoxOption[];
   local: CustomerReturnLocalInspectionSnapshot;
   provider: CustomerReturnShopifySnapshot;
   facts: CustomerReturnEligibilityInput;
@@ -151,8 +154,9 @@ export class CustomerReturnLiveService {
     }));
     if (canonicalScope) verifyProviderOwnership(provider, canonicalScope);
     verifyIdentity(first, provider, reference);
-    const boxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic,
+    const canonicalBoxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic,
       this.dependencies.measurements, this.dependencies.storedDimensions);
+    const boxOptions = [...canonicalBoxOptions];
     if (this.dependencies.packageHistory) {
       try {
         const history = await this.dependencies.packageHistory.read({
@@ -235,7 +239,7 @@ export class CustomerReturnLiveService {
       packingLimits: operationalPolicy.packingLimits,
       purchasedAt: provider.order.createdAt, evaluatedAt: eligibility.evaluatedAt,
       returnWindowEndsAt: eligibility.returnWindowEndsAt, message, lines, boxOptions });
-    return { order, local, provider, facts, eligibility, shippingSettings: operationalPolicy.shippingSettings, operationalPolicy: {
+    return { order, canonicalBoxOptions, local, provider, facts, eligibility, shippingSettings: operationalPolicy.shippingSettings, operationalPolicy: {
       id: operationalPolicy.id, version: operationalPolicy.version, snapshot: operationalPolicy.snapshot,
     } };
   }

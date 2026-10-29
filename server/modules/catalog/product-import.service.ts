@@ -11,7 +11,7 @@
 
 import { catalogStorage, createSharedProductPhotoImporter } from "../catalog";
 import { warehouseStorage } from "../warehouse";
-const storage = { ...catalogStorage, ...warehouseStorage };
+const importStorage = { ...catalogStorage, ...warehouseStorage };
 import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify";
 import { db, productCategories, eq, and } from "../../storage/base";
 import {
@@ -24,6 +24,8 @@ import {
   type ShopifyProductMappingService,
   type VerifiedShopifyProduct,
 } from "./shopify-product-mapping.service";
+import { retryPublicationSelectionWrite } from "../inventory-planning/publication-selection-retry";
+import { filterConnectionOwnedShopifyProducts } from "./shopify-import-connection-guard";
 
 // ---------------------------------------------------------------------------
 // Shopify product_type → Echelon product_type slug mapping
@@ -170,6 +172,8 @@ type ShopifyMappingOwner = Pick<ShopifyProductMappingService, "repair">;
 
 export interface ProductImportDependencies {
   readonly mappingOwner?: ShopifyMappingOwner;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly filterConnectionOwnedProducts?: typeof filterConnectionOwnedShopifyProducts;
 }
 
 function emptyCanonicalMappingProjection(): ShopifyCanonicalMappingProjectionSummary {
@@ -251,8 +255,20 @@ const VARIANT_PATTERN = /^(.+)-(P|B|C)(\d+)$/i;
 export function createProductImportService(
   dependencies: ProductImportDependencies = {},
 ) {
-  const mappingOwner = dependencies.mappingOwner ?? createShopifyProductMappingService();
+  const mappingOwner = dependencies.mappingOwner ?? createShopifyProductMappingService({ sleep: dependencies.sleep });
+  const retryWrite = <Arguments extends unknown[], Result>(write: (...args: Arguments) => Promise<Result>) =>
+    (...args: Arguments) => retryPublicationSelectionWrite(() => write(...args), { sleep: dependencies.sleep });
+  // Each retried call owns one statement or complete storage transaction. A
+  // partially committed store-wide import is never replayed as one unit.
+  const storage = {
+    ...importStorage,
+    createProduct: retryWrite(importStorage.createProduct.bind(importStorage)),
+    updateProduct: retryWrite(importStorage.updateProduct.bind(importStorage)),
+    createProductVariant: retryWrite(importStorage.createProductVariant.bind(importStorage)),
+    updateProductVariant: retryWrite(importStorage.updateProductVariant.bind(importStorage)),
+  };
   const photoImporter = createSharedProductPhotoImporter(db, () => new Date());
+  const filterConnections = dependencies.filterConnectionOwnedProducts ?? filterConnectionOwnedShopifyProducts;
 
   async function projectCanonicalMapping(input: {
     productId: number;
@@ -313,7 +329,7 @@ export function createProductImportService(
   } = {}): Promise<ContentSyncResult> {
     console.log("Starting Shopify catalog sync...");
 
-    const shopifyProducts = options.shopifyProducts ?? await fetchShopifyCatalogProducts();
+    const shopifyProducts = await filterConnections(options.shopifyProducts ?? await fetchShopifyCatalogProducts());
     const verifiedShopifyProducts = buildVerifiedShopifyProducts(shopifyProducts);
     const canonicalMappings = emptyCanonicalMappingProjection();
     console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);
@@ -543,7 +559,7 @@ export function createProductImportService(
   } = {}): Promise<ProductSyncResult> {
     console.log("Starting Shopify product sync to products/product_variants tables...");
 
-    const shopifyProducts = options.shopifyProducts ?? await fetchShopifyCatalogProducts();
+    const shopifyProducts = await filterConnections(options.shopifyProducts ?? await fetchShopifyCatalogProducts());
     const verifiedShopifyProducts = buildVerifiedShopifyProducts(shopifyProducts);
     const canonicalMappings = emptyCanonicalMappingProjection();
     console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);

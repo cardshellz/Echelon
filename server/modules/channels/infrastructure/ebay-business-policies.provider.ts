@@ -94,7 +94,7 @@ export class EbayBusinessPolicyProvider {
               id,
               name,
               marketplaceId: scope.marketplaceId,
-              ...(kind === "fulfillment" ? { packageRequirements: fulfillmentPackageRequirements(policy) } : {}),
+              ...(kind === "fulfillment" ? { packageRequirements: fulfillmentPackageRequirements() } : {}),
               ...(typeof policy.description === "string"
                 ? { description: policy.description }
                 : {}),
@@ -123,18 +123,10 @@ export class EbayBusinessPolicyProvider {
   }
 }
 
-/** Shipping policy vocabulary stays in the adapter. All scopes consume the
- * same normalized requirements from the same authoritative policy catalog. */
-function fulfillmentPackageRequirements(policy: Record<string, unknown>) {
-  const shippingOptions = z.array(z.object({ costType: z.enum(["CALCULATED", "FLAT_RATE", "NOT_SPECIFIED"]) }).passthrough())
-    .parse(policy.shippingOptions ?? []);
-  const calculated = shippingOptions.some(option => option.costType === "CALCULATED");
-  // Inventory publication documents dimensions for calculated shipping. Existing
-  // published weight-only items have accepted maintenance writes; the package
-  // adapter must prove exact publication and unchanged fulfillment policy before
-  // using the maintenance recommendation. A policy change/new variation remains
-  // publication validation. Optional dimensions still carry an accuracy warning.
-  // https://developer.ebay.com/api-docs/master/sell/inventory/openapi/3/sell_inventory_v1_oas3.json
-  return { weight: true, dimensions: calculated ? true : "recommended" as const,
-    dimensionsOnMaintenance: "recommended" as const };
+/** Every policy scope and listing operation uses the same package rule.
+ * Dimensions affect shipping accuracy, but the shipping cost type alone does
+ * not prove that eBay will refuse this listing. Warn without inventing values;
+ * the saved execution owner retains any actual provider rejection. */
+function fulfillmentPackageRequirements() {
+  return { weight: true, dimensions: "recommended" as const };
 }

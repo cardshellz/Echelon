@@ -65,10 +65,16 @@ test("PO editor adds and removes lines in one review and retains protected recei
   await expect(page).toHaveURL(/purchase-orders\/17\?tab=lines/);
 });
 
-async function shipmentSetup(page: Page, options: { lost?: boolean; blocked?: boolean; stale?: boolean; canApprove?: boolean; refreshFailure?: boolean } = {}) {
+async function shipmentSetup(page: Page, options: { lost?: boolean; blocked?: boolean; stale?: boolean; canApprove?: boolean; refreshFailure?: boolean; unallocated?: boolean } = {}) {
   const failures = await installFixtures(page);
   const line: ShipmentEditorContext["lines"][number] = { key: "line:7", id: 7, sku: "ORIGINAL", name: "Original product", purchaseOrderId: 17, purchaseOrderLineId: 11, poNumber: "TEST-PO-17",
     fields: { qtyShipped: 100, cartonCount: 2, dimensionBasis: "carton", weightKg: "2.000", lengthCm: "10.00", widthCm: "20.00", heightCm: "30.00", notes: null }, allocatedCostCents: 500, totalWeightKg: "4.000", totalVolumeCbm: "0.012000" };
+  if (options.unallocated) {
+    line.fields = { ...line.fields, weightKg: null, lengthCm: null, widthCm: null, heightCm: null };
+    line.allocatedCostCents = null;
+    line.totalWeightKg = "0.000";
+    line.totalVolumeCbm = "0.000000";
+  }
   const context: ShipmentEditorContext = { shipmentId: 42, shipmentNumber: "TEST-SHIP-42", status: "booked", sourceVersion: version,
     canApprove: options.canApprove !== false, blockedReason: options.blocked ? "This shipment has receiving history. Use Receipt and quantity corrections below." : null, lines: [line], charges: [{ currency: "USD", cents: 500 }], receipts: [] };
   let committed = false, lose = options.lost === true;
@@ -92,7 +98,8 @@ async function shipmentSetup(page: Page, options: { lost?: boolean; blocked?: bo
       const body = request.postDataJSON() as ShipmentEditorRequest;
       preview = { previewVersion: reviewed, review: { shipmentId: 42, sourceVersion: version, reason: body.reason, before: [line],
         after: body.additions.length ? [{ ...line, id: null, key: `new:${body.additions[0].clientKey}`, name: "Second PO product", purchaseOrderId: 99, purchaseOrderLineId: 15, poNumber: "TEST-PO-99", fields: { qtyShipped: 200 } }] : [{ ...line, fields: { ...line.fields, ...body.changes[0].fields } }], charges: context.charges,
-        costShares: [{ purchaseOrderId: 17, poNumber: "TEST-PO-17", beforeCents: 500, afterCents: 0 }, { purchaseOrderId: 99, poNumber: "TEST-PO-99", beforeCents: 0, afterCents: 500 }] } };
+        costShares: options.unallocated ? [{ purchaseOrderId: 17, poNumber: "TEST-PO-17", beforeCents: null, afterCents: null }]
+          : [{ purchaseOrderId: 17, poNumber: "TEST-PO-17", beforeCents: 500, afterCents: 0 }, { purchaseOrderId: 99, poNumber: "TEST-PO-99", beforeCents: 0, afterCents: 500 }] } };
       return route.fulfill({ json: preview });
     }
     if (path === "/api/inbound-shipments/42/editor" && request.method() === "POST") {
@@ -141,6 +148,19 @@ test("shipment editor keeps a stale review unsavable and explains receiving rest
   await expect(dialog.getByRole("alert")).toContainText("Shipment charges changed");
   await expect(dialog.getByRole("button", { name: "Review changes", exact: true })).toBeDisabled();
   expect(approvals).toEqual([]); expect(failures).toEqual([]);
+});
+
+test("shipment edit keeps an unknown cost share distinct from zero while preserving the recorded charge", async ({ page }) => {
+  const { dialog, approvals, failures } = await shipmentSetup(page, { unallocated: true });
+  await dialog.getByLabel("Pieces 7", { exact: true }).fill("150");
+  await dialog.getByLabel("Reason / document reference").fill("Supplier corrected the shipment piece count");
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  await expect(dialog.getByText("TEST-PO-17: Not allocated → Not allocated", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/Shipment charges: 5.00 USD/)).toBeVisible();
+  const costRow = dialog.getByRole("row").filter({ has: page.getByRole("cell", { name: "Cost share (USD)", exact: true }) });
+  await expect(costRow.getByRole("cell", { name: "Not allocated", exact: true })).toHaveCount(2);
+  expect(approvals).toEqual([]);
+  expect(failures).toEqual([]);
 });
 
 test("shipment with receiving history explains why physical lines cannot be removed", async ({ page }) => {

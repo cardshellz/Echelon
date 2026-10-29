@@ -1,5 +1,5 @@
 import { ebayIntentAccount, prepareEbayChannelIntent } from "../ebay-prepared-intent";
-import { prepareEbayListingPackages, type EbayPackageMaintenanceScope } from "../adapters/ebay/ebay-listing-package";
+import { prepareEbayListingPackages } from "../adapters/ebay/ebay-listing-package";
 import { ebayBusinessPolicies } from "../ebay-business-policies";
 import { z } from "zod";
 import { db, pool, getDatabasePoolSnapshot } from "../../../db";
@@ -71,7 +71,6 @@ async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>
   category: Awaited<ReturnType<typeof repository.readCategory>>; variants: EbayPushVariant[];
   listingIds: string[]; groupKey: string | null; existingGroupKey?: string | null;
   alignExistingVariationSchema?: boolean;
-  maintenanceScope?: EbayPackageMaintenanceScope;
   quantities?: Awaited<ReturnType<typeof atpService.getAtpPerVariant>>;
   onRateLimit?: (seconds: number) => void }) {
   const { ctx, product, category, variants, listingIds, groupKey, existingGroupKey, onRateLimit } = input;
@@ -126,7 +125,7 @@ async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>
     // connector rechecks this content contract before any subsequent write.
     draft = alignDraftVariationSchemaToLiveGroup({ draft: { ...draft, itemGroup: draft.itemGroup }, liveGroup });
   }
-  draft = await prepareEbayListingPackages(createEbayRouteListingLifecycleClient(clientInput), draft, input.maintenanceScope);
+  draft = await prepareEbayListingPackages(createEbayRouteListingLifecycleClient(clientInput), draft);
   draft.preparedIntent = prepareEbayChannelIntent({
     account: ebayIntentAccount({ channelId: EBAY_CHANNEL_ID, connectionId: ctx.connectionId, accountId: ctx.account.externalAccountId,
       environment: ctx.auth.getEnvironment(), marketplaceId: ctx.metadata.marketplaceId, merchantLocationKey: ctx.metadata.merchantLocationKey }),
@@ -172,8 +171,7 @@ export async function prepareEbayPublicationCompletion(source: EbayListingSyncId
   const identity = resolveEbayPublicationTarget(source, inspection);
   if (savedTarget) assertEbayPublicationTargetUnchanged(savedTarget, identity);
   const { draft, clientInput, prices, resolvePublishedIdentity } = await preparePushDraft({ ctx, product, category,
-    variants, listingIds: [], groupKey: identity.groupKey, existingGroupKey: identity.groupKey, quantities,
-    maintenanceScope: inspection.publication ? identity : undefined });
+    variants, listingIds: [], groupKey: identity.groupKey, existingGroupKey: identity.groupKey, quantities });
   assertEbayListingSourceIdentityUnchanged(source, await readEbayPublicationSource(source.productId));
   return { sourceIdentity, identity, inspection, inspect,
     assertInventoryReady: execution => ensureEbayListingInventoryReady({

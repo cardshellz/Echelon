@@ -43,6 +43,12 @@
   "catalog.shipping_groups": [
     "modules/catalog"
   ],
+  "catalog.shopify_product_connection_commands": [
+    "modules/catalog"
+  ],
+  "catalog.shopify_product_connection_events": [
+    "modules/catalog"
+  ],
   "channels.allocation_audit_log": [
     "modules/channels"
   ],
@@ -1190,6 +1196,9 @@
     "modules/oms"
   ],
   "oms.package_allocation_commercial_fulfillment_activations": [
+    "modules/oms"
+  ],
+  "oms.package_reconciliation_commands": [
     "modules/oms"
   ],
   "oms.shipstation_label_reconciliation_checkpoint": [

@@ -19,6 +19,7 @@ import {
 } from "../../../returns/__tests__/support/live-inspection-fixtures";
 import { labelActivePolicy } from "../../../returns/__tests__/support/label-fixtures";
 import { CustomerReturnLiveService } from "../../../returns/application/customer-return-live.service";
+import { PostgresCustomerReturnBoxMeasurements } from "../../../returns/infrastructure/customer-return-box-measurements.repository";
 import {
   createPackageHistorySource,
   createPackageHistoryShipStationRequester,
@@ -279,6 +280,42 @@ integration("historical package capture and resumable backfill", () => {
       ).rows,
     ).toHaveLength(1);
   });
+  it("scans mixed-width numeric IDs without skipping orders and safely resumes existing jobs", async () => {
+    await pool.query(`INSERT INTO oms.oms_orders(id,channel_id,external_order_id,external_order_number)
+      VALUES(9,36,'9009','#9'),(10,36,'9010','#10'),(99,36,'9099','#99'),(1000,36,'9100','#1000'),(10000,36,'9101','#10000')`);
+    const visited: string[] = [];
+    for (let batch = 0; batch < 10; batch++) {
+      const result = await backfill.seed(
+        {
+          channelId: 36,
+          runKey: "mixed-ids",
+          actor: "fixture-operator",
+          limit: 2,
+        },
+        now,
+      );
+      visited.push(result.after);
+      if (result.state === "seeded") break;
+    }
+    expect(visited).toEqual(["10", "100", "1000", "10000"]);
+    expect(
+      (
+        await pool.query(
+          "SELECT j.oms_order_id::text AS oms_order_id FROM wms.shipping_package_history_jobs j ORDER BY j.oms_order_id",
+        )
+      ).rows.map((row) => row.oms_order_id),
+    ).toEqual(["9", "10", "99", "100", "101", "1000", "10000"]);
+    const replay = await backfill.seed(
+      {
+        channelId: 36,
+        runKey: "mixed-ids",
+        actor: "fixture-operator",
+        limit: 2,
+      },
+      now,
+    );
+    expect(replay).toMatchObject({ scanned: 0, seeded: 0, state: "seeded" });
+  });
   it("captures legacy package evidence, populates returns and preserves every protected source/balance row", async () => {
     await seed();
     const before = await fingerprint();
@@ -336,6 +373,21 @@ integration("historical package capture and resumable backfill", () => {
     expect(order.boxOptions[0].items).toEqual([
       { lineId: order.lines[0].id, quantity: 1 },
     ]);
+    const inspection = await service.inspectCanonicalForIntake({
+      channelId: 36,
+      omsOrderId: 100,
+      externalOrderId: "1001",
+      externalCustomerId: "901",
+    });
+    // Execute the real background retention boundary too: historical boxes have
+    // durable shipping proof but intentionally have no operational WMS package.
+    await new PostgresCustomerReturnBoxMeasurements(pool).retain(
+      inspection.local,
+      inspection.canonicalBoxOptions ?? inspection.order.boxOptions,
+      now,
+    );
+    expect(inspection.canonicalBoxOptions).toEqual([]);
+    expect(inspection.order.boxOptions).toEqual(order.boxOptions);
     expect(dimensions.read).not.toHaveBeenCalled();
     expect(await fingerprint()).toBe(before);
     expect(new Set(requests)).toEqual(new Set(["/shipments"]));
