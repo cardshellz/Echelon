@@ -456,8 +456,8 @@ describe("Shopify Adapter", () => {
       expect(body.product.variants[0].barcode).toBe("0123456789012"); // GTIN used as barcode
       expect(body.product.variants[0].price).toBe("14.99");
       expect(body.product.variants[0].compare_at_price).toBe("19.99");
-      expect(body.product.variants[0].weight).toBe(450);
-      expect(body.product.variants[0].weight_unit).toBe("g");
+      expect(body.product.variants[0].weight).toBe(16);
+      expect(body.product.variants[0].weight_unit).toBe("oz");
 
       // Image mapping
       expect(body.product.images).toHaveLength(1);

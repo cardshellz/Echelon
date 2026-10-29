@@ -155,7 +155,7 @@ describe("dropship marketplace listing push providers", () => {
         shipToLocationAvailability: { quantity: 4 },
       },
       packageWeightAndSize: {
-        weight: { value: 100, unit: "GRAM" },
+        weight: { value: 4, unit: "OUNCE" },
       },
     });
     const offerBody = JSON.parse(String(fetcher.calls.find(call => call.init.method === "POST" && call.url.endsWith("/offer"))?.init.body));
@@ -671,9 +671,8 @@ describe("dropship marketplace listing push providers", () => {
     expect(fetcher.calls).toHaveLength(0);
   });
 
-  // The shared builder preserves measured fractions instead of inventing a
-  // whole-gram minimum for this second consumer of the same connector.
-  it.each([453.59, 12.5, 12.49, 0.4, 100])("preserves a catalog weight of %s g on eBay", async (weightGrams) => {
+  // This consumer uses the same outbound ounce rule as direct channel listings.
+  it.each([[453.59, 16], [12.5, 1], [12.49, 1], [0.4, 1], [100, 4], [28, 1]] as const)("publishes %s g as %s whole ounces on eBay", async (weightGrams, expectedOunces) => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([
       jsonResponse({ offers: [] }),
@@ -690,7 +689,7 @@ describe("dropship marketplace listing push providers", () => {
     }))).resolves.toMatchObject({ status: "created", externalOfferId: "offer-101" });
 
     const inventoryBody = JSON.parse(String(fetcher.calls.find(call => call.init.method === "PUT" && call.url.includes("/inventory_item/"))?.init.body));
-    expect(inventoryBody.packageWeightAndSize.weight).toEqual({ value: weightGrams, unit: "GRAM" });
+    expect(inventoryBody.packageWeightAndSize.weight).toEqual({ value: expectedOunces, unit: "OUNCE" });
   });
 
   it("forces an access-token refresh without deleting the grant on an eBay listing API 401", async () => {

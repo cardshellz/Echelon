@@ -9,6 +9,29 @@ const source = { productId: 20, variantId: 101, facts: { weightGrams: "120.25" }
 const observed = { dimensions: { length: 6, width: 4, height: 1, unit: "INCH" as const },
   weight: { value: 2, unit: "POUND" as const }, packageType: "MAILING_BOX", shippingIrregular: true };
 describe("eBay package transport", () => {
+  it("sends a below-one-ounce catalog weight as one ounce and keeps original facts", () => {
+    const small = { ...source, facts: { weightGrams: "28.00" } };
+    const result = resolveEbayListingPackage({ source: small, sku: "SMALL" });
+    expect(result.payload.weight).toEqual({ value: 1, unit: "OUNCE" });
+    expect(result.plan.values.weightGrams).toBe(28);
+    expect(small.facts.weightGrams).toBe("28.00");
+  });
+  it("normalizes a preserved channel weight but detects even a concurrent edit within the rounded ounce", async () => {
+    const provider = syncProviderFixture(), prepared = await provider.prepare();
+    provider.currentItem().packageWeightAndSize = { weight: { value: 28, unit: "GRAM" } };
+    prepared.draft.inventoryItems[0].packageSource = { ...source, facts: {} };
+    const draft = await prepareEbayListingPackages(provider.client, prepared.draft);
+    expect(draft.inventoryItems[0].payload.packageWeightAndSize?.weight).toEqual({ value: 1, unit: "OUNCE" });
+    await expect(assertEbayPackagePreservation(provider.client, draft.inventoryItems)).resolves.toBeUndefined();
+    // Resuming after this exact item stage succeeded must not turn our own
+    // normalization into an external-change failure.
+    provider.currentItem().packageWeightAndSize!.weight = { value: 1, unit: "OUNCE" };
+    await expect(assertEbayPackagePreservation(provider.client, draft.inventoryItems)).resolves.toBeUndefined();
+    provider.currentItem().packageWeightAndSize!.weight = { value: 28.1, unit: "GRAM" };
+    await expect(assertEbayPackagePreservation(provider.client, draft.inventoryItems))
+      .rejects.toMatchObject({ code: "EBAY_SYNC_PACKAGE_CHANGED" });
+    expect(provider.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+  });
   it.each(["new", "published", "policy-change"] as const)("warns for %s packages without offer-policy reads", async shape => {
     const provider = syncProviderFixture(), prepared = await provider.prepare();
     prepared.draft.inventoryItems[0].packageSource = source;
@@ -20,7 +43,7 @@ describe("eBay package transport", () => {
     const draft = await prepareEbayListingPackages(client, prepared.draft);
     expect(draft.inventoryItems[0].packagePlan?.warnings).toEqual([{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING",
       field: "package_dimensions", productId: 20, variantId: 101, variantSku: "P5" }]);
-    expect(draft.inventoryItems[0].payload.packageWeightAndSize).toEqual({ weight: { value: 120.25, unit: "GRAM" } });
+    expect(draft.inventoryItems[0].payload.packageWeightAndSize).toEqual({ weight: { value: 5, unit: "OUNCE" } });
     await expect(assertEbayPackagePreservation(provider.client, draft.inventoryItems)).resolves.toBeUndefined();
     expect(provider.client.getOffers).not.toHaveBeenCalled();
     expect(getOffer).not.toHaveBeenCalled();
@@ -49,24 +72,24 @@ describe("eBay package transport", () => {
     expect(prepared.draft.inventoryItems[0].packageMaintenance).toEqual(historical);
     expect(draft.inventoryItems[0].packagePlan?.warnings).toHaveLength(1);
   });
-  it("preserves provider type, dimensions, units and irregular flag while replacing only known weight", () => {
+  it("preserves provider type, dimension units and irregular flag while rounding known weight", () => {
     const result = resolveEbayListingPackage({ source, sku: "P5", observed });
-    expect(result.payload).toEqual({ ...observed, weight: { value: 120.25, unit: "GRAM" } });
+    expect(result.payload).toEqual({ ...observed, weight: { value: 5, unit: "OUNCE" } });
     expect(result.plan.sources).toEqual({ weight: "catalog", dimensions: "channel" });
     expect(observed.weight).toEqual({ value: 2, unit: "POUND" });
   });
   it("translates complete catalog dimensions without replacing provider-owned package type", () => {
     expect(resolveEbayListingPackage({ source: { ...source, facts: { ...source.facts, lengthMm: "152.40", widthMm: "101.60",
       heightMm: "25.40" } }, sku: "P5", observed }).payload).toEqual({
-        ...observed, weight: { value: 120.25, unit: "GRAM" }, dimensions: { length: 15.24, width: 10.16, height: 2.54, unit: "CENTIMETER" },
+        ...observed, weight: { value: 5, unit: "OUNCE" }, dimensions: { length: 15.24, width: 10.16, height: 2.54, unit: "CENTIMETER" },
         packageType: "MAILING_BOX" });
   });
   it("does not fabricate package type or dimensions for a new item", () => {
     const missing = resolveEbayListingPackage({ source, sku: "P5" });
-    expect(missing.payload).toEqual({ weight: { value: 120.25, unit: "GRAM" } });
+    expect(missing.payload).toEqual({ weight: { value: 5, unit: "OUNCE" } });
     expect(missing.plan.warnings).toHaveLength(1);
     const result = resolveEbayListingPackage({ source, sku: "P5", observed: { dimensions: observed.dimensions } });
-    expect(result.payload).toEqual({ dimensions: observed.dimensions, weight: { value: 120.25, unit: "GRAM" } });
+    expect(result.payload).toEqual({ dimensions: observed.dimensions, weight: { value: 5, unit: "OUNCE" } });
     expect(result.payload).not.toHaveProperty("packageType");
   });
   it("ignores a retired catalog type in old snapshots and never overwrites the observed provider type", () => {
@@ -79,7 +102,7 @@ describe("eBay package transport", () => {
   it("refuses malformed preserved data but allows complete catalog facts to repair that field", () => {
     const malformed = { ...observed, weight: { value: 0, unit: "GRAM" as const } };
     expect(() => resolveEbayListingPackage({ source: { ...source, facts: {} }, sku: "P5", observed: malformed })).toThrow(/invalid package data/);
-    expect(resolveEbayListingPackage({ source, sku: "P5", observed: malformed }).payload.weight?.value).toBe(120.25);
+    expect(resolveEbayListingPackage({ source, sku: "P5", observed: malformed }).payload.weight?.value).toBe(5);
   });
   it("preserves unknown provider extension fields", () => {
     const extended = { ...observed, providerExtension: { handling: "fragile" } };
@@ -88,9 +111,9 @@ describe("eBay package transport", () => {
   it("preserves provider flags when an older draft contains a default irregular flag", async () => {
     const provider = syncProviderFixture(), prepared = await provider.prepare();
     provider.currentItem().packageWeightAndSize = structuredClone(observed);
-    prepared.draft.inventoryItems[0].payload.packageWeightAndSize = { weight: { value: 120.25, unit: "GRAM" }, packageType: "LETTER", shippingIrregular: false };
+    prepared.draft.inventoryItems[0].payload.packageWeightAndSize = { weight: { value: 5, unit: "OUNCE" }, packageType: "LETTER", shippingIrregular: false };
     const draft = await prepareEbayListingPackages(provider.client, prepared.draft);
-    expect(draft.inventoryItems[0].payload.packageWeightAndSize).toEqual({ ...observed, weight: { value: 120.25, unit: "GRAM" } });
+    expect(draft.inventoryItems[0].payload.packageWeightAndSize).toEqual({ ...observed, weight: { value: 5, unit: "OUNCE" } });
     await expect(assertEbayPackagePreservation(provider.client, draft.inventoryItems)).resolves.toBeUndefined();
   });
   it("does not replay a legacy type-only container when the provider has no package data", async () => {

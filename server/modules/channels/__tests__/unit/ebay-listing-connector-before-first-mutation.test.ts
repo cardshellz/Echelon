@@ -86,7 +86,7 @@ describe("EbayMarketplaceListingConnector beforeFirstMutation", () => {
     const result = await f.connector.pushListing(f);
     expect(result.warnings).toHaveLength(1);
     expect(vi.mocked(f.client.createOrReplaceInventoryItem).mock.calls[0][1].packageWeightAndSize)
-      .toEqual({ weight: { value: 120.25, unit: "GRAM" } });
+      .toEqual({ weight: { value: 5, unit: "OUNCE" } });
     if (grouped) expect(f.client.publishOfferByInventoryItemGroup).toHaveBeenCalledExactlyOnceWith("PACK", "EBAY_US");
     else expect(f.client.publishOffer).toHaveBeenCalledExactlyOnceWith("offer-101");
   });
