@@ -50,3 +50,25 @@ export function calculateCustomerReturnProductWeight(
   }
   return total.greaterThan(0) ? total.ceil().toNumber() : null;
 }
+
+/** Explicit scale measurement is needed only when catalog weights are missing.
+ * Keep the known product subtotal as a floor; never turn missing weight into 0. */
+export function resolveCustomerReturnParcelWeight(
+  items: readonly { quantity: number; unitWeightGrams: number | null | undefined }[],
+  packedWeightGrams?: number,
+): number | null {
+  if (items.length === 0 || items.some(item => !Number.isSafeInteger(item.quantity) || item.quantity <= 0
+    || (item.unitWeightGrams != null && !customerReturnUnitWeightSchema.safeParse(item.unitWeightGrams).success))) return null;
+  const calculated = calculateCustomerReturnProductWeight(items);
+  if (calculated !== null) return packedWeightGrams === undefined ? calculated : null;
+  if (!customerReturnParcelWeightSchema.safeParse(packedWeightGrams).success) return null;
+  const known = items.filter(item => item.unitWeightGrams != null);
+  const floor = known.length > 0 ? calculateCustomerReturnProductWeight(known) : 0;
+  return floor !== null && packedWeightGrams! >= floor ? packedWeightGrams! : null;
+}
+
+export function customerReturnPackedOuncesToGrams(value: string): number | null {
+  if (!/^\d{1,6}(?:\.\d{1,3})?$/.test(value)) return null;
+  const grams = new WeightDecimal(value).times("28.349523125").ceil();
+  return grams.greaterThan(0) && grams.lessThanOrEqualTo(Number.MAX_SAFE_INTEGER) ? grams.toNumber() : null;
+}

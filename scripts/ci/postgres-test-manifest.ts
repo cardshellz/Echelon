@@ -23,6 +23,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/marketplace-listings/__tests__/integration/prepared-channel-intent.integration.test.ts",
   "server/modules/marketplace-listings/__tests__/integration/listing-intent-propagation.integration.test.ts",
   "server/modules/marketplace-listings/__tests__/integration/channel-package-propagation.integration.test.ts",
+  "server/modules/marketplace-listings/__tests__/integration/channel-identifiers-propagation.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/listing-intent-lifecycle.integration.test.ts",
   "server/modules/procurement/__tests__/integration/shipment-create-recovery.integration.test.ts",
   "server/modules/procurement/__tests__/integration/shipment-work-list.integration.test.ts",
@@ -170,6 +171,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/returns/__tests__/integration/customer-return-authorization.repository.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-local-inspection.reader.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-intake.repository.test.ts",
+  "server/modules/returns/__tests__/integration/customer-return-complex-flow.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-labels.repository.test.ts",
   "server/modules/returns/__tests__/integration/return-policy-archive.repository.test.ts",
   "server/modules/returns/__tests__/integration/return-policy-shipping.repository.test.ts",
@@ -258,4 +260,5 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/inventory-planning/__tests__/integration/stock-link.integration.test.ts",
   "server/modules/channels/__tests__/integration/shopify-stock-link-source.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-ebay-stock-enrollment.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/quantity-publication-catchup-parking.integration.test.ts",
 ]);

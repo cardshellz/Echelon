@@ -15,7 +15,9 @@ describe("OMS/WMS authority conformance :: Shopify event ordering", () => {
       sourceTopic: "orders/updated",
       sourceEventId: "webhook_inbox:update-before-paid",
       sourceInboxId: 101,
-      financialStatus: "paid",
+      // Before payment Shopify reports pending; a fully paid update now grants
+      // first authority (#64592), so the race is modelled with its real status.
+      financialStatus: "pending",
       quantity: 2,
       fulfillableQuantity: 2,
       now: NOW,
@@ -108,12 +110,12 @@ describe("OMS/WMS authority conformance :: Shopify event ordering", () => {
     expect(duplicateEvent.eventKey).toBe(firstEvent.eventKey);
   });
 
-  it("does not authorize a newly added Shopify edit line from update-only evidence", () => {
+  it("does not authorize a newly added Shopify edit line while the edit leaves a balance due", () => {
     const unpaidEditLine = deriveOmsLineAuthority({
       sourceTopic: "orders/updated",
       sourceEventId: "webhook_inbox:edit-added-unpaid",
       sourceInboxId: 301,
-      financialStatus: "paid",
+      financialStatus: "partially_paid",
       quantity: 1,
       fulfillableQuantity: 1,
       now: NOW,
@@ -133,7 +135,7 @@ describe("OMS/WMS authority conformance :: Shopify event ordering", () => {
       sourceTopic: "orders/updated",
       sourceEventId: "webhook_inbox:edit-added-seen",
       sourceInboxId: 401,
-      financialStatus: "paid",
+      financialStatus: "partially_paid",
       quantity: 1,
       fulfillableQuantity: 1,
       now: NOW,

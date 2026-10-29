@@ -138,6 +138,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/returns/__tests__/integration/customer-return-authorization.repository.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-local-inspection.reader.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-intake.repository.test.ts",
+      "server/modules/returns/__tests__/integration/customer-return-complex-flow.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-labels.repository.test.ts",
       "server/modules/returns/__tests__/integration/return-policy-archive.repository.test.ts",
       "server/modules/returns/__tests__/integration/return-policy-shipping.repository.test.ts",
@@ -243,6 +244,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/channels/__tests__/integration/shopify-stock-link-source.integration.test.ts",
       // Channels PR3: Dropship eBay listing enrollment (the Dropship source SQL, the tick and the Dropship writer).
       "server/modules/dropship/__tests__/integration/dropship-ebay-stock-enrollment.integration.test.ts",
+      // Channels PR5: catch-up parking (park, the sealer's wake, identity_retired settlement, retry classes, Ops Health SQL).
+      "server/modules/inventory-planning/__tests__/integration/quantity-publication-catchup-parking.integration.test.ts",
     ];
     addedSuites.push(
       "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",
@@ -260,6 +263,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/procurement-lifecycle-quarantine.integration.test.ts",
       "server/modules/inventory/__tests__/integration/receiving-custody-count-guard.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/channel-package-propagation.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/channel-identifiers-propagation.integration.test.ts",
       "server/modules/oms/__tests__/integration/channel-merchandise-quantity.integration.test.ts",
       "server/modules/oms/__tests__/integration/shopify-merchandise-refund.integration.test.ts",
     );

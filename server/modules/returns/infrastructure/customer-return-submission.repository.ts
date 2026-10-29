@@ -29,7 +29,8 @@ export class PostgresCustomerReturnSubmissionStore
   async acquire(
     input: Parameters<CustomerReturnSubmissionStore["acquire"]>[0],
   ): Promise<ReturnSubmissionCommand> {
-    if (input.omsOrderId !== undefined) z.number().int().positive().safe().parse(input.omsOrderId);
+    if (input.omsOrderId !== undefined)
+      z.number().int().positive().safe().parse(input.omsOrderId);
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -62,8 +63,16 @@ export class PostgresCustomerReturnSubmissionStore
       if (!row) throw submissionNotFound();
       // Validate immutable canonical identity before even leasing a retry. A UUID
       // shared with another request does not grant ownership of that command.
-      if (input.omsOrderId !== undefined && (row.oms_order_id == null || Number(row.oms_order_id) !== input.omsOrderId))
-        throw new CustomerReturnIntakeError("RETURN_LABEL_COMMAND_CONFLICT", "This request belongs to different return details.", 409);
+      if (
+        input.omsOrderId !== undefined &&
+        (row.oms_order_id == null ||
+          Number(row.oms_order_id) !== input.omsOrderId)
+      )
+        throw new CustomerReturnIntakeError(
+          "RETURN_LABEL_COMMAND_CONFLICT",
+          "This request belongs to different return details.",
+          409,
+        );
       if (input.hash && row.request_hash !== input.hash)
         throw new CustomerReturnIntakeError(
           "RETURN_LABEL_COMMAND_CONFLICT",
@@ -114,7 +123,10 @@ export class PostgresCustomerReturnSubmissionStore
 function parse(row: Record<string, unknown>): ReturnSubmissionCommand {
   return {
     request: customerReturnLabelSubmitInputSchema.parse(row.request_snapshot),
-    omsOrderId: row.oms_order_id == null ? null : z.coerce.number().int().positive().safe().parse(row.oms_order_id),
+    omsOrderId:
+      row.oms_order_id == null
+        ? null
+        : z.coerce.number().int().positive().safe().parse(row.oms_order_id),
     actor: z
       .string()
       .min(1)
@@ -122,6 +134,10 @@ function parse(row: Record<string, unknown>): ReturnSubmissionCommand {
       .parse(row.lease_actor ?? row.actor),
     leaseToken: z.string().uuid().parse(row.lease_token),
     status: z.enum(["preparing", "accepted", "rejected"]).parse(row.status),
+    errorCode:
+      row.error_code == null
+        ? null
+        : z.string().min(1).max(100).parse(row.error_code),
     authorizationId:
       row.authorization_id === null
         ? null

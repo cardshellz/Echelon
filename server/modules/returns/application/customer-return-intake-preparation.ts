@@ -6,11 +6,14 @@ import {
   type CustomerReturnLabelSubmitInput,
 } from "@shared/returns/customer-return-label.contract";
 import { normalizeCustomerReturnOrderReference } from "../domain/customer-return-order-reference";
-import { projectCustomerReturnLiveWmsAllocations } from "./customer-return-live-delivery";
 import { customerReturnPublicLineId } from "./customer-return-live-packaging";
 import { customerReturnProviderGid as gid } from "./customer-return-live-identity";
 import { validateCustomerReturnBoxPlan } from "./customer-return-box-plan";
-import { customerReturnOriginAddress, customerReturnWarehouseAddressType } from "./customer-return-shipping-plan";
+import {
+  assertCustomerReturnShippingReady,
+  customerReturnOriginAddress,
+  customerReturnWarehouseAddressType,
+} from "./customer-return-shipping-plan";
 import {
   CustomerReturnIntakeError,
   type PreparedCustomerReturnIntake,
@@ -29,7 +32,11 @@ export function customerReturnSubmissionHash(
       JSON.stringify({
         channelId: input.channelId,
         ...(omsOrderId === undefined
-          ? { orderReference: normalizeCustomerReturnOrderReference(input.orderReference) }
+          ? {
+              orderReference: normalizeCustomerReturnOrderReference(
+                input.orderReference,
+              ),
+            }
           : { omsOrderId }),
         settingsVersion: input.settingsVersion,
         selections: [...input.selections].sort((a, b) =>
@@ -54,10 +61,12 @@ export function prepareCustomerReturnIntake(
   expectedOmsOrderId?: number,
 ): PreparedCustomerReturnIntake {
   const input = customerReturnLabelSubmitInputSchema.parse(raw);
+  assertCustomerReturnShippingReady(settings);
   const { local, provider, order, eligibility, facts } = inspection;
   if (
     input.channelId !== local.shop.channelId ||
-    (expectedOmsOrderId !== undefined && local.order.omsOrderId !== expectedOmsOrderId) ||
+    (expectedOmsOrderId !== undefined &&
+      local.order.omsOrderId !== expectedOmsOrderId) ||
     input.sourceRevision !== order.sourceRevision ||
     normalizeCustomerReturnOrderReference(input.orderReference) !==
       order.orderReference ||
@@ -81,10 +90,6 @@ export function prepareCustomerReturnIntake(
     customerReturnPackingLimits(settings),
   );
   const origin = customerReturnOriginAddress(provider.order.shippingAddress);
-  const mappings = projectCustomerReturnLiveWmsAllocations({
-    local,
-    shopify: provider,
-  });
   const publicLines = new Map(
     local.lines.flatMap((line) =>
       line.externalLineItemId === null
@@ -92,7 +97,7 @@ export function prepareCustomerReturnIntake(
         : [
             [
               customerReturnPublicLineId(
-                input.channelId,
+                local.shop.channelId,
                 provider.order.id,
                 gid("LineItem", line.externalLineItemId),
               ),
@@ -101,85 +106,10 @@ export function prepareCustomerReturnIntake(
           ],
     ),
   );
-  const selectedIds = new Set<number>();
-  const lines = input.selections.map((selection) => {
-    const localLine = publicLines.get(selection.lineId);
-    if (!localLine?.externalLineItemId) return mappingMissing();
-    selectedIds.add(localLine.omsOrderLineId);
-    const providerLineId = gid("LineItem", localLine.externalLineItemId);
-    const eligible = eligibility.lines.find(
-      (line) => line.lineId === providerLineId,
-    );
-    if (!eligible || eligible.eligibleQuantity < selection.quantity)
-      return mappingMissing();
-    const allocations: PreparedCustomerReturnIntake["lines"][number]["allocations"][number][] =
-      [];
-    let remaining = selection.quantity;
-    for (const allocation of [...eligible.allocations].sort((a, b) =>
-      compare(a.allocationId, b.allocationId),
-    )) {
-      if (remaining === 0) break;
-      if (allocation.eligibleQuantity === 0) continue;
-      const mapped = mappings.get(allocation.allocationId);
-      if (!mapped?.length) return mappingMissing();
-      const sourceFacts = facts.order.lines.find(
-        (line) => line.lineId === providerLineId,
-      )!;
-      const externalClaims = sourceFacts.claims.filter(
-        (claim) =>
-          claim.allocationId === allocation.allocationId &&
-          !claim.claimId.startsWith("local-root:"),
-      );
-      if (mapped.length > 1 && externalClaims.length > 0)
-        return mappingMissing();
-      let allocationRemaining = Math.min(
-        remaining,
-        allocation.eligibleQuantity,
-      );
-      for (const mapping of mapped) {
-        const rootQuantity = local.rootClaims
-          .filter(
-            (claim) =>
-              claim.wmsOrderItemId === mapping.wmsOrderItemId &&
-              gid("FulfillmentLineItem", claim.fulfillmentLineItemId) ===
-                allocation.fulfillmentLineItemId,
-          )
-          .reduce((total, claim) => total + claim.quantity, 0);
-        const externalQuantity = externalClaims.reduce(
-          (total, claim) => total + claim.quantity,
-          0,
-        );
-        const available =
-          mapping.originalQuantity - rootQuantity - externalQuantity;
-        if (!Number.isSafeInteger(available) || available < 0)
-          return mappingMissing();
-        const quantity = Math.min(available, allocationRemaining);
-        if (quantity > 0) {
-          allocations.push({
-            ...mapping,
-            quantity,
-            fulfillmentId: allocation.fulfillmentId,
-            fulfillmentLineItemId: allocation.fulfillmentLineItemId,
-            eligibleQuantity: allocation.deliveredQuantity,
-            deliveryEvidence: {
-              evidenceIds: allocation.evidenceIds,
-              deliveryStatus: allocation.deliveryStatus,
-            },
-          });
-          remaining -= quantity;
-          allocationRemaining -= quantity;
-        }
-      }
-    }
-    if (remaining !== 0) return mappingMissing();
-    return {
-      omsOrderLineId: localLine.omsOrderLineId,
-      externalLineItemId: localLine.externalLineItemId,
-      quantity: selection.quantity,
-      reasonCode: selection.reasonCode,
-      allocations,
-    };
-  });
+  const lines = prepareCustomerReturnSelectedLines(
+    input.selections,
+    inspection,
+  );
   return {
     channelId: input.channelId,
     omsOrderId: local.order.omsOrderId,
@@ -201,7 +131,9 @@ export function prepareCustomerReturnIntake(
     },
     warehouseSnapshot: {
       warehouseId: settings.warehouseId,
-      addressType: customerReturnWarehouseAddressType(settings.warehouseAddressType),
+      addressType: customerReturnWarehouseAddressType(
+        settings.warehouseAddressType,
+      ),
       version: settings.version,
       address: {
         name: settings.destinationAddress.name,
@@ -215,20 +147,7 @@ export function prepareCustomerReturnIntake(
     },
     operationalPolicy,
     lines,
-    expectedClaims: local.wmsItems
-      .filter(
-        (item) =>
-          item.omsOrderLineId !== null && selectedIds.has(item.omsOrderLineId),
-      )
-      .map((item) => ({
-        wmsOrderItemId: item.wmsOrderItemId,
-        legacyExpectedQuantity: local.legacyClaims
-          .filter((claim) => claim.wmsOrderItemId === item.wmsOrderItemId)
-          .reduce((sum, claim) => sum + claim.expectedQuantity, 0),
-        claimedQuantity: local.rootClaims
-          .filter((claim) => claim.wmsOrderItemId === item.wmsOrderItemId)
-          .reduce((sum, claim) => sum + claim.quantity, 0),
-      })),
+    expectedClaims: [],
     parcels: plan.parcels.map((parcel) => ({
       parcelKey: String(parcel.number),
       dimensions: parcel.dimensions,
@@ -246,12 +165,36 @@ export function prepareCustomerReturnIntake(
   };
 }
 
-function mappingMissing(): never {
-  throw new CustomerReturnIntakeError(
-    "RETURN_LABEL_ALLOCATION_UNVERIFIED",
-    "The original shipment and warehouse quantities need verification before this return can be created.",
-  );
+/** Shared by lookup readiness, review, and the final transactional submission. */
+export function prepareCustomerReturnSelectedLines(
+  selections: CustomerReturnLabelSubmitInput["selections"],
+  inspection: Pick<CustomerReturnIntakeInspection, "local" | "provider" | "eligibility" | "facts">,
+): PreparedCustomerReturnIntake["lines"] {
+  const { local, provider, eligibility, facts } = inspection;
+  return selections.map(selection => {
+    const localLine = local.lines.find(line => line.externalLineItemId !== null
+      && customerReturnPublicLineId(local.shop.channelId, provider.order.id,
+        gid("LineItem", line.externalLineItemId)) === selection.lineId);
+    const nativeId = localLine?.externalLineItemId;
+    const purchased = nativeId ? provider.lines.find(line => line.id === gid("LineItem", nativeId)) : undefined;
+    const eligible = purchased ? eligibility.lines.find(line => line.lineId === purchased.id) : undefined;
+    if (!localLine || !nativeId || !purchased || !eligible || eligible.eligibleQuantity < selection.quantity) {
+      throw new CustomerReturnIntakeError("RETURN_INTAKE_SOURCE_CHANGED", "Available return quantities changed. Review your items again.");
+    }
+    const externalClaims = facts.order.lines.find(line => line.lineId === purchased.id)!.claims
+      .filter(claim => !claim.claimId.startsWith("local-root:") && !claim.claimId.startsWith("legacy-return-item:") && !claim.claimId.startsWith("inventory-return:"))
+      .reduce((total, claim) => total + claim.quantity, 0);
+    return { omsOrderLineId: localLine.omsOrderLineId, externalLineItemId: nativeId,
+      quantity: selection.quantity, reasonCode: selection.reasonCode, allocations: [{
+        sourceKind: "shopify_purchase" as const, wmsOrderItemId: null, fulfillmentId: null, fulfillmentLineItemId: null,
+        quantity: selection.quantity, originalQuantity: purchased.quantity,
+        eligibleQuantity: purchased.quantity - externalClaims,
+        deliveryEvidence: { method: "verified_shopify_purchase_v1", orderId: provider.order.id,
+          purchasedLineId: purchased.id, purchasedQuantity: purchased.quantity, observedAt: provider.observedAt },
+      }] };
+  });
 }
+
 function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }

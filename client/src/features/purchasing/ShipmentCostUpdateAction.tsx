@@ -4,8 +4,9 @@ import { useAuth } from "@/lib/auth";
 import { createShipmentCostUpdateClient, shipmentCostWorkflowError } from "@/lib/shipment-cost-workflow";
 import { Button } from "@/components/ui/button";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
+import { FinancialCommandRequestError } from "@/lib/financial-command";
 
-export function ShipmentCostUpdateAction({ shipmentId, disabled = false }: { shipmentId: number; disabled?: boolean }) {
+export function ShipmentCostUpdateAction({ shipmentId, disabled = false, onMeasurementsNeeded }: { shipmentId: number; disabled?: boolean; onMeasurementsNeeded?: () => void }) {
   const { hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const [client] = useState(() => createShipmentCostUpdateClient(() => crypto.randomUUID()));
@@ -20,7 +21,13 @@ export function ShipmentCostUpdateAction({ shipmentId, disabled = false }: { shi
   </p>;
   const current = update.variables === shipmentId;
   return <div className="space-y-2">
-    <Button className="min-h-[44px]" disabled={disabled || update.isPending} onClick={() => update.mutate(shipmentId)}>
+    <Button className="min-h-[44px]" disabled={disabled || update.isPending} onClick={() => update.mutate(shipmentId, {
+      // Observer callbacks stop on unmount; a late result still refreshes saved
+      // costs through onSettled without opening another shipment's editor.
+      onError: error => {
+        if (error instanceof FinancialCommandRequestError && error.code === "MISSING_ALLOCATION_DIMENSIONS") onMeasurementsNeeded?.();
+      },
+    })}>
       {update.isPending && current ? "Updating shipment costs…" : "Update shipment costs"}
     </Button>
     {current && update.isError && <p role="alert" className="text-sm text-destructive">{shipmentCostWorkflowError(update.error)}</p>}

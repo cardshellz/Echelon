@@ -182,6 +182,10 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/getOmsLineRemainingMaterializableQuantity/);
     expect(WMS_SYNC_SRC).toMatch(/const materializableOmsLines = omsLines\.filter/);
     expect(WMS_SYNC_SRC).toMatch(/no OMS-authorized fulfillable quantity/);
+    expect(WMS_SYNC_SRC).toContain(
+      "Paid physical OMS order has zero paid line authority",
+    );
+    expect(WMS_SYNC_SRC).toContain("assertPaidPhysicalLineAuthority({");
     expect(WMS_SYNC_SRC).toMatch(/const omsQty = omsLine \? getOmsLineMaterializableQuantity\(omsLine\) : 0/);
     expect(WMS_SYNC_SRC).toMatch(/const materializableQuantity = getOmsLineRemainingMaterializableQuantity\(omsLine\)/);
   });

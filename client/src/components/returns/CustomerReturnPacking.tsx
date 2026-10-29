@@ -1,3 +1,4 @@
+import { previewParcelLabelWeight } from "@/lib/customer-return-parcels";
 import { useContext, useLayoutEffect, useRef, useState, type DragEvent } from "react";
 import { CustomerReturnEmbeddedContext } from "./CustomerReturnSurface";
 import {
@@ -108,7 +109,7 @@ export function CustomerReturnPacking({
   const currentNotice = notice?.after === parcels ? notice : null;
   const weightNeedsVerification = parcels.some(
     (parcel) =>
-      previewParcelProductWeight(order, parcel).status === "unverified",
+      previewParcelLabelWeight(order, parcel).status === "unverified",
   );
   const guardrailIssues = parcels.map(parcel => previewPackingGuardrailIssue(order, parcel));
   function splitToFit(parcel: PreviewParcelDraft) {
@@ -556,11 +557,22 @@ export function CustomerReturnPacking({
               onChange={(next) =>
                 onChange(
                   parcels.map((candidate) =>
-                    candidate.key === parcel.key ? next : candidate,
+                    candidate.key === parcel.key ? { ...next, packedWeightOunces: undefined } : candidate,
                   ),
                 )
               }
             />
+            {previewParcelProductWeight(order, parcel).status === "unverified" && (
+              <div className="my-4 max-w-sm space-y-2">
+                <label htmlFor={`packed-weight-${parcel.key}`} className="block text-sm font-medium">Packed box weight (ounces)</label>
+                <input id={`packed-weight-${parcel.key}`} type="text" inputMode="decimal" disabled={busy}
+                  value={parcel.packedWeightOunces ?? ""} className="h-11 w-full rounded-md border px-3 text-sm"
+                  aria-describedby={`packed-weight-help-${parcel.key}`}
+                  onChange={event => onChange(parcels.map(candidate => candidate.key === parcel.key
+                    ? { ...candidate, packedWeightOunces: event.target.value } : candidate))} />
+                <p id={`packed-weight-help-${parcel.key}`} className="text-xs text-muted-foreground">Weigh the sealed box, including packing materials. We need this measurement because the original item weights aren't recorded.</p>
+              </div>
+            )}
             <CustomerReturnBoxContents
               order={order}
               selections={selections}

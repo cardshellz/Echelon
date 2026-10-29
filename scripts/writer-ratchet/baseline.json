@@ -1548,6 +1548,12 @@
   "returns.customer_return_parcel_items": [
     "modules/returns"
   ],
+  "returns.customer_return_parcel_receipt_allocations": [
+    "modules/returns"
+  ],
+  "returns.customer_return_parcel_receipts": [
+    "modules/returns"
+  ],
   "returns.customer_return_parcels": [
     "modules/returns"
   ],

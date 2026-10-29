@@ -19,7 +19,7 @@ export interface ApplyReturnRestockInput {
   warehouseLocationId: number;
   quantity: number;
   omsOrderId: number;
-  wmsOrderId: number;
+  wmsOrderId: number | null;
   wmsOrderItemId: number | null;
   actor: string;
   notes: string | null;
@@ -74,7 +74,7 @@ interface InsertedIdRow { id: unknown }
 
 export interface ApplyReturnedStockInput {
   productVariantId: number; warehouseLocationId: number; quantity: number;
-  wmsOrderId: number; wmsOrderItemId: number | null; actor: string; notes: string | null; now: Date;
+  wmsOrderId: number | null; wmsOrderItemId: number | null; actor: string; notes: string | null; now: Date;
   operationKey: string; referenceType: "return_inventory_treatment" | "order_return_command";
   referenceId: string; lotNumberPrefix: string;
   condition?: "sellable" | "damaged" | "defective";
@@ -97,8 +97,12 @@ export async function applyReturnRestock(executor: ReturnRestockExecutor, rawInp
  */
 export async function applyReturnedStock(executor: ReturnRestockExecutor, input: ApplyReturnedStockInput): Promise<ApplyReturnRestockResult> {
   for (const [field,value] of Object.entries({ productVariantId: input.productVariantId,
-    warehouseLocationId: input.warehouseLocationId, quantity: input.quantity, wmsOrderId: input.wmsOrderId })) {
+    warehouseLocationId: input.warehouseLocationId, quantity: input.quantity })) {
     if (!Number.isSafeInteger(value) || value<=0) throw new ReturnRestockError("RETURN_RESTOCK_INPUT_INVALID",`${field} must be a positive safe integer.`);
+  }
+  if (input.wmsOrderId === null ? input.referenceType !== "return_inventory_treatment" || input.wmsOrderItemId !== null
+    : !Number.isSafeInteger(input.wmsOrderId) || input.wmsOrderId <= 0) {
+    throw new ReturnRestockError("RETURN_RESTOCK_INPUT_INVALID", "Missing outbound provenance is supported only for canonical purchased return dispositions.");
   }
   if (typeof input.actor !== "string" || !input.actor.trim()
     || typeof input.operationKey !== "string" || !input.operationKey.trim() || input.operationKey.length>240
@@ -261,7 +265,6 @@ function normalizeInput(input: ApplyReturnRestockInput): ApplyReturnRestockInput
     warehouseLocationId: input.warehouseLocationId,
     quantity: input.quantity,
     omsOrderId: input.omsOrderId,
-    wmsOrderId: input.wmsOrderId,
   })) {
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new ReturnRestockError("RETURN_RESTOCK_INPUT_INVALID", `${field} must be a positive safe integer.`, { field, value });
@@ -285,7 +288,7 @@ function validateReplay(rows: ExistingTransactionRow[], input: ApplyReturnedStoc
   const inventoryTransactionIds: number[] = [];
   const targetState = input.condition && input.condition !== "sellable" ? input.condition : "on_hand";
   for (const row of rows) {
-    if (readPositiveInteger(row.order_id,"existing return WMS order") !== input.wmsOrderId
+    if ((row.order_id === null ? null : readPositiveInteger(row.order_id,"existing return WMS order")) !== input.wmsOrderId
       || (row.order_item_id === null ? null : readPositiveInteger(row.order_item_id,"existing return WMS item")) !== input.wmsOrderItemId
       || readPositiveInteger(row.product_variant_id,"existing return variant") !== input.productVariantId
       || readPositiveInteger(row.to_location_id,"existing return location") !== input.warehouseLocationId

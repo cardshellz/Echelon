@@ -124,7 +124,7 @@ dbDescribe.sequential("durable external quantity admission with actual migration
       restarted.withLegacyCatchupScope(currentScope, () => restarted.run(currentScope, provider), currentClaim);
     const service = new QuantityPublicationCatchupService({ settleArchived: restarted.settleArchived.bind(restarted),
       listDue: async limit => (await restarted.listDue(limit)).filter(row => row.catchupId === claim.catchupId),
-      complete: restarted.complete.bind(restarted), fail: restarted.fail.bind(restarted),
+      complete: restarted.complete.bind(restarted), fail: restarted.fail.bind(restarted), park: restarted.park.bind(restarted),
     }, replan);
     expect(await service.processDue()).toEqual({ completed: 0, failed: 1 });
     expect(provider).toHaveBeenCalledOnce();
@@ -140,12 +140,13 @@ dbDescribe.sequential("durable external quantity admission with actual migration
     // A worker may have selected the claim just before the first attempt became
     // uncertain. That stale selection must not rewrite the revision or bypass backoff.
     const selectedBeforeUncertainty = new QuantityPublicationCatchupService({ settleArchived: restarted.settleArchived.bind(restarted),
-      listDue: async () => [claim], complete: restarted.complete.bind(restarted), fail: restarted.fail.bind(restarted),
+      listDue: async () => [claim], complete: restarted.complete.bind(restarted), fail: restarted.fail.bind(restarted), park: restarted.park.bind(restarted),
     }, replan);
     expect(await selectedBeforeUncertainty.processDue()).toEqual({ completed: 0, failed: 1 });
     expect(provider).toHaveBeenCalledOnce();
+    // Channels PR5: the second counted transient failure of the revision doubles its delay (min(1 min x 2^n, 1 h)).
     expect(await read()).toEqual({ revision: claim.revision,
-      next_attempt_at: new Date("2026-09-08T15:01:00.000Z"), last_error_code: "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED" });
+      next_attempt_at: new Date("2026-09-08T15:02:00.000Z"), last_error_code: "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED" });
     const afterDelay = new PostgresQuantityPublicationAdmission(database.pool,
       () => new Date("2026-09-08T15:01:00.000Z"));
     expect((await afterDelay.listDue(100)).some(row => row.catchupId === claim.catchupId)).toBe(false);
@@ -253,7 +254,7 @@ dbDescribe.sequential("durable external quantity admission with actual migration
     const restarted = new PostgresQuantityPublicationAdmission(database.pool, clock);
     const replan = vi.fn(async () => { throw new Error("Unrelated marketplace resolver is broken"); });
     const fail = vi.fn(restarted.fail.bind(restarted));
-    const service = new QuantityPublicationCatchupService({ settleArchived: restarted.settleArchived.bind(restarted), listDue: async () => [claim], complete: restarted.complete.bind(restarted), fail }, replan);
+    const service = new QuantityPublicationCatchupService({ settleArchived: restarted.settleArchived.bind(restarted), listDue: async () => [claim], complete: restarted.complete.bind(restarted), fail, park: restarted.park.bind(restarted) }, replan);
     expect(await service.processDue()).toEqual({ completed: 1, failed: 0 });
     expect(replan).not.toHaveBeenCalled(); expect(fail).not.toHaveBeenCalled();
     expect(await restarted.complete(claim)).toBe(false); // Already completed is not a newly completed revision.

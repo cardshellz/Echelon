@@ -6,6 +6,7 @@ import type { ReservationServiceContract } from "../../../channels/reservation.s
 
 import {
   admitInitialProviderShipmentAfterInventoryAuthority,
+  assertPaidPhysicalLineAuthority,
   requireRoutedWarehouseId,
   WmsShipmentPrerequisiteError,
   WmsSyncService,
@@ -59,6 +60,45 @@ describe("WMS shipment inventory prerequisites", () => {
       hasShippableItems: true,
       routedWarehouseId: 7,
     })).toBe(7);
+  });
+
+  it("rejects a paid physical order whose payment never authorized its lines", () => {
+    expect(() =>
+      assertPaidPhysicalLineAuthority({
+        omsOrderId: 1178672,
+        financialStatus: "paid",
+        lines: [
+          {
+            id: 123649,
+            quantity: 20,
+            paidQuantity: 0,
+            requiresShipping: true,
+          },
+        ],
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "WMS_SHIPMENT_PREREQUISITE_FAILED",
+        context: {
+          omsOrderId: 1178672,
+          financialStatus: "paid",
+          orderLineIds: [123649],
+        },
+      }),
+    );
+  });
+
+  it("allows legitimate zero-materialization states", () => {
+    expect(() =>
+      assertPaidPhysicalLineAuthority({
+        omsOrderId: 10,
+        financialStatus: "paid",
+        lines: [
+          { id: 1, quantity: 2, paidQuantity: 2, requiresShipping: true },
+          { id: 2, quantity: 1, paidQuantity: 0, requiresShipping: false },
+        ],
+      }),
+    ).not.toThrow();
   });
 
   it("allows an untracked physical line when authority returns an explicit no-claim success", async () => {

@@ -33,7 +33,7 @@ const variantSchema = z.object({
   id: z.number().int().positive(), sku: z.string().trim().min(1).max(100), catalog_sku: z.string().min(1), name: nullableText,
   option1_name: nullableText, option1_value: nullableText, option2_name: nullableText, option2_value: nullableText,
   price_cents: storedCents, compare_at_price_cents: storedCents,
-  weight_grams: z.number().nullable(), ebay_weight_grams: z.number().nullable(), barcode: nullableText,
+  weight_grams: z.number().nullable(), ebay_weight_grams: z.number().nullable(), barcode: nullableText, mpn: nullableText,
   length_mm: z.number().nullable(), width_mm: z.number().nullable(), height_mm: z.number().nullable(),
   ebay_fulfillment_policy_override: nullableText, ebay_return_policy_override: nullableText,
   ebay_payment_policy_override: nullableText, external_variant_id: nullableText, external_product_id: nullableText,
@@ -99,7 +99,7 @@ export class PostgresEbayListingPushRepository {
   async readVariants(productId: number, database: Pick<PoolClient, "query"> = this.pool): Promise<EbayPushVariant[]> {
     const rows = await database.query(`SELECT pv.id, COALESCE(cl.external_sku, pv.sku) AS sku, pv.sku AS catalog_sku,
       pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
-      pv.price_cents, pv.compare_at_price_cents, pv.weight_grams::float8 AS weight_grams, pv.barcode,
+      pv.price_cents, pv.compare_at_price_cents, pv.weight_grams::float8 AS weight_grams, pv.barcode, pv.mpn,
       pv.length_mm::float8 AS length_mm, pv.width_mm::float8 AS width_mm, pv.height_mm::float8 AS height_mm,
       COALESCE(cvo.weight_override, pv.weight_grams)::float8 AS ebay_weight_grams,
       pv.ebay_fulfillment_policy_override, pv.ebay_return_policy_override, pv.ebay_payment_policy_override,

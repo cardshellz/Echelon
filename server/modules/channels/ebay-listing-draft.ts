@@ -30,6 +30,7 @@ interface EbayRouteVariantInput {
   price_cents?: unknown;
   compare_at_price_cents?: unknown;
   barcode?: string | null;
+  mpn?: string | null;
   ebay_weight_grams?: unknown;
   weight_override?: unknown;
   weight_grams?: unknown;
@@ -112,7 +113,7 @@ export function buildEbayRouteListingDraft(
       name: routeVariant.name || variationValue,
       barcode: routeVariant.barcode ?? null,
       gtin: null,
-      mpn: null,
+      mpn: routeVariant.mpn ?? null,
       weightGrams: normalizePackageWeightGrams(routeVariant),
       package: { weightGrams: (routeVariant.ebay_weight_grams ?? routeVariant.weight_override ?? routeVariant.weight_grams ?? routeVariant.weightGrams ?? null) as number | string | null,
         lengthMm: routeVariant.length_mm, widthMm: routeVariant.width_mm, heightMm: routeVariant.height_mm },

@@ -1,3 +1,4 @@
+import { customerReturnRejectionMessage } from "@shared/returns/customer-return-errors";
 import { z } from "zod";
 import {
   CUSTOMER_RETURNS_API,
@@ -53,14 +54,24 @@ async function responseBody<T extends z.ZodTypeAny>(
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     const parsed = z
-      .object({ error: z.object({ code: z.string().max(100) }) })
+      .object({
+        error: z.object({
+          code: z.string().max(100),
+          reasonCode: z.string().max(100).optional(),
+        }),
+      })
       .safeParse(body);
     const code = parsed.success
       ? parsed.data.error.code
       : "CUSTOMER_RETURN_REQUEST_FAILED";
     if (
       code === "RETURN_LIVE_REVIEW_CHANGED" ||
-      code === "RETURN_LABEL_SETTINGS_CHANGED"
+      code === "RETURN_LABEL_SETTINGS_CHANGED" ||
+      code === "RETURN_LIVE_QUANTITY_INVALID" ||
+      code === "RETURN_LABEL_ALLOCATION_UNVERIFIED" ||
+      code === "RETURN_ITEM_WEIGHT_UNVERIFIED" ||
+      code === "RETURN_LABEL_ORIGIN_UNVERIFIED" ||
+      code === "RETURN_LABEL_SETTINGS_DISABLED"
     ) {
       throw new ReturnSourceChangedError(
         "This order changed. Choose it again to review the available items.",
@@ -74,17 +85,20 @@ async function responseBody<T extends z.ZodTypeAny>(
           : "Your return is saved, but prepaid shipping for this box needs our team's help. No new label was purchased."
         : code === "RETURN_RATE_COST_UNVERIFIED"
           ? "The prepaid shipping price could not be verified. No label was purchased. Try again or contact us for help."
-        : code === "RETURN_RATE_NONE_ELIGIBLE" || code === "RETURN_LABEL_PARCEL_NOT_ELIGIBLE"
-          ? canRepack
-            ? "Review your box sizes and separate heavy items into more boxes, or contact us for help. No label was purchased."
-            : "Your return is saved, but no allowed prepaid service is available for this box. Contact us for help."
-        : code === "RETURN_LABEL_SUBMISSION_REJECTED"
-        ? "This request was not accepted. Choose the order again to review its availability."
-        : code === "RETURN_LABEL_SUBMISSION_PROCESSING"
-          ? "Your request is still being checked. Check its status again shortly."
-          : code === "RETURN_LABEL_SUBMISSION_NOT_FOUND"
-            ? "We have not confirmed your request yet. Retry this saved request to continue."
-            : "We could not confirm the result. Your saved request will be kept. Please try again.",
+          : code === "RETURN_RATE_NONE_ELIGIBLE" ||
+              code === "RETURN_LABEL_PARCEL_NOT_ELIGIBLE"
+            ? canRepack
+              ? "Review your box sizes and separate heavy items into more boxes, or contact us for help. No label was purchased."
+              : "Your return is saved, but no allowed prepaid service is available for this box. Contact us for help."
+            : code === "RETURN_LABEL_SUBMISSION_REJECTED"
+              ? customerReturnRejectionMessage(
+                  parsed.success ? parsed.data.error.reasonCode : undefined,
+                )
+              : code === "RETURN_LABEL_SUBMISSION_PROCESSING"
+                ? "Your request is still being checked. Check its status again shortly."
+                : code === "RETURN_LABEL_SUBMISSION_NOT_FOUND"
+                  ? "We have not confirmed your request yet. Retry this saved request to continue."
+                  : "We could not confirm the result. Your saved request will be kept. Please try again.",
       response.status,
     );
   }

@@ -16,6 +16,17 @@ function statement(file: string, marker: string): string {
   return source.slice(start, end + 1);
 }
 
+export async function addHistoricalReturnSourceColumns(pool: Pool): Promise<void> {
+  // Legacy compatibility columns are retained in current orders.schema.ts and
+  // originate in the 0001 owner tables (the 0002 WMS projection omitted them).
+  const legacy = readFileSync("migrations/0001_past_molly_hayes.sql", "utf8");
+  for (const [relation, column] of [["orders", "source_table_id"], ["order_items", "source_item_id"], ["order_items", "shopify_line_item_id"]]) {
+    const definition = legacy.match(new RegExp(`"${column}" varchar\\(\\d+\\)`))?.[0];
+    if (!definition) throw new Error(`Legacy source column missing: ${column}`);
+    await pool.query(`ALTER TABLE wms.${relation} ADD COLUMN ${definition}`);
+  }
+}
+
 /** Queried relations come from retained migration DDL. Unread FK parents are
  * minimal fixtures. This is a targeted schema test, not a historical migration
  * chain replay; compatibility projection columns are copied explicitly below. */
@@ -36,14 +47,7 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
     ALTER TABLE wms.order_items ALTER COLUMN oms_order_line_id TYPE BIGINT;
     ALTER TABLE wms.order_items ADD CONSTRAINT inspection_item_order_fk FOREIGN KEY (order_id) REFERENCES wms.orders(id);
     ALTER TABLE wms.order_items ADD CONSTRAINT inspection_item_line_fk FOREIGN KEY (oms_order_line_id) REFERENCES oms.oms_order_lines(id);`);
-  // These two legacy columns are retained in current orders.schema.ts and
-  // originate in the 0001 owner tables (the 0002 WMS projection omitted them).
-  const legacy = readFileSync("migrations/0001_past_molly_hayes.sql", "utf8");
-  for (const [relation, column] of [["orders", "source_table_id"], ["order_items", "source_item_id"]]) {
-    const definition = legacy.match(new RegExp(`"${column}" varchar\\(100\\)`))?.[0];
-    if (!definition) throw new Error(`Legacy source column missing: ${column}`);
-    await pool.query(`ALTER TABLE wms.${relation} ADD COLUMN ${definition}`);
-  }
+  await addHistoricalReturnSourceColumns(pool);
   await pool.query(table("migrations/0002_concerned_darwin.sql", 'CREATE TABLE "product_variants" (')
     .replace('CREATE TABLE "product_variants"', 'CREATE TABLE catalog."product_variants"'));
   await pool.query(statement("migrations/185_dropship_package_data_consolidation.sql",
@@ -92,6 +96,7 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
   await pool.query(readFileSync("migrations/062_returns.sql", "utf8"));
   await pool.query(readFileSync("migrations/131_refund_line_disposition_authority.sql", "utf8"));
   await pool.query(readFileSync("migrations/0699_customer_return_authorizations.sql", "utf8"));
+  await pool.query(readFileSync("migrations/900000039000019450001_historical_return_sources.sql", "utf8"));
   await createIntakeOwnerTables(pool);
   // Only the evidence relations read by the mirror predicate are needed here;
   // their definitions are extracted verbatim from the canonical migrations.
@@ -115,6 +120,7 @@ export async function createIntakeOwnerTables(pool: Pool): Promise<void> {
   await pool.query(readFileSync("migrations/0613_return_cases.sql", "utf8"));
   await pool.query(table("migrations/207_return_case_financial_actions.sql", "CREATE TABLE returns.return_case_customer_refunds ("));
   await pool.query(readFileSync("migrations/250_customer_return_private_intake.sql", "utf8"));
+  await pool.query(readFileSync("migrations/900000040000019450002_purchase_return_receiving.sql", "utf8"));
 }
 
 export async function seedInspectionTestSchema(pool: Pool): Promise<void> {

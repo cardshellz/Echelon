@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000039000019440002_quantity_catchup_identity_retired_settlement.sql",
+  "generation": 39,
+  "pr": 1944,
+  "ordinal": 2,
+  "after": [
+    "900000038000019440001_quantity_catchup_parking.sql"
+  ]
+}
