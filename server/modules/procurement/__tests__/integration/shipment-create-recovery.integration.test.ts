@@ -60,6 +60,36 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
       (SELECT count(*)::int FROM procurement.inbound_shipment_lines) AS lines,
       (SELECT count(*)::int FROM public.audit_events WHERE actor=$1) AS audits`, [actorId])).rows[0];
   }
+  async function creationAudits() {
+    return (await pool.query(`SELECT id,actor,action,target,changes,context,timestamp
+      FROM public.audit_events WHERE actor = ANY($1::text[]) ORDER BY id`, [[actorId, delegateId]])).rows;
+  }
+  async function expectSelectedCreationAudit(pieces: number) {
+    expect(await counts()).toEqual({ shipments: 1, histories: 1, lines: 1, audits: 4 });
+    const audits = await creationAudits();
+    expect(audits.map(event => event.action)).toEqual([
+      "procurement.shipment.physical_totals_materialized",
+      "procurement.shipment.allocation_refreshed",
+      "procurement.shipment_line.add-from-po",
+      "procurement.shipment.create",
+    ]);
+    for (const event of audits) expect(event).toMatchObject({ actor: actorId, timestamp: NOW });
+    expect(audits[0]).toMatchObject({
+      changes: { lines: [], after: { totalPieces: pieces } },
+      context: { source: "saved_shipment_line_measurements" },
+    });
+    expect(audits[1]).toMatchObject({
+      changes: { before: [], after: [], lines: [{
+        before: { allocatedCostCents: null }, after: { allocatedCostCents: 0 },
+      }] }, context: { pendingCostIds: [] },
+    });
+    expect(audits[2]).toMatchObject({ changes: { before: [], after: [{ qtyShipped: pieces }] } });
+    expect(audits[3]).toMatchObject({
+      changes: { before: null, after: { shipment: { totalPieces: pieces }, lines: [{ qtyShipped: pieces }] } },
+      context: { lineCount: 1 },
+    });
+    return audits;
+  }
   async function retryDue(name: string) {
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
@@ -165,7 +195,7 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
     const result = await execute("selected", fromPo(501));
     expect(result).toMatchObject({ httpStatus: 201, body: { lineCount: 1, totalPieces: 501, totalCartons: 3 } });
     expect((await pool.query("SELECT purchase_order_id,purchase_order_line_id,product_variant_id,qty_shipped,carton_count FROM procurement.inbound_shipment_lines")).rows).toEqual([{ purchase_order_id: 10, purchase_order_line_id: 21, product_variant_id: 200, qty_shipped: 501, carton_count: 3 }]);
-    expect(await counts()).toEqual({ shipments: 1, histories: 1, lines: 1, audits: 2 });
+    await expectSelectedCreationAudit(501);
   });
 
   it("creates and recovers a shipment with the same explicit unit conversion used by Add from PO", async () => {
@@ -176,9 +206,10 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
     expect((await pool.query(`SELECT purchase_order_line_id,product_variant_id,qty_shipped,units_per_variant_snapshot
       FROM procurement.inbound_shipment_lines`)).rows)
       .toEqual([{ purchase_order_line_id: 21, product_variant_id: 200, qty_shipped: 500, units_per_variant_snapshot: 250 }]);
+    const committedAudit = await expectSelectedCreationAudit(500);
     await pool.query("UPDATE catalog.product_variants SET units_per_variant=500 WHERE id=200");
     expect(await execute("selected-unit", body, delegateId)).toEqual({ ...result, replayed: true });
-    expect(await counts()).toEqual({ shipments: 1, histories: 1, lines: 1, audits: 2 });
+    expect(await expectSelectedCreationAudit(500)).toEqual(committedAudit);
   });
 
   it("leaves no shipment, selected units or history when catalog conversion changed before creation", async () => {
@@ -194,17 +225,19 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
     const body = fromPo();
     const original = await execute("lost-response", body);
     const created = shipmentCreateResultSchema.parse(original.body);
+    const committedAudit = await expectSelectedCreationAudit(35);
     await pool.query("UPDATE procurement.inbound_shipments SET status='booked',notes='Later edit' WHERE id=$1", [created.id]);
     const replay = await execute("lost-response", body, delegateId);
     expect(replay).toEqual({ ...original, replayed: true });
-    expect(await counts()).toEqual({ shipments: 1, histories: 1, lines: 1, audits: 2 });
+    expect(await expectSelectedCreationAudit(35)).toEqual(committedAudit);
     expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1", [delegateId])).rows[0].count).toBe(0);
   });
 
   it("rejects changed requests under the original key without creating another draft", async () => {
     await execute("changed", fromPo(35));
+    const committedAudit = await expectSelectedCreationAudit(35);
     await expect(execute("changed", fromPo(36))).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
-    expect(await counts()).toEqual({ shipments: 1, histories: 1, lines: 1, audits: 2 });
+    expect(await expectSelectedCreationAudit(35)).toEqual(committedAudit);
   });
 
   it("retains exact raw identity rather than treating trimmed manual numbers as the same request", async () => {
@@ -254,7 +287,7 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
     expect(await counts()).toEqual({ shipments: 0, histories: 0, lines: 0, audits: 0 });
     await retryDue("result-failure");
     expect(await execute("result-failure", fromPo())).toMatchObject({ httpStatus: 201 });
-    expect(await counts()).toEqual({ shipments: 1, histories: 1, lines: 1, audits: 2 });
+    await expectSelectedCreationAudit(35);
   });
 
   it("rejects concurrent duplicate manual numbers without misclassifying audit failures", async () => {
@@ -293,7 +326,7 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
     const results = await Promise.all([execute("capacity-a", fromPo(700)), execute("capacity-b", fromPo(700))]);
     expect(results.filter(result => result.httpStatus === 201)).toHaveLength(1);
     expect(results.find(result => result.httpStatus !== 201)).toMatchObject({ httpStatus: 409, body: { code: "SHIPMENT_LINE_QUANTITY_EXCEEDED" } });
-    expect(await counts()).toEqual({ shipments: 1, histories: 1, lines: 1, audits: 2 });
+    await expectSelectedCreationAudit(700);
     expect((await pool.query("SELECT sum(qty_shipped)::int AS qty FROM procurement.inbound_shipment_lines")).rows[0].qty).toBe(700);
   });
 
@@ -311,8 +344,9 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
       await expect(execute("concurrent-same", fromPo())).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IN_PROGRESS" });
       await holder.query("COMMIT"); open = false;
       const original = await pending;
+      const committedAudit = await expectSelectedCreationAudit(35);
       expect(await execute("concurrent-same", fromPo())).toEqual({ ...original, replayed: true });
-      expect(await counts()).toEqual({ shipments: 1, histories: 1, lines: 1, audits: 2 });
+      expect(await expectSelectedCreationAudit(35)).toEqual(committedAudit);
     } finally {
       if (open) await holder.query("ROLLBACK");
       holder.release();

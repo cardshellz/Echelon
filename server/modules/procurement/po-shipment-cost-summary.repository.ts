@@ -9,6 +9,7 @@ import { readShipmentCostPostingEvidence } from "./shipment-cost-posting-read.re
 import { readPurchaseCostStatus } from "./purchase-cost-status.repository";
 import { readSupplierCreditCostRows } from "./supplier-credit-source.repository";
 import { resolveShipmentSupplierCredits } from "./domain/shipment-supplier-credits";
+import { isUnresolvedPhysicalAllocation } from "@shared/procurement/shipment-allocation";
 
 type SummaryReader = {
   execute(query: SQL): Promise<{ rows: Record<string, unknown>[] }>;
@@ -111,7 +112,7 @@ export async function readPoShipmentCosts(
         lineTotalCents: row.line_total_cents,
       }));
       const allocations =
-        await tx.execute(sql`SELECT allocation.shipment_cost_id,allocation.inbound_shipment_line_id,allocation.allocated_cents,line.purchase_order_id
+        await tx.execute(sql`SELECT allocation.shipment_cost_id,allocation.inbound_shipment_line_id,allocation.allocated_cents,allocation.basis_evidence,line.purchase_order_id
       FROM procurement.inbound_freight_allocations allocation JOIN procurement.inbound_freight_costs cost ON cost.id=allocation.shipment_cost_id
       JOIN procurement.inbound_shipment_lines line ON line.id=allocation.inbound_shipment_line_id
       WHERE cost.inbound_shipment_id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(shipmentIds)}::jsonb)) ORDER BY allocation.id`);
@@ -178,7 +179,7 @@ export async function readPoShipmentCosts(
               issue: authority.issue?.code ?? creditAdjustment.issues[0]?.code ?? null,
             };
           }),
-          allocations: creditAdjustment.allocations.map((row) => ({
+          allocations: creditAdjustment.allocations.filter(row => !isUnresolvedPhysicalAllocation(row.basis_evidence)).map((row) => ({
             costId: costInteger(row.shipment_cost_id, "costId", 1),
             poId:
               row.purchase_order_id == null

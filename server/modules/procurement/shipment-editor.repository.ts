@@ -13,6 +13,7 @@ import { shipmentLineVersion } from "./shipment-line-version";
 import { rejectShipmentEdit, sumShipmentCents, shipmentEditorBlockedReason } from "./shipment-editor.policy";
 import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
 import { shipmentReceivingUnitSource } from "./shipment-receiving-setup.service";
+import { computeShipmentPhysicalTotals } from "@shared/procurement/shipment-physical-values";
 
 const number = (value: unknown) => costInteger(value, "shipment value", -Number.MAX_SAFE_INTEGER);
 const nullableId = (value: unknown) => value == null ? null : costInteger(value, "linked document", 1);
@@ -42,6 +43,9 @@ export async function readShipmentEditorSource(tx: AmendmentTransaction, shipmen
     ...shipmentReceivingUnitSource({ productVariantId: nullableId(row.product_variant_id), unitsPerVariantSnapshot: nullableId(row.units_per_variant_snapshot) },
       { productId: nullableId(row.source_product_id), expectedReceiveVariantId: nullableId(row.expected_receive_variant_id),
         productVariantId: nullableId(row.source_variant_id), expectedReceiveUnitsPerVariant: nullableId(row.expected_receive_units_per_variant) }) })));
+  const physicalByLine = new Map(lines.map(row => [number(row.id), computeShipmentPhysicalTotals({ qtyShipped: number(row.qty_shipped),
+    cartonCount: row.carton_count == null ? null : number(row.carton_count), dimensionBasis: nullableString(row.dimension_basis),
+    weightKg: nullableString(row.weight_kg), lengthCm: nullableString(row.length_cm), widthCm: nullableString(row.width_cm), heightCm: nullableString(row.height_cm) })]));
   const context = shipmentEditorContextSchema.parse({ shipmentId, shipmentNumber: shipment.shipment_number, status: shipment.status,
     sourceVersion: costFingerprint({ shipment, lines, costs, allocations, receipts, posted, actor }),
     canApprove: hasQuantityAmendmentAuthority(actor),
@@ -51,7 +55,8 @@ export async function readShipmentEditorSource(tx: AmendmentTransaction, shipmen
       purchaseOrderId: nullableId(row.purchase_order_id), purchaseOrderLineId: nullableId(row.purchase_order_line_id), poNumber: nullableString(row.po_number),
       fields: shipmentLineEditableSchema.parse({ qtyShipped: row.qty_shipped, cartonCount: row.carton_count,
         dimensionBasis: row.dimension_basis, weightKg: row.weight_kg, lengthCm: row.length_cm, widthCm: row.width_cm, heightCm: row.height_cm, notes: row.notes }),
-      shipmentUnits: unitOptions.get(number(row.id)), allocatedCostCents: number(row.allocated_cost_cents ?? 0), totalWeightKg: nullableString(row.total_weight_kg), totalVolumeCbm: nullableString(row.total_volume_cbm) })),
+      shipmentUnits: unitOptions.get(number(row.id)), allocatedCostCents: row.allocated_cost_cents == null ? null : number(row.allocated_cost_cents),
+      totalWeightKg: physicalByLine.get(number(row.id))!.totalWeightKg, totalVolumeCbm: physicalByLine.get(number(row.id))!.totalVolumeCbm })),
     charges: currencies.map(currency => ({ currency: currency ?? "Unspecified currency", cents: sumShipmentCents(costs.filter(cost => cost.currency === currency).map(cost => number(cost.actual_cents ?? cost.estimated_cents ?? 0))) })),
     receipts: receipts.map(row => ({ id: number(row.id), number: row.receipt_number })),
   });

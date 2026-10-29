@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { readShipmentPurchaseOrders } from "../../shipment-purchase-orders.repository";
 import { createShipmentTrackingService } from "../../shipment-tracking.service";
+vi.mock("../../shipment-physical-read.repository", () => ({ readShipmentPhysicalLines: vi.fn(async (_tx: unknown, ids: number[]) =>
+  new Map(ids.map(id => [id, []]))) }));
 
 describe("shipment purchase-order projection", () => {
   it("does not query an empty shipment page", async () => {
@@ -52,8 +54,10 @@ describe("shipment list and detail purchase references", () => {
     };
     const service = createShipmentTrackingService({} as never, storage as never);
     expect(await service.getShipments(filters)).toEqual([
-      { ...page[0], purchaseOrders: [{ id: 17, poNumber: "TEST-PO-17" }] },
-      { ...page[1], purchaseOrders: [{ id: 17, poNumber: "TEST-PO-17" }, { id: 99, poNumber: "TEST-PO-99" }] },
+      { ...page[0], totalPieces: 0, totalCartons: 0, totalWeightKg: "0.000", totalVolumeCbm: "0.000000", physicalMeasurementIssue: null,
+        purchaseOrders: [{ id: 17, poNumber: "TEST-PO-17" }] },
+      { ...page[1], totalPieces: 0, totalCartons: 0, totalWeightKg: "0.000", totalVolumeCbm: "0.000000", physicalMeasurementIssue: null,
+        purchaseOrders: [{ id: 17, poNumber: "TEST-PO-17" }, { id: 99, poNumber: "TEST-PO-99" }] },
     ]);
     expect(storage.getInboundShipments).toHaveBeenCalledWith(filters);
     expect(storage.getInboundShipmentPurchaseOrders).toHaveBeenCalledExactlyOnceWith([43, 42]);

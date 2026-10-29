@@ -12,7 +12,7 @@ import {
 import type { ShipmentLineCommand } from "./shipment-line-commands";
 import { shipmentLineVersion, versionShipmentLine } from "./shipment-line-version";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
-import { computeShipmentLinePhysicalTotals, validateShipmentPhysicalTotals } from "./shipment-line-physical-values";
+import { computeShipmentLinePhysicalTotals } from "./shipment-line-physical-values";
 import { lockShipmentSourceCapacity } from "./shipment-source-capacity";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import type { ShipmentReceivingSetup } from "@shared/procurement/shipment-receiving-setup";
@@ -34,7 +34,8 @@ interface Dependencies {
   lockShipment(tx: any, id: number): Promise<InboundShipment>;
   resolveDimensions(variantId: number, vendorId: number | undefined, tx: any): Promise<Dimensions>;
   recomputeTotals(id: number, tx: any, now?: Date): Promise<void>;
-  refreshAllocations(tx: any, id: number, shipment: InboundShipment, now?: Date): Promise<unknown>;
+  materializePhysicalTotals(tx: any, shipment: InboundShipment, lines: InboundShipmentLine[], now: Date, actorId: string): Promise<void>;
+  refreshAllocations(tx: any, id: number, shipment: InboundShipment, now?: Date, actorId?: string): Promise<unknown>;
   checkReceivingSetup(tx: any, shipmentId: number, required: boolean, options?: { previous?: ShipmentReceivingSetup; lockEvidence?: boolean }): Promise<ShipmentReceivingSetup>;
 }
 
@@ -334,9 +335,9 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
       // Drafts may be incomplete. Do not retroactively prevent corrections to
       // delivered history; the operational booking/departure gates own readiness.
       await dependencies.checkReceivingSetup(tx, shipmentId, guardedSetup, { previous: setupBefore });
-      validateShipmentPhysicalTotals(await storage.getInboundShipmentLines(shipmentId, tx));
+      await dependencies.materializePhysicalTotals(tx, shipment, await storage.getInboundShipmentLines(shipmentId, tx), now, actorId);
       await dependencies.recomputeTotals(shipmentId, tx, now);
-      await dependencies.refreshAllocations(tx, shipmentId, shipment, now);
+      await dependencies.refreshAllocations(tx, shipmentId, shipment, now, actorId);
     }
     const after = await storage.getInboundShipmentLines(shipmentId, tx);
     await tx.insert(auditEvents).values({
@@ -368,9 +369,9 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     const lines = await storage.getInboundShipmentLines(shipmentId, tx);
     if (!lines.length) reject("A shipment needs at least one line. Cancel the shipment to remove the whole delivery.", "SHIPMENT_EDITOR_EMPTY");
     await dependencies.checkReceivingSetup(tx, shipmentId, guardedSetup, { previous: setupBefore });
-    validateShipmentPhysicalTotals(lines);
+    await dependencies.materializePhysicalTotals(tx, shipment, lines, now, actorId);
     await dependencies.recomputeTotals(shipmentId, tx, now);
-    await dependencies.refreshAllocations(tx, shipmentId, shipment, now);
+    await dependencies.refreshAllocations(tx, shipmentId, shipment, now, actorId);
     return results;
   }
   return { executeLineCommandInTransaction, executeLineBatchInTransaction };

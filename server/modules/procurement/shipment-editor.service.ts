@@ -14,6 +14,8 @@ import { runTransactionalFinancialCommand, type FinancialCommandDescriptor } fro
 export const shipmentEditorScope = (id: number) => ({ method: "POST", routeTemplate: "/api/inbound-shipments/:id/editor",
   resourceKey: `shipment:${id}`, commandName: "procurement.shipment.editor.approve" });
 type Source = Awaited<ReturnType<typeof readShipmentEditorSource>>;
+const sumShares = (values: readonly (number | null)[]) => values.some(value => value === null) ? null
+  : sumShipmentCents(values.filter((value): value is number => value !== null));
 
 export function createShipmentEditorService(database: AmendmentDatabase, owner: Pick<ShipmentTrackingService, "executeLineBatchInTransaction">, clock: () => Date) {
   async function apply(tx: AmendmentTransaction, source: Source, request: ShipmentEditorRequest, actorId: string) {
@@ -49,8 +51,8 @@ export function createShipmentEditorService(database: AmendmentDatabase, owner: 
       before: source.context.lines, after: afterLines, charges: source.context.charges,
       costShares: poIds.map(id => ({ purchaseOrderId: id,
         poNumber: [...source.context.lines, ...afterLines].find(line => line.purchaseOrderId === id)?.poNumber ?? null,
-        beforeCents: sumShipmentCents(source.context.lines.filter(line => line.purchaseOrderId === id).map(line => line.allocatedCostCents)),
-        afterCents: sumShipmentCents(afterLines.filter(line => line.purchaseOrderId === id).map(line => line.allocatedCostCents)) })) };
+        beforeCents: sumShares(source.context.lines.filter(line => line.purchaseOrderId === id).map(line => line.allocatedCostCents)),
+        afterCents: sumShares(afterLines.filter(line => line.purchaseOrderId === id).map(line => line.allocatedCostCents)) })) };
     if (costFingerprint(review.before) === costFingerprint(review.after)) {
       rejectShipmentEdit("Change a line value before approving.", "SHIPMENT_EDITOR_NO_CHANGE", 400);
     }
