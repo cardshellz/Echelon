@@ -972,6 +972,27 @@ describe("ListingPublicationService asynchronous worker", () => {
     expect(h.operation.state).toBe("completed");
     expect(h.provider.submit).toHaveBeenCalledOnce();
   });
+  it("shows publication reasons after feed acceptance and clears them on recovery without resubmitting", async () => {
+    const h = setup();
+    h.provider.status.mockResolvedValue({ state: "processed", items: [result("SKU-10", "accepted")] });
+    const observation = await h.provider.observe(h.operation.snapshot.account, "SKU-10");
+    const message = "Walmart unpublished this item. Check its product type or submit an appeal.";
+    h.provider.observe.mockResolvedValueOnce({ ...observation,
+      item: { ...observation.item, publishedStatus: "SYSTEM_PROBLEM" },
+      issues: [{ code: "WALMART_ITEM_UNPUBLISHED", message, field: null }],
+    });
+    await h.run();
+    expect(h.operation.progress.items[0]).toMatchObject({ state: "accepted", canRetry: false,
+      stockState: "waiting_for_item", error: message });
+    expect(h.link).not.toHaveBeenCalled();
+    expect(h.inventory.resumeRecreationStock).not.toHaveBeenCalled();
+    expect((await h.service.retryItems(104, h.operation.id)).items).toEqual([]);
+    await h.run();
+    expect(h.operation.progress.items[0]).toMatchObject({ state: "verified", error: null });
+    expect(h.provider.submit).toHaveBeenCalledOnce();
+    expect(h.inventory.submitInitialStock).toHaveBeenCalledOnce();
+    expect(h.link).toHaveBeenCalledOnce();
+  });
   it("verifies a later accepted maintenance price without changing the original creation evidence or resending stock", async () => {
     const h = setup();
     h.provider.status.mockResolvedValue({ state: "processed", items: [result("SKU-10", "accepted")] });
