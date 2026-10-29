@@ -385,6 +385,7 @@ export default function InboundShipmentDetail() {
   const [cancelError, setCancelError] = useState<string | null>(null);
   useEffect(() => {
     setShowCancelDialog(false);
+    setShowMeasurementCorrection(false);
     setCancelReason("");
     setCancelError(null);
   }, [shipmentId]);
@@ -781,16 +782,18 @@ export default function InboundShipmentDetail() {
 
   function createTransitionMutation(endpoint: string) {
     return useMutation({
+      onMutate: () => captureNavigation(),
       mutationFn: async (body: any = {}) => {
         if (endpoint === "book" || endpoint === "in-transit" || endpoint === "close") return financialCommandFetchJson(`/api/inbound-shipments/${shipmentId}/${endpoint}`,
           { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/${endpoint}`, body || undefined);
         return res.json();
       },
-      onSuccess: (result: { costApplication?: LandedCostPushResult | { status: "retry_required"; code: string } }) => {
+      onSuccess: (result: { costApplication?: LandedCostPushResult | { status: "retry_required"; code: string } }, _body, context) => {
         queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
         queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
         invalidatePoViews();
+        if (!context?.isCurrent()) return;
         const costResult = result.costApplication;
         if (costResult) {
           void queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/cost-review`] });
@@ -806,7 +809,8 @@ export default function InboundShipmentDetail() {
         }
         toast({ title: "Success", description: `Shipment ${endpoint.replace(/-/g, " ")} completed` });
       },
-      onError: (err: Error) => {
+      onError: (err: Error, _body, context) => {
+        if (!context?.isCurrent()) return;
         if (endpoint === "book" || endpoint === "in-transit") void receivingSetup.refetch();
         if (endpoint === "close" && err instanceof FinancialCommandRequestError && err.code === "MISSING_ALLOCATION_DIMENSIONS") {
           setActiveTab("allocation"); setShowMeasurementCorrection(true);

@@ -169,3 +169,41 @@ test("closing a received shipment opens the same approved measurement editor and
   await expect(page.getByText("Closed", { exact: true }).first()).toBeVisible();
   expect(state.closes).toBe(2); expect(state.approvalCount).toBe(1); expect(failures).toEqual([]);
 });
+
+for (const action of ["update-costs", "close"] as const) {
+  test(`a late ${action} blocker cannot open a correction or change tabs on another shipment`, async ({ page }) => {
+    const { dialog, failures } = await setup(page, { costing: action === "close" });
+    await dialog.getByRole("button", { name: "Close review", exact: true }).click();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let started = false;
+    await page.route(`**/api/inbound-shipments/42/${action}`, async route => {
+      started = true; await gate;
+      await route.fulfill({ status: 400, json: { code: "MISSING_ALLOCATION_DIMENSIONS", error: "Original shipment measurements are missing." } });
+    });
+    await page.route("**/api/inbound-shipments/43", route => route.fulfill({ json: {
+      id: 43, shipmentNumber: "CURRENT-SHIPMENT-43", status: "costing", mode: "sea_fcl", allocationMethodDefault: "by_line_count",
+      statusHistory: [], costs: [], lines: [{ id: 3, purchaseOrderId: 99, purchaseOrderLineId: 103, sku: "CURRENT-PRODUCT-43", productName: "Current product", qtyShipped: 100, cartonCount: 2 }],
+    } }));
+    await page.route("**/api/inbound-shipments/43/allocation-status", route => route.fulfill({ json: {
+      shipmentId: 43, status: "allocated", lineCount: 1, allocatableCostCount: 0, effectiveCostCents: 0, allocatedCostCents: 0,
+      unallocatedCents: 0, blockerCount: 0, warningCount: 0, issues: [], costs: [],
+    } }));
+    await page.route("**/api/inbound-shipments/43/invoices", route => route.fulfill({ json: {
+      invoices: [], summary: { invoiceCount: 0, activeInvoiceCount: 0, totalInvoicedCents: 0, totalPaidCents: 0, outstandingCents: 0 },
+    } }));
+    await page.getByRole("button", { name: action === "close" ? "Close Shipment" : "Update shipment costs", exact: true }).click();
+    await expect.poll(() => started).toBe(true);
+    await page.evaluate(() => { window.history.pushState(null, "", "/shipments/43?tab=lines"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    await expect(page.getByRole("heading", { name: "CURRENT-SHIPMENT-43", exact: true })).toBeVisible();
+    const response = page.waitForResponse(value => new URL(value.url()).pathname === `/api/inbound-shipments/42/${action}`);
+    release(); await (await response).finished();
+    // Observe the rendered frame after the completed response, rather than
+    // asserting absence while the old request is still waiting on the gate.
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(new URL(page.url()).pathname).toBe("/shipments/43");
+    expect(new URL(page.url()).searchParams.get("tab")).toBe("lines");
+    expect(failures).toEqual([]);
+  });
+}
