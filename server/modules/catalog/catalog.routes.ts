@@ -32,6 +32,7 @@ import {
 import {
   registerShopifyProductMappingReconciliationRoutes,
 } from "./shopify-product-mapping-reconciliation.routes";
+import { registerShopifyProductConnectionRoutes } from "./shopify-product-connection.routes";
 import {
   coercePackageAttributesOnVariantPayload,
   parsePackageAttributeBulkRows,
@@ -407,6 +408,7 @@ export async function registerProductRoutes(app: Express) {
   const shopifyProductMapping = createShopifyProductMappingService();
   const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService();
   registerShopifyProductMappingReconciliationRoutes(app);
+  registerShopifyProductConnectionRoutes(app);
   registerBulkInventoryTrackingRoutes(app);
   registerInventoryTrackingHistoryRoutes(app);
   registerProductAssetRoutes(app);
@@ -2316,6 +2318,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
             variantId: id,
             remoteVariantId: shopifyVariantId,
           },
+          operatorVariantBindings: [{ variantId: id, remoteVariantId: shopifyVariantId }],
         });
 
         const [repairedVariant] = await db
