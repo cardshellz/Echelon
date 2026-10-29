@@ -1,3 +1,4 @@
+import { registerReturnParcelReceivingRoutes } from "./return-parcel-receiving.routes";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { dropshipFaultCategoryEnum, returnCaseStatuses, returnDispositionTreatments } from "@shared/schema";
@@ -119,6 +120,7 @@ export function registerReturnCaseAdminRoutes(
   ),
   financialService: ReturnCaseFinancialService = createReturnCaseFinancialServiceFromEnv(),
 ): void {
+  registerReturnParcelReceivingRoutes(app);
   app.get("/api/returns/admin/cases", requirePermission("inventory", "view"), async (req, res) => {
     const parsed = listQuerySchema.safeParse(req.query);
     if (!parsed.success) return sendValidationError(res, parsed.error);

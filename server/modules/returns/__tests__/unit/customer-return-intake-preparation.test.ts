@@ -73,7 +73,7 @@ describe("trusted live return intake preparation", () => {
     ]);
     expect(prepared.settingsVersion).toBe(settings.version);
   });
-  it("preserves purchased-line identities and exact warehouse allocations across repacked boxes", async () => {
+  it("preserves purchased-line identities and independent receiving allocations across repacked boxes", async () => {
     const f = await labelPreparationFixture();
     const before = structuredClone(f.inspection);
     const prepared = prepareCustomerReturnIntake(
@@ -98,7 +98,7 @@ describe("trusted live return intake preparation", () => {
       prepared.lines.map((line) =>
         line.allocations.map((a) => [a.wmsOrderItemId, a.quantity]),
       ),
-    ).toEqual([[[301, 2]], [[302, 1]]]);
+    ).toEqual([[[null, 2]], [[null, 1]]]);
     expect(prepared.parcels.map((parcel) => parcel.weightGrams)).toEqual([
       33, 13,
     ]);
@@ -116,26 +116,22 @@ describe("trusted live return intake preparation", () => {
     });
     expect(f.inspection).toEqual(before);
   });
-  it("does not invent a receiving partition from delivery alone", async () => {
+  it("accepts purchased items when outbound warehouse history is missing", async () => {
     const f = await labelPreparationFixture();
     f.local.fulfillmentBindings = [];
+    f.local.wmsItems = [];
+    f.local.packageItems = [];
+    f.local.packageLabels = [];
     const inspection = await f.service.inspectForIntake({
       channelId: 36,
       orderReference: "0012-A",
     });
-    expect(inspection.order.lines[0].eligibleQuantity).toBe(2);
-    expect(() =>
-      prepareCustomerReturnIntake(
-        { ...f.input, sourceRevision: inspection.order.sourceRevision },
-        inspection,
-        labelSettings,
-        policy,
-        "admin",
-        LABEL_LEASE,
-      ),
-    ).toThrowError(
-      expect.objectContaining({ code: "RETURN_LABEL_ALLOCATION_UNVERIFIED" }),
-    );
+    expect(inspection.order.lines[0].eligibleQuantity).toBe(3);
+    const prepared = prepareCustomerReturnIntake(
+      { ...f.input, sourceRevision: inspection.order.sourceRevision }, inspection, labelSettings, policy, "admin", LABEL_LEASE);
+    expect(prepared.lines.every(line => line.allocations.every(item => item.sourceKind === "shopify_purchase"
+      && item.wmsOrderItemId === null && item.fulfillmentId === null))).toBe(true);
+
   });
   it.each([
     "revision",

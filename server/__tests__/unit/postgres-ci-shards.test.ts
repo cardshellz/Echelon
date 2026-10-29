@@ -138,6 +138,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/returns/__tests__/integration/customer-return-authorization.repository.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-local-inspection.reader.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-intake.repository.test.ts",
+      "server/modules/returns/__tests__/integration/customer-return-complex-flow.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-labels.repository.test.ts",
       "server/modules/returns/__tests__/integration/return-policy-archive.repository.test.ts",
       "server/modules/returns/__tests__/integration/return-policy-shipping.repository.test.ts",

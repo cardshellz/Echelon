@@ -1,3 +1,4 @@
+import { CustomerReturnIntakeError } from "../../application/customer-return-intake.ports";
 import { randomBytes } from "node:crypto";
 import type { Express, NextFunction, Request, Response } from "express";
 import { z } from "zod";
@@ -33,7 +34,7 @@ export function returnCustomerError(res: Response, error: unknown) {
   const status = known ? Number(error.status) : error instanceof z.ZodError ? 400 : 503;
   // No token, signed proxy query, customer details, provider URL or raw exception.
   console.error(JSON.stringify({ event: "customer_return_request_failed", code }));
-  res.status(status).json({ error: { code, message: known ? error.message : status === 400
+  res.status(status).json({ error: { code, ...(error instanceof CustomerReturnIntakeError && error.reasonCode ? { reasonCode: error.reasonCode } : {}), message: known ? error.message : status === 400
     ? "The return request is invalid." : "Returns are temporarily unavailable. Please try again." } });
 }
 export function requireReturnCustomerCommand(req: Request, publicOrigin: string) {

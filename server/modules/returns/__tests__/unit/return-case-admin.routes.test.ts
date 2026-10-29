@@ -878,6 +878,7 @@ describe("return case admin routes", () => {
       ["inventory", "adjust"],
       ["inventory", "adjust"],
       ["inventory", "adjust"],
+      ["inventory", "adjust"],
     ]);
   });
 });

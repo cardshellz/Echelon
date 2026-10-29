@@ -399,8 +399,8 @@ function ReturnCaseDetailBody({
                   <TableCell>{item.title || item.externalLineItemId || "Unnamed line"}</TableCell>
                   <TableCell>{item.sku || "Not provided"}</TableCell>
                   <TableCell className="text-right">{item.quantity}</TableCell>
-                  <TableCell className="text-right">{formatCents(item.unitPaidPriceCents)}</TableCell>
-                  <TableCell className="text-right">{formatCents(item.sourceLineTotalCents)}</TableCell>
+                  <TableCell className="text-right">{item.unitPaidPriceCents === null ? "Reviewed in Shopify" : formatCents(item.unitPaidPriceCents)}</TableCell>
+                  <TableCell className="text-right">{item.sourceLineTotalCents === null ? "Reviewed in Shopify" : formatCents(item.sourceLineTotalCents)}</TableCell>
                 </TableRow>
               ))}
             </TableBody>

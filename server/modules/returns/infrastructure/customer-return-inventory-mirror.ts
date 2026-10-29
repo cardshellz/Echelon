@@ -14,7 +14,7 @@ export const portalInventoryReturnMirrorSql = `EXISTS (
     AND allocation_link.authorization_id=case_link.authorization_id
     AND allocation_link.wms_return_item_id=case_item.wms_return_item_id
   JOIN returns.customer_return_authorization_allocations allocation ON allocation.id=allocation_link.authorization_allocation_id
-    AND allocation.authorization_id=case_link.authorization_id AND allocation.wms_order_item_id=case_item.wms_order_item_id
+    AND allocation.authorization_id=case_link.authorization_id AND allocation.wms_order_item_id IS NOT DISTINCT FROM case_item.wms_order_item_id
   JOIN returns.customer_return_authorization_lines line ON line.id=allocation.authorization_line_id
     AND line.oms_order_line_id=case_item.oms_order_line_id
   JOIN oms.oms_order_lines oms_line ON oms_line.id=line.oms_order_line_id
@@ -24,7 +24,7 @@ export const portalInventoryReturnMirrorSql = `EXISTS (
     AND treatment_item.treatment='restock_sellable' AND disposition_item.treatment='restock_sellable'
     AND treatment_item.quantity=disposition_item.quantity AND treatment_item.quantity=it.variant_qty_delta
     AND it.reference_type='return_inventory_treatment' AND it.reference_id=disposition_item.id::text
-    AND it.order_item_id=case_item.wms_order_item_id AND it.order_id=case_link.wms_order_id
+    AND it.order_item_id IS NOT DISTINCT FROM case_item.wms_order_item_id AND it.order_id IS NOT DISTINCT FROM case_link.wms_order_id
     AND it.product_variant_id=oms_line.product_variant_id
     AND it.to_location_id=treatment_item.warehouse_location_id
     AND it.inventory_lot_id=treatment_item.inventory_lot_id AND it.voided_at IS NULL

@@ -1,3 +1,4 @@
+import { portalInventoryReturnMirrorSql } from "./customer-return-inventory-mirror";
 import { sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -33,6 +34,7 @@ const sourceSchema = z.object({
   channelId: positiveId.max(POSTGRES_INTEGER_MAX),
   omsOrderId: positiveId,
   omsOrderLineIds: z.array(positiveId).min(1).max(MAX_LINES_PER_AUTHORIZATION),
+  basis: z.literal("shopify_purchase").optional(),
 }).strict();
 const inputSchema = commandSchema.extend({
   omsOrderId: positiveId,
@@ -48,9 +50,10 @@ const inputSchema = commandSchema.extend({
     quantity,
     reasonCode: boundedText(100).nullable(),
     allocations: z.array(z.object({
-      wmsOrderItemId: positiveId.max(POSTGRES_INTEGER_MAX),
-      fulfillmentId: boundedText(200),
-      fulfillmentLineItemId: boundedText(200),
+      sourceKind: z.enum(["shopify_fulfillment", "shopify_purchase"]).optional(),
+      wmsOrderItemId: positiveId.max(POSTGRES_INTEGER_MAX).nullable(),
+      fulfillmentId: boundedText(200).nullable(),
+      fulfillmentLineItemId: boundedText(200).nullable(),
       quantity,
       originalQuantity: quantity,
       eligibleQuantity: quantity,
@@ -114,6 +117,7 @@ export class PostgresCustomerReturnAuthorizationTransaction implements CustomerR
     channelId: number;
     omsOrderId: number;
     omsOrderLineIds: readonly number[];
+    basis?: "shopify_purchase";
   }): Promise<LockedCustomerReturnAuthorizationSource | null> {
     validate(sourceSchema, input);
     if (this.sourceLockAttempted) {
@@ -141,24 +145,26 @@ export class PostgresCustomerReturnAuthorizationTransaction implements CustomerR
     // Lock every partition/item for the source order before reading quantities.
     // A claim for one line can otherwise race a legacy writer on another split.
     await this.tx.execute(sql`
-      SELECT id FROM wms.orders WHERE oms_fulfillment_order_id = ${String(input.omsOrderId)} ORDER BY id FOR UPDATE
+      SELECT wo.id FROM wms.orders wo WHERE wo.id IN (SELECT wms_order_id FROM returns.customer_return_source_items
+        WHERE oms_order_id=${input.omsOrderId}) ORDER BY wo.id FOR UPDATE
     `);
     const itemRows = rows(await this.tx.execute(sql`
-      SELECT wi.id, wi.order_id, wi.oms_order_line_id, wi.fulfilled_quantity
-      FROM wms.order_items wi JOIN wms.orders wo ON wo.id = wi.order_id
-      WHERE wo.oms_fulfillment_order_id = ${String(input.omsOrderId)}
+      SELECT wi.id, wi.order_id, resolved.oms_order_line_id, wi.fulfilled_quantity
+      FROM wms.order_items wi JOIN returns.customer_return_source_items resolved ON resolved.wms_order_item_id=wi.id
+      WHERE resolved.oms_order_id = ${input.omsOrderId}
       ORDER BY wi.id FOR UPDATE OF wi
     `));
     const legacyRows = rows(await this.tx.execute(sql`
-      SELECT ri.order_item_id, ri.oms_order_line_id, ri.expected_qty,
-        wi.oms_order_line_id AS item_oms_order_line_id,
-        returned_order.oms_fulfillment_order_id AS return_source_order_id,
-        item_order.oms_fulfillment_order_id AS item_source_order_id
+      SELECT ri.order_item_id, ri.oms_order_line_id, ri.external_line_item_id, ri.expected_qty, ri.received_qty,
+        resolved.oms_order_line_id AS item_oms_order_line_id,
+        CASE WHEN returned_order.id=item_order.id THEN resolved.oms_order_id::text ELSE returned_order.oms_fulfillment_order_id END AS return_source_order_id,
+        resolved.oms_order_id::text AS item_source_order_id
       FROM wms.return_items ri JOIN wms.returns r ON r.id = ri.return_id
       JOIN wms.orders returned_order ON returned_order.id = r.order_id
       LEFT JOIN wms.order_items wi ON wi.id = ri.order_item_id
       LEFT JOIN wms.orders item_order ON item_order.id = wi.order_id
-       WHERE (returned_order.oms_fulfillment_order_id = ${String(input.omsOrderId)}
+      LEFT JOIN returns.customer_return_source_items resolved ON resolved.wms_order_item_id=wi.id AND resolved.oms_order_id=${input.omsOrderId}
+       WHERE (resolved.oms_order_id=${input.omsOrderId} OR returned_order.oms_fulfillment_order_id = ${String(input.omsOrderId)}
          OR item_order.oms_fulfillment_order_id = ${String(input.omsOrderId)}
          OR ri.oms_order_line_id = ANY(ARRAY[${sql.join(lineIds, sql`, `)}]::bigint[]))
          AND NOT EXISTS (SELECT 1 FROM returns.customer_return_allocation_case_items link WHERE link.wms_return_item_id = ri.id)
@@ -173,7 +179,19 @@ export class PostgresCustomerReturnAuthorizationTransaction implements CustomerR
       GROUP BY aa.wms_order_item_id, al.oms_order_line_id, aa.fulfillment_id, aa.fulfillment_line_item_id
     `));
     const legacyByItem = new Map<number, number>();
+    const legacyByLine = new Map<number, number>();
     for (const row of legacyRows) {
+      if (input.basis === "shopify_purchase") {
+        const native = (value: unknown) => typeof value === "string" ? value.replace(/^gid:\/\/shopify\/LineItem\//, "") : null;
+        const sourceLine = lineRows.find(line => String(line.id) === String(row.oms_order_line_id ?? row.item_oms_order_line_id));
+        if (sourceLine && sourceLine.external_line_item_id != null && (row.external_line_item_id == null
+          || native(row.external_line_item_id) === native(sourceLine.external_line_item_id))) {
+          const lineId = readInteger(sourceLine.id, "legacy purchased line id", true);
+          const quantity = Math.max(readInteger(row.expected_qty, "legacy expected quantity"), readInteger(row.received_qty, "legacy received quantity"));
+          legacyByLine.set(lineId, add(legacyByLine.get(lineId) ?? 0, quantity));
+        }
+        continue;
+      }
       if (row.order_item_id == null || row.item_oms_order_line_id == null
         || row.return_source_order_id !== String(input.omsOrderId) || row.item_source_order_id !== String(input.omsOrderId)
         || (row.oms_order_line_id != null && readInteger(row.oms_order_line_id, "legacy OMS line id", true)
@@ -183,27 +201,39 @@ export class PostgresCustomerReturnAuthorizationTransaction implements CustomerR
       const itemId = readInteger(row.order_item_id, "legacy WMS item id", true);
       legacyByItem.set(itemId, add(legacyByItem.get(itemId) ?? 0, readInteger(row.expected_qty, "legacy expected quantity", true)));
     }
+    if (input.basis === "shopify_purchase") {
+      const physicalReturns = rows(await this.tx.execute(sql`SELECT source.oms_order_line_id,it.variant_qty_delta
+        FROM inventory.inventory_transactions it JOIN returns.customer_return_source_items source
+          ON source.wms_order_item_id=it.order_item_id AND source.wms_order_id=it.order_id
+        WHERE source.oms_order_id=${input.omsOrderId} AND it.transaction_type='return' AND it.voided_at IS NULL
+          AND NOT (${sql.raw(portalInventoryReturnMirrorSql)})`));
+      for (const row of physicalReturns) {
+        const lineId = readInteger(row.oms_order_line_id, "physically returned purchased line id", true);
+        legacyByLine.set(lineId, add(legacyByLine.get(lineId) ?? 0, readInteger(row.variant_qty_delta, "physically returned quantity", true)));
+      }
+    }
     const claimedByItem = new Map<number, number>();
     const claimedByLine = new Map<number, number>();
     const allocationClaims: LockedCustomerReturnAuthorizationSource["allocationClaims"] = [];
     const allocationLines = new Map<string, number>();
     for (const row of claimRows) {
-      const itemId = readInteger(row.wms_order_item_id, "claimed WMS item id", true);
+      const itemId = row.wms_order_item_id == null ? null : readInteger(row.wms_order_item_id, "claimed WMS item id", true);
       const claimedQuantity = readInteger(row.quantity, "claimed quantity");
-      claimedByItem.set(itemId, add(claimedByItem.get(itemId) ?? 0, claimedQuantity));
+      if (itemId !== null) claimedByItem.set(itemId, add(claimedByItem.get(itemId) ?? 0, claimedQuantity));
       const claim = {
         omsOrderLineId: readInteger(row.oms_order_line_id, "claimed OMS line id", true),
         wmsOrderItemId: itemId,
-        fulfillmentId: readText(row.fulfillment_id, "fulfillment id"),
-        fulfillmentLineItemId: readText(row.fulfillment_line_item_id, "fulfillment line id"),
+        fulfillmentId: row.fulfillment_id == null ? null : readText(row.fulfillment_id, "fulfillment id"),
+        fulfillmentLineItemId: row.fulfillment_line_item_id == null ? null : readText(row.fulfillment_line_item_id, "fulfillment line id"),
         quantity: claimedQuantity,
       };
       const currentItem = itemRows.find((item) => readInteger(item.id, "WMS item id", true) === itemId);
-      if (!currentItem || currentItem.oms_order_line_id == null
-        || readInteger(currentItem.oms_order_line_id, "WMS OMS line id", true) !== claim.omsOrderLineId) {
+      if (input.basis !== "shopify_purchase" && itemId !== null && (!currentItem || currentItem.oms_order_line_id == null
+        || readInteger(currentItem.oms_order_line_id, "WMS OMS line id", true) !== claim.omsOrderLineId)) {
         fail("RETURN_AUTHORIZATION_SOURCE_CONFLICT", "A claimed allocation's source mapping changed.");
       }
       claimedByLine.set(claim.omsOrderLineId, add(claimedByLine.get(claim.omsOrderLineId) ?? 0, claimedQuantity));
+      if (input.basis === "shopify_purchase" || claim.fulfillmentId === null || claim.fulfillmentLineItemId === null) { allocationClaims.push(claim); continue; }
       const key = allocationKey(claim.fulfillmentId, claim.fulfillmentLineItemId);
       const existingLine = allocationLines.get(key);
       if (existingLine !== undefined && existingLine !== claim.omsOrderLineId) {
@@ -232,7 +262,8 @@ export class PostgresCustomerReturnAuthorizationTransaction implements CustomerR
           omsOrderLineId,
           externalLineItemId: line.external_line_item_id == null ? null : readText(line.external_line_item_id, "external line id"),
           orderedQuantity: readInteger(line.quantity, "ordered quantity"),
-          legacyExpectedQuantity: wmsItems.reduce((total, item) => add(total, item.legacyExpectedQuantity), 0),
+          legacyExpectedQuantity: input.basis === "shopify_purchase" ? legacyByLine.get(omsOrderLineId) ?? 0
+            : wmsItems.reduce((total, item) => add(total, item.legacyExpectedQuantity), 0),
           claimedQuantity: claimedByLine.get(omsOrderLineId) ?? 0,
           wmsItems,
         };
@@ -289,10 +320,10 @@ export class PostgresCustomerReturnAuthorizationTransaction implements CustomerR
       for (const allocation of line.allocations) {
         await this.tx.execute(sql`
           INSERT INTO returns.customer_return_authorization_allocations
-            (authorization_id, authorization_line_id, wms_order_item_id, fulfillment_id, fulfillment_line_item_id,
+            (authorization_id, authorization_line_id, wms_order_item_id, fulfillment_id, fulfillment_line_item_id, source_kind,
              quantity, eligible_quantity, delivery_evidence, created_at)
           VALUES (${result.authorizationId}, ${lineId}, ${allocation.wmsOrderItemId}, ${allocation.fulfillmentId},
-            ${allocation.fulfillmentLineItemId}, ${allocation.quantity}, ${allocation.eligibleQuantity},
+            ${allocation.fulfillmentLineItemId}, ${allocation.sourceKind ?? "shopify_fulfillment"}, ${allocation.quantity}, ${allocation.eligibleQuantity},
             ${JSON.stringify({ ...allocation.deliveryEvidence, wmsOriginalQuantity: allocation.originalQuantity })}::jsonb, ${input.now})
         `);
       }
@@ -351,6 +382,21 @@ function assertCapacity(input: PersistCustomerReturnAuthorizationInput, source: 
     let allocatedQuantity = 0;
     const exactAllocations = new Set<string>();
     for (const allocation of line.allocations) {
+      if (allocation.sourceKind === "shopify_purchase") {
+        if (line.allocations.length !== 1 || allocation.wmsOrderItemId !== null
+          || allocation.fulfillmentId !== null || allocation.fulfillmentLineItemId !== null
+          || allocation.originalQuantity !== sourceLine.orderedQuantity) {
+          fail("RETURN_AUTHORIZATION_SOURCE_CONFLICT", "Purchased-line return provenance does not match its source.");
+        }
+        if (add(add(sourceLine.legacyExpectedQuantity, sourceLine.claimedQuantity), allocation.quantity) > allocation.eligibleQuantity) {
+          exceeded("The purchased quantity has already been claimed.", line.omsOrderLineId);
+        }
+        allocatedQuantity = add(allocatedQuantity, allocation.quantity);
+        continue;
+      }
+      if (allocation.wmsOrderItemId === null || allocation.fulfillmentId === null || allocation.fulfillmentLineItemId === null) {
+        invalid("Fulfillment claims require their original warehouse provenance.");
+      }
       const item = sourceLine.wmsItems.find((candidate) => candidate.wmsOrderItemId === allocation.wmsOrderItemId);
       if (!item) fail("RETURN_AUTHORIZATION_SOURCE_CONFLICT", "An allocation does not belong to its ordered line.", { wmsOrderItemId: allocation.wmsOrderItemId });
       const key = allocationKey(allocation.fulfillmentId, allocation.fulfillmentLineItemId);
@@ -396,7 +442,7 @@ function commandKey(command: CustomerReturnAuthorizationCommand): string {
   return JSON.stringify([command.channelId, command.idempotencyKey]);
 }
 
-function allocationKey(fulfillmentId: string, fulfillmentLineItemId: string): string {
+function allocationKey(fulfillmentId: string | null, fulfillmentLineItemId: string | null): string {
   return JSON.stringify([fulfillmentId, fulfillmentLineItemId]);
 }
 

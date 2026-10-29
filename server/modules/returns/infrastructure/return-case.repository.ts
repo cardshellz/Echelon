@@ -408,7 +408,7 @@ function selectCaseRows() {
     .leftJoin(dropshipVendors, eq(dropshipVendors.id, returnCases.vendorId))
     .leftJoin(dropshipStoreConnections, eq(dropshipStoreConnections.id, returnCases.storeConnectionId))
     .innerJoin(omsOrders, eq(omsOrders.id, returnCases.omsOrderId))
-    .innerJoin(orders, eq(orders.id, returnCases.wmsOrderId))
+    .leftJoin(orders, eq(orders.id, returnCases.wmsOrderId))
     .leftJoin(itemSummary, eq(itemSummary.returnCaseId, returnCases.id));
 }
 
@@ -519,8 +519,8 @@ function mapItemRow(row: SelectedDetailItemRow): ReturnCaseItemRow {
     receivedQuantity,
     remainingQuantity: expectedQuantity - receivedQuantity,
     receiptStatus: readReceiptStatus(row.wmsItem.status),
-    unitPaidPriceCents: readNonNegativeInteger(row.caseItem.unitPaidPriceCents, "unit paid price cents"),
-    sourceLineTotalCents: readNonNegativeInteger(row.caseItem.sourceLineTotalCents, "source line total cents"),
+    unitPaidPriceCents: row.caseItem.unitPaidPriceCents === null ? null : readNonNegativeInteger(row.caseItem.unitPaidPriceCents, "unit paid price cents"),
+    sourceLineTotalCents: row.caseItem.sourceLineTotalCents === null ? null : readNonNegativeInteger(row.caseItem.sourceLineTotalCents, "source line total cents"),
     createdAt: row.caseItem.createdAt,
   };
 }
