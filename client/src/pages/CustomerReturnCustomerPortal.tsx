@@ -130,6 +130,7 @@ export function CustomerWorkspace({
   onSignedOut,
   transport,
   initialOrder,
+  initialOrderId,
   initialStatus,
   downloadRequest = fetch,
   embedded = false,
@@ -140,6 +141,7 @@ export function CustomerWorkspace({
   onSignedOut: () => void;
   transport?: ReturnType<typeof createCustomerReturnTransport>;
   initialOrder?: CustomerReturnCustomerOrder;
+  initialOrderId?: number;
   initialStatus?: CustomerReturnCustomerLabelStatus;
   downloadRequest?: typeof fetch;
   embedded?: boolean;
@@ -252,6 +254,17 @@ export function CustomerWorkspace({
     });
     return () => operation.current?.abort();
   }, [api, run, attempt, command.record !== null, embedded]);
+
+  useEffect(() => {
+    if (!embedded || initialOrder || initialStatus || initialOrderId === undefined || command.record) return;
+    // Explicit return navigation uses the same authenticated owner as the normal
+    // chooser. No review, submission or label command is executed during loading.
+    void run(async (signal) => {
+      const order = await api.order(initialOrderId, signal);
+      if (!signal.aborted) setSelected(order);
+    });
+    return () => operation.current?.abort();
+  }, [api, run, embedded, initialOrder, initialStatus, initialOrderId, attempt, command.record !== null]);
 
   function chooseAnother(reason?: string) {
     if (embedded) { onSignedOut(); return; }
@@ -494,6 +507,25 @@ export function CustomerWorkspace({
       </>
     );
 
+  if (embedded && initialOrderId !== undefined)
+    return (
+      <CustomerReturnSurface onClose={onSignedOut} closeDisabled={inProgress}>
+        <div className="csz-return-status">
+          <h1 className="text-2xl font-semibold">Return items</h1>
+          <PreviewError message={error} />
+          {busy && <Loading text="Loading return items…" />}
+          {error && !busy && (
+            <Button variant="outline" onClick={() => setAttempt(value => value + 1)}>
+              Try again
+            </Button>
+          )}
+          <Button variant="ghost" disabled={inProgress} onClick={onSignedOut}>
+            Back to your orders
+          </Button>
+        </div>
+      </CustomerReturnSurface>
+    );
+
   return (
     <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={inProgress}>
       <div className="csz-return-status">
@@ -514,7 +546,7 @@ export function CustomerWorkspace({
         {!busy && !error && !orders.length && unavailableOrders === 0 && (
           <p className="text-sm text-muted-foreground">
             No eligible orders were found on this page. Items must meet the return
-            policy and have confirmed delivery.
+            policy.
           </p>
         )}
         <div className="space-y-3">

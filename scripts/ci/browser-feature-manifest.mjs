@@ -81,8 +81,9 @@ export const BROWSER_FEATURES = Object.freeze({
         "test/browser/returns-account-layout.spec.ts"
       ],
       "roots": [
-        "client/src/main.tsx"
-      ]
+        "client/src/customer-account/entry.tsx"
+      ],
+      "appRoutes": ["/returns", "/return-policies", "/customer-returns"]
     }
   }
 });

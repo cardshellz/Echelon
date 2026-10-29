@@ -28,13 +28,14 @@ export function CustomerOrderPanelLoader(props: {
   onAccessRetry(): void;
   onEdit(omsOrderId: number): void;
   onReturn(order: CustomerReturnCustomerOrder): void;
+  onStartReturn(omsOrderId: number): void;
   onLabel(authorizationId: number, omsOrderId: number): Promise<boolean>;
 }) {
   const summary = props.summary?.status === "verified" ? props.summary.order : null;
   const actions = props.actions;
   const unverified = actions?.state === "ready" ? actions.snapshot : null;
-  const mismatch = Boolean(unverified?.order && (unverified.order.connectionId !== props.connectionId
-    || (summary?.omsOrderId !== null && summary?.omsOrderId !== undefined && summary.omsOrderId !== unverified.order.omsOrderId)));
+  const mismatch = Boolean((unverified?.order && unverified.order.connectionId !== props.connectionId)
+    || (summary?.omsOrderId != null && actions?.omsOrderId != null && summary.omsOrderId !== actions.omsOrderId));
   const snapshot = mismatch ? null : unverified;
   const state: CustomerOrderPanelState = {
     loading: !props.actionError && (!actions || actions.state === "refreshing"),
@@ -43,6 +44,11 @@ export function CustomerOrderPanelLoader(props: {
     order: snapshot?.order ?? null,
     omsOrderId: actions?.omsOrderId ?? summary?.omsOrderId ?? null,
     returnOrder: snapshot?.returnOrder ?? null,
+    // This only opens the existing owned-order return lookup. A cache rebuild is
+    // not a policy decision, and never authorizes intake or a label purchase.
+    returnLookupAvailable: Boolean(props.enabled && props.connectionId && !props.accessNotice && !mismatch
+      && (actions?.omsOrderId ?? summary?.omsOrderId) != null && props.row.dataset.cancelled !== "true"
+      && (!snapshot || snapshot.returnFailed)),
   };
   return <CustomerOrderPanel {...props} state={state} summary={summary} onChanged={props.onRefresh}
     onRetry={() => {

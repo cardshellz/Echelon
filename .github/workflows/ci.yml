@@ -54,6 +54,32 @@ jobs:
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: node --import tsx scripts/ci/postgres-test-impact.ts
 
+  app-bootstrap:
+    name: Application import and startup smoke
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      options: --user 1001 --ipc=host
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Always required: route-scoped suites rely on this eager-import coverage.
+      - run: npx playwright test --config playwright.app-bootstrap.config.ts --forbid-only
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: app-bootstrap-traces
+          path: test-results/app-bootstrap/
+          retention-days: 7
+
   typecheck:
     name: Typecheck (${{ matrix.project }})
     needs: preflight
@@ -267,7 +293,7 @@ jobs:
   check-and-unit:
     # Preserve the existing required check name; skipped/cancelled jobs are failures.
     name: Typecheck + unit tests
-    needs: [preflight, typecheck, unit-tests, contracts]
+    needs: [preflight, app-bootstrap, typecheck, unit-tests, contracts]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -276,7 +302,7 @@ jobs:
       - name: Require every core check
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
-        run: node scripts/ci/require-success.mjs preflight typecheck unit-tests contracts
+        run: node scripts/ci/require-success.mjs preflight app-bootstrap typecheck unit-tests contracts
 
   postgres-hardening-shard:
     name: PostgreSQL hardening (shard ${{ matrix.shard }}/${{ matrix.count }})

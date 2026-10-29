@@ -1,6 +1,6 @@
 import { sql, type SQL } from "drizzle-orm";
 import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
-import { readReconciliationLedger, readReconciliationRecords } from "../inventory/infrastructure/cost-reconciliation.repository";
+import { visitShipmentReconciliationEvidence, type ShipmentReconciliationReadRequest } from "../inventory/infrastructure/cost-reconciliation.repository";
 import { reconciliationEligibility, reconciliationState } from "../inventory/domain/cost-reconciliation";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { shipmentExceptionDecisionSchema, shipmentExceptionHistorySchema, type ShipmentCostException, type ShipmentExceptionContext,
@@ -74,17 +74,22 @@ export async function readShipmentCostExceptions(tx: ShipmentExceptionReader, li
   const reviews = new Map<number, ShipmentCostException>();
   const current = new Map(currentSources);
   const freshness = new Map<number, { shipmentId: number; fingerprint: string }>();
+  const requests = new Map<number, ShipmentReconciliationReadRequest>();
   for (const fact of facts) {
     const review = buildShipmentCostException(fact);
     if (!review) continue;
     const source = costSourceRevisionSchema.parse(fact.contract);
-    const records = await readReconciliationRecords(tx, source, review.issues);
-    review.reconciliation = reconciliationState(reconciliationEligibility(source, review.issues, records), await readReconciliationLedger(tx, fact.lineId));
-    if (review.state === "accepted" || review.reconciliation.status === "posted") {
-      freshness.set(fact.lineId, { shipmentId: fact.shipmentId, fingerprint: source.fingerprint });
-    }
+    requests.set(fact.lineId, { source, issues: review.issues });
     reviews.set(fact.lineId, review);
   }
+  await visitShipmentReconciliationEvidence(tx, [...requests.values()], (lineId, { records, ledger }) => {
+    const review = reviews.get(lineId)!;
+    const source = requests.get(lineId)!.source;
+    review.reconciliation = reconciliationState(reconciliationEligibility(source, review.issues, records), ledger);
+    if (review.state === "accepted" || review.reconciliation.status === "posted") {
+      if (source.scope.kind === "shipment_line") freshness.set(lineId, { shipmentId: source.scope.inboundShipmentId, fingerprint: source.fingerprint });
+    }
+  });
   const missing = [...new Set([...freshness.values()].map(value => value.shipmentId))].filter(id => !current.has(id));
   if (missing.length) for (const [id, fingerprints] of await readCurrentShipmentSourceFingerprintBatch(tx, missing)) current.set(id, fingerprints);
   for (const [lineId, source] of freshness) {
