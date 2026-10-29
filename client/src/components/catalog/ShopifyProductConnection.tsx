@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRightLeft, ExternalLink, Loader2, Plus, Search } from "lucide-react";
+import { ArrowRightLeft, Check, ExternalLink, Loader2, Plus, Search } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { shopifyProductFetch, ShopifyProductRequestError } from "@/lib/shopify-product-connection";
@@ -76,6 +76,7 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
   const [page, setPage] = useState(0);
   const initialized = useRef<number | null>(null);
   const handledTerminal = useRef<string | null>(null);
+  const reviewRevision = useRef(0);
   const base = `/api/products/${productId}/shopify-connection`;
   const contextUrl = `${base}${channelId ? `?channelId=${channelId}` : ""}`;
   const contextQuery = useQuery<ShopifyConnectionContext>({ queryKey: [contextUrl],
@@ -110,15 +111,20 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
     ]);
   };
 
-  const request = (): ShopifyProductConnectionRequest => {
+  const request = (matchingProductId?: string): ShopifyProductConnectionRequest => {
     if (!context) throw new Error("The Shopify product context has not loaded.");
+    // Build the exact selected link request before React applies mode/target
+    // state changes. Switching from Create must not validate creation prices.
+    const requestedMode = matchingProductId === undefined ? mode : "link";
+    const keepBindings = matchingProductId === undefined || mode === "link"
+      && (review?.targetProductId === matchingProductId || target.trim() === matchingProductId);
     const ids = context.productOnly ? [null] : context.variants.map(variant => variant.id);
-    return { channelId: context.channelId, currency: context.currency, mode,
-      targetProductRef: mode === "link" ? target.trim() : undefined,
+    return { channelId: context.channelId, currency: context.currency, mode: requestedMode,
+      targetProductRef: requestedMode === "link" ? matchingProductId ?? target.trim() : undefined,
       productOnlyRequiresShipping: requiresShipping,
-      publicationId: mode === "create" ? publicationId : null,
-      bindings: mode === "link" ? Object.entries(bindings).map(([variantId, remoteVariantId]) => ({ variantId: Number(variantId), remoteVariantId })) : [],
-      prices: mode === "create" ? ids.map(variantId => {
+      publicationId: requestedMode === "create" ? publicationId : null,
+      bindings: requestedMode === "link" && keepBindings ? Object.entries(bindings).map(([variantId, remoteVariantId]) => ({ variantId: Number(variantId), remoteVariantId })) : [],
+      prices: requestedMode === "create" ? ids.map(variantId => {
         const key = variantId === null ? "product" : String(variantId);
         const priceCents = parseShopifyConnectionMoney(prices[key] || "");
         const compareText = comparisons[key]?.trim();
@@ -130,12 +136,17 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
   };
 
   const reviewMutation = useMutation({
-    mutationFn: async () => { const reviewedRequest = request(); return {
-      request: reviewedRequest, preview: await shopifyProductFetch(`${base}/preview`, reviewedRequest, shopifyProductConnectionPreviewSchema),
-    }; },
+    mutationFn: async (input: { request: ShopifyProductConnectionRequest; revision: number }) => ({
+      ...input, preview: await shopifyProductFetch(`${base}/preview`, input.request, shopifyProductConnectionPreviewSchema),
+    }),
     onMutate: () => setError(null),
-    onSuccess: result => { setReview(result.preview); setReviewRequest(result.request); setDirty(false); setSubmitted(null); },
-    onError: failure => setError(failure instanceof Error ? failure.message : "The Shopify product could not be reviewed."),
+    onSuccess: result => {
+      if (result.revision !== reviewRevision.current) return;
+      setReview(result.preview); setReviewRequest(result.request); setDirty(false); setSubmitted(null);
+    },
+    onError: (failure, input) => {
+      if (input.revision === reviewRevision.current) setError(failure instanceof Error ? failure.message : "The Shopify product could not be reviewed.");
+    },
   });
 
   const executeMutation = useMutation({
@@ -188,10 +199,28 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
   const pending = statusQuery.data && !["complete", "rejected"].includes(statusQuery.data.state) ? statusQuery.data : context?.pendingCommand;
   const busy = contextQuery.isFetching || reviewMutation.isPending || executeMutation.isPending;
   const locked = Boolean(pending || submitted || executeMutation.isPending);
-  const change = () => { setDirty(true); setError(null); };
+  const change = () => { reviewRevision.current += 1; setDirty(true); setError(null); };
   const start = (nextMode: "create" | "link") => {
+    reviewRevision.current += 1;
     initialized.current = null; setMode(nextMode); setChannelId(undefined); setTarget(""); setReview(null); setReviewRequest(null);
     setSubmitted(null); setError(null); setPage(0); setOpen(true);
+  };
+  const close = () => { reviewRevision.current += 1; setOpen(false); };
+  const reviewConnection = (matchingProductId?: string) => {
+    if (busy || locked || !context || context.blockedReason) return;
+    const revision = ++reviewRevision.current;
+    setDirty(true); setError(null);
+    try {
+      const reviewedRequest = request(matchingProductId);
+      if (matchingProductId !== undefined) {
+        const sameProduct = mode === "link" && (review?.targetProductId === matchingProductId || target.trim() === matchingProductId);
+        setMode("link"); setTarget(matchingProductId);
+        if (!sameProduct) { setBindings({}); setReview(null); setReviewRequest(null); setPage(0); }
+      }
+      reviewMutation.mutate({ request: reviewedRequest, revision });
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "The Shopify product could not be reviewed.");
+    }
   };
   const resume = () => {
     const intent = pending ? { commandKey: pending.commandKey, request: pending.request, previewHash: pending.previewHash } : submitted;
@@ -215,7 +244,7 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
         <Plus className="mr-2 h-4 w-4" />Create on Shopify
       </Button>
     </div>
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={nextOpen => nextOpen ? setOpen(true) : close()}>
       <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{mode === "create" ? "Create Shopify product" : "Link existing Shopify product"}</DialogTitle>
@@ -246,10 +275,19 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
           {context.blockedReason && <p role="alert" className="text-sm text-destructive">{context.blockedReason}</p>}
           {!pending && context.matchingProducts.length > 0 && <div className="space-y-2 rounded border p-3 text-sm">
             <p className="font-medium">Shopify products matching this catalog's SKUs</p>
-            {context.matchingProducts.map(product => <div key={product.id} className="flex flex-wrap items-center justify-between gap-2">
-              <span>{product.title} · {product.status.toLowerCase()} · {product.id}</span>
-              <Button size="sm" variant="outline" disabled={locked} onClick={() => { setMode("link"); setTarget(product.id); setReview(null); setBindings({}); change(); }}>Link this product</Button>
-            </div>)}
+            <p className="text-xs text-muted-foreground">Review a product and its variants, then confirm the link below.</p>
+            {context.matchingProducts.map(product => {
+              const reviewed = mode === "link" && review?.targetProductId === product.id && !dirty;
+              const reviewing = reviewMutation.isPending && reviewMutation.variables?.request.mode === "link"
+                && reviewMutation.variables.request.targetProductRef === product.id;
+              return <div key={product.id} className="flex flex-wrap items-center justify-between gap-2">
+                <span>{product.title} · {product.status.toLowerCase()} · {product.id}</span>
+                <Button size="sm" variant="outline" disabled={locked || busy || reviewed || Boolean(context.blockedReason)} onClick={() => reviewConnection(product.id)}>
+                  {reviewing ? <><Loader2 className="mr-2 h-3 w-3 animate-spin" />Reviewing product…</>
+                    : reviewed ? <><Check className="mr-2 h-3 w-3" />Reviewed</> : "Review this product"}
+                </Button>
+              </div>;
+            })}
           </div>}
           {context.lookupIssue && <p className="text-sm text-muted-foreground">SKU lookup: {context.lookupIssue} You can still enter an exact Shopify product ID.</p>}
           {mode === "link" ? <div className="space-y-1"><Label htmlFor="shopify-product-reference">Shopify product URL or ID</Label>
@@ -299,11 +337,11 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
         </div>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <DialogFooter className="flex-wrap gap-2">
-          <Button variant="outline" onClick={() => setOpen(false)}>Close</Button>
+          <Button variant="outline" onClick={close}>Close</Button>
           {pending || submitted ? <Button onClick={resume} disabled={busy}>
             {executeMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Resume saved Shopify command
           </Button> : <>
-            <Button variant="outline" onClick={() => reviewMutation.mutate()} disabled={!context || busy || Boolean(context.blockedReason) || mode === "link" && !target.trim()}>
+            <Button variant="outline" onClick={() => reviewConnection()} disabled={!context || busy || Boolean(context.blockedReason) || mode === "link" && !target.trim()}>
               {reviewMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{review ? "Refresh review" : "Review Shopify connection"}
             </Button>
             <Button onClick={confirm} disabled={!review?.ready || dirty || busy || Boolean(context?.blockedReason)}>
