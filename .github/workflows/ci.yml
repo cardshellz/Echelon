@@ -198,6 +198,7 @@ jobs:
           client/src/features/channel-inventory/__tests__/stock-link-presentation.test.ts
           client/src/features/channel-inventory/__tests__/stock-link-api.test.ts
           client/src/features/channel-inventory/__tests__/stock-link-controls.test.ts
+          client/src/features/channel-inventory/__tests__/stock-send-api.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run

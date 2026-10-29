@@ -30,6 +30,7 @@ import { ProductPicker } from "./ProductPicker";
 import { PublicationStatus } from "./PublicationStatus";
 import { Callout, SectionCard, SourceTag, StatePill } from "./primitives";
 import { NoDestinationYet } from "./SupplyTab";
+import { InventoryStockSendButton } from "./InventoryStockSend";
 
 const NO_SNAPSHOT_CODE = "INVENTORY_CHANNEL_EXPOSURE_SHADOW_NOT_FOUND";
 
@@ -78,11 +79,16 @@ export function QuantitiesTab({ view, channel, target, canEdit, productId, onPro
     <SectionCard
       title={`Stock preview for ${identity.title}`}
       description="See available stock and the quantity after your saved stock rules. This preview does not send an update."
-      actions={canEdit && productId !== null ? (
-        <Button type="button" variant="outline" size="sm" disabled={snapshot.isPending} onClick={() => snapshot.mutate()}>
-          <RefreshCw className={cn("mr-1 h-3.5 w-3.5", snapshot.isPending && "animate-spin")} aria-hidden="true" />
-          {snapshot.isPending ? "Calculating…" : "Recalculate stock"}
-        </Button>
+      actions={productId !== null ? (
+        <div className="flex flex-wrap gap-2">
+          {canEdit && <Button type="button" variant="outline" size="sm" disabled={snapshot.isPending} onClick={() => snapshot.mutate()}>
+            <RefreshCw className={cn("mr-1 h-3.5 w-3.5", snapshot.isPending && "animate-spin")} aria-hidden="true" />
+            {snapshot.isPending ? "Calculating…" : "Recalculate stock"}
+          </Button>}
+          {channel.provider.toLowerCase() === "shopify" && target.destinationKind === "channel_connection" && (
+            <InventoryStockSendButton productId={productId} channelId={channel.id} publicationTargetId={target.id} />
+          )}
+        </div>
       ) : undefined}
     >
       {target.publicationAuthority === "echelon" && (target.state !== "live" || view.runtimeAuthority !== "canonical") && (

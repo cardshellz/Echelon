@@ -17,6 +17,7 @@ async function fixtures(
     unverifiedOrders?: boolean;
     missingWeight?: boolean;
     unconfirmedDelivery?: boolean;
+    rejectSubmit?: boolean;
   } = {},
 ) {
   const service = new CustomerReturnPreviewService();
@@ -42,6 +43,7 @@ async function fixtures(
   let sessionKey = identity;
   let submitted = false;
   let failed = false;
+  let rejected = false;
   let signedOut = false;
   const status = {
     authorizationId: 20,
@@ -128,6 +130,12 @@ async function fixtures(
     if (path === `${API}/orders/10/returns`) {
       expect(body).not.toHaveProperty("channelId");
       expect(body).not.toHaveProperty("orderReference");
+      if (options.rejectSubmit && !rejected) {
+        rejected = true;
+        return route.fulfill({ status: 410, json: { error: {
+          code: "RETURN_LABEL_SUBMISSION_REJECTED", reasonCode: "RETURN_LABEL_ALLOCATION_UNVERIFIED",
+        } } });
+      }
       if (options.failSubmit && !failed) {
         failed = true;
         return route.abort("failed");
@@ -135,6 +143,10 @@ async function fixtures(
       submitted = true;
       return route.fulfill({ json: status });
     }
+    if (path.startsWith(`${API}/commands/`) && rejected && !submitted)
+      return route.fulfill({ status: 410, json: { error: {
+        code: "RETURN_LABEL_SUBMISSION_REJECTED", reasonCode: "RETURN_LABEL_ALLOCATION_UNVERIFIED",
+      } } });
     if (path.startsWith(`${API}/commands/`))
       return submitted
         ? route.fulfill({ json: status })
@@ -261,6 +273,22 @@ test("owned selection skips Find order, reviews exact quantities and creates onl
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
+});
+
+test("a rejected standalone request can reload current items and return to the order chooser", async ({ page }) => {
+  const f = await fixtures(page, { rejectSubmit: true });
+  await page.goto("/customer-returns");
+  await selectAndPack(page);
+  await page.getByRole("button", { name: "Get return labels", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Return not accepted", exact: true })).toBeVisible();
+  const lookupsBeforeRecovery = f.calls.filter(call => call.path === `${API}/orders/10`).length;
+  await page.getByRole("button", { name: "Review return items", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
+  expect(f.calls.filter(call => call.path === `${API}/orders/10`)).toHaveLength(lookupsBeforeRecovery + 1);
+  expect(f.calls.filter(call => call.path === `${API}/orders/10/returns`)).toHaveLength(1);
+  await page.getByRole("button", { name: "Back to order", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Choose an order to return", exact: true })).toBeVisible();
+  expect(f.calls.some(call => call.path.endsWith("/resume"))).toBe(false);
 });
 
 test("verified purchases remain selectable and reviewable without delivery confirmation", async ({ page }) => {

@@ -118,6 +118,25 @@ async function setup() {
   };
 }
 describe("private return submission and exact-intent recovery", () => {
+  it("replays a legacy definitive rejection without rewriting evidence or executing intake", async () => {
+    const s = await setup();
+    s.command.status = "rejected";
+    s.command.errorCode = "RETURN_LABEL_ALLOCATION_UNVERIFIED";
+    const recorded = structuredClone(s.command);
+    await expect(s.service.status(36, LABEL_KEY)).rejects.toMatchObject({
+      code: "RETURN_LABEL_SUBMISSION_REJECTED", status: 410,
+      reasonCode: "RETURN_LABEL_ALLOCATION_UNVERIFIED",
+      message: expect.stringContaining("Review your return items"),
+    });
+    expect(s.command).toEqual(recorded);
+    expect(s.acquire).not.toHaveBeenCalled();
+    expect(s.reject).not.toHaveBeenCalled();
+    expect(s.persist).not.toHaveBeenCalled();
+    expect(s.inspectForIntake).not.toHaveBeenCalled();
+    expect(s.inspectCanonicalForIntake).not.toHaveBeenCalled();
+    expect(s.preflight).not.toHaveBeenCalled();
+    expect(s.status).not.toHaveBeenCalled();
+  });
   it("rejects an excessive quoted price before reserving return quantities", async () => {
     const s = await setup();
     s.requireEnabled.mockResolvedValue({ settings: { ...labelSettings, parcelGuardrails: defaultCustomerReturnShippingGuardrails() },
