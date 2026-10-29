@@ -63,6 +63,8 @@ import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procureme
 import { readShipmentCostReview, readShipmentCostReviewProjectionsInTransaction } from "./shipment-cost-review.repository";
 import { createPurchaseCostStatusSnapshotReader } from "./purchase-cost-status-snapshot.repository";
 import { purchaseLineNeedsCostReview, purchaseCostNextAction } from "@shared/procurement/purchase-cost-status";
+import { buildCostReviewGroups } from "@shared/procurement/cost-review-tasks";
+import { shipmentCostReviewLines } from "@shared/procurement/cost-review-adapters";
 import { shipmentAllocationsEqual } from "./domain/shipment-allocation-equality";
 import { shipmentCancellationBlockers, SHIPMENT_CANCELLATION_REASON_MAX_LENGTH } from "./domain/shipment-cancellation";
 import { readShipmentCancellationEvidence } from "./shipment-cancellation.repository";
@@ -74,15 +76,21 @@ type ShipmentHealthCostReview = Pick<ShipmentCostReview, "shipmentId" | "lines">
   supplierReviewLineCount: number;
   supplierInvoiceReviewRequired: boolean;
   tracedLotIds: number[];
+  supplierTasks: NonNullable<LandedCostHealth["items"][number]["tasks"]>;
+  shipmentTasks: NonNullable<LandedCostHealth["items"][number]["tasks"]>;
 };
 
 /** Keep only evidence used by health; supplier decisions retain their existing owner. */
 function projectShipmentHealthCostReview(review: ShipmentCostReview): ShipmentHealthCostReview {
   const supplierReview = review.supplierCosts?.lines.filter(purchaseLineNeedsCostReview) ?? [];
+  const groups = buildCostReviewGroups(review.supplierCosts, shipmentCostReviewLines(review));
+  const tasks = groups.flatMap(group => group.tasks.map(task => ({ id: task.id, sku: group.sku, title: task.title, explanation: task.explanation, shipment: !!task.shipment })));
   return { shipmentId: review.shipmentId, lines: review.lines,
     supplierReviewLineCount: supplierReview.length,
     supplierInvoiceReviewRequired: supplierReview.some(line => purchaseCostNextAction(line) === "invoice"),
     tracedLotIds: [...new Set(review.supplierCosts?.lines.flatMap(line => line.lots.map(lot => lot.id)) ?? [])],
+    supplierTasks: tasks.filter(task => !task.shipment).map(({ shipment, ...task }) => task),
+    shipmentTasks: tasks.filter(task => task.shipment).map(({ shipment, ...task }) => task),
   };
 }
 
@@ -1459,6 +1467,7 @@ export function createShipmentTrackingService(
           ? `${supplierReviewCount} PO lines need product / packaging cost review (${provisionalLotCount} provisional lots on this shipment). ${review.supplierInvoiceReviewRequired ? "Confirm the supplier invoice amounts in cost review." : "Open cost review for the affected receipts and lot history."}`
           : `${untracedProvisionalLotCount} lot${untracedProvisionalLotCount === 1 ? " retains" : "s retain"} a provisional flag without verified supplier-cost coverage. Open cost review to compare their current component evidence; this flag alone does not mean freight is unposted.`}`,
         action: "review_cost_evidence", provisionalLotCount: provisionalLotCount,
+        tasks: review.supplierTasks,
       });
     }
     if (unpostedLines.length > 0 && (provisionalLotCount > 0
@@ -1477,6 +1486,7 @@ export function createShipmentTrackingService(
           : "Update shipment costs to apply the current source to inventory and sold costs."}`,
         action: needsSourceReview ? "review_cost_evidence" : fullyFinalized ? "push_costs_to_lots" : "finalize_landed_cost",
         provisionalLotCount: provisionalLotCount,
+        tasks: review.shipmentTasks,
       });
     }
     return items;

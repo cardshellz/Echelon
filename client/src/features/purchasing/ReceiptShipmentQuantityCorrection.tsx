@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useSearch } from "wouter";
 import { SHIPMENT_COST_REPAIR_QUERY_PARAM } from "@/lib/procurement-navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -94,18 +94,31 @@ export function ShipmentQuantityEditor(props: {
     />
   );
 }
+/** Cost-only entry into the existing, approved receipt/link repair. Initial
+ * quantities remain the saved values; no destination or expense is invented. */
+export function ShipmentCostLinkReview({ shipmentId, lineId, sku, open, onOpenChange, hideTrigger }: {
+  shipmentId: number; lineId: number; sku: string | null;
+  open?: boolean; onOpenChange?: (open: boolean) => void; hideTrigger?: boolean;
+}) {
+  return <QuantityCorrectionDialog shipmentId={shipmentId} shipmentLines={[{ id: lineId, sku }]}
+    repairLineId={lineId} openInitially={false} buttonLabel="Review missing links" open={open} onOpenChange={onOpenChange} hideTrigger={hideTrigger} />;
+}
 function QuantityCorrectionDialog(
-  props: Entry & { onSaved?: () => void; repairLineId?: number; buttonLabel?: string },
+  props: Entry & { onSaved?: () => void; repairLineId?: number; buttonLabel?: string; openInitially?: boolean;
+    open?: boolean; onOpenChange?: (open: boolean) => void; hideTrigger?: boolean },
 ) {
   const purpose = props.receiptLineId === undefined ? "shipment" : "receipt";
-  const [open, setOpen] = useState(props.repairLineId !== undefined);
+  const reviewingLinks = props.repairLineId !== undefined;
+  const [internalOpen, setInternalOpen] = useState(props.openInitially ?? (props.repairLineId !== undefined));
+  const open = props.open ?? internalOpen;
+  function setOpen(value: boolean) { setInternalOpen(value); props.onOpenChange?.(value); }
   const [locked, setLocked] = useState(false);
   const [mode, setMode] = useState<"lines" | "quantities">(
     props.repairLineId !== undefined || props.shipmentStatus === "closed" || props.shipmentId === undefined ? "quantities" : "lines",
   );
   return (
     <>
-      <Button
+      {!props.hideTrigger && <Button
         size="sm"
         variant="outline"
         className="whitespace-normal"
@@ -114,7 +127,7 @@ function QuantityCorrectionDialog(
         {props.buttonLabel ?? (purpose === "shipment"
           ? "Edit shipment"
           : "Correct received quantities")}
-      </Button>
+      </Button>}
       <Dialog
         open={open}
         onOpenChange={(value) => {
@@ -132,17 +145,17 @@ function QuantityCorrectionDialog(
         >
           <DialogHeader>
             <DialogTitle>
-              {purpose === "shipment"
+              {reviewingLinks ? "Review receipt and stock links" : purpose === "shipment"
                 ? "Edit shipment"
                 : "Correct receipt and shipment"}
             </DialogTitle>
             <DialogDescription>
-              {purpose === "shipment"
+              {reviewingLinks ? "Review the receipt, transfers and repacking history and their cost changes. Leave the saved counts unchanged unless the physical documents show a quantity error." : purpose === "shipment"
                 ? "Edit line items or correct linked receipt quantities. Review the full impact and save with administrator approval."
                 : "Set the recorded pieces, review the cost impact, then approve one correction for the linked records."}
             </DialogDescription>
           </DialogHeader>
-          {props.shipmentId !== undefined && <div className="flex flex-wrap gap-2" aria-label="Shipment edit options">
+          {props.shipmentId !== undefined && !reviewingLinks && <div className="flex flex-wrap gap-2" aria-label="Shipment edit options">
             <Button variant={mode === "lines" ? "default" : "outline"} disabled={locked} onClick={() => setMode("lines")}>Line items</Button>
             {props.shipmentLines.length > 0 && <Button variant={mode === "quantities" ? "default" : "outline"} disabled={locked} onClick={() => setMode("quantities")}>Receipt and quantity corrections</Button>}
           </div>}

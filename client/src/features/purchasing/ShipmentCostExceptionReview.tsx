@@ -20,8 +20,13 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ShipmentCostPostingDetails, ShipmentCostPostingHistory } from "./ShipmentCostPostingDetails";
 
-export function ShipmentCostExceptionReview({ lineId, review }: { lineId: number; review: ShipmentCostException }) {
-  const [open, setOpen] = useState(false);
+export function ShipmentCostExceptionReview({ lineId, review, compact = false, buttonLabel, open: controlledOpen, onOpenChange, hideTrigger = false }: {
+  lineId: number; review: ShipmentCostException; compact?: boolean; buttonLabel?: string;
+  open?: boolean; onOpenChange?: (open: boolean) => void; hideTrigger?: boolean;
+}) {
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  function setOpen(value: boolean) { setInternalOpen(value); onOpenChange?.(value); }
   const posted = review.reconciliation?.status === "posted";
   const amount = formatShipmentExceptionAmount(
     review.reconciliation?.postedMills ?? review.amountMills,
@@ -29,7 +34,7 @@ export function ShipmentCostExceptionReview({ lineId, review }: { lineId: number
   );
   return (
     <div className="space-y-2 text-sm">
-      <Badge variant={posted ? "outline" : "destructive"} className={posted ? "border-green-600/40 text-green-800 dark:text-green-300" : undefined}>
+      {!compact && <><Badge variant={posted ? "outline" : "destructive"} className={posted ? "border-green-600/40 text-green-800 dark:text-green-300" : undefined}>
         {posted ? "Costs posted" : "Cost reconciliation needed"}
       </Badge>
       <p>
@@ -43,10 +48,10 @@ export function ShipmentCostExceptionReview({ lineId, review }: { lineId: number
         <p className="text-xs text-muted-foreground">
           No further cost approval is needed. The approval and original stock history are saved below.
         </p>
-      )}
-      <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
-        {posted ? "View posting and approval" : "Reconcile costs"}
-      </Button>
+      )}</>}
+      {!hideTrigger && <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
+        {buttonLabel ?? (posted ? "View posting and approval" : "Reconcile costs")}
+      </Button>}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-2xl max-h-[90dvh] flex flex-col overflow-hidden">
           {open && <ShipmentReconciliation lineId={lineId} onClose={() => setOpen(false)} />}

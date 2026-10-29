@@ -25,7 +25,7 @@ export async function readShipmentCostReviewInTransaction(tx: ShipmentExceptionR
   shipmentCostWorkflowIdSchema.parse(shipmentId);
   const shipment = await tx.execute(sql`SELECT id FROM procurement.inbound_shipments WHERE id=${shipmentId}`);
   if (!shipment.rows.length) return null;
-  const result = await tx.execute(sql`SELECT line.id,line.sku,line.purchase_order_line_id,revision.contract,
+  const result = await tx.execute(sql`SELECT line.id,line.sku,line.purchase_order_id,line.purchase_order_line_id,line.allocated_cost_cents,revision.contract,
     application.id AS application_id,application.status,application.recorded_at,application.evidence->'result' AS result
     FROM procurement.inbound_shipment_lines line
     LEFT JOIN LATERAL (SELECT id,contract FROM procurement.cost_source_revisions revision
@@ -56,6 +56,10 @@ function projectShipmentCostReview(shipmentId: number, rows: Record<string, unkn
     const outcome = row.result as Record<string, unknown> | null;
     return {
       lineId: costInteger(row.id, "line.id", 1), sku: row.sku == null ? null : String(row.sku),
+      purchaseOrderId: row.purchase_order_id == null ? null : costInteger(row.purchase_order_id, "purchaseOrderId", 1),
+      purchaseOrderLineId: row.purchase_order_line_id == null ? null : costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1),
+      allocatedCents: row.allocated_cost_cents == null ? null : costInteger(row.allocated_cost_cents, "allocatedCents", -Number.MAX_SAFE_INTEGER),
+      currency: row.contract == null ? null : (row.contract as Record<string, unknown>).currency ?? null,
       sourceIssue: sourceIssues.get(costInteger(row.id, "line.id", 1)) ?? null,
       exceptionReview: exceptions.get(costInteger(row.id, "line.id", 1)) ?? null,
       application: row.application_id == null ? null : {
@@ -82,7 +86,7 @@ export async function readShipmentCostReviewProjectionsInTransaction<T>(tx: Ship
     rowsByShipment.set(id, []);
   }
   if (!rowsByShipment.size) return new Map();
-  const result = await tx.execute(sql`SELECT line.inbound_shipment_id AS shipment_id,line.id,line.sku,line.purchase_order_line_id,revision.contract,
+  const result = await tx.execute(sql`SELECT line.inbound_shipment_id AS shipment_id,line.id,line.sku,line.purchase_order_id,line.purchase_order_line_id,line.allocated_cost_cents,revision.contract,
     application.id AS application_id,application.status,application.recorded_at,application.evidence->'result' AS result
     FROM procurement.inbound_shipment_lines line
     LEFT JOIN LATERAL (SELECT id,contract FROM procurement.cost_source_revisions revision
