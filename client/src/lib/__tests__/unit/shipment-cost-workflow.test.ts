@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createShipmentCostUpdateClient, readShipmentCostWorkflow, shipmentCostWorkflowError } from "../../shipment-cost-workflow";
 import { FinancialCommandRequestError } from "../../financial-command";
 import { isShipmentCostLinePosted, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
+import { shipmentMeasurementApprovalResultSchema } from "@shared/procurement/shipment-measurement-correction";
 
 afterEach(() => vi.unstubAllGlobals());
 const result = (shipmentId = 42) => ({ shipmentId, finalizedLines: 2, adjustments: 1,
@@ -53,6 +54,9 @@ it("opts into PO line links without dropping the current reconciliation contract
 });
 
 describe("shipment cost update intent", () => {
+  it.each([{}, { actorId: "admin", actorName: "Admin", approvedAt: "2026-10-29T12:00:00Z" }, { auditEventId: 0, actorId: "", actorName: "", approvedAt: "invalid" }])("requires a saved audit identity, approver and timestamp in approval response %j", body => {
+    expect(shipmentMeasurementApprovalResultSchema.safeParse(body).success).toBe(false);
+  });
   it("does not accept an ordinary update response as proof of a saved measurement approval", async () => {
     const fetch = vi.fn().mockImplementation(async () => response()); vi.stubGlobal("fetch", fetch);
     const generateKey = vi.fn(() => "measurement-key");

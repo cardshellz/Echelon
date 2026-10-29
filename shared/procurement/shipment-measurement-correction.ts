@@ -43,6 +43,10 @@ export const shipmentMeasurementPreviewSchema = z.object({
   }).strict()),
   impact: shipmentMeasurementImpactSchema,
 }).strict();
+export const shipmentMeasurementApprovalResultSchema = z.object({
+  auditEventId: z.number().int().positive().safe(), actorId: z.string().min(1), actorName: z.string().min(1).max(200),
+  approvedAt: z.string().datetime({ offset: true }), preview: shipmentMeasurementPreviewSchema,
+}).strict();
 export const shipmentMeasurementContextSchema = z.object({
   shipmentId: shipmentLineResourceIdSchema, shipmentNumber: z.string(), status: z.string(),
   sourceVersion: shipmentLineVersionSchema, canApprove: z.boolean(), blockedReason: z.string().nullable(), lines: z.array(line),

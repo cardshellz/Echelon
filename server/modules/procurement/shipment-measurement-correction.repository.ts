@@ -1,6 +1,6 @@
 import { asc, eq, sql } from "drizzle-orm";
 import { auditEvents, inboundShipments, inboundShipmentLines } from "@shared/schema";
-import { shipmentMeasurementContextSchema, shipmentMeasurementsSchema, type ShipmentMeasurementReviewRequest, type ShipmentMeasurementPreview } from "@shared/procurement/shipment-measurement-correction";
+import { shipmentMeasurementContextSchema, shipmentMeasurementsSchema, shipmentMeasurementApprovalResultSchema, type ShipmentMeasurementReviewRequest, type ShipmentMeasurementPreview } from "@shared/procurement/shipment-measurement-correction";
 import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
 import { lockInventoryCostGraph, costFingerprint } from "../inventory/infrastructure/cost-evidence.repository";
 import { readPoAmendmentDependencies, type PoAmendmentDependencies } from "./po-amendment-dependencies.repository";
@@ -62,7 +62,7 @@ export async function recordShipmentMeasurementApproval(tx: AmendmentTransaction
       source: "saved_shipment_line_measurements", inventoryQuantityDelta: 0, shipmentStatus: source.shipment.status },
   }).returning({ id: auditEvents.id });
   if (!event) throw new ShipmentMeasurementCorrectionError("The measurement approval could not be recorded.", "SHIPMENT_MEASUREMENTS_AUDIT_FAILED", 500);
-  return { auditEventId: event.id, actorId, actorName, approvedAt: at.toISOString(), preview };
+  return shipmentMeasurementApprovalResultSchema.parse({ auditEventId: event.id, actorId, actorName, approvedAt: at.toISOString(), preview });
 }
 
 export function shipmentDependencyLines(dependencies: PoAmendmentDependencies, shipmentId: number) {

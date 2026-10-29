@@ -4,13 +4,17 @@ import { useAuth } from "@/lib/auth";
 import { createShipmentCostUpdateClient, shipmentCostWorkflowError } from "@/lib/shipment-cost-workflow";
 import { Button } from "@/components/ui/button";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
+import { FinancialCommandRequestError } from "@/lib/financial-command";
 
-export function ShipmentCostUpdateAction({ shipmentId, disabled = false }: { shipmentId: number; disabled?: boolean }) {
+export function ShipmentCostUpdateAction({ shipmentId, disabled = false, onMeasurementsNeeded }: { shipmentId: number; disabled?: boolean; onMeasurementsNeeded?: () => void }) {
   const { hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const [client] = useState(() => createShipmentCostUpdateClient(() => crypto.randomUUID()));
   const update = useMutation({
     mutationFn: (id: number) => client.update(id),
+    onError: error => {
+      if (error instanceof FinancialCommandRequestError && error.code === "MISSING_ALLOCATION_DIMENSIONS") onMeasurementsNeeded?.();
+    },
     // The response can be lost after commit. Always reload persisted outcomes,
     // including other linked POs; never leave a success toast over stale totals.
     onSettled: () => invalidatePurchaseCosts(queryClient),

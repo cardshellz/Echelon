@@ -1937,11 +1937,11 @@ export default function InboundShipmentDetail() {
                   <details className="text-sm">
                     <summary className="cursor-pointer">Reapply costs (optional)</summary>
                     <p className="my-2 text-muted-foreground">Use this only to refresh costs after a change. The recorded postings remain in the audit.</p>
-                    <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} />
+                    <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} onMeasurementsNeeded={() => setShowMeasurementCorrection(true)} />
                   </details>
                 </div> : <div className="space-y-2 rounded-md bg-muted/40 p-3">
                   <p className="text-sm">Update shipment costs recalculates this split and updates stock and sold-order costs. {shipment.status === "closed" && "This shipment stays closed; cost adjustments are recorded automatically."}</p>
-                  <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} disabled={allocationStatusError || lines.length === 0} />
+                  <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} disabled={allocationStatusError || lines.length === 0} onMeasurementsNeeded={() => setShowMeasurementCorrection(true)} />
                 </div> : shipment.status !== "cancelled" && <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">The charge split updates when charges change. Stock and sold-order costs are updated when the shipment closes.</p>
                   {hasPermission("purchasing", "edit") && <Button variant="outline" className="min-h-[44px]" disabled={runAllocationMutation.isPending || lines.length === 0 || allocationStatusError} onClick={() => runAllocationMutation.mutate()}>

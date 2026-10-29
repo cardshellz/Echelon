@@ -46,6 +46,7 @@ async function setup(page: Page, options: { loseResponse?: boolean; cannotApprov
     }
     if (path.endsWith("/42/update-costs") && request.method() === "POST") {
       const input = request.postDataJSON();
+      if (!input.measurementCorrection) return route.fulfill({ status: 400, json: { code: "MISSING_ALLOCATION_DIMENSIONS", error: "Box dimensions are missing." } });
       expect(input.measurementCorrection.previewVersion).toBe("b".repeat(64));
       expect(input.measurementCorrection.evidenceConfirmed).toBe(true);
       expect(input.measurementCorrection.lines[0].measurements).not.toHaveProperty("qtyShipped");
@@ -126,6 +127,14 @@ test("server authority controls measurement corrections even for an apparent adm
   await expect(dialog.getByLabel("Length (cm) FIRST-PO-PRODUCT", { exact: true })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "Review changes", exact: true })).toHaveCount(0);
   expect(state.previews).toBe(0); expect(state.keys).toEqual([]);
+});
+test("a cost update blocked by missing measurements opens the same correction without leaving the shipment", async ({ page }) => {
+  const { dialog, failures } = await setup(page);
+  await dialog.getByRole("button", { name: "Close review", exact: true }).click();
+  await page.getByRole("button", { name: "Update shipment costs", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "Correct shipment measurements" })).toBeVisible();
+  await expect(dialog.getByLabel("Length (cm) FIRST-PO-PRODUCT", { exact: true })).toHaveValue("10.00");
+  expect(new URL(page.url()).pathname).toBe("/shipments/42"); expect(failures).toEqual([]);
 });
 test("closing a received shipment opens the same approved measurement editor and can finish after correction", async ({ page }) => {
   const { dialog, state, failures } = await setup(page, { costing: true });
