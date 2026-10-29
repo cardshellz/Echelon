@@ -5,8 +5,9 @@ This changes test scheduling, not application behavior or production configurati
 
 ## Required check and database isolation
 
-`Typecheck + unit tests` retains its existing name and commands. This change does
-not modify repository merge rules.
+`Typecheck + unit tests` retains its existing name and requires preflight,
+application startup smoke, all typecheck programs, all unit shards and the
+maintenance/UI contracts. Repository merge rules are unchanged.
 
 PostgreSQL hardening runs on every PR and push to main. The explicit inventory in
 `scripts/ci/postgres-test-manifest.ts` preserves the 70 integration files previously
@@ -51,21 +52,40 @@ an explicit explanation. Do not add standalone serial commands back to the workf
 
 ## Browser suites
 
-Procurement uses four runner shards; Dropship uses two. Both desktop and mobile
-projects and the existing test patterns remain enabled. Tests within each runner
-retain the original single-worker configuration. Test failures and traces are
-associated with distinct shard artifacts.
+Procurement uses eight runner shards with two workers per runner. Connected
+procurement uses four shards with one worker per runner and isolated databases.
+Its TypeScript program compiles once, on a separate runner in parallel with those
+shards; the aggregate requires both compiler and browser success. Dropship,
+inventory and returns use their affected-feature matrices. Existing journey
+patterns, assertions, and desktop/mobile projects remain enabled. Test failures
+and traces are associated with distinct shard artifacts.
 
 Browser selection follows the relevant suite entrypoints and their transitive
 source imports. Shared UI, app-shell, style, and toolchain changes run both suites.
 Uncertain imports or changed-file information run tests rather than skipping them.
 Manual workflow dispatch runs the complete selected suite.
 
-Procurement currently loads `App.tsx`, which eagerly imports the application pages.
-Those imports remain dependencies even when a test does not navigate to their
-routes: a module initialization failure can break startup. Consequently many
-frontend edits still require procurement coverage. This CI change does not
-introduce lazy-loaded application routes just to make the filter narrower.
+The required `app-bootstrap` job always runs the real `main.tsx` and `App.tsx` in
+Chromium and renders the login form, covering eager module initialization once.
+It intercepts API traffic and rejects startup mutations. It does not authenticate
+or certify business workflows; those remain covered by the relevant journeys.
+
+Procurement, order editing and returns resolve their entrypoints from the actual
+`Route` JSX in `App.tsx`, using the URL scopes in `browser-suite-impact.mjs` and
+`browser-feature-manifest.mjs`. The resolver follows local wrappers, including
+both branches of feature switches, without evaluating source. It includes
+dynamic/pathless routes conservatively in every app-based suite. The existing
+impact owner then follows test, harness, shell, route and transitive source
+dependencies in both Git snapshots, preserving deleted/renamed dependency
+coverage. An unrelated catalog component therefore requires catalog journeys and
+startup smoke without requiring every procurement journey.
+
+When adding journeys for a new URL namespace, register that scope alongside the
+suite and add an entrypoint regression to `browser-ci-selection.test.ts`. Do not
+replace the bootstrap test with mocked HTML or a feature harness. Router/import
+parse failures, missing roots, unsupported route attributes, unknown paths or
+missing diff evidence select broad coverage. Shared shell, UI, hooks, libraries,
+styles, toolchain and selector changes continue to select broad coverage.
 
 The selector does not claim that a server behavior change is proven by mocked
 browser tests. Database and unit coverage remain separate and are not path-filtered

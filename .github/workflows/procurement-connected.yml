@@ -45,6 +45,26 @@ jobs:
           BROWSER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: node scripts/ci/browser-suite-impact.mjs
 
+  typecheck:
+    name: Connected procurement types
+    needs: select
+    if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # One compiler owner, parallel with all four browser/database shards.
+      - run: npx tsc -p tsconfig.tests.connected.json
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+
   browser:
     name: Connected procurement database and browser (${{ matrix.shard }}/4)
     needs: select
@@ -82,9 +102,6 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx tsc -p tsconfig.tests.connected.json
-        env:
-          NODE_OPTIONS: --max-old-space-size=6144
       - name: Install browser and OS dependencies
         run: npx playwright install --with-deps chromium
       - name: Build actual frontend
@@ -100,7 +117,7 @@ jobs:
 
   result:
     name: Procurement connected acceptance
-    needs: [select, browser]
+    needs: [select, typecheck, browser]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -110,6 +127,7 @@ jobs:
           SELECT_RESULT: ${{ needs.select.result }}
           RUN_SUITE: ${{ needs.select.outputs.run }}
           BROWSER_RESULT: ${{ needs.browser.result }}
+          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
         run: |
           if [ "$MIGRATIONS_RESULT" != "success" ]; then
             echo "::error::Migration validation did not pass"
@@ -119,11 +137,11 @@ jobs:
             echo "::error::Connected coverage selection failed"
             exit 1
           fi
-          if [ "$RUN_SUITE" = "false" ] && [ "$BROWSER_RESULT" = "skipped" ]; then
+          if [ "$RUN_SUITE" = "false" ] && [ "$BROWSER_RESULT" = "skipped" ] && [ "$TYPECHECK_RESULT" = "skipped" ]; then
             echo "Dependency analysis found no affected connected procurement coverage."
             exit 0
           fi
-          if [ "$RUN_SUITE" != "true" ] || [ "$BROWSER_RESULT" != "success" ]; then
-            echo "::error::Connected procurement coverage did not pass (result: $BROWSER_RESULT)"
+          if [ "$RUN_SUITE" != "true" ] || [ "$BROWSER_RESULT" != "success" ] || [ "$TYPECHECK_RESULT" != "success" ]; then
+            echo "::error::Connected procurement coverage did not pass (browser: $BROWSER_RESULT; types: $TYPECHECK_RESULT)"
             exit 1
           fi

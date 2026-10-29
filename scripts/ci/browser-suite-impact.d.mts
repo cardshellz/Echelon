@@ -4,6 +4,7 @@ export interface BrowserSuiteDefinition {
   workflow: string;
   tests: RegExp;
   roots: string[];
+  appRoutes?: readonly string[];
   ownedPrefixes: string[];
   isolated?: boolean;
 }
@@ -18,7 +19,7 @@ export interface BrowserSelection {
   reason: string;
 }
 
-export const BROWSER_SUITES: Record<"orderEdits" | "procurement" | "procurementConnected" | "dropship", BrowserSuiteDefinition>;
+export const BROWSER_SUITES: Record<"appBootstrap" | "orderEdits" | "procurement" | "procurementConnected" | "dropship", BrowserSuiteDefinition>;
 
 export function parseChangedFiles(output: string): BrowserFileChange[];
 
