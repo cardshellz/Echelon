@@ -4,6 +4,7 @@ import type { ChannelPackageFacts, ChannelPackageRequirements } from "@shared/ca
 import { prepareChannelPackage, type ChannelPackagePlan, type ListingPackageValues } from "../../../marketplace-listings/domain/channel-package";
 import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { prepareChannelPublicationWeight } from "../../../marketplace-listings/domain/channel-package-weight";
 import type { BuiltInventoryItem } from "./ebay-listing-builder";
 import type { EbayInventoryItem, EbayPackageWeightAndSize } from "./ebay-types";
 
@@ -34,7 +35,8 @@ function observedValues(value: EbayPackageWeightAndSize | undefined): ListingPac
 }
 
 /** Transport translation only. The shared package owner selects facts and
- * enforces requirements; preserved provider fields keep their original units. */
+ * enforces requirements. Weight uses shared publication precision; preserved
+ * dimensions, flags and provider extensions retain their original values. */
 export function resolveEbayListingPackage(input: { source: EbayPackageSource; sku: string;
   observed?: EbayPackageWeightAndSize }): { payload: EbayPackageWeightAndSize; plan: ChannelPackagePlan } {
   const { facts } = input.source;
@@ -45,7 +47,9 @@ export function resolveEbayListingPackage(input: { source: EbayPackageSource; sk
     catalog: facts,
     observed: observedValues(preserved) });
   const payload: EbayPackageWeightAndSize = structuredClone(input.observed ?? {});
-  if (plan.sources.weight === "catalog") payload.weight = { value: Number(plan.values.weightGrams), unit: "GRAM" };
+  if (plan.values.weightGrams != null) payload.weight = {
+    value: prepareChannelPublicationWeight({ value: plan.values.weightGrams, unit: "GRAM" }).ounces, unit: "OUNCE",
+  };
   if (plan.sources.dimensions === "catalog") payload.dimensions = {
     length: new Decimal(plan.values.lengthMm!).div(10).toNumber(),
     width: new Decimal(plan.values.widthMm!).div(10).toNumber(),
@@ -101,7 +105,9 @@ export async function prepareEbayListingPackages<T extends { productId: number; 
       // Only weight and dimensions are authoritative in that draft;
       // preserve provider flags and extensions instead of replaying defaults.
       payload = structuredClone(current?.packageWeightAndSize ?? {});
-      if (plan.sources.weight === "catalog") payload.weight = structuredClone(legacy!.weight);
+      if (plan.values.weightGrams != null) payload.weight = {
+        value: prepareChannelPublicationWeight({ value: plan.values.weightGrams, unit: "GRAM" }).ounces, unit: "OUNCE",
+      };
       if (plan.sources.dimensions === "catalog") payload.dimensions = structuredClone(legacy!.dimensions);
     }
     // Remove the original container even when no measurements remain. Otherwise
@@ -122,9 +128,24 @@ export async function assertEbayPackagePreservation(client: ItemReader, items: r
     if (!item.packagePlan) throw new EbayListingSyncError("EBAY_SYNC_DRAFT_SCOPE_INVALID", "Package data must be prepared before publishing.");
     const current = await client.getInventoryItem(item.sku);
     if (current && current.sku !== item.sku) throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The observed inventory item does not match the requested SKU.");
+    // Preserve the original measurement when checking a channel-owned weight.
+    // Comparing only rounded ounces would hide concurrent edits in one bucket.
+    if (item.packagePlan.sources.weight === "channel") {
+      const observedWeight = observedValues(current?.packageWeightAndSize).weightGrams;
+      const intendedWeight = observedValues(item.payload.packageWeightAndSize).weightGrams;
+      if (intendedWeight == null) throw new EbayListingSyncError("EBAY_SYNC_DRAFT_SCOPE_INVALID",
+        "The prepared update is missing the package weight it must preserve. Prepare the listing again before syncing.");
+      // An earlier successful item stage may already have normalized this
+      // weight before a later stage failed. Its exact target is safe to resume;
+      // an unrelated edit inside the same rounded ounce is still a conflict.
+      const unchanged = observedWeight != null && new Decimal(observedWeight).eq(item.packagePlan.values.weightGrams!);
+      const alreadyApplied = observedWeight != null && new Decimal(observedWeight).eq(intendedWeight);
+      if (!unchanged && !alreadyApplied)
+        throw new EbayListingSyncError("EBAY_SYNC_PACKAGE_CHANGED", "Package weight changed on eBay after preparation. Prepare the update again before replacing the item.");
+    }
     const preserved = (value: EbayPackageWeightAndSize | undefined) => {
       const copy = structuredClone(value ?? {});
-      if (item.packagePlan!.sources.weight === "catalog") delete copy.weight;
+      if (item.packagePlan!.sources.weight !== "absent") delete copy.weight;
       if (item.packagePlan!.sources.dimensions === "catalog") delete copy.dimensions;
       return copy;
     };

@@ -1,3 +1,4 @@
+import { prepareChannelPublicationWeight } from "../../marketplace-listings/domain/channel-package-weight";
 import type {
   ChannelListingPayload,
   ListingPushResult,
@@ -301,8 +302,8 @@ function buildRestProductPayload(listing: ChannelListingPayload): Record<string,
         variant.compare_at_price = centsToDecimalString(v.compareAtPriceCents);
       }
       if (v.weightGrams != null) {
-        variant.weight = v.weightGrams;
-        variant.weight_unit = "g";
+        variant.weight = prepareChannelPublicationWeight({ value: v.weightGrams, unit: "GRAM" }).ounces;
+        variant.weight_unit = "oz";
       }
       if (v.externalVariantId) {
         variant.id = Number(v.externalVariantId);
