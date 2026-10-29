@@ -151,7 +151,7 @@ describe("fast CI preserves coverage and required checks", () => {
       expect(browser).toContain("needs: select");
       expect(browser).toContain("if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}");
       const aggregate = job(browserWorkflow, "result");
-      expect(aggregate).toContain("needs: [select, browser]");
+      expect(aggregate).toContain(file === "procurement-connected" ? "needs: [select, typecheck, browser]" : "needs: [select, browser]");
       expect(aggregate).toContain("if: ${{ always() }}");
       expect(aggregate).toContain("MIGRATIONS_RESULT: ${{ needs.select.outputs.migrations }}");
       expect(aggregate).toContain("SELECT_RESULT: ${{ needs.select.result }}");
@@ -174,7 +174,7 @@ describe("fast CI preserves coverage and required checks", () => {
       ] as const) {
         const result = runBrowserAggregate(aggregate, {
           MIGRATIONS_RESULT: migrations, SELECT_RESULT: selection, RUN_SUITE: run,
-          SHARD_RESULT: shards, BROWSER_RESULT: shards,
+          SHARD_RESULT: shards, BROWSER_RESULT: shards, TYPECHECK_RESULT: shards,
         });
         expect(result.error).toBeUndefined();
         expect(result.status, JSON.stringify({ migrations, selection, run, shards })).toBe(exitStatus);
@@ -221,8 +221,50 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(config).toContain("fullyParallel: true");
     expect(config).toContain("globalTimeout: 12 * 60_000");
     const aggregate = job(connected, "result");
-    expect(aggregate).toContain("needs: [select, browser]");
+    expect(aggregate).toContain("needs: [select, typecheck, browser]");
     expect(aggregate).toContain("BROWSER_RESULT: ${{ needs.browser.result }}");
+  });
+
+  it("compiles connected tests once, in parallel, and requires compiler success or an explicit safe skip", () => {
+    const connected = source(".github/workflows/procurement-connected.yml");
+    const types = job(connected, "typecheck");
+    expect(connected.match(/run: npx tsc -p tsconfig.tests.connected.json/g)).toHaveLength(1);
+    expect(types).toContain("needs: select");
+    expect(types).toContain("if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}");
+    expect(types).toContain("NODE_OPTIONS: --max-old-space-size=6144");
+    expect(types).not.toMatch(/services:|playwright install|needs: browser/);
+    expect(job(connected, "browser")).not.toContain("tsc -p");
+    const aggregate = job(connected, "result");
+    expect(aggregate).toContain("TYPECHECK_RESULT: ${{ needs.typecheck.result }}");
+    for (const run of ["true", "false"]) {
+      for (const result of ["success", "failure", "cancelled", "skipped", ""]) {
+        const execution = runBrowserAggregate(aggregate, {
+          MIGRATIONS_RESULT: "success", SELECT_RESULT: "success", RUN_SUITE: run,
+          BROWSER_RESULT: run === "true" ? "success" : "skipped", TYPECHECK_RESULT: result,
+        });
+        const expected = run === "true" ? "success" : "skipped";
+        expect(execution.error).toBeUndefined();
+        expect(execution.status, JSON.stringify({ run, result })).toBe(result === expected ? 0 : 1);
+      }
+    }
+  });
+
+  it("requires the actual App startup smoke before the core check can pass", () => {
+    const bootstrap = job(workflow, "app-bootstrap");
+    expect(bootstrap).toContain("needs: preflight");
+    expect(bootstrap).toContain("playwright test --config playwright.app-bootstrap.config.ts --forbid-only");
+    expect(bootstrap).not.toMatch(/if:.*needs\.|--grep|--pass-with-no-tests|continue-on-error/);
+    const config = source("playwright.app-bootstrap.config.ts");
+    expect(config).toContain('testMatch: "app-bootstrap.spec.ts"');
+    expect(config).toContain("reuseExistingServer: false");
+    const smoke = source("test/browser/app-bootstrap.spec.ts");
+    expect(smoke).not.toMatch(/route\([^\n]*(?:html|main\.tsx)|setContent\(/);
+    for (const result of ["failure", "skipped", "cancelled"]) {
+      expect(() => requireSuccessfulJobs({ preflight: success(), "app-bootstrap": { result },
+        typecheck: success(), "unit-tests": success(), contracts: success(),
+      }, ["preflight", "app-bootstrap", "typecheck", "unit-tests", "contracts"]))
+        .toThrow("CI jobs did not all succeed: app-bootstrap");
+    }
   });
 
   it("runs cheap coverage, test-exclusion, migration and writer-ownership guards before expensive core jobs", () => {
@@ -440,10 +482,10 @@ describe("fast CI preserves coverage and required checks", () => {
   it("retains the existing required core check and fails closed on every dependency", () => {
     const gate = job(workflow, "check-and-unit");
     expect(gate).toContain("name: Typecheck + unit tests");
-    expect(gate).toContain("needs: [preflight, typecheck, unit-tests, contracts]");
+    expect(gate).toContain("needs: [preflight, app-bootstrap, typecheck, unit-tests, contracts]");
     expect(gate).toContain("if: ${{ always() }}");
     expect(gate).toContain("CI_NEEDS: ${{ toJSON(needs) }}");
-    expect(gate).toContain("node scripts/ci/require-success.mjs preflight typecheck unit-tests contracts");
+    expect(gate).toContain("node scripts/ci/require-success.mjs preflight app-bootstrap typecheck unit-tests contracts");
     expect(workflow).not.toMatch(/continue-on-error:|paths(?:-ignore)?:/);
   });
 
@@ -451,6 +493,7 @@ describe("fast CI preserves coverage and required checks", () => {
     ["order-edits", "browser"], ["inventory-availability", "browser-shard"],
     ["returns-preview", "browser-shard"], ["procurement-navigation", "browser"],
     ["dropship-pricing", "browser"],
+    ["ci", "app-bootstrap"],
   ])("uses a pinned compatible browser runtime in %s", (file, jobName) => {
     const lock = JSON.parse(source("package-lock.json")) as { packages: Record<string, { version: string }> };
     const version = lock.packages["node_modules/playwright"].version;
