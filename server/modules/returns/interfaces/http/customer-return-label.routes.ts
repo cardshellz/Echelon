@@ -94,6 +94,7 @@ export function registerCustomerReturnLabelRoutes(
           .json({
             error: {
               code,
+              ...(error instanceof CustomerReturnIntakeError && error.reasonCode ? { reasonCode: error.reasonCode } : {}),
               message: known
                 ? error.message
                 : "Return labels are temporarily unavailable. Check the saved return status before trying again.",

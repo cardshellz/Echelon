@@ -36,7 +36,7 @@ export class OrderActionProjectionInspectorService implements OrderActionProject
       order = null; orderFailed = true; failures.push(classify(error));
       this.dependencies.report({ action: "order_action_edit_inspection", outcome: "failed", omsOrderId: scope.omsOrderId, code: "ORDER_ACTION_EDIT_UNAVAILABLE" });
     }
-    // The returns owner decides from delivered quantities and existing claims.
+    // The returns owner decides from purchased quantities and existing physical claims.
     // A warehouse hold or edit restriction must not hide an eligible return.
     {
       try {

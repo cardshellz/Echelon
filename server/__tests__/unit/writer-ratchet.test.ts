@@ -42,6 +42,8 @@ describe("writer-ratchet (P2.1)", () => {
     ["wms.shipping_package_history_invalidations", "modules/shipping"],
     ["wms.shipping_package_history_backfills", "modules/shipping"],
     ["returns.customer_return_box_measurements", "modules/returns"],
+    ["returns.customer_return_parcel_receipts", "modules/returns"],
+    ["returns.customer_return_parcel_receipt_allocations", "modules/returns"],
     ["wms.picking_commands", "modules/wms"],
     ["procurement.receiving_custody_fence", "modules/procurement"],
     ["procurement.receiving_quarantine_observations", "modules/procurement"],

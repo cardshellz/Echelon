@@ -1,3 +1,4 @@
+import { ReturnParcelReceivingCard } from "@/components/returns/ReturnParcelReceivingCard";
 import { useInventoryCommand } from "@/lib/inventory-command";
 import { returnCommandBodySchema, returnCommandResultFor, type ReturnCommandBody } from "@shared/inventory/return-command";
 import { useMemo, useState } from "react";
@@ -233,6 +234,8 @@ export default function Returns() {
           Receive approved returns and post inspected inventory disposition.
         </p>
       </div>
+
+      <ReturnParcelReceivingCard />
 
       {/* Order Search */}
       <Card>

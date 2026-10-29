@@ -1,3 +1,5 @@
+import { validateCustomerReturnBoxPlan } from "../../server/modules/returns/application/customer-return-box-plan";
+import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { CustomerReturnPreviewService } from "../../server/modules/returns/application/customer-return-preview.service";
 import { customerReturnSavedRequestSchema } from "../../client/src/lib/customer-return-customer";
@@ -13,6 +15,8 @@ async function fixtures(
     history?: boolean;
     changedReview?: boolean;
     unverifiedOrders?: boolean;
+    missingWeight?: boolean;
+    unconfirmedDelivery?: boolean;
   } = {},
 ) {
   const service = new CustomerReturnPreviewService();
@@ -24,7 +28,15 @@ async function fixtures(
     scenarioId: "split_delivered",
     orderReference: "TEST-1001",
   });
-  const order = { ...fields, sourceRevision: "a".repeat(64) };
+  const order = {
+    ...fields,
+    sourceRevision: "a".repeat(64),
+    lines: fields.lines.map(line => ({
+      ...line,
+      deliveredQuantity: options.unconfirmedDelivery ? 0 : line.deliveredQuantity,
+    })),
+  };
+  if (options.missingWeight) order.lines[0].unitWeightGrams = null;
   const detail = { omsOrderId: 10, order, settingsVersion: 2 };
   const calls: { path: string; method: string; body: any }[] = [];
   let sessionKey = identity;
@@ -98,6 +110,11 @@ async function fixtures(
         });
       expect(body).not.toHaveProperty("orderReference");
       expect(body).not.toHaveProperty("channelId");
+      if (options.missingWeight || options.unconfirmedDelivery) {
+        const plan = validateCustomerReturnBoxPlan(order.lines, { selections: body.selections, parcels: body.parcels }, order.boxOptions);
+        return route.fulfill({ json: { ...plan, sourceRevision: order.sourceRevision, effects: "none",
+          orderReference: order.orderReference, refundMethod: "manual_shopify" } });
+      }
       const { mode: _reviewMode, ...review } = service.review({
         scenarioId: "split_delivered",
         orderReference: "TEST-1001",
@@ -161,7 +178,7 @@ async function fixtures(
   };
 }
 
-async function selectAndPack(page: Page) {
+async function selectAndPack(page: Page, packedWeightOunces?: string, beforeReview?: () => Promise<void>) {
   await page.getByRole("button", { name: "Return items", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "What would you like to return?" }),
@@ -186,6 +203,11 @@ async function selectAndPack(page: Page) {
       .getByLabel("Height of box 1 in inches", { exact: true })
       .fill("6");
   }
+  if (packedWeightOunces !== undefined) {
+    await expect(page.getByRole("button", { name: "Review return", exact: true })).toBeDisabled();
+    await page.getByLabel("Packed box weight (ounces)", { exact: true }).fill(packedWeightOunces);
+  }
+  await beforeReview?.();
   await page
     .getByRole("button", { name: "Review return", exact: true })
     .click();
@@ -239,6 +261,39 @@ test("owned selection skips Find order, reviews exact quantities and creates onl
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
+});
+
+test("verified purchases remain selectable and reviewable without delivery confirmation", async ({ page }) => {
+  const f = await fixtures(page, { unconfirmedDelivery: true });
+  await page.goto("/customer-returns");
+  await selectAndPack(page);
+  await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
+  const reviews = f.calls.filter(call => call.path.endsWith("/review"));
+  expect(reviews).toHaveLength(1);
+  expect(reviews[0].body.selections).toEqual([{ lineId: "sample-line-1", quantity: 1, reasonCode: null }]);
+  expect(f.calls.some(call => call.path.endsWith("/returns") && call.method === "POST")).toBe(false);
+});
+
+test("missing item weights use a measured package weight and preserve it through a lost-response retry", async ({ page }, testInfo) => {
+  const f = await fixtures(page, { missingWeight: true, failSubmit: true });
+  await page.goto("/customer-returns");
+  await selectAndPack(page, "16", async () => {
+    await page.screenshot({ path: testInfo.outputPath("measured-box-packing.png"), fullPage: true });
+  });
+  await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
+  const review = f.calls.find(call => call.path.endsWith("/review"))!;
+  expect(review.body.parcels[0].packedWeightGrams).toBe(454);
+  await page.screenshot({ path: testInfo.outputPath("measured-return-weight.png"), fullPage: true });
+  await page.getByRole("button", { name: "Get return labels", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Retry saved request" })).toBeEnabled();
+  await page.reload();
+  await page.getByRole("button", { name: "Retry saved request" }).click();
+  await expect(page.getByRole("heading", { name: "Return RMA-20" })).toBeVisible();
+  const writes = f.calls.filter(call => call.path.endsWith("/returns") && call.method === "POST");
+  expect(writes).toHaveLength(2);
+  expect(writes[1].body).toEqual(writes[0].body);
+  expect(writes[1].body.parcels[0].packedWeightGrams).toBe(454);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test("uncertain creation survives reload and retries exact durable intent without a new key", async ({
@@ -307,7 +362,7 @@ test("existing returns open through read-only history without current eligibilit
 }) => {
   const f = await fixtures(page, { history: true });
   await page.goto("/customer-returns");
-  await page.getByRole("button", { name: "RMA-20 · Order TEST-1001" }).click();
+  await page.getByRole("button", { name: "RMA-20 \u00b7 Order TEST-1001" }).click();
   await expect(
     page.getByRole("button", { name: "Download label for box 1" }),
   ).toBeVisible();
@@ -321,7 +376,7 @@ test("order load failure remains an error and never claims no eligible orders", 
   await page.goto("/customer-returns");
   await expect(page.getByRole("alert")).toContainText("could not confirm");
   await expect(page.getByText(/No eligible orders were found/)).toHaveCount(0);
-  await page.getByRole("button", { name: "RMA-20 · Order TEST-1001" }).click();
+  await page.getByRole("button", { name: "RMA-20 \u00b7 Order TEST-1001" }).click();
   await expect(
     page.getByRole("button", { name: "Download label for box 1" }),
   ).toBeVisible();
@@ -406,4 +461,112 @@ test("sign out clears visible customer data and retains an uncertain saved reque
       .filter((call) => call.path === `${API}/logout`)
       .map((call) => call.method),
   ).toEqual(["POST"]);
+});
+
+test("mixed-box receiving restores and retries the identical saved receipt after a lost response", async ({
+  page,
+}) => {
+  const parcel = {
+    parcelId: 71,
+    authorizationId: 61,
+    authorizationNumber: "RMA-61",
+    boxNumber: 2,
+    trackingNumber: "RETURN-BOX-2",
+    lines: [
+      {
+        authorizationLineId: 81,
+        title: "Sleeves",
+        sku: "SAME",
+        expectedQuantity: 2,
+        receivedQuantity: 0,
+      },
+      {
+        authorizationLineId: 82,
+        title: "Toploaders",
+        sku: "TOP",
+        expectedQuantity: 3,
+        receivedQuantity: 0,
+      },
+      {
+        authorizationLineId: 83,
+        title: "Separate sleeve purchase",
+        sku: "SAME",
+        expectedQuantity: 1,
+        receivedQuantity: 0,
+      },
+    ],
+  };
+  const writes: unknown[] = [];
+  await page.route("**/api/returns/admin/receiving/**", async (route) => {
+    if (route.request().method() === "GET")
+      return route.fulfill({ json: parcel });
+    const body = route.request().postDataJSON();
+    writes.push(body);
+    if (writes.length === 1)
+      return route.fulfill({
+        status: 503,
+        json: {
+          error: {
+            code: "RETURN_PARCEL_RECEIPT_UNAVAILABLE",
+            message:
+              "The receipt outcome could not be confirmed. Retry the same saved receipt.",
+          },
+        },
+      });
+    return route.fulfill({
+      json: {
+        parcel: {
+          ...parcel,
+          lines: parcel.lines.map((line) => ({
+            ...line,
+            receivedQuantity: line.authorizationLineId === 81 ? 1 : 0,
+          })),
+        },
+        caseIds: [91, 92],
+        replayed: true,
+      },
+    });
+  });
+  await page.route("**/__return-parcel-test**", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script type="module">import RefreshRuntime from '/@react-refresh';RefreshRuntime.injectIntoGlobalHook(window);window.$RefreshReg$=()=>{};window.$RefreshSig$=()=>type=>type;window.__vite_plugin_react_preamble_installed__=true;</script></head>
+  <body><div id="root"></div><script type="module" src="/@fs/${resolve(process.cwd(), "test/browser/fixtures/return-parcel-receiving-harness.tsx").replaceAll("\\", "/")}"></script></body></html>`,
+    }),
+  );
+  await page.goto("/__return-parcel-test");
+  await page.getByLabel("Return tracking number").fill("RETURN-BOX-2");
+  await page.getByRole("button", { name: "Find box", exact: true }).click();
+  await expect(page.getByText(/RMA-61.*Box 2/)).toBeVisible();
+  await expect(
+    page.getByText("Separate sleeve purchase", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByLabel("Units received now", { exact: true })
+    .first()
+    .fill("1");
+  await page
+    .getByRole("button", { name: "Record box receipt", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Retry saved receipt", exact: true }),
+  ).toBeVisible();
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Retry saved receipt", exact: true })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "No quantities were received twice",
+  );
+  expect(writes).toHaveLength(2);
+  expect(writes[1]).toEqual(writes[0]);
+  await expect(
+    page.getByText("1 of 2 received", { exact: false }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
 });

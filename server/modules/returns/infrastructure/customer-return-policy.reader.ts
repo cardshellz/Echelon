@@ -48,7 +48,12 @@ export class PostgresCustomerReturnPortalPolicyReader
     return this.database.transaction(async (tx) => {
       await acquireReturnPolicyCatalogLock(tx, "shared");
       const policies = await readCustomerReturnPolicyCandidates(tx, channelId);
-      const result = await tx.execute(sql`SELECT policy_id,configuration FROM returns.return_policy_shipping
+      const result = await tx.execute(sql`SELECT policy_id, CASE WHEN EXISTS (
+        SELECT 1 FROM returns.customer_return_label_controls control WHERE control.channel_id=${channelId} AND control.paused=true)
+        OR NOT EXISTS (SELECT 1 FROM warehouse.warehouses warehouse
+          WHERE warehouse.id::text=configuration->>'warehouseId' AND warehouse.is_active=1 AND warehouse.country='US')
+        THEN jsonb_set(configuration,'{enabled}','false'::jsonb) ELSE configuration END AS configuration
+        FROM returns.return_policy_shipping
         WHERE policy_id IN (SELECT id FROM returns.return_policies WHERE status='active'
           AND (business_context IS NULL OR business_context='retail') AND (channel_id IS NULL OR channel_id=${channelId})
           AND vendor_id IS NULL AND store_connection_id IS NULL) LIMIT 201`);

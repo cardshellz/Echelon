@@ -16,6 +16,16 @@ export function customerReturnProviderDimensions(dimensions: CustomerReturnDimen
     .toDecimalPlaces(DIMENSION_INCH_DECIMAL_PLACES, Decimal.ROUND_CEIL).toNumber();
   return { length: inches(dimensions.lengthMm), width: inches(dimensions.widthMm), height: inches(dimensions.heightMm) };
 }
+/** Used by lookup, review, and submission; provider quotes remain read-only. */
+export function assertCustomerReturnShippingReady(
+  settings: CustomerReturnLabelSettings | null | undefined,
+): asserts settings is CustomerReturnLabelSettings {
+  if (!settings?.enabled)
+    throw new CustomerReturnIntakeError(
+      "RETURN_LABEL_SETTINGS_DISABLED",
+      "Prepaid return shipping is temporarily unavailable. Contact us for help before starting a return.",
+    );
+}
 export function customerReturnOriginAddress(source: CustomerReturnShopifySnapshot["order"]["shippingAddress"]) {
   const origin = customerReturnLabelAddressSchema.safeParse(source && {
     name: source.name, ...(source.phone?.trim() ? { phone: source.phone } : {}),

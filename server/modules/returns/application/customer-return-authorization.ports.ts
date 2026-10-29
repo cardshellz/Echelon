@@ -17,14 +17,19 @@ export interface CustomerReturnAuthorizationCommand {
 }
 
 export interface CustomerReturnAuthorizationAllocation {
-  wmsOrderItemId: number;
-  fulfillmentId: string;
-  fulfillmentLineItemId: string;
+  /** Older authorizations keep their fulfillment provenance. New customer
+   * returns are anchored directly to the verified purchased line. */
+  sourceKind?: "shopify_fulfillment" | "shopify_purchase";
+  wmsOrderItemId: number | null;
+  fulfillmentId: string | null;
+  fulfillmentLineItemId: string | null;
   quantity: number;
-  /** Original purchased units on this exact WMS item and provider fulfillment line. */
+  /** Original source capacity: purchased units for new RMAs; fulfillment
+   * partition units for existing authorizations. This never asserts box packing. */
   originalQuantity: number;
-  /** Total eligible units for this original fulfillment line, before claims. */
+  /** Source capacity after external claims, before locally locked claims. */
   eligibleQuantity: number;
+  /** Persisted legacy column name; purchase sources record purchase proof only. */
   deliveryEvidence: ReturnAuthorizationSnapshot;
 }
 
@@ -65,9 +70,9 @@ export interface LockedCustomerReturnAuthorizationSource {
   }[];
   allocationClaims: {
     omsOrderLineId: number;
-    wmsOrderItemId: number;
-    fulfillmentId: string;
-    fulfillmentLineItemId: string;
+    wmsOrderItemId: number | null;
+    fulfillmentId: string | null;
+    fulfillmentLineItemId: string | null;
     quantity: number;
   }[];
 }
@@ -83,6 +88,7 @@ export interface CustomerReturnAuthorizationTransaction {
     channelId: number;
     omsOrderId: number;
     omsOrderLineIds: readonly number[];
+    basis?: "shopify_purchase";
   }): Promise<LockedCustomerReturnAuthorizationSource | null>;
   /** Requires command/source locks; rejects stale capacity and commits no effects itself. */
   persist(input: PersistCustomerReturnAuthorizationInput): Promise<CustomerReturnAuthorizationResult>;

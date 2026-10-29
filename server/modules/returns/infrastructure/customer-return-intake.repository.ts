@@ -54,11 +54,14 @@ export class PostgresCustomerReturnIntakeStore implements CustomerReturnIntakeSt
       await verifyConfiguration(tx, input);
       const authorization = new PostgresCustomerReturnAuthorizationTransaction(tx);
       await authorization.lockCommand({ channelId: input.channelId, idempotencyKey: input.idempotencyKey });
+      const purchaseReturn = input.lines.every(line => line.allocations.every(item => item.sourceKind === "shopify_purchase"));
       const locked = await authorization.lockSource({
         channelId: input.channelId, omsOrderId: input.omsOrderId,
-        omsOrderLineIds: input.lines.map(line => line.omsOrderLineId)
+        omsOrderLineIds: input.lines.map(line => line.omsOrderLineId),
+        ...(purchaseReturn ? { basis: "shopify_purchase" as const } : {})
       });
       if (!locked) sourceChanged();
+      if (!purchaseReturn) {
       const actualClaims = locked.lines.flatMap(line => line.wmsItems.map(item => ({
         wmsOrderItemId: item.wmsOrderItemId,
         legacyExpectedQuantity: item.legacyExpectedQuantity, claimedQuantity: item.claimedQuantity
@@ -66,17 +69,26 @@ export class PostgresCustomerReturnIntakeStore implements CustomerReturnIntakeSt
       if (canonical(actualClaims.sort(byItem)) !== canonical([...input.expectedClaims].sort(byItem))) sourceChanged();
       // Legacy direct inventory returns do not always create expected-return rows.
       // Recheck this separate authority under the order locks before granting units.
-      const inventoryHistory = rows(await tx.execute(sql`SELECT 1 FROM inventory.inventory_transactions it
-        LEFT JOIN wms.orders wo ON wo.id=it.order_id WHERE it.transaction_type='return'
-        AND (wo.oms_fulfillment_order_id=${String(input.omsOrderId)} OR wo.source_table_id=${String(input.omsOrderId)}
-          OR EXISTS (SELECT 1 FROM wms.order_items wi JOIN oms.oms_order_lines ol ON ol.id=wi.oms_order_line_id
-            WHERE wi.id=it.order_item_id AND ol.order_id=${input.omsOrderId}))
-        AND (NOT EXISTS (SELECT 1 FROM wms.order_items wi JOIN oms.oms_order_lines ol ON ol.id=wi.oms_order_line_id
-            WHERE wi.id=it.order_item_id AND wi.order_id=it.order_id AND ol.order_id=${input.omsOrderId})
-          OR EXISTS (SELECT 1 FROM wms.order_items wi WHERE wi.id=it.order_item_id
-            AND wi.oms_order_line_id IN (${sql.join(input.lines.map(line => sql`${line.omsOrderLineId}`), sql`, `)})))
+      const inventoryHistory = rows(await tx.execute(sql`WITH selected_sources AS MATERIALIZED (
+        SELECT wms_order_id,wms_order_item_id,oms_order_line_id FROM returns.customer_return_source_items
+        WHERE oms_order_id=${input.omsOrderId}
+      ) SELECT 1 FROM inventory.inventory_transactions it WHERE it.transaction_type='return'
+        AND (EXISTS (SELECT 1 FROM selected_sources source
+          WHERE (source.wms_order_id=it.order_id OR source.wms_order_item_id=it.order_item_id)))
+        AND (NOT EXISTS (SELECT 1 FROM selected_sources source
+            WHERE source.wms_order_item_id=it.order_item_id AND source.wms_order_id=it.order_id)
+          OR EXISTS (SELECT 1 FROM selected_sources source
+            WHERE source.wms_order_item_id=it.order_item_id
+              AND source.oms_order_line_id IN (${sql.join(input.lines.map(line => sql`${line.omsOrderLineId}`), sql`, `)})))
         AND NOT (${sql.raw(portalInventoryReturnMirrorSql)}) LIMIT 1`));
       if (inventoryHistory.length > 0) sourceChanged();
+      const unallocated = rows(await tx.execute(sql`SELECT 1 FROM wms.returns existing
+        JOIN wms.orders wo ON wo.id=existing.order_id
+        WHERE (wo.oms_fulfillment_order_id=${String(input.omsOrderId)} OR wo.source_table_id=${String(input.omsOrderId)}
+          OR EXISTS (SELECT 1 FROM returns.customer_return_source_items source WHERE source.oms_order_id=${input.omsOrderId} AND source.wms_order_id=wo.id))
+          AND NOT EXISTS (SELECT 1 FROM wms.return_items item WHERE item.return_id=existing.id) LIMIT 1`));
+      if (unallocated.length > 0) sourceChanged();
+      }
       // Catalog, settings and order locks can all wait. The source TTL, lease,
       // and purchase-based policy deadline must still hold after the final lock.
       const now = z.date().parse(this.clock());
@@ -152,6 +164,9 @@ async function verifyConfiguration(tx: Executor, input: PreparedCustomerReturnIn
 }
 
 async function materializeCases(tx: Executor, input: PreparedCustomerReturnIntake, authorizationId: number, now: Date): Promise<void> {
+  if (input.lines.every(line => line.allocations.every(item => item.sourceKind === "shopify_purchase"))) {
+    return materializePurchasedReturnCase(tx, input, authorizationId, now);
+  }
   const source = rows(await tx.execute(sql`SELECT aa.id AS allocation_id,aa.authorization_line_id,aa.wms_order_item_id,aa.quantity,
     al.oms_order_line_id,al.external_line_item_id,wi.order_id,wi.sku,wi.name,wi.paid_price_cents
     FROM returns.customer_return_authorization_allocations aa
@@ -211,6 +226,50 @@ async function materializeCases(tx: Executor, input: PreparedCustomerReturnIntak
   }
 }
 
+/** A customer RMA creates its own expected inbound work. Outbound warehouse
+ * orders are optional evidence, never a prerequisite or a fabricated source. */
+async function materializePurchasedReturnCase(tx: Executor, input: PreparedCustomerReturnIntake, authorizationId: number, now: Date): Promise<void> {
+  const source = rows(await tx.execute(sql`SELECT aa.id AS allocation_id,al.oms_order_line_id,al.external_line_item_id,
+    al.quantity,ol.sku,ol.title FROM returns.customer_return_authorization_allocations aa
+    JOIN returns.customer_return_authorization_lines al ON al.id=aa.authorization_line_id
+    JOIN oms.oms_order_lines ol ON ol.id=al.oms_order_line_id
+    WHERE aa.authorization_id=${authorizationId} ORDER BY al.oms_order_line_id`));
+  if (source.length !== input.lines.length) sourceChanged();
+  const expected = await createExpectedWmsReturn(tx, { orderId: null, sourceAuthorizationId: authorizationId,
+    source: "customer_portal", sourceEventKey: `customer-return:${authorizationId}:purchase`, reason: "customer_return", now,
+    items: source.map(row => ({ orderItemId: null, omsOrderLineId: positive.parse(row.oms_order_line_id),
+      externalLineItemId: String(row.external_line_item_id), sku: row.sku == null ? null : String(row.sku),
+      expectedQuantity: positive.parse(row.quantity), restockPolicy: "return" })) });
+  const policy = input.operationalPolicy;
+  const saved = rows(await tx.execute(sql`INSERT INTO returns.return_cases
+    (source_provider,source_event_type,source_event_id,business_context,channel_id,oms_order_id,wms_order_id,wms_return_id,
+      policy_id,policy_version,policy_snapshot,case_status,approval_status,logistics_status,inspection_status,
+      customer_refund_status,vendor_settlement_status,opened_at,created_at,updated_at)
+    VALUES('customer_portal','private_customer_return',${`${authorizationId}:purchase`},'retail',${input.channelId},
+      ${input.omsOrderId},NULL,${expected.returnId},${policy.id},${policy.version},${JSON.stringify(policy.snapshot)}::jsonb,
+      'open','approved','awaiting_return',${policy.snapshot.inspectionRequirement === "none" ? "not_required" : "pending"},
+      'pending','not_applicable',${now},${now},${now}) RETURNING id`))[0];
+  const caseId = positive.parse(saved?.id);
+  await tx.execute(sql`INSERT INTO returns.customer_return_case_links(authorization_id,case_id,wms_order_id,wms_return_id,created_at)
+    VALUES(${authorizationId},${caseId},NULL,${expected.returnId},${now})`);
+  for (const row of source) {
+    const returnedItem = expected.items.find(item => item.omsOrderLineId === Number(row.oms_order_line_id));
+    if (!returnedItem) sourceChanged();
+    // No invented zero price: refunds remain a separately reviewed Shopify action.
+    const item = rows(await tx.execute(sql`INSERT INTO returns.return_case_items
+      (return_case_id,wms_return_item_id,oms_order_line_id,wms_order_item_id,external_line_item_id,sku,title,quantity,
+        unit_paid_price_cents,source_line_total_cents,created_at)
+      VALUES(${caseId},${returnedItem.id},${row.oms_order_line_id},NULL,${row.external_line_item_id},${row.sku},${row.title},
+        ${row.quantity},NULL,NULL,${now}) RETURNING id`))[0];
+    await tx.execute(sql`INSERT INTO returns.customer_return_allocation_case_items
+      (authorization_id,authorization_allocation_id,case_item_id,wms_return_item_id,created_at)
+      VALUES(${authorizationId},${row.allocation_id},${item.id},${returnedItem.id},${now})`);
+  }
+  await tx.execute(sql`INSERT INTO returns.return_case_events(return_case_id,event_type,actor,details,occurred_at,created_at)
+    VALUES(${caseId},'private_customer_return_created',${input.actor},
+      ${JSON.stringify({ authorizationId, source: "shopify_purchase", wmsReturnId: expected.returnId, refundAuthority: "manual_shopify" })}::jsonb,${now},${now})`);
+}
+
 async function persistParcels(tx: Executor, input: PreparedCustomerReturnIntake, authorizationId: number, now: Date): Promise<void> {
   for (const parcel of input.parcels) {
     const saved = rows(await tx.execute(sql`INSERT INTO returns.customer_return_parcels
@@ -235,7 +294,7 @@ async function readResult(tx: Executor, authorizationId: number, replayed: boole
     FROM returns.customer_return_parcels WHERE authorization_id=${authorizationId} ORDER BY id`));
   return customerReturnIntakeResultSchema.parse({
     authorizationId, authorizationNumber: root?.authorization_number, replayed,
-    cases: cases.map(row => ({ caseId: Number(row.id), caseNumber: row.case_number, wmsOrderId: Number(row.wms_order_id), wmsReturnId: Number(row.wms_return_id) })),
+    cases: cases.map(row => ({ caseId: Number(row.id), caseNumber: row.case_number, wmsOrderId: row.wms_order_id == null ? null : Number(row.wms_order_id), wmsReturnId: Number(row.wms_return_id) })),
     parcels: parcels.map(row => ({
       parcelId: Number(row.id), parcelKey: row.parcel_key, providerExternalShipmentId: row.provider_external_shipment_id,
       dimensions: row.dimensions, weightGrams: Number(row.weight_grams)

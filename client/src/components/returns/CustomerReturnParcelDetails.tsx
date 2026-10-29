@@ -5,7 +5,6 @@ import type { CustomerReturnFlowOrder } from "@shared/returns/customer-return-fl
 import {
   customPreviewParcelSize,
   formatPreviewDimensions,
-  previewParcelProductWeight,
   type PreviewParcelDraft,
 } from "@/lib/customer-return-parcels";
 
@@ -28,7 +27,6 @@ export function CustomerReturnParcelDetails({
   busy: boolean;
   onChange: (parcel: PreviewParcelDraft) => void;
 }) {
-  const weight = previewParcelProductWeight(order, parcel);
   const originalBoxId =
     parcel.size.kind === "original" ? parcel.size.originalBoxId : null;
   const original = order.boxOptions.find(
@@ -37,12 +35,6 @@ export function CustomerReturnParcelDetails({
   const sizeId = `return-box-${parcel.key}-size`;
   return (
     <div className="mb-4 space-y-3 border-b pb-4">
-      {weight.status === "unverified" && (
-        <p className="text-sm text-muted-foreground">
-          We cannot prepare this box for return yet. Please contact support for
-          help.
-        </p>
-      )}
       {original && parcel.size.kind === "original" ? (
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0 space-y-1">
