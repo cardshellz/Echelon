@@ -68,6 +68,7 @@ import { shipmentCancellationBlockers, SHIPMENT_CANCELLATION_REASON_MAX_LENGTH }
 import { readShipmentCancellationEvidence } from "./shipment-cancellation.repository";
 import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts, type ShipmentProvisionalLotCounts, type ShipmentAllocationReadEvidence, type ShipmentHealthReadEvidence } from "./shipment-health-evidence.repository";
 import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
+import { applyShipmentMeasurementCorrection, type ShipmentCostUpdateApplicationResult } from "./shipment-measurement-correction.service";
 
 type ShipmentHealthCostReview = Pick<ShipmentCostReview, "shipmentId" | "lines"> & {
   supplierReviewLineCount: number;
@@ -1668,9 +1669,9 @@ export function createShipmentTrackingService(
 
   /** The operator's single cost update: fresh allocation, audited snapshots and
    * downstream revaluation share the financial command's transaction and clock. */
-  async function updateCostsInTransaction(tx: any, shipmentId: number, body: unknown, actorId: string, now: Date, options: CostApplicationOptions = {}) {
+  async function updateCostsInTransaction(tx: any, shipmentId: number, body: unknown, actorId: string, now: Date, options: CostApplicationOptions = {}): Promise<ShipmentCostUpdateApplicationResult> {
     shipmentCostWorkflowIdSchema.parse(shipmentId);
-    shipmentCostUpdateInputSchema.parse(body);
+    const input = shipmentCostUpdateInputSchema.parse(body);
     if (!tx || typeof tx.execute !== "function" || typeof tx.insert !== "function") {
       throw new ShipmentTrackingError("A database transaction is required to update shipment costs.", 500,
         { code: "SHIPMENT_COST_UPDATE_TRANSACTION_REQUIRED" });
@@ -1679,6 +1680,8 @@ export function createShipmentTrackingService(
       throw new ShipmentTrackingError("Valid audit context is required to update shipment costs.", 500,
         { code: "SHIPMENT_COST_UPDATE_AUDIT_REQUIRED" });
     }
+    if (input.measurementCorrection) return applyShipmentMeasurementCorrection(tx, shipmentId, input.measurementCorrection, actorId, now,
+      recordedAt => updateCostsInTransaction(tx, shipmentId, {}, actorId, recordedAt, { historicalReconciliation: "preserve" }));
     // Durable commands enter outside runInTransaction. Match its graph-before-
     // shipment lock order so receiving, PO edits and revaluation cannot deadlock.
     await lockInventoryCostGraph(tx);

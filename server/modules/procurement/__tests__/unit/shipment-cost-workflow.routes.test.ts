@@ -5,7 +5,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ServiceRegistry } from "../../../../services";
 
-const mocks = vi.hoisted(() => ({ execute: vi.fn(), getCostReview: vi.fn(), cancel: vi.fn() }));
+const mocks = vi.hoisted(() => ({ execute: vi.fn(), getCostReview: vi.fn(), cancel: vi.fn(), close: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../routes/middleware", () => ({
   requireAuth: (_req: Request, _res: Response, next: NextFunction) => next(),
@@ -38,7 +38,7 @@ describe("shipment cost workflow HTTP boundaries", () => {
       next();
     });
     // Only the workflow read is invoked here; the command owner is mocked above.
-    app.locals.services = { shipmentTracking: { getCostReview: mocks.getCostReview, cancel: mocks.cancel } } as unknown as ServiceRegistry;
+    app.locals.services = { shipmentTracking: { getCostReview: mocks.getCostReview, cancel: mocks.cancel, close: mocks.close } } as unknown as ServiceRegistry;
     registerInboundShipmentRoutes(app);
     server = http.createServer(app);
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -56,6 +56,14 @@ describe("shipment cost workflow HTTP boundaries", () => {
   const cancel = (permission = "purchasing:edit", id = "42") => requestLocalHttp(`${base}/api/inbound-shipments/${id}/cancel`, {
     method: "POST", body: JSON.stringify({ reason: "Supplier withdrew shipment" }),
     headers: { "content-type": "application/json", "x-test-permission": permission, "x-cancel-actor": "cancelling-operator" },
+  });
+  it("retains the structured measurement blocker when closing so the UI can open the approved correction", async () => {
+    mocks.close.mockRejectedValueOnce(new ShipmentTrackingError("Box dimensions are missing.", 400, { code: "MISSING_ALLOCATION_DIMENSIONS", issues: [] }));
+    const response = await requestLocalHttp(`${base}/api/inbound-shipments/42/close`, { method: "POST", body: "{}",
+      headers: { "content-type": "application/json", "x-test-permission": "purchasing:approve", "x-test-actor": "approver" } });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ code: "MISSING_ALLOCATION_DIMENSIONS", error: "Box dimensions are missing.", details: { code: "MISSING_ALLOCATION_DIMENSIONS", issues: [] } });
+    expect(mocks.close).toHaveBeenCalledWith(42, "approver", undefined);
   });
   it("requires edit permission for shipment cancellation", async () => {
     expect((await cancel("purchasing:view")).status).toBe(403);

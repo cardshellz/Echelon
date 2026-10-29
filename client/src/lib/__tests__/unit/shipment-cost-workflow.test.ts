@@ -53,6 +53,17 @@ it("opts into PO line links without dropping the current reconciliation contract
 });
 
 describe("shipment cost update intent", () => {
+  it("does not accept an ordinary update response as proof of a saved measurement approval", async () => {
+    const fetch = vi.fn().mockImplementation(async () => response()); vi.stubGlobal("fetch", fetch);
+    const generateKey = vi.fn(() => "measurement-key");
+    const client = createShipmentCostUpdateClient(generateKey);
+    const correction = { sourceVersion: "a".repeat(64), previewVersion: "b".repeat(64), reason: "Verified packing list measurements", evidenceConfirmed: true as const,
+      lines: [{ lineId: 1, measurements: { cartonCount: 1, dimensionBasis: "carton" as const, weightKg: "5", lengthCm: "10", widthCm: "10", heightCm: "10" } }] };
+    for (let attempt = 0; attempt < 2; attempt++) await expect(client.update(42, correction)).rejects.toMatchObject({ code: "SHIPMENT_MEASUREMENTS_RESPONSE_INVALID", ambiguous: true });
+    expect(generateKey).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls.map(call => call[1].headers["Idempotency-Key"])).toEqual(["measurement-key", "measurement-key"]);
+    await expect(client.update(42)).rejects.toMatchObject({ code: "SHIPMENT_COST_UPDATE_PENDING_REQUEST" });
+  });
   it("keeps the same key after a lost response and rotates only after verified completion", async () => {
     const fetch = vi.fn().mockRejectedValueOnce(new TypeError("network lost"))
       .mockImplementation(async () => response());

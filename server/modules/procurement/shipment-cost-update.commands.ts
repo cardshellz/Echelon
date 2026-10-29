@@ -5,6 +5,7 @@ import { FinancialCommandError, runTransactionalFinancialCommand,
 } from "../../platform/commands/transactional-command.service";
 import { ShipmentTrackingError, type ShipmentTrackingService } from "./shipment-tracking.service";
 import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence.repository";
+import { ShipmentMeasurementCorrectionError } from "./shipment-measurement-correction.repository";
 
 export const SHIPMENT_COST_UPDATE_PRINCIPAL = "procurement.shipment-cost-update";
 export function shipmentCostUpdateScope(shipmentId: number) {
@@ -14,6 +15,8 @@ export function shipmentCostUpdateScope(shipmentId: number) {
 }
 
 export function classifyShipmentCostUpdateFailure(error: unknown): FinancialCommandFailureDisposition {
+  if (error instanceof ShipmentMeasurementCorrectionError && error.statusCode >= 400 && error.statusCode < 500) return { kind: "rejected", httpStatus: error.statusCode,
+    body: { code: error.code, error: error.message }, errorCode: error.code, errorMessage: error.message };
   if (error instanceof CostEvidenceError && error.code === "COST_RECONCILIATION_PARTIAL_HISTORY") {
     return { kind: "rejected", httpStatus: 409, body: { code: error.code, error: error.message },
       errorCode: error.code, errorMessage: error.message };
@@ -34,11 +37,16 @@ export function createShipmentCostUpdateCommands(
 ) {
   return { async execute(shipmentId: number, body: unknown, actorId: string, descriptor: FinancialCommandDescriptor) {
     if (typeof actorId !== "string" || !actorId.trim()) throw new FinancialCommandError("Sign in before updating costs.", 401, "SHIPMENT_COST_UPDATE_ACTOR_REQUIRED");
-    if (!shipmentCostUpdateInputSchema.safeParse(body).success) {
+    const input = shipmentCostUpdateInputSchema.safeParse(body);
+    if (!input.success) {
       throw new FinancialCommandError("Reload this shipment before updating its costs.", 400, "SHIPMENT_COST_UPDATE_INPUT_INVALID");
     }
     const scope = shipmentCostUpdateScope(shipmentId);
-    if (descriptor.actorType !== "service" || descriptor.actorId !== SHIPMENT_COST_UPDATE_PRINCIPAL
+    // A correction is a personal admin approval. Normal refreshes retain their
+    // existing service principal and idempotency scope for older clients.
+    const expectedActorType = input.data.measurementCorrection ? "user" : "service";
+    const expectedActorId = input.data.measurementCorrection ? actorId : SHIPMENT_COST_UPDATE_PRINCIPAL;
+    if (descriptor.actorType !== expectedActorType || descriptor.actorId !== expectedActorId
       || descriptor.method !== scope.method || descriptor.routeTemplate !== scope.routeTemplate
       || descriptor.resourceKey !== scope.resourceKey || descriptor.commandName !== scope.commandName) {
       throw new FinancialCommandError("Shipment cost update scope is invalid", 500, "SHIPMENT_COST_UPDATE_SCOPE_INVALID");
