@@ -15,7 +15,7 @@ export function selectBrowserFeatures(suite, evidence) {
   try {
     validateBrowserFeatures(suite, evidence.files);
     const definitions = Object.fromEntries(Object.entries(BROWSER_FEATURES[suite]).map(([name, group]) => [name, {
-      ...BROWSER_CONFIGS[suite], roots: group.roots, ownedPrefixes: [], isolated: true,
+      ...BROWSER_CONFIGS[suite], roots: group.roots, appRoutes: group.appRoutes, ownedPrefixes: [], isolated: true,
       tests: new RegExp("^(?:" + group.tests.map(file => file.replace(/[.*+?^\${}()|[\]\\]/g, "\\$&")).join("|") + ")$"),
     }]));
     const dependencyCache = new Map();

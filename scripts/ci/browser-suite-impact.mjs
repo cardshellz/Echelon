@@ -2,26 +2,38 @@ import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { dependencyClosure, importsIn, resolveLocalImport, parseChangedFiles, readTestChangeEvidence, selectTestImpact } from "./test-impact.mjs";
+import { appRouteRoots } from "./app-route-roots.mjs";
 export { dependencyClosure, parseChangedFiles };
 
-// Procurement loads the real application. App eagerly imports all pages, so even
-// an unrelated page can break startup. Preserve that full runtime dependency
-// graph; narrowing procurement to route-specific pages would be unsafe today.
-// Both commit snapshots are traversed, so deleted dependencies remain covered.
+// The required app-bootstrap job covers eager imports once. Journey coverage
+// follows router entrypoints and their imports in both commit snapshots.
+const PROCUREMENT_ROUTES = [
+  "/purchase-orders", "/purchasing", "/reorder-analysis", "/procurement", "/receiving", "/suppliers",
+  "/shipments", "/inventory/costs", "/ap", "/ap-invoices", "/ap-payments", "/supplier-returns",
+  "/supplier-credits", "/settings/procurement", "/replenishment", "/demand-planner",
+];
 export const BROWSER_SUITES = {
+  appBootstrap: {
+    config: "playwright.app-bootstrap.config.ts",
+    workflow: ".github/workflows/ci.yml",
+    tests: /^test\/browser\/app-bootstrap\.spec\.ts$/,
+    roots: ["client/src/main.tsx"],
+    ownedPrefixes: [],
+  },
   orderEdits: {
     config: "playwright.order-edits.config.ts",
     workflow: ".github/workflows/order-edits.yml",
-    tests: /^test\/browser\/(order-edits|customer-order-edit-(?:resume|rewards|payment))\.spec\.ts$/,
-    // The pilot renders the real application, including its eager page imports.
-    roots: ["client/src/main.tsx", "client/src/customer-account/entry.tsx", "test/browser/fixtures/customer-order-edit-harness.tsx"],
+    tests: /^test\/browser\/(order-edits|customer-order-edit-(?:resume|rewards|payment)|customer-order-cancellation)\.spec\.ts$/,
+    roots: ["client/src/customer-account/entry.tsx", "test/browser/fixtures/customer-order-edit-harness.tsx"],
+    appRoutes: ["/order-edits", "/oms/orders"],
     ownedPrefixes: ["server/modules/order-edits/", "client/src/pages/OrderEdits.tsx"],
   },
   procurement: {
     config: "playwright.procurement.config.ts",
     workflow: ".github/workflows/procurement-navigation.yml",
     tests: /^test\/browser\/procurement-.*\.ts$/,
-    roots: ["client/src/main.tsx"],
+    roots: [],
+    appRoutes: PROCUREMENT_ROUTES,
     ownedPrefixes: ["client/src/features/purchasing/", "client/src/features/po-edit/", "client/src/components/purchasing/"],
   },
   procurementConnected: {
@@ -29,7 +41,8 @@ export const BROWSER_SUITES = {
     workflow: ".github/workflows/procurement-connected.yml",
     tests: /^test\/connected\/procurement\/.*\.spec\.ts$/,
     // The backend is started in a child process; it must be an explicit root.
-    roots: ["client/src/main.tsx", "test/connected/procurement/server.ts"],
+    roots: ["test/connected/procurement/server.ts"],
+    appRoutes: PROCUREMENT_ROUTES,
     ownedPrefixes: ["test/connected/procurement/", "server/modules/procurement/", "migrations/", "tsconfig.tests.connected.json"],
   },
   dropship: {
@@ -79,13 +92,16 @@ export function selectBrowserSuite({ suite, changes, files, readSource, previous
   if (!Object.hasOwn(definitions, suite)) throw new Error(`Unknown browser suite: ${suite}`);
   if (force) return { run: true, reason: "Manual dispatch requests complete coverage" };
   const config = definitions[suite];
+  const usesAppShell = !config.isolated || Boolean(config.appRoutes?.length);
   return selectTestImpact({ changes, files, readSource, previous, dependencyCache, coverage: {
-    roots: snapshot => [...config.roots, ...(config.isolated ? [] : sharedShellRoots(snapshot.files, snapshot.readSource))],
+    roots: snapshot => [...config.roots,
+      ...(config.appRoutes?.length ? appRouteRoots(snapshot, config.appRoutes) : []),
+      ...(usesAppShell ? sharedShellRoots(snapshot.files, snapshot.readSource) : [])],
     testPattern: config.tests,
     ownedFiles: [config.config, config.workflow],
     ownedPrefixes: config.ownedPrefixes,
-    globalFiles: [...(config.isolated ? ISOLATED_GLOBAL_FILES : GLOBAL_FILES)],
-    globalPrefixes: config.isolated ? ISOLATED_GLOBAL_PREFIXES : GLOBAL_PREFIXES,
+    globalFiles: [...(usesAppShell ? GLOBAL_FILES : ISOLATED_GLOBAL_FILES)],
+    globalPrefixes: usesAppShell ? GLOBAL_PREFIXES : ISOLATED_GLOBAL_PREFIXES,
     globalPattern: /^(?:vite|tailwind|postcss|playwright)[^/]*\.[cm]?[jt]s$|\.(?:css|scss|sass|less)$/,
     knownPrefixes: [...KNOWN_FEATURE_PREFIXES, ...KNOWN_NON_BROWSER_PREFIXES, "test/browser/",
       ...(config.isolated ? ["shared/", "client/src/", "test/browser/"] : [])],
