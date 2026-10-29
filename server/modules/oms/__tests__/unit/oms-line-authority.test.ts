@@ -10,12 +10,12 @@ import {
 const NOW = new Date("2026-06-25T12:00:00.000Z");
 
 describe("OMS line authority", () => {
-  it("records Shopify update-only lines as seen but not WMS-materializable", () => {
+  it("records Shopify update-only lines on an unpaid order as seen but not WMS-materializable", () => {
     const authority = deriveOmsLineAuthority({
       sourceTopic: "orders/updated",
       sourceEventId: "webhook_inbox:1",
       sourceInboxId: 1,
-      financialStatus: "paid",
+      financialStatus: "pending",
       quantity: 2,
       fulfillableQuantity: 2,
       now: NOW,

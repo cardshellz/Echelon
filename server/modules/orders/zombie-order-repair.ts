@@ -60,14 +60,40 @@ export const OMS_STILL_OWES_UNCARRIED_UNITS_FOR_WMS_ORDER_O = sql`
   )
 `;
 
+/**
+ * True when the WMS order (alias `o`) is linked to an OMS order that the
+ * channel has NOT finished: not cancelled (Shopify: real cancelledAt via
+ * status='cancelled'), not shipped/fulfilled, not a legacy refund/void stop.
+ * #64592 (2026-10-21): an order-edit swap removed the only line, the added
+ * line was still being authorized, and this repair cancelled the open order at
+ * the next boot. Emptiness is not a cancel signal; only the channel's is.
+ */
+export const OMS_ORDER_STILL_OPEN_FOR_WMS_ORDER_O = sql`
+  EXISTS (
+    SELECT 1
+    FROM oms.oms_orders oo
+    WHERE oo.id = ${wmsOmsOrderIdSql({
+      source: sql.raw("o.source"),
+      omsFulfillmentOrderId: sql.raw("o.oms_fulfillment_order_id"),
+      legacySourceTableId: sql.raw("o.source_table_id"),
+    })}
+      AND NOT ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded", "voided"], includeShipped: true })}
+      AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
+  )
+`;
+
+export const ZOMBIE_REPAIR_SKIPPED_OPEN_ORDER_CODE = "WMS_ZOMBIE_REPAIR_SKIPPED_OMS_ORDER_OPEN";
+
 export type ZombieTargetStatus = "cancelled" | "completed";
-export type ZombieRepairAction = "cancel" | "complete" | "skip_oms_still_owes";
+export type ZombieRepairAction = "cancel" | "complete" | "skip_oms_still_owes" | "skip_oms_order_open";
 
 export interface ZombieRepairCandidate {
   wmsOrderId: number;
   orderNumber: string;
   targetStatus: ZombieTargetStatus;
   omsStillOwesUncarriedUnits: boolean;
+  /** Linked OMS order exists and the channel has not cancelled or finished it. */
+  omsOrderStillOpen: boolean;
 }
 
 export interface ZombieRepairSummary {
@@ -80,9 +106,12 @@ interface ZombieRepairDb {
 }
 
 export function decideZombieRepairAction(
-  candidate: Pick<ZombieRepairCandidate, "targetStatus" | "omsStillOwesUncarriedUnits">,
+  candidate: Pick<ZombieRepairCandidate, "targetStatus" | "omsStillOwesUncarriedUnits"> & { omsOrderStillOpen?: boolean },
 ): ZombieRepairAction {
   if (candidate.omsStillOwesUncarriedUnits) return "skip_oms_still_owes";
+  // Completing an order whose lines are all done needs no channel signal;
+  // cancelling one requires the channel to have cancelled or finished it.
+  if (candidate.targetStatus === "cancelled" && candidate.omsOrderStillOpen === true) return "skip_oms_order_open";
   return candidate.targetStatus === "cancelled" ? "cancel" : "complete";
 }
 
@@ -104,7 +133,8 @@ const ZOMBIE_CANDIDATES_SQL = sql`
       ) THEN 'completed'
       ELSE 'cancelled'
     END AS target_status,
-    ${OMS_STILL_OWES_UNCARRIED_UNITS_FOR_WMS_ORDER_O} AS oms_still_owes_uncarried_units
+    ${OMS_STILL_OWES_UNCARRIED_UNITS_FOR_WMS_ORDER_O} AS oms_still_owes_uncarried_units,
+    ${OMS_ORDER_STILL_OPEN_FOR_WMS_ORDER_O} AS oms_order_still_open
   FROM wms.orders o
   WHERE o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
     AND o.order_edit_operation_id IS NULL
@@ -125,6 +155,7 @@ function toCandidate(row: any): ZombieRepairCandidate {
     orderNumber: String(row.order_number ?? row.id),
     targetStatus: row.target_status === "cancelled" ? "cancelled" : "completed",
     omsStillOwesUncarriedUnits: row.oms_still_owes_uncarried_units === true,
+    omsOrderStillOpen: row.oms_order_still_open === true,
   };
 }
 
@@ -150,6 +181,22 @@ export async function runStartupZombieOrderRepair(deps: {
         message:
           "WMS order has no pending lines but its live OMS order still owes shippable units; " +
           "not cancelling or completing it.",
+        wms_order_id: candidate.wmsOrderId,
+        order_number: candidate.orderNumber,
+        target_status: candidate.targetStatus,
+      });
+      continue;
+    }
+
+    if (action === "skip_oms_order_open") {
+      summary.skipped.push(candidate);
+      // WARN: anomaly left untouched. The channel has not cancelled this order
+      // (e.g. mid order-edit swap, or an added line awaiting payment); the WMS
+      // sync re-materializes its lines when they are authorized.
+      logger.warn("wms_zombie_order_repair", {
+        outcome: "skipped",
+        error_code: ZOMBIE_REPAIR_SKIPPED_OPEN_ORDER_CODE,
+        message: "WMS order has no live lines but its channel order is still open; not cancelling it.",
         wms_order_id: candidate.wmsOrderId,
         order_number: candidate.orderNumber,
         target_status: candidate.targetStatus,
