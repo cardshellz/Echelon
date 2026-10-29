@@ -5,10 +5,11 @@ import {
 } from "../../../inventory-planning/stock-link-health";
 import {
   STOCK_LINK_HEALTH_ENGINE_ACTOR, STOCK_LINK_HEALTH_ESCALATION, STOCK_LINK_HEALTH_RETIRE_HOLD, STOCK_LINK_HEALTH_RETIRES_HELD_CODE,
-  stockLinkRetiresHeldCountText,
+  STOCK_LINK_HEALTH_SKU_CHANGED_CODE, stockLinkRetiresHeldCountText,
 } from "../../../inventory-planning/infrastructure/stock-link-health.sql";
 import { STOCK_LINK_RETIRES_WITHOUT_REPLACEMENT_SQL } from "../../../inventory-planning/infrastructure/stock-link-checks.repository";
 import { STOCK_LINK_ACTOR, STOCK_LINK_DECISION_CODES, STOCK_LINK_RETIRE_HOLD } from "../../../inventory-planning/domain/stock-link";
+import { STOCK_LINK_ENROLLMENT_CODES } from "../../../inventory-planning/domain/stock-link-enrollment";
 import { getOmsOpsHealth } from "../../ops-health.service";
 import { evaluateOmsOpsAlert } from "../../oms-ops-alert.service";
 import { getOperationsControlTower, parseControlTowerFilters } from "../../../operations/control-tower.service";
@@ -54,11 +55,12 @@ describe("ops-health :: stock links", () => {
     }
   }
 
-  it("names the plan's seven issues with their severities; only UNLINKED is info and only STALLED a warning", () => {
+  it("names the plan's seven issues and SKU_CHANGED with their severities; only UNLINKED is info, SKU_CHANGED and STALLED warnings", () => {
     expect(STOCK_LINK_HEALTH_CHECKS.map((check) => [check.code, check.severity])).toEqual([
       ["STOCK_LINK_UNLINKED", "info"],
       ["STOCK_LINK_FLAGGED", "critical"],
       ["STOCK_LINK_ERROR", "critical"],
+      ["STOCK_LINK_SKU_CHANGED", "warning"],
       ["STOCK_LINK_DESTINATION_PAUSED", "critical"],
       ["STOCK_LINK_RETIRES_HELD", "critical"],
       ["STOCK_LINK_HALTED", "critical"],
@@ -71,6 +73,7 @@ describe("ops-health :: stock links", () => {
     expect(STOCK_LINK_HEALTH_ENGINE_ACTOR).toBe(STOCK_LINK_ACTOR);
     expect(STOCK_LINK_HEALTH_RETIRE_HOLD).toEqual(STOCK_LINK_RETIRE_HOLD);
     expect(STOCK_LINK_HEALTH_RETIRES_HELD_CODE).toBe(STOCK_LINK_DECISION_CODES.retiresHeld);
+    expect(STOCK_LINK_HEALTH_SKU_CHANGED_CODE).toBe(STOCK_LINK_ENROLLMENT_CODES.skuChanged);
     expect(STOCK_LINK_HEALTH_ESCALATION).toEqual({ attempts: 8, transientStreakHours: 72, busyStreakHours: 24 });
   });
 
@@ -88,6 +91,22 @@ describe("ops-health :: stock links", () => {
     expect(dialect.sqlToQuery(held.sampleSql).sql).toContain(`(${predicate}) AS retires_in_window`);
   });
 
+  it("raises a linked size whose SKU changed with no on-sale item for the new SKU, kill switch on or off (channels PR4 §3.5, D4-5)", async () => {
+    for (const checks of [STOCK_LINK_HEALTH_CHECKS, STOCK_LINK_HEALTH_CHECKS_RUNNER_OFF]) {
+      const changed = checks.find((check) => check.code === "STOCK_LINK_SKU_CHANGED")!;
+      for (const query of [changed.countSql, changed.sampleSql]) {
+        expect(dialect.sqlToQuery(query).sql).toContain("c.status = 'linked' AND c.reason_code = 'STOCK_LINK_SKU_CHANGED'");
+      }
+      // The sample names the store and the size (correlation ids), as every row-level check does.
+      expect(dialect.sqlToQuery(changed.sampleSql).sql).toMatch(/c\.publication_target_id, t\.channel_id, t\.channel_connection_id, c\.product_variant_id/);
+    }
+    const { health } = await healthWith({ STOCK_LINK_SKU_CHANGED: 2 });
+    expect(health.issues.find((entry) => entry.code === "STOCK_LINK_SKU_CHANGED")).toMatchObject({ severity: "warning", count: 2,
+      sample: [{ publication_target_id: 5, channel_id: 35 }] });
+    expect(health.status).not.toBe("critical");
+    expect(evaluateOmsOpsAlert(health, Date.now()).criticalIssues.map((entry) => entry.code)).not.toContain("STOCK_LINK_SKU_CHANGED");
+  });
+
   it("with the runner's kill switch on, leaves out what a stopped runner can never clear and says linking is off (review CMP-1)", async () => {
     expect(stockLinkHealthChecksForProcess({})).toBe(STOCK_LINK_HEALTH_CHECKS);
     expect(stockLinkHealthChecksForProcess({ STOCK_LINK_AUTO_DISABLED: "true" })).toBe(STOCK_LINK_HEALTH_CHECKS_RUNNER_OFF);
@@ -96,6 +115,7 @@ describe("ops-health :: stock links", () => {
       ["STOCK_LINK_UNLINKED", "info"],
       ["STOCK_LINK_FLAGGED", "critical"],
       ["STOCK_LINK_ERROR", "critical"],
+      ["STOCK_LINK_SKU_CHANGED", "warning"],
       ["STOCK_LINK_RETIRES_HELD", "critical"],
       ["STOCK_LINK_HALTED", "critical"],
       ["STOCK_LINK_RUNNER_OFF", "info"],

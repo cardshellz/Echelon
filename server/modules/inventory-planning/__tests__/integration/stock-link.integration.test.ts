@@ -1866,7 +1866,7 @@ dbDescribe.sequential("stock-link controls, Ops Health and two stores, real Post
     await database.pool.query(`UPDATE inventory.stock_link_destinations SET heartbeat_at=$2, updated_at=$2 WHERE publication_target_id=$1`,
       [targetId, ago(11 * 60_000)]);
     expect(await allCounts(NOW)).toEqual({ STOCK_LINK_UNLINKED: 3, STOCK_LINK_FLAGGED: 1, STOCK_LINK_ERROR: 3,
-      STOCK_LINK_DESTINATION_PAUSED: 0, STOCK_LINK_RETIRES_HELD: 0, STOCK_LINK_HALTED: 0, STOCK_LINK_STALLED: 1 });
+      STOCK_LINK_SKU_CHANGED: 0, STOCK_LINK_DESTINATION_PAUSED: 0, STOCK_LINK_RETIRES_HELD: 0, STOCK_LINK_HALTED: 0, STOCK_LINK_STALLED: 1 });
     expect(await healthSample("STOCK_LINK_UNLINKED", NOW)).toEqual([{ publication_target_id: targetId, channel_id: STOCK_LINK_SHOPIFY.channelId,
       channel_connection_id: STOCK_LINK_SHOPIFY.connectionId, external_scope_id: STOCK_LINK_SHOPIFY.location,
       linked: 2, waiting: 3, flagged: 1, error: 1 }]);
@@ -1900,6 +1900,26 @@ dbDescribe.sequential("stock-link controls, Ops Health and two stores, real Post
     await new InventoryPublicationTargetStopService(new PostgresInventoryPublicationTargetStopStore(database.pool), { now: () => NOW })
       .stop({ publicationTargetId: targetId, expectedRevision: revision, idempotencyKey: `stop-${targetId}` }, "operator-1");
     expect(Object.values(await allCounts(NOW)).every(count => count === 0)).toBe(true);
+  }, CASE_TIMEOUT_MS);
+
+  it("raises a linked size whose SKU changed while no on-sale item carries the new SKU, and drops it once the row is decided again (PG 16, channels PR4 §3.5)", async () => {
+    await seedStockLinkDestination(database.pool, targetId, AT);
+    await seedCheck(101, { status: "linked", reasonCode: "STOCK_LINK_SKU_CHANGED" });
+    await seedCheck(102, { status: "linked" });
+    await seedCheck(103, { status: "waiting", reasonCode: "STOCK_LINK_SKU_CHANGED" }); // only a linked row means the old link is kept
+    expect(await healthCount("STOCK_LINK_SKU_CHANGED", NOW)).toBe(1);
+    expect(await healthSample("STOCK_LINK_SKU_CHANGED", NOW)).toMatchObject([{ publication_target_id: targetId,
+      channel_id: STOCK_LINK_SHOPIFY.channelId, channel_connection_id: STOCK_LINK_SHOPIFY.connectionId, product_variant_id: 101,
+      status: "linked", reason_code: "STOCK_LINK_SKU_CHANGED" }]);
+    // The kill switch leaves it in: stock keeps flowing to the old item either way.
+    const off = stockLinkHealthChecks({ now: NOW, runnerOff: true }).find(entry => entry.code === "STOCK_LINK_SKU_CHANGED")!;
+    const rendered = dialect.sqlToQuery(off.countSql);
+    expect(Number((await database.pool.query(rendered.sql, rendered.params as unknown[])).rows[0]!.count)).toBe(1);
+    // A later decision (a relink to the new SKU, or the SKU changed back) records another reason: the size leaves the issue.
+    await database.pool.query(`UPDATE inventory.stock_link_checks SET reason_code=NULL, updated_at=$3
+      WHERE publication_target_id=$1 AND product_variant_id=$2`, [targetId, 101, NOW]);
+    expect(await healthCount("STOCK_LINK_SKU_CHANGED", NOW)).toBe(0);
+    expect(await healthSample("STOCK_LINK_SKU_CHANGED", NOW)).toEqual([]);
   }, CASE_TIMEOUT_MS);
 
   it("counts the window's retires exactly as the engine does with equal clocks; RETIRES_HELD only while a retire is held, and Continue makes it due (PG 16, TST-8, review LNK-1/LNK-3)", async () => {

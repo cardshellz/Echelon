@@ -17,6 +17,7 @@ import { stockLinkRunnerDisableReason } from "./stock-link-runner-switch";
  * no tick writes the engine's rows, so a pause, a busy or retry streak and a missing heartbeat can never clear: those
  * checks are left out and one info line says linking is off (review CMP-1). Failed (`error`), flagged, waiting, held
  * and halted sizes still count: a person can act on them (Check again and Continue write the rows directly).
+ * STOCK_LINK_SKU_CHANGED counts either way: with the switch on or off, stock keeps flowing to the item with the old SKU.
  */
 
 export interface StockLinkHealthCheck {
@@ -34,6 +35,11 @@ export const STOCK_LINK_HEALTH_ENGINE_ACTOR = "system:stock-link";
 export const STOCK_LINK_HEALTH_RETIRE_HOLD = Object.freeze({ windowHours: 24, limit: 25 });
 /** IP/domain/stock-link.ts STOCK_LINK_DECISION_CODES.retiresHeld: the reason a check row records when the hold kept its link. */
 export const STOCK_LINK_HEALTH_RETIRES_HELD_CODE = "STOCK_LINK_RETIRES_HELD";
+/**
+ * IP/domain/stock-link-enrollment.ts STOCK_LINK_ENROLLMENT_CODES.skuChanged (channels PR4, §3.5): recorded on a
+ * `linked` row whose Card Shellz SKU changed while no on-sale item carries the new SKU; the old link is kept.
+ */
+export const STOCK_LINK_HEALTH_SKU_CHANGED_CODE = "STOCK_LINK_SKU_CHANGED";
 /**
  * When a row needs a person although it is still retrying (§8 STOCK_LINK_ERROR, §10 LOOKUP_MISSED "ERROR after 8
  * attempts and 72 h", TST-9 a busy streak over 24 h). Ops Health is the only reader of these limits.
@@ -169,6 +175,15 @@ export function stockLinkHealthChecks(options: { now?: Date; runnerOff?: boolean
       ...checkIssue(runnerOff ? "c.status = 'error'" : `c.status = 'error'
         OR (c.attempt_count >= ${escalation.attempts} AND c.first_failure_at < ${now} - interval '${escalation.transientStreakHours} hours')
         OR c.busy_since < ${now} - interval '${escalation.busyStreakHours} hours'`, "c.updated_at"),
+    },
+    {
+      code: "STOCK_LINK_SKU_CHANGED",
+      // A warning, not critical: the size still sends stock, but to the item that carries its old SKU (BUILD-NOTES D4-5).
+      severity: "warning",
+      // PROPOSED: owner wording
+      message: "Some Walmart sizes have a new Card Shellz SKU that no Walmart item on sale carries yet. Stock still goes to the item with the old SKU until the new SKU is on sale.",
+      // The re-check that relinks the size, or finds the SKU changed back, writes another reason code: the row leaves.
+      ...checkIssue(`c.status = 'linked' AND c.reason_code = '${STOCK_LINK_HEALTH_SKU_CHANGED_CODE}'`, "c.updated_at"),
     },
     ...(runnerOff ? [] : [{
       code: "STOCK_LINK_DESTINATION_PAUSED",
