@@ -205,7 +205,14 @@ export function deriveOmsLineAuthority(
     channelCurrentQuantity: merchandise.channelCurrentQuantity,
     channelQuantityUpdatedAt: merchandise.channelQuantityUpdatedAt,
   };
-  if (merchandise.stale) return {
+  const eventCanAuthorize =
+    canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
+    isPaidFinancialStatus(input.financialStatus);
+  // Freshness applies to Shopify's mutable merchandise observation, not to the
+  // independent payment fact. A paid webhook can arrive after a newer
+  // orders/updated webhook; preserve the newer quantity snapshot while still
+  // granting authority from the paid event.
+  if (merchandise.stale && !eventCanAuthorize) return {
     staleChannelObservation: true,
     channelObservedQuantity: requireNonNegativeInteger(input.previous?.channelObservedQuantity ?? observedQuantity, "previous.channelObservedQuantity"),
     ...merchandiseValues,
@@ -217,9 +224,6 @@ export function deriveOmsLineAuthority(
     authoritySourceTopic: input.sourceTopic,
     authoritySourceInboxId: input.sourceInboxId ?? null,
   };
-  const eventCanAuthorize =
-    canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
-    isPaidFinancialStatus(input.financialStatus);
   const incomingCurrentQuantity = finiteNonNegativeIntegerOrNull(
     merchandise.channelCurrentQuantity ?? input.currentQuantity,
     "currentQuantity",
@@ -254,6 +258,14 @@ export function deriveOmsLineAuthority(
       readinessCap,
     );
     let authorizationStatus = statusForQuantities(observedQuantity);
+    if (
+      merchandise.stale &&
+      incomingCurrentQuantity !== null &&
+      incomingCurrentQuantity < observedQuantity
+    ) {
+      authorizationStatus =
+        incomingCurrentQuantity === 0 ? "cancelled" : "partially_cancelled";
+    }
     if (input.sourceTopic === "walmart/acknowledged" && dispositionCap < observedQuantity) {
       const previousStatus = input.previous?.authorizationStatus;
       switch (previousStatus) {

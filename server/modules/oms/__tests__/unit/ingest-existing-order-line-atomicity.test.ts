@@ -23,6 +23,7 @@ const EXISTING_ORDER = { id: 55, channelId: 36, externalOrderId: "12292006838431
 const EXISTING_LINES = [121028, 121029, 121030, 121031].map((id, index) => ({
   id, orderId: 55, externalLineItemId: `line-${index}`, sku: `SKU-${index}`, quantity: 1,
   channelObservedQuantity: 1, paidQuantity: 0, authorityFulfillableQuantity: 0, cancelledQuantity: 0,
+  channelCurrentQuantity: 1, channelQuantityUpdatedAt: new Date("2026-10-28T22:26:58Z"),
   refundedQuantity: 0, authorizationStatus: "seen",
 }));
 
@@ -66,6 +67,7 @@ function paidIngest() {
   return {
     externalOrderNumber: "#63964",
     financialStatus: "paid",
+    channelUpdatedAt: new Date("2026-10-28T22:26:56Z"),
     sourceTopic: "orders/paid",
     sourceEventId: "webhook_inbox:180711",
     lineItems: EXISTING_LINES.map((line) => ({
@@ -90,6 +92,7 @@ describe("re-ingesting an existing order authorizes its lines atomically", () =>
     expect(transactionCount()).toBe(3);
     expect(committed).toHaveLength(4);
     expect(committed.every((line) => line.paidQuantity === 1 && line.authorityFulfillableQuantity === 1)).toBe(true);
+    expect(committed.every((line) => line.channelQuantityUpdatedAt?.toISOString() === "2026-10-28T22:26:58.000Z")).toBe(true);
   });
 
   it("commits no line when a later line fails, so no sync can see a half-authorized order", async () => {

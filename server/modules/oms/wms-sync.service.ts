@@ -231,6 +231,40 @@ export class WmsShipmentPrerequisiteError extends Error {
   }
 }
 
+export function assertPaidPhysicalLineAuthority(input: {
+  omsOrderId: number;
+  financialStatus: string | null | undefined;
+  lines: Array<{
+    id: number;
+    quantity: number | null | undefined;
+    paidQuantity: number | null | undefined;
+    requiresShipping: boolean | null | undefined;
+  }>;
+}): void {
+  const financialStatus = String(input.financialStatus ?? "").toLowerCase();
+  const unauthorizedPhysicalLines = input.lines.filter(
+    (line) =>
+      line.requiresShipping !== false &&
+      Number(line.quantity ?? 0) > 0 &&
+      Number(line.paidQuantity ?? 0) === 0,
+  );
+  if (
+    ["paid", "partially_paid", "partially_refunded"].includes(
+      financialStatus,
+    ) &&
+    unauthorizedPhysicalLines.length > 0
+  ) {
+    throw new WmsShipmentPrerequisiteError(
+      "Paid physical OMS order has zero paid line authority; payment ingestion must be replayed before WMS materialization",
+      {
+        omsOrderId: input.omsOrderId,
+        financialStatus,
+        orderLineIds: unauthorizedPhysicalLines.map((line) => line.id),
+      },
+    );
+  }
+}
+
 function requirePositiveWarehouseId(value: unknown): number {
   const warehouseId = Number(value);
   if (!Number.isSafeInteger(warehouseId) || warehouseId <= 0) {
@@ -960,6 +994,11 @@ export class WmsSyncService {
       );
 
       if (materializableOmsLines.length === 0) {
+        assertPaidPhysicalLineAuthority({
+          omsOrderId,
+          financialStatus: omsOrder.financialStatus,
+          lines: omsLines,
+        });
         console.warn(
           `[WMS Sync] OMS order ${omsOrderId} has no OMS-authorized fulfillable quantity; skipping WMS materialization`,
         );
