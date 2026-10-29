@@ -394,16 +394,17 @@ describe("eBay Listing Builder", () => {
     it("should include weight when available", () => {
       const items = builder.buildInventoryItems(SAMPLE_LISTING, defaultConfig);
       expect(items[0].payload.packageWeightAndSize?.weight).toEqual({
-        value: 120,
-        unit: "GRAM",
+        value: 5,
+        unit: "OUNCE",
       });
     });
 
-    it("keeps fractional weight and refuses an incomplete authoritative requirements map", () => {
+    it("keeps fractional source weight, rounds publication and refuses an incomplete requirements map", () => {
       const listing = structuredClone(SAMPLE_LISTING);
       listing.variants[0].weightGrams = 120.25;
       expect(builder.buildInventoryItems(listing, defaultConfig)[0].payload.packageWeightAndSize?.weight)
-        .toEqual({ value: 120.25, unit: "GRAM" });
+        .toEqual({ value: 5, unit: "OUNCE" });
+      expect(listing.variants[0].weightGrams).toBe(120.25);
       expect(() => builder.buildInventoryItems(listing, defaultConfig, { packageRequirementsByVariantId: new Map() }))
         .toThrow(/Business policy selection is required/);
     });

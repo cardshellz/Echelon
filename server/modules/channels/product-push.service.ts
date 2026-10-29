@@ -11,6 +11,7 @@
  */
 
 import { eq, and, sql } from "drizzle-orm";
+import { prepareChannelPublicationWeight } from "../marketplace-listings/domain/channel-package-weight";
 import {
   products,
   productVariants,
@@ -547,8 +548,8 @@ export function createChannelProductPushService(db: any) {
         variant.compare_at_price = (v.compareAtPrice / 100).toFixed(2);
       }
       if (v.weight != null) {
-        variant.weight = v.weight;
-        variant.weight_unit = "g";
+        variant.weight = prepareChannelPublicationWeight({ value: v.weight, unit: "GRAM" }).ounces;
+        variant.weight_unit = "oz";
       }
       if (v.shopifyVariantId) {
         variant.id = Number(v.shopifyVariantId);

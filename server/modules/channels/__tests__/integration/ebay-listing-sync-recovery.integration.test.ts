@@ -444,7 +444,7 @@ const configured =
       expect(jobs[0].id).toBe(jobs[1].id);
       await processConcurrently(f, jobs[0].id);
       expect(await f.store.get(jobs[0].id)).toMatchObject({ state: "completed" });
-      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ ...existing, weight: { value: 3175.25, unit: "GRAM" } });
+      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ ...existing, weight: { value: 113, unit: "OUNCE" } });
       const writes = f.mutations.length;
       await f.service.enqueue(identity, "operator", key);
       expect(await f.service.processDue(1, jobs[0].id)).toEqual({ processed: 0, failed: 0 });
@@ -467,7 +467,7 @@ const configured =
       const saved = await f.service.enqueue(identity, "operator");
       await processConcurrently(f, saved.id);
       expect(await f.store.get(saved.id)).toMatchObject({ state: "completed" });
-      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ ...existing, weight: { value: 120.25, unit: "GRAM" } });
+      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ ...existing, weight: { value: 5, unit: "OUNCE" } });
       const writes = f.mutations.length;
       expect(await f.service.processDue(1, saved.id)).toEqual({ processed: 0, failed: 0 });
       expect(f.mutations).toHaveLength(writes);
@@ -490,7 +490,7 @@ const configured =
       expect(corrected[0].id).toBe(corrected[1].id);
       await processConcurrently(f, corrected[0].id);
       expect(await f.store.get(corrected[0].id)).toMatchObject({ state: "completed" });
-      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ weight: { value: 120.25, unit: "GRAM" },
+      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ weight: { value: 5, unit: "OUNCE" },
         dimensions: { length: 15.24, width: 10.16, height: 2.54, unit: "CENTIMETER" } });
       expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(evidence);
     });
@@ -506,7 +506,7 @@ const configured =
       expect(await f.store.get(saved[0].id)).toMatchObject({ state: "completed", code: null,
         result: { errors: 0, warnings: [warning] }, warnings: [warning] });
       expect(await f.service.list(1)).toEqual(expect.arrayContaining([expect.objectContaining({ id: saved[0].id, state: "completed", warnings: [warning] })]));
-      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ weight: { value: 120.25, unit: "GRAM" } });
+      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ weight: { value: 5, unit: "OUNCE" } });
       expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
         .toEqual({ length_mm: null, width_mm: null, height_mm: null });
       const writes = f.mutations.length; expect(writes).toBeGreaterThan(0);
@@ -715,7 +715,7 @@ const configured =
       expect(admitted[0].id).toBe(admitted[1].id);
       await processConcurrently(f, admitted[0].id);
       expect(await f.store.get(admitted[0].id)).toMatchObject({ state: "completed" });
-      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ weight: { value: 120, unit: "GRAM" },
+      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ weight: { value: 5, unit: "OUNCE" },
         dimensions: { length: 10, width: 8, height: 2, unit: "CENTIMETER" } });
       const writes = f.mutations.length;
       expect(writes).toBeGreaterThan(0);
@@ -764,7 +764,7 @@ const configured =
       advance();
       await f.service.processDue(1, saved.id);
       expect(await f.store.get(saved.id)).toMatchObject({ state: "completed" });
-      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ ...existing, weight: { value: 120, unit: "GRAM" } });
+      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ ...existing, weight: { value: 5, unit: "OUNCE" } });
       expect((await database.pool.query("SELECT evidence->'diagnostic'->>'code' AS code FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='recovering'", [saved.id])).rows)
         .toEqual([{ code: "ETIMEDOUT" }]);
     });
@@ -872,7 +872,7 @@ const configured =
       expect(resumed[0].id).toBe(resumed[1].id);
       await processConcurrently(f, resumed[0].id);
       expect(await f.store.get(resumed[0].id)).toMatchObject({ state: "completed" });
-      expect(f.provider.currentItem().packageWeightAndSize?.weight).toEqual({ value: 250, unit: "GRAM" });
+      expect(f.provider.currentItem().packageWeightAndSize?.weight).toEqual({ value: 9, unit: "OUNCE" });
       expect(f.mutations).toHaveLength(3);
       expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(events);
     });

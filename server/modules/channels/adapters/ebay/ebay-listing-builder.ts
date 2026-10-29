@@ -12,6 +12,7 @@
  */
 
 import { centsToDollarString } from "@shared/utils/money";
+import { prepareChannelPublicationWeight } from "../../../marketplace-listings/domain/channel-package-weight";
 import { ChannelListingValidationError } from "@shared/channel-listing-validation";
 import type { ChannelPackageRequirements } from "@shared/catalog/shipping-package";
 import type { ChannelPackagePlan } from "../../../marketplace-listings/domain/channel-package";
@@ -353,9 +354,8 @@ export class EbayListingBuilder {
     if (variant.weightGrams) {
       item.packageWeightAndSize = {
         weight: {
-          // The provider accepts decimal measurements. Preserve the catalog fact.
-          value: variant.weightGrams,
-          unit: "GRAM",
+          value: prepareChannelPublicationWeight({ value: variant.weightGrams, unit: "GRAM" }).ounces,
+          unit: "OUNCE",
         },
       };
     } else if (options.requirePackageWeight && !options.packageRequirementsByVariantId) {

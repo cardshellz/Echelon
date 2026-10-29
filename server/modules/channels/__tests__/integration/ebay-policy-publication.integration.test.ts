@@ -181,7 +181,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(completed, `${completed.code}: ${completed.message}`).toMatchObject({ state: "completed", code: null, operation: "publish" });
     expect(runtime.provider.snapshot().offer).toMatchObject({ status: "PUBLISHED", listingId: "listing-20", availableQuantity: 17,
       listingPolicies: { fulfillmentPolicyId: "store-shipping", returnPolicyId: "product-returns", paymentPolicyId: "product-payment" } });
-    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 100, unit: "GRAM" } });
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 4, unit: "OUNCE" } });
     expect(completed.warnings).toEqual([{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
       productId: 20, variantId: 101, variantSku: "P5" }]);
     expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
@@ -226,7 +226,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     await service.processDue(1, resumed.id);
     expect(await store.get(resumed.id)).toMatchObject({ state: "completed", warnings: [{ variantSku: "P5" }] });
     expect(runtime.provider.snapshot().offer.status).toBe("PUBLISHED");
-    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 100, unit: "GRAM" } });
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 4, unit: "OUNCE" } });
     expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
       .toEqual({ length_mm: null, width_mm: null, height_mm: null });
     expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(receipt);
