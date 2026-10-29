@@ -35,6 +35,7 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
   let pool: pg.Pool;
   let ownsSchema = false;
   let ownsInventorySchema = false;
+  let ownsIdentitySchema = false;
   let database: ReturnType<typeof drizzle<typeof schema>>;
 
   beforeAll(async () => {
@@ -49,7 +50,12 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     ownsSchema = true;
     await pool.query("CREATE SCHEMA inventory");
     ownsInventorySchema = true;
+    await pool.query("CREATE SCHEMA identity");
+    ownsIdentitySchema = true;
     const tables = [
+      // Current cost postings resolve their recorded actor through the same
+      // identity table as production; retain the real column names and types.
+      fixtureTable(schema.users, ["id", "username", "displayName"]),
       fixtureTable(schema.vendors, ["id", "name"]),
       fixtureTable(schema.purchaseOrders, ["id", "poNumber", "vendorId", "status", "physicalStatus", "financialStatus", "currency", "totalCents", "invoicedTotalCents", "paidTotalCents", "outstandingCents", "expectedDeliveryDate", "confirmedDeliveryDate", "actualDeliveryDate"]),
       fixtureTable(schema.purchaseOrderLines, Object.keys(getTableColumns(schema.purchaseOrderLines))),
@@ -145,6 +151,7 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     if (pool) {
       if (ownsInventorySchema) await pool.query("DROP SCHEMA inventory CASCADE");
       if (ownsSchema) await pool.query("DROP SCHEMA procurement CASCADE");
+      if (ownsIdentitySchema) await pool.query("DROP SCHEMA identity CASCADE");
       await pool.end();
     }
   });
