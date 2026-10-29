@@ -319,14 +319,15 @@ const configured =
       // and constraints above come from the unchanged production migrations.
       await database.pool.query(`ALTER TABLE catalog.product_variants ADD COLUMN IF NOT EXISTS weight_grams numeric(10,2);
         ALTER TABLE catalog.product_variants ADD COLUMN IF NOT EXISTS length_mm numeric(10,2), ADD COLUMN IF NOT EXISTS width_mm numeric(10,2),
-          ADD COLUMN IF NOT EXISTS height_mm numeric(10,2), ADD COLUMN IF NOT EXISTS shipping_package_type varchar(30);
+          ADD COLUMN IF NOT EXISTS height_mm numeric(10,2), ADD COLUMN IF NOT EXISTS shipping_package_type varchar(30),
+          ADD COLUMN IF NOT EXISTS mpn varchar(100);
         ALTER TABLE catalog.products ADD COLUMN IF NOT EXISTS description text;`);
-      await database.pool.query("UPDATE catalog.product_variants SET length_mm=NULL,width_mm=NULL,height_mm=NULL,shipping_package_type=NULL WHERE id=101");
+      await database.pool.query("UPDATE catalog.product_variants SET length_mm=NULL,width_mm=NULL,height_mm=NULL,shipping_package_type=NULL,mpn=NULL WHERE id=101");
       await database.pool.query("UPDATE catalog.product_variants SET weight_grams=$1 WHERE id=101", [weight]);
       await database.pool.query("UPDATE catalog.products SET description=$1 WHERE id=20", ["<p>Current catalog description</p>"]);
       f.prepare.mockImplementation(async () => {
         const product = (await database.pool.query("SELECT name,sku,description FROM catalog.products WHERE id=20")).rows[0];
-        const variants = (await database.pool.query("SELECT id,sku,name,weight_grams,length_mm,width_mm,height_mm,shipping_package_type FROM catalog.product_variants WHERE id=101")).rows;
+        const variants = (await database.pool.query("SELECT id,sku,name,mpn,weight_grams,length_mm,width_mm,height_mm,shipping_package_type FROM catalog.product_variants WHERE id=101")).rows;
         const draft = buildEbayRouteListingDraft({ productId: 20, product, variants,
           photoPlan: { byVariantId: new Map([[101, galleryPhotos]]), groupImageUrls: galleryPhotos },
           aspects: { Brand: ["Shellz"] }, isMultiVariant: false, variationAspectName: "Pack Size",
@@ -513,6 +514,92 @@ const configured =
       expect(f.mutations).toHaveLength(writes);
       expect(f.provider.client.publishOffer).not.toHaveBeenCalled();
       expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+    });
+
+    const rejectIncompleteBrandMpn = (request: EbayQuantityHttpRequest): Response | undefined => {
+      if (identity.groupKey !== null || !request.path.includes("/inventory_item/")) return;
+      const product = (request.body as { product: { brand?: string; mpn?: string } }).product;
+      if (Boolean(product.brand) === Boolean(product.mpn)) return;
+      return new Response(JSON.stringify({ errors: [{ errorId: 25002, category: "REQUEST",
+        message: "Input data for tag <BrandMPN> is invalid or missing." }] }), { status: 400 });
+    };
+
+    it.each([
+      ["standalone", null], ["standalone", "PART-123"],
+      ["one-member-group", null], ["one-member-group", "PART-123"],
+    ] as const)("syncs %s with catalog MPN %s through concurrent workers and exact replay", async (shape, mpn) => {
+      if (shape === "standalone") identity = { ...identity, groupKey: null };
+      const f = fixture({ reject: rejectIncompleteBrandMpn });
+      await prepareFromCatalog(f);
+      await database.pool.query("UPDATE catalog.product_variants SET mpn=$1 WHERE id=101", [mpn]);
+      const replace = vi.mocked(f.provider.client.createOrReplaceInventoryItem).getMockImplementation()!;
+      vi.mocked(f.provider.client.createOrReplaceInventoryItem).mockImplementation(async (sku, body) => {
+        await replace(sku, body);
+        // eBay can echo Brand derived from item specifics even if the native
+        // optional pair was omitted. Completion must still verify owned fields.
+        f.provider.currentItem().product.brand = "Shellz";
+      });
+      try {
+        const key = randomUUID();
+        const saved = await Promise.all([f.service.enqueue(identity, "operator", key), f.service.enqueue(identity, "operator", key)]);
+        expect(saved[0].id).toBe(saved[1].id);
+        await processConcurrently(f, saved[0].id);
+        expect(await f.store.get(saved[0].id)).toMatchObject({ state: "completed", code: null,
+          result: { errors: 0, pending: 0, synced: 1 } });
+        const itemWrites = f.mutations.filter(request => request.path.includes("/inventory_item/"));
+        expect(itemWrites).toHaveLength(1);
+        const product = (itemWrites[0].body as { product: { brand?: string; mpn?: string; aspects: Record<string, string[]> } }).product;
+        expect(product.aspects.Brand).toEqual(["Shellz"]);
+        if (mpn) expect(product).toMatchObject({ brand: "Shellz", mpn, aspects: { MPN: [mpn] } });
+        else {
+          expect(product).not.toHaveProperty("brand");
+          expect(product).not.toHaveProperty("mpn");
+          expect(product.aspects).not.toHaveProperty("MPN");
+        }
+        expect((await database.pool.query("SELECT mpn FROM catalog.product_variants WHERE id=101")).rows[0].mpn).toBe(mpn);
+        const writes = f.mutations.length;
+        await f.service.enqueue(identity, "operator", key);
+        await processConcurrently(f, saved[0].id);
+        expect(f.mutations).toHaveLength(writes);
+        expect(f.provider.client.publishOffer).not.toHaveBeenCalled();
+        expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+      } finally {
+        await database.pool.query("UPDATE catalog.product_variants SET mpn=NULL WHERE id=101");
+      }
+    });
+
+    it("recovers an old standalone BrandMPN rejection through ordinary Sync without replacing its failure evidence", async () => {
+      identity = { ...identity, groupKey: null };
+      const f = fixture({ reject: rejectIncompleteBrandMpn });
+      await prepareFromCatalog(f);
+      const prepareCurrent = f.prepare.getMockImplementation()!;
+      let legacy = true;
+      f.prepare.mockImplementation(async () => {
+        const prepared = await prepareCurrent();
+        if (legacy) prepared.draft.inventoryItems[0].payload.product.brand = "Shellz";
+        return prepared;
+      });
+      const previous = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, previous.id);
+      expect(await f.store.get(previous.id)).toMatchObject({ state: "needs_attention", code: "EBAY_QUANTITY_REJECTED" });
+      const failure = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [previous.id])).rows;
+      expect(failure[0].evidence.diagnostic.context.providerWrite).toMatchObject({ httpStatus: 400, errorCodes: ["25002"] });
+      legacy = false;
+      const key = randomUUID();
+      const current = await Promise.all([f.service.enqueue(identity, "operator", key), f.service.enqueue(identity, "operator", key)]);
+      expect(current[0].id).toBe(current[1].id);
+      await processConcurrently(f, current[0].id);
+      expect(await f.store.get(current[0].id)).toMatchObject({ state: "recovering", code: "PUBLICATION_PROVIDER_COOLDOWN" });
+      expect(f.mutations.filter(request => request.path.includes("/inventory_item/"))).toHaveLength(1);
+      advance();
+      await processConcurrently(f, current[0].id);
+      expect(await f.store.get(current[0].id)).toMatchObject({ state: "completed", code: null });
+      expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [previous.id])).rows).toEqual(failure);
+      const beforeReplay = f.mutations.length;
+      await f.service.enqueue(identity, "operator", key);
+      await processConcurrently(f, current[0].id);
+      expect(f.mutations).toHaveLength(beforeReplay);
+      expect(f.mutations.filter(request => request.path.includes("/inventory_item/"))).toHaveLength(2);
     });
 
     it.each(["reviewed-update", "rebuild"] as const)("keeps optional dimensions as warnings during %s preparation", async operation => {
