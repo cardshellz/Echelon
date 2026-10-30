@@ -247,12 +247,11 @@ test("a mismatched fresh return response cannot expose another order's items", a
 test("an old definitively rejected request can be left and restarted while cached options remain refreshing", async ({ page }) => {
   const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "rejected" });
   await page.getByRole("button", { name: "Return items", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Return not accepted", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "We couldn’t finish your return", exact: true })).toBeVisible();
   expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(0);
-  await page.getByRole("button", { name: "Back to your orders", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Back to your orders", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).toBeNull();
-  await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
-  await page.getByRole("button", { name: "Return items", exact: true }).click();
   await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
   await pack(page);
   await page.getByRole("button", { name: "Review return", exact: true }).click();
@@ -267,12 +266,12 @@ for (const cache of ["ready", "refreshing"] as const) {
     const f = await fixture(page, { openReturn: false, actionState: cache === "ready" ? undefined : cache,
       savedRequestOutcome: "rejected" });
     await page.getByRole("button", { name: "Return items", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Return not accepted", exact: true })).toBeVisible();
-    await expect(page.getByText(/saved result of an earlier attempt/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "We couldn’t finish your return", exact: true })).toBeVisible();
+    await expect(page.getByText(/saved result of an earlier attempt/)).toHaveCount(0);
     await expect(page.getByText(/original shipment/)).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Check status", exact: true })).toHaveCount(0);
     await page.screenshot({ path: info.outputPath(`saved-rejection-${cache}.png`), fullPage: true });
-    await page.getByRole("button", { name: "Review return items", exact: true }).click();
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
     await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
     expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(1);
     expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).toBeNull();
@@ -294,7 +293,7 @@ for (const cache of ["ready", "refreshing"] as const) {
 test("fresh review after a saved rejection can retry an unavailable order lookup", async ({ page }) => {
   const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "rejected", failReturnLookup: true });
   await page.getByRole("button", { name: "Return items", exact: true }).click();
-  await page.getByRole("button", { name: "Review return items", exact: true }).click();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(page.getByRole("alert")).toBeVisible();
   await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
@@ -306,7 +305,7 @@ test("fresh review after a saved rejection can retry an unavailable order lookup
 test("failed local recovery clearing cannot discard a saved request or start a fresh one", async ({ page }) => {
   const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "rejected", blockRecoveryClear: true });
   await page.getByRole("button", { name: "Return items", exact: true }).click();
-  await page.getByRole("button", { name: "Review return items", exact: true }).click();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("could not be cleared");
   expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).not.toBeNull();
   expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(0);
@@ -317,8 +316,8 @@ test("failed local recovery clearing cannot discard a saved request or start a f
 test("an unknown prior request remains recoverable and cannot be discarded to bypass its outcome", async ({ page }) => {
   const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "unknown" });
   await page.getByRole("button", { name: "Return items", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Checking your return", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Retry saved request", exact: true })).toBeEnabled();
+  await expect(page.getByRole("heading", { name: "We couldn’t finish your return", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Review return items", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Back to your orders", exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).not.toBeNull();
@@ -383,8 +382,8 @@ test("review failures preserve packing and a lost synthetic submission recovers 
   await page.getByRole("button", { name: "Review return", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Get return labels", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Checking your return", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Check status", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "We couldn’t finish your return", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Return RMA-20", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Download label for box 1" })).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(1);

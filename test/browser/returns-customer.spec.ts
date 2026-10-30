@@ -18,6 +18,8 @@ async function fixtures(
     missingWeight?: boolean;
     unconfirmedDelivery?: boolean;
     rejectSubmit?: boolean;
+    rejectResume?: boolean;
+    pendingHistory?: boolean;
   } = {},
 ) {
   const service = new CustomerReturnPreviewService();
@@ -45,6 +47,7 @@ async function fixtures(
   let failed = false;
   let rejected = false;
   let signedOut = false;
+  let historyStatusReads = 0;
   const status = {
     authorizationId: 20,
     authorizationNumber: "RMA-20",
@@ -143,6 +146,12 @@ async function fixtures(
       submitted = true;
       return route.fulfill({ json: status });
     }
+    if (path.startsWith(`${API}/commands/`) && path.endsWith("/resume") && options.rejectResume) {
+      rejected = true;
+      return route.fulfill({ status: 410, json: { error: {
+        code: "RETURN_LABEL_SUBMISSION_REJECTED", reasonCode: "RETURN_LABEL_SETTINGS_CHANGED",
+      } } });
+    }
     if (path.startsWith(`${API}/commands/`) && rejected && !submitted)
       return route.fulfill({ status: 410, json: { error: {
         code: "RETURN_LABEL_SUBMISSION_REJECTED", reasonCode: "RETURN_LABEL_ALLOCATION_UNVERIFIED",
@@ -171,7 +180,11 @@ async function fixtures(
           nextBeforeAuthorizationId: null,
         },
       });
-    if (path === `${API}/returns/20`) return route.fulfill({ json: status });
+    if (path === `${API}/returns/20`) {
+      if (options.pendingHistory && historyStatusReads++ === 0)
+        return route.fulfill({ json: { ...status, parcels: [{ ...status.parcels[0], status: "pending", trackingNumber: null, downloadPath: null }] } });
+      return route.fulfill({ json: status });
+    }
     if (path.endsWith("/download"))
       return route.fulfill({
         headers: { "Content-Type": "application/pdf" },
@@ -280,15 +293,32 @@ test("a rejected standalone request can reload current items and return to the o
   await page.goto("/customer-returns");
   await selectAndPack(page);
   await page.getByRole("button", { name: "Get return labels", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Return not accepted", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "We couldn’t finish your return", exact: true })).toBeVisible();
   const lookupsBeforeRecovery = f.calls.filter(call => call.path === `${API}/orders/10`).length;
-  await page.getByRole("button", { name: "Review return items", exact: true }).click();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
   expect(f.calls.filter(call => call.path === `${API}/orders/10`)).toHaveLength(lookupsBeforeRecovery + 1);
   expect(f.calls.filter(call => call.path === `${API}/orders/10/returns`)).toHaveLength(1);
   await page.getByRole("button", { name: "Back to order", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Choose an order to return", exact: true })).toBeVisible();
   expect(f.calls.some(call => call.path.endsWith("/resume"))).toBe(false);
+});
+
+test("one Try again action refreshes an obsolete saved request directly into item review", async ({ page }, info) => {
+  const f = await fixtures(page, { failSubmit: true, rejectResume: true });
+  await page.goto("/customer-returns");
+  await selectAndPack(page);
+  await page.getByRole("button", { name: "Get return labels", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Check status", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review return items", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("single-return-retry.png"), fullPage: true });
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "What would you like to return?", exact: true })).toBeVisible();
+  expect(f.calls.filter(call => call.path.endsWith("/resume"))).toHaveLength(1);
+  expect(f.calls.filter(call => call.path === `${API}/orders/10/returns`)).toHaveLength(1);
+  expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).toBeNull();
+  await expect(page.getByRole("spinbutton", { name: /^Return quantity for item 1:/ })).toHaveValue("0");
 });
 
 test("verified purchases remain selectable and reviewable without delivery confirmation", async ({ page }) => {
@@ -313,9 +343,9 @@ test("missing item weights use a measured package weight and preserve it through
   expect(review.body.parcels[0].packedWeightGrams).toBe(454);
   await page.screenshot({ path: testInfo.outputPath("measured-return-weight.png"), fullPage: true });
   await page.getByRole("button", { name: "Get return labels", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Retry saved request" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Try again" })).toBeEnabled();
   await page.reload();
-  await page.getByRole("button", { name: "Retry saved request" }).click();
+  await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.getByRole("heading", { name: "Return RMA-20" })).toBeVisible();
   const writes = f.calls.filter(call => call.path.endsWith("/returns") && call.method === "POST");
   expect(writes).toHaveLength(2);
@@ -334,7 +364,7 @@ test("uncertain creation survives reload and retries exact durable intent withou
     .getByRole("button", { name: "Get return labels", exact: true })
     .click();
   await expect(
-    page.getByRole("button", { name: "Retry saved request" }),
+    page.getByRole("button", { name: "Try again" }),
   ).toBeEnabled();
   const original = f.calls.find(
     (call) => call.path === `${API}/orders/10/returns`,
@@ -348,10 +378,10 @@ test("uncertain creation survives reload and retries exact durable intent withou
   ).toEqual(original);
   await page.reload();
   await expect(
-    page.getByRole("button", { name: "Retry saved request" }),
+    page.getByRole("button", { name: "Try again" }),
   ).toBeEnabled();
   expect(f.calls.filter((call) => call.method === "POST")).toHaveLength(2); // review + the first explicit submission
-  await page.getByRole("button", { name: "Retry saved request" }).click();
+  await page.getByRole("button", { name: "Try again" }).click();
   await expect(
     page.getByRole("heading", { name: "Return RMA-20" }),
   ).toBeVisible();
@@ -372,7 +402,7 @@ test("a different verified session cannot restore another customer's pending req
     .getByRole("button", { name: "Get return labels", exact: true })
     .click();
   await expect(
-    page.getByRole("button", { name: "Retry saved request" }),
+    page.getByRole("button", { name: "Try again" }),
   ).toBeEnabled();
   f.changeSession();
   await page.reload();
@@ -380,7 +410,7 @@ test("a different verified session cannot restore another customer's pending req
     page.getByRole("heading", { name: "Choose an order to return" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Retry saved request" }),
+    page.getByRole("button", { name: "Try again" }),
   ).toHaveCount(0);
   expect(f.calls.some((call) => call.path.includes("/commands/"))).toBe(false);
 });
@@ -395,6 +425,17 @@ test("existing returns open through read-only history without current eligibilit
     page.getByRole("button", { name: "Download label for box 1" }),
   ).toBeVisible();
   expect(f.calls.every((call) => call.method === "GET")).toBe(true);
+});
+
+test("a waiting historical label has one customer retry action and recovers through reads only", async ({ page }) => {
+  const f = await fixtures(page, { history: true, pendingHistory: true });
+  await page.goto("/customer-returns");
+  await page.getByRole("button", { name: "RMA-20 \u00b7 Order TEST-1001" }).click();
+  await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Check status", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Download label for box 1", exact: true })).toBeVisible();
+  expect(f.calls.every(call => call.method === "GET")).toBe(true);
 });
 
 test("order load failure remains an error and never claims no eligible orders", async ({
@@ -468,7 +509,7 @@ test("sign out clears visible customer data and retains an uncertain saved reque
     .getByRole("button", { name: "Get return labels", exact: true })
     .click();
   await expect(
-    page.getByRole("button", { name: "Retry saved request" }),
+    page.getByRole("button", { name: "Try again" }),
   ).toBeEnabled();
   const saved = await page.evaluate(
     (key) => sessionStorage.getItem(key),

@@ -287,6 +287,26 @@ export function CustomerWorkspace({
     setAttempt(value => value + 1);
   }
 
+  async function retryReturn(): Promise<void> {
+    const saved = commands.getSnapshot();
+    if (saved.busy || busy) return;
+    if (saved.record) {
+      if (!saved.rejected) await commands.retry();
+      // One action also handles an obsolete request discovered during resume.
+      // Unknown/accepted outcomes retain their original recovery record.
+      if (commands.getSnapshot().rejected) reviewRejectedReturn();
+      return;
+    }
+    if (historicalStatus) {
+      await run(async signal => {
+        let next = await api.status(historicalStatus.authorizationId, signal);
+        if (signal.aborted) return;
+        if (next.canProgress) next = await api.progress(next.authorizationId, signal);
+        if (!signal.aborted) setHistoricalStatus(next);
+      });
+    }
+  }
+
   function chooseAnother(reason?: string) {
     if (embedded) { onSignedOut(); return; }
     operation.current?.abort();
@@ -386,24 +406,15 @@ export function CustomerWorkspace({
           <h1 ref={statusHeading} tabIndex={-1} className="text-2xl font-semibold outline-none">
             {status
               ? `Return ${status.authorizationNumber}`
-              : command.rejected
-                ? "Return not accepted"
-                : "Checking your return"}
+              : inProgress ? "Preparing your return" : "We couldn’t finish your return"}
           </h1>
           <PreviewError message={error ?? command.error ?? notice} />
-          {command.rejected && (
+          {!status && !error && !command.error && (
             <p className="text-sm text-muted-foreground">
-              This is the saved result of an earlier attempt. Review your return
-              items to check what is available now.
+              Your selections are saved. Try again to continue with your return.
             </p>
           )}
-          {!status && !command.rejected && (
-            <p className="text-sm text-muted-foreground">
-              Your request is saved. Check its status or retry this same request
-              before starting another return.
-            </p>
-          )}
-          {inProgress && <Loading text="Checking your return…" />}
+          {inProgress && <Loading text="Preparing your return…" />}
           {status?.parcels.map((parcel) => (
             <section
               key={parcel.parcelId}
@@ -416,8 +427,10 @@ export function CustomerWorkspace({
                   : parcel.status === "pending"
                     ? "Your label is waiting to be prepared."
                     : parcel.status === "processing"
-                      ? "We are checking whether this label was created."
-                      : "This label needs verification. Contact support if checking its status does not resolve it."}
+                      ? "Your label is taking longer than expected. Try again to continue."
+                      : parcel.status === "failed"
+                        ? "This label could not be prepared. Contact us for help."
+                      : "We couldn’t finish preparing this label. Try again, or contact us for help."}
               </p>
               {parcel.trackingNumber && (
                 <p className="break-all text-sm">
@@ -436,53 +449,14 @@ export function CustomerWorkspace({
             </section>
           ))}
           <div className="flex flex-wrap gap-3">
-            {!command.rejected && <Button
-              variant="outline"
-              disabled={inProgress}
-              onClick={() => {
-                if (command.record) void commands.check();
-                else if (status)
-                  void run(async (signal) => {
-                    const result = await api.status(
-                      status.authorizationId,
-                      signal,
-                    );
-                    if (!signal.aborted) setHistoricalStatus(result);
-                  });
-              }}
-            >
-              Check status
-            </Button>}
-            {command.rejected && command.record?.authorizationId === null && (
-              <Button disabled={inProgress} onClick={reviewRejectedReturn}>
-                Review return items
-              </Button>
-            )}
-            {command.record && !status && !command.rejected && (
-              <Button disabled={inProgress} onClick={() => void commands.retry()}>
-                Retry saved request
-              </Button>
-            )}
-            {status?.canProgress && (
-              <Button
-                disabled={inProgress}
-                onClick={() => {
-                  if (command.record) void commands.progress();
-                  else
-                    void run(async (signal) => {
-                      const result = await api.progress(
-                        status.authorizationId,
-                        signal,
-                      );
-                      if (!signal.aborted) setHistoricalStatus(result);
-                    });
-                }}
-              >
-                Prepare or recover labels
+            {(!status || status.canProgress || status.parcels.some(parcel =>
+              parcel.status === "pending" || parcel.status === "processing" || parcel.status === "needs_review")) && (
+              <Button disabled={inProgress} onClick={() => void retryReturn()}>
+                {inProgress ? "Please wait…" : "Try again"}
               </Button>
             )}
             {command.record &&
-              (command.rejected || customerReturnCanLeave(status)) && (
+              customerReturnCanLeave(status) && (
                 <Button
                   variant="ghost"
                   disabled={inProgress}
@@ -494,7 +468,7 @@ export function CustomerWorkspace({
                   Back to your orders
                 </Button>
               )}
-            {!command.record && (
+            {!command.record && status && customerReturnCanLeave(status) && (
               <Button
                 variant="ghost"
                 disabled={inProgress}

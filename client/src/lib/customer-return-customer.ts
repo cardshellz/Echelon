@@ -91,13 +91,15 @@ async function responseBody<T extends z.ZodTypeAny>(
               ? "Review your box sizes and separate heavy items into more boxes, or contact us for help. No label was purchased."
               : "Your return is saved, but no allowed prepaid service is available for this box. Contact us for help."
             : code === "RETURN_LABEL_SUBMISSION_REJECTED"
-              ? customerReturnRejectionMessage(
+              ? parsed.success && ["RETURN_LABEL_SETTINGS_CHANGED", "RETURN_LIVE_REVIEW_CHANGED"].includes(parsed.data.error.reasonCode ?? "")
+                ? "Your return details need to be refreshed. Try again to review your items."
+                : customerReturnRejectionMessage(
                   parsed.success ? parsed.data.error.reasonCode : undefined,
                 )
               : code === "RETURN_LABEL_SUBMISSION_PROCESSING"
-                ? "Your request is still being checked. Check its status again shortly."
+                ? "We couldn’t finish preparing your return. Your selections are saved. Please try again."
                 : code === "RETURN_LABEL_SUBMISSION_NOT_FOUND"
-                  ? "We have not confirmed your request yet. Retry this saved request to continue."
+                  ? "We couldn’t finish preparing your return. Your selections are saved. Please try again."
                   : "We could not confirm the result. Your saved request will be kept. Please try again.",
       response.status,
     );
@@ -106,7 +108,7 @@ async function responseBody<T extends z.ZodTypeAny>(
   if (!parsed.success)
     throw new CustomerReturnRequestError(
       "CUSTOMER_RETURN_RESPONSE_INVALID",
-      "The response could not be verified. Please check its status again.",
+      "We couldn’t load your return details. Please try again.",
     );
   return parsed.data;
 }
@@ -377,8 +379,9 @@ export class CustomerReturnCommandSession {
             ),
         ))
     ) {
-      throw new Error(
-        "The saved box identities changed. Contact support before continuing.",
+      throw new CustomerReturnRequestError(
+        "CUSTOMER_RETURN_IDENTITY_CHANGED",
+        "Your return details could not be verified. Contact us for help.",
       );
     }
     const saved = { ...record, authorizationId: status.authorizationId };
@@ -407,9 +410,9 @@ export class CustomerReturnCommandSession {
         else
           this.update({
             error:
-              cause instanceof Error
+              cause instanceof CustomerReturnRequestError
                 ? cause.message
-                : "The outcome is unknown. Check this saved request again.",
+                : "We couldn’t finish preparing your return. Your selections are saved. Please try again.",
             rejected:
               this.state.rejected ||
               (cause instanceof CustomerReturnRequestError &&
@@ -447,33 +450,39 @@ export class CustomerReturnCommandSession {
     }
     this.update({ record, rejected: false });
     await this.run(async (signal) => {
-      let status = await this.api.submit(
+      const status = await this.api.submit(
         record.omsOrderId,
         record.input,
         signal,
       );
-      const attempted = new Set<number>();
-      // The explicit Get labels action authorizes each reviewed box. Stop at
-      // uncertainty; reloads/checks never enter this purchase loop.
-      while (
-        !signal.aborted &&
-        this.active &&
-        status.canProgress &&
-        !status.parcels.some(
-          (parcel) =>
-            parcel.status === "processing" || parcel.status === "needs_review",
-        )
-      ) {
-        this.accept(status);
-        const next = [...status.parcels]
-          .sort((left, right) => left.number - right.number)
-          .find((parcel) => parcel.status === "pending");
-        if (!next || attempted.has(next.parcelId)) break;
-        attempted.add(next.parcelId);
-        status = await this.api.progress(status.authorizationId, signal);
-      }
-      return status;
+      return this.prepareLabels(status, signal);
     });
+  }
+  /** Only explicit Get labels/Try again actions enter this bounded loop. An
+   * uncertain purchase is reconciled at most once; reload and check stay GET-only.
+   */
+  private async prepareLabels(
+    initial: CustomerReturnCustomerLabelStatus,
+    signal: AbortSignal,
+    reconcile = false,
+  ): Promise<CustomerReturnCustomerLabelStatus> {
+    let status = initial;
+    const attempted = new Set<number>();
+    const uncertain = () => status.parcels.some(parcel =>
+      parcel.status === "processing" || parcel.status === "needs_review");
+    if (reconcile && status.canProgress && uncertain() && !signal.aborted && this.active) {
+      this.accept(status);
+      status = await this.api.progress(status.authorizationId, signal);
+    }
+    while (!signal.aborted && this.active && status.canProgress && !uncertain()) {
+      this.accept(status);
+      const next = [...status.parcels].sort((left, right) => left.number - right.number)
+        .find(parcel => parcel.status === "pending");
+      if (!next || attempted.has(next.parcelId)) break;
+      attempted.add(next.parcelId);
+      status = await this.api.progress(status.authorizationId, signal);
+    }
+    return status;
   }
   async check() {
     const record = this.state.record;
@@ -486,28 +495,33 @@ export class CustomerReturnCommandSession {
   }
   async retry() {
     const record = this.state.record;
-    if (!record || record.authorizationId !== null || this.state.rejected)
+    if (!record || this.state.rejected)
       return;
     await this.run(async (signal) => {
+      if (record.authorizationId !== null) {
+        return this.prepareLabels(await this.api.status(record.authorizationId, signal), signal, true);
+      }
+      let status: CustomerReturnCustomerLabelStatus;
       try {
-        return await this.api.resume(record.input.idempotencyKey, signal);
+        status = await this.api.resume(record.input.idempotencyKey, signal);
       } catch (cause) {
         if (
           cause instanceof CustomerReturnRequestError &&
           (cause.status === 404 ||
             cause.code === "RETURN_LABEL_SUBMISSION_NOT_FOUND")
         )
-          return this.api.submit(record.omsOrderId, record.input, signal);
-        throw cause;
+          status = await this.api.submit(record.omsOrderId, record.input, signal);
+        else throw cause;
       }
+      return this.prepareLabels(status, signal, true);
     });
   }
   async progress() {
     const record = this.state.record;
     if (record?.authorizationId && this.state.status?.canProgress)
-      await this.run((signal) =>
-        this.api.progress(record.authorizationId!, signal),
-      );
+      await this.run(async signal => this.prepareLabels(
+        await this.api.progress(record.authorizationId!, signal), signal,
+      ));
   }
   finish() {
     if (

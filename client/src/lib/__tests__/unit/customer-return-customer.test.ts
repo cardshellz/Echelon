@@ -373,6 +373,72 @@ describe("durable customer return commands", () => {
     expect(s.session.getSnapshot().record).toBeNull();
     expect(s.saved.rows.has(storageKey)).toBe(false);
   });
+  it("continues both reviewed boxes from one explicit retry without replacing the saved key", async () => {
+    const s = setup();
+    s.api.submit.mockRejectedValueOnce(new Error("Lost response"));
+    const { idempotencyKey: _key, ...body } = input();
+    await s.session.begin(10, { ...body, selections: [{ ...body.selections[0], quantity: 2 }],
+      parcels: [body.parcels[0], structuredClone(body.parcels[0])] });
+    const pending = { ...status(), canProgress: true, parcels: [30, 31].map((parcelId, index) => ({
+      parcelId, number: index + 1, status: "pending" as const, trackingNumber: null, downloadPath: null,
+    })) };
+    const ready = (index: number) => ({ ...pending.parcels[index], status: "ready" as const,
+      trackingNumber: `TRACK-${index}`, downloadPath: `/api/returns/customer/returns/20/parcels/${pending.parcels[index].parcelId}/download` });
+    s.api.resume.mockResolvedValueOnce(pending);
+    s.api.progress.mockResolvedValueOnce({ ...pending, parcels: [ready(0), pending.parcels[1]] });
+    s.api.progress.mockResolvedValueOnce({ ...pending, canProgress: false, parcels: [ready(0), ready(1)] });
+    await s.session.retry();
+    expect(s.api.resume).toHaveBeenCalledExactlyOnceWith(commandKey, expect.any(AbortSignal));
+    expect(s.api.submit).toHaveBeenCalledTimes(1);
+    expect(s.api.progress).toHaveBeenCalledTimes(2);
+    expect(s.newKey).toHaveBeenCalledTimes(1);
+    expect(s.session.getSnapshot().status?.parcels.map(parcel => parcel.status)).toEqual(["ready", "ready"]);
+  });
+  it("bounds uncertain-label reconciliation to one call per explicit retry", async () => {
+    const s = setup();
+    s.api.submit.mockRejectedValueOnce(new Error("Lost response"));
+    await begin(s);
+    const processing = { ...status(), canProgress: true,
+      parcels: [{ ...status().parcels[0], status: "processing" as const, trackingNumber: null, downloadPath: null }] };
+    s.api.resume.mockResolvedValueOnce(processing);
+    s.api.progress.mockResolvedValue(processing);
+    await s.session.retry();
+    expect(s.api.progress).toHaveBeenCalledTimes(1);
+    expect(s.session.getSnapshot().status?.parcels[0].status).toBe("processing");
+    expect(s.saved.rows.has(storageKey)).toBe(true);
+    s.api.status.mockResolvedValue(processing);
+    await s.session.check();
+    expect(s.api.progress).toHaveBeenCalledTimes(1);
+    await s.session.retry();
+    expect(s.api.resume).toHaveBeenCalledTimes(1);
+    expect(s.api.status).toHaveBeenCalledTimes(2);
+    expect(s.api.progress).toHaveBeenCalledTimes(2);
+    expect(s.api.submit).toHaveBeenCalledTimes(1);
+  });
+  it("coalesces repeated recovery clicks while a request is in flight", async () => {
+    const s = setup();
+    s.api.submit.mockRejectedValueOnce(new Error("Lost response"));
+    await begin(s);
+    let resolve!: (value: CustomerReturnCustomerLabelStatus) => void;
+    s.api.resume.mockImplementation(() => new Promise(done => { resolve = done; }));
+    const first = s.session.retry();
+    await s.session.retry();
+    expect(s.api.resume).toHaveBeenCalledTimes(1);
+    resolve(status());
+    await first;
+    expect(s.newKey).toHaveBeenCalledTimes(1);
+    expect(s.api.submit).toHaveBeenCalledTimes(1);
+  });
+  it("validates an accepted return's identity before a recovery action can prepare labels", async () => {
+    const s = setup();
+    await begin(s);
+    s.api.status.mockResolvedValue({ ...status(), authorizationId: 21, canProgress: true,
+      parcels: [{ ...status().parcels[0], status: "pending", trackingNumber: null, downloadPath: null }] });
+    await s.session.retry();
+    expect(s.api.progress).not.toHaveBeenCalled();
+    expect(s.session.getSnapshot().status?.authorizationId).toBe(20);
+    expect(s.saved.rows.has(storageKey)).toBe(true);
+  });
   it("allows leaving a known terminal failed return without losing its server history", async () => {
     const s = setup();
     s.api.submit.mockResolvedValue({
@@ -470,7 +536,7 @@ describe("durable customer return commands", () => {
     });
     await s.session.check();
     expect(s.session.getSnapshot().status?.parcels[0].parcelId).toBe(30);
-    expect(s.session.getSnapshot().error).toContain("box identities changed");
+    expect(s.session.getSnapshot().error).toContain("return details could not be verified");
   });
   it("clears authenticated UI on access denial without erasing uncertain recovery", async () => {
     const s = setup();
