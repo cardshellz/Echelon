@@ -14,8 +14,9 @@ import { STOCK_LINK_ERROR_CODES, StockLinkError } from "./stock-link-errors";
  * batch, the two safety stops, the retry schedule and the command keys. No I/O, no clock, no randomness of its own:
  * the tick passes the facts it read and an injected `random`; the same facts always give the same plan.
  *
- * The decision tables are Shopify's (the only policy PR2 runs): identity = the decimal InventoryItem id, "on sale" =
- * product status ACTIVE, SKU equality = trimmed and case-insensitive (the shopify-link route's rule, DV4-9).
+ * For Shopify destinations, Echelon's stock-link policy uses the decimal InventoryItem id as identity and ACTIVE as "on sale",
+ * while a stock-link candidate may be ACTIVE or DRAFT. Draft preparation must not require making the product
+ * available for sale. SKU equality is trimmed and case-insensitive (the shopify-link route's rule, DV4-9).
  */
 
 const MINUTE_MS = 60_000;
@@ -27,8 +28,10 @@ export const STOCK_LINK_ACTOR = "system:stock-link";
 /** Prefix of every engine key: the command lock and receipt `stock-link:<commandKey>`, each draft
  * `stock-link:<commandKey>:<variantId>` (C14). Dropship keeps its own `dropship-ebay-stock` prefix. */
 export const STOCK_LINK_KEY_PREFIX = "stock-link";
-/** The only Shopify product status that is on sale (C10): an archived or draft copy can't oversell. */
+/** Sale status remains separate from permission to prepare a draft item's stock. */
 export const STOCK_LINK_SHOPIFY_ON_SALE_STATUS = "ACTIVE";
+/** A Shopify draft can receive its exact inventory link before it is made available for sale. */
+export const STOCK_LINK_SHOPIFY_DRAFT_STATUS = "DRAFT";
 /** Members of one command (one destination, one product), as the Dropship contract bounds them. */
 export const STOCK_LINK_COMMAND_MEMBERS_MAX = 500;
 /** Provider evidence older than this is re-read, never applied (§4.3 step 0, STOCK_LINK_EVIDENCE_STALE). */
@@ -105,6 +108,12 @@ export function normalizeShopifyItemId(raw: string | null | undefined): string |
 /** On sale = the store item's product is ACTIVE (C10, DV4-1). */
 export function isStockLinkItemOnSale(item: Pick<StockLinkStoreItem, "productStatus">): boolean {
   return item.productStatus === STOCK_LINK_SHOPIFY_ON_SALE_STATUS;
+}
+
+/** Stock identity can be established before sale. Archived and unknown statuses
+ * are excluded; SKU uniqueness, selection and item ownership are checked separately. */
+export function isStockLinkItemEligible(item: Pick<StockLinkStoreItem, "productStatus">): boolean {
+  return isStockLinkItemOnSale(item) || item.productStatus === STOCK_LINK_SHOPIFY_DRAFT_STATUS;
 }
 
 // ---------------------------------------------------------------------------
@@ -558,9 +567,12 @@ function skuPool(size: StockLinkSizeFacts, sku: Extract<StockLinkSku, { kind: "s
   const exact = new Map<string, StockLinkStoreItem>();
   for (const item of [...lookup, ...(hint ? [hint] : []), ...(carries(linked) ? [linked] : [])])
     if (!exact.has(item.itemId)) exact.set(item.itemId, item);
-  // SAF-10: the candidates are every on-sale item any read saw, never only what the search returned.
-  const candidates = [...exact.values()].filter(isStockLinkItemOnSale).sort((a, b) => compareIds(a.itemId, b.itemId));
-  return { lookup, lookupOnSale: lookup.filter(isStockLinkItemOnSale), hint, exactCount: exact.size, candidates };
+  // SAF-10: use every eligible item any read saw, never only the search results.
+  // Draft copies count toward ambiguity too: status cannot pick an arbitrary
+  // inventory identity when an ACTIVE and a DRAFT item share the SKU.
+  const candidates = [...exact.values()].filter(isStockLinkItemEligible).sort((a, b) => compareIds(a.itemId, b.itemId));
+  return { lookup, lookupEligible: lookup.filter(isStockLinkItemEligible), lookupOnSale: lookup.filter(isStockLinkItemOnSale),
+    hint, exactCount: exact.size, candidates };
 }
 
 /** Who else holds `itemId`, and whether this batch frees it (only by the active version of a changed size). */
@@ -623,9 +635,9 @@ function candidateOutcome(size: StockLinkSizeFacts, context: Context, freed: Rea
       { detail: { kind: "SELECTION_BLOCKED", action: size.selection.action, blockerCodes: [...size.selection.blockerCodes] } });
   }
   const pool = skuPool(size, sku, context, null, excludeItemId);
-  // Row 4: never link on the hint alone. The hint is on sale with this SKU but the search returned no on-sale item:
-  // the search missed it (SAF-10, DV4-2; BUILD-NOTES D-P2-4 for an archived-only search result).
-  if (pool.lookupOnSale.length === 0 && pool.hint !== null && isStockLinkItemOnSale(pool.hint))
+  // Row 4: never link on the hint alone. A draft needs the same complete lookup
+  // proof as an active item; an archived-only search cannot vouch for either.
+  if (pool.lookupEligible.length === 0 && pool.hint !== null && isStockLinkItemEligible(pool.hint))
     return settled("transient", rule("L4"), D.lookupMissed, { waitingItemId: null });
   if (pool.candidates.length === 0) {
     const code = pool.exactCount > 0 ? D.notOnSale : D.notListed;
@@ -658,9 +670,12 @@ function verifyOutcome(size: StockLinkSizeFacts, prelim: Extract<Prelim, { kind:
   }
   const linked = prelim.observed;
   const pool = skuPool(size, sku, context, linked, null);
-  const linkedOnSale = isStockLinkItemOnSale(linked);
+  const linkedEligible = isStockLinkItemEligible(linked);
   const others = pool.candidates.filter(item => item.itemId !== prelim.storedItemId);
-  if (!linkedOnSale && others.length === 1 && linkableSelection(size)) {
+  if (!linkedEligible && others.length === 1 && isStockLinkItemOnSale(others[0]!) && linkableSelection(size)) {
+    // V7 still identifies a live replacement for an inactive old copy. A correct
+    // DRAFT is now a valid stock identity: do not move it to another draft or
+    // active copy. The duplicate rule below retains that link for review.
     // V7b, row 4's rule for a relink: never move a link to a copy only the feed hint showed. The search must
     // return the copy itself, or a search that dropped results could hide a second live copy (review LNK-2).
     if (!pool.lookupOnSale.some(item => item.itemId === others[0]!.itemId))
@@ -674,7 +689,7 @@ function verifyOutcome(size: StockLinkSizeFacts, prelim: Extract<Prelim, { kind:
       { detail: { kind: "SKU_DUPLICATE", itemIds: pool.candidates.map(item => item.itemId) } });
   }
   const carriesSku = stockLinkSkusEqual(normalizeStockLinkSku(linked.sku), sku);
-  if (linkedOnSale && carriesSku && !pool.lookup.some(item => item.itemId === prelim.storedItemId))
+  if (linkedEligible && carriesSku && !pool.lookup.some(item => item.itemId === prelim.storedItemId))
     return settled("transient", "V9", D.lookupMissed);
   // V10: a link saved as a gid is re-pointed to the decimal form of the same item (the outbox writes only that).
   if (size.head!.active!.itemId !== prelim.storedItemId && linkableSelection(size)) {
@@ -838,7 +853,7 @@ export const STOCK_LINK_RETRY = Object.freeze({
   /** Transient: 10 min × 2^(n−1), at most 24 h, never earlier than the provider's Retry-After. */
   transientBaseMs: 10 * MINUTE_MS,
   transientMaxMs: DAY_MS,
-  /** Waits (not listed, not on sale, selection blocked): 15 min doubling to 24 h. */
+  /** Waits (not listed, no eligible stock item, selection blocked): 15 min doubling to 24 h. */
   waitBaseMs: 15 * MINUTE_MS,
   waitMaxMs: DAY_MS,
   /** Destination pause: 15 min doubling to 24 h. */

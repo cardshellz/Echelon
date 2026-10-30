@@ -3,13 +3,14 @@ import { resolve } from "node:path";
 import type { InventoryProductSyncRequest, InventoryProductSyncReceipt, InventoryProductSyncProgress, InventoryProductSyncReview } from "../../shared/types/inventory-product-sync";
 
 const ROOT = "/api/inventory-planning/admin/product-sync";
+const SAVED_SHOPIFY_LINK_CHECK = "Last saved stock-link check: STOCK_LINK_NOT_ON_SALE (waiting); updated 2026-10-29T12:00:00.000Z. Shopify ACTIVE and DRAFT products can qualify for stock linking. Use Check again in Channel Inventory to recheck this saved result. Linking does not publish the product. No automatic retry is scheduled.";
 async function setup(page: Page, options: { surface?: "catalog" | "channel" | "preview"; canSync?: boolean } = {}) {
   const state = { requests: [] as InventoryProductSyncRequest[], receipt: null as InventoryProductSyncReceipt | null,
     loseResponse: false, progressUnavailable: false, verified: false, failed: false, wrongProgress: false, wrongActor: false,
     stale: false, paused: false, reviewUnavailable: false, stockLinkIssue: false, delayResponse: false, releaseResponse: null as (() => void) | null,
     hash: "a".repeat(64), errors: [] as string[] };
   const mappingBlockers = () => ["INVENTORY_MAPPING_MISSING: BINDER-P1 has no active inventory link.",
-    ...(state.stockLinkIssue ? ["Last saved stock-link check: STOCK_LINK_NOT_ON_SALE at 2026-10-29T12:00:00.000Z. The listing is not on sale; review channel listing eligibility."] : [])];
+    ...(state.stockLinkIssue ? [SAVED_SHOPIFY_LINK_CHECK] : [])];
   const variants = [{ id: 51, sku: "BINDER-P1" }, { id: 52, sku: "BINDER-C5" }];
   const destinations = [
     { publicationTargetId: 9, channelId: 7, channelName: "Test Shopify", providerKey: "shopify", externalScopeId: "123" },
@@ -192,9 +193,9 @@ test("starts a fresh request for the same product after terminal delivery", asyn
   await expect(page.getByText("Queued quantities verified at channels", { exact: true })).not.toBeVisible(); expect(state.errors).toEqual([]);
 });
 
-test("shows the dated saved stock-link reason in review and after a partial sync", async ({ page }) => {
+test("shows the historical stock-link refusal and draft-aware recheck guidance without publishing the listing", async ({ page }) => {
   const state = await setup(page); state.stockLinkIssue = true;
-  const reason = "Last saved stock-link check: STOCK_LINK_NOT_ON_SALE at 2026-10-29T12:00:00.000Z. The listing is not on sale; review channel listing eligibility.";
+  const reason = SAVED_SHOPIFY_LINK_CHECK;
   await openReview(page); await expect(page.getByText(reason, { exact: true })).toHaveCount(2);
   await page.getByRole("button", { name: "Sync eligible inventory", exact: true }).click();
   await expect(page.getByText("Inventory sync recorded", { exact: true })).toBeVisible();

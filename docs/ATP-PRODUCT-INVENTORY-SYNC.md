@@ -41,12 +41,20 @@ A catalog listing identity and an active ATP stock-publication link are separate
 records. The stock-link owner establishes the latter from provider evidence; this
 sync does not manufacture a link from a catalog mapping.
 
-For Shopify, the existing stock-link rule requires product status `ACTIVE`.
-`DRAFT` and `ARCHIVED` products are not linked by that rule. A saved
-`STOCK_LINK_NOT_ON_SALE` diagnostic describes the last stock-link check, not a new
-provider read. Review the listing's intended lifecycle and the stock-link status
-in Channel Inventory. This inventory command does not publish a draft listing or
-change its lifecycle.
+For Shopify, verified products with status `ACTIVE` or `DRAFT` can qualify for a
+stock link. `ARCHIVED` and unknown statuses do not qualify. Draft eligibility does
+not bypass the stock-link owner's identity and duplicate checks, or ATP's saved
+inventory rules. Linking and inventory synchronization leave Shopify product
+status unchanged: preparing a draft product's inventory does not publish it.
+
+A saved `STOCK_LINK_NOT_ON_SALE` diagnostic describes the last stock-link check,
+not a new provider read. It may predate support for draft products. Use **Check
+again** in the destination's Channel Inventory stock-link controls to request a
+fresh check under the current rule. This immediate retry includes Shopify items
+waiting with `STOCK_LINK_NOT_ON_SALE`; other waiting reasons keep their scheduled
+checks. A missing link remains blocked until the stock-link owner verifies and
+establishes it; the product sync never treats the
+historical refusal as a current provider observation or creates a link itself.
 
 ## Compatibility and permissions
 

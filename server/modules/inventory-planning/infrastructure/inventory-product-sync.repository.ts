@@ -191,6 +191,7 @@ async function captureReview(client: PoolClient, productId: number): Promise<Inv
 async function readMissingLinkDiagnostics(client: PoolClient, rows: InventoryProductSyncReview["rows"]): Promise<Map<string, string[]>> {
   const missing = rows.filter(row => row.status === "blocked" && row.blockers.includes("PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"));
   if (missing.length === 0) return new Map();
+  const providerByScope = new Map(missing.map(row => [scopeKey(row), row.providerKey]));
   const checks = (await client.query<Scope & { status: string; reasonCode: string | null; updatedAt: Date; nextCheckAt: Date | null }>(
     `SELECT checks.publication_target_id AS "publicationTargetId",checks.product_variant_id AS "productVariantId",
       checks.status,checks.reason_code AS "reasonCode",checks.updated_at AS "updatedAt",checks.next_check_at AS "nextCheckAt"
@@ -199,11 +200,19 @@ async function readMissingLinkDiagnostics(client: PoolClient, rows: InventoryPro
         ON selected."publicationTargetId"=checks.publication_target_id AND selected."productVariantId"=checks.product_variant_id
       ORDER BY checks.publication_target_id,checks.product_variant_id`,
     [JSON.stringify(missing.map(row => ({ publicationTargetId: row.publicationTargetId, productVariantId: row.productVariantId })))])).rows;
-  return new Map(checks.map(check => [scopeKey(check), [
-    `Last saved stock-link check: ${check.reasonCode ?? check.status} (${check.status}); updated ${check.updatedAt.toISOString()}.`
-      + (check.reasonCode === "STOCK_LINK_NOT_ON_SALE" ? " The listing must be active before its stock link can be created." : "")
-      + (check.nextCheckAt ? ` Next check scheduled for ${check.nextCheckAt.toISOString()}.` : " No automatic retry is scheduled."),
-  ]]));
+  return new Map(checks.map(check => {
+    // A historical refusal is not evidence of the current provider status. In
+    // particular, Shopify drafts can now qualify without publishing the product.
+    const guidance = check.reasonCode !== "STOCK_LINK_NOT_ON_SALE" ? ""
+      : providerByScope.get(scopeKey(check)) === "shopify"
+        ? " Shopify ACTIVE and DRAFT products can qualify for stock linking. Use Check again in Channel Inventory to recheck this saved result. Linking does not publish the product."
+        : " Recheck current provider eligibility before creating a stock link; this saved result is not a new provider check.";
+    return [scopeKey(check), [
+      `Last saved stock-link check: ${check.reasonCode ?? check.status} (${check.status}); updated ${check.updatedAt.toISOString()}.`
+        + guidance
+        + (check.nextCheckAt ? ` Next check scheduled for ${check.nextCheckAt.toISOString()}.` : " No automatic retry is scheduled."),
+    ]];
+  }));
 }
 
 function destination(target: { publicationTargetId: number; channelId: number; channelName: string; providerKey: string; externalScopeId: string }) {

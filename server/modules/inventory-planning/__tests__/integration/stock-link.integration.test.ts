@@ -21,7 +21,7 @@ import type { StockLinkDestination, StockLinkStoreItem } from "@shared/types/sto
 import { readPublicationStockSelection } from "../../infrastructure/inventory-publication-selection.reader";
 import { createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source";
 import { CHANNEL_VARIANT_OVERRIDE_LOCK_SQL, channelVariantOverrideLockKey } from "../../../channels/infrastructure/channel-variant-override-lock";
-import { quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
+import { PostgresQuantityPublicationAdmission, quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../infrastructure/inventory-publication-target-stop.repository";
 import { STOCK_LINK_HEADS_FOR_UPDATE_SQL } from "../../infrastructure/stock-link-command";
 import type { StockLinkCheckClaim } from "../../infrastructure/stock-link-checks.repository";
@@ -54,6 +54,8 @@ import { PostgresStockLinkControlsStore } from "../../infrastructure/stock-link-
 import { STOCK_LINK_HEALTH_CHECKS, stockLinkHealthChecks } from "../../stock-link-health";
 import { beatStockLinkDestination, countStockLinkRetiresWithoutReplacement } from "../../infrastructure/stock-link-checks.repository";
 import { stockLinkRetireWindowStart } from "../../domain/stock-link";
+import { InventoryProductSyncService } from "../../application/inventory-product-sync.service";
+import { PostgresInventoryProductSyncStore } from "../../infrastructure/inventory-product-sync.repository";
 
 // Channels PR2 (PLAN-CH2 v4.1 §11.4): the shared stock-link engine over real PostgreSQL. This block is the schema
 // (PG 1 and 1b): migration M1 through the release executor, its keys, CHECKs, indexes and the Drizzle declaration.
@@ -1433,7 +1435,7 @@ dbDescribe.sequential("stock-link tick and runner, real PostgreSQL (P7: PG 18, 2
   let now: Date;
   const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const source = createShopifyStockLinkSource();
-  const storeItem = (itemId: string, sku: string | null): StockLinkStoreItem => ({ itemId, sku, productId: "9001", productStatus: "ACTIVE" });
+  const storeItem = (itemId: string, sku: string | null, productStatus = "ACTIVE"): StockLinkStoreItem => ({ itemId, sku, productId: "9001", productStatus });
   const reads: Array<{ kind: "lookup" | "observe"; values: string[] }> = [];
 
   beforeEach(async () => {
@@ -1516,6 +1518,93 @@ dbDescribe.sequential("stock-link tick and runner, real PostgreSQL (P7: PG 18, 2
     return new InventoryPublicationOutboxService(repository, { get: () => transport }, { now: () => due }, () => "stock-link-p7-lease",
       { runOutbox: async (_claim, work) => work() }).processDue();
   };
+
+  it("links a unique draft Shopify item and publishes canonical ATP without changing its product status", async () => {
+    shop = new Map([[ITEM_A, storeItem(ITEM_A, "P5", "DRAFT")]]);
+    const beforeShop = structuredClone([...shop]);
+    const beforeStock = (await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
+    await database.pool.query("ALTER TABLE channels.sync_settings ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 1");
+    const productSync = new InventoryProductSyncService(new PostgresInventoryProductSyncStore(database.pool), () => now);
+
+    expect(await head(101)).toBeNull();
+    const missingLinkReview = await productSync.review({ productId: STOCK_LINK_SHOPIFY.productId });
+    expect(missingLinkReview.rows.find(row => row.publicationTargetId === targetId && row.productVariantId === 101))
+      .toMatchObject({ status: "blocked", blockers: ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"] });
+
+    // Recover an already scheduled refusal from the former ACTIVE-only rule;
+    // the operator's Check again must make that exact waiting row due now.
+    await database.pool.query(`INSERT INTO inventory.stock_link_checks(publication_target_id,product_variant_id,status,reason_code,
+      next_check_at,created_at,updated_at) VALUES($1,101,'waiting','STOCK_LINK_NOT_ON_SALE',$2,$3,$3)`,
+    [targetId, new Date(now.getTime() + 6 * 60 * 60_000), now]);
+    const stockControls = new StockLinkControlsService(new PostgresStockLinkControlsStore(database.pool), () => now, log);
+    const stockStatus = await stockControls.status({ publicationTargetId: String(targetId) });
+    if (!stockStatus.supported) throw new Error("The fixture Shopify destination must support stock-link controls.");
+    await stockControls.checkAgain({ publicationTargetId: targetId, expectedRevision: stockStatus.revision }, "draft-stock-operator");
+    expect(await readStockLinkCheck(database.pool, targetId, 101)).toMatchObject({ status: "waiting", next_check_at: now });
+
+    expect(await tickThroughRunner()).toMatchObject({ outcome: "completed", links: 1, applies: 1 });
+    expect(await head(101)).toEqual({ item: ITEM_A, versions: `sealed:${ITEM_A}` });
+    expect(await readStockLinkCheck(database.pool, targetId, 101)).toMatchObject({ status: "linked", reason_code: null });
+    const review = await productSync.review({ productId: STOCK_LINK_SHOPIFY.productId });
+    expect(review.ready).toBe(true);
+    expect(review.rows.find(row => row.publicationTargetId === targetId && row.productVariantId === 101))
+      .toMatchObject({ status: "ready", quantity: "17", externalInventoryItemId: ITEM_A });
+    const result = await productSync.sync({ productId: STOCK_LINK_SHOPIFY.productId, expectedReviewHash: review.reviewHash,
+      idempotencyKey: "a1111111-1111-4111-8111-111111111111" }, "draft-stock-operator");
+    expect(result.receipt.rows).toMatchObject([{ publicationTargetId: targetId, productVariantId: 101, quantity: "17", externalInventoryItemId: ITEM_A }]);
+    expect(result.receipt.rows).toHaveLength(1);
+
+    const due = (await database.pool.query(`SELECT date_trunc('milliseconds',max(available_at))+interval '1 millisecond' AS due
+      FROM inventory.inventory_publication_outbox WHERE state='queued'`)).rows[0].due as Date;
+    const publishAbsolute = vi.fn<InventoryPublicationTransportAdapter["publishAbsolute"]>(async request =>
+      ({ publishedQuantity: request.desiredQuantity, providerResponse: { accepted: true } }));
+    const readAbsolute = vi.fn<InventoryPublicationTransportAdapter["readAbsolute"]>(async () =>
+      ({ observedQuantity: 17, providerResponse: { quantity: 17 } }));
+    const transport: InventoryPublicationTransportAdapter = { destinationKind: "channel_connection", providerKey: "shopify",
+      supportedScopeTypes: ["location"], publishAbsolute, readAbsolute };
+    const worker = new InventoryPublicationOutboxService(new PostgresInventoryPublicationOutboxRepository(database.pool),
+      { get: () => transport }, { now: () => due }, () => "draft-stock-link-publication", new PostgresQuantityPublicationAdmission(database.pool));
+    expect(await worker.processDue()).toMatchObject({ claimed: 1, verified: 1, failed: 0 });
+    expect(publishAbsolute).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ externalInventoryItemId: ITEM_A,
+      productVariantId: 101, desiredQuantity: 17, channelId: STOCK_LINK_SHOPIFY.channelId, externalScopeId: STOCK_LINK_SHOPIFY.location }));
+    expect(readAbsolute).toHaveBeenCalledTimes(1);
+    expect((await productSync.progress(result.receipt.idempotencyKey)).rows).toMatchObject([
+      { publicationTargetId: targetId, productVariantId: 101, state: "verified", observedQuantity: "17" },
+    ]);
+    // The stock-link adapter exposes reads only, and the publication transport
+    // exposes absolute inventory writes only. No product-status mutation is available.
+    expect([...shop]).toEqual(beforeShop);
+    expect(shop.get(ITEM_A)?.productStatus).toBe("DRAFT");
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows).toEqual(beforeStock);
+  }, CASE_TIMEOUT_MS);
+
+  it.each(["ACTIVE", "DRAFT"] as const)("flags duplicate draft Shopify matches against another %s item without creating a mapping", async otherStatus => {
+    shop = new Map([[ITEM_A, storeItem(ITEM_A, "P5", "DRAFT")], [ITEM_NEW, storeItem(ITEM_NEW, "P5", otherStatus)]]);
+    const before = structuredClone([...shop]);
+    expect(await tickThroughRunner()).toMatchObject({ outcome: "completed", links: 0, applies: 0 });
+    expect(await head(101)).toBeNull();
+    expect(await readStockLinkCheck(database.pool, targetId, 101)).toMatchObject({ status: "flagged", reason_code: "STOCK_LINK_SKU_DUPLICATE" });
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox WHERE publication_target_id=$1", [targetId])).rows).toEqual([]);
+    expect([...shop]).toEqual(before);
+  }, CASE_TIMEOUT_MS);
+
+  it.each(["ACTIVE", "DRAFT"] as const)("preserves an existing draft Shopify mapping when another %s item duplicates its SKU", async otherStatus => {
+    await sealStockLink(database.pool, targetId, 101, ITEM_A, { sku: "P5" });
+    shop = new Map([[ITEM_A, storeItem(ITEM_A, "P5", "DRAFT")], [ITEM_NEW, storeItem(ITEM_NEW, "P5", otherStatus)]]);
+    expect(await tickThroughRunner()).toMatchObject({ outcome: "completed", links: 0, relinks: 0, applies: 0 });
+    expect(await head(101)).toEqual({ item: ITEM_A, versions: `sealed:${ITEM_A}` });
+    expect(await readStockLinkCheck(database.pool, targetId, 101)).toMatchObject({ status: "flagged", reason_code: "STOCK_LINK_SKU_DUPLICATE" });
+    expect(await stockLinkAudit()).toEqual([]);
+  }, CASE_TIMEOUT_MS);
+
+  it("does not claim a draft Shopify item already owned by another canonical size", async () => {
+    await sealStockLink(database.pool, targetId, 102, ITEM_A, { sku: "NEW" });
+    shop = new Map([[ITEM_A, storeItem(ITEM_A, "P5", "DRAFT")]]);
+    expect(await tickThroughRunner()).toMatchObject({ outcome: "completed", links: 0, applies: 0 });
+    expect(await head(101)).toBeNull();
+    expect(await head(102)).toEqual({ item: ITEM_A, versions: `sealed:${ITEM_A}` });
+    expect(await readStockLinkCheck(database.pool, targetId, 101)).toMatchObject({ status: "flagged", reason_code: "STOCK_LINK_ITEM_SHARED" });
+  }, CASE_TIMEOUT_MS);
 
   it("links a new size end to end through the runner, then verifies it at once after a 404 dead letter and relinks (PG 18)", async () => {
     // Tick 1: the destination row is created switch-on with its heartbeat; discovery adds the size, the tick reads the
@@ -1782,6 +1871,31 @@ dbDescribe.sequential("stock-link controls, Ops Health and two stores, real Post
       revision: "0", counts: { linked: 0, waiting: 0, flagged: 0, error: 0 } });
     await expect(controls().status({ publicationTargetId: "999999" })).rejects.toMatchObject({ status: 404 });
     expect(await destination(walmart)).toBeNull();
+  }, CASE_TIMEOUT_MS);
+
+  it("Check again recovers historical draft Shopify waits while preserving claims, unrelated waits and other providers", async () => {
+    const later = new Date(NOW.getTime() + 6 * HOUR_MS);
+    await seedStockLinkDestination(database.pool, targetId, AT);
+    await seedCheck(101, { status: "waiting", reasonCode: "STOCK_LINK_NOT_ON_SALE", nextCheckAt: later });
+    await seedCheck(102, { status: "waiting", reasonCode: "STOCK_LINK_NOT_ON_SALE", nextCheckAt: later,
+      leaseExpiresAt: new Date(NOW.getTime() + 60_000) });
+    await seedCheck(103, { status: "waiting", reasonCode: "STOCK_LINK_NOT_LISTED", nextCheckAt: later });
+    const claimed = await readStockLinkCheck(database.pool, targetId, 102);
+    const unrelated = await readStockLinkCheck(database.pool, targetId, 103);
+
+    await controls().checkAgain({ publicationTargetId: targetId, expectedRevision: (await destination())!.revision }, "operator-draft-recovery");
+    expect(await readStockLinkCheck(database.pool, targetId, 101)).toMatchObject({ status: "waiting", next_check_at: NOW });
+    expect(await readStockLinkCheck(database.pool, targetId, 102)).toEqual(claimed);
+    expect(await readStockLinkCheck(database.pool, targetId, 103)).toEqual(unrelated);
+    expect((await controlAudit()).at(-1)?.context).toMatchObject({ rowsMadeDue: 1, productVariantIds: [101] });
+
+    const walmart = (await database.pool.query<{ id: number }>(`SELECT target.id FROM inventory.inventory_publication_targets target
+      JOIN channels.channels channel ON channel.id=target.channel_id WHERE channel.provider='walmart' ORDER BY target.id LIMIT 1`)).rows[0]!.id;
+    await seedStockLinkDestination(database.pool, walmart, AT);
+    await seedCheck(101, { id: walmart, status: "waiting", reasonCode: "STOCK_LINK_NOT_ON_SALE", nextCheckAt: later });
+    const otherProvider = await readStockLinkCheck(database.pool, walmart, 101);
+    await controls().checkAgain({ publicationTargetId: walmart, expectedRevision: (await destination(walmart))!.revision }, "operator-draft-recovery");
+    expect(await readStockLinkCheck(database.pool, walmart, 101)).toEqual(otherProvider);
   }, CASE_TIMEOUT_MS);
 
   it("Check again makes failed, flagged and linked sizes due with streaks reset, clears a halt, and leaves claimed and waiting rows (PG 15)", async () => {

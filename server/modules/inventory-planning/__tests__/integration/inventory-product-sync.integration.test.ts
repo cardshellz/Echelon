@@ -129,6 +129,10 @@ dbDescribe.sequential("selected product ATP sync with real planning, transaction
     const blocked = review.rows.find(row => row.publicationTargetId === 1 && row.productVariantId === 101);
     expect(blocked?.blockers.join(" ")).toContain("STOCK_LINK_NOT_ON_SALE");
     expect(blocked?.blockers.join(" ")).toContain("Last saved");
+    expect(blocked?.blockers.join(" ")).toContain("Shopify ACTIVE and DRAFT products can qualify for stock linking.");
+    expect(blocked?.blockers.join(" ")).toContain("Use Check again in Channel Inventory to recheck this saved result.");
+    expect(blocked?.blockers.join(" ")).toContain("Linking does not publish the product.");
+    expect(blocked?.blockers.join(" ")).not.toContain("must be active");
     await database.pool.query("UPDATE inventory.stock_link_checks SET next_check_at='2026-09-29T12:00:00Z',updated_at='2026-09-28T12:00:00Z',revision=revision+1 WHERE publication_target_id=1");
     const refreshed = await service.review(product);
     expect(refreshed.reviewHash).toBe(review.reviewHash);
