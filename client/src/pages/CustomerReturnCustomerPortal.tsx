@@ -1,3 +1,5 @@
+import { customerReturnWorkflowWorking, customerReturnWorkflowMessage, type CustomerReturnWorkflowStatus } from "@shared/returns/customer-return-workflow.contract";
+import { CustomerReturnRequestError } from "@/lib/customer-return-customer";
 import {
   useCallback,
   useEffect,
@@ -22,6 +24,9 @@ import {
 import type { CustomerReturnFlowGateway } from "@/lib/customer-return-gateway";
 import type { CustomerReturnCustomerOrder } from "@shared/returns/customer-return-access.contract";
 import type { CustomerReturnCustomerLabelStatus } from "@shared/returns/customer-return-customer.contract";
+
+const RETURN_OBSERVATION_INTERVAL_MS = 2_000;
+const MAX_RETURN_OBSERVATION_FAILURES = 3;
 
 type Session = Awaited<
   ReturnType<ReturnType<typeof createCustomerReturnTransport>["session"]>
@@ -173,11 +178,14 @@ export function CustomerWorkspace({
   });
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [selected, setSelected] = useState<CustomerReturnCustomerOrder | null>(
-    initialOrder ?? null,
+    null,
   );
   const [directOrderId, setDirectOrderId] = useState<number | null>(
-    embedded && !initialOrder && !initialStatus ? initialOrderId ?? null : null,
+    !initialStatus ? initialOrder?.omsOrderId ?? initialOrderId ?? null : null,
   );
+  const [restoring, setRestoring] = useState(Boolean(!initialStatus && (initialOrder || initialOrderId)));
+  const [historicalWorkflow, setHistoricalWorkflow] = useState<CustomerReturnWorkflowStatus | null>(null);
+  const [observationAttempt, setObservationAttempt] = useState(0);
   const [historicalStatus, setHistoricalStatus] =
     useState<CustomerReturnCustomerLabelStatus | null>(initialStatus ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -189,14 +197,63 @@ export function CustomerWorkspace({
   const downloads = useRef(new Set<string>());
   const chooser = useRef<HTMLHeadingElement>(null);
   const statusHeading = useRef<HTMLHeadingElement>(null);
+  const reviewAfterRetry = useRef(false);
   useEffect(() => {
     commands.activate();
     if (commands.getSnapshot().record) void commands.check();
     return () => commands.dispose();
   }, [commands]);
+  useEffect(() => {
+    if (!command.workflow || !customerReturnWorkflowWorking(command.workflow.phase)) return;
+    let stopped = false, timer: ReturnType<typeof setTimeout> | undefined, failures = 0;
+    const observe = async () => {
+      const observed = await commands.check();
+      if (stopped) return;
+      failures = observed ? 0 : failures + 1;
+      if (failures < MAX_RETURN_OBSERVATION_FAILURES) timer = setTimeout(() => { void observe(); }, RETURN_OBSERVATION_INTERVAL_MS);
+    };
+    timer = setTimeout(() => { void observe(); }, RETURN_OBSERVATION_INTERVAL_MS);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [commands, command.workflow?.requestKey, command.workflow?.phase, observationAttempt]);
+  useEffect(() => {
+    if (!historicalStatus || command.record) return;
+    const controller = new AbortController();
+    void api.authorizationWorkflow(historicalStatus.authorizationId, controller.signal).then(value => {
+      if (!controller.signal.aborted) setHistoricalWorkflow(value);
+    }).catch(cause => {
+      if (!controller.signal.aborted && !(cause instanceof CustomerReturnRequestError && cause.code === "RETURN_WORKFLOW_NOT_FOUND")) {
+        if (cause instanceof PreviewAccessError) onDenied(cause.message);
+        else setError(message(cause));
+      }
+    });
+    return () => controller.abort();
+  }, [api, historicalStatus?.authorizationId, command.record !== null, onDenied]);
+  useEffect(() => {
+    if (!historicalWorkflow || !customerReturnWorkflowWorking(historicalWorkflow.phase)) return;
+    let stopped = false, timer: ReturnType<typeof setTimeout> | undefined, failures = 0;
+    const controller = new AbortController();
+    const observe = async () => {
+      try {
+        const next = await api.workflow(historicalWorkflow.requestKey, controller.signal);
+        if (stopped) return;
+        if (next.omsOrderId !== historicalWorkflow.omsOrderId || next.labels?.authorizationId !== historicalWorkflow.labels?.authorizationId)
+          throw new Error("Your return details could not be verified. Contact us for help.");
+        setHistoricalWorkflow(next); setHistoricalStatus(next.labels); setError(null); failures = 0;
+      } catch (cause) {
+        if (stopped) return;
+        if (cause instanceof PreviewAccessError) { onDenied(cause.message); return; }
+        setError(message(cause)); failures++;
+      }
+      if (!stopped && failures < MAX_RETURN_OBSERVATION_FAILURES) timer = setTimeout(() => { void observe(); }, RETURN_OBSERVATION_INTERVAL_MS);
+    };
+    timer = setTimeout(() => { void observe(); }, RETURN_OBSERVATION_INTERVAL_MS);
+    return () => { stopped = true; controller.abort(); clearTimeout(timer); };
+  }, [api, historicalWorkflow?.requestKey, historicalWorkflow?.phase, observationAttempt, onDenied]);
   useEffect(
     () => () => {
-      operation.current?.abort();
+      const pending = operation.current;
+      operation.current = null;
+      pending?.abort();
       downloads.current.forEach((url) => URL.revokeObjectURL(url));
     },
     [],
@@ -217,7 +274,13 @@ export function CustomerWorkspace({
           else setError(message(cause));
         }
       } finally {
-        if (!controller.signal.aborted) setBusy(false);
+        // A view transition can legitimately abort its own read after restoring
+        // a durable request. Clear only this operation's busy state; an aborted
+        // older read must not clear a newer operation or leave the UI frozen.
+        if (operation.current === controller) {
+          operation.current = null;
+          setBusy(false);
+        }
       }
     },
     [onDenied],
@@ -259,20 +322,27 @@ export function CustomerWorkspace({
   }, [api, run, attempt, command.record !== null, embedded, directOrderId]);
 
   useEffect(() => {
-    if (directOrderId === null || command.record) return;
-    // Explicit return navigation uses the same authenticated owner as the normal
-    // chooser. No review, submission or label command is executed during loading.
-    void run(async (signal) => {
-      const order = await api.order(directOrderId, signal);
+    if (directOrderId === null || command.record) { setRestoring(false); return; }
+    let cancelled = false;
+    setRestoring(true);
+    void run(async signal => {
+      if (await commands.restore(directOrderId, signal)) return;
+      const order = attempt === 0 && initialOrder?.omsOrderId === directOrderId
+        ? initialOrder : await api.order(directOrderId, signal);
       if (!signal.aborted) setSelected(order);
-    });
-    return () => operation.current?.abort();
-  }, [api, run, directOrderId, attempt, command.record !== null]);
+    }).finally(() => { if (!cancelled) setRestoring(false); });
+    return () => { cancelled = true; operation.current?.abort(); };
+  }, [api, run, commands, directOrderId, attempt, command.record !== null, initialOrder]);
+
+  useEffect(() => {
+    if (reviewAfterRetry.current && command.rejected && !command.busy) reviewRejectedReturn();
+  }, [command.rejected, command.busy]);
 
   function reviewRejectedReturn(): void {
     const previous = commands.getSnapshot();
     if (!previous.record || !previous.rejected || previous.busy
       || previous.record.authorizationId !== null) return;
+    reviewAfterRetry.current = false;
     const orderId = initialOrderId ?? initialOrder?.omsOrderId ?? previous.record.omsOrderId;
     // Only an authoritative, definitive rejection permits a new intent. Keep the
     // immutable server receipt; clear local recovery through its existing owner.
@@ -281,10 +351,33 @@ export function CustomerWorkspace({
     operation.current?.abort();
     setSelected(null);
     setHistoricalStatus(null);
+    setHistoricalWorkflow(null);
     setError(null);
     setNotice(null);
     setDirectOrderId(orderId);
     setAttempt(value => value + 1);
+  }
+
+  async function retryReturn(): Promise<void> {
+    const saved = commands.getSnapshot();
+    if (saved.busy || busy) return;
+    setObservationAttempt(value => value + 1);
+    if (saved.record) {
+      reviewAfterRetry.current = saved.record.authorizationId === null;
+      if (!saved.rejected) await commands.retry();
+      // One action also handles an obsolete request discovered during resume.
+      // Unknown/accepted outcomes retain their original recovery record.
+      if (commands.getSnapshot().rejected) reviewRejectedReturn();
+      return;
+    }
+    if (historicalStatus) {
+      await run(async signal => {
+        const next = historicalWorkflow
+          ? await api.retryWorkflow(historicalWorkflow.requestKey, signal)
+          : await api.queueExistingLabels(historicalStatus.authorizationId, signal);
+        if (!signal.aborted) { setHistoricalWorkflow(next); setHistoricalStatus(next.labels); }
+      });
+    }
   }
 
   function chooseAnother(reason?: string) {
@@ -294,6 +387,7 @@ export function CustomerWorkspace({
     setSelected(null);
     setDirectOrderId(null);
     setHistoricalStatus(null);
+    setHistoricalWorkflow(null);
     setError(null);
     setNotice(reason ?? null);
     setAttempt((value) => value + 1);
@@ -335,15 +429,25 @@ export function CustomerWorkspace({
   useEffect(() => {
     if (showStatus) statusHeading.current?.focus();
   }, [showStatus, status?.authorizationId]);
-  const inProgress = busy || command.busy || flowBusy;
+  const workflow = command.record ? command.workflow : historicalWorkflow;
+  const workflowWorking = workflow !== null && customerReturnWorkflowWorking(workflow.phase);
+  const requestBusy = busy || command.busy || flowBusy;
+  const inProgress = requestBusy || (workflowWorking && !error && !command.error);
+  const workflowError = workflow?.reason ? customerReturnWorkflowMessage(workflow.reason) : null;
+  const canRetry = workflow ? !customerReturnWorkflowWorking(workflow.phase) && workflow.phase !== "ready"
+    : !status || status.canProgress || status.parcels.some(parcel => parcel.status !== "ready" && parcel.status !== "failed");
+  const labelPreparationText =
+    (command.record?.input.parcels.length ?? status?.parcels.length ?? 1) > 1
+      ? "Getting your return labels"
+      : "Getting your return label";
   useLayoutEffect(() => {
-    onBusy?.(inProgress);
+    onBusy?.(busy || flowBusy);
     return () => onBusy?.(false);
-  }, [inProgress, onBusy]);
+  }, [busy, flowBusy, onBusy]);
   const signOut = embedded ? null : (
     <Button
       variant="ghost"
-      disabled={inProgress}
+      disabled={requestBusy}
       onClick={() =>
         void run(async (signal) => {
           await api.logout(signal);
@@ -381,29 +485,20 @@ export function CustomerWorkspace({
   }
   if (showStatus)
     return (
-      <CustomerReturnSurface label="Your return" onClose={embedded ? onSignedOut : undefined} closeDisabled={inProgress}>
+      <CustomerReturnSurface label="Your return" onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
         <div className="csz-return-status">
           <h1 ref={statusHeading} tabIndex={-1} className="text-2xl font-semibold outline-none">
             {status
               ? `Return ${status.authorizationNumber}`
-              : command.rejected
-                ? "Return not accepted"
-                : "Checking your return"}
+              : inProgress ? labelPreparationText : "We couldn’t finish your return"}
           </h1>
-          <PreviewError message={error ?? command.error ?? notice} />
-          {command.rejected && (
+          <PreviewError message={error ?? command.error ?? workflowError ?? notice} />
+          {!status && !inProgress && !error && !command.error && (
             <p className="text-sm text-muted-foreground">
-              This is the saved result of an earlier attempt. Review your return
-              items to check what is available now.
+              Your selections are saved. Try again to continue with your return.
             </p>
           )}
-          {!status && !command.rejected && (
-            <p className="text-sm text-muted-foreground">
-              Your request is saved. Check its status or retry this same request
-              before starting another return.
-            </p>
-          )}
-          {inProgress && <Loading text="Checking your return…" />}
+          {inProgress && <Loading text={`${labelPreparationText}…`} />}
           {status?.parcels.map((parcel) => (
             <section
               key={parcel.parcelId}
@@ -414,10 +509,12 @@ export function CustomerWorkspace({
                 {parcel.status === "ready"
                   ? "Ready to download."
                   : parcel.status === "pending"
-                    ? "Your label is waiting to be prepared."
+                    ? workflowWorking ? "Getting this label." : "This label is not ready yet."
                     : parcel.status === "processing"
-                      ? "We are checking whether this label was created."
-                      : "This label needs verification. Contact support if checking its status does not resolve it."}
+                      ? workflowWorking ? "Getting this label." : "We couldn’t confirm this label. Try again."
+                      : parcel.status === "failed"
+                        ? "This label could not be prepared. Contact us for help."
+                      : "We couldn’t finish preparing this label. Try again, or contact us for help."}
               </p>
               {parcel.trackingNumber && (
                 <p className="break-all text-sm">
@@ -427,7 +524,7 @@ export function CustomerWorkspace({
               {parcel.downloadPath && (
                 <Button
                   variant="outline"
-                  disabled={inProgress}
+                  disabled={busy}
                   onClick={() => void download(parcel.parcelId)}
                 >
                   Download label for box {parcel.number}
@@ -436,53 +533,13 @@ export function CustomerWorkspace({
             </section>
           ))}
           <div className="flex flex-wrap gap-3">
-            {!command.rejected && <Button
-              variant="outline"
-              disabled={inProgress}
-              onClick={() => {
-                if (command.record) void commands.check();
-                else if (status)
-                  void run(async (signal) => {
-                    const result = await api.status(
-                      status.authorizationId,
-                      signal,
-                    );
-                    if (!signal.aborted) setHistoricalStatus(result);
-                  });
-              }}
-            >
-              Check status
-            </Button>}
-            {command.rejected && command.record?.authorizationId === null && (
-              <Button disabled={inProgress} onClick={reviewRejectedReturn}>
-                Review return items
-              </Button>
-            )}
-            {command.record && !status && !command.rejected && (
-              <Button disabled={inProgress} onClick={() => void commands.retry()}>
-                Retry saved request
-              </Button>
-            )}
-            {status?.canProgress && (
-              <Button
-                disabled={inProgress}
-                onClick={() => {
-                  if (command.record) void commands.progress();
-                  else
-                    void run(async (signal) => {
-                      const result = await api.progress(
-                        status.authorizationId,
-                        signal,
-                      );
-                      if (!signal.aborted) setHistoricalStatus(result);
-                    });
-                }}
-              >
-                Prepare or recover labels
+            {(canRetry || Boolean(error || command.error)) && !requestBusy && (
+              <Button disabled={inProgress} onClick={() => void retryReturn()}>
+                {inProgress ? "Please wait…" : "Try again"}
               </Button>
             )}
             {command.record &&
-              (command.rejected || customerReturnCanLeave(status)) && (
+              customerReturnCanLeave(status) && (
                 <Button
                   variant="ghost"
                   disabled={inProgress}
@@ -494,7 +551,7 @@ export function CustomerWorkspace({
                   Back to your orders
                 </Button>
               )}
-            {!command.record && (
+            {!command.record && status && customerReturnCanLeave(status) && (
               <Button
                 variant="ghost"
                 disabled={inProgress}
@@ -504,6 +561,7 @@ export function CustomerWorkspace({
               </Button>
             )}
           </div>
+          {workflow && <p className="break-all text-xs text-muted-foreground">Return reference: {workflow.requestKey}</p>}
           <p className="text-xs leading-relaxed text-muted-foreground">
             Use one label per box. Our team inspects returned items and reviews
             any refund. Creating a label does not issue a refund.
@@ -513,7 +571,7 @@ export function CustomerWorkspace({
       </CustomerReturnSurface>
     );
 
-  if (selected && gateway)
+  if (selected && gateway && !restoring)
     return (
       <>
         {signOut && <div className="flex justify-end">{signOut}</div>}
@@ -525,7 +583,7 @@ export function CustomerWorkspace({
           gateway={gateway}
           onAccessDenied={onDenied}
           onClose={embedded ? onSignedOut : undefined}
-          closeDisabled={inProgress}
+          closeDisabled={busy || flowBusy}
           onBusy={setFlowBusy}
           notice={<>
             <PreviewError message={command.error} />
@@ -542,7 +600,7 @@ export function CustomerWorkspace({
 
   if (directOrderId !== null)
     return (
-      <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={inProgress}>
+      <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
         <div className="csz-return-status">
           <h1 className="text-2xl font-semibold">Return items</h1>
           <PreviewError message={error} />
@@ -560,7 +618,7 @@ export function CustomerWorkspace({
     );
 
   return (
-    <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={inProgress}>
+    <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
       <div className="csz-return-status">
         <h1
           ref={chooser}
@@ -569,7 +627,7 @@ export function CustomerWorkspace({
         >
           Choose an order to return
         </h1>
-        <PreviewError message={error ?? command.error ?? notice} />
+        <PreviewError message={error ?? command.error ?? workflowError ?? notice} />
         {busy && <Loading text="Loading your orders…" />}
         {unavailableOrders > 0 && (
           <p role="status" className="text-sm text-muted-foreground">
@@ -605,11 +663,9 @@ export function CustomerWorkspace({
                 disabled={busy}
                 onClick={() =>
                   void run(async (signal) => {
+                    if (await commands.restore(item.omsOrderId, signal)) return;
                     const detail = await api.order(item.omsOrderId, signal);
-                    if (!signal.aborted) {
-                      setNotice(null);
-                      setSelected(detail);
-                    }
+                    if (!signal.aborted) { setNotice(null); setSelected(detail); }
                   })
                 }
               >

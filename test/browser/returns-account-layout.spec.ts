@@ -10,7 +10,7 @@ import { customerReturnSavedRequestSchema } from "../../client/src/lib/customer-
 // Exercise the actual shipped IIFE and scoped stylesheet, not a component with
 // the staff app's global CSS. All transport is fictional and intercepted.
 async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?: boolean; holdReview?: Promise<void>; originalBox?: boolean; openReturn?: boolean; invalidateAfterFirstLookup?: boolean;
-  actionState?: "refreshing" | "failed"; failReturnLookup?: boolean; holdReturnLookup?: Promise<void>; returnLookupOrderId?: number; noReturnQuantity?: boolean;
+  actionState?: "refreshing" | "failed"; failReturnLookup?: boolean; holdReturnLookup?: Promise<void>; queuedWorkflow?: boolean; returnLookupOrderId?: number; noReturnQuantity?: boolean;
   savedRequestOutcome?: "rejected" | "unknown";
   blockRecoveryClear?: boolean;
 } = {}) {
@@ -48,6 +48,9 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
   const calls: CustomerAccountRequest[] = [];
   const errors: string[] = [];
   let reviewFailed = false, returnLookupFailed = false, submitCount = 0, actionReads = 0;
+  let workflowKey: string | null = null;
+  let workflowInput: unknown = null, workflowReady = false;
+  const workflowReply = () => ({ requestKey: workflowKey, omsOrderId: 10, phase: options.queuedWorkflow && !workflowReady ? "queued" : "ready", reason: null, labels: options.queuedWorkflow && !workflowReady ? null : status, updatedAt: "2026-10-30T12:00:00.000Z" });
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/return-layout-assets/*", async (route) => {
@@ -85,7 +88,9 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       }
       return route.fulfill({ json: detail });
     }
-    if (input.path === "/returns/returns") return route.fulfill({ json: { returns: [], nextBeforeAuthorizationId: null } });
+    if (input.path === "/returns/returns") return route.fulfill({ json: { returns: workflowReady ? [{ authorizationId: 20, authorizationNumber: "RMA-20", omsOrderId: 10, orderReference: "TEST-1001", createdAt: "2026-10-30T12:00:00.000Z" }] : [], nextBeforeAuthorizationId: null } });
+    if (input.path === "/returns/returns/20") return route.fulfill({ json: status });
+    if (input.path === "/returns/returns/20/parcels/30/download") return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.4 synthetic account return label" });
     if (input.path === "/returns/orders/10/review") {
       if (options.holdReview) await options.holdReview;
       if (options.failReview && !reviewFailed) { reviewFailed = true; return route.fulfill({ status: 503, json: { error: { code: "FIXTURE_REVIEW_FAILED" } } }); }
@@ -95,10 +100,24 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       return route.fulfill({ json: { ...review, sourceRevision: order.sourceRevision,
         parcels: review.parcels.map(parcel => ({ ...parcel, items: parcel.items.map(item => ({ ...item, title: order.lines.find(line => line.id === item.lineId)!.title })) })) } });
     }
-    if (input.path === "/returns/orders/10/returns") {
+    if (input.path === "/returns/orders/10/label-requests" && input.method === "GET")
+      return workflowKey !== null && options.queuedWorkflow && !workflowReady
+        ? route.fulfill({ json: { workflow: workflowReply(), input: workflowInput } })
+        : route.fulfill({ status: 404, json: { error: { code: "RETURN_WORKFLOW_NOT_FOUND" } } });
+    if (input.path === "/returns/orders/10/label-requests") {
       submitCount++;
+      workflowKey = (input.body as { idempotencyKey: string }).idempotencyKey;
+      workflowInput = input.body;
       if (options.lostSubmit && submitCount === 1) return route.abort("failed");
-      return route.fulfill({ json: status });
+      return route.fulfill({ json: workflowReply() });
+    }
+    if (input.path.startsWith("/returns/label-requests/")) {
+      if (workflowKey === null) return route.fulfill({ status: 404, json: { error: { code: "RETURN_WORKFLOW_NOT_FOUND" } } });
+      return route.fulfill({ json: workflowReply() });
+    }
+    if (input.path === "/returns/returns/20/label-requests") {
+      return workflowKey ? route.fulfill({ json: workflowReply() })
+        : route.fulfill({ status: 404, json: { error: { code: "RETURN_WORKFLOW_NOT_FOUND" } } });
     }
     if (input.path.startsWith("/returns/commands/")) {
       if (options.savedRequestOutcome) return route.fulfill({ status: options.savedRequestOutcome === "rejected" ? 409 : 503,
@@ -121,7 +140,7 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     await page.getByRole("button", { name: "Return items", exact: true }).click();
     await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
   }
-  return { calls, errors, submitCount: () => submitCount, actionReads: () => actionReads };
+  return { calls, errors, submitCount: () => submitCount, actionReads: () => actionReads, completeWorkflow: () => { workflowReady = true; } };
 }
 
 async function assertFrame(page: Page) {
@@ -247,12 +266,11 @@ test("a mismatched fresh return response cannot expose another order's items", a
 test("an old definitively rejected request can be left and restarted while cached options remain refreshing", async ({ page }) => {
   const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "rejected" });
   await page.getByRole("button", { name: "Return items", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Return not accepted", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "We couldn’t finish your return", exact: true })).toBeVisible();
   expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(0);
-  await page.getByRole("button", { name: "Back to your orders", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Back to your orders", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).toBeNull();
-  await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
-  await page.getByRole("button", { name: "Return items", exact: true }).click();
   await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
   await pack(page);
   await page.getByRole("button", { name: "Review return", exact: true }).click();
@@ -267,12 +285,12 @@ for (const cache of ["ready", "refreshing"] as const) {
     const f = await fixture(page, { openReturn: false, actionState: cache === "ready" ? undefined : cache,
       savedRequestOutcome: "rejected" });
     await page.getByRole("button", { name: "Return items", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Return not accepted", exact: true })).toBeVisible();
-    await expect(page.getByText(/saved result of an earlier attempt/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "We couldn’t finish your return", exact: true })).toBeVisible();
+    await expect(page.getByText(/saved result of an earlier attempt/)).toHaveCount(0);
     await expect(page.getByText(/original shipment/)).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Check status", exact: true })).toHaveCount(0);
     await page.screenshot({ path: info.outputPath(`saved-rejection-${cache}.png`), fullPage: true });
-    await page.getByRole("button", { name: "Review return items", exact: true }).click();
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
     await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
     expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(1);
     expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).toBeNull();
@@ -282,7 +300,7 @@ for (const cache of ["ready", "refreshing"] as const) {
     expect(f.submitCount()).toBe(0);
     await page.getByRole("button", { name: "Get return labels", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Return RMA-20", exact: true })).toBeVisible();
-    const submissions = f.calls.filter(call => call.path === "/returns/orders/10/returns");
+    const submissions = f.calls.filter(call => call.path === "/returns/orders/10/label-requests" && call.method === "POST");
     expect(submissions).toHaveLength(1);
     expect(submissions[0].body).toMatchObject({ sourceRevision: "a".repeat(64), settingsVersion: 2 });
     expect((submissions[0].body as { idempotencyKey: string }).idempotencyKey).not.toBe("20000000-0000-4000-8000-000000000001");
@@ -294,7 +312,7 @@ for (const cache of ["ready", "refreshing"] as const) {
 test("fresh review after a saved rejection can retry an unavailable order lookup", async ({ page }) => {
   const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "rejected", failReturnLookup: true });
   await page.getByRole("button", { name: "Return items", exact: true }).click();
-  await page.getByRole("button", { name: "Review return items", exact: true }).click();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(page.getByRole("alert")).toBeVisible();
   await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
@@ -306,7 +324,7 @@ test("fresh review after a saved rejection can retry an unavailable order lookup
 test("failed local recovery clearing cannot discard a saved request or start a fresh one", async ({ page }) => {
   const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "rejected", blockRecoveryClear: true });
   await page.getByRole("button", { name: "Return items", exact: true }).click();
-  await page.getByRole("button", { name: "Review return items", exact: true }).click();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("could not be cleared");
   expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).not.toBeNull();
   expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(0);
@@ -317,8 +335,8 @@ test("failed local recovery clearing cannot discard a saved request or start a f
 test("an unknown prior request remains recoverable and cannot be discarded to bypass its outcome", async ({ page }) => {
   const f = await fixture(page, { openReturn: false, actionState: "refreshing", savedRequestOutcome: "unknown" });
   await page.getByRole("button", { name: "Return items", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Checking your return", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Retry saved request", exact: true })).toBeEnabled();
+  await expect(page.getByRole("heading", { name: "We couldn’t finish your return", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Review return items", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Back to your orders", exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => sessionStorage.getItem(`customer-return-request:${"a".repeat(43)}`))).not.toBeNull();
@@ -383,14 +401,35 @@ test("review failures preserve packing and a lost synthetic submission recovers 
   await page.getByRole("button", { name: "Review return", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Get return labels", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Checking your return", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Check status", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "We couldn’t finish your return", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Return RMA-20", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Download label for box 1" })).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(1);
   await expect(page.locator(".csz-return-brand")).toHaveCount(1);
   await page.screenshot({ path: info.outputPath("return-labels.png"), fullPage: true });
   expect(f.submitCount()).toBe(1);
+  expect(f.errors).toEqual([]);
+});
+
+test("queued work survives closing the modal and loss of browser storage, then exposes the same downloadable label", async ({ page }) => {
+  const f = await fixture(page, { queuedWorkflow: true });
+  await pack(page); await page.getByRole("button", { name: "Review return", exact: true }).click();
+  await page.getByRole("button", { name: "Get return labels", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Getting your return label", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close returns", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Close returns", exact: true }).click();
+  await page.evaluate(() => sessionStorage.clear());
+  await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
+  await page.getByRole("button", { name: "Return items", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Getting your return label", exact: true })).toBeVisible();
+  f.completeWorkflow();
+  await expect(page.getByRole("button", { name: "Download label for box 1", exact: true })).toBeVisible();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download label for box 1", exact: true }).click();
+  expect((await download).suggestedFilename()).toBe("return-20-box-30.pdf");
+  expect(f.submitCount()).toBe(1);
+  expect(f.calls.some(call => call.path.endsWith("/progress") || call.path.endsWith("/resume"))).toBe(false);
   expect(f.errors).toEqual([]);
 });
 

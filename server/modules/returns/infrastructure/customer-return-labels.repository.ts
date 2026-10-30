@@ -36,6 +36,9 @@ function matchesSavedRequestAddress(saved: ReturnLabelAddress, expected: ReturnL
   return equalJson(savedPhysical, expectedPhysical)
     && (savedType === undefined || savedType === (expectedType ?? "unknown"));
 }
+// attempt_number is a PostgreSQL integer; this is a storage bound, not a customer retry quota.
+const MAX_LABEL_ATTEMPT_NUMBER = 2_147_483_647;
+
 export class PostgresCustomerReturnLabelStore
   implements CustomerReturnLabelStore
 {
@@ -222,6 +225,7 @@ export class PostgresCustomerReturnLabelStore
     actor: string,
     now: Date,
     quoteDecisionId?: number,
+    retryRejected = false,
   ): Promise<{ id: number; input: ReturnLabelInput } | null> {
     z.string().trim().min(1).max(255).parse(actor);
     z.date().parse(now);
@@ -240,10 +244,15 @@ export class PostgresCustomerReturnLabelStore
           404,
         );
       const existing = await client.query(
-        `SELECT id FROM returns.customer_return_label_attempts WHERE parcel_id=$1 LIMIT 1`,
+        `SELECT id,status,attempt_number FROM returns.customer_return_label_attempts WHERE parcel_id=$1 ORDER BY attempt_number DESC`,
         [parcelId],
       );
-      if (existing.rowCount) return null;
+      if (existing.rowCount) {
+        if (!retryRejected || existing.rows.some(row => row.status !== "failed")) return null;
+      }
+      const attemptNumber = existing.rowCount ? Number(existing.rows[0].attempt_number) + 1 : 1;
+      if (!Number.isSafeInteger(attemptNumber) || attemptNumber > MAX_LABEL_ATTEMPT_NUMBER)
+        throw new CustomerReturnIntakeError("RETURN_LABEL_RETRIES_EXHAUSTED", "The label attempt history needs administrator attention.");
       // Shared advisory lock also protects against the first control-row insert.
       // Keep it until durable intent commits, before contacting the carrier.
       await client.query(`SELECT pg_advisory_xact_lock_shared($1,$2)`, [RETURN_LABEL_CONTROL_LOCK_NAMESPACE, channelId]);
@@ -340,14 +349,15 @@ export class PostgresCustomerReturnLabelStore
       const inserted = await client.query(
         `INSERT INTO returns.customer_return_label_attempts
         (parcel_id,attempt_number,idempotency_key,status,request_snapshot,actor,started_at,quote_decision_id)
-        VALUES($1,1,$2,'executing',$3::jsonb,$4,$5,$6) RETURNING id`,
+        VALUES($1,$7,$2,'executing',$3::jsonb,$4,$5,$6) RETURNING id`,
         [
           parcelId,
-          `return-label:${parcelId}:1`,
+          `return-label:${parcelId}:${attemptNumber}`,
           JSON.stringify(input),
           actor,
           purchaseNow,
           quoteDecisionId ?? null,
+          attemptNumber,
         ],
       );
       const attemptId = id.parse(inserted.rows[0].id);
