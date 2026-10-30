@@ -5,13 +5,14 @@ This is the active tracker for consolidating purchase costing from PO through sh
 | Tracking field | Current value |
 | --- | --- |
 | Created | 2026-10-30 |
-| Overall state | Planned; implementation has not started |
+| Overall state | Stage 1 contract foundation implemented and locally tested; two business policy answers remain pending |
 | Current stage | S1 — authoritative cost contract and source rules |
-| Next work item | COST-01/COST-02: define the shared monetary projection and quantity-scoped source selection, with regression tests |
+| Next work item | Finish S1 receipt-allocation and supplier-tax policy decisions, then implement the S2 source/legacy-compatibility adapters before connecting writers |
 | Working branch | `codex/purchase-cost-authority-cleanup` |
 | Plan branch base | `5f9e911a0c7506329624135d4a9a222842880962` |
 | Audited main baseline | `e571bcac780852c3ac6b488354c10aaf7f1c417c`; reviewed costing paths were unchanged at the plan branch base |
 | Audit | [Purchase costing authority review](procurement-costing-authority-audit-2026-10-30.md) |
+| Stage 1 contract and ownership map | [Contract, compatibility and recognition boundary](procurement-costing-stage-1-contract.md) |
 | Current implementation PR | None |
 | Deployment and live acceptance | Not started for this cleanup |
 
@@ -45,13 +46,13 @@ The audit contains exact functions, source references, reasoning and limits. Eac
 
 | Work item | Audit finding | Required outcome | State |
 | --- | --- | --- | --- |
-| COST-01 | F1: competing PO/shipment/inventory monetary projections | One selected monetary projection, including packaging, correct source precedence and exact scope totals, feeds every consumer | planned |
-| COST-02 | F2: all-or-nothing invoice coverage | Approved invoices establish actual costs for their covered quantities; uncovered quantities stay provisional; overlaps and ambiguity are explicit | planned |
+| COST-01 | F1: competing PO/shipment/inventory monetary projections | One selected monetary projection, including packaging, correct source precedence and exact scope totals, feeds every consumer | in_progress |
+| COST-02 | F2: all-or-nothing invoice coverage | Approved invoices establish actual costs for their covered quantities; uncovered quantities stay provisional; overlaps and ambiguity are explicit | in_progress |
 | COST-03 | F3: invoice corrections stop before costing | Approved corrections invoke the shared cost pipeline or commit a durable visible continuation with complete downstream impact | planned |
 | COST-04 | F4: freight invoice and charge amount dead end | One approved reconciliation replaces the estimate, preserves its history, recalculates shares and updates downstream costs | planned |
-| COST-05 | F5: non-economic changes invalidate costs | Payment progress and superseded quote edits preserve unchanged cost identity; real financial/source-authority changes remain controlled | planned |
+| COST-05 | F5: non-economic changes invalidate costs | Payment progress and superseded quote edits preserve unchanged cost identity; real financial/source-authority changes remain controlled | in_progress |
 | COST-06 | F6: transformed lots invalidate static completion | Completion accepts proven exact cost inheritance; genuine missing links/values have a direct resolution without repeat approval of unchanged money | planned |
-| COST-07 | F7: unsupported breakdowns and adjustments | Known totals, optional breakdowns, discounts, taxes, credits and supplier freight have explicit source and inclusion/allocation rules | planned |
+| COST-07 | F7: unsupported breakdowns and adjustments | Known totals, optional breakdowns, discounts, taxes, credits and supplier freight have explicit source and inclusion/allocation rules | in_progress |
 | COST-08 | F8: approval lacks a reviewed financial version | Ordinary invoice approvals and corrections bind the reviewed economics and downstream impact to the transaction | planned |
 | COST-09 | F9: shared results lost at UI boundaries | Relationship identifiers and shared results survive every API; completed costs and approval details appear consistently; genuine issues expose the owning action | planned |
 
@@ -63,13 +64,13 @@ Develop one coordinated candidate. Changes can be split into reviewable dependen
 
 Primary work: COST-01, COST-02, COST-05, COST-07.
 
-- [ ] Define validated monetary contracts: selected source/revision, currency, quantity coverage, component/combined totals, allocated charges, provisional/confirmed state, application status and approval provenance.
-- [ ] Define confirmed invoice coverage and provisional remainder behavior. Use explicit existing receipt/shipment links; document the rule for cases linked only to a PO line. Never choose an arbitrary historical stock destination.
-- [ ] Define economic identity independently of settlement metadata and superseded supporting quotes. Preserve the audit of all source documents while invalidating costs only for relevant changes.
-- [ ] Support known combined supplier amounts without fabricating a breakdown or counting combined and component amounts twice. Define a compatible representation and migration strategy before writing new financial rows.
+- [x] Define validated monetary contracts: selected source/revision, currency, quantity coverage, component/combined totals, allocated charges, provisional/confirmed state, application status and approval provenance.
+- [ ] Define confirmed invoice coverage and provisional remainder behavior. Explicit interval validation and actual-plus-provisional money are implemented; the PO-line-only allocation policy still awaits the user's answer. Never choose an arbitrary historical stock destination.
+- [x] Define economic identity independently of settlement metadata and superseded supporting quotes. Preserve the audit of all source documents while invalidating costs only for relevant changes. New semantic identity is not substituted into legacy posting writers in S1.
+- [x] Support known combined supplier amounts without fabricating a breakdown or counting combined and component amounts twice. The additive contract and bounded compatibility strategy are documented; the stored representation/adapter must be proven in S2 before financial writes.
 - [ ] Resolve the applicable inclusion/allocation rules for adjustments, tax, credits, supplier freight and non-product PO charges.
-- [ ] Trace ordinary order-cost updates through reporting/recognition to establish the verified-sale boundary before changing COGS behavior.
-- [ ] Add target-behavior regression tests for source precedence, partial coverage, known zero, unsupported/invalid input, exact totals and economic identity.
+- [x] Trace ordinary order-cost updates through local reporting/transport and distinguish order basis from verified-sale recognition. [The exact trace and external-receiver evidence gap](procurement-costing-stage-1-contract.md#verified-sales-and-recognition-boundary) are recorded. S2/S3 may not change recognition semantics without closing that remaining boundary.
+- [x] Add target-behavior regression tests for source precedence, partial coverage, known zero, unsupported/invalid input, exact totals and economic identity.
 
 Exit evidence: agreed contracts/rules, exact source ownership map, bounded compatibility plan and passing domain tests. No production migration or financial backfill is implied by this stage.
 
@@ -159,11 +160,11 @@ Exit evidence: exact deployed candidate accepted across the complete flow, origi
 | --- | --- | --- |
 | Approved invoice versus provisional PO versus payments | Agreed | Invoice-first for covered goods; PO estimate for uncovered goods; payment is settlement |
 | Invoice coverage where explicit receipt links exist | Agreed principle | Preserve and use those links and immutable quantity evidence |
-| Allocation where invoices identify only a PO line | Decision needed in S1 | Document and test the deterministic rule before assigning actual costs to specific receipts/lots |
-| Tax inclusion/recovery and allocation of header/non-product adjustments | Decision needed in S1 | Follow an explicit approved business/accounting policy; do not infer it from a residual |
-| Known total with unknown product/packaging split | Agreed principle; representation needed in S1 | Preserve the full known amount once and keep the unknown breakdown explicit |
+| Allocation where invoices identify only a PO line | Asked; awaiting answer | Require receipt allocation where costs differ, or explicitly blend costs over the PO line; no stock destination is chosen in S1 |
+| Tax inclusion/recovery and allocation of header/non-product adjustments | Tax question asked; awaiting answer. Header allocation evidence remains to be adapted | The contract accepts explicit included/excluded/unclassified adjustments; no global tax rule or residual header allocation is invented |
+| Known total with unknown product/packaging split | S1 contract implemented; stored compatibility still required in S2 | Preserve the full known amount once and keep the unknown breakdown explicit |
 | Foreign currency | Existing unsupported/review boundary retained | Do not activate guessed FX conversions; broader currency support needs its own approved rule/scope |
-| Ordinary order cost basis versus recognized COGS | Verification needed in S1 | Trace the actual recognition boundary and enforce verified sales consistently before changing postings |
+| Ordinary order cost basis versus recognized COGS | Local trace documented; external recognition is not proven | Picking writes order basis; ordinary recosting/reporting includes that basis. Repaired history has an explicit verified-sale policy. S2/S3 must prove recognition before changing its behavior |
 | Historical production dollar exposure | Not measured | Use separate read-only comparisons and specific reviewed corrections |
 
 These dependencies do not stop unrelated contract, identity, preview or consumer work. Ask only the focused business questions that cannot be answered from existing approved policy or source evidence.
@@ -174,8 +175,8 @@ Add exact identifiers as work exists. A proposed slice is not an existing PR or 
 
 | Slice | Intended contents | PR/commit | Local evidence | Hosted CI | Deployment/live proof |
 | --- | --- | --- | --- | --- | --- |
-| Plan and audit | This tracker, baseline audit and synthetic characterization evidence | Record the documentation commit in Git history | Documentation links and synthetic evidence checks | Not run for implementation | No runtime change |
-| Contract foundation | S1 contracts, economic identity, source rules and compatibility tests | Not created | Not run | Not run | Not deployed |
+| Plan and audit | This tracker, baseline audit and synthetic characterization evidence | `3cf9b7102043eb14386f69ffe70b8590951d7169` | Documentation links and synthetic evidence checks | Not run for implementation | No runtime change |
+| Contract foundation | S1 contracts, economic identity, source rules and compatibility tests | Current branch; implementation commit/PR to be recorded after validation | 480 tests / 16 files passed; production and server-test TypeScript passed | Not run | Not deployed; projection not connected to readers/posting commands |
 | Commands and downstream application | S2-S3 owning workflows, approvals, inheritance and safe recovery | Not created | Not run | Not run | Not deployed |
 | Shared consumers and complete acceptance | S4-S5 connected readers, actions and full acceptance | Not created | Not run | Not run | Not deployed |
 | Rollout and historical review | S6 manifest, read-only comparisons and specifically approved corrections | Not created | Not run | Not run | Not deployed |
@@ -188,32 +189,65 @@ Final PR boundaries follow verified dependencies and reviewable size. If a slice
 - [Synthetic characterization source](evidence/procurement-cost-authority-audit-20261030.ts) and [captured output](evidence/procurement-cost-authority-audit-20261030.json).
 - At the audit baseline, 379 existing unit tests passed across 13 focused files. The historical characterization reproduces current defects; those passing checks are not acceptance of the new design.
 - The audit did not execute PostgreSQL/full browser acceptance or measure production exposure. Those remain explicit work above.
+- Stage 1 added 101 target contract/fingerprint tests, with the 379 existing tests still passing: 480 tests across 16 files. New projection/schema coverage: 98.59% statements, 97.25% branches, 99.10% lines. Coverage is bounded to the three new money/projection/schema files, not the whole purchase flow.
+- Stage 1 production TypeScript passed using `node --max-old-space-size=8192 node_modules/typescript/bin/tsc --pretty false --incremental false`. Default-heap TypeScript previously exhausted memory; the explicit heap run succeeded.
+- Stage 1 server-test TypeScript passed using `node --max-old-space-size=8192 node_modules/typescript/bin/tsc -p tsconfig.tests.server.json --pretty false --incremental false`. No client UI change was made in this stage.
+- Windows sandbox temporary-file renames prevented Vitest cache writes; the same pure/local suites passed outside that restriction. No database credentials or live financial commands were used.
+
+### Stage 1 repeatable local validation
+
+Run from the repository root. These cases do not use a database. Passing them does not close the PostgreSQL, command, concurrency, browser or live acceptance rows in S5/S6.
+
+```powershell
+$cases = @(
+  'server/modules/procurement/__tests__/unit/purchase-cost-authority.test.ts'
+  'server/modules/procurement/__tests__/unit/purchase-cost-authority.validation.test.ts'
+  'server/modules/inventory/__tests__/unit/cost-fingerprint.test.ts'
+  'server/modules/procurement/__tests__/unit/purchase-cost-status.test.ts'
+  'server/modules/procurement/__tests__/unit/shipment-charge-evidence.test.ts'
+  'server/modules/procurement/__tests__/unit/shipment-allocation-basis.test.ts'
+  'server/modules/procurement/__tests__/unit/cost-review-tasks.test.ts'
+  'server/modules/procurement/__tests__/unit/po-shipment-costs.test.ts'
+  'shared/procurement/__tests__/unit/po-line-landed-cost.test.ts'
+  'shared/procurement/__tests__/unit/cost-source-contracts.test.ts'
+  'server/modules/inventory/__tests__/unit/cost-application.domain.test.ts'
+  'server/modules/inventory/__tests__/unit/verified-cost-sale.test.ts'
+  'server/modules/procurement/__tests__/unit/shipment-cost-source-identity.test.ts'
+  'server/modules/procurement/__tests__/unit/current-shipment-cost-source.test.ts'
+  'server/modules/procurement/__tests__/unit/invoice-quantity-correction.policy.test.ts'
+  'server/modules/procurement/__tests__/unit/receipt-cost-recovery.test.ts'
+)
+node node_modules/vitest/vitest.mjs run @cases --coverage --coverage.include=server/modules/procurement/domain/purchase-cost-authority.ts --coverage.include=server/modules/procurement/domain/purchase-cost-authority-money.ts --coverage.include=shared/procurement/purchase-cost-authority.ts --coverage.reportsDirectory=.codex-artifacts/purchase-cost-authority-stage-1-coverage --coverage.reporter=text --reporter=dot
+node --max-old-space-size=8192 node_modules/typescript/bin/tsc --pretty false --incremental false
+node --max-old-space-size=8192 node_modules/typescript/bin/tsc -p tsconfig.tests.server.json --pretty false --incremental false
+```
 
 The evidence script is a baseline diagnostic outside normal test discovery. Its assertions intentionally characterize the audited behavior. Implementation must add target-behavior tests to the real suites, retain this dated evidence, and avoid treating a later diagnostic assertion failure after a fix as a production regression.
 
 ## Current handoff
 
-**Completed:** reviewed merged code, identified F1-F9, executed focused unit suites and synthetic diagnostics, agreed the six-stage cleanup approach, and persisted this tracker plus its evidence.
+**Completed:** the audit/plan plus the additive S1 monetary contracts, pure invoice-first/partial-coverage projection, exact adjustment/charge validation, semantic identity and historical compatibility/ownership documentation. The $1,000 PO + $1,200 approved invoice + $200 freight case now passes the target $1,400 projection. Payment-only transitions and superseded quote edits preserve its identity and original application/approval details. Known combined bills retain their complete amount with an explicitly unknown split.
 
-**Implementation state:** no COST item or S1-S6 exit gate is complete. No costing implementation, migration, historical correction or live financial change has been performed for this cleanup.
+**Implementation state:** S1 remains in progress pending the two policy answers and final review. COST-01/02/05/07 have tested foundations, not completed runtime remediation. COST-03/04/06/08/09 and all full-flow acceptance gates remain open. No migration, source rehash, historical correction, stock mutation or live financial change has occurred. The only existing runtime module change is the unchanged canonical fingerprint implementation's move into the domain with its compatibility export retained.
 
-**Next action:** begin S1 by inventorying every monetary reader/writer against the ownership contract, then define the selected-cost/quantity-coverage contract and its target regression tests. Reproduce the $1,000 PO + $1,200 approved invoice + $200 freight discrepancy as a failing target test, and add payment-only identity and partial-invoice coverage cases.
+**New code entry points:**
 
-**First code entry points to inspect:**
+- `shared/procurement/purchase-cost-authority.ts`: normalized input/output schemas and types.
+- `server/modules/procurement/domain/purchase-cost-authority.ts`: `projectPurchaseCostAuthority`.
+- `server/modules/procurement/domain/purchase-cost-authority-money.ts`: exact signed proration, sums and classified failures.
+- `server/modules/inventory/domain/cost-fingerprint.ts`: the existing canonical hash, now pure and reusable without importing infrastructure.
+- `server/modules/procurement/__tests__/unit/purchase-cost-authority*.ts` and `server/modules/inventory/__tests__/unit/cost-fingerprint.test.ts`: synthetic target and boundary/compatibility tests.
+- [Stage 1 contract document](procurement-costing-stage-1-contract.md): concrete ownership map, compatibility steps, recognition trace and remaining evidence gaps.
 
-- `server/modules/procurement/domain/purchase-cost-source.ts`: `resolvePurchaseCostSource`.
-- `server/modules/procurement/purchase-cost-application.service.ts`: source recording and supplier application.
-- `server/modules/procurement/shipment-cost-revision-proposals.ts` and `shipment-cost-source-identity.ts`: landed source/economic identity.
-- `shared/procurement/po-line-landed-cost.ts` and `server/modules/procurement/domain/po-shipment-cost-summary.ts`: competing monetary projections.
-- `server/modules/procurement/invoice-quantity-correction.repository.ts` and `ap-ledger.service.ts`: correction/approval integration.
-- `server/modules/inventory/application/apply-cost-revision.ts` and `cogs.service.ts`: existing downstream owners and sale-recognition boundary.
+**Next action:** record review/commit state; incorporate the pending policy answers without inventing defaults. Then implement the S2 read/compatibility adapters against the existing source revision/application owners and prove legacy equivalence in PostgreSQL before connecting any writer. The unknown-breakdown model cannot be stuffed into legacy product/packaging rows by assuming zero packaging. Validate header/credit/return allocation and the verified-sale reporting boundary before activating those paths.
 
-**Open dependencies:** S1 business-rule decisions above. Do not fill them with guesses or pause independent work unnecessarily.
+**Remaining checks:** hosted CI for the review head; S2 public-command/adapter and PostgreSQL compatibility tests; S3 lineage/verified-sale acceptance; S4 connected consumers/browser journeys; S5/S6 full-flow and deployed/live proof. Production/server-test TypeScript and all 480 focused tests have passed.
 
-**Before the next handoff:** update current stage, work item states, changed files, exact validation results, PR/commit state, any remaining decisions and the next concrete action.
+**Open dependencies:** the user has not yet answered the S1 receipt-allocation and supplier-tax questions. External accounting recognition and historical production exposure remain unproven. Do not assign stock destinations, tax inclusion or accounting effects from a guess.
 
 ## Change log
 
 | Date | Change | Evidence/state |
 | --- | --- | --- |
 | 2026-10-30 | Established the active cleanup tracker, preserved all nine audit findings and synthetic evidence, and recorded ownership rules, stages, acceptance and resumption procedure | Planning/evidence only; implementation not started |
+| 2026-10-30 | Implemented the additive S1 contract/projection and compatibility hash extraction, documented the owning paths/recognition limits, and added target/validation tests | 480 tests / 16 files and production/server-test TypeScript passed; policy answers pending; no activation/live writes |
