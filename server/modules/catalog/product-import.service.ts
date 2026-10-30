@@ -70,15 +70,15 @@ function normalizeCategorySlug(value: string): string {
     .replace(/^-|-$/g, "");
 }
 
-async function resolveImportedProductCategory(categoryName: string | null | undefined): Promise<{ categoryId: number | null; category: string | null }> {
-  const name = categoryName?.trim();
-  if (!name) {
-    return { categoryId: null, category: null };
-  }
-
-  const slug = normalizeCategorySlug(name);
+/**
+ * Echelon owns product categories: the import never changes an existing
+ * product's category and never creates one. A new product takes a category only
+ * when Shopify's productType matches an active category exactly.
+ */
+async function findActiveCategoryForNewProduct(productType: string | null | undefined): Promise<{ categoryId: number | null; category: string | null }> {
+  const slug = normalizeCategorySlug(productType ?? "");
   if (!slug) {
-    return { categoryId: null, category: name };
+    return { categoryId: null, category: null };
   }
 
   const [existing] = await db
@@ -86,21 +86,11 @@ async function resolveImportedProductCategory(categoryName: string | null | unde
     .from(productCategories)
     .where(and(eq(productCategories.slug, slug), eq(productCategories.isActive, true)));
 
-  if (existing) {
-    return { categoryId: existing.id, category: existing.name };
+  if (!existing) {
+    console.warn(JSON.stringify({ event: "shopify_import_category_unmatched", productType }));
+    return { categoryId: null, category: null };
   }
-
-  try {
-    const [created] = await db
-      .insert(productCategories)
-      .values({ name, slug })
-      .returning();
-    return { categoryId: created.id, category: created.name };
-  } catch (error: any) {
-    if (error?.code !== "23505") throw error;
-    const [category] = await db.select().from(productCategories).where(eq(productCategories.slug, slug));
-    return category ? { categoryId: category.id, category: category.name } : { categoryId: null, category: name };
-  }
+  return { categoryId: existing.id, category: existing.name };
 }
 
 // ---------------------------------------------------------------------------
@@ -450,15 +440,11 @@ export function createProductImportService(
           }));
           continue;
         }
-        const productCategory = await resolveImportedProductCategory(firstVariant.productType);
-
         // Update content fields
         await storage.updateProduct(echelonProduct.id, {
           title: firstVariant.productTitle || firstVariant.title || undefined,
           description: firstVariant.description || undefined,
           brand: firstVariant.vendor || undefined,
-          categoryId: productCategory.categoryId,
-          category: productCategory.category,
           productType: resolveProductTypeSlug(firstVariant.productType, firstVariant.sku),
           tags: firstVariant.tags || undefined,
           status: firstVariant.status || undefined,
@@ -798,7 +784,6 @@ export function createProductImportService(
         continue;
       }
       let product = await storage.getProductBySku(baseSku);
-      const productCategory = await resolveImportedProductCategory(data.productType);
 
       if (product) {
         const mappingDecision = decideImportedShopifyProductMapping(
@@ -827,14 +812,13 @@ export function createProductImportService(
         }
         await storage.updateProduct(product.id, {
           name: data.baseName,
-          categoryId: productCategory.categoryId,
-          category: productCategory.category,
           productType: resolveProductTypeSlug(data.productType, baseSku),
           brand: data.vendor,
           description: data.description,
         });
         productsUpdated++;
       } else {
+        const productCategory = await findActiveCategoryForNewProduct(data.productType);
         product = await storage.createProduct({
           sku: baseSku,
           name: data.baseName,
@@ -943,7 +927,6 @@ export function createProductImportService(
 
       const existingVariant = await storage.getProductVariantBySku(sv.sku);
       let product = await storage.getProductBySku(sv.sku);
-      const productCategory = await resolveImportedProductCategory(sv.productType);
 
       if (product) {
         const mappingDecision = decideImportedShopifyProductMapping(
@@ -972,13 +955,12 @@ export function createProductImportService(
         }
         await storage.updateProduct(product.id, {
           name: sv.name,
-          categoryId: productCategory.categoryId,
-          category: productCategory.category,
           brand: sv.vendor,
           description: sv.description,
         });
         productsUpdated++;
       } else {
+        const productCategory = await findActiveCategoryForNewProduct(sv.productType);
         product = await storage.createProduct({
           sku: sv.sku,
           name: sv.name,
