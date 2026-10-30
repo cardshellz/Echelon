@@ -1,3 +1,4 @@
+import { enqueueSavedLabelStatus } from "./saved-label-status.repository";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { invalidateCustomerOrderActions } from "../customer-account/order-action-invalidation";
@@ -35,7 +36,7 @@ function knownLabelConflictSql(document: "j.document" | "$1::jsonb"): string {
   return `SELECT 1 FROM jsonb_array_elements((${document})->'packages') p JOIN wms.shipping_provider_labels l
     ON l.provider='shipstation' AND l.provider_label_id=p->>'providerShipmentId'
     LEFT JOIN LATERAL(SELECT event.sanitized_payload->>'sourceObservationHash' AS contents_hash
-      FROM wms.shipping_provider_label_events event WHERE event.shipping_provider_label_id=l.id
+      FROM wms.shipping_provider_label_events event WHERE event.shipping_provider_label_id=l.id AND event.sanitized_payload ? 'sourceObservationHash'
       ORDER BY event.received_at DESC,event.id DESC LIMIT 1) latest ON true
     WHERE l.label_status<>'active' OR l.label_direction<>'outbound' OR l.tracking_number<>p->>'trackingNumber'
       OR (latest.contents_hash IS NOT NULL AND latest.contents_hash<>p->>'providerObservationHash')
@@ -183,6 +184,7 @@ export class PostgresPackageHistoryStore implements PackageHistoryStore {
         computed_generation=generation,next_attempt_at='infinity',priority=0,attempts=0,lease_id=NULL,lease_until=NULL,last_error_code=NULL WHERE oms_order_id=$1`,
         [claim.omsOrderId, JSON.stringify(document), hash, now],
       );
+      for (const parcel of document.packages) await enqueueSavedLabelStatus(client, { kind: "history", sourceId: claim.omsOrderId, providerReference: parcel.providerShipmentId, trackingNumber: parcel.trackingNumber }, now);
       if (previous[0].evidence_hash !== hash)
         await invalidateCustomerOrderActions(client, claim.omsOrderId);
       return true;
@@ -241,51 +243,41 @@ export class PostgresPackageHistoryStore implements PackageHistoryStore {
       ],
     );
   }
-  async read(raw: {
-    omsOrderId: number;
-    channelId: number;
-    externalOrderId: string;
-  }): Promise<PackageHistoryDocument | null> {
-    const input = z
-      .object({
-        omsOrderId: id,
-        channelId: id,
-        externalOrderId: z
-          .string()
-          .regex(/^(?:gid:\/\/shopify\/Order\/)?[1-9][0-9]*$/),
-      })
-      .strict()
-      .parse(raw);
-    const external = input.externalOrderId.replace(
-      /^gid:\/\/shopify\/Order\//,
-      "",
-    );
+  async read(raw: { omsOrderId: number; channelId: number; externalOrderId: string }): Promise<PackageHistoryDocument | null> {
+    return (await this.readMany([raw])).get(raw.omsOrderId) ?? null;
+  }
+
+  /** One bounded local lookup for an account page. Uses the same evidence,
+   * generation and invalidation checks as the single-order read. */
+  async readMany(raw: readonly { omsOrderId: number; channelId: number; externalOrderId: string }[]): Promise<ReadonlyMap<number, PackageHistoryDocument>> {
+    const input = z.array(z.object({ omsOrderId: id, channelId: id,
+      externalOrderId: z.string().regex(/^(?:gid:\/\/shopify\/Order\/)?[1-9][0-9]*$/),
+    }).strict()).max(20).parse(raw).map(scope => ({ ...scope,
+      externalOrderId: scope.externalOrderId.replace(/^gid:\/\/shopify\/Order\//, ""),
+    }));
+    if (new Set(input.map(scope => scope.omsOrderId)).size !== input.length) throw new Error("PACKAGE_HISTORY_DUPLICATE_SCOPE");
+    const output = new Map<number, PackageHistoryDocument>();
+    if (!input.length) return output;
     const instant = z.date().parse(this.now());
-    const result = await this.pool.query(
-      `SELECT j.document,j.evidence_hash FROM wms.shipping_package_history_jobs j JOIN oms.oms_orders o ON o.id=j.oms_order_id
+    const result = await this.pool.query(`WITH requested AS (
+      SELECT * FROM jsonb_to_recordset($1::jsonb) AS r("omsOrderId" bigint,"channelId" integer,"externalOrderId" text)
+    ) SELECT j.document,j.evidence_hash FROM requested r
+      JOIN oms.oms_orders o ON o.id=r."omsOrderId" AND o.channel_id=r."channelId"
+        AND replace(o.external_order_id,'gid://shopify/Order/','')=r."externalOrderId"
+      JOIN wms.shipping_package_history_jobs j ON j.oms_order_id=o.id
       JOIN wms.shipping_package_history_events saved ON saved.oms_order_id=j.oms_order_id AND saved.evidence_hash=j.evidence_hash AND saved.document=j.document
-      WHERE o.id=$1 AND o.channel_id=$2 AND o.external_order_id=ANY($3::text[]) AND j.state='ready'
-      AND j.computed_generation=j.generation AND j.verified_at<=$4
+      WHERE j.state='ready' AND j.computed_generation=j.generation AND j.verified_at<=$2
       AND NOT EXISTS(SELECT 1 FROM wms.shipping_package_history_invalidations d WHERE d.oms_order_id=o.id)
-      AND NOT EXISTS(${knownLabelConflictSql("j.document")})`,
-      [
-        input.omsOrderId,
-        input.channelId,
-        [external, `gid://shopify/Order/${external}`],
-        instant,
-      ],
-    );
-    if (!result.rows.length) return null;
-    const document = verifyPackageHistoryDocument(result.rows[0].document);
-    if (packageHistoryHash(document) !== result.rows[0].evidence_hash)
-      throw new Error("PACKAGE_HISTORY_EVIDENCE_INVALID");
-    if (
-      document.omsOrderId !== input.omsOrderId ||
-      document.channelId !== input.channelId ||
-      document.externalOrderId !== external
-    )
-      throw new Error("PACKAGE_HISTORY_OWNER_CHANGED");
-    return document;
+      AND NOT EXISTS(${knownLabelConflictSql("j.document")})`, [JSON.stringify(input), instant]);
+    for (const row of result.rows) {
+      const document = verifyPackageHistoryDocument(row.document);
+      if (packageHistoryHash(document) !== row.evidence_hash) throw new Error("PACKAGE_HISTORY_EVIDENCE_INVALID");
+      if (!input.some(scope => document.omsOrderId === scope.omsOrderId && document.channelId === scope.channelId
+        && document.externalOrderId === scope.externalOrderId)) throw new Error("PACKAGE_HISTORY_OWNER_CHANGED");
+      if (output.has(document.omsOrderId)) throw new Error("PACKAGE_HISTORY_EVIDENCE_AMBIGUOUS");
+      output.set(document.omsOrderId, document);
+    }
+    return output;
   }
   private async transaction<T>(
     work: (client: PoolClient) => Promise<T>,

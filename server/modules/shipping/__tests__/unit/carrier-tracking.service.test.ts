@@ -150,6 +150,14 @@ function repositoryWithCandidates(candidates: Awaited<ReturnType<CarrierTracking
 }
 
 describe("CarrierTrackingService", () => {
+  it("cannot enqueue an outbound dispatch from status-only delivery evidence, even if the existing label has outbound links",async()=>{
+    const {repository,enqueueDispatchCommand,insertOrGetEvent}=repositoryWithCandidates([{shippingProviderLabelId:10,providerLabelId:"901",labelStatus:"active",labelDirection:"outbound",carrier:"ups",serviceCode:null,linkCount:1,orderNumbers:[]}]);
+    const service=new CarrierTrackingService({repository,clock:{now:()=>new Date(now)},logger:logger()});
+    const result=await service.ingestStatusSnapshot(payload().data,{providerLabelId:"901",carrierCode:"ups",trackingNumber:payload().data.tracking_number});
+    expect(result.matchStatus).toBe("matched");expect(result.dispatchCommandId).toBeNull();
+    expect(insertOrGetEvent.mock.calls[0][0]).toMatchObject({dispatchEvidence:"not_confirmed",sanitizedPayload:{statusOnly:true}});
+    expect(enqueueDispatchCommand).not.toHaveBeenCalled();
+  });
   it("does not prepare paid tracking subscriptions without an explicitly configured client", async () => {
     const { repository } = repositoryWithCandidates([]);
     const service = new CarrierTrackingService({

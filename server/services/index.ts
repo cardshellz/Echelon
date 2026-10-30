@@ -1,3 +1,7 @@
+import { randomUUID as newShippingStatusToken } from "node:crypto";
+import { createSavedLabelStatusSource } from "../modules/shipping/saved-label-status.source";
+import { PostgresSavedLabelStatusStore } from "../modules/shipping/saved-label-status.repository";
+import { SavedLabelStatusWorker } from "../modules/shipping/saved-label-status.worker";
 import { createReservedInventoryTransferOwner } from "../modules/inventory-planning/infrastructure/reserved-inventory-transfer.repository";
 import { createPackageReconciliationService } from "./package-reconciliation";
 /**
@@ -657,13 +661,22 @@ export function createServices(
       return providerDispatchAuthority.confirmDispatch(input);
     },
   };
-  const carrierTracking = new CarrierTrackingService({
+  const carrierTracking: CarrierTrackingService = new CarrierTrackingService({
     repository: createDrizzleCarrierTrackingRepository(db),
     clock: systemCarrierTrackingClock,
     logger: carrierTrackingLogger,
     trackingEventsClient: createShipStationTrackingEventsClient(),
     dispatchAuthority: dispatchAuthorityProxy,
     labelVoidObserver: shopifyLabelLifecycle,
+    captureSavedLabels: (): Promise<unknown> => savedLabelStatus.run(),
+  });
+  const savedLabelStatus: SavedLabelStatusWorker = new SavedLabelStatusWorker({
+    store: new PostgresSavedLabelStatusStore(databasePool),
+    source: createSavedLabelStatusSource({ pool: databasePool, now: () => systemCarrierTrackingClock.now(),
+      v1Key: process.env.SHIPSTATION_API_KEY, v1Secret: process.env.SHIPSTATION_API_SECRET,
+      v2Key: process.env.SHIPSTATION_V2_API_KEY }),
+    tracking: carrierTracking, now: () => systemCarrierTrackingClock.now(), newToken: newShippingStatusToken,
+    report: event => carrierTrackingLogger.warn({ code: event.code, message: "Saved-label status capture needs retry or review.", context: { jobId: event.jobId, attempt: event.attempt } }),
   });
   const labelCommercialFulfillment =
     new PackageAllocationLabelCommercialFulfillmentService({

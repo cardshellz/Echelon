@@ -1,3 +1,4 @@
+import { CustomerOrderProgressSummary, CustomerOrderProgressDetails } from "./CustomerOrderProgress";
 import { useEffect, useRef, useState } from "react";
 import { ChevronRight, X } from "lucide-react";
 import type { OrderEditOrder } from "@shared/order-edits/order-edit.contract";
@@ -97,6 +98,7 @@ export function CustomerOrderPanel({
   const order = state.order;
   // A newer native financial summary must not be replaced by cached action data.
   const displayedOrder = summary ?? order;
+  const progress = displayedOrder && "progress" in displayedOrder ? displayedOrder.progress : undefined;
   const fulfillmentLabel =
     knownCustomerOrderFulfillment(displayedOrder?.fulfillment)?.label ??
     (row
@@ -262,7 +264,7 @@ export function CustomerOrderPanel({
             <p role="status">Loading order details…</p>
           ) : (
             <div className="csz-panel-summary">
-              <span>{fulfillmentLabel}</span>
+              <CustomerOrderProgressSummary financialStatus={displayedOrder?.financialStatus ?? "Status unavailable"} deliveryLabel={fulfillmentLabel} progress={progress} />
               <strong>
                 {displayedOrder
                   ? formatOrderEditMoney(
@@ -271,9 +273,7 @@ export function CustomerOrderPanel({
                     )
                   : "Total unavailable"}
               </strong>
-              {displayedOrder && (
-                <small>{displayedOrder.financialStatus}</small>
-              )}
+
             </div>
           ))}
         {view === "cancellation" && connectionId && state.omsOrderId ? (
@@ -345,6 +345,7 @@ export function CustomerOrderPanel({
                 cancellation are unavailable until it is resolved.
               </p>
             )}
+            <CustomerOrderProgressDetails progress={progress} />
             <h3 className="csz-panel-group">Your order</h3>
             {row.dataset.externalOrderId && row.dataset.orderReference && (
               <CustomerOrderDetails

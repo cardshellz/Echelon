@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { customerOrderProgressSchema } from "./order-progress";
 import { customerAccountOrderIdentityInputSchema } from "./customer-account.contract";
 import { customerOrderFulfillmentSchema } from "./order-fulfillment";
 import { orderEditLineSchema } from "../order-edits/order-edit.contract";
@@ -36,6 +37,7 @@ export const customerAccountOrderSummarySchema =
       financialStatus: z.string().min(1).max(80),
       cancelled: z.boolean(),
       fulfillment: customerOrderFulfillmentSchema.optional(),
+      progress: customerOrderProgressSchema.nullable().optional(),
     })
     .strict();
 export const customerAccountOrderSummariesSchema = z

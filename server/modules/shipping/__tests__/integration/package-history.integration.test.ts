@@ -175,10 +175,11 @@ integration("historical package capture and resumable backfill", () => {
     ])
       await pool.query(priorFunction(name));
     await pool.query(readFileSync(migration, "utf8"));
+    await pool.query(readFileSync("docs/customer-account/saved-label-status-capture.sql", "utf8").split("-- Existing successful labels")[0]);
   });
   beforeEach(async () => {
     await guard(false);
-    await pool.query(`TRUNCATE wms.shipping_package_history_jobs,wms.shipping_package_history_events,wms.shipping_package_history_invalidations,
+    await pool.query(`TRUNCATE wms.saved_label_status_jobs,wms.shipping_package_history_jobs,wms.shipping_package_history_events,wms.shipping_package_history_invalidations,
       wms.shipping_package_history_backfills,wms.shipping_provider_label_events,wms.shipping_provider_label_links,wms.shipping_provider_labels,
       oms.customer_order_action_invalidations,wms.outbound_shipment_items,wms.outbound_shipments,wms.order_items,wms.orders,oms.oms_order_lines,oms.oms_orders,
       oms.channel_fulfillment_receipts,channels.channel_connections,channels.channels,test_guard.balances RESTART IDENTITY CASCADE;
@@ -693,6 +694,25 @@ integration("historical package capture and resumable backfill", () => {
       ).rows[0].count,
     ).toBe(1);
     expect(await fingerprint()).toBe(before);
+  });
+  it("does not let a newer status-only observation hide contradictory contents evidence",async()=>{
+    await seed();await makeWorker().run({orderIds:[100]});
+    const scope={omsOrderId:100,channelId:36,externalOrderId:"1001"};
+    expect(await store.read(scope)).not.toBeNull();
+    await pool.query(`INSERT INTO wms.shipping_provider_labels(id,provider,provider_label_id,label_status,label_direction,tracking_number)
+      VALUES(1,'shipstation','601','active','outbound','TRACK601');
+      INSERT INTO wms.shipping_provider_label_events(id,shipping_provider_label_id,sanitized_payload,received_at)
+      VALUES(1,1,jsonb_build_object('sourceObservationHash',repeat('b',64)),'2026-09-20T12:00:00Z'),
+        (2,1,'{"observationSource":"shipstation_status_observation"}','2026-09-21T12:00:00Z')`);
+    expect(await store.read(scope)).toBeNull();
+  });
+  it("reads the whole owned history page in one bounded lookup and rejects duplicate scopes",async()=>{
+    await seed();await makeWorker().run({orderIds:[100]});
+    const scope={omsOrderId:100,channelId:36,externalOrderId:"1001"};
+    expect((await store.readMany([scope])).get(100)).toEqual(await store.read(scope));
+    expect((await store.readMany([{...scope,channelId:37}])).size).toBe(0);
+    expect((await store.readMany([{...scope,externalOrderId:"1002"}])).size).toBe(0);
+    await expect(store.readMany([scope,scope])).rejects.toThrow(/DUPLICATE_SCOPE/);
   });
   it("does not publish an observation superseded by an incoming source event", async () => {
     await seed();
