@@ -141,9 +141,6 @@ export class PostgresCustomerOrderDeliveryReader
             normalizeTrackingNumber(p.trackingNumber) ===
               normalizeTrackingNumber(parcel.trackingNumber),
         );
-        for (const match of matching)
-          if (match.providerReference === null)
-            match.providerReference = parcel.providerShipmentId;
         if (!matching.length)
           rows.push({
             orderId: order.id,
