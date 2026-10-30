@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000044000019650001_product_inventory_sync_requests.sql",
+  "generation": 44,
+  "pr": 1965,
+  "ordinal": 1,
+  "after": [
+    "900000036000019340001_stock_links.sql",
+    "900000043000019600002_customer_return_workflow.sql"
+  ]
+}
