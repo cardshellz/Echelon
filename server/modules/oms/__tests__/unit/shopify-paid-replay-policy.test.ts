@@ -23,6 +23,9 @@ describe("automatic paid receipt replay policy", () => {
   it.each([
     { sku: "OTHER" }, { id: "999" }, { quantity: 2 }, { current_quantity: 0 },
     { fulfillable_quantity: 0 }, { requires_shipping: false },
+    { product_id: "901" }, { variant_id: "999" }, { title: "Changed title" },
+    { price: "11.00" }, { total_discount: "1.00" },
+    { discount_allocations: [{ amount: "1.00", discount_application_index: 0 }] },
   ])("refuses changed provider lines %j", change => {
     const fixture = paidReplayFixture();
     Object.assign(fixture.evidence.order.line_items[0], change);
@@ -47,6 +50,14 @@ describe("automatic paid receipt replay policy", () => {
     const fixture = paidReplayFixture();
     Object.assign(fixture.lines[0], change);
     expect(decideAutomaticPaidReplay(fixture.stored, fixture.lines, fixture.evidence).eligible).toBe(false);
+  });
+  it("refuses changed currency or discount applications even when merchandise quantities match", () => {
+    for (const change of [{ currency: "CAD" }, { discount_applications: [{ type: "manual" }] }]) {
+      const fixture = paidReplayFixture();
+      Object.assign(fixture.evidence.order, change);
+      expect(decideAutomaticPaidReplay(fixture.stored, fixture.lines, fixture.evidence))
+        .toEqual({ eligible: false, reason: "provider_commercial_terms_changed" });
+    }
   });
   it("accepts canonical Shopify GIDs and unobserved current quantities", () => {
     const fixture = paidReplayFixture();

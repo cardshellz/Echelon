@@ -9,10 +9,13 @@ export function paidReplayFixture(): {
   const evidence: AutomaticPaidReplayEvidence = {
     channelId: 36, shopDomain: "fixture.myshopify.com",
     order: {
-      id: "1001", updated_at: "2026-10-30T12:01:00Z", financial_status: "paid",
+      id: "1001", updated_at: "2026-10-30T12:01:00Z", financial_status: "paid", currency: "USD", discount_applications: [],
       fulfillment_status: null, cancelled_at: null, refunds: [], fulfillments: [],
       line_items: [11, 12, 13].map(id => ({
         id: String(id), sku: "FIXTURE-" + id, quantity: 1, current_quantity: 1,
+        product_id: "900", variant_id: String(100 + id),
+        title: "Fixture", name: "Fixture", variant_title: null,
+        price: "10.00", total_discount: "0.00", discount_allocations: [],
         fulfillable_quantity: 1, requires_shipping: true,
       })),
     },

@@ -71,7 +71,7 @@ describe("bounded Shopify paid recovery sweep", () => {
     expect(ports.replay).not.toHaveBeenCalled();
     expect(ports.readiness).not.toHaveBeenCalled();
   });
-  it.each([{ id: "1002" }, { refunds: undefined }, { updated_at: "invalid" }])(
+  it.each([{ id: "1002" }, { refunds: undefined }, { updated_at: "invalid" }, { shipping_address: { country_code: "ZZ" } }])(
     "rejects mismatched or incomplete provider evidence %j and preserves the poll checkpoint", async change => {
       Object.assign(providerOrder, change);
       expect(await runReconciliationNow()).toMatchObject({ paidReplaysQueued: 0, failed: 1 });

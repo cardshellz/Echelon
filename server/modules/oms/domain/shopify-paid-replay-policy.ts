@@ -1,13 +1,26 @@
 import { z } from "zod";
+import { canonicalJson } from "@shared/utils/canonical-json";
 
 const quantity = z.number().int().min(0).max(2_147_483_647);
 const providerId = z.union([
   z.string().regex(/^[1-9]\d*$/),
   z.number().int().positive().safe().transform(String),
 ]);
+const decimalMoney = z.string().regex(/^[0-9]+(?:[.][0-9]+)?$/);
 const providerLine = z.object({
   id: providerId,
   sku: z.string().nullable(),
+  product_id: providerId.nullable(),
+  variant_id: providerId.nullable(),
+  title: z.string(),
+  name: z.string(),
+  variant_title: z.string().nullable(),
+  price: decimalMoney,
+  total_discount: decimalMoney,
+  discount_allocations: z.array(z.object({
+    amount: decimalMoney,
+    discount_application_index: quantity,
+  })),
   quantity,
   current_quantity: quantity,
   fulfillable_quantity: quantity,
@@ -17,6 +30,8 @@ const providerOrder = z.object({
   id: providerId,
   updated_at: z.string().datetime({ offset: true }),
   financial_status: z.string(),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  discount_applications: z.array(z.record(z.unknown())),
   fulfillment_status: z.string().nullable(),
   cancelled_at: z.string().nullable(),
   refunds: z.array(z.unknown()),
@@ -93,6 +108,12 @@ export function decideAutomaticPaidReplay(
     || Date.parse(receipt.data.updated_at) > Date.parse(evidence.order.updated_at)) {
     return { eligible: false, reason: "provider_order_not_eligible" };
   }
+  // The canonical paid handler also normalizes catalog identities and line prices.
+  // A historical replay must not overwrite changed product or commercial terms.
+  if (receipt.data.currency !== evidence.order.currency
+    || canonicalJson(receipt.data.discount_applications) !== canonicalJson(evidence.order.discount_applications)) {
+    return { eligible: false, reason: "provider_commercial_terms_changed" };
+  }
   const live = new Map(evidence.order.line_items.map(line => [line.id, line]));
   const paid = new Map(receipt.data.line_items.map(line => [line.id, line]));
   if (live.size !== evidence.order.line_items.length
@@ -109,6 +130,9 @@ export function decideAutomaticPaidReplay(
       || line.requires_shipping !== current.requires_shipping
       || original.requires_shipping !== current.requires_shipping) {
       return { eligible: false, reason: "line_identity_mismatch" };
+    }
+    if (canonicalJson(original) !== canonicalJson(current)) {
+      return { eligible: false, reason: "provider_commercial_terms_changed" };
     }
     if (line.authorization_status !== "seen"
       || [line.paid_quantity, line.authority_fulfillable_quantity, line.cancelled_quantity,

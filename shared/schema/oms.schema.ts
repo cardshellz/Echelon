@@ -514,6 +514,9 @@ export const webhookInbox = omsSchema.table("webhook_inbox", {
     idempotencyKeyIdx: uniqueIndex("webhook_inbox_idempotency_key_uidx").on(table.idempotencyKey),
     statusUpdatedIdx: index("idx_webhook_inbox_status_updated").on(table.status, table.updatedAt),
     providerTopicEventIdx: index("idx_webhook_inbox_provider_topic_event").on(table.provider, table.topic, table.eventId),
+    shopifyPaidOrderIdx: index("idx_webhook_inbox_shopify_paid_order")
+      .on(sql`COALESCE(${table.payload}->>'id', ${table.payload}->>'order_id')`, table.sourceDomain)
+      .where(sql`${table.provider} = 'shopify' AND ${table.topic} = 'orders/paid' AND ${table.status} = 'succeeded'`),
   };
 });
 

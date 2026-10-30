@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000045000019660001_shopify_paid_inbox_order_lookup.sql",
+  "generation": 45,
+  "pr": 1966,
+  "ordinal": 1,
+  "after": [
+    "071_oms_webhook_inbox.sql",
+    "900000044000019650001_product_inventory_sync_requests.sql"
+  ]
+}

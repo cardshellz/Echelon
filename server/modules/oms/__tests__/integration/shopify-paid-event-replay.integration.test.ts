@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
@@ -20,8 +21,8 @@ CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY, order_id bigint, externa
  quantity integer, requires_shipping boolean, paid_quantity integer, authority_fulfillable_quantity integer,
  cancelled_quantity integer, refunded_quantity integer, wms_materialized_quantity integer,
  authorization_status text, channel_current_quantity integer, channel_quantity_updated_at timestamptz);
-CREATE TABLE oms.webhook_inbox(id integer PRIMARY KEY, provider text, topic text, status text,
- payload jsonb, source_domain text, processed_at timestamptz, updated_at timestamptz, first_received_at timestamptz);
+CREATE TABLE oms.webhook_inbox(id integer PRIMARY KEY, provider varchar(50), topic varchar(100), status varchar(20),
+ payload jsonb, source_domain varchar(255), processed_at timestamptz, updated_at timestamptz, first_received_at timestamptz);
 CREATE TABLE oms.webhook_retry_queue(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
  provider text, topic text, payload jsonb, source_inbox_id integer, attempts integer, last_error text,
  next_retry_at timestamptz, status text, created_at timestamptz, updated_at timestamptz);
@@ -39,9 +40,15 @@ const operator = { omsOrderId: 10, operator: "scheduled_shopify_reconciliation" 
 (url && disposable ? describe : describe.skip).sequential("paid receipt recovery in PostgreSQL", () => {
   let database: InventoryCutoverTestDatabase;
   let db: PaidReplayDatabase;
+  let migrationSql: string;
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, fixtureSql);
     db = drizzle(database.pool) as unknown as PaidReplayDatabase;
+    migrationSql = await readFile(new URL(
+      "../../../../../migrations/900000045000019660001_shopify_paid_inbox_order_lookup.sql",
+      import.meta.url,
+    ), "utf8");
+    await database.pool.query(migrationSql);
   });
   afterAll(async () => { await database?.close(); });
   beforeEach(async () => {
@@ -68,6 +75,28 @@ const operator = { omsOrderId: 10, operator: "scheduled_shopify_reconciliation" 
       wms: (await database.pool.query("SELECT * FROM wms.orders")).rows,
     };
   }
+  it("reapplies the lookup migration and uses its order-ID index among unrelated paid receipts", async () => {
+    await database.pool.query(migrationSql);
+    await database.pool.query(`INSERT INTO oms.webhook_inbox
+      SELECT value,'shopify','orders/paid','succeeded',
+        jsonb_build_object('id',(value+10000)::text),'fixture.myshopify.com',NOW(),NOW(),NOW()
+      FROM generate_series(1000,6000) value;
+      ANALYZE oms.webhook_inbox`);
+    const result = await database.pool.query(`EXPLAIN (ANALYZE,FORMAT JSON) SELECT wi.id
+      FROM oms.webhook_inbox wi WHERE provider='shopify' AND topic='orders/paid' AND status='succeeded'
+      AND COALESCE(payload->>'id',payload->>'order_id')='1001' AND source_domain='fixture.myshopify.com'`);
+    expect(JSON.stringify(result.rows)).toContain("idx_webhook_inbox_shopify_paid_order");
+    expect((await queueOmsPaidEventReplay(db, operator, paidReplayFixture().evidence)).changed).toBe(true);
+  });
+  it("refuses an incompatible existing lookup index instead of silently accepting its name", async () => {
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`DROP INDEX oms.idx_webhook_inbox_shopify_paid_order;
+        CREATE INDEX idx_webhook_inbox_shopify_paid_order ON oms.webhook_inbox(source_domain)`);
+      await expect(client.query(migrationSql)).rejects.toThrow("incompatible definition");
+    } finally { await client.query("ROLLBACK"); client.release(); }
+  });
   it("selects zero/zero authority even with a current-quantity version, and wraps its bounded cursor", async () => {
     const input = { channelId: 36, afterOmsOrderId: 0, limit: 1 };
     expect(await loadShopifyReadinessCandidates(db, input)).toEqual([

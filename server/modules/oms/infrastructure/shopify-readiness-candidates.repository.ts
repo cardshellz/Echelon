@@ -4,7 +4,7 @@ import { z } from "zod";
 const inputSchema = z.object({
   channelId: z.number().int().positive().safe(),
   afterOmsOrderId: z.number().int().min(0).safe(),
-  limit: z.number().int().min(1).max(1000),
+  limit: z.number().int().positive().safe(),
 });
 const rowSchema = z.object({
   oms_order_id: z.coerce.number().int().positive().safe(),
