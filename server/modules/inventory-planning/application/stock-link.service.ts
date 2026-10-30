@@ -28,6 +28,7 @@ import {
   type StockLinkRegistry, type StockLinkSource,
 } from "./stock-link.ports";
 import { runStockLinkEnrollment } from "./stock-link-enrollment.run";
+import { productSyncLinkScopeSchema, type ProductSyncLinkScope } from "@shared/types/inventory-product-sync-workflow";
 
 /**
  * The stock-link engine's background tick (channels PR2, PLAN-CH2 v4.1 §7.2): one cluster-wide runner
@@ -61,13 +62,14 @@ export interface StockLinkTickStore {
   beat(publicationTargetId: number, now: Date): Promise<StockLinkDestinationState>;
   saveCursors(publicationTargetId: number, update: StockLinkCursorUpdate): Promise<void>;
   insertMissingChecks(publicationTargetId: number, rows: readonly { productVariantId: number; firstVerifyAt: Date }[],
-    now: Date): Promise<number[]>;
+    now: Date, productId?: number): Promise<number[]>;
   wakeChecks(publicationTargetId: number, productVariantIds: readonly number[], now: Date): Promise<number[]>;
   deleteUncarriedChecks(publicationTargetId: number, range: { afterVariantId: number; throughVariantId: number | null },
     carriedVariantIds: readonly number[], now: Date): Promise<number[]>;
   listDeadLetterWakes(publicationTargetId: number, after: string | null, limit: number):
     Promise<{ productVariantIds: number[]; lastAt: string | null }>;
-  claimDue(publicationTargetId: number, input: { now: Date; leaseToken: string; leaseMs: number; limit: number }):
+  claimDue(publicationTargetId: number, input: { now: Date; leaseToken: string; leaseMs: number; limit: number;
+    productId?: number; productVariantIds?: readonly number[] }):
     Promise<StockLinkClaimedCheck[]>;
   readHeads(publicationTargetId: number): Promise<readonly StockLinkHeadRead[]>;
   readSelection(destination: StockLinkDestination, productId: number, productVariantIds: readonly number[]):
@@ -193,6 +195,8 @@ export interface DestinationRun<B extends StockLinkBinding = StockLinkPolicyBind
   readonly binding: B;
   readonly state: StockLinkDestinationState;
   readonly correlation: Readonly<Record<string, unknown>>;
+  /** Explicit command scope. Background runs omit it and retain normal discovery. */
+  readonly productScope?: { productId: number; productVariantIds: readonly number[] };
 }
 
 export type StepResult<T> = { readonly ok: true; readonly value: T }
@@ -221,9 +225,20 @@ export class StockLinkService {
 
   /** One tick. Never throws: every failure is classified, logged and handled here. */
   async tick(): Promise<StockLinkTickSummary> {
+    return (await this.runTick()).summary;
+  }
+
+  /** Uses the same policies, leases, fences and budgets as the background engine.
+   * A manual product request never advances global cursors or claims another product. */
+  async checkProduct(input: ProductSyncLinkScope): Promise<{ summary: StockLinkTickSummary; skippedTargets: number[] }> {
+    return this.runTick(productSyncLinkScopeSchema.parse(input));
+  }
+
+  private async runTick(scope?: ProductSyncLinkScope): Promise<{ summary: StockLinkTickSummary; skippedTargets: number[] }> {
     const tick = new TickRun(this.deps.monotonicNow, this.deadline);
+    const skippedTargets: number[] = [];
     try {
-      await this.run(tick);
+      await this.run(tick, scope, skippedTargets);
     } catch (error) {
       // A failure no step routed (a bug): one ERROR, the tick ends; the next tick starts afresh.
       const failure = classifyStockLinkFailure(error);
@@ -238,7 +253,7 @@ export class StockLinkService {
       provider_calls: s.providerCalls, observations: s.observations, lookups: s.lookups, applies: s.applies, links: s.links,
       relinks: s.relinks, retires: s.retires, flags: s.flags, fence_hold_ms_total: s.fenceHoldMsTotal,
       fence_hold_ms_max: s.fenceHoldMsMax, elapsed_ms: s.elapsedMs });
-    return { ...s };
+    return { summary: { ...s }, skippedTargets };
   }
 
   /** A failure of the runner around the tick (its lock pool, the server), handed over by the runner. */
@@ -267,7 +282,7 @@ export class StockLinkService {
     }
   }
 
-  private async run(tick: TickRun): Promise<void> {
+  private async run(tick: TickRun, scope?: ProductSyncLinkScope, skippedTargets: number[] = []): Promise<void> {
     const authority = await this.step(() => this.deps.store.readAuthority());
     if (!authority.ok) return this.tickLevelFailure(tick, authority);
     if (authority.value === "legacy") {
@@ -281,9 +296,11 @@ export class StockLinkService {
     // Every supported destination beats first, so a long tick never leaves a later one looking stalled (TST-9).
     const beaten: { target: StockLinkTargetRow; binding: StockLinkBinding; state: StockLinkDestinationState }[] = [];
     for (const target of targets.value) {
+      if (scope && !scope.targets.some(selected => selected.publicationTargetId === target.publicationTargetId)) continue;
       const binding = target.destination === null ? null
         : this.deps.registry.resolve(target.destination.destinationKind, target.destination.providerKey);
       if (target.destination === null || binding === null) {
+        skippedTargets.push(target.publicationTargetId);
         this.log.debug(ACTION, { outcome: "skipped", reason: "no_policy", publication_target_id: target.publicationTargetId,
           destination_kind: target.destinationKind, provider_key: target.providerKey, actor: STOCK_LINK_ACTOR });
         continue;
@@ -301,12 +318,16 @@ export class StockLinkService {
     }
     for (const { target, binding, state } of beaten) {
       const destination = target.destination!;
+      const selected = scope?.targets.find(candidate => candidate.publicationTargetId === destination.publicationTargetId);
       const run: DestinationRun<StockLinkBinding> = { tick, destination, binding, state, correlation: {
         publication_target_id: destination.publicationTargetId, destination_kind: destination.destinationKind,
         provider_key: destination.providerKey, connection_id: destination.channelConnectionId ?? destination.dropshipStoreConnectionId,
-        actor: STOCK_LINK_ACTOR } };
+        actor: STOCK_LINK_ACTOR }, ...(selected && scope ? { productScope: { productId: scope.productId,
+          productVariantIds: selected.productVariantIds } } : {}) };
       const skip = skipReason(target, state, this.now(), tick);
       if (skip !== null) {
+        // Budget exhaustion is pending work, not a destination refusal.
+        if (skip !== "time_budget_used" && skip !== "paused") skippedTargets.push(target.publicationTargetId);
         this.log.debug(ACTION, { ...run.correlation, outcome: "skipped", reason: skip });
         continue;
       }
@@ -385,7 +406,7 @@ export class StockLinkService {
     if (run.tick.timeUp()) return "continue";
     const leaseToken = this.deps.newLeaseToken();
     const claimed = await this.step(() => store.claimDue(targetId, { now: this.now(), leaseToken, leaseMs: L.leaseMs,
-      limit: L.claimLimit }));
+      limit: L.claimLimit, ...run.productScope }));
     if (!claimed.ok) return this.failDestination(run, claimed, "claim");
     const claims = claimed.value;
     run.tick.summary.claimed += claims.length;
@@ -434,6 +455,13 @@ export class StockLinkService {
 
   /** §7.2 steps 2-3, database only. */
   private async discover(run: DestinationRun<StockLinkBinding>): Promise<void> {
+    // Acceptance inserted/woke these exact checks transactionally with its durable request.
+    if (run.productScope) {
+      const now = this.now();
+      await this.deps.store.insertMissingChecks(run.destination.publicationTargetId,
+        run.productScope.productVariantIds.map(productVariantId => ({ productVariantId, firstVerifyAt: now })), now, run.productScope.productId);
+      return;
+    }
     const { store, db, random } = this.deps;
     const { destination, state } = run;
     const source = run.binding.source;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InventoryProductSyncProgress, InventoryProductSyncReceipt, InventoryProductSyncReview } from "@shared/types/inventory-product-sync";
-import { productSyncProgress, reviewProductSync, syncProductInventory } from "../product-sync-api";
+import { productSyncProgress, reviewProductSync, syncProductInventory, startProductSyncWorkflow, readProductSyncWorkflow } from "../product-sync-api";
 import { productSyncState } from "../product-sync-presentation";
 
 const command = { productId: 20, idempotencyKey: "11111111-1111-4111-8111-111111111111", expectedReviewHash: "a".repeat(64) };
@@ -17,6 +17,22 @@ const respond = (body: unknown, status = 200) => vi.stubGlobal("fetch", vi.fn(as
 afterEach(() => vi.unstubAllGlobals());
 
 describe("product inventory sync transport and evidence", () => {
+  const workflow = { productId:20,idempotencyKey:command.idempotencyKey,requestedBy:"operator",requestedAt:receipt.requestedAt,
+    updatedAt:receipt.requestedAt,state:"checking_links",message:"Checking existing inventory links",review,delivery:null };
+  it("records only the product intent and key and recovers the same workflow with a GET", async () => {
+    const input={productId:20,idempotencyKey:command.idempotencyKey};
+    respond(workflow);
+    expect(await startProductSyncWorkflow(input,"operator")).toEqual(workflow);
+    expect(JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string)).toEqual(input);
+    expect(await readProductSyncWorkflow(input,"operator")).toEqual(workflow);
+    expect(vi.mocked(fetch).mock.calls[1][1]?.method).toBeUndefined();
+  });
+  it.each([{productId:21},{requestedBy:"someone-else"},{idempotencyKey:"22222222-2222-4222-8222-222222222222"},
+    {state:"queued",delivery:null}])("keeps inconsistent workflow evidence unconfirmed %j", async override => {
+    const input={productId:20,idempotencyKey:command.idempotencyKey};respond({...workflow,...override});
+    await expect(startProductSyncWorkflow(input,"operator")).rejects.toMatchObject({definitiveRejected:false});
+    await expect(readProductSyncWorkflow(input,"operator")).rejects.toMatchObject({definitiveRejected:false});
+  });
   it("sends only a product scope, reviewed hash and durable retry key", async () => {
     respond({ receipt, replayed: false });
     expect((await syncProductInventory(command, "operator")).receipt).toEqual(receipt);
