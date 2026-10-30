@@ -6,6 +6,8 @@
  * for the endpoints those owners call, and records every call in order.
  * Nothing here decides a quantity: it stores what it is sent.
  */
+import { XMLBuilder, XMLParser } from "fast-xml-parser";
+
 export interface FakeEbayCall {
   method: string;
   path: string;
@@ -31,6 +33,8 @@ export class FakeEbayInventory {
   readonly offers = new Map<string, FakeEbayOffer>();
   /** Inventory item groups (key -> group body with variantSKUs), for multi-variation listings. */
   readonly groups = new Map<string, Record<string, unknown>>();
+  /** Native listing classification, independent of the Inventory GET projection. */
+  readonly nativePackageTypes = new Map<string, string>();
   readonly calls: FakeEbayCall[] = [];
   /** Runs before a call is answered (after it is recorded); tests use it to interleave other work. */
   beforeRequest?: (call: FakeEbayCall) => Promise<void>;
@@ -42,7 +46,9 @@ export class FakeEbayInventory {
   fetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const parsed = new URL(String(url));
     const method = (init?.method ?? "GET").toUpperCase();
-    const body = typeof init?.body === "string" && init.body ? JSON.parse(init.body) as unknown : undefined;
+    const body = typeof init?.body === "string" && init.body
+      ? parsed.pathname === "/ws/api.dll" ? new XMLParser({ parseTagValue: false }).parse(init.body) as unknown : JSON.parse(init.body) as unknown
+      : undefined;
     const call = { method, path: `${parsed.pathname}${parsed.search}`, body };
     this.calls.push(call);
     if (this.beforeRequest) await this.beforeRequest(call);
@@ -79,10 +85,20 @@ export class FakeEbayInventory {
   }
 
   private nextOfferId(): string { this.offerSequence += 1; return `${this.prefix}-offer-${this.offerSequence}`; }
-  private nextListingId(): string { this.listingSequence += 1; return `${this.prefix}-listing-${this.listingSequence}`; }
+  // Trading GetItem accepts numeric item IDs, unlike the opaque REST offer IDs.
+  private nextListingId(): string { this.listingSequence += 1; return String(900000000000 + this.listingSequence); }
 
   private answer(method: string, url: URL, body: unknown): Response {
     const path = url.pathname;
+    if (path === "/ws/api.dll" && method === "POST") {
+      const listingId = (body as { GetItemRequest?: { ItemID?: string } }).GetItemRequest?.ItemID;
+      const members = [...this.offers.values()].filter(offer => offer.status === "PUBLISHED" && offer.listingId === listingId);
+      const nativeType = listingId ? this.nativePackageTypes.get(listingId) : undefined;
+      const document = members.length ? { Ack: "Success", Item: { ItemID: listingId, SKU: members[0]!.sku,
+        ...(members.length > 1 ? { Variations: { Variation: members.map(member => ({ SKU: member.sku })) } } : {}),
+        ...(nativeType ? { ShippingPackageDetails: { ShippingPackage: nativeType } } : {}) } } : { Ack: "Failure" };
+      return new Response(new XMLBuilder().build({ GetItemResponse: document }), { headers: { "Content-Type": "text/xml" } });
+    }
     const inventory = path.match(/^\/sell\/inventory\/v1\/inventory_item\/([^/]+)$/);
     if (inventory) {
       const sku = decodeURIComponent(inventory[1]!);

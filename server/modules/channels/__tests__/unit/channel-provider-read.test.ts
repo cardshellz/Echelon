@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { channelProviderReadDiagnosticSchema, providerReadDiagnosticFromError, providerReadShouldRetry } from "@shared/channel-provider-read";
+import { channelProviderReadDiagnosticSchema, providerReadDiagnosticFromError, providerReadShouldRetry, providerReadDetails } from "@shared/channel-provider-read";
 import { resolveEbayListingIssue, resolveEbayListingJobIssue } from "@shared/ebay-listing-issue";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import { ebayListingFailureDiagnostic } from "../../ebay-listing-failure-diagnostic";
 import { syncFailure } from "../../ebay-listing-sync.domain";
 import { ebayReadDiagnostic, ebayReadFailureKind } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-read-diagnostic";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
+import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
 
 const now = new Date("2026-10-21T12:00:00Z");
 const read = channelProviderReadDiagnosticSchema.parse({ provider: "ebay", resource: "offers", method: "GET", kind: "invalid_response",
@@ -14,6 +15,19 @@ const failure = (providerRead = read) => Object.assign(new Error("private provid
   code: "EBAY_REGISTRATION_PROVIDER_RESPONSE_INVALID", context: { providerRead, body: "private", headers: { authorization: "private" } },
 });
 describe("shared provider read failure policy and diagnostics", () => {
+  it("preserves HTTP read failures at their transport source without classifying writes as reads", () => {
+    const error = new EbayApiRequestError(500, "private provider body", "private provider body", "listing_resource");
+    expect(providerReadDiagnosticFromError(error)).toEqual({ provider: "ebay", resource: "listing_resource", method: "GET", kind: "unavailable", httpStatus: 500 });
+    expect(syncFailure(error, 1, now).state).toBe("recovering");
+    expect(JSON.stringify(ebayListingFailureDiagnostic(error))).not.toContain("private provider body");
+    expect(providerReadDiagnosticFromError(new EbayApiRequestError(500, "write failure", "private provider body"))).toBeUndefined();
+  });
+  it("retains the actual method of a read-only POST without admitting mutation methods", () => {
+    const diagnostic = channelProviderReadDiagnosticSchema.parse({ ...read, resource: "listing_package", method: "POST" });
+    expect(providerReadDetails(diagnostic)[0]).toEqual({ label: "Provider read", value: "ebay / listing_package (POST)" });
+    expect(syncFailure(failure(diagnostic), 1, now)).toMatchObject({ state: "recovering" });
+    expect(channelProviderReadDiagnosticSchema.safeParse({ ...read, method: "PUT" }).success).toBe(false);
+  });
   it("preserves only bounded safe evidence through a wrapped cause", () => {
     const wrapped = Object.assign(new Error("outer", { cause: failure() }), { code: "EBAY_SYNC_PREPARE_FAILED" });
     expect(ebayListingFailureDiagnostic(wrapped)).toEqual({ code: wrapped.code, context: { providerRead: read } });

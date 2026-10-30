@@ -5,7 +5,7 @@ const token = z.string().regex(/^[a-zA-Z0-9_.:-]{1,100}$/);
 export const channelProviderReadDiagnosticSchema = z.object({
   provider: token,
   resource: token,
-  method: z.literal("GET"),
+  method: z.enum(["GET", "POST"]),
   kind: z.enum(["unavailable", "invalid_response", "refused"]),
   httpStatus: z.number().int().min(100).max(599).optional(),
   requestId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,200}$/).optional(),
@@ -16,6 +16,12 @@ export const channelProviderReadDiagnosticSchema = z.object({
   issuesTruncated: z.boolean().optional(),
 }).strict();
 export type ChannelProviderReadDiagnostic = z.infer<typeof channelProviderReadDiagnosticSchema>;
+
+/** Transport status classification is shared by every channel adapter. */
+export function providerHttpReadFailureKind(status: number): ChannelProviderReadDiagnostic["kind"] {
+  if (!Number.isInteger(status) || status < 100 || status > 599) return "invalid_response";
+  return status === 408 || status === 429 || status >= 500 ? "unavailable" : "refused";
+}
 
 /** Restore a validated read diagnostic when a transport-neutral DTO crosses
  * back into an exception path. Error translations must retain this as cause. */
@@ -31,7 +37,8 @@ export class ChannelProviderReadError extends Error {
 // Repeated schema failures may require an adapter fix. Stop after a bounded
 // number of reads while retaining the failed job and all diagnostic evidence.
 export const INVALID_PROVIDER_READ_RETRY_LIMIT = 5;
-/** A failed GET never authorizes a write or clears an unresolved write receipt. */
+/** A failed read never authorizes a write or clears an unresolved write receipt.
+ * Some providers expose read-only RPCs, such as eBay GetItem, over POST. */
 export function providerReadShouldRetry(read: ChannelProviderReadDiagnostic, attempts: number): boolean {
   if (!Number.isSafeInteger(attempts) || attempts < 0) throw new Error("Invalid provider read attempt count.");
   return read.kind === "unavailable"
@@ -56,7 +63,7 @@ export function providerReadDiagnosticFromError(error: unknown): ChannelProvider
 export function providerReadDetails(read: ChannelProviderReadDiagnostic): Array<{label: string; value: string}> {
   const parsed = channelProviderReadDiagnosticSchema.parse(read);
   return [
-    { label: "Provider read", value: parsed.provider + " / " + parsed.resource + " (GET)" },
+    { label: "Provider read", value: parsed.provider + " / " + parsed.resource + " (" + parsed.method + ")" },
     ...(parsed.httpStatus ? [{ label: "HTTP status", value: String(parsed.httpStatus) }] : []),
     ...(parsed.requestId ? [{ label: "Provider request", value: parsed.requestId }] : []),
     ...(parsed.issues ?? []).slice(0, 20).map(issue => ({ label: "Rejected field", value: (issue.path || "(response)") + ": " + issue.code })),
