@@ -12,7 +12,7 @@ import {
   storedCustomerReturnQuoteResult,
   readStoredCustomerReturnQuoteResult,
 } from "../application/customer-return-label-quote";
-import { customerReturnProviderDimensions, customerReturnWarehouseAddressType } from "../application/customer-return-shipping-plan";
+import { customerReturnContactAddress, customerReturnProviderDimensions, customerReturnWarehouseAddressType } from "../application/customer-return-shipping-plan";
 import {
   returnLabelInputSchema,
   returnLabelOrderNumberSchema,
@@ -260,7 +260,7 @@ export class PostgresCustomerReturnLabelStore
         control?.paused === true || !current?.enabled ||
         current.warehouseId !== parcel.warehouse_snapshot.warehouseId ||
         customerReturnWarehouseAddressType(current.warehouseAddressType) !== customerReturnWarehouseAddressType(parcel.warehouse_snapshot.addressType) ||
-        !equalJson(current.destinationAddress, parcel.destination_address)
+        !equalJson(customerReturnContactAddress(current.destinationAddress, current), parcel.destination_address)
       )
         throw new CustomerReturnIntakeError(
           "RETURN_LABEL_SETTINGS_CHANGED",

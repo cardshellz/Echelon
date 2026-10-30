@@ -62,6 +62,25 @@ function draft() {
 }
 
 describe("return label settings draft", () => {
+  it.each([undefined, null])("preserves legacy guardrails %s during a contact-only save", parcelGuardrails => {
+    const current = state();
+    current.settings = {
+      version: 1, policyId: 1, enabled: true, warehouseId: 1,
+      selectionMode: "fixed_service", carrierRules: [], carrierId: "se-usps", serviceCode: "ground",
+      contactName: "Returns", contactPhone: null, destinationAddress: current.warehouses[0].address!,
+      ...(parcelGuardrails === undefined ? {} : { parcelGuardrails }),
+    };
+    const before = structuredClone(current.settings);
+    const value = createReturnLabelSettingsDraft(current);
+    value.contactPhone = "512-555-0100";
+    const parsed = parseReturnLabelSettingsDraft(value, 1);
+    if (!parsed.success) throw parsed.error;
+    expect(parsed.data.contactPhone).toBe("512-555-0100");
+    expect(parsed.data.parcelGuardrails).toBe(parcelGuardrails);
+    expect(Object.hasOwn(parsed.data, "parcelGuardrails")).toBe(parcelGuardrails !== undefined);
+    expect(parsed.data).not.toHaveProperty("warehouseAddressType");
+    expect(current.settings).toEqual(before);
+  });
   it("defaults the warehouse to commercial and saves the administrator's residential override", () => {
     const value = draft();
     expect(value.warehouseAddressType).toBe("commercial");

@@ -33,7 +33,7 @@ export interface ReturnLabelSettingsDraft {
   contactName: string;
   contactPhone: string;
   enabled: boolean;
-  parcelGuardrails?: ReturnShippingGuardrailsDraft;
+  parcelGuardrails?: ReturnShippingGuardrailsDraft | null;
 }
 
 export type ReturnLabelSettingsField =
@@ -62,7 +62,7 @@ export function createReturnLabelSettingsDraft(
   ]);
   return {
     warehouseId: settings ? String(settings.warehouseId) : "",
-    warehouseAddressType: settings?.warehouseAddressType ?? DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE,
+    warehouseAddressType: settings ? settings.warehouseAddressType : DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE,
     selectionMode: settings?.selectionMode ?? "cheapest_eligible",
     carrierId: settings?.carrierId ?? "",
     serviceCode: settings?.serviceCode ?? "",
@@ -87,7 +87,11 @@ export function createReturnLabelSettingsDraft(
     contactName: settings?.contactName ?? "",
     contactPhone: settings?.contactPhone ?? "",
     enabled: settings?.enabled ?? false,
-    parcelGuardrails: createReturnShippingGuardrailsDraft(settings?.parcelGuardrails),
+    // Contact-only edits must not opt an existing policy into new restrictions.
+    // Default guardrails belong to new shipping configurations or explicit opt-in.
+    parcelGuardrails: settings
+      ? settings.parcelGuardrails == null ? settings.parcelGuardrails : createReturnShippingGuardrailsDraft(settings.parcelGuardrails)
+      : createReturnShippingGuardrailsDraft(),
   };
 }
 
@@ -103,7 +107,7 @@ export function parseReturnLabelSettingsDraft(
     expectedVersion,
     enabled: draft.enabled,
     warehouseId: Number(draft.warehouseId),
-    warehouseAddressType: draft.warehouseAddressType ?? DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE,
+    ...(draft.warehouseAddressType === undefined ? {} : { warehouseAddressType: draft.warehouseAddressType }),
     selectionMode: draft.selectionMode,
     carrierId: automatic ? null : draft.carrierId,
     serviceCode: automatic ? null : draft.serviceCode,
@@ -118,7 +122,7 @@ export function parseReturnLabelSettingsDraft(
       : [],
     contactName: draft.contactName,
     contactPhone: draft.contactPhone.trim() || null,
-    parcelGuardrails: guardrails?.success ? guardrails.data : null,
+    ...(draft.parcelGuardrails === undefined ? {} : { parcelGuardrails: guardrails?.success ? guardrails.data : null }),
   });
 }
 
