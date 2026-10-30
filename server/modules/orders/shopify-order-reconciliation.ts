@@ -1,3 +1,6 @@
+import { loadShopifyReadinessCandidates } from "../oms/infrastructure/shopify-readiness-candidates.repository";
+import { queueOmsPaidEventReplay } from "../oms/shopify-paid-event-replay";
+import { automaticPaidReplayEvidenceSchema } from "../oms/domain/shopify-paid-replay-policy";
 import { parseDecimalCents, sumCents } from "@shared/money-read";
 /**
  * Shopify Order Reconciliation Job
@@ -109,6 +112,7 @@ interface ReconciliationResult {
   readinessChecked: number;
   readinessAdvanced: number;
   wmsSyncRequested: number;
+  paidReplaysQueued: number;
   details: string[];
 }
 
@@ -121,6 +125,7 @@ const READINESS_RECOVERY_CURSOR_KEY = "shopify_reconciliation_readiness_cursor";
 const RECONCILIATION_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const SHOPIFY_CHANNEL_ID = 36;
 const SHOPIFY_API_VERSION = "2024-10";
+const SHOPIFY_REQUEST_TIMEOUT_MS = 15_000;
 const RATE_LIMIT_DELAY_MS = 550; // ~2 calls/sec
 const MAX_RECONCILIATION_PAGES = envPositiveInteger(
   "SHOPIFY_RECONCILIATION_MAX_PAGES",
@@ -170,6 +175,7 @@ async function shopifyGet(
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     const response = await fetch(url, {
+      signal: AbortSignal.timeout(SHOPIFY_REQUEST_TIMEOUT_MS),
       headers: {
         "X-Shopify-Access-Token": creds.accessToken,
         "Content-Type": "application/json",
@@ -257,6 +263,7 @@ async function fetchOrdersFromShopify(since: Date): Promise<ShopifyApiOrder[]> {
 interface DelayedReadinessCandidate {
   omsOrderId: number;
   shopifyOrderId: string;
+  needsPaidReplay: boolean;
 }
 
 function normalizeShopifyNumericOrderId(value: string | number): string {
@@ -271,7 +278,7 @@ function normalizeShopifyNumericOrderId(value: string | number): string {
 
 async function fetchShopifyOrderById(
   shopifyOrderId: string | number,
-): Promise<ShopifyApiOrder> {
+): Promise<{ order: ShopifyApiOrder; shopDomain: string }> {
   const creds = await getShopifyCredentials();
   const numericOrderId = normalizeShopifyNumericOrderId(shopifyOrderId);
   const { data } = await shopifyGet(creds, `/orders/${numericOrderId}.json`);
@@ -280,43 +287,18 @@ async function fetchShopifyOrderById(
       `Shopify order ${numericOrderId} was not returned by the API`,
     );
   }
-  return data.order as ShopifyApiOrder;
+  if (normalizeShopifyNumericOrderId(data.order.id) !== numericOrderId) {
+    throw new Error("Shopify returned a different order during readiness recovery");
+  }
+  return { order: data.order as ShopifyApiOrder, shopDomain: creds.shopDomain };
 }
 
 async function loadDelayedReadinessCandidates(
   afterOmsOrderId: number,
 ): Promise<DelayedReadinessCandidate[]> {
-  const candidates = await db.execute<{
-    oms_order_id: number;
-    shopify_order_id: string;
-  }>(sql`
-    SELECT
-      oo.id AS oms_order_id,
-      split_part(oo.external_order_id, '/', -1) AS shopify_order_id
-    FROM oms.oms_orders oo
-    JOIN oms.oms_order_lines ol ON ol.order_id = oo.id
-    WHERE oo.channel_id = ${SHOPIFY_CHANNEL_ID}
-      AND oo.status NOT IN ('cancelled', 'refunded', 'shipped')
-      AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
-      AND COALESCE(oo.financial_status, '') IN ('paid', 'partially_paid', 'partially_refunded', 'refunded')
-      AND ol.requires_shipping IS DISTINCT FROM false
-      AND (
-        COALESCE(ol.paid_quantity, 0) > COALESCE(ol.authority_fulfillable_quantity, 0)
-        OR COALESCE(ol.authority_fulfillable_quantity, 0) >
-           COALESCE(ol.wms_materialized_quantity, 0)
-        OR ol.channel_quantity_updated_at IS NULL
-      )
-    GROUP BY oo.id, oo.external_order_id
-    ORDER BY
-      CASE WHEN oo.id > ${afterOmsOrderId} THEN 0 ELSE 1 END ASC,
-      oo.id ASC
-    LIMIT ${READINESS_RECOVERY_LIMIT}
-  `);
-
-  return candidates.rows.map((row) => ({
-    omsOrderId: Number(row.oms_order_id),
-    shopifyOrderId: normalizeShopifyNumericOrderId(row.shopify_order_id),
-  }));
+  return loadShopifyReadinessCandidates(db, {
+    channelId: SHOPIFY_CHANNEL_ID, afterOmsOrderId, limit: READINESS_RECOVERY_LIMIT,
+  });
 }
 
 function buildReadinessSourceEventId(order: ShopifyApiOrder): string {
@@ -541,6 +523,7 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     readinessChecked: 0,
     readinessAdvanced: 0,
     wmsSyncRequested: 0,
+    paidReplaysQueued: 0,
     details: [],
   };
 
@@ -653,15 +636,38 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     const delayedCandidates =
       await loadDelayedReadinessCandidates(readinessCursor);
     for (const candidate of delayedCandidates) {
-      if (recentlyCheckedOmsOrderIds.has(candidate.omsOrderId)) {
-        continue;
-      }
-
+      // Paid recovery still needs a fresh per-order observation after the poll.
+      if (!candidate.needsPaidReplay && recentlyCheckedOmsOrderIds.has(candidate.omsOrderId)) continue;
       try {
-        const order = await fetchShopifyOrderById(candidate.shopifyOrderId);
+        const { order, shopDomain } = await fetchShopifyOrderById(candidate.shopifyOrderId);
         if (order.cancelled_at) {
           result.skipped++;
           continue;
+        }
+        if (candidate.needsPaidReplay) {
+          resolveProviderCountryCode(
+            order.shipping_address?.country_code, order.shipping_address?.country,
+          );
+          // Readiness observations cannot grant the first payment authority.
+          // Replay the original receipt only after checking current Shopify truth.
+          const evidence = automaticPaidReplayEvidenceSchema.safeParse({
+            channelId: SHOPIFY_CHANNEL_ID, shopDomain, order,
+          });
+          if (!evidence.success) {
+            throw new Error("Shopify paid recovery received incomplete order evidence");
+          }
+          const replay = await queueOmsPaidEventReplay(db, {
+            omsOrderId: candidate.omsOrderId,
+            operator: "scheduled_shopify_reconciliation",
+          }, evidence.data);
+          if (replay.changed) result.paidReplaysQueued++;
+          if (replay.reason) {
+            console.warn(JSON.stringify({
+              event: "shopify_paid_recovery_requires_review",
+              omsOrderId: candidate.omsOrderId,
+              reason: replay.reason,
+            }));
+          }
         }
         await reconcileReadiness(order, candidate.omsOrderId);
       } catch (err: any) {
@@ -690,11 +696,11 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     }
 
     const durationMs = Date.now() - startTime;
-    if (result.reconciled > 0 || result.readinessAdvanced > 0) {
+    if (result.reconciled > 0 || result.readinessAdvanced > 0 || result.paidReplaysQueued > 0) {
       console.log(
         `[RECONCILE] Imported ${result.reconciled} order(s), advanced ` +
           `${result.readinessAdvanced} readiness unit(s), requested ` +
-          `${result.wmsSyncRequested} WMS sync(s) in ${durationMs}ms`,
+          `${result.wmsSyncRequested} WMS sync(s), queued ${result.paidReplaysQueued} paid replay(s) in ${durationMs}ms`,
       );
     }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { PgDialect } from "drizzle-orm/pg-core";
 import {
   autoCloseResolvedDeadFulfillmentRetries,
   collectOmsFlowReconciliationIssues,
@@ -483,7 +484,7 @@ describe("oms-flow-reconciliation.service", () => {
     warn.mockRestore();
   });
 
-  it("leaves replay-after-fix orders for operators while auto-remediating missing shipments", async () => {
+  it("leaves paid recovery to the Shopify sweep while auto-remediating missing shipments", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const inserts: unknown[] = [];
     const { execute } = checkDb({
@@ -690,11 +691,12 @@ describe("oms-flow-reconciliation.service", () => {
     });
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(tx.execute).toHaveBeenCalledTimes(5);
-    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("hashtext('oms_paid_without_wms_replay')");
-    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("wi.topic = 'orders/paid'");
-    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("SELECT wi.provider");
-    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("wi.payload");
-    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("source_inbox_id");
+    const statements = tx.execute.mock.calls.map(([query]) => new PgDialect().sqlToQuery(query));
+    expect(statements[0].sql).toContain("pg_advisory_xact_lock");
+    expect(statements[1].sql).toContain("wi.topic = 'orders/paid'");
+    expect(statements[3].sql).toContain("SELECT wi.provider");
+    expect(statements[3].sql).toContain("wi.payload");
+    expect(statements[3].sql).toContain("source_inbox_id");
     expect(OMS_FLOW_RECONCILIATION_SRC).not.toContain("enqueueOmsWmsSyncRetry");
     expect(OMS_FLOW_RECONCILIATION_SRC).not.toContain("queued_oms_wms_sync");
   });
