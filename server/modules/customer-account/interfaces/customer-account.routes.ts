@@ -365,7 +365,7 @@ async function dispatch(
   if (!path.startsWith("/returns/")) throw notFound();
   const returns = await services.returns();
   const returnOrder =
-    /^\/returns\/orders\/([1-9][0-9]*)(?:\/(review|returns))?$/.exec(path);
+    /^\/returns\/orders\/([1-9][0-9]*)(?:\/(review|returns|label-requests))?$/.exec(path);
   if (returnOrder) {
     empty.parse(query);
     const omsOrderId = id.parse(returnOrder[1]);
@@ -374,12 +374,32 @@ async function dispatch(
       return returns.orders.review(omsOrderId, body);
     if (!read && returnOrder[2] === "returns")
       return returns.operations.submit(omsOrderId, body);
+    if (read && returnOrder[2] === "label-requests")
+      return returns.operations.orderWorkflow(omsOrderId);
+    if (!read && returnOrder[2] === "label-requests")
+      return returns.operations.queueLabels(omsOrderId, body);
   }
   if (path === "/returns/returns" && read) {
     const parsed = z.object({ before: id.optional() }).strict().parse(query);
     return returns.operations.listReturns(
       parsed.before ? { beforeAuthorizationId: parsed.before } : {},
     );
+  }
+  const workflow = /^\/returns\/label-requests\/([a-f0-9-]+)(?:\/(retry))?$/.exec(path);
+  if (workflow) {
+    empty.parse(query);
+    const key = z.string().uuid().parse(workflow[1]);
+    if (read && !workflow[2]) return returns.operations.workflowStatus(key);
+    if (!read && workflow[2]) { empty.parse(body); return returns.operations.retryWorkflow(key); }
+  }
+  const existingLabels = /^\/returns\/returns\/([1-9][0-9]*)\/label-requests$/.exec(path);
+  if (existingLabels && read) {
+    empty.parse(query);
+    return returns.operations.authorizationWorkflow(id.parse(existingLabels[1]));
+  }
+  if (existingLabels && !read) {
+    empty.parse(query); empty.parse(body);
+    return returns.operations.queueExistingLabels(id.parse(existingLabels[1]));
   }
   const command = /^\/returns\/commands\/([a-f0-9-]+)(?:\/(resume))?$/.exec(
     path,

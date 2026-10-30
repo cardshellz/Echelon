@@ -1,3 +1,5 @@
+import { createCustomerReturnWorkflowWorker, startCustomerReturnWorkflowScheduler } from "./modules/returns/infrastructure/customer-return-workflow.composition";
+import type { ReturnWorkflowReport } from "./modules/returns/application/customer-return-workflow.worker";
 import { createChannelSyncBatchService } from "./channel-sync-batch.composition";
 import { registerChannelSyncBatchRoutes } from "./modules/marketplace-listings/infrastructure/channel-sync-batch.routes";
 import { createListingIntentPropagationService } from "./listing-intent-propagation.composition";
@@ -761,6 +763,14 @@ function startEchelonSyncScheduler(
       else logger.warn("shipping_package_history_start", { outcome: "unconfigured", error_code: "PACKAGE_HISTORY_PROVIDER_NOT_CONFIGURED" });
     } catch {
       logger.error("shipping_package_history_start", { outcome: "failed", error_code: "PACKAGE_HISTORY_CONFIGURATION_INVALID" });
+    }
+    try {
+      const reportReturns: ReturnWorkflowReport = event =>
+        console.info(JSON.stringify(event));
+      const returnWorkflow = await createCustomerReturnWorkflowWorker(reportReturns);
+      httpServer.once("close", startCustomerReturnWorkflowScheduler(returnWorkflow, reportReturns));
+    } catch {
+      logger.error("customer_return_workflow_start", { outcome: "failed", error_code: "RETURN_WORKFLOW_CONFIGURATION_INVALID" });
     }
     const reportActions: OrderActionProjectionReport = ({ action, code, ...event }) => {
       const write = event.outcome === "failed" ? logger.error : logger.info;

@@ -250,7 +250,7 @@ export class CustomerReturnSubmissionService {
             latest.errorCode ?? code,
           );
       }
-      throw processing();
+      throw processing({ code: event.code, stage: event.stage });
     }
   }
   private inspectCanonical(
@@ -298,12 +298,13 @@ function commandConflict(): CustomerReturnIntakeError {
     409,
   );
 }
-export function processing(): CustomerReturnIntakeError {
-  return new CustomerReturnIntakeError(
-    "RETURN_LABEL_SUBMISSION_PROCESSING",
-    "Your return is being checked. Check its status before starting another request.",
-    409,
-  );
+export class CustomerReturnSubmissionProcessingError extends CustomerReturnIntakeError {
+  constructor(readonly failure?: { code: string; stage: ReturnSubmissionStage }) {
+    super("RETURN_LABEL_SUBMISSION_PROCESSING", "Your label request is saved. Please try again to continue.", 409);
+  }
+}
+export function processing(failure?: { code: string; stage: ReturnSubmissionStage }): CustomerReturnIntakeError {
+  return new CustomerReturnSubmissionProcessingError(failure);
 }
 export function submissionNotFound(): CustomerReturnIntakeError {
   return new CustomerReturnIntakeError(

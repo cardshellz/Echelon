@@ -64,6 +64,7 @@ export interface CustomerReturnLabelStore {
     actor: string,
     now: Date,
     quoteDecisionId?: number,
+    retryRejected?: boolean,
   ): Promise<{ id: number; input: ReturnLabelInput } | null>;
   finish(
     attemptId: number,
@@ -114,17 +115,21 @@ export class CustomerReturnLabelsService {
     );
   }
 
-  async progress(
-    channelId: number,
-    authorizationId: number,
-    actor: string,
-  ): Promise<CustomerReturnLabelStatus> {
+  async progress(channelId: number, authorizationId: number, actor: string): Promise<CustomerReturnLabelStatus> {
+    return this.advance(channelId, authorizationId, actor, false);
+  }
+  /** A new explicit customer retry may repeat only a definitively rejected
+   * purchase. Unknown/executing/successful attempts always retain recovery. */
+  async retryRejected(channelId: number, authorizationId: number, actor: string): Promise<CustomerReturnLabelStatus> {
+    return this.advance(channelId, authorizationId, actor, true);
+  }
+  private async advance(channelId: number, authorizationId: number, actor: string, retryRejected: boolean): Promise<CustomerReturnLabelStatus> {
     await this.dependencies.authorizeChannel(channelId);
     const stored = await this.dependencies.store.read(
       channelId,
       authorizationId,
     );
-    const pending = stored.parcels.find((parcel) => parcel.attempt === null);
+    const pending = stored.parcels.find(parcel => parcel.attempt === null || (retryRejected && parcel.attempt.status === "failed"));
     const recovery = stored.parcels.find(
       (parcel) => parcel.attempt && this.needsRecovery(parcel.attempt),
     );
@@ -140,9 +145,11 @@ export class CustomerReturnLabelsService {
       await this.dependencies.requirePurchaseConfiguration(channelId, authorizationId);
     let quoteDecisionId: number | undefined;
     if (settings.parcelGuardrails != null) {
-      // Verify every unpurchased box before buying any of them. A cost or size
-      // failure in a later box must not purchase the first box of an invalid plan.
-      const otherPending = stored.parcels.filter(row => row.attempt === null && row.id !== parcel.id);
+      // Verify the complete immutable box plan before the first purchase. Later
+      // purchases refresh their own quote, avoiding quadratic provider requests.
+      const alreadyPurchased = stored.parcels.some(row => row.attempt?.status === "succeeded");
+      const otherPending = alreadyPurchased ? [] : stored.parcels.filter(row => row.id !== parcel.id
+        && (row.attempt === null || (retryRejected && row.attempt.status === "failed")));
       // Quote the purchase target last so a large plan does not age its decision
       // while other boxes are being checked. The repository still fences the TTL.
       for (const pendingParcel of [...otherPending, parcel]) {
@@ -157,6 +164,7 @@ export class CustomerReturnLabelsService {
       actor,
       this.dependencies.now(),
       quoteDecisionId,
+      retryRejected,
     );
     if (attempt === null) return this.status(channelId, authorizationId);
     let outcome: Parameters<CustomerReturnLabelStore["finish"]>[1];

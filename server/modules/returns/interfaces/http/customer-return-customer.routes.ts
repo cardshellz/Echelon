@@ -49,6 +49,24 @@ export function registerCustomerReturnCustomerRoutes(app: Express, dependencies:
   app.post(`${CUSTOMER_RETURNS_API}/orders/:omsOrderId/returns`, handle(true, (req, value) => {
     noQuery(req); return value.operations.submit(id(req.params.omsOrderId), req.body);
   }));
+  app.get(`${CUSTOMER_RETURNS_API}/orders/:omsOrderId/label-requests`, handle(false, (req, value) => {
+    noQuery(req); return value.operations.orderWorkflow(id(req.params.omsOrderId));
+  }));
+  app.post(`${CUSTOMER_RETURNS_API}/orders/:omsOrderId/label-requests`, handle(true, (req, value) => {
+    noQuery(req); return value.operations.queueLabels(id(req.params.omsOrderId), req.body);
+  }));
+  app.get(`${CUSTOMER_RETURNS_API}/label-requests/:key`, handle(false, (req, value) => {
+    noQuery(req); return value.operations.workflowStatus(req.params.key);
+  }));
+  app.post(`${CUSTOMER_RETURNS_API}/label-requests/:key/retry`, handle(true, (req, value) => {
+    emptyCommand(req); return value.operations.retryWorkflow(req.params.key);
+  }));
+  app.get(`${CUSTOMER_RETURNS_API}/returns/:authorizationId/label-requests`, handle(false, (req, value) => {
+    noQuery(req); return value.operations.authorizationWorkflow(id(req.params.authorizationId));
+  }));
+  app.post(`${CUSTOMER_RETURNS_API}/returns/:authorizationId/label-requests`, handle(true, (req, value) => {
+    emptyCommand(req); return value.operations.queueExistingLabels(id(req.params.authorizationId));
+  }));
   app.get(`${CUSTOMER_RETURNS_API}/returns`, handle(false, (req, value) => {
     const before = cursor(req.query);
     return value.operations.listReturns(before === undefined ? {} : { beforeAuthorizationId: id(before) });

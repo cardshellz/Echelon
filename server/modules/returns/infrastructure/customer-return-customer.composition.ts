@@ -1,3 +1,4 @@
+import { PostgresCustomerReturnWorkflowStore } from "./customer-return-workflow.repository";
 import type { CustomerReturnCustomerSession } from "../application/customer-return-customer-auth.service";
 import { CustomerReturnOrderAccessService } from "../application/customer-return-order-access.service";
 import { PostgresCustomerReturnOrderAccessRepository } from "./customer-return-order-access.repository";
@@ -28,7 +29,7 @@ export async function createCustomerReturnCustomerServices(session: CustomerRetu
       shippingVersion: () => settings.customerVersion(principal.channelId) }),
     operations: new CustomerReturnCustomerOperationsService({ principal, orderAccess: access,
       ownership: new PostgresCustomerReturnCustomerOwnershipReader(pool),
-      submissions: internal.submissions, labels: internal.labels }),
+      submissions: internal.submissions, labels: internal.labels, workflows: new PostgresCustomerReturnWorkflowStore(pool), now: () => new Date() }),
     download: internal.download,
   };
 }

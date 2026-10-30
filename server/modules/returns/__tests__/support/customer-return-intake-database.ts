@@ -211,4 +211,5 @@ export async function createIntakeActionProjectionSchema(pool: Pool): Promise<vo
   }
   await pool.query(readFileSync("migrations/900000033000019220001_customer_order_action_projection.sql", "utf8"));
   await pool.query(readFileSync("migrations/900000042000019600001_order_action_trigger_variable_qualification.sql", "utf8"));
+  await pool.query(readFileSync("migrations/900000043000019600002_customer_return_workflow.sql", "utf8"));
 }
