@@ -18,9 +18,9 @@ const nativeResponseSchema = z.object({ GetItemResponse: z.object({
   Ack: z.enum(["Success", "Warning", "Failure", "PartialFailure"]),
   Errors: z.union([z.object({ ErrorClassification: z.string().optional(), SeverityCode: z.string().optional() }).passthrough(),
     z.array(z.object({ ErrorClassification: z.string().optional(), SeverityCode: z.string().optional() }).passthrough())]).optional(),
-  Item: z.object({ ItemID: text, SKU: text.optional(), Variations: z.object({
+  Item: z.object({ ItemID: text, SKU: text.optional(), Variations: z.preprocess(value => value === "" ? undefined : value, z.object({
     Variation: z.union([z.object({ SKU: text }).passthrough(), z.array(z.object({ SKU: text }).passthrough())]),
-  }).passthrough().optional(), ShippingPackageDetails: optionalShippingPackageSchema,
+  }).passthrough().optional()), ShippingPackageDetails: optionalShippingPackageSchema,
   ShippingDetails: z.preprocess(value => value === "" ? undefined : value,
     z.object({ CalculatedShippingRate: optionalShippingPackageSchema }).passthrough().optional()),
   }).passthrough().optional(),
@@ -94,8 +94,10 @@ export async function readEbayNativePackage(input: {
     throw new EbayListingSyncError("EBAY_PACKAGE_READ_UNAVAILABLE", "eBay's package response did not finish. The saved Sync will retry.",
       { cause: new ChannelProviderReadError({ provider: "ebay", resource: "listing_package", method: "POST", kind: "unavailable" }, { cause }) }); }
   if (/<!DOCTYPE|<!ENTITY/i.test(raw) || XMLValidator.validate(raw) !== true) throw invalid();
+  // DTD/entity declarations are rejected above. Decode character references so
+  // a legitimate SKU is compared with its exact JSON identity.
   const parsedXml = nativeResponseSchema.safeParse(new XMLParser({ parseTagValue: false, ignoreAttributes: true,
-    removeNSPrefix: true, processEntities: false }).parse(raw));
+    removeNSPrefix: true, processEntities: true, htmlEntities: true }).parse(raw));
   if (!parsedXml.success) throw invalid();
   const result = parsedXml.data.GetItemResponse, item = result.Item;
   const errors = result.Errors ? (Array.isArray(result.Errors) ? result.Errors : [result.Errors]) : [];

@@ -21,6 +21,20 @@ describe("eBay native package read and preservation", () => {
   it("does not invent a classification when the exact listing has none", async () => {
     expect(await readEbayNativePackage(input(vi.fn(async () => new Response(xml("")))))).toEqual({ listingId: "298000000001", packageType: null });
   });
+  it.each(["BOX&amp;P5", "BOX&#38;P5", "BOX&#x26;P5"])("binds the XML-encoded SKU %s to its exact JSON identity", async encodedSku => {
+    const request = vi.fn(async () => new Response(xml("PackageThickEnvelope", encodedSku)));
+    expect(await readEbayNativePackage({ ...input(request), sku: "BOX&P5", offers: [{ ...offer, sku: "BOX&P5" }] }))
+      .toEqual({ listingId: "298000000001", packageType: "PACKAGE_THICK_ENVELOPE" });
+  });
+  it("accepts an empty optional variation container only when the root SKU binds exactly", async () => {
+    const request = vi.fn(async () => new Response(xml().replace("<Item>", "<Item><Variations/>")));
+    expect(await readEbayNativePackage(input(request))).toEqual({ listingId: "298000000001", packageType: "PACKAGE_THICK_ENVELOPE" });
+  });
+  it("does not recursively decode a literal entity-looking SKU into another identity", async () => {
+    const request = vi.fn(async () => new Response(xml("PackageThickEnvelope", "BOX&amp;amp;P5")));
+    expect(await readEbayNativePackage({ ...input(request), sku: "BOX&amp;P5", offers: [{ ...offer, sku: "BOX&amp;P5" }] }))
+      .toEqual({ listingId: "298000000001", packageType: "PACKAGE_THICK_ENVELOPE" });
+  });
   it("accepts empty optional XML parents and binds a variation SKU rather than its parent SKU", async () => {
     const body = `<GetItemResponse><Ack>Success</Ack><Item><ItemID>298000000001</ItemID><ShippingDetails/><SKU>BOX</SKU>
       <Variations><Variation><SKU>BOX-P5</SKU></Variation><Variation><SKU>BOX-C25</SKU></Variation></Variations></Item></GetItemResponse>`;
