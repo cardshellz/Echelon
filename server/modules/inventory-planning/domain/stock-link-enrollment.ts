@@ -19,7 +19,8 @@ import { STOCK_LINK_BUSY_CODES, STOCK_LINK_TRANSIENT_CODES, type StockLinkFailur
  * compares, ebay-inventory-quantity.ts):
  * 1. already linked → kept (eBay links are never moved here: a relist keeps the SKU, §1 rule 5; §3.5 out of scope);
  * 2. no listing, a listing not in managed live mode (or without a recorded offer), an ended listing, or a size the
- *    selection does not carry (read_only / none) → not the engine's: the row is removed;
+ *    selection does not carry (read_only / none) → uncarried; background cleanup removes the row where applicable,
+ *    while an explicit product check retains its negative result for the requesting workflow;
  * 3. listing under change (open push job, processing publish run incl. an unexpanded chunk, open end request) → wait;
  * 4. blank SKU → F1; another carried size of the store has the same SKU → F4 (never linked by guess);
  * 5. selection with blockers → wait;

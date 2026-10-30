@@ -131,11 +131,14 @@ export async function runStockLinkEnrollment(context: StockLinkEnrollmentContext
       continue;
     }
     if (decision.kind === "uncarried") {
-      // Channels PR4: a channel owner's listing whose size its selection does not carry stays a waiting row (backoff to
-      // 24 h). Removing it would make discovery, which lists every feed or listing, add it back due now every tick.
-      if (run.binding.writer !== undefined && size.listing !== null) {
+      // Explicit product requests need a durable negative result, including when
+      // no listing exists. Deleting it would look like an unprocessed check to
+      // the workflow and repeat discovery until its deadline. Background cleanup
+      // retains its existing policy for destinations without a carried listing.
+      if (run.productScope !== undefined || run.binding.writer !== undefined && size.listing !== null) {
         results.set(size.productVariantId, { kind: "wait", code: STOCK_LINK_ENROLLMENT_CODES.notCarried,
-          message: `NOT_CARRIED: selection ${size.selection?.action ?? "none"}` });
+          message: run.productScope !== undefined ? "This item has no eligible listing selected for inventory at this destination."
+            : `NOT_CARRIED: selection ${size.selection?.action ?? "none"}` });
       } else uncarried.push(size.productVariantId);
       continue;
     }

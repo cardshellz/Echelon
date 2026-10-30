@@ -63,6 +63,11 @@ for registration before reporting any destinations still blocked. Failed or
 uncertain publication can be recovered with **Retry same sync**, which retains its
 original publication command instead of creating another revision.
 
+An explicit product check records a definitive exclusion when a provider's owner
+finds no eligible listing or the current selection does not carry the item. That
+result settles the destination promptly; it is not treated as an unfinished
+provider lookup. Ordinary background cleanup keeps its existing behavior.
+
 ## Compatibility and permissions
 
 The previous Shopify-only action is replaced at normal entry points. Its API and

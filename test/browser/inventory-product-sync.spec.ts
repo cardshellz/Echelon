@@ -8,8 +8,8 @@ async function setup(page: Page, options: { surface?: "catalog" | "channel" | "p
   const state = { checkingLinks: false, allMissing: false, requests: [] as InventoryProductSyncRequest[], receipt: null as InventoryProductSyncReceipt | null,
     loseResponse: false, progressUnavailable: false, verified: false, failed: false, wrongProgress: false, wrongActor: false,
     stale: false, paused: false, reviewUnavailable: false, stockLinkIssue: false, delayResponse: false, releaseResponse: null as (() => void) | null,
-    hash: "a".repeat(64), errors: [] as string[] };
-  const mappingBlockers = () => ["INVENTORY_MAPPING_MISSING: BINDER-P1 has no active inventory link.",
+    notCarried: false, hash: "a".repeat(64), errors: [] as string[] };
+  const mappingBlockers = () => state.notCarried ? ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING", "STOCK_LINK_NOT_CARRIED"] : ["INVENTORY_MAPPING_MISSING: BINDER-P1 has no active inventory link.",
     ...(state.stockLinkIssue ? [SAVED_SHOPIFY_LINK_CHECK] : [])];
   const variants = [{ id: 51, sku: "BINDER-P1" }, { id: 52, sku: "BINDER-C5" }];
   const destinations = [
@@ -193,6 +193,19 @@ for(const mismatch of ["wrongProgress","wrongActor"] as const)test(`rejects ${mi
   await expect(page.getByText("Current status is unavailable. The original request is retained.",{exact:true})).toBeVisible();
   await expect(page.getByText(verified,{exact:true})).not.toBeVisible();expect(state.errors).toEqual([]);
 });
+test("explains a settled listing exclusion without asking for another ATP check", async ({ page }) => {
+  const state = await setup(page);
+  state.notCarried = true;
+  state.verified = true;
+  await openReview(page);
+  await page.getByRole("button", { name: "Sync eligible inventory", exact: true }).click();
+  await expect(page.getByText(verified, { exact: true })).toBeVisible();
+  await expect(page.getByText("This item has no eligible listing selected for inventory at this destination.", { exact: true })).toHaveCount(1);
+  await expect(page.getByText("The existing channel inventory link needs an ATP check.", { exact: true })).toHaveCount(0);
+  expect(state.requests).toHaveLength(1);
+  expect(state.errors).toEqual([]);
+});
+
 test("requires activation permission",async({page})=>{
   const state=await setup(page,{canSync:false});await expect(page.getByRole("button",{name:"Sync inventory",exact:true})).toBeDisabled();
   expect(state.requests).toEqual([]);
