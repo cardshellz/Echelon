@@ -46,6 +46,7 @@ export function ebayPreparedContentHash(
       .map((item) => ({
         sku: item.sku,
         ...(item.packagePlan ? { packagePlan: item.packagePlan } : {}),
+        ...(item.packageTypeProof ? { packageTypeProof: item.packageTypeProof } : {}),
         ...(item.packageMaintenance ? { packageMaintenance: item.packageMaintenance } : {}),
         payload: inventoryItemSyncContent(item.payload),
       }))

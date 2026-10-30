@@ -1,17 +1,26 @@
 import { z } from "zod";
+import { channelProviderReadDiagnosticSchema, providerHttpReadFailureKind, type ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
 
 const errorResponseSchema = z.object({ errors:z.array(z.object({ errorId:z.number().int() }).passthrough()) }).passthrough();
 
 /** Preserve the existing message while retaining the provider's actual HTTP/error identity. */
 export class EbayApiRequestError extends Error {
   readonly errorIds: readonly number[];
-  constructor(readonly statusCode: number | undefined, message: string, responseBody: string) {
+  readonly context?: { providerRead: ChannelProviderReadDiagnostic };
+  constructor(readonly statusCode: number | undefined, message: string, responseBody: string, readResource?: string) {
     super(message);
     this.name = "EbayApiRequestError";
     try {
       const parsed = errorResponseSchema.safeParse(JSON.parse(responseBody));
       this.errorIds = parsed.success ? parsed.data.errors.map(error => error.errorId) : [];
     } catch { this.errorIds = []; }
+    // Only the transport's explicit read boundary supplies this argument. A
+    // rejected write must never acquire read-only retry or recovery semantics.
+    if (readResource) this.context = { providerRead: channelProviderReadDiagnosticSchema.parse({
+      provider: "ebay", resource: readResource, method: "GET",
+      kind: statusCode === undefined ? "unavailable" : providerHttpReadFailureKind(statusCode),
+      ...(statusCode !== undefined && Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599 ? { httpStatus: statusCode } : {}),
+    }) };
   }
 }
 

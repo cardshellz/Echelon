@@ -7,6 +7,8 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { prepareChannelPublicationWeight } from "../../../marketplace-listings/domain/channel-package-weight";
 import type { BuiltInventoryItem } from "./ebay-listing-builder";
 import type { EbayInventoryItem, EbayPackageWeightAndSize } from "./ebay-types";
+import type { EbayNativePackageReader } from "./ebay-native-package.reader";
+import { EBAY_US_STANDARD_PACKAGE_TYPE, ebayPreparedPackageTypeSchema, type EbayPreparedPackageType } from "./ebay-package-classification";
 
 export interface EbayPackageSource {
   productId: number; variantId: number; facts: ChannelPackageFacts;
@@ -60,7 +62,18 @@ export function resolveEbayListingPackage(input: { source: EbayPackageSource; sk
   return { payload, plan };
 }
 
-type ItemReader = { getInventoryItem(sku: string): Promise<EbayInventoryItem | null> };
+type ItemReader = { getInventoryItem(sku: string): Promise<EbayInventoryItem | null>; getListingPackageType?: EbayNativePackageReader };
+
+/** Verify the native classification when Inventory GET omits its projection.
+ * Other package fields remain the exact inventory response, without backfill. */
+export async function readEbayPackageVerificationView(client: ItemReader, item: BuiltInventoryItem,
+  current: EbayInventoryItem, marketplaceId: string): Promise<EbayInventoryItem> {
+  if (!item.payload.packageWeightAndSize?.packageType || current.packageWeightAndSize?.packageType !== undefined
+    || marketplaceId !== "EBAY_US" || !client.getListingPackageType) return current;
+  const native = await client.getListingPackageType(item.sku, marketplaceId);
+  if (native.packageType === null) return current;
+  return { ...current, packageWeightAndSize: { ...current.packageWeightAndSize, packageType: native.packageType } };
+}
 
 /** @deprecated Retained only to decode and hash already-sealed historical drafts.
  * New preparation never creates an operation-specific package proof. */
@@ -79,9 +92,9 @@ export interface EbayPackageMaintenanceProof {
 }
 
 /** Read and prepare every member before any provider mutation or intent seal. */
-export async function prepareEbayListingPackages<T extends { productId: number; inventoryItems: BuiltInventoryItem[];
+export async function prepareEbayListingPackages<T extends { productId: number; marketplaceId?: string; inventoryItems: BuiltInventoryItem[];
   offers: Array<{ sku: string; variantId: number; payload?: { listingPolicies?: { fulfillmentPolicyId?: string } } }> }>(
-    client: ItemReader, draft: T): Promise<T> {
+    client: ItemReader, draft: T, observedOffersBySku?: ReadonlyMap<string, readonly unknown[]>): Promise<T> {
   const inventoryItems: BuiltInventoryItem[] = [];
   for (const item of draft.inventoryItems) {
     const member = draft.offers.find(offer => offer.sku === item.sku);
@@ -113,8 +126,19 @@ export async function prepareEbayListingPackages<T extends { productId: number; 
     // Remove the original container even when no measurements remain. Otherwise
     // a legacy type-only draft would survive the conditional spread below.
     const { packageWeightAndSize: _previousPackage, ...basePayload } = item.payload;
-    const { packageMaintenance: _legacyProof, ...preparedItem } = item;
-    inventoryItems.push({ ...preparedItem, packagePlan: plan,
+    let packageTypeProof: EbayPreparedPackageType | undefined;
+    // Only an authoritative read can distinguish absence from a failed read.
+    // New publication reuses the connector's exact offer discovery; unpublished
+    // offers do not need a native GetItem request.
+    if (!payload.packageType && payload.weight && draft.marketplaceId === "EBAY_US" && client.getListingPackageType) {
+      const native = await client.getListingPackageType(item.sku, draft.marketplaceId, observedOffersBySku?.get(item.sku));
+      packageTypeProof = ebayPreparedPackageTypeSchema.parse({ sku: item.sku, marketplaceId: draft.marketplaceId,
+        listingId: native.listingId, packageType: native.packageType ?? EBAY_US_STANDARD_PACKAGE_TYPE,
+        ...(native.packageType === null ? { source: "marketplace_default", observedPackageType: null } : {}) });
+      payload.packageType = packageTypeProof.packageType;
+    }
+    const { packageMaintenance: _legacyProof, packageTypeProof: _previousTypeProof, ...preparedItem } = item;
+    inventoryItems.push({ ...preparedItem, packagePlan: plan, ...(packageTypeProof ? { packageTypeProof } : {}),
       payload: { ...basePayload, ...(Object.keys(payload).length ? { packageWeightAndSize: payload } : {}) } });
   }
   return { ...draft, inventoryItems };
@@ -128,6 +152,20 @@ export async function assertEbayPackagePreservation(client: ItemReader, items: r
     if (!item.packagePlan) throw new EbayListingSyncError("EBAY_SYNC_DRAFT_SCOPE_INVALID", "Package data must be prepared before publishing.");
     const current = await client.getInventoryItem(item.sku);
     if (current && current.sku !== item.sku) throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The observed inventory item does not match the requested SKU.");
+    if (item.packageTypeProof) {
+      const proof = ebayPreparedPackageTypeSchema.parse(item.packageTypeProof);
+      if (proof.sku !== item.sku || !client.getListingPackageType || item.payload.packageWeightAndSize?.packageType !== proof.packageType)
+        throw new EbayListingSyncError("EBAY_SYNC_DRAFT_SCOPE_INVALID", "The prepared package classification no longer matches this SKU's verified source.");
+      const native = await client.getListingPackageType(item.sku, proof.marketplaceId);
+      const observed = current?.packageWeightAndSize?.packageType;
+      // An earlier journaled item PUT may already have applied our default.
+      // A different observed class is a concurrent edit, never permission to
+      // overwrite it with the default or with an old sealed value.
+      const nativeUnchanged = native.packageType === proof.packageType
+        || ("source" in proof && native.packageType === proof.observedPackageType);
+      if (native.listingId !== proof.listingId || !nativeUnchanged || (observed !== undefined && observed !== proof.packageType))
+        throw new EbayListingSyncError("EBAY_SYNC_PACKAGE_CHANGED", "Package configuration changed on eBay after preparation. Retry Sync to prepare current values.");
+    }
     // Preserve the original measurement when checking a channel-owned weight.
     // Comparing only rounded ounces would hide concurrent edits in one bucket.
     if (item.packagePlan.sources.weight === "channel") {
@@ -147,6 +185,7 @@ export async function assertEbayPackagePreservation(client: ItemReader, items: r
       const copy = structuredClone(value ?? {});
       if (item.packagePlan!.sources.weight !== "absent") delete copy.weight;
       if (item.packagePlan!.sources.dimensions === "catalog") delete copy.dimensions;
+      if (item.packageTypeProof) delete copy.packageType;
       return copy;
     };
     observedValues(preserved(current?.packageWeightAndSize));

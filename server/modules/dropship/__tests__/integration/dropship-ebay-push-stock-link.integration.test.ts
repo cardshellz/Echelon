@@ -277,11 +277,12 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
     const result = await h.process(1);
 
     expect(result.items[0]).toMatchObject({ status: "completed", errorCode: null });
-    expect(await listing()).toEqual({ status: "active", external_listing_id: "fake-listing-1", external_offer_id: "fake-offer-1" });
+    expect(await listing()).toEqual({ status: "active", external_listing_id: "900000000001", external_offer_id: "fake-offer-1" });
     expect(h.fake.calls.map(call => `${call.method} ${call.path.split("?")[0]}`)).toEqual([
       "GET /sell/inventory/v1/offer",
       "GET /sell/inventory/v1/inventory_item/P5",
       "GET /sell/inventory/v1/inventory_item/P5",
+      "GET /sell/inventory/v1/offer",
       "PUT /sell/inventory/v1/inventory_item/P5",
       "POST /sell/inventory/v1/offer",
       "PUT /sell/inventory/v1/offer/fake-offer-1",
@@ -319,6 +320,10 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
     await queuePush({ jobId: 1, itemId: 1 });
     const h = harness();
     await h.process(1);
+    // Inventory GET omits this existing classification, just as the live API
+    // does. The shared connector must preserve the verified native value.
+    h.fake.nativePackageTypes.set("900000000001", "LargeEnvelope");
+    delete (h.fake.items.get(F.sku)!.packageWeightAndSize as Record<string, unknown>).packageType;
     const before = await counts(targetId), epochBefore = await epoch();
     await queuePush({ jobId: 2, itemId: 2, quantity: 3 });
 
@@ -329,6 +334,8 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
     expect(await epoch()).toBe(epochBefore);
     expect(h.logs.filter(log => log.context?.outcome === "already_linked")).toHaveLength(1);
     expect(h.fake.offersForSku(F.sku)).toHaveLength(1);
+    expect(h.fake.items.get(F.sku)?.packageWeightAndSize).toMatchObject({ packageType: "LARGE_ENVELOPE" });
+    expect(h.fake.calls.filter(call => call.path === "/ws/api.dll")).toHaveLength(2);
   });
 
   it("replays the same item after a post-link eBay failure: same command, no second link, then it lists", async () => {
@@ -372,7 +379,7 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
     expect((await item(1)).result.push).toMatchObject({ retryable: false, context: { inventoryCode: "STOCK_LISTING_TARGET_MISMATCH",
       operatorAction: true, targetCount: 0, classification: "permanent", requiresReview: true } });
     expect(h.fake.inventoryOrOfferMutations()).toEqual([]);
-    expect(h.fake.calls.map(call => call.method)).toEqual(["GET", "GET", "GET"]);
+    expect(h.fake.calls.map(call => call.method)).toEqual(["GET", "GET", "GET", "GET"]);
     expect(await counts(null)).toMatchObject({ mappings: 0, outbox: 0, preparations: 0 });
     expect(h.logs.find(log => log.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_OPERATOR")).toMatchObject({ level: "error",
       context: { errorCode: "DROPSHIP_STOCK_DESTINATION_NOT_READY", inventoryCode: "STOCK_LISTING_TARGET_MISMATCH" } });
@@ -826,7 +833,7 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
       await failedBeforeDeploy();
       const h = harness();
       // The vendor listed the SKU on eBay themselves after the failure.
-      const vendorOffer = h.fake.seedOffer({ sku: F.sku, offerId: "vendor-offer", listingId: "vendor-listing", availableQuantity: 3 });
+      const vendorOffer = h.fake.seedOffer({ sku: F.sku, offerId: "vendor-offer", listingId: "900000009999", availableQuantity: 3 });
       expect((await ops().requeueAutomaticStockLinkFailures({ now: NOW, workerId: "sweep-p3", limit: 25 })).requeued).toHaveLength(1);
 
       const result = await h.process(1);

@@ -24,6 +24,56 @@ const pending = {
 };
 const statusName = "Sync status for 55PT Toploader Combo Pack";
 
+test("normal Sync recovers a rejected package classification without opening a package editor", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  await scopedInventoryFeed(page, state);
+  state.jobs = [{ ...job, state: "needs_attention", code: "EBAY_QUANTITY_REJECTED",
+    message: "eBay rejected this update (HTTP 400; codes 25002). Please provide a valid Shipping Package type." }];
+  await page.reload();
+  const sync = page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true });
+  await expect(sync).toBeEnabled();
+  const queued = { ...job, id: "6e4d8e03-3197-4d21-a6d7-aa1ddaecc776" };
+  state.response = { ...pending, jobs: [queued] };
+  await sync.click();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Queued for eBay");
+  state.jobs = [{ ...queued, state: "completed", warnings: [{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING",
+    field: "package_dimensions", productId: 1, variantId: 101, variantSku: "PACK-1" }] }];
+  await page.reload();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Listing warnings" })).toContainText("PACK-1: package dimensions are missing");
+  await expect(page.getByLabel("Shipping package type", { exact: true })).toHaveCount(0);
+  expect(state.commands).toHaveLength(1);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  await page.screenshot({ path: info.outputPath("ordinary-package-normal-sync.png"), fullPage: true });
+});
+
+test("native package read diagnostics retain POST and recover through normal Sync", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  state.jobs = [{ ...job, state: "awaiting_evidence", readRetryPaused: true, code: "EBAY_PACKAGE_READ_INVALID",
+    message: "The package response could not be validated.", providerRead: { provider: "ebay", resource: "listing_package",
+      method: "POST", kind: "invalid_response", httpStatus: 200, requestId: "native-package-read" } }];
+  await page.reload();
+  await page.getByRole("button", { name: "View update status", exact: true }).filter({ visible: true }).first().click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByText("Technical details", { exact: true }).click();
+  await expect(dialog.getByText("ebay / listing_package (POST)", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("native-package-read", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  const queued = { ...job, id: "6e4d8e03-3197-4d21-a6d7-aa1ddaecc776" };
+  state.response = { ...pending, jobs: [queued] };
+  await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Queued for eBay");
+  state.jobs = [{ ...queued, state: "completed" }];
+  await page.reload();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true })).toBeEnabled();
+  await expect(page.getByLabel("Shipping package type", { exact: true })).toHaveCount(0);
+  expect(state.commands).toHaveLength(1);
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  await page.screenshot({ path: info.outputPath("native-package-normal-sync.png"), fullPage: true });
+});
+
 async function scopedInventoryFeed(page: Page, state: Awaited<ReturnType<typeof setupEbayChannelPage>>) {
   await page.route("**/api/ebay/category-aspects/183438", route => route.fulfill({ json: { aspects: [], categoryId: "183438" } }));
   await page.route("**/api/ebay/product-aspects/1", route => route.fulfill({ json: { overrides: {} } }));
