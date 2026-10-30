@@ -12,6 +12,7 @@ export const RETURN_ACCEPTANCE_DATABASE_FILES = [
   "server/modules/customer-account/__tests__/integration/order-action-projection.repository.test.ts",
 ] as const;
 const UNIT_FILES = [
+  "server/modules/shipping/__tests__/unit/sales-channel-delivery.test.ts",
   "client/src/customer-account/__tests__/unit/customer-order-progress-presentation.test.ts",
   "server/modules/shipping/__tests__/unit/saved-label-status.source.test.ts",
   "client/src/customer-account/__tests__/customer-account.transport.test.ts",

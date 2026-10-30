@@ -5,7 +5,9 @@ import {
   type SavedLabelStatusSource,
 } from "./saved-label-status.domain";
 
-export const SAVED_LABEL_STATUS_LEASE_MS = 15 * 60_000;
+// A batch can include ten fully paginated historical channel reads. Keep the
+// lease above their bounded provider deadlines; stale workers remain fenced.
+export const SAVED_LABEL_STATUS_LEASE_MS = 30 * 60_000;
 export interface SavedLabelStatusClaim extends SavedLabelStatusSource {
   id: number;
   attempt: number;

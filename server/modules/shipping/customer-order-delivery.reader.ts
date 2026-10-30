@@ -4,9 +4,11 @@ import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import {
-  normalizeTrackingNumber,
-  type CanonicalCarrierTrackingStatus,
-} from "./carrier-tracking.domain";
+  mergeDeliveryStatus,
+  salesChannelDeliveryEvidenceSchema,
+  type DatedDeliveryStatus,
+} from "./sales-channel-delivery.domain";
+import { normalizeTrackingNumber } from "./carrier-tracking.domain";
 import { createCarrierTrackingProjectionReader } from "./carrier-tracking-projection.repository";
 import { PostgresPackageHistoryStore } from "./package-history.repository";
 import {
@@ -182,7 +184,7 @@ export class PostgresCustomerOrderDeliveryReader
           .flatMap((p) => (p.labelId === null ? [] : [p.labelId])),
       ),
     ];
-    const statuses = new Map<number, CanonicalCarrierTrackingStatus>();
+    const statuses = new Map<number, DatedDeliveryStatus>();
     if (labelIds.length) {
       const result = await createCarrierTrackingProjectionReader(
         drizzle(this.pool),
@@ -198,7 +200,54 @@ export class PostgresCustomerOrderDeliveryReader
           "Delivery projection exceeded its bounded package plan.",
         );
       for (const parcel of result.packages)
-        statuses.set(id.parse(parcel.providerLabelId), parcel.canonicalStatus);
+        statuses.set(id.parse(parcel.providerLabelId), {
+          status: parcel.canonicalStatus,
+          occurredAt: parcel.eventOccurredAt,
+        });
+    }
+    const evidenceBindings = [...savedHistory.values()].flatMap((history) =>
+      history.packages.map((parcel) => ({
+        orderId: history.omsOrderId,
+        providerReference: parcel.providerShipmentId,
+        trackingNumber: parcel.trackingNumber,
+        fulfillmentId: parcel.fulfillmentId,
+        nativeRevision: history.nativeRevision,
+        providerObservationHash: parcel.providerObservationHash,
+      })),
+    );
+    const channelStatuses = new Map<string, DatedDeliveryStatus>();
+    const evidenceKey = (orderId: number, reference: string, number: string) =>
+      `${orderId}:${reference}:${normalizeTrackingNumber(number)}`;
+    if (evidenceBindings.length) {
+      const evidence = await this.pool.query(
+        `WITH owned AS (${owned})
+        SELECT DISTINCT ON (e.oms_order_id,e.provider_reference,e.tracking_number) e.proof
+        FROM wms.sales_channel_delivery_evidence e JOIN owned o ON o.id=e.oms_order_id AND o."externalOrderId"=e.external_order_id
+        JOIN jsonb_to_recordset($4::jsonb) AS b("orderId" bigint,"providerReference" text,"trackingNumber" text,
+          "fulfillmentId" text,"nativeRevision" text,"providerObservationHash" text)
+          ON b."orderId"=e.oms_order_id AND b."providerReference"=e.provider_reference AND b."trackingNumber"=e.tracking_number
+          AND b."fulfillmentId"=e.fulfillment_id AND b."nativeRevision"=e.native_revision AND b."providerObservationHash"=e.provider_observation_hash
+        WHERE e.channel_id=$1 AND e.occurred_at<=$5 AND e.observed_at<=$5
+        ORDER BY e.oms_order_id,e.provider_reference,e.tracking_number,e.occurred_at DESC,
+          CASE WHEN e.canonical_status IN ('exception','delivery_attempt') THEN 0 WHEN e.canonical_status='delivered' THEN 1 ELSE 2 END,e.id DESC LIMIT 4001`,
+        [...parameters, JSON.stringify(evidenceBindings), now],
+      );
+      const rows = z
+        .array(z.object({ proof: salesChannelDeliveryEvidenceSchema }))
+        .max(4000)
+        .parse(evidence.rows);
+      for (const { proof } of rows)
+        channelStatuses.set(
+          evidenceKey(
+            proof.omsOrderId,
+            proof.providerReference,
+            proof.trackingNumber,
+          ),
+          {
+            status: proof.canonicalStatus,
+            occurredAt: new Date(proof.occurredAt),
+          },
+        );
     }
     // Recheck owner identity after asynchronous reads; a reassigned purchase is
     // never exposed using a grant from the beginning of the request.
@@ -224,13 +273,42 @@ export class PostgresCustomerOrderDeliveryReader
             candidates.flatMap((c) => (c.labelId === null ? [] : [c.labelId])),
           ),
         ];
+        const candidate =
+          unique.length === 1
+            ? candidates.find((c) => c.labelId === unique[0])!
+            : unique.length === 0 &&
+                new Set(
+                  candidates.map(
+                    (c) => `${c.providerReference}:${c.trackingNumber}`,
+                  ),
+                ).size === 1
+              ? candidates[0]
+              : null;
+        const channel =
+          candidate?.providerReference && candidate.trackingNumber
+            ? (channelStatuses.get(
+                evidenceKey(
+                  order.id,
+                  candidate.providerReference,
+                  candidate.trackingNumber,
+                ),
+              ) ?? null)
+            : null;
         return {
           key,
-          trackingNumber: unique.length === 1
-            ? candidates.find(candidate => candidate.labelId === unique[0])!.trackingNumber
-            : new Set(candidates.map(candidate => candidate.trackingNumber)).size === 1 ? candidates[0].trackingNumber : null,
+          trackingNumber:
+            unique.length === 1
+              ? candidates.find((candidate) => candidate.labelId === unique[0])!
+                  .trackingNumber
+              : new Set(candidates.map((candidate) => candidate.trackingNumber))
+                    .size === 1
+                ? candidates[0].trackingNumber
+                : null,
           status: presentCarrierPackageStatus(
-            unique.length === 1 ? (statuses.get(unique[0]) ?? null) : null,
+            mergeDeliveryStatus(
+              unique.length === 1 ? (statuses.get(unique[0]) ?? null) : null,
+              channel,
+            ),
           ),
         };
       });

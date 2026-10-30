@@ -1,5 +1,15 @@
 import type { Pool } from "pg";
 import { z } from "zod";
+import type { PackageHistoryDocument } from "@shared/shipping/package-history";
+import {
+  CustomerReturnShopifySnapshotError,
+  type CustomerReturnShopifySnapshotReader,
+  type CustomerReturnShopifySnapshot,
+} from "../returns/application/customer-return-shopify-snapshot.ports";
+import {
+  deriveSalesChannelDeliveryEvidence,
+  type SalesChannelDeliveryEvidence,
+} from "./sales-channel-delivery.domain";
 import { returnLabelRecordSchema } from "../shipping-engine/application/return-label-provider.port";
 import { createShipStationLabelReconciliationClient } from "../oms/shipstation-label-reconciliation.client";
 import { createPackageHistoryShipStationRequester } from "./package-history.source";
@@ -12,7 +22,10 @@ import {
   isRetryableTrackingEventsError,
   createShipStationLabelTrackingRequest,
 } from "./shipstation-tracking-events.client";
-import { normalizeTrackingNumber, normalizeShipStationLabelObservation } from "./carrier-tracking.domain";
+import {
+  normalizeTrackingNumber,
+  normalizeShipStationLabelObservation,
+} from "./carrier-tracking.domain";
 import {
   savedLabelStatusFactsSchema,
   verifyHistoricalStatusLabelAlias,
@@ -33,11 +46,15 @@ export interface SavedLabelStatusSourceReader {
   read(
     source: SavedLabelStatusSource,
   ): Promise<
-    | { facts: SavedLabelStatusFacts; snapshot: Record<string, unknown> | null }
+    | {
+        facts: SavedLabelStatusFacts;
+        snapshot: Record<string, unknown> | null;
+        channelEvidence?: SalesChannelDeliveryEvidence[];
+      }
     | { finished: true }
   >;
 }
-/** Only authenticated GETs to fixed provider endpoints. Nothing in account
+/** Authenticated provider reads only. Nothing in account
  * rendering invokes this adapter; a durable shipping worker owns the calls. */
 export function createSavedLabelStatusSource(dependencies: {
   pool: Pick<Pool, "query" | "connect">;
@@ -46,6 +63,7 @@ export function createSavedLabelStatusSource(dependencies: {
   v1Secret?: string;
   v2Key?: string;
   request?: typeof fetch;
+  shopify?: CustomerReturnShopifySnapshotReader;
 }): SavedLabelStatusSourceReader {
   const fetchFn = dependencies.request ?? fetch;
   const v1 =
@@ -102,6 +120,7 @@ export function createSavedLabelStatusSource(dependencies: {
     async read(raw) {
       const source = savedLabelStatusSourceSchema.parse(raw);
       let facts: SavedLabelStatusFacts;
+      let historical: PackageHistoryDocument | null = null;
       let trackingLabelReference = source.providerReference;
       if (source.kind === "return") {
         const rows = (
@@ -139,7 +158,7 @@ export function createSavedLabelStatusSource(dependencies: {
             tracking_number: z.string(),
             is_return_label: z.boolean(),
             voided: z.boolean(),
-            voided_at:z.string().datetime({offset:true}).nullish(),
+            voided_at: z.string().datetime({ offset: true }).nullish(),
             status: z.string(),
           })
           .parse(await v2(`/labels/${encodeURIComponent(saved.labelId)}`));
@@ -163,7 +182,11 @@ export function createSavedLabelStatusSource(dependencies: {
             "SAVED_LABEL_STATUS_IDENTITY_MISMATCH",
             false,
           );
-        if((label.voided||label.status==='voided')&&!label.voided_at)throw new SavedLabelStatusSourceError('SAVED_LABEL_STATUS_VOID_TIME_UNAVAILABLE',true);
+        if ((label.voided || label.status === "voided") && !label.voided_at)
+          throw new SavedLabelStatusSourceError(
+            "SAVED_LABEL_STATUS_VOID_TIME_UNAVAILABLE",
+            true,
+          );
         facts = savedLabelStatusFactsSchema.parse({
           providerReference: saved.labelId,
           trackingNumber: saved.trackingNumber,
@@ -209,6 +232,7 @@ export function createSavedLabelStatusSource(dependencies: {
             "SAVED_LABEL_STATUS_SOURCE_CHANGED",
             false,
           );
+        historical = history;
         if (!v1)
           throw new SavedLabelStatusSourceError(
             "SAVED_LABEL_STATUS_CONFIGURATION",
@@ -228,12 +252,26 @@ export function createSavedLabelStatusSource(dependencies: {
             "SAVED_LABEL_STATUS_IDENTITY_MISMATCH",
             false,
           );
-        const observed=normalizeShipStationLabelObservation(label,dependencies.now());
-        if(label.voided===true||label.voidDate){
-          if(observed.voidedAt===null)throw new SavedLabelStatusSourceError('SAVED_LABEL_STATUS_VOID_TIME_UNAVAILABLE',true);
-          facts=savedLabelStatusFactsSchema.parse({providerReference:String(label.shipmentId),trackingNumber:label.trackingNumber,
-            carrierCode:label.carrierCode,serviceCode:label.serviceCode??null,direction:'outbound',voided:true,voidedAt:observed.voidedAt.toISOString()});
-          return {facts,snapshot:null};
+        const observed = normalizeShipStationLabelObservation(
+          label,
+          dependencies.now(),
+        );
+        if (label.voided === true || label.voidDate) {
+          if (observed.voidedAt === null)
+            throw new SavedLabelStatusSourceError(
+              "SAVED_LABEL_STATUS_VOID_TIME_UNAVAILABLE",
+              true,
+            );
+          facts = savedLabelStatusFactsSchema.parse({
+            providerReference: String(label.shipmentId),
+            trackingNumber: label.trackingNumber,
+            carrierCode: label.carrierCode,
+            serviceCode: label.serviceCode ?? null,
+            direction: "outbound",
+            voided: true,
+            voidedAt: observed.voidedAt.toISOString(),
+          });
+          return { facts, snapshot: null };
         }
         let alias: ReturnType<typeof verifyHistoricalStatusLabelAlias>;
         try {
@@ -307,6 +345,41 @@ export function createSavedLabelStatusSource(dependencies: {
           "SAVED_LABEL_STATUS_TRACKING_MISMATCH",
           false,
         );
+      // Historical tracking may retain an old in-transit event instead of UN.
+      // Reconcile both dated sources until the carrier confirms final delivery.
+      if (historical && dependencies.shopify && payload.status_code !== "DE") {
+        const scope = historical.sourceEvidence;
+        let snapshot: CustomerReturnShopifySnapshot;
+        try {
+          snapshot = await dependencies.shopify.read({
+            shop: {
+              channelId: scope.channelId,
+              connectionId: scope.connectionId,
+              shopDomain: scope.shopDomain,
+              displayName: scope.displayName,
+            },
+            externalOrderId: historical.externalOrderId,
+          });
+        } catch (error) {
+          if (!(error instanceof CustomerReturnShopifySnapshotError))
+            throw error;
+          throw new SavedLabelStatusSourceError(
+            `SAVED_LABEL_STATUS_${error.code}`,
+            error.failureClass === "transient" ||
+              [
+                "RETURN_SHOPIFY_SCOPE_MISSING",
+                "RETURN_SHOPIFY_CONNECTION_UNAVAILABLE",
+              ].includes(error.code),
+          );
+        }
+        const channelEvidence = deriveSalesChannelDeliveryEvidence(
+          historical,
+          source.providerReference,
+          snapshot,
+          dependencies.now(),
+        );
+        return { facts, snapshot: payload, channelEvidence };
+      }
       return { facts, snapshot: payload };
     },
   };

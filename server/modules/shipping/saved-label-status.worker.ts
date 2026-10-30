@@ -10,6 +10,12 @@ import type {
   SavedLabelStatusOutcome,
 } from "./saved-label-status.repository";
 import type { CarrierTrackingService } from "./carrier-tracking.service";
+import {
+  latestSalesChannelDeliveryEvidence,
+  mergeDeliveryStatus,
+  salesChannelDeliveryEvidenceSchema,
+} from "./sales-channel-delivery.domain";
+import type { SalesChannelDeliveryEvidenceStore } from "./sales-channel-delivery.repository";
 
 const ACTIVE_POLL_MS = 6 * 60 * 60_000;
 /** Lease fencing and immutable attempts make retries safe. Capture performs
@@ -19,6 +25,7 @@ export class SavedLabelStatusWorker {
     private readonly dependencies: {
       store: SavedLabelStatusStore;
       source: SavedLabelStatusSourceReader;
+      channelEvidence?: SalesChannelDeliveryEvidenceStore;
       tracking: Pick<
         CarrierTrackingService,
         "observeStatusLabel" | "ingestStatusSnapshot"
@@ -57,6 +64,35 @@ export class SavedLabelStatusWorker {
           };
         } else {
           const { facts, snapshot } = loaded;
+          const channelEvidence = z
+            .array(salesChannelDeliveryEvidenceSchema)
+            .max(201)
+            .parse(loaded.channelEvidence ?? []);
+          if (channelEvidence.length) {
+            if (
+              source.kind !== "history" ||
+              facts.direction !== "outbound" ||
+              channelEvidence.some(
+                (e) =>
+                  e.omsOrderId !== source.sourceId ||
+                  e.providerReference !== source.providerReference ||
+                  e.trackingNumber !== source.trackingNumber ||
+                  Date.parse(e.occurredAt) >
+                    this.dependencies.now().getTime() ||
+                  Date.parse(e.observedAt) > this.dependencies.now().getTime(),
+              )
+            ) {
+              throw new SavedLabelStatusSourceError(
+                "SAVED_LABEL_STATUS_CHANNEL_IDENTITY_MISMATCH",
+                false,
+              );
+            }
+            if (!this.dependencies.channelEvidence)
+              throw new Error(
+                "Shipping delivery evidence store is unavailable",
+              );
+            await this.dependencies.channelEvidence.append(channelEvidence);
+          }
           await this.dependencies.tracking.observeStatusLabel(
             normalizeSavedLabelStatusObservation(
               source,
@@ -75,11 +111,25 @@ export class SavedLabelStatusWorker {
                     trackingNumber: facts.trackingNumber,
                   },
                 );
-          const delivered =
-            ingested?.canonicalStatus === "delivered" &&
-            ingested.matchStatus === "matched" &&
-            (ingested.eventOccurredAt === null ||
-              ingested.eventOccurredAt <= this.dependencies.now());
+          const latestChannel =
+            latestSalesChannelDeliveryEvidence(channelEvidence);
+          const effectiveStatus = mergeDeliveryStatus(
+            ingested?.matchStatus === "matched" &&
+              (ingested.eventOccurredAt === null ||
+                ingested.eventOccurredAt <= this.dependencies.now())
+              ? {
+                  status: ingested.canonicalStatus,
+                  occurredAt: ingested.eventOccurredAt,
+                }
+              : null,
+            latestChannel
+              ? {
+                  status: latestChannel.canonicalStatus,
+                  occurredAt: new Date(latestChannel.occurredAt),
+                }
+              : null,
+          );
+          const delivered = effectiveStatus === "delivered";
           const complete = facts.voided || delivered;
           outcome = {
             state: complete ? "complete" : "active",
@@ -95,7 +145,10 @@ export class SavedLabelStatusWorker {
         }
       } catch (error) {
         const invalid =
-          error instanceof z.ZodError || error instanceof CarrierTrackingPayloadError ||
+          error instanceof z.ZodError ||
+          error instanceof CarrierTrackingPayloadError ||
+          (error instanceof Error &&
+            error.message.startsWith("SALES_CHANNEL_DELIVERY_")) ||
           (error instanceof Error &&
             [
               "SAVED_LABEL_STATUS_IDENTITY_MISMATCH",

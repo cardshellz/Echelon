@@ -1,5 +1,7 @@
 import { randomUUID as newShippingStatusToken } from "node:crypto";
 import { createSavedLabelStatusSource } from "../modules/shipping/saved-label-status.source";
+import { PostgresSalesChannelDeliveryEvidenceStore } from "../modules/shipping/sales-channel-delivery.repository";
+import { ShopifyCustomerReturnSnapshotReader } from "../modules/returns/infrastructure/customer-return-shopify-snapshot.reader";
 import { PostgresSavedLabelStatusStore } from "../modules/shipping/saved-label-status.repository";
 import { SavedLabelStatusWorker } from "../modules/shipping/saved-label-status.worker";
 import { createReservedInventoryTransferOwner } from "../modules/inventory-planning/infrastructure/reserved-inventory-transfer.repository";
@@ -668,11 +670,13 @@ export function createServices(
     trackingEventsClient: createShipStationTrackingEventsClient(),
     dispatchAuthority: dispatchAuthorityProxy,
     labelVoidObserver: shopifyLabelLifecycle,
-    captureSavedLabels: (): Promise<unknown> => savedLabelStatus.run(),
+    captureSavedLabels: (): Promise<{ errors: number }> => savedLabelStatus.run(),
   });
   const savedLabelStatus: SavedLabelStatusWorker = new SavedLabelStatusWorker({
     store: new PostgresSavedLabelStatusStore(databasePool),
+    channelEvidence: new PostgresSalesChannelDeliveryEvidenceStore(databasePool),
     source: createSavedLabelStatusSource({ pool: databasePool, now: () => systemCarrierTrackingClock.now(),
+      shopify: new ShopifyCustomerReturnSnapshotReader({ resolveConnection: channelId => new ChannelIdentityService(db).shopifyConnection(channelId), request: fetch, now: () => systemCarrierTrackingClock.now() }),
       v1Key: process.env.SHIPSTATION_API_KEY, v1Secret: process.env.SHIPSTATION_API_SECRET,
       v2Key: process.env.SHIPSTATION_V2_API_KEY }),
     tracking: carrierTracking, now: () => systemCarrierTrackingClock.now(), newToken: newShippingStatusToken,

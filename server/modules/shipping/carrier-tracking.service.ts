@@ -226,7 +226,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       dispatchLeaseOwner?: string;
       /** Channel-owned correction intake; no remote mutation during observation. */
       labelVoidObserver?: { observe(labelId: number): Promise<void> };
-      captureSavedLabels?: () => Promise<unknown>;
+      captureSavedLabels?: () => Promise<{ errors: number }>;
     },
   ) {}
 
@@ -452,9 +452,6 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
   async reconcileUnresolved(
     limit: number = DEFAULT_RECONCILIATION_LIMIT,
   ): Promise<CarrierTrackingReconciliationResult> {
-    let captureErrors = 0;
-    try { await this.dependencies.captureSavedLabels?.(); }
-    catch { captureErrors = 1; this.dependencies.logger.error({ code: "SAVED_LABEL_STATUS_SWEEP_FAILED", message: "Saved-label tracking capture will retry on the next sweep." }); }
     const hydrationSummary = await this.hydrateWebhookPayloads(
       Math.min(limit, DEFAULT_SUBSCRIPTION_BATCH_LIMIT),
     );
@@ -492,7 +489,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       dispatchCommandsRetryScheduled: 0,
       dispatchCommandsReviewRequired: 0,
       dispatchAuthorityConfigured: Boolean(this.dependencies.dispatchAuthority),
-      errors: captureErrors + hydrationSummary.errors + subscriptionSummary.errors,
+      errors: hydrationSummary.errors + subscriptionSummary.errors,
     };
 
     for (const label of labels) {
@@ -566,6 +563,20 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
     summary.dispatchAuthorityConfigured =
       dispatchSummary.dispatchAuthorityConfigured;
     summary.errors += dispatchSummary.errors;
+
+    // Historical provider reads may page through an old purchase. Finish the
+    // existing dispatch/reconciliation owners first so capture cannot delay them.
+    try {
+      const capture = await this.dependencies.captureSavedLabels?.();
+      if (capture) {
+        if (!Number.isSafeInteger(capture.errors) || capture.errors < 0) throw new Error("Invalid shipping capture result");
+        summary.errors += capture.errors;
+      }
+    }
+    catch {
+      summary.errors += 1;
+      this.dependencies.logger.error({ code: "SAVED_LABEL_STATUS_SWEEP_FAILED", message: "Saved-label tracking capture will retry on the next sweep." });
+    }
 
     return summary;
   }

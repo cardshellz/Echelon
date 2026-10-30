@@ -1,4 +1,6 @@
 import { PostgresPackageHistoryStore } from "../../../shipping/package-history.repository";
+import { PostgresSalesChannelDeliveryEvidenceStore } from "../../../shipping/sales-channel-delivery.repository";
+import { deriveSalesChannelDeliveryEvidence } from "../../../shipping/sales-channel-delivery.domain";
 import { PostgresCustomerReturnProgressReader } from "../../infrastructure/customer-return-progress.reader";
 import { PostgresCustomerOrderDeliveryReader } from "../../../shipping/customer-order-delivery.reader";
 import { CarrierTrackingService } from "../../../shipping/carrier-tracking.service";
@@ -387,7 +389,7 @@ integration(
       const claims=await historyStore.claim(1,instant,"19600000-0000-4000-8000-000000000099",{orderIds:[100]});
       expect(claims).toHaveLength(1);
       expect(await historyStore.complete(claims[0],complexHistory(s.provider),instant)).toBe(true);
-      const outboundCodes=new Map([['SYNTHETIC-OUTBOUND-1','DE'],['SYNTHETIC-OUTBOUND-2','DE'],['SYNTHETIC-OUTBOUND-3','IT']]);
+      const outboundCodes=new Map([['SYNTHETIC-OUTBOUND-1','IT'],['SYNTHETIC-OUTBOUND-2','UN'],['SYNTHETIC-OUTBOUND-3','IT']]);
       const providerGet:typeof fetch=async(target,options)=>{
         const url=new URL(String(target));
         if(url.origin==='https://ssapi.shipstation.com'){
@@ -403,7 +405,7 @@ integration(
         if(/^\/v2\/labels\/se-90[123]\/track$/.test(url.pathname)){
           expect(options?.method).toBe('GET');const index=Number(url.pathname.split('/').at(-2)!.slice(-1)),number=`SYNTHETIC-OUTBOUND-${index}`,code=outboundCodes.get(number)!;
           return Response.json({label_id:`se-${900+index}`,tracking_number:number,carrier_code:'ups',status_code:code,
-            events:[{occurred_at:instant.toISOString(),status_code:code}]});
+            events:[{occurred_at:index===1&&code==='IT'?'2026-09-20T13:00:00Z':instant.toISOString(),status_code:code}]});
         }
         return carrier.fetchFn(target,options);
       };
@@ -419,11 +421,22 @@ integration(
       expect((await read()).get(100)!.returns[0].status.code).toBe("label_ready");
       const immutable=await sourceFacts();
       const tracking=new CarrierTrackingService({repository:createDrizzleCarrierTrackingRepository(drizzle(pool)),clock:{now:()=>new Date(instant)},logger:{info:vi.fn(),warn:vi.fn(),error:vi.fn()}});
-      const statusSource=createSavedLabelStatusSource({pool,now:()=>new Date(instant),v1Key:"synthetic-v1",v1Secret:"synthetic-secret",v2Key:"synthetic-status-key",request:providerGet});
+      const laterDelivery=structuredClone(s.provider);
+      laterDelivery.fulfillments[0].deliveredAt='2026-09-21T12:00:00Z';
+      const nativeRead=vi.fn(async()=>laterDelivery);
+      const statusSource=createSavedLabelStatusSource({pool,now:()=>new Date(instant),v1Key:"synthetic-v1",v1Secret:"synthetic-secret",v2Key:"synthetic-status-key",request:providerGet,shopify:{read:nativeRead}});
+      const channelEvidence=new PostgresSalesChannelDeliveryEvidenceStore(pool);
       const capture=new SavedLabelStatusWorker({store:new PostgresSavedLabelStatusStore(pool),
+        channelEvidence,
         source:statusSource,
         tracking,now:()=>new Date(instant),newToken:()=>`19600000-0000-4000-8000-${String(++leaseSequence).padStart(12,"0")}`,report:vi.fn()});
       expect((await capture.run()).errors).toBe(0);
+      expect(nativeRead).toHaveBeenCalledTimes(3);
+      for(const call of nativeRead.mock.calls)expect(call).toHaveLength(1);
+      const historicalEvidence=deriveSalesChannelDeliveryEvidence(complexHistory(s.provider),"901",laterDelivery,instant);
+      await Promise.all([channelEvidence.append(historicalEvidence),channelEvidence.append(historicalEvidence)]);
+      expect((await pool.query("SELECT count(*)::int AS n FROM wms.sales_channel_delivery_evidence")).rows[0].n).toBe(2);
+      await expect(pool.query("UPDATE wms.sales_channel_delivery_evidence SET actor='changed'")).rejects.toThrow(/immutable/);
       const deliveryReader=new PostgresCustomerOrderDeliveryReader(pool);
       expect((await deliveryReader.read(scope,instant)).get(100)).toMatchObject({delivery:{code:"partially_delivered"},packages:expect.arrayContaining([{key:"physical:3",trackingNumber:"SYNTHETIC-OUTBOUND-3",status:{code:"in_transit",label:"In transit"}}])});
       expect((await pool.query("SELECT count(*)::int AS n FROM wms.shipping_provider_labels WHERE label_direction='return'")).rows[0].n).toBe(2);
@@ -453,6 +466,20 @@ integration(
       expect(await sourceFacts()).toEqual(immutable);
       expect(carrier.calls.filter(call=>call.method==="POST")).toHaveLength(2);
       expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("delivered");
+      // Historical evidence is bound to its exact current source revision; a
+      // differently bound event cannot complete or damage another package.
+      await channelEvidence.append(historicalEvidence.map(event=>({...event,nativeRevision:"f".repeat(64),canonicalStatus:"exception",eventId:"unrelated-revision"})));
+      expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("delivered");
+      await expect(channelEvidence.append([...historicalEvidence,...historicalEvidence.map(event=>({...event,omsOrderId:200}))])).rejects.toThrow("BATCH_MISMATCH");
+      await expect(channelEvidence.append(historicalEvidence.map(event=>({...event,externalCustomerId:"902"})))).rejects.toThrow("OWNER_CHANGED");
+      await tracking.ingestStatusSnapshot({tracking_number:"SYNTHETIC-OUTBOUND-1",carrier_code:"ups",status_code:"EX",events:[{occurred_at:instant.toISOString(),status_code:"EX"}]},
+        {providerLabelId:"901",carrierCode:"ups",trackingNumber:"SYNTHETIC-OUTBOUND-1"});
+      expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("delivery_issue");
+      instant=new Date(instant.getTime()+1000);
+      await tracking.ingestStatusSnapshot({tracking_number:"SYNTHETIC-OUTBOUND-1",carrier_code:"ups",status_code:"DE",events:[{occurred_at:instant.toISOString(),status_code:"DE"}]},
+        {providerLabelId:"901",carrierCode:"ups",trackingNumber:"SYNTHETIC-OUTBOUND-1"});
+      expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("delivered");
+      expect(nativeRead).toHaveBeenCalledTimes(4);
       for(const invalid of [{...scope,externalCustomerId:"902"},{...scope,channelId:37},{...scope,orders:[{omsOrderId:100,externalOrderId:"2000"},{omsOrderId:200,externalOrderId:"1000"}]}]){
         expect((await deliveryReader.read(invalid,instant)).size).toBe(0);
         expect((await new PostgresCustomerReturnProgressReader(pool).read(invalid,instant)).size).toBe(0);
@@ -467,6 +494,16 @@ integration(
       // claiming the entire revised order was delivered.
       await pool.query("UPDATE wms.order_items SET quantity=quantity+1 WHERE id=(SELECT min(id) FROM wms.order_items)");
       expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("partially_delivered");
+    });
+
+    it("retains the full supported OMS bigint identity without narrowing shipping evidence to 32 bits",async()=>{
+      const provider=complexProvider(), omsOrderId=Number.MAX_SAFE_INTEGER;
+      await pool.query(`INSERT INTO oms.oms_orders(id,channel_id,external_order_id,external_order_number,external_customer_id,ordered_at)
+        OVERRIDING SYSTEM VALUE VALUES($1,36,'1001','#BIGINT-TEST','901',$2)`,[omsOrderId,instant]);
+      const evidence=deriveSalesChannelDeliveryEvidence(complexHistory(provider),"901",provider,instant)
+        .map(event=>({...event,omsOrderId,externalOrderId:"1001"}));
+      await new PostgresSalesChannelDeliveryEvidenceStore(pool).append(evidence);
+      expect((await pool.query("SELECT oms_order_id::text AS id FROM wms.sales_channel_delivery_evidence WHERE oms_order_id=$1",[omsOrderId])).rows).toEqual([{id:String(omsOrderId)}]);
     });
 
     it("fences concurrent status workers and expired leases, retains immutable attempts and stable source identity",async()=>{
@@ -507,7 +544,7 @@ integration(
       const seed=migration.slice(migration.indexOf("-- Existing successful labels"));
       await pool.query(seed);await pool.query(seed);
       const jobs=(await pool.query("SELECT source_kind,priority,count(*)::int AS n FROM wms.saved_label_status_jobs GROUP BY source_kind,priority ORDER BY source_kind")).rows;
-      expect(jobs).toEqual([{source_kind:"history",priority:2,n:3},{source_kind:"return",priority:0,n:2}]);
+      expect(jobs).toEqual([{source_kind:"history",priority:1,n:3},{source_kind:"return",priority:0,n:2}]);
       expect(await sourceFacts()).toEqual(before);expect(await counts()).toEqual(beforeCounts);
     });
 

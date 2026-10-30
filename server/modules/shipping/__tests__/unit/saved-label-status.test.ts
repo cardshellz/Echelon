@@ -5,6 +5,11 @@ import {
 } from "../../saved-label-status.domain";
 import { SavedLabelStatusWorker } from "../../saved-label-status.worker";
 import {
+  complexHistory,
+  complexProvider,
+} from "../../../returns/__tests__/support/complex-return-scenario";
+import { deriveSalesChannelDeliveryEvidence } from "../../sales-channel-delivery.domain";
+import {
   SavedLabelStatusSourceError,
   type SavedLabelStatusSourceReader,
 } from "../../saved-label-status.source";
@@ -27,7 +32,7 @@ const facts = {
   serviceCode: "ups_ground",
   direction: "return" as const,
   voided: false,
-  voidedAt:null,
+  voidedAt: null,
 };
 function fixture() {
   const claim: SavedLabelStatusClaim = {
@@ -64,15 +69,18 @@ function fixture() {
     ),
   };
   const report = vi.fn();
+  const channelEvidence = { append: vi.fn(async () => undefined) };
   return {
     claim,
     store,
     reader,
     tracking,
     report,
+    channelEvidence,
     worker: new SavedLabelStatusWorker({
       store,
       source: reader,
+      channelEvidence,
       tracking,
       report,
       now: () => new Date(now),
@@ -81,6 +89,42 @@ function fixture() {
   };
 }
 describe("adversarial durable shipping status capture", () => {
+  it("retries a failed evidence append before closing capture or advancing delivery", async () => {
+    const s=fixture(), provider=complexProvider();
+    s.claim.kind="history"; s.claim.sourceId=100; s.claim.providerReference="901"; s.claim.trackingNumber="SYNTHETIC-OUTBOUND-1";
+    const historyFacts={...facts,providerReference:"901",trackingNumber:s.claim.trackingNumber,direction:"outbound" as const};
+    const channelEvidence=deriveSalesChannelDeliveryEvidence(complexHistory(provider),"901",provider,now);
+    s.reader.read.mockResolvedValue({facts:historyFacts,snapshot:null,channelEvidence});
+    s.channelEvidence.append.mockRejectedValueOnce(new Error("synthetic lost database response"));
+    expect((await s.worker.run()).errors).toBe(1);
+    expect(s.tracking.observeStatusLabel).not.toHaveBeenCalled();
+    expect(s.store.settle).toHaveBeenLastCalledWith(expect.anything(),expect.objectContaining({state:"retry"}),now);
+    expect((await s.worker.run()).errors).toBe(0);
+    expect(s.channelEvidence.append).toHaveBeenCalledTimes(2);
+    expect(s.store.settle).toHaveBeenLastCalledWith(expect.anything(),expect.objectContaining({state:"complete",status:"delivered"}),now);
+  });
+  it("never gives a return label the original shipment's channel delivery evidence", async () => {
+    const s = fixture(),
+      provider = complexProvider();
+    const channelEvidence = deriveSalesChannelDeliveryEvidence(
+      complexHistory(provider),
+      "901",
+      provider,
+      now,
+    );
+    s.reader.read.mockResolvedValue({ facts, snapshot: null, channelEvidence });
+    expect((await s.worker.run()).errors).toBe(1);
+    expect(s.channelEvidence.append).not.toHaveBeenCalled();
+    expect(s.tracking.observeStatusLabel).not.toHaveBeenCalled();
+    expect(s.store.settle).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        state: "review",
+        code: "SAVED_LABEL_STATUS_CHANNEL_IDENTITY_MISMATCH",
+      }),
+      now,
+    );
+  });
   it("preserves V2 return identity, never invents V1 contents or outbound authority", () => {
     const observed = normalizeSavedLabelStatusObservation(source, facts, now);
     expect(observed).toMatchObject({
