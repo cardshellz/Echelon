@@ -10,10 +10,11 @@ This is the active tracker for consolidating purchase costing from PO through sh
 | Next work item | Finish S1 receipt-allocation and supplier-tax policy decisions, then implement the S2 source/legacy-compatibility adapters before connecting writers |
 | Working branch | `codex/purchase-cost-authority-cleanup` |
 | Plan branch base | `5f9e911a0c7506329624135d4a9a222842880962` |
+| Latest main incorporated | `31c03b80ba465128a4827a69897e0e3694020d9d`; merge `c157e98f72645cd51ce2da0a61ea5e6ab486ba59`. Upstream changes were inventory-sync/UI/CI files, with no audited procurement cost owner change. |
 | Audited main baseline | `e571bcac780852c3ac6b488354c10aaf7f1c417c`; reviewed costing paths were unchanged at the plan branch base |
 | Audit | [Purchase costing authority review](procurement-costing-authority-audit-2026-10-30.md) |
 | Stage 1 contract and ownership map | [Contract, compatibility and recognition boundary](procurement-costing-stage-1-contract.md) |
-| Current implementation PR | None |
+| Current implementation PR | [Draft PR #1964](https://github.com/cardshellz/Echelon/pull/1964) |
 | Deployment and live acceptance | Not started for this cleanup |
 
 ## Resume here after a context reset
@@ -176,7 +177,7 @@ Add exact identifiers as work exists. A proposed slice is not an existing PR or 
 | Slice | Intended contents | PR/commit | Local evidence | Hosted CI | Deployment/live proof |
 | --- | --- | --- | --- | --- | --- |
 | Plan and audit | This tracker, baseline audit and synthetic characterization evidence | `3cf9b7102043eb14386f69ffe70b8590951d7169` | Documentation links and synthetic evidence checks | Not run for implementation | No runtime change |
-| Contract foundation | S1 contracts, economic identity, source rules and compatibility tests | Current branch; implementation commit/PR to be recorded after validation | 480 tests / 16 files passed; production and server-test TypeScript passed | Not run | Not deployed; projection not connected to readers/posting commands |
+| Contract foundation | S1 contracts, economic identity, source rules and compatibility tests | [Draft #1964](https://github.com/cardshellz/Echelon/pull/1964); implementation `ceb76a6c9f370435facbea0574629c3ed92b2fe7`; validated latest-main merge `c157e98f72645cd51ce2da0a61ea5e6ab486ba59` | 480 tests / 16 files and production/server-test TypeScript passed again on the main-integrated code; the subsequent ledger update changes documentation only | Running on draft; initial checks passed, complete final-head success not established | Not deployed; projection not connected to readers/posting commands |
 | Commands and downstream application | S2-S3 owning workflows, approvals, inheritance and safe recovery | Not created | Not run | Not run | Not deployed |
 | Shared consumers and complete acceptance | S4-S5 connected readers, actions and full acceptance | Not created | Not run | Not run | Not deployed |
 | Rollout and historical review | S6 manifest, read-only comparisons and specifically approved corrections | Not created | Not run | Not run | Not deployed |
@@ -192,6 +193,7 @@ Final PR boundaries follow verified dependencies and reviewable size. If a slice
 - Stage 1 added 101 target contract/fingerprint tests, with the 379 existing tests still passing: 480 tests across 16 files. New projection/schema coverage: 98.59% statements, 97.25% branches, 99.10% lines. Coverage is bounded to the three new money/projection/schema files, not the whole purchase flow.
 - Stage 1 production TypeScript passed using `node --max-old-space-size=8192 node_modules/typescript/bin/tsc --pretty false --incremental false`. Default-heap TypeScript previously exhausted memory; the explicit heap run succeeded.
 - Stage 1 server-test TypeScript passed using `node --max-old-space-size=8192 node_modules/typescript/bin/tsc -p tsconfig.tests.server.json --pretty false --incremental false`. No client UI change was made in this stage.
+- Repeated all 480 tests and both TypeScript checks after merging main at code commit `c157e98f72645cd51ce2da0a61ea5e6ab486ba59`: all passed. The PR/validation ledger was the only subsequent changed file.
 - Windows sandbox temporary-file renames prevented Vitest cache writes; the same pure/local suites passed outside that restriction. No database credentials or live financial commands were used.
 
 ### Stage 1 repeatable local validation
@@ -239,9 +241,9 @@ The evidence script is a baseline diagnostic outside normal test discovery. Its 
 - `server/modules/procurement/__tests__/unit/purchase-cost-authority*.ts` and `server/modules/inventory/__tests__/unit/cost-fingerprint.test.ts`: synthetic target and boundary/compatibility tests.
 - [Stage 1 contract document](procurement-costing-stage-1-contract.md): concrete ownership map, compatibility steps, recognition trace and remaining evidence gaps.
 
-**Next action:** record review/commit state; incorporate the pending policy answers without inventing defaults. Then implement the S2 read/compatibility adapters against the existing source revision/application owners and prove legacy equivalence in PostgreSQL before connecting any writer. The unknown-breakdown model cannot be stuffed into legacy product/packaging rows by assuming zero packaging. Validate header/credit/return allocation and the verified-sale reporting boundary before activating those paths.
+**Next action:** incorporate the pending policy answers without inventing defaults and finish the applicable S1 rules. Then implement the S2 read/compatibility adapters against the existing source revision/application owners and prove legacy equivalence in PostgreSQL before connecting any writer. The unknown-breakdown model cannot be stuffed into legacy product/packaging rows by assuming zero packaging. Validate header/credit/return allocation and the verified-sale reporting boundary before activating those paths.
 
-**Remaining checks:** hosted CI for the review head; S2 public-command/adapter and PostgreSQL compatibility tests; S3 lineage/verified-sale acceptance; S4 connected consumers/browser journeys; S5/S6 full-flow and deployed/live proof. Production/server-test TypeScript and all 480 focused tests have passed.
+**Remaining checks:** complete hosted CI for the final review head; S2 public-command/adapter and PostgreSQL compatibility tests; S3 lineage/verified-sale acceptance; S4 connected consumers/browser journeys; S5/S6 full-flow and deployed/live proof. Production/server-test TypeScript and all 480 focused tests passed on the main-integrated code at `c157e98f72645cd51ce2da0a61ea5e6ab486ba59`. The PR stays draft while S1 policies remain unanswered; a passing regression browser suite alone does not prove future reader/command activation.
 
 **Open dependencies:** the user has not yet answered the S1 receipt-allocation and supplier-tax questions. External accounting recognition and historical production exposure remain unproven. Do not assign stock destinations, tax inclusion or accounting effects from a guess.
 
@@ -251,3 +253,4 @@ The evidence script is a baseline diagnostic outside normal test discovery. Its 
 | --- | --- | --- |
 | 2026-10-30 | Established the active cleanup tracker, preserved all nine audit findings and synthetic evidence, and recorded ownership rules, stages, acceptance and resumption procedure | Planning/evidence only; implementation not started |
 | 2026-10-30 | Implemented the additive S1 contract/projection and compatibility hash extraction, documented the owning paths/recognition limits, and added target/validation tests | 480 tests / 16 files and production/server-test TypeScript passed; policy answers pending; no activation/live writes |
+| 2026-10-30 | Incorporated refreshed main `31c03b80b` and opened draft PR #1964 for the contract foundation and durable plan | No audited cost owner changed upstream; 480 tests and both TypeScript checks passed again on merged code `c157e98f7`; hosted CI running; no deployment or financial writes |
