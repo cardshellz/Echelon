@@ -1,6 +1,8 @@
+import type { CustomerReturnWorkflowStatus } from "@shared/returns/customer-return-workflow.contract";
 import { describe, expect, it, vi } from "vitest";
 import {
   CustomerReturnCommandSession,
+  CUSTOMER_RETURN_REQUEST_TIMEOUT_MS,
   CustomerReturnRequestError,
   assertCustomerReturnStatus,
   createCustomerReturnTransport,
@@ -61,8 +63,20 @@ function storage() {
     }),
   };
 }
+function workflow(phase: CustomerReturnWorkflowStatus["phase"] = "queued", labels?: CustomerReturnCustomerLabelStatus): CustomerReturnWorkflowStatus {
+  return { requestKey: commandKey, omsOrderId: 10, phase, updatedAt: "2026-10-30T12:00:00.000Z",
+    reason: phase === "needs_input" ? "RETURN_DETAILS_CHANGED" : phase === "needs_help" ? "RETURN_LABEL_RECONCILIATION_REQUIRED"
+      : phase === "retryable_failure" ? "RETURN_WORKFLOW_TEMPORARY_FAILURE" : null,
+    labels: labels ?? (phase === "ready" ? status() : phase === "labels" ? { ...status(), canProgress: true,
+      parcels: [{ ...status().parcels[0], status: "pending", trackingNumber: null, downloadPath: null }] } : null) };
+}
 function setup(saved = storage()) {
   const api = {
+    orderWorkflow: vi.fn(async () => ({ workflow: workflow("labels"), input: input() })),
+    enqueue: vi.fn(async () => workflow()),
+    workflow: vi.fn(async () => workflow("ready")),
+    retryWorkflow: vi.fn(async () => workflow()),
+    queueExistingLabels: vi.fn(async () => workflow("labels")),
     submit: vi.fn(async () => status()),
     byCommand: vi.fn(async () => status()),
     status: vi.fn(async () => status()),
@@ -86,6 +100,20 @@ function begin(s: ReturnType<typeof setup>) {
 }
 
 describe("customer return transport", () => {
+  it("bounds a stalled observation without issuing any command", async () => {
+    vi.useFakeTimers();
+    try {
+      const request = vi.fn<typeof fetch>(async (_target, options) => new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      }));
+      const result = expect(createCustomerReturnTransport(request, identity).workflow(commandKey, new AbortController().signal))
+        .rejects.toMatchObject({ code: "CUSTOMER_RETURN_REQUEST_TIMEOUT" });
+      await vi.advanceTimersByTimeAsync(CUSTOMER_RETURN_REQUEST_TIMEOUT_MS);
+      await result;
+      expect(request).toHaveBeenCalledTimes(1); expect(request.mock.calls[0][1]?.method).toBe("GET");
+    } finally { vi.useRealTimers(); }
+  });
+
   it("uses customer-only routes and explicit JSON command protection", async () => {
     const request = vi
       .fn<typeof fetch>()
@@ -255,228 +283,135 @@ describe("customer return transport", () => {
   });
 });
 
-describe("durable customer return commands", () => {
-  it("saves validated exact intent before the first write and never auto-progresses", async () => {
+describe("durable customer return workflow observation", () => {
+  it("saves exact intent before enqueue and leaves all label continuation to the backend", async () => {
     const s = setup();
-    s.api.submit.mockImplementation(async () => {
-      expect(
-        customerReturnSavedRequestSchema.parse(
-          JSON.parse(s.saved.rows.get(storageKey)!),
-        ),
-      ).toMatchObject({
-        omsOrderId: 10,
-        input: input(),
-        authorizationId: null,
-      });
-      return status();
+    s.api.enqueue.mockImplementationOnce(async () => {
+      expect(customerReturnSavedRequestSchema.parse(JSON.parse(s.saved.rows.get(storageKey)!)).input).toEqual(input());
+      return workflow();
     });
     await begin(s);
-    expect(s.session.getSnapshot().status?.authorizationId).toBe(20);
-    expect(s.api.progress).not.toHaveBeenCalled();
+    expect(s.api.enqueue).toHaveBeenCalledExactlyOnceWith(10, input(), expect.any(AbortSignal));
+    expect(s.session.getSnapshot().workflow?.phase).toBe("queued");
+    expect(s.api.progress).not.toHaveBeenCalled(); expect(s.api.submit).not.toHaveBeenCalled(); expect(s.api.resume).not.toHaveBeenCalled();
   });
-  it("prepares pending boxes from the explicit initial action and stops at uncertainty", async () => {
-    const s = setup();
-    const pending = {
-      ...status(),
-      canProgress: true,
-      parcels: [
-        {
-          ...status().parcels[0],
-          status: "pending" as const,
-          trackingNumber: null,
-          downloadPath: null,
-        },
-      ],
-    };
-    s.api.submit.mockResolvedValue(pending);
-    s.api.progress.mockResolvedValue({
-      ...pending,
-      parcels: [{ ...pending.parcels[0], status: "processing" }],
-    });
-    await begin(s);
-    expect(s.api.progress).toHaveBeenCalledExactlyOnceWith(
-      20,
-      expect.any(AbortSignal),
-    );
-    expect(s.session.getSnapshot().status?.parcels[0].status).toBe(
-      "processing",
-    );
+  it("observes completed downloads through GET only", async () => {
+    const s = setup(); await begin(s); await s.session.check();
+    expect(s.session.getSnapshot().workflow?.phase).toBe("ready");
+    expect(s.session.getSnapshot().status).toEqual(status());
+    expect(s.api.workflow).toHaveBeenCalledExactlyOnceWith(commandKey, expect.any(AbortSignal));
+    expect(s.api.progress).not.toHaveBeenCalled(); expect(s.api.retryWorkflow).not.toHaveBeenCalled();
+  });
+  it("retains the same key through a lost enqueue response, reload and explicit retry", async () => {
+    const s = setup(); s.api.enqueue.mockRejectedValueOnce(new TypeError("lost response")); await begin(s);
     const resumed = setup(s.saved);
-    await resumed.session.check();
-    expect(resumed.api.progress).not.toHaveBeenCalled();
-  });
-  it("retains exact intent/key through timeout, reload, absent command and explicit retry", async () => {
-    const first = setup();
-    first.api.submit.mockRejectedValue(new Error("Network response lost"));
-    await begin(first);
-    const record = first.saved.rows.get(storageKey);
-    first.session.finish();
-    expect(first.saved.rows.get(storageKey)).toBe(record);
-    const resumed = setup(first.saved);
-    resumed.api.byCommand.mockRejectedValue(
-      new CustomerReturnRequestError(
-        "CUSTOMER_RETURN_UNAVAILABLE",
-        "Unknown",
-        404,
-      ),
-    );
-    await resumed.session.check();
-    expect(resumed.api.submit).not.toHaveBeenCalled();
-    expect(resumed.api.resume).not.toHaveBeenCalled();
-    expect(resumed.session.getSnapshot().record?.input).toEqual(input());
-    resumed.api.resume.mockRejectedValue(
-      new CustomerReturnRequestError(
-        "CUSTOMER_RETURN_UNAVAILABLE",
-        "Unknown",
-        404,
-      ),
-    );
+    resumed.api.workflow.mockRejectedValueOnce(new CustomerReturnRequestError("RETURN_WORKFLOW_NOT_FOUND", "missing", 404));
+    resumed.api.byCommand.mockRejectedValueOnce(new CustomerReturnRequestError("RETURN_LABEL_SUBMISSION_NOT_FOUND", "missing", 404));
+    await resumed.session.check(); expect(resumed.api.enqueue).not.toHaveBeenCalled();
+    resumed.api.retryWorkflow.mockRejectedValueOnce(new CustomerReturnRequestError("RETURN_WORKFLOW_NOT_FOUND", "missing", 404));
     await resumed.session.retry();
-    expect(resumed.api.submit).toHaveBeenCalledExactlyOnceWith(
-      10,
-      input(),
-      expect.any(AbortSignal),
-    );
+    expect(resumed.api.enqueue).toHaveBeenCalledExactlyOnceWith(10, input(), expect.any(AbortSignal));
     expect(resumed.newKey).not.toHaveBeenCalled();
   });
-  it("never resubmits when a known command resumes successfully or when its outcome is still uncertain", async () => {
-    const first = setup();
-    first.api.submit.mockRejectedValue(new Error("Network"));
-    await begin(first);
-    const s = setup(first.saved);
-    s.api.resume.mockRejectedValueOnce(
-      new CustomerReturnRequestError(
-        "RETURN_LABEL_SUBMISSION_PROCESSING",
-        "Still checking",
-        409,
-      ),
-    );
+  it("restores an active server request after browser storage is gone without enqueueing or purchasing", async () => {
+    const s = setup();
+    expect(await s.session.restore(10, new AbortController().signal)).toBe(true);
+    expect(s.session.getSnapshot().record?.input).toEqual(input());
+    expect(s.session.getSnapshot().workflow?.phase).toBe("labels");
+    expect(s.api.enqueue).not.toHaveBeenCalled(); expect(s.api.progress).not.toHaveBeenCalled();
+    expect(JSON.parse(s.saved.rows.get(storageKey)!).input.idempotencyKey).toBe(commandKey);
+  });
+  it("permits a new selection only when the owned server lookup confirms no active request", async () => {
+    const s = setup(); s.api.orderWorkflow.mockRejectedValueOnce(new CustomerReturnRequestError("RETURN_WORKFLOW_NOT_FOUND", "missing", 404));
+    expect(await s.session.restore(10, new AbortController().signal)).toBe(false);
+    expect(s.session.getSnapshot().record).toBeNull();
+  });
+  it("reads old accepted receipts without commands and adopts only on an explicit retry", async () => {
+    const s = setup(); await begin(s);
+    s.api.workflow.mockRejectedValueOnce(new CustomerReturnRequestError("RETURN_WORKFLOW_NOT_FOUND", "missing", 404));
+    await s.session.check();
+    expect(s.api.byCommand).toHaveBeenCalledTimes(1);
+    expect(s.api.queueExistingLabels).not.toHaveBeenCalled();
+    s.api.retryWorkflow.mockRejectedValueOnce(new CustomerReturnRequestError("RETURN_WORKFLOW_NOT_FOUND", "missing", 404));
     await s.session.retry();
-    expect(s.api.submit).not.toHaveBeenCalled();
+    expect(s.api.queueExistingLabels).toHaveBeenCalledExactlyOnceWith(20, expect.any(AbortSignal));
+    expect(s.api.resume).not.toHaveBeenCalled(); expect(s.api.progress).not.toHaveBeenCalled();
+  });
+  it("keeps unresolved carrier outcomes on the original workflow and never progresses postage in the browser", async () => {
+    const s = setup(); await begin(s);
+    const uncertain = { ...status(), canProgress: true, parcels: [{ ...status().parcels[0], status: "needs_review" as const, downloadPath: null, trackingNumber: null }] };
+    s.api.workflow.mockResolvedValueOnce(workflow("needs_help", uncertain));
+    await s.session.check();
+    expect(s.session.getSnapshot().error).toContain("couldn't confirm");
+    s.api.retryWorkflow.mockResolvedValueOnce(workflow("labels", uncertain));
     await s.session.retry();
+    expect(s.api.retryWorkflow).toHaveBeenCalledExactlyOnceWith(commandKey, expect.any(AbortSignal));
+    expect(s.api.progress).not.toHaveBeenCalled(); expect(s.api.enqueue).toHaveBeenCalledTimes(1);
+  });
+  it("permits fresh item review only after an authoritative pre-authorization rejection", async () => {
+    const s = setup(); await begin(s); s.session.finish();
+    expect(s.session.getSnapshot().record).not.toBeNull();
+    s.api.workflow.mockResolvedValueOnce(workflow("needs_input")); await s.session.check();
+    expect(s.session.getSnapshot().rejected).toBe(true); s.session.finish();
+    expect(s.session.getSnapshot().record).toBeNull(); expect(s.saved.rows.has(storageKey)).toBe(false);
+  });
+  it.each(["key", "order", "authorization", "box"])("rejects a changed %s without overwriting the original identity", async mismatch => {
+    const s = setup(); await begin(s); await s.session.check();
+    const changed = workflow("ready");
+    if (mismatch === "key") changed.requestKey = "00000000-0000-4000-8000-000000000009";
+    if (mismatch === "order") changed.omsOrderId = 11;
+    if (mismatch === "authorization") changed.labels!.authorizationId = 21;
+    if (mismatch === "box") changed.labels!.parcels[0].parcelId = 31;
+    s.api.workflow.mockResolvedValueOnce(changed); await s.session.check();
+    expect(s.session.getSnapshot().error).not.toBeNull();
     expect(s.session.getSnapshot().status).toEqual(status());
-    expect(s.api.submit).not.toHaveBeenCalled();
-  });
-  it("allows explicit reset only after definitive rejection or all labels are ready", async () => {
-    const s = setup();
-    s.api.submit.mockRejectedValue(
-      new CustomerReturnRequestError(
-        "RETURN_LABEL_SUBMISSION_REJECTED",
-        "Rejected",
-        410,
-      ),
-    );
-    await begin(s);
-    expect(s.session.getSnapshot().rejected).toBe(true);
-    expect(s.saved.rows.has(storageKey)).toBe(true);
-    s.session.finish();
-    expect(s.session.getSnapshot().record).toBeNull();
-    expect(s.saved.rows.has(storageKey)).toBe(false);
-  });
-  it("allows leaving a known terminal failed return without losing its server history", async () => {
-    const s = setup();
-    s.api.submit.mockResolvedValue({
-      ...status(),
-      parcels: [
-        {
-          ...status().parcels[0],
-          status: "failed",
-          trackingNumber: null,
-          downloadPath: null,
-        },
-      ],
-    });
-    await begin(s);
-    s.session.finish();
-    expect(s.session.getSnapshot().record).toBeNull();
+    expect(s.session.getSnapshot().record!.authorizationId).toBe(20);
     expect(s.api.progress).not.toHaveBeenCalled();
   });
-  it("prevents concurrent clicks from creating another command key", async () => {
-    const s = setup();
-    let resolve!: (value: CustomerReturnCustomerLabelStatus) => void;
-    s.api.submit.mockImplementation(
-      () =>
-        new Promise((done) => {
-          resolve = done;
-        }),
-    );
-    const pending = begin(s);
-    await begin(s);
-    expect(s.api.submit).toHaveBeenCalledOnce();
-    expect(s.newKey).toHaveBeenCalledOnce();
-    resolve(status());
-    await pending;
+  it("coalesces duplicate initial clicks and retry clicks", async () => {
+    const s = setup(); let release!: (value: CustomerReturnWorkflowStatus) => void;
+    s.api.enqueue.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const pending = begin(s); await begin(s); expect(s.newKey).toHaveBeenCalledTimes(1);
+    release(workflow()); await pending;
+    s.api.retryWorkflow.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const retry = s.session.retry(); await s.session.retry();
+    expect(s.api.retryWorkflow).toHaveBeenCalledTimes(1); release(workflow()); await retry;
   });
-  it("does not submit if recovery storage is unavailable", async () => {
-    const s = setup();
-    s.saved.setItem.mockImplementation(() => {
-      throw new Error("Quota");
-    });
-    await begin(s);
-    expect(s.api.submit).not.toHaveBeenCalled();
-    expect(s.session.getSnapshot().storageBlocked).toBe(true);
+  it("does not enqueue if recovery storage is unavailable", async () => {
+    const s = setup(); s.saved.setItem.mockImplementationOnce(() => { throw new Error("quota"); });
+    await begin(s); expect(s.api.enqueue).not.toHaveBeenCalled(); expect(s.session.getSnapshot().storageBlocked).toBe(true);
   });
-  it("does not overwrite malformed or differently scoped saved intent", async () => {
-    const saved = storage();
-    saved.rows.set(storageKey, JSON.stringify({ untrusted: true }));
-    const s = setup(saved);
-    await begin(s);
-    expect(s.api.submit).not.toHaveBeenCalled();
-    expect(saved.setItem).not.toHaveBeenCalled();
-    expect(s.session.getSnapshot().storageBlocked).toBe(true);
+  it("preserves the original key and warns if an accepted identity cannot be saved", async () => {
+    const s = setup(); await begin(s); s.saved.setItem.mockImplementationOnce(() => { throw new Error("quota"); });
+    await s.session.check(); expect(s.session.getSnapshot().error).toContain("Keep this page open");
+    expect(JSON.parse(s.saved.rows.get(storageKey)!).input.idempotencyKey).toBe(commandKey);
   });
-  it("isolates browser recovery by the verified session key", async () => {
-    const s = setup();
-    s.api.submit.mockRejectedValue(new Error("Network"));
-    await begin(s);
-    const next = new CustomerReturnCommandSession(
-      "b".repeat(43),
-      s.saved,
-      s.api as unknown as CustomerReturnTransport,
-      s.denied,
-    );
-    await next.check();
-    expect(next.getSnapshot().record).toBeNull();
-    expect(s.api.byCommand).not.toHaveBeenCalled();
+  it("does not overwrite a malformed or differently scoped saved receipt", async () => {
+    for (const raw of ["{bad", JSON.stringify({ ...customerReturnSavedRequestSchema.parse({ version: 1, sessionKey: identity,
+      omsOrderId: 10, authorizationId: null, input: input() }), sessionKey: "b".repeat(43) })]) {
+      const saved = storage(); saved.rows.set(storageKey, raw); const s = setup(saved);
+      await begin(s); expect(s.api.enqueue).not.toHaveBeenCalled(); expect(saved.rows.get(storageKey)).toBe(raw);
+    }
   });
-  it("ignores a response after disposal and keeps the recovery key", async () => {
-    const s = setup();
-    let resolve!: (value: CustomerReturnCustomerLabelStatus) => void;
-    s.api.submit.mockImplementation(
-      () =>
-        new Promise((done) => {
-          resolve = done;
-        }),
-    );
-    const pending = begin(s);
-    s.session.dispose();
-    resolve(status());
-    await pending;
+  it("isolates recovery by the verified session", async () => {
+    const s = setup(); await begin(s);
+    const denied = vi.fn(); const other = new CustomerReturnCommandSession("b".repeat(43), s.saved, s.api as unknown as CustomerReturnTransport, denied);
+    expect(other.getSnapshot().record).toBeNull();
+  });
+  it("ignores a late response after disposal and resumes by observation", async () => {
+    const s = setup(); let release!: (value: CustomerReturnWorkflowStatus) => void;
+    s.api.enqueue.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const pending = begin(s); s.session.dispose(); release(workflow("ready")); await pending;
     expect(s.session.getSnapshot().status).toBeNull();
-    expect(s.saved.rows.has(storageKey)).toBe(true);
+    const reopened = setup(s.saved); await reopened.session.check();
+    expect(reopened.session.getSnapshot().status).toEqual(status()); expect(reopened.api.enqueue).not.toHaveBeenCalled();
   });
-  it("keeps the prior accepted identity when a later status claims different boxes", async () => {
-    const s = setup();
-    await begin(s);
-    s.api.status.mockResolvedValue({
-      ...status(),
-      parcels: [
-        {
-          ...status().parcels[0],
-          parcelId: 31,
-          downloadPath: "/api/returns/customer/returns/20/parcels/31/download",
-        },
-      ],
-    });
-    await s.session.check();
-    expect(s.session.getSnapshot().status?.parcels[0].parcelId).toBe(30);
-    expect(s.session.getSnapshot().error).toContain("box identities changed");
+  it("clears the authenticated surface on access denial and retains the uncertain recovery key", async () => {
+    const s = setup(); await begin(s); s.api.workflow.mockRejectedValueOnce(new PreviewAccessError("Sign in again"));
+    await s.session.check(); expect(s.denied).toHaveBeenCalledWith("Sign in again"); expect(s.saved.rows.has(storageKey)).toBe(true);
   });
-  it("clears authenticated UI on access denial without erasing uncertain recovery", async () => {
-    const s = setup();
-    s.api.submit.mockRejectedValue(new PreviewAccessError("Sign in again"));
-    await begin(s);
-    expect(s.denied).toHaveBeenCalledWith("Sign in again");
-    expect(s.saved.rows.has(storageKey)).toBe(true);
+  it("keeps the receipt when local clearing fails", async () => {
+    const s = setup(); await begin(s); await s.session.check(); s.saved.removeItem.mockImplementationOnce(() => { throw new Error("blocked"); });
+    s.session.finish(); expect(s.session.getSnapshot().record).not.toBeNull(); expect(s.session.getSnapshot().error).toContain("could not be cleared");
   });
 });

@@ -1,3 +1,5 @@
+import { customerReturnWorkflowStatusSchema, customerReturnWorkflowResumeSchema } from "@shared/returns/customer-return-workflow.contract";
+import type { CustomerReturnWorkflowStore, ReturnWorkflowRecord } from "./customer-return-workflow.ports";
 import { z } from "zod";
 import {
   CUSTOMER_RETURN_CUSTOMER_API,
@@ -39,6 +41,8 @@ export interface CustomerReturnCustomerOperationsDependencies {
   ownership: CustomerReturnCustomerOwnershipReader;
   submissions: Pick<CustomerReturnSubmissionService, "submitForOrder" | "resumeForOrder" | "status">;
   labels: Pick<CustomerReturnLabelsService, "status" | "progress" | "artifact">;
+  workflows?: CustomerReturnWorkflowStore;
+  now?: () => Date;
 }
 
 /** Request-scoped public boundary; existing staff authorization is intentionally unchanged. */
@@ -60,6 +64,70 @@ export class CustomerReturnCustomerOperationsService {
     return customerReturnCustomerHistorySchema.parse({ returns: page,
       nextBeforeAuthorizationId: rows.length > input.pageSize ? page[page.length - 1].authorizationId : null,
     });
+  }
+
+  /** One durable customer command; the normal backend worker owns continuation. */
+  async queueLabels(omsOrderId: number, raw: unknown) {
+    const input = parseInput(customerReturnCustomerSubmitInputSchema, raw);
+    const order = await this.ownedOrder(parseInput(id, omsOrderId));
+    const saved = await this.workflowStore().enqueue({ request: { ...input, channelId: this.principal.channelId, orderReference: order.externalOrderNumber },
+      scope: this.scope(order), actor: this.actor, now: this.workflowNow() });
+    return this.presentWorkflow(saved, { omsOrderId: order.omsOrderId, requestKey: input.idempotencyKey });
+  }
+  async orderWorkflow(rawOrderId: number) {
+    const omsOrderId = parseInput(id, rawOrderId);
+    await this.ownedOrder(omsOrderId);
+    const saved = await this.workflowStore().readOwnedOrder(this.principal, omsOrderId);
+    if (!saved) throw new CustomerReturnIntakeError("RETURN_WORKFLOW_NOT_FOUND", "The saved label request is unavailable.", 404);
+    const { channelId: _channel, orderReference: _reference, ...input } = saved.request;
+    return customerReturnWorkflowResumeSchema.parse({ workflow: await this.presentWorkflow(saved, { omsOrderId }), input });
+  }
+  async workflowStatus(rawKey: string) {
+    const key = parseInput(z.string().uuid(), rawKey);
+    const saved = await this.workflowStore().readOwned(this.principal, key);
+    if (!saved) throw new CustomerReturnIntakeError("RETURN_WORKFLOW_NOT_FOUND", "The saved label request is unavailable.", 404);
+    return this.presentWorkflow(saved, { requestKey: key });
+  }
+  async authorizationWorkflow(rawAuthorizationId: number) {
+    const authorizationId = parseInput(id, rawAuthorizationId);
+    await this.ownedAuthorization(authorizationId);
+    const saved = await this.workflowStore().readOwnedAuthorization(this.principal, authorizationId);
+    if (!saved) throw new CustomerReturnIntakeError("RETURN_WORKFLOW_NOT_FOUND", "The saved label request is unavailable.", 404);
+    return this.presentWorkflow(saved, { authorizationId });
+  }
+  async retryWorkflow(rawKey: string) {
+    const key = parseInput(z.string().uuid(), rawKey);
+    const saved = await this.workflowStore().retryOwned(this.principal, key, this.workflowNow());
+    if (!saved) throw new CustomerReturnIntakeError("RETURN_WORKFLOW_NOT_FOUND", "The saved label request is unavailable.", 404);
+    return this.presentWorkflow(saved, { requestKey: key });
+  }
+  async queueExistingLabels(rawAuthorizationId: number) {
+    const authorizationId = parseInput(id, rawAuthorizationId);
+    const owned = await this.ownedAuthorization(authorizationId);
+    const original = await this.workflowStore().acceptedRequest(this.principal, authorizationId);
+    if (!original || original.scope.omsOrderId !== owned.omsOrderId) throw customerReturnUnavailable();
+    const saved = await this.workflowStore().enqueue({ ...original, authorizationId, actor: this.actor, now: this.workflowNow() });
+    const retried = await this.workflowStore().retryOwned(this.principal, saved.request.idempotencyKey, this.workflowNow());
+    return this.presentWorkflow(retried ?? saved, { omsOrderId: owned.omsOrderId, requestKey: saved.request.idempotencyKey, authorizationId });
+  }
+  private workflowStore(): CustomerReturnWorkflowStore {
+    if (!this.dependencies.workflows) throw new CustomerReturnIntakeError("RETURN_WORKFLOW_UNAVAILABLE", "Labels are temporarily unavailable.", 503);
+    return this.dependencies.workflows;
+  }
+  private workflowNow(): Date {
+    if (!this.dependencies.now) throw new CustomerReturnIntakeError("RETURN_WORKFLOW_UNAVAILABLE", "Labels are temporarily unavailable.", 503);
+    return z.date().parse(this.dependencies.now());
+  }
+  private async presentWorkflow(record: ReturnWorkflowRecord, expected: { omsOrderId?: number; requestKey?: string; authorizationId?: number } = {}) {
+    if (record.scope.channelId !== this.principal.channelId || record.scope.externalCustomerId !== this.principal.externalCustomerId
+      || (expected.omsOrderId !== undefined && record.scope.omsOrderId !== expected.omsOrderId)
+      || (expected.requestKey !== undefined && record.request.idempotencyKey !== expected.requestKey)
+      || (expected.authorizationId !== undefined && record.authorizationId !== null && record.authorizationId !== expected.authorizationId)) throw customerReturnUnavailable();
+    const labels = record.authorizationId === null ? null : await this.present(
+      await this.dependencies.labels.status(this.principal.channelId, record.authorizationId),
+      { omsOrderId: record.scope.omsOrderId, authorizationId: record.authorizationId });
+    return customerReturnWorkflowStatusSchema.parse({ requestKey: record.request.idempotencyKey, omsOrderId: record.scope.omsOrderId,
+      phase: record.phase, reason: record.reason, labels, updatedAt: record.updatedAt.toISOString() });
   }
 
   async submit(omsOrderId: number, raw: unknown): Promise<CustomerReturnCustomerLabelStatus> {

@@ -10,5 +10,6 @@ export const CI_GUARD_TEST_FILES = Object.freeze([
   "server/__tests__/unit/writer-ratchet.test.ts",
   "server/__tests__/unit/test-typecheck-ratchet.test.ts",
   "server/__tests__/unit/ci-fast-feedback.test.ts",
+  "server/__tests__/unit/returns-workflow-ci.test.ts",
   "server/__tests__/unit/test-impact.test.ts",
 ]);

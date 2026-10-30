@@ -32,6 +32,7 @@ integration("durable customer action lookup and transactional source invalidatio
     for (const relation of ["return_policy_shipping", "customer_return_label_controls"])
       await pool.query(table("migrations/255_return_policy_shipping.sql", `CREATE TABLE returns.${relation} (`));
     await pool.query(readFileSync("migrations/900000033000019220001_customer_order_action_projection.sql", "utf8"));
+    await pool.query(readFileSync("migrations/900000042000019600001_order_action_trigger_variable_qualification.sql", "utf8"));
     store = new PostgresOrderActionProjectionStore(pool, ["test-shop.myshopify.com", "other-shop.myshopify.com"]);
   });
   beforeEach(async () => {
@@ -237,6 +238,36 @@ integration("durable customer action lookup and transactional source invalidatio
       await store.complete(scope, { ...SNAPSHOT, orderFailed: true }, NOW, new Date(NOW.getTime() + 60_000), "permanent");
     await pool.query(readFileSync("migrations/900000034000019260001_refresh_failed_return_options.sql", "utf8"));
     expect((await pool.query("SELECT count(*)::int AS count FROM oms.customer_order_action_invalidations")).rows[0].count).toBe(0);
+  });
+  it("upgrades the ambiguous source variable without blocking return receiving or losing invalidations", async () => {
+    const original = readFileSync("migrations/900000033000019220001_customer_order_action_projection.sql", "utf8").replace(/\r\n/g, "\n");
+    const start = original.indexOf("CREATE FUNCTION oms.customer_order_actions_source_changed()");
+    const end = original.indexOf("\n$$;", start);
+    if (start < 0 || end < 0) throw new Error("Missing canonical trigger function");
+    const oldFunction = original.slice(start, end + 4).replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION");
+    const client = await pool.connect();
+    const receive = async () => {
+      const result = await client.query(`INSERT INTO wms.returns(order_id,source,source_event_key,reason,status)
+        VALUES(201,'customer_portal','test-source-ambiguity','customer_return','expected') RETURNING id`);
+      await client.query(`INSERT INTO wms.return_items(return_id,order_item_id,oms_order_line_id,external_line_item_id,
+        expected_qty,received_qty,restock_policy,status) VALUES($1,301,101,'500',1,0,'return','expected')`, [result.rows[0].id]);
+    };
+    try {
+      // Transactional DDL reproduces the previously deployed function only in
+      // this disposable database. Rollback restores the corrected definition.
+      await client.query("BEGIN");
+      await client.query(oldFunction);
+      await expect(receive()).rejects.toMatchObject({ code: "42702" });
+      await client.query("ROLLBACK");
+      const migration = readFileSync("migrations/900000042000019600001_order_action_trigger_variable_qualification.sql", "utf8");
+      await client.query(migration); await client.query(migration);
+      await client.query("BEGIN");
+      await expect(receive()).resolves.toBeUndefined();
+      expect((await client.query("SELECT DISTINCT oms_order_id FROM oms.customer_order_action_invalidations")).rows)
+        .toEqual([{ oms_order_id: "100" }]);
+    } finally {
+      await client.query("ROLLBACK"); client.release();
+    }
   });
   it("source changes do not wait behind a locked cache row", async () => {
     const holder = await pool.connect(), source = await pool.connect();

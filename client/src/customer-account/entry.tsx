@@ -334,6 +334,12 @@ function CustomerAccount({
     });
     if (row) void loadSummaries([row]);
     void loadActions(accountRequests.current?.signal);
+    if (session?.session.sessionKey) {
+      const signal = accountRequests.current?.signal ?? new AbortController().signal;
+      void api.returns(session.session.sessionKey).history(null, signal).then(value => {
+        if (!signal.aborted) { setHistory(value); setHistoryError(null); }
+      }).catch(cause => { if (!signal.aborted) setHistoryError(message(cause)); });
+    }
   };
 
   useEffect(() => {

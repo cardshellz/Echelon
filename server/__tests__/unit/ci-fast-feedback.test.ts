@@ -193,10 +193,10 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(shards).toContain("if: ${{ needs.preflight.outputs.run == 'true' }}");
     expect(shards).toContain("matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}");
     const aggregate = job(browserWorkflow, "browser");
-    expect(aggregate).toContain("needs: [preflight, browser-shard]");
+    expect(aggregate).toContain(file === "returns-preview" ? "needs: [preflight, browser-shard, workflow-acceptance]" : "needs: [preflight, browser-shard]");
     expect(aggregate).toContain("if: ${{ always() }}");
     expect(aggregate).toContain("CI_NEEDS: ${{ toJSON(needs) }}");
-    expect(aggregate).toContain("node scripts/ci/require-selected-success.mjs browser-shard");
+    expect(aggregate).toContain(file === "returns-preview" ? "node scripts/ci/require-returns-success.mjs" : "node scripts/ci/require-selected-success.mjs browser-shard");
     for (const result of ["failure", "cancelled", "skipped", "", undefined]) {
       expect(() => requireSuccessfulJobs({ preflight: { result }, "browser-shard": success() }, ["preflight", "browser-shard"]))
         .toThrow("CI jobs did not all succeed: preflight");
@@ -537,10 +537,14 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(shards).toContain("name: returns-preview-browser-results-${{ matrix.feature }}-${{ matrix.shard }}");
     const gate = job(returns, "browser");
     expect(gate).toContain("name: Returns preview browser journeys\n");
-    expect(gate).toContain("needs: [preflight, browser-shard]");
+    expect(gate).toContain("needs: [preflight, browser-shard, workflow-acceptance]");
     expect(gate).toContain("if: ${{ always() }}");
     expect(gate).toContain("CI_NEEDS: ${{ toJSON(needs) }}");
-    expect(gate).toContain("node scripts/ci/require-selected-success.mjs browser-shard");
+    expect(gate).toContain("node scripts/ci/require-returns-success.mjs");
+    const acceptance = job(returns, "workflow-acceptance");
+    expect(acceptance).toContain("needs: preflight");
+    expect(acceptance).toContain("node --import tsx scripts/ci/returns-workflow-acceptance.ts");
+    expect(acceptance).toContain('ECHELON_TEST_DATABASE_DISPOSABLE: "true"');
     expect(returns).not.toMatch(/continue-on-error:|paths(?:-ignore)?:/);
   });
 

@@ -90,7 +90,9 @@ async function setup() {
   );
   const authorizeChannel = vi.fn(async () => {});
   const preflight = vi.fn<CustomerReturnLabelsService["preflight"]>(async () => {});
+  const reportFailure = vi.fn();
   const service = new CustomerReturnSubmissionService({
+    reportFailure,
     commands: { read, acquire, reject },
     intake: { persist, find: vi.fn() },
     live,
@@ -103,6 +105,7 @@ async function setup() {
   return {
     ...fixture,
     service,
+    reportFailure,
     command,
     acquire,
     read,
@@ -118,6 +121,45 @@ async function setup() {
   };
 }
 describe("private return submission and exact-intent recovery", () => {
+  it("reports the exact failed boundary and wrapped SQL code without private payloads, then resumes the same intent", async () => {
+    const s = await setup();
+    const failure = Object.assign(new Error("private query and customer address"), { cause: { code: "42702", detail: "private SQL parameters" } });
+    s.persist.mockRejectedValueOnce(failure);
+    await expect(s.service.submit(s.input, "admin")).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_PROCESSING" });
+    expect(s.reportFailure).toHaveBeenCalledExactlyOnceWith({
+      event: "customer_return_submission_failed", stage: "intake", code: "42702",
+      channelId: 36, omsOrderId: null, idempotencyKey: LABEL_KEY,
+    });
+    expect(JSON.stringify(s.reportFailure.mock.calls)).not.toContain("private");
+    expect(s.reject).not.toHaveBeenCalled();
+    await s.service.resume(36, LABEL_KEY, "admin");
+    expect(s.persist).toHaveBeenCalledTimes(2);
+    expect(s.persist.mock.calls[1][0].idempotencyKey).toBe(LABEL_KEY);
+    expect(s.command.status).toBe("accepted");
+  });
+  it("separates quote failures from intake failures in diagnostics", async () => {
+    const s = await setup();
+    s.requireEnabled.mockResolvedValue({ settings: { ...labelSettings, parcelGuardrails: defaultCustomerReturnShippingGuardrails() },
+      operationalPolicy: { id: 1, version: 1, snapshot: labelPolicy } });
+    s.preflight.mockRejectedValueOnce(new CustomerReturnIntakeError("RETURN_RATE_UNAVAILABLE", "Private provider failure", 503));
+    await expect(s.service.submit(s.input, "admin")).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_PROCESSING" });
+    expect(s.reportFailure).toHaveBeenCalledWith(expect.objectContaining({ stage: "rate_quote", code: "RETURN_RATE_UNAVAILABLE" }));
+    expect(s.persist).not.toHaveBeenCalled();
+  });
+  it("ignores unsafe diagnostic codes and preserves recovery if the reporter fails", async () => {
+    const s = await setup();
+    s.persist.mockRejectedValueOnce({ code: "private customer payload", cause: null });
+    s.reportFailure.mockImplementationOnce(() => { throw new Error("reporter unavailable"); });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(s.service.submit(s.input, "admin")).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_PROCESSING" });
+      expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ code: "RETURN_SUBMISSION_UNEXPECTED_FAILURE", reportingFailed: true });
+      expect(JSON.stringify(log.mock.calls)).not.toContain("private customer payload");
+      await s.service.resume(36, LABEL_KEY, "admin");
+      expect(s.command.status).toBe("accepted");
+    } finally { log.mockRestore(); }
+  });
+
   it("replays a legacy definitive rejection without rewriting evidence or executing intake", async () => {
     const s = await setup();
     s.command.status = "rejected";

@@ -82,9 +82,53 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  workflow-acceptance:
+    name: Connected returns workflow acceptance
+    needs: preflight
+    if: ${{ needs.preflight.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: echelon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d echelon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ECHELON_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/echelon_test
+      ECHELON_TEST_DATABASE_DISPOSABLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Require the complete durable customer journey
+        run: node --import tsx scripts/ci/returns-workflow-acceptance.ts
+      - name: Upload connected acceptance evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: returns-workflow-acceptance-results
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
   browser:
     name: Returns preview browser journeys
-    needs: [preflight, browser-shard]
+    needs: [preflight, browser-shard, workflow-acceptance]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -93,4 +137,4 @@ jobs:
       - name: Require every Returns shard
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
-        run: node scripts/ci/require-selected-success.mjs browser-shard
+        run: node scripts/ci/require-returns-success.mjs

@@ -1,25 +1,29 @@
-# Recovering a definitively rejected return request
+# Customer return recovery
 
-## Proven code path
+## Customer interaction
 
-`CustomerReturnCommandSession` restores the browser's saved command and calls its status endpoint. `CustomerReturnSubmissionService.status` reads the immutable server receipt; `completed` replays a definitive rejection without running current intake or creating a return. The receipt's historical reason is not a fresh eligibility decision.
+A return that could not finish shows one **Try again** action. Customers do not see Check status, Retry saved request, Prepare or recover labels, or a separate rejection-to-review action. Loading is shown only while a request is in flight. Completed returns retain their label downloads and normal navigation.
 
-The previous account-navigation fix made the return entry available during a cache refresh, but this terminal screen still offered Check status and Back to your orders. Rechecking a definitive rejection cannot turn it into a new request. The old allocation-error guidance also incorrectly told customers that original shipment records were still required.
+Try again resumes the original saved request. If the server confirms that the request was rejected before authorization, the same action clears the local recovery receipt through its existing owner and reloads current return items. There is no second rejection-screen click. Old selections and source revisions are discarded; a new key is created only after the customer reviews the new selection and explicitly requests labels.
 
-## Normal recovery
+Unknown outcomes retain their original key and request. An absent server command can replay the identical submitted request under that key. An accepted return continues its reviewed boxes; uncertain label attempts receive at most one reconciliation call per explicit action. A still-uncertain result stops the loop. The existing backend remains responsible for deciding whether recovery is GET-only or a new label purchase is allowed.
 
-The terminal screen identifies the saved result as an earlier attempt and offers **Review return items**. It removes the ineffective Check status action only for definitive rejections. Other outcomes keep their existing status/retry controls.
-
-The recovery action is available only when the server has confirmed rejection, the request has no authorization ID and no request is running. It uses the existing `commands.finish` owner to clear the local recovery receipt. If that write fails, the saved request remains and no fresh lookup starts. The server receipt, original key and original error code are never rewritten.
-
-After successful local clearing, the existing authenticated order lookup reloads current items for the account's requested order, or the saved request's order in the standalone portal. Old selections, package drafts and source revisions are discarded. Current policy, quantity, ownership and shipping checks still apply. A new submission gets a new key only after the customer chooses items, reviews the result and explicitly requests labels.
-
-Unknown and accepted outcomes cannot use this action. Their original recovery identities remain intact, preventing duplicate return or label creation. The standalone chooser and existing Back to your orders action remain available through their normal owners.
-
-The shared allocation-rejection guidance no longer asserts an original-shipment prerequisite. It describes the failed request and directs the customer to fresh item review. This changes public guidance, not stored rejection evidence or business rules.
+Opening or reloading the portal reads saved results only. It never enters the preparation or purchase loop. Duplicate recovery clicks are coalesced while a request is in flight. Response identities and parcel counts are checked before any further preparation call. A failed local receipt clear cannot begin a fresh lookup or discard the original key.
 
 ## Validation and limits
 
-The 34 compiled-account desktop/mobile cases passed, including direct recovery with ready and refreshing cache projections, current source revisions, explicit new-key submission, lookup retry, storage failure and preservation of unknown outcomes. Existing back/close, layout, packing and lost-response cases remain covered. All 204 account, customer-return-session and submission-service unit tests passed, including immutable replay of the old rejection with no intake, provider quote or label call. Client TypeScript checks also passed. The full returns browser run and server-test typecheck are reported separately against the published PR head before release.
+Unit tests cover lost responses, same-key retries, multiple boxes, bounded reconciliation, duplicate clicks, response identity changes, session changes and storage failures. Browser tests cover both the standalone portal and the compiled account modal on desktop and mobile, including the exact expired-request-to-fresh-review sequence with one click.
 
-Tests use synthetic customer data and shipping ports. No real order, points, inventory, payment, refund, return or label-purchase command was submitted. Production lookup and status evidence was read-only. The existing Back to your orders action was also used on a confirmed-rejected browser attempt, followed by reopening the fresh selection form with quantity zero. That normal UI action cleared only the local recovery receipt; the server history was preserved. A source deployment alone does not replace the Shopify account bundle; the companion staging theme must also receive the tested assets. Live label purchase and financial acceptance are not part of this validation.
+All test orders, carrier responses, labels and receiving receipts are synthetic. No real order, return, label purchase, refund, inventory or points command is part of validation. Server eligibility, pricing, receiving ownership and purchase-reconciliation rules stay in place.
+
+The source app and companion customer-account bundle must both be released for their respective surfaces to receive the change. The companion theme targets the existing unpublished staging theme; it must not publish the live Shopify theme implicitly.
+
+## Source transaction failure and label preparation
+
+`oms.customer_order_actions_source_changed` used an unqualified PL/pgSQL variable named `source` inside queries of tables that also have a `source` column. The `return_item` branch reads `wms.returns`, and the `receipt_child` branch reads fulfillment receipts. PostgreSQL raises `42702` before these source transactions can commit. The forward migration qualifies that variable with a block label while preserving every invalidation branch and trigger. It updates the function only; it does not repair or rewrite customer records.
+
+The connected three-shipment/two-return-box test now includes the canonical action-projection migration and its real source triggers. Previously that fixture omitted those triggers. The migration regression temporarily restores the original function in a disposable transaction, proves the receiving insert fails with `42702`, rolls it back, reapplies the correction twice, and proves receiving still queues its parent-order invalidation.
+
+Submission failures report an allowlisted cause code and the failed boundary (settings, inspection, preparation, rate quote, intake, or label status), tied to the original command key and canonical order. Exception messages, SQL, addresses and carrier payloads are excluded. Unknown outcomes still retain their original command for safe recovery; diagnostics do not authorize a replacement or a new purchase.
+
+During active work the portal says **Getting your return label** (or **labels** for multiple boxes). Retry instructions stay hidden while that work is in flight. A failed attempt has the existing single **Try again** action. Source and compiled theme assets both need release before the account modal changes.

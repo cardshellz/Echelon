@@ -1,3 +1,11 @@
+import { CustomerReturnCustomerOperationsService } from "../../application/customer-return-customer-operations.service";
+import { CustomerReturnOrderAccessService } from "../../application/customer-return-order-access.service";
+import { PostgresCustomerReturnOrderAccessRepository } from "../../infrastructure/customer-return-order-access.repository";
+import { PostgresCustomerReturnCustomerOwnershipReader } from "../../infrastructure/customer-return-customer-ownership.repository";
+import { shipStationReturnWorkflowFixture } from "../support/shipstation-return-workflow-fixture";
+import { downloadCustomerReturnLabel } from "../../infrastructure/customer-return-label-download";
+import { CustomerReturnWorkflowWorker } from "../../application/customer-return-workflow.worker";
+import { PostgresCustomerReturnWorkflowStore, RETURN_WORKFLOW_LEASE_MS } from "../../infrastructure/customer-return-workflow.repository";
 import { PostgresCustomerReturnAuthorizationStore } from "../../infrastructure/customer-return-authorization.repository";
 import { ReturnParcelReceivingService } from "../../application/return-parcel-receiving.service";
 import { PostgresReturnParcelReceivingStore } from "../../infrastructure/return-parcel-receiving.repository";
@@ -37,6 +45,8 @@ import { PostgresReturnCaseOperationStore } from "../../infrastructure/return-ca
 import { resolveReturnsTestDatabase } from "../support/disposable-database";
 import {
   createIntakeTestSchema,
+  publishIntakeTestPolicyShipping,
+  createIntakeActionProjectionSchema,
   INTAKE_NOW,
 } from "../support/customer-return-intake-database";
 import {
@@ -118,6 +128,7 @@ integration(
           "utf8",
         ),
       );
+      await createIntakeActionProjectionSchema(pool);
       const database = drizzle(pool, { schema });
       globalConnection.transaction.mockImplementation(
         (work: Parameters<typeof database.transaction>[0]) =>
@@ -133,7 +144,7 @@ integration(
       await pool?.end();
     });
 
-    async function setup(legacy = false, beforePersist?: () => Promise<void>) {
+    async function setup(legacy = false, beforePersist?: () => Promise<void>, carrier?: ReturnLabelProvider) {
       if (legacy) await seedComplexSource(pool, true);
       const database = drizzle(pool, { schema });
       const provider = complexProvider();
@@ -229,7 +240,7 @@ integration(
           pool,
           () => new Date(instant),
         ),
-        provider: { purchase, recover },
+        provider: carrier ?? { purchase, recover },
         rates: { quote },
         authorizeChannel: async (channel) => {
           expect(channel).toBe(36);
@@ -262,7 +273,8 @@ integration(
           `19370000-0000-4000-8000-${String(++leaseSequence).padStart(12, "0")}`,
       });
       const inspection = await live.inspectCanonicalForIntake(COMPLEX_SCOPE);
-      const config = await settings.requireEnabled(36, 1);
+      const currentVersion = await new PostgresCustomerReturnSettingsStore(database).customerVersion(36);
+      const config = await settings.requireEnabled(36, currentVersion!);
       const input = complexRequest(inspection, config.settings.version);
       return {
         live,
@@ -277,6 +289,175 @@ integration(
         makeLabel,
       };
     }
+
+    function workflow(s: Awaited<ReturnType<typeof setup>>) {
+      const store = new PostgresCustomerReturnWorkflowStore(pool);
+      const report = vi.fn();
+      const worker = new CustomerReturnWorkflowWorker({ store, submissions: s.submission, labels: s.labels,
+        now: () => new Date(instant), newToken: () => `19600000-0000-4000-8000-${String(++leaseSequence).padStart(12, "0")}`, report });
+      const principal = { channelId: COMPLEX_SCOPE.channelId, externalCustomerId: COMPLEX_SCOPE.externalCustomerId };
+      return { store, worker, report, principal,
+        enqueue: () => store.enqueue({ request: s.input, scope: COMPLEX_SCOPE, actor: "customer:36:901", now: new Date(instant) }),
+        read: () => store.readOwned(principal, s.input.idempotencyKey) };
+    }
+    it("uses the actual ShipStation adapter through purchase, readback, lost-response recovery and PDF download", async () => {
+      await publishIntakeTestPolicyShipping(pool, { contactPhone: "555-010-1000" });
+      const carrier = shipStationReturnWorkflowFixture(() => new Date(instant));
+      const s = await setup(false, undefined, carrier.provider), w = workflow(s);
+      carrier.loseNextPurchaseReply();
+      await w.enqueue(); await w.worker.run(); await w.worker.run();
+      expect(carrier.calls.filter(call => call.method === "POST")).toHaveLength(1);
+      instant = new Date(instant.getTime() + 5_001);
+      await w.worker.run(); await w.worker.run();
+      const saved = (await w.read())!;
+      expect(saved.phase).toBe("ready");
+      expect(carrier.calls.filter(call => call.method === "POST")).toHaveLength(2);
+      const ready = await s.labels.status(36, saved.authorizationId!);
+      for (const parcel of ready.parcels) {
+        const artifact = await s.labels.artifact(36, saved.authorizationId!, parcel.parcelId);
+        const pdf = await downloadCustomerReturnLabel(artifact.downloadUrl, carrier.fetchFn);
+        expect(Buffer.from(pdf).subarray(0, 5).toString()).toBe("%PDF-");
+      }
+      expect(new Set(carrier.calls.filter(call => call.method === "POST").map(call => call.externalShipmentId)).size).toBe(2);
+      expect((await pool.query("SELECT count(*)::int AS count FROM returns.customer_return_authorizations")).rows[0].count).toBe(1);
+    });
+    it("finishes an explicitly queued mixed-box return without any browser continuation and receives both labels once", async () => {
+      const s = await setup(), w = workflow(s);
+      const before = await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions");
+      expect((await w.enqueue()).phase).toBe("queued");
+      expect((await w.enqueue()).phase).toBe("queued");
+      expect(s.purchase).not.toHaveBeenCalled();
+      await Promise.all([w.worker.run(), w.worker.run()]);
+      expect((await w.read())?.phase).toBe("labels");
+      expect(s.purchase).not.toHaveBeenCalled();
+      await w.worker.run(); await w.worker.run(); await w.worker.run();
+      const saved = (await w.read())!;
+      expect(saved.phase).toBe("ready");
+      expect(s.purchase).toHaveBeenCalledTimes(2);
+      const ready = await s.labels.status(36, saved.authorizationId!);
+      const boxes = new ReturnParcelReceivingService(new PostgresReturnParcelReceivingStore(), () => new Date(instant));
+      for (const parcel of [...ready.parcels].reverse()) {
+        const box = await boxes.lookup(parcel.trackingNumber!);
+        const input = { idempotencyKey: `19600000-0000-4000-9000-${String(box.boxNumber).padStart(12, "0")}`, notes: null,
+          lines: box.lines.map(line => ({ authorizationLineId: line.authorizationLineId, expectedCurrentReceivedQuantity: 0, quantityReceivedNow: line.expectedQuantity })) };
+        await boxes.receive(box.parcelId, input, "synthetic-receiver");
+        expect((await boxes.receive(box.parcelId, input, "retry")).replayed).toBe(true);
+      }
+      expect((await pool.query("SELECT count(*)::int AS count FROM returns.customer_return_authorizations")).rows[0].count).toBe(1);
+      expect((await pool.query("SELECT sum(received_qty)::int AS units FROM wms.return_items")).rows[0].units).toBe(13);
+      expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions")).rows).toEqual(before.rows);
+      expect((await pool.query("SELECT count(*)::int AS count FROM returns.return_case_customer_refunds")).rows[0].count).toBe(0);
+    });
+    it("recovers a worker crash after a label commit through its original manifest without repurchasing", async () => {
+      const s = await setup(), w = workflow(s);
+      await w.enqueue(); await w.worker.run();
+      const settle = vi.spyOn(w.store, "settle").mockRejectedValueOnce(new Error("lost checkpoint"));
+      await expect(w.worker.run()).rejects.toThrow("lost checkpoint"); settle.mockRestore();
+      expect(s.purchase).toHaveBeenCalledTimes(1);
+      instant = new Date(instant.getTime() + RETURN_WORKFLOW_LEASE_MS + 1);
+      const restarted = workflow(s);
+      await restarted.worker.run(); await restarted.worker.run();
+      expect((await restarted.read())?.phase).toBe("ready");
+      expect(s.purchase).toHaveBeenCalledTimes(2);
+      expect((await pool.query("SELECT count(*)::int AS count FROM returns.customer_return_authorizations")).rows[0].count).toBe(1);
+    });
+    it("automatically reconciles a lost carrier reply before buying another reviewed box", async () => {
+      const s = await setup(), w = workflow(s);
+      s.purchase.mockImplementationOnce(async input => {
+        s.savedProviderLabels.set(input.externalShipmentId, s.makeLabel(input));
+        throw new ReturnLabelProviderError("RETURN_LABEL_TIMEOUT", "unknown");
+      });
+      await w.enqueue(); await w.worker.run(); await w.worker.run();
+      expect(s.purchase).toHaveBeenCalledTimes(1);
+      instant = new Date(instant.getTime() + 5_001);
+      await w.worker.run(); await w.worker.run();
+      expect((await w.read())?.phase).toBe("ready");
+      expect(s.recover).toHaveBeenCalledTimes(1);
+      expect(s.purchase).toHaveBeenCalledTimes(2);
+    });
+    it("stops bounded unresolved purchases with a useful result and resumes reconciliation on the same explicit retry", async () => {
+      const s = await setup(), w = workflow(s);
+      s.purchase.mockRejectedValueOnce(new ReturnLabelProviderError("RETURN_LABEL_TIMEOUT", "unknown"));
+      await w.enqueue(); await w.worker.run(); await w.worker.run();
+      for (let count = 0; count < 8; count++) { instant = new Date(instant.getTime() + 60_001); await w.worker.run(); }
+      const stopped = (await w.read())!;
+      expect(stopped.phase).toBe("needs_help");
+      expect(stopped.reason).toBe("RETURN_LABEL_RECONCILIATION_REQUIRED");
+      const count = s.recover.mock.calls.length;
+      await w.worker.run(); expect(s.recover).toHaveBeenCalledTimes(count);
+      expect(s.purchase).toHaveBeenCalledTimes(1);
+      const original = s.purchase.mock.calls[0][0];
+      s.savedProviderLabels.set(original.externalShipmentId, s.makeLabel(original));
+      await w.store.retryOwned(w.principal, s.input.idempotencyKey, instant);
+      await w.worker.run(); await w.worker.run();
+      expect((await w.read())?.phase).toBe("ready");
+      expect(s.purchase).toHaveBeenCalledTimes(2);
+    });
+    it("retries a conclusively rejected label only after a new explicit action, preserving failed evidence", async () => {
+      const s = await setup(), w = workflow(s);
+      s.purchase.mockRejectedValueOnce(new ReturnLabelProviderError("RETURN_LABEL_REJECTED", "rejected"));
+      await w.enqueue(); await w.worker.run(); await w.worker.run();
+      expect((await w.read())?.phase).toBe("retryable_failure");
+      await w.worker.run(); expect(s.purchase).toHaveBeenCalledTimes(1);
+      await w.store.retryOwned(w.principal, s.input.idempotencyKey, instant);
+      await w.worker.run(); await w.worker.run();
+      expect((await w.read())?.phase).toBe("ready");
+      expect(s.purchase).toHaveBeenCalledTimes(3);
+      expect((await pool.query("SELECT status FROM returns.customer_return_label_attempts ORDER BY id")).rows.map(row => row.status))
+        .toEqual(["failed", "succeeded", "succeeded"]);
+    });
+    it("restores the same server intent through the owned customer boundary and exposes completed labels in history", async () => {
+      const s = await setup(), w = workflow(s);
+      const access = new CustomerReturnOrderAccessService({ channelId: 36,
+        principalReader: { getVerifiedPrincipal: async () => ({ kind: "customer", ...w.principal }) },
+        repository: new PostgresCustomerReturnOrderAccessRepository(pool) });
+      const operations = new CustomerReturnCustomerOperationsService({ principal: w.principal, orderAccess: access,
+        ownership: new PostgresCustomerReturnCustomerOwnershipReader(pool), submissions: s.submission,
+        labels: s.labels, workflows: w.store, now: () => new Date(instant) });
+      const { channelId: _channel, orderReference: _reference, ...input } = s.input;
+      expect((await operations.queueLabels(100, input)).phase).toBe("queued");
+      const restored = await operations.orderWorkflow(100);
+      expect(restored.input).toEqual(input); expect(s.purchase).not.toHaveBeenCalled();
+      await w.worker.run(); await w.worker.run(); await w.worker.run();
+      const ready = await operations.workflowStatus(s.input.idempotencyKey);
+      expect(ready.phase).toBe("ready");
+      expect(ready.labels?.parcels.every(parcel => parcel.downloadPath?.startsWith("/api/returns/customer/returns/"))).toBe(true);
+      expect((await operations.listReturns()).returns.map(row => row.authorizationId)).toEqual([ready.labels!.authorizationId]);
+      await expect(operations.orderWorkflow(100)).rejects.toMatchObject({ code: "RETURN_WORKFLOW_NOT_FOUND" });
+      await operations.queueExistingLabels(ready.labels!.authorizationId); await w.worker.run();
+      expect(s.purchase).toHaveBeenCalledTimes(2);
+    });
+    it("can retry a corrected definitive carrier rejection after several failures without resetting the RMA", async () => {
+      const s = await setup(), w = workflow(s);
+      s.purchase.mockRejectedValue(new ReturnLabelProviderError("RETURN_LABEL_CREDENTIAL_REJECTED", "rejected"));
+      await w.enqueue(); await w.worker.run(); await w.worker.run();
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await w.store.retryOwned(w.principal, s.input.idempotencyKey, instant); await w.worker.run();
+        expect((await w.read())?.phase).toBe("retryable_failure");
+      }
+      expect(s.purchase).toHaveBeenCalledTimes(4);
+      s.purchase.mockImplementation(async input => { const label = s.makeLabel(input); s.savedProviderLabels.set(input.externalShipmentId, label); return label; });
+      await w.store.retryOwned(w.principal, s.input.idempotencyKey, instant); await w.worker.run(); await w.worker.run();
+      expect((await w.read())?.phase).toBe("ready"); expect(s.purchase).toHaveBeenCalledTimes(6);
+      expect((await pool.query("SELECT count(*)::int AS count FROM returns.customer_return_authorizations")).rows[0].count).toBe(1);
+    });
+    it("fences stale worker completion, changed intent, and changed customer ownership", async () => {
+      const s = await setup(), w = workflow(s);
+      await w.enqueue();
+      await expect(w.store.enqueue({ request: { ...s.input, parcels: [...s.input.parcels].reverse() }, scope: COMPLEX_SCOPE,
+        actor: "customer:36:901", now: instant })).rejects.toMatchObject({ code: "RETURN_LABEL_COMMAND_CONFLICT" });
+      const [leased] = await w.store.claim(1, "19600000-0000-4000-8000-000000000099", instant);
+      instant = new Date(instant.getTime() + RETURN_WORKFLOW_LEASE_MS + 1);
+      await w.store.claim(1, "19600000-0000-4000-8000-000000000098", instant);
+      expect(await w.store.settle(leased, { phase: "retryable_failure", reason: "RETURN_WORKFLOW_TEMPORARY_FAILURE",
+        authorizationId: null, failures: 1, nextRunAt: instant, errorCode: "RETURN_TEST_FAILURE" }, instant)).toBe(false);
+      await pool.query("UPDATE oms.oms_orders SET external_customer_id='902' WHERE id=100");
+      expect(await w.read()).toBeNull();
+      instant = new Date(instant.getTime() + RETURN_WORKFLOW_LEASE_MS + 1);
+      await w.worker.run(); expect(s.purchase).not.toHaveBeenCalled();
+      expect((await pool.query("SELECT phase,last_error_code FROM returns.customer_return_workflows")).rows[0])
+        .toEqual({ phase: "needs_help", last_error_code: "RETURN_WORKFLOW_OWNER_CHANGED" });
+    });
 
     async function counts() {
       return (
