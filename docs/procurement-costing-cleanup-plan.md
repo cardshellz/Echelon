@@ -5,17 +5,18 @@ This is the active tracker for consolidating purchase costing from PO through sh
 | Tracking field | Current value |
 | --- | --- |
 | Created | 2026-10-30 |
-| Overall state | Stage 1 contract foundation implemented and locally tested; two business policy answers remain pending |
-| Current stage | S1 — authoritative cost contract and source rules |
-| Next work item | Finish S1 receipt-allocation and supplier-tax policy decisions, then implement the S2 source/legacy-compatibility adapters before connecting writers |
-| Working branch | `codex/purchase-cost-authority-cleanup` |
+| Overall state | S1 foundation merged; deployment reported by the user. First S2 source-compatibility integration locally verified; two S1 policy answers remain pending |
+| Current stage | S2 — compatibility integration that preserves existing authority; policy-dependent S1/S2 work remains open |
+| Next work item | Publish/review the verified compatibility candidate, incorporate the receipt-allocation and supplier-tax decisions, then connect the broader monetary source adapters and financial commands |
+| Working branch | `codex/purchase-cost-source-compatibility` |
 | Plan branch base | `5f9e911a0c7506329624135d4a9a222842880962` |
-| Latest main incorporated | `31c03b80ba465128a4827a69897e0e3694020d9d`; merge `c157e98f72645cd51ce2da0a61ea5e6ab486ba59`. Upstream changes were inventory-sync/UI/CI files, with no audited procurement cost owner change. |
+| Latest main incorporated | Candidate begins at `80f5353b99a8500d78ac2687e7a736d0dbcc78e8`, the merge of PR #1964 |
 | Audited main baseline | `e571bcac780852c3ac6b488354c10aaf7f1c417c`; reviewed costing paths were unchanged at the plan branch base |
 | Audit | [Purchase costing authority review](procurement-costing-authority-audit-2026-10-30.md) |
 | Stage 1 contract and ownership map | [Contract, compatibility and recognition boundary](procurement-costing-stage-1-contract.md) |
-| Current implementation PR | [Draft PR #1964](https://github.com/cardshellz/Echelon/pull/1964) |
-| Deployment and live acceptance | Not started for this cleanup |
+| Stage 2 compatibility trace | [Recorded authority and selected-input proof](procurement-costing-stage-2-compatibility.md) |
+| Current implementation PR | S2 candidate not published yet; [#1964](https://github.com/cardshellz/Echelon/pull/1964) is merged |
+| Deployment and live acceptance | User reports #1964 deployed on 2026-10-30. Release ancestry/processes and live records were not independently checked this session. S2 compatibility changes are local only. |
 
 ## Resume here after a context reset
 
@@ -79,6 +80,8 @@ Exit evidence: agreed contracts/rules, exact source ownership map, bounded compa
 
 Depends on the applicable S1 contracts. Primary work: COST-03, COST-04, COST-08.
 
+- [x] Integrate the first legacy-equivalence bridge with source recording and shared status. Prove original hashes, confirmed supplier economics through the S1 model, approved settlement class and selected shipment allocation inputs; retain original revisions/approvals when unchanged. Candidate validation/review recorded below.
+- [ ] Complete the broader monetary read/persistence adapters, including partial/combined supplier sources, header/credit treatment and their legacy compatibility, after the applicable policy decisions. The equivalence bridge alone is not this activation.
 - [ ] Inventory every supported cost-changing command: invoice approval/correction/dispute/void, relevant PO amendments, shipment charge changes, invoice-to-charge reconciliation and source credits.
 - [ ] Route these commands through shared planning/source selection and the existing revision/application owners. Record the affected scopes and update prerequisites explicitly.
 - [ ] Produce a before/after preview covering document amounts, quantities, source selection, allocations, landed totals, remaining stock value, verified-sales cost changes and any unresolved amount.
@@ -177,7 +180,8 @@ Add exact identifiers as work exists. A proposed slice is not an existing PR or 
 | Slice | Intended contents | PR/commit | Local evidence | Hosted CI | Deployment/live proof |
 | --- | --- | --- | --- | --- | --- |
 | Plan and audit | This tracker, baseline audit and synthetic characterization evidence | `3cf9b7102043eb14386f69ffe70b8590951d7169` | Documentation links and synthetic evidence checks | Not run for implementation | No runtime change |
-| Contract foundation | S1 contracts, economic identity, source rules and compatibility tests | [Draft #1964](https://github.com/cardshellz/Echelon/pull/1964); implementation `ceb76a6c9f370435facbea0574629c3ed92b2fe7`; validated latest-main merge `c157e98f72645cd51ce2da0a61ea5e6ab486ba59` | 480 tests / 16 files and production/server-test TypeScript passed again on the main-integrated code; the subsequent ledger update changes documentation only | Running on draft; initial checks passed, complete final-head success not established | Not deployed; projection not connected to readers/posting commands |
+| Contract foundation | S1 contracts, economic identity, source rules and compatibility tests | [Merged #1964](https://github.com/cardshellz/Echelon/pull/1964), merge `80f5353b99a8500d78ac2687e7a736d0dbcc78e8`; head `691ae3c87a7ca36ea7c17dfc9e652c00f96c7d9b` | 480 tests / 16 files and production/server-test TypeScript passed on main-integrated code `c157e98f7` | Final head read: 49 successful, 2 skipped, 1 cancelled browser shard and its failed aggregate. Cancellation cause was not established; do not call this fully green | Deployment reported by user; independent release/live acceptance not recorded |
+| Source compatibility | First S2 integration and F5: original revisions/approvals survive settlement and unused-quote changes across shared read/write owners | Current branch; PR/commit to record on publication | Final candidate: 558 focused unit tests / 17 files, 50 related reader/cache tests / 4 files, 259 real-owner PostgreSQL tests and 455 guard tests passed. Production/server-test TypeScript passed. Six SQL cases are new; the added closed-health regression remains active | Not run for new candidate | Not deployed; no live data changed |
 | Commands and downstream application | S2-S3 owning workflows, approvals, inheritance and safe recovery | Not created | Not run | Not run | Not deployed |
 | Shared consumers and complete acceptance | S4-S5 connected readers, actions and full acceptance | Not created | Not run | Not run | Not deployed |
 | Rollout and historical review | S6 manifest, read-only comparisons and specifically approved corrections | Not created | Not run | Not run | Not deployed |
@@ -226,13 +230,46 @@ node --max-old-space-size=8192 node_modules/typescript/bin/tsc -p tsconfig.tests
 
 The evidence script is a baseline diagnostic outside normal test discovery. Its assertions intentionally characterize the audited behavior. Implementation must add target-behavior tests to the real suites, retain this dated evidence, and avoid treating a later diagnostic assertion failure after a fix as a production regression.
 
+### S2 compatibility evidence and repeatable checks
+
+- `verifiedStoredCostSource` checks the original stored contract, fingerprint and captured evidence before any semantic comparison.
+- `retainEquivalentPurchaseCostSource` regenerates a supported fully confirmed legacy component and verifies its selected money through the S1 projection. Original revisions are reused in `recordCostRevision` and `readPurchaseCostStatus`; unchanged postings are not rehashed or recreated.
+- `retainEquivalentShipmentCostSource` shares the approved settlement class. `normalizeUnselectedShipmentQuote` proves exact charge signatures and selected allocation methods before excluding unused PO quote inputs. By-value price dependencies remain active.
+- Real SQL proof calls the actual AP payment owner, supplier reconciliation and shipment application owners. It compares original source/application/reporting/approval and stock records before/after. Genuine amount/currency/lot mismatches remain visible; concurrent retries retain one source revision.
+- New closed-shipment health checks reproduced an additional F5 failure beyond the initial supplier bridge: quote fields were hashed into landed sources even for volume, weight or line-count allocation. Four target unit cases failed before the selected-input proof; the corrected six-case SQL group passed afterward. Do not remove this regression to obtain a green suite.
+- Unknown captured fields, including prototype-named JSON keys, remain significant. Validation is not allowed to discard raw captured evidence during comparison.
+- Final focused coverage for the four compatibility files: 95.32% statements, 92.18% branches, 100% functions and 98.37% lines. This is bounded comparison coverage, not whole-flow coverage.
+- The money boundary guard rejected a direct BigInt-to-number conversion in the initial candidate. The final implementation uses the existing exact `readIntegerMills` boundary; no guard exception was added. All 455 guard tests then passed.
+- Final local results on 2026-10-30: 558 focused tests / 17 files, 50 related repository-reader/cache tests / 4 files, 259 receipt/AP/freight SQL tests / 1 file, 455 guards / 12 files, and production/server-test TypeScript all passed. The final SQL run started at 16:38:34 local time and completed in 216.46 seconds.
+- Testing uses a newly initialized PostgreSQL 17 cluster bound to `127.0.0.1:55439`, under ignored `.codex-artifacts/stage2-cost-source-pg`, and database `echelon_stage2_cost_compat`. No existing/live database was accessed. The fixture owns and removes its schemas; final cleanup stops this cluster.
+
+The unit command from S1 adds `server/modules/procurement/__tests__/unit/purchase-cost-source-identity.test.ts` (558 tests total). The related reader/cache command below adds 50 separate tests. For SQL acceptance against an explicitly disposable LOCAL database:
+
+```powershell
+$env:ECHELON_TEST_DATABASE_URL = 'postgresql://test@127.0.0.1:55439/echelon_stage2_cost_compat'
+$env:ECHELON_TEST_DATABASE_DISPOSABLE = 'true'
+node node_modules/vitest/vitest.mjs run server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts --reporter=dot
+node node_modules/vitest/vitest.mjs run server/modules/procurement/__tests__/unit/purchase-cost-status-batch.repository.test.ts server/modules/procurement/__tests__/unit/purchase-cost-status-snapshot.repository.test.ts server/modules/procurement/__tests__/unit/shipment-cost-review-supplier-snapshot.test.ts server/modules/procurement/__tests__/unit/supplier-credit-cost-read-cache.test.ts --reporter=dot
+node scripts/ci/run-test-lane.mjs guards
+node --max-old-space-size=8192 node_modules/typescript/bin/tsc --pretty false --incremental false
+node --max-old-space-size=8192 node_modules/typescript/bin/tsc -p tsconfig.tests.server.json --pretty false --incremental false
+```
+
+Never point the integration fixture at a live database. Final counts/head and hosted CI state belong in the ledger/handoff; earlier passing runs do not replace final candidate verification.
+
 ## Current handoff
 
-**Completed:** the audit/plan plus the additive S1 monetary contracts, pure invoice-first/partial-coverage projection, exact adjustment/charge validation, semantic identity and historical compatibility/ownership documentation. The $1,000 PO + $1,200 approved invoice + $200 freight case now passes the target $1,400 projection. Payment-only transitions and superseded quote edits preserve its identity and original application/approval details. Known combined bills retain their complete amount with an explicitly unknown split.
+**Completed:** S1 foundation merged in #1964; the user reports deployment. The first S2 candidate connects the supported semantic compatibility proof to actual source recording/shared status and shipment preparation, preserving original recorded authority across AP payment progress and unused PO quote edits. Real AP payment, source/app/history preservation, concurrent retry and genuine-exception cases pass in the disposable SQL fixture. The additional unused landed-snapshot quote dependency found by closed-shipment health tests is fixed in the selected-input proof. Final local unit/reader, SQL, guard and both TypeScript checks passed; publication/hosted verification remain.
 
-**Implementation state:** S1 remains in progress pending the two policy answers and final review. COST-01/02/05/07 have tested foundations, not completed runtime remediation. COST-03/04/06/08/09 and all full-flow acceptance gates remain open. No migration, source rehash, historical correction, stock mutation or live financial change has occurred. The only existing runtime module change is the unchanged canonical fingerprint implementation's move into the domain with its compatibility export retained.
+**Implementation state:** the applicable S1 receipt-allocation/tax rules remain open. COST-05 has a cross-cutting runtime candidate; COST-01/02/07 retain foundations rather than activated replacement pricing. COST-03/04/06/08/09 and the remaining acceptance gates are open. No migration, stored-source rehash, historical correction or live stock/financial mutation has occurred. The new bridge changes equivalence/currentness in the existing owners; it does not create a new posting engine or activate unsupported costs.
 
 **New code entry points:**
+
+- `server/modules/procurement/domain/cost-source-compatibility.ts`: validate the original immutable proposal before reuse.
+- `server/modules/procurement/domain/purchase-cost-source-identity.ts`: fully confirmed supplier equivalence through the S1 money model.
+- `server/modules/procurement/domain/shipment-cost-selected-inputs.ts`: method-dependent proof of unused quote inputs, including exact source-reference verification.
+- `server/modules/procurement/cost-source-revision.repository.ts`, `purchase-cost-status.repository.ts` and `shipment-cost-source-identity.ts`: shared writer/read integration.
+- `server/modules/procurement/__tests__/integration/cost-source-compatibility.cases.ts`: real AP payments, immutable history, closed health, concurrent retries and real mismatches.
 
 - `shared/procurement/purchase-cost-authority.ts`: normalized input/output schemas and types.
 - `server/modules/procurement/domain/purchase-cost-authority.ts`: `projectPurchaseCostAuthority`.
@@ -241,9 +278,9 @@ The evidence script is a baseline diagnostic outside normal test discovery. Its 
 - `server/modules/procurement/__tests__/unit/purchase-cost-authority*.ts` and `server/modules/inventory/__tests__/unit/cost-fingerprint.test.ts`: synthetic target and boundary/compatibility tests.
 - [Stage 1 contract document](procurement-costing-stage-1-contract.md): concrete ownership map, compatibility steps, recognition trace and remaining evidence gaps.
 
-**Next action:** incorporate the pending policy answers without inventing defaults and finish the applicable S1 rules. Then implement the S2 read/compatibility adapters against the existing source revision/application owners and prove legacy equivalence in PostgreSQL before connecting any writer. The unknown-breakdown model cannot be stuffed into legacy product/packaging rows by assuming zero packaging. Validate header/credit/return allocation and the verified-sale reporting boundary before activating those paths.
+**Next action:** publish the S2 compatibility PR and check hosted CI on its exact head. Incorporate the pending policy answers, then implement the broader S2 source/persistence adapters and approved financial mutation/preview binding. The unknown-breakdown model cannot be stuffed into legacy product/packaging rows by assuming zero packaging. Validate header/credit/return allocation and the verified-sale reporting boundary before activating those paths.
 
-**Remaining checks:** complete hosted CI for the final review head; S2 public-command/adapter and PostgreSQL compatibility tests; S3 lineage/verified-sale acceptance; S4 connected consumers/browser journeys; S5/S6 full-flow and deployed/live proof. Production/server-test TypeScript and all 480 focused tests passed on the main-integrated code at `c157e98f72645cd51ce2da0a61ea5e6ab486ba59`. The PR stays draft while S1 policies remain unanswered; a passing regression browser suite alone does not prove future reader/command activation.
+**Remaining checks:** hosted validation for the new compatibility candidate; broader S2 mutation/source adapter acceptance; S3 inheritance/verified-sale acceptance; S4 complete monetary consumers and connected UI; S5/S6 complete candidate and release/live proof. A regression suite for the existing owners is not acceptance of unimplemented financial adapters or UI activation.
 
 **Open dependencies:** the user has not yet answered the S1 receipt-allocation and supplier-tax questions. External accounting recognition and historical production exposure remain unproven. Do not assign stock destinations, tax inclusion or accounting effects from a guess.
 
@@ -254,3 +291,5 @@ The evidence script is a baseline diagnostic outside normal test discovery. Its 
 | 2026-10-30 | Established the active cleanup tracker, preserved all nine audit findings and synthetic evidence, and recorded ownership rules, stages, acceptance and resumption procedure | Planning/evidence only; implementation not started |
 | 2026-10-30 | Implemented the additive S1 contract/projection and compatibility hash extraction, documented the owning paths/recognition limits, and added target/validation tests | 480 tests / 16 files and production/server-test TypeScript passed; policy answers pending; no activation/live writes |
 | 2026-10-30 | Incorporated refreshed main `31c03b80b` and opened draft PR #1964 for the contract foundation and durable plan | No audited cost owner changed upstream; 480 tests and both TypeScript checks passed again on merged code `c157e98f7`; hosted CI running; no deployment or financial writes |
+| 2026-10-30 | Verified #1964 merged at `80f5353b9`; recorded user-reported deployment and continued S2 on `codex/purchase-cost-source-compatibility` | Historical cleanup remains separate. Final S1 head had a cancelled browser shard/failed aggregate; cancellation cause not proven |
+| 2026-10-30 | Added source-record/status compatibility, actual AP payment regression coverage and method-aware unused quote proof; retained unknown raw JSON evidence | 558 focused + 50 reader/cache + 259 real-owner SQL + 455 guard tests and both TypeScript checks passed. The expanded closed-health case exposed and now guards the extra landed-source dependency; publishing/hosted CI remain |
