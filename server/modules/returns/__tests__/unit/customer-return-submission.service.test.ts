@@ -179,6 +179,28 @@ describe("private return submission and exact-intent recovery", () => {
     expect(s.inspectCanonicalForIntake).toHaveBeenCalledExactlyOnceWith(customerScope);
     expect(s.inspectForIntake).not.toHaveBeenCalled();
   });
+  it("keeps the business contact and original key when a preflight failure is retried", async () => {
+    const s = await setup();
+    const businessPhone = "512-555-0100";
+    s.command.omsOrderId = 100;
+    s.requireEnabled.mockResolvedValue({
+      settings: { ...labelSettings, contactPhone: businessPhone, parcelGuardrails: defaultCustomerReturnShippingGuardrails() },
+      operationalPolicy: { id: 1, version: 1, snapshot: labelPolicy },
+    });
+    s.preflight.mockRejectedValueOnce(new CustomerReturnIntakeError("RETURN_RATE_UNAVAILABLE", "Try again.", 503));
+    await expect(s.service.submitForOrder(s.input, "customer", customerScope)).rejects.toMatchObject({ code: "RETURN_LABEL_SUBMISSION_PROCESSING" });
+    expect(s.persist).not.toHaveBeenCalled();
+    await s.service.resumeForOrder(36, LABEL_KEY, "customer", customerScope);
+    expect(s.persist).toHaveBeenCalledTimes(1);
+    expect(s.persist.mock.calls[0][0].idempotencyKey).toBe(LABEL_KEY);
+    for (const [prepared] of s.preflight.mock.calls) {
+      for (const parcel of prepared.parcels) {
+        expect(parcel.originAddress.phone).toBe(businessPhone);
+        expect(parcel.destinationAddress.phone).toBe(businessPhone);
+      }
+    }
+    expect(s.reject).not.toHaveBeenCalled();
+  });
   it("rejects an unbound legacy command before replaying its accepted result to a customer", async () => {
     const s = await setup();
     s.command.status = "accepted";
