@@ -463,17 +463,18 @@ async function openCombinedFromShipment(page: Page) {
   return dialog;
 }
 
-test("PO cost warnings open the affected shipment's combined history repair directly", async ({
+test("PO cost review opens the affected shipment's history repair in place", async ({
   page,
 }) => {
   const { commands, failures } = await install(page, { missingHistory: true });
   await page.goto("/purchase-orders/17?tab=lines");
+  const originalUrl = page.url();
   await page
-    .getByRole("button", { name: "Review 1 line", exact: true })
+    .getByRole("button", { name: "Review costs", exact: true })
     .click();
   await page
-    .getByRole("link", {
-      name: "Review transfer and repacking links",
+    .getByRole("button", {
+      name: "Review missing links",
       exact: true,
     })
     .click();
@@ -492,6 +493,7 @@ test("PO cost warnings open the affected shipment's combined history repair dire
     }),
   ).toBeChecked();
   await expect(dialog.getByLabel(/TEST-RECEIPT-31/)).toBeVisible();
+  expect(page.url()).toBe(originalUrl);
   expect(commands).toEqual([]);
   expect(failures).toEqual([]);
 });
@@ -505,7 +507,14 @@ test("remaining stock gaps stay visible without asking for the same history appr
   });
   await page.goto("/purchase-orders/17?tab=lines");
   await page
-    .getByRole("button", { name: "Review 1 line", exact: true })
+    .getByRole("button", { name: "Review costs", exact: true })
+    .click();
+  await expect(
+    page.getByText(/The transfer and repacking links were already reviewed/),
+  ).toBeVisible();
+  await page
+    .getByTestId("cost-task-shipment:1")
+    .getByText("Saved records and technical details", { exact: true })
     .click();
   await expect(
     page.getByText(
@@ -514,11 +523,8 @@ test("remaining stock gaps stay visible without asking for the same history appr
     ),
   ).toBeVisible();
   await expect(
-    page.getByText(/Transfer and repacking links have already been reviewed/),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("link", {
-      name: "Review transfer and repacking links",
+    page.getByRole("button", {
+      name: "Review missing links",
       exact: true,
     }),
   ).toHaveCount(0);

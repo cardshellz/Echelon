@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useSearch } from "wouter";
 import { INVOICE_CORRECTION_QUERY_PARAM } from "@/lib/procurement-navigation";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
@@ -8,6 +8,7 @@ import { invoiceQuantityContextSchema, invoiceQuantityPreviewSchema, invoiceQuan
   type InvoiceQuantityContext, type InvoiceQuantityPreview, type InvoiceQuantityApprovalRequest, type InvoiceQuantityResult } from "@shared/procurement/invoice-quantity-correction";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
+import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { invoiceLineDraft } from "./invoice-line-editor";
 import { exactMoneyAsInput } from "@/lib/exact-money-input";
 import { financialCommandFetchJson, FinancialCommandRequestError, shouldRetryFinancialCommand, financialCommandRetryDelay } from "@/lib/financial-command";
@@ -82,6 +83,7 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
   }
   const [unresolved, setUnresolved] = useState<Intent | null>(recovery.current.intent);
   const active = useRef<Intent | null>(recovery.current.intent);
+  const queryClient = useQueryClient();
   const [quantity, setQuantity] = useState(String(context.suggestedQuantity ?? context.current.beforeQuantity));
   const [unitPrice, setUnitPrice] = useState(exactMoneyAsInput(context.current.recordedUnitCostMills, 4));
   const [lineAmount, setLineAmount] = useState(exactMoneyAsInput(context.current.invoiceLineAmountCents, 2));
@@ -104,6 +106,7 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
     onSettled: () => setBusy(false),
   });
   const approve = useMutation<InvoiceQuantityResult, Error, Intent>({
+    onSettled: () => invalidatePurchaseCosts(queryClient),
     mutationFn: async (intent) => {
       const raw = await financialCommandFetchJson(root, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", "Idempotency-Key": intent.key }, body: JSON.stringify(intent.body) });
       const result = invoiceQuantityResultSchema.safeParse(raw);
@@ -197,7 +200,10 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
     </div>
   </div>;
 }
-export function InvoiceQuantityCorrection({ lineId, lineNumber, needsCorrection, onSaved, allowMatched = false }: { lineId: number; lineNumber: number; needsCorrection: boolean; allowMatched?: boolean; onSaved: () => void }) {
+export function InvoiceQuantityCorrection({ lineId, lineNumber, needsCorrection, onSaved, allowMatched = false, buttonLabel, open: controlledOpen, onOpenChange, hideTrigger = false }: {
+  lineId: number; lineNumber: number; needsCorrection: boolean; allowMatched?: boolean; onSaved: () => void; buttonLabel?: string;
+  open?: boolean; onOpenChange?: (open: boolean) => void; hideTrigger?: boolean;
+}) {
   const { user } = useAuth();
   const [path, navigate] = useLocation();
   const search = useSearch();
@@ -206,12 +212,14 @@ export function InvoiceQuantityCorrection({ lineId, lineNumber, needsCorrection,
   const procurementNavigation = useProcurementNavigation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(requestedCorrection), [busy, setBusy] = useState(false);
+  const [internalOpen, setOpen] = useState(requestedCorrection), [busy, setBusy] = useState(false);
+  const open = controlledOpen ?? internalOpen;
   const [editorEpoch, setEditorEpoch] = useState(0);
   useEffect(() => { if (requestedCorrection) setOpen(true); }, [requestedCorrection]);
   function changeOpen(value: boolean) {
     if (busy) return;
     setOpen(value);
+    onOpenChange?.(value);
     if (!value) {
       setEditorEpoch(epoch => epoch + 1);
       if (requestedCorrection) { const params = new URLSearchParams(search); params.delete(INVOICE_CORRECTION_QUERY_PARAM); navigate(`${path}${params.size ? `?${params.toString()}` : ""}`, { replace: true }); }
@@ -231,7 +239,7 @@ export function InvoiceQuantityCorrection({ lineId, lineNumber, needsCorrection,
   // its response. Keep its saved command accessible for verification after reload.
   if (!needsCorrection && !allowMatched && !pendingReceipt && !open) return null;
   return <>
-    <Button size="sm" variant="outline" className="mt-2 min-h-[36px] whitespace-normal text-xs" onClick={() => setOpen(true)} aria-label={`${pendingReceipt && !needsCorrection ? "Verify invoice correction" : "Edit invoice line"} for line ${lineNumber}`}>{pendingReceipt && !needsCorrection ? "Verify invoice correction" : "Edit invoice line"}</Button>
+    {!hideTrigger && <Button size="sm" variant="outline" className="min-h-[36px] whitespace-normal text-xs" onClick={() => changeOpen(true)} aria-label={`${pendingReceipt && !needsCorrection ? "Verify invoice correction" : buttonLabel ?? "Edit invoice line"} for line ${lineNumber}`}>{pendingReceipt && !needsCorrection ? "Verify invoice correction" : buttonLabel ?? "Edit invoice line"}</Button>}
     <Dialog open={open} onOpenChange={changeOpen}><DialogContent className="flex max-h-[90dvh] flex-col overflow-hidden sm:max-w-2xl" onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }} onInteractOutside={(event) => { if (busy) event.preventDefault(); }}>
       <DialogHeader><DialogTitle>Edit invoice line · Line {context.data?.lineNumber ?? lineNumber}</DialogTitle><DialogDescription>{context.data && <span className="mb-1 block line-clamp-2 font-medium">{context.data.name}</span>}Edit the quantity, unit price and amount. Review changes before saving.</DialogDescription></DialogHeader>
       {context.isLoading && <p>Loading the invoice and PO quantities…</p>}
@@ -250,7 +258,7 @@ export function InvoiceQuantityCorrection({ lineId, lineNumber, needsCorrection,
         } });
         toast({ title: "Invoice correction saved", description: "Invoice matching and balance were checked. Payments and stock stay unchanged." }); onSaved();
       }} setBusy={setBusy} onReload={reload} onClose={() => changeOpen(false)} onEditPo={editPoHref ? () => navigate(editPoHref) : undefined} />}
-      {!context.data && <Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>Close</Button>}
+      {!context.data && <Button variant="outline" disabled={busy} onClick={() => changeOpen(false)}>Close</Button>}
     </DialogContent></Dialog>
   </>;
 }

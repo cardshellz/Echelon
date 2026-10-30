@@ -5,13 +5,14 @@ import {
 } from "../../inventory/infrastructure/cost-evidence-values";
 import type { CostRevisionInput } from "../../inventory/infrastructure/cost-evidence.repository";
 import { resolveSupplierCreditReductions, type SupplierCreditCostRow } from "./supplier-credit-source";
+import { supplierCostReviewFactsSchema } from "@shared/procurement/cost-review-facts";
 
 /** The single product/packaging source decision, shared by posting and reads. */
-export function resolvePurchaseCostSource(source: {
+function purchaseInvoiceEvidence(source: {
   purchaseOrderLine: Record<string, unknown>;
   approvedInvoices: Record<string, unknown>[];
   supplierCredits?: SupplierCreditCostRow[];
-}): CostRevisionInput[] {
+}) {
   const { purchaseOrderLine: line, approvedInvoices } = source;
   const purchaseOrderLineId = costInteger(line.id, "purchaseOrderLineId", 1);
   const qty = costInteger(line.order_qty, "orderQty", 1);
@@ -30,6 +31,29 @@ export function resolvePurchaseCostSource(source: {
     && credits.basePieces > BigInt(0) && credits.issues.length === 0 && parsed.every(result => result.success)
     && parsed.reduce((sum, result) => sum + BigInt(result.success ? result.data.productMills : 0), BigInt(0)) === credits.productMills
     && parsed.reduce((sum, result) => sum + BigInt(result.success ? result.data.packagingMills : 0), BigInt(0)) === credits.packagingMills;
+  return { line, approvedInvoices, purchaseOrderLineId, qty, coverageQty, credits, approvedQty, parsed, fullQuarantineReturn };
+}
+
+/** The same source checks explained with their actual counts and invoice rows.
+ * Never add these display facts to a revision fingerprint. */
+export function purchaseCostReviewFacts(source: Parameters<typeof purchaseInvoiceEvidence>[0]) {
+  const evidence = purchaseInvoiceEvidence(source);
+  const currencies = new Set(evidence.approvedInvoices.map(row => row.currency == null ? null : String(row.currency)));
+  const currency = currencies.size === 1 ? [...currencies][0] : null;
+  return supplierCostReviewFactsSchema.parse({
+    quantityBasis: ["received", "closed"].includes(String(evidence.line.status)) ? "received" : "ordered",
+    expectedPieces: evidence.coverageQty,
+    invoicedPieces: costInteger(evidence.approvedQty.toString(), "invoicePieces", -Number.MAX_SAFE_INTEGER),
+    creditedPieces: costInteger(evidence.credits.basePieces.toString(), "creditedPieces"),
+    quantityMatches: evidence.fullQuarantineReturn || (evidence.coverageQty > 0 && evidence.approvedQty === BigInt(evidence.coverageQty)),
+    missingAmountLineIds: evidence.approvedInvoices.flatMap((row, index) => evidence.parsed[index].success ? [] : [costInteger(row.id, "invoiceLineId", 1)]),
+    invoiceAmountCents: currency === null ? null : costInteger(evidence.approvedInvoices.reduce((sum, row) => sum + BigInt(costInteger(row.line_total_cents, "invoiceLineAmount", -Number.MAX_SAFE_INTEGER)), BigInt(0)).toString(), "invoiceAmount", -Number.MAX_SAFE_INTEGER),
+    currency,
+  });
+}
+
+export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvoiceEvidence>[0]): CostRevisionInput[] {
+  const { line, approvedInvoices, purchaseOrderLineId, qty, coverageQty, credits, approvedQty, parsed, fullQuarantineReturn } = purchaseInvoiceEvidence(source);
   // This is a source disposition, not proof of inventory completion. The
   // application owner must independently verify live custody and cost history.
   let issue: { code: string; message: string } | null = null;

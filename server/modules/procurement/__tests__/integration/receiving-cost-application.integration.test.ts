@@ -32,6 +32,7 @@ import { registerSupplierReturnCommandCases } from "./supplier-return-command.ca
 import { registerSupplierReturnCreditCases } from "./supplier-return-credit.cases";
 import { registerQuantityCorrectionCases } from "./receipt-shipment-quantity-correction.cases";
 import { registerShipmentMeasurementCorrectionCases } from "./shipment-measurement-correction.cases";
+import { registerInvoiceCostTaskReviewCases } from "./invoice-cost-task-review.cases";
 import { registerPoAmendmentDependencyCases } from "./po-amendment-dependencies.cases";
 import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
 import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
@@ -1004,6 +1005,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   });
 
   function exceptionService() { return createShipmentCostExceptionService(database, () => NOW); }
+  registerInvoiceCostTaskReviewCases({ pool: () => pool, database: () => database, at: NOW, actorId, receive, sell: seedConsumedCost });
   registerShipmentMeasurementCorrectionCases({ pool: () => pool, database: () => database, shipments: () => shipment,
     at: NOW, receive, approveSupplier: approveEvidence, sell: seedConsumedCost, historicalGaps: legacyQuantityGaps });
   registerPoAmendmentDependencyCases({ pool: () => pool, database: () => database, shipments: () => shipment, at: NOW, receive,

@@ -248,8 +248,9 @@ async function installReconciliation(
     return route.fallback();
   });
   await page.goto("/purchase-orders/17?tab=lines");
-  await page.getByRole("button", { name: options.posted ? "View cost postings" : "Review 1 line", exact: true }).click();
-  await page.getByRole("button", { name: options.posted ? "View posting and approval" : "Reconcile costs", exact: true }).click();
+  await page.getByRole("button", { name: options.posted ? "View completed costs" : "Review costs", exact: true }).click();
+  if (options.posted) await page.getByTestId("completed-costs").locator(":scope > summary").click();
+  await page.getByRole("button", { name: options.posted ? "View posting and approval" : "Review remaining cost", exact: true }).click();
   return { state, failures, dialog: page.getByRole("dialog") };
 }
 async function chooseInventory(dialog: ReturnType<Page["getByRole"]>) {
@@ -278,10 +279,11 @@ test("admin sees exact before/after, posts costs and reloads the saved financial
   await expect(approve).toHaveCount(0);
   await expect(dialog.getByRole("region", { name: "Approval details" })).toContainText("Test administrator");
   await dialog.getByRole("button", { name: "Done", exact: true }).click();
-  await expect(page.getByText("Costs posted", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Approved historical cost postings: 1 shipment line/)).toBeVisible();
+  await page.getByTestId("completed-costs").locator(":scope > summary").click();
+  await expect(page.getByTestId("completed-costs")).toContainText("Shipping costs applied");
   await page.reload();
-  await page.getByRole("button", { name: "View cost postings", exact: true }).click();
+  await page.getByRole("button", { name: "View completed costs", exact: true }).click();
+  await page.getByTestId("completed-costs").locator(":scope > summary").click();
   await page.getByRole("button", { name: "View posting and approval", exact: true }).click();
   await expect(dialog).toContainText("Test administrator");
   await expect(dialog).toContainText("Historical records reviewed");
@@ -336,7 +338,7 @@ test("shipment allocation exposes the same reconciliation without another workfl
   await dialog.getByRole("button", { name: "Close review", exact: true }).click();
   await page.goto("/shipments/42?tab=allocation");
   const results = page.getByRole("region", { name: "Inventory cost results", exact: true });
-  await results.getByRole("button", { name: "Reconcile costs", exact: true }).click();
+  await results.getByRole("button", { name: "Review remaining cost", exact: true }).click();
   await chooseInventory(page.getByRole("dialog"));
   await expect(page.getByRole("table", { name: "Cost reconciliation before and after" })).toBeVisible();
   expect(failures).toEqual([]);
@@ -358,15 +360,16 @@ test("an already posted estimate shows its approval across the PO, shipment and 
   await dialog.screenshot({ path: info.outputPath("posted-cost-approval.png") });
   await done.click();
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByText("Shipment costs are posted. No shipment cost approval is outstanding.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Shipping costs applied", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/Supplier confirmation:.*Their costs are already posted/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Update shipment costs", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Review \d+ line/ })).toHaveCount(0);
-  await page.getByRole("heading", { name: "Shipment costs", exact: true }).locator("..").locator("..").locator("..")
+  await page.getByRole("heading", { name: "Purchase costs", exact: true }).locator("..").locator("..").locator("..")
     .screenshot({ path: info.outputPath("po-posted-costs.png") });
   await page.getByRole("link", { name: "View shipment cost details", exact: true }).click();
   const results = page.getByRole("region", { name: "Inventory cost results" });
-  await expect(results).toContainText("Costs posted on 1 of 1 shipment lines.");
+  await expect(results).toContainText("Shipping costs applied");
+  await results.getByTestId("completed-costs").locator(":scope > summary").click();
   await results.getByRole("button", { name: "View posting and approval", exact: true }).click();
   await expect(dialog.getByRole("region", { name: "Approval details" })).toContainText("Test administrator");
   await expect(dialog.getByRole("button", { name: "Approve & post costs", exact: true })).toHaveCount(0);
@@ -405,10 +408,10 @@ test("a new unresolved revision restores the review task after reload", async ({
   state.context = { ...state.context, state: state.review.reconciliation!, sourceVersion: "e".repeat(64),
     blockedReason: "Shipment costs changed. Update shipment costs, then review the new amounts." };
   await page.reload();
-  await page.getByRole("button", { name: "Review 1 line", exact: true }).click();
+  await page.getByRole("button", { name: "Review costs", exact: true }).click();
   await expect(page.getByRole("button", { name: "View posting and approval", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Update shipment costs", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Reconcile costs", exact: true }).click();
+  await page.getByRole("button", { name: "Review remaining cost", exact: true }).click();
   await expect(dialog.getByText("Costs already posted", { exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("alert")).toContainText("Shipment costs changed");
   expect(state.keys).toEqual([]);

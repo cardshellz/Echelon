@@ -5,6 +5,7 @@ import type {
 } from "../../shared/procurement/cost-origin-repair";
 import type { PurchaseCostStatus } from "../../shared/procurement/purchase-cost-status";
 import { installFixtures, po } from "./procurement-fixtures";
+import { openCompletedCosts, openReceiptCostHistory } from "./procurement-cost-review-helpers";
 import {
   ordinaryPostedCosts,
   ordinaryPostedReview,
@@ -216,7 +217,7 @@ async function install(page: Page, admin = true, loseResponse = false) {
   });
   await page.goto("/purchase-orders/17?tab=lifecycle");
   await page
-    .getByRole("button", { name: "Repair historical cost origin", exact: true })
+    .getByRole("button", { name: "Review receipt link", exact: true })
     .first()
     .click();
   return { failures, commands };
@@ -261,16 +262,18 @@ test("admin repairs origin with visible before/after and sees the approval acros
   await dialog
     .getByRole("button", { name: "Close review", exact: true })
     .click();
+  await openReceiptCostHistory(page);
   await expect(page.getByTestId("receipt-cost-request-61")).toContainText(
     "Current supplier costs posted",
   );
   for (const id of [42, 43]) {
     await page.goto(`/shipments/${id}?tab=allocation`);
     const supplier = page.getByRole("region", {
-      name: "Supplier product and packaging costs",
+      name: "Cost review",
     });
-    await expect(supplier).toContainText("Product: Posted");
-    await expect(supplier).toContainText("Origin repaired");
+    await openCompletedCosts(supplier);
+    await expect(supplier).toContainText("Supplier costs applied");
+    await expect(supplier).toContainText("Receipt link repaired");
     await supplier
       .getByRole("button", { name: "View origin repair and approval" })
       .click();
@@ -296,8 +299,8 @@ test("admin repairs origin with visible before/after and sees the approval acros
   const receiptCosts = page.getByRole("region", {
     name: "Receipt supplier cost status",
   });
-  await expect(receiptCosts).toContainText("Product: Posted");
-  await expect(receiptCosts).toContainText("Packaging: Posted");
+  await openCompletedCosts(receiptCosts);
+  await expect(receiptCosts).toContainText("Supplier costs applied");
   await expect(receiptCosts).toContainText("Test Administrator");
   await expect(
     receiptCosts.getByRole("button", {
@@ -318,7 +321,7 @@ test("admin repairs origin with visible before/after and sees the approval acros
     "No supplier cost lines are linked to this receipt.",
   );
   await expect(
-    receiptCosts.getByText("Product: Posted", { exact: true }),
+    receiptCosts.getByText("Supplier costs applied. No further approval is needed.", { exact: true }),
   ).toHaveCount(0);
   const healthLoaded = page.waitForResponse(response =>
     new URL(response.url()).pathname === "/api/procurement/landed-cost-health",
@@ -352,14 +355,14 @@ test("receipt cost read failures stay explicit and can be retried", async ({
     "Current receipt costs could not be loaded.",
   );
   await expect(
-    receiptCosts.getByText("Product: Posted", { exact: true }),
+    receiptCosts.getByText("Supplier costs applied. No further approval is needed.", { exact: true }),
   ).toHaveCount(0);
   failed = false;
   await receiptCosts
     .getByRole("button", { name: "Reload receipt costs" })
     .click();
   await expect(
-    receiptCosts.getByRole("button", { name: "Repair historical cost origin" }),
+    receiptCosts.getByRole("button", { name: "Review receipt link" }),
   ).toBeVisible();
   expect(failures).toEqual([]);
 });
