@@ -257,7 +257,7 @@ export function createSavedLabelStatusSource(dependencies: {
           carrierCode: label.carrierCode,
           serviceCode: label.serviceCode ?? null,
           direction: "outbound",
-          voided: label.voided === true || Boolean(label.voidDate),
+          voided: false,
           verifiedAlias: alias,
         });
       }
