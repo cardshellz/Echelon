@@ -131,6 +131,7 @@ import { registerQuantityPublicationRecoveryRoutes } from "./modules/inventory-p
 import { registerQuantityPublicationReconciliationRoutes } from "./modules/inventory-planning/interfaces/http/quantity-publication-reconciliation.routes";
 import { registerInventoryChannelExposureRoutes } from "./modules/inventory-planning/interfaces/http/inventory-channel-exposure.routes";
 import { registerInventoryStockSendRoutes } from "./modules/inventory-planning/interfaces/http/inventory-stock-send.routes";
+import { registerInventoryProductSyncRoutes } from "./modules/inventory-planning/interfaces/http/inventory-product-sync.routes";
 import { registerInventoryPublicationGlobalControlRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-global-control.routes";
 import { registerShippingDestinationNormalizationRoutes } from "./modules/shipping-engine/interfaces/http/shipping-destination-normalization.routes";
 import { registerFulfillmentRoutingAdminRoutes } from "./modules/shipping-engine/interfaces/http/fulfillment-routing-admin.routes";
@@ -202,6 +203,7 @@ export async function registerRoutes(
   registerInventoryPublicationGlobalControlRoutes(app);
   registerInventoryChannelExposureRoutes(app);
   registerInventoryStockSendRoutes(app);
+  registerInventoryProductSyncRoutes(app);
   registerShippingDestinationNormalizationRoutes(app);
   registerOutboundShipmentRoutes(app);
   registerDropshipAdminOmsChannelConfigRoutes(app);
