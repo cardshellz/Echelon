@@ -1,5 +1,7 @@
 # Procurement cost application: current findings and proposed contract
 
+For the active purchase-cost authority cleanup, use [the current plan and tracker](procurement-costing-cleanup-plan.md) and [the 2026-10-30 code audit](procurement-costing-authority-audit-2026-10-30.md). The baseline and findings below retain their original historical scope.
+
 Baseline inspected: `d836adc228897ca16f0dbb2416d15a2f7e6a36db`, merged PR #1387. Deployment was reported by the user; this review does not establish the state of the production database or migration 221. The investigation uses a separate worktree and synthetic disposable PostgreSQL records.
 
 This follows the receiving quantity/source slice. The older [receiving cost audit](procurement-receiving-cost-followup.md) is historical evidence, not the current PO pricing contract. The [invoice trace](procurement-cost-invoice-trace.md), [shipment/descendant trace](procurement-cost-shipment-trace.md), and [test proof](procurement-cost-test-proof.md) provide the detailed sources and execution results for this review.
