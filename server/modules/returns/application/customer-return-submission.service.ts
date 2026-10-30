@@ -53,6 +53,15 @@ export interface CustomerReturnSubmissionStore {
     now: Date,
   ): Promise<void>;
 }
+export type ReturnSubmissionStage = "settings" | "inspection" | "preparation" | "rate_quote" | "intake" | "label_status";
+export interface ReturnSubmissionFailure {
+  event: "customer_return_submission_failed";
+  stage: ReturnSubmissionStage;
+  code: string;
+  channelId: number;
+  omsOrderId: number | null;
+  idempotencyKey: string;
+}
 export interface CustomerReturnSubmissionDependencies {
   commands: CustomerReturnSubmissionStore;
   intake: CustomerReturnIntakeStore;
@@ -64,6 +73,7 @@ export interface CustomerReturnSubmissionDependencies {
   authorizeChannel: (channelId: number) => Promise<void>;
   now: () => Date;
   newToken: () => string;
+  reportFailure?: (event: ReturnSubmissionFailure) => void;
 }
 /** No carrier purchase happens here. Intake persists all receiving evidence atomically. */
 export class CustomerReturnSubmissionService {
@@ -158,12 +168,14 @@ export class CustomerReturnSubmissionService {
   ) {
     if (command.status !== "preparing") return this.completed(command);
     const { request } = command;
+    let stage: ReturnSubmissionStage = "settings";
     try {
       const { settings, operationalPolicy } =
         await this.dependencies.settings.requireEnabled(
           request.channelId,
           request.settingsVersion,
         );
+      stage = "inspection";
       const inspection =
         command.omsOrderId === null
           ? await this.dependencies.live.inspectForIntake({
@@ -171,6 +183,7 @@ export class CustomerReturnSubmissionService {
               orderReference: request.orderReference,
             })
           : await this.inspectCanonical(command, scope);
+      stage = "preparation";
       const prepared = prepareCustomerReturnIntake(
         request,
         inspection,
@@ -181,6 +194,7 @@ export class CustomerReturnSubmissionService {
         command.omsOrderId ?? undefined,
       );
       if (settings.parcelGuardrails != null) {
+        stage = "rate_quote";
         if (!this.dependencies.labels.preflight)
           throw new CustomerReturnIntakeError(
             "RETURN_RATE_UNAVAILABLE",
@@ -189,15 +203,29 @@ export class CustomerReturnSubmissionService {
           );
         await this.dependencies.labels.preflight(prepared, settings);
       }
+      stage = "intake";
       const result = await this.dependencies.intake.persist({
         ...prepared,
         now: this.dependencies.now(),
       });
+      stage = "label_status";
       return await this.dependencies.labels.status(
         request.channelId,
         result.authorizationId,
       );
     } catch (error) {
+      const event: ReturnSubmissionFailure = {
+        event: "customer_return_submission_failed", stage, code: submissionFailureCode(error),
+        channelId: request.channelId, omsOrderId: command.omsOrderId, idempotencyKey: request.idempotencyKey,
+      };
+      // Trace the failed boundary without serializing customer details, SQL,
+      // provider payloads, or exception messages. Reporting cannot change intent.
+      try {
+        if (this.dependencies.reportFailure) this.dependencies.reportFailure(event);
+        else console.error(JSON.stringify(event));
+      } catch {
+        console.error(JSON.stringify({ ...event, reportingFailed: true }));
+      }
       // Only known validation failures prove preparation did not authorize a return.
       // Unknown database/transport failures retain the original durable intent.
       const code = definitiveFailureCode(error);
@@ -291,4 +319,16 @@ function definitiveFailureCode(error: unknown): string | null {
   if (error instanceof CustomerReturnAuthorizationPersistenceError
     && (error.code === "RETURN_AUTHORIZATION_SOURCE_CONFLICT" || error.code === "RETURN_AUTHORIZATION_QUANTITY_EXCEEDED")) return error.code;
   return null;
+}
+
+/** Drizzle wraps PostgreSQL errors in cause. Read only bounded, recognizable
+ * codes; never pass arbitrary provider text or query parameters to logs. */
+function submissionFailureCode(error: unknown): string {
+  let cause: unknown = error;
+  for (let depth = 0; depth < 4 && cause !== null && typeof cause === "object"; depth++) {
+    const detail = cause as { code?: unknown; cause?: unknown };
+    if (typeof detail.code === "string" && /^(?:[A-Z0-9]{5}|RETURN_[A-Z0-9_]{1,74})$/.test(detail.code)) return detail.code;
+    cause = detail.cause;
+  }
+  return "RETURN_SUBMISSION_UNEXPECTED_FAILURE";
 }

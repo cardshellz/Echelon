@@ -20,6 +20,7 @@ async function fixtures(
     rejectSubmit?: boolean;
     rejectResume?: boolean;
     pendingHistory?: boolean;
+    beforeSubmit?: () => Promise<void>;
   } = {},
 ) {
   const service = new CustomerReturnPreviewService();
@@ -131,6 +132,7 @@ async function fixtures(
       });
     }
     if (path === `${API}/orders/10/returns`) {
+      await options.beforeSubmit?.();
       expect(body).not.toHaveProperty("channelId");
       expect(body).not.toHaveProperty("orderReference");
       if (options.rejectSubmit && !rejected) {
@@ -286,6 +288,26 @@ test("owned selection skips Find order, reviews exact quantities and creates onl
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
+});
+
+test("label creation names the customer task and hides retry instructions while working", async ({ page }) => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const f = await fixtures(page, { beforeSubmit: () => pending });
+  await page.goto("/customer-returns");
+  await selectAndPack(page);
+  try {
+    await page.getByRole("button", { name: "Get return labels", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Getting your return label", exact: true })).toBeVisible();
+    await expect(page.getByText("Getting your return label…", { exact: true })).toBeVisible();
+    await expect(page.getByText("Your selections are saved. Try again to continue with your return.", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Check status", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Try again", exact: true })).toHaveCount(0);
+  } finally {
+    release();
+  }
+  await expect(page.getByRole("button", { name: "Download label for box 1" })).toBeVisible();
+  expect(f.calls.filter(call => call.path.endsWith("/returns") && call.method === "POST")).toHaveLength(1);
 });
 
 test("a rejected standalone request can reload current items and return to the order chooser", async ({ page }) => {

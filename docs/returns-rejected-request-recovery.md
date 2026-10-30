@@ -14,6 +14,16 @@ Opening or reloading the portal reads saved results only. It never enters the pr
 
 Unit tests cover lost responses, same-key retries, multiple boxes, bounded reconciliation, duplicate clicks, response identity changes, session changes and storage failures. Browser tests cover both the standalone portal and the compiled account modal on desktop and mobile, including the exact expired-request-to-fresh-review sequence with one click.
 
-All test orders, carrier responses, labels and receiving receipts are synthetic. No real order, return, label purchase, refund, inventory or points command is part of validation. This changes the customer interaction; it does not change server eligibility, pricing, receiving, or purchase-reconciliation rules.
+All test orders, carrier responses, labels and receiving receipts are synthetic. No real order, return, label purchase, refund, inventory or points command is part of validation. Server eligibility, pricing, receiving ownership and purchase-reconciliation rules stay in place.
 
 The source app and companion customer-account bundle must both be released for their respective surfaces to receive the change. The companion theme targets the existing unpublished staging theme; it must not publish the live Shopify theme implicitly.
+
+## Source transaction failure and label preparation
+
+`oms.customer_order_actions_source_changed` used an unqualified PL/pgSQL variable named `source` inside queries of tables that also have a `source` column. The `return_item` branch reads `wms.returns`, and the `receipt_child` branch reads fulfillment receipts. PostgreSQL raises `42702` before these source transactions can commit. The forward migration qualifies that variable with a block label while preserving every invalidation branch and trigger. It updates the function only; it does not repair or rewrite customer records.
+
+The connected three-shipment/two-return-box test now includes the canonical action-projection migration and its real source triggers. Previously that fixture omitted those triggers. The migration regression temporarily restores the original function in a disposable transaction, proves the receiving insert fails with `42702`, rolls it back, reapplies the correction twice, and proves receiving still queues its parent-order invalidation.
+
+Submission failures report an allowlisted cause code and the failed boundary (settings, inspection, preparation, rate quote, intake, or label status), tied to the original command key and canonical order. Exception messages, SQL, addresses and carrier payloads are excluded. Unknown outcomes still retain their original command for safe recovery; diagnostics do not authorize a replacement or a new purchase.
+
+During active work the portal says **Getting your return label** (or **labels** for multiple boxes). Retry instructions stay hidden while that work is in flight. A failed attempt has the existing single **Try again** action. Source and compiled theme assets both need release before the account modal changes.

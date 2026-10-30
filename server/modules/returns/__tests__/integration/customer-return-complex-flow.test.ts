@@ -37,6 +37,7 @@ import { PostgresReturnCaseOperationStore } from "../../infrastructure/return-ca
 import { resolveReturnsTestDatabase } from "../support/disposable-database";
 import {
   createIntakeTestSchema,
+  createIntakeActionProjectionSchema,
   INTAKE_NOW,
 } from "../support/customer-return-intake-database";
 import {
@@ -118,6 +119,7 @@ integration(
           "utf8",
         ),
       );
+      await createIntakeActionProjectionSchema(pool);
       const database = drizzle(pool, { schema });
       globalConnection.transaction.mockImplementation(
         (work: Parameters<typeof database.transaction>[0]) =>

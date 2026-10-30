@@ -356,6 +356,10 @@ export function CustomerWorkspace({
     if (showStatus) statusHeading.current?.focus();
   }, [showStatus, status?.authorizationId]);
   const inProgress = busy || command.busy || flowBusy;
+  const labelPreparationText =
+    (command.record?.input.parcels.length ?? status?.parcels.length ?? 1) > 1
+      ? "Getting your return labels"
+      : "Getting your return label";
   useLayoutEffect(() => {
     onBusy?.(inProgress);
     return () => onBusy?.(false);
@@ -406,15 +410,15 @@ export function CustomerWorkspace({
           <h1 ref={statusHeading} tabIndex={-1} className="text-2xl font-semibold outline-none">
             {status
               ? `Return ${status.authorizationNumber}`
-              : inProgress ? "Preparing your return" : "We couldn’t finish your return"}
+              : inProgress ? labelPreparationText : "We couldn’t finish your return"}
           </h1>
           <PreviewError message={error ?? command.error ?? notice} />
-          {!status && !error && !command.error && (
+          {!status && !inProgress && !error && !command.error && (
             <p className="text-sm text-muted-foreground">
               Your selections are saved. Try again to continue with your return.
             </p>
           )}
-          {inProgress && <Loading text="Preparing your return…" />}
+          {inProgress && <Loading text={`${labelPreparationText}…`} />}
           {status?.parcels.map((parcel) => (
             <section
               key={parcel.parcelId}
