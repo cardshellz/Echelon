@@ -9,7 +9,9 @@
  * - Request/response logging for debugging
  */
 
-import { EbayApiRequestError, isMissingEbayInventoryResource } from "./ebay-api-error";
+import { EbayApiRequestError, isMissingEbayInventoryResource, isMissingEbayOfferCollection } from "./ebay-api-error";
+import { readEbayNativePackage, type EbayNativePackageSnapshot } from "./ebay-native-package.reader";
+import { normalizeEbayObservedOffers } from "./ebay-offer-observation";
 import type { EbayAuthService } from "./ebay-auth.service";
 import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
 import { replaceEbayPackageTracking, type EbayTrackingReplacementBatch } from "./ebay-package-tracking-replacement";
@@ -282,14 +284,22 @@ export class EbayApiClient {
     marketplaceId: string = "EBAY_US",
   ): Promise<{ offers: Array<EbayOffer & { offerId: string; listingId?: string }> }> {
     try {
-      return await this.request({
+      const response = await this.request<unknown>({
         method: "GET",
-        path: `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${marketplaceId}`,
+        path: `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${encodeURIComponent(marketplaceId)}`,
       });
-    } catch (err: any) {
-      if (err.message?.includes("404")) return { offers: [] };
+      return { offers: normalizeEbayObservedOffers(response) };
+    } catch (err: unknown) {
+      if (err instanceof EbayApiRequestError && isMissingEbayOfferCollection(err.statusCode, err.errorIds)) return { offers: [] };
       throw err;
     }
+  }
+
+  async getListingPackageType(sku: string, marketplaceId: string, observedOffers?: readonly unknown[]): Promise<EbayNativePackageSnapshot> {
+    if (this.isDryRun) return { listingId: null, packageType: null };
+    return readEbayNativePackage({ sku, marketplaceId, offers: observedOffers ?? (await this.getOffers(sku, marketplaceId)).offers,
+      accessToken: await this.authService.getAccessToken(this.channelId),
+      environment: this.baseUrl === API_BASE_URLS.production ? "production" : "sandbox", request: this.options.request });
   }
 
   /** Complete, validated discovery is owned by the quantity protocol, not the legacy first-offer helper. */
@@ -1038,6 +1048,7 @@ export class EbayApiClient {
 
           throw new EbayApiRequestError(
             response.status, `eBay API ${method} ${path} failed (${response.status}): ${errorDetail}`, errorBody,
+            method === "GET" ? "listing_resource" : undefined,
           );
         }
 
@@ -1053,9 +1064,9 @@ export class EbayApiClient {
             await this.delay(delay);
             continue;
           }
-          throw new Error(
-            `eBay API ${method} ${path} failed after ${MAX_RETRIES} retries (${response.status}): ${errorBody}`,
-          );
+          const message = `eBay API ${method} ${path} failed after ${MAX_RETRIES} retries (${response.status}): ${errorBody}`;
+          if (method === "GET") throw new EbayApiRequestError(response.status, message, errorBody, "listing_resource");
+          throw new Error(message);
         }
       } catch (err: any) {
         if (deadline.signal.aborted) throw deadline.signal.reason;

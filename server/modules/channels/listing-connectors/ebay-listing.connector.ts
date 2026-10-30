@@ -1,6 +1,6 @@
 import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
 import { assertEbayPreparedIntent } from "../ebay-prepared-intent";
-import { prepareEbayListingPackages, assertEbayPackagePreservation } from "../adapters/ebay/ebay-listing-package";
+import { prepareEbayListingPackages, assertEbayPackagePreservation, readEbayPackageVerificationView } from "../adapters/ebay/ebay-listing-package";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
@@ -24,6 +24,7 @@ import type {
   BuiltOffer,
 } from "../adapters/ebay/ebay-listing-builder";
 import type { ChannelListingWarning } from "@shared/channel-listing-validation";
+import type { EbayNativePackageReader } from "../adapters/ebay/ebay-native-package.reader";
 import type {
   EbayBulkPriceQuantityRequest,
   EbayBulkPriceQuantityResponse,
@@ -48,6 +49,7 @@ export interface EbayListingConnectorClient {
   /** Every mutation is admitted and journaled before network I/O. */
   readonly quantityRequestJournalVersion?: 1;
   getInventoryItem(sku: string): Promise<EbayInventoryItem | null>;
+  getListingPackageType?: EbayNativePackageReader;
   createOrReplaceInventoryItem(
     sku: string,
     item: Omit<EbayInventoryItem, "sku">,
@@ -209,12 +211,12 @@ async function runSyncStage(
   await work();
 }
 async function ensurePreparedPackages<T extends Pick<EbayListingConnectorDraft, "productId" | "inventoryItems" | "offers" | "preparedIntent">>(
-  client: EbayListingConnectorClient, draft: T,
+  client: EbayListingConnectorClient, draft: T, observedOffersBySku?: ReadonlyMap<string, readonly unknown[]>,
 ): Promise<T> {
   if (draft.inventoryItems.every(item => item.packagePlan)) return draft;
   if (draft.preparedIntent) throw new EbayListingSyncError("EBAY_SYNC_DRAFT_SCOPE_INVALID",
     "Package data must be prepared before the listing intent is sealed. Prepare this update again.");
-  return prepareEbayListingPackages(client, draft);
+  return prepareEbayListingPackages(client, draft, observedOffersBySku);
 }
 function readbackPending(resource: string, field: string): EbayListingSyncError {
   return new EbayListingSyncError(
@@ -310,7 +312,10 @@ export class EbayMarketplaceListingConnector {
 
     // Discovery proves provider identity; package requirements are the same for
     // new publication, existing updates and reviewed rebuilds.
-    draft = await ensurePreparedPackages(input.client, draft);
+    // Reuse this operation's exact discovery during preparation. The later
+    // preservation guard still reads fresh evidence before any mutation.
+    draft = await ensurePreparedPackages(input.client, draft, new Map(resolvedOffers.map(member =>
+      [member.offer.sku, member.observedOffer ? [member.observedOffer] : []])));
     input = { ...input, draft };
 
     // Every discovery and identity refusal above has already run; nothing below
@@ -367,7 +372,7 @@ export class EbayMarketplaceListingConnector {
       verifiedPublishedListingId,
       stage: input.stage,
     });
-    await this.verifyListingPackages(input.client, input.draft.inventoryItems);
+    await this.verifyListingPackages(input.client, input.draft.inventoryItems, input.draft.marketplaceId);
 
     return {
       productId: input.draft.productId,
@@ -1069,7 +1074,8 @@ export class EbayMarketplaceListingConnector {
       const current = await input.client.getInventoryItem(item.sku);
       if (!current) throw readbackPending(`inventory item ${item.sku}`, "resource");
       if (current.sku !== item.sku) throw readbackPending(`inventory item ${item.sku}`, "sku");
-      const mismatch = findEbaySyncContentMismatch(current, inventoryItemSyncContent(item.payload));
+      const observed = await readEbayPackageVerificationView(input.client, item, current, input.draft.marketplaceId);
+      const mismatch = findEbaySyncContentMismatch(observed, inventoryItemSyncContent(item.payload));
       if (mismatch) throw readbackPending(`inventory item ${item.sku}`, mismatch);
     }
     for (const offer of input.draft.offers) {
@@ -1113,14 +1119,15 @@ export class EbayMarketplaceListingConnector {
 
   /** Every update path must observe the exact ordered item and group galleries before success. */
   private async verifyListingMedia(input: {
-    client: Pick<EbayListingLifecycleClient, "getInventoryItem" | "getInventoryItemGroup">;
-    draft: Pick<EbayListingConnectorDraft, "inventoryItems" | "itemGroup">;
+    client: Pick<EbayListingLifecycleClient, "getInventoryItem" | "getInventoryItemGroup" | "getListingPackageType">;
+    draft: Pick<EbayListingConnectorDraft, "inventoryItems" | "itemGroup" | "marketplaceId">;
   }): Promise<void> {
     for (const item of input.draft.inventoryItems) {
       const current = await input.client.getInventoryItem(item.sku);
       if (!current || current.sku !== item.sku) throw readbackPending(`inventory item ${item.sku}`, "sku");
       if (item.payload.packageWeightAndSize) {
-        const packageMismatch = findEbaySyncContentMismatch(current.packageWeightAndSize, item.payload.packageWeightAndSize, "packageWeightAndSize");
+        const observed = await readEbayPackageVerificationView(input.client, item, current, input.draft.marketplaceId);
+        const packageMismatch = findEbaySyncContentMismatch(observed.packageWeightAndSize, item.payload.packageWeightAndSize, "packageWeightAndSize");
         if (packageMismatch) throw readbackPending(`package for ${item.sku}`, packageMismatch);
       }
       const mismatch = findEbaySyncContentMismatch(current.product?.imageUrls, item.payload.product?.imageUrls, "content.product.imageUrls");
@@ -1136,12 +1143,14 @@ export class EbayMarketplaceListingConnector {
     }
   }
 
-  private async verifyListingPackages(client: Pick<EbayListingConnectorClient, "getInventoryItem">, items: readonly BuiltInventoryItem[]): Promise<void> {
+  private async verifyListingPackages(client: Pick<EbayListingConnectorClient, "getInventoryItem" | "getListingPackageType">,
+    items: readonly BuiltInventoryItem[], marketplaceId: string): Promise<void> {
     for (const item of items) {
       if (!item.payload.packageWeightAndSize) continue;
       const current = await client.getInventoryItem(item.sku);
       if (!current || current.sku !== item.sku) throw readbackPending(`package for ${item.sku}`, "sku");
-      const mismatch = findEbaySyncContentMismatch(current.packageWeightAndSize, item.payload.packageWeightAndSize, "packageWeightAndSize");
+      const observed = await readEbayPackageVerificationView(client, item, current, marketplaceId);
+      const mismatch = findEbaySyncContentMismatch(observed.packageWeightAndSize, item.payload.packageWeightAndSize, "packageWeightAndSize");
       if (mismatch) throw readbackPending(`package for ${item.sku}`, mismatch);
     }
   }

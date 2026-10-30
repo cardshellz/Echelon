@@ -16,7 +16,4 @@ export function ebayReadDiagnostic(resource: string, kind: ChannelProviderReadDi
   });
 }
 
-export function ebayReadFailureKind(status: number): ChannelProviderReadDiagnostic["kind"] {
-  if (!Number.isInteger(status) || status < 100 || status > 599) return "invalid_response";
-  return status === 408 || status === 429 || status >= 500 ? "unavailable" : "refused";
-}
+export { providerHttpReadFailureKind as ebayReadFailureKind } from "@shared/channel-provider-read";

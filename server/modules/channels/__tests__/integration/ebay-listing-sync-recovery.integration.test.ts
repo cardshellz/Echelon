@@ -10,6 +10,7 @@ import {
 } from "vitest";
 import { randomUUID } from "node:crypto";
 import { ChannelListingValidationError } from "@shared/channel-listing-validation";
+import { ChannelProviderReadError, type ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
 import type { Pool } from "pg";
 import { EbayListingRecoveryService } from "../../ebay-listing-recovery.service";
 import { PostgresEbayListingRecoveryContinuation } from "../../infrastructure/ebay-listing-recovery-continuation";
@@ -62,6 +63,8 @@ import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listin
 import { publicationCompletionFixture } from "../fixtures/ebay-publication-completion.fixture";
 import { buildEbayRouteListingDraft } from "../../ebay-listing-draft";
 import { prepareEbayListingPackages } from "../../adapters/ebay/ebay-listing-package";
+import { EBAY_US_STANDARD_PACKAGE_TYPE } from "../../adapters/ebay/ebay-package-classification";
+import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
 vi.mock("../../../../db", () => ({ pool: {} }));
 const configured =
   process.env.ECHELON_TEST_DATABASE_URL &&
@@ -312,6 +315,176 @@ const configured =
       code: "INVENTORY_PUBLICATION_TARGET_BUSY", context: { retryable: true },
     });
     const galleryPhotos = ["https://example.com/current-front.jpg", "https://example.com/current-back.jpg"];
+
+    it("retains an inventory HTTP read failure from the transport and recovers before selecting the missing-class default", async () => {
+      const f = fixture();
+      const getItem = f.client.getInventoryItem.bind(f.client);
+      f.client.getInventoryItem = vi.fn().mockRejectedValueOnce(new EbayApiRequestError(500, "private body", "private body", "listing_resource"))
+        .mockImplementation(getItem);
+      f.client.getListingPackageType = vi.fn(async () => ({ listingId: "listing-20", packageType: null }));
+      await prepareFromCatalog(f, 120.25, "recommended");
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "recovering", providerRead: {
+        provider: "ebay", resource: "listing_resource", method: "GET", kind: "unavailable", httpStatus: 500 } });
+      expect(f.mutations).toEqual([]);
+      expect(f.client.getListingPackageType).not.toHaveBeenCalled();
+      advance(); await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed" });
+      expect(f.provider.currentItem().packageWeightAndSize?.packageType).toBe(EBAY_US_STANDARD_PACKAGE_TYPE);
+    });
+
+    it("applies the ordinary US class for verified absence once across concurrent workers and command replay", async () => {
+      const f = fixture();
+      f.client.getListingPackageType = vi.fn(async () => ({ listingId: "listing-20",
+        packageType: f.provider.currentItem().packageWeightAndSize?.packageType ?? null }));
+      await prepareFromCatalog(f, 120.25, "recommended");
+      const command = randomUUID();
+      const saved = await f.service.enqueue(identity, "operator", command);
+      expect((await f.service.enqueue(identity, "operator", command)).id).toBe(saved.id);
+      await processConcurrently(f, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed", code: null });
+      expect(f.mutations).toHaveLength(3);
+      expect(f.mutations[0].body).toMatchObject({ packageWeightAndSize: {
+        packageType: EBAY_US_STANDARD_PACKAGE_TYPE, weight: { value: 5, unit: "OUNCE" } } });
+      expect((f.mutations[0].body as { packageWeightAndSize: object }).packageWeightAndSize).not.toHaveProperty("dimensions");
+      const fresh = await f.service.enqueue(identity, "operator", randomUUID());
+      await f.service.processDue(1, fresh.id);
+      expect(await f.store.get(fresh.id)).toMatchObject({ state: "completed" });
+      expect(f.mutations).toHaveLength(3);
+      expect((await database.pool.query("SELECT weight_grams,shipping_package_type,length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+        .toEqual({ weight_grams: "120.25", shipping_package_type: null, length_mm: null, width_mm: null, height_mm: null });
+      expect(f.provider.client.withdrawOfferByInventoryItemGroup).not.toHaveBeenCalled();
+      expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+    });
+
+    it("rejects a concurrent non-default class before mutation and preserves it on the same job's retry", async () => {
+      const f = fixture();
+      f.client.getListingPackageType = vi.fn().mockResolvedValueOnce({ listingId: "listing-20", packageType: null })
+        .mockResolvedValue({ listingId: "listing-20", packageType: "LETTER" });
+      await prepareFromCatalog(f, 120.25, "recommended");
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "recovering", code: "EBAY_SYNC_PACKAGE_CHANGED" });
+      expect(f.mutations).toEqual([]);
+      advance();
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed" });
+      expect(f.mutations[0].body).toMatchObject({ packageWeightAndSize: { packageType: "LETTER" } });
+    });
+
+    it("recovers a partially applied default with preserved identity and fresh catalog values", async () => {
+      const f = fixture();
+      f.client.getListingPackageType = vi.fn(async () => ({ listingId: "listing-20",
+        packageType: f.provider.currentItem().packageWeightAndSize?.packageType ?? null }));
+      await prepareFromCatalog(f, 120.25, "recommended");
+      f.fail("response");
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      expect((await f.store.get(saved.id))?.state).not.toBe("completed");
+      await database.pool.query("UPDATE catalog.product_variants SET weight_grams=240.50 WHERE id=101");
+      advance();
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed" });
+      expect(f.provider.currentItem().packageWeightAndSize).toEqual({ packageType: EBAY_US_STANDARD_PACKAGE_TYPE,
+        weight: { value: 9, unit: "OUNCE" } });
+      expect(f.provider.client.withdrawOfferByInventoryItemGroup).not.toHaveBeenCalled();
+      expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+      expect((await database.pool.query("SELECT external_product_id,external_variant_id FROM channels.channel_listings WHERE channel_id=1 AND product_variant_id=101")).rows[0])
+        .toEqual({ external_product_id: "listing-20", external_variant_id: "offer-101" });
+    });
+
+    it("does not declare the default applied while both provider projections still omit its class", async () => {
+      const f = fixture();
+      let nativeType: string | null = null;
+      f.client.getListingPackageType = vi.fn(async () => ({ listingId: "listing-20", packageType: nativeType }));
+      const getItem = f.client.getInventoryItem.bind(f.client);
+      f.client.getInventoryItem = async sku => {
+        const current = await getItem(sku);
+        if (current?.packageWeightAndSize) delete current.packageWeightAndSize.packageType;
+        return current;
+      };
+      await prepareFromCatalog(f, 120.25, "recommended");
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "recovering", code: "EBAY_SYNC_READBACK_PENDING" });
+      expect(f.mutations).toHaveLength(3);
+      nativeType = EBAY_US_STANDARD_PACKAGE_TYPE;
+      advance();
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed" });
+      expect(f.mutations).toHaveLength(3);
+    });
+
+    it("preserves verified native classification through journaled Sync and idempotent replay without inventing package facts", async () => {
+      const f = fixture();
+      f.client.getListingPackageType = vi.fn(async () => ({ listingId: "listing-20", packageType: "LETTER" }));
+      await prepareFromCatalog(f, 120.25, "recommended");
+      const command = randomUUID();
+      const first = await f.service.enqueue(identity, "operator", command);
+      const replay = await f.service.enqueue(identity, "operator", command);
+      expect(replay.id).toBe(first.id);
+      expect(await f.service.processDue(1, first.id)).toEqual({ processed: 1, failed: 0 });
+      expect(await f.store.get(first.id)).toMatchObject({ state: "completed", code: null });
+      expect(f.mutations.map(request => request.path)).toEqual([
+        "/sell/inventory/v1/inventory_item/P5", "/sell/inventory/v1/inventory_item_group/PACK", "/sell/inventory/v1/offer/offer-101",
+      ]);
+      expect(f.mutations[0].body).toMatchObject({ packageWeightAndSize: { packageType: "LETTER", weight: { value: 5, unit: "OUNCE" } } });
+      expect((f.mutations[0].body as { packageWeightAndSize: object }).packageWeightAndSize).not.toHaveProperty("dimensions");
+      const receipts = (await database.pool.query(`SELECT q.path,r.outcome,r.http_status
+        FROM inventory.quantity_provider_requests q JOIN inventory.quantity_provider_request_results r ON r.request_id=q.id
+        JOIN inventory.quantity_publication_attempts a ON a.id=q.attempt_id
+        WHERE a.scope->>'externalScopeId'=$1 ORDER BY q.id`, [identity.accountId])).rows;
+      expect(receipts).toHaveLength(3);
+      expect(receipts[0]).toMatchObject({ path: "/sell/inventory/v1/inventory_item/P5", outcome: "completed", http_status: 204 });
+      const mapping = (await database.pool.query("SELECT external_product_id,external_variant_id FROM channels.channel_listings WHERE channel_id=1 AND product_variant_id=101")).rows[0];
+      expect(mapping).toEqual({ external_product_id: "listing-20", external_variant_id: "offer-101" });
+      const second = await f.service.enqueue(identity, "operator", randomUUID());
+      await f.service.processDue(1, second.id);
+      expect(await f.store.get(second.id)).toMatchObject({ state: "completed", code: null });
+      expect(f.mutations).toHaveLength(3);
+      expect(f.provider.client.withdrawOfferByInventoryItemGroup).not.toHaveBeenCalled();
+      expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+      expect((await database.pool.query("SELECT weight_grams,shipping_package_type,length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+        .toEqual({ weight_grams: "120.25", shipping_package_type: null, length_mm: null, width_mm: null, height_mm: null });
+    });
+
+    it("fences a concurrent native package edit before mutation and recovers using its freshly observed value", async () => {
+      const f = fixture();
+      f.client.getListingPackageType = vi.fn()
+        .mockResolvedValueOnce({ listingId: "listing-20", packageType: "LETTER" })
+        .mockResolvedValue({ listingId: "listing-20", packageType: "LARGE_ENVELOPE" });
+      await prepareFromCatalog(f, 120.25, "recommended");
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "recovering", code: "EBAY_SYNC_PACKAGE_CHANGED" });
+      expect(f.mutations).toHaveLength(0);
+      advance();
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed", code: null });
+      expect(f.mutations[0].body).toMatchObject({ packageWeightAndSize: { packageType: "LARGE_ENVELOPE" } });
+    });
+
+    it.each(["invalid_response", "unavailable"] as const)("retains a native POST %s read in PostgreSQL and retries without sending an unverified package", async kind => {
+      const f = fixture();
+      const read: ChannelProviderReadDiagnostic = { provider: "ebay", resource: "listing_package", method: "POST", kind,
+        httpStatus: kind === "unavailable" ? 503 : 200 };
+      f.client.getListingPackageType = vi.fn().mockRejectedValueOnce(new EbayListingSyncError("EBAY_PACKAGE_READ_INVALID",
+        "The package read did not finish.", { cause: new ChannelProviderReadError(read, { cause: new Error("private response body") }) }))
+        .mockResolvedValue({ listingId: "listing-20", packageType: "LETTER" });
+      await prepareFromCatalog(f, 120.25, "recommended");
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "recovering", providerRead: read });
+      expect(f.mutations).toEqual([]);
+      const events = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='recovering'", [saved.id])).rows;
+      expect(events[0].evidence.diagnostic.context.providerRead).toEqual(read);
+      expect(JSON.stringify(events)).not.toContain("private response body");
+      advance();
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed", providerRead: undefined });
+      expect(f.mutations).toHaveLength(3);
+    });
 
     async function prepareFromCatalog(f: ReturnType<typeof fixture>, weight: number | null = 120,
       dimensions: boolean | "recommended" = false) {
