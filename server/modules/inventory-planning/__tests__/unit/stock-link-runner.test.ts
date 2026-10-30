@@ -141,12 +141,12 @@ describe("the stock-link runner (§7.1)", () => {
       .map((line, index) => ({ path: file.path, line: index + 1, text: line }))
       .filter((line) => /\b736220\b/.test(line.text)));
     expect(hits).toHaveLength(1);
-    expect(hits[0].path.endsWith("server/modules/inventory-planning/infrastructure/stock-link-runner.ts")).toBe(true);
+    expect(hits[0].path.replaceAll("\\", "/").endsWith("server/modules/inventory-planning/infrastructure/stock-link-runner.ts")).toBe(true);
     expect(hits[0].text).toContain("export const STOCK_LINK_LOCK_ID = 736220;");
   });
 
   it("is started by the server once, in its own block right after the publication outbox worker's, behind its own switch", () => {
-    const index = readFileSync(resolve(process.cwd(), "server/index.ts"), "utf8");
+    const index = readFileSync(resolve(process.cwd(), "server/index.ts"), "utf8").replaceAll("\r\n", "\n");
     expect(index.match(/startStockLinkRunner\(/g)).toHaveLength(1);
     const outbox = index.indexOf('"INVENTORY_PUBLICATION_WORKER_DISABLED",\n        );\n      }');
     const block = /if \(!schedulersDisabled\("STOCK_LINK_AUTO_DISABLED"\)\) \{\n\s*const stockLinkRunner = startStockLinkRunner\(services\.stockLink\);\n\s*if \(stockLinkRunner\) httpServer\.once\("close", \(\) => stockLinkRunner\.stop\(\)\);\n\s*\} else \{\n\s*logSchedulerDisabled\("scheduler", "Stock link runner", "STOCK_LINK_AUTO_DISABLED"\);\n\s*\}/.exec(index);

@@ -6,6 +6,7 @@ import {
   STOCK_LINK_RETRY,
   buildCarriedSkuIndex,
   isStockLinkItemOnSale,
+  isStockLinkItemEligible,
   normalizeShopifyItemId,
   normalizeStockLinkSku,
   planStockLinkBatch,
@@ -114,6 +115,14 @@ describe("stock-link SKU and id rules", () => {
     for (const status of ["ARCHIVED", "DRAFT", "UNLISTED", "active"]) expect(isStockLinkItemOnSale({ productStatus: status })).toBe(false);
   });
 
+  it("separates a draft's stock-link eligibility from its sale status", () => {
+    expect(isStockLinkItemEligible({ productStatus: "ACTIVE" })).toBe(true);
+    expect(isStockLinkItemEligible({ productStatus: "DRAFT" })).toBe(true);
+    expect(isStockLinkItemOnSale({ productStatus: "DRAFT" })).toBe(false);
+    for (const status of ["ARCHIVED", "UNLISTED", "UNKNOWN", "draft", "active", ""])
+      expect(isStockLinkItemEligible({ productStatus: status })).toBe(false);
+  });
+
   it("N6 index groups carried sizes by normalised SKU and skips blanks", () => {
     const index = buildCarriedSkuIndex([{ productVariantId: 3, sku: "abc" }, { productVariantId: 1, sku: " ABC" },
       { productVariantId: 2, sku: "  " }, { productVariantId: 4, sku: "XYZ" }]);
@@ -173,11 +182,11 @@ describe("first link (no active version), §4.2 rows 1-10", () => {
     expect(decisionOf(result, 10)).toMatchObject({ code: D.lookupMissed, retry: "transient" });
   });
 
-  it("row 5: no candidate waits NOT_LISTED, or NOT_ON_SALE when only archived or draft copies exist", () => {
+  it("row 5: no candidate waits NOT_LISTED, or NOT_ON_SALE when only archived or unknown copies exist", () => {
     expect(decisionOf(plan({ sizes: [size(10)] }), 10)).toMatchObject({ status: "waiting", code: D.notListed, retry: null });
-    const result = plan({ sizes: [size(10)], items: [item("600", "SKU-10", "ARCHIVED"), item("601", "sku-10", "DRAFT")] });
+    const result = plan({ sizes: [size(10)], items: [item("600", "SKU-10", "ARCHIVED"), item("601", "sku-10", "UNKNOWN")] });
     expect(decisionOf(result, 10)).toMatchObject({ status: "waiting", code: D.notOnSale });
-    // A hint that is not on sale is not a miss either.
+    // An archived hint is not eligible and is not a lookup miss either.
     const hinted = plan({ sizes: [size(10, { feedHintItemId: "700" })], observations: [["700", item("700", "SKU-10", "ARCHIVED")]] });
     expect(decisionOf(hinted, 10)).toMatchObject({ code: D.notOnSale });
   });
@@ -382,6 +391,109 @@ describe("verify (active version exists), §4.2 V1-V10", () => {
   it("a linked item that was not observed is released busy", () => {
     const result = plan({ sizes: [size(10, { head: linked(5, "500", "SKU-10") })] });
     expect(decisionOf(result, 10)).toMatchObject({ status: "unchanged", retry: "busy", code: D.notRead });
+  });
+});
+
+describe("Shopify draft stock identity", () => {
+  it("links a unique DRAFT item without making it on sale; archived and unknown copies do not compete", () => {
+    const draft = item("500", "SKU-10", "DRAFT");
+    const result = plan({ sizes: [size(10)], items: [draft, item("600", "SKU-10", "ARCHIVED"), item("601", "SKU-10", "UNKNOWN")] });
+    expect(decisionOf(result, 10)).toMatchObject({ change: "link", status: "linked", code: null,
+      link: { itemId: "500", storeSku: "SKU-10", mappingAction: "create" } });
+    expect(result.commands).toHaveLength(1);
+    expect(result.commands[0]).toMatchObject({ purpose: "publish", freedItemIds: [] });
+    expect(draft.productStatus).toBe("DRAFT");
+    expect(isStockLinkItemOnSale(draft)).toBe(false);
+  });
+
+  it.each([
+    { name: "empty", items: [] },
+    { name: "archived-only", items: [item("600", "SKU-10", "ARCHIVED")] },
+  ])("requires complete lookup proof for a DRAFT feed hint with an $name result", ({ items }) => {
+    const result = plan({ sizes: [size(10, { feedHintItemId: "500" })], items,
+      observations: [["500", item("500", "SKU-10", "DRAFT")]] });
+    expect(decisionOf(result, 10)).toMatchObject({ change: "none", status: "waiting", code: D.lookupMissed, retry: "transient" });
+    expect(result.commands).toEqual([]);
+  });
+
+  it.each(["ACTIVE", "DRAFT"])("refuses first-link ambiguity between DRAFT and %s copies", status => {
+    const result = plan({ sizes: [size(10)], items: [item("500", "SKU-10", "DRAFT"), item("510", "SKU-10", status)] });
+    expect(decisionOf(result, 10)).toMatchObject({ change: "none", status: "flagged", code: D.skuDuplicate,
+      detail: { kind: "SKU_DUPLICATE", itemIds: ["500", "510"] } });
+    expect(result.commands).toEqual([]);
+  });
+
+  it("counts a different DRAFT feed hint toward ambiguity with the lookup's ACTIVE item", () => {
+    const result = plan({ sizes: [size(10, { feedHintItemId: "510" })], items: [item("500", "SKU-10")],
+      observations: [["510", item("510", "SKU-10", "DRAFT")]] });
+    expect(decisionOf(result, 10)).toMatchObject({ change: "none", code: D.skuDuplicate,
+      detail: { itemIds: ["500", "510"] } });
+    expect(result.commands).toEqual([]);
+  });
+
+  it("preserves selection and ownership safeguards for a unique DRAFT item", () => {
+    const draft = item("500", "SKU-10", "DRAFT");
+    const blocked = plan({ sizes: [size(10, { selection: { action: "publish", blockerCodes: ["CHANNEL_SELECTION_MAPPING_QUARANTINED"] } })],
+      items: [draft] });
+    expect(decisionOf(blocked, 10)).toMatchObject({ change: "none", code: D.selectionBlocked });
+    expect(blocked.commands).toEqual([]);
+    const held = plan({ sizes: [size(10)], items: [draft],
+      otherHeads: [{ productVariantId: 44, activeItemId: "500", draftItemId: null }] });
+    expect(decisionOf(held, 10)).toMatchObject({ change: "none", code: D.itemShared,
+      detail: { heldByProductVariantIds: [44] } });
+    expect(held.commands).toEqual([]);
+  });
+
+  it.each([null, item("500", "OTHER-SKU", "DRAFT")])("replaces a missing or SKU-changed old identity with the unique verified DRAFT", observed => {
+    const result = plan({ sizes: [size(10, { head: linked(5, "500", "SKU-10") })],
+      items: [item("510", "SKU-10", "DRAFT")], observations: [["500", observed]] });
+    expect(decisionOf(result, 10)).toMatchObject({ change: "relink", status: "linked", replacesMappingId: 5,
+      link: { itemId: "510" } });
+    expect(result.commands[0]).toMatchObject({ freedItemIds: ["500"] });
+  });
+
+  it("keeps the same correct stock link through DRAFT and ACTIVE observations", () => {
+    for (const productStatus of ["DRAFT", "ACTIVE", "DRAFT"]) {
+      const current = item("500", "SKU-10", productStatus);
+      const result = plan({ sizes: [size(10, { head: linked(5, "500", "SKU-10") })], items: [current], observations: [["500", current]] });
+      expect(decisionOf(result, 10)).toMatchObject({ change: "none", status: "linked", code: null, link: null });
+      expect(result.commands).toEqual([]);
+    }
+  });
+
+  it.each([
+    { linkedStatus: "DRAFT", otherStatus: "ACTIVE" },
+    { linkedStatus: "DRAFT", otherStatus: "DRAFT" },
+    { linkedStatus: "ACTIVE", otherStatus: "DRAFT" },
+  ])("retains a correct $linkedStatus link and flags its $otherStatus duplicate", ({ linkedStatus, otherStatus }) => {
+    const current = item("500", "SKU-10", linkedStatus);
+    const result = plan({ sizes: [size(10, { head: linked(5, "500", "SKU-10") })],
+      items: [current, item("510", "SKU-10", otherStatus)], observations: [["500", current]] });
+    expect(decisionOf(result, 10)).toMatchObject({ change: "none", status: "flagged", code: D.skuDuplicate, rule: "V8", link: null,
+      detail: { kind: "SKU_DUPLICATE", itemIds: ["500", "510"] } });
+    expect(result.commands).toEqual([]);
+  });
+
+  it("does not move a correct archived link to another DRAFT copy merely because it is eligible for first-link", () => {
+    const result = plan({ sizes: [size(10, { head: linked(5, "500", "SKU-10") })], items: [item("510", "SKU-10", "DRAFT")],
+      observations: [["500", item("500", "SKU-10", "ARCHIVED")]] });
+    expect(decisionOf(result, 10)).toMatchObject({ change: "none", status: "linked", code: null, link: null });
+    expect(result.commands).toEqual([]);
+  });
+
+  it("does not choose the ACTIVE replacement when an archived link has both ACTIVE and DRAFT candidates", () => {
+    const result = plan({ sizes: [size(10, { head: linked(5, "500", "SKU-10") })],
+      items: [item("510", "SKU-10"), item("520", "SKU-10", "DRAFT")],
+      observations: [["500", item("500", "SKU-10", "ARCHIVED")]] });
+    expect(decisionOf(result, 10)).toMatchObject({ change: "none", status: "flagged", code: D.skuDuplicate,
+      detail: { itemIds: ["510", "520"] } });
+    expect(result.commands).toEqual([]);
+  });
+
+  it("retains a correct DRAFT link missing from the lookup and retries the incomplete evidence", () => {
+    const result = plan({ sizes: [size(10, { head: linked(5, "500", "SKU-10") })], observations: [["500", item("500", "SKU-10", "DRAFT")]] });
+    expect(decisionOf(result, 10)).toMatchObject({ change: "none", status: "linked", code: D.lookupMissed, retry: "transient", rule: "V9" });
+    expect(result.commands).toEqual([]);
   });
 });
 

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
-  STOCK_LINK_CONTROL_AUDIT_ACTIONS, planStockLinkControl, type StockLinkControlDestinationState,
+  STOCK_LINK_CONTROL_AUDIT_ACTIONS, planStockLinkControl, stockLinkCheckAgainWaitingReasons, type StockLinkControlDestinationState,
 } from "../../domain/stock-link-controls";
 import { stockLinkRunnerDisableReason } from "../../infrastructure/stock-link-runner-switch";
 import {
@@ -28,6 +28,15 @@ const state = (overrides: Partial<StockLinkControlDestinationState> = {}): Stock
   autoLinkEnabled: true, pausedUntil: null, haltedAt: null, retiresHeld: false, ...overrides });
 
 describe("planStockLinkControl", () => {
+  it("rechecks historical status-ineligible waits only for Shopify channel destinations", () => {
+    expect(stockLinkCheckAgainWaitingReasons({ destinationKind: "channel_connection", providerKey: "shopify" }))
+      .toEqual(["STOCK_LINK_NOT_ON_SALE"]);
+    for (const providerKey of ["ebay", "walmart", "unknown", null]) {
+      expect(stockLinkCheckAgainWaitingReasons({ destinationKind: "channel_connection", providerKey })).toEqual([]);
+    }
+    expect(stockLinkCheckAgainWaitingReasons({ destinationKind: "dropship_store_connection", providerKey: "shopify" })).toEqual([]);
+  });
+
   it("turns the switch off and on, and changes nothing when it is already in that position", () => {
     expect(planStockLinkControl({ kind: "switch", enabled: false }, state(), NOW))
       .toEqual({ changed: true, autoLinkEnabled: false, releaseRetires: false, resumePause: false, clearHalt: false, makeRowsDue: false });

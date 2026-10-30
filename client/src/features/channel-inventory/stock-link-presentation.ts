@@ -58,6 +58,8 @@ export const STOCK_LINK_WORDS = {
   reloadStatus: "Reload linking status",
   /* PROPOSED: owner wording (details heading state, not in the plan's list, D-P9-3) */
   heading: (on: boolean) => `Link store items by SKU · ${on ? "On" : "Off"}`,
+  /* PROPOSED: owner wording (inventory links are independent of Shopify storefront publication) */
+  eligibility: "Verified active and draft Shopify products can be linked for inventory. Archived products cannot. Linking leaves the product’s Shopify status unchanged. Use Check again to retry items waiting after a previous product status check.",
   /* PROPOSED: owner wording (the server's kill switch is on, not in the plan's list, review CMP-1) */
   runnerOff: "Automatic linking is turned off for every store on the server. Existing links keep sending stock; nothing is linked or changed until it is turned back on.",
   /* PROPOSED: owner wording (toasts of a refused control, keyed by the server's code, not in the plan's list, review TST-2) */
