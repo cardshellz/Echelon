@@ -33,7 +33,7 @@ export function createPostgresStockLinkTickStore(pool: StockLinkPool): StockLink
     listTargets: () => listStockLinkTargets(pool),
     beat: (publicationTargetId, now) => beatStockLinkDestination(pool, publicationTargetId, now),
     saveCursors: (publicationTargetId, update) => saveStockLinkCursors(pool, publicationTargetId, update),
-    insertMissingChecks: (publicationTargetId, rows, now) => insertMissingStockLinkChecks(pool, publicationTargetId, rows, now),
+    insertMissingChecks: (publicationTargetId, rows, now, productId) => insertMissingStockLinkChecks(pool, publicationTargetId, rows, now, productId),
     wakeChecks: (publicationTargetId, productVariantIds, now) => wakeStockLinkChecks(pool, publicationTargetId, productVariantIds, now),
     deleteUncarriedChecks: (publicationTargetId, range, carriedVariantIds, now) =>
       deleteUncarriedStockLinkChecks(pool, publicationTargetId, range, carriedVariantIds, now),

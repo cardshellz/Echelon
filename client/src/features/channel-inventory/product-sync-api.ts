@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { productSyncStartSchema, productSyncWorkflowSchema, type ProductSyncStart } from "@shared/types/inventory-product-sync-workflow";
 import {
   inventoryProductSyncProgressSchema, inventoryProductSyncRequestSchema, inventoryProductSyncResultSchema,
   inventoryProductSyncReviewRequestSchema, inventoryProductSyncReviewSchema,
@@ -6,6 +7,23 @@ import {
 } from "@shared/types/inventory-product-sync";
 
 const ROOT = "/api/inventory-planning/admin/product-sync";
+
+export async function startProductSyncWorkflow(input: ProductSyncStart, actor: string) {
+  const command = productSyncStartSchema.parse(input);
+  const result = await request("/requests", productSyncWorkflowSchema, command);
+  assertWorkflowScope(result, command, actor);
+  return result;
+}
+export async function readProductSyncWorkflow(input: ProductSyncStart, actor: string) {
+  const command = productSyncStartSchema.parse(input);
+  const result = await request(`/requests/${encodeURIComponent(command.idempotencyKey)}`, productSyncWorkflowSchema);
+  assertWorkflowScope(result, command, actor);
+  return result;
+}
+function assertWorkflowScope(result: z.infer<typeof productSyncWorkflowSchema>, command: ProductSyncStart, actor: string) {
+  if (result.idempotencyKey !== command.idempotencyKey || result.productId !== command.productId || result.requestedBy !== actor)
+    throw new ProductSyncRequestError("The inventory sync status belongs to another request. Retry the saved request.", 502, false);
+}
 
 export class ProductSyncRequestError extends Error {
   constructor(message: string, readonly status: number, readonly definitiveRejected: boolean) {

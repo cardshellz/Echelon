@@ -76,6 +76,8 @@ import {
 import { startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
 import { startQuantityPublicationCatchupWorker } from "./modules/inventory-planning/application/quantity-publication-catchup.worker";
 import { startStockLinkRunner } from "./modules/inventory-planning/infrastructure/stock-link-runner";
+import { startProductSyncWorkflowRunner } from "./modules/inventory-planning/infrastructure/product-sync-workflow.runner";
+import { registerProductSyncWorkflowRoutes } from "./modules/inventory-planning/interfaces/http/inventory-product-sync.routes";
 import { startFinancialCommandRetentionWorker } from "./platform/commands/financial-command-retention.worker";
 import {
   startWebhookRetryWorker,
@@ -789,6 +791,7 @@ function startEchelonSyncScheduler(
   registerCustomerAccountRoutes(app, { services: customerAccountServices(dbPool, orderEdits),
     report: event => console.error(JSON.stringify({ event: "customer_account_request_failed", ...event })) });
   await registerRoutes(httpServer, app);
+  registerProductSyncWorkflowRoutes(app, services.productInventorySync);
 
   registerOrderEditRoutes(app, { service: orderEdits, hasPermission,
     report: event => console.error(JSON.stringify({ event: "order_edit_request_failed", ...event })) });
@@ -956,6 +959,8 @@ function startEchelonSyncScheduler(
       if (!schedulersDisabled("STOCK_LINK_AUTO_DISABLED")) {
         const stockLinkRunner = startStockLinkRunner(services.stockLink);
         if (stockLinkRunner) httpServer.once("close", () => stockLinkRunner.stop());
+        const productSyncRunner = startProductSyncWorkflowRunner(services.productInventorySync);
+        httpServer.once("close", () => productSyncRunner.stop());
       } else {
         logSchedulerDisabled("scheduler", "Stock link runner", "STOCK_LINK_AUTO_DISABLED");
       }

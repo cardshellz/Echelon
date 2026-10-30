@@ -124,6 +124,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-enable.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-stock-send.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-product-sync.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/product-sync-workflow.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/transformation-execution-authority.integration.test.ts",
       "server/modules/inventory/__tests__/integration/build-order-transformation-authority.integration.test.ts",
       "server/modules/catalog/__tests__/integration/piece-variant-backfill.integration.test.ts",

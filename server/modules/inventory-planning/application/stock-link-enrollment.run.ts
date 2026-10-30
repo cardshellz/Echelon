@@ -66,7 +66,7 @@ export async function runStockLinkEnrollment(context: StockLinkEnrollmentContext
   if (run.tick.timeUp()) return "continue";
   const leaseToken = deps.newLeaseToken();
   const claimed = await context.step(() => deps.store.claimDue(targetId, { now: context.now(), leaseToken, leaseMs: L.leaseMs,
-    limit: L.claimLimit }));
+    limit: L.claimLimit, ...run.productScope }));
   if (!claimed.ok) return context.failDestination(run, claimed, "claim");
   const claims = claimed.value;
   run.tick.summary.claimed += claims.length;

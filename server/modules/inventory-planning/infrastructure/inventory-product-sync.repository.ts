@@ -97,7 +97,7 @@ export class PostgresInventoryProductSyncStore implements InventoryProductSyncSt
   }
 }
 
-async function captureReview(client: PoolClient, productId: number): Promise<InventoryProductSyncReview> {
+export async function captureReview(client: PoolClient, productId: number): Promise<InventoryProductSyncReview> {
   const authority = await loadAndLockRuntimeAuthority(client);
   const global = (await client.query<{ global_enabled: boolean; revision: string }>(
     "SELECT global_enabled,revision::text FROM channels.sync_settings WHERE singleton_key=true FOR SHARE")).rows[0];

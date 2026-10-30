@@ -134,6 +134,12 @@ import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-cl
 import { ChannelIdentityService } from "../modules/channels/channel-identity.service";
 import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../modules/channels/shopify-stock-link-source";
 import { createStockLinkService } from "../modules/inventory-planning/infrastructure/stock-link.factory";
+import { randomUUID } from "node:crypto";
+import { ProductSyncWorkflowService } from "../modules/inventory-planning/application/product-sync-workflow.service";
+import { PostgresProductSyncWorkflowStore } from "../modules/inventory-planning/infrastructure/product-sync-workflow.repository";
+import { InventoryProductSyncService } from "../modules/inventory-planning/application/inventory-product-sync.service";
+import { PostgresInventoryProductSyncStore } from "../modules/inventory-planning/infrastructure/inventory-product-sync.repository";
+import { stockLinkRunnerDisableReason } from "../modules/inventory-planning/infrastructure/stock-link-runner-switch";
 import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../modules/channels/channel-fulfillment-provider-clients.service";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
@@ -494,6 +500,12 @@ export function createServices(
     monotonicNow: () => performance.now(),
     random: Math.random,
   });
+  const productInventorySync = new ProductSyncWorkflowService({
+    store: new PostgresProductSyncWorkflowStore(databasePool),
+    publication: new InventoryProductSyncService(new PostgresInventoryProductSyncStore(databasePool)),
+    links: stockLink, clock: () => new Date(), newLeaseToken: randomUUID,
+    enabled: () => stockLinkRunnerDisableReason(process.env) === null, logger: platformLogger,
+  });
   const channelShippingCapabilities = new ChannelShippingCapabilityRegistry();
   channelShippingCapabilities.register(shopifyAdapter);
   channelShippingCapabilities.register(ebayAdapter);
@@ -799,6 +811,7 @@ export function createServices(
     ebayPublicationReconciliation,
     inventoryPublicationReadback,
     stockLink,
+    productInventorySync,
     inventoryAvailabilityClaims,
     assemblyWork,
     assemblyExecution,

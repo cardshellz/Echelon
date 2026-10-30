@@ -101,7 +101,7 @@ describe("writer-ratchet (P2.1)", () => {
       expect(baseline[table]).toEqual([owner]);
     });
 
-  it.each(["inventory.stock_link_checks", "inventory.stock_link_destinations"])(
+  it.each(["inventory.stock_link_checks", "inventory.stock_link_destinations", "inventory.product_inventory_sync_requests"])(
     "%s has only the inventory-planning engine as writer, including scripts (PLAN-CH2 §3)", (table) => {
       // The check rows gained their writer with the command (P4), the destination rows with the tick (P7).
       expect(current[table]).toEqual(["modules/inventory-planning"]);
