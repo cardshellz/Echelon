@@ -5,8 +5,22 @@ import { InventoryProductSyncError, InventoryProductSyncService } from "../../ap
 import { PostgresInventoryProductSyncStore } from "../../infrastructure/inventory-product-sync.repository";
 import { InventoryAvailabilityRuntimePublicationError } from "../../application/inventory-availability-runtime-publication.service";
 import { logger } from "../../../../platform/observability/logger";
+import type { ProductSyncWorkflowService } from "../../application/product-sync-workflow.service";
 
 const root = "/api/inventory-planning/admin/product-sync";
+export function registerProductSyncWorkflowRoutes(app: Express, service: Pick<ProductSyncWorkflowService, "start" | "progress">): void {
+  app.post(root + "/requests", requirePermission("inventory_planning", "activate"), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    try { res.status(202).json(await service.start(req.body, req.session?.user?.id)); }
+    catch (error) { sendError(res, error); }
+  });
+  app.get(root + "/requests/:commandKey", requirePermission("inventory_planning", "view"), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    try { res.json(await service.progress(req.params.commandKey, req.session?.user?.id)); }
+    catch (error) { sendError(res, error); }
+  });
+}
+
 export function registerInventoryProductSyncRoutes(app: Express,
   service: Pick<InventoryProductSyncService, "review" | "sync" | "progress"> = new InventoryProductSyncService(new PostgresInventoryProductSyncStore()),
 ): void {

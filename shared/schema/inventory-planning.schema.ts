@@ -10,6 +10,7 @@ import {
   pgSchema,
   primaryKey,
   timestamp,
+  text,
   unique,
   uniqueIndex,
   varchar,
@@ -2045,13 +2046,42 @@ export const inventoryPublicationTargetResumeReviews = inventoryPlanningSchema.t
 );
 
 /**
- * Stock-link engine state (Channels PR2, migration *_stock_links.sql). One check
- * row per (destination, size) the engine looks after: linked, waiting for a store
- * item, flagged for a person, or stopped on an error; when to look again; the
- * lease of the tick that holds it. Operational state, not history (the audit rows
- * and the append-only mapping versions are the history), so deleting a size
- * deletes its check rows. Only inventory-planning writes these tables.
+ * Durable product sync orchestration. Acceptance, retry identity and the exact
+ * publication command survive HTTP failures and worker restarts. Only Inventory
+ * Planning writes this state; audit_events retain its transition history.
  */
+export const productInventorySyncRequests = inventoryPlanningSchema.table("product_inventory_sync_requests", {
+  id: uuid("id").primaryKey(),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+  requestedBy: varchar("requested_by", { length: 100 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  state: varchar("state", { length: 24 }).notNull(),
+  message: text("message").notNull(),
+  review: jsonb("review").notNull(),
+  publicationCommand: jsonb("publication_command"),
+  requestedAt: timestamp("requested_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull(),
+  deadlineAt: timestamp("deadline_at", { withTimezone: true }).notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  leaseToken: uuid("lease_token"),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+}, table => ({
+  dueIndex: index("product_inventory_sync_requests_due_idx").on(table.nextAttemptAt, table.requestedAt, table.id)
+    .where(sql`${table.state} IN ('checking_links','publishing')`),
+  productIndex: index("product_inventory_sync_requests_product_idx").on(table.productId, table.requestedAt.desc()),
+  actorCheck: check("product_inventory_sync_requests_requested_by_check", sql`btrim(${table.requestedBy}) <> ''`),
+  hashCheck: check("product_inventory_sync_requests_request_hash_check", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  stateCheck: check("product_inventory_sync_requests_state_check", sql`${table.state} IN ('checking_links','publishing','queued','blocked','failed')`),
+  messageCheck: check("product_inventory_sync_requests_message_check", sql`${table.message} <> ''`),
+  attemptsCheck: check("product_inventory_sync_requests_attempts_check", sql`${table.attempts} >= 0`),
+  leaseCheck: check("product_inventory_sync_requests_lease_check", sql`(${table.leaseToken} IS NULL) = (${table.leaseExpiresAt} IS NULL)`),
+  deadlineCheck: check("product_inventory_sync_requests_deadline_check", sql`${table.deadlineAt} > ${table.requestedAt}`),
+  commandCheck: check("product_inventory_sync_requests_command_check", sql`${table.state} NOT IN ('publishing','queued') OR COALESCE(jsonb_typeof(${table.publicationCommand})='object',false)`),
+}));
+
+/** One operational check and lease per destination and variant. Immutable audit
+ * events and mapping versions retain the stock-link history. */
 export const stockLinkChecks = inventoryPlanningSchema.table(
   "stock_link_checks",
   {

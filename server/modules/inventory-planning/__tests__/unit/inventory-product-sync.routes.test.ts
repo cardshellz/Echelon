@@ -2,7 +2,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerInventoryProductSyncRoutes } from "../../interfaces/http/inventory-product-sync.routes";
+import { registerInventoryProductSyncRoutes, registerProductSyncWorkflowRoutes } from "../../interfaces/http/inventory-product-sync.routes";
 import { InventoryProductSyncError } from "../../application/inventory-product-sync.service";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
@@ -12,12 +12,15 @@ describe("product ATP sync HTTP permission and outcome boundary", () => {
   let server: http.Server;
   let url: string;
   let service: { review: ReturnType<typeof vi.fn>; sync: ReturnType<typeof vi.fn>; progress: ReturnType<typeof vi.fn> };
+  const workflow = { start: vi.fn(async () => ({})), progress: vi.fn(async () => ({})) };
   beforeEach(async () => {
     hasPermission.mockReset().mockResolvedValue(true);
     service = { review: vi.fn(async () => ({})), sync: vi.fn(async () => ({ replayed: false })), progress: vi.fn(async () => ({})) };
     const app = express(); app.use(express.json());
     app.use((req, _res, next) => { Object.defineProperty(req, "session", { value: { user: { id: "operator" } } }); next(); });
     registerInventoryProductSyncRoutes(app, service as never);
+    workflow.start.mockClear(); workflow.progress.mockClear();
+    registerProductSyncWorkflowRoutes(app, workflow as never);
     server = http.createServer(app);
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/inventory-planning/admin/product-sync`;
@@ -37,6 +40,17 @@ describe("product ATP sync HTTP permission and outcome boundary", () => {
     expect(service.sync).toHaveBeenCalledWith({}, "operator");
     hasPermission.mockResolvedValue(false);
     expect((await post("/sync")).status).toBe(403); expect(service.sync).toHaveBeenCalledTimes(1);
+  });
+  it("requires activation for durable acceptance and actor-scoped view permission for read-only recovery", async () => {
+    expect((await post("/requests")).status).toBe(202);
+    expect(workflow.start).toHaveBeenCalledWith({}, "operator");
+    expect(hasPermission).toHaveBeenCalledWith("operator", "inventory_planning", "activate");
+    expect((await fetch(url+"/requests/11111111-1111-4111-8111-111111111111")).status).toBe(200);
+    expect(workflow.progress).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", "operator");
+    expect(hasPermission).toHaveBeenCalledWith("operator", "inventory_planning", "view");
+    hasPermission.mockResolvedValue(false);
+    expect((await post("/requests")).status).toBe(403);
+    expect(workflow.start).toHaveBeenCalledTimes(1);
   });
   it("distinguishes stale refusal, uncertain outcome and replay", async () => {
     service.sync.mockRejectedValueOnce(new InventoryProductSyncError("PRODUCT_SYNC_REVIEW_STALE", "Review changed."));
