@@ -9,6 +9,7 @@ import type {
 import { previewSelectClass } from "./CustomerReturnPreviewSteps";
 import { ReturnLabelCarrierRules } from "./ReturnLabelCarrierRules";
 import { ReturnShippingGuardrailsFields } from "./ReturnShippingGuardrailsFields";
+import { createReturnShippingGuardrailsDraft } from "@/lib/customer-return-guardrails-draft";
 
 export const returnShippingFieldIds: Record<ReturnLabelSettingsField, string> =
   {
@@ -232,7 +233,7 @@ export function ReturnPolicyShippingFields({
         </div>
         <div className="space-y-1">
           <Label htmlFor="return-label-phone">
-            Return contact phone (optional)
+            Business contact phone
           </Label>
           <Input
             id="return-label-phone"
@@ -240,9 +241,13 @@ export function ReturnPolicyShippingFields({
             maxLength={50}
             value={draft.contactPhone}
             aria-invalid={hasIssue("contactPhone")}
-            aria-describedby={description("contactPhone")}
+            aria-describedby={description("contactPhone", "return-label-phone-help")}
             onChange={(event) => onChange({ contactPhone: event.target.value })}
           />
+          <p id="return-label-phone-help" className="text-xs text-muted-foreground">
+            Use your business number. It supplies missing shipping contact phones
+            for return labels; customers do not need to enter a number.
+          </p>
           {fieldErrors("contactPhone")}
         </div>
       </div>
@@ -266,6 +271,13 @@ export function ReturnPolicyShippingFields({
         aria-describedby={description("parcelGuardrails")}>
         <ReturnShippingGuardrailsFields draft={draft.parcelGuardrails} onChange={parcelGuardrails => onChange({ parcelGuardrails })} />
         {fieldErrors("parcelGuardrails")}
+      </div>}
+      {!draft.parcelGuardrails && <div className="space-y-2 rounded-md border p-3">
+        <p className="text-sm">This policy has no additional prepaid return guardrails.</p>
+        <button type="button" className="min-h-11 rounded-md border px-3 text-sm"
+          onClick={() => onChange({ parcelGuardrails: createReturnShippingGuardrailsDraft() })}>
+          Configure prepaid return guardrails
+        </button>
       </div>}
     </>
   );

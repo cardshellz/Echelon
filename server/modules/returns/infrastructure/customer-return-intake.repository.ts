@@ -14,6 +14,7 @@ import { readCustomerReturnPolicyCandidates } from "./customer-return-policy.rea
 import { resolveCustomerReturnPortalPolicy } from "../application/customer-return-policy";
 import { snapshotReturnPolicy } from "../domain/return-case";
 import { customerReturnLabelSettingsSchema } from "@shared/returns/customer-return-label.contract";
+import { customerReturnContactAddress } from "../application/customer-return-shipping-plan";
 import { RETURN_LABEL_CONTROL_LOCK_NAMESPACE } from "./customer-return-label-settings.repository";
 import {
   PostgresCustomerReturnAuthorizationTransaction, type CustomerReturnAuthorizationDatabase,
@@ -145,7 +146,7 @@ async function verifyConfiguration(tx: Executor, input: PreparedCustomerReturnIn
     || input.warehouseSnapshot.version !== input.settingsVersion
     || input.parcels.some(parcel => (parcel.selectionMode ?? "fixed_service") !== settings.selectionMode
       || parcel.carrierId !== settings.carrierId || parcel.serviceCode !== settings.serviceCode
-      || canonical(parcel.destinationAddress) !== canonical(settings.destinationAddress))) configurationChanged();
+      || canonical(parcel.destinationAddress) !== canonical(customerReturnContactAddress(settings.destinationAddress, settings)))) configurationChanged();
   const warehouse = rows(await tx.execute(sql`SELECT is_active,country FROM warehouse.warehouses WHERE id=${settings.warehouseId} FOR SHARE`))[0];
   const limits = customerReturnPackingLimits(settings);
   if (input.parcels.some(parcel => parcel.originAddress.countryCode !== "US"

@@ -10,6 +10,22 @@ async function openPolicy(page: Page) {
   return dialog;
 }
 
+test("saving a business contact preserves a legacy policy's absent shipping guardrails", async ({ page }) => {
+  await installReturnPreviewFixtures(page);
+  const policies = await installPolicyShippingFixtures(page, { guardrails: false });
+  await installReturnLabelFixtures(page);
+  const dialog = await openPolicy(page);
+  await expect(dialog.getByRole("heading", { name: "Prepaid return guardrails", exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Configure prepaid return guardrails", exact: true })).toBeVisible();
+  await dialog.getByLabel("Business contact phone", { exact: true }).fill("512-555-0100");
+  await dialog.getByRole("button", { name: "Create version", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(policies.writes).toHaveLength(1);
+  expect(policies.writes[0].shipping.contactPhone).toBe("512-555-0100");
+  expect(policies.writes[0].shipping).not.toHaveProperty("parcelGuardrails");
+  expect(policies.writes[0].shipping).not.toHaveProperty("warehouseAddressType");
+});
+
 test("policy editor saves rules and shipping as one version and removes the separate menu entry", async ({
   page,
 }, testInfo) => {
@@ -39,6 +55,8 @@ test("policy editor saves rules and shipping as one version and removes the sepa
   await dialog
     .getByLabel("Return contact name", { exact: true })
     .fill("Updated receiving desk");
+  await dialog.getByLabel("Business contact phone", { exact: true }).fill("512-555-0100");
+  await expect(dialog.getByText("Use your business number. It supplies missing shipping contact phones for return labels; customers do not need to enter a number.")).toBeVisible();
   await expect(
     page.getByRole("link", { name: "Label settings", exact: true }),
   ).toHaveCount(0);
@@ -62,6 +80,7 @@ test("policy editor saves rules and shipping as one version and removes the sepa
     shipping: {
       warehouseId: 2,
       contactName: "Updated receiving desk",
+      contactPhone: "512-555-0100",
       enabled: true,
       parcelGuardrails: { geography: "us_domestic", costProtection: true,
         usps: { maxWeightLb: "20", maxLengthPlusGirthInches: "130" },

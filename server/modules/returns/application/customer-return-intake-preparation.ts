@@ -12,6 +12,7 @@ import { validateCustomerReturnBoxPlan } from "./customer-return-box-plan";
 import {
   assertCustomerReturnShippingReady,
   customerReturnOriginAddress,
+  customerReturnContactAddress,
   customerReturnWarehouseAddressType,
 } from "./customer-return-shipping-plan";
 import {
@@ -89,7 +90,9 @@ export function prepareCustomerReturnIntake(
     order.boxOptions,
     customerReturnPackingLimits(settings),
   );
-  const origin = customerReturnOriginAddress(provider.order.shippingAddress);
+  const origin = customerReturnContactAddress(
+    customerReturnOriginAddress(provider.order.shippingAddress), settings,
+  );
   const publicLines = new Map(
     local.lines.flatMap((line) =>
       line.externalLineItemId === null
@@ -153,7 +156,7 @@ export function prepareCustomerReturnIntake(
       dimensions: parcel.dimensions,
       weightGrams: parcel.weightGrams,
       originAddress: origin,
-      destinationAddress: settings.destinationAddress,
+      destinationAddress: customerReturnContactAddress(settings.destinationAddress, settings),
       selectionMode: settings.selectionMode,
       carrierId: settings.carrierId,
       serviceCode: settings.serviceCode,

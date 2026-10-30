@@ -37,6 +37,22 @@ export function customerReturnOriginAddress(source: CustomerReturnShopifySnapsho
     "The order's return shipping address needs verification before labels can be created.");
   return origin.data;
 }
+
+/** A carrier contact is not a change to the buyer's account or order address.
+ * Freeze the policy's business contact in the shipping manifest when the buyer
+ * did not supply a phone, so quoting and label recovery use the same input.
+ */
+export function customerReturnContactAddress(
+  address: CustomerReturnLabelSettings["destinationAddress"],
+  settings: Pick<CustomerReturnLabelSettings, "contactPhone" | "destinationAddress">,
+): CustomerReturnLabelSettings["destinationAddress"] {
+  const phone = address.phone?.trim() || settings.contactPhone?.trim()
+    || settings.destinationAddress.phone?.trim();
+  return customerReturnLabelAddressSchema.parse({
+    ...address,
+    ...(phone ? { phone } : {}),
+  });
+}
 export function customerReturnPreflightShipments(
   origin: ReturnType<typeof customerReturnOriginAddress>, settings: CustomerReturnLabelSettings,
   parcels: readonly { weightGrams: number; dimensions: CustomerReturnDimensions }[],
@@ -45,7 +61,9 @@ export function customerReturnPreflightShipments(
     // Quick quotes do not persist provider shipments. These identifiers must never
     // be used for purchases; real purchases use the durable RMA/parcel identity.
     externalShipmentId: `echelon-return-preflight-${index + 1}`, rmaNumber: "RETURN-PREFLIGHT",
-    shipFrom: origin, shipTo: { ...settings.destinationAddress, addressType: customerReturnWarehouseAddressType(settings.warehouseAddressType) },
+    shipFrom: customerReturnContactAddress(origin, settings),
+    shipTo: { ...customerReturnContactAddress(settings.destinationAddress, settings),
+      addressType: customerReturnWarehouseAddressType(settings.warehouseAddressType) },
     parcel: { weightGrams: parcel.weightGrams, dimensionsInches: customerReturnProviderDimensions(parcel.dimensions) },
   }));
 }
