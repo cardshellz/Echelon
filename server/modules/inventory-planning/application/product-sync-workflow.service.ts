@@ -108,8 +108,10 @@ export class ProductSyncWorkflowService {
     } catch (error) {
       if (error instanceof InventoryProductSyncError && error.code === "PRODUCT_SYNC_REVIEW_STALE") {
         // This rejection is transactional: no publication or receipt committed.
-        return this.save(job, { state: "checking_links", publicationCommand: null,
-          message: "Availability or settings changed. Recalculating with the current ATP rules." }, true);
+        const expired = this.now() >= job.deadlineAt;
+        return this.save(job, { state: expired ? "failed" : "checking_links", publicationCommand: null,
+          message: expired ? "Availability kept changing during this sync. Retry the same request using the current ATP rules."
+            : "Availability or settings changed. Recalculating with the current ATP rules." }, true);
       }
       throw error;
     }

@@ -234,6 +234,36 @@ test("retains recovery details while an acceptance response is still in flight",
     expect(state.requests).toHaveLength(1);
   }finally{state.releaseResponse?.();}
 });
+test("recovers a delayed status failure after acceptance returns verified delivery", async ({ page }) => {
+  const state = await setup(page);
+  state.delayResponse = true;
+  state.verified = true;
+  let releaseStatus: (() => void) | undefined;
+  let firstStatus = true;
+  await page.route("**/product-sync/requests/*", async route => {
+    if (!firstStatus) return route.fallback();
+    firstStatus = false;
+    await new Promise<void>(resolve => { releaseStatus = resolve; });
+    return route.fulfill({ status: 503, json: { error: { message: "Delayed status failure", definitiveRejected: false } } });
+  });
+  try {
+    await openReview(page);
+    await page.getByRole("button", { name: "Sync eligible inventory", exact: true }).click();
+    await expect.poll(() => Boolean(releaseStatus && state.releaseResponse)).toBe(true);
+    state.releaseResponse?.();
+    await expect(page.getByText(verified, { exact: true })).toBeVisible();
+    releaseStatus?.();
+    await expect(page.getByText("Current status is unavailable. The original request is retained.", { exact: true })).toBeVisible();
+    await expect(page.getByText(verified, { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sync again", exact: true })).toBeEnabled();
+    expect(state.requests).toHaveLength(1);
+    expect(state.errors).toEqual([]);
+  } finally {
+    releaseStatus?.();
+    state.releaseResponse?.();
+  }
+});
+
 test("hides stale quantities after a failed review refresh",async({page})=>{
   const state=await setup(page);await openReview(page);state.reviewUnavailable=true;
   await page.getByRole("button",{name:"Refresh review",exact:true}).click();

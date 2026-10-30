@@ -64,6 +64,15 @@ describe("durable product sync boundaries and recovery decisions", () => {
     expect(productSyncWorkflowSchema.safeParse({...base,state:"queued"}).success).toBe(false);
     expect(productSyncWorkflowSchema.safeParse({...base,productId:21}).success).toBe(false);
   });
+  it("bounds repeated stale-review refusals without discarding the request identity", async () => {
+    const {deps,service}=fixture();
+    const command={productId:20,idempotencyKey:key,expectedReviewHash:review.reviewHash};
+    vi.mocked(deps.store.claim).mockResolvedValue({...job,state:"publishing",publicationCommand:command,deadlineAt:now});
+    vi.mocked(deps.publication.sync).mockRejectedValue(new InventoryProductSyncError("PRODUCT_SYNC_REVIEW_STALE","Changed"));
+    await service.tick();
+    expect(deps.store.save).toHaveBeenCalledWith(expect.objectContaining({idempotencyKey:key}),
+      expect.objectContaining({state:"failed",publicationCommand:null}),now,true);
+  });
   it("recalculates after a proven transactional stale-review refusal, retaining the same request identity", async () => {
     const {deps,service}=fixture(); const command={productId:20,idempotencyKey:key,expectedReviewHash:review.reviewHash};
     vi.mocked(deps.store.claim).mockResolvedValue({...job,state:"publishing",publicationCommand:command});

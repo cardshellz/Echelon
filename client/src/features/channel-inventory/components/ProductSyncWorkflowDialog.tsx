@@ -39,7 +39,10 @@ export function ProductSyncWorkflowDialog({ productId, actor, onClose }: { produ
   const statusKey = ["product-sync-workflow", actor, command?.idempotencyKey];
   const status = useQuery({ queryKey: statusKey, queryFn: () => readProductSyncWorkflow(command!, actor),
     enabled: command !== null, retry: false,
-    refetchInterval: query => query.state.data && productSyncWorkflowFinished(query.state.data) ? false : 2000 });
+    // A delayed status failure can arrive after POST seeded a terminal receipt.
+    // Retained data alone must not stop recovery of that newer failed read.
+    refetchInterval: query => query.state.status === "success" && query.state.data
+      && productSyncWorkflowFinished(query.state.data) ? false : 2000 });
   const mutation = useMutation({ mutationFn: (input: ProductSyncStart) => startProductSyncWorkflow(input, actor),
     onSuccess: (result, input) => {
       client.setQueryData(["product-sync-workflow", actor, input.idempotencyKey], result);
