@@ -10,7 +10,7 @@ import type { StockLinkControlKind, StockLinkControlRequest } from "../domain/st
 /**
  * Channel Inventory's stock-link controls (channels PR2, PLAN-CH2 v4.1 §7.3): the status of one destination and a
  * person's three writes, the per-store switch, Continue (release held retires, retry a pause now) and Check again
- * (failed, flagged and linked sizes due now, a halt cleared). Validates every input against the shared contract,
+ * (failed, flagged, linked and Shopify status-ineligible waiting sizes due now, a halt cleared). Validates every input against the shared contract,
  * names the actor and takes the time from the injected clock; the store makes the change, its audit row and the
  * revision guard in one transaction. Every change is logged at INFO with before → after; a control that changes
  * nothing (the switch already in that position, Continue with nothing held or paused) writes nothing and logs DEBUG.

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { StockLinkDestination } from "@shared/types/stock-link";
-import { isStockLinkItemOnSale } from "../../../inventory-planning/domain/stock-link";
+import { isStockLinkItemEligible, isStockLinkItemOnSale } from "../../../inventory-planning/domain/stock-link";
 import { classifyStockLinkFailure } from "../../../inventory-planning/domain/stock-link-errors";
 import { ChannelIdentityError } from "../../channel-identity.domain";
 import type { ShopifyIdentityConnection } from "../../adapters/shopify-identity.reader";
@@ -106,13 +106,14 @@ describe("Shopify stock-link adapter: findItemsBySku", () => {
     expect(result.items.map(item => [item.itemId, item.sku])).toEqual([["101", "ABC-1"], ["102", " abc-1 "]]);
   });
 
-  it("returns archived and draft copies with their raw status: only the engine decides what is on sale (C10)", async () => {
+  it("returns raw statuses so the engine can distinguish stock-link eligibility from sale status", async () => {
     const { adapter } = setup([page([variant("201", "P5", "ARCHIVED"), variant("202", "P5", "DRAFT"),
       variant("203", "P5", "ACTIVE"), variant("204", "P5", "UNLISTED")])]);
     const result = await adapter.findItemsBySku(destination, ["P5"], signal());
     expect(result.items.map(item => [item.itemId, item.productStatus])).toEqual([
       ["201", "ARCHIVED"], ["202", "DRAFT"], ["203", "ACTIVE"], ["204", "UNLISTED"]]);
     expect(result.items.filter(isStockLinkItemOnSale).map(item => item.itemId)).toEqual(["203"]);
+    expect(result.items.filter(isStockLinkItemEligible).map(item => item.itemId)).toEqual(["202", "203"]);
   });
 
   it("reads every page up to the bound, passing each cursor once, and merges the answer in id order", async () => {

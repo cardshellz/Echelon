@@ -24,7 +24,7 @@ import {
  * - findItemsBySku: every store item whose SKU equals one of up to 50 Card Shellz SKUs, complete or not at all;
  * - observeItems: up to 100 saved items read by id (never through the search index); a deleted item is `null`.
  * It decides nothing: archived and draft copies are returned with their raw product status (only the engine decides
- * what is on sale, C10), and every refusal is thrown as a classified, destination-scoped error (SAF-9), never naming
+ * stock-link eligibility separately from sale status), and every refusal is thrown as a classified, destination-scoped error (SAF-9), never naming
  * one item. No retry inside: the engine's tick decides what happens next.
  */
 

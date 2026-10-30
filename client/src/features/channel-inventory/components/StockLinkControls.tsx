@@ -118,6 +118,7 @@ export function StockLinkDetails({ presentation, canActivate, busy, retrying, on
     <div className="space-y-1">
       <h3 className="text-sm font-medium">{STOCK_LINK_WORDS.heading(presentation.switchOn)}</h3>
       <p className="text-sm text-muted-foreground">{presentation.statusLine}</p>
+      <p className="text-sm text-muted-foreground">{STOCK_LINK_WORDS.eligibility}</p>
     </div>
     {presentation.callouts.map(callout => <Callout key={callout.text} tone={callout.tone}>{callout.text}</Callout>)}
     <div className="flex flex-wrap gap-2">

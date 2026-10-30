@@ -72,7 +72,7 @@ export type StockLinkDestination = z.infer<typeof stockLinkDestinationSchema>;
 /**
  * One store item as the store reports it now. `sku` is raw (the engine trims and compares); `productStatus` is the
  * product's status as the store names it (Shopify ACTIVE, ARCHIVED, DRAFT, ...): only the engine decides what is
- * "on sale" (§4.2, C10), so a new status is never on sale by accident.
+ * eligible for a stock link versus on sale. Unknown statuses never become eligible by accident.
  */
 export const stockLinkStoreItemSchema = z.object({
   itemId: decimalId,

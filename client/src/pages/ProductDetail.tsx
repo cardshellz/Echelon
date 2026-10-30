@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useInventoryCommand } from "@/lib/inventory-command";
 import { InventoryTrackingHistory } from "@/components/catalog/InventoryTrackingHistory";
 import { ShopifyProductConnectionActions } from "@/components/catalog/ShopifyProductConnection";
-import { InventoryStockSendButton } from "@/features/channel-inventory/components/InventoryStockSend";
+import { InventoryProductSyncButton } from "@/features/channel-inventory/components/InventoryProductSync";
 import { ProductImageGallery } from "@/components/catalog/ProductImageGallery";
 import { invalidateCatalogImages } from "@/lib/catalog-image-queries";
 import { saveProductAssetScope, type ProductAssetScopeAttempt } from "@/lib/product-asset-scope";
@@ -835,6 +835,18 @@ const SHOPIFY_MAPPING_STATUS: Record<ShopifyProductMappingStatus, {
   },
 };
 
+export function ProductInventorySyncPanel({ productId }: { productId: number }) {
+  return <Card>
+    <CardHeader className="flex flex-col gap-3 p-3 md:flex-row md:items-center md:justify-between md:p-6">
+      <div>
+        <CardTitle className="text-base md:text-lg">Product inventory</CardTitle>
+        <CardDescription className="mt-1">Recalculate this product through ATP and sync all eligible channel destinations using the saved inventory rules.</CardDescription>
+      </div>
+      <InventoryProductSyncButton productId={productId} />
+    </CardHeader>
+  </Card>;
+}
+
 export function ShopifyProductMappingPanel({ productId, enabled }: { productId: number; enabled: boolean }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -893,7 +905,6 @@ export function ShopifyProductMappingPanel({ productId, enabled }: { productId: 
             <div className="flex flex-wrap items-center gap-2">
               {status && <Badge variant="outline" className={status.className}>{status.label}</Badge>}
               <ShopifyProductConnectionActions productId={productId} />
-              <InventoryStockSendButton productId={productId} />
             </div>
           </div>
         </CardHeader>
@@ -3243,6 +3254,7 @@ export default function ProductDetail() {
 
             {/* ===== CHANNELS TAB ===== */}
             <TabsContent value="channels" className="mt-4 space-y-4">
+              <ProductInventorySyncPanel productId={product!.productId} />
               {/* Action buttons row */}
               <div className="flex items-center justify-between">
                 <div className="text-sm text-muted-foreground">

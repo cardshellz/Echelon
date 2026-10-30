@@ -1,5 +1,10 @@
 # Send selected inventory to Shopify
 
+This is the legacy command retained for existing receipts and retries. Normal
+product entry points now use [Sync one product's inventory through ATP](ATP-PRODUCT-INVENTORY-SYNC.md),
+which applies the existing ATP rules across eligible destinations for one product.
+The description below documents the legacy API's behavior.
+
 Use **Send inventory** in the catalog product's **Channels → Shopify Product
 Mapping** widget, a product row on **Shopify Channel**, or the selected product's
 **Channel Inventory → Stock preview**. All three use the same command.
