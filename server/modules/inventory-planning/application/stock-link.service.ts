@@ -668,9 +668,10 @@ export class StockLinkService {
     const linked = new Set(heads.filter(head => head.active !== null).map(head => head.productVariantId));
     const guards = claims.filter(claim => decisions.has(claim.productVariantId) && !ran.has(claim.productVariantId))
       .map(claim => ({ productVariantId: claim.productVariantId, leaseToken: claim.leaseToken, revision: claim.revision }));
-    // A size no longer carried by the selection (read_only / none) and not linked is not the engine's to look after
-    // (BUILD-NOTES D-P6-10): its row is deleted, so Ops Health's waiting count stays honest.
-    const uncarried = guards.filter(guard => {
+    // Background discovery removes sizes it no longer carries (D-P6-10).
+    // An explicit product check retains its definitive exclusion so the durable
+    // workflow can distinguish it from work that has not been processed yet.
+    const uncarried = run.productScope !== undefined ? [] : guards.filter(guard => {
       const decision = decisions.get(guard.productVariantId)!;
       return decision.change === "none" && decision.status === "waiting" && decision.code === STOCK_LINK_DECISION_CODES.selectionBlocked
         && decision.selectionAction !== "publish" && decision.selectionAction !== "zero" && !linked.has(guard.productVariantId);
