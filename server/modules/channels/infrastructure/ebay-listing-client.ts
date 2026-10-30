@@ -4,7 +4,6 @@ import { EbayListingSyncError } from "../ebay-listing-sync.domain";
 import {
   EbayMarketplaceListingConnector,
   type EbayListingConnectorClient,
-  type EbayObservedOffer,
 } from "../listing-connectors/ebay-listing.connector";
 import type {
   EbayBulkPriceQuantityRequest,
@@ -28,6 +27,9 @@ import {
 
 import { EbayApiRequestError, isMissingEbayInventoryResource, isMissingEbayOfferCollection } from "../adapters/ebay/ebay-api-error";
 import { readExistingEbayListingPhotos } from "../adapters/ebay/ebay-listing-photos.reader";
+import { readEbayNativePackage } from "../adapters/ebay/ebay-native-package.reader";
+import { normalizeEbayObservedOffers } from "../adapters/ebay/ebay-offer-observation";
+export { normalizeEbayObservedOffers } from "../adapters/ebay/ebay-offer-observation";
 import type {
   EbayListingPhotoPlan,
   EbayPhotoVariant,
@@ -41,38 +43,6 @@ function normalizePublishedListingResponse(response: unknown): { listingId: stri
     "eBay publish did not return a valid listing id. Publication may have completed; review the existing listing before another publication attempt.");
   return parsed.data;
 }
-
-const ebayObservedOfferSchema = z
-  .object({
-    sku: z.string().min(1).max(100).refine(value => value.trim().length > 0),
-    offerId: z.string().trim().min(1).max(255),
-    status: z.enum(["PUBLISHED", "UNPUBLISHED"]),
-    availableQuantity: z
-      .number()
-      .int()
-      .nonnegative()
-      .max(Number.MAX_SAFE_INTEGER)
-      .optional(),
-    listingId: z.string().trim().min(1).max(255).optional(),
-    listing: z
-      .object({
-        listingId: z.string().trim().min(1).max(255),
-      })
-      .passthrough()
-      .optional(),
-  })
-  .passthrough()
-  .superRefine((offer, context) => {
-    if (offer.listingId && offer.listing?.listingId && offer.listingId !== offer.listing.listingId) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["listingId"], message: "Conflicting listing identifiers." });
-    }
-  });
-
-const ebayOffersResponseSchema = z
-  .object({
-    offers: z.array(ebayObservedOfferSchema).max(10_000),
-  })
-  .passthrough();
 
 const ebayObservedInventoryItemGroupSchema = z.object({
   inventoryItemGroupKey: z.string().min(1).max(100).optional(),
@@ -97,23 +67,6 @@ export function normalizeEbayObservedInventoryItemGroup(response: unknown): Ebay
     );
   }
   return parsed.data;
-}
-
-export function normalizeEbayObservedOffers(
-  response: unknown,
-): EbayObservedOffer[] {
-  const parsed = ebayOffersResponseSchema.safeParse(response);
-  if (!parsed.success) throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_RESPONSE_INVALID",
-    "eBay returned an invalid offer response. Review the current listing identity before another write.");
-  return parsed.data.offers.map((offer) => {
-    const listingId = offer.listingId ?? offer.listing?.listingId;
-    return {
-      ...offer,
-      offerId: offer.offerId,
-      status: offer.status,
-      ...(listingId === undefined ? {} : { listingId }),
-    } as unknown as EbayObservedOffer;
-  });
 }
 
 interface EbayRouteClientInput {
@@ -201,8 +154,14 @@ export function createEbayRouteListingClient(
   input: EbayRouteClientInput,
 ): EbayListingConnectorClient {
   const request = createEbayRouteRequest(input);
-  return {
+  const client: EbayListingConnectorClient = {
     quantityRequestJournalVersion: 1,
+    getListingPackageType: async (sku, marketplaceId, observedOffers) => {
+      const auth = getAuthService();
+      if (!auth) throw new EbayListingSyncError("EBAY_SYNC_AUTH_REQUIRED", "An exact eBay environment is required to read package configuration.");
+      return readEbayNativePackage({ sku, marketplaceId, offers: observedOffers ?? (await client.getOffers(sku, marketplaceId)).offers,
+        accessToken: input.accessToken, environment: auth.getEnvironment() });
+    },
     getInventoryItem: async (sku) => {
       try {
         return await request<EbayInventoryItem>(
@@ -283,6 +242,7 @@ export function createEbayRouteListingClient(
       ));
     },
   };
+  return client;
 }
 
 export function createEbayRouteListingLifecycleClient(

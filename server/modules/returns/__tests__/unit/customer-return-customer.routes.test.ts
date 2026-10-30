@@ -14,10 +14,16 @@ describe("customer returns HTTP boundaries", () => {
   const order = vi.fn(async () => ({ test: "owned-order" }));
   const review = vi.fn(async () => ({}));
   const submit = vi.fn(async () => ({}));
+  const queueLabels = vi.fn(async () => ({ phase: "queued" }));
+  const orderWorkflow = vi.fn(async () => ({ phase: "labels" }));
+  const workflowStatus = vi.fn(async () => ({ phase: "labels" }));
+  const retryWorkflow = vi.fn(async () => ({ phase: "queued" }));
+  const authorizationWorkflow = vi.fn(async () => ({ phase: "labels" }));
+  const queueExistingLabels = vi.fn(async () => ({ phase: "labels" }));
   const artifact = vi.fn(async () => ({ downloadUrl: "https://approved-provider/label.pdf" }));
   const download = vi.fn(async () => new TextEncoder().encode("%PDF-test"));
   const services = vi.fn(async () => ({ orders: { order, review, list: vi.fn(async () => ({ orders: [] })) },
-    operations: { submit, artifact, listReturns: vi.fn(async () => ({ returns: [] })), labelStatus: vi.fn(),
+    operations: { submit, queueLabels, orderWorkflow, workflowStatus, retryWorkflow, authorizationWorkflow, queueExistingLabels, artifact, listReturns: vi.fn(async () => ({ returns: [] })), labelStatus: vi.fn(),
       progressLabels: vi.fn(), submissionStatus: vi.fn(), resumeSubmission: vi.fn() }, download }));
   async function start() {
     vi.clearAllMocks();
@@ -40,6 +46,21 @@ describe("customer returns HTTP boundaries", () => {
       headers: { "X-Return-Session": principal.sessionKey, ...options.headers } });
   }
   afterEach(async () => { if (server) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
+  it("keeps workflow observation read-only and gates every enqueue/retry behind the existing command protection", async () => {
+    const request = await start(), key = "19600000-0000-4000-8000-000000000001";
+    for (const path of ["/orders/7/label-requests", `/label-requests/${key}`, "/returns/10/label-requests"])
+      expect((await request(`/api/returns/customer${path}`)).status).toBe(200);
+    expect(orderWorkflow).toHaveBeenCalledWith(7); expect(workflowStatus).toHaveBeenCalledWith(key); expect(authorizationWorkflow).toHaveBeenCalledWith(10);
+    expect(queueLabels).not.toHaveBeenCalled(); expect(retryWorkflow).not.toHaveBeenCalled(); expect(queueExistingLabels).not.toHaveBeenCalled();
+    const commands = ["/orders/7/label-requests", `/label-requests/${key}/retry`, "/returns/10/label-requests"];
+    for (const path of commands)
+      expect((await request(`/api/returns/customer${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
+    expect(queueLabels).not.toHaveBeenCalled(); expect(retryWorkflow).not.toHaveBeenCalled(); expect(queueExistingLabels).not.toHaveBeenCalled();
+    const headers = { "Content-Type": "application/json", Origin: "https://returns.example.com", "X-Return-Command": "1" };
+    for (const path of commands) expect((await request(`/api/returns/customer${path}`, { method: "POST", headers, body: "{}" })).status).toBe(200);
+    expect(queueLabels).toHaveBeenCalledExactlyOnceWith(7, {}); expect(retryWorkflow).toHaveBeenCalledExactlyOnceWith(key); expect(queueExistingLabels).toHaveBeenCalledExactlyOnceWith(10);
+    expect(submit).not.toHaveBeenCalled();
+  });
   it("keeps page and API staff-gated during private testing", async () => {
     const request = await start(); admin.mockRejectedValue(new CustomerReturnCustomerAccessError("PRIVATE", "Private testing", 403));
     expect((await request("/customer-returns")).status).toBe(403);

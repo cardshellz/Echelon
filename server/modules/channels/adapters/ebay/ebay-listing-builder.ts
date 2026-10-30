@@ -17,6 +17,7 @@ import { ChannelListingValidationError } from "@shared/channel-listing-validatio
 import type { ChannelPackageRequirements } from "@shared/catalog/shipping-package";
 import type { ChannelPackagePlan } from "../../../marketplace-listings/domain/channel-package";
 import type { EbayPackageSource, EbayPackageMaintenanceProof } from "./ebay-listing-package";
+import type { EbayPreparedPackageType } from "./ebay-package-classification";
 import { assertEbayListingPhotoPlan, buildEbayListingPhotoPlan, type EbayListingPhotoPlan } from "../../ebay-listing-photos.domain";
 
 import type {
@@ -62,6 +63,7 @@ export interface BuiltInventoryItem {
   sku: string;
   packageSource?: EbayPackageSource;
   packagePlan?: ChannelPackagePlan;
+  packageTypeProof?: EbayPreparedPackageType;
   /** Legacy audit/hash compatibility only; fresh preparation removes this proof. */
   packageMaintenance?: EbayPackageMaintenanceProof;
   payload: Omit<EbayInventoryItem, "sku">;

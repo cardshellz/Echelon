@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000043000019600002_customer_return_workflow.sql",
+  "generation": 43,
+  "pr": 1960,
+  "ordinal": 2,
+  "after": [
+    "900000042000019600001_order_action_trigger_variable_qualification.sql"
+  ]
+}

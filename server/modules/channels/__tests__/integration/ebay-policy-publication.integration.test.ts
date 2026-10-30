@@ -10,6 +10,7 @@ import { installEbayPublicationInventoryFixture } from "../../../inventory-plann
 import { installPublicationSelectionWorkFixture } from "../../../inventory-planning/__tests__/fixtures/publication-selection-work.fixture";
 import { AutomaticSyncEbayProvider, automaticSyncPhotos } from "../fixtures/ebay-automatic-sync-provider.fixture";
 import { EbayPolicyCatalogHttp, providerPolicyCatalog } from "../fixtures/ebay-business-policies.fixture";
+import { EBAY_US_STANDARD_PACKAGE_TYPE } from "../../adapters/ebay/ebay-package-classification";
 
 const runtime = vi.hoisted(() => ({ pool: null as Pool | null, provider: null as AutomaticSyncEbayProvider | null }));
 vi.mock("../../../../db", () => ({ pool: new Proxy({} as Pool, { get(_target, key) {
@@ -159,6 +160,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     let timestamp = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now.getTime() + 1_000;
     const clock = () => new Date(timestamp++);
     runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"], grouped ? "group" : "single");
+    const originalMeasurements = (await database.pool.query("SELECT weight_grams,length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0];
     const { source, store, service, execution } = await publicationOwner(clock);
     const job = await service.enqueue(source, "user:policy-reviewer", randomUUID(), "publish");
     await service.processDue(1, job.id);
@@ -181,20 +183,24 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(completed, `${completed.code}: ${completed.message}`).toMatchObject({ state: "completed", code: null, operation: "publish" });
     expect(runtime.provider.snapshot().offer).toMatchObject({ status: "PUBLISHED", listingId: "listing-20", availableQuantity: 17,
       listingPolicies: { fulfillmentPolicyId: "store-shipping", returnPolicyId: "product-returns", paymentPolicyId: "product-payment" } });
-    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 4, unit: "OUNCE" } });
+    // Unpublished offers establish absence without a native listing read. The
+    // approved US classification adds no package measurements to that evidence.
+    const expectedPackage = { weight: { value: 4, unit: "OUNCE" }, packageType: EBAY_US_STANDARD_PACKAGE_TYPE };
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual(expectedPackage);
     expect(completed.warnings).toEqual([{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
       productId: 20, variantId: 101, variantSku: "P5" }]);
-    expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
-      .toEqual({ length_mm: null, width_mm: null, height_mm: null });
-    expect(runtime.provider.snapshot().item.packageWeightAndSize).not.toHaveProperty("packageType");
+    expect((await database.pool.query("SELECT weight_grams,length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+      .toEqual(originalMeasurements);
     const publishPath = grouped ? "/sell/inventory/v1/offer/publish_by_inventory_item_group"
       : `/sell/inventory/v1/offer/${runtime.provider.snapshot().offer.offerId}/publish`;
     expect(runtime.provider.writes.filter(write => write.path === publishPath)).toHaveLength(1);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_jobs")).rows[0].count).toBe(1);
     expect((await database.pool.query("SELECT actor,changes FROM public.audit_events WHERE action='ebay.business_policies.changed'")).rows)
       .toMatchObject([{ actor: "user:policy-reviewer", changes: { before: { fulfillmentPolicyId: "deleted-shipping" }, after: { fulfillmentPolicyId: null } } }]);
+    const completedWrites = structuredClone(runtime.provider.writes);
     await service.processDue(1, job.id);
-    expect(runtime.provider.snapshot().item.packageWeightAndSize).not.toHaveProperty("packageType");
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual(expectedPackage);
+    expect(runtime.provider.writes).toEqual(completedWrites);
     expect(runtime.provider.writes.filter(write => write.path === publishPath)).toHaveLength(1);
   }, 30_000);
   it("normal Sync retries a legacy required-dimensions failure without changing measurements or rewriting its receipt", async () => {
@@ -206,6 +212,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     let timestamp = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now.getTime() + 1_000;
     const clock = () => new Date(timestamp++);
     runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"], "group");
+    const originalMeasurements = (await database.pool.query("SELECT weight_grams,length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0];
     let historicalFailure = true;
     const { source, store, service } = await publicationOwner(clock, async (...args) => {
       // Reproduce the retired preparation refusal as a real saved failed job.
@@ -226,9 +233,9 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     await service.processDue(1, resumed.id);
     expect(await store.get(resumed.id)).toMatchObject({ state: "completed", warnings: [{ variantSku: "P5" }] });
     expect(runtime.provider.snapshot().offer.status).toBe("PUBLISHED");
-    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 4, unit: "OUNCE" } });
-    expect((await database.pool.query("SELECT length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
-      .toEqual({ length_mm: null, width_mm: null, height_mm: null });
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 4, unit: "OUNCE" }, packageType: EBAY_US_STANDARD_PACKAGE_TYPE });
+    expect((await database.pool.query("SELECT weight_grams,length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+      .toEqual(originalMeasurements);
     expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(receipt);
   }, 30_000);
 

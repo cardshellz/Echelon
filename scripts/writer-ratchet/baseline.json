@@ -1563,6 +1563,12 @@
   "returns.customer_return_submission_commands": [
     "modules/returns"
   ],
+  "returns.customer_return_workflow_events": [
+    "modules/returns"
+  ],
+  "returns.customer_return_workflows": [
+    "modules/returns"
+  ],
   "returns.return_case_commands": [
     "modules/returns"
   ],

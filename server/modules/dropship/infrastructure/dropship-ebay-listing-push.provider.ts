@@ -1,5 +1,6 @@
 import { logger as platformLogger } from "../../../platform/observability/logger";
 import { DropshipError } from "../domain/errors";
+import { providerHttpReadFailureKind } from "@shared/channel-provider-read";
 import { resolveEbayMpn } from "../domain/ebay-product-identifiers";
 import { marketplaceSyncError, MARKETPLACE_SYNC_CODES } from "../domain/marketplace-sync-errors";
 import { sha256Hex } from "../domain/marketplace-listing-observation";
@@ -43,6 +44,9 @@ import type {
   EbayListingPolicies,
   EbayOffer,
 } from "../../channels/adapters/ebay/ebay-types";
+import { readEbayNativePackage } from "../../channels/adapters/ebay/ebay-native-package.reader";
+import { EbayApiRequestError, isMissingEbayOfferCollection } from "../../channels/adapters/ebay/ebay-api-error";
+import { normalizeEbayObservedOffers } from "../../channels/adapters/ebay/ebay-offer-observation";
 import { ebayListingImagesFromUrls } from "../../channels/ebay-listing-photos.domain";
 import type { ChannelListingPayload } from "../../channels/channel-adapter.interface";
 import {
@@ -82,16 +86,6 @@ interface EbayListingConfig {
     fulfillmentPolicyId: string;
   };
   environment: "sandbox" | "production";
-}
-
-interface EbayOfferResponse {
-  offers?: Array<
-    EbayOffer & {
-      offerId?: string;
-      listingId?: string;
-      status?: string;
-    }
-  >;
 }
 
 export interface DropshipEbayListingLifecycleClient extends EbayListingLifecycleClient {
@@ -521,7 +515,13 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     /** Push ids for the quantity request's own log lines (absent for replacement sessions). */
     correlation?: Readonly<Record<string, unknown>>;
   }): DropshipEbayListingLifecycleClient {
-    return {
+    const client: DropshipEbayListingLifecycleClient = {
+      getListingPackageType: async (sku, marketplaceId, observedOffers) => {
+        if (input.baseUrl !== "https://api.ebay.com" && input.baseUrl !== "https://api.sandbox.ebay.com")
+          throw new DropshipError("DROPSHIP_EBAY_CONFIG_INVALID", "Package reads require an exact eBay API environment.", { retryable: false });
+        return readEbayNativePackage({ sku, marketplaceId, offers: observedOffers ?? (await client.getOffers(sku, marketplaceId)).offers,
+          accessToken: input.credential.accessToken, environment: input.baseUrl === "https://api.ebay.com" ? "production" : "sandbox", request: this.fetchImpl });
+      },
       getInventoryItemGroup: async (groupKey) => {
         try {
           return await this.requestEbay<
@@ -568,9 +568,9 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         });
       },
       getOffers: async (sku, marketplaceId) => {
-        let result: EbayOfferResponse;
+        let result: unknown;
         try {
-          result = await this.requestEbay<EbayOfferResponse>({
+          result = await this.requestEbay<unknown>({
             credential: input.credential,
             config: input.config,
             correlation: input.correlation,
@@ -582,25 +582,10 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           // A SKU with no offer yet answers 404 (25713 "This Offer is not
           // available"), not an empty list; the channel client reads it the
           // same way. Every other refusal still fails the push.
-          if (isEbayNotFound(error)) return { offers: [] };
+          if (error instanceof DropshipError && error.context?.offerCollectionMissing === true) return { offers: [] };
           throw error;
         }
-        return {
-          offers: (result.offers ?? [])
-            .filter(
-              (
-                offer,
-              ): offer is EbayOffer & {
-                offerId: string;
-                listingId?: string;
-                status?: string;
-              } => Boolean(offer.offerId),
-            )
-            .map(
-              (offer) =>
-                offer as EbayOffer & { offerId: string; listingId?: string },
-            ),
-        };
+        return { offers: normalizeEbayObservedOffers(result) };
       },
       createOffer: async (offer) => {
         const result = await this.requestEbay<{ offerId?: string }>({
@@ -710,6 +695,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         });
       },
     };
+    return client;
   }
 
   private async requestEbay<T = Record<string, unknown>>(input: {
@@ -880,7 +866,8 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
         message,
         {
-          retryable: accessTokenRejected || status === 429 || status >= 500,
+          retryable: accessTokenRejected || (endpoint.startsWith("GET ")
+            ? providerHttpReadFailureKind(status) === "unavailable" : status === 429 || status >= 500),
           status,
           // Which eBay call refused: the reason alone does not say.
           endpoint,
@@ -888,6 +875,11 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
           method: endpoint.split(" ", 1)[0],
           body: text.slice(0, 1000),
           providerErrors,
+          ...(endpoint.startsWith("GET ") ? { providerRead: { provider: "ebay", resource: "listing_resource",
+            method: "GET", kind: providerHttpReadFailureKind(status), httpStatus: status } } : {}),
+          ...(endpoint.startsWith("GET /sell/inventory/v1/offer?")
+            && isMissingEbayOfferCollection(status, new EbayApiRequestError(status, message, text).errorIds)
+            ? { offerCollectionMissing: true } : {}),
         },
       );
   }
