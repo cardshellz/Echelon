@@ -20,6 +20,13 @@ describe("atomic publication selection write retries", () => {
       await expect(retryPublicationSelectionWrite(write, { sleep })).rejects.toBe(error);
       expect(write).toHaveBeenCalledOnce(); expect(sleep).not.toHaveBeenCalled();
     });
+  it("lets a caller widen what counts as retryable", async () => {
+    const other = { code: "40001", message: "another lock" }; const sleep = vi.fn(async () => undefined);
+    const write = vi.fn().mockRejectedValueOnce(other).mockResolvedValue("committed");
+    const isRetryable = (error: unknown) => (error as { code?: string }).code === "40001";
+    expect(await retryPublicationSelectionWrite(write, { sleep, isRetryable })).toBe("committed");
+    expect(write).toHaveBeenCalledTimes(2); expect(sleep.mock.calls).toEqual([[50]]);
+  });
   it("refuses unbounded or invalid retry policies", async () => {
     const write = vi.fn(); await expect(retryPublicationSelectionWrite(write, { delaysMs: [1001] })).rejects.toThrow(TypeError);
     expect(write).not.toHaveBeenCalled();
