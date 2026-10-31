@@ -554,7 +554,7 @@ const BASE_ISSUES: FlowIssueDef[] = [
     message: "Paid orders haven't reached the warehouse",
     why: "The customer paid but the order never made it to the warehouse to be picked. Re-send it to the warehouse — it's safe to re-run.",
     remediation: "REPLAY_AFTER_FIX", replaySafe: true,
-    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.status NOT IN ('cancelled','shipped') AND oo.financial_status IN ('paid','partially_paid') AND oo.ordered_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo WHERE ${LINK})`,
+    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.status NOT IN ('cancelled','shipped') AND oo.financial_status IN ('paid','partially_paid') AND oo.ordered_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo WHERE ${LINK}) AND NOT EXISTS (SELECT 1 FROM channels.channels channel JOIN public.shopify_orders so ON split_part(so.id, '/', -1) = split_part(oo.external_order_id, '/', -1) WHERE channel.id = oo.channel_id AND LOWER(channel.provider) = 'shopify' AND (so.cancelled_at IS NOT NULL OR LOWER(COALESCE(so.fulfillment_status, '')) = 'fulfilled'))`,
     sample: (win: any) => sql`
       SELECT oo.id AS oms_order_id,
              oo.external_order_number AS order_number,
@@ -581,6 +581,18 @@ const BASE_ISSUES: FlowIssueDef[] = [
           SELECT 1
           FROM wms.orders wo
           WHERE ${LINK}
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM channels.channels channel
+          JOIN public.shopify_orders so
+            ON split_part(so.id, '/', -1) = split_part(oo.external_order_id, '/', -1)
+          WHERE channel.id = oo.channel_id
+            AND LOWER(channel.provider) = 'shopify'
+            AND (
+              so.cancelled_at IS NOT NULL
+              OR LOWER(COALESCE(so.fulfillment_status, '')) = 'fulfilled'
+            )
         )
       ORDER BY oo.ordered_at DESC
       LIMIT 50

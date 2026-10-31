@@ -16,6 +16,15 @@ const OMS_FLOW_RECONCILIATION_SRC = readFileSync(
   "utf-8",
 );
 
+describe("OMS paid recovery source-state safety", () => {
+  it("excludes authoritative Shopify terminal orders from detection and replay", () => {
+    const paidBlocks = OMS_FLOW_RECONCILIATION_SRC.match(
+      /JOIN public\.shopify_orders so[\s\S]{0,700}LOWER\(COALESCE\(so\.fulfillment_status, ''\)\) = 'fulfilled'/g,
+    );
+    expect(paidBlocks?.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
 function countRows(count: number) {
   return { rows: [{ count }] };
 }

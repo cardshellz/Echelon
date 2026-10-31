@@ -191,6 +191,8 @@ describe("getFlowWaterfall", () => {
     expect(issueBlock).toContain("paid_inbox.id AS _replay_source_inbox_id");
     expect(issueBlock).toContain("wi.topic = 'orders/paid'");
     expect(issueBlock).toContain("wi.status = 'succeeded'");
+    expect(issueBlock).toContain("JOIN public.shopify_orders so");
+    expect(issueBlock).toContain("LOWER(COALESCE(so.fulfillment_status, '')) = 'fulfilled'");
   });
 
   it("detects paid line authority and materialization gaps after the intake window", () => {

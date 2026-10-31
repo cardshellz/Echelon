@@ -321,6 +321,18 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           AND oo.created_at > NOW() - INTERVAL '14 days'
           AND NOT EXISTS (
             SELECT 1
+            FROM channels.channels channel
+            JOIN public.shopify_orders so
+              ON split_part(so.id, '/', -1) = split_part(oo.external_order_id, '/', -1)
+            WHERE channel.id = oo.channel_id
+              AND LOWER(channel.provider) = 'shopify'
+              AND (
+                so.cancelled_at IS NOT NULL
+                OR LOWER(COALESCE(so.fulfillment_status, '')) = 'fulfilled'
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
             FROM wms.orders wo
             WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
                OR (wo.source_table_id = oo.id::text)
@@ -333,6 +345,18 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         WHERE oo.status NOT IN ('cancelled', 'shipped')
           AND oo.financial_status IN ('paid', 'partially_paid')
           AND oo.created_at > NOW() - INTERVAL '14 days'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM channels.channels channel
+            JOIN public.shopify_orders so
+              ON split_part(so.id, '/', -1) = split_part(oo.external_order_id, '/', -1)
+            WHERE channel.id = oo.channel_id
+              AND LOWER(channel.provider) = 'shopify'
+              AND (
+                so.cancelled_at IS NOT NULL
+                OR LOWER(COALESCE(so.fulfillment_status, '')) = 'fulfilled'
+              )
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM wms.orders wo
@@ -1541,6 +1565,18 @@ export async function remediateOmsFlowIssue(
         WHERE oo.id = ${omsOrderId}
           AND oo.status NOT IN ('cancelled', 'shipped')
           AND oo.financial_status IN ('paid', 'partially_paid')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM channels.channels channel
+            JOIN public.shopify_orders so
+              ON split_part(so.id, '/', -1) = split_part(oo.external_order_id, '/', -1)
+            WHERE channel.id = oo.channel_id
+              AND LOWER(channel.provider) = 'shopify'
+              AND (
+                so.cancelled_at IS NOT NULL
+                OR LOWER(COALESCE(so.fulfillment_status, '')) = 'fulfilled'
+              )
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM wms.orders wo
