@@ -70,6 +70,6 @@ Provider outages retain saved status jobs with bounded retries. Source identity 
 
 ## Release boundary
 
-This local implementation is not deployed. The SQL in `saved-label-status-capture.sql` is the reviewed migration template used by disposable staging fixtures. After public PR publication is authorized, allocate its immutable migration filename using the real PR number, move the template into the migration inventory, update fixture references, rerun the final acceptance/CI checks and pin the theme build to the final source commit. Do not deploy source that references the new queue without that migration.
+The implementation is published for review in Echelon PR #1969 and is not deployed. `migrations/900000045000019690001_customer_order_progress_capture.sql` contains the shipping status jobs, immutable attempts and channel delivery evidence, plus idempotent historical bootstrap. Its allocation metadata depends on the current main migration inventory. Disposable staging fixtures execute this same migration; there is no separate SQL template. Deploy the backend with this migration before the companion theme, and require final-head hosted CI and read-only deployed acceptance.
 
 Deploy the backend before updating unpublished staging theme 174740308127. The live theme is not a target. Final acceptance must verify final-head/post-merge CI, deployed source ancestry, migration presence and read-only account behavior. Real orders, returns, payments, postage purchases, refunds, rewards, points and inventory balances are not changed by our verification.

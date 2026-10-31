@@ -175,7 +175,7 @@ integration("historical package capture and resumable backfill", () => {
     ])
       await pool.query(priorFunction(name));
     await pool.query(readFileSync(migration, "utf8"));
-    await pool.query(readFileSync("docs/customer-account/saved-label-status-capture.sql", "utf8").split("-- Existing successful labels")[0]);
+    await pool.query(readFileSync("migrations/900000045000019690001_customer_order_progress_capture.sql", "utf8").split("-- Existing successful labels")[0]);
   });
   beforeEach(async () => {
     await guard(false);

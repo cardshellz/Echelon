@@ -540,7 +540,7 @@ integration(
       expect(await history.complete(claim,complexHistory(s.provider),instant)).toBe(true);
       const before=await sourceFacts(),beforeCounts=await counts();
       await pool.query("TRUNCATE wms.saved_label_status_jobs CASCADE");
-      const migration=readFileSync("docs/customer-account/saved-label-status-capture.sql","utf8");
+      const migration=readFileSync("migrations/900000045000019690001_customer_order_progress_capture.sql","utf8");
       const seed=migration.slice(migration.indexOf("-- Existing successful labels"));
       await pool.query(seed);await pool.query(seed);
       const jobs=(await pool.query("SELECT source_kind,priority,count(*)::int AS n FROM wms.saved_label_status_jobs GROUP BY source_kind,priority ORDER BY source_kind")).rows;
