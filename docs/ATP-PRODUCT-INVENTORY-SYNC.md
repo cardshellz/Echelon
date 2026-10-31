@@ -15,13 +15,20 @@ The review shows calculated quantities for eligible destinations and reasons for
 blocked or skipped destinations. Existing ATP isolation applies: a blocked
 destination remains blocked; supported destinations with an individual missing
 stock link may still receive their other eligible variants. Global pause prevents
-the command. A product with no publishable work cannot be submitted.
+the command. Missing ATP registrations can be checked by the sync even when no
+destination is publishable yet.
 
-**Sync eligible inventory** records the reviewed safe publication work in the canonical
-outbox. The server checks the review again inside a serializable transaction.
-Changed quantities, links or rules require another review. The command, exact
-outbox identities and audit record commit together. A failed transaction rolls
-back the entire local command.
+**Sync eligible inventory** records a durable request for this product using the
+current ATP rules. In the acceptance transaction it wakes only the selected
+product's missing registrations, including old draft rejections. A worker checks
+them through the existing channel-specific stock-link owners. Opening the dialog
+or reading its status does not make these changes.
+
+After registration settles, the worker captures a fresh ATP review and persists
+the exact publication command before executing it. Changed stock or rules cause
+an automatic replan under the same request identity. Publication, exact outbox
+identities and its audit record commit together. Provider calls do not run inside
+the request transaction. Worker leases and saved state survive process restarts.
 
 Delivery happens through the existing provider admission and outbox workers.
 Queued or acknowledged work is not verified inventory. Verification requires the
@@ -47,14 +54,19 @@ not bypass the stock-link owner's identity and duplicate checks, or ATP's saved
 inventory rules. Linking and inventory synchronization leave Shopify product
 status unchanged: preparing a draft product's inventory does not publish it.
 
-A saved `STOCK_LINK_NOT_ON_SALE` diagnostic describes the last stock-link check,
-not a new provider read. It may predate support for draft products. Use **Check
-again** in the destination's Channel Inventory stock-link controls to request a
-fresh check under the current rule. This immediate retry includes Shopify items
-waiting with `STOCK_LINK_NOT_ON_SALE`; other waiting reasons keep their scheduled
-checks. A missing link remains blocked until the stock-link owner verifies and
-establishes it; the product sync never treats the
-historical refusal as a current provider observation or creates a link itself.
+A saved `STOCK_LINK_NOT_ON_SALE` diagnostic may predate support for draft products.
+The explicit product sync requests a fresh check automatically; the operator does
+not need to visit a second screen or run Sync All. Existing live claims, permanent
+errors, pauses, holds, automatic-link switches and channel rules remain enforced.
+Provider failures keep their retry backoff. The workflow allows up to 30 minutes
+for registration before reporting any destinations still blocked. Failed or
+uncertain publication can be recovered with **Retry same sync**, which retains its
+original publication command instead of creating another revision.
+
+An explicit product check records a definitive exclusion when a provider's owner
+finds no eligible listing or the current selection does not carry the item. That
+result settles the destination promptly; it is not treated as an unfinished
+provider lookup. Ordinary background cleanup keeps its existing behavior.
 
 ## Compatibility and permissions
 
@@ -64,6 +76,13 @@ must never be converted into a new all-channel command.
 
 Review and progress require `inventory_planning:view`; synchronization requires
 `inventory_planning:activate`. The request contains only the product identity,
-review hash and idempotency key. The implementation is bounded to 1,000 product
+and idempotency key. The worker derives the reviewed publication hash internally;
+the previous reviewed-command API remains available for saved commands. The implementation is bounded to 1,000 product
 variants, 1,000 configured targets and 10,000 target/variant review rows, and
 refuses oversized operations explicitly.
+
+The product workflow shares the stock-link engine's cluster lock and kill
+switches. Its database migration adds only operational request state and indexes;
+it does not backfill links or alter warehouse inventory. Disabling the workflow
+leaves durable requests available for recovery and does not disable delivery of
+already admitted outbox work.

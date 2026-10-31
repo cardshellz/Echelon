@@ -1,3 +1,4 @@
+import { LegacyDeliveryNotice } from "./LegacyInventorySendNotice";
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, RefreshCw } from "lucide-react";
@@ -5,32 +6,37 @@ import {
   inventoryProductSyncRequestSchema, type InventoryProductSyncRequest, type InventoryProductSyncReceipt,
   type InventoryProductSyncProgress, type InventoryProductSyncReview,
 } from "@shared/types/inventory-product-sync";
-import { inventoryStockSendRequestSchema } from "@shared/types/inventory-stock-send";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { productSyncProgress, ProductSyncRequestError, reviewProductSync, syncProductInventory } from "../product-sync-api";
 import { productSyncState } from "../product-sync-presentation";
-import { stockSendProgress } from "../stock-send-api";
-import { stockSendState } from "../stock-send-presentation";
 import { ENDPOINTS } from "../api";
 import { invalidateChannelInventory } from "../hooks";
 import { formatAbsoluteTime, formatUnits } from "../format";
+import { ProductSyncWorkflowDialog } from "./ProductSyncWorkflowDialog";
 
 interface Props { productId: number; disabled?: boolean }
 
 export function InventoryProductSyncButton(props: Props) {
   const { user, hasPermission } = useAuth();
   const [open, setOpen] = useState(false);
+  const [legacy, setLegacy] = useState(false);
   if (!hasPermission("inventory_planning", "view")) return null;
   const canSync = hasPermission("inventory_planning", "activate");
   return <>
-    <Button type="button" variant="outline" size="sm" disabled={props.disabled || !canSync} onClick={() => setOpen(true)}
+    <Button type="button" variant="outline" size="sm" disabled={props.disabled || !canSync} onClick={() => {
+      try { setLegacy(sessionStorage.getItem(`inventory-product-sync:v1:${user?.id ?? ""}:${props.productId}`) !== null); }
+      catch { setLegacy(true); }
+      setOpen(true);
+    }}
       title={canSync ? "Recalculate this product through ATP and sync its eligible channel inventory" : "Inventory activation permission is required"}>
       <RefreshCw className="mr-2 h-4 w-4" /> Sync inventory
     </Button>
-    {open && <ProductSyncDialog key={`${user?.id}:${props.productId}`} productId={props.productId}
-      actor={user?.id ?? ""} onClose={() => setOpen(false)} />}
+    {open && (legacy ? <ProductSyncDialog key={`${user?.id}:${props.productId}`} productId={props.productId}
+      actor={user?.id ?? ""} onClose={() => setOpen(false)} onStartCurrentSync={() => setLegacy(false)} />
+      : <ProductSyncWorkflowDialog key={`${user?.id}:${props.productId}`} productId={props.productId}
+        actor={user?.id ?? ""} onClose={() => setOpen(false)} />)}
   </>;
 }
 
@@ -52,7 +58,9 @@ function progressFinished(progress: InventoryProductSyncProgress): boolean {
   });
 }
 
-function ProductSyncDialog({ productId, actor, onClose }: { productId: number; actor: string; onClose(): void }) {
+function ProductSyncDialog({ productId, actor, onClose, onStartCurrentSync }: {
+  productId: number; actor: string; onClose(): void; onStartCurrentSync(): void;
+}) {
   const queryClient = useQueryClient();
   const storageKey = `inventory-product-sync:v1:${actor}:${productId}`;
   const [saved] = useState(() => readSavedRequest(storageKey, productId));
@@ -93,6 +101,7 @@ function ProductSyncDialog({ productId, actor, onClose }: { productId: number; a
         try {
           clearOwnedRequest(storageKey, command.idempotencyKey);
           setPending(null);
+          onStartCurrentSync();
         }
         catch { setStorageBlocked(true); }
         setError(failure.message);
@@ -126,6 +135,7 @@ function ProductSyncDialog({ productId, actor, onClose }: { productId: number; a
     try { clearOwnedRequest(storageKey, pending?.idempotencyKey ?? recorded!.idempotencyKey); }
     catch { setError("The saved request could not be cleared. Reload before starting another sync."); return; }
     setPending(null); setReceipt(null); setError(null);
+    onStartCurrentSync();
     void queryClient.invalidateQueries({ queryKey: ["inventory-product-sync-review", productId] });
   };
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
@@ -224,50 +234,4 @@ function TargetIssues({ targets }: { targets: InventoryProductSyncReview["target
       <IssueList messages={target.blockers} />
     </div>)}
   </aside>;
-}
-
-function LegacyDeliveryNotice({ productId, actor }: { productId: number; actor: string }) {
-  const [saved] = useState(() => {
-    const keys = new Set<string>();
-    let unreadable = false;
-    try {
-      const prefix = `inventory-stock-send:v1:${actor}:${productId}:`;
-      for (let index = 0; index < sessionStorage.length; index++) {
-        const key = sessionStorage.key(index);
-        if (!key?.startsWith(prefix)) continue;
-        try {
-          const command = inventoryStockSendRequestSchema.parse(JSON.parse(sessionStorage.getItem(key)!));
-          if (command.productId !== productId) throw new Error("Legacy scope differs.");
-          keys.add(command.idempotencyKey);
-        } catch { unreadable = true; }
-      }
-    } catch { unreadable = true; }
-    return { keys: [...keys], unreadable };
-  });
-  const [expanded, setExpanded] = useState(false);
-  if (saved.keys.length === 0 && !saved.unreadable) return null;
-  return <aside className="rounded border p-3 text-sm" aria-label="Previous inventory send">
-    <p>A previous Shopify inventory request is saved in this browser. Its outcome may still be pending. This ATP sync does not retry that request.</p>
-    {saved.unreadable && <p className="mt-1 text-destructive">Some saved request details could not be read. Check their history in <a href="/channels/inventory" className="underline">Channel Inventory</a>.</p>}
-    {saved.keys.length > 0 && <Button type="button" variant="link" className="h-auto px-0" onClick={() => setExpanded(value => !value)}>{expanded ? "Hide previous delivery status" : "View previous delivery status"}</Button>}
-    {expanded && saved.keys.map(key => <LegacyDelivery key={key} commandKey={key} productId={productId} actor={actor} />)}
-  </aside>;
-}
-
-function LegacyDelivery({ commandKey, productId, actor }: { commandKey: string; productId: number; actor: string }) {
-  const query = useQuery({ queryKey: ["inventory-stock-send-legacy-progress", commandKey, actor], queryFn: async () => {
-    const result = await stockSendProgress(commandKey);
-    if (result.receipt.productId !== productId || result.receipt.requestedBy !== actor) throw new Error("Previous inventory send scope could not be confirmed.");
-    return result;
-  }, retry: false });
-  return <div className="mt-2 border-t pt-2">
-    {query.isFetching && <p>Checking previous delivery…</p>}
-    {query.error && <p role="alert">Previous delivery status could not be confirmed. Check Channel Inventory history before retrying it.</p>}
-    {query.data && <><p>{query.data.receipt.channelName} · {query.data.receipt.location}</p>
-      {query.data.rows.map(row => {
-        const expected = query.data!.receipt.rows.find(candidate => candidate.outboxId === row.outboxId)!;
-        return <p key={row.outboxId}>{expected.sku ?? `SKU #${row.productVariantId}`} · {stockSendState(row, expected.quantity).label}</p>;
-      })}</>}
-    <Button type="button" variant="link" className="h-auto px-0" disabled={query.isFetching} onClick={() => void query.refetch()}>Refresh previous status</Button>
-  </div>;
 }

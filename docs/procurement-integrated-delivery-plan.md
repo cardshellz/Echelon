@@ -1,5 +1,7 @@
 # Procurement integrated development and ordered rollout
 
+The active purchase-cost authority cleanup is tracked in [the purchase costing cleanup plan](procurement-costing-cleanup-plan.md). That tracker records the 2026-10-30 audit findings, current work, acceptance gates and handoff for this scope. Preserve the earlier delivery history below as evidence for its recorded releases.
+
 The coordinated implementation is recorded in [the integrated acceptance ledger](procurement-integrated-acceptance.md). Use [the release manifest](procurement-release-manifest.md) for exact local commits, evidence, deployment order and remaining publication/production steps. The delivery decisions below retain the original planning context.
 
 ## Delivery decision

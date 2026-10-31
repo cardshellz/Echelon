@@ -149,7 +149,7 @@ describe("the stock-link runner (§7.1)", () => {
     const index = readFileSync(resolve(process.cwd(), "server/index.ts"), "utf8").replaceAll("\r\n", "\n");
     expect(index.match(/startStockLinkRunner\(/g)).toHaveLength(1);
     const outbox = index.indexOf('"INVENTORY_PUBLICATION_WORKER_DISABLED",\n        );\n      }');
-    const block = /if \(!schedulersDisabled\("STOCK_LINK_AUTO_DISABLED"\)\) \{\n\s*const stockLinkRunner = startStockLinkRunner\(services\.stockLink\);\n\s*if \(stockLinkRunner\) httpServer\.once\("close", \(\) => stockLinkRunner\.stop\(\)\);\n\s*\} else \{\n\s*logSchedulerDisabled\("scheduler", "Stock link runner", "STOCK_LINK_AUTO_DISABLED"\);\n\s*\}/.exec(index);
+    const block = /if \(!schedulersDisabled\("STOCK_LINK_AUTO_DISABLED"\)\) \{\n\s*const stockLinkRunner = startStockLinkRunner\(services\.stockLink\);\n\s*if \(stockLinkRunner\) httpServer\.once\("close", \(\) => stockLinkRunner\.stop\(\)\);\n\s*const productSyncRunner = startProductSyncWorkflowRunner\(services\.productInventorySync\);\n\s*httpServer\.once\("close", \(\) => productSyncRunner\.stop\(\)\);\n\s*\} else \{\n\s*logSchedulerDisabled\("scheduler", "Stock link runner", "STOCK_LINK_AUTO_DISABLED"\);\n\s*\}/.exec(index);
     expect(outbox).toBeGreaterThan(0);
     expect(block).not.toBeNull();
     // Nothing but the block's own comment lies between the outbox worker's block and this one.

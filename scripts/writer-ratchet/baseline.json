@@ -941,6 +941,9 @@
   "inventory.stock_link_checks": [
     "modules/inventory-planning"
   ],
+  "inventory.product_inventory_sync_requests": [
+    "modules/inventory-planning"
+  ],
   "inventory.stock_link_destinations": [
     "modules/inventory-planning"
   ],
