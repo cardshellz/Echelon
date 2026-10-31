@@ -44,6 +44,8 @@ describe("wms-sync: bridge-path OMS→WMS trigger + backfill correctness", () =>
         /COALESCE\(oo\.fulfillment_status, ''\) <> 'fulfilled'/,
       );
       expect(WMS_SYNC_SRC).toContain('omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded", "voided"] })');
+      expect(WMS_SYNC_SRC).toContain("JOIN public.shopify_orders so");
+      expect(WMS_SYNC_SRC).toContain("LOWER(COALESCE(so.fulfillment_status, '')) = 'fulfilled'");
     });
 
     it("drains oldest-first so no stuck straggler is starved", () => {
@@ -78,6 +80,25 @@ describe("wms-sync: bridge-path OMS→WMS trigger + backfill correctness", () =>
       expect(existingReturnIdx).toBeGreaterThan(0);
       expect(guardIdx).toBeGreaterThan(existingReturnIdx);
       expect(fetchLinesIdx).toBeGreaterThan(guardIdx);
+    });
+
+    it("checks authoritative Shopify state while holding the WMS creation lock", () => {
+      const lockIdx = WMS_SYNC_SRC.indexOf("pg_advisory_xact_lock(918407");
+      const sourceGuardIdx = WMS_SYNC_SRC.indexOf(
+        "readShopifySourceTerminalState(",
+        lockIdx,
+      );
+      const createIdx = WMS_SYNC_SRC.indexOf("createOrderWithItems", sourceGuardIdx);
+      expect(lockIdx).toBeGreaterThan(0);
+      expect(sourceGuardIdx).toBeGreaterThan(lockIdx);
+      expect(createIdx).toBeGreaterThan(sourceGuardIdx);
+      expect(WMS_SYNC_SRC.slice(sourceGuardIdx, createIdx)).toContain("true");
+    });
+
+    it("rechecks authoritative Shopify state before provider shipment and push", () => {
+      expect(WMS_SYNC_SRC).toContain('"before_provider_shipment"');
+      expect(WMS_SYNC_SRC).toContain('"before_provider_push"');
+      expect(WMS_SYNC_SRC).toContain("shopify_source_terminal_wms_admission_blocked");
     });
   });
 });

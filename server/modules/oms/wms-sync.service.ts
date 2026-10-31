@@ -131,6 +131,13 @@ type MaterializableOmsLine = {
   fulfillmentStatus?: string | null;
 };
 
+type ShopifySourceTerminalState = {
+  kind: "fulfilled" | "cancelled";
+  fulfillmentStatus: string | null;
+  cancelledAt: Date | string | null;
+  sourceUpdatedAt: Date | string | null;
+};
+
 const DEFAULT_FULFILLMENT_PARTITION_KEY = "default";
 /** Canonical claim refusal when an order's demand no longer matches its claim. */
 const ACTIVE_CLAIM_REPLACEMENT_REQUIRED_CODE = "ACTIVE_CLAIM_REPLACEMENT_REQUIRED";
@@ -976,6 +983,24 @@ export class WmsSyncService {
         return null;
       }
 
+      if (!isTerminalResidualRecovery) {
+        const sourceTerminal = await this.readShopifySourceTerminalState(db, omsOrder);
+        if (sourceTerminal) {
+          await db.transaction((tx: any) =>
+            this.projectShopifySourceTerminalState(
+              tx,
+              omsOrderId,
+              sourceTerminal,
+              "preflight",
+            ),
+          );
+          console.warn(
+            `[WMS Sync] OMS order ${omsOrderId} is ${sourceTerminal.kind} in Shopify; skipped WMS create despite stale OMS state`,
+          );
+          return null;
+        }
+      }
+
       // 2. Fetch OMS line items
       const omsLines = await db
         .select()
@@ -1224,6 +1249,23 @@ export class WmsSyncService {
           return { racedExistingWmsOrderId: Number(racedWmsOrder[0].id) };
         }
 
+        if (!isTerminalResidualRecovery) {
+          const sourceTerminal = await this.readShopifySourceTerminalState(
+            tx,
+            omsOrder,
+            true,
+          );
+          if (sourceTerminal) {
+            await this.projectShopifySourceTerminalState(
+              tx,
+              omsOrderId,
+              sourceTerminal,
+              "wms_create_lock",
+            );
+            return { sourceTerminalSkip: sourceTerminal };
+          }
+        }
+
         const lockedOmsLines = await this.lockOmsLinesForMaterialization(tx, omsOrderId);
         const remainingOmsLines = lockedOmsLines.filter(
           (line) => omsLineRemainingQuantityToMaterialize(line, mode) > 0,
@@ -1357,6 +1399,14 @@ export class WmsSyncService {
         return null;
       }
 
+      if ((txResult as any).sourceTerminalSkip) {
+        const sourceTerminal = (txResult as any).sourceTerminalSkip as ShopifySourceTerminalState;
+        console.warn(
+          `[WMS Sync] OMS order ${omsOrderId} became ${sourceTerminal.kind} in Shopify before WMS creation; admission blocked`,
+        );
+        return null;
+      }
+
       // Past the race guard: txResult is the create-path variant.
       const { newWmsOrder, warehouseStatus: createdWarehouseStatus, hasShippableItems: createdHasShippableItems } = txResult as {
         newWmsOrder: { id: number };
@@ -1375,6 +1425,24 @@ export class WmsSyncService {
       if (isDropshipAcceptanceClaim) {
         await this.reserveRequired(newWmsOrder.id, omsOrderId, "dropship_acceptance_prepare");
       } else {
+        const sourceTerminal = !isTerminalResidualRecovery
+          ? await this.readShopifySourceTerminalState(db, omsOrder)
+          : null;
+        if (sourceTerminal) {
+          await db.transaction((tx: any) =>
+            this.projectShopifySourceTerminalState(
+              tx,
+              omsOrderId,
+              sourceTerminal,
+              "before_provider_shipment",
+            ),
+          );
+          await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
+          console.warn(
+            `[WMS Sync] OMS order ${omsOrderId} became ${sourceTerminal.kind} in Shopify after WMS materialization; cancelled WMS before provider work`,
+          );
+          return newWmsOrder.id;
+        }
         const persisted = await admitInitialProviderShipmentAfterInventoryAuthority(
           {
             hasShippableItems: createdHasShippableItems,
@@ -1413,6 +1481,24 @@ export class WmsSyncService {
       // between step 5 (WMS order creation) and now.
       const engine = this.services.shippingEngine ?? this.services.shipStation;
       if (engine?.isConfigured?.() && shipmentIdForPush !== null) {
+        const sourceTerminal = !isTerminalResidualRecovery
+          ? await this.readShopifySourceTerminalState(db, omsOrder)
+          : null;
+        if (sourceTerminal) {
+          await db.transaction((tx: any) =>
+            this.projectShopifySourceTerminalState(
+              tx,
+              omsOrderId,
+              sourceTerminal,
+              "before_provider_push",
+            ),
+          );
+          await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
+          console.warn(
+            `[WMS Sync] OMS order ${omsOrderId} became ${sourceTerminal.kind} in Shopify before provider push; push blocked and WMS cancelled`,
+          );
+          return newWmsOrder.id;
+        }
         const [recheckOms] = await db.select().from(omsOrders).where(eq(omsOrders.id, omsOrderId)).limit(1);
         if (recheckOms && (await this.isFinalOrCancelledOmsOrder(recheckOms))) {
             console.warn(`[WMS Sync] OMS order ${omsOrderId} cancelled/refunded after WMS creation — skipping engine push, cancelling WMS`);
@@ -1565,6 +1651,85 @@ export class WmsSyncService {
     return this.services.useChannelMerchandise
       ? this.services.useChannelMerchandise(channelId)
       : readChannelMerchandiseCapability(db, channelId);
+  }
+
+  private async readShopifySourceTerminalState(
+    executor: DbLike,
+    omsOrder: typeof omsOrders.$inferSelect,
+    lockSourceRow = false,
+  ): Promise<ShopifySourceTerminalState | null> {
+    const result: any = await executor.execute(sql`
+      SELECT so.fulfillment_status,
+             so.cancelled_at,
+             so.updated_at AS source_updated_at
+      FROM channels.channels channel
+      JOIN public.shopify_orders so
+        ON split_part(so.id, '/', -1) = split_part(${omsOrder.externalOrderId}, '/', -1)
+      WHERE channel.id = ${omsOrder.channelId}
+        AND LOWER(channel.provider) = 'shopify'
+      ORDER BY so.updated_at DESC NULLS LAST
+      LIMIT 1
+      ${lockSourceRow ? sql`FOR SHARE OF so` : sql``}
+    `);
+    const row = result?.rows?.[0];
+    if (!row) return null;
+
+    const fulfillmentStatus = String(row.fulfillment_status ?? "").toLowerCase();
+    if (row.cancelled_at) {
+      return {
+        kind: "cancelled",
+        fulfillmentStatus: fulfillmentStatus || null,
+        cancelledAt: row.cancelled_at,
+        sourceUpdatedAt: row.source_updated_at ?? null,
+      };
+    }
+    if (fulfillmentStatus === "fulfilled") {
+      return {
+        kind: "fulfilled",
+        fulfillmentStatus,
+        cancelledAt: null,
+        sourceUpdatedAt: row.source_updated_at ?? null,
+      };
+    }
+    return null;
+  }
+
+  private async projectShopifySourceTerminalState(
+    executor: DbLike,
+    omsOrderId: number,
+    source: ShopifySourceTerminalState,
+    admissionStage: string,
+  ): Promise<void> {
+    if (source.kind === "cancelled") {
+      await executor.execute(sql`
+        UPDATE oms.oms_orders
+        SET status = 'cancelled',
+            cancelled_at = COALESCE(cancelled_at, ${source.cancelledAt ?? new Date()}),
+            updated_at = NOW()
+        WHERE id = ${omsOrderId}
+          AND status NOT IN ('cancelled', 'refunded')
+      `);
+    } else {
+      await executor.execute(sql`
+        UPDATE oms.oms_orders
+        SET fulfillment_status = 'fulfilled',
+            updated_at = NOW()
+        WHERE id = ${omsOrderId}
+          AND COALESCE(fulfillment_status, '') <> 'fulfilled'
+      `);
+    }
+
+    await executor.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "shopify_source_terminal_wms_admission_blocked",
+      details: {
+        sourceState: source.kind,
+        sourceFulfillmentStatus: source.fulfillmentStatus,
+        sourceCancelledAt: source.cancelledAt,
+        sourceUpdatedAt: source.sourceUpdatedAt,
+        admissionStage,
+      },
+    });
   }
 
   private async resolveWarehouseStatus(omsOrder: typeof omsOrders.$inferSelect): Promise<string> {
@@ -3812,6 +3977,18 @@ export class WmsSyncService {
       AND oo.status            NOT IN ('cancelled', 'refunded', 'shipped')
       AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
       AND NOT ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded", "voided"] })}
+      AND NOT EXISTS (
+        SELECT 1
+        FROM channels.channels channel
+        JOIN public.shopify_orders so
+          ON split_part(so.id, '/', -1) = split_part(oo.external_order_id, '/', -1)
+        WHERE channel.id = oo.channel_id
+          AND LOWER(channel.provider) = 'shopify'
+          AND (
+            so.cancelled_at IS NOT NULL
+            OR LOWER(COALESCE(so.fulfillment_status, '')) = 'fulfilled'
+          )
+      )
       ORDER BY oo.ordered_at ASC
       LIMIT ${limit}
     `);

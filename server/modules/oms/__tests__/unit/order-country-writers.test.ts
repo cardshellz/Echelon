@@ -313,6 +313,11 @@ describe("OMS to WMS country boundary", () => {
       scriptedSelect([[order], [], [line], []]);
       harness.database.execute
         .mockResolvedValueOnce({ rows: [{ provider: "shopify" }] })
+        // Preflight authoritative Shopify source-state guard.
+        .mockResolvedValueOnce({ rows: [] })
+        // Per-order advisory lock.
+        .mockResolvedValueOnce({ rows: [] })
+        // Authoritative source-state recheck while holding the lock.
         .mockResolvedValueOnce({ rows: [] })
         .mockResolvedValueOnce({
           rows: [
