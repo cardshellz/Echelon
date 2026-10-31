@@ -33,6 +33,7 @@ import {
   registerShopifyProductMappingReconciliationRoutes,
 } from "./shopify-product-mapping-reconciliation.routes";
 import { registerShopifyProductConnectionRoutes } from "./shopify-product-connection.routes";
+import { normalizeCategorySlug, registerProductCategoryUpdateRoute } from "./product-category-update.routes";
 import {
   coercePackageAttributesOnVariantPayload,
   parsePackageAttributeBulkRows,
@@ -361,14 +362,6 @@ async function resolveShopifyVariant(input: {
   }
 
   return matches[0];
-}
-
-function normalizeCategorySlug(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
 }
 
 async function resolveProductCategory(input: { categoryId?: number | string | null; category?: string | null }) {
@@ -873,51 +866,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     }
   });
 
-  app.patch("/api/product-categories/:id", requirePermission("inventory", "edit"), async (req, res) => {
-    try {
-      const id = Number(req.params.id);
-      if (!Number.isInteger(id) || id <= 0) {
-        return res.status(400).json({ error: "Invalid product category id" });
-      }
-      const existing = await db.select().from(productCategories).where(eq(productCategories.id, id));
-      if (!existing[0]) return res.status(404).json({ error: "Product category not found" });
-
-      const name = req.body.name !== undefined ? String(req.body.name).trim() : existing[0].name;
-      if (!name) return res.status(400).json({ error: "Category name is required" });
-      const slug = req.body.slug !== undefined
-        ? normalizeCategorySlug(String(req.body.slug))
-        : req.body.name !== undefined
-          ? normalizeCategorySlug(name)
-          : existing[0].slug;
-      if (!slug) return res.status(400).json({ error: "Category slug is required" });
-
-      const [category] = await db
-        .update(productCategories)
-        .set({
-          name,
-          slug,
-          description: req.body.description !== undefined ? req.body.description || null : existing[0].description,
-          sortOrder: req.body.sortOrder !== undefined ? Number(req.body.sortOrder) : existing[0].sortOrder,
-          isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : existing[0].isActive,
-          updatedAt: new Date(),
-        })
-        .where(eq(productCategories.id, id))
-        .returning();
-
-      await db
-        .update(products)
-        .set({ category: category.name, updatedAt: new Date() })
-        .where(eq(products.categoryId, category.id));
-
-      res.json(category);
-    } catch (error: any) {
-      if (error?.code === "23505") {
-        return res.status(409).json({ error: "Category already exists" });
-      }
-      console.error("Error updating product category:", error);
-      res.status(500).json({ error: "Failed to update product category" });
-    }
-  });
+  registerProductCategoryUpdateRoute(app, db);
 
   app.get("/api/products/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
