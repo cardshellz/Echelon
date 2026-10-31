@@ -45,6 +45,7 @@ import { orderEditPricingDisplayVersionSchema } from "@shared/order-edits/order-
 import { orderEditResponsePresentation, orderEditOrderManagementPresentation } from "../../order-edits/application/order-edit-response-presentation";
 import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
 import { customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
+import { CUSTOMER_ORDER_PROGRESS_VERSION } from "@shared/customer-account/order-progress";
 import { customerAccountOrderDetailsSchema, customerAccountOrderSummariesSchema } from "@shared/customer-account/customer-account-orders";
 import { customerOrderActionPageSchema } from "@shared/customer-account/order-actions";
 
@@ -242,8 +243,8 @@ async function dispatch(
     return services.edits.resolve(body);
   }
   if (path === "/account/order-summaries" && !read) {
-    empty.parse(query);
-    return customerAccountOrderSummariesSchema.parse(await services.orders.summaries(body));
+    const version = z.object({ statusDisplayVersion: z.literal(CUSTOMER_ORDER_PROGRESS_VERSION).optional() }).strict().parse(query);
+    return customerAccountOrderSummariesSchema.parse(version.statusDisplayVersion ? await services.orders.summaries(body, { progress: true }) : await services.orders.summaries(body));
   }
   if (path === "/account/order-actions" && !read) {
     empty.parse(query);

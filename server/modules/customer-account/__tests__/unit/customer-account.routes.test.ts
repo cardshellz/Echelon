@@ -75,6 +75,18 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request({ method: "POST", path: "/account/order-details", sessionKey, body: input })).status).toBe(403);
     expect(orders.details).toHaveBeenCalledTimes(1);
   });
+  it("opts into the new progress response only for the supported explicit version", async()=>{
+    const input={externalOrderId:"99",orderReference:"#49180"};
+    const summaries=vi.fn(async()=>({orders:[{...input,omsOrderId:null,currency:"USD",totalCents:0,cancelled:true,financialStatus:"Refunded",progress:{delivery:null,packages:[],returns:[],refunds:[]}}],unavailableExternalOrderIds:[],statusUnavailable:false}));
+    services.mockImplementation(()=>({edits:{connection},orders:{summaries},returns:vi.fn()}) as never);
+    const sessionKey=(await(await request()).json()).session.sessionKey;
+    const result=await request({method:"POST",path:"/account/order-summaries",query:{statusDisplayVersion:"v2"},sessionKey,body:{orders:[input]}});
+    expect(result.status).toBe(200);expect(summaries).toHaveBeenCalledExactlyOnceWith({orders:[input]},{progress:true});
+    for(const query of [{statusDisplayVersion:"v3"},{statusDisplayVersion:"v2",unrecognized:"true"}]){
+      expect((await request({method:"POST",path:"/account/order-summaries",query,sessionKey,body:{orders:[input]}})).status).toBe(400);
+    }
+    expect(summaries).toHaveBeenCalledTimes(1);
+  });
   it.each([
     { signed: () => `${proof()}&signature=duplicate` },
     { signed: () => proof({ timestamp: String(Math.floor(now.getTime() / 1000) - 301) }) },

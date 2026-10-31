@@ -54,11 +54,13 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
     "ALTER TABLE catalog.product_variants\n  ALTER COLUMN weight_grams TYPE"));
   await pool.query(table("migrations/0001_past_molly_hayes.sql", 'CREATE TABLE "warehouses" (')
     .replace('CREATE TABLE "warehouses"', 'CREATE TABLE warehouse."warehouses"'));
-  await pool.query(`CREATE TABLE wms.outbound_shipments (id INTEGER PRIMARY KEY);
-    CREATE TABLE wms.outbound_shipment_items (id INTEGER PRIMARY KEY, shipment_id INTEGER REFERENCES wms.outbound_shipments(id));
-    CREATE TABLE dropship.dropship_vendors (id INTEGER PRIMARY KEY);
+  for (const name of ["outbound_shipments", "outbound_shipment_items"]) {
+    await pool.query(table("migrations/0002_concerned_darwin.sql", `CREATE TABLE "${name}" (`).replace(`CREATE TABLE "${name}"`, `CREATE TABLE wms."${name}"`));
+  }
+  await pool.query(`CREATE TABLE dropship.dropship_vendors (id INTEGER PRIMARY KEY);
     CREATE TABLE dropship.dropship_store_connections (id INTEGER PRIMARY KEY);`);
   await pool.query(readFileSync("migrations/066_shipping_config_columns.sql", "utf8"));
+  await pool.query(statement("migrations/060_outbound_shipments_expand.sql", "ALTER TABLE wms.outbound_shipments\n  ADD COLUMN IF NOT EXISTS shipstation_order_id"));
   await pool.query(table("migrations/0086_dropship_v2_foundation.sql", "CREATE TABLE IF NOT EXISTS dropship.dropship_order_intake ("));
   await pool.query(table("migrations/0001_past_molly_hayes.sql", 'CREATE TABLE "inventory_transactions" (')
     .replace('CREATE TABLE "inventory_transactions"', 'CREATE TABLE inventory."inventory_transactions"'));
@@ -87,7 +89,7 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
   for (const name of ["channel_fulfillment_receipts", "channel_fulfillment_receipt_items"]) {
     await pool.query(table(foundation, `CREATE TABLE IF NOT EXISTS oms.${name} (`));
   }
-  for (const name of ["shipping_provider_labels", "shipping_provider_label_links", "carrier_tracking_events",
+  for (const name of ["shipping_provider_labels", "shipping_provider_label_links", "shipping_provider_label_events", "carrier_tracking_events",
     "carrier_tracking_event_matches", "carrier_tracking_reconciliation_state"]) {
     await pool.query(table("migrations/154_carrier_tracking_event_authority.sql", `CREATE TABLE IF NOT EXISTS wms.${name} (`));
   }

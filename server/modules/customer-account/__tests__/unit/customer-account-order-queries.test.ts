@@ -74,6 +74,25 @@ describe("owned, query-only account history", () => {
     expect(actions.read).toHaveBeenCalledExactlyOnceWith({ orders: [identity], channelId: 2, externalCustomerId: "100" }, now);
     expect(connect).not.toHaveBeenCalled(); expect(h.edits.orderSummaries).not.toHaveBeenCalled(); expect(h.context.read).not.toHaveBeenCalled();
   });
+  it("negotiates progress without changing native money or legacy strict responses", async () => {
+    const h=fixture();h.context.read.mockResolvedValue([{externalOrderId:"99",omsOrderId:10,warehouseStatuses:["shipped"],held:false}]);
+    const progress={read:vi.fn(async()=>new Map([[10,{unavailable:[],delivery:null,packages:[],returns:[],refunds:[]}]]))};
+    const service=new CustomerAccountOrderQueriesService({principal,connection:async()=>connection,edits:h.edits,context:h.context,progress,now:()=>new Date("2026-10-30T12:00:00Z"),report:h.report});
+    const legacy=await service.summaries({orders:[identity]});
+    expect(legacy.orders[0]).not.toHaveProperty("progress");expect(progress.read).not.toHaveBeenCalled();
+    const current=await service.summaries({orders:[identity]},{progress:true});
+    expect(current.orders[0]).toMatchObject({totalCents:0,financialStatus:"Refunded",progress:{returns:[],refunds:[]}});
+    expect(progress.read).toHaveBeenCalledWith({channelId:2,externalCustomerId:"100",orders:[{omsOrderId:10,externalOrderId:"99"}]},new Date("2026-10-30T12:00:00Z"));
+  });
+  it("keeps verified money readable when progress fails or returns an unrequested identity", async () => {
+    for(const failure of [new Error("owner unavailable"),new Map([[11,{delivery:null,packages:[],returns:[]}]])]){
+      const h=fixture();h.context.read.mockResolvedValue([{externalOrderId:"99",omsOrderId:10,warehouseStatuses:["shipped"],held:false}]);
+      const read=vi.fn(async()=>{if(failure instanceof Error)throw failure;return failure;});
+      const service=new CustomerAccountOrderQueriesService({principal,connection:async()=>connection,edits:h.edits,context:h.context,progress:{read:read as never},now:()=>new Date("2026-10-30T12:00:00Z"),report:h.report});
+      const current=await service.summaries({orders:[identity]},{progress:true});
+      expect(current.orders[0]).toMatchObject({totalCents:0,financialStatus:"Refunded",progress:null});expect(current.statusUnavailable).toBe(true);
+    }
+  });
   it("returns an exact zero total for a historical purchase without an OMS order", async () => {
     const h = fixture();
     const result = await h.service.summaries({ orders: [identity] });

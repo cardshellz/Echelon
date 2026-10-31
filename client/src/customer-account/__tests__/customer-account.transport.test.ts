@@ -33,6 +33,22 @@ describe("storefront transport reuses canonical clients", () => {
     const api = createCustomerAccountTransport(config, async () => Response.json({ externalOrderId: "98", orderReference: "#other", currency: "USD", totalCents: 917, lines: [] }));
     await expect(api.orderDetails({ externalOrderId: "99", orderReference: "#49180" })).rejects.toMatchObject({ code: "CUSTOMER_ACCOUNT_ORDER_MISMATCH" });
   });
+  it("survives an older backend during a rolling theme deployment with one read-only compatibility retry",async()=>{
+    const request=vi.fn(async()=>Response.json({error:{code:"RETURN_CUSTOMER_INPUT_INVALID",message:"The return request is invalid."}},{status:400}));
+    request.mockResolvedValueOnce(Response.json({error:{code:"RETURN_CUSTOMER_INPUT_INVALID",message:"The return request is invalid."}},{status:400}))
+      .mockResolvedValueOnce(Response.json({orders:[{externalOrderId:"99",orderReference:"#49180",omsOrderId:null,currency:"USD",totalCents:0,cancelled:true,financialStatus:"Refunded"}],unavailableExternalOrderIds:[],statusUnavailable:false}));
+    const api=createCustomerAccountTransport(config,request);
+    expect((await api.orderSummaries({orders:[{externalOrderId:"99",orderReference:"#49180"}]})).orders[0].totalCents).toBe(0);
+    expect(request).toHaveBeenCalledTimes(2);
+    const calls=request.mock.calls as unknown as [string,RequestInit][];
+    expect(JSON.parse(String(calls[0][1].body))).toMatchObject({query:{statusDisplayVersion:"v2"}});
+    const second=JSON.parse(String(calls[1][1].body));expect(second.query??{}).toEqual({});expect(second.commandKey).toBeUndefined();
+  });
+  it.each([401,403,503])("does not downgrade progress negotiation after a %i access/service failure",async status=>{
+    const request=vi.fn(async()=>Response.json({error:{code:"RETURN_CUSTOMER_INPUT_INVALID",message:"Failure"}},{status}));
+    const api=createCustomerAccountTransport(config,request);
+    await expect(api.orderSummaries({orders:[{externalOrderId:"99",orderReference:"#49180"}]})).rejects.toThrow();expect(request).toHaveBeenCalledOnce();
+  });
   it("binds rewards issuance to the same signed session and preserves its request identity", async () => {
     const request = vi.fn(async () => Response.json(bootstrap));
     const api = createCustomerAccountTransport(config, request);
