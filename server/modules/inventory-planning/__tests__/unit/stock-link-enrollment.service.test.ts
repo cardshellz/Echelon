@@ -188,6 +188,18 @@ describe("listing enrollment in the stock-link tick (channels PR3)", () => {
     expect(h.deleted).toEqual([102]);
   });
 
+  it.each(["missing", "ended", "not_selected"])("retains the scoped %s listing exclusion without a provider call or link", async reason => {
+    const h = new Harness();
+    if (reason !== "missing") h.listing(101, reason === "ended" ? { skipReason: "ended" } : {});
+    if (reason === "not_selected") h.selection.set(101, { action: "none", blockerCodes: [] });
+    await h.service.checkProduct({ productId: 20, targets: [{ publicationTargetId: TARGET, productVariantIds: [101] }] });
+    expect(h.rows.get(101)).toMatchObject({ status: "waiting", reasonCode: E.notCarried, leaseToken: null });
+    expect(h.rows.get(101)!.nextCheckAt!.getTime()).toBeGreaterThan(NOW);
+    expect(h.deleted).toEqual([]);
+    expect(h.lookups).toEqual([]);
+    expect(h.links).toEqual([]);
+  });
+
   it("keeps an already-linked size without reading eBay or calling the writer", async () => {
     const h = new Harness();
     h.listing(101);
