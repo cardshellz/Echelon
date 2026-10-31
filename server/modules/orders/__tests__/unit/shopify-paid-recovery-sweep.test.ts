@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { paidReplayFixture } from "../../../oms/__tests__/fixtures/shopify-paid-replay.fixture";
 
-const ports = vi.hoisted(() => ({ execute: vi.fn(), select: vi.fn(), readiness: vi.fn(), replay: vi.fn() }));
+const ports = vi.hoisted(() => ({ execute: vi.fn(), select: vi.fn(), readiness: vi.fn(), replay: vi.fn(), sync: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: ports }));
 vi.mock("../../../oms/shopify-bridge", () => ({ bridgeShopifyOrderToOms: vi.fn() }));
 vi.mock("../../../oms/shopify-line-readiness.service", () => ({ reconcileShopifyLineReadiness: ports.readiness }));
@@ -40,7 +40,7 @@ beforeEach(() => {
     ok: true, headers: { get: () => null },
     json: async () => String(url).includes("/orders.json") ? { orders: [] } : { order: providerOrder },
   })));
-  initReconciliation({} as never, { syncOmsOrderToWms: vi.fn() } as never);
+  initReconciliation({} as never, { syncOmsOrderToWms: ports.sync } as never);
   vi.spyOn(console, "log").mockImplementation(() => { });
   vi.spyOn(console, "warn").mockImplementation(() => { });
   vi.spyOn(console, "error").mockImplementation(() => { });
@@ -64,6 +64,16 @@ describe("bounded Shopify paid recovery sweep", () => {
     expect(await runReconciliationNow()).toMatchObject({ paidReplaysQueued: 0, failed: 0 });
     expect(ports.replay).not.toHaveBeenCalled();
     expect(ports.readiness).toHaveBeenCalledOnce();
+  });
+  it("requests canonical WMS sync when readiness reports incomplete materialization", async () => {
+    needsReplay = false;
+    ports.readiness.mockResolvedValueOnce({ advancedQuantity: 0, wmsSyncRequired: true });
+
+    expect(await runReconciliationNow()).toMatchObject({
+      paidReplaysQueued: 0, wmsSyncRequested: 1, failed: 0,
+    });
+    expect(ports.sync).toHaveBeenCalledExactlyOnceWith(10);
+    expect(ports.replay).not.toHaveBeenCalled();
   });
   it("does not replay a cancelled live Shopify order", async () => {
     providerOrder.cancelled_at = "2026-10-30T12:00:45Z";
