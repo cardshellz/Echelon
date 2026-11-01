@@ -9,6 +9,8 @@ import { logger } from "../../platform/observability/logger";
 import { createInvoiceQuantityCorrectionService } from "./invoice-quantity-correction.service";
 import { PurchaseApprovalAuthorityError } from "./purchase-order-approval.policy";
 import { InvoiceQuantityCorrectionError } from "./invoice-quantity-correction.policy";
+import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
+import { PoQuantityAmendmentError } from "./po-quantity-amendment.policy";
 
 const pathId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(invoiceQuantityIdSchema);
 function id(value: string): number {
@@ -19,6 +21,11 @@ function id(value: string): number {
 export function registerInvoiceQuantityCorrectionRoutes(app: Express, service = createInvoiceQuantityCorrectionService(db, () => new Date())) {
   const root = "/api/vendor-invoice-lines/:lineId/quantity-correction";
   function failure(error: unknown, req: Request, res: Response) {
+    if (error instanceof CostEvidenceError || error instanceof PoQuantityAmendmentError) {
+      logger.warn("procurement.invoice_quantity_correction", { outcome: "rejected", actor_id: req.session.user?.id,
+        invoice_line_id: req.params.lineId, error_code: error.code });
+      return res.status(409).json({ error: error.message, code: "INVOICE_QUANTITY_COST_REVIEW_REQUIRED" });
+    }
     if (error instanceof PurchaseApprovalAuthorityError) {
       logger.warn("procurement.invoice_quantity_correction", { outcome: "rejected", actor_id: req.session.user?.id, invoice_line_id: req.params.lineId, error_code: error.details.code });
       return res.status(error.statusCode).json({ error: error.message, code: error.details.code });

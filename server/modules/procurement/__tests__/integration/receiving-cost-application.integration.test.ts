@@ -41,6 +41,7 @@ import { registerHistoricalCostTimestampCases } from "./historical-cost-timestam
 import { registerPurchaseCostStatusBatchCases } from "./purchase-cost-status-batch.cases";
 import { registerReceiptConfigurationAuthorityCases } from "./receipt-configuration-authority.cases";
 import { registerCostSourceCompatibilityCases } from "./cost-source-compatibility.cases";
+import { registerInvoiceCorrectionCostCases } from "./invoice-correction-costs.cases";
 import type { ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../receiving.service";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
@@ -1580,6 +1581,8 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   registerCostSourceCompatibilityCases({ pool: () => pool, database: () => database, shipment: () => shipment,
     receive, approveSupplier: approveEvidence, retrySupplier: () => database.transaction(tx => reconcile(21, tx, actorId)),
     actorId, at: NOW });
+  registerInvoiceCorrectionCostCases({ pool: () => pool, database: () => database, actorId, at: NOW,
+    receive, consume: seedConsumedCost });
   registerReceiptConfigurationAuthorityCases({ pool: () => pool, database: () => database,
     purchasing: () => purchasing, shipments: () => shipment, actorId,
     receivingLines: (id) => storage.getReceivingLines(id), receivingWithWarnings: (evaluator, reporter) => receivingWithWarnings(evaluator, reporter),

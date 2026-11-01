@@ -1,13 +1,15 @@
 import { expect, test, type Page } from "@playwright/test";
-import { invoiceAmountPerPiece, type InvoiceQuantityApprovalRequest, type InvoiceQuantityContext, type InvoiceQuantityPreview, type InvoiceQuantityResult } from "../../shared/procurement/invoice-quantity-correction";
+import { invoiceAmountPerPiece, type InvoiceQuantityApprovalRequest, type InvoiceQuantityContext, type InvoiceQuantityPreview, type InvoiceQuantityResult, type InvoiceCorrectionCostComponents } from "../../shared/procurement/invoice-quantity-correction";
+import type { InvoiceCostComponentEvidence } from "../../shared/procurement/invoice-cost-evidence";
 import { installFixtures, po } from "./procurement-fixtures";
 import { normalizePoLinePricing } from "@shared/utils/po-line-pricing";
 import { poLineAmountCents, type PoQuantityAmendmentContext, type PoQuantityAmendmentPreview, type PoQuantityPreviewRequest, type PoQuantityApprovalRequest } from "@shared/procurement/po-quantity-amendment";
 
 const initialVersion = "a".repeat(64), nextVersion = "b".repeat(64);
 const poPreviewVersion = "c".repeat(64);
+const invoicePreviewVersion = "d".repeat(64);
 const receiptKey = "invoice-quantity-correction:quantity-admin:72";
-async function setup(page: Page, options: { canApprove?: boolean; stale?: boolean; loss?: "once" | "untilReleased"; otherQuantity?: number; disagree?: boolean; openModal?: boolean; multiplePos?: boolean; closedPo?: boolean; poRate?: number; poAllocation?: number; alreadyCorrected?: boolean; skipInitialReview?: boolean; omitPoPreview?: "impact" | "previewVersion" } = {}) {
+async function setup(page: Page, options: { canApprove?: boolean; stale?: boolean; loss?: "once" | "untilReleased"; otherQuantity?: number; disagree?: boolean; openModal?: boolean; multiplePos?: boolean; closedPo?: boolean; poRate?: number; poAllocation?: number; alreadyCorrected?: boolean; skipInitialReview?: boolean; omitPoPreview?: "impact" | "previewVersion"; knownSupplierCosts?: boolean; omitInvoicePreview?: "costing" | "previewVersion" } = {}) {
   const failures = await installFixtures(page);
   let version = initialVersion, stale = options.stale ?? false, acknowledged = options.loss === undefined;
   const otherQuantity = options.otherQuantity ?? 0;
@@ -17,7 +19,9 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
   const poTotal = poLineAmountCents(poProductAmount, poPackaging, 0, 0);
   const line = { id: 72, lineNumber: 1, purchaseOrderLineId: 18, sku: "QUANTITY-SKU", productName: "Synthetic quantity correction",
     qtyInvoiced: options.alreadyCorrected ? 25000 : 12500, qtyOrdered: 12500, qtyReceived: 25000, unitCostCents: 50, unitCostMills: 5023, lineTotalCents: options.alreadyCorrected ? 1338750 : 669375,
-    matchStatus: poRate === 5023 ? "qty_discrepancy" : "price_discrepancy", costComponentEvidence: null,
+    matchStatus: poRate === 5023 ? "qty_discrepancy" : "price_discrepancy", costComponentEvidence: (options.knownSupplierCosts
+      ? { contractVersion: 1, packagingTreatment: "separate", productMills: 62787500, packagingMills: 4150000, adjustmentMills: 0, source: "operator_review" }
+      : null) as InvoiceCostComponentEvidence | null,
     poQuantities: { status: "current", purchaseOrderId: 17, purchaseOrderLineId: 18, orderedQty: 25000, receivedQty: options.disagree ? 20000 : 25000 } };
   const invoice = { id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test vendor", status: (options.alreadyCorrected ? "partially_paid" : "paid") as NonNullable<InvoiceQuantityPreview["beforeInvoiceStatus"]>, currency: "USD",
     invoicedAmountCents: line.lineTotalCents, balanceCents: options.alreadyCorrected ? 669375 : 0, paidAmountCents: 669375, attachments: [], payments: [], lines: [line],
@@ -32,9 +36,28 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
       beforeAmountPerPiece: invoiceAmountPerPiece(line.lineTotalCents, line.qtyInvoiced), afterAmountPerPiece: invoiceAmountPerPiece(amount, quantity),
       beforeMatch: match(line.qtyInvoiced), afterMatch: match(quantity, unitPrice),
       remainingIssues: match(quantity, unitPrice) === "matched" ? [] : [{ invoiceId: 71, lineId: 72, status: match(quantity, unitPrice) }],
-      warnings: ["The product and packaging amounts have not been recorded. This correction does not guess their split or change inventory costs."],
+      warnings: line.costComponentEvidence ? [] : ["Product and packaging amounts are not confirmed. Review them against the supplier invoice."],
+      beforeCostComponents: line.costComponentEvidence, afterCostComponents: line.costComponentEvidence, costComponentsReviewed: false,
     };
   };
+  function measuredPreview(quantity: number, unitPrice: number, amount: number, components?: InvoiceCorrectionCostComponents): InvoiceQuantityPreview {
+    const result = preview(quantity, unitPrice, amount);
+    const after: InvoiceCostComponentEvidence | null = components ? { ...components, contractVersion: 1, source: "operator_review" }
+      : amount !== line.lineTotalCents || unitPrice !== line.unitCostMills ? null : line.costComponentEvidence;
+    const needsReview = after === null || quantity + otherQuantity !== line.poQuantities.receivedQty;
+    const issue = { code: "INVOICE_COMPONENT_REVIEW_REQUIRED", message: "Check the supplier quantity and amounts against the recorded receipt." };
+    return { ...result, afterCostComponents: after, costComponentsReviewed: components !== undefined, previewVersion: invoicePreviewVersion,
+      costing: { purchaseOrderLineId: 18, needsReview,
+        reviewTasks: needsReview ? [{ id: "supplier:18:amounts", title: "Confirm the supplier amounts", explanation: "The invoice is saved. Confirm the product and packaging amounts before inventory costs can be updated." }] : [],
+        lots: [], inventoryValues: [], orderCosts: [], historicalCosts: [],
+        sourceAmounts: (["product", "packaging"] as const).map(component => ({ component,
+          before: { totalMills: null, basePieces: 25000, evidence: "review_required" },
+          after: { totalMills: needsReview ? null : after![component === "product" ? "productMills" : "packagingMills"], basePieces: 25000, evidence: needsReview ? "review_required" : "confirmed" },
+        })),
+        applications: (["product", "packaging"] as const).map(component => ({ component, purchaseOrderLineId: 18, shipmentId: null,
+          status: needsReview ? "review_required" : "applied", lotsUpdated: 0, orderCostsUpdated: 0, orderCostDeltaCents: 0, issues: needsReview ? [issue] : [] })),
+      } };
+  }
   const context = (): InvoiceQuantityContext => ({
     invoiceId: 71, invoiceLineId: 72, purchaseOrderId: 17, lineNumber: 1, name: line.productName, currency: "USD", sourceVersion: version,
     canApprove: options.canApprove !== false, blockedReason: null, closedPurchaseOrder: options.closedPo === true, poUnitCostMills: poRate, poLineAmountCents: poTotal, current: preview(line.qtyInvoiced),
@@ -107,7 +130,9 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
   await page.route("**/api/vendor-invoices/71", (route) => route.fulfill({ json: invoice }));
   await page.route("**/api/vendor-invoice-lines/72/quantity-correction/preview", (route) => {
     const body = route.request().postDataJSON(); previews.push(body);
-    return route.fulfill({ json: preview(body.quantityPieces, body.unitCostMills, body.lineTotalCents) });
+    const response = measuredPreview(body.quantityPieces, body.unitCostMills, body.lineTotalCents, body.costComponents);
+    if (options.omitInvoicePreview) delete response[options.omitInvoicePreview];
+    return route.fulfill({ json: response });
   });
   await page.route("**/api/vendor-invoice-lines/72/quantity-correction", async (route) => {
     if (route.request().method() === "GET") return route.fulfill({ json: context() });
@@ -115,9 +140,10 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
     commands.push({ key, body });
     if (stale) { stale = false; version = nextVersion; return route.fulfill({ status: 409, json: { error: "The invoice or PO changed. Reload and review the new values.", code: "INVOICE_QUANTITY_STALE" } }); }
     if (!replay.has(key)) {
-      const result: InvoiceQuantityResult = { invoiceLineId: 72, auditEventId: 901, preview: preview(body.quantityPieces, body.unitCostMills, body.lineTotalCents) };
+      const result: InvoiceQuantityResult = { invoiceLineId: 72, auditEventId: 901, preview: measuredPreview(body.quantityPieces, body.unitCostMills!, body.lineTotalCents!, body.costComponents) };
       invoice.invoicedAmountCents = result.preview.afterInvoiceAmountCents!; invoice.balanceCents = result.preview.afterBalanceCents!; invoice.status = result.preview.afterInvoiceStatus!;
       line.lineTotalCents = result.preview.afterLineAmountCents!; line.unitCostMills = result.preview.afterUnitCostMills!;
+      line.costComponentEvidence = result.preview.afterCostComponents ?? null;
       line.qtyInvoiced = body.quantityPieces; line.matchStatus = result.preview.afterMatch; version = nextVersion; replay.set(key, result);
     }
     if (!acknowledged) { if (options.loss === "once") acknowledged = true; return route.abort("connectionreset"); }
@@ -162,6 +188,40 @@ test("prefills the correction and clearly shows quantity and financial impact be
   await expect(page.getByText("Qty Mismatch", { exact: true })).toHaveCount(0);
   expect(proof.failures).toEqual([]);
 });
+
+test("corrects the invoice and supplier amounts together with one approval on a mobile screen", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const proof = await setup(page, { knownSupplierCosts: true, skipInitialReview: true });
+  await page.getByLabel("Invoice line amount (USD)").fill("13387.50");
+  await page.getByRole("checkbox", { name: "Include product and packaging amounts in this correction" }).check();
+  await expect(page.getByLabel("Product total (USD)")).toHaveValue("6278.7500");
+  await expect(page.getByLabel("Packaging total (USD)")).toHaveValue("415.0000");
+  await page.getByLabel("Product total (USD)").fill("12557.50");
+  await page.getByLabel("Packaging total (USD)").fill("830.00");
+  await page.getByRole("button", { name: "Review changes", exact: true }).click();
+  await expect(page.getByRole("table", { name: "Inventory cost changes", exact: true })).toContainText("12557.50 USD");
+  await expect(page.getByRole("table", { name: "Inventory cost changes", exact: true })).toContainText("830.00 USD");
+  await approval(page).check();
+  await page.getByRole("button", { name: "Approve & save invoice", exact: true }).click();
+  await expect(page.getByText("Supplier costs are posted.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Approval record #901" })).toBeVisible();
+  expect(proof.commands).toHaveLength(1);
+  expect(proof.commands[0].body).toMatchObject({ previewVersion: invoicePreviewVersion, quantityPieces: 25000, lineTotalCents: 1338750,
+    costComponents: { packagingTreatment: "separate", productMills: 125575000, packagingMills: 8300000, adjustmentMills: 0 } });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole("dialog").screenshot({ path: testInfo.outputPath("invoice-and-inventory-costs-mobile.png") });
+  expect(proof.failures).toEqual([]);
+});
+
+for (const omitted of ["costing", "previewVersion"] as const) {
+  test(`refuses a document-only preview missing ${omitted}`, async ({ page }) => {
+    const proof = await setup(page, { skipInitialReview: true, omitInvoicePreview: omitted });
+    await page.getByRole("button", { name: "Review changes", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("inventory cost preview is unavailable");
+    await expect(page.getByRole("button", { name: "Approve & save invoice", exact: true })).toBeDisabled();
+    expect(proof.commands).toEqual([]);
+  });
+}
 
 test("allows an override only after updating the preview and rechecking confirmation", async ({ page }) => {
   const proof = await setup(page);

@@ -5,7 +5,11 @@ import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { invoiceQuantityContextSchema, invoiceQuantityPreviewSchema, invoiceQuantityApprovalRequestSchema, invoiceQuantityResultSchema,
-  type InvoiceQuantityContext, type InvoiceQuantityPreview, type InvoiceQuantityApprovalRequest, type InvoiceQuantityResult } from "@shared/procurement/invoice-quantity-correction";
+  type InvoiceQuantityContext, type InvoiceQuantityPreview, type InvoiceQuantityApprovalRequest, type InvoiceQuantityResult, type InvoiceQuantityPreviewRequest } from "@shared/procurement/invoice-quantity-correction";
+import { invoiceCostComponentsFromForm, invoiceCostReviewForm, type InvoiceCostReviewForm } from "@/lib/invoice-cost-review-form";
+import { invoiceCorrectionMatchesRequest } from "@/lib/invoice-correction-review";
+import { InvoiceCorrectionSupplierAmounts } from "./InvoiceCorrectionSupplierAmounts";
+import { InvoiceCorrectionCostImpact } from "./InvoiceCorrectionCostImpact";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
@@ -27,7 +31,7 @@ function amount(cents: number, currency: string) {
   const formatted = exactMoneyAsInput(cents, 2).replace(/\B(?=(\d{3})+\.)/g, ",");
   return currency === "USD" ? `$${formatted}` : `${formatted} ${currency}`;
 }
-export function InvoiceQuantityImpact({ preview, currency }: { preview: InvoiceQuantityPreview; currency: string }) {
+export function InvoiceQuantityImpact({ preview, currency, approved = false }: { preview: InvoiceQuantityPreview; currency: string; approved?: boolean }) {
   const afterLineAmount = preview.afterLineAmountCents ?? preview.invoiceLineAmountCents;
   const afterInvoiceAmount = preview.afterInvoiceAmountCents ?? preview.invoiceAmountCents;
   const afterBalance = preview.afterBalanceCents ?? preview.balanceCents;
@@ -58,7 +62,8 @@ export function InvoiceQuantityImpact({ preview, currency }: { preview: InvoiceQ
       <p>Balance <strong className="block">{amount(afterBalance, currency)}</strong></p>
     </div>
     <p className="text-xs text-muted-foreground">Billed amount per piece after saving: {perPiece(preview.afterAmountPerPiece)}. This is the complete line amount divided by quantity.</p>
-    <p className="text-xs text-muted-foreground">{moneyChanged ? "Invoice totals and balance are recalculated. Payments, PO lines, received stock and inventory costs stay unchanged." : "Payments, PO lines, received stock and inventory costs stay unchanged."}</p>
+    <p className="text-xs text-muted-foreground">{moneyChanged ? "Invoice totals and balance are recalculated. " : ""}Payments, PO quantities and received stock counts stay unchanged.</p>
+    {preview.costing && <InvoiceCorrectionCostImpact impact={preview.costing} currency={currency} purchaseOrderId={preview.purchaseOrderId} approved={approved} />}
     {preview.closedPurchaseOrder && <p className="text-sm">The PO stays closed.</p>}
     {preview.otherInvoicedQuantity > 0 && <p className="text-sm">Other invoice lines already cover {preview.otherInvoicedQuantity.toLocaleString("en-US")} pieces.</p>}
     {preview.remainingIssues.length > 0 && <p className="text-sm text-amber-800 dark:text-amber-300">After this change, {preview.remainingIssues.length} invoice line(s) on this PO still need review.</p>}
@@ -76,8 +81,7 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
       const raw = sessionStorage.getItem(storageKey);
       const intent = raw === null ? null : intentSchema.parse(JSON.parse(raw));
       if (intent && (intent.preview.invoiceLineId !== context.invoiceLineId || intent.preview.invoiceId !== context.invoiceId
-        || intent.preview.sourceVersion !== intent.body.sourceVersion || intent.preview.afterQuantity !== intent.body.quantityPieces
-        || (intent.body.lineTotalCents !== undefined && (intent.preview.afterLineAmountCents !== intent.body.lineTotalCents || intent.preview.afterUnitCostMills !== intent.body.unitCostMills)))) throw new Error("Saved confirmation does not match its preview");
+        || !invoiceCorrectionMatchesRequest(intent.preview, intent.body))) throw new Error("Saved confirmation does not match its preview");
       recovery.current = { intent, error: null };
     } catch { recovery.current = { intent: null, error: "A saved confirmation could not be read. Contact an administrator before submitting another correction." }; }
   }
@@ -87,6 +91,8 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
   const [quantity, setQuantity] = useState(String(context.suggestedQuantity ?? context.current.beforeQuantity));
   const [unitPrice, setUnitPrice] = useState(exactMoneyAsInput(context.current.recordedUnitCostMills, 4));
   const [lineAmount, setLineAmount] = useState(exactMoneyAsInput(context.current.invoiceLineAmountCents, 2));
+  const [includeCosts, setIncludeCosts] = useState(false);
+  const [costForm, setCostForm] = useState(() => invoiceCostReviewForm(context.current.beforeCostComponents));
   const supportsEconomics = context.current.afterLineAmountCents !== undefined && context.current.afterInvoiceAmountCents !== undefined && context.current.afterBalanceCents !== undefined;
   const confirmationLabel = context.closedPurchaseOrder ? "I approve these invoice changes on the closed PO." : "I reviewed these invoice changes.";
   const [reason, setReason] = useState(context.suggestedQuantity === null ? "" : "Correct the invoice line using the supplier quantity and amount.");
@@ -96,9 +102,10 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
   const [stale, setStale] = useState(false);
   const [saved, setSaved] = useState<InvoiceQuantityResult | null>(null);
   const preview = useMutation({
-    mutationFn: async (request: Omit<InvoiceQuantityApprovalRequest, "reason" | "approvalConfirmed">) => {
+    mutationFn: async (request: InvoiceQuantityPreviewRequest) => {
       const result = invoiceQuantityPreviewSchema.parse(await financialCommandFetchJson(`${root}/preview`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }));
-      if (result.invoiceLineId !== context.invoiceLineId || result.sourceVersion !== context.sourceVersion || result.afterQuantity !== request.quantityPieces || result.afterLineAmountCents !== request.lineTotalCents || result.afterUnitCostMills !== request.unitCostMills) throw new Error("The preview does not match this invoice correction. Reload the invoice.");
+      if (result.invoiceLineId !== context.invoiceLineId || !invoiceCorrectionMatchesRequest(result, request)) throw new Error("The preview does not match this invoice correction. Reload the invoice.");
+      if (!result.previewVersion || !result.costing) throw new Error("The inventory cost preview is unavailable. Reload the invoice before approving this correction.");
       return result;
     },
     onMutate: () => setBusy(true), onSuccess: (result) => { setReview(result); setConfirmed(false); },
@@ -110,7 +117,7 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
     mutationFn: async (intent) => {
       const raw = await financialCommandFetchJson(root, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", "Idempotency-Key": intent.key }, body: JSON.stringify(intent.body) });
       const result = invoiceQuantityResultSchema.safeParse(raw);
-      if (!result.success || result.data.invoiceLineId !== context.invoiceLineId || result.data.preview.sourceVersion !== intent.body.sourceVersion || result.data.preview.afterQuantity !== intent.body.quantityPieces || (intent.body.lineTotalCents !== undefined && (result.data.preview.afterLineAmountCents !== intent.body.lineTotalCents || result.data.preview.afterUnitCostMills !== intent.body.unitCostMills))) throw new FinancialCommandRequestError("The correction may have completed. Retry the saved confirmation to verify it.", { status: 200, code: "INVOICE_QUANTITY_RESPONSE_INVALID", retryable: true, ambiguous: true });
+      if (!result.success || result.data.invoiceLineId !== context.invoiceLineId || !invoiceCorrectionMatchesRequest(result.data.preview, intent.body)) throw new FinancialCommandRequestError("The correction may have completed. Retry the saved confirmation to verify it.", { status: 200, code: "INVOICE_QUANTITY_RESPONSE_INVALID", retryable: true, ambiguous: true });
       return result.data;
     },
     retry: shouldRetryFinancialCommand, retryDelay: financialCommandRetryDelay,
@@ -134,29 +141,34 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
   const draft = invoiceLineDraft({ quantity, unitPrice, lineAmount }, context.current);
   const reviewedChange = !!review && (review.afterQuantity !== review.beforeQuantity
     || (review.afterLineAmountCents ?? review.invoiceLineAmountCents) !== review.invoiceLineAmountCents
-    || (review.afterUnitCostMills ?? review.recordedUnitCostMills) !== review.recordedUnitCostMills);
+    || (review.afterUnitCostMills ?? review.recordedUnitCostMills) !== review.recordedUnitCostMills || review.costComponentsReviewed === true);
   const validReason = reason.trim().length >= 10 && reason.trim().length <= 2000;
-  const canSave = !locked && !blocked && reviewedChange && validReason && confirmed;
+  const canSave = !locked && !blocked && reviewedChange && !!review?.previewVersion && !!review?.costing && validReason && confirmed;
   const guidance = blocked ?? recovery.current.error ?? (stale ? "Reload the invoice and review its latest values."
     : preview.isPending ? "Reviewing your changes…"
     : !draft.valid ? draft.message
-    : !draft.changed ? "No changes to save. Edit the quantity, unit price or line amount above."
+    : !draft.changed && !includeCosts ? "No changes to save. Edit the quantity, unit price or line amount above."
     : !review ? "Review your changes before saving."
     : !validReason ? "Enter a reason of at least 10 characters."
     : !confirmed ? "Confirm the reviewed changes below to enable Save." : null);
   function updatePreview() {
     if (locked || blocked) return;
     if (!draft.valid) { setError(draft.message); return; }
-    if (!draft.changed) return;
-    setError(null);
-    preview.mutate({ sourceVersion: context.sourceVersion, quantityPieces: draft.quantityPieces, unitCostMills: draft.unitCostMills,
-      lineTotalCents: draft.lineTotalCents, ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true as const } : {}) });
+    if (!draft.changed && !includeCosts) return;
+    try {
+      const costComponents = includeCosts ? invoiceCostComponentsFromForm(costForm, draft.lineTotalCents) : undefined;
+      setError(null);
+      preview.mutate({ sourceVersion: context.sourceVersion, quantityPieces: draft.quantityPieces, unitCostMills: draft.unitCostMills,
+        lineTotalCents: draft.lineTotalCents, ...(costComponents ? { costComponents } : {}), ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true as const } : {}) });
+    } catch (failure) { setError(failure instanceof Error ? failure.message : "Check the supplier amounts."); }
   }
   function confirm() {
     if (!review || !canSave || active.current) return;
     try {
+      const components = review.costComponentsReviewed ? review.afterCostComponents : null;
       const body = invoiceQuantityApprovalRequestSchema.parse({ sourceVersion: context.sourceVersion, quantityPieces: review.afterQuantity, unitCostMills: review.afterUnitCostMills, lineTotalCents: review.afterLineAmountCents,
-        ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true } : {}), reason, approvalConfirmed: true });
+        ...(components ? { costComponents: { packagingTreatment: components.packagingTreatment, productMills: components.productMills, packagingMills: components.packagingMills, adjustmentMills: components.adjustmentMills } } : {}),
+        previewVersion: review.previewVersion, ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true } : {}), reason, approvalConfirmed: true });
       const intent: Intent = { key: crypto.randomUUID(), body, preview: review };
       sessionStorage.setItem(storageKey, JSON.stringify(intent)); active.current = intent; setUnresolved(intent); setError(null); approve.mutate(intent);
     } catch { setError("Include a reason of at least 10 characters. Session storage must be available for safe confirmation retries."); }
@@ -175,10 +187,13 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
       </div>
       <p className="text-xs text-muted-foreground">{context.suggestionReason} Check the complete billed line amount against the supplier invoice.</p>
       {context.poUnitCostMills !== undefined && <p className="text-xs text-muted-foreground">PO unit price: {exactMoneyAsInput(context.poUnitCostMills, 4)} {context.currency}{context.poLineAmountCents !== undefined && ` · PO line amount: ${exactMoneyAsInput(context.poLineAmountCents, 2)} ${context.currency}`}</p>}
+      <InvoiceCorrectionSupplierAmounts id={context.invoiceLineId} currency={context.currency} enabled={includeCosts} form={costForm}
+        onEnable={enabled => { setIncludeCosts(enabled); setReview(null); setConfirmed(false); setError(null); }}
+        onField={(name: keyof InvoiceCostReviewForm, value: string) => { setCostForm(current => ({ ...current, [name]: value })); setReview(null); setConfirmed(false); setError(null); }} />
     </fieldset>}
-    {impact ? <InvoiceQuantityImpact preview={impact} currency={context.currency} />
+    {impact ? <InvoiceQuantityImpact preview={impact} currency={context.currency} approved={saved !== null} />
       : <p className="rounded bg-muted p-2 text-sm">PO ordered: <strong>{context.current.orderedQuantity.toLocaleString("en-US")}</strong> pieces · Received: <strong>{context.current.receivedQuantity.toLocaleString("en-US")}</strong> pieces</p>}
-    {saved && <p role="status" className="rounded border border-green-300 bg-green-50 p-3 font-semibold text-green-900">Invoice correction approved and saved. {matchNames[saved.preview.afterMatch]}.</p>}
+    {saved && <p role="status" className="rounded border border-green-300 bg-green-50 p-3 font-semibold text-green-900">Invoice correction approved and saved. {matchNames[saved.preview.afterMatch]}. Approval record #{saved.auditEventId}.</p>}
     </div>
     <div className="mt-4 shrink-0 space-y-3 border-t pt-3">
       {(error || preview.error || approve.error) && <p role="alert" className="text-sm text-destructive">{error ?? approve.error?.message ?? preview.error?.message}</p>}
@@ -191,7 +206,7 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
         <Button variant="outline" aria-label="Close invoice editor" className="min-h-[44px]" disabled={preview.isPending || approve.isPending} onClick={onClose}>Close</Button>
         {!saved && !unresolved && <>
           {review && <Button variant="outline" className="min-h-[44px]" disabled={locked || !!blocked} onClick={() => { setReview(null); setConfirmed(false); setError(null); preview.reset(); }}>Keep editing</Button>}
-          {!review && <Button className="min-h-[44px]" disabled={locked || !!blocked || !draft.valid || !draft.changed} onClick={updatePreview}>{preview.isPending ? "Reviewing…" : "Review changes"}</Button>}
+          {!review && <Button className="min-h-[44px]" disabled={locked || !!blocked || !draft.valid || (!draft.changed && !includeCosts)} onClick={updatePreview}>{preview.isPending ? "Reviewing…" : "Review changes"}</Button>}
           <Button className="min-h-[44px] flex-1 bg-green-700 text-white hover:bg-green-800" aria-describedby={guidance ? `invoice-save-guidance-${context.invoiceLineId}` : undefined} disabled={!canSave} onClick={confirm}>{approve.isPending ? "Saving correction…" : "Approve & save invoice"}</Button>
         </>}
         {unresolved && <Button className="min-h-[44px] flex-1" disabled={approve.isPending} onClick={() => approve.mutate(unresolved)}>{approve.isPending ? "Verifying confirmation…" : "Retry saved confirmation"}</Button>}

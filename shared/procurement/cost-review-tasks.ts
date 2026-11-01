@@ -41,6 +41,7 @@ export interface CostReviewGroup {
 
 const quantity = (value: number) => value.toLocaleString("en-US");
 const historyCodes = new Set(["COST_HISTORICAL_LINEAGE_MISSING", "COST_LINEAGE_UNPROVEN", "COST_UNRESOLVED_QUANTITY_RETAINED", "COST_GRAPH_INCOMPLETE"]);
+const receiptCostHistoryCodes = new Set(["COST_ROOT_REVIEW_REQUIRED", "COST_HISTORICAL_BASIS_MISSING", "COST_SOURCE_INTERVAL_REVIEW"]);
 const oldRoundingCodes = new Set(["COST_UNIFORM_LOT_RESIDUAL_REVIEW", "COST_TRANSFORM_RESIDUAL_REVIEW", "COST_GRAPH_INCOMPLETE"]);
 
 /** Task classification explains the existing posting status. It never grants
@@ -78,7 +79,11 @@ export function supplierCostReviewTasks(line: PurchaseLineCostStatus): CostRevie
   if (issues.some(issue => historyCodes.has(issue.code)) && !tasks.some(task => task.action === "repair_origin")) {
     add({ title: "Check missing stock history", explanation: "Some stock movements cannot be traced through the receipt, transfer or repacking records. Review the recorded history; a missing link does not prove a sale.", action: "review_history" }, "history");
   }
-  const otherIssues = issues.filter(issue => !issue.code.startsWith("INVOICE_") && issue.code !== "PURCHASE_ADJUSTMENT_REVIEW" && !historyCodes.has(issue.code));
+  if (issues.some(issue => receiptCostHistoryCodes.has(issue.code))) {
+    add({ title: "Check the original receipt", explanation: "Confirm the original receipt quantity and cost link, including any receipt reversal. Its stock costs are not yet confirmed.", action: "review_history" }, "receipt");
+  }
+  const otherIssues = issues.filter(issue => !issue.code.startsWith("INVOICE_") && issue.code !== "PURCHASE_ADJUSTMENT_REVIEW"
+    && !historyCodes.has(issue.code) && !receiptCostHistoryCodes.has(issue.code));
   if (otherIssues.length) add({ title: "Check the recorded cost", explanation: otherIssues.map(issue => issue.message).join(" "), action: "accounting" }, "record");
   if (!tasks.length) add({ title: "Apply the supplier costs", explanation: "The supplier amounts are recorded. Apply them to the remaining stock and verified sales; review the saved result afterwards.", action: "apply_supplier" }, "apply");
   return tasks;

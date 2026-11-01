@@ -13,7 +13,7 @@ export class InvoiceQuantityCorrectionError extends Error {
   constructor(message: string, readonly code: string, readonly statusCode = 409) { super(message); this.name = "InvoiceQuantityCorrectionError"; }
 }
 export type InvoiceCorrectionFacts = AmendmentFacts & { billing?: {
-  hasCreditHistory: boolean; invoiceId: number; purchaseOrderIds: number[]; purchaseAllocations: { purchaseOrderId: number; amountCents: number | null }[]; allInvoiceLines: AmendmentFacts["invoiceLines"];
+  hasCreditHistory: boolean; hasShipmentCharges?: boolean; invoiceId: number; purchaseOrderIds: number[]; purchaseAllocations: { purchaseOrderId: number; amountCents: number | null }[]; allInvoiceLines: AmendmentFacts["invoiceLines"];
   allocations: { invoiceId: number; amountCents: number; paymentStatus: string; currency: string | null }[];
 } };
 const nonnegative = z.number().int().nonnegative().safe();
@@ -35,6 +35,7 @@ function sourceLine(facts: AmendmentFacts, lineId: number) {
 function blockedReason(facts: InvoiceCorrectionFacts, lineId: number, allowClosedBilling = false): string | null {
   const { invoice, poLine } = sourceLine(facts, lineId);
   if (facts.billing?.hasCreditHistory) return "This invoice has supplier credit history. Review its credits before changing original quantity or amounts.";
+  if (facts.billing?.hasShipmentCharges) return "This invoice is also linked to shipment charges. It needs a combined invoice and freight review; this product-line editor cannot safely update that scope yet.";
   if (invoice.status === "voided") return "A voided invoice cannot be corrected.";
   if (poLine.lineType !== "product") return "Quantity correction is available for product lines.";
   if (facts.header.cancelledAt || ["cancelled", "short_closed"].includes(facts.header.status)
@@ -100,6 +101,15 @@ export function previewInvoiceQuantity(facts: InvoiceCorrectionFacts, lineId: nu
   const explicitEconomics = request.lineTotalCents !== undefined;
   const invoiceAmount = explicitEconomics ? reviewedInvoiceAmount(facts, lineId, afterAmount) : recorded(invoice.invoicedAmountCents, "invoice amount");
   const moneyChanged = amount !== afterAmount || currentUnitCost !== afterUnitCost;
+  const currentComponents = invoiceCostComponentEvidenceSchema.safeParse(line.costComponentEvidence);
+  const beforeCostComponents = currentComponents.success ? currentComponents.data : null;
+  const afterCostComponents = request.costComponents === undefined
+    ? moneyChanged ? null : beforeCostComponents
+    : invoiceCostComponentEvidenceSchema.parse({ contractVersion: 1, ...request.costComponents, source: "operator_review" });
+  if (request.costComponents !== undefined && afterCostComponents !== null
+    && BigInt(afterCostComponents.productMills) + BigInt(afterCostComponents.packagingMills) + BigInt(afterCostComponents.adjustmentMills) !== BigInt(afterAmount) * BigInt(100)) {
+    throw new InvoiceQuantityCorrectionError("Product, packaging and adjustments must equal the corrected invoice line amount exactly.", "INVOICE_CORRECTION_COST_TOTAL_MISMATCH", 422);
+  }
   const beforeAllocation = facts.billing?.purchaseAllocations.find(row => row.purchaseOrderId === facts.header.id)?.amountCents ?? null;
   // A sole link assigning the entire bill follows its corrected whole amount.
   // Partial allocations require the allocation owner; an unspecified link stays unspecified.
@@ -107,7 +117,8 @@ export function previewInvoiceQuantity(facts: InvoiceCorrectionFacts, lineId: nu
   const afterFinancials = moneyChanged ? deriveInvoiceFinancialState({ status: invoice.status, invoiceAmountCents: invoiceAmount, paidAmountCents: recorded(invoice.paidAmountCents, "paid amount") })
     : { status: invoice.status, balanceCents: recorded(invoice.balanceCents, "invoice balance") };
   const beforeMatches = invoiceMatches(facts, facts.invoiceLines);
-  const afterLines = facts.invoiceLines.map(row => row.id === line.id ? { ...row, qtyInvoiced: afterQuantity, unitCostMills: afterUnitCost, unitCostCents: millsToCents(afterUnitCost), lineTotalCents: afterAmount, ...(moneyChanged ? { costComponentEvidence: null } : {}) } : row);
+  const afterLines = facts.invoiceLines.map(row => row.id === line.id ? { ...row, qtyInvoiced: afterQuantity, unitCostMills: afterUnitCost, unitCostCents: millsToCents(afterUnitCost), lineTotalCents: afterAmount,
+    ...(moneyChanged || request.costComponents !== undefined ? { costComponentEvidence: afterCostComponents } : {}) } : row);
   const afterMatches = invoiceMatches(facts, afterLines);
   const warnings: string[] = [];
   const mappedInvoiceIds = new Set(afterLines.map((row) => row.vendorInvoiceId));
@@ -115,8 +126,7 @@ export function previewInvoiceQuantity(facts: InvoiceCorrectionFacts, lineId: nu
   if (unmappedInvoiceCount > 0) warnings.push(`${unmappedInvoiceCount} invoice(s) linked to this PO have no mapped lines and still need review.`);
   const afterMatch = afterMatches.find((row) => row.id === line.id)!.matchStatus;
   if (afterMatch !== "matched") warnings.push("This quantity will not clear every match issue on this line. Review the proposed match result before confirming.");
-  if (moneyChanged) warnings.push("The billed amount or unit price changes. Any recorded cost breakdown must be reviewed again; inventory costs are not changed by this correction.");
-  if (!invoiceCostComponentEvidenceSchema.safeParse(line.costComponentEvidence).success) warnings.push("The product and packaging amounts have not been recorded. This correction does not guess their split or change inventory costs.");
+  if (afterCostComponents === null) warnings.push("Product and packaging amounts are not confirmed for the corrected line. The invoice can be saved; those inventory costs remain unchanged until the supplier amounts are reviewed.");
   return invoiceQuantityPreviewSchema.parse({
     invoiceId: invoice.id, invoiceLineId: line.id, purchaseOrderId: facts.header.id, sourceVersion: request.sourceVersion,
     beforeQuantity, afterQuantity, orderedQuantity: recorded(poLine.orderQty, "PO quantity"), receivedQuantity: recorded(poLine.receivedQty ?? 0, "received quantity"),
@@ -129,6 +139,7 @@ export function previewInvoiceQuantity(facts: InvoiceCorrectionFacts, lineId: nu
     afterUnitCostMills: afterUnitCost, beforeInvoiceStatus: invoice.status, afterInvoiceStatus: afterFinancials.status, closedPurchaseOrder: isClosedPurchaseOrder(facts),
     beforeMatch: beforeMatches.find((row) => row.id === line.id)!.matchStatus, afterMatch,
     remainingIssues: afterMatches.filter((row) => row.matchStatus !== "matched").map((row) => ({ invoiceId: row.vendorInvoiceId, lineId: row.id, status: row.matchStatus })), warnings,
+    beforeCostComponents, afterCostComponents, costComponentsReviewed: request.costComponents !== undefined,
   });
 }
 export function invoiceQuantityContext(facts: InvoiceCorrectionFacts, lineId: number, actor: PurchaseApprovalActor, sourceVersion: string) {
@@ -159,6 +170,10 @@ export function planInvoiceQuantityCorrection(facts: InvoiceCorrectionFacts, lin
   const blocked = blockedReason(facts, lineId, allowClosedBilling);
   if (blocked) throw new InvoiceQuantityCorrectionError(blocked, "INVOICE_QUANTITY_BLOCKED");
   const preview = previewInvoiceQuantity(facts, lineId, request);
-  if (preview.beforeQuantity === preview.afterQuantity && preview.invoiceLineAmountCents === preview.afterLineAmountCents && preview.recordedUnitCostMills === preview.afterUnitCostMills) throw new InvoiceQuantityCorrectionError("Enter a quantity, unit price or line amount different from the current invoice.", "INVOICE_QUANTITY_NO_CHANGE", 400);
+  const supplied = request.costComponents, previous = preview.beforeCostComponents;
+  const breakdownChanged = supplied !== undefined && (!previous || supplied.productMills !== previous.productMills
+    || supplied.packagingMills !== previous.packagingMills || supplied.adjustmentMills !== previous.adjustmentMills
+    || supplied.packagingTreatment !== previous.packagingTreatment);
+  if (preview.beforeQuantity === preview.afterQuantity && preview.invoiceLineAmountCents === preview.afterLineAmountCents && preview.recordedUnitCostMills === preview.afterUnitCostMills && !breakdownChanged) throw new InvoiceQuantityCorrectionError("Enter a quantity, unit price, line amount or supplier cost amount different from the current invoice.", "INVOICE_QUANTITY_NO_CHANGE", 400);
   return preview;
 }

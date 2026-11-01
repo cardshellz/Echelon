@@ -5,18 +5,18 @@ This is the active tracker for consolidating purchase costing from PO through sh
 | Tracking field | Current value |
 | --- | --- |
 | Created | 2026-10-30 |
-| Overall state | S1 foundation merged; deployment reported by the user. First S2 source-compatibility integration locally verified on main-integrated code and in review as #1967; two S1 policy answers remain pending |
-| Current stage | S2 — compatibility integration that preserves existing authority; policy-dependent S1/S2 work remains open |
-| Next work item | Complete #1967 hosted checks/review, incorporate the receipt-allocation and supplier-tax decisions, then connect the broader monetary source adapters and financial commands |
-| Working branch | `codex/purchase-cost-source-compatibility` |
+| Overall state | #1964 and #1967 merged; deployments reported by the user. S2 approved invoice-correction integration in progress. Receipt-specific invoice costs confirmed; supplier-tax decision remains pending |
+| Current stage | S2 — connect approved financial corrections to the existing costing pipeline and reviewed impact |
+| Next work item | Publish/review the approved invoice-correction slice, then implement receipt-specific invoice allocation and the remaining source adapters; supplier-tax treatment is still undecided |
+| Working branch | `codex/purchase-cost-approved-corrections` |
 | Plan branch base | `5f9e911a0c7506329624135d4a9a222842880962` |
-| Latest main incorporated | `77a1d438b59f286a5b81d66e515be08555d6c7fe` (#1965), incorporated at `f4e0c6dd821eef6bf573bc53a74486bc2dbde208`; no costing implementation file changed upstream |
+| Latest main incorporated | `2ea5a8d2cabe65ecfa0436f583a6eee7ad351278`, the merge of #1967; its final head also incorporated #1968 |
 | Audited main baseline | `e571bcac780852c3ac6b488354c10aaf7f1c417c`; reviewed costing paths were unchanged at the plan branch base |
 | Audit | [Purchase costing authority review](procurement-costing-authority-audit-2026-10-30.md) |
 | Stage 1 contract and ownership map | [Contract, compatibility and recognition boundary](procurement-costing-stage-1-contract.md) |
 | Stage 2 compatibility trace | [Recorded authority and selected-input proof](procurement-costing-stage-2-compatibility.md) |
-| Current implementation PR | [#1967 — preserve posted purchase costs](https://github.com/cardshellz/Echelon/pull/1967); [#1964](https://github.com/cardshellz/Echelon/pull/1964) is merged |
-| Deployment and live acceptance | User reports #1964 deployed on 2026-10-30. Release ancestry/processes and live records were not independently checked this session. S2 compatibility changes are published for review, not deployed. |
+| Current implementation PR | Next S2 invoice-correction PR not created; [#1967](https://github.com/cardshellz/Echelon/pull/1967) and [#1964](https://github.com/cardshellz/Echelon/pull/1964) are merged |
+| Deployment and live acceptance | User reports #1967 deployed on 2026-11-01. Its merge and final-head CI were independently read: 51 successful and 2 skipped checks. Release/process ancestry and live records were not independently checked. No live financial or stock records are being edited in this work. |
 
 ## Resume here after a context reset
 
@@ -50,12 +50,12 @@ The audit contains exact functions, source references, reasoning and limits. Eac
 | --- | --- | --- | --- |
 | COST-01 | F1: competing PO/shipment/inventory monetary projections | One selected monetary projection, including packaging, correct source precedence and exact scope totals, feeds every consumer | in_progress |
 | COST-02 | F2: all-or-nothing invoice coverage | Approved invoices establish actual costs for their covered quantities; uncovered quantities stay provisional; overlaps and ambiguity are explicit | in_progress |
-| COST-03 | F3: invoice corrections stop before costing | Approved corrections invoke the shared cost pipeline or commit a durable visible continuation with complete downstream impact | planned |
+| COST-03 | F3: invoice corrections stop before costing | Approved corrections invoke the shared cost pipeline or commit a durable visible continuation with complete downstream impact | in_progress |
 | COST-04 | F4: freight invoice and charge amount dead end | One approved reconciliation replaces the estimate, preserves its history, recalculates shares and updates downstream costs | planned |
 | COST-05 | F5: non-economic changes invalidate costs | Payment progress and superseded quote edits preserve unchanged cost identity; real financial/source-authority changes remain controlled | in_progress |
 | COST-06 | F6: transformed lots invalidate static completion | Completion accepts proven exact cost inheritance; genuine missing links/values have a direct resolution without repeat approval of unchanged money | planned |
 | COST-07 | F7: unsupported breakdowns and adjustments | Known totals, optional breakdowns, discounts, taxes, credits and supplier freight have explicit source and inclusion/allocation rules | in_progress |
-| COST-08 | F8: approval lacks a reviewed financial version | Ordinary invoice approvals and corrections bind the reviewed economics and downstream impact to the transaction | planned |
+| COST-08 | F8: approval lacks a reviewed financial version | Ordinary invoice approvals and corrections bind the reviewed economics and downstream impact to the transaction | in_progress |
 | COST-09 | F9: shared results lost at UI boundaries | Relationship identifiers and shared results survive every API; completed costs and approval details appear consistently; genuine issues expose the owning action | planned |
 
 ## Delivery stages and dependencies
@@ -67,7 +67,7 @@ Develop one coordinated candidate. Changes can be split into reviewable dependen
 Primary work: COST-01, COST-02, COST-05, COST-07.
 
 - [x] Define validated monetary contracts: selected source/revision, currency, quantity coverage, component/combined totals, allocated charges, provisional/confirmed state, application status and approval provenance.
-- [ ] Define confirmed invoice coverage and provisional remainder behavior. Explicit interval validation and actual-plus-provisional money are implemented; the PO-line-only allocation policy still awaits the user's answer. Never choose an arbitrary historical stock destination.
+- [x] Define confirmed invoice coverage and provisional remainder behavior. Explicit interval validation and actual-plus-provisional money are implemented. On 2026-11-01 the user confirmed that each receipt keeps its own invoice cost; do not average differently priced invoices. The S2 persistence/allocation adapter remains open. Never choose an arbitrary historical stock destination.
 - [x] Define economic identity independently of settlement metadata and superseded supporting quotes. Preserve the audit of all source documents while invalidating costs only for relevant changes. New semantic identity is not substituted into legacy posting writers in S1.
 - [x] Support known combined supplier amounts without fabricating a breakdown or counting combined and component amounts twice. The additive contract and bounded compatibility strategy are documented; the stored representation/adapter must be proven in S2 before financial writes.
 - [ ] Resolve the applicable inclusion/allocation rules for adjustments, tax, credits, supplier freight and non-product PO charges.
@@ -81,6 +81,7 @@ Exit evidence: agreed contracts/rules, exact source ownership map, bounded compa
 Depends on the applicable S1 contracts. Primary work: COST-03, COST-04, COST-08.
 
 - [x] Integrate the first legacy-equivalence bridge with source recording and shared status. Prove original hashes, confirmed supplier economics through the S1 model, approved settlement class and selected shipment allocation inputs; retain original revisions/approvals when unchanged. Candidate validation/review recorded below.
+- [x] Implement the bounded invoice-correction connector: measure the actual document/cost owners in a rolled-back preview, require a reviewed impact version for new approvals, commit supported costs and history in one transaction, replay committed legacy receipts without new postings, and retain a durable separate review for real missing cost evidence. [Trace, examples, owner inventory and limitations](procurement-costing-stage-2-invoice-corrections.md). Final broader S2 gates below remain open.
 - [ ] Complete the broader monetary read/persistence adapters, including partial/combined supplier sources, header/credit treatment and their legacy compatibility, after the applicable policy decisions. The equivalence bridge alone is not this activation.
 - [ ] Inventory every supported cost-changing command: invoice approval/correction/dispute/void, relevant PO amendments, shipment charge changes, invoice-to-charge reconciliation and source credits.
 - [ ] Route these commands through shared planning/source selection and the existing revision/application owners. Record the affected scopes and update prerequisites explicitly.
@@ -164,8 +165,8 @@ Exit evidence: exact deployed candidate accepted across the complete flow, origi
 | --- | --- | --- |
 | Approved invoice versus provisional PO versus payments | Agreed | Invoice-first for covered goods; PO estimate for uncovered goods; payment is settlement |
 | Invoice coverage where explicit receipt links exist | Agreed principle | Preserve and use those links and immutable quantity evidence |
-| Allocation where invoices identify only a PO line | Asked; awaiting answer | Require receipt allocation where costs differ, or explicitly blend costs over the PO line; no stock destination is chosen in S1 |
-| Tax inclusion/recovery and allocation of header/non-product adjustments | Tax question asked; awaiting answer. Header allocation evidence remains to be adapted | The contract accepts explicit included/excluded/unclassified adjustments; no global tax rule or residual header allocation is invented |
+| Allocation where invoices identify only a PO line | User confirmed 2026-11-01: keep each receipt's own invoice cost | Use explicit receipt coverage; never introduce PO-line averaging. The database allocation adapter/workflow remains to be implemented. New correction application must reject ambiguous multi-invoice scopes rather than activate legacy averaging |
+| Tax inclusion/recovery and allocation of header/non-product adjustments | On 2026-11-01 the user requested an example. Explained 100 pieces / $1,000 goods / $100 tax: inventory is $1,100 ($11/piece) if included, or $1,000 ($10/piece) with $100 separately reclaimable; the $1,100 bill/payment is unchanged. No treatment selected yet. Header allocation remains to be adapted | The contract accepts explicit included/excluded/unclassified adjustments; no global tax rule or residual header allocation is invented |
 | Known total with unknown product/packaging split | S1 contract implemented; stored compatibility still required in S2 | Preserve the full known amount once and keep the unknown breakdown explicit |
 | Foreign currency | Existing unsupported/review boundary retained | Do not activate guessed FX conversions; broader currency support needs its own approved rule/scope |
 | Ordinary order cost basis versus recognized COGS | Local trace documented; external recognition is not proven | Picking writes order basis; ordinary recosting/reporting includes that basis. Repaired history has an explicit verified-sale policy. S2/S3 must prove recognition before changing its behavior |
@@ -181,7 +182,8 @@ Add exact identifiers as work exists. A proposed slice is not an existing PR or 
 | --- | --- | --- | --- | --- | --- |
 | Plan and audit | This tracker, baseline audit and synthetic characterization evidence | `3cf9b7102043eb14386f69ffe70b8590951d7169` | Documentation links and synthetic evidence checks | Not run for implementation | No runtime change |
 | Contract foundation | S1 contracts, economic identity, source rules and compatibility tests | [Merged #1964](https://github.com/cardshellz/Echelon/pull/1964), merge `80f5353b99a8500d78ac2687e7a736d0dbcc78e8`; head `691ae3c87a7ca36ea7c17dfc9e652c00f96c7d9b` | 480 tests / 16 files and production/server-test TypeScript passed on main-integrated code `c157e98f7` | Final head read: 49 successful, 2 skipped, 1 cancelled browser shard and its failed aggregate. Cancellation cause was not established; do not call this fully green | Deployment reported by user; independent release/live acceptance not recorded |
-| Source compatibility | First S2 integration and F5: original revisions/approvals survive settlement and unused-quote changes across shared read/write owners | [#1967](https://github.com/cardshellz/Echelon/pull/1967); implementation `a38ee3072511aaf749231c332a22eba3f125cd24`; main-integrated code `f4e0c6dd821eef6bf573bc53a74486bc2dbde208`; subsequent documentation-only changes preserve that tested runtime | Main-integrated code: 608 unit/reader tests / 21 files, 259 real-owner PostgreSQL tests, 456 guards and production/server-test TypeScript all passed. Six SQL cases are new; the added closed-health regression remains active | [Checks](https://github.com/cardshellz/Echelon/pull/1967/checks) running; complete final-head results pending. Initial head had 4 successful checks and no failures at the recorded read | Not deployed; no live data changed |
+| Source compatibility | First S2 integration and F5: original revisions/approvals survive settlement and unused-quote changes across shared read/write owners | [Merged #1967](https://github.com/cardshellz/Echelon/pull/1967), merge `2ea5a8d2cabe65ecfa0436f583a6eee7ad351278`; final head `b2d57e538f705698d3752d7ff55ea3ad8f662621` | Main-integrated runtime: 608 unit/reader tests / 21 files, 259 real-owner PostgreSQL tests, 456 guards and production/server-test TypeScript passed | Final head verified: 51 successful, 2 skipped, no failing checks | User reports deployment; independent release ancestry/process/live acceptance not recorded |
+| Approved invoice corrections | COST-03 and correction portion of COST-08: real document/cost preview, mandatory impact binding, optional same-approval supplier evidence, atomic postings/history, safe legacy/retry behavior | `codex/purchase-cost-approved-corrections`, based on `2ea5a8d2c`; new PR/head pending publication | 639 unit/reader tests / 22 files, 278 receipt/AP/freight SQL cases (including 19 new HTTP cases), 97 existing correction SQL cases, 52 desktop/mobile browser cases, 456 guards, production/server/client-test TypeScript and production build passed | Not published yet | No deployment or live writes |
 | Commands and downstream application | S2-S3 owning workflows, approvals, inheritance and safe recovery | Not created | Not run | Not run | Not deployed |
 | Shared consumers and complete acceptance | S4-S5 connected readers, actions and full acceptance | Not created | Not run | Not run | Not deployed |
 | Rollout and historical review | S6 manifest, read-only comparisons and specifically approved corrections | Not created | Not run | Not run | Not deployed |
@@ -260,11 +262,22 @@ Never point the integration fixture at a live database. Final counts/head and ho
 
 ## Current handoff
 
-**Completed:** S1 foundation merged in #1964; the user reports deployment. The first S2 candidate connects the supported semantic compatibility proof to actual source recording/shared status and shipment preparation, preserving original recorded authority across AP payment progress and unused PO quote edits. Real AP payment, source/app/history preservation, concurrent retry and genuine-exception cases pass in the disposable SQL fixture. The additional unused landed-snapshot quote dependency found by closed-shipment health tests is fixed in the selected-input proof. Final local unit/reader, SQL, guard and both TypeScript checks passed again on main-integrated code `f4e0c6dd8`. #1967 is open and attached; final hosted results remain pending.
+**Completed:** #1964 and #1967 are merged and the user reports both deployments. #1967's final head has 51 successful and 2 skipped checks. The new correction slice connects approved invoice quantity/price/amount/component edits to the existing supplier source/application/status owners, with a real rolled-back cost preview and mandatory new approval fingerprint. Legacy committed receipts replay without applying new costs. Known supplier components are retained for quantity-only edits; changed money without new evidence leaves a durable visible supplier review. Real invoice/matching/cost/audit writes share one transaction.
 
-**Implementation state:** the applicable S1 receipt-allocation/tax rules remain open. COST-05 has a cross-cutting runtime candidate; COST-01/02/07 retain foundations rather than activated replacement pricing. COST-03/04/06/08/09 and the remaining acceptance gates are open. No migration, stored-source rehash, historical correction or live stock/financial mutation has occurred. The new bridge changes equivalence/currentness in the existing owners; it does not create a new posting engine or activate unsupported costs.
+**Implementation state:** COST-03 and the correction portion of COST-08 have a bounded candidate. Whole-stage completion is not claimed. Each receipt keeping its own invoice cost is now confirmed policy; explicit receipt allocations/partial coverage still need the S2 adapter. New confirmed multi-invoice corrections cannot use the legacy average. Mixed product/freight bills are explicitly guarded because the existing shipment billing owner cannot safely accept that combined authority. COST-04/06/09, remaining COST-01/02/07/08 work, and all broader acceptance gates remain open. No migration, source rehash, historical cleanup or live financial/stock mutation occurred.
 
 **New code entry points:**
+
+- `invoice-quantity-correction.service.ts`: common measured execution, rolled-back preview, current authority and transactional impact binding.
+- `invoice-correction-costs.service.ts`: existing supplier cost owner, current shared status/tasks and target-line impact scope.
+- `invoice-correction-cost-values.ts`: exact original/remaining lot value via the existing valuation owner.
+- `invoice-quantity-correction.repository.ts`: separate persistence and final audit/history, complete billing/freight-link evidence, review version 4.
+- `shared/procurement/invoice-correction-cost-impact.ts`: validated measured result; no generated preview IDs in economic identity.
+- `InvoiceCorrectionSupplierAmounts.tsx`, `InvoiceCorrectionCostImpact.tsx`, `invoice-correction-review.ts`: same-modal optional amounts, before/after/posting result and strict saved-intent recovery.
+- `invoice-correction-costs.cases.ts`: actual public HTTP/IAM/AP/command/cost/status/audit acceptance, concurrency, rollback and compatibility cases.
+- [Stage 2 correction trace](procurement-costing-stage-2-invoice-corrections.md): exact owner sequence, examples, mutation inventory and unsupported scopes.
+
+Earlier foundation/compatibility entry points:
 
 - `server/modules/procurement/domain/cost-source-compatibility.ts`: validate the original immutable proposal before reuse.
 - `server/modules/procurement/domain/purchase-cost-source-identity.ts`: fully confirmed supplier equivalence through the S1 money model.
@@ -279,11 +292,11 @@ Never point the integration fixture at a live database. Final counts/head and ho
 - `server/modules/procurement/__tests__/unit/purchase-cost-authority*.ts` and `server/modules/inventory/__tests__/unit/cost-fingerprint.test.ts`: synthetic target and boundary/compatibility tests.
 - [Stage 1 contract document](procurement-costing-stage-1-contract.md): concrete ownership map, compatibility steps, recognition trace and remaining evidence gaps.
 
-**Next action:** complete hosted CI/review for #1967 on its exact review head; the local tests above cover its runtime code, and the validation follow-up changes only documentation. Incorporate the pending policy answers, then implement the broader S2 source/persistence adapters and approved financial mutation/preview binding. The unknown-breakdown model cannot be stuffed into legacy product/packaging rows by assuming zero packaging. Validate header/credit/return allocation and the verified-sale reporting boundary before activating those paths.
+**Next action:** publish the new correction PR and verify its final-head hosted checks. Then build the explicit invoice-to-receipt allocation adapter using the confirmed receipt-specific rule; integrate partial/combined sources, followed by ordinary AP approval and the combined invoice/freight correction owner. Keep those changes under the same source/revision/application owners. The unknown-breakdown model cannot be stuffed into legacy product/packaging rows by assuming zero packaging.
 
-**Remaining checks:** hosted validation for the new compatibility candidate; broader S2 mutation/source adapter acceptance; S3 inheritance/verified-sale acceptance; S4 complete monetary consumers and connected UI; S5/S6 complete candidate and release/live proof. A regression suite for the existing owners is not acceptance of unimplemented financial adapters or UI activation.
+**Remaining checks:** final correction candidate checks and new PR/hosted results; broader S2 mutation/source adapter acceptance; S3 inheritance/verified-sale acceptance; S4 complete monetary consumers and connected UI; S5/S6 complete candidate and release/live proof. Existing regression passes do not establish acceptance of unimplemented adapters. The disposable PostgreSQL 17 cluster on 55441 must be stopped after the final local SQL checks.
 
-**Open dependencies:** the user has not yet answered the S1 receipt-allocation and supplier-tax questions. External accounting recognition and historical production exposure remain unproven. Do not assign stock destinations, tax inclusion or accounting effects from a guess.
+**Open dependencies:** supplier-tax treatment remains unanswered after the requested numerical explanation. Receipt-specific invoice cost is confirmed, but the allocation adapter/UI does not yet exist. External accounting recognition and historical production exposure remain unproven. Do not choose a stock destination, tax treatment or recognized expense from a guess.
 
 ## Change log
 
@@ -295,3 +308,5 @@ Never point the integration fixture at a live database. Final counts/head and ho
 | 2026-10-30 | Verified #1964 merged at `80f5353b9`; recorded user-reported deployment and continued S2 on `codex/purchase-cost-source-compatibility` | Historical cleanup remains separate. Final S1 head had a cancelled browser shard/failed aggregate; cancellation cause not proven |
 | 2026-10-30 | Added source-record/status compatibility, actual AP payment regression coverage and method-aware unused quote proof; retained unknown raw JSON evidence | 558 focused + 50 reader/cache + 259 real-owner SQL + 455 guard tests and both TypeScript checks passed. The expanded closed-health case exposed and now guards the extra landed-source dependency; publishing/hosted CI remain |
 | 2026-10-30 | Incorporated current main #1965 at `f4e0c6dd8`, opened/attached #1967 and repeated validation | No costing implementation file changed upstream. All 608 unit/reader, 259 SQL and 456 guard tests passed, as did both TypeScript checks. Hosted CI is running; no deployment/live writes |
+| 2026-11-01 | Verified #1967 merge `2ea5a8d2c`, final-head hosted results (51 successful / 2 skipped) and recorded reported deployment; started approved correction integration from pinned main | No upstream drift at the prepublication fetch. Each receipt keeping its own invoice cost is confirmed; tax example explained without selecting a treatment |
+| 2026-11-01 | Added measured same-approval invoice/supplier-cost correction, exact remaining-stock values, shared human tasks, strict impact binding and legacy/retry protections | 639 unit/reader, 278 receipt/AP/freight SQL (19 new HTTP cases), 97 existing correction SQL, 52 browser and 456 guard cases passed; production/server/client-test TypeScript and production build passed. Full SQL started 08:32:03 local and completed in 322.91s; publication/hosted CI remain pending |

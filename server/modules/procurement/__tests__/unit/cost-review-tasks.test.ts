@@ -16,6 +16,12 @@ function line(): PurchaseLineCostStatus {
 function shipment(): CostReviewShipmentLine { return { lineId: 11, purchaseOrderLineId: 21, shipmentId: 1, shipmentNumber: "TEST-SHIPMENT", sku: "SAME-SKU", posted: false, amountCents: 5000, currency: "USD", recordedAt: null, issues: [] }; }
 
 describe("shared human-readable cost tasks", () => {
+  it.each(["COST_ROOT_REVIEW_REQUIRED", "COST_HISTORICAL_BASIS_MISSING", "COST_SOURCE_INTERVAL_REVIEW"])("explains %s as a receipt check in the shared task model", code => {
+    const current = line();
+    current.components.forEach(component => { component.sourceEvidence = "confirmed"; component.issues = [{ code, message: "Stored low-level receipt evidence" }]; });
+    expect(supplierCostReviewTasks(current)).toEqual([expect.objectContaining({ title: "Check the original receipt", action: "review_history",
+      explanation: expect.stringContaining("original receipt quantity and cost link") })]);
+  });
   it("reports an actual quantity difference without claiming packaging is missing", () => {
     const current = line(); current.reviewFacts = { ...current.reviewFacts!, invoicedPieces: 50, quantityMatches: false };
     expect(supplierCostReviewTasks(current)).toEqual([expect.objectContaining({ action: "invoice_quantity", title: "Invoice quantity differs", explanation: expect.stringContaining("Invoice: 50 pieces. Received: 100 pieces.") })]);

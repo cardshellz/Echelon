@@ -35,10 +35,9 @@ export function invoiceCostReviewAmounts(form: InvoiceCostReviewForm) {
   };
 }
 
-export function invoiceCostReviewFromForm(form: InvoiceCostReviewForm, expectedVersion: string, lineTotalCents: number): InvoiceCostReview {
+export function invoiceCostComponentsFromForm(form: InvoiceCostReviewForm, lineTotalCents: number): Pick<InvoiceCostReview, "packagingTreatment" | "productMills" | "packagingMills" | "adjustmentMills"> {
   if (!Number.isSafeInteger(lineTotalCents)) throw new Error("The recorded invoice total cannot be reviewed safely.");
   if (!form.packagingTreatment) throw new Error("Select the packaging treatment from the supplier evidence.");
-  if (!form.reason.trim()) throw new Error("Enter a reason or reference for this cost review.");
   const amounts = invoiceCostReviewAmounts(form);
   if (form.packagingTreatment === "included_in_product" && amounts.packagingMills !== 0) {
     throw new Error("Packaging included in product must have a separate packaging amount of zero.");
@@ -46,5 +45,11 @@ export function invoiceCostReviewFromForm(form: InvoiceCostReviewForm, expectedV
   if (BigInt(amounts.productMills) + BigInt(amounts.packagingMills) + BigInt(amounts.adjustmentMills) !== BigInt(lineTotalCents) * BigInt(100)) {
     throw new Error("Product, packaging and adjustments must equal the recorded invoice line total exactly.");
   }
-  return invoiceCostReviewSchema.parse({ expectedVersion, packagingTreatment: form.packagingTreatment, ...amounts, reason: form.reason.trim() });
+  return { packagingTreatment: form.packagingTreatment, ...amounts };
+}
+
+export function invoiceCostReviewFromForm(form: InvoiceCostReviewForm, expectedVersion: string, lineTotalCents: number): InvoiceCostReview {
+  const amounts = invoiceCostComponentsFromForm(form, lineTotalCents);
+  if (!form.reason.trim()) throw new Error("Enter a reason or reference for this cost review.");
+  return invoiceCostReviewSchema.parse({ expectedVersion, ...amounts, reason: form.reason.trim() });
 }
