@@ -15,7 +15,7 @@ import { useToast } from "@/hooks/use-toast";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { invoiceLineDraft } from "./invoice-line-editor";
 import { exactMoneyAsInput } from "@/lib/exact-money-input";
-import { financialCommandFetchJson, FinancialCommandRequestError, shouldRetryFinancialCommand, financialCommandRetryDelay } from "@/lib/financial-command";
+import { financialCommandFetchJson, FinancialCommandRequestError, financialCommandNeedsRecovery, shouldRetryFinancialCommand, financialCommandRetryDelay } from "@/lib/financial-command";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -128,8 +128,7 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
       onSaved();
     },
     onError: (failure, intent) => {
-      const ambiguous = failure instanceof FinancialCommandRequestError && (failure.ambiguous || failure.retryable || (failure.status ?? 0) >= 500 || [401, 403].includes(failure.status ?? 0)
-        || ["FINANCIAL_COMMAND_CONTRACT_CHANGED", "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED"].includes(failure.code ?? ""));
+      const ambiguous = financialCommandNeedsRecovery(failure);
       if (!ambiguous) { try { sessionStorage.removeItem(storageKey); } catch { setError("The browser could not clear the rejected confirmation. Reload before making another correction."); } }
       active.current = ambiguous ? intent : null; setUnresolved(ambiguous ? intent : null); setBusy(false);
       if (failure instanceof FinancialCommandRequestError && [403, 409].includes(failure.status ?? 0)) setStale(true);

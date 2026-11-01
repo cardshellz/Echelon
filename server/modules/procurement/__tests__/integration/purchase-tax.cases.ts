@@ -340,6 +340,24 @@ export function registerPurchaseTaxCases(fixture: {
       expect((await query("SELECT count(*)::int AS count FROM public.audit_events WHERE action='procurement.tax.approved' AND context->>'commandKey'=$1", [key])).rows[0].count).toBe(1);
     });
 
+    it("retains a terminal authority rejection and requires a new reviewed key after authority is restored", async () => {
+      await setup(); await fixture.receive(); await applyShipment();
+      const { request } = await review(typeChange("recoverable")), key = randomUUID(), before = await state();
+      const roles = (await query(`SELECT role.id FROM identity.auth_roles role JOIN identity.auth_user_roles assignment ON assignment.role_id=role.id
+        WHERE assignment.user_id=$1 AND role.is_system=1`, [actorId])).rows;
+      expect(roles.length).toBeGreaterThan(0);
+      for (const role of roles) await query("UPDATE identity.auth_roles SET is_system=0 WHERE id=$1", [role.id]);
+      const rejected = await post("", request, key);
+      expect(rejected).toMatchObject({ status: 403, replayed: "false", body: { code: "INVOICE_QUANTITY_ADMIN_REQUIRED" } });
+      for (const role of roles) await query("UPDATE identity.auth_roles SET is_system=1 WHERE id=$1", [role.id]);
+      expect(await post("", request, key)).toMatchObject({ status: 403, replayed: "true", body: rejected.body });
+      expect(await state()).toEqual(before);
+      const fresh = await review(typeChange("recoverable"));
+      expect((await post("", fresh.request, randomUUID())).status).toBe(200);
+      expect(await lotTotals()).toMatchObject([{ product_total_cost_mills: "1000000", packaging_total_cost_mills: "100000" }]);
+      expect((await query("SELECT count(*)::int AS count FROM public.audit_events WHERE action='procurement.tax.approved'")).rows[0].count).toBe(1);
+    });
+
     it("records mixed invoice tax treatments once with exact billed conservation", async () => {
       await setup(); await fixture.receive(); await applyShipment();
       await query("UPDATE procurement.vendor_invoices SET status='approved',invoiced_amount_cents=13000,balance_cents=13000 WHERE id=71; UPDATE procurement.vendor_invoice_lines SET qty_invoiced=100,line_total_cents=13000,cost_component_evidence=NULL WHERE id=72");

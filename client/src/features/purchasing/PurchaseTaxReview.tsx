@@ -6,7 +6,7 @@ import { purchaseTaxChangeSchema, purchaseTaxContextSchema, purchaseTaxApprovalR
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { readIntegerMills } from "@shared/money-read";
 import { exactMoneyAsInput, parseExactMoneyInput } from "@/lib/exact-money-input";
-import { financialCommandFetchJson, FinancialCommandRequestError, shouldRetryFinancialCommand, financialCommandRetryDelay } from "@/lib/financial-command";
+import { financialCommandFetchJson, FinancialCommandRequestError, financialCommandNeedsRecovery, shouldRetryFinancialCommand, financialCommandRetryDelay } from "@/lib/financial-command";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
@@ -116,7 +116,7 @@ function TaxEditor({ loaded, storageKey, setBusy, close, reload }: { loaded: Pur
   }, retry: shouldRetryFinancialCommand, retryDelay: financialCommandRetryDelay, onMutate: () => setBusy(true),
   onSuccess: result => { setSaved(result); setPending(null); active.current = null; try { sessionStorage.removeItem(storageKey); } catch { setError("Saved. Reopening will safely verify this same approval if the browser retains it."); } },
   onError: failure => {
-    const uncertain = !(failure instanceof FinancialCommandRequestError) || failure.ambiguous || failure.retryable || [401, 403].includes(failure.status ?? 0) || (failure.status ?? 0) >= 500;
+    const uncertain = financialCommandNeedsRecovery(failure);
     if (!uncertain) { try { sessionStorage.removeItem(storageKey); } catch { setError("Reload before changing this approval."); } setPending(null); active.current = null; setStale(true); }
   }, onSettled: () => { setBusy(false); void invalidatePurchaseCosts(queryClient); } });
   const locked = preview.isPending || approval.isPending || pending !== null || saved !== null || stale || recovery.current.error !== null;

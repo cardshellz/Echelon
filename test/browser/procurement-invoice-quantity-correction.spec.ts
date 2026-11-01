@@ -161,6 +161,23 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
 const approval = (page: Page) => page.getByRole("checkbox", { name: "I reviewed these invoice changes." });
 const impactRow = (page: Page, name: string) => page.getByRole("table", { name: "Invoice changes" }).getByRole("row").filter({ has: page.getByRole("rowheader", { name, exact: true }) });
 
+for (const recorded of [false, true]) {
+  test(`invoice permission rejection ${recorded ? "with a stored receipt allows fresh review" : "without a receipt keeps the original confirmation"}`, async ({ page }) => {
+    const proof = await setup(page);
+    await page.route("**/api/vendor-invoice-lines/72/quantity-correction", route => route.request().method() !== "POST" ? route.fallback()
+      : route.fulfill({ status: 403, ...(recorded ? { headers: { "Idempotency-Replayed": "false" } } : {}),
+        json: { code: "INVOICE_QUANTITY_ADMIN_REQUIRED", error: "Current administrator approval is required" } }));
+    await approval(page).check();
+    await page.getByRole("button", { name: "Approve & save invoice", exact: true }).click();
+    const retry = page.getByRole("button", { name: "Retry saved confirmation", exact: true });
+    const reload = page.getByRole("button", { name: "Reload invoice and review again", exact: true });
+    if (recorded) { await expect(reload).toBeVisible(); await expect(retry).toHaveCount(0); }
+    else { await expect(retry).toBeVisible(); await expect(reload).toHaveCount(0); }
+    expect(proof.commands).toEqual([]);
+    expect(proof.failures).toEqual([]);
+  });
+}
+
 test("prefills the correction and clearly shows quantity and financial impact before approval", async ({ page }, testInfo) => {
   const proof = await setup(page, { skipInitialReview: true });
   await expect(page.getByLabel("Invoice quantity (pieces)")).toHaveValue("25000");

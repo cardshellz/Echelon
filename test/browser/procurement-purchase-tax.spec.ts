@@ -5,7 +5,7 @@ import { purchaseTaxSettingsChanges } from "../../shared/procurement/purchase-ta
 
 const sourceVersion = "a".repeat(64), previewVersion = "b".repeat(64);
 const type = { id: 1, code: "VAT", name: "Supplier VAT", treatment: "inventory", revision: 1 };
-async function setup(page: Page, options: { target?: PurchaseTaxTarget; canApprove?: boolean; stale?: boolean; loseResponse?: boolean; create?: boolean } = {}) {
+async function setup(page: Page, options: { target?: PurchaseTaxTarget; canApprove?: boolean; stale?: boolean; loseResponse?: boolean; create?: boolean; denial?: "terminal" | "middleware" } = {}) {
   const failures = await installFixtures(page), writes: { key: string | undefined; body: unknown }[] = [];
   const target = options.target ?? { kind: "tax_type", id: options.create ? null : 1 };
   const components = { contractVersion: 1, packagingTreatment: "separate", productMills: 1100000, packagingMills: 100000, adjustmentMills: 0, source: "operator_review" };
@@ -18,7 +18,7 @@ async function setup(page: Page, options: { target?: PurchaseTaxTarget; canAppro
   const context = purchaseTaxContextSchema.parse({ target, sourceVersion, canApprove: options.canApprove !== false, types: options.create ? [] : [type, { ...type, id: 2, code: "RECOVERABLE", name: "Recoverable VAT", treatment: "recoverable" }], current,
     documents: target.kind === "tax_type" && target.id === null ? [] : [document], lines: [{ id: 18, label: "Test goods", taxMills: 0, taxTypeId: null }],
     invoice: target.kind === "invoice_line" ? { totalCents: 12000, currency: "USD", taxes: [], components } : null, approvals: [] });
-  let measured: PurchaseTaxPreview | undefined, lost = options.loseResponse ?? false;
+  let measured: PurchaseTaxPreview | undefined, lost = options.loseResponse ?? false, denial = options.denial;
   await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "tax-admin", username: "tax-admin", role: "admin" }, permissions: ["purchasing:view", "purchasing:approve", "settings:edit"], roles: ["admin"] } }));
   await page.route("**/api/settings/procurement", route => route.fulfill({ json: { requireApproval: false, autoSendOnApprove: false, requireAcknowledgeBeforeReceive: false, hideIncotermsDomestic: false, enableShipmentTracking: true, autoPutawayLocation: false, autoCloseOnReconcile: false, oneClickReceiveStart: false, useNewPoEditor: true, useNewReorderCockpit: false, revision: 1 } }));
   await page.route("**/api/purchasing/tax-types", route => route.fulfill({ json: options.create ? [] : [type] }));
@@ -34,6 +34,9 @@ async function setup(page: Page, options: { target?: PurchaseTaxTarget; canAppro
   });
   await page.route("**/api/purchasing/tax-changes", route => {
     writes.push({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() });
+    if (denial) return route.fulfill({ status: 403, ...(denial === "terminal" ? { headers: { "Idempotency-Replayed": "false" } } : {}), json: denial === "terminal"
+      ? { code: "INVOICE_QUANTITY_ADMIN_REQUIRED", error: "An Administrator with purchasing approval permission must confirm this correction." }
+      : { error: "Permission required" } });
     if (lost) return route.abort("failed");
     return route.fulfill({ json: { auditEventId: 421, preview: measured } });
   });
@@ -49,7 +52,7 @@ async function setup(page: Page, options: { target?: PurchaseTaxTarget; canAppro
     await page.goto("/shipments/42?tab=costs"); await page.getByRole("button", { name: "Tax treatment", exact: true }).filter({ visible: true }).click();
   }
   const dialog = page.getByRole("dialog"); await expect(dialog).toBeVisible();
-  return { dialog, failures, writes, release: () => { lost = false; } };
+  return { dialog, failures, writes, release: () => { lost = false; denial = undefined; } };
 }
 async function approve(page: Page) {
   const dialog = page.getByRole("dialog"); await dialog.getByLabel("Reason / supporting reference").fill("Supplier tax eligibility and amounts verified");
@@ -100,6 +103,39 @@ test("read-only users cannot approve tax changes", async ({ page }) => {
   const { dialog, writes } = await setup(page, { canApprove: false });
   await expect(dialog.getByRole("button", { name: "Review changes", exact: true })).toBeDisabled();
   await expect(dialog).toContainText("Administrator"); expect(writes).toEqual([]);
+});
+
+test("a terminal admin rejection allows a fresh reviewed approval", async ({ page }) => {
+  const proof = await setup(page, { denial: "terminal" }), dialog = proof.dialog;
+  await dialog.getByLabel("How this tax is recorded", { exact: true }).selectOption("recoverable");
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  await approve(page);
+  await expect(dialog.getByRole("button", { name: "Reload and review again", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Retry saved approval", exact: true })).toHaveCount(0);
+  proof.release();
+  await dialog.getByRole("button", { name: "Reload and review again", exact: true }).click();
+  await dialog.getByLabel("How this tax is recorded", { exact: true }).selectOption("recoverable");
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  await approve(page);
+  await expect(dialog.getByRole("status")).toContainText("Tax change approved and saved.");
+  expect(proof.writes).toHaveLength(2);
+  expect(proof.writes[1].key).not.toBe(proof.writes[0].key);
+  expect(proof.failures).toEqual([]);
+});
+
+test("a permission gate retains the original approval key until its outcome can be recovered", async ({ page }) => {
+  const proof = await setup(page, { denial: "middleware" }), dialog = proof.dialog;
+  await dialog.getByLabel("How this tax is recorded", { exact: true }).selectOption("recoverable");
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  await approve(page);
+  await expect(dialog.getByRole("button", { name: "Retry saved approval", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Reload and review again", exact: true })).toHaveCount(0);
+  proof.release();
+  await dialog.getByRole("button", { name: "Retry saved approval", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText("Tax change approved and saved.");
+  expect(proof.writes).toHaveLength(2);
+  expect(proof.writes[1]).toEqual(proof.writes[0]);
+  expect(proof.failures).toEqual([]);
 });
 test("stale stock or tax evidence requires a fresh preview", async ({ page }) => {
   const { dialog, writes } = await setup(page, { stale: true }); await dialog.getByLabel("How this tax is recorded", { exact: true }).selectOption("recoverable");
