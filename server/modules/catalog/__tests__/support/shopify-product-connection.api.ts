@@ -40,7 +40,20 @@ export function createProductConnectionApi(firstProductId = 900) {
     let data: Record<string, unknown>;
     if (operation === "EchelonConnectionScopes") {
       data = { shop: { myshopifyDomain: shopDomain, currencyCode: shopDomain === "second-store.myshopify.com" ? "CAD" : "USD" },
-        currentAppInstallation: { accessScopes: ["read_products", "write_products", "read_publications", "write_publications"].map(handle => ({ handle })) } };
+        currentAppInstallation: { accessScopes: ["read_products", "write_products", "write_inventory", "read_publications", "write_publications"].map(handle => ({ handle })) } };
+    } else if (operation === "EchelonConnectionSkuRead" || operation === "EchelonConnectionSkuFill") {
+      const product = [...products.entries()].find(([key, product]) => key.startsWith(`${shopDomain}:`)
+        && product.variants.some(variant => variant.inventoryItem.id === variables.id))?.[1];
+      const variant = product?.variants.find(variant => variant.inventoryItem.id === variables.id);
+      if (operation === "EchelonConnectionSkuRead") {
+        data = { inventoryItem: variant && product ? { id: variant.inventoryItem.id, sku: variant.sku,
+          variant: { id: variant.id, product: { id: product.id, status: product.status } } } : null };
+      } else {
+        if (!variant) throw new Error("Missing inventory item");
+        const input = variables.input as { sku: string };
+        variant.sku = input.sku;
+        data = { inventoryItemUpdate: { inventoryItem: { id: variant.inventoryItem.id, sku: variant.sku }, userErrors: [] } };
+      }
     } else if (operation === "EchelonConnectionPublications") {
       data = { publications: { nodes: [{ id: "gid://shopify/Publication/777", name: "Online Store" }], pageInfo: { hasNextPage: false } } };
     } else if (operation === "EchelonConnectionSearch") {

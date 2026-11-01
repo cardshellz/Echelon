@@ -7,7 +7,7 @@ import { registerShopifyProductConnectionRoutes } from "../../shopify-product-co
 import { CONNECTION_COMMAND_KEY } from "../support/shopify-product-connection.fixture";
 
 const mocks = vi.hoisted(() => ({ context: vi.fn(), search: vi.fn(), preview: vi.fn(), submit: vi.fn(), status: vi.fn(),
-  grants: new Set(["inventory:view", "inventory:edit", "channels:view", "channels:edit"]), authenticated: true }));
+  grants: new Set(["inventory:view", "inventory:edit", "channels:view", "channels:edit", "inventory_planning:activate", "inventory_planning:view"]), authenticated: true }));
 vi.mock("../../../../services/shopify-product-connection", () => ({ createDefaultShopifyProductConnectionService: () => mocks }));
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) =>
   (req: Request, res: Response, next: NextFunction) => {
@@ -23,7 +23,7 @@ describe("reviewed Shopify product command HTTP boundary", () => {
   const command = { ...intent, productId: 41, channelId: 7, mode: "link", state: "pending", remoteProductId: null,
     lastErrorCode: null, lastErrorMessage: null, retryable: true, completedAt: null };
   beforeEach(async () => {
-    vi.clearAllMocks(); mocks.authenticated = true; mocks.grants = new Set(["inventory:view", "inventory:edit", "channels:view", "channels:edit"]);
+    vi.clearAllMocks(); mocks.authenticated = true; mocks.grants = new Set(["inventory:view", "inventory:edit", "channels:view", "channels:edit", "inventory_planning:activate", "inventory_planning:view"]);
     const app = express(); app.use(express.json()); registerShopifyProductConnectionRoutes(app);
     server = http.createServer(app); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/products/41/shopify-connection`;
@@ -37,6 +37,12 @@ describe("reviewed Shopify product command HTTP boundary", () => {
     mocks.grants.delete("channels:edit"); expect((await post("execute", intent)).status).toBe(403);
     mocks.grants.add("channels:edit"); mocks.authenticated = false; expect((await post("preview", request)).status).toBe(401);
     expect(mocks.submit).not.toHaveBeenCalled(); expect(mocks.preview).not.toHaveBeenCalled();
+  });
+  it("requires inventory activation permission before reviewing or admitting a linking sync", async () => {
+    mocks.grants.delete("inventory_planning:activate");
+    expect((await post("preview", request)).status).toBe(403);
+    expect((await post("execute", intent)).status).toBe(403);
+    expect(mocks.preview).not.toHaveBeenCalled(); expect(mocks.submit).not.toHaveBeenCalled();
   });
   it("serves bounded read-only search and strips private fields", async () => {
     mocks.search.mockResolvedValue({ products: [{ id: "900", title: "Draft binder", status: "DRAFT", token: "private" }], nextCursor: "next", credentials: {} });

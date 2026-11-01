@@ -121,6 +121,8 @@ export interface ShopifyConnectionPreview {
 }
 
 export interface ShopifyProductConnectionCommand {
+  inventorySyncRequestId?: string | null;
+  inventorySyncRequestedBy?: string | null;
   commandKey: string;
   productId: number;
   channelId: number;
@@ -138,6 +140,8 @@ export interface ShopifyProductConnectionCommand {
 // Shared response validation also strips internal repository fields at the HTTP
 // boundary. Saved commands never expose leases, credentials or source snapshots.
 export const shopifyProductConnectionCommandSchema = z.object({
+  inventorySyncRequestId: z.string().uuid().nullable().optional(),
+  inventorySyncRequestedBy: z.string().min(1).nullable().optional(),
   commandKey: z.string().uuid(), productId: positiveId, channelId: positiveId,
   mode: z.enum(["create", "link"]),
   state: z.enum(["pending", "creating", "configuring", "mapping", "publishing", "complete", "review", "rejected"]),
