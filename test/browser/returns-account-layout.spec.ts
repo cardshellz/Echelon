@@ -16,6 +16,8 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
   recoverOptions?: boolean;
   heldOrder?: boolean;
   failRefreshOnce?: boolean;
+  cancellationFlow?: boolean;
+  loseCancellationReply?: boolean;
 } = {}) {
   const service = new CustomerReturnPreviewService();
   const { mode: _mode, scenarioId: _scenario, ...fields } = service.lookup({ scenarioId: "split_delivered", orderReference: "TEST-1001" });
@@ -52,6 +54,11 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     };
   });
   const calls: CustomerAccountRequest[] = [];
+  let cancellationPhase: "open" | "refunding" | "completed" = "open", cancellationRequest: string | null = null, cancellationPosts = 0, summaryReads = 0;
+  const cancellationResult = () => ({operationId:"40000000-0000-4000-8000-000000000001",requestKey:cancellationRequest,
+    omsOrderId:10,orderNumber:"#TEST-1001",currency:"USD",status:cancellationPhase === "completed" ? "completed" : "refunding",
+    refundCents:741,refundStatus:cancellationPhase === "completed" ? "completed" : "pending",
+    rewards:{fingerprint:"d".repeat(64),returnedPoints:"100.00",deductedEarnedPoints:"0.00",settled:cancellationPhase === "completed"},error:null});
   const errors: string[] = [];
   let reviewFailed = false, returnLookupFailed = false, submitCount = 0, actionReads = 0, refreshRequested = false, refreshFailed = false;
   let workflowKey: string | null = null;
@@ -71,10 +78,23 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       session: { authenticated: true, privateTesting: true, sessionKey: "a".repeat(43) },
       connection: { connectionId: 4, channelId: 36, shopDomain: "fixture.myshopify.com", name: "Synthetic", enabled: true, paymentWindowMinutes: 30 },
     } });
-    if (input.path === "/account/order-summaries") return route.fulfill({ json: {
-      orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10, currency: "USD", totalCents: 741, financialStatus: "Paid", cancelled: false, fulfillment }],
+    if (input.path === "/account/orders/10/cancellation/review") return route.fulfill({json:{connectionId:4,omsOrderId:10,orderNumber:"#TEST-1001",currency:"USD",
+      revision:"c".repeat(64),orderRevision:"a".repeat(64),refundCents:741,eligibility:{allowed:true,reasons:[]},
+      rewards:{fingerprint:"d".repeat(64),returnedPoints:"100.00",deductedEarnedPoints:"0.00",settled:false}}});
+    if (input.path === "/account/orders/10/cancellation") {
+      cancellationPosts++; cancellationRequest=(input.body as {requestKey:string}).requestKey;
+      expect(input.commandKey).toBe(cancellationRequest);cancellationPhase="refunding";
+      if(options.loseCancellationReply && cancellationPosts===1) return route.abort("failed");
+      return route.fulfill({json:cancellationResult()});
+    }
+    if (input.path === "/account/orders/10/cancellation/status") return route.fulfill({json:cancellationResult()});
+    if (input.path === "/account/order-summaries") { summaryReads++;return route.fulfill({ json: {
+      orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10, currency: "USD", totalCents: cancellationPhase === "open" ? 741 : 0,
+        financialStatus:cancellationPhase === "completed" ? "Refunded" : "Paid", cancelled:cancellationPhase !== "open", fulfillment,
+        ...(options.cancellationFlow ? {progress:{unavailable:[],delivery:null,packages:[],returns:[],refunds:cancellationPhase === "open" ? [] : [
+          {key:"cancellation:40000000-0000-4000-8000-000000000001",reference:"Order cancellation",status:{code:cancellationPhase === "completed" ? "completed" : "processing",label:cancellationPhase === "completed" ? "Refund issued" : "Refund processing"}}]}} : {})}],
       unavailableExternalOrderIds: [], statusUnavailable: false,
-    } });
+    } }); }
     if (input.path === "/account/order-actions" || input.path === "/account/order-actions/refresh") {
       const refreshing = input.path.endsWith("/refresh");
       if (refreshing && options.failRefreshOnce && !refreshFailed) {
@@ -86,7 +106,9 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
         : !options.actionState && (!options.invalidateAfterFirstLookup || actionReads===1);
       return route.fulfill({ json: { orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10,
         state: ready ? "ready" : options.recoverOptions && refreshing ? "refreshing" : options.actionState ?? "refreshing", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
-        snapshot: ready ? { order: actionOrder, returnOrder: detail, orderFailed: false, returnFailed: false } : null }] } });
+        snapshot: ready ? { order: {...actionOrder,...(options.cancellationFlow && cancellationPhase !== "open" ? {
+          activeOperationId:"40000000-0000-4000-8000-000000000001",activeOperationKind:"cancel_order",activeOperationStatus:"refunding",
+          cancellation:{canReview:false,reasons:[],requestKey:cancellationRequest}} : {})}, returnOrder: detail, orderFailed: false, returnFailed: false } : null }] } });
     }
     if (input.path === "/order-edits/orders/10") return route.fulfill({ json: {
       connectionId: 4, omsOrderId: 10, orderNumber: "#TEST-1001", customerName: "Synthetic customer", customerEmail: null, activeOperationId: null, revision: "fixture", currency: "USD",
@@ -143,7 +165,7 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
   await page.route("**/__return-account-layout", (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <style>body{margin:0;background:#f7f8fa;font-size:10px}h1,h2,h3{font:700 32px Impact,fantasy;text-transform:uppercase;margin:24px 0}h1{font-family:Impact,fantasy!important}button{font-family:Impact,fantasy}ol,ul{padding-left:32px}main{padding:24px}*{box-sizing:border-box}</style>
     <link rel="stylesheet" href="/return-layout-assets/csz-customer-account.css"></head><body><main data-csz-customer-account>
-    <h1>Your account</h1><div data-csz-account-tools-status></div><table><tbody><tr data-csz-account-order data-external-order-id="1001" data-order-reference="#TEST-1001" data-fulfillment="${options.heldOrder ? "unfulfilled" : "fulfilled"}" data-cancelled="false"><td>#TEST-1001</td><td data-csz-order-fulfillment-native>${fulfillment.label}</td><td data-csz-order-financial-native>Paid</td><td data-csz-order-total></td><td data-csz-order-panel-trigger>${options.heldOrder ? '<a data-csz-account-action="address" href="/account/addresses">Change address</a>' : ''}</td></tr></tbody></table>
+    <h1>Your account</h1><div data-csz-account-tools-status></div><table><tbody><tr data-csz-account-order data-external-order-id="1001" data-order-reference="#TEST-1001" data-fulfillment="${options.heldOrder ? "unfulfilled" : "fulfilled"}" data-cancelled="false"><td>#TEST-1001</td><td><dl class="csz-order-tracks"><div data-csz-order-order-track hidden><dt>Order</dt><dd>Cancelled</dd></div><div><dt>Payment</dt><dd><span data-csz-order-financial-native>Paid</span><span data-csz-order-financial-status></span></dd></div><div data-csz-order-delivery-track><dt>Delivery</dt><dd><span data-csz-order-fulfillment-native>${fulfillment.label}</span><span data-csz-order-fulfillment></span></dd></div><div data-csz-order-return-track hidden><dt>Return</dt><dd data-csz-order-return-status></dd></div></dl></td><td data-csz-order-total></td><td data-csz-order-panel-trigger>${options.heldOrder ? '<a data-csz-account-action="address" href="/account/addresses">Change address</a>' : ''}</td></tr></tbody></table>
     </main><div id="csz-customer-account-tools"></div><script type="application/json" id="csz-customer-account-config">${JSON.stringify({ themeId: "174740308127", customerId: "100", proxyPath: "/apps/echelon-returns", loginPath: "/account/login" })}</script><script src="/return-layout-assets/csz-customer-account.js"></script></body></html>` }));
   await page.goto("/__return-account-layout");
   await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
@@ -152,7 +174,8 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     await page.getByRole("button", { name: "Return items", exact: true }).click();
     await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
   }
-  return { calls, errors, submitCount: () => submitCount, actionReads: () => actionReads, completeWorkflow: () => { workflowReady = true; } };
+  return { calls, errors, submitCount: () => submitCount, actionReads: () => actionReads, completeWorkflow: () => { workflowReady = true; },
+    completeCancellation:()=>{cancellationPhase="completed";},summaryReads:()=>summaryReads,cancellationPosts:()=>cancellationPosts };
 }
 
 async function assertFrame(page: Page) {
@@ -179,6 +202,35 @@ async function pack(page: Page, quantity = "1") {
   await expect(page.getByRole("heading", { name: "How will you pack your return?" })).toBeVisible();
   await page.getByRole("combobox", { name: "Box size for box 1", exact: true }).selectOption({ index: 1 });
 }
+
+for(const lostReply of [false,true]) test(`account cancellation updates the list through refund settlement after closing the panel (lost reply=${lostReply})`,async({page},info)=>{
+  await page.clock.install({time:new Date()});
+  const f=await fixture(page,{openReturn:false,heldOrder:true,cancellationFlow:true,loseCancellationReply:lostReply});
+  await page.getByRole("button",{name:"Cancel order",exact:true}).click();
+  await page.getByRole("button",{name:"Confirm cancellation",exact:true}).click();
+  if(lostReply) await page.clock.fastForward(6_000);
+  await expect(page.getByRole("heading",{name:"Order cancelled",exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"Close order options",exact:true}).click();
+  const row=page.locator("[data-csz-account-order]");
+  await expect(row.locator("[data-csz-order-order-track]")).toBeVisible();
+  await expect(row.locator("[data-csz-order-delivery-track]")).toBeHidden();
+  await expect(row.locator("[data-csz-order-financial-status]")).toContainText("Refund processing");
+  await expect(row.locator("[data-csz-order-total]")).toContainText("$0.00");
+  f.completeCancellation();await page.clock.fastForward(6_000);
+  await expect(row.locator("[data-csz-order-financial-status]")).toContainText("Refunded");
+  await expect(row.locator("[data-csz-order-financial-status]")).not.toContainText("Refund processing");
+  const reads=f.summaryReads();await page.clock.fastForward(20_000);expect(f.summaryReads()).toBe(reads);
+  await page.getByRole("button",{name:"Manage order #TEST-1001",exact:true}).click();
+  const panel=page.getByRole("dialog");
+  await expect(panel.getByRole("definition").filter({hasText:/^Cancelled$/})).toHaveCount(1);
+  await expect(panel.getByRole("button",{name:"Edit order",exact:true})).toHaveCount(0);
+  await expect(panel.getByRole("button",{name:"Cancel order",exact:true})).toHaveCount(0);
+  await expect(panel.getByRole("heading",{name:"Delivery and returns",exact:true})).toHaveCount(0);
+  await page.screenshot({path:info.outputPath(`cancelled-refunded-${lostReply}.png`),fullPage:false});
+  expect(f.cancellationPosts()).toBe(1);
+  expect(f.calls.filter(call=>call.commandKey && call.path!=="/account/orders/10/cancellation")).toEqual([]);
+  expect(f.errors).toEqual([]);
+});
 
 test("compiled account returns use one frame, aligned controls and readable storefront-independent type", async ({ page }, info) => {
   const f = await fixture(page);

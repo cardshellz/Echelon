@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { ACCOUNT_SETTLEMENT_REFRESH_MS, needsCancellationSettlementRefresh } from "./account-settlement-refresh";
 import type { CustomerOrderActions } from "@shared/customer-account/order-actions";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
@@ -206,6 +207,7 @@ function CustomerAccount({
   const accountRequests = useRef<AbortController | null>(null);
   const actionGeneration = useRef(0);
   const requestedActionRefreshes = useRef(new Set<string>());
+  const settlementReadBusy = useRef(false);
 
   const loadActions = useCallback(async (signal?: AbortSignal, retry = false) => {
     if (!rows.length) return;
@@ -267,6 +269,7 @@ function CustomerAccount({
       if (!selected.length) return;
       setError(null);
       setTotals((previous) => {
+        if (selected.every(row => previous.get(row)?.status === "verified")) return previous;
         const next = new Map(previous);
         for (const row of selected)
           if (previous.get(row)?.status !== "verified")
@@ -344,6 +347,28 @@ function CustomerAccount({
     },
     [api, accessSurface],
   );
+
+  useEffect(() => {
+    if (!session) return;
+    const selected = rows.filter(row => {
+      const summary = totals.get(row);
+      return needsCancellationSettlementRefresh(summary?.status === "verified" ? summary.order : null, actions.get(row));
+    });
+    if (!selected.length) return;
+    const controller = new AbortController();
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const observe = async () => {
+      if (document.visibilityState === "visible" && !settlementReadBusy.current) {
+        settlementReadBusy.current = true;
+        try { await loadSummaries(selected, controller.signal); }
+        finally { settlementReadBusy.current = false; }
+      }
+      if (!stopped) timer = setTimeout(() => { void observe(); }, ACCOUNT_SETTLEMENT_REFRESH_MS);
+    };
+    timer = setTimeout(() => { void observe(); }, ACCOUNT_SETTLEMENT_REFRESH_MS);
+    return () => { stopped = true; controller.abort(); if (timer) clearTimeout(timer); };
+  }, [session, rows, totals, actions, loadSummaries]);
 
   const closePanel = useCallback(() => setManaged(null), []);
   const closeModal = () => {

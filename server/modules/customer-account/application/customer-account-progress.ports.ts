@@ -62,3 +62,6 @@ export interface CustomerAccountProgressReader {
     now: Date,
   ): Promise<ReadonlyMap<number, CustomerOrderProgress>>;
 }
+export interface CustomerAccountCancellationRefundReader {
+  read(scope: CustomerAccountProgressScope, now: Date): Promise<ReadonlyMap<number, CustomerOrderProgress["refunds"]>>;
+}

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const CUSTOMER_ORDER_PROGRESS_VERSION = "v2" as const;
+export const CANCELLATION_REFUND_PROGRESS_KEY_PREFIX = "cancellation:";
 const status = z
   .object({
     code: z
@@ -93,6 +94,12 @@ export const customerReturnProgressSchema = z
         message: "Received units exceed the authorized return.",
       });
   });
+export const customerRefundActivitySchema = z.object({
+  key: z.string().min(1).max(100),
+  reference: z.string().min(1).max(100),
+  status: customerReturnRefundStatusSchema,
+}).strict();
+export const customerRefundActivitiesSchema = z.array(customerRefundActivitySchema).max(200);
 export const customerOrderProgressSchema = z
   .object({
     unavailable: z
@@ -102,18 +109,7 @@ export const customerOrderProgressSchema = z
     delivery: customerDeliveryStatusSchema.nullable(),
     packages: z.array(customerDeliveryPackageSchema).max(200),
     returns: z.array(customerReturnProgressSchema).max(200),
-    refunds: z
-      .array(
-        z
-          .object({
-            key: z.string().min(1).max(100),
-            reference: z.string().min(1).max(100),
-            status: customerReturnRefundStatusSchema,
-          })
-          .strict(),
-      )
-      .max(200)
-      .default([]),
+    refunds: customerRefundActivitiesSchema.default([]),
   })
   .strict()
   .superRefine((value, context) => {

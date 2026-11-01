@@ -184,6 +184,16 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     }
   });
 
+  it("keeps cancelled/shipped held history in terminal buckets without changing records",async()=>{
+    const cancelled=await seed("cancelled",{onHold:1,priority:-1});
+    const shipped=await seed("shipped",{onHold:1,priority:-1});
+    const active=await seed("ready",{onHold:1,priority:-1});
+    const before=(await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows;
+    expect((await repository.page({bucket:"issues"})).orders.map(order=>order.id)).toEqual([active.id]);
+    expect((await repository.page({bucket:"cancelled"})).orders.map(order=>order.id)).toEqual([cancelled.id]);
+    expect((await repository.page({bucket:"shipped"})).orders.map(order=>order.id)).toEqual([shipped.id]);
+    expect((await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows).toEqual(before);
+  });
   it("matches every operational bucket including held/unknown statuses and scoped counts", async () => {
     const rows = [];
     for (const status of ["ready", "in_progress", "partially_shipped", "completed", "ready_to_ship", "exception", "on_hold", "shipped", "cancelled", "unknown", " READY "]) {

@@ -102,7 +102,13 @@ export function normalizeSearchTerm(value: unknown): string | undefined {
 }
 
 export function isWmsOrderOnHold(order: Pick<WmsOrderListOrder, "onHold" | "warehouseStatus">): boolean {
+  // Holds remain in history, but a terminal order is no longer paused work.
+  if (isWmsOrderTerminal(order)) return false;
   return order.onHold === true || Number(order.onHold ?? 0) === 1 || normalizeStatus(order.warehouseStatus) === "on_hold";
+}
+
+export function isWmsOrderTerminal(order: Pick<WmsOrderListOrder, "warehouseStatus">): boolean {
+  return ["cancelled", "shipped"].includes(normalizeStatus(order.warehouseStatus));
 }
 
 export function orderMatchesBucket(order: WmsOrderListOrder, bucket: WmsOrderBucket): boolean {

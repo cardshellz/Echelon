@@ -26,12 +26,14 @@ export function CustomerOrderCancellation({
   existingRequestKey,
   onBack,
   onDone,
+  onChanged,
 }: {
   api: CustomerAccountTransport;
   scope: CancellationRequestScope;
   existingRequestKey: string | null;
   onBack(): void;
   onDone(): void;
+  onChanged?(): void;
 }) {
   const [review, setReview] = useState<CustomerOrderCancellationReview | null>(
     null,
@@ -49,6 +51,9 @@ export function CustomerOrderCancellation({
   const revision = useRef(0);
   const mounted = useRef(true);
   const keepOrder = useRef<HTMLButtonElement>(null);
+  const changed = useRef(onChanged);
+  changed.current = onChanged;
+  const lastObservation = useRef<string | null>(null);
   const check = useCallback(
     (result: Cancellation, requestKey: string): Cancellation => {
       if (
@@ -66,6 +71,11 @@ export function CustomerOrderCancellation({
       setRecoveryRequestKey(result.requestKey);
       setUncertain(false);
       setError(null);
+      const observation = JSON.stringify([result.operationId, result.status, result.refundStatus, result.rewards.settled]);
+      if (lastObservation.current !== observation) {
+        lastObservation.current = observation;
+        changed.current?.();
+      }
       if (["completed", "not_submitted"].includes(result.status)) {
         try {
           clearCancellationRequest(
