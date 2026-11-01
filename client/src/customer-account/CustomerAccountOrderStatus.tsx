@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import type { CustomerOrderTotalsState } from "./CustomerAccountOrderTotals";
 import {
   returnProgressLabel,
-  refundActivityLabel,
+  customerPaymentPresentation,
   orderDeliveryLabel,
 } from "./customer-order-progress-presentation";
 import { knownCustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
@@ -76,6 +76,7 @@ export function CustomerAccountOrderStatus({
             ? knownCustomerOrderFulfillment(state.order.fulfillment)
             : undefined;
         const progress = state.status === "verified" && "progress" in state.order ? state.order.progress : undefined;
+        const payment = state.status === "verified" ? customerPaymentPresentation(state.order.financialStatus, progress) : null;
         const deliveryLabel = state.status === "verified"
           ? orderDeliveryLabel("cancelled" in state.order ? state.order.cancelled : row.dataset.cancelled === "true", fulfillment, progress, "Status unavailable", row.dataset.fulfillment) : null;
         const target = row.querySelector<HTMLElement>(
@@ -123,20 +124,10 @@ export function CustomerAccountOrderStatus({
                 ? [
                     createPortal(
                       <span>
-                        {state.order.financialStatus}
-                        {refundActivityLabel(
-                          state.order.financialStatus,
-                          "progress" in state.order
-                            ? state.order.progress
-                            : undefined,
-                        ) && (
+                        {payment?.label}
+                        {payment?.detail && (
                           <small className="csz-refund-activity">
-                            {refundActivityLabel(
-                              state.order.financialStatus,
-                              "progress" in state.order
-                                ? state.order.progress
-                                : undefined,
-                            )}
+                            {payment.detail}
                           </small>
                         )}
                       </span>,
