@@ -365,6 +365,38 @@ const configured =
       expect(f.mutations).toHaveLength(3);
     });
 
+    it("pauses a persistent published policy mismatch with an actionable normal Sync while retaining accepted writes", async () => {
+      const f = fixture();
+      const native = f.client.getPublishedListingContent!;
+      let visible = false;
+      f.client.getPublishedListingContent = vi.fn(async listingId => {
+        const current = await native(listingId);
+        return visible ? current : { ...current, policies: { ...current.policies, shipping: "old-policy-copy" } };
+      });
+      const saved = await f.service.enqueue(identity, "operator");
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        await f.service.processDue(1, saved.id);
+        const observed = await f.store.get(saved.id);
+        expect(observed).toMatchObject({ readFailureCount: attempt, readRetryPaused: attempt === 5,
+          state: "recovering", code: "EBAY_SYNC_READBACK_PENDING" });
+        expect(observed.providerRead).toBeUndefined();
+        advance();
+      }
+      const paused = (await f.service.list(identity.channelId)).find(row => row.id === saved.id)!;
+      expect(paused.issue).toMatchObject({ title: "eBay has not confirmed this update", retryable: true,
+        action: { kind: "retry_sync" } });
+      expect(paused.issue?.message).toContain("business policies");
+      await f.service.processDue(1, saved.id);
+      expect(f.mutations).toHaveLength(3);
+      visible = true;
+      const resumed = await f.service.enqueue(identity, "operator");
+      expect(resumed).toMatchObject({ id: saved.id, readRetryPaused: false });
+      await f.service.processDue(1, resumed.id);
+      expect(await f.store.get(resumed.id)).toMatchObject({ state: "completed" });
+      expect(f.mutations).toHaveLength(3);
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='completed'", [saved.id])).rows[0].count).toBe(1);
+    });
+
     it.each([
       { resource: "published_listing", method: "POST" },
       { resource: "published_photo", method: "GET" },
@@ -1268,6 +1300,34 @@ const configured =
       await service.enqueue(f.source, "operator", key, "publish");
       await service.processDue(1, admitted[0].id);
       expect(f.client.createOffer).toHaveBeenCalledTimes(1); expect(f.client.publishOffer).toHaveBeenCalledTimes(1);
+    });
+
+    it("pauses invisible accepted publication and resumes its saved barrier through normal Sync without republishing", async () => {
+      await separatePublicationChannel();
+      const f = await publicationCompletionFixture(undefined, { source: identity });
+      await seedPublicationMapping(f.source);
+      f.setVisibility(false);
+      const store = new PostgresEbayListingSyncRepository(database.pool);
+      const service = new EbayListingSyncService(store, f.executor, clock, randomUUID);
+      const saved = await service.enqueue(f.source, "operator", randomUUID(), "publish");
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        await service.processDue(1, saved.id);
+        expect(await store.get(saved.id)).toMatchObject({ state: "recovering", code: "EBAY_PUBLICATION_READBACK_PENDING",
+          readFailureCount: attempt, readRetryPaused: attempt === 5,
+          publicationAccepted: { listingId: "listing-20", offerIds: { 101: "offer-101" } } });
+        advance();
+      }
+      const paused = (await service.list(f.source.channelId)).find(row => row.id === saved.id)!;
+      expect(paused.issue).toMatchObject({ title: "eBay has not confirmed this update", retryable: true,
+        action: { kind: "retry_sync" } });
+      await service.processDue(1, saved.id);
+      expect(f.client.publishOffer).toHaveBeenCalledTimes(1);
+      f.setVisibility(true);
+      const resumed = await service.enqueue(f.source, "operator", randomUUID(), "sync");
+      expect(resumed).toMatchObject({ id: saved.id, readRetryPaused: false });
+      await service.processDue(1, resumed.id);
+      expect(await store.get(saved.id)).toMatchObject({ state: "completed", publicationWriteCompleted: true });
+      expect(f.client.publishOffer).toHaveBeenCalledTimes(1);
     });
 
     it.each(["preparation", "readback"] as const)("retains translated %s read evidence in the real publication queue and recovers without duplicate creation", async phase => {

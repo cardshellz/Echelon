@@ -25,6 +25,20 @@ export interface ChannelPublicationContentExpectation {
   readonly minimumPhotoLongestSide: number;
 }
 
+/** A provider can acknowledge a write while continuing to expose older content.
+ * Allow propagation time, but do not leave an update spinning forever when a
+ * successful read repeatedly shows that the requested content is absent. */
+export const CHANNEL_VERIFICATION_MISMATCH_RETRY_LIMIT = 5;
+
+export function channelVerificationMismatchRetry(
+  previousChecks: number,
+): { failures: number; paused: boolean } {
+  if (!Number.isSafeInteger(previousChecks) || previousChecks < 0 || previousChecks === Number.MAX_SAFE_INTEGER)
+    throw new Error("Invalid channel verification check count.");
+  const failures = previousChecks + 1;
+  return { failures, paused: failures >= CHANNEL_VERIFICATION_MISMATCH_RETRY_LIMIT };
+}
+
 /** Return a safe field path. Inventory/offer echoes cannot substitute for this
  * published observation, and provider read failures must never become a match. */
 export function findChannelPublishedContentMismatch(

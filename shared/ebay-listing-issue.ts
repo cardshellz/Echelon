@@ -29,8 +29,9 @@ export function resolveEbayListingJobIssue(job: EbayListingSyncJob): EbayListing
   // Replace older cached quantity-only copy without changing the saved outcome.
   if (isUnresolvedListingRequest(code)) return resolveEbayListingIssue({ code,
     message: job.message, productId: job.productId, jobId: job.id, state: job.state, operation: job.operation });
-  if (job.providerRead || code === "PUBLICATION_RECOVERY_REVIEW_REQUIRED" || code?.startsWith("EBAY_REGISTRATION_"))
-    return resolveEbayListingIssue({ code, productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead, readRetryPaused: job.readRetryPaused });
+  if (job.providerRead || code === "EBAY_SYNC_READBACK_PENDING" || code === "EBAY_PUBLICATION_READBACK_PENDING"
+    || code === "PUBLICATION_RECOVERY_REVIEW_REQUIRED" || code?.startsWith("EBAY_REGISTRATION_"))
+    return resolveEbayListingIssue({ code, message: job.message, productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead, readRetryPaused: job.readRetryPaused });
   return job.issue ?? resolveEbayListingIssue({ code: job.code, message: job.message,
     productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead, readRetryPaused: job.readRetryPaused });
 }
@@ -286,6 +287,10 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("An earlier quantity update needs review", "Echelon cannot confirm the outcome of an earlier eBay quantity request.",
       "Review the saved request and its response. An inventory administrator can authorize a fresh update using current inventory when the old outcome remains unknown.",
       false, "check_recovery", "Review blocked update");
+  if (["EBAY_SYNC_READBACK_PENDING", "EBAY_PUBLICATION_READBACK_PENDING"].includes(code) && input.readRetryPaused)
+    return issue("eBay has not confirmed this update", "The published listing still differs from the saved update.",
+      "Compare the issue above with the listing in Echelon and on eBay. Correct the source if needed, then Retry Sync to check the saved update again.",
+      true, "retry_sync", "Retry Sync");
   if (code === "EBAY_PUBLICATION_READBACK_PENDING")
     return issue("Checking published listing and pictures", "eBay accepted the publication request. Echelon is still checking the published listing and picture information.",
       "The saved publication will check again automatically without publishing a second time. View its status or refresh the check.",

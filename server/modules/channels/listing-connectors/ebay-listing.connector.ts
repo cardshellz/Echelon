@@ -1151,7 +1151,7 @@ export class EbayMarketplaceListingConnector {
       if (mismatch) {
         const detail = mismatch.startsWith("published.policies.") ? "the selected business policies"
           : mismatch.startsWith("published.photos") ? "the expected picture count, first picture or picture sizes" : "the intended listing variants";
-        throw new EbayListingSyncError("EBAY_SYNC_READBACK_PENDING", `eBay's published listing has not confirmed ${detail}. This update is not completed; the saved Sync will check again.`);
+        throw new EbayListingSyncError("EBAY_SYNC_READBACK_PENDING", `eBay's published listing has not confirmed ${detail}. This update is not complete.`);
       }
     }
   }

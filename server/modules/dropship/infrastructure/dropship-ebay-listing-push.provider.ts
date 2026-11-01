@@ -46,6 +46,7 @@ import type {
 } from "../../channels/adapters/ebay/ebay-types";
 import { readEbayNativePackage } from "../../channels/adapters/ebay/ebay-native-package.reader";
 import { readEbayPublishedContent } from "../../channels/adapters/ebay/ebay-published-content.reader";
+import type { CatalogImageInspector } from "../../catalog/catalog-image-inspection";
 import { EbayApiRequestError, isMissingEbayOfferCollection } from "../../channels/adapters/ebay/ebay-api-error";
 import { normalizeEbayObservedOffers } from "../../channels/adapters/ebay/ebay-offer-observation";
 import { ebayListingImagesFromUrls } from "../../channels/ebay-listing-photos.domain";
@@ -143,6 +144,8 @@ export interface EbayDropshipListingPushProviderOptions {
   /** Injected wait for the bounded PUBLICATION_SCOPE_BUSY retry (tests pass a recorder). */
   readonly sleep?: (ms: number) => Promise<void>;
   readonly logger?: { debug(event: Record<string, unknown>): void; warn(event: Record<string, unknown>): void };
+  /** Optional photo reader for isolated provider tests; production uses Catalog's guarded transport. */
+  readonly publishedImages?: CatalogImageInspector;
 }
 
 /** The platform logger in this provider's event shape (the action is the event's own). */
@@ -518,7 +521,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
   }): DropshipEbayListingLifecycleClient {
     const client: DropshipEbayListingLifecycleClient = {
       getPublishedListingContent: listingId => readEbayPublishedContent({listingId,accessToken:input.credential.accessToken,
-        environment:input.config.environment,request:this.fetchImpl}),
+        environment:input.config.environment,request:this.fetchImpl,images:this.options.publishedImages}),
       getListingPackageType: async (sku, marketplaceId, observedOffers) => {
         if (input.baseUrl !== "https://api.ebay.com" && input.baseUrl !== "https://api.sandbox.ebay.com")
           throw new DropshipError("DROPSHIP_EBAY_CONFIG_INVALID", "Package reads require an exact eBay API environment.", { retryable: false });
