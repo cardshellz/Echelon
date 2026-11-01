@@ -79,6 +79,7 @@ describe("order action inspection reuses existing capability owners", () => {
     const h = fixture(); h.inspectReturnAndRetainMeasurements.mockRejectedValue(new CustomerReturnLiveError("RETURN_PORTAL_POLICY_MISSING", "private diagnostic", 409));
     expect(await h.service.inspect(scope)).toMatchObject({ order, returnOrder: null, returnFailed: true, orderFailed: false, failureClass: "permanent" });
     expect(JSON.stringify(h.report.mock.calls)).not.toContain("private");
+    expect(h.report).toHaveBeenCalledWith(expect.objectContaining({causeCode:"RETURN_PORTAL_POLICY_MISSING"}));
   });
   it("does not infer return eligibility from a warehouse hold or edit restriction", async () => {
     const h = fixture(); h.readEdit.mockResolvedValue({ ...order, fulfillment: { code: "on_hold", label: "On hold" } });

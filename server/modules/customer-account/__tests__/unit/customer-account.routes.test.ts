@@ -75,6 +75,16 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request({ method: "POST", path: "/account/order-details", sessionKey, body: input })).status).toBe(403);
     expect(orders.details).toHaveBeenCalledTimes(1);
   });
+  it("authenticates explicit presentation refreshes without submitting a business command",async()=>{
+    const input={externalOrderId:"99",orderReference:"#49180"};
+    const refreshActions=vi.fn(async()=>({orders:[{...input,omsOrderId:10,state:"refreshing",snapshot:null,verifiedAt:null,validUntil:null}]}));
+    services.mockImplementation(()=>({edits:{connection},orders:{refreshActions},returns:vi.fn()}) as never);
+    const sessionKey=(await(await request()).json()).session.sessionKey;
+    expect((await request({method:"POST",path:"/account/order-actions/refresh",sessionKey,body:{orders:[input]}})).status).toBe(200);
+    expect(refreshActions).toHaveBeenCalledExactlyOnceWith({orders:[input]});
+    expect((await request({method:"POST",path:"/account/order-actions/refresh",sessionKey,body:{orders:[input]}},proof({logged_in_customer_id:""}))).status).toBe(401);
+    expect(refreshActions).toHaveBeenCalledOnce();
+  });
   it("opts into the new progress response only for the supported explicit version", async()=>{
     const input={externalOrderId:"99",orderReference:"#49180"};
     const summaries=vi.fn(async()=>({orders:[{...input,omsOrderId:null,currency:"USD",totalCents:0,cancelled:true,financialStatus:"Refunded",progress:{delivery:null,packages:[],returns:[],refunds:[]}}],unavailableExternalOrderIds:[],statusUnavailable:false}));

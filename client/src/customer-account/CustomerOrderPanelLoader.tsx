@@ -39,8 +39,11 @@ export function CustomerOrderPanelLoader(props: {
   const snapshot = mismatch ? null : unverified;
   const state: CustomerOrderPanelState = {
     loading: !props.actionError && (!actions || actions.state === "refreshing"),
-    error: props.actionError || mismatch || actions?.state === "failed" || snapshot?.orderFailed || snapshot?.returnFailed
-      ? "Some order options couldn’t be loaded." : props.historyError,
+    error: props.actionError || mismatch || actions?.state === "failed" || (snapshot?.orderFailed && snapshot.returnFailed)
+      ? "Some order options couldn’t be loaded. Try again to refresh them."
+      : snapshot?.orderFailed ? "Editing, address and cancellation options couldn’t be loaded."
+        : snapshot?.returnFailed ? "Return options couldn’t be loaded. You can still open Return items."
+          : props.historyError,
     order: snapshot?.order ?? null,
     omsOrderId: actions?.omsOrderId ?? summary?.omsOrderId ?? null,
     returnOrder: snapshot?.returnOrder ?? null,

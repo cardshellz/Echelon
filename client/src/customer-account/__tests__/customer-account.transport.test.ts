@@ -6,6 +6,16 @@ const connection = { connectionId: 4, channelId: 2, name: "Shopify", shopDomain:
 const key = "a".repeat(43);
 const bootstrap = { session: { authenticated: true, privateTesting: true, sessionKey: key }, connection };
 describe("storefront transport reuses canonical clients", () => {
+  it("sends cache recovery to the explicit refresh path with paired identities and no financial command",async()=>{
+    const identity={externalOrderId:"99",orderReference:"#49180"};
+    const request=vi.fn(async()=>Response.json({orders:[{...identity,omsOrderId:10,state:"refreshing",snapshot:null,verifiedAt:null,validUntil:null}]}));
+    const api=createCustomerAccountTransport(config,request);
+    await api.orderActions({orders:[identity]},undefined,true);
+    const calls=request.mock.calls as unknown as [string,RequestInit][];
+    const input=JSON.parse(String(calls[0][1].body));
+    expect(input).toMatchObject({method:"POST",path:"/account/order-actions/refresh",expectedCustomerId:"100",body:{orders:[identity]}});
+    expect(input.commandKey).toBeUndefined();
+  });
   it("binds batch history and inline details to the signed session without creating a financial command key", async () => {
     const request = vi.fn(async () => Response.json(bootstrap));
     const api = createCustomerAccountTransport(config, request); await api.bootstrap();

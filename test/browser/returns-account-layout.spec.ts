@@ -13,6 +13,9 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
   actionState?: "refreshing" | "failed"; failReturnLookup?: boolean; holdReturnLookup?: Promise<void>; queuedWorkflow?: boolean; returnLookupOrderId?: number; noReturnQuantity?: boolean;
   savedRequestOutcome?: "rejected" | "unknown";
   blockRecoveryClear?: boolean;
+  recoverOptions?: boolean;
+  heldOrder?: boolean;
+  failRefreshOnce?: boolean;
 } = {}) {
   const service = new CustomerReturnPreviewService();
   const { mode: _mode, scenarioId: _scenario, ...fields } = service.lookup({ scenarioId: "split_delivered", orderReference: "TEST-1001" });
@@ -25,9 +28,12 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
   const detail = { omsOrderId: options.returnLookupOrderId ?? 10,
     order: options.noReturnQuantity ? { ...order, lines: order.lines.map(line => ({ ...line, eligibleQuantity: 0,
       message: "The 365-day return window has ended." })) } : order, settingsVersion: 2 };
+  const fulfillment = options.heldOrder ? { code: "on_hold", label: "On hold" } : { code: "shipped", label: "Shipped" };
   const actionOrder = { connectionId: 4, omsOrderId: 10, orderNumber: "#TEST-1001", customerName: "Synthetic customer", customerEmail: null,
     activeOperationId: null, revision: "fixture", currency: "USD", eligibility: { editable: false, reasons: ["Picking or fulfillment has already started."] },
-    lines: [], totalCents: 741, financialStatus: "Paid", warehouseStatus: "shipped", fulfillment: { code: "shipped", label: "Shipped" } };
+    lines: [], totalCents: 741, financialStatus: "Paid", warehouseStatus: fulfillment.label, fulfillment,
+    ...(options.heldOrder ? {eligibility:{editable:true,reasons:[]},addressEligibility:{editable:true,reasons:[]},
+      cancellation:{canReview:true,reasons:[],requestKey:null}} : {}) };
   const status = { authorizationId: 20, authorizationNumber: "RMA-20", canProgress: false,
     parcels: [{ parcelId: 30, number: 1, status: "ready", trackingNumber: "FIXTURE-TRACK", downloadPath: "/api/returns/customer/returns/20/parcels/30/download" }] };
   if (options.savedRequestOutcome) {
@@ -47,7 +53,7 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
   });
   const calls: CustomerAccountRequest[] = [];
   const errors: string[] = [];
-  let reviewFailed = false, returnLookupFailed = false, submitCount = 0, actionReads = 0;
+  let reviewFailed = false, returnLookupFailed = false, submitCount = 0, actionReads = 0, refreshRequested = false, refreshFailed = false;
   let workflowKey: string | null = null;
   let workflowInput: unknown = null, workflowReady = false;
   const workflowReply = () => ({ requestKey: workflowKey, omsOrderId: 10, phase: options.queuedWorkflow && !workflowReady ? "queued" : "ready", reason: null, labels: options.queuedWorkflow && !workflowReady ? null : status, updatedAt: "2026-10-30T12:00:00.000Z" });
@@ -66,14 +72,20 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       connection: { connectionId: 4, channelId: 36, shopDomain: "fixture.myshopify.com", name: "Synthetic", enabled: true, paymentWindowMinutes: 30 },
     } });
     if (input.path === "/account/order-summaries") return route.fulfill({ json: {
-      orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10, currency: "USD", totalCents: 741, financialStatus: "Paid", cancelled: false, fulfillment: { code: "shipped", label: "Shipped" } }],
+      orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10, currency: "USD", totalCents: 741, financialStatus: "Paid", cancelled: false, fulfillment }],
       unavailableExternalOrderIds: [], statusUnavailable: false,
     } });
-    if (input.path === "/account/order-actions") {
-      actionReads++;
-      const ready = !options.actionState && (!options.invalidateAfterFirstLookup || actionReads===1);
+    if (input.path === "/account/order-actions" || input.path === "/account/order-actions/refresh") {
+      const refreshing = input.path.endsWith("/refresh");
+      if (refreshing && options.failRefreshOnce && !refreshFailed) {
+        refreshFailed = true;
+        return route.fulfill({status:503,json:{error:{code:"FIXTURE_REFRESH_UNAVAILABLE",message:"Refresh unavailable"}}});
+      }
+      if (refreshing) refreshRequested = true; else actionReads++;
+      const ready = options.recoverOptions ? refreshRequested && !refreshing
+        : !options.actionState && (!options.invalidateAfterFirstLookup || actionReads===1);
       return route.fulfill({ json: { orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10,
-        state: ready ? "ready" : options.actionState ?? "refreshing", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
+        state: ready ? "ready" : options.recoverOptions && refreshing ? "refreshing" : options.actionState ?? "refreshing", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
         snapshot: ready ? { order: actionOrder, returnOrder: detail, orderFailed: false, returnFailed: false } : null }] } });
     }
     if (input.path === "/order-edits/orders/10") return route.fulfill({ json: {
@@ -131,7 +143,7 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
   await page.route("**/__return-account-layout", (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <style>body{margin:0;background:#f7f8fa;font-size:10px}h1,h2,h3{font:700 32px Impact,fantasy;text-transform:uppercase;margin:24px 0}h1{font-family:Impact,fantasy!important}button{font-family:Impact,fantasy}ol,ul{padding-left:32px}main{padding:24px}*{box-sizing:border-box}</style>
     <link rel="stylesheet" href="/return-layout-assets/csz-customer-account.css"></head><body><main data-csz-customer-account>
-    <h1>Your account</h1><div data-csz-account-tools-status></div><table><tbody><tr data-csz-account-order data-external-order-id="1001" data-order-reference="#TEST-1001" data-fulfillment="fulfilled" data-cancelled="false"><td>#TEST-1001</td><td data-csz-order-fulfillment-native>Shipped</td><td data-csz-order-financial-native>Paid</td><td data-csz-order-total></td><td data-csz-order-panel-trigger></td></tr></tbody></table>
+    <h1>Your account</h1><div data-csz-account-tools-status></div><table><tbody><tr data-csz-account-order data-external-order-id="1001" data-order-reference="#TEST-1001" data-fulfillment="${options.heldOrder ? "unfulfilled" : "fulfilled"}" data-cancelled="false"><td>#TEST-1001</td><td data-csz-order-fulfillment-native>${fulfillment.label}</td><td data-csz-order-financial-native>Paid</td><td data-csz-order-total></td><td data-csz-order-panel-trigger>${options.heldOrder ? '<a data-csz-account-action="address" href="/account/addresses">Change address</a>' : ''}</td></tr></tbody></table>
     </main><div id="csz-customer-account-tools"></div><script type="application/json" id="csz-customer-account-config">${JSON.stringify({ themeId: "174740308127", customerId: "100", proxyPath: "/apps/echelon-returns", loginPath: "/account/login" })}</script><script src="/return-layout-assets/csz-customer-account.js"></script></body></html>` }));
   await page.goto("/__return-account-layout");
   await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
@@ -198,6 +210,35 @@ test("an already-loaded order panel opens with its return action without workflo
   await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled({ timeout: 250 });
   expect(f.calls.slice(before)).toEqual([]);
   expect(f.calls.filter(call => call.path.startsWith("/order-edits/") || /^\/returns\/orders\//.test(call.path))).toEqual([]);
+});
+
+test("expired options request worker recovery and refresh automatically without false order restrictions",async({page})=>{
+  const f=await fixture(page,{openReturn:false,actionState:"failed",recoverOptions:true,heldOrder:true});
+  await expect.poll(()=>f.calls.filter(call=>call.path==="/account/order-actions/refresh").length).toBe(1);
+  await expect(page.getByText("Contact us to cancel this order.",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("Contact us to change this order’s shipping address.",{exact:true})).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0,{timeout:10_000});
+  await expect.poll(f.actionReads,{timeout:10_000}).toBeGreaterThanOrEqual(2);
+  expect(f.calls.filter(call=>call.path==="/account/order-actions/refresh")).toHaveLength(1);
+  expect(f.calls.some(call=>call.commandKey)).toBe(false);
+  expect(f.calls.filter(call=>call.path.startsWith("/order-edits/")||/^\/returns\/orders\//.test(call.path))).toEqual([]);
+  expect(f.errors).toEqual([]);
+});
+
+test("a failed cache refresh has one useful retry that restores held-order actions",async({page},info)=>{
+  const f=await fixture(page,{openReturn:false,actionState:"failed",recoverOptions:true,heldOrder:true,failRefreshOnce:true});
+  await expect(page.getByRole("alert")).toContainText("Some order options couldn’t be loaded");
+  await expect(page.getByRole("button",{name:"Cancel order",exact:true})).toBeDisabled();
+  await expect(page.getByText("Contact us to cancel this order.",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("Contact us to change this order’s shipping address.",{exact:true})).toHaveCount(0);
+  await page.getByRole("button",{name:"Try again",exact:true}).click();
+  await expect(page.getByRole("button",{name:"Edit order",exact:true})).toBeEnabled({timeout:10_000});
+  await expect(page.getByRole("button",{name:"Cancel order",exact:true})).toBeEnabled();
+  await expect(page.getByRole("link",{name:"Change shipping address",exact:true})).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.screenshot({path:info.outputPath("held-order-options-recovered.png"),fullPage:false});
+  expect(f.calls.filter(call=>call.path==="/account/order-actions/refresh")).toHaveLength(2);
+  expect(f.calls.some(call=>call.commandKey)).toBe(false);expect(f.errors).toEqual([]);
 });
 
 test("local invalidation keeps return navigation available without inspecting providers on panel open", async ({ page }) => {

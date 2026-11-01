@@ -46,6 +46,7 @@ export function customerAccountServices(pool: Pool, edits: OrderEditService) {
         connection: () => customerEdits.connection(),
         context: new PostgresCustomerAccountOrderContextReader(pool),
         actions: new PostgresOrderActionProjectionStore(pool),
+        actionRefresh: new PostgresOrderActionProjectionStore(pool),
         progress: new CustomerAccountProgressService({
           delivery: new PostgresCustomerOrderDeliveryReader(pool),
           returns: new PostgresCustomerReturnProgressReader(pool),

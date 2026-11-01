@@ -20,7 +20,7 @@ import type {
 } from "@shared/customer-account/customer-account-orders";
 import { customerOrderProgressSchema } from "@shared/customer-account/order-progress";
 import type { CustomerAccountProgressReader } from "./customer-account-progress.ports";
-import type { OrderActionProjectionReader } from "./order-action-projection.ports";
+import type { OrderActionProjectionReader, OrderActionProjectionRefresher } from "./order-action-projection.ports";
 
 export interface CustomerAccountOrderContext {
   externalOrderId: string;
@@ -46,6 +46,7 @@ export class CustomerAccountOrderQueriesService {
       edits: Pick<OrderEditService, "orderSummaries" | "customerOrderDetails">;
       context: CustomerAccountOrderContextReader;
       actions?: OrderActionProjectionReader;
+      actionRefresh?: OrderActionProjectionRefresher;
       progress?: CustomerAccountProgressReader;
       now?: () => Date;
       report(event: { code: string; causeCode?: string }): void;
@@ -84,6 +85,15 @@ export class CustomerAccountOrderQueriesService {
       },
       this.dependencies.now(),
     );
+  }
+
+  async refreshActions(raw: unknown) {
+    const input = customerAccountOrderSummariesInputSchema.parse(raw);
+    if (!this.dependencies.actionRefresh || !this.dependencies.now)
+      throw new OrderEditError("CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE", "Order options are temporarily unavailable. Please try again.", 503);
+    const { channelId, externalCustomerId } = this.dependencies.principal;
+    await this.dependencies.actionRefresh.requestRefresh({ ...input, channelId, externalCustomerId }, this.dependencies.now());
+    return this.actions(input);
   }
 
   async summaries(
