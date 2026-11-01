@@ -2,6 +2,7 @@ import type {
   ShopifyConnectionContext, ShopifyConnectionPreview, ShopifyProductConnectionExecute,
   ShopifyProductConnectionRequest,
 } from "@shared/catalog/shopify-product-connection";
+import { shopifyProductSearchRequestSchema, type ShopifyProductSearchRequest, type ShopifyProductSearchResult } from "@shared/catalog/shopify-product-connection";
 import {
   assertProductConnectionAllowed, buildShopifyConnectionCreateSpec, connectionFingerprint,
   eligibleConnectionVariants, parseShopifyProductReference, resolveConnectionBindings,
@@ -113,6 +114,18 @@ export function createShopifyProductConnectionService(input: {
       blockedReason, publications, publicationIssue, matchingProducts, lookupIssue,
       pendingCommand: pending ? publicConnectionCommand(pending) : null,
     };
+  }
+
+  async function search(productId: number, input: ShopifyProductSearchRequest): Promise<ShopifyProductSearchResult> {
+    const request = shopifyProductSearchRequestSchema.parse(input);
+    const channels = await repository.configuredChannels();
+    if (!channels.some(channel => channel.id === request.channelId)) {
+      throw new ShopifyProductConnectionError("SHOPIFY_CHANNEL_UNAVAILABLE", "Select a configured active Shopify channel.", 422);
+    }
+    const source = await repository.source(productId, request.channelId);
+    assertProductConnectionAllowed(source);
+    const { credentials } = await account(source);
+    return provider.search(credentials, { query: request.query, cursor: request.cursor });
   }
 
   async function plan(productId: number, request: ShopifyProductConnectionRequest): Promise<ConnectionPlan> {
@@ -392,7 +405,7 @@ export function createShopifyProductConnectionService(input: {
     return result;
   }
 
-  return { context, preview, submit, execute, status, processDue };
+  return { context, search, preview, submit, execute, status, processDue };
 }
 
 export type ShopifyProductConnectionService = ReturnType<typeof createShopifyProductConnectionService>;
