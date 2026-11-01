@@ -4,6 +4,7 @@ import { resolveCatalogPublicationMediaPlan } from "./catalog-publication-media"
 import { resolveCatalogPublicationImage, usesStoredCatalogPublicationImage, type CatalogPublicationImage, type CatalogPublicationPhotoSelection } from "./catalog-publication-image";
 import { ProductAssetError } from "./product-asset-errors";
 import { CATALOG_IMAGE_HASH_PATTERN, type CatalogPublicImageUrl } from "./catalog-public-image";
+import { catalogRenditionProfile } from "./catalog-publication-rendition";
 import {
   MAX_PRODUCT_IMAGE_BYTES,
   validateProductImage,
@@ -127,6 +128,7 @@ export async function readCatalogVariantPublicationImages(
   database: Pick<PoolClient, "query">,
   input: CatalogPublicationPhotoSelection,
 ): Promise<Map<number, CatalogPublicationImage[]>> {
+  const renditionProfile = catalogRenditionProfile(input.minimumLongestSide);
   if (input.productVariantIds.some((id) => !Number.isInteger(id) || id <= 0 || id > MAX_CATALOG_ID)
     || !Number.isSafeInteger(input.maxPhotosPerVariant) || input.maxPhotosPerVariant <= 0
     || (input.maxGroupPhotos !== undefined && (!Number.isSafeInteger(input.maxGroupPhotos) || input.maxGroupPhotos <= 0))) {
@@ -190,12 +192,18 @@ export async function readCatalogVariantPublicationImages(
       photos.is_primary AS "isPrimary", photos.included,
       photos.storage_type AS "storageType", photos.mime_type AS "mimeType",
       photos.file_bytes AS "fileBytes", photos.file_hash AS "fileHash", photos.file_header AS "fileHeader"
+      ${renditionProfile ? ', rendition.rendition_hash AS "renditionHash", rendition_version.mime_type AS "renditionMimeType"' : ''}
     FROM kept
     INNER JOIN photos ON photos.id = kept.asset_id
+    ${renditionProfile ? `LEFT JOIN catalog.product_asset_renditions rendition ON rendition.asset_id=photos.id
+      AND rendition.source_hash=photos.file_hash AND rendition.profile=$6 AND rendition.source_longest_side < $7::int
+      LEFT JOIN catalog.product_asset_versions rendition_version ON rendition_version.asset_id=rendition.asset_id
+        AND rendition_version.content_hash=rendition.rendition_hash` : ''}
     ORDER BY kept.variant_id, kept.photo_rank
   `, [productVariantIds, input.maxPhotosPerVariant, MAX_PRODUCT_IMAGE_BYTES,
     JSON.stringify(overrides.map(override => ({ asset_id: override.assetId, included: override.included,
-      url_override: override.urlOverride, position_override: override.positionOverride }))), input.productId ?? null]);
+      url_override: override.urlOverride, position_override: override.positionOverride }))), input.productId ?? null,
+    ...(renditionProfile ? [renditionProfile, input.minimumLongestSide] : [])]);
   for (const { forProductVariantId, ...image } of result.rows) {
     byVariantId.get(forProductVariantId)?.push(image);
   }

@@ -9,6 +9,7 @@ import { planSharedPhotoAdditions, type SharedImportedPhoto } from "./shared-pro
 import { fetchProductImage } from "./product-image-download.transport";
 import { inspectCatalogImage } from "./catalog-image-inspection";
 import { storeCatalogOriginal } from "./catalog-image-originals.service";
+import { prepareOptionalCatalogRendition, type CatalogPublicationRendition, type CatalogRenditionWarning } from "./catalog-publication-rendition";
 import type { DownloadableProductImage } from "./product-image-download.service";
 export type { SharedImportedPhoto } from "./shared-product-photos.domain";
 const MAX_POSITION = 2147483647;
@@ -45,6 +46,7 @@ export function createSharedProductPhotoImporter(database: Pick<typeof db, "tran
       actor: string;
     }): Promise<{
       created: number;
+      warnings?: Array<CatalogRenditionWarning & { url: string }>;
     }> {
       const parsed = requestSchema.safeParse(input);
       if (!parsed.success)
@@ -56,14 +58,22 @@ export function createSharedProductPhotoImporter(database: Pick<typeof db, "tran
         .from(productAssets).where(eq(productAssets.productId, productId)).orderBy(asc(productAssets.id));
       const candidates = planSharedPhotoAdditions(snapshot, photos);
       const originals = new Map<string, DownloadableProductImage>();
+      const renditions = new Map<string, CatalogPublicationRendition | null>();
+      const warnings: Array<CatalogRenditionWarning & { url: string }> = [];
       let retainedBytes = 0;
       for (const candidate of candidates) {
         const image = await readImage(candidate.url);
         inspectCatalogImage(image);
-        retainedBytes += image.data.byteLength;
+        const {rendition,warning} = await prepareOptionalCatalogRendition(image);
+        if (warning) {
+          warnings.push({...warning,url:candidate.url});
+          console.warn(JSON.stringify({event:"catalog.image_rendition.unavailable",productId,code:warning.code}));
+        }
+        retainedBytes += image.data.byteLength + (rendition?.image.data.byteLength ?? 0);
         if (retainedBytes > MAX_IMPORTED_ORIGINAL_BYTES)
           throw new ProductAssetError("IMPORTED_PHOTOS_TOO_LARGE", "The original images exceed the 100 MB per-product import limit. Import a smaller group of photos.", 413);
         originals.set(candidate.url, { data: Buffer.from(image.data), mimeType: image.mimeType });
+        renditions.set(candidate.url, rendition);
       }
       return database.transaction(async (tx) => {
         const [product] = await tx.select({ id: products.id }).from(products)
@@ -78,11 +88,13 @@ export function createSharedProductPhotoImporter(database: Pick<typeof db, "tran
         const created = await tx.insert(productAssets).values(additions.map(photo => ({
           ...photo, productId, assetType: "image",
         }))).returning({ id: productAssets.id, url: productAssets.url });
+        const createdUrls = new Set(created.map(asset => asset.url));
+        const appliedWarnings = warnings.filter(warning => createdUrls.has(warning.url));
         const now = clock();
         for (const asset of created) {
           const original = asset.url === null ? undefined : originals.get(asset.url);
           if (!original) throw new ProductAssetError("IMPORTED_PHOTOS_SOURCE_CHANGED", "Photo sources changed during import. Retry with the current gallery.", 409);
-          await storeCatalogOriginal(tx, asset.id, original, "both", now);
+          await storeCatalogOriginal(tx, asset.id, original, "both", now, renditions.get(asset.url!) ?? null);
         }
         await persistAuditEvent(tx, {
           actor, action: "catalog.photos.imported_shared", target: `catalog.products:${productId}`,
@@ -90,9 +102,9 @@ export function createSharedProductPhotoImporter(database: Pick<typeof db, "tran
             before: { assetIds: existing.map(photo => photo.id) },
             after: { addedAssetIds: created.map(photo => photo.id), productVariantId: null }
           },
-          context: { productId, created: created.length },
+          context: { productId, created: created.length, ...(appliedWarnings.length ? { renditionWarnings: appliedWarnings } : {}) },
         }, { timestamp: now, emitStructuredLog: false });
-        return { created: created.length };
+        return { created: created.length, ...(appliedWarnings.length ? { warnings: appliedWarnings } : {}) };
       });
     },
   };

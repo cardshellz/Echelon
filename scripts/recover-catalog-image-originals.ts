@@ -15,10 +15,13 @@ import * as schema from "../shared/schema";
 import {
   catalogOriginalReplacementSchema,
   createCatalogImageOriginalsService,
+  MAX_RECOVERY_BATCH_BYTES,
+  MAX_RECOVERY_PHOTOS_PER_PRODUCT,
 } from "../server/modules/catalog/catalog-image-originals.service";
 import { inspectCatalogImage } from "../server/modules/catalog/catalog-image-inspection";
 import { MAX_PRODUCT_IMAGE_BYTES } from "../server/modules/catalog/product-image-download.service";
 import { ProductAssetError } from "../server/modules/catalog/product-asset-errors";
+import { fetchProductImage } from "../server/modules/catalog/product-image-download.transport";
 
 const manifestSchema = z
   .object({
@@ -39,6 +42,10 @@ const manifestSchema = z
               "image/webp",
               "image/gif",
             ]),
+            prior: z.object({
+              file: z.string().min(1).max(1000).refine((value) => !isAbsolute(value)),
+              mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "image/gif"]),
+            }).strict().optional(),
           })
           .strict(),
       )
@@ -51,6 +58,7 @@ async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
       manifest: { type: "string" },
+      product: { type: "string" },
       execute: { type: "boolean", default: false },
     },
     strict: true,
@@ -70,8 +78,12 @@ async function main(): Promise<void> {
     throw new Error(
       "Each Catalog image must appear once in the reviewed manifest.",
     );
-  async function original(photo: (typeof manifest.photos)[number]) {
-    const path = await realpath(resolve(directory, photo.file)),
+  const productId = values.product === undefined ? undefined
+    : z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647)).parse(values.product);
+  const photos = productId === undefined ? manifest.photos : manifest.photos.filter(photo => photo.command.productId === productId);
+  if (!photos.length) throw new ProductAssetError("CATALOG_RECOVERY_PRODUCT_MISSING", "The selected product has no photos in this reviewed manifest.", 404);
+  async function fileImage(file: string, mimeType: string, expectedHash: string) {
+    const path = await realpath(resolve(directory, file)),
       within = relative(directory, path);
     if (isAbsolute(within) || within === ".." || within.startsWith(".." + sep))
       throw new Error(
@@ -79,16 +91,38 @@ async function main(): Promise<void> {
       );
     if ((await stat(path)).size > MAX_PRODUCT_IMAGE_BYTES)
       throw new Error("Original exceeds the Catalog image limit.");
-    const image = { data: await readFile(path), mimeType: photo.mimeType };
-    if (
-      inspectCatalogImage(image).contentHash !==
-      photo.command.expectedOriginalHash
-    )
+    const image = { data: await readFile(path), mimeType };
+    if (inspectCatalogImage(image).contentHash !== expectedHash)
       throw new Error("An original differs from its reviewed content hash.");
     return image;
   }
+  async function original(photo: (typeof manifest.photos)[number]) {
+    return fileImage(photo.file, photo.mimeType, photo.command.expectedOriginalHash);
+  }
+  async function prior(photo: (typeof manifest.photos)[number]) {
+    if (!photo.prior) {
+      if (photo.command.expected.storageType === "url" && photo.command.expected.url)
+        throw new ProductAssetError("CATALOG_PRIOR_IMAGE_REQUIRED", `Save the previous source for photo ${photo.command.assetId} before recovery.`, 409);
+      return undefined;
+    }
+    if (!photo.command.expectedPriorHash || !photo.command.expected.url)
+      throw new Error("A prior snapshot requires the exact expected URL and hash.");
+    return fileImage(photo.prior.file, photo.prior.mimeType, photo.command.expectedPriorHash);
+  }
   // Validate every reviewed file before opening a database connection or writing.
-  for (const photo of manifest.photos) await original(photo);
+  for (const photo of photos) { await original(photo); await prior(photo); }
+  async function checkPrior(photo: (typeof manifest.photos)[number], checkedUrls?: Map<string,string>) {
+    if (!photo.prior) return;
+    const url = photo.command.expected.url!;
+    const key = `${photo.prior.mimeType}\n${url}`;
+    let actual = checkedUrls?.get(key);
+    if (!actual) {
+      actual = inspectCatalogImage(await fetchProductImage(url, undefined, { acceptMimeType: photo.prior.mimeType })).contentHash;
+      checkedUrls?.set(key, actual);
+    }
+    if (actual !== photo.command.expectedPriorHash)
+      throw new ProductAssetError("CATALOG_PRIOR_IMAGE_CHANGED", `The current source for photo ${photo.command.assetId} changed after review.`, 409);
+  }
   const connection = new URL(process.env.CATALOG_RECOVERY_DATABASE_URL);
   if (!["postgresql:", "postgres:"].includes(connection.protocol))
     throw new Error("A PostgreSQL recovery connection is required.");
@@ -117,19 +151,46 @@ async function main(): Promise<void> {
   try {
     // Preview uses the same source/CAS validation in a PostgreSQL read-only
     // transaction. Execution rechecks under locks; each image/audit is atomic.
-    if (values.execute)
-      for (const photo of manifest.photos)
-        await owner.preview(photo.command, await original(photo));
-    for (const photo of manifest.photos) {
-      const result = values.execute
-        ? await owner.replace(photo.command, await original(photo))
-        : await owner.preview(photo.command, await original(photo));
-      results.push({ assetId: photo.command.assetId, ...result });
+    const previews = [];
+    for (const photo of photos)
+      previews.push(await owner.preview(photo.command, await original(photo), await prior(photo)));
+    // Check all still-pending URL sources before the first write. Completed
+    // replays do not depend on an old external URL remaining available forever.
+    const checkedUrls = new Map<string,string>();
+    for (const [index, photo] of photos.entries())
+      if (previews[index].wouldApply) await checkPrior(photo, checkedUrls);
+    if (!values.execute) {
+      for (const [index, photo] of photos.entries())
+        results.push({assetId:photo.command.assetId,...previews[index]});
+    } else {
+      const groups = new Map<number, Array<{photo:(typeof manifest.photos)[number];index:number}>>();
+      for (const [index, photo] of photos.entries()) {
+        const group = groups.get(photo.command.productId) ?? [];
+        group.push({photo,index});
+        groups.set(photo.command.productId,group);
+      }
+      for (const group of groups.values()) {
+        if (group.length > MAX_RECOVERY_PHOTOS_PER_PRODUCT)
+          throw new ProductAssetError("CATALOG_RECOVERY_BATCH_INVALID", "The product has too many photos for one atomic recovery.", 422);
+        let fileBytes = 0;
+        for (const {photo} of group) {
+          fileBytes += (await stat(resolve(directory,photo.file))).size;
+          if (photo.prior) fileBytes += (await stat(resolve(directory,photo.prior.file))).size;
+        }
+        if (fileBytes > MAX_RECOVERY_BATCH_BYTES)
+          throw new ProductAssetError("CATALOG_RECOVERY_BATCH_TOO_LARGE", "The reviewed photos exceed the per-product recovery limit.", 413);
+        for (const {photo,index} of group)
+          if (previews[index].wouldApply) await checkPrior(photo);
+        const items = [];
+        for (const {photo} of group)
+          items.push({command:photo.command,image:await original(photo),priorImage:await prior(photo)});
+        results.push(...await owner.replaceBatch(items));
+      }
     }
     console.log(
       JSON.stringify({
         mode: values.execute ? "execute" : "preview",
-        reviewed: manifest.photos.length,
+        reviewed: photos.length,
         results,
       }),
     );
@@ -141,8 +202,8 @@ async function main(): Promise<void> {
             ? error.code
             : "CATALOG_ORIGINAL_RECOVERY_FAILED",
         completed: results,
-        message:
-          "Recovery stopped. Committed images remain audited and an unchanged manifest can be replayed safely.",
+        message: error instanceof ProductAssetError ? error.message
+          : "Recovery stopped. Committed images remain audited and an unchanged manifest can be replayed safely.",
       }),
     );
     process.exitCode = 1;
@@ -153,9 +214,9 @@ async function main(): Promise<void> {
 main().catch((error) => {
   console.error(
     JSON.stringify({
-      code: "CATALOG_ORIGINAL_RECOVERY_INVALID",
+      code: error instanceof ProductAssetError ? error.code : "CATALOG_ORIGINAL_RECOVERY_INVALID",
       message:
-        error instanceof z.ZodError
+        error instanceof ProductAssetError ? error.message : error instanceof z.ZodError
           ? "The reviewed manifest is invalid."
           : "Validate the manifest, files and recovery connection before retrying.",
     }),

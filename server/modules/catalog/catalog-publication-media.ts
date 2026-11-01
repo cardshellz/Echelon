@@ -12,6 +12,7 @@ import type { CatalogPublicImageUrl } from "./catalog-public-image";
 import { ProductAssetError } from "./product-asset-errors";
 import {
   resolveCatalogPublicationImage,
+  catalogPublicationVersionHash,
   usesStoredCatalogPublicationImage,
   type CatalogPublicationImage,
   type CatalogPublicationPhotoSelection,
@@ -54,6 +55,7 @@ export function resolveCatalogPublicationMediaPlan(
     limits: {
       perVariant: selection.maxPhotosPerVariant,
       group: selection.maxGroupPhotos ?? selection.maxPhotosPerVariant,
+      ...(selection.minimumLongestSide === undefined ? {} : { minimumLongestSide: selection.minimumLongestSide }),
     },
     assets: ordered([...unique.values()]).map(({ fileHeader, ...image }) => ({
       ...image,
@@ -92,7 +94,7 @@ function selectGallery(
               position: image.publicationPosition ?? image.position,
               isPrimary: image.isPrimary === true,
               uploaded: usesStoredCatalogPublicationImage(image),
-              versionHash: usesStoredCatalogPublicationImage(image) ? image.fileHash : null,
+              versionHash: catalogPublicationVersionHash(image),
             };
       },
     })),

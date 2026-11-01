@@ -1918,11 +1918,11 @@ export default function ProductDetail() {
       }
       return res.json();
     },
-    onSuccess: async () => {
+    onSuccess: async (data: { publicationWarning?: { message: string } }) => {
       await refreshImageReferences();
       setAddImageUrl("");
       setAddImageAlt("");
-      toast({ title: "Image added" });
+      toast({ title: "Image added", ...(data.publicationWarning ? { description: data.publicationWarning.message } : {}) });
     },
     onError: (error: Error) => {
       toast({ title: "Could not add image", description: error.message, variant: "destructive" });
@@ -1948,9 +1948,9 @@ export default function ProductDetail() {
       }
       return res.json();
     },
-    onSuccess: async () => {
+    onSuccess: async (data: { publicationWarning?: { message: string } }) => {
       await refreshImageReferences();
-      toast({ title: "Image uploaded" });
+      toast({ title: "Image uploaded", ...(data.publicationWarning ? { description: data.publicationWarning.message } : {}) });
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
     onError: (err: Error) => {

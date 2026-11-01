@@ -1,7 +1,12 @@
 {
+  "catalog.product_asset_renditions": [
+    "modules/catalog"
+  ],
+  "catalog.product_asset_versions": [
+    "modules/catalog"
+  ],
   "catalog.product_assets": [
-    "modules/catalog",
-    "server/routes/ebay/ebay-policies.routes.ts"
+    "modules/catalog"
   ],
   "catalog.product_categories": [
     "modules/catalog"

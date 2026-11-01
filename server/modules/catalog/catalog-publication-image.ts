@@ -21,6 +21,9 @@ export interface CatalogPublicationImage {
   fileBytes: number | null;
   fileHash: string | null;
   fileHeader: Buffer | null;
+  /** A derived copy of these exact source bytes, when the audience requests it. */
+  renditionHash?: string | null;
+  renditionMimeType?: string | null;
 }
 
 /** An explicit audience selection; Catalog does not know which channel supplied it. */
@@ -37,6 +40,7 @@ export interface CatalogPublicationPhotoSelection {
   maxGroupPhotos?: number;
   productId?: number;
   overrides?: readonly CatalogPublicationImageOverride[];
+  minimumLongestSide?: number;
 }
 
 /** A cached original is Catalog's authoritative source. Its historical remote
@@ -69,5 +73,11 @@ export function resolveCatalogPublicationImage(
     data: image.fileHeader,
     mimeType: image.mimeType ?? "",
   });
+  if (image.renditionHash && image.renditionMimeType)
+    return publicUrl(image.id, image.renditionHash, image.renditionMimeType);
   return publicUrl(image.id, image.fileHash, validated.mimeType);
+}
+
+export function catalogPublicationVersionHash(image: CatalogPublicationImage): string | null {
+  return usesStoredCatalogPublicationImage(image) ? image.renditionHash ?? image.fileHash : null;
 }

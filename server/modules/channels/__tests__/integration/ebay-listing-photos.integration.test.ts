@@ -16,7 +16,8 @@ const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 // Reduced owner fixture: actual SQL, read-only transactions and concurrent commits; no production migrations.
 const fixture = `
-  CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA inventory;
+  CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA inventory; CREATE SCHEMA marketplace;
+  CREATE FUNCTION marketplace.capture_listing_intent_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
   CREATE TABLE catalog.products (id integer PRIMARY KEY);
   CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, product_id integer NOT NULL REFERENCES catalog.products, sku text NOT NULL UNIQUE);
   CREATE TABLE catalog.product_assets (
@@ -49,7 +50,7 @@ const request = { productId: 1, channelId: 67, variants };
 (url && disposable ? describe : describe.skip)("one eBay photo owner (PostgreSQL)", () => {
   let database: InventoryCutoverTestDatabase;
   let resolver: ChannelEbayListingPhotoResolver;
-  beforeAll(async () => { database = await createInventoryCutoverTestDatabase(url, disposable, fixture); await database.pool.query(await readFile("migrations/900000017000018580001_catalog_publication_media_versions.sql", "utf8")); });
+  beforeAll(async () => { database = await createInventoryCutoverTestDatabase(url, disposable, fixture); await database.pool.query(await readFile("migrations/900000017000018580001_catalog_publication_media_versions.sql", "utf8")); await database.pool.query(await readFile("migrations/900000047000019770001_catalog_publication_renditions.sql", "utf8")); });
   afterAll(async () => { await database?.close(); });
   afterEach(() => vi.restoreAllMocks());
   beforeEach(async () => {

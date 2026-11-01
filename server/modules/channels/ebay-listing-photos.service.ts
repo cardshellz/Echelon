@@ -83,6 +83,7 @@ export class ChannelEbayListingPhotoResolver implements EbayListingPhotoResolver
         mediaPlan = await new PgCatalogVariantPublicationPhotoReader(client, this.publicUrl).listPublicationPlan({
           productId: input.productId, productVariantIds: input.variants.map(variant => variant.variantId),
           maxPhotosPerVariant: EBAY_LISTING_MAX_PHOTOS, maxGroupPhotos: EBAY_LISTING_MAX_PHOTOS, overrides,
+          minimumLongestSide: EBAY_MINIMUM_PHOTO_LONGEST_SIDE,
         });
         for (const variant of input.variants) {
           const resolved = mediaPlan.variants.find(candidate => candidate.variantId === variant.variantId)?.gallery;

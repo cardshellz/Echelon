@@ -4,6 +4,7 @@ import type { db } from "../../db";
 import { products, productAssets, productVariants } from "@shared/schema";
 import { persistAuditEvent } from "../../infrastructure/transactional-audit";
 import { inspectCatalogImage } from "./catalog-image-inspection";
+import { prepareCatalogPublicationRendition, prepareOptionalCatalogRendition, type CatalogPublicationRendition } from "./catalog-publication-rendition";
 import type { DownloadableProductImage } from "./product-image-download.service";
 import { ProductAssetError } from "./product-asset-errors";
 
@@ -51,6 +52,8 @@ export const catalogOriginalReplacementSchema = z
       .strict(),
     source: recoverySource,
     expectedOriginalHash: hash,
+    /** Snapshot of the previous URL-only photo, retained before replacement. */
+    expectedPriorHash: hash.optional(),
     actor: z.string().trim().min(1).max(200),
     reason: z.string().trim().min(1).max(2000),
     evidenceReference: z.string().trim().min(1).max(1000),
@@ -89,6 +92,23 @@ export type CatalogOriginalCreation = z.input<
 type CatalogImageTransaction = Parameters<
   Parameters<typeof db.transaction>[0]
 >[0];
+export const MAX_RECOVERY_PHOTOS_PER_PRODUCT = 100;
+export const MAX_RECOVERY_BATCH_BYTES = 100 * 1024 * 1024;
+
+async function storeCatalogRendition(transaction: CatalogImageTransaction, assetId: number,
+  rendition: CatalogPublicationRendition, now: Date): Promise<boolean> {
+  const existing = await transaction.execute(sql`SELECT 1 FROM catalog.product_asset_renditions
+    WHERE asset_id=${assetId} AND source_hash=${rendition.sourceHash} AND profile=${rendition.profile}`);
+  if (existing.rows.length) return false;
+  await transaction.execute(sql`INSERT INTO catalog.product_asset_versions(asset_id,content_hash,file_data,mime_type,created_at)
+    VALUES (${assetId},${rendition.contentHash},${rendition.image.data},${rendition.image.mimeType},${now})
+    ON CONFLICT (asset_id,content_hash) DO NOTHING`);
+  const result = await transaction.execute(sql`INSERT INTO catalog.product_asset_renditions(asset_id,product_id,product_variant_id,source_hash,source_longest_side,profile,rendition_hash,created_at)
+    SELECT id,product_id,product_variant_id,${rendition.sourceHash},${rendition.sourceLongestSide},${rendition.profile},${rendition.contentHash},${now}
+    FROM catalog.product_assets WHERE id=${assetId}
+    ON CONFLICT (asset_id,source_hash,profile) DO NOTHING`);
+  return result.rowCount === 1;
+}
 
 /** The sole stored-original writer, shared by imports and reviewed recovery.
  * The version-retention trigger preserves immutable public URLs in the same transaction. */
@@ -98,6 +118,7 @@ export async function storeCatalogOriginal(
   image: DownloadableProductImage,
   storageType: "file" | "both",
   now: Date,
+  rendition: CatalogPublicationRendition | null,
 ): Promise<void> {
   const data = Buffer.from(image.data);
   const measured = inspectCatalogImage({ data, mimeType: image.mimeType });
@@ -111,6 +132,11 @@ export async function storeCatalogOriginal(
       "The photo no longer exists. Refresh and try again.",
       409,
     );
+  if (rendition) {
+    if (rendition.sourceHash !== measured.contentHash)
+      throw new ProductAssetError("CATALOG_IMAGE_RENDITION_SOURCE_CHANGED", "The enlarged photo does not match its original.", 409);
+    await storeCatalogRendition(transaction,assetId,rendition,now);
+  }
 }
 
 /** Catalog owns an original's bytes. Every consumer keeps the same asset ID,
@@ -120,10 +146,10 @@ export function createCatalogImageOriginalsService(
   database: Pick<typeof db, "transaction">,
   clock: () => Date,
 ) {
-  async function recoverOriginal(
+  async function prepareRecovery(
     input: CatalogOriginalReplacement,
     image: DownloadableProductImage,
-    apply: boolean,
+    priorImage?: DownloadableProductImage,
   ) {
     const command = catalogOriginalReplacementSchema.parse(input);
     // Copy caller-owned bytes before crossing an asynchronous transaction boundary.
@@ -135,6 +161,12 @@ export function createCatalogImageOriginalsService(
         "The recovered image differs from its reviewed file. Review the original again.",
         409,
       );
+    const rendition = await prepareCatalogPublicationRendition({ data, mimeType: measured.mimeType });
+    const prior = priorImage ? { data: Buffer.from(priorImage.data), mimeType: priorImage.mimeType } : undefined;
+    const priorMeasured = prior ? inspectCatalogImage(prior) : undefined;
+    if (Boolean(command.expectedPriorHash) !== Boolean(priorMeasured)
+      || (priorMeasured && priorMeasured.contentHash !== command.expectedPriorHash))
+      throw new ProductAssetError("CATALOG_PRIOR_IMAGE_CHANGED", "The previous photo differs from the reviewed source snapshot.", 409);
     if (
       command.source.kind === "catalog_asset" &&
       command.source.contentHash !== measured.contentHash
@@ -144,8 +176,11 @@ export function createCatalogImageOriginalsService(
         "The referenced Catalog source does not match the reviewed file.",
         409,
       );
-    const now = clock();
-    return database.transaction(async (tx) => {
+    return {command,data,measured,rendition,prior,priorMeasured};
+  }
+  async function recoverPrepared(prepared: Awaited<ReturnType<typeof prepareRecovery>>,
+    apply: boolean, tx: CatalogImageTransaction, now: Date) {
+      const {command,data,measured,rendition,prior,priorMeasured} = prepared;
       if (!apply) await tx.execute(sql`SET TRANSACTION READ ONLY`);
       const productQuery = tx
         .select({ id: products.id })
@@ -215,8 +250,28 @@ export function createCatalogImageOriginalsService(
         asset.fileSize === measured.bytes &&
         asset.mimeType === measured.mimeType &&
         asset.storageType === (asset.url === null ? "file" : "both")
-      )
-        return { changed: false, contentHash: measured.contentHash };
+      ) {
+        const renditionExists = !rendition || (await tx.execute(sql`SELECT 1 FROM catalog.product_asset_renditions
+          WHERE asset_id=${command.assetId} AND source_hash=${rendition.sourceHash} AND profile=${rendition.profile}`)).rows.length > 0;
+        const priorExists = !priorMeasured || (await tx.execute(sql`SELECT 1 FROM catalog.product_asset_versions
+          WHERE asset_id=${command.assetId} AND content_hash=${priorMeasured.contentHash}`)).rows.length > 0;
+        if (renditionExists && priorExists) return { changed: false, contentHash: measured.contentHash };
+        if (apply) {
+          if (!priorExists && prior && priorMeasured)
+            await tx.execute(sql`INSERT INTO catalog.product_asset_versions(asset_id,content_hash,file_data,mime_type,created_at)
+              VALUES (${command.assetId},${priorMeasured.contentHash},${prior.data},${priorMeasured.mimeType},${now})
+              ON CONFLICT (asset_id,content_hash) DO NOTHING`);
+          if (!renditionExists && rendition) await storeCatalogRendition(tx,command.assetId,rendition,now);
+          await persistAuditEvent(tx, {
+            actor: command.actor, action: "catalog.image_recovery.completed", target: `catalog.product_assets:${command.assetId}`,
+            changes: { before: { sourceHash: measured.contentHash, priorRetained: priorExists, renditionRetained: renditionExists },
+              after: { sourceHash: measured.contentHash, priorHash: priorMeasured?.contentHash ?? null,
+                renditionHash: rendition?.contentHash ?? null } },
+            context: { productId: command.productId, reason: command.reason, evidenceReference: command.evidenceReference },
+          }, { timestamp: now, emitStructuredLog: false });
+        }
+        return { changed: true, contentHash: measured.contentHash };
+      }
       if (
         asset.storedHash !== expected.storedHash ||
         asset.storageType !== expected.storageType ||
@@ -230,13 +285,23 @@ export function createCatalogImageOriginalsService(
           "The photo's stored original changed. Review the repair again.",
           409,
         );
+      if (!asset.storedHash && asset.url && !prior
+        && !(command.source.kind === "external_url" && command.source.url === asset.url))
+        throw new ProductAssetError("CATALOG_PRIOR_IMAGE_REQUIRED", "Save the current URL-only photo before replacing it with a different original.", 409);
+      if (asset.storedHash && priorMeasured && asset.storedHash !== priorMeasured.contentHash)
+        throw new ProductAssetError("CATALOG_PRIOR_IMAGE_CHANGED", "The previous photo no longer matches the stored original.", 409);
       if (apply) {
+        if (prior && priorMeasured && !asset.storedHash)
+          await tx.execute(sql`INSERT INTO catalog.product_asset_versions(asset_id,content_hash,file_data,mime_type,created_at)
+            VALUES (${command.assetId},${priorMeasured.contentHash},${prior.data},${priorMeasured.mimeType},${now})
+            ON CONFLICT (asset_id,content_hash) DO NOTHING`);
         await storeCatalogOriginal(
           tx,
           command.assetId,
           { data, mimeType: measured.mimeType },
           asset.url === null ? "file" : "both",
           now,
+          rendition,
         );
         await persistAuditEvent(
           tx,
@@ -261,13 +326,19 @@ export function createCatalogImageOriginalsService(
               source: command.source,
               reason: command.reason,
               evidenceReference: command.evidenceReference,
+              priorSourceHash: priorMeasured?.contentHash ?? asset.storedHash ?? measured.contentHash,
             },
           },
           { timestamp: now, emitStructuredLog: false },
         );
       }
       return { changed: true, contentHash: measured.contentHash };
-    });
+  }
+  async function recoverOriginal(input: CatalogOriginalReplacement, image: DownloadableProductImage,
+    apply: boolean, priorImage?: DownloadableProductImage) {
+    const prepared = await prepareRecovery(input,image,priorImage);
+    const now = clock();
+    return database.transaction(tx => recoverPrepared(prepared,apply,tx,now));
   }
   return {
     async create(
@@ -277,6 +348,8 @@ export function createCatalogImageOriginalsService(
       const command = catalogOriginalCreationSchema.parse(input);
       const data = Buffer.from(image.data),
         measured = inspectCatalogImage({ data, mimeType: image.mimeType });
+      const { rendition, warning } = await prepareOptionalCatalogRendition({ data, mimeType: measured.mimeType });
+      if (warning) console.warn(JSON.stringify({event:"catalog.image_rendition.unavailable",productId:command.productId,code:warning.code}));
       const now = clock();
       return database.transaction(async (tx) => {
         const [product] = await tx
@@ -368,6 +441,7 @@ export function createCatalogImageOriginalsService(
               { data, mimeType: measured.mimeType },
               storageType,
               now,
+              rendition,
             );
             await persistAuditEvent(
               tx,
@@ -394,12 +468,21 @@ export function createCatalogImageOriginalsService(
               { timestamp: now, emitStructuredLog: false },
             );
           }
-          return (
+          if (rendition && await storeCatalogRendition(tx,replay.id,rendition,now)) {
+            await persistAuditEvent(tx, {
+              actor: command.actor, action: "catalog.image_rendition.created", target: `catalog.product_assets:${replay.id}`,
+              changes: { before: { sourceHash: rendition.sourceHash }, after: { sourceHash: rendition.sourceHash,
+                profile: rendition.profile, renditionHash: rendition.contentHash } },
+              context: { productId: command.productId, sourceUrl: command.sourceUrl },
+            }, { timestamp: now, emitStructuredLog: false });
+          }
+          const existingAsset = (
             await tx
               .select()
               .from(productAssets)
               .where(eq(productAssets.id, replay.id))
           )[0];
+          return warning ? {...existingAsset,publicationWarning:warning} : existingAsset;
         }
         const isPrimary = command.isPrimary ?? existing.length === 0;
         if (isPrimary)
@@ -440,6 +523,7 @@ export function createCatalogImageOriginalsService(
           { data, mimeType: measured.mimeType },
           command.sourceUrl === null ? "file" : "both",
           now,
+          rendition,
         );
         await persistAuditEvent(
           tx,
@@ -469,26 +553,58 @@ export function createCatalogImageOriginalsService(
             context: {
               productId: command.productId,
               sourceUrl: command.sourceUrl,
+              ...(warning ? { renditionWarning: warning } : {}),
             },
           },
           { timestamp: now, emitStructuredLog: false },
         );
-        return asset;
+        return warning ? {...asset,publicationWarning:warning} : asset;
       });
     },
     async preview(
       input: CatalogOriginalReplacement,
       image: DownloadableProductImage,
+      priorImage?: DownloadableProductImage,
     ): Promise<{ wouldApply: boolean; contentHash: string }> {
-      const result = await recoverOriginal(input, image, false);
+      const result = await recoverOriginal(input, image, false, priorImage);
       return { wouldApply: result.changed, contentHash: result.contentHash };
     },
     async replace(
       input: CatalogOriginalReplacement,
       image: DownloadableProductImage,
+      priorImage?: DownloadableProductImage,
     ): Promise<{ applied: boolean; contentHash: string }> {
-      const result = await recoverOriginal(input, image, true);
+      const result = await recoverOriginal(input, image, true, priorImage);
       return { applied: result.changed, contentHash: result.contentHash };
+    },
+    /** One product's entire reviewed gallery commits together, before any
+     * listing-intent worker can observe a partially recovered photo set. */
+    async replaceBatch(items: readonly {command: CatalogOriginalReplacement; image: DownloadableProductImage;
+      priorImage?: DownloadableProductImage}[]): Promise<Array<{assetId:number;applied:boolean;contentHash:string}>> {
+      if (!Array.isArray(items) || items.length === 0 || items.length > MAX_RECOVERY_PHOTOS_PER_PRODUCT)
+        throw new ProductAssetError("CATALOG_RECOVERY_BATCH_INVALID", "Select a bounded set of photos for one product.", 422);
+      const commands = items.map(item => catalogOriginalReplacementSchema.parse(item.command));
+      if (new Set(commands.map(command => command.productId)).size !== 1
+        || new Set(commands.map(command => command.assetId)).size !== commands.length)
+        throw new ProductAssetError("CATALOG_RECOVERY_BATCH_INVALID", "Each photo must appear once and belong to the same product.", 422);
+      let bytes = 0;
+      const prepared: Awaited<ReturnType<typeof prepareRecovery>>[] = [];
+      for (const item of items) {
+        const next = await prepareRecovery(item.command,item.image,item.priorImage);
+        bytes += next.data.byteLength + (next.prior?.data.byteLength ?? 0) + (next.rendition?.image.data.byteLength ?? 0);
+        if (bytes > MAX_RECOVERY_BATCH_BYTES)
+          throw new ProductAssetError("CATALOG_RECOVERY_BATCH_TOO_LARGE", "The reviewed photos exceed the per-product recovery limit.", 413);
+        prepared.push(next);
+      }
+      const now = clock();
+      return database.transaction(async tx => {
+        const results = [];
+        for (const item of prepared) {
+          const result = await recoverPrepared(item,true,tx,now);
+          results.push({assetId:item.command.assetId,applied:result.changed,contentHash:result.contentHash});
+        }
+        return results;
+      });
     },
   };
 }
