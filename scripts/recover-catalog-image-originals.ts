@@ -2,7 +2,8 @@
  * CATALOG_RECOVERY_DATABASE_URL must explicitly name the intended database.
  * npx tsx scripts/recover-catalog-image-originals.ts --manifest review.json [--execute]
  * Files are local, hash-pinned originals under the manifest directory. This
- * command never creates channel work, changes photo selection or uploads to a provider.
+ * command does not change photo selection or upload to a provider. An applied
+ * Catalog change can schedule normal channel work through intent invalidation.
  */
 import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
