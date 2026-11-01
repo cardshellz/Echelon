@@ -1,18 +1,22 @@
 import type { CustomerOrderProgress } from "@shared/customer-account/order-progress";
 import type { CustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
+import { knownCustomerOrderFulfillment, presentCustomerOrderLifecycle } from "@shared/customer-account/order-fulfillment";
 
 export function orderDeliveryLabel(
   cancelled: boolean,
   fulfillment: CustomerOrderFulfillment | undefined,
   progress: CustomerOrderProgress | null | undefined,
   fallback: string,
+  nativeFulfillment?: string,
 ): string | null {
+  const known = fulfillment && knownCustomerOrderFulfillment(presentCustomerOrderLifecycle(fulfillment, cancelled));
   const carrier = progress?.delivery;
   const physicallyMoving = carrier && !["awaiting_carrier", "unknown"].includes(carrier.code);
-  if (cancelled && !physicallyMoving && !["shipped", "partially_shipped"].includes(fulfillment?.code ?? "")) return null;
+  if (cancelled && !physicallyMoving && !["shipped", "partially_shipped"].includes(known?.code ?? "")
+    && !["fulfilled", "partial"].includes(nativeFulfillment ?? "")) return null;
   if (carrier && (!cancelled || physicallyMoving)) return carrier.label;
-  if (["cancelled", "cancelling"].includes(fulfillment?.code ?? "")) return null;
-  return fulfillment?.label ?? fallback;
+  if (["cancelled", "cancelling"].includes(known?.code ?? "")) return null;
+  return known?.label ?? fallback;
 }
 
 export function returnProgressLabel(

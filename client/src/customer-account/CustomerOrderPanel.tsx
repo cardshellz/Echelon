@@ -268,7 +268,7 @@ export function CustomerOrderPanel({
           ) : (
             <div className="csz-panel-summary">
               <CustomerOrderProgressSummary financialStatus={displayedOrder?.financialStatus ?? "Status unavailable"}
-                cancelled={cancelled} deliveryLabel={orderDeliveryLabel(cancelled, displayedOrder?.fulfillment, progress, fulfillmentLabel)} progress={progress} />
+                cancelled={cancelled} deliveryLabel={orderDeliveryLabel(cancelled, displayedOrder?.fulfillment, progress, fulfillmentLabel, row.dataset.fulfillment)} progress={progress} />
               <strong>
                 {displayedOrder
                   ? formatOrderEditMoney(
@@ -351,7 +351,7 @@ export function CustomerOrderPanel({
               </p>
             )}
             <CustomerOrderProgressDetails progress={progress}
-              showDelivery={orderDeliveryLabel(cancelled, displayedOrder?.fulfillment, progress, fulfillmentLabel) !== null} />
+              showDelivery={orderDeliveryLabel(cancelled, displayedOrder?.fulfillment, progress, fulfillmentLabel, row.dataset.fulfillment) !== null} />
             <h3 className="csz-panel-group">Your order</h3>
             {row.dataset.externalOrderId && row.dataset.orderReference && (
               <CustomerOrderDetails

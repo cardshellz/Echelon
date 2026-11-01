@@ -14,6 +14,9 @@ describe("independent compact customer status labels", () => {
     expect(orderDeliveryLabel(true,{code:"on_hold",label:"On hold"},progress(),"Not shipped")).toBeNull();
     expect(orderDeliveryLabel(true,{code:"cancelled",label:"Cancelled"},{...progress(),delivery:{code:"delivered",label:"Delivered"}},"Not shipped")).toBe("Delivered");
     expect(orderDeliveryLabel(false,{code:"attention",label:"Order needs attention"},progress(),"Not shipped")).toBe("Order needs attention");
+    expect(orderDeliveryLabel(false,{code:"unavailable",label:"Status unavailable"},undefined,"Shipped","fulfilled")).toBe("Shipped");
+    expect(orderDeliveryLabel(true,{code:"unavailable",label:"Status unavailable"},undefined,"Shipped","fulfilled")).toBe("Shipped");
+    expect(orderDeliveryLabel(false,{code:"cancelled",label:"Picking stopped"},undefined,"Not shipped")).toBe("Order needs attention");
   });
   it("hides a genuinely absent return without hiding a failed return read", () => {
     expect(returnProgressLabel(undefined)).toBeNull();
