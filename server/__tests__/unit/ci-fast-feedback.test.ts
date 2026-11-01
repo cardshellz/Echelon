@@ -506,14 +506,14 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(browser).not.toContain("continue-on-error:");
   });
 
-  it("gives procurement eight complete shards and setup headroom without weakening coverage", () => {
+  it("gives procurement twelve complete shards and setup headroom without weakening coverage", () => {
     const procurement = source(".github/workflows/procurement-navigation.yml");
     const browser = job(procurement, "browser");
     // Parse the actual matrix: missing/duplicated indices or a mismatched total
     // would silently repeat or omit cases even when every scheduled job succeeds.
     const indices: number[] = JSON.parse(browser.match(/^        shard: (\[[\d, ]+\])$/m)?.[1] ?? "[]");
     const totals: number[] = JSON.parse(browser.match(/^        shards: (\[[\d, ]+\])$/m)?.[1] ?? "[]");
-    expect(totals).toEqual([8]);
+    expect(totals).toEqual([12]);
     expect(indices).toEqual(Array.from({ length: totals[0] }, (_, index) => index + 1));
     expect(browser).toContain("timeout-minutes: 20");
     expect(browser).toContain("fail-fast: false");
