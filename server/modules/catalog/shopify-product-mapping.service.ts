@@ -37,6 +37,7 @@ type QueryClient = typeof db | TransactionClient;
 interface LoadedMapping {
   summary: ShopifyProductMappingSummary;
   shippingGroupCode: string | null;
+  skuEvidence: Array<{ variantId: number; feedSku: string | null; listingSku: string | null }>;
 }
 
 export interface VerifiedShopifyProduct {
@@ -145,9 +146,11 @@ async function loadMapping(
       feedProductId: channelFeeds.channelProductId,
       feedVariantId: channelFeeds.channelVariantId,
       feedInventoryItemId: channelFeeds.channelInventoryItemId,
+      feedSku: channelFeeds.channelSku,
       listingId: channelListings.id,
       listingProductId: channelListings.externalProductId,
       listingVariantId: channelListings.externalVariantId,
+      listingSku: channelListings.externalSku,
     })
     .from(productVariants)
     .leftJoin(
@@ -201,6 +204,7 @@ async function loadMapping(
   return {
     summary: buildShopifyProductMappingSummary(source),
     shippingGroupCode: product.shippingGroupCode,
+    skuEvidence: rows.map(row => ({ variantId: row.variantId, feedSku: row.feedSku, listingSku: row.listingSku })),
   };
 }
 
@@ -456,12 +460,19 @@ function mappingRequiresWrite(
   summary: ShopifyProductMappingSummary,
   targetProductId: string,
   variantMappings: ShopifyVariantMappingResolution[],
+  skuEvidence: LoadedMapping["skuEvidence"],
 ): boolean {
   if (summary.catalogProductId !== targetProductId || summary.status !== "consistent") return true;
   const variantsById = new Map(summary.variants.map((variant) => [variant.variantId, variant]));
+  const skusById = new Map(skuEvidence.map(item => [item.variantId, item]));
   return variantMappings.some((mapping) => {
     const variant = variantsById.get(mapping.variantId);
+    const skus = skusById.get(mapping.variantId);
+    const remoteSku = mapping.remoteSku || mapping.sku || null;
+    // A blank SKU can be filled after identity ownership was claimed. Refresh
+    // observed channel metadata even when product/variant/item IDs are unchanged.
     return !variant
+      || skus?.feedSku !== remoteSku || skus?.listingSku !== remoteSku
       || variant.catalogVariantId !== mapping.remoteVariantId
       || variant.catalogInventoryItemId !== mapping.remoteInventoryItemId
       || (!variant.catalogBarcode && Boolean(mapping.remoteBarcode))
@@ -577,7 +588,7 @@ export function createShopifyProductMappingService(dependencies: {
     }
     const mappedVariantIds = repairEvaluation.mappedVariantIds;
     const variantMappings = repairEvaluation.variantMappings;
-    const requiresWrite = before.channelProductId !== targetProductId || mappingRequiresWrite(before, targetProductId, variantMappings);
+    const requiresWrite = before.channelProductId !== targetProductId || mappingRequiresWrite(before, targetProductId, variantMappings, loaded.skuEvidence);
 
     if (!requiresWrite) {
       if (input.afterMapping) {

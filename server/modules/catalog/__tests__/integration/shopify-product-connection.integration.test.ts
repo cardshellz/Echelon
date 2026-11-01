@@ -150,6 +150,10 @@ integration("durable per-product Shopify connections with real mapping and price
     expect((await f.mappingOwner.getSummary(product.id, 7)).status).toBe("consistent");
     expect((await f.service.execute(product.id, intent, "user:other-operator")).command.state).toBe("complete");
     expect(native.variants.map(variant => variant.sku)).toEqual(["CHANNEL-SKU", "PRESERVE-THIS"]);
+    const evidence = (await database.pool.query(`SELECT f.channel_sku,l.external_sku
+      FROM channels.channel_feeds f JOIN channels.channel_listings l ON l.channel_id=f.channel_id AND l.product_variant_id=f.product_variant_id
+      WHERE f.channel_id=7 AND f.product_variant_id=ANY($1::int[]) ORDER BY f.product_variant_id`, [product.variants.map(variant => variant.id)])).rows;
+    expect(evidence).toEqual([{ channel_sku: "CHANNEL-SKU", external_sku: "CHANNEL-SKU" }, { channel_sku: "PRESERVE-THIS", external_sku: "PRESERVE-THIS" }]);
     expect(f.api.operations.filter(operation => operation.operation === "EchelonConnectionSkuFill")).toHaveLength(1);
     expect(f.startInventorySync).toHaveBeenCalledExactlyOnceWith({ productId: product.id, idempotencyKey: intent.commandKey }, "operator");
     expect(await inventory()).toEqual(stock);
