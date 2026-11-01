@@ -40,6 +40,7 @@ import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
 import { registerHistoricalCostTimestampCases } from "./historical-cost-timestamps.cases";
 import { registerPurchaseCostStatusBatchCases } from "./purchase-cost-status-batch.cases";
 import { registerReceiptConfigurationAuthorityCases } from "./receipt-configuration-authority.cases";
+import { registerCostSourceCompatibilityCases } from "./cost-source-compatibility.cases";
 import type { ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../receiving.service";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
@@ -57,6 +58,7 @@ const TABLES = [
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
   schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines,
   schema.vendorInvoicePoLinks, schema.poStatusHistory, schema.poEvents, schema.poExceptions,
+  schema.apPayments, schema.apPaymentAllocations,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.productLocations, schema.inventoryLevels,
@@ -1575,6 +1577,9 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await failAudit(async () => { await expect(approveEvidence()).rejects.toThrow(/cost audit injected AP audit failure/); });
     expect(await state()).toEqual(before);
   });
+  registerCostSourceCompatibilityCases({ pool: () => pool, database: () => database, shipment: () => shipment,
+    receive, approveSupplier: approveEvidence, retrySupplier: () => database.transaction(tx => reconcile(21, tx, actorId)),
+    actorId, at: NOW });
   registerReceiptConfigurationAuthorityCases({ pool: () => pool, database: () => database,
     purchasing: () => purchasing, shipments: () => shipment, actorId,
     receivingLines: (id) => storage.getReceivingLines(id), receivingWithWarnings: (evaluator, reporter) => receivingWithWarnings(evaluator, reporter),

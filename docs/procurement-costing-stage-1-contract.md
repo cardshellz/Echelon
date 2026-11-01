@@ -2,7 +2,7 @@
 
 Tracker: [purchase costing cleanup](procurement-costing-cleanup-plan.md). Baseline findings and pinned source links: [authority audit](procurement-costing-authority-audit-2026-10-30.md).
 
-State: additive contract and pure projection implemented; receipt allocation policy and supplier tax policy are awaiting the user's answers. This document records the foundation and the boundaries that later stages must satisfy. The new projection is not connected to runtime readers or posting commands.
+Stage 1 delivery: additive contract and pure projection merged in PR #1964; the user reports deployment. Receipt allocation and supplier tax policy answers remain pending. This document records that foundation and its activation boundaries. The [first S2 compatibility integration](procurement-costing-stage-2-compatibility.md) now uses the model to prove unchanged recorded authority; replacing the active pricing selection and all monetary consumers remains later work.
 
 ## Implemented contract
 

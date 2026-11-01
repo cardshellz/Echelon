@@ -10,6 +10,11 @@ const currency = z.string().regex(/^[A-Z]{3}$/);
 const MAX_SOURCES = 1_000;
 const MAX_ADJUSTMENTS = 100;
 
+const approvedCostInvoiceStatuses = ["approved", "partially_paid", "paid"] as const;
+export function isApprovedCostInvoiceStatus(value: unknown): value is typeof approvedCostInvoiceStatuses[number] {
+  return approvedCostInvoiceStatuses.some(status => status === value);
+}
+
 export const purchaseCostReferenceSchema = z.object({
   kind: z.enum(["purchase_order_line", "vendor_invoice_line", "shipment_cost", "supplier_credit_line"]),
   documentId: id,
