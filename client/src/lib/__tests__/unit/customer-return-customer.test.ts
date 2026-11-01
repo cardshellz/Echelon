@@ -100,6 +100,24 @@ function begin(s: ReturnType<typeof setup>) {
 }
 
 describe("customer return transport", () => {
+  it("loads lightweight choices through the session-bound read endpoint", async () => {
+    const page = { orders: [{ omsOrderId: 10, orderReference: "TEST-1001", purchasedAt: null,
+      eligibleItemCount: null }], nextBeforeOmsOrderId: 10, unavailableOrderCount: 0 };
+    const request = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(page)));
+    expect(await createCustomerReturnTransport(request, identity).orderChoices(null, new AbortController().signal)).toEqual(page);
+    expect(request).toHaveBeenCalledExactlyOnceWith("/api/returns/customer/order-options", expect.objectContaining({
+      method: "GET", cache: "no-store", credentials: "include", headers: { "X-Return-Session": identity },
+    }));
+  });
+  it.each(["duplicate", "repeated-cursor", "out-of-page"])("rejects invalid chooser pagination: %s", async invalid => {
+    const choice = { omsOrderId: invalid === "out-of-page" ? 20 : 10,
+      orderReference: "TEST-1001", purchasedAt: null, eligibleItemCount: null };
+    const page = { orders: invalid === "duplicate" ? [choice, choice] : [choice],
+      nextBeforeOmsOrderId: invalid === "repeated-cursor" ? 20 : null, unavailableOrderCount: 0 };
+    const request = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(page)));
+    await expect(createCustomerReturnTransport(request, identity).orderChoices(20, new AbortController().signal)).rejects.toThrow();
+    expect(request.mock.calls[0][0]).toBe("/api/returns/customer/order-options?before=20");
+  });
   it("bounds a stalled observation without issuing any command", async () => {
     vi.useFakeTimers();
     try {

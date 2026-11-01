@@ -38,6 +38,10 @@ export function registerCustomerReturnCustomerRoutes(app: Express, dependencies:
   };
   const noQuery = (req: Request) => z.object({}).strict().parse(req.query);
   const emptyCommand = (req: Request) => { noQuery(req); z.object({}).strict().parse(req.body); };
+  app.get(`${CUSTOMER_RETURNS_API}/order-options`, handle(false, (req, value) => {
+    const before = cursor(req.query);
+    return value.orders.choices(before === undefined ? {} : { beforeOmsOrderId: id(before) });
+  }));
   app.get(`${CUSTOMER_RETURNS_API}/orders`, handle(false, (req, value) => {
     const before = cursor(req.query);
     return value.orders.list(before === undefined ? {} : { beforeOmsOrderId: id(before) });
