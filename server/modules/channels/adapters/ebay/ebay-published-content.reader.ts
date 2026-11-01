@@ -120,12 +120,13 @@ export async function readEbayPublishedContent(input: {
     );
   } catch (cause) {
     throw nativeListingReadFailure(
-      transport,
+      { ...transport, resource: "published_photo" },
       cause instanceof ProductAssetError && cause.status < 500
         ? "invalid_response"
         : "unavailable",
       undefined,
       cause,
+      "GET",
     );
   }
   const policies = item.SellerProfiles;
@@ -152,7 +153,14 @@ export async function readEbayPublishedContent(input: {
     ),
     photos: urls.map((url, index) => {
       const image = inspected.get(url);
-      if (!image) throw nativeListingReadFailure(transport);
+      if (!image)
+        throw nativeListingReadFailure(
+          { ...transport, resource: "published_photo" },
+          "invalid_response",
+          undefined,
+          undefined,
+          "GET",
+        );
       return {
         url,
         width: image.width,

@@ -58,11 +58,16 @@ describe("eBay published content adapter", () => {
       kind: status===401?"refused":"unavailable" });
     expect(error.message).not.toContain("private provider body");
   });
-  it.each([422,502])("retains an image inspection failure (%i) as a failed native read", async status => {
+  it.each([422,502])("retains an image inspection failure (%i) as a failed published photo read", async status => {
     const error = await readEbayPublishedContent({ ...input(vi.fn(async () => new Response(xml()))),
       images: { inspect: async()=> { throw new ProductAssetError("IMAGE_FAILED","private image details",status); } } }).catch(error=>error);
-    expect(providerReadDiagnosticFromError(error)).toMatchObject({ resource: "published_listing", method: "POST",
+    expect(providerReadDiagnosticFromError(error)).toMatchObject({ resource: "published_photo", method: "GET",
       kind: status===422?"invalid_response":"unavailable" });
+  });
+  it("rejects a missing inspection result as a published photo read failure", async () => {
+    const error = await readEbayPublishedContent({ ...input(vi.fn(async () => new Response(xml()))),
+      images: { inspect: async () => new Map() } }).catch(error => error);
+    expect(providerReadDiagnosticFromError(error)).toMatchObject({ resource: "published_photo", method: "GET", kind: "invalid_response" });
   });
   it("only selects another rendition of the exact eBay image key", () => {
     expect(ebayOriginalPhotoUrl(thumbnail)).toBe(fullSize);

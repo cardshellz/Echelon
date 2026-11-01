@@ -365,9 +365,12 @@ const configured =
       expect(f.mutations).toHaveLength(3);
     });
 
-    it("preserves failed native POST diagnostics after accepted writes and recovers without replaying those writes", async () => {
+    it.each([
+      { resource: "published_listing", method: "POST" },
+      { resource: "published_photo", method: "GET" },
+    ] as const)("preserves failed $resource $method diagnostics after accepted writes and recovers without replaying those writes", async ({ resource, method }) => {
       const f = fixture(), native = f.client.getPublishedListingContent!;
-      const read: ChannelProviderReadDiagnostic = { provider:"ebay",resource:"published_listing",method:"POST",kind:"unavailable",httpStatus:503 };
+      const read: ChannelProviderReadDiagnostic = { provider:"ebay",resource,method,kind:"unavailable",httpStatus:503 };
       f.client.getPublishedListingContent = vi.fn().mockRejectedValueOnce(new EbayListingSyncError("EBAY_PUBLISHED_CONTENT_READ_UNAVAILABLE",
         "The published listing could not be checked.",{cause:new ChannelProviderReadError(read,{cause:new Error("private provider body")})})).mockImplementation(native);
       const saved = await f.service.enqueue(identity,"operator");

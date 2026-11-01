@@ -200,7 +200,7 @@ export function EbayMappingRepairDialog({ productId, productName, onClose, onQue
       {storageFailure === "read" && <Button variant="outline" className="min-h-11" onClick={loadSavedCommand}>Retry loading saved request</Button>}
       {result && job ? <div className="space-y-3 text-sm">
         <p role="status" className="font-medium">{publishing
-          ? job.state === "completed" ? "Published on eBay. Listing and pictures verified." : job.code === "EBAY_PUBLICATION_READBACK_PENDING" ? "eBay accepted publication. Checking the published listing and pictures automatically." : jobIssue ? "Publishing request saved. The listing needs the correction below." : "Publishing is queued or running. Publication is not yet confirmed."
+          ? job.state === "completed" ? "Published on eBay." : job.code === "EBAY_PUBLICATION_READBACK_PENDING" ? "eBay accepted publication. Checking the published listing and pictures automatically." : jobIssue ? "Publishing request saved. The listing needs the correction below." : "Publishing is queued or running. Publication is not yet confirmed."
           : job.state === "completed" ? "Listing sync completed." : jobIssue ? "Mapping request saved. The listing needs the correction below." : "Mapping request saved. Listing sync is queued or running."}</p>
         {job.state !== "completed" && <p>The listing update is not yet confirmed complete. You can close this dialog and follow its saved status in the listing feed.</p>}
         {jobIssue && <EbayListingIssueCard issue={jobIssue} onAction={(issue) => { onClose(); onIssueAction(issue, productId, job.id); }} />}

@@ -287,8 +287,8 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       "Review the saved request and its response. An inventory administrator can authorize a fresh update using current inventory when the old outcome remains unknown.",
       false, "check_recovery", "Review blocked update");
   if (code === "EBAY_PUBLICATION_READBACK_PENDING")
-    return issue("Checking published listing and pictures", "eBay accepted the publication request. Echelon is still checking the complete listing and its pictures.",
-      "The saved publication will check again automatically without publishing a second time. View its status or refresh the check; completion appears after the listing and pictures are verified.",
+    return issue("Checking published listing and pictures", "eBay accepted the publication request. Echelon is still checking the published listing and picture information.",
+      "The saved publication will check again automatically without publishing a second time. View its status or refresh the check.",
       false, "check_status", "View publishing status");
   if (code === "EBAY_PUBLICATION_PRIOR_WORK_REQUIRED")
     return issue("An earlier publication must finish first", "An earlier saved publication may already have reached eBay.",
@@ -427,7 +427,7 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
   if (code === "EBAY_SYNC_READBACK_PENDING") {
     const automatic = ["queued", "running", "recovering", "awaiting_evidence"].includes(input.state ?? "");
     return issue("Waiting for eBay to confirm the listing", "eBay has not yet confirmed all of the saved listing changes.",
-      automatic ? "Echelon will check the published listing again automatically. This update is complete only after its listing details, photos and policies are confirmed."
+      automatic ? "Echelon will check the published listing again automatically, including its policies, variants, picture count and picture sizes."
         : "Retry Sync. Echelon will check the saved update and published listing before sending another change.",
       !automatic, automatic ? "check_status" : "retry_sync", automatic ? "View update status" : "Retry Sync");
   }

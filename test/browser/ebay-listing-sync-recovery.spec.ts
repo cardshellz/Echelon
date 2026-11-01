@@ -47,15 +47,18 @@ test("published policy verification remains unfinished in Sync All after closing
   expect(state.requests).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("published gallery read diagnostics preserve POST and a read-only recovery without another Sync click", async ({page},info) => {
+for (const read of [
+  { resource: "published_listing", method: "POST" },
+  { resource: "published_photo", method: "GET" },
+] as const) test(`published ${read.resource} ${read.method} diagnostics recover without another Sync click`, async ({page},info) => {
   const state = await setupEbayChannelPage(page);
   state.jobs = [{...job,state:"recovering",code:"EBAY_PUBLISHED_CONTENT_READ_UNAVAILABLE",message:"The published listing could not be checked.",
-    providerRead:{provider:"ebay",resource:"published_listing",method:"POST",kind:"unavailable",httpStatus:503}}];
+    providerRead:{provider:"ebay",resource:read.resource,method:read.method,kind:"unavailable",httpStatus:503}}];
   await page.reload();
   await page.getByRole("button",{name:"View update status",exact:true}).filter({visible:true}).first().click();
   const dialog = page.getByRole("dialog");
   await dialog.getByText("Technical details",{exact:true}).click();
-  await expect(dialog.getByText("ebay / published_listing (POST)",{exact:true})).toBeVisible();
+  await expect(dialog.getByText(`ebay / ${read.resource} (${read.method})`,{exact:true})).toBeVisible();
   await page.screenshot({path:info.outputPath("published-gallery-read-diagnostic.png"),fullPage:true});
   await dialog.getByRole("button",{name:"Close",exact:true}).last().click();
   await page.clock.install(); state.jobs = [{...job,state:"completed"}];

@@ -22,6 +22,7 @@ export function nativeListingReadFailure(
   kind: ChannelProviderReadDiagnostic["kind"] = "invalid_response",
   httpStatus?: number,
   cause?: unknown,
+  method: "GET" | "POST" = "POST",
 ): EbayListingSyncError {
   return new EbayListingSyncError(
     httpStatus === 401
@@ -33,7 +34,7 @@ export function nativeListingReadFailure(
         {
           provider: "ebay",
           resource: input.resource,
-          method: "POST",
+          method,
           kind,
           ...(httpStatus === undefined ? {} : { httpStatus }),
         },
