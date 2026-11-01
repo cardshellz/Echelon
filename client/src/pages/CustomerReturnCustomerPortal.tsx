@@ -27,6 +27,9 @@ import type { CustomerReturnCustomerLabelStatus } from "@shared/returns/customer
 
 const RETURN_OBSERVATION_INTERVAL_MS = 2_000;
 const MAX_RETURN_OBSERVATION_FAILURES = 3;
+// This customer portal is branded for Card Shellz. Use its public storefront,
+// never the backend origin, referrer, or a caller-supplied redirect destination.
+const CUSTOMER_RETURN_SHOPPING_URL = "https://www.cardshellz.com/";
 
 type Session = Awaited<
   ReturnType<ReturnType<typeof createCustomerReturnTransport>["session"]>
@@ -95,7 +98,7 @@ export default function CustomerReturnCustomerPortal() {
             onSignedOut={signedOut}
           />
         ) : (
-          <CustomerReturnSurface>
+          <CustomerReturnSurface shoppingHref={CUSTOMER_RETURN_SHOPPING_URL}>
             <div className="csz-return-status">
               <h1 className="text-2xl font-semibold">Return an order</h1>
               <PreviewError message={error} />
@@ -156,6 +159,7 @@ export function CustomerWorkspace({
     () => transport ?? createCustomerReturnTransport(fetch, sessionKey),
     [sessionKey, transport],
   );
+  const shoppingHref = embedded ? undefined : CUSTOMER_RETURN_SHOPPING_URL;
   const [commands] = useState(() => {
     let storage: Storage | null = null;
     try {
@@ -485,7 +489,7 @@ export function CustomerWorkspace({
   }
   if (showStatus)
     return (
-      <CustomerReturnSurface label="Your return" onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
+      <CustomerReturnSurface label="Your return" shoppingHref={shoppingHref} onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
         <div className="csz-return-status">
           <h1 ref={statusHeading} tabIndex={-1} className="text-2xl font-semibold outline-none">
             {status
@@ -583,6 +587,7 @@ export function CustomerWorkspace({
           gateway={gateway}
           onAccessDenied={onDenied}
           onClose={embedded ? onSignedOut : undefined}
+          shoppingHref={shoppingHref}
           closeDisabled={busy || flowBusy}
           onBusy={setFlowBusy}
           notice={<>
@@ -600,7 +605,7 @@ export function CustomerWorkspace({
 
   if (directOrderId !== null)
     return (
-      <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
+      <CustomerReturnSurface shoppingHref={shoppingHref} onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
         <div className="csz-return-status">
           <h1 className="text-2xl font-semibold">Return items</h1>
           <PreviewError message={error} />
@@ -618,7 +623,7 @@ export function CustomerWorkspace({
     );
 
   return (
-    <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
+    <CustomerReturnSurface shoppingHref={shoppingHref} onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
       <div className="csz-return-status">
         <h1
           ref={chooser}

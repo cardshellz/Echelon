@@ -19,12 +19,16 @@ export class CachedCustomerReturnOrderChoicesReader implements CustomerReturnOrd
 
   async read(raw: readonly CustomerReturnOrderAccessResult[]) {
     if (raw.length > 10) throw new CustomerReturnOrderChoicesError("RETURN_ORDER_CHOICES_PAGE_TOO_LARGE");
-    const owned = raw.map(order => customerReturnOrderAccessResultSchema.parse(order));
-    if (new Set(owned.map(order => order.omsOrderId)).size !== owned.length)
+    const candidates = raw.map(order => customerReturnOrderAccessResultSchema.parse(order));
+    if (new Set(candidates.map(order => order.omsOrderId)).size !== candidates.length)
       throw new CustomerReturnOrderChoicesError("RETURN_ORDER_CHOICES_DUPLICATE_IDENTITY");
-    if (!owned.length) return { orders: [], unavailableOrderCount: 0 };
-    if (owned.some(order => order.channelId !== this.dependencies.principal.channelId))
+    if (candidates.some(order => order.channelId !== this.dependencies.principal.channelId))
       throw new CustomerReturnOrderChoicesError("RETURN_ORDER_CHOICES_SCOPE_MISMATCH");
+    // Canonical return inspection already gives a cancelled order zero eligible
+    // units. Honor that channel fact even while its cached inspection refreshes;
+    // refunds alone are not cancellation evidence and are never consulted here.
+    const owned = candidates.filter(order => !order.cancelledAt);
+    if (!owned.length) return { orders: [], unavailableOrderCount: 0 };
     const requested = owned.map(order => ({
       externalOrderId: order.externalOrderId.replace(/^gid:\/\/shopify\/Order\//, ""),
       orderReference: order.externalOrderNumber,

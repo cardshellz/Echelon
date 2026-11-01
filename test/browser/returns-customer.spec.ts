@@ -6,6 +6,14 @@ import { customerReturnSavedRequestSchema } from "../../client/src/lib/customer-
 
 const API = "/api/returns/customer";
 const identity = "a".repeat(43);
+const SHOPPING = "https://www.cardshellz.com/";
+
+async function assertShoppingExit(page: Page) {
+  const link = page.getByRole("link", { name: "Back to shopping", exact: true });
+  await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute("href", SHOPPING);
+  await expect(link).not.toHaveAttribute("target", "_blank");
+}
 async function fixtures(
   page: Page,
   options: {
@@ -241,12 +249,14 @@ async function selectAndPack(page: Page, packedWeightOunces?: string, beforeRevi
     page.getByRole("heading", { name: "What would you like to return?" }),
   ).toBeVisible();
   await expect(page.getByLabel("Order number", { exact: true })).toHaveCount(0);
+  await assertShoppingExit(page);
   await page
     .getByRole("spinbutton", { name: /^Return quantity for item 1:/ })
     .fill("1");
   await page
     .getByRole("button", { name: "Continue to packing", exact: true })
     .click();
+  await assertShoppingExit(page);
   await page
     .getByRole("combobox", { name: "Box size for box 1", exact: true })
     .selectOption({ label: "Use a different box" });
@@ -268,6 +278,7 @@ async function selectAndPack(page: Page, packedWeightOunces?: string, beforeRevi
   await page
     .getByRole("button", { name: "Review return", exact: true })
     .click();
+  await assertShoppingExit(page);
 }
 
 test("signed-out customer sees fixed sign-in and no staff shell or order reads", async ({
@@ -275,6 +286,7 @@ test("signed-out customer sees fixed sign-in and no staff shell or order reads",
 }) => {
   const f = await fixtures(page, { signedIn: false });
   await page.goto("/customer-returns");
+  await assertShoppingExit(page);
   await expect(
     page.getByRole("link", { name: "Sign in to Card Shellz" }),
   ).toHaveAttribute("href", "/customer-returns/start");
@@ -320,6 +332,47 @@ test("owned selection skips Find order, reviews exact quantities and creates onl
   ).toBe(true);
 });
 
+test("the standalone header provides an accessible same-tab route back to shopping", async ({ page }, info) => {
+  const f = await fixtures(page);
+  await page.route(SHOPPING, route => route.fulfill({ contentType: "text/html", body: "<h1>Storefront</h1>" }));
+  await page.goto("/customer-returns");
+  await assertShoppingExit(page);
+  const measurements = await page.locator(".csz-return-brand").evaluate(header => {
+    const link = header.querySelector<HTMLAnchorElement>(".csz-return-shopping")!;
+    const bounds = link.getBoundingClientRect();
+    const frame = header.getBoundingClientRect();
+    return { overflow: header.scrollWidth > header.clientWidth, height: bounds.height,
+      contained: bounds.left >= frame.left && bounds.right <= frame.right };
+  });
+  expect(measurements).toMatchObject({ overflow: false, contained: true });
+  expect(measurements.height).toBeGreaterThanOrEqual(44);
+  await page.screenshot({ path: info.outputPath("back-to-shopping.png") });
+  await page.getByRole("link", { name: "Back to shopping", exact: true }).click();
+  await expect(page).toHaveURL(SHOPPING);
+  await expect(page.getByRole("heading", { name: "Storefront" })).toBeVisible();
+  expect(page.context().pages()).toHaveLength(1);
+  expect(f.calls.every(call => call.method === "GET")).toBe(true);
+});
+
+test("returning to shopping preserves an uncertain label request for safe recovery", async ({ page }) => {
+  const f = await fixtures(page, { failSubmit: true });
+  await page.route(SHOPPING, route => route.fulfill({ contentType: "text/html", body: "<h1>Storefront</h1>" }));
+  await page.goto("/customer-returns");
+  await selectAndPack(page);
+  await page.getByRole("button", { name: "Get return labels", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeEnabled();
+  const original = await page.evaluate(key => sessionStorage.getItem(key), `customer-return-request:${identity}`);
+  expect(original).not.toBeNull();
+  await assertShoppingExit(page);
+  await page.getByRole("link", { name: "Back to shopping", exact: true }).click();
+  await expect(page).toHaveURL(SHOPPING);
+  await page.goto("/customer-returns");
+  await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeEnabled();
+  expect(await page.evaluate(key => sessionStorage.getItem(key), `customer-return-request:${identity}`)).toBe(original);
+  expect(f.calls.filter(call => call.method === "POST").map(call => call.path))
+    .toEqual([`${API}/orders/10/review`, `${API}/orders/10/label-requests`]);
+});
+
 test("label creation names the customer task and hides retry instructions while working", async ({ page }) => {
   let release!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
@@ -329,6 +382,7 @@ test("label creation names the customer task and hides retry instructions while 
   try {
     await page.getByRole("button", { name: "Get return labels", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Getting your return label", exact: true })).toBeVisible();
+    await assertShoppingExit(page);
     await expect(page.getByText("Getting your return label…", { exact: true })).toBeVisible();
     await expect(page.getByText("Your selections are saved. Try again to continue with your return.", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Check status", exact: true })).toHaveCount(0);
@@ -519,6 +573,7 @@ test("order load failure remains an error and never claims no eligible orders", 
   const f = await fixtures(page, { failOrders: true, history: true });
   await page.goto("/customer-returns");
   await expect(page.getByRole("alert")).toContainText("could not confirm");
+  await assertShoppingExit(page);
   await expect(page.getByText(/No eligible orders were found/)).toHaveCount(0);
   await page.getByRole("button", { name: "RMA-20 \u00b7 Order TEST-1001" }).click();
   await expect(

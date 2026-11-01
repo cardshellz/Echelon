@@ -49,6 +49,9 @@ export const customerReturnOrderCandidateSchema = z.object({
   externalOrderId: externalIdSchema,
   externalOrderNumber: z.string().min(1).max(MAX_CUSTOMER_RETURN_ORDER_REFERENCE_LENGTH),
   externalCustomerId: externalIdSchema.nullable(),
+  // Channel-owned cancellation evidence, independent of payment/refund status.
+  // Optional for older adapters; missing evidence must not mean cancelled.
+  cancelledAt: z.string().datetime().nullable().optional(),
 }).strict();
 
 export type CustomerReturnOrderCandidate = z.infer<typeof customerReturnOrderCandidateSchema>;
