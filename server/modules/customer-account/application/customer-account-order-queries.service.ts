@@ -18,6 +18,8 @@ import type {
   CustomerAccountOrderSummaries,
   CustomerAccountOrderDetails,
 } from "@shared/customer-account/customer-account-orders";
+import { customerOrderProgressSchema } from "@shared/customer-account/order-progress";
+import type { CustomerAccountProgressReader } from "./customer-account-progress.ports";
 import type { OrderActionProjectionReader } from "./order-action-projection.ports";
 
 export interface CustomerAccountOrderContext {
@@ -44,6 +46,7 @@ export class CustomerAccountOrderQueriesService {
       edits: Pick<OrderEditService, "orderSummaries" | "customerOrderDetails">;
       context: CustomerAccountOrderContextReader;
       actions?: OrderActionProjectionReader;
+      progress?: CustomerAccountProgressReader;
       now?: () => Date;
       report(event: { code: string; causeCode?: string }): void;
     },
@@ -66,14 +69,27 @@ export class CustomerAccountOrderQueriesService {
 
   async actions(raw: unknown) {
     const input = customerAccountOrderSummariesInputSchema.parse(raw);
-    if (!this.dependencies.actions || !this.dependencies.now) throw new OrderEditError(
-      "CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE", "Order options are temporarily unavailable. Please try again.", 503);
+    if (!this.dependencies.actions || !this.dependencies.now)
+      throw new OrderEditError(
+        "CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE",
+        "Order options are temporarily unavailable. Please try again.",
+        503,
+      );
     const principal = this.dependencies.principal;
-    return this.dependencies.actions.read({ ...input, channelId: principal.channelId,
-      externalCustomerId: principal.externalCustomerId }, this.dependencies.now());
+    return this.dependencies.actions.read(
+      {
+        ...input,
+        channelId: principal.channelId,
+        externalCustomerId: principal.externalCustomerId,
+      },
+      this.dependencies.now(),
+    );
   }
 
-  async summaries(raw: unknown): Promise<CustomerAccountOrderSummaries> {
+  async summaries(
+    raw: unknown,
+    options: { progress?: boolean } = {},
+  ): Promise<CustomerAccountOrderSummaries> {
     const input = customerAccountOrderSummariesInputSchema.parse(raw);
     const connection = await this.connection();
     const principal = this.dependencies.principal;
@@ -135,6 +151,20 @@ export class CustomerAccountOrderQueriesService {
       orders.push({
         ...summary,
         omsOrderId: context?.omsOrderId ?? null,
+        ...(options.progress
+          ? {
+              progress:
+                contexts === null || matchingContexts.length > 1
+                  ? null
+                  : {
+                      unavailable: [],
+                      delivery: null,
+                      packages: [],
+                      returns: [],
+                      refunds: [],
+                    },
+            }
+          : {}),
         ...(context
           ? {
               fulfillment: presentCustomerOrderLifecycle(
@@ -146,6 +176,48 @@ export class CustomerAccountOrderQueriesService {
             }
           : {}),
       });
+    }
+    if (options.progress) {
+      try {
+        if (!this.dependencies.progress || !this.dependencies.now)
+          throw new Error("Progress reader unavailable");
+        const progress = await this.dependencies.progress.read(
+          {
+            channelId: principal.channelId,
+            externalCustomerId: principal.externalCustomerId,
+            orders: orders
+              .filter((order) => order.omsOrderId !== null)
+              .map((order) => ({
+                omsOrderId: order.omsOrderId!,
+                externalOrderId: order.externalOrderId,
+              })),
+          },
+          this.dependencies.now(),
+        );
+        if (
+          [...progress.keys()].some(
+            (id) => !orders.some((order) => order.omsOrderId === id),
+          )
+        )
+          throw new Error("Progress returned an unrequested identity");
+        const verified = orders
+          .filter((order) => order.omsOrderId !== null)
+          .map((order) => ({
+            order,
+            value: customerOrderProgressSchema.parse(
+              progress.get(order.omsOrderId!),
+            ),
+          }));
+        for (const { order, value } of verified) order.progress = value;
+      } catch {
+        // A progress outage must not hide verified totals or invent completion.
+        statusUnavailable = true;
+        for (const order of orders)
+          if (order.omsOrderId !== null) order.progress = null;
+        this.dependencies.report({
+          code: "CUSTOMER_ACCOUNT_PROGRESS_UNAVAILABLE",
+        });
+      }
     }
     return customerAccountOrderSummariesSchema.parse({
       orders,

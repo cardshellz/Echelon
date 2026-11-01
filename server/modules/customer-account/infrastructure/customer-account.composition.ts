@@ -1,4 +1,7 @@
 import type { Pool } from "pg";
+import { CustomerAccountProgressService } from "../application/customer-account-progress.service";
+import { PostgresCustomerOrderDeliveryReader } from "../../shipping/customer-order-delivery.reader";
+import { PostgresCustomerReturnProgressReader } from "../../returns/infrastructure/customer-return-progress.reader";
 import type { OrderEditService } from "../../order-edits/application/order-edit.service";
 import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
 import { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
@@ -43,6 +46,11 @@ export function customerAccountServices(pool: Pool, edits: OrderEditService) {
         connection: () => customerEdits.connection(),
         context: new PostgresCustomerAccountOrderContextReader(pool),
         actions: new PostgresOrderActionProjectionStore(pool),
+        progress: new CustomerAccountProgressService({
+          delivery: new PostgresCustomerOrderDeliveryReader(pool),
+          returns: new PostgresCustomerReturnProgressReader(pool),
+          report: event => console.error(JSON.stringify({ event: "customer_account_progress_read_failed", ...event })),
+        }),
         now: () => new Date(),
         report: (event) =>
           console.error(

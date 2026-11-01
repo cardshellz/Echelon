@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { z } from "zod";
 
 import type {
   CanonicalCarrierTrackingStatus,
@@ -36,6 +37,8 @@ export interface ListChangedCarrierTrackingPackagesInput {
   observedThrough: Date;
   after: CarrierTrackingProjectionCursor | null;
   limit: number;
+  /** Internal owner-scoped read; never accepted from the public cursor route. */
+  providerLabelIds?: readonly number[];
 }
 
 export interface ListChangedCarrierTrackingPackagesResult {
@@ -112,6 +115,13 @@ export function createCarrierTrackingProjectionReader(
   return {
     async listChangedPackages(input) {
       const queryLimit = input.limit + 1;
+      const labelIds = input.providerLabelIds === undefined ? null
+        : z.array(z.number().int().positive().safe()).min(1).max(4000).parse(input.providerLabelIds);
+      const labelFilter = labelIds === null ? sql``
+        : sql`AND match.shipping_provider_label_id IN (${sql.join(labelIds.map(id => sql`${id}`), sql`,`)})
+          AND match.created_at <= ${input.observedThrough.toISOString()}::timestamptz
+          AND COALESCE(event.event_occurred_at,event.received_at) <= ${input.observedThrough.toISOString()}::timestamptz
+          AND (event.actual_delivery_at IS NULL OR event.actual_delivery_at <= ${input.observedThrough.toISOString()}::timestamptz)`;
       const rows = await db.execute(sql`
         WITH authoritative_matches AS (
           SELECT
@@ -135,6 +145,7 @@ export function createCarrierTrackingProjectionReader(
           WHERE state.last_match_status = 'matched'
             AND match.match_status = 'matched'
             AND match.shipping_provider_label_id IS NOT NULL
+            ${labelFilter}
         ),
         changed_labels AS (
           SELECT
