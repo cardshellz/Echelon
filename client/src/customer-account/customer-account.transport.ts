@@ -93,9 +93,9 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
       return result;
     },
     resolve: async (raw: unknown, signal?: AbortSignal) => json(await call({ method: "POST", path: "/account/resolve", body: customerAccountOrderIdentityInputSchema.parse(raw) }, signal), customerAccountOrderIdentitySchema),
-    orderActions: async (raw: unknown, signal?: AbortSignal) => {
+    orderActions: async (raw: unknown, signal?: AbortSignal, refresh = false) => {
       const input = customerAccountOrderSummariesInputSchema.parse(raw);
-      const result = await json(await call({ method: "POST", path: "/account/order-actions", body: input }, signal), customerOrderActionPageSchema);
+      const result = await json(await call({ method: "POST", path: refresh ? "/account/order-actions/refresh" : "/account/order-actions", body: input }, signal), customerOrderActionPageSchema);
       if (result.orders.length !== input.orders.length || result.orders.some(row => !input.orders.some(
         expected => row.externalOrderId === expected.externalOrderId && row.orderReference === expected.orderReference)))
         throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_ACTION_MISMATCH", "Order options could not be verified. Please try again.");

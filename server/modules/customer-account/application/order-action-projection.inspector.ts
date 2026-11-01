@@ -5,6 +5,12 @@ import { CustomerReturnLiveError } from "../../returns/application/customer-retu
 import type { OrderActionScope, OrderActionProjectionInspector } from "./order-action-projection.ports";
 import { customerOrderActionReferenceKey } from "@shared/customer-account/order-actions";
 
+function causeCode(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    && /^[A-Z0-9_]{1,80}$/.test(error.code)) return error.code;
+  return "UNCLASSIFIED";
+}
+
 function classify(error: unknown): "permanent" | "transient" {
   if ((error instanceof OrderEditError || error instanceof CustomerReturnLiveError)
     && ((error.status >= 400 && error.status < 409) || ["RETURN_PORTAL_POLICY_MISSING", "RETURN_PORTAL_POLICY_UNSUPPORTED",
@@ -19,7 +25,7 @@ export class OrderActionProjectionInspectorService implements OrderActionProject
   constructor(private readonly dependencies: {
     readEdit(scope: OrderActionScope): Promise<OrderEditOrder>;
     inspectReturnAndRetainMeasurements(scope: OrderActionScope): Promise<CustomerReturnCustomerOrder>;
-    report(event: { action: string; outcome: string; omsOrderId: number; code: string }): void;
+    report(event: { action: string; outcome: string; omsOrderId: number; code: string; causeCode: string }): void;
   }) {}
 
   async inspect(scope: OrderActionScope) {
@@ -34,7 +40,7 @@ export class OrderActionProjectionInspectorService implements OrderActionProject
         throw new OrderEditError("ORDER_ACTION_IDENTITY_CHANGED", "The order identity changed.", 409);
     } catch (error) {
       order = null; orderFailed = true; failures.push(classify(error));
-      this.dependencies.report({ action: "order_action_edit_inspection", outcome: "failed", omsOrderId: scope.omsOrderId, code: "ORDER_ACTION_EDIT_UNAVAILABLE" });
+      this.dependencies.report({ action: "order_action_edit_inspection", outcome: "failed", omsOrderId: scope.omsOrderId, code: "ORDER_ACTION_EDIT_UNAVAILABLE", causeCode: causeCode(error) });
     }
     // The returns owner decides from purchased quantities and existing physical claims.
     // A warehouse hold or edit restriction must not hide an eligible return.
@@ -46,7 +52,7 @@ export class OrderActionProjectionInspectorService implements OrderActionProject
           throw new OrderEditError("ORDER_ACTION_IDENTITY_CHANGED", "The return identity changed.", 409);
       } catch (error) {
         returnOrder = null; returnFailed = true; failures.push(classify(error));
-        this.dependencies.report({ action: "order_action_return_inspection", outcome: "failed", omsOrderId: scope.omsOrderId, code: "ORDER_ACTION_RETURN_UNAVAILABLE" });
+        this.dependencies.report({ action: "order_action_return_inspection", outcome: "failed", omsOrderId: scope.omsOrderId, code: "ORDER_ACTION_RETURN_UNAVAILABLE", causeCode: causeCode(error) });
       }
     }
     // A permanent fault waits for source/configuration invalidation instead of

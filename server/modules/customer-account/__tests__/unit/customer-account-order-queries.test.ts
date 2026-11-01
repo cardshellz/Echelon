@@ -63,6 +63,19 @@ function fixture() {
   return { service, edits, context, report };
 }
 describe("owned, query-only account history", () => {
+  it("explicit recovery queues only presentation work for the signed principal and rereads locally",async()=>{
+    const h=fixture();const actions={read:vi.fn(async()=>({orders:[]}))};
+    const actionRefresh={requestRefresh:vi.fn(async()=>{})};const connect=vi.fn(async()=>connection);
+    const now=new Date("2026-11-01T12:00:00Z");
+    const service=new CustomerAccountOrderQueriesService({principal,connection:connect,edits:h.edits,context:h.context,
+      actions,actionRefresh,now:()=>now,report:h.report});
+    await service.refreshActions({orders:[identity]});
+    expect(actionRefresh.requestRefresh).toHaveBeenCalledExactlyOnceWith({orders:[identity],channelId:2,externalCustomerId:"100"},now);
+    expect(actions.read).toHaveBeenCalledOnce();expect(connect).not.toHaveBeenCalled();
+    expect(h.edits.orderSummaries).not.toHaveBeenCalled();expect(h.context.read).not.toHaveBeenCalled();
+    await expect(service.refreshActions({orders:[{...identity,externalOrderId:"invalid"}]})).rejects.toThrow();
+    expect(actionRefresh.requestRefresh).toHaveBeenCalledOnce();
+  });
   it("reads action projections without a provider, connection, or warehouse inspection", async () => {
     const h = fixture();
     const actions = { read: vi.fn(async () => ({ orders: [] })) };

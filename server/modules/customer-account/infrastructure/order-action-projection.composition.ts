@@ -17,7 +17,7 @@ import { PostgresOrderActionProjectionStore } from "./order-action-projection.re
 import { readCustomerAccountStagingConfig } from "../domain/customer-account-staging";
 
 export type OrderActionProjectionReport = (event: {
-  action: string; outcome: string; omsOrderId?: number; code?: string; durationMs?: number;
+  action: string; outcome: string; omsOrderId?: number; code?: string; causeCode?: string; durationMs?: number;
 }) => void;
 const SWEEP_INTERVAL_MS = 5_000;
 

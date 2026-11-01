@@ -312,7 +312,7 @@ export function CustomerOrderPanel({
             )}
             {!accessNotice && state.error && (
               <div className="csz-panel-error" role="alert">
-                <p>Some order options couldn’t be loaded.</p>
+                <p>{state.error}</p>
                 <button
                   type="button"
                   className="csz-action"
@@ -384,12 +384,12 @@ export function CustomerOrderPanel({
                     aria-describedby={
                       reviewNotice
                         ? "csz-order-review-notice"
-                        : "csz-address-restriction"
+                        : order ? "csz-address-restriction" : undefined
                     }
                   >
                     Change shipping address
                   </button>
-                  {!reviewNotice && (
+                  {!reviewNotice && order && (
                     <p
                       id="csz-address-restriction"
                       className="csz-panel-restriction"
@@ -492,12 +492,12 @@ export function CustomerOrderPanel({
                       aria-describedby={
                         reviewNotice
                           ? "csz-order-review-notice"
-                          : "csz-cancellation-restriction"
+                          : order ? "csz-cancellation-restriction" : undefined
                       }
                     >
                       Cancel order
                     </button>
-                    {!reviewNotice && (
+                    {!reviewNotice && order && (
                       <p
                         id="csz-cancellation-restriction"
                         className="csz-panel-restriction"
