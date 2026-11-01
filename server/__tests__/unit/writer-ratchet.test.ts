@@ -34,6 +34,12 @@ describe("writer-ratchet (P2.1)", () => {
     roots: ["server", "scripts"],
   });
 
+  it("Catalog owns runtime image writes and the legacy direct import cannot write photos", () => {
+    expect(current["catalog.product_assets"]).toEqual(["modules/catalog"]);
+    expect(baseline["catalog.product_assets"]).toEqual(["modules/catalog"]);
+    expect(currentIncludingScripts["catalog.product_assets"]).not.toContain("scripts/import_ebay_to_echelon.ts");
+  });
+
   it.each([
     ["oms.customer_order_actions", "modules/customer-account"],
     ["oms.customer_order_action_invalidations", "modules/customer-account"],
@@ -65,6 +71,8 @@ describe("writer-ratchet (P2.1)", () => {
   });
 
   it.each([
+    ["catalog.product_asset_versions", "modules/catalog"],
+    ["catalog.product_asset_renditions", "modules/catalog"],
     [
         "catalog.publication_media_references",
         "modules/catalog"

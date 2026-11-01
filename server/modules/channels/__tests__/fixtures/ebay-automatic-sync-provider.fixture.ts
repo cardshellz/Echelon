@@ -8,6 +8,7 @@ import { executeEbayQuantityHttp } from "../../adapters/ebay/ebay-quantity-http"
 import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
 import type { EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
 import type { EbayQuantityHttpRequest } from "../../quantity-publication-request";
+import type { ChannelPublishedContent } from "../../../marketplace-listings/domain/channel-publication-content";
 
 export const automaticSyncPhotos = [
   "https://example.test/current-front.jpg",
@@ -85,6 +86,18 @@ export class AutomaticSyncEbayProvider {
 
   snapshot(sku = "P5") {
     return structuredClone({ ...this.member(sku), group: this.group });
+  }
+
+  publishedContent(listingId: string): ChannelPublishedContent {
+    const published = [...this.members.values()].filter(member => member.offer.status === "PUBLISHED" && member.offer.listingId === listingId);
+    if (!published.length) throw new Error("The fake published listing does not exist.");
+    const urls = this.listingShape === "group" ? this.group.imageUrls : published[0].item.product?.imageUrls ?? [];
+    const policy = published[0].offer.listingPolicies;
+    return { listingId, skus: published.map(member => member.item.sku), policies: {
+      ...(policy?.fulfillmentPolicyId ? { shipping: policy.fulfillmentPolicyId } : {}),
+      ...(policy?.returnPolicyId ? { return: policy.returnPolicyId } : {}),
+      ...(policy?.paymentPolicyId ? { payment: policy.paymentPolicyId } : {}),
+    }, firstPhotoSource: urls[0] ?? null, photos: urls.map(url => ({ url, width: 640, height: 640 })) };
   }
 
   loseNextResponse(path: string, applyBeforeFailure = false): void {

@@ -137,7 +137,7 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
           ?? (inspection.publicationIssue?.providerRead ? inspection.publicationIssue : null);
         if (issue) throw publicationInspectionError(issue);
         throw new EbayListingSyncError(accepted || context.publicationWriteCompleted ? "EBAY_PUBLICATION_READBACK_PENDING" : "EBAY_PUBLICATION_RESPONSE_UNCERTAIN", accepted || context.publicationWriteCompleted
-          ? "eBay accepted the publication request, but its complete published listing is not visible yet. This saved job will check again."
+          ? "eBay accepted the publication request, but its complete published listing is not visible yet."
           : "The saved publication attempt has no confirmed completion and eBay still reports unpublished offers. No second publish request was sent. Review this job's recovery details before authorizing another attempt.");
       }
       verified = resolveEbayPublicationTarget(source, inspection);
@@ -156,7 +156,7 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
         });
       } catch (error) {
         if (error instanceof EbayListingSyncError && error.code === "EBAY_SYNC_READBACK_PENDING")
-          throw new EbayListingSyncError("EBAY_PUBLICATION_READBACK_PENDING", "eBay's published listing is visible, but its accepted content and photos are still being verified. This saved publication will check again without republishing.", { cause: error });
+          throw new EbayListingSyncError("EBAY_PUBLICATION_READBACK_PENDING", error.message, { cause: error });
         throw error;
       }
     });

@@ -156,7 +156,7 @@ describe("the listing end worker's runner (§5.2)", () => {
       .map((line, index) => ({ path: file.path, line: index + 1, text: line }))
       .filter((line) => /\b736218\b/.test(line.text)));
     expect(hits).toHaveLength(1);
-    expect(hits[0].path.endsWith("server/modules/dropship/infrastructure/dropship-listing-end-runner.ts")).toBe(true);
+    expect(hits[0].path.replaceAll("\\", "/").endsWith("server/modules/dropship/infrastructure/dropship-listing-end-runner.ts")).toBe(true);
     expect(hits[0].text).toContain("export const DROPSHIP_LISTING_END_LOCK_ID = 736218;");
   });
 

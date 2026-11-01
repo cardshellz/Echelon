@@ -32,7 +32,7 @@ test("channel selection resumes its saved publication through normal Sync withou
   await dialog.screenshot({ path: info.outputPath("normal-publication-stock-preparation.png") });
   feed.jobs = [{ ...queuedJob, state: "completed" }];
   await dialog.getByRole("button", { name: "Refresh publishing status", exact: true }).click();
-  await expect(dialog).toContainText("Published. Listing and pictures verified.");
+  await expect(dialog).toContainText("Published on eBay.");
   expect(requests).toHaveLength(1);
   expect(feed.errors).toEqual([]); expect(feed.unexpected).toEqual([]);
 });

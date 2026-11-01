@@ -5,12 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerProductAssetRoutes } from "../../product-asset.routes";
 import { ProductAssetError } from "../../product-asset-errors";
 
-const mocks = vi.hoisted(() => ({ reorder: vi.fn(), read: vi.fn(), fetchImage: vi.fn(), scope: vi.fn(), allowed: true, permissions: [] as string[] }));
+const mocks = vi.hoisted(() => ({ reorder: vi.fn(), read: vi.fn(), fetchImage: vi.fn(), createOriginal: vi.fn(), scope: vi.fn(), allowed: true, permissions: [] as string[] }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../product-asset-order.repository", () => ({ reorderCatalogAssets: mocks.reorder }));
 vi.mock("../../product-asset-scope.service", () => ({ createProductAssetScopeService: () => ({ apply: mocks.scope }) }));
 vi.mock("../../product-image-download.repository", () => ({ readProductImageDownload: mocks.read }));
 vi.mock("../../product-image-download.transport", () => ({ fetchProductImage: mocks.fetchImage }));
+vi.mock("../../catalog-image-originals.service", async importOriginal => ({ ...await importOriginal<typeof import("../../catalog-image-originals.service")>(),
+  createCatalogImageOriginalsService: () => ({create:mocks.createOriginal}) }));
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) => {
   mocks.permissions.push(`${resource}:${action}`);
   return (req: Request, res: Response, next: NextFunction) => {
@@ -33,13 +35,45 @@ describe("catalog asset HTTP boundary", () => {
     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
   it("requires catalog view to download and edit to reorder", async () => {
-    expect(mocks.permissions).toEqual(["inventory:edit", "inventory:edit", "inventory:view"]);
+    expect(mocks.permissions).toEqual(["inventory:edit", "inventory:edit", "inventory:create", "inventory:edit", "inventory:edit", "inventory:view"]);
     mocks.allowed = false;
     expect((await reorder(base, { orderedIds: [1] })).status).toBe(403);
     expect((await fetch(base + "/api/product-assets/1/download")).status).toBe(403);
     expect((await fetch(base + "/api/products/1/assets/2/scope", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ productVariantId: null, expectedProductVariantId: 10 }) })).status).toBe(403);
     expect(mocks.scope).not.toHaveBeenCalled();
     expect(mocks.reorder).not.toHaveBeenCalled(); expect(mocks.read).not.toHaveBeenCalled();
+  });
+  it("retains actual original bytes through the shared owner even when the old URL cache hint is false", async () => {
+    const image = { data: Buffer.from("original-bytes"), mimeType:"image/png" };
+    mocks.fetchImage.mockResolvedValue(image); mocks.createOriginal.mockResolvedValue({id:42,url:"https://images.example.com/original.png"});
+    const response = await fetch(base+"/api/product-assets/store-url",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({productId:1,productVariantId:10,url:"https://images.example.com/original.png",cacheLocally:false})});
+    expect(response.status).toBe(200);
+    expect(mocks.createOriginal).toHaveBeenCalledExactlyOnceWith({productId:1,productVariantId:10,sourceUrl:"https://images.example.com/original.png",actor:"user:operator"},image);
+  });
+  it("does not accept supplied pixel dimensions or arbitrary image metadata through the compatibility endpoint", async () => {
+    const response = await fetch(base+"/api/products/1/assets",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({url:"https://images.example.com/photo.png",width:1600,height:1600})});
+    expect(response.status).toBe(400);
+    expect(mocks.createOriginal).not.toHaveBeenCalled(); expect(mocks.fetchImage).not.toHaveBeenCalled();
+  });
+  it("returns classified original-writer failures without leaking storage details", async () => {
+    mocks.fetchImage.mockResolvedValue({data:Buffer.from("bytes"),mimeType:"image/png"});
+    mocks.createOriginal.mockRejectedValueOnce(new ProductAssetError("ASSET_VARIANT_MISMATCH","Choose a variant that belongs to this product.",422));
+    const request=()=>fetch(base+"/api/product-assets/store-url",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({productId:1,productVariantId:20,url:"https://images.example.com/photo.png"})});
+    expect((await request()).status).toBe(422);
+    mocks.createOriginal.mockRejectedValueOnce(new Error("private storage password"));
+    const failed = await request(); expect(failed.status).toBe(500); expect(await failed.text()).not.toContain("private storage password");
+  });
+  it("rejects oversized uploads before they reach the original writer", async () => {
+    const form = new FormData();
+    form.append("productId","1");
+    form.append("file",new Blob([Buffer.alloc(10*1024*1024+1)],{type:"image/png"}),"oversized.png");
+    const response=await fetch(base+"/api/product-assets/upload",{method:"POST",body:form});
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({code:"IMAGE_TOO_LARGE"});
+    expect(mocks.createOriginal).not.toHaveBeenCalled();
   });
   it.each(["0", "1.5", "1suffix", "2147483648"])("rejects invalid identity %s", async id => {
     expect((await reorder(base, { orderedIds: [1] }, id)).status).toBe(400);

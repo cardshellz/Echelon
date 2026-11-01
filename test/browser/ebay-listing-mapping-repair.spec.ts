@@ -144,13 +144,13 @@ test("a replayed publication repair shows its result without replacing a newer p
   };
   await page.route(`**/api/ebay/listings/sync-jobs/${job.id}`, route => route.fulfill({ json: { job: completedJob } }));
   await dialog.getByRole("button", { name: "Finish publishing", exact: true }).click();
-  await expect(dialog.getByRole("status")).toHaveText("Published on eBay. Listing and pictures verified.");
+  await expect(dialog.getByRole("status")).toHaveText("Published on eBay.");
   await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
   await expect(page.getByText("A newer request needs a catalog photo.", { exact: true })).toBeVisible();
   await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
   const currentStatus = page.getByRole("status", { name: /^Sync status for / });
   await expect(currentStatus).toContainText("Review this product's photos");
-  await expect(currentStatus).not.toContainText("Listing and pictures verified.");
+  await expect(currentStatus).not.toContainText("Listing sync completed.");
   await expect(page.getByRole("button", { name: "Errors (1)", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Open product images", exact: true })).toHaveAttribute("href", "/products/1?tab=images");
   await page.getByRole("button", { name: "View update status", exact: true }).click();
@@ -158,7 +158,7 @@ test("a replayed publication repair shows its result without replacing a newer p
   await expect(dialog).toContainText(newerJob.id);
   await expect(dialog).toContainText(newerJob.message);
   await expect(dialog).not.toContainText(completedJob.id);
-  await expect(dialog).not.toContainText("Listing and pictures verified.");
+  await expect(dialog).not.toContainText("Listing sync completed.");
   expect(mapping.commands).toHaveLength(1); expect(state.commands).toEqual([]); expect(state.requests).toEqual([]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
@@ -406,7 +406,7 @@ test("an explicitly requested publication review stays Publishing until live com
   state.feedStatus = "listed"; state.externalListingId = "listing-current";
   state.jobs = [{ ...job, operation: "publish", state: "completed" }];
   await dialog.getByRole("button", { name: "Refresh publishing status" }).click();
-  await expect(dialog.getByRole("status")).toHaveText("Published on eBay. Listing and pictures verified.");
+  await expect(dialog.getByRole("status")).toHaveText("Published on eBay.");
   await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
   await expect(page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true })).toBeVisible();
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);

@@ -1912,14 +1912,20 @@ export default function ProductDetail() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, altText: altText || null, assetType: "image", productVariantId: null }),
       });
-      if (!res.ok) throw new Error("Failed to add image");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body.error === "string" ? body.error : "Failed to add image");
+      }
       return res.json();
     },
-    onSuccess: async () => {
+    onSuccess: async (data: { publicationWarning?: { message: string } }) => {
       await refreshImageReferences();
       setAddImageUrl("");
       setAddImageAlt("");
-      toast({ title: "Image added" });
+      toast({ title: "Image added", ...(data.publicationWarning ? { description: data.publicationWarning.message } : {}) });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Could not add image", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1936,12 +1942,15 @@ export default function ProductDetail() {
         method: "POST",
         body: formData,
       });
-      if (!res.ok) throw new Error("Failed to upload image");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body.error === "string" ? body.error : "Failed to upload image");
+      }
       return res.json();
     },
-    onSuccess: async () => {
+    onSuccess: async (data: { publicationWarning?: { message: string } }) => {
       await refreshImageReferences();
-      toast({ title: "Image uploaded" });
+      toast({ title: "Image uploaded", ...(data.publicationWarning ? { description: data.publicationWarning.message } : {}) });
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
     onError: (err: Error) => {

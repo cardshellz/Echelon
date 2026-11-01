@@ -432,7 +432,7 @@ export class EbayListingSyncService {
           result.processed++;
         } catch (error) {
           result.failed++;
-          const failure = syncFailure(error, job.attempts, this.now(), job.readFailureCount ?? 0);
+          const failure = syncFailure(error, job.attempts, this.now(), job.readFailureCount ?? 0, job.code, !!job.providerRead);
           // Never retire a publication's unresolved write barrier. A new command
           // must join this job and retain its acceptance/start evidence.
           if (job.operation === "publish" && (publicationProgress.started || publicationProgress.completed || publicationProgress.accepted)) {

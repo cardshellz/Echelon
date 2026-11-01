@@ -11,6 +11,8 @@
 
 import { EbayApiRequestError, isMissingEbayInventoryResource, isMissingEbayOfferCollection } from "./ebay-api-error";
 import { readEbayNativePackage, type EbayNativePackageSnapshot } from "./ebay-native-package.reader";
+import { readEbayPublishedContent } from "./ebay-published-content.reader";
+import type { ChannelPublishedContent } from "../../../marketplace-listings/domain/channel-publication-content";
 import { normalizeEbayObservedOffers } from "./ebay-offer-observation";
 import type { EbayAuthService } from "./ebay-auth.service";
 import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
@@ -300,6 +302,11 @@ export class EbayApiClient {
     return readEbayNativePackage({ sku, marketplaceId, offers: observedOffers ?? (await this.getOffers(sku, marketplaceId)).offers,
       accessToken: await this.authService.getAccessToken(this.channelId),
       environment: this.baseUrl === API_BASE_URLS.production ? "production" : "sandbox", request: this.options.request });
+  }
+
+  async getPublishedListingContent(listingId: string): Promise<ChannelPublishedContent> {
+    return readEbayPublishedContent({ listingId, accessToken: await this.authService.getAccessToken(this.channelId),
+      environment: this.environment, request: this.options.request });
   }
 
   /** Complete, validated discovery is owned by the quantity protocol, not the legacy first-offer helper. */

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EbayListingLifecycleClient, EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
 import type { EbayRegistrationReadTransport } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
-import { syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
+import { syncProviderFixture, publishedContentFixture } from "../fixtures/ebay-listing-sync.fixture";
 
 const state = vi.hoisted(() => ({
   product: {} as Record<string, unknown>, variants: [] as Array<Record<string, unknown>>,
@@ -104,6 +104,8 @@ function provider(example = examples[0], grouped = true) {
   const items = new Map(state.variants.map(variant => [String(variant.sku), { ...base.currentItem(), sku: String(variant.sku) }]));
   let group = { ...base.currentGroup(), variantSKUs: state.variants.map(variant => String(variant.sku)) };
   state.client = { ...base.client,
+    getPublishedListingContent:vi.fn(async()=>publishedContentFixture(example.listing,[...offers.keys()],
+      (grouped?group.imageUrls:items.values().next().value?.product?.imageUrls)??[],offers.values().next().value?.listingPolicies)),
     getInventoryItem: vi.fn(async sku => structuredClone(items.get(sku) ?? null)),
     createOrReplaceInventoryItem: vi.fn(async (sku, payload) => { items.set(sku, { ...structuredClone(payload), sku }); }),
     getInventoryItemGroup: vi.fn(async () => structuredClone(group)),

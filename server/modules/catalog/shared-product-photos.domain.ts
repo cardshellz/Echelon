@@ -3,6 +3,9 @@ export interface SharedImportedPhoto {
   url: string;
   position: number;
   altText?: string | null;
+  /** Provider adapter-proven addresses of the same source, such as a thumbnail
+   * rendition and its original. Catalog never guesses aliases from filenames. */
+  sourceAliases?: readonly string[];
 }
 export interface ExistingImportPhoto {
   id: number;
@@ -24,7 +27,7 @@ export function planSharedPhotoAdditions(existing: readonly ExistingImportPhoto[
   const candidates = [...photos].sort((a, b) => a.position - b.position || (a.url < b.url ? -1 : a.url > b.url ? 1 : 0));
   const seen = new Set(existing.map(photo => photo.url).filter((url): url is string => url !== null));
   const additions = candidates.filter(photo => {
-    if (seen.has(photo.url))
+    if (seen.has(photo.url) || photo.sourceAliases?.some(alias => seen.has(alias)))
       return false;
     seen.add(photo.url);
     return true;

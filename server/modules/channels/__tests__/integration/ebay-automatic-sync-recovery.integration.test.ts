@@ -120,6 +120,9 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
       accessToken: "synthetic-test-token", expectedAccountId: identity.accountId, expectedConnectionId: identity.connectionId,
       quantityAdmission: async () => quantityAdmission,
     });
+    // This suite models eBay with a stateful provider rather than a Trading
+    // HTTP server. Read back that provider's published state after its writes.
+    client.getPublishedListingContent = async listingId => provider.publishedContent(listingId);
     const original = provider.snapshot();
     const members = sourceIdentity.variants.map(member => ({ ...member, original: provider.snapshot(member.sku) }));
     const existingOfferIdsByVariantId = Object.fromEntries(members.map(member => [member.variantId, member.offerId!]));

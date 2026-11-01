@@ -1506,6 +1506,8 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
   });
 
   app.post("/api/products/:id/assets", requirePermission("inventory", "create"), async (req, res) => {
+    if (!["video", "document"].includes(req.body.assetType))
+      return res.status(400).json({ code: "ASSET_SOURCE_ENDPOINT_REQUIRED", error: "Create photos through the Catalog image source owner." });
     try {
       const productId = parseInt(req.params.id);
 
@@ -1546,7 +1548,10 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (Object.hasOwn(req.body, "productVariantId") || Object.hasOwn(req.body, "productId")) {
         return res.status(400).json({ code: "ASSET_SCOPE_ENDPOINT_REQUIRED", error: "Change photo assignments using the product image scope endpoint." });
       }
-      const asset = await storage.updateProductAsset(id, req.body);
+      const metadata = z.object({ altText: z.string().max(500).nullable().optional() }).strict().safeParse(req.body);
+      if (!metadata.success) return res.status(400).json({ code: "ASSET_METADATA_ENDPOINT_REQUIRED",
+        error: "This endpoint edits photo captions only. Use Images to upload a replacement, change the primary photo, reorder photos or change their assignment." });
+      const asset = await storage.updateProductAsset(id, metadata.data);
       if (!asset) {
         return res.status(404).json({ error: "Asset not found" });
       }
@@ -2877,74 +2882,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
   // PRODUCT ASSET UPLOAD (file storage)
   // ============================================================================
 
-  const multer = (await import("multer")).default;
-  const assetUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
-
-  /**
-   * POST /api/product-assets/upload
-   * Upload an image file and store it in the database.
-   * Accepts multipart form: file, productId, productVariantId (optional), altText, isPrimary, position
-   */
-  app.post("/api/product-assets/upload", requirePermission("inventory", "edit"), assetUpload.single("file"), async (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({ error: "No file provided" });
-      }
-
-      const { productId, productVariantId, altText, isPrimary, position } = req.body;
-
-      if (!productId) {
-        return res.status(400).json({ error: "productId is required" });
-      }
-
-      // Validate file type
-      const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-      if (!allowedTypes.includes(req.file.mimetype)) {
-        return res.status(400).json({ error: `Invalid file type: ${req.file.mimetype}. Allowed: ${allowedTypes.join(", ")}` });
-      }
-
-      // If setting as primary, unset existing primary
-      if (isPrimary === "true" || isPrimary === "1") {
-        await db.execute(sql`
-          UPDATE catalog.product_assets SET is_primary = 0
-          WHERE product_id = ${parseInt(productId)}
-            ${productVariantId ? sql`AND product_variant_id = ${parseInt(productVariantId)}` : sql`AND product_variant_id IS NULL`}
-        `);
-      }
-
-      const [asset] = await db
-        .insert(productAssets)
-        .values({
-          productId: parseInt(productId),
-          productVariantId: productVariantId ? parseInt(productVariantId) : null,
-          assetType: "image",
-          url: null,
-          altText: altText || null,
-          position: position ? parseInt(position) : 0,
-          isPrimary: (isPrimary === "true" || isPrimary === "1") ? 1 : 0,
-          fileSize: req.file.size,
-          mimeType: req.file.mimetype,
-          storageType: "file",
-        })
-        .returning();
-
-      // Store the actual file data
-      await db.execute(sql`
-        UPDATE catalog.product_assets SET file_data = ${req.file.buffer} WHERE id = ${asset.id}
-      `);
-
-      console.log(`[Assets] Uploaded file for product ${productId}: ${req.file.originalname} (${req.file.size} bytes)`);
-
-      res.json({
-        ...asset,
-        // Don't return file_data in the response — too large
-        fileUrl: `/api/product-assets/${asset.id}/file`,
-      });
-    } catch (error: any) {
-      console.error("Error uploading asset:", error);
-      res.status(500).json({ error: "Failed to upload asset" });
-    }
-  });
+  // Photo source mutations are registered by registerProductAssetRoutes.
 
   /**
    * GET /api/product-assets/:id/file
@@ -3003,111 +2941,6 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     }
   });
 
-  /**
-   * DELETE /api/product-assets/:id
-   * Delete an asset (both URL reference and stored file).
-   */
-  app.delete("/api/product-assets/:id", requirePermission("inventory", "edit"), async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const [deleted] = await db
-        .delete(productAssets)
-        .where(eq(productAssets.id, id))
-        .returning();
-
-      if (!deleted) {
-        return res.status(404).json({ error: "Asset not found" });
-      }
-
-      console.log(`[Assets] Deleted asset ${id} for product ${deleted.productId}`);
-      res.json({ success: true });
-    } catch (error: any) {
-      console.error("Error deleting asset:", error);
-      res.status(500).json({ error: "Failed to delete asset" });
-    }
-  });
-
-  /**
-   * POST /api/product-assets/store-url
-   * Store an external URL as an asset (e.g., from eBay image pull).
-   * Body: { productId, productVariantId, url, altText, isPrimary, position }
-   * Optionally downloads and caches the file locally.
-   */
-  app.post("/api/product-assets/store-url", requirePermission("inventory", "edit"), async (req, res) => {
-    try {
-      const { productId, productVariantId, url, altText, isPrimary, position, cacheLocally } = req.body;
-
-      if (!productId || !url) {
-        return res.status(400).json({ error: "productId and url are required" });
-      }
-
-      // If setting as primary, unset existing primary
-      if (isPrimary) {
-        await db.execute(sql`
-          UPDATE catalog.product_assets SET is_primary = 0
-          WHERE product_id = ${productId}
-            ${productVariantId ? sql`AND product_variant_id = ${productVariantId}` : sql`AND product_variant_id IS NULL`}
-        `);
-      }
-
-      let fileBuffer: Buffer | null = null;
-      let mimeType: string | null = null;
-      let fileSize: number | null = null;
-
-      // Optionally download and cache the file
-      if (cacheLocally) {
-        try {
-          const response = await fetch(url);
-          if (response.ok) {
-            const arrayBuf = await response.arrayBuffer();
-            fileBuffer = Buffer.from(arrayBuf);
-            mimeType = response.headers.get("content-type") || "image/jpeg";
-            fileSize = fileBuffer.length;
-          }
-        } catch (fetchErr: any) {
-          console.warn(`[Assets] Failed to cache file from ${url}: ${fetchErr.message}`);
-          // Continue with URL-only storage
-        }
-      }
-
-      const storageType: string = fileBuffer ? "both" : "url";
-
-      const [asset] = await db
-        .insert(productAssets)
-        .values({
-          productId,
-          productVariantId: productVariantId || null,
-          assetType: "image",
-          url,
-          altText: altText || null,
-          position: position || 0,
-          isPrimary: isPrimary ? 1 : 0,
-          fileSize,
-          mimeType,
-          storageType,
-        })
-        .returning();
-
-      if (fileBuffer) {
-        await db.execute(sql`
-          UPDATE catalog.product_assets SET file_data = ${fileBuffer} WHERE id = ${asset.id}
-        `);
-      }
-
-      console.log(`[Assets] Stored URL for product ${productId}: ${url} (storage: ${storageType})`);
-
-      res.json({
-        ...asset,
-        fileUrl: storageType === "both" || storageType === "file"
-          ? `/api/product-assets/${asset.id}/file`
-          : asset.url,
-      });
-    } catch (error: any) {
-      console.error("Error storing URL asset:", error);
-      res.status(500).json({ error: "Failed to store URL asset" });
-    }
-  });
-
   // ============================================================================
   // IMAGE SYNC — Pull/Push between Echelon and channels
   // ============================================================================
@@ -3124,23 +2957,25 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const { productIds } = req.body;
       console.log(`[ImageSync] Pulling images from eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
 
-      // Get eBay access token to use Browse API (much more reliable than scraping)
-      let ebayAccessToken: string | undefined;
+      // A failed authenticated read cannot become an unscoped page scrape.
+      let ebayAccessToken: string;
+      let ebayEnvironment: "production" | "sandbox";
       try {
         const { EbayAuthService, createEbayAuthConfig } = await import("../channels/adapters/ebay/ebay-auth.service");
         const config = createEbayAuthConfig();
         const authService = new EbayAuthService(db as any, config);
         ebayAccessToken = await authService.getAccessToken(67);
-        console.log(`[ImageSync] Got eBay access token (${ebayAccessToken?.substring(0, 10)}...)`);
+        ebayEnvironment = authService.getEnvironment();
       } catch (authErr: any) {
-        console.warn(`[ImageSync] Could not get eBay token, falling back to scraping: ${authErr.message}`);
+        console.warn(JSON.stringify({ event: "catalog_photo_import_auth_failed", provider: "ebay" }));
+        return res.status(503).json({ code: "EBAY_AUTH_REQUIRED", error: "Reconnect eBay before importing its listing photos." });
       }
 
       // Respond immediately — processing 90+ products takes too long for a single request
       res.json({ status: "started", message: "eBay image pull started in background. Check Heroku logs for progress." });
 
       // Run in background
-      imageSync.pullFromEbay(productIds, ebayAccessToken).then((results) => {
+      imageSync.pullFromEbay(productIds, ebayAccessToken, ebayEnvironment).then((results) => {
         const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
         const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
         console.log(`[ImageSync] pullFromEbay complete: ${results.length} products, ${totalAdded} images added, ${totalErrors} errors`);
@@ -3204,7 +3039,6 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       console.log(`[ImageSync] === PUSH STARTED ===`);
       console.log(`[ImageSync] Domain: ${shopDomain}`);
-      console.log(`[ImageSync] Token prefix: ${accessToken.substring(0, 10)}...`);
       console.log(`[ImageSync] Product IDs: ${productIds?.join(", ") || "ALL"}`);
 
       const results = await imageSync.pushToShopify(shopDomain, accessToken, productIds);
@@ -3228,15 +3062,9 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
    * Push Echelon catalog images to eBay listings.
    * Body: { productIds?: number[] }
    */
-  app.post("/api/images/push/ebay", requirePermission("inventory", "edit"), async (req, res) => {
-    try {
-      const { productIds } = req.body;
-      console.log(`[ImageSync] Pushing images to eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
-      const results = await imageSync.pushToEbay("", productIds);
-      res.json({ results });
-    } catch (error: any) {
-      console.error("Error pushing images to eBay:", error);
-      res.status(500).json({ error: error.message || "Failed to push images to eBay" });
-    }
+  app.post("/api/images/push/ebay", requirePermission("inventory", "edit"), (_req, res) => {
+    return res.status(410).json({ code: "CATALOG_IMAGE_PUSH_USE_CHANNEL_SYNC",
+      error: "Open the eBay channel and use Sync to publish the product's current Catalog originals.",
+      action: { label: "Open eBay channel", href: "/channels/ebay" } });
   });
 }
