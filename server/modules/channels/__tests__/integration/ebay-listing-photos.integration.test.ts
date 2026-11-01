@@ -1,3 +1,4 @@
+import { fixedImageInspector } from "../../../catalog/__tests__/fixtures/catalog-image-inspector.fixture";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
@@ -53,7 +54,7 @@ const request = { productId: 1, channelId: 67, variants };
   afterEach(() => vi.restoreAllMocks());
   beforeEach(async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    resolver = new ChannelEbayListingPhotoResolver(database.pool, publicUrl);
+    resolver = new ChannelEbayListingPhotoResolver(database.pool, publicUrl, fixedImageInspector());
     await database.pool.query("TRUNCATE channels.channel_variant_overrides, channels.channel_asset_overrides, catalog.product_assets");
     await database.pool.query(`INSERT INTO catalog.product_assets
       (id,product_id,product_variant_id,url,position,is_primary,storage_type,mime_type,file_data) VALUES
@@ -111,6 +112,7 @@ const request = { productId: 1, channelId: 67, variants };
         variantSKUs:variants.map(v=>v.sku),variesBy:{specifications:[{name:"Size",values:variants.map(v=>v.sku)}]}}},
     };
     const client:EbayListingLifecycleClient = {
+      getPublishedListingContent:async listingId=>({ listingId,skus:group.variantSKUs ?? [],policies:{shipping:"f",return:"r",payment:"p"},firstPhotoSource:group.imageUrls[0] ?? null,photos:group.imageUrls.map(url=>({url,width:640,height:640})) }),
       getInventoryItem:async sku=>items.get(sku)??null,
       createOrReplaceInventoryItem:async(sku,payload)=>{written.push(sku);items.set(sku,{sku,...structuredClone(payload),
         ...(fault==="existing_member"&&sku==="PACK"?{product:{...payload.product,imageUrls:["https://cdn.example.com/stale.jpg"]}}:{})});},
@@ -197,7 +199,7 @@ const request = { productId: 1, channelId: 67, variants };
         return result;
       } } as unknown as PoolClient;
     } };
-    const inFlight = await new ChannelEbayListingPhotoResolver(databaseWithConcurrentEdit as Pool,publicUrl).resolve(request);
+    const inFlight = await new ChannelEbayListingPhotoResolver(databaseWithConcurrentEdit as Pool, publicUrl, fixedImageInspector()).resolve(request);
     expect(inFlight.byVariantId.get(10)).toEqual([imageUrl(2),"https://cdn.example.com/pack.jpg","https://cdn.example.com/common.jpg"]);
     const next = await resolver.resolve(request);
     expect(next.byVariantId.get(10)).toEqual([imageUrl(2,jpeg,"jpg"),"https://cdn.example.com/common.jpg"]);
@@ -207,7 +209,7 @@ const request = { productId: 1, channelId: 67, variants };
   it("resolves concurrent requests with one available connection and releases it before provider fallback", async () => {
     const oneSlot = new Pool({ connectionString:database.connectionString,max:1,connectionTimeoutMillis:2000 });
     try {
-      const bounded = new ChannelEbayListingPhotoResolver(oneSlot,publicUrl);
+      const bounded = new ChannelEbayListingPhotoResolver(oneSlot, publicUrl, fixedImageInspector());
       const plans = await Promise.all([bounded.resolve(request),bounded.resolve(request),bounded.resolve(request)]);
       expect(plans[1]).toEqual(plans[0]);expect(plans[2]).toEqual(plans[0]);
       expect(oneSlot.waitingCount).toBe(0);

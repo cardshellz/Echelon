@@ -160,7 +160,7 @@ const configured =
     };
     function fixture(options: { beforeGroup?: () => Promise<void>; photoUrls?: readonly string[];
       reject?: (request: EbayQuantityHttpRequest) => Response | undefined } = {}) {
-      const provider = syncProviderFixture(),
+      const provider = syncProviderFixture({ grouped: identity.groupKey !== null }),
         admission = new PostgresQuantityPublicationAdmission(
           database.pool,
           clock,
@@ -315,6 +315,72 @@ const configured =
       code: "INVENTORY_PUBLICATION_TARGET_BUSY", context: { retryable: true },
     });
     const galleryPhotos = ["https://example.com/current-front.jpg", "https://example.com/current-back.jpg"];
+
+    it.each(["shipping", "return", "payment"] as const)("does not complete when Inventory echoes the desired %s policy but the published listing keeps an old copy", async kind => {
+      const f = fixture();
+      const native = f.client.getPublishedListingContent!;
+      let visible = false;
+      f.client.getPublishedListingContent = vi.fn(async listingId => {
+        const current = await native(listingId);
+        return visible ? current : { ...current, policies: { ...current.policies, [kind]: "old-policy-copy" } };
+      });
+      const command = randomUUID(), saved = await f.service.enqueue(identity,"operator",command);
+      await f.service.processDue(1,saved.id);
+      const waiting = await f.store.get(saved.id);
+      expect(waiting).toMatchObject({ state: "recovering", code: "EBAY_SYNC_READBACK_PENDING", verificationRevision: "1" });
+      expect(waiting.message).toContain("business policies");
+      expect(f.mutations).toHaveLength(3);
+      expect(f.provider.currentOffer().listingPolicies).toEqual({ fulfillmentPolicyId: "fulfillment",returnPolicyId:"return",paymentPolicyId:"payment" });
+      expect((await database.pool.query("SELECT sync_status FROM channels.channel_listings WHERE channel_id=1")).rows[0].sync_status).not.toBe("synced");
+      expect((await f.service.enqueue(identity,"operator",command)).id).toBe(saved.id);
+      visible = true; advance();
+      await processConcurrently(f,saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed", code: null });
+      expect(f.mutations).toHaveLength(3);
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='completed'",[saved.id])).rows[0].count).toBe(1);
+    });
+
+    it.each(["missing_photo", "old_first_source", "thumbnail"] as const)("retains a verified-write checkpoint while the published gallery has %s and completes on read-only retry", async fault => {
+      const f = fixture({photoUrls:galleryPhotos});
+      const native = f.client.getPublishedListingContent!;
+      let visible = false;
+      f.client.getPublishedListingContent = vi.fn(async listingId => {
+        const current = await native(listingId);
+        if (visible) return current;
+        if (fault === "missing_photo") return {...current,photos:current.photos.slice(0,1)};
+        if (fault === "old_first_source") return {...current,firstPhotoSource:"https://example.com/old-thumbnail.jpg"};
+        return {...current,photos:current.photos.map(photo=>({...photo,width:400,height:400}))};
+      });
+      const saved = await f.service.enqueue(identity,"operator");
+      await f.service.processDue(1,saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state:"recovering", code:"EBAY_SYNC_READBACK_PENDING", verificationRevision:"1" });
+      expect(f.mutations).toHaveLength(3);
+      const accepted = (await database.pool.query(`SELECT count(*)::int AS count FROM inventory.quantity_provider_requests q
+        JOIN inventory.quantity_provider_request_results r ON r.request_id=q.id
+        JOIN inventory.quantity_publication_attempts a ON a.id=q.attempt_id
+        WHERE a.scope->>'externalScopeId'=$1 AND r.outcome='completed'`,[identity.accountId])).rows[0].count;
+      expect(accepted).toBe(3);
+      visible = true; advance(); await f.service.processDue(1,saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state:"completed",code:null });
+      expect(f.mutations).toHaveLength(3);
+    });
+
+    it("preserves failed native POST diagnostics after accepted writes and recovers without replaying those writes", async () => {
+      const f = fixture(), native = f.client.getPublishedListingContent!;
+      const read: ChannelProviderReadDiagnostic = { provider:"ebay",resource:"published_listing",method:"POST",kind:"unavailable",httpStatus:503 };
+      f.client.getPublishedListingContent = vi.fn().mockRejectedValueOnce(new EbayListingSyncError("EBAY_PUBLISHED_CONTENT_READ_UNAVAILABLE",
+        "The published listing could not be checked.",{cause:new ChannelProviderReadError(read,{cause:new Error("private provider body")})})).mockImplementation(native);
+      const saved = await f.service.enqueue(identity,"operator");
+      await f.service.processDue(1,saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state:"recovering",providerRead:read,verificationRevision:"1" });
+      expect(f.mutations).toHaveLength(3);
+      const events = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='recovering'",[saved.id])).rows;
+      expect(events[0].evidence.diagnostic.context.providerRead).toEqual(read);
+      expect(JSON.stringify(events)).not.toContain("private provider body");
+      advance(); await f.service.processDue(1,saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state:"completed",providerRead:undefined });
+      expect(f.mutations).toHaveLength(3);
+    });
 
     it("retains an inventory HTTP read failure from the transport and recovers before selecting the missing-class default", async () => {
       const f = fixture();

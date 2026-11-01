@@ -25,6 +25,8 @@ import type {
 } from "../adapters/ebay/ebay-listing-builder";
 import type { ChannelListingWarning } from "@shared/channel-listing-validation";
 import type { EbayNativePackageReader } from "../adapters/ebay/ebay-native-package.reader";
+import { findChannelPublishedContentMismatch, type ChannelPublishedContent } from "../../marketplace-listings/domain/channel-publication-content";
+import { EBAY_MINIMUM_PHOTO_LONGEST_SIDE, ebayOriginalPhotoUrl } from "../adapters/ebay/ebay-photo-requirements";
 import type {
   EbayBulkPriceQuantityRequest,
   EbayBulkPriceQuantityResponse,
@@ -50,6 +52,7 @@ export interface EbayListingConnectorClient {
   readonly quantityRequestJournalVersion?: 1;
   getInventoryItem(sku: string): Promise<EbayInventoryItem | null>;
   getListingPackageType?: EbayNativePackageReader;
+  getPublishedListingContent?(listingId: string): Promise<ChannelPublishedContent>;
   createOrReplaceInventoryItem(
     sku: string,
     item: Omit<EbayInventoryItem, "sku">,
@@ -373,6 +376,8 @@ export class EbayMarketplaceListingConnector {
       stage: input.stage,
     });
     await this.verifyListingPackages(input.client, input.draft.inventoryItems, input.draft.marketplaceId);
+    if (input.draft.publishMode === "publish")
+      await this.verifyPublishedContent(input.client, input.draft, externalProductId);
 
     return {
       productId: input.draft.productId,
@@ -758,6 +763,7 @@ export class EbayMarketplaceListingConnector {
       marketplaceId: input.draft.marketplaceId,
     });
     await this.verifyListingMedia({ client: input.client, draft: input.draft });
+    await this.verifyPublishedContent(input.client, input.draft, publishResult.listingId ?? input.draft.existingExternalProductId ?? undefined);
     return {
       productId: input.draft.productId,
       status: "updated",
@@ -1114,6 +1120,39 @@ export class EbayMarketplaceListingConnector {
       }
       const mismatch = findEbaySyncContentMismatch(current, itemGroupSyncContent(group.payload));
       if (mismatch) throw readbackPending(`group ${group.groupKey}`, mismatch);
+    }
+    const selected = new Set(input.draft.offers.map(offer => offer.sku));
+    const listingIds = [...new Set(input.identity.variants.filter(member => selected.has(member.sku)).map(member => member.listingId).filter((id): id is string => Boolean(id)))];
+    if (!listingIds.length) throw readbackPending("published listing", "publishedIdentity");
+    for (const listingId of listingIds)
+      await this.verifyPublishedContent(input.client, input.draft, listingId);
+  }
+
+  private async verifyPublishedContent(
+    client: EbayListingConnectorClient,
+    draft: Pick<EbayListingConnectorDraft, "offers" | "inventoryItems" | "itemGroup">,
+    listingId: string | undefined,
+  ): Promise<void> {
+    if (!listingId) throw readbackPending("published listing", "publishedIdentity");
+    if (!client.getPublishedListingContent) throw new EbayListingSyncError("EBAY_SYNC_PUBLISHED_READER_REQUIRED",
+      "The published-listing reader is unavailable. This update cannot be marked completed until its live photos and policies are checked.");
+    const published = await client.getPublishedListingContent(listingId);
+    for (const offer of draft.offers) {
+      const urls = draft.itemGroup?.payload.imageUrls ?? draft.inventoryItems.find(item => item.sku === offer.sku)?.payload.product?.imageUrls ?? [];
+      if (!urls.length) throw readbackPending("published listing", "published.photos.source");
+      const policy = offer.payload.listingPolicies;
+      const mismatch = findChannelPublishedContentMismatch(published, {
+        listingId, skus: draft.offers.map(member => member.sku),
+        policies: { ...(policy?.fulfillmentPolicyId ? { shipping: policy.fulfillmentPolicyId } : {}),
+          ...(policy?.returnPolicyId ? { return: policy.returnPolicyId } : {}),
+          ...(policy?.paymentPolicyId ? { payment: policy.paymentPolicyId } : {}) },
+        photoCount: urls.length, firstPhotoSource: ebayOriginalPhotoUrl(urls[0]), minimumPhotoLongestSide: EBAY_MINIMUM_PHOTO_LONGEST_SIDE,
+      });
+      if (mismatch) {
+        const detail = mismatch.startsWith("published.policies.") ? "the selected business policies"
+          : mismatch.startsWith("published.photos") ? "the complete, full-resolution photo gallery" : "the intended listing variants";
+        throw new EbayListingSyncError("EBAY_SYNC_READBACK_PENDING", `eBay's published listing has not confirmed ${detail}. This update is not completed; the saved Sync will check again.`);
+      }
     }
   }
 

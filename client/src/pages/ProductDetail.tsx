@@ -1912,7 +1912,10 @@ export default function ProductDetail() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, altText: altText || null, assetType: "image", productVariantId: null }),
       });
-      if (!res.ok) throw new Error("Failed to add image");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body.error === "string" ? body.error : "Failed to add image");
+      }
       return res.json();
     },
     onSuccess: async () => {
@@ -1920,6 +1923,9 @@ export default function ProductDetail() {
       setAddImageUrl("");
       setAddImageAlt("");
       toast({ title: "Image added" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Could not add image", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1936,7 +1942,10 @@ export default function ProductDetail() {
         method: "POST",
         body: formData,
       });
-      if (!res.ok) throw new Error("Failed to upload image");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body.error === "string" ? body.error : "Failed to upload image");
+      }
       return res.json();
     },
     onSuccess: async () => {

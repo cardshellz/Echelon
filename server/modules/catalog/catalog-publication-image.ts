@@ -39,11 +39,18 @@ export interface CatalogPublicationPhotoSelection {
   overrides?: readonly CatalogPublicationImageOverride[];
 }
 
+/** A cached original is Catalog's authoritative source. Its historical remote
+ * URL remains provenance/deduplication identity, not a preferred thumbnail. */
+export function usesStoredCatalogPublicationImage(image: CatalogPublicationImage): boolean {
+  return (image.storageType === "file" || image.storageType === "both")
+    && (image.url === null || image.fileBytes !== null);
+}
+
 export function resolveCatalogPublicationImage(
   image: CatalogPublicationImage,
   publicUrl: CatalogPublicImageUrl,
 ): string | null {
-  if (image.url !== null) return image.url;
+  if (!usesStoredCatalogPublicationImage(image)) return image.url;
   if (image.storageType !== "file" && image.storageType !== "both") return null;
   if (
     !image.fileBytes ||

@@ -24,6 +24,47 @@ const pending = {
 };
 const statusName = "Sync status for 55PT Toploader Combo Pack";
 
+test("published policy verification remains unfinished in Sync All after closing its modal and completes only on provider confirmation", async ({page},info) => {
+  const state = await setupEbayChannelPage(page);
+  const message = "eBay's published listing has not confirmed the selected business policies. This update is not completed; the saved Sync will check again.";
+  const issue = resolveEbayListingIssue({productId:1,jobId:job.id,state:"recovering",code:"EBAY_SYNC_READBACK_PENDING",message});
+  state.jobs = [{...job,state:"recovering",code:issue.code,message,issue}];
+  const batches = await mockSyncBatches(page,batchFixture(["verifying"])); batches.saved = true;
+  await page.reload();
+  const progress = page.getByRole("region",{name:"Channel sync progress"});
+  await expect(progress).toContainText("1 verifying");
+  await expect(page.getByRole("status",{name:statusName})).toContainText("Waiting for eBay to confirm the listing");
+  await page.getByRole("button",{name:"View sync progress",exact:true}).click();
+  await page.getByRole("dialog").getByRole("button",{name:"Close",exact:true}).last().click();
+  await expect(progress).toContainText("1 verifying");
+  await expect(progress).not.toContainText("Sync complete");
+  await page.screenshot({path:info.outputPath("published-policy-verifying-after-close.png"),fullPage:true});
+  await page.clock.install();
+  state.jobs = [{...job,state:"completed"}];
+  batches.batch = refreshBatch({...batches.batch,items:batches.batch.items.map(item=>({...item,state:"completed"}))});
+  await page.clock.fastForward(10_100);
+  await expect(progress).toContainText("Sync complete");
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("published gallery read diagnostics preserve POST and a read-only recovery without another Sync click", async ({page},info) => {
+  const state = await setupEbayChannelPage(page);
+  state.jobs = [{...job,state:"recovering",code:"EBAY_PUBLISHED_CONTENT_READ_UNAVAILABLE",message:"The published listing could not be checked.",
+    providerRead:{provider:"ebay",resource:"published_listing",method:"POST",kind:"unavailable",httpStatus:503}}];
+  await page.reload();
+  await page.getByRole("button",{name:"View update status",exact:true}).filter({visible:true}).first().click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByText("Technical details",{exact:true}).click();
+  await expect(dialog.getByText("ebay / published_listing (POST)",{exact:true})).toBeVisible();
+  await page.screenshot({path:info.outputPath("published-gallery-read-diagnostic.png"),fullPage:true});
+  await dialog.getByRole("button",{name:"Close",exact:true}).last().click();
+  await page.clock.install(); state.jobs = [{...job,state:"completed"}];
+  await page.clock.fastForward(10_100);
+  await expect(page.getByText("Listed",{exact:true}).filter({visible:true})).toBeVisible();
+  expect(state.requests).toEqual([]); expect(state.commands).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("normal Sync recovers a rejected package classification without opening a package editor", async ({ page }, info) => {
   const state = await setupEbayChannelPage(page);
   await scopedInventoryFeed(page, state);

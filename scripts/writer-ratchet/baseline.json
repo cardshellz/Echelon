@@ -1480,7 +1480,7 @@
   "public.audit_events": [
     "modules/inventory-planning",
     "modules/procurement",
-    "server/infrastructure/auditLogger.ts"
+    "server/infrastructure/transactional-audit.ts"
   ],
   "public.auto_draft_runs": [
     "modules/procurement"

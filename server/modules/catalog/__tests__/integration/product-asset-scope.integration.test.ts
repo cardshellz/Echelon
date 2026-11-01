@@ -1,3 +1,4 @@
+import { fixedImageInspector } from "../fixtures/catalog-image-inspector.fixture";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -66,7 +67,7 @@ const defaultsSql = readFileSync(resolve(process.cwd(), "migrations", defaultsFi
     database = await createInventoryCutoverTestDatabase(url, disposable, fixture);
     service = createProductAssetScopeService(drizzle(database.pool, { schema }), () => now);
     reader = new PgCatalogVariantPublicationPhotoReader(database.pool, publicUrl);
-    ebay = new ChannelEbayListingPhotoResolver(database.pool, publicUrl);
+    ebay = new ChannelEbayListingPhotoResolver(database.pool, publicUrl, fixedImageInspector());
   });
   afterAll(async () => { await database?.close(); });
   beforeEach(async () => {

@@ -45,6 +45,7 @@ import type {
   EbayOffer,
 } from "../../channels/adapters/ebay/ebay-types";
 import { readEbayNativePackage } from "../../channels/adapters/ebay/ebay-native-package.reader";
+import { readEbayPublishedContent } from "../../channels/adapters/ebay/ebay-published-content.reader";
 import { EbayApiRequestError, isMissingEbayOfferCollection } from "../../channels/adapters/ebay/ebay-api-error";
 import { normalizeEbayObservedOffers } from "../../channels/adapters/ebay/ebay-offer-observation";
 import { ebayListingImagesFromUrls } from "../../channels/ebay-listing-photos.domain";
@@ -516,6 +517,8 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     correlation?: Readonly<Record<string, unknown>>;
   }): DropshipEbayListingLifecycleClient {
     const client: DropshipEbayListingLifecycleClient = {
+      getPublishedListingContent: listingId => readEbayPublishedContent({listingId,accessToken:input.credential.accessToken,
+        environment:input.config.environment,request:this.fetchImpl}),
       getListingPackageType: async (sku, marketplaceId, observedOffers) => {
         if (input.baseUrl !== "https://api.ebay.com" && input.baseUrl !== "https://api.sandbox.ebay.com")
           throw new DropshipError("DROPSHIP_EBAY_CONFIG_INVALID", "Package reads require an exact eBay API environment.", { retryable: false });
