@@ -1,3 +1,4 @@
+import { enqueueSavedLabelStatus } from "../../shipping/saved-label-status.repository";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { customerReturnDimensionsSchema } from "@shared/returns/customer-return-parcel";
@@ -416,6 +417,7 @@ export class PostgresCustomerReturnLabelStore
           now,
         ],
       );
+      if (result) await enqueueSavedLabelStatus(client, { kind: "return", sourceId: attemptId, providerReference: result.labelId, trackingNumber: result.trackingNumber }, now);
       await audit(
         client,
         attemptId,

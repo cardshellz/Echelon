@@ -1953,6 +1953,15 @@
   "wms.returns": [
     "modules/wms"
   ],
+  "wms.sales_channel_delivery_evidence": [
+    "modules/shipping"
+  ],
+  "wms.saved_label_status_attempts": [
+    "modules/shipping"
+  ],
+  "wms.saved_label_status_jobs": [
+    "modules/shipping"
+  ],
   "wms.shipment_request_items": [
     "modules/oms"
   ],
