@@ -1,3 +1,5 @@
+import { readReceiptCostingEvidence } from "./receipt-invoice-costs.repository";
+import type { ReceiptCostingEvidence } from "./domain/receipt-invoice-costs";
 import { sql } from "drizzle-orm";
 import {
   costInteger,
@@ -14,6 +16,7 @@ export interface PurchaseCostSource {
   purchaseOrderLine: Record<string, unknown>;
   approvedInvoices: Record<string, unknown>[];
   supplierCredits?: SupplierCreditCostRow[];
+  receiptCosting?: ReceiptCostingEvidence;
 }
 
 /** These selected fields are part of the persisted source fingerprint contract.
@@ -48,6 +51,7 @@ export async function readPurchaseCostSources(
     );
   const sourceResult = await tx.execute(sql`
     SELECT line.id,line.purchase_order_id,line.line_type,line.order_qty,line.received_qty,line.status,line.total_product_cost_cents,line.packaging_cost_cents,
+      line.receipt_costing_enabled AS __receipt_costing,
       line.discount_cents,line.tax_cents,po.currency,
       (COALESCE(po.tax_cents,0)<>0 OR po.tax_type_id IS NOT NULL OR line.tax_type_id IS NOT NULL
         OR EXISTS(SELECT 1 FROM procurement.purchase_order_lines tax_line WHERE tax_line.purchase_order_id=po.id
@@ -56,8 +60,10 @@ export async function readPurchaseCostSources(
     WHERE line.id=ANY(${sql.param(ids)}::int[]) ORDER BY line.id
   `);
   const possibleQuoteTaxes = new Set<number>();
+  const receiptScoped = new Set<number>();
   for (const raw of sourceResult.rows) {
-    const { __tax_possible: taxPossible, ...line } = raw;
+    const { __tax_possible: taxPossible, __receipt_costing: receiptCosting, ...line } = raw;
+    if (costInteger(receiptCosting ?? 0, "receipt invoice policy") === 1) receiptScoped.add(costInteger(line.id, "purchaseOrderLineId", 1));
     if (taxPossible === true || costInteger(line.tax_cents ?? 0, "line tax") !== 0) possibleQuoteTaxes.add(costInteger(line.purchase_order_id, "purchaseOrderId", 1));
     if (line.line_type === "product")
       result.set(costInteger(line.id, "purchaseOrderLineId", 1), {
@@ -93,16 +99,17 @@ export async function readPurchaseCostSources(
   }
   // Only selected tax evidence enters source identity. A quote's tax policy is
   // superseded by a complete approved invoice, just like its product price.
-  const quoteIds = [...result.values()].filter(source => source.approvedInvoices.length === 0)
+  const quoteIds = [...result.values()].filter(source => (source.approvedInvoices.length === 0 || receiptScoped.has(Number(source.purchaseOrderLine.id))))
     .map(source => costInteger(source.purchaseOrderLine.purchase_order_id, "purchaseOrderId", 1)).filter(id => possibleQuoteTaxes.has(id));
   const quoteTaxes = await readPoTaxEvidence(tx, quoteIds);
   for (const [lineId, source] of result) {
-    if (!source.approvedInvoices.length && quoteTaxes.has(lineId)) source.purchaseOrderLine = { ...source.purchaseOrderLine, tax_cost_evidence: quoteTaxes.get(lineId) };
+    if ((!source.approvedInvoices.length || receiptScoped.has(lineId)) && quoteTaxes.has(lineId)) source.purchaseOrderLine = { ...source.purchaseOrderLine, tax_cost_evidence: quoteTaxes.get(lineId) };
   }
   const credits = await readSupplierCreditCostRows(tx, { purchaseOrderLineIds: [...result.keys()] });
   for (const row of credits) {
     const source = result.get(costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1));
     if (source) (source.supplierCredits ??= []).push(row);
   }
+  for (const id of receiptScoped) { const source = result.get(id); if (source) source.receiptCosting = await readReceiptCostingEvidence(tx, id); }
   return result;
 }

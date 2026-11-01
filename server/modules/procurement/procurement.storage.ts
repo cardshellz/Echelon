@@ -873,13 +873,13 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine> {
-    const result = await db.insert(purchaseOrderLines).values(data).returning();
+    const result = await db.insert(purchaseOrderLines).values({ ...data, receiptCostingEnabled: 1 }).returning();
     return result[0];
   },
 
   async bulkCreatePurchaseOrderLines(lines: InsertPurchaseOrderLine[]): Promise<PurchaseOrderLine[]> {
     if (lines.length === 0) return [];
-    return await db.insert(purchaseOrderLines).values(lines).returning();
+    return await db.insert(purchaseOrderLines).values(lines.map(line => ({ ...line, receiptCostingEnabled: 1 }))).returning();
   },
 
   async updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>, executor: any = db): Promise<PurchaseOrderLine | null> {

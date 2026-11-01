@@ -88,7 +88,7 @@ export async function persistQuantityAmendment(
   const revisionNumber = (header.revisionNumber ?? 0) + 1;
   if (!Number.isSafeInteger(revisionNumber) || revisionNumber > 2_147_483_647) throw new PoQuantityAmendmentError("The revision limit has been reached.", "PO_AMENDMENT_REVISION_LIMIT");
   for (const addition of plan.additions ?? []) {
-    const [line] = await tx.insert(purchaseOrderLines).values({ ...addition.values, createdAt: approvedAt, updatedAt: approvedAt }).returning();
+    const [line] = await tx.insert(purchaseOrderLines).values({ ...addition.values, receiptCostingEnabled: 1, createdAt: approvedAt, updatedAt: approvedAt }).returning();
     if (!line) throw new PoQuantityAmendmentError("The new PO line could not be saved.", "PO_AMENDMENT_UPDATE_FAILED");
     await tx.insert(poRevisions).values({ purchaseOrderId: header.id, revisionNumber, changedBy: actorId,
       changeType: "line_added", fieldChanged: "line", oldValue: null, newValue: JSON.stringify(line), lineId: line.id, notes: plan.preview.reason, createdAt: approvedAt });

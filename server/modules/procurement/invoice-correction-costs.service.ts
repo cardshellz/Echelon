@@ -42,7 +42,7 @@ export async function applyInvoiceCorrectionCosts(
 ) {
   const currentSource = await readPurchaseCostSource(tx, purchaseOrderLineId);
   if (!currentSource) throw new CostEvidenceError("INVOICE_CORRECTION_COST_SOURCE_MISSING", "The invoice's purchase cost source could not be read.");
-  if (currentSource.approvedInvoices.length > 1 && resolvePurchaseCostSource(currentSource).some(input => input.evidence === "confirmed")) {
+  if (!currentSource.receiptCosting && currentSource.approvedInvoices.length > 1 && resolvePurchaseCostSource(currentSource).some(input => input.evidence === "confirmed")) {
     // The confirmed policy keeps each receipt's own invoice cost. Until the
     // receipt-allocation adapter exists, a new correction cannot invoke the
     // legacy whole-line aggregate and silently introduce averaged costs.
@@ -61,7 +61,7 @@ export async function applyInvoiceCorrectionCosts(
   const afterValues = new Map((await readInvoiceCorrectionInventoryValues(tx, after)).map(row => [row.lotId, row]));
   const impact = invoiceCorrectionCostImpactSchema.parse({
     purchaseOrderLineId,
-    needsReview: purchaseLineNeedsCostReview(line),
+    needsReview: purchaseLineNeedsCostReview(line) || afterAmounts.some(row => row.evidence !== "confirmed"),
     reviewTasks: supplierCostReviewTasks(line).map(({ id, title, explanation }) => ({ id, title, explanation })),
     sourceAmounts: beforeAmounts.map(previous => {
       const next = afterAmounts.find(row => row.component === previous.component);

@@ -1,8 +1,9 @@
+import { ReceiptInvoiceCosts } from "./ReceiptInvoiceCosts";
 import React, { useState } from "react";
 import { Link } from "wouter";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { buildCostReviewGroups, costReviewSummary, type CostReviewGroup, type CostReviewTask, type CostReviewShipmentLine } from "@shared/procurement/cost-review-tasks";
-import { purchaseLineNeedsCostReview, purchaseLineInventoryEffect, type PurchaseCostStatus, type PurchaseLineCostStatus } from "@shared/procurement/purchase-cost-status";
+import { hasReceiptInvoiceCostDestinations, purchaseLineNeedsCostReview, purchaseLineInventoryEffect, type PurchaseCostStatus, type PurchaseLineCostStatus } from "@shared/procurement/purchase-cost-status";
 import { noInventoryEffectLabel } from "./cost-inventory-effect-presentation";
 import { formatShipmentExceptionAmount } from "@shared/procurement/shipment-cost-exception";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
@@ -38,11 +39,13 @@ function InvoiceTaskActions({ task, group, openReview }: { task: CostReviewTask;
 
 function TaskAction({ task, group, navigation, showShipmentUpdates, openReview }: { task: CostReviewTask; group: CostReviewGroup; navigation: ProcurementNavigation; showShipmentUpdates: boolean; openReview: OpenCostReview }) {
   const line = group.supplier;
+  if (task.action === "receipt_invoice" && line) return <ReceiptInvoiceCosts purchaseOrderLineId={line.purchaseOrderLineId} label="Review receipt costs" />;
   if (task.action === "tax_treatment" && group.purchaseOrderId !== null) return <PurchaseTaxReview target={{ kind: "purchase_order", id: group.purchaseOrderId }} label="Choose tax treatment" />;
   if (task.action === "invoice_amounts" || task.action === "invoice_quantity") return <InvoiceTaskActions task={task} group={group} openReview={openReview} />;
   if (task.action === "repair_origin" && task.lotId) return <Button size="sm" variant="outline" onClick={() => openReview({ kind: "origin", lotId: task.lotId! })}>Review receipt link</Button>;
   if (task.action === "apply_supplier" && line?.receipts[0]) return <ApplySupplierCosts receiptId={line.receipts[0].receiptId} />;
   if (task.action === "record_invoice" && line) return <Button size="sm" variant="outline" asChild><Link href={navigation.childHref(`/purchase-orders/${line.purchaseOrderId}?tab=invoices`)}>Record supplier invoice</Link></Button>;
+  if (task.action === "receive_goods" && line) return <Button size="sm" variant="outline" asChild><Link href={navigation.childHref(`/purchase-orders/${line.purchaseOrderId}?tab=receipts`)}>Review receiving</Link></Button>;
   const shipment = task.shipment;
   if (shipment) {
     if (task.action === "measurements") return <Button size="sm" variant="outline" onClick={() => openReview({ kind: "measurements", shipmentId: shipment.shipmentId })}>Review measurements</Button>;
@@ -63,6 +66,7 @@ function CostReviewProduct({ group, navigation, showShipmentUpdates = true, upda
   return <article className="rounded-lg border p-3 space-y-3 min-w-0" data-testid={`cost-review-${group.key}`}>
     <div className="space-y-3" data-testid={group.supplier && purchaseLineNeedsCostReview(group.supplier) ? `supplier-cost-line-${group.supplier.purchaseOrderLineId}` : undefined}>
     <div className="flex flex-wrap items-baseline justify-between gap-1"><h4 className="font-semibold break-words">{group.sku ?? "Product without a saved SKU"}</h4>
+      {group.supplier && hasReceiptInvoiceCostDestinations(group.supplier) && !group.tasks.some(task => task.action === "receipt_invoice") && <ReceiptInvoiceCosts purchaseOrderLineId={group.supplier.purchaseOrderLineId} />}
       {group.purchaseOrderId !== null && <span className="text-xs text-muted-foreground">{group.poNumber ?? `PO #${group.purchaseOrderId}`}</span>}</div>
     {group.tasks.map(task => <div key={task.id} className="border-t pt-3 space-y-2" data-testid={`cost-task-${task.id}`}>
       <h5 className="font-medium">{task.title}</h5><p className="text-sm">{task.explanation}</p>
@@ -102,6 +106,7 @@ function CompletedCosts({ groups, navigation, openReview }: { groups: CostReview
     <div className="mt-3 space-y-3">{completed.map(group => <div key={group.key} className="border-t pt-3 space-y-2" data-testid={group.supplier && !purchaseLineNeedsCostReview(group.supplier) ? `supplier-cost-line-${group.supplier.purchaseOrderLineId}` : undefined}><strong>{group.sku ?? "Product"}</strong>
       {group.supplier && !purchaseLineNeedsCostReview(group.supplier) && <>
         <p className="text-green-800 dark:text-green-300">Supplier costs applied. No further approval is needed.</p>
+        {hasReceiptInvoiceCostDestinations(group.supplier) && <ReceiptInvoiceCosts purchaseOrderLineId={group.supplier.purchaseOrderLineId} label="View receipt costs and approvals" />}
         <SupplierReturnCompletion line={group.supplier} />
         {group.supplier.components.flatMap(component => component.postingReceipt ? [<p key={component.component} className="text-xs">{component.component === "product" ? "Product" : "Packaging"}: {formatShipmentExceptionAmount(component.postingReceipt.amountMills, group.supplier?.reviewFacts?.currency ?? "USD")} · Applied by {component.postingReceipt.actorName} · {new Date(component.postingReceipt.recordedAt).toLocaleString()}</p>] : [])}
         {group.supplier.originRepairs?.map(repair => <p key={repair.id} className="text-xs">Receipt link repaired · Approved by {repair.actorName} · {new Date(repair.recordedAt).toLocaleString()} · {repair.reason}</p>)}

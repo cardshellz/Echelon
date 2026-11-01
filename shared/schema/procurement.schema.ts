@@ -582,6 +582,7 @@ export type PurchaseOrder = typeof purchaseOrders.$inferSelect;
 // ===== PURCHASE ORDER LINES =====
 
 export const purchaseOrderLines = procurementSchema.table("purchase_order_lines", {
+  receiptCostingEnabled: integer("receipt_costing_enabled").notNull().default(0),
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
   lineNumber: integer("line_number").notNull(), // Sequential for display
@@ -827,6 +828,7 @@ export { PO_LINE_TYPES, isPoLineType, type PoLineType } from "../procurement/po-
 
 export const insertPurchaseOrderLineSchema = createInsertSchema(purchaseOrderLines).omit({
   id: true,
+  receiptCostingEnabled: true,
   createdAt: true,
   updatedAt: true,
 });
@@ -2508,3 +2510,20 @@ export const supplierCreditApplicationReversals = procurementSchema.table("suppl
   actorId: varchar("actor_id").notNull().references(() => users.id, { onDelete: "restrict" }),
   recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(), reason: text("reason").notNull(),
 }, table => [uniqueIndex("supplier_credit_reversals_application_idx").on(table.applicationId)]);
+
+/** Current approved coverage; immutable before/after remains in audit/PO events. */
+export const receiptInvoiceCostAllocations = procurementSchema.table("receipt_invoice_cost_allocations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  purchaseOrderLineId: integer("purchase_order_line_id").notNull().references(() => purchaseOrderLines.id),
+  receivingLineId: integer("receiving_line_id").notNull().references(() => receivingLines.id),
+  invoiceLineId: integer("invoice_line_id").notNull().references(() => vendorInvoiceLines.id),
+  receiptStartPiece: bigint("receipt_start_piece", { mode: "number" }).notNull(),
+  invoiceStartPiece: bigint("invoice_start_piece", { mode: "number" }).notNull(),
+  pieces: bigint("pieces", { mode: "number" }).notNull(),
+  approvedBy: varchar("approved_by").notNull().references(() => users.id),
+  approvedAt: timestamp("approved_at", { withTimezone: true }).notNull(),
+}, table => [
+  uniqueIndex("receipt_invoice_cost_receipt_interval_uidx").on(table.receivingLineId, table.receiptStartPiece),
+  uniqueIndex("receipt_invoice_cost_invoice_interval_uidx").on(table.invoiceLineId, table.invoiceStartPiece),
+  check("receipt_invoice_cost_interval_check", sql`${table.pieces} > 0 AND ${table.receiptStartPiece} >= 0 AND ${table.invoiceStartPiece} >= 0`),
+]);

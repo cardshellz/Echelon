@@ -295,7 +295,7 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
     async createPurchaseOrderLine(values) {
       const [created] = await tx
         .insert(purchaseOrderLines)
-        .values(values)
+        .values({ ...values, receiptCostingEnabled: 1 })
         .returning();
       if (!created) throw new Error("Purchase order line insert returned no row");
       return created as CreatedRecommendationPurchaseOrderLine;

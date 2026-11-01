@@ -1,3 +1,4 @@
+import { receiptSegmentCost } from "@shared/procurement/receipt-cost-segments";
 import { readIntegerCents } from "@shared/money-read";
 import { readIntegerMills } from "@shared/money-read";
 import Decimal from "decimal.js";
@@ -16,7 +17,8 @@ type SupplierSource = Parameters<typeof resolvePurchaseCostSource>[0];
  * amounts. It neither selects a different price policy nor posts any money. */
 export function projectPurchaseTaxCosts(records: readonly Record<string, unknown>[], sources: readonly SupplierSource[], shipping: PurchaseTaxShippingCosts) {
   const selected = sources.map(source => ({ source, proposals: resolvePurchaseCostSource(source) }));
-  const taxed = records.some(row => row.tax_type_id != null || row.header_tax_type_id != null)
+  const receiptScoped = sources.some(source => source.receiptCosting);
+  const taxed = receiptScoped || records.some(row => row.tax_type_id != null || row.header_tax_type_id != null)
     || selected.some(row => row.source.purchaseOrderLine.tax_cost_evidence !== undefined || row.source.approvedInvoices.some(invoice => invoice.tax_cost_evidence !== undefined))
     || shipping.recoverableByShipmentLine.size > 0;
   if (!taxed) return undefined;
@@ -36,7 +38,11 @@ export function projectPurchaseTaxCosts(records: readonly Record<string, unknown
     const lineId = readIntegerCents(source.purchaseOrderLine.id, "lineId"), basis = proposals[0]?.basePieces;
     const known = proposals.length === 2 && proposals.every(row => row.currency === "USD" && row.totalMills !== null
       && ["estimated", "confirmed"].includes(row.evidence) && row.basePieces === basis);
-    const supplierInventoryCents = known ? exactCents(proposals.reduce((sum, row) => sum + BigInt(row.totalMills!), BigInt(0))) : null;
+    const supplierMills = known ? proposals.reduce((sum, row) => sum + BigInt(row.totalMills!), BigInt(0)) : null;
+    // Summary cents are display rounding only. Exact selected mills remain in
+    // the DTO and the receipt/cost contracts; they are never posted from a rate.
+    const supplierInventoryCents = supplierMills === null ? null : source.receiptCosting
+      ? readIntegerCents((supplierMills+BigInt(50))/BigInt(100),"display supplier cost") : exactCents(supplierMills);
     if (supplierInventoryCents === null) reason ??= proposals.some(row => row.issue?.code === "PURCHASE_TAX_TYPE_REQUIRED")
       ? "Choose the supplier tax type before using its inventory cost."
       : "Confirm the supplier quantities, tax type and billed amounts to calculate inventory cost.";
@@ -54,7 +60,11 @@ export function projectPurchaseTaxCosts(records: readonly Record<string, unknown
       shipmentInventoryCents, inventoryLandedCents: supplierInventoryCents === null || !shipping.complete ? null : readIntegerCents(BigInt(supplierInventoryCents) + shipment, "inventory line total", true) };
   });
   if (hasUnallocatedOtherCharges) reason = [reason, "Other PO charges still need their inventory cost allocation."].filter(Boolean).join(" ");
-  const supplierInventoryCents = reason !== null ? null : readIntegerCents(lines.reduce((sum, row) => sum + BigInt(row.supplierInventoryCents!), BigInt(0)), "selected supplier total", true);
+  const exactSupplierMills = selected.every(row=>row.proposals.every(item=>item.totalMills!==null))
+    ? selected.reduce((sum,row)=>sum+row.proposals.reduce((value,item)=>value+BigInt(item.totalMills!),BigInt(0)),BigInt(0)) : null;
+  const supplierInventoryCents = reason !== null ? null : receiptScoped && exactSupplierMills !== null
+    ? readIntegerCents((exactSupplierMills+BigInt(50))/BigInt(100),"display supplier total")
+    : readIntegerCents(lines.reduce((sum, row) => sum + BigInt(row.supplierInventoryCents!), BigInt(0)), "selected supplier total", true);
   const shipmentInventoryCents = shipping.complete ? readIntegerCents(lines.reduce((sum, row) => sum + BigInt(row.shipmentInventoryCents), BigInt(0)), "selected shipment total", true) : null;
   if (!shipping.complete) reason ??= "Complete the shipment charge allocation before using its inventory cost.";
   const recoverableSupplierTaxCents = exactCents(recoverableSupplier);
@@ -62,12 +72,30 @@ export function projectPurchaseTaxCosts(records: readonly Record<string, unknown
   return purchaseTaxCostsSchema.parse({ supplierInventoryCents, shipmentInventoryCents,
     inventoryLandedCents: supplierInventoryCents === null || shipmentInventoryCents === null ? null : readIntegerCents(BigInt(supplierInventoryCents) + BigInt(shipmentInventoryCents), "landed inventory total", true),
     recoverableSupplierTaxCents,
+    ...(receiptScoped ? { supplierInventoryMills: reason !== null ? null : exactSupplierMills===null ? null : readIntegerMills(exactSupplierMills,"selected exact supplier cost") } : {}),
     recoverableShipmentTaxCents: readIntegerCents(recoverableShipment, "recoverable shipment tax", true), reason, lines });
 }
 
 /** Current landed display uses the same selected supplier extended amounts as
  * receiving. Allocation's by-value basis remains the pre-tax product quote. */
-export function projectTaxedShipmentSupplierCost(source: SupplierSource, pieces: number, shipmentHasTax: boolean) {
+export function projectTaxedShipmentSupplierCost(source: SupplierSource, pieces: number, shipmentHasTax: boolean, shipmentLineId?: number) {
+  if (source.receiptCosting) {
+    const selected = resolvePurchaseCostSource(source);
+    const receipts = source.receiptCosting.receipts.filter(row=>row.inboundShipmentLineId===shipmentLineId);
+    const received = receipts.reduce((sum,row)=>sum+BigInt(row.pieces),BigInt(0));
+    if (!Number.isSafeInteger(pieces) || pieces<=0 || shipmentLineId===undefined || received>BigInt(pieces)
+      || selected.some(row=>!row.receiptCostSegments)) return {unitCostMills:null,reason:"Review this shipment's receipt coverage before using its supplier cost."};
+    let amount = new Decimal(0);
+    for (const receipt of receipts) for (const component of selected) amount = amount.plus(receiptSegmentCost(component.receiptCostSegments!,receipt.startBasePiece,receipt.pieces,receipt.receivingLineId).totalMills);
+    const remaining = BigInt(pieces)-received;
+    if (remaining>BigInt(0)) {
+      const quote = resolvePurchaseCostSource({purchaseOrderLine:{...source.purchaseOrderLine,status:"open"},approvedInvoices:[]});
+      if(quote.some(row=>row.evidence!=="estimated"||row.currency!=="USD"||row.totalMills===null||row.basePieces===null))
+        return {unitCostMills:null,reason:"The unreceived pieces need a supported provisional PO cost."};
+      for(const component of quote)amount=amount.plus(new Decimal(component.totalMills!).mul(remaining.toString()).div(component.basePieces!));
+    }
+    return {unitCostMills:readIntegerMills(amount.div(pieces).toDecimalPlaces(0,Decimal.ROUND_HALF_UP).toFixed(0),"shipment receipt display rate"),reason:null};
+  }
   const selectedTax = source.purchaseOrderLine.tax_cost_evidence !== undefined || source.approvedInvoices.some(row => row.tax_cost_evidence !== undefined);
   if (!selectedTax && !shipmentHasTax) return undefined;
   const proposals = resolvePurchaseCostSource(source), base = proposals[0]?.basePieces;

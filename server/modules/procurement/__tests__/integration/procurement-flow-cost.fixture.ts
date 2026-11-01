@@ -26,6 +26,7 @@ const TABLES = [
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
   ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
   schema.apPayments, schema.apPaymentAllocations,
+  schema.receiptInvoiceCostAllocations,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.warehouseSettings, schema.productLocations, schema.echelonSettings,

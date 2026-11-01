@@ -1,3 +1,4 @@
+import { receiptInvoiceCostRows } from "./domain/receipt-invoice-preview";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -266,6 +267,14 @@ export async function readPurchaseCostStatus(
       poNumber: line.po_number == null ? null : String(line.po_number),
       reviewFacts: purchaseCostReviewFacts(source),
       components,
+      ...(source.receiptCosting ? { receiptCosting: {
+        receipts: receiptInvoiceCostRows(source,source.receiptCosting.receipts),
+        provisionalPieces: resolvedSources.get(lineId)![0]?.receiptCostSegments
+          ? costInteger(resolvedSources.get(lineId)![0].receiptCostSegments!.filter(row=>row.evidence==="estimated").reduce((sum,row)=>sum+BigInt(row.pieces),BigInt(0)).toString(),"provisional pieces") : null,
+        unassignedInvoicePieces: resolvedSources.get(lineId)![0]?.receiptCostSegments
+          ? costInteger((source.approvedInvoices.reduce((sum,row)=>sum+BigInt(String(row.qty_invoiced)),BigInt(0))
+            -source.receiptCosting.allocations.reduce((sum,row)=>sum+BigInt(row.pieces),BigInt(0))).toString(),"unassigned invoice pieces") : null,
+      } } : {}),
       originRepairs: repairs.filter(repair => Number(repair.purchase_order_line_id) === lineId).map(repair => ({
         ...originRepairApprovalSchema.parse({ id: costInteger(repair.id, "repairId", 1), actorName: repair.actor_name,
           reason: repair.reason, recordedAt: new Date(repair.recorded_at).toISOString(), destination: repair.evidence.choices.destination,
