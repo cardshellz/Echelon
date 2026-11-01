@@ -1,6 +1,10 @@
 import { z } from "zod";
 import sanitizeHtml from "sanitize-html";
-import { formatShopifyConnectionMoney, parseShopifyConnectionMoney } from "@shared/catalog/shopify-product-connection";
+import {
+  formatShopifyConnectionMoney, parseShopifyConnectionMoney, SHOPIFY_CONNECTION_SEARCH_PAGE_SIZE,
+  shopifyProductSearchTermSchema, shopifyProductSearchCursorSchema, shopifyProductSearchResultSchema,
+  type ShopifyProductSearchResult,
+} from "@shared/catalog/shopify-product-connection";
 import type { ShopifyConnectionCredentials } from "./shopify-product-connection.repository";
 import {
   ShopifyProductConnectionError, type ShopifyConnectionCreateSpec,
@@ -15,6 +19,16 @@ export const SHOPIFY_VARIANT_WRITE_BATCH_SIZE = 100;
 const SKU_SEARCH_BATCH_SIZE = 25;
 const METAFIELD_NAMESPACE = "echelon";
 const COMMAND_METAFIELD_KEY = "connection_command";
+
+/** Treat operator input as literal name/SKU text, never as Shopify filter syntax.
+ * Each title word is a prefix; a single SKU prefix also finds package variants. */
+export function buildShopifyProductSearchQuery(input: string): string {
+  const query = shopifyProductSearchTermSchema.parse(input);
+  const terms = query.split(/\s+/).map(term => term.replace(/[\\:()"'*<>=]/g, "\\$&").replace(/^-/, "\\-"));
+  const title = terms.map(term => `title:${term}*`).join(" AND ");
+  const sku = terms.length === 1 ? `${terms[0]}*` : searchValue(query);
+  return `(${title}) OR sku:${sku}`;
+}
 
 export class ShopifyConnectionProviderError extends ShopifyProductConnectionError {
   constructor(code: string, message: string, public readonly writeOutcome: "not_applied" | "unknown", statusCode = 502, retryable = true) {
@@ -332,7 +346,30 @@ export function createShopifyProductConnectionProvider(input: {
     if (userErrors(data.publishablePublish).length) throw new ShopifyProductConnectionError("SHOPIFY_PUBLICATION_REFUSED", "Shopify could not publish the mapped product to the selected publication. Resume the saved command.", 422, true);
   }
 
-  return { product, matches, owned, create, createVariants, capabilities, verifyMedia, publications, published, activate, publish };
+  async function search(credentials: ShopifyConnectionCredentials, input: { query: string; cursor?: string }): Promise<ShopifyProductSearchResult> {
+    const query = buildShopifyProductSearchQuery(input.query);
+    const after = input.cursor === undefined ? null : shopifyProductSearchCursorSchema.parse(input.cursor);
+    const data = await graphql(credentials, `query EchelonConnectionProductSearch($query: String!, $after: String) {
+      products(first: ${SHOPIFY_CONNECTION_SEARCH_PAGE_SIZE}, after: $after, query: $query, sortKey: ID) {
+        nodes { id title status } pageInfo { hasNextPage endCursor }
+      }
+    }`, { query, after });
+    const parsed = z.object({
+      nodes: z.array(z.object({ id: z.string(), title: z.string().min(1), status: z.enum(["ACTIVE", "DRAFT", "ARCHIVED", "UNLISTED"]) })).max(SHOPIFY_CONNECTION_SEARCH_PAGE_SIZE),
+      pageInfo: pageInfoSchema,
+    }).safeParse(data.products);
+    if (!parsed.success || parsed.data.pageInfo.hasNextPage && (!parsed.data.nodes.length || !parsed.data.pageInfo.endCursor || parsed.data.pageInfo.endCursor === after)) {
+      throw new ShopifyProductConnectionError("SHOPIFY_SEARCH_INVALID", "Shopify returned an incomplete product search. Retry the search.", 502, true);
+    }
+    const result = shopifyProductSearchResultSchema.safeParse({
+      products: parsed.data.nodes.map(node => ({ ...node, id: numericId(node.id, "Product") })),
+      nextCursor: parsed.data.pageInfo.hasNextPage ? parsed.data.pageInfo.endCursor : null,
+    });
+    if (!result.success) throw new ShopifyProductConnectionError("SHOPIFY_SEARCH_INVALID", "Shopify returned an invalid product search. Retry the search.", 502, true);
+    return result.data;
+  }
+
+  return { product, matches, search, owned, create, createVariants, capabilities, verifyMedia, publications, published, activate, publish };
 }
 
 export type ShopifyProductConnectionProvider = ReturnType<typeof createShopifyProductConnectionProvider>;

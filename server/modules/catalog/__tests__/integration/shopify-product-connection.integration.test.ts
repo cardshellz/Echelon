@@ -67,6 +67,18 @@ integration("durable per-product Shopify connections with real mapping and price
     return { commandKey: commandKey(), request, previewHash: (await f.service.preview(productId, request)).previewHash };
   }
 
+  it("searches with the database-owned store credentials without reserving a command or changing inventory", async () => {
+    const local = await seed(); const f = fixture(); const before = await inventory();
+    const search = vi.spyOn(f.provider, "search").mockResolvedValue({ products: [{ id: "900", title: "Draft binder", status: "DRAFT" }], nextCursor: null });
+    expect(await f.service.search(local.id, { channelId: 7, query: "Draft binder" })).toEqual({ products: [{ id: "900", title: "Draft binder", status: "DRAFT" }], nextCursor: null });
+    expect(search).toHaveBeenCalledWith(expect.objectContaining({ shopDomain: "test-store.myshopify.com" }), { query: "Draft binder", cursor: undefined });
+    expect(await f.repository.pending(local.id, 7)).toBeNull();
+    expect((await f.repository.source(local.id, 7)).mapping.status).toBe("unmapped");
+    expect(await inventory()).toEqual(before); expect(f.onConnected).not.toHaveBeenCalled();
+    await expect(f.service.search(local.id, { channelId: 999, query: "Draft binder" })).rejects.toMatchObject({ code: "SHOPIFY_CHANNEL_UNAVAILABLE" });
+    expect(search).toHaveBeenCalledOnce();
+  });
+
   it("links a fully unmapped product in one mapping transaction and preserves stock and native content", async () => {
     const product = await seed(); const f = fixture();
     const native = f.api.seed({ productId: "999001", variants: product.variants.map(variant => ({ sku: variant.sku })) });
