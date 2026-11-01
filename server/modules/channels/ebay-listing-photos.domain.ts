@@ -6,8 +6,8 @@ import type { CatalogPublicationMediaPlan } from "@shared/types/catalog-publicat
 export const EBAY_LISTING_MAX_PHOTOS = 12;
 
 export class EbayListingPhotoError extends Error {
-  constructor(readonly code: string, message: string, readonly context: Readonly<Record<string, unknown>> = {}) {
-    super(message);
+  constructor(readonly code: string, message: string, readonly context: Readonly<Record<string, unknown>> = {}, options?: ErrorOptions) {
+    super(message, options);
     this.name = "EbayListingPhotoError";
   }
 }

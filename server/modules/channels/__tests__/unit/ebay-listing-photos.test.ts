@@ -1,3 +1,4 @@
+import { fixedImageInspector } from "../../../catalog/__tests__/fixtures/catalog-image-inspector.fixture";
 import type { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
@@ -26,7 +27,7 @@ function fixture(options: { assetIds?: number[]; rows?: unknown[]; scope?: unkno
   });
   const release = vi.fn();
   const connect = vi.fn(async () => ({ query, release }));
-  const resolver = new ChannelEbayListingPhotoResolver({ connect } as unknown as Pool, publicUrl);
+  const resolver = new ChannelEbayListingPhotoResolver({ connect } as unknown as Pool, publicUrl, fixedImageInspector());
   return { resolver, connect, query, release };
 }
 const request = { productId: 1, channelId: 67, variants };

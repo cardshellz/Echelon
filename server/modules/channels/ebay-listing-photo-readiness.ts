@@ -6,6 +6,7 @@ import {
 } from "../catalog/catalog-publication-images.reader";
 import { readChannelPhotoOverrides } from "./ebay-listing-photos.repository";
 import { EBAY_LISTING_MAX_PHOTOS } from "./ebay-listing-photos.domain";
+import { EBAY_MINIMUM_PHOTO_LONGEST_SIDE } from "./adapters/ebay/ebay-photo-requirements";
 
 /** Readiness is a projection of the publication selector, never a raw asset count. */
 export async function readEbayListingPhotoReadiness(
@@ -31,6 +32,7 @@ export async function readEbayListingPhotoReadiness(
     productVariantIds: input.variantIds,
     maxPhotosPerVariant: EBAY_LISTING_MAX_PHOTOS,
     maxGroupPhotos: EBAY_LISTING_MAX_PHOTOS,
+    minimumLongestSide: EBAY_MINIMUM_PHOTO_LONGEST_SIDE,
     overrides,
   });
   return {

@@ -17,7 +17,6 @@ import {
   productTypes,
   inventoryLevels,
   channelListings,
-  productAssets,
 } from "@shared/schema";
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { delay } from "../../modules/channels/infrastructure/ebay-listing-helpers";
@@ -27,6 +26,8 @@ import {
 } from "./ebay-listing-connector-client";
 import { ebayListingExclusionService } from "../../modules/channels/ebay-listing-exclusion";
 import { registerEbayListingExclusionRoutes } from "./ebay-listing-exclusion.routes";
+import { createSharedProductPhotoImporter } from "../../modules/catalog/shared-product-photos.service";
+import { ebayOriginalPhotoUrl } from "../../modules/channels/adapters/ebay/ebay-photo-requirements";
 
 export const router = express.Router();
 
@@ -70,7 +71,7 @@ for (const kind of ["product", "variant"] as const) {
   // POST /api/ebay/import-images — Import product images from eBay into product_assets
 
   // -----------------------------------------------------------------------
-  router.post("/api/ebay/import-images", requireAuth, requirePermission("channels", "edit"), async (_req: Request, res: Response) => {
+  router.post("/api/ebay/import-images", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -100,7 +101,8 @@ for (const kind of ["product", "variant"] as const) {
         let imported = 0;
         let skipped = 0;
         let errors = 0;
-        const details: Array<{ productId: number; productName: string; status: string; imageCount?: number; error?: string }> = [];
+        const details: Array<{ productId: number; productName: string; status: string; imageCount?: number; error?: string;
+          warnings?: Array<{code:string;message:string;url:string}> }> = [];
 
         for (const prod of prods) {
           try {
@@ -114,37 +116,18 @@ for (const kind of ["product", "variant"] as const) {
               continue;
             }
 
-            const existingResult = await db.select({ url: productAssets.url })
-              .from(productAssets)
-              .where(eq(productAssets.productId, prod.product_id));
-            const existingUrls = new Set(existingResult.map(r => r.url));
-
-            const posResult = await db.select({ max_pos: sql<number>`COALESCE(MAX(${productAssets.position}), -1)` })
-              .from(productAssets)
-              .where(eq(productAssets.productId, prod.product_id));
-            let position = Number(posResult[0].max_pos) + 1;
-
-            let addedCount = 0;
-            const toInsert = [];
-            for (const url of ebayImageUrls) {
-              if (!url || existingUrls.has(url)) continue;
-              toInsert.push({
-                productId: prod.product_id,
-                assetType: 'image',
-                url,
-                position,
-                isPrimary: position === 0,
-                storageType: 'url',
-                createdAt: new Date()
-              });
-              position++;
-              addedCount++;
-            }
-
-            if (toInsert.length > 0) {
-              await db.insert(productAssets).values(toInsert as any);
+            const result = await createSharedProductPhotoImporter(db, () => new Date()).append({
+              productId: prod.product_id,
+              actor: ebayPolicyActor(req),
+              photos: ebayImageUrls.filter(Boolean).map((url, position) => {
+                const original = ebayOriginalPhotoUrl(url);
+                return { url: original, position, ...(original === url ? {} : { sourceAliases: [url] }) };
+              }),
+            });
+            if (result.created > 0) {
               imported++;
-              details.push({ productId: prod.product_id, productName: prod.product_name, status: "imported", imageCount: addedCount });
+              details.push({ productId: prod.product_id, productName: prod.product_name, status: "imported", imageCount: result.created,
+                ...(result.warnings ? {warnings:result.warnings} : {}) });
             } else {
               skipped++;
               details.push({ productId: prod.product_id, productName: prod.product_name, status: "already_exists" });

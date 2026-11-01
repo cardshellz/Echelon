@@ -29,8 +29,9 @@ export function resolveEbayListingJobIssue(job: EbayListingSyncJob): EbayListing
   // Replace older cached quantity-only copy without changing the saved outcome.
   if (isUnresolvedListingRequest(code)) return resolveEbayListingIssue({ code,
     message: job.message, productId: job.productId, jobId: job.id, state: job.state, operation: job.operation });
-  if (job.providerRead || code === "PUBLICATION_RECOVERY_REVIEW_REQUIRED" || code?.startsWith("EBAY_REGISTRATION_"))
-    return resolveEbayListingIssue({ code, productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead, readRetryPaused: job.readRetryPaused });
+  if (job.providerRead || code === "EBAY_SYNC_READBACK_PENDING" || code === "EBAY_PUBLICATION_READBACK_PENDING"
+    || code === "PUBLICATION_RECOVERY_REVIEW_REQUIRED" || code?.startsWith("EBAY_REGISTRATION_"))
+    return resolveEbayListingIssue({ code, message: job.message, productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead, readRetryPaused: job.readRetryPaused });
   return job.issue ?? resolveEbayListingIssue({ code: job.code, message: job.message,
     productId: job.productId, jobId: job.id, state: job.state, providerRead: job.providerRead, readRetryPaused: job.readRetryPaused });
 }
@@ -286,9 +287,13 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("An earlier quantity update needs review", "Echelon cannot confirm the outcome of an earlier eBay quantity request.",
       "Review the saved request and its response. An inventory administrator can authorize a fresh update using current inventory when the old outcome remains unknown.",
       false, "check_recovery", "Review blocked update");
+  if (["EBAY_SYNC_READBACK_PENDING", "EBAY_PUBLICATION_READBACK_PENDING"].includes(code) && input.readRetryPaused)
+    return issue("eBay has not confirmed this update", "The published listing still differs from the saved update.",
+      "Compare the issue above with the listing in Echelon and on eBay. Correct the source if needed, then Retry Sync to check the saved update again.",
+      true, "retry_sync", "Retry Sync");
   if (code === "EBAY_PUBLICATION_READBACK_PENDING")
-    return issue("Checking published listing and pictures", "eBay accepted the publication request. Echelon is still checking the complete listing and its pictures.",
-      "The saved publication will check again automatically without publishing a second time. View its status or refresh the check; completion appears after the listing and pictures are verified.",
+    return issue("Checking published listing and pictures", "eBay accepted the publication request. Echelon is still checking the published listing and picture information.",
+      "The saved publication will check again automatically without publishing a second time. View its status or refresh the check.",
       false, "check_status", "View publishing status");
   if (code === "EBAY_PUBLICATION_PRIOR_WORK_REQUIRED")
     return issue("An earlier publication must finish first", "An earlier saved publication may already have reached eBay.",
@@ -359,6 +364,10 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Reconnect the eBay account", "The saved eBay connection cannot authorize this operation.",
       "Open Connection settings, reconnect the intended eBay account, then return to this product and retry the update.",
       false, "reconnect", "Open connection settings", "/channels/ebay#connection");
+  if (code === "EBAY_PHOTO_RESOLUTION_TOO_SMALL")
+    return issue("A photo is too small for eBay", "A selected photo is below eBay's minimum image resolution.",
+      "Open Images and replace the small photo with its original file, at least 500 pixels on the longest side. Then Sync again.",
+      false, "edit_photos", "Open product images", `${productPath}?tab=images`);
   if (["EBAY_CATALOG_PHOTO_REQUIRED", "EBAY_CATALOG_PHOTO_UNAVAILABLE", "EBAY_EXISTING_GROUP_PHOTOS_REQUIRED", "EBAY_PHOTO_SCOPE_INVALID"].includes(code))
     return issue("Review this product's photos", "An included variant has no usable catalog photo for eBay.",
       "Open Images. Include a usable product photo for All variants or assign a photo to each included variant, save, then retry the listing update.",
@@ -420,7 +429,14 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       "eBay could not complete a check before publication. Echelon confirmed that no publication request was sent.",
       "Echelon will retry this saved update automatically, using current inventory and pictures. No mapping review is needed for this failure.",
       false, "check_status", "View publishing status");
-  if (["EBAY_SYNC_READBACK_PENDING", "EBAY_SYNC_PACKAGE_CHANGED", "EBAY_PHOTO_READ_FAILED", "EBAY_SYNC_PERSISTENCE_FAILED", "PUBLICATION_RESPONSE_RECOVERY_FAILED",
+  if (code === "EBAY_SYNC_READBACK_PENDING") {
+    const automatic = ["queued", "running", "recovering", "awaiting_evidence"].includes(input.state ?? "");
+    return issue("Waiting for eBay to confirm the listing", "eBay has not yet confirmed all of the saved listing changes.",
+      automatic ? "Echelon will check the published listing again automatically, including its policies, variants, picture count and picture sizes."
+        : "Retry Sync. Echelon will check the saved update and published listing before sending another change.",
+      !automatic, automatic ? "check_status" : "retry_sync", automatic ? "View update status" : "Retry Sync");
+  }
+  if (["EBAY_SYNC_PACKAGE_CHANGED", "EBAY_PHOTO_READ_FAILED", "EBAY_SYNC_PERSISTENCE_FAILED", "PUBLICATION_RESPONSE_RECOVERY_FAILED",
     "PUBLICATION_SCOPE_BUSY", "PUBLICATION_ADMISSION_CAPACITY_BUSY", "QUANTITY_PUBLICATION_DRAIN_BUSY", "EBAY_SYNC_ADMISSION_UNSAVED",
     "EBAY_SYNC_ADMISSION_FAILED", "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED", "EBAY_AUTH_UNAVAILABLE", "EBAY_AUTH_REFRESH_SUPERSEDED",
     "EBAY_LISTING_SYNC_FAILED", "DATABASE_POOL_ACQUIRE_TIMEOUT", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED"].includes(code))

@@ -52,6 +52,7 @@ describe("marketplace listing connectors", () => {
   it("publishes eBay listings through one connector client", async () => {
     const calls: string[] = [];
     const client: EbayListingConnectorClient = {
+      getPublishedListingContent: vi.fn(async listingId => ({ listingId, skus: ["SKU-1"], policies: { shipping: "fulfillment", return: "return", payment: "payment" }, firstPhotoSource: "https://example.com/product.jpg", photos: [{url:"https://example.com/product.jpg",width:640,height:640}] })),
       getInventoryItem: vi.fn(async () => null),
       createOrReplaceInventoryItem: vi.fn(async () => {
         calls.push("put_inventory");
@@ -85,7 +86,7 @@ describe("marketplace listing connectors", () => {
         sku: "SKU-1",
         payload: {
           condition: "NEW",
-          product: { title: "Test", imageUrls: [], aspects: {} },
+          product: { title: "Test", imageUrls: ["https://example.com/product.jpg"], aspects: {} },
           availability: { shipToLocationAvailability: { quantity: 3 } },
         } satisfies Omit<EbayInventoryItem, "sku">,
       },
@@ -183,7 +184,7 @@ describe("marketplace listing connectors", () => {
             sku: "SKU-1",
             payload: {
               condition: "NEW",
-              product: { title: "Test", imageUrls: [], aspects: {} },
+              product: { title: "Test", imageUrls: ["https://example.com/product.jpg"], aspects: {} },
               availability: { shipToLocationAvailability: { quantity: 1 } },
             } satisfies Omit<EbayInventoryItem, "sku">,
           },
@@ -252,7 +253,7 @@ describe("marketplace listing connectors", () => {
         sku: "SKU-1",
         payload: {
           condition: "NEW",
-          product: { title: "Test", imageUrls: [], aspects: {} },
+          product: { title: "Test", imageUrls: ["https://example.com/product.jpg"], aspects: {} },
           availability: { shipToLocationAvailability: { quantity: 4 } },
         } satisfies Omit<EbayInventoryItem, "sku">,
       },
@@ -282,7 +283,7 @@ describe("marketplace listing connectors", () => {
       payload: {
         aspects: {},
         description: "Test group",
-        imageUrls: [],
+        imageUrls: ["https://example.com/product.jpg"],
         title: "Test group",
         variantSKUs: ["SKU-1"],
         variesBy: { specifications: [{ name: "Size", values: ["One"] }] },
@@ -348,7 +349,7 @@ describe("marketplace listing connectors", () => {
         return {
           sku,
           condition: "NEW",
-          product: { title: "Test", imageUrls: [], aspects: {} },
+          product: { title: "Test", imageUrls: ["https://example.com/product.jpg"], aspects: {} },
           availability: { shipToLocationAvailability: { quantity: 1 } },
         } satisfies EbayInventoryItem;
       }),
@@ -803,16 +804,17 @@ describe("explicit eBay listing rebuild lifecycle", () => {
       currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"],
       currentListingId: "listing-old",
     });
+    const applyGroup = vi.mocked(client.createOrReplaceInventoryItemGroup).getMockImplementation()!;
     vi.mocked(client.createOrReplaceInventoryItemGroup)
       .mockRejectedValueOnce(new Error("eBay API failed: errorId:25013 Invalid data in the Inventory Item Group"))
-      .mockResolvedValueOnce(undefined);
+      .mockImplementationOnce(applyGroup);
     const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
     vi.mocked(client.getInventoryItem).mockImplementation(async sku => sku !== "CATALOG-OLD" ? readInventoryItem(sku) : ({
       sku: "CATALOG-OLD",
       condition: "NEW",
       product: {
         title: "Generic catalog item",
-        imageUrls: [],
+        imageUrls: ["https://example.com/product.jpg"],
         aspects: { Size: ["CATALOG-OLD"] },
       },
       availability: { shipToLocationAvailability: { quantity: 5 } },
@@ -856,7 +858,7 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
     vi.mocked(client.getInventoryItem).mockImplementation(async sku => sku !== "CATALOG-OLD" ? readInventoryItem(sku) : ({
       sku: changed === "inventory_item" ? "WRONG" : "CATALOG-OLD", condition: "NEW",
-      product: { title: "Old", imageUrls: [], aspects: {} }, availability: { shipToLocationAvailability: { quantity: 5 } } }));
+      product: { title: "Old", imageUrls: ["https://example.com/product.jpg"], aspects: {} }, availability: { shipToLocationAvailability: { quantity: 5 } } }));
     const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
     vi.mocked(client.getOffers).mockImplementation(async (sku, marketplace) => ({
       offers: (await readOffers(sku, marketplace)).offers.map(offer => sku === "CATALOG-OLD" && vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.length >= 2
@@ -887,7 +889,7 @@ describe("explicit eBay listing rebuild lifecycle", () => {
       inventoryItemGroupKey: "CATALOG-GROUP",
       aspects: {},
       description: "Changed group",
-      imageUrls: [],
+      imageUrls: ["https://example.com/product.jpg"],
       title: "Changed group",
       variesBy: { specifications: [] },
       variantSKUs: ["CATALOG-KEEP"],
@@ -1115,7 +1117,7 @@ describe("explicit eBay listing rebuild lifecycle", () => {
       inventoryItemGroupKey: "CATALOG-GROUP",
       aspects: {},
       description: "Replacement group",
-      imageUrls: [],
+      imageUrls: ["https://example.com/product.jpg"],
       title: "Replacement group",
       variesBy: { specifications: [] },
       variantSKUs: ["CATALOG-KEEP", "CATALOG-NEW"],
@@ -1163,7 +1165,7 @@ function makeGroupedDraft(skus: string[]): EbayListingConnectorDraft {
       sku,
       payload: {
         condition: "NEW" as const,
-        product: { title: "Generic catalog item", imageUrls: [], aspects: { Size: [sku] } },
+        product: { title: "Generic catalog item", imageUrls: ["https://example.com/product.jpg"], aspects: { Size: [sku] } },
         availability: { shipToLocationAvailability: { quantity: 5 } },
       },
     })),
@@ -1190,7 +1192,7 @@ function makeGroupedDraft(skus: string[]): EbayListingConnectorDraft {
       payload: {
         aspects: {},
         description: "Generic catalog item",
-        imageUrls: [],
+        imageUrls: ["https://example.com/product.jpg"],
         title: "Generic catalog item",
         variantSKUs: skus,
         variesBy: { specifications: [{ name: "Size", values: skus }] },
@@ -1216,6 +1218,9 @@ function makeLifecycleClient(input: {
     variesBy:{specifications:[{name:input.currentVariationAspectName ?? "Size",values:input.currentSkus}]},variantSKUs:input.currentSkus,
   };
   return {
+    getPublishedListingContent: vi.fn(async listingId => ({ listingId, skus: currentGroup.variantSKUs ?? [...items.keys()],
+      policies: { shipping: "fulfillment", return: "return", payment: "payment" }, firstPhotoSource: currentGroup.imageUrls[0] ?? null,
+      photos: currentGroup.imageUrls.map(url => ({ url, width:640, height:640 })) })),
     getInventoryItemGroup: vi.fn(async () => structuredClone(currentGroup)),
     getInventoryItem: vi.fn(async (sku:string) => items.get(sku) ?? null),
     createOrReplaceInventoryItem: vi.fn(async (sku:string,payload:Omit<EbayInventoryItem,"sku">) => {

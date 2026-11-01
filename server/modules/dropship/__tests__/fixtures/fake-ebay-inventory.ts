@@ -94,8 +94,17 @@ export class FakeEbayInventory {
       const listingId = (body as { GetItemRequest?: { ItemID?: string } }).GetItemRequest?.ItemID;
       const members = [...this.offers.values()].filter(offer => offer.status === "PUBLISHED" && offer.listingId === listingId);
       const nativeType = listingId ? this.nativePackageTypes.get(listingId) : undefined;
+      const product = members.length ? this.items.get(members[0].sku)?.product as { imageUrls?: string[] } | undefined : undefined;
+      const photos = product?.imageUrls ?? [];
+      const policies = members[0]?.listingPolicies as { fulfillmentPolicyId?: string; returnPolicyId?: string; paymentPolicyId?: string } | undefined;
       const document = members.length ? { Ack: "Success", Item: { ItemID: listingId, SKU: members[0]!.sku,
         ...(members.length > 1 ? { Variations: { Variation: members.map(member => ({ SKU: member.sku })) } } : {}),
+        ...(photos.length ? { PictureDetails: { PictureURL: photos, ExternalPictureURL: photos[0] } } : {}),
+        ...(policies ? { SellerProfiles: {
+          ...(policies.fulfillmentPolicyId ? { SellerShippingProfile: { ShippingProfileID: policies.fulfillmentPolicyId } } : {}),
+          ...(policies.returnPolicyId ? { SellerReturnProfile: { ReturnProfileID: policies.returnPolicyId } } : {}),
+          ...(policies.paymentPolicyId ? { SellerPaymentProfile: { PaymentProfileID: policies.paymentPolicyId } } : {}),
+        } } : {}),
         ...(nativeType ? { ShippingPackageDetails: { ShippingPackage: nativeType } } : {}) } } : { Ack: "Failure" };
       return new Response(new XMLBuilder().build({ GetItemResponse: document }), { headers: { "Content-Type": "text/xml" } });
     }

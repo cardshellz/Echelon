@@ -1,4 +1,5 @@
 import pg from "pg";
+import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { EbaySyncSelectionReader } from "../../infrastructure/ebay-sync-selection.reader";
@@ -11,7 +12,8 @@ import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-ima
 // Supporting read-model fixture. Durable queue/index tests live in the sync
 // recovery suite, which installs the actual production migrations unchanged.
 const schema = `
-CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA ebay;
+CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA ebay; CREATE SCHEMA marketplace;
+CREATE FUNCTION marketplace.capture_listing_intent_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
 CREATE TABLE catalog.products(id integer PRIMARY KEY,name text,sku text,product_type text,is_active boolean DEFAULT true,
  ebay_listing_excluded boolean DEFAULT false,ebay_browse_category_id text,ebay_browse_category_name text,
  ebay_fulfillment_policy_override text,ebay_return_policy_override text,ebay_payment_policy_override text);
@@ -61,6 +63,8 @@ const configured = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_
   const publicUrl = createCatalogPublicImageUrl({ PUBLIC_APP_URL: "https://example.com" });
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(process.env.ECHELON_TEST_DATABASE_URL, true, schema);
+    for (const migration of ["900000017000018580001_catalog_publication_media_versions.sql", "900000047000019770001_catalog_publication_renditions.sql"])
+      await database.pool.query(await readFile(`migrations/${migration}`,"utf8"));
     pool = new pg.Pool({ connectionString: database.connectionString, max: 1, connectionTimeoutMillis: 250,
       options: "-c search_path=catalog,channels,ebay,public" });
   });

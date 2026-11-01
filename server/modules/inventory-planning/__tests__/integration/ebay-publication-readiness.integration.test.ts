@@ -285,6 +285,22 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
       throw new Error(`Unexpected provider mutation ${method} ${path}`);
     });
     const client = createEbayRouteListingLifecycleClient({ accessToken: "synthetic-test-token", expectedAccountId: "seller-36", expectedConnectionId: 9 });
+    // The synthetic provider must expose its current published state, not the
+    // requested draft, so the normal Sync verifier checks provider-state readback.
+    client.getPublishedListingContent = async listingId => {
+      const published = (group.variantSKUs ?? []).flatMap(sku => {
+        const offer = offers.get(sku);
+        return offer?.status === "PUBLISHED" && offer.listingId === listingId ? [offer] : [];
+      });
+      if (!published.length) throw new Error("The fake published listing does not exist.");
+      const policy = published[0].listingPolicies;
+      return { listingId, skus: published.map(offer => offer.sku), policies: {
+        ...(policy?.fulfillmentPolicyId ? { shipping: policy.fulfillmentPolicyId } : {}),
+        ...(policy?.returnPolicyId ? { return: policy.returnPolicyId } : {}),
+        ...(policy?.paymentPolicyId ? { payment: policy.paymentPolicyId } : {}),
+      }, firstPhotoSource: group.imageUrls[0] ?? null,
+      photos: group.imageUrls.map(url => ({ url, width: 640, height: 640 })) };
+    };
     // Reproduce the next failure hidden by the old mapping-review UI.
     await expect(client.createOrReplaceInventoryItemGroup("PACK", group)).rejects.toMatchObject({ code: "PUBLICATION_LISTING_TARGET_UNMAPPED" });
     expect(runtime.api).not.toHaveBeenCalled();
