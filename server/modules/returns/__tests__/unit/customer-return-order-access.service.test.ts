@@ -48,6 +48,12 @@ const unavailable = {
 };
 
 describe("CustomerReturnOrderAccessService", () => {
+  it("preserves channel cancellation evidence on the owned page without using it as identity", async () => {
+    const cancelledAt = "2026-10-30T12:00:00.000Z";
+    const { service } = setup(CUSTOMER, [order({ cancelledAt })]);
+    expect((await service.list({})).orders[0]).toMatchObject({ omsOrderId: 321, cancelledAt });
+    expect((await service.list({})).orders[0]).not.toHaveProperty("externalCustomerId");
+  });
   it("resolves only canonical owned IDs and never re-resolves their shared display number", async () => {
     const { service, repository } = setup();
     expect(await service.resolveOwned({ omsOrderId: 321 })).toMatchObject({ omsOrderId: 321 });

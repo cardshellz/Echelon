@@ -12,6 +12,7 @@ describe("customer returns HTTP boundaries", () => {
   const authenticate = vi.fn(async () => principal);
   const sessionPrincipal = vi.fn(async () => principal);
   const order = vi.fn(async () => ({ test: "owned-order" }));
+  const choices = vi.fn(async () => ({ orders: [], nextBeforeOmsOrderId: null, unavailableOrderCount: 0 }));
   const review = vi.fn(async () => ({}));
   const submit = vi.fn(async () => ({}));
   const queueLabels = vi.fn(async () => ({ phase: "queued" }));
@@ -22,17 +23,17 @@ describe("customer returns HTTP boundaries", () => {
   const queueExistingLabels = vi.fn(async () => ({ phase: "labels" }));
   const artifact = vi.fn(async () => ({ downloadUrl: "https://approved-provider/label.pdf" }));
   const download = vi.fn(async () => new TextEncoder().encode("%PDF-test"));
-  const services = vi.fn(async () => ({ orders: { order, review, list: vi.fn(async () => ({ orders: [] })) },
+  const services = vi.fn(async () => ({ orders: { order, choices, review, list: vi.fn(async () => ({ orders: [] })) },
     operations: { submit, queueLabels, orderWorkflow, workflowStatus, retryWorkflow, authorizationWorkflow, queueExistingLabels, artifact, listReturns: vi.fn(async () => ({ returns: [] })), labelStatus: vi.fn(),
       progressLabels: vi.fn(), submissionStatus: vi.fn(), resumeSubmission: vi.fn() }, download }));
-  async function start() {
+  async function start(privateTesting = true) {
     vi.clearAllMocks();
     admin.mockResolvedValue(); sessionPrincipal.mockResolvedValue(principal);
     const app = express(); app.use(express.json()); app.use(express.urlencoded({ extended: false }));
     const session = { customerReturnSession: principal, returnLoginBrowserKey: "browser", user: { id: "admin" }, cookie: {},
       save: (done: (error?: Error) => void) => done(), regenerate: (done: (error?: Error) => void) => done() };
     app.use((req, _res, next) => { req.session = session as unknown as typeof req.session; next(); });
-    registerCustomerReturnCustomerRoutes(app, { privateTesting: () => true, authorizeStaff: admin,
+    registerCustomerReturnCustomerRoutes(app, { privateTesting: () => privateTesting, authorizeStaff: admin,
       context: async () => ({ config: { publicOrigin: "https://returns.example.com" }, auth: {
         principal: sessionPrincipal, authenticate, start: vi.fn(async () => "https://store.example.com/apps/echelon-returns?state=test"),
       } }) as unknown as Awaited<ReturnType<NonNullable<CustomerReturnCustomerRouteDependencies["context"]>>>,
@@ -46,6 +47,16 @@ describe("customer returns HTTP boundaries", () => {
       headers: { "X-Return-Session": principal.sessionKey, ...options.headers } });
   }
   afterEach(async () => { if (server) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
+  it("serves choices only to an independently authenticated customer and does not issue commands", async () => {
+    const request = await start(false);
+    expect((await request("/api/returns/customer/order-options?before=9")).status).toBe(200);
+    expect(choices).toHaveBeenCalledExactlyOnceWith({ beforeOmsOrderId: 9 });
+    expect(admin).not.toHaveBeenCalled(); expect(order).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled(); expect(queueLabels).not.toHaveBeenCalled();
+    sessionPrincipal.mockRejectedValue(new CustomerReturnCustomerAccessError("LOGIN", "Sign in", 401));
+    expect((await request("/api/returns/customer/order-options")).status).toBe(401);
+    expect(choices).toHaveBeenCalledTimes(1);
+  });
   it("keeps workflow observation read-only and gates every enqueue/retry behind the existing command protection", async () => {
     const request = await start(), key = "19600000-0000-4000-8000-000000000001";
     for (const path of ["/orders/7/label-requests", `/label-requests/${key}`, "/returns/10/label-requests"])
