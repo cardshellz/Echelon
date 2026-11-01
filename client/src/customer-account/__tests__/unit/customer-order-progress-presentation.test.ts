@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { customerOrderProgressSchema, type CustomerReturnProgressStatus } from "@shared/customer-account/order-progress";
-import { refundActivityLabel, returnProgressLabel } from "../../customer-order-progress-presentation";
+import { refundActivityLabel, returnProgressLabel, orderDeliveryLabel } from "../../customer-order-progress-presentation";
 
 function progress(codes: CustomerReturnProgressStatus["code"][] = []) {
   return customerOrderProgressSchema.parse({ delivery: null, packages: [], refunds: [], returns: codes.map((code, index) => ({
@@ -9,6 +9,15 @@ function progress(codes: CustomerReturnProgressStatus["code"][] = []) {
   })) });
 }
 describe("independent compact customer status labels", () => {
+  it("keeps order cancellation out of delivery while preserving actual delivery on a cancelled purchase",()=>{
+    expect(orderDeliveryLabel(true,{code:"cancelling",label:"Cancellation processing"},undefined,"Not shipped")).toBeNull();
+    expect(orderDeliveryLabel(true,{code:"on_hold",label:"On hold"},progress(),"Not shipped")).toBeNull();
+    expect(orderDeliveryLabel(true,{code:"cancelled",label:"Cancelled"},{...progress(),delivery:{code:"delivered",label:"Delivered"}},"Not shipped")).toBe("Delivered");
+    expect(orderDeliveryLabel(false,{code:"attention",label:"Order needs attention"},progress(),"Not shipped")).toBe("Order needs attention");
+    expect(orderDeliveryLabel(false,{code:"unavailable",label:"Status unavailable"},undefined,"Shipped","fulfilled")).toBe("Shipped");
+    expect(orderDeliveryLabel(true,{code:"unavailable",label:"Status unavailable"},undefined,"Shipped","fulfilled")).toBe("Shipped");
+    expect(orderDeliveryLabel(false,{code:"cancelled",label:"Picking stopped"},undefined,"Not shipped")).toBe("Order needs attention");
+  });
   it("hides a genuinely absent return without hiding a failed return read", () => {
     expect(returnProgressLabel(undefined)).toBeNull();
     expect(returnProgressLabel(progress())).toBeNull();

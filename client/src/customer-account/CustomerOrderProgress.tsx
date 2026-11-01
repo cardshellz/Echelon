@@ -8,15 +8,18 @@ export function CustomerOrderProgressSummary({
   financialStatus,
   deliveryLabel,
   progress,
+  cancelled = false,
 }: {
   financialStatus: string;
-  deliveryLabel: string;
+  deliveryLabel: string | null;
+  cancelled?: boolean;
   progress?: CustomerOrderProgress | null;
 }) {
   const returned = returnProgressLabel(progress),
     refund = refundActivityLabel(financialStatus, progress);
   return (
     <dl className="csz-order-tracks">
+      {cancelled && <div><dt>Order</dt><dd>Cancelled</dd></div>}
       <div>
         <dt>Payment</dt>
         <dd>
@@ -24,10 +27,10 @@ export function CustomerOrderProgressSummary({
           {refund && <small>{refund}</small>}
         </dd>
       </div>
-      <div>
+      {deliveryLabel && <div>
         <dt>Delivery</dt>
-        <dd>{progress?.delivery?.label ?? deliveryLabel}</dd>
-      </div>
+        <dd>{deliveryLabel}</dd>
+      </div>}
       {returned && (
         <div>
           <dt>Return</dt>
@@ -42,8 +45,10 @@ export function CustomerOrderProgressSummary({
  * no carrier read, eligibility check, money calculation or command. */
 export function CustomerOrderProgressDetails({
   progress,
+  showDelivery = true,
 }: {
   progress?: CustomerOrderProgress | null;
+  showDelivery?: boolean;
 }) {
   if (progress === undefined) return null;
   if (progress === null)
@@ -70,7 +75,7 @@ export function CustomerOrderProgressDetails({
           </section>
         </details>
       )}
-      {progress.packages.length > 0 && (
+      {showDelivery && progress.packages.length > 0 && (
         <details>
           <summary>
             Delivery details ({progress.packages.length}{" "}
