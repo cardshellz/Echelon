@@ -4,6 +4,7 @@ import type { CustomerOrderTotalsState } from "./CustomerAccountOrderTotals";
 import {
   returnProgressLabel,
   refundActivityLabel,
+  orderDeliveryLabel,
 } from "./customer-order-progress-presentation";
 import { knownCustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
 
@@ -16,6 +17,14 @@ export function CustomerAccountOrderStatus({
 }) {
   useLayoutEffect(() => {
     for (const [row, state] of states) {
+      const order = state.status === "verified" ? state.order : null;
+      const progress = order && "progress" in order ? order.progress : undefined;
+      const cancelled = order && "cancelled" in order ? order.cancelled : row.dataset.cancelled === "true";
+      const delivery = order ? orderDeliveryLabel(cancelled, order.fulfillment, progress, "Status unavailable", row.dataset.fulfillment) : undefined;
+      const deliveryTrack = row.querySelector<HTMLElement>("[data-csz-order-delivery-track]");
+      if (deliveryTrack) deliveryTrack.hidden = delivery === null;
+      const orderTrack = row.querySelector<HTMLElement>("[data-csz-order-order-track]");
+      if (orderTrack) orderTrack.hidden = !cancelled;
       const fallback = row.querySelector<HTMLElement>(
         "[data-csz-order-fulfillment-native]",
       );
@@ -50,6 +59,8 @@ export function CustomerAccountOrderStatus({
             fallback.hidden = false;
           });
       for (const row of states.keys()) {
+        const delivery = row.querySelector<HTMLElement>("[data-csz-order-delivery-track]");
+        if (delivery) delivery.hidden = row.dataset.cancelled === "true" && !["fulfilled", "partial"].includes(row.dataset.fulfillment ?? "");
         const returned = row.querySelector<HTMLElement>(
           "[data-csz-order-return-track]",
         );
@@ -64,6 +75,9 @@ export function CustomerAccountOrderStatus({
           state.status === "verified"
             ? knownCustomerOrderFulfillment(state.order.fulfillment)
             : undefined;
+        const progress = state.status === "verified" && "progress" in state.order ? state.order.progress : undefined;
+        const deliveryLabel = state.status === "verified"
+          ? orderDeliveryLabel("cancelled" in state.order ? state.order.cancelled : row.dataset.cancelled === "true", fulfillment, progress, "Status unavailable", row.dataset.fulfillment) : null;
         const target = row.querySelector<HTMLElement>(
           "[data-csz-order-fulfillment]",
         );
@@ -83,16 +97,13 @@ export function CustomerAccountOrderStatus({
           ? []
           : [
               ...(target &&
-              (fulfillment ||
+              deliveryLabel && (fulfillment ||
                 ("progress" in state.order ? state.order.progress : undefined)
                   ?.delivery)
                 ? [
                     createPortal(
                       <span>
-                        {("progress" in state.order
-                          ? state.order.progress
-                          : undefined
-                        )?.delivery?.label ?? fulfillment!.label}
+                        {deliveryLabel}
                       </span>,
                       target,
                       `${row.dataset.externalOrderId}:fulfillment`,

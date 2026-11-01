@@ -47,6 +47,11 @@ import { OrderEditPaidProjection } from "../../../oms/order-edit-paid-projection
 import { paidRewardFixture } from "../fixtures/order-edit-paid-reward.fixture";
 import { settledRefundEditFixture } from "../fixtures/settled-refund-edit.fixture";
 import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "../../../orders/cancel-wms-order";
+import { OrderCancellationService } from "../../../customer-account/application/order-cancellation.service";
+import { PostgresCancellationRefundProgressReader } from "../../../customer-account/infrastructure/cancellation-refund-progress.reader";
+import { OrderEditProviderError } from "../../application/order-edit-provider";
+import { OrderEditError } from "../../domain/order-edit-error";
+import { orderMatchesBucket, isWmsOrderOnHold } from "@shared/wms-order-listing";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -320,7 +325,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
     afterAll(async () => {
       await database?.close();
     });
-    beforeEach(async () => {
+    beforeEach(async context => {
       await database.pool.query(
         "TRUNCATE oms.order_edit_operations,wms.orders,oms.oms_orders,oms.webhook_retry_queue CASCADE",
       );
@@ -333,7 +338,10 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,quantity,paid_quantity,authority_fulfillable_quantity) VALUES(30,20,'101',1,1,1);
       INSERT INTO wms.orders(id,source,oms_fulfillment_order_id,channel_id,external_order_id) VALUES(10,'oms','20',36,'1');
       INSERT INTO wms.order_items(id,order_id,oms_order_line_id,quantity) VALUES(40,10,30,1);`);
-      await new PostgresOrderEditStore(database.pool).create(record());
+      // Full cancellation journeys start before operation creation. Other
+      // warehouse tests retain their pre-existing command fixture.
+      if (!context.task.name.startsWith("runs cancellation through split"))
+        await new PostgresOrderEditStore(database.pool).create(record());
       await database.pool
         .query(`INSERT INTO inventory.availability_claims VALUES(1,10,'active',1,'satisfied',1,1,repeat('f',64));
       INSERT INTO inventory.availability_claim_lines VALUES(1,1,40,100,1,1,0,0,0,0);`);
@@ -471,6 +479,62 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBeNull();
       expect((await database.pool.query("SELECT paid_quantity,authority_fulfillable_quantity FROM oms.oms_order_lines WHERE id=30")).rows[0]).toEqual({ paid_quantity: 1, authority_fulfillable_quantity: 1 });
       expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_events WHERE operation_id=$1 AND action='cancellation_completed'", [OP])).rows[0].count).toBe(1);
+    });
+    it.each([false,true])("runs cancellation through split refunds, retries and owned hold cleanup (lost reply=%s)",async lostReply=>{
+      await database.pool.query(`INSERT INTO oms.order_edit_settings VALUES(4,30,true,'staff','2026-10-05T00:00:00Z')
+        ON CONFLICT(connection_id) DO UPDATE SET enabled=true;
+        UPDATE oms.oms_orders SET external_customer_id='8',external_order_number='#1' WHERE id=20;
+        UPDATE wms.orders SET on_hold=1,order_edit_operation_id=NULL WHERE id=10`);
+      const store=new PostgresOrderEditStore(database.pool);
+      const sale={id:"gid://shopify/OrderTransaction/11",kind:"SALE",status:"SUCCESS",parentId:null,gateway:"manual",manual:true,amountCents:600};
+      const second={...sale,id:"gid://shopify/OrderTransaction/12",amountCents:400};
+      let native:OrderEditSnapshot={...snapshot(),customerId:"gid://shopify/Customer/8",transactions:[sale,second]};
+      const provider={readOrder:vi.fn(async()=>structuredClone(native)),
+        cancelOrder:vi.fn(async()=>{if(lostReply)throw new OrderEditProviderError("SHOPIFY_UNAVAILABLE","Synthetic lost response","unknown");return {jobId:"gid://shopify/Job/1",done:false};}),
+        cancellationJob:vi.fn(async()=>({done:true,failed:false,orderId:native.orderId}))};
+      const rewardReview={fingerprint:"b".repeat(64),returnedPoints:"100.00",deductedEarnedPoints:"0.00",settled:false};
+      const rewards={reviewCancellation:vi.fn(async()=>({...rewardReview})),
+        settleCancellation:vi.fn(async()=>({...rewardReview,settled:true}))};
+      const service=new OrderCancellationService({store,provider,warehouse:gateway,rewards,clock:()=>new Date("2026-10-06T00:00:00Z"),uuid:()=>OP,report:vi.fn()});
+      expect(await gateway.inspect(20)).toMatchObject({cancellationReasons:[]});
+      const review=await service.review(4,20);expect(review.eligibility).toEqual({allowed:true,reasons:[]});
+      const input={connectionId:4,omsOrderId:20,requestKey:record().requestKey,expectedRevision:review.revision};
+      await service.submit(input,"staff");await service.submit(input,"staff");
+      expect(provider.cancelOrder).toHaveBeenCalledTimes(1);
+      const originalLines=(await database.pool.query("SELECT paid_quantity,authority_fulfillable_quantity FROM oms.oms_order_lines ORDER BY id")).rows;
+      native={...native,cancelled:true,fullyPaid:false,totalCents:0,fingerprint:"d".repeat(64),transactions:[sale,second,
+        {...sale,id:"gid://shopify/OrderTransaction/21",parentId:sale.id,kind:"REFUND",status:"PENDING"},
+        {...second,id:"gid://shopify/OrderTransaction/22",parentId:second.id,kind:"REFUND",status:"PENDING"}]};
+      await database.pool.query("UPDATE oms.oms_orders SET status='cancelled',cancelled_at='2026-10-06T00:00:00Z' WHERE id=20");
+      const reservation={releaseOrderReservation:vi.fn(async()=>{await database.pool.query("UPDATE inventory.availability_claims SET status='released' WHERE order_id=10");return {released:1,failed:[]};})};
+      await cancelWmsOrderAndRelease(drizzle(database.pool),reservation,10,"synthetic native cancellation");
+      await service.reconcile(OP);
+      const reader=new PostgresCancellationRefundProgressReader(database.pool);
+      const scope={channelId:36,externalCustomerId:"8",orders:[{omsOrderId:20,externalOrderId:"1"}]};
+      const read=()=>reader.read(scope,new Date("2026-10-07T00:00:00Z"));
+      expect((await read()).get(20)?.[0].status.code).toBe("processing");
+      await expect(reader.read(scope,new Date("2026-10-04T00:00:00Z"))).rejects.toThrow("identity mismatch");
+      expect((await store.get(OP)).status).toBe("refunding");expect(rewards.settleCancellation).not.toHaveBeenCalled();
+      native={...native,netPaidCents:400,transactions:native.transactions.map(t=>t.id.endsWith("/21")?{...t,status:"SUCCESS"}:t)};
+      await service.reconcile(OP);expect((await read()).get(20)?.[0].status.code).toBe("processing");
+      native={...native,netPaidCents:0,transactions:native.transactions.map(t=>({...t,status:"SUCCESS"}))};
+      rewards.settleCancellation.mockRejectedValueOnce(new OrderEditProviderError("REWARD_ORDER_PROCESSING","Synthetic retry","unknown"));
+      await service.reconcile(OP);expect((await read()).get(20)?.[0].status.code).toBe("completed");
+      const release=vi.spyOn(gateway,"cancellationReleaseProof");
+      release.mockRejectedValueOnce(new OrderEditError("ORDER_CANCELLATION_WAREHOUSE_PENDING","Synthetic release retry"));
+      await service.reconcile(OP);expect((await store.get(OP)).status).toBe("synchronizing");
+      await service.reconcile(OP);await service.reconcile(OP);
+      const final=(await database.pool.query("SELECT id,warehouse_status,on_hold,order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0];
+      expect(final).toMatchObject({warehouse_status:"cancelled",on_hold:1,order_edit_operation_id:null});
+      expect(isWmsOrderOnHold({warehouseStatus:final.warehouse_status,onHold:final.on_hold})).toBe(false);
+      expect(orderMatchesBucket({id:10,warehouseStatus:final.warehouse_status,onHold:final.on_hold},"cancelled")).toBe(true);
+      expect((await store.get(OP)).status).toBe("completed");expect(rewards.settleCancellation).toHaveBeenCalledTimes(2);
+      expect((await read()).get(20)).toEqual([]); // Completed payment is now the native financial summary's responsibility.
+      expect((await database.pool.query("SELECT count(*)::int AS n FROM oms.order_edit_events WHERE operation_id=$1 AND action='cancellation_completed'",[OP])).rows[0].n).toBe(1);
+      expect((await database.pool.query("SELECT paid_quantity,authority_fulfillable_quantity FROM oms.oms_order_lines ORDER BY id")).rows).toEqual(originalLines);
+      expect((await reader.read({...scope,externalCustomerId:"9"},new Date("2026-10-07T00:00:00Z")) ).get(20)).toEqual([]);
+      expect((await reader.read({...scope,orders:[{omsOrderId:20,externalOrderId:"99"}]},new Date("2026-10-07T00:00:00Z")) ).get(20)).toEqual([]);
+      release.mockRestore();
     });
     it.each(["active_claim", "uncancelled_partition", "live_shipment", "unsettled_rewards", "unsettled_payment"])("retains ownership for cancellation with %s", async failure => {
       const value = await cancelledOperation();
