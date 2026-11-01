@@ -529,7 +529,12 @@ integration(
       await enqueueSavedLabelStatus(pool,{kind:"history",sourceId:100,providerReference:"901",trackingNumber:"CURRENT-OUTBOUND"},instant);
       await enqueueSavedLabelStatus(pool,{kind:"return",sourceId:1,providerReference:"se-901",trackingNumber:"CURRENT-RETURN"},instant);
       const selected=await new PostgresSavedLabelStatusStore(pool).claim(2,instant,"19600000-0000-4000-8000-000000000105");
-      expect(selected.map(c=>c.kind)).toEqual(["return","history"]);expect(selected[1].providerReference).toBe("901");
+      // UPDATE ... RETURNING does not sort the claimed rows. Priority controls
+      // membership: both current jobs must win over the historical backlog.
+      expect(selected).toHaveLength(2);
+      expect(selected.map(c=>({kind:c.kind,providerReference:c.providerReference}))).toEqual(expect.arrayContaining([
+        {kind:"return",providerReference:"se-901"},{kind:"history",providerReference:"901"},
+      ]));
     });
 
     it("bootstraps existing successful labels and verified packages idempotently without altering their source records",async()=>{

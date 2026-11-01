@@ -1,3 +1,4 @@
+import { receiptSegmentCost } from "@shared/procurement/receipt-cost-segments";
 import { normalizeLotCosts, lotCostNeedsReview, lotCostTotals, hasExactLotCostTotals } from "../domain/lot-cost";
 import { costForQuantityIntervals, validateCostQuantityIntervals, type CostQuantityInterval } from "../domain/cost-quantity-intervals";
 import { ensureLotCostQuantityBasis } from "../infrastructure/cost-quantity.repository";
@@ -172,9 +173,14 @@ export async function applyCostRevision(
     for (const root of roots) {
       const lot = lots.get(Number(root.inventory_lot_id))!;
       try {
-        const projection = projectCostForFrozenLot({ totalMills: source.totalMills, basePieces: source.basePieces,
-          startBasePiece: costInteger(shipmentLineId === null ? root.purchase_start_base_piece : root.shipment_start_base_piece, "startBasePiece"),
-          lotQuantity: costInteger(root.received_variant_qty, "receivedVariantQty", 1), unitsPerVariantSnapshot: costInteger(root.units_per_variant_snapshot, "unitsPerVariantSnapshot", 1) });
+        const quantity = costInteger(root.received_variant_qty, "receivedVariantQty", 1);
+        const units = costInteger(root.units_per_variant_snapshot, "unitsPerVariantSnapshot", 1);
+        const pieces = costInteger((BigInt(quantity)*BigInt(units)).toString(), "root pieces", 1);
+        const start = costInteger(shipmentLineId === null ? root.purchase_start_base_piece : root.shipment_start_base_piece, "startBasePiece");
+        const receiptCost = source.receiptCostSegments ? receiptSegmentCost(source.receiptCostSegments, start, pieces, Number(root.receiving_line_id)) : null;
+        const projection = projectCostForFrozenLot({ totalMills: receiptCost?.totalMills ?? source.totalMills,
+          basePieces: receiptCost ? pieces : source.basePieces, startBasePiece: receiptCost ? 0 : start,
+          lotQuantity: quantity, unitsPerVariantSnapshot: units });
         projections.set(lot.id, { lot, unitMills: projection.unitMills, remainderMills: projection.remainderMills, allocatedMills: projection.allocatedMills, quantity: projection.lotQuantity });
       } catch (error) {
         issues.push({ code: "COST_SOURCE_INTERVAL_REVIEW", message: `Lot ${lot.id} is outside the captured source quantity: ${error instanceof Error ? error.message : "invalid interval"}` });
