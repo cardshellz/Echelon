@@ -365,6 +365,31 @@ const configured =
       expect(f.mutations).toHaveLength(3);
     });
 
+    it("retains a long outage backoff when a successful read finds a published policy mismatch", async () => {
+      const f = fixture();
+      const native = f.client.getPublishedListingContent!;
+      let visible = false;
+      f.client.getPublishedListingContent = vi.fn(async listingId => {
+        const current = await native(listingId);
+        return visible ? current : { ...current, policies: { ...current.policies, shipping: "old-policy-copy" } };
+      });
+      const saved = await f.service.enqueue(identity, "operator");
+      // The claim increments the persisted attempt count before execution.
+      await database.pool.query("UPDATE channels.ebay_listing_sync_jobs SET attempts=499 WHERE id=$1", [saved.id]);
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({
+        attempts: 500, readFailureCount: 1, readRetryPaused: false,
+        state: "recovering", code: "EBAY_SYNC_READBACK_PENDING",
+        nextAttemptAt: new Date(clock().getTime() + 15 * 60_000).toISOString(),
+      });
+      expect(f.mutations).toHaveLength(3);
+      visible = true;
+      advance();
+      await f.service.processDue(1, saved.id);
+      expect(await f.store.get(saved.id)).toMatchObject({ state: "completed", code: null });
+      expect(f.mutations).toHaveLength(3);
+    });
+
     it("pauses a persistent published policy mismatch with an actionable normal Sync while retaining accepted writes", async () => {
       const f = fixture();
       const native = f.client.getPublishedListingContent!;

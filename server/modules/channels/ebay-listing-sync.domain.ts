@@ -201,8 +201,12 @@ export function syncFailure(
     "retryNotBefore" in error.context
       ? Date.parse(String(error.context.retryNotBefore))
       : NaN;
+  // Publication recovery may reset attempts to retain its write barrier. Use
+  // the mismatch count in that case, but never shorten an established outage
+  // backoff merely because a successful read revealed a content mismatch.
+  const backoffAttempts = Math.max(attempts, mismatch?.failures ?? 0);
   const minimum = now.getTime() + Math.min(15 * 60_000,
-    30_000 * 2 ** Math.min(mismatch?.failures ?? attempts, 5));
+    30_000 * 2 ** Math.min(backoffAttempts, 5));
   const message = code === "DATABASE_POOL_ACQUIRE_TIMEOUT"
     ? "The database connection queue timed out. The saved update retains its earlier write evidence and can be retried safely."
     : readFailure
