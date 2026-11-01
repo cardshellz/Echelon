@@ -59,3 +59,19 @@ export function refundActivityLabel(
     return "Refund issued";
   return null;
 }
+
+/** Present money already returned separately from a refund still being settled.
+ * A refund receipt never proves that the entire order has been refunded. */
+export function customerPaymentPresentation(
+  financialStatus: string,
+  progress: CustomerOrderProgress | null | undefined,
+): { label: string; detail: string | null } {
+  const activity = refundActivityLabel(financialStatus, progress);
+  if (activity === "Refund processing" || activity === "Refund needs attention" || activity === "Refund issued") {
+    return {
+      label: activity === "Refund processing" ? "Refund pending" : activity,
+      detail: financialStatus.toLowerCase() === "partially refunded" ? financialStatus : null,
+    };
+  }
+  return { label: financialStatus, detail: activity };
+}

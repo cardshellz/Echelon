@@ -28,6 +28,25 @@ reads. Confirmed native refunds or completed settlement stop polling even when
 the independent action cache still contains an older phase. Polling never
 submits or retries cancellation, refunds, rewards or hold commands.
 
+Payment presentation uses `customerPaymentPresentation` in the native account
+list and the order panel. An actual processing refund receipt makes **Refund
+pending** the primary Payment status, rather than leaving **Paid** above small
+supplemental text. Native **Refunded** wins over an older processing receipt.
+Partial refunds remain explicit; a completed individual refund never implies
+that the whole purchase is refunded. Missing refund evidence does not invent a
+pending refund.
+
+Returning to the account tab (window focus or visibility becoming visible)
+refreshes its summaries through the existing read-only query, with overlapping
+reactivation/settlement reads suppressed. This also covers an older summary
+that contains no refund receipt and therefore cannot start settlement polling.
+Hidden tabs do not refresh. A failed refresh retains already verified payment
+facts; discovery of pending cancellation settlement starts the existing timer,
+and native Refunded stops that timer. The compiled browser tests reproduce an
+older empty-refund summary with unavailable cached actions, discover pending
+refunds on tab reactivation, survive a failed read, and reach Refunded without
+submitting any cancellation or financial command.
+
 WMS terminal classification precedes the hold overlay. Cancelled/shipped orders
 with retained hold history belong in their terminal buckets, not active Issues.
 Neither HELD/ON HOLD badges nor priority hold controls advertise terminal orders
