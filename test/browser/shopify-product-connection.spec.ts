@@ -4,7 +4,7 @@ import type { ShopifyConnectionContext, ShopifyConnectionPreview, ShopifyProduct
 
 const HASH = "a".repeat(64);
 const base = "/api/products/41/shopify-connection";
-async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boolean; saved?: boolean; noMatches?: boolean; secondChannel?: boolean } = {}) {
+async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boolean; canActivate?: boolean; saved?: boolean; noMatches?: boolean; secondChannel?: boolean; syncActor?: string } = {}) {
   const context: ShopifyConnectionContext = {
     productId: 41, productName: "Graded slab binder", productSku: "BINDER", channelId: 7,
     channels: [{ id: 7, name: "Shopify", isDefault: true }, ...(options.secondChannel ? [{ id: 8, name: "Shopify Canada", isDefault: false }] : [])], shopDomain: "test-store.myshopify.com", currency: "USD",
@@ -26,7 +26,7 @@ async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boo
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "staff" }, roles: [],
-      permissions: ["inventory:view", "channels:view", ...(options.canEdit === false ? [] : ["inventory:edit", "channels:edit"])] } });
+      permissions: ["inventory:view", "channels:view", "inventory_planning:view", ...(options.canEdit === false ? [] : ["inventory:edit", "channels:edit", ...(options.canActivate === false ? [] : ["inventory_planning:activate"])])] } });
     if (path === base) {
       if (state.reject) await new Promise(resolve => setTimeout(resolve,250));
       const channelId = Number(new URL(request.url()).searchParams.get("channelId") || 7);
@@ -58,7 +58,8 @@ async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boo
     }
     if (path.startsWith(`${base}/commands/`)) {
       if (!state.pending) return route.fulfill({ status: 404, json: { code: "SHOPIFY_COMMAND_NOT_FOUND", error: "No saved command.", retryable: false } });
-      if (state.finish) state.pending = { ...state.pending, state: "complete", completedAt: "2026-10-28T12:00:00.000Z" };
+      if (state.finish) state.pending = { ...state.pending, state: "complete", completedAt: "2026-10-28T12:00:00.000Z",
+        ...(options.syncActor ? { inventorySyncRequestId: state.pending.commandKey, inventorySyncRequestedBy: options.syncActor } : {}) };
       if (state.reject) state.pending = { ...state.pending, state: "rejected", lastErrorCode: "SHOPIFY_CATALOG_IDENTITY_CHANGED", lastErrorMessage: "The queued product changed. Review a new request.", retryable: false, completedAt: "2026-10-28T12:00:00.000Z" };
       return route.fulfill({ json: state.pending });
     }
@@ -84,6 +85,42 @@ test("links the existing native draft from a product with variants, without a st
   state.finish = true;
   await expect(page.getByRole("dialog")).not.toBeVisible();
   expect(state.errors).toEqual([]);
+});
+
+test("opens the already-admitted ATP workflow after linking without submitting a second sync", async ({ page }, info) => {
+  const state = await setup(page, { syncActor: "operator" }); const reads: string[] = [];
+  await page.route("**/api/inventory-planning/admin/product-sync/requests/**", async route => {
+    expect(route.request().method()).toBe("GET");
+    const key = new URL(route.request().url()).pathname.split("/").at(-1)!; reads.push(key);
+    await route.fulfill({ json: { productId: 41, idempotencyKey: key, requestedBy: "operator", requestedAt: "2026-10-30T12:00:00.000Z",
+      updatedAt: "2026-10-30T12:00:00.000Z", state: "checking_links", message: "Checking this product's inventory links before ATP publication.",
+      review: { productId: 41, productName: "Graded slab binder", sku: "BINDER", reviewHash: HASH, ready: false, blockers: [], targets: [], rows: [] }, delivery: null } });
+  });
+  await page.getByRole("button", { name: "Link existing Shopify product", exact: true }).click();
+  await page.getByRole("button", { name: "Review Shopify connection", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm Shopify link", exact: true }).click();
+  await expect.poll(() => state.requests.length).toBe(1); state.finish = true;
+  await expect(page.getByRole("heading", { name: "Sync inventory through ATP" })).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("status")).toContainText("Checking this product's inventory links");
+  expect(reads.every(key => key === state.requests[0].commandKey)).toBe(true);
+  await page.screenshot({ path: info.outputPath("shopify-link-atp-handoff.png"), fullPage: true });
+  expect(state.errors).toEqual([]);
+});
+
+test("resuming another operator's link does not read or resubmit their private ATP request", async ({ page }) => {
+  const state = await setup(page, { saved: true, syncActor: "original-operator" });
+  await page.getByRole("button", { name: "Link existing Shopify product", exact: true }).click();
+  state.finish = true;
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+  await expect(page.getByText("Inventory sync is recorded for the original operator. Channel Inventory shows channel delivery.", { exact: true })).toBeVisible();
+  expect(state.errors).toEqual([]); expect(state.requests).toEqual([]);
+});
+
+test("requires inventory activation permission for linking while preserving product creation", async ({ page }) => {
+  const state = await setup(page, { canActivate: false });
+  await expect(page.getByRole("button", { name: "Link existing Shopify product", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Create on Shopify", exact: true })).toBeEnabled();
+  expect(state.requests).toEqual([]);
 });
 
 test("creates a draft with reviewed integer prices and an explicit publication choice", async ({ page }) => {

@@ -55,8 +55,9 @@ integration("durable per-product Shopify connections with real mapping and price
     const mappingOwner = createShopifyProductMappingService({ database: db, now: () => NOW, sleep });
     const provider = createShopifyProductConnectionProvider({ fetchImpl: api.fetchImpl, sleep });
     const onConnected = vi.fn(async () => undefined);
-    return { api, repository, mappingOwner, provider, onConnected,
-      service: createShopifyProductConnectionService({ repository, mappingOwner, provider, onConnected, log: vi.fn() }) };
+    const startInventorySync = vi.fn(async (_command: { productId: number; idempotencyKey: string }, _actor: string) => undefined);
+    return { api, repository, mappingOwner, provider, onConnected, startInventorySync,
+      service: createShopifyProductConnectionService({ repository, mappingOwner, provider, onConnected, startInventorySync, log: vi.fn() }) };
   }
   async function inventory() {
     return { levels: (await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows,
@@ -110,6 +111,54 @@ integration("durable per-product Shopify connections with real mapping and price
     expect((await database.pool.query("SELECT count(*)::int AS n FROM public.audit_events WHERE action='channel_pricing.price_saved' AND target LIKE $1", [`channel:7:%`])).rows[0].n).toBeGreaterThanOrEqual(2);
   });
 
+  it("persists both blank SKU fills, verifies their exact identities and hands the saved link to ATP", async () => {
+    const product = await seed(); const f = fixture(); const stock = await inventory();
+    const native = f.api.seed({ productId: "999101", variants: product.variants.map(() => ({ sku: null })) });
+    const original = structuredClone(native);
+    const bindings = product.variants.map((variant, index) => ({ variantId: variant.id, remoteVariantId: native.variants[index].id.split("/").at(-1)! }));
+    const intent = await prepare(f, product.id, { mode: "link", targetProductRef: "999101", bindings });
+    f.startInventorySync.mockImplementation(async (command, actor) => {
+      expect(command).toEqual({ productId: product.id, idempotencyKey: intent.commandKey }); expect(actor).toBe("operator");
+      expect((await f.mappingOwner.getSummary(product.id, 7)).status).toBe("consistent");
+      expect(native.variants.map(variant => variant.sku)).toEqual(product.variants.map(variant => variant.sku));
+      expect(await inventory()).toEqual(stock);
+    });
+    await f.service.submit(product.id, intent, "user:operator");
+    expect((await f.service.processDue()).completed).toBe(1);
+    const completed = await f.service.status(product.id, intent.commandKey);
+    expect(completed).toMatchObject({ state: "complete", inventorySyncRequestId: intent.commandKey, inventorySyncRequestedBy: "operator" });
+    original.variants.forEach((variant, index) => { variant.sku = product.variants[index].sku; });
+    expect(native).toEqual(original); expect(await inventory()).toEqual(stock);
+    const feeds = (await database.pool.query("SELECT channel_sku,channel_variant_id,channel_inventory_item_id FROM channels.channel_feeds WHERE product_variant_id=ANY($1::int[]) ORDER BY product_variant_id", [product.variants.map(variant => variant.id)])).rows;
+    expect(feeds).toEqual(native.variants.map(variant => ({ channel_sku: variant.sku, channel_variant_id: variant.id.split("/").at(-1), channel_inventory_item_id: variant.inventoryItem.id.split("/").at(-1) })));
+    const events = (await database.pool.query("SELECT event_type,details FROM catalog.shopify_product_connection_events WHERE command_key=$1 ORDER BY id", [intent.commandKey])).rows;
+    expect(events.filter(row => row.event_type === "sku_completion_requested").map(row => [row.details.before,row.details.after])).toEqual(product.variants.map(variant => [null,variant.sku]));
+    expect(events.filter(row => row.event_type === "sku_completion_verified")).toHaveLength(2);
+    expect(events.findIndex(row => row.event_type === "inventory_sync_requested")).toBeGreaterThan(events.findIndex(row => row.event_type === "mapping_committed"));
+    expect(f.startInventorySync).toHaveBeenCalledOnce();
+  });
+
+  it("resumes a partial SKU fill after a lost response without overwriting a channel SKU or duplicating ATP admission", async () => {
+    const product = await seed(); const f = fixture(); const stock = await inventory();
+    await database.pool.query("INSERT INTO channels.channel_variant_overrides(channel_id,product_variant_id,sku_override) VALUES(7,$1,$2)", [product.variants[0].id, "CHANNEL-SKU"]);
+    const native = f.api.seed({ productId: "999102", variants: [{ sku: null }, { sku: "PRESERVE-THIS" }] });
+    const bindings = product.variants.map((variant, index) => ({ variantId: variant.id, remoteVariantId: native.variants[index].id.split("/").at(-1)! }));
+    const intent = await prepare(f, product.id, { mode: "link", targetProductRef: "999102", bindings });
+    f.api.failAfter.add("EchelonConnectionSkuFill");
+    await expect(f.service.execute(product.id, intent, "user:operator")).rejects.toMatchObject({ code: "SHOPIFY_REQUEST_UNCERTAIN" });
+    expect(f.startInventorySync).not.toHaveBeenCalled();
+    expect((await f.mappingOwner.getSummary(product.id, 7)).status).toBe("consistent");
+    expect((await f.service.execute(product.id, intent, "user:other-operator")).command.state).toBe("complete");
+    expect(native.variants.map(variant => variant.sku)).toEqual(["CHANNEL-SKU", "PRESERVE-THIS"]);
+    const evidence = (await database.pool.query(`SELECT f.channel_sku,l.external_sku
+      FROM channels.channel_feeds f JOIN channels.channel_listings l ON l.channel_id=f.channel_id AND l.product_variant_id=f.product_variant_id
+      WHERE f.channel_id=7 AND f.product_variant_id=ANY($1::int[]) ORDER BY f.product_variant_id`, [product.variants.map(variant => variant.id)])).rows;
+    expect(evidence).toEqual([{ channel_sku: "CHANNEL-SKU", external_sku: "CHANNEL-SKU" }, { channel_sku: "PRESERVE-THIS", external_sku: "PRESERVE-THIS" }]);
+    expect(f.api.operations.filter(operation => operation.operation === "EchelonConnectionSkuFill")).toHaveLength(1);
+    expect(f.startInventorySync).toHaveBeenCalledExactlyOnceWith({ productId: product.id, idempotencyKey: intent.commandKey }, "operator");
+    expect(await inventory()).toEqual(stock);
+  });
+
   it("recovers a committed native create whose response was lost, without another product", async () => {
     const product = await seed(); const f = fixture(); const stock = await inventory();
     const intent = await prepare(f, product.id); f.api.failAfter.add("EchelonConnectionCreate");
@@ -131,6 +180,41 @@ integration("durable per-product Shopify connections with real mapping and price
     expect(await inventory()).toEqual(stock);
     const native = [...f.api.products.values()][0];
     expect(await filterConnectionOwnedShopifyProducts([{ shopifyProductId: Number(native.id.split("/").at(-1)), tags: native.tags }], drizzle(database.pool))).toEqual([]);
+  });
+
+  it("refuses to fill a blank SKU when the selected Shopify identity belongs to another catalog product", async () => {
+    const owner = await seed(); const contender = await seed(); const f = fixture();
+    const native = f.api.seed({ productId: "999103", variants: owner.variants.map(() => ({ sku: null })) });
+    const remote = await f.provider.product(await f.repository.credentials(7), "999103");
+    const binding = (local: typeof owner) => local.variants.map((variant,index) => ({ variantId: variant.id, remoteVariantId: remote.variants[index].id }));
+    await f.mappingOwner.repair({ productId: owner.id, channelId: 7, targetProductId: remote.id, actor: "user:owner",
+      verifiedShopifyProduct: remote, operatorVariantBindings: binding(owner) });
+    const intent = await prepare(f, contender.id, { mode: "link", targetProductRef: "999103", bindings: binding(contender) });
+    await expect(f.service.execute(contender.id, intent, "user:contender")).rejects.toMatchObject({ code: "SHOPIFY_PRODUCT_ALREADY_MAPPED" });
+    expect(native.variants.every(variant => variant.sku === null)).toBe(true);
+    expect(f.api.operations.some(operation => operation.operation === "EchelonConnectionSkuFill")).toBe(false);
+    expect(f.startInventorySync).not.toHaveBeenCalled();
+  });
+
+  it.each(["target", "sku"])("admits only one concurrent link owning the same native %s", async conflict => {
+    const left = await seed(); const right = await seed(); const f = fixture();
+    if (conflict === "sku") await database.pool.query(
+      "INSERT INTO channels.channel_variant_overrides(channel_id,product_variant_id,sku_override) VALUES(7,$1,$3),(7,$2,$3)",
+      [left.variants[0].id,right.variants[0].id,`SHARED-${left.id}`]);
+    const nativeLeft = f.api.seed({ productId: String(left.id), variants: left.variants.map(() => ({ sku: null })) });
+    const nativeRight = conflict === "target" ? nativeLeft : f.api.seed({ productId: String(right.id), variants: right.variants.map(() => ({ sku: null })) });
+    const intents = await Promise.all([[left,nativeLeft],[right,nativeRight]].map(async ([local,native]) => {
+      const product = local as typeof left; const remote = native as typeof nativeLeft;
+      return { product, intent: await prepare(f, product.id, { mode: "link", targetProductRef: remote.id.split("/").at(-1),
+        bindings: product.variants.map((variant,index) => ({ variantId: variant.id, remoteVariantId: remote.variants[index].id.split("/").at(-1) })) }) };
+    }));
+    const results = await Promise.allSettled(intents.map(({ product,intent }) => f.service.submit(product.id,intent,"user:operator")));
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find(result => result.status === "rejected")).toMatchObject({ reason: { code: "SHOPIFY_SKU_COMMAND_PENDING" } });
+    expect(f.api.operations.some(operation => operation.operation === "EchelonConnectionSkuFill")).toBe(false);
+    const winner = intents[results.findIndex(result => result.status === "fulfilled")];
+    expect((await f.service.execute(winner.product.id,winner.intent,"user:operator")).command.state).toBe("complete");
+    expect(f.startInventorySync).toHaveBeenCalledOnce();
   });
 
   it("keeps primary catalog IDs intact when linking a different Shopify store", async () => {

@@ -16,6 +16,63 @@ function setup() {
 }
 
 describe("Shopify product connection native boundary", () => {
+  function blankFixture() {
+    const f = setup();
+    const native = f.api.seed({ productId: "123", variants: [{ sku: null }] });
+    const variant = native.variants[0];
+    const assignment = { variantId: 51, remoteVariantId: variant.id.split("/").at(-1)!,
+      inventoryItemId: variant.inventoryItem.id.split("/").at(-1)!, beforeSku: null, sku: "BINDER-P1" };
+    return { ...f, native, variant, assignment };
+  }
+  it("fills only the reviewed draft inventory SKU and independently reads it back", async () => {
+    const f = blankFixture(); const before = structuredClone(f.native);
+    expect(await f.provider.fillBlankSku(credentials, "123", f.assignment)).toBe("filled");
+    expect(f.api.operations.map(operation => operation.operation)).toEqual(["EchelonConnectionSkuRead", "EchelonConnectionSkuFill", "EchelonConnectionSkuRead"]);
+    expect(f.api.operations[1].variables).toEqual({ id: f.variant.inventoryItem.id, input: { sku: "BINDER-P1" } });
+    before.variants[0].sku = "BINDER-P1"; expect(f.native).toEqual(before);
+    expect(await f.provider.fillBlankSku(credentials, "123", f.assignment)).toBe("already_set");
+    expect(f.api.operations.filter(operation => operation.operation === "EchelonConnectionSkuFill")).toHaveLength(1);
+  });
+  it("reconciles a lost SKU response by reading the same item without another write", async () => {
+    const f = blankFixture(); f.api.failAfter.add("EchelonConnectionSkuFill");
+    await expect(f.provider.fillBlankSku(credentials, "123", f.assignment)).rejects.toMatchObject({ writeOutcome: "unknown", retryable: true });
+    expect(await f.provider.fillBlankSku(credentials, "123", f.assignment)).toBe("already_set");
+    expect(f.api.operations.filter(operation => operation.operation === "EchelonConnectionSkuFill")).toHaveLength(1);
+  });
+  it("refuses a nonblank SKU, invalid assignment, changed identity or archived product before any mutation", async () => {
+    const f = blankFixture(); f.variant.sku = "EXISTING";
+    await expect(f.provider.fillBlankSku(credentials, "123", f.assignment)).rejects.toMatchObject({ code: "SHOPIFY_SKU_CHANGED" });
+    f.variant.sku = null;
+    for (const change of [{ sku: "" }, { sku: "a\u0000" }, { sku: "x".repeat(101) }, { beforeSku: "EXISTING" }]) {
+      await expect(f.provider.fillBlankSku(credentials, "123", { ...f.assignment, ...change })).rejects.toMatchObject({ code: "SHOPIFY_SKU_ASSIGNMENT_INVALID" });
+    }
+    await expect(f.provider.fillBlankSku(credentials, "124", f.assignment)).rejects.toMatchObject({ code: "SHOPIFY_SKU_IDENTITY_CHANGED" });
+    await expect(f.provider.fillBlankSku(credentials, "123", { ...f.assignment, remoteVariantId: "1" })).rejects.toMatchObject({ code: "SHOPIFY_SKU_IDENTITY_CHANGED" });
+    f.native.status = "ARCHIVED";
+    await expect(f.provider.fillBlankSku(credentials, "123", f.assignment)).rejects.toMatchObject({ code: "SHOPIFY_SKU_IDENTITY_CHANGED" });
+    expect(f.api.operations.some(operation => operation.operation === "EchelonConnectionSkuFill")).toBe(false);
+  });
+  it("does not treat a successful mutation response as verified when readback differs", async () => {
+    const f = blankFixture(); let written = false;
+    const provider = createShopifyProductConnectionProvider({ fetchImpl: async (url, init) => {
+      if (written) f.variant.sku = "EXTERNAL";
+      const reply = await f.api.fetchImpl(url, init);
+      if (String(init.body).includes("mutation EchelonConnectionSkuFill")) written = true;
+      return reply;
+    } });
+    await expect(provider.fillBlankSku(credentials, "123", f.assignment)).rejects.toMatchObject({ code: "SHOPIFY_SKU_CHANGED" });
+    expect(f.variant.sku).toBe("EXTERNAL");
+  });
+  it.each(["refused", "malformed"])("classifies a %s SKU mutation without retrying it", async kind => {
+    const f = blankFixture();
+    const mutate = vi.fn(async () => new Response(JSON.stringify({ data: { inventoryItemUpdate: kind === "refused"
+      ? { inventoryItem: null, userErrors: [{ message: "Denied" }] } : {} } })));
+    const provider = createShopifyProductConnectionProvider({ fetchImpl: (url, init) =>
+      String(init.body).includes("mutation EchelonConnectionSkuFill") ? mutate() : f.api.fetchImpl(url, init) });
+    await expect(provider.fillBlankSku(credentials, "123", f.assignment)).rejects.toMatchObject({
+      code: kind === "refused" ? "SHOPIFY_SKU_REFUSED" : "SHOPIFY_SKU_UNCONFIRMED", writeOutcome: kind === "refused" ? "not_applied" : "unknown" });
+    expect(mutate).toHaveBeenCalledOnce();
+  });
   it("searches title words and SKU prefixes without accepting operator filter syntax", () => {
     expect(buildShopifyProductSearchQuery(" PSA Binder ")).toBe('(title:PSA* AND title:Binder*) OR sku:"PSA Binder"');
     expect(buildShopifyProductSearchQuery("SHLZ-BNDR-PAGE")).toBe("(title:SHLZ-BNDR-PAGE*) OR sku:SHLZ-BNDR-PAGE*");

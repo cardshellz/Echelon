@@ -21,6 +21,8 @@ import { ShopifyProductMappingError, type ShopifyProductMappingService } from ".
 import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
 import { createChannelPricingService } from "../channels/channel-pricing.service";
 import { ChannelPricingError } from "../channels/channel-pricing.domain";
+import { assertLinkSkuProgress, assertLinkSkusAvailable, planLinkSkuAssignments,
+  shopifyConnectionRemoteFingerprint } from "./shopify-link-sku-completion";
 
 interface ConnectionPlan {
   source: ShopifyConnectionSource;
@@ -33,14 +35,6 @@ function skuList(source: ShopifyConnectionSource): string[] {
   const variants = eligibleConnectionVariants(source);
   return (variants.length ? variants.map(variant => variant.sku) : [source.product.sku])
     .filter((sku): sku is string => Boolean(sku?.trim()));
-}
-
-function remoteFingerprint(remote: ShopifyConnectionRemoteProduct): string {
-  // Stock quantities change independently and do not change product identity.
-  // They must not invalidate an otherwise exact, reviewed linking decision.
-  return connectionFingerprint({ id: remote.id, title: remote.title, status: remote.status,
-    variants: remote.variants.map(variant => ({ id: variant.id, sku: variant.sku,
-      inventoryItemId: variant.inventoryItemId, barcode: variant.barcode })).sort((left, right) => left.id < right.id ? -1 : 1) });
 }
 
 function localIdentity(source: ShopifyConnectionSource): string {
@@ -63,6 +57,7 @@ export function createShopifyProductConnectionService(input: {
   provider: ShopifyProductConnectionProvider;
   mappingOwner: Pick<ShopifyProductMappingService, "repair">;
   onConnected?: (productId: number, trackedVariantIds: readonly number[]) => Promise<void>;
+  startInventorySync?: (command: { productId: number; idempotencyKey: string }, actor: string) => Promise<unknown>;
   log?: (event: Record<string, unknown>) => void;
 }) {
   const { repository, provider, mappingOwner } = input;
@@ -169,7 +164,14 @@ export function createShopifyProductConnectionService(input: {
         if (!(error instanceof ShopifyProductConnectionError) || error.code !== "SHOPIFY_VARIANT_SELECTION_REQUIRED") throw error;
         issues.push(error.message);
       }
-      review = { remoteProductId: remote.id, remoteFingerprint: remoteFingerprint(remote), bindings };
+      const skuAssignments = planLinkSkuAssignments(source, remote, bindings);
+      if (skuAssignments.length) {
+        if (!live.scopes.has("write_inventory")) issues.push("This Shopify connection needs write_inventory permission to fill the selected blank SKUs.");
+        await verifyAvailableSkus(live.credentials, remote, skuAssignments);
+        warnings.push(...skuAssignments.map(item => `Fill the blank Shopify SKU on variant ${item.remoteVariantId} with ${item.sku}. Existing Shopify SKUs are preserved.`));
+      }
+      review = { remoteProductId: remote.id, remoteFingerprint: shopifyConnectionRemoteFingerprint(remote), bindings,
+        skuAssignments, syncInventory: source.variants.length > 0 };
       variants = eligibleConnectionVariants(source).map(variant => {
         const chosen = bindings.find(binding => binding.variantId === variant.id)?.remoteVariantId
           ?? request.bindings.find(binding => binding.variantId === variant.id)?.remoteVariantId;
@@ -179,12 +181,16 @@ export function createShopifyProductConnectionService(input: {
           remoteVariantId: matching.length === 1 ? matching[0].id : null, priceCents: matching.length === 1 ? matching[0].priceCents : null };
       });
       warnings.push("Link this existing product and the reviewed variants. Its content, photos, prices and publication stay as they are.");
-      if (variants.some(variant => variant.remoteVariantId && remote.variants.find(candidate => candidate.id === variant.remoteVariantId)?.sku?.trim().toUpperCase() !== variant.sku?.trim().toUpperCase())) {
+      if (variants.some(variant => {
+        const nativeSku = remote.variants.find(candidate => candidate.id === variant.remoteVariantId)?.sku?.trim();
+        return nativeSku && nativeSku.toUpperCase() !== variant.sku?.trim().toUpperCase();
+      })) {
         warnings.push("One or more explicitly selected Shopify SKUs differ from the catalog SKU. Review each selected variant carefully.");
       }
     }
     if (source.variants.some(variant => !variant.isActive || variant.salesEligibility === "internal_only")) warnings.push("Archived and internal-only variants are excluded.");
-    warnings.push("Inventory quantities continue through Channel Inventory; this command does not adjust stock.");
+    warnings.push(review.syncInventory ? "After the Shopify SKUs and links are verified, inventory sync will start through ATP using the saved rules for all eligible channels. Channel delivery is verified separately."
+      : "Inventory quantities continue through Channel Inventory; this command does not adjust stock.");
     const previewHash = connectionFingerprint({ source, request, createSpec, review, publicationName });
     return { source, createSpec, review, preview: {
       previewHash, mode: request.mode, productId, productName: source.product.name, channelId: request.channelId,
@@ -251,7 +257,32 @@ export function createShopifyProductConnectionService(input: {
       let remote: ShopifyConnectionRemoteProduct;
       if (command.mode === "link") {
         remote = await provider.product(live.credentials, command.review.remoteProductId!, heartbeat);
-        if (remoteFingerprint(remote) !== command.review.remoteFingerprint) throw new ShopifyProductConnectionError("SHOPIFY_REMOTE_CHANGED", "The reviewed Shopify product or variant identities changed. Review a new linking request.");
+        assertLinkSkuProgress(remote, command.review);
+        const assignments = command.review.skuAssignments ?? [];
+        if (assignments.length) {
+          if (!live.scopes.has("write_inventory")) throw new ShopifyProductConnectionError("SHOPIFY_SKU_PERMISSION_REQUIRED", "Shopify write_inventory permission is required to complete the reviewed blank SKUs.", 422);
+          assertSkuSourceUnchanged(admittedSource, assignments);
+          await verifyAvailableSkus(live.credentials, remote, assignments, heartbeat);
+          // Claim the reviewed identities with the existing mapping owner before
+          // changing Shopify. Its transaction rejects another catalog owner's
+          // product/variant/feed/listing. A failed SKU fill retains this link and
+          // the saved command; final mapping refresh and ATP wait for readback.
+          await mappingOwner.repair({ productId, channelId: command.channelId, targetProductId: remote.id, actor,
+            verifiedShopifyProduct: { id: remote.id, title: remote.title, variants: remote.variants },
+            operatorVariantBindings: command.review.bindings,
+            expectedMappingFingerprint: ownsSelection(admittedSource, remote.id, command.review.bindings)
+              ? undefined : command.source.mapping.fingerprint });
+          await step({ actor, state: "configuring", eventType: "sku_identity_claimed", remoteProductId: remote.id });
+          for (const assignment of assignments) {
+            await step({ actor, state: "configuring", eventType: "sku_completion_requested", remoteProductId: remote.id,
+              details: { ...assignment, before: assignment.beforeSku, after: assignment.sku } });
+            const outcome = await provider.fillBlankSku(live.credentials, remote.id, assignment, heartbeat);
+            await step({ actor, state: "configuring", eventType: "sku_completion_verified", details: { ...assignment, outcome } });
+          }
+          remote = await provider.product(live.credentials, remote.id, heartbeat);
+          assertLinkSkuProgress(remote, command.review, true);
+          await verifyAvailableSkus(live.credentials, remote, assignments, heartbeat);
+        }
       } else {
         const ownership = connectionOwnership(command.channelId, command.productId, command.commandKey);
         if (command.remoteProductId) remote = await provider.product(live.credentials, command.remoteProductId, heartbeat);
@@ -279,13 +310,13 @@ export function createShopifyProductConnectionService(input: {
       if (localIdentity(current) !== localIdentity(command.source)) {
         throw new ShopifyProductConnectionError("SHOPIFY_CATALOG_IDENTITY_CHANGED", "The catalog's active SKUs or inventory policies changed after review. The Shopify draft is retained for review.");
       }
+      assertSkuSourceUnchanged(current, command.review.skuAssignments ?? []);
       const bindings = command.mode === "link" ? command.review.bindings : eligibleConnectionVariants(command.source).map(variant => {
         const matching = remote.variants.filter(candidate => candidate.localVariantId === variant.id);
         if (matching.length !== 1) throw new ShopifyProductConnectionError("SHOPIFY_VARIANT_EVIDENCE_MISSING", "A created variant is missing its exact catalog identity.");
         return { variantId: variant.id, remoteVariantId: matching[0].id };
       });
-      const alreadyApplied = current.mapping.status === "consistent" && current.mapping.catalogProductId === remote.id
-        && bindings.every(binding => current.mapping.variants.some(variant => variant.variantId === binding.variantId && variant.catalogVariantId === binding.remoteVariantId));
+      const alreadyApplied = ownsSelection(current, remote.id, bindings);
       await mappingOwner.repair({ productId, channelId: command.channelId, targetProductId: remote.id, actor,
         verifiedShopifyProduct: { id: remote.id, title: remote.title, variants: remote.variants },
         operatorVariantBindings: bindings,
@@ -307,9 +338,18 @@ export function createShopifyProductConnectionService(input: {
       if (command.request.publicationId) {
         await finishPublication(live.credentials, remote.id, command.request.publicationId, step, heartbeat, actor);
       }
+      let inventorySyncRequestId: string | null = null;
+      if (command.review.syncInventory) {
+        if (!input.startInventorySync) throw new ShopifyProductConnectionError("SHOPIFY_ATP_UNAVAILABLE", "The Shopify link is saved. Resume this command to start its recorded ATP inventory sync.", 503, true);
+        await step({ actor, state: "mapping", eventType: "inventory_sync_requested", details: { inventorySyncRequestId: command.commandKey } });
+        // The initiating actor and command key stay fixed across worker/operator retries.
+        const syncActor = command.actor.startsWith("user:") ? command.actor.slice(5) : command.actor;
+        await input.startInventorySync({ productId, idempotencyKey: command.commandKey }, syncActor);
+        inventorySyncRequestId = command.commandKey;
+      }
       await step({ actor, state: "complete", eventType: "command_completed", result: {
         productId, channelId: command.channelId, remoteProductId: remote.id, bindings,
-        publicationId: command.request.publicationId, mode: command.mode,
+        publicationId: command.request.publicationId, mode: command.mode, inventorySyncRequestId,
       } });
       log({ code: "SHOPIFY_PRODUCT_CONNECTION_COMPLETED", actor, commandKey: command.commandKey, productId, channelId: command.channelId, remoteProductId: remote.id, mode: command.mode });
       return { command: publicConnectionCommand(command), replayed: false };
@@ -325,6 +365,30 @@ export function createShopifyProductConnectionService(input: {
         details: { code: failure.code, retryable: failure.retryable }, release: true });
       log({ code: failure.code, actor, commandKey: command.commandKey, productId, channelId: command.channelId, state: command.state, retryable: failure.retryable });
       throw new ShopifyProductConnectionError(failure.code, failure.message, failure.statusCode, failure.retryable, error);
+    }
+  }
+
+  function assertSkuSourceUnchanged(source: ShopifyConnectionSource, assignments: NonNullable<ShopifyConnectionReviewEvidence["skuAssignments"]>) {
+    for (const item of assignments) {
+      const variant = source.variants.find(variant => variant.id === item.variantId);
+      const sku = item.variantId === null ? source.product.sku : variant?.stockSku === undefined ? variant?.sku : variant.stockSku;
+      if (sku?.trim() !== item.sku) throw new ShopifyProductConnectionError("SHOPIFY_CATALOG_IDENTITY_CHANGED", "The catalog or channel SKU changed after review. Review the current product before continuing.");
+    }
+  }
+
+  function ownsSelection(source: ShopifyConnectionSource, remoteProductId: string, bindings: ShopifyConnectionReviewEvidence["bindings"]): boolean {
+    return source.mapping.status === "consistent" && source.mapping.catalogProductId === remoteProductId
+      && bindings.every(binding => source.mapping.variants.some(variant => variant.variantId === binding.variantId && variant.catalogVariantId === binding.remoteVariantId));
+  }
+
+  async function verifyAvailableSkus(credentials: ShopifyConnectionCredentials, selected: ShopifyConnectionRemoteProduct,
+    assignments: NonNullable<ShopifyConnectionReviewEvidence["skuAssignments"]>, heartbeat?: () => Promise<void>) {
+    // Search returns product summaries. Resolve every candidate's complete variant
+    // identities before deciding whether an SKU belongs to another inventory item.
+    const matches = await provider.matches(credentials, assignments.map(item => item.sku), heartbeat);
+    assertLinkSkusAvailable(assignments, [selected]);
+    for (const match of matches) {
+      if (match.id !== selected.id) assertLinkSkusAvailable(assignments, [await provider.product(credentials, match.id, heartbeat)]);
     }
   }
 
