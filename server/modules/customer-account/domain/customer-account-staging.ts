@@ -3,11 +3,20 @@ import type { CustomerReturnCustomerSession, ReturnCustomerAuthConfig } from "..
 import { CustomerReturnCustomerAccessError } from "../../returns/application/customer-return-customer-auth.service";
 
 const id = z.string().max(30).regex(/^[1-9][0-9]*$/);
+// Keep rollout configuration bounded; theme IDs do not authenticate customers.
+const MAX_ADDITIONAL_ACCOUNT_THEMES = 10;
 const configSchema = z.object({
   themeId: id,
+  // Preserve the original single-theme configuration and allow an explicitly
+  // configured live theme without disabling an existing staging preview.
+  additionalThemeIds: z.array(id).max(MAX_ADDITIONAL_ACCOUNT_THEMES).optional(),
   shops: z.record(z.string().regex(/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/),
     z.object({ enabled: z.boolean() }).strict()),
-}).strict();
+}).strict().superRefine((config, context) => {
+  const themes = [config.themeId, ...(config.additionalThemeIds ?? [])];
+  if (new Set(themes).size !== themes.length)
+    context.addIssue({ code: "custom", path: ["additionalThemeIds"], message: "Account theme IDs must be unique." });
+});
 export type CustomerAccountStagingConfig = z.infer<typeof configSchema>;
 export interface CustomerAccountOriginContext {
   origin: "primary_storefront" | "shopify_storefront" | "missing" | "rejected";
@@ -21,7 +30,7 @@ export class CustomerAccountOriginAccessError extends CustomerReturnCustomerAcce
 export function readCustomerAccountStagingConfig(raw: string | undefined): CustomerAccountStagingConfig | null {
   if (!raw) return null;
   try { return configSchema.parse(JSON.parse(raw)); }
-  catch { throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_CONFIGURATION_INVALID", "Account testing is not configured yet.", 503); }
+  catch { throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_CONFIGURATION_INVALID", "Account tools are not configured yet.", 503); }
 }
 
 /** Theme IDs select the rollout, never authenticate it. The enabled shop admits
@@ -32,9 +41,9 @@ export function requireCustomerAccountStaging(input: {
   origin: string | undefined; commandHeader: string | undefined; sessionKey?: string | null;
 }): void {
   const { config, principal } = input;
-  if (!config || config.themeId !== input.themeId ||
+  if (!config || (config.themeId !== input.themeId && !config.additionalThemeIds?.includes(input.themeId)) ||
       !config.shops[principal.shopDomain]?.enabled) {
-    throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_TESTING_UNAVAILABLE", "Staging account tools are not enabled yet.", 403);
+    throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_TESTING_UNAVAILABLE", "Account tools are not enabled yet.", 403);
   }
   const shop = input.authConfig.shops[principal.shopDomain];
   // Shopify serves theme previews on the shop's canonical myshopify host.
