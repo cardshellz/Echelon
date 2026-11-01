@@ -229,11 +229,17 @@ export function registerReceiptInvoiceCostCases(fixture: {
         expect.objectContaining({ reason: body.reason }),
       ]);
     });
-    it.each(["receiptCostingEnabled","receipt_costing_enabled"])("rejects changing %s through an ordinary PO edit",async field=>{
-      await setup(); const before=await state();
-      await expect(fixture.purchasing().updateLine(21,{[field]:0},fixture.actorId)).rejects.toMatchObject({statusCode:400});
-      expect(await state()).toEqual(before);
-    });
+    it.each(["receiptCostingEnabled", "receipt_costing_enabled"])(
+      "rejects changing %s through an ordinary PO edit",
+      async (field) => {
+        await setup();
+        const before = await state();
+        await expect(
+          fixture.purchasing().updateLine(21, { [field]: 0 }, fixture.actorId),
+        ).rejects.toMatchObject({ statusCode: 400 });
+        expect(await state()).toEqual(before);
+      },
+    );
     it("updates actual and provisional inventory flags separately after freight is posted", async () => {
       const { rows } = await setup(),
         { body } = await review([rows[0]]);
@@ -256,6 +262,56 @@ export function registerReceiptInvoiceCostCases(fixture: {
           )
         ).rows,
       ).toEqual([{ cost_provisional: 0 }, { cost_provisional: 0 }]);
+    });
+    it("marks inventory provisional when a real invoice void invalidates saved receipt coverage without changing posted amounts", async () => {
+      const { rows } = await setup(),
+        reviewed = await review(rows);
+      expect((await post("", reviewed.body, randomUUID())).status).toBe(200);
+      await fixture.shipments().finalizeAllocations(1, fixture.actorId);
+      await fixture.shipments().pushLandedCostsToLots(1, fixture.actorId);
+      const before = (
+        await query(
+          "SELECT id,qty_on_hand,product_total_cost_mills,packaging_total_cost_mills,cost_provisional FROM inventory.inventory_lots ORDER BY id",
+        )
+      ).rows;
+      expect(before.map((row) => row.cost_provisional)).toEqual([0, 0]);
+      const approvals = (await context()).approvals;
+      const { voidInvoice } = await import("../../ap-ledger.service");
+      await voidInvoice(
+        71,
+        "Supplier withdrew this invoice; replace its original receipt coverage",
+        fixture.actorId,
+      );
+      const after = (
+        await query(
+          "SELECT id,qty_on_hand,product_total_cost_mills,packaging_total_cost_mills,cost_provisional FROM inventory.inventory_lots ORDER BY id",
+        )
+      ).rows;
+      expect(after.map(({ cost_provisional, ...row }) => row)).toEqual(
+        before.map(({ cost_provisional, ...row }) => row),
+      );
+      expect(after.map((row) => row.cost_provisional)).toEqual([1, 1]);
+      const current = await fixture
+        .database()
+        .transaction((tx) => readPurchaseCostStatus(tx, [21]));
+      expect(
+        current.lines[0].components.every(
+          (row) => row.status === "review_required",
+        ),
+      ).toBe(true);
+      expect((await context()).approvals).toEqual(approvals);
+      const coverageReview = await review([rows[1]]);
+      expect((await post("", coverageReview.body, randomUUID())).status).toBe(
+        200,
+      );
+      expect(
+        (
+          await query(
+            "SELECT cost_provisional FROM inventory.inventory_lots ORDER BY id",
+          )
+        ).rows,
+      ).toEqual([{ cost_provisional: 1 }, { cost_provisional: 0 }]);
+      expect((await context()).approvals[1]).toEqual(approvals[0]);
     });
     it("keeps a second received batch provisional until its own invoice is assigned", async () => {
       const { rows } = await setup();

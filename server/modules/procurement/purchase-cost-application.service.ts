@@ -29,7 +29,13 @@ export async function reconcilePurchaseCostEvidence(
   const revisions = await recordPurchaseCostRevisions(tx, purchaseOrderLineId, actorId, now);
   const applications: CostRevisionApplicationResult[] = [];
   for (const revision of revisions) applications.push(await applyCostRevision(tx, revision, writer, actorId, now, options));
-  if (revisions.some(row => row.contract.receiptCostSegments)) await refreshReceiptCostProvisionalForLine(tx, purchaseOrderLineId, actorId, now);
+  // Invalidated mappings deliberately have no allocatable segments. Their
+  // current stock must still lose the confirmed flag when an invoice is voided
+  // or disputed, while the cost owner retains its last posted amounts.
+  if (revisions.some(row => row.contract.receiptCostSegments
+    || row.contract.issue?.code === "RECEIPT_INVOICE_ALLOCATION_REVIEW")) {
+    await refreshReceiptCostProvisionalForLine(tx, purchaseOrderLineId, actorId, now);
+  }
   return { lotsUpdated: applications.reduce((sum, result) => sum + result.lotsUpdated, 0),
     cogsRowsUpdated: applications.reduce((sum, result) => sum + result.cogsRowsUpdated, 0),
     totalCogsDeltaCents: costInteger(applications.reduce((sum, result) => sum + BigInt(result.totalCogsDeltaCents), BigInt(0)).toString(), "totalCogsDeltaCents", -Number.MAX_SAFE_INTEGER), costApplications: applications, costSources: revisions };
