@@ -6,6 +6,27 @@ const connection = { connectionId: 4, channelId: 2, name: "Shopify", shopDomain:
 const key = "a".repeat(43);
 const bootstrap = { session: { authenticated: true, privateTesting: true, sessionKey: key }, connection };
 describe("storefront transport reuses canonical clients", () => {
+  it("routes native chooser pagination and history through the same-origin proxy without mutation keys", async () => {
+    const request = vi.fn(async (_url: RequestInfo | URL, options?: RequestInit) => {
+      const input = JSON.parse(String(options?.body));
+      if (input.path === "/account/bootstrap") return Response.json(bootstrap);
+      return Response.json(input.path === "/returns/order-options"
+        ? { orders: [{ omsOrderId: 10, orderReference: "#TEST-1001", purchasedAt: null, eligibleItemCount: 1 }], nextBeforeOmsOrderId: null }
+        : { returns: [], nextBeforeAuthorizationId: null });
+    });
+    const api = createCustomerAccountTransport(config, request);
+    await api.bootstrap();
+    const returns = api.returns(key);
+    await returns.orderChoices(20, new AbortController().signal);
+    await returns.history(null, new AbortController().signal);
+    for (const [url, options] of request.mock.calls.slice(1)) {
+      expect(url).toBe("/apps/echelon-returns/account");
+      expect(options).toMatchObject({ credentials: "same-origin", redirect: "error", cache: "no-store" });
+      expect(JSON.parse(String(options?.body))).toMatchObject({ method: "GET", expectedCustomerId: "100", sessionKey: key });
+      expect(JSON.parse(String(options?.body)).commandKey).toBeUndefined();
+    }
+    expect(JSON.parse(String(request.mock.calls[1][1]?.body))).toMatchObject({ path: "/returns/order-options", query: { before: "20" } });
+  });
   it("sends cache recovery to the explicit refresh path with paired identities and no financial command",async()=>{
     const identity={externalOrderId:"99",orderReference:"#49180"};
     const request=vi.fn(async()=>Response.json({orders:[{...identity,omsOrderId:10,state:"refreshing",snapshot:null,verifiedAt:null,validUntil:null}]}));

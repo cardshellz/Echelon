@@ -72,6 +72,8 @@ jobs:
       - run: npm ci
       - name: Build the storefront bundle for embedded returns coverage
         run: npx vite build --config vite.customer-account.config.ts
+      - name: Build the native storefront returns page
+        run: npx vite build --config vite.customer-return-portal.config.ts
       - run: npx playwright test --config playwright.returns-preview.config.ts --shard=${{ matrix.shard }}/${{ matrix.shards }} --forbid-only
       - name: Upload browser traces and screenshots
         if: ${{ !cancelled() }}

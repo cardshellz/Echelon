@@ -143,6 +143,7 @@ export function CustomerWorkspace({
   downloadRequest = fetch,
   embedded = false,
   onBusy,
+  signOutHref,
 }: {
   sessionKey: string;
   onDenied: (message: string) => void;
@@ -154,6 +155,8 @@ export function CustomerWorkspace({
   downloadRequest?: typeof fetch;
   embedded?: boolean;
   onBusy?: (busy: boolean) => void;
+  /** Native Shopify pages sign out through Shopify, not the backend cookie. */
+  signOutHref?: string;
 }) {
   const api = useMemo(
     () => transport ?? createCustomerReturnTransport(fetch, sessionKey),
@@ -448,7 +451,10 @@ export function CustomerWorkspace({
     onBusy?.(busy || flowBusy);
     return () => onBusy?.(false);
   }, [busy, flowBusy, onBusy]);
-  const signOut = embedded ? null : (
+  const signOut = embedded ? null : signOutHref ? (
+    requestBusy ? <Button variant="ghost" disabled>Sign out</Button> :
+      <Button variant="ghost" asChild><a href={signOutHref}>Sign out</a></Button>
+  ) : (
     <Button
       variant="ghost"
       disabled={requestBusy}

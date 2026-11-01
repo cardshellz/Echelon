@@ -79,10 +79,12 @@ export const BROWSER_FEATURES = Object.freeze({
         "test/browser/returns-portal-preview.spec.ts",
         "test/browser/returns-policy-shipping.spec.ts",
         "test/browser/returns-customer.spec.ts",
-        "test/browser/returns-account-layout.spec.ts"
+        "test/browser/returns-account-layout.spec.ts",
+        "test/browser/returns-storefront-page.spec.ts"
       ],
       "roots": [
-        "client/src/customer-account/entry.tsx"
+        "client/src/customer-account/entry.tsx",
+        "client/src/customer-account/return-portal.entry.tsx"
       ],
       "appRoutes": ["/returns", "/return-policies", "/customer-returns"]
     }
