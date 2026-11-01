@@ -6019,7 +6019,7 @@ export function createPurchasingService(
       );
       const insertedLines = await tx
         .insert(purchaseOrderLinesTable)
-        .values(lineRows)
+        .values(lineRows.map(row => ({ ...row, receiptCostingEnabled: 1 })))
         .returning({
           id: purchaseOrderLinesTable.id,
           lineNumber: purchaseOrderLinesTable.lineNumber,
@@ -6321,7 +6321,7 @@ export function createPurchasingService(
         } else {
           const insertedRows = await tx
             .insert(purchaseOrderLinesTable)
-            .values({ ...values, createdAt: changedAt, updatedAt: changedAt })
+            .values({ ...values, receiptCostingEnabled: 1, createdAt: changedAt, updatedAt: changedAt })
             .returning();
           persisted = insertedRows[0];
           if (!persisted) {

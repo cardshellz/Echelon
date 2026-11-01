@@ -63,7 +63,7 @@ export async function readPurchaseCostSources(
   const receiptScoped = new Set<number>();
   for (const raw of sourceResult.rows) {
     const { __tax_possible: taxPossible, __receipt_costing: receiptCosting, ...line } = raw;
-    if (Number(receiptCosting) === 1) receiptScoped.add(costInteger(line.id, "purchaseOrderLineId", 1));
+    if (costInteger(receiptCosting ?? 0, "receipt invoice policy") === 1) receiptScoped.add(costInteger(line.id, "purchaseOrderLineId", 1));
     if (taxPossible === true || costInteger(line.tax_cents ?? 0, "line tax") !== 0) possibleQuoteTaxes.add(costInteger(line.purchase_order_id, "purchaseOrderId", 1));
     if (line.line_type === "product")
       result.set(costInteger(line.id, "purchaseOrderLineId", 1), {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readIntegerMills } from "../money-read";
 import { allocateIntegerCostInterval } from "../utils/integer-cost-interval";
 const id = z.number().int().positive().max(2_147_483_647);
 const quantity = z.number().int().nonnegative().safe();
@@ -99,7 +100,7 @@ export function receiptSegmentCost(
       "The complete receipt interval has no exact supported source coverage.",
     );
   return {
-    totalMills: Number(mills),
+    totalMills: readIntegerMills(mills, "receipt supplier total"),
     confirmedPieces: Number(confirmed),
     provisionalPieces: pieces - Number(confirmed),
   };

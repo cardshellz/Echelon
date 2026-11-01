@@ -26,12 +26,14 @@ Only completed receipts with a proved saved piece conversion and complete cost-o
 
 ## Candidate validation
 
-- Initial domain tests: 21 passed; expanded interval, shared-status, own-shipment-rate and exact PO projection tests are included in the current suite.
-- Public HTTP/real SQL acceptance: 18 passed after adding real transfer and package-conversion propagation. It covers partial and later receipts, source/stock/permission changes, durable duplicate retries, concurrent approvals and audit rollback. The later real AP approval and policy-edit rejection cases are running with the final candidate.
-- Full existing receipt/AP/freight suite previously passed 322 tests; a final expanded repeat is pending. These are owned disposable SQL fixtures, not production data.
+- Purchasing/inventory regression and ownership guards: 6,430 tests passed across 399 files. The expanded domain suite covers shared-status round trips, own-shipment rates, exact PO totals and invalid interval identities.
+- Public HTTP/real SQL acceptance: 21 receipt-specific cases passed, including real transfer/package-conversion propagation, real later AP approval without repricing the earlier receipt, ordinary PO-edit policy rejection, partial/later receipts, source/stock/permission changes, durable retries, concurrency and audit rollback.
+- Full receipt/AP/freight suite: 325 tests passed. The additional two policy-edit cases passed in the 21-case targeted run; these scopes overlap and are not added together. These are owned disposable SQL fixtures, not production data.
+- PO entry HTTP/SQL recovery: 22 passed in CI's UTC timezone. Inline creation and adding a new draft line enable the policy; editing an existing historical line preserves its original policy.
 - Desktop/mobile mocked browser: all 18 passed, including lost-response/reopened approval recovery, definite permission rejection and saved approval details. Visual review found cramped mobile amount spacing; explicit column spacing is now included.
 - Production, server-test and client-test TypeScript projects passed; the production build passed. Final changes are being checked again before review.
 - The actual migration's four PostgreSQL cases passed, including adjacent intervals and both overlap exclusions. The new suite is registered in the shard inventory and its independent coverage guard.
 - The ownership baseline adds only `procurement.receipt_invoice_cost_allocations -> modules/procurement`; existing public audit ownership is retained. Latest main `b80898c9b` is incorporated; its changes concern customer-account live-theme configuration.
+- Hosted preflight identified two unchecked native conversions. They now use the existing exact readers; the money-boundary/domain repeat passed 27 tests without new exemptions.
 
 Remaining gates: final affected SQL/types/connected browser runs, final-head hosted CI and a ready-for-review PR. One concurrent local browser run completed its assertions but failed database cleanup; isolated acceptance must confirm cleanup before claiming success. No live financial or inventory record has been changed. Merge, deployment and production acceptance remain separate gates.
