@@ -43,4 +43,6 @@ A complete supplier-credit return before acceptance has no inventory batch to as
 
 An earlier local browser run completed its assertions but failed cleanup while PostgreSQL was performing a 66-second checkpoint (recorded in the owned cluster log). After a normal checkpoint, the complete four-case repeat passed without changing cleanup checks or durability settings. No connected test databases or application connections remained. The owned test cluster stopped cleanly at 16:41:31 local on 2026-11-01.
 
+Hosted returns acceptance exposed an unrelated row-order assumption in its tracking queue test. `claim` prioritizes the selected jobs but its `UPDATE ... RETURNING` does not sort them. The assertion now requires exactly the two current job identities, preserving the backlog-starvation check without changing shipping behavior. All 46 cases in the actual SQL returns file passed locally; its browser aggregate had reported the same dependency failure. Final-head hosted CI remains required.
+
 Remaining gates: final-head hosted CI, review, merge, deployment and production acceptance. No live financial or inventory record has been changed. This slice does not close the plan's remaining combined/credit/header-source or external recognition work.
