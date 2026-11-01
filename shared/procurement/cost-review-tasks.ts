@@ -4,7 +4,7 @@ import { purchaseLineNeedsCostReview } from "./purchase-cost-status";
 import { formatShipmentExceptionAmount, type ShipmentCostException } from "./shipment-cost-exception";
 
 export type CostReviewAction = "invoice_amounts" | "invoice_quantity" | "record_invoice" | "apply_supplier"
-  | "repair_origin" | "repair_links" | "review_history" | "update_shipment" | "measurements" | "accounting";
+  | "repair_origin" | "repair_links" | "review_history" | "update_shipment" | "measurements" | "tax_treatment" | "accounting";
 export interface CostReviewTask {
   id: string;
   title: string;
@@ -41,6 +41,7 @@ export interface CostReviewGroup {
 
 const quantity = (value: number) => value.toLocaleString("en-US");
 const historyCodes = new Set(["COST_HISTORICAL_LINEAGE_MISSING", "COST_LINEAGE_UNPROVEN", "COST_UNRESOLVED_QUANTITY_RETAINED", "COST_GRAPH_INCOMPLETE"]);
+const receiptCostHistoryCodes = new Set(["COST_ROOT_REVIEW_REQUIRED", "COST_HISTORICAL_BASIS_MISSING", "COST_SOURCE_INTERVAL_REVIEW"]);
 const oldRoundingCodes = new Set(["COST_UNIFORM_LOT_RESIDUAL_REVIEW", "COST_TRANSFORM_RESIDUAL_REVIEW", "COST_GRAPH_INCOMPLETE"]);
 
 /** Task classification explains the existing posting status. It never grants
@@ -51,6 +52,9 @@ export function supplierCostReviewTasks(line: PurchaseLineCostStatus): CostRevie
   const issues = [...new Map(line.components.flatMap(component => component.issues).map(issue => [issue.code + issue.message, issue])).values()];
   const facts = line.reviewFacts;
   const add = (task: Omit<CostReviewTask, "id" | "issues">, key: string) => tasks.push({ ...task, id: `supplier:${line.purchaseOrderLineId}:${key}`, issues });
+  if (issues.some(issue => issue.code === "PURCHASE_TAX_TYPE_REQUIRED")) {
+    add({ title: "Choose the purchase tax type", explanation: "The tax amount is saved. Select its configured type so receiving knows whether it belongs in inventory cost or is recorded separately.", action: "tax_treatment" }, "tax");
+  }
   if (issues.some(issue => issue.code === "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW")) {
     add({ title: "Check the supplier return", explanation: "The recorded return could not be verified against its cost records. There is no automatic cost retry for this case; review the saved return and invoice evidence.", action: "accounting" }, "return");
     return tasks;
@@ -78,7 +82,11 @@ export function supplierCostReviewTasks(line: PurchaseLineCostStatus): CostRevie
   if (issues.some(issue => historyCodes.has(issue.code)) && !tasks.some(task => task.action === "repair_origin")) {
     add({ title: "Check missing stock history", explanation: "Some stock movements cannot be traced through the receipt, transfer or repacking records. Review the recorded history; a missing link does not prove a sale.", action: "review_history" }, "history");
   }
-  const otherIssues = issues.filter(issue => !issue.code.startsWith("INVOICE_") && issue.code !== "PURCHASE_ADJUSTMENT_REVIEW" && !historyCodes.has(issue.code));
+  if (issues.some(issue => receiptCostHistoryCodes.has(issue.code))) {
+    add({ title: "Check the original receipt", explanation: "Confirm the original receipt quantity and cost link, including any receipt reversal. Its stock costs are not yet confirmed.", action: "review_history" }, "receipt");
+  }
+  const otherIssues = issues.filter(issue => !issue.code.startsWith("INVOICE_") && issue.code !== "PURCHASE_ADJUSTMENT_REVIEW"
+    && !historyCodes.has(issue.code) && !receiptCostHistoryCodes.has(issue.code) && issue.code !== "PURCHASE_TAX_TYPE_REQUIRED");
   if (otherIssues.length) add({ title: "Check the recorded cost", explanation: otherIssues.map(issue => issue.message).join(" "), action: "accounting" }, "record");
   if (!tasks.length) add({ title: "Apply the supplier costs", explanation: "The supplier amounts are recorded. Apply them to the remaining stock and verified sales; review the saved result afterwards.", action: "apply_supplier" }, "apply");
   return tasks;

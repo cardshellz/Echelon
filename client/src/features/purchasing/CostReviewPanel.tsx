@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { CostReviewDialogs, type CostReviewDialog, type OpenCostReview } from "./CostReviewDialogs";
 import { ShipmentCostUpdateAction } from "./ShipmentCostUpdateAction";
 import { createReceiptCostRetryClient } from "./receipt-cost-retry";
+import { PurchaseTaxReview } from "./PurchaseTaxReview";
 
 function ApplySupplierCosts({ receiptId }: { receiptId: number }) {
   const { hasPermission } = useAuth();
@@ -37,6 +38,7 @@ function InvoiceTaskActions({ task, group, openReview }: { task: CostReviewTask;
 
 function TaskAction({ task, group, navigation, showShipmentUpdates, openReview }: { task: CostReviewTask; group: CostReviewGroup; navigation: ProcurementNavigation; showShipmentUpdates: boolean; openReview: OpenCostReview }) {
   const line = group.supplier;
+  if (task.action === "tax_treatment" && group.purchaseOrderId !== null) return <PurchaseTaxReview target={{ kind: "purchase_order", id: group.purchaseOrderId }} label="Choose tax treatment" />;
   if (task.action === "invoice_amounts" || task.action === "invoice_quantity") return <InvoiceTaskActions task={task} group={group} openReview={openReview} />;
   if (task.action === "repair_origin" && task.lotId) return <Button size="sm" variant="outline" onClick={() => openReview({ kind: "origin", lotId: task.lotId! })}>Review receipt link</Button>;
   if (task.action === "apply_supplier" && line?.receipts[0]) return <ApplySupplierCosts receiptId={line.receipts[0].receiptId} />;

@@ -4,18 +4,19 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { auditEvents } from "@shared/schema";
-import { poEvents, poStatusHistory, purchaseOrderLines, vendorInvoiceLines, vendorInvoices, vendorInvoicePoLinks, apPaymentAllocations, apPayments } from "@shared/schema/procurement.schema";
+import { poEvents, poStatusHistory, purchaseOrderLines, vendorInvoiceLines, vendorInvoices, vendorInvoicePoLinks, apPaymentAllocations, apPayments, inboundFreightCosts } from "@shared/schema/procurement.schema";
 import { centsToMills, millsToCents } from "@shared/utils/money";
 import type { InvoiceQuantityPreview } from "@shared/procurement/invoice-quantity-correction";
 import { readQuantityAmendmentSource, type AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { InvoiceQuantityCorrectionError } from "./invoice-quantity-correction.policy";
 import { recalculateCorrectedInvoiceFinancialsInTransaction, recomputePurchaseOrderInvoiceMatchesInTransaction } from "./ap-ledger.service";
 import { replacePurchaseOrderMatchExceptions } from "./purchase-order-match-exceptions.repository";
+import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
 
 import type { PurchaseApprovalSnapshot } from "./purchase-order-approval.policy";
 
 // Version the reviewed behavior as well as its data; saved committed receipts still replay.
-const INVOICE_LINE_REVIEW_VERSION = 3;
+const INVOICE_LINE_REVIEW_VERSION = 4;
 
 export async function readInvoiceQuantitySource(tx: AmendmentTransaction, lineId: number, actorId: string) {
   // Discover the scope, then re-read the exact line under the established graph,
@@ -37,10 +38,15 @@ export async function readInvoiceBillingSource(tx: AmendmentTransaction, source:
     .where(eq(apPaymentAllocations.vendorInvoiceId, target.vendorInvoiceId)).orderBy(apPaymentAllocations.id).for("share");
   const invoicePoLinks = await tx.select().from(vendorInvoicePoLinks).where(eq(vendorInvoicePoLinks.vendorInvoiceId, target.vendorInvoiceId)).orderBy(vendorInvoicePoLinks.id).for("share");
   const hasCreditHistory = await hasInvoiceCreditHistory(tx, target.vendorInvoiceId);
-  const billing = { hasCreditHistory, purchaseAllocations: invoicePoLinks.map(row => ({ purchaseOrderId: row.purchaseOrderId, amountCents: row.allocatedAmountCents })), purchaseOrderIds: invoicePoLinks.map(row => row.purchaseOrderId), invoiceId: target.vendorInvoiceId, allInvoiceLines,
+  // A direct charge link can exist without a freight invoice line. Capture both
+  // forms: product-only corrections cannot silently invalidate shipment authority.
+  const freightLinks = await tx.select({ id: inboundFreightCosts.id }).from(inboundFreightCosts)
+    .where(eq(inboundFreightCosts.vendorInvoiceId, target.vendorInvoiceId)).orderBy(inboundFreightCosts.id).for("share");
+  const hasShipmentCharges = freightLinks.length > 0 || allInvoiceLines.some(row => row.freightCostId !== null);
+  const billing = { hasCreditHistory, hasShipmentCharges, purchaseAllocations: invoicePoLinks.map(row => ({ purchaseOrderId: row.purchaseOrderId, amountCents: row.allocatedAmountCents })), purchaseOrderIds: invoicePoLinks.map(row => row.purchaseOrderId), invoiceId: target.vendorInvoiceId, allInvoiceLines,
     allocations: allocations.map(row => ({ invoiceId: row.allocation.vendorInvoiceId, amountCents: row.allocation.appliedAmountCents, paymentStatus: row.payment.status, currency: row.payment.currency })) };
   return { ...source, invoicePoLinks, facts: { ...source.facts, billing },
-    sourceVersion: createHash("sha256").update(canonicalJson({ reviewVersion: INVOICE_LINE_REVIEW_VERSION, sourceVersion: source.sourceVersion, allInvoiceLines, allocations, invoicePoLinks, hasCreditHistory })).digest("hex") };
+    sourceVersion: createHash("sha256").update(canonicalJson({ reviewVersion: INVOICE_LINE_REVIEW_VERSION, sourceVersion: source.sourceVersion, allInvoiceLines, allocations, invoicePoLinks, hasCreditHistory, freightLinks })).digest("hex") };
 }
 export function invoiceQuantityCorrectionTime(source: Awaited<ReturnType<typeof readInvoiceQuantitySource>>, now: Date): Date {
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new Error("Invoice correction clock is invalid.");
@@ -49,15 +55,17 @@ export function invoiceQuantityCorrectionTime(source: Awaited<ReturnType<typeof 
 }
 export async function persistInvoiceQuantityCorrection(
   tx: AmendmentTransaction, source: Awaited<ReturnType<typeof readInvoiceQuantitySource>>,
-  preview: InvoiceQuantityPreview, actorId: string, commandKey: string, reason: string, at: Date,
-  approvalEvidence: PurchaseApprovalSnapshot, closedPurchaseOrderConfirmed: boolean,
+  preview: InvoiceQuantityPreview, actorId: string, at: Date,
 ) {
   const before = source.facts.invoiceLines.find((line) => line.id === preview.invoiceLineId)!;
   const explicitCorrection = preview.afterLineAmountCents !== undefined && preview.afterUnitCostMills !== undefined;
   const moneyChanged = explicitCorrection && (preview.afterLineAmountCents !== before.lineTotalCents || preview.afterUnitCostMills !== (before.unitCostMills ?? centsToMills(before.unitCostCents)));
+  const costEvidence = preview.costComponentsReviewed
+    ? invoiceCostComponentEvidenceSchema.parse(preview.afterCostComponents) : moneyChanged ? null : undefined;
   const [updated] = await tx.update(vendorInvoiceLines).set({ qtyInvoiced: preview.afterQuantity, updatedAt: at,
     ...(moneyChanged ? { lineTotalCents: preview.afterLineAmountCents, unitCostMills: preview.afterUnitCostMills,
-      unitCostCents: millsToCents(preview.afterUnitCostMills!), costComponentEvidence: null } : {}),
+      unitCostCents: millsToCents(preview.afterUnitCostMills!) } : {}),
+    ...(costEvidence !== undefined ? { costComponentEvidence: costEvidence } : {}),
   })
     .where(and(eq(vendorInvoiceLines.id, before.id), eq(vendorInvoiceLines.vendorInvoiceId, before.vendorInvoiceId), eq(vendorInvoiceLines.purchaseOrderLineId, before.purchaseOrderLineId!)))
     .returning();
@@ -82,17 +90,31 @@ export async function persistInvoiceQuantityCorrection(
     actorId, at, supersessionNote: "Superseded by an admin-approved invoice quantity correction.", messagePrefix: "Invoice quantity correction", quantityCorrectionInvoiceLineId: before.id });
   const [after] = await tx.select().from(vendorInvoiceLines).where(eq(vendorInvoiceLines.id, before.id));
   if (!after) throw new InvoiceQuantityCorrectionError("The corrected invoice line could not be verified for its audit record.", "INVOICE_QUANTITY_UPDATE_FAILED");
+  return { before, after, beforeInvoice, afterInvoice, afterInvoicePoLinks, moneyChanged, match, superseded };
+}
+
+/** Record one reviewed correction only after its document and cost owners have
+ * succeeded. The surrounding financial command rolls every write back together. */
+export async function recordInvoiceQuantityCorrectionResult(
+  tx: AmendmentTransaction, source: Awaited<ReturnType<typeof readInvoiceQuantitySource>>,
+  saved: Awaited<ReturnType<typeof persistInvoiceQuantityCorrection>>, preview: InvoiceQuantityPreview,
+  actorId: string, commandKey: string, reason: string, at: Date,
+  approvalEvidence: PurchaseApprovalSnapshot, closedPurchaseOrderConfirmed: boolean,
+  costApplication: unknown,
+) {
+  const { before, after, beforeInvoice, afterInvoice, afterInvoicePoLinks, moneyChanged, match, superseded } = saved;
+  const lineCorrected = moneyChanged || preview.costComponentsReviewed === true;
   const [audit] = await tx.insert(auditEvents).values({
-    timestamp: at, level: "AUDIT", actor: actorId, action: moneyChanged ? "procurement.invoice.line_corrected" : "procurement.invoice.quantity_corrected", target: `invoice-line:${before.id}`,
+    timestamp: at, level: "AUDIT", actor: actorId, action: lineCorrected ? "procurement.invoice.line_corrected" : "procurement.invoice.quantity_corrected", target: `invoice-line:${before.id}`,
     changes: { before, after, ...(moneyChanged ? { beforeInvoice, afterInvoice, beforeInvoicePoLinks: source.invoicePoLinks, afterInvoicePoLinks } : {}) }, context: { commandKey, reason, preview, approvalAuthority: source.actor, approvalEvidence, closedPurchaseOrderConfirmed, reviewedSourceVersion: source.sourceVersion,
-      supersededMatchExceptions: superseded, resultingMatchSourceFingerprint: match.sourceFingerprint },
+      supersededMatchExceptions: superseded, resultingMatchSourceFingerprint: match.sourceFingerprint, costApplication },
   }).returning({ id: auditEvents.id });
-  await tx.insert(poEvents).values({ poId: source.facts.header.id, eventType: moneyChanged ? "invoice_line_corrected" : "invoice_quantity_corrected", actorType: "user", actorId, createdAt: at,
+  await tx.insert(poEvents).values({ poId: source.facts.header.id, eventType: lineCorrected ? "invoice_line_corrected" : "invoice_quantity_corrected", actorType: "user", actorId, createdAt: at,
     payloadJson: { auditEventId: audit.id, commandKey, invoiceId: before.vendorInvoiceId, invoiceLineId: before.id, reason, preview,
       contractVersion: 1, before, after, ...(moneyChanged ? { beforeInvoice, afterInvoice, beforeInvoicePoLinks: source.invoicePoLinks, afterInvoicePoLinks } : {}), approvalAuthority: source.actor, approvalEvidence, closedPurchaseOrderConfirmed, approvalConfirmed: true, reviewedSourceVersion: source.sourceVersion,
-      supersededMatchExceptions: superseded, resultingMatchSourceFingerprint: match.sourceFingerprint } });
+      supersededMatchExceptions: superseded, resultingMatchSourceFingerprint: match.sourceFingerprint, costApplication } });
   await tx.insert(poStatusHistory).values({ purchaseOrderId: source.facts.header.id, fromStatus: source.facts.header.status, toStatus: source.facts.header.status,
     changedBy: actorId, changedAt: at, revisionNumber: source.facts.header.revisionNumber,
-    notes: `Admin corrected invoice #${before.vendorInvoiceId}, line ${before.lineNumber}: ${before.qtyInvoiced} → ${after.qtyInvoiced} pieces. ${moneyChanged ? `Line amount ${before.lineTotalCents} → ${after.lineTotalCents} cents; invoice balance ${beforeInvoice.balanceCents} → ${afterInvoice.balanceCents} cents. Payments and stock unchanged.` : "Billed amount and stock unchanged."} ${reason}` });
+    notes: `Admin corrected invoice #${before.vendorInvoiceId}, line ${before.lineNumber}: ${before.qtyInvoiced} → ${after.qtyInvoiced} pieces. Line amount ${before.lineTotalCents} → ${after.lineTotalCents} cents; invoice balance ${beforeInvoice.balanceCents} → ${afterInvoice.balanceCents} cents. Supplier cost results were recorded with this approval. Cash payments and stock counts are unchanged. ${reason}` });
   return { invoiceLineId: before.id, auditEventId: audit.id, preview };
 }

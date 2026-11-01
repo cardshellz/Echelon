@@ -117,9 +117,9 @@ async function setup(page: Page, options: { configured?: boolean; dimensionRevie
   return { state, failures, release: () => { state.released = true; release(); } };
 }
 async function openEditor(page: Page) {
-  const button = page.locator('button[aria-label="Edit shipment line"]:visible').first();
-  if (await button.count()) await button.click();
-  else await page.getByText("PARTIAL-CASE-7", { exact: true }).first().click();
+  // Relationship actions load separately from the shipment heading. Waiting
+  // for their real edit button avoids clicking a non-interactive SKU label.
+  await page.getByRole("button", { name: "Edit shipment line", exact: true }).filter({ visible: true }).first().click();
   await expect(page.getByRole("dialog")).toBeVisible();
 }
 async function upload(page: Page, csv: string) {

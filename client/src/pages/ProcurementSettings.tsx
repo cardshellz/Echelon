@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { Settings2 } from "lucide-react";
+import { PurchaseTaxTypesSettings } from "@/features/purchasing/PurchaseTaxTypes";
 import { Link } from "wouter";
 
 type SettingsIntent = { key: ProcurementSettingKey; value: boolean; expectedRevision: number; idempotencyKey: string };
@@ -196,6 +197,8 @@ export default function ProcurementSettings() {
         </p>
         {!canEdit && <p className="mt-2 text-sm">Your role has read-only access to these settings.</p>}
       </div>
+
+      <PurchaseTaxTypesSettings />
 
       {hasPermission("inventory_planning", "view") && (
         <Card>

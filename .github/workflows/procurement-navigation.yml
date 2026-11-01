@@ -57,13 +57,14 @@ jobs:
       image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
       options: --user 1001 --ipc=host
     # The budget includes dependency/browser setup, test execution, and artifacts.
-    # Eight shards reduce test load; headroom accommodates hosted runner variance.
+    # Twelve complete shards keep the growing suite within this budget; the
+    # previous 199-case shards could exhaust it without any failing assertion.
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
-        shards: [8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        shards: [12]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,7 +74,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      # Two page-isolated workers per runner; the eight shards retain separate servers.
+      # Two page-isolated workers per runner; every shard retains its own server.
       - run: npx playwright test --config playwright.procurement.config.ts --shard=${{ matrix.shard }}/${{ matrix.shards }}
       - uses: actions/upload-artifact@v4
         if: failure()

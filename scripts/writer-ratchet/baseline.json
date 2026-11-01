@@ -1357,6 +1357,9 @@
   "procurement.purchase_supplier_progress_revisions": [
     "modules/procurement"
   ],
+  "procurement.purchase_tax_types": [
+    "modules/procurement"
+  ],
   "procurement.purchasing_recommendation_decisions": [
     "modules/procurement"
   ],
@@ -1454,6 +1457,9 @@
     "modules/procurement"
   ],
   "procurement.vendor_invoice_attachments": [
+    "modules/procurement"
+  ],
+  "procurement.vendor_invoice_line_taxes": [
     "modules/procurement"
   ],
   "procurement.vendor_invoice_lines": [

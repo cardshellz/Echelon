@@ -6,6 +6,8 @@ import {
 import type { CostRevisionInput } from "../../inventory/infrastructure/cost-evidence.repository";
 import { resolveSupplierCreditReductions, type SupplierCreditCostRow } from "./supplier-credit-source";
 import { supplierCostReviewFactsSchema } from "@shared/procurement/cost-review-facts";
+import { purchaseTaxEvidence, purchaseTaxAmounts, taxTreatmentIssue } from "./purchase-tax";
+import { readIntegerMills } from "@shared/money-read";
 
 /** The single product/packaging source decision, shared by posting and reads. */
 function purchaseInvoiceEvidence(source: {
@@ -94,6 +96,8 @@ export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvo
       if (!evidence.success)
         throw new Error("Validated invoice evidence changed in memory");
       const components = evidence.data;
+      const taxes = purchaseTaxEvidence(approvedInvoices[index].tax_cost_evidence);
+      const tax = purchaseTaxAmounts(taxes);
       const total =
         BigInt(components.productMills) +
         BigInt(components.packagingMills) +
@@ -107,7 +111,7 @@ export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvo
             ),
           ) *
             BigInt(100) ||
-        components.adjustmentMills !== 0 ||
+        components.adjustmentMills !== tax.taxMills ||
         (components.packagingTreatment === "included_in_product" &&
           components.packagingMills !== 0)
       ) {
@@ -117,7 +121,8 @@ export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvo
             "The recorded invoice components do not have a supported, exact reconciliation to the document total.",
         };
       }
-      product += BigInt(components.productMills);
+      issue ??= taxTreatmentIssue(taxes);
+      product += BigInt(components.productMills) + BigInt(tax.inventoryMills);
       packaging += BigInt(components.packagingMills);
       if (components.packagingTreatment === "included_in_product")
         packagingTreatment = "included_in_product";
@@ -134,16 +139,22 @@ export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvo
       (netPackaging < BigInt(0) ? packaging : netPackaging).toString(),
       "invoice.packagingMills",
     );
-  } else if (
-    costInteger(line.discount_cents ?? 0, "discountCents") !== 0 ||
-    costInteger(line.tax_cents ?? 0, "taxCents") !== 0
-  ) {
+  } else if (costInteger(line.discount_cents ?? 0, "discountCents") !== 0
+    || (costInteger(line.tax_cents ?? 0, "taxCents") !== 0 && line.tax_cost_evidence === undefined)) {
     issue ??= {
       code: "PURCHASE_ADJUSTMENT_REVIEW",
       message:
         "The purchase has a discount or tax requiring an explicit cost component disposition.",
     };
   }
+  if (!actual && line.tax_cost_evidence !== undefined) {
+    const taxes = purchaseTaxEvidence(line.tax_cost_evidence), amounts = purchaseTaxAmounts(taxes);
+    issue ??= taxTreatmentIssue(taxes);
+    productMills = readIntegerMills(BigInt(productMills) + BigInt(amounts.inventoryMills), "product and capitalized tax");
+  }
+  if (credits.sources.length && (approvedInvoices.some(row => purchaseTaxEvidence(row.tax_cost_evidence).some(tax => tax.amountMills !== 0)))) issue ??= {
+    code: "PURCHASE_TAX_CREDIT_REVIEW", message: "This supplier credit needs its tax amounts checked against the original taxed invoice before inventory costs can be replaced.",
+  };
   issue ??= credits.issues[0] ?? null;
   const currency = actual
     ? approvedInvoices.every((row) => row.currency === "USD")

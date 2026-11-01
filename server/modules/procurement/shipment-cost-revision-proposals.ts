@@ -8,6 +8,7 @@ import { retainEquivalentShipmentCostSource, type ShipmentCostProposal } from ".
 import type { SupplierCreditSourceRow } from "./supplier-credit-source.repository";
 import { resolveShipmentSupplierCredits } from "./domain/shipment-supplier-credits";
 import type { ShipmentPhysicalSource } from "@shared/procurement/shipment-physical-values";
+import { purchaseTaxEvidence } from "./domain/purchase-tax";
 
 type ReadRows = Awaited<ReturnType<CostEvidenceTransaction["execute"]>>["rows"];
 export type ShipmentRevisionOptions = { allocationJustFinalized?: boolean; inboundShipmentLineId?: number };
@@ -29,6 +30,8 @@ export function buildShipmentCostRevisionProposals(shipmentId: number, evidence:
   const lines = { rows: evidence.lines }, charges = { rows: evidence.charges }, invoiceRows = { rows: evidence.invoiceRows };
   const allocationRows = { rows: evidence.allocationRows }, previous = { rows: evidence.previous };
   const supplierCredits = evidence.supplierCredits;
+  const recoverableChargeIds = new Set(charges.rows.filter(charge => charge.tax_cost_evidence !== undefined
+    && purchaseTaxEvidence([charge.tax_cost_evidence])[0]?.treatment === "recoverable").map(charge => Number(charge.id)));
   const invoiceEvidence = invoiceRows.rows.map((line) => ({
     id: line.id, invoiceId: line.vendor_invoice_id, freightCostId: line.freight_cost_id,
     purchaseOrderLineId: line.purchase_order_line_id, productVariantId: line.product_variant_id,
@@ -43,8 +46,9 @@ export function buildShipmentCostRevisionProposals(shipmentId: number, evidence:
     costType: charge.cost_type, allocationMethod: charge.allocation_method, currency: charge.currency,
     actualCents: charge.actual_cents, estimatedCents: charge.estimated_cents, status: charge.cost_status,
   });
-  const creditAdjustment = resolveShipmentSupplierCredits({ charges: charges.rows, allocations: allocationRows.rows,
-    invoices: invoiceRows.rows, credits: supplierCredits });
+  const creditAdjustment = resolveShipmentSupplierCredits({ charges: charges.rows.filter(charge => !recoverableChargeIds.has(Number(charge.id))),
+    allocations: allocationRows.rows.filter(row => !recoverableChargeIds.has(Number(row.shipment_cost_id))),
+    invoices: invoiceRows.rows, credits: supplierCredits.filter(row => !recoverableChargeIds.has(Number(row.freight_cost_id))) });
   const validLineIds = new Set(lines.rows.map((line) => costInteger(line.id, "shipmentLineId", 1)));
   const allocationsComplete = charges.rows.every((charge) => {
     const amount = charge.actual_cents ?? charge.estimated_cents;
@@ -119,11 +123,14 @@ export function buildShipmentCostRevisionProposals(shipmentId: number, evidence:
         version: costFingerprint(invoiceLine) });
     }
     sources.push(...creditAdjustment.sources);
+    const savedRecoverable = BigInt(costInteger(line.recoverable_tax_allocated_cents ?? 0, "saved recoverable tax")) * BigInt(100);
+    const currentRecoverable = allocationRows.rows.filter(row => Number(row.inbound_shipment_line_id) === Number(line.id)
+      && recoverableChargeIds.has(Number(row.shipment_cost_id))).reduce<bigint>((sum, row) => sum + BigInt(costInteger(row.allocated_cents, "recoverable tax allocation")) * BigInt(100), BigInt(0));
     const amount = line.qty == null ? null : costInteger((["freight_allocated_cents","duty_allocated_cents","insurance_allocated_cents","other_allocated_cents"]
-      .reduce((sum, field) => sum + BigInt(costInteger(line[field], field, -Number.MAX_SAFE_INTEGER)), BigInt(0)) * BigInt(100)).toString(), "allocatedMills", -Number.MAX_SAFE_INTEGER);
+      .reduce((sum, field) => sum + BigInt(costInteger(line[field], field, -Number.MAX_SAFE_INTEGER)), BigInt(0)) * BigInt(100) - savedRecoverable).toString(), "allocatedMills", -Number.MAX_SAFE_INTEGER);
     const actual = chargeAuthorities.length > 0 && chargeAuthorities.every((authority) => authority.evidence === "confirmed");
     const lineAllocatedMills = allocationRows.rows.filter((allocation) => Number(allocation.inbound_shipment_line_id) === Number(line.id))
-      .reduce((sum, allocation) => sum + BigInt(costInteger(allocation.allocated_cents, "allocationCents", -Number.MAX_SAFE_INTEGER)) * BigInt(100), BigInt(0));
+      .reduce<bigint>((sum, allocation) => sum + BigInt(costInteger(allocation.allocated_cents, "allocationCents", -Number.MAX_SAFE_INTEGER)) * BigInt(100), BigInt(0)) - currentRecoverable;
     const sameSnapshot = prior?.shipmentLineSnapshot?.snapshot_id != null && Number(prior.shipmentLineSnapshot.snapshot_id) === Number(line.snapshot_id);
     const allocationPolicyChanged = sameSnapshot && Array.isArray(prior.charges) && charges.rows.some((charge) => {
       const oldCharge = prior.charges.find((old: any) => Number(old.id) === Number(charge.id));
@@ -133,7 +140,7 @@ export function buildShipmentCostRevisionProposals(shipmentId: number, evidence:
       const old = prior.allocationBasis.find((entry: any) => Number(entry.costId) === basis.costId);
       return !old || old.method !== basis.method || old.source !== basis.source;
     }));
-    const allocationStale = basisStale || !allocationsComplete || (amount !== null && lineAllocatedMills !== BigInt(amount))
+    const allocationStale = basisStale || !allocationsComplete || savedRecoverable !== currentRecoverable || (amount !== null && lineAllocatedMills !== BigInt(amount))
       || (line.qty != null && Number(line.qty) !== Number(line.qty_shipped)) || ((allocationPolicyChanged || effectiveMethodChanged) && !options.allocationJustFinalized);
     const netAmount = amount === null ? null : costInteger((BigInt(amount) - BigInt(creditAdjustment.creditedCentsByLine.get(Number(line.id)) ?? 0) * BigInt(100)).toString(), "netAllocatedMills", -Number.MAX_SAFE_INTEGER);
     const issue = amount === null ? { code: "LANDED_ALLOCATION_MISSING", message: `Shipment line ${line.id} has no saved allocation.` }

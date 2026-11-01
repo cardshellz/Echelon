@@ -18,7 +18,7 @@ import { fixtureTable,fixtureForeignKeys } from "./shipment-line-fixture";
 const url=process.env.ECHELON_TEST_DATABASE_URL;
 const enabled=!!url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const NOW=new Date("2026-09-07T12:00:00.000Z");
-const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShipments,schema.inboundShipmentLines,schema.receivingOrders,schema.receivingLines,schema.receiptReversals,schema.vendorInvoiceLines,schema.inventoryLots,schema.orderItemCosts];
+const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShipments,schema.inboundShipmentLines,schema.receivingOrders,schema.receivingLines,schema.receiptReversals,schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines,schema.inventoryLots,schema.orderItemCosts];
 (enabled ? describe : describe.skip).sequential("durable reporting owner in PostgreSQL",() => {
   let pool:pg.Pool,repository:CostReportingRepository,destination:ReportDestination;
   const owned:string[]=[];
