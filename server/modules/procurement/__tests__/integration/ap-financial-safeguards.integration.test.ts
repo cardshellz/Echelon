@@ -15,7 +15,7 @@ const databaseTests = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "t
 const tables = [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.vendors, schema.inboundShipments, schema.purchaseOrders, schema.purchaseOrderLines,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.inboundFreightCosts,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.inboundFreightCosts,
   schema.apPayments, schema.apPaymentAllocations, schema.poStatusHistory, schema.vendorInvoiceAttachments];
 databaseTests.sequential("AP financial safeguards with actual0620 and status constraint (real PostgreSQL)", () => {
   let pool: pg.Pool; let modulePool: pg.Pool; let db: any;

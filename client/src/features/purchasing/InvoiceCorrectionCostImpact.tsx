@@ -2,6 +2,7 @@ import React from "react";
 import type { InvoiceCorrectionCostImpact as Impact } from "@shared/procurement/invoice-correction-cost-impact";
 import { exactMoneyAsInput } from "@/lib/exact-money-input";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
+import { costDestinationRows } from "./cost-destination-presentation";
 
 export function InvoiceCorrectionCostImpact({ impact, currency, purchaseOrderId, approved }: { impact: Impact; currency: string; purchaseOrderId: number; approved: boolean }) {
   const navigation = useProcurementNavigation();
@@ -10,19 +11,7 @@ export function InvoiceCorrectionCostImpact({ impact, currency, purchaseOrderId,
   const rows: Array<[string, number | null, number | null]> = impact.sourceAmounts
     .filter(row => row.before.totalMills !== row.after.totalMills || row.before.evidence !== row.after.evidence)
     .map(row => [`Supplier ${row.component} cost`, row.before.totalMills, row.after.totalMills]);
-  for (const lot of impact.inventoryValues) {
-    if (lot.onHandValueMills.before !== lot.onHandValueMills.after) rows.push([
-      `${lot.lotNumber} · ${lot.onHandUnits.toLocaleString("en-US")} units on hand`, lot.onHandValueMills.before, lot.onHandValueMills.after,
-    ]);
-  }
-  rows.push(...impact.orderCosts.filter(row => row.totalMills.before !== row.totalMills.after)
-    .map(row => [`Order #${row.orderId} · cost basis`, row.totalMills.before, row.totalMills.after] as [string, number | null, number | null]));
-  rows.push(...impact.historicalCosts.filter(row => row.totalMills.before !== row.totalMills.after)
-    .map(row => [row.destination === "historical_cogs" ? "Previously approved cost of goods sold" : "Previously approved inventory adjustment",
-      row.totalMills.before, row.totalMills.after] as [string, number | null, number | null]));
-  rows.push(...impact.applications.flatMap(application => application.returnedCosts ?? [])
-    .filter(row => row.beforeMills !== row.afterMills)
-    .map(row => [`Supplier return #${row.returnId} · value`, row.beforeMills, row.afterMills] as [string, number | null, number | null]));
+  rows.push(...costDestinationRows(impact));
   const issues = [...new Map(impact.applications.flatMap(row => row.issues).map(issue => [issue.code + issue.message, issue])).values()];
   const posted = !impact.needsReview;
   const waitingForReceipt = impact.applications.every(row => row.status === "pending_finalization");

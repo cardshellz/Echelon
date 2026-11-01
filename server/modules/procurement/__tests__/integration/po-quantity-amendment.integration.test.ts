@@ -68,9 +68,9 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     }
   }
   const tables: Parameters<typeof fixtureTable>[0][] = [schema.products, schema.productVariants, schema.vendors, schema.vendorProducts, schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
-    schema.purchaseOrders, schema.purchaseOrderLines, schema.poApprovalTiers, schema.poStatusHistory, schema.poRevisions, schema.poEvents, schema.poExceptions,
+    schema.purchaseTaxTypes, schema.purchaseOrders, schema.purchaseOrderLines, schema.poApprovalTiers, schema.poStatusHistory, schema.poRevisions, schema.poEvents, schema.poExceptions,
     schema.purchasingRecommendationPoHandoffs, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poReceipts,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoiceLineTaxes, schema.vendorInvoicePoLinks, schema.poReceipts,
     schema.warehouseSettings, schema.apPayments, schema.apPaymentAllocations, schema.receivingOrders, schema.receivingLines, schema.inventoryLots, schema.auditEvents];
   tables.push(schema.inboundShipments, schema.inboundShipmentLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
     schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receiptReversals, schema.inventoryTransactions, schema.orderItemCosts, schema.orderLineCosts);

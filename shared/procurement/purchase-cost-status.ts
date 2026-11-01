@@ -143,7 +143,7 @@ export function purchaseLineNeedsCostReview(
 export function purchaseCostNextAction(
   line: PurchaseLineCostStatus,
 ): "invoice" | "history" | "review" | "apply" | "none" {
-  if (line.components.some(component => component.issues.some(issue => issue.code === "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW"))) return "review";
+  if (line.components.some(component => component.issues.some(issue => issue.code === "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW" || issue.code.startsWith("PURCHASE_TAX_")))) return "review";
   if (
     line.components.some(
       (component) =>

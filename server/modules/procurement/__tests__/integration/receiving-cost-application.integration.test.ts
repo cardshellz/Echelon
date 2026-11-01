@@ -42,6 +42,7 @@ import { registerPurchaseCostStatusBatchCases } from "./purchase-cost-status-bat
 import { registerReceiptConfigurationAuthorityCases } from "./receipt-configuration-authority.cases";
 import { registerCostSourceCompatibilityCases } from "./cost-source-compatibility.cases";
 import { registerInvoiceCorrectionCostCases } from "./invoice-correction-costs.cases";
+import { registerPurchaseTaxCases } from "./purchase-tax.cases";
 import type { ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../receiving.service";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
@@ -52,12 +53,12 @@ const audit = enabled ? describe : describe.skip;
 const NOW = new Date("2026-09-06T12:00:00.000Z");
 const TABLES = [
   schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
-  schema.products, schema.productVariants, schema.vendors, schema.purchaseOrders,
+  schema.products, schema.productVariants, schema.vendors, schema.purchaseTaxTypes, schema.purchaseOrders,
   schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.poApprovalTiers, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoiceLineTaxes,
   schema.vendorInvoicePoLinks, schema.poStatusHistory, schema.poEvents, schema.poExceptions,
   schema.apPayments, schema.apPaymentAllocations,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
@@ -1449,9 +1450,10 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect(projectPoLineLandedCosts({
       poHeader: { totalCents: 22500, taxCents: 200, shippingCostCents: 300 },
       poLines: [{ id: 21, orderQty: 200, lineTotalCents: 22000 }], costs,
-    })).toEqual({ status: "complete", poLevelAdjustmentCents: 500, lines: [
-      { purchaseOrderLineId: 21, pieces: 200, supplierCents: 22000, shipmentCents: 5000, totalCents: 27000 },
-    ] });
+    })).toEqual({ status: "unavailable", reason: "Choose the supplier tax type before using its inventory cost. Other PO charges still need their inventory cost allocation." });
+    // Financial cards retain every saved dollar above. An unclassified tax and
+    // unallocated header freight cannot be asserted as a posted inventory value.
+    expect(costs?.taxCosts?.inventoryLandedCents).toBeNull();
     expect(costs?.lines[0].applicationId).toBeGreaterThan(0);
     expect(costs?.lines[0].recordedAt).toBeTruthy();
     expect(await state()).toEqual(before);
@@ -1583,6 +1585,8 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     actorId, at: NOW });
   registerInvoiceCorrectionCostCases({ pool: () => pool, database: () => database, actorId, at: NOW,
     receive, consume: seedConsumedCost });
+  registerPurchaseTaxCases({ pool: () => pool, database: () => database, actorId, at: NOW,
+    receive, consume: seedConsumedCost, shipments: () => shipment, historicalGaps: legacyQuantityGaps });
   registerReceiptConfigurationAuthorityCases({ pool: () => pool, database: () => database,
     purchasing: () => purchasing, shipments: () => shipment, actorId,
     receivingLines: (id) => storage.getReceivingLines(id), receivingWithWarnings: (evaluator, reporter) => receivingWithWarnings(evaluator, reporter),

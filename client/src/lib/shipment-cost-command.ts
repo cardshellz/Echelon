@@ -38,6 +38,7 @@ const recordedCostSchema = z.object({
 export type ShipmentCostRecord = z.infer<typeof recordedCostSchema>;
 export type ShipmentCostForm = {
   costType: string;
+  taxTypeId?: string;
   description: string;
   amount: string;
   allocationMethod: string;
@@ -160,13 +161,15 @@ function economicPayload(form: ShipmentCostForm) {
 }
 
 export function createShipmentCostPayload(form: ShipmentCostForm) {
-  return shipmentCostCreateSchema.parse({ ...economicPayload(form), reason: "Added shipment charge from shipment detail" });
+  if (["tax", "duty"].includes(form.costType) && !form.taxTypeId) throw new Error("Choose a configured tax type. Add missing types in Settings → Procurement.");
+  return shipmentCostCreateSchema.parse({ ...economicPayload(form), ...(form.taxTypeId ? { taxTypeId: Number(form.taxTypeId) } : {}), reason: "Added shipment charge from shipment detail" });
 }
 
 export function shipmentCostFormFromCreate(body: ReturnType<typeof createShipmentCostPayload>): ShipmentCostForm {
   const date = body.invoiceDate ? new Date(body.invoiceDate) : null;
   return {
     costType: body.costType, description: body.description ?? "",
+    ...(body.taxTypeId ? { taxTypeId: String(body.taxTypeId) } : {}),
     amount: centsAsInput(body.actualCents ?? body.estimatedCents ?? null),
     allocationMethod: body.allocationMethod ?? "default", vendorId: body.vendorId ?? null,
     vendorName: "", performedByName: body.performedByName ?? "",

@@ -16,6 +16,10 @@ function line(): PurchaseLineCostStatus {
 function shipment(): CostReviewShipmentLine { return { lineId: 11, purchaseOrderLineId: 21, shipmentId: 1, shipmentNumber: "TEST-SHIPMENT", sku: "SAME-SKU", posted: false, amountCents: 5000, currency: "USD", recordedAt: null, issues: [] }; }
 
 describe("shared human-readable cost tasks", () => {
+  it("gives an unclassified tax a direct tax-review action without a duplicate generic accounting task", () => {
+    const current = line(); current.components.forEach(component => { component.issues = [{ code: "PURCHASE_TAX_TYPE_REQUIRED", message: "A tax type is required." }]; });
+    expect(supplierCostReviewTasks(current)).toEqual([expect.objectContaining({ action: "tax_treatment", title: "Choose the purchase tax type" })]);
+  });
   it.each(["COST_ROOT_REVIEW_REQUIRED", "COST_HISTORICAL_BASIS_MISSING", "COST_SOURCE_INTERVAL_REVIEW"])("explains %s as a receipt check in the shared task model", code => {
     const current = line();
     current.components.forEach(component => { component.sourceEvidence = "confirmed"; component.issues = [{ code, message: "Stored low-level receipt evidence" }]; });

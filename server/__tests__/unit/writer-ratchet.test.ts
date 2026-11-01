@@ -48,6 +48,8 @@ describe("writer-ratchet (P2.1)", () => {
     ["returns.customer_return_parcel_receipt_allocations", "modules/returns"],
     ["wms.picking_commands", "modules/wms"],
     ["procurement.receiving_custody_fence", "modules/procurement"],
+    ["procurement.purchase_tax_types", "modules/procurement"],
+    ["procurement.vendor_invoice_line_taxes", "modules/procurement"],
     ["procurement.receiving_quarantine_observations", "modules/procurement"],
     ["procurement.receiving_quarantine_acceptances", "modules/procurement"],
     ["procurement.receiving_quarantine_dispositions", "modules/procurement"],

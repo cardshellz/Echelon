@@ -9,6 +9,9 @@ vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview
 import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../shipment-cost-application.service";
 vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
 import { shipmentLineVersion } from "../../shipment-line-version";
+// These tests isolate packing/allocation and malformed input behavior. The tax
+// source reader has real receipt/AP/landed PostgreSQL acceptance separately.
+vi.mock("../../purchase-tax-costs.repository", () => ({ readTaxedShipmentSupplierCosts: vi.fn(async () => new Map()) }));
 import { buildShipmentAllocationBasis, buildShipmentAllocationEvidence } from "../../domain/shipment-allocation-basis";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";

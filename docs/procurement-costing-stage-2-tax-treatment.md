@@ -1,0 +1,40 @@
+# Configured tax in the existing purchase cost flow
+
+Status: locally verified candidate in PR #1971; final publication/hosted CI remain separate checks. No live records changed.
+
+The confirmed policy is configurable treatment per tax type: include in inventory cost, or retain separately as recoverable tax. No type is seeded or inferred from a name. The supplier bill and payable retain the full tax. A tax claim is outside this flow.
+
+## Authority and execution
+
+1. `purchase_tax_types` owns the rule. Settings uses the shared `PurchaseTaxReview` approval editor. PO headers select a default; PO lines can override it. Invoice lines record actual tax amounts by type and reconcile product + packaging + tax to the unchanged billed line. Shipment tax/duty charges select a type.
+2. `readPoTaxEvidence` splits header/unparented tax by net goods value using the existing exact cents allocator. Explicit parent tax stays on that product. Unknown treatment remains a named review. `readPurchaseCostSources` includes only selected economic tax evidence in source identity. Actual approved invoice evidence supersedes the quote; quote tax is never added again.
+3. `resolvePurchaseCostSource` adds included tax to the existing product component. Packaging stays separate. Recoverable amounts remain on their source documents and outside inventory. Invoice adjustments must exactly equal their named taxes. No unknown packaging amount or tax refund is invented.
+4. `createPurchaseTaxChangeService` locks the existing cost graph and complete affected scope, checks current identity/approval authority and source version, then executes the existing supplier and shipment cost owners. Preview executes this same transaction under a rollback savepoint. Approval binds the measured impact, reason and current admin to a durable idempotent financial command. The root audit and related PO history commit with the costs.
+   An unchanged selected supplier source is preserved: changing superseded PO tax cannot use an unchanged multi-invoice average to update stock. Label-only rule changes also leave existing cost owners alone. The injected approval clock follows the purchasing correction owners' monotonic timestamp convention.
+5. Receiving uses the same supplier source and shipment revisions. The saved receive conversion still owns pieces per counted pack. There is no receiving tax override. Transfer/repack/order costs and previously approved historical destinations use the existing cost updater. Missing history does not become a sale or an expense.
+6. Shipment allocations remain gross financial shares. Snapshots retain the separately excluded recoverable share; landed proposals subtract it once. The pure `projectPurchaseTaxCosts` and `projectTaxedShipmentSupplierCost` display projections use the same selected supplier extended totals and saved charge shares. Receiving and tax-aware shipment landed rates therefore include the same product, packaging and included tax. Untaxed raw source rows retain their previous shape and identity.
+
+## Example
+
+100 pieces cost $100 product + $10 packaging + $10 supplier tax. If the tax type includes inventory, receiving carries $120. If recoverable, receiving carries $110 and records $10 separately. The bill remains $120 in either case. Two received packs of 50 still represent 100 pieces. Changing the treatment after receipt previews $120 → $110 stock value; it does not change those packs, pieces, bills or payments. If a real linked order consumed one pack, the existing order cost basis changes $60 → $55. That is not proof of an independently recognized sale.
+
+## Explicit limits and failure behavior
+
+- This USD inventory owner does not invent foreign-currency conversions.
+- Confirmed multi-invoice changes requiring receipt-specific allocation are rejected atomically until that adapter exists; no PO-line price averaging is introduced.
+- Supplier tax credits and unrelated invoice adjustments still need explicit supported attribution. They remain review items rather than guessed tax refunds.
+- Missing weight/dimensions retains the tax decision but leaves the existing shipment source unapplied with its real measurement task. Other failures roll back the whole approval.
+- Global rule reviews are bounded to 100 affected POs and complete existing dependency read limits. Exceeding a limit saves no partial rule change.
+- Recent approval panels show the last 20 records and clearly label that limit. The root audit retains each command's original source, measured preview, actor, reason and full actual cost-application evidence; the UI does not rewrite historical facts to match today's balances.
+- The new migration adds explicit types/references and separate recoverable snapshot amounts. It does not backfill historical eligibility, change historical money or rewrite approvals.
+
+## Acceptance ledger
+
+- Initial exact policy/unchanged-source tests: 120 passed across three files.
+- Final real HTTP/IAM/receiving/AP/shipment tax acceptance: 26 passed. Covers rollback-only preview, duplicate-code rejection, current admin authority, stock-count preservation, exact tax reclassification, invoice precedence, PO inheritance before and after receiving, gross shipment shares, selected landed totals/rates, concurrency, stale source/impact/stock/role, audit rollback/retry, non-economic label edits, mixed taxes, exact header/parent/line allocation, missing measurements and both first-use/existing historical gaps. Already approved historical COGS moves $10 → $0 when its tax becomes recoverable, with the original destination approval unchanged and no new expense choice.
+- The first-use gap case exposed an unstable preview hash containing newly generated allocation IDs. The corrected implementation validates the existing shared impact DTO before hashing it. Its code/messages and measured money stay in the review; the committed owner's full original IDs remain in the root audit. Both first-use and previously applied gap cases pass after this correction.
+- Broad local proof: 5,238 procurement unit cases / 296 files; 301 full receipt/AP/freight SQL cases followed by the final 26 tax cases; 122 desktop/mobile regressions and a final 16-tax-journey repeat; 458 guards; production, server-test and client-test TypeScript; production build. The last four affected unit files passed 67 cases after identity-label changes. These are separate runs and must not be presented as one invocation.
+- Five additional real SQL files passed 177 assertions. The original runner exits included three local database-cleanup timeouts under concurrent load; all three exact generated databases were subsequently removed successfully. This is not an application assertion failure or a green original runner exit.
+- Remaining: final-head publication/hosted CI, final main-integrated build/check repeats, and independent deployment/live acceptance. Receipt-specific multi-invoice allocation, tax-credit/FX adapters and other adjustment owners remain the explicitly bounded work described above and in the plan.
+
+These are local candidate results, not proof of production acceptance or whole-stage completion.

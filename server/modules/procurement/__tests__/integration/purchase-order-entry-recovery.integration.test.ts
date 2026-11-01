@@ -36,7 +36,7 @@ const TABLES = [schema.products, schema.productVariants, schema.vendors, schema.
   schema.purchaseOrders, schema.purchaseOrderLines, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.poApprovalTiers,
   schema.warehouseSettings, schema.purchasingRecommendationPoHandoffs, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines,
   schema.vendorInvoicePoLinks, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inventoryLots];
 
 interface HttpResult { status: number; body: unknown; replayed: string | undefined }
