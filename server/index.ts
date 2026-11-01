@@ -543,6 +543,7 @@ function startEchelonSyncScheduler(
   startListingPublicationWorker(services.listingLifecycle, "listing_lifecycle_worker");
   startWalmartStockConnectionWorker(services.walmartStockConnection);
   startShopifyProductConnectionWorker(createDefaultShopifyProductConnectionService({
+    startInventorySync: (command, actor) => services.productInventorySync.start(command, actor),
     onConnected: async (_productId, variantIds) => {
       for (const variantId of variantIds) services.inventoryCore.triggerNotifyChange(variantId, "shopify_product_connection");
     },

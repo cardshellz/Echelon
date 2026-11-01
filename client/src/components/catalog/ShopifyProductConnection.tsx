@@ -19,6 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Checkbox } from "@/components/ui/checkbox";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ShopifyProductSearch, isShopifyProductReference } from "./ShopifyProductSearch";
+import { ProductSyncWorkflowDialog } from "@/features/channel-inventory/components/ProductSyncWorkflowDialog";
 
 const ROWS_PER_PAGE = 25;
 
@@ -56,10 +57,12 @@ function VariantChoice(props: {
 }
 
 export function ShopifyProductConnectionActions({ productId }: { productId: number }) {
-  const { hasPermission } = useAuth();
+  const { user, hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const allowed = hasPermission("inventory", "edit") && hasPermission("channels", "edit");
+  const canLink = allowed && hasPermission("inventory_planning", "activate") && hasPermission("inventory_planning", "view");
+  const [inventorySyncRequestId, setInventorySyncRequestId] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<"create" | "link">("link");
   const [channelId, setChannelId] = useState<number | undefined>();
@@ -182,8 +185,13 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
     if (handledTerminal.current === command.commandKey) return;
     handledTerminal.current = command.commandKey;
     await invalidate(); setSubmitted(null); setReview(null); setError(null); setOpen(false);
+    // ATP status is scoped to the original operator. Another operator can resume
+    // the link without trying to read or re-admit someone else's ATP request.
+    const ownSync = command.inventorySyncRequestId && command.inventorySyncRequestedBy === user?.id;
+    if (ownSync) setInventorySyncRequestId(command.inventorySyncRequestId!);
     toast({ title: command.mode === "create" ? "Shopify product created and connected" : "Shopify product linked",
-      description: command.remoteProductId ? `Shopify product ${command.remoteProductId}` : undefined });
+      description: command.inventorySyncRequestId && !ownSync ? "Inventory sync is recorded for the original operator. Channel Inventory shows channel delivery."
+        : command.remoteProductId ? `Shopify product ${command.remoteProductId}` : undefined });
   }
   useEffect(() => {
     const command = statusQuery.data;
@@ -220,7 +228,8 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
 
   return <>
     <div className="flex flex-wrap gap-2">
-      <Button variant="outline" size="sm" onClick={() => start("link")} disabled={!allowed || executeMutation.isPending}>
+      <Button variant="outline" size="sm" onClick={() => start("link")} disabled={!canLink || executeMutation.isPending}
+        title={!canLink ? "Inventory, channel editing and inventory activation permissions are required to link and sync." : undefined}>
         <ArrowRightLeft className="mr-2 h-4 w-4" />Link existing Shopify product
       </Button>
       <Button size="sm" onClick={() => start("create")} disabled={!allowed || executeMutation.isPending}>
@@ -260,7 +269,7 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
             <p className="font-medium">Shopify products matching this catalog's SKUs</p>
             {context.matchingProducts.map(product => <div key={product.id} className="flex flex-wrap items-center justify-between gap-2">
               <span>{product.title} · {product.status.toLowerCase()} · {product.id}</span>
-              <Button size="sm" variant="outline" disabled={locked || product.status === "ARCHIVED"} onClick={() => { setMode("link"); setTarget(product.id); setSearchText(product.title); setReview(null); setBindings({}); change(); }}>Link this product</Button>
+              <Button size="sm" variant="outline" disabled={!canLink || locked || product.status === "ARCHIVED"} onClick={() => { setMode("link"); setTarget(product.id); setSearchText(product.title); setReview(null); setBindings({}); change(); }}>Link this product</Button>
             </div>)}
           </div>}
           {context.lookupIssue && <p className="text-sm text-muted-foreground">SKU lookup: {context.lookupIssue} You can search by name or enter an exact Shopify product ID.</p>}
@@ -326,5 +335,7 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    {inventorySyncRequestId && <ProductSyncWorkflowDialog key={inventorySyncRequestId} productId={productId} actor={user?.id ?? ""}
+      initialCommand={{ productId, idempotencyKey: inventorySyncRequestId }} onClose={() => setInventorySyncRequestId(null)} />}
   </>;
 }

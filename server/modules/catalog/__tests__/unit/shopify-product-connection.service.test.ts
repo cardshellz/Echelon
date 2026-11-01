@@ -26,7 +26,7 @@ function fixture(variantCount = 2) {
     reserve: vi.fn(async input => {
       if (command?.state === "complete" || command?.state === "rejected") return structuredClone(command);
       if (command?.leaseToken) throw new ShopifyProductConnectionError("SHOPIFY_COMMAND_IN_PROGRESS", "Already running", 409, true);
-      if (!command) command = { commandKey: input.commandKey, productId: input.productId, channelId: input.request.channelId,
+      if (!command) command = { commandKey: input.commandKey, productId: input.productId, channelId: input.request.channelId, actor: input.actor,
         mode: input.request.mode, state: "pending", remoteProductId: null, request: structuredClone(input.request), previewHash: input.previewHash,
         source: structuredClone(input.source), review: structuredClone(input.review), createSpec: structuredClone(input.createSpec),
         createRequested: false, connectionId: 9, shopDomain: local.channel.shopDomain, leaseToken: null,
@@ -51,8 +51,16 @@ function fixture(variantCount = 2) {
     }),
   };
   const provider: ShopifyProductConnectionProvider = {
+    fillBlankSku: vi.fn(async (_credentials, productId, assignment) => {
+      const variant = native?.variants.find(variant => variant.id === assignment.remoteVariantId && variant.inventoryItemId === assignment.inventoryItemId);
+      if (!variant || native?.id !== productId) throw new Error("Wrong SKU identity");
+      if (variant.sku === assignment.sku) return "already_set";
+      if (variant.sku?.trim()) throw new Error("Must not overwrite an existing SKU");
+      variant.sku = assignment.sku;
+      return "filled";
+    }),
     search: vi.fn(async () => ({ products: [{ id: "900", title: "Existing binder", status: "DRAFT" as const }], nextCursor: null })),
-    capabilities: vi.fn(async () => ({ scopes: new Set(["read_products", "write_products", "read_publications", "write_publications"]), currency: "USD" })),
+    capabilities: vi.fn(async () => ({ scopes: new Set(["read_products", "write_products", "write_inventory", "read_publications", "write_publications"]), currency: "USD" })),
     publications: vi.fn(async () => [{ id: "777", name: "Online Store" }]),
     verifyMedia: vi.fn(async () => undefined),
     matches: vi.fn(async (_credentials, _skus, heartbeat) => { await heartbeat?.(); return []; }),
@@ -97,16 +105,70 @@ function fixture(variantCount = 2) {
       createdListingCount: bindings.length, shippingGroupMetafieldQueued: true, alreadyConsistent: before.status === "consistent" };
   });
   const onConnected = vi.fn(async () => undefined);
-  const service = createShopifyProductConnectionService({ repository, provider, mappingOwner: { repair }, onConnected, log: vi.fn() });
+  const startInventorySync = vi.fn(async (_command: { productId: number; idempotencyKey: string }, _actor: string) => { events.push("atp_started"); });
+  const service = createShopifyProductConnectionService({ repository, provider, mappingOwner: { repair }, onConnected, startInventorySync, log: vi.fn() });
   const request = (mode: "create" | "link" = "create") => shopifyProductConnectionRequestSchema.parse({ channelId: 7, currency: "USD", mode,
     ...(mode === "link" ? { targetProductRef: "900" } : {}) });
   const intent = async (input = request()) => ({ request: input, previewHash: (await service.preview(41, input)).previewHash, commandKey: CONNECTION_COMMAND_KEY });
-  return { local, repository, provider, repair, onConnected, service, request, intent, events,
+  return { local, repository, provider, repair, onConnected, startInventorySync, service, request, intent, events,
     native: () => native, setNative: (value: ShopifyConnectionRemoteProduct | null) => { native = value; },
     saved: () => command, setPublication: (value: boolean) => { publication = value; } };
 }
 
 describe("product-scoped Shopify command recovery", () => {
+  function blankLink(f: ReturnType<typeof fixture>) {
+    const native = existingConnectionProduct(f.local); native.variants.forEach(variant => { variant.sku = null; }); f.setNative(native);
+    return { ...f.request("link"), bindings: f.local.variants.map((variant, index) => ({ variantId: variant.id, remoteVariantId: native.variants[index].id })) };
+  }
+  it("reviews blank SKU fills, verifies them, maps, then admits exactly one ATP request", async () => {
+    const f = fixture(); const request = blankLink(f);
+    expect((await f.service.preview(41, request)).warnings.join(" ")).toContain("Fill the blank Shopify SKU");
+    const intent = await f.intent(request); const result = await f.service.execute(41, intent, CONNECTION_ACTOR);
+    expect(f.native()?.variants.map(variant => variant.sku)).toEqual(["BINDER-P1", "BINDER-P2"]);
+    expect(result.command.inventorySyncRequestId).toBe(intent.commandKey);
+    expect(f.events.indexOf("sku_completion_verified")).toBeLessThan(f.events.indexOf("mapping_requested"));
+    expect(f.events.indexOf("mapping_committed")).toBeLessThan(f.events.indexOf("atp_started"));
+    expect(f.startInventorySync).toHaveBeenCalledWith({ productId: 41, idempotencyKey: intent.commandKey }, "operator-1");
+    await f.service.execute(41, intent, "system:worker"); expect(f.startInventorySync).toHaveBeenCalledOnce();
+    expect(f.native()?.status).toBe("DRAFT"); expect(f.provider.publish).not.toHaveBeenCalled();
+  });
+  it("recovers a lost SKU-write response and never rewrites a filled SKU", async () => {
+    const f = fixture(); const request = blankLink(f); const intent = await f.intent(request);
+    const fill = vi.mocked(f.provider.fillBlankSku); const original = fill.getMockImplementation()!;
+    fill.mockImplementationOnce(async (...args) => { await original(...args); throw new ShopifyConnectionProviderError("SHOPIFY_REQUEST_UNCERTAIN", "Lost response", "unknown"); });
+    await expect(f.service.execute(41, intent, CONNECTION_ACTOR)).rejects.toMatchObject({ retryable: true });
+    expect(f.repair).toHaveBeenCalledOnce(); expect(f.startInventorySync).not.toHaveBeenCalled();
+    await f.service.execute(41, intent, "system:worker");
+    expect(f.native()?.variants.map(variant => variant.sku)).toEqual(["BINDER-P1", "BINDER-P2"]);
+    expect(f.startInventorySync).toHaveBeenCalledWith({ productId: 41, idempotencyKey: intent.commandKey }, "operator-1");
+  });
+  it("reuses the initiating actor and ATP key after an uncertain ATP admission", async () => {
+    const f = fixture(); const intent = await f.intent(blankLink(f));
+    f.startInventorySync.mockRejectedValueOnce(new Error("Lost response after ATP admission"));
+    await expect(f.service.execute(41, intent, CONNECTION_ACTOR)).rejects.toMatchObject({ retryable: true });
+    await f.service.execute(41, intent, "system:worker");
+    expect(f.startInventorySync.mock.calls).toEqual([
+      [{ productId: 41, idempotencyKey: intent.commandKey }, "operator-1"], [{ productId: 41, idempotencyKey: intent.commandKey }, "operator-1"],
+    ]);
+  });
+  it("preserves existing different SKUs and refuses to fill a SKU changed after admission", async () => {
+    const f = fixture(); const request = blankLink(f);
+    f.native()!.variants[1].sku = "CHANNEL-CUSTOM";
+    const intent = await f.intent(request); await f.service.submit(41, intent, CONNECTION_ACTOR);
+    f.native()!.variants[0].sku = "ADDED-ELSEWHERE";
+    await expect(f.service.execute(41, intent, CONNECTION_ACTOR)).rejects.toMatchObject({ code: "SHOPIFY_SKU_CHANGED" });
+    expect(f.provider.fillBlankSku).not.toHaveBeenCalled(); expect(f.repair).not.toHaveBeenCalled();
+    expect(f.native()!.variants.map(variant => variant.sku)).toEqual(["ADDED-ELSEWHERE", "CHANNEL-CUSTOM"]);
+  });
+  it("blocks missing Shopify write scope and a changed channel SKU without writes", async () => {
+    const f = fixture(); const request = blankLink(f);
+    vi.mocked(f.provider.capabilities).mockResolvedValueOnce({ scopes: new Set(["read_products"]), currency: "USD" });
+    expect(await f.service.preview(41, request)).toMatchObject({ ready: false, issues: [expect.stringContaining("write_inventory")] });
+    const intent = await f.intent(request); await f.service.submit(41, intent, CONNECTION_ACTOR);
+    f.local.variants[0].stockSku = "CHANGED-OVERRIDE";
+    await expect(f.service.execute(41, intent, CONNECTION_ACTOR)).rejects.toMatchObject({ code: "SHOPIFY_CATALOG_IDENTITY_CHANGED" });
+    expect(f.provider.fillBlankSku).not.toHaveBeenCalled(); expect(f.startInventorySync).not.toHaveBeenCalled();
+  });
   it("searches only the selected configured store and creates no command or mapping", async () => {
     const f = fixture();
     const result = await f.service.search(41, { channelId: 7, query: "PSA", cursor: "page-two" });
