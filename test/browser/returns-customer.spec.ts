@@ -22,6 +22,7 @@ async function fixtures(
     pendingHistory?: boolean;
     queuedWorkflow?: boolean;
     restoreWorkflow?: boolean;
+    missingChoiceInspection?: boolean;
     beforeSubmit?: () => Promise<void>;
   } = {},
 ) {
@@ -104,7 +105,7 @@ async function fixtures(
       signedOut = true;
       return route.fulfill({ json: { ok: true } });
     }
-    if (path === `${API}/orders`)
+    if (path === `${API}/order-options`)
       return options.failOrders
         ? route.fulfill({
             status: 503,
@@ -112,7 +113,10 @@ async function fixtures(
           })
         : route.fulfill({
             json: {
-              orders: options.unverifiedOrders ? [] : [detail],
+              orders: options.unverifiedOrders ? [] : [{ omsOrderId: detail.omsOrderId,
+                orderReference: order.orderReference,
+                purchasedAt: options.missingChoiceInspection ? null : order.purchasedAt,
+                eligibleItemCount: options.missingChoiceInspection ? null : order.lines.reduce((sum, line) => sum + line.eligibleQuantity, 0) }],
               nextBeforeOmsOrderId: null,
               unavailableOrderCount: options.unverifiedOrders ? 1 : 0,
             },
@@ -521,6 +525,33 @@ test("order load failure remains an error and never claims no eligible orders", 
     page.getByRole("button", { name: "Download label for box 1" }),
   ).toBeVisible();
   expect(f.calls.every((call) => call.method === "GET")).toBe(true);
+});
+
+test("a missing cached inspection leaves an owned purchase selectable and verifies it only on selection", async ({ page }) => {
+  const f = await fixtures(page, { missingChoiceInspection: true });
+  await page.goto("/customer-returns");
+  await expect(page.getByText("Choose the items you want to return.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled();
+  expect(f.calls.some(call => call.path.startsWith(`${API}/orders`))).toBe(false);
+  await page.getByRole("button", { name: "Return items", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
+  expect(f.calls.filter(call => call.path === `${API}/orders/10`)).toHaveLength(1);
+  expect(f.calls.every(call => call.method === "GET")).toBe(true);
+  expect(f.calls.some(call => call.path === `${API}/orders`)).toBe(false);
+});
+
+test("a failed chooser read recovers through Refresh orders without issuing a return command", async ({ page }) => {
+  const options = { failOrders: true };
+  const f = await fixtures(page, options);
+  await page.goto("/customer-returns");
+  await expect(page.getByRole("alert")).toContainText("could not confirm");
+  options.failOrders = false;
+  await page.getByRole("button", { name: "Refresh orders", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(f.calls.filter(call => call.path === `${API}/order-options`)).toHaveLength(2);
+  expect(f.calls.every(call => call.method === "GET")).toBe(true);
+  expect(f.calls.some(call => call.path.startsWith(`${API}/orders`))).toBe(false);
 });
 
 test("a changed review returns to the owned chooser without a label write", async ({
