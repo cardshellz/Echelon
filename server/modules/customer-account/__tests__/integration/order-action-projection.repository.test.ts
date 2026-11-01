@@ -283,4 +283,50 @@ integration("durable customer action lookup and transactional source invalidatio
       await source.query("ROLLBACK"); await holder.query("ROLLBACK"); holder.release(); source.release();
     }
   });
+  it("promotes an expired owned order ahead of the published historical backlog without changing business records", async () => {
+    const scope = await claim();
+    await store.complete(scope, { ...SNAPSHOT, returnFailed: true }, NOW, new Date(NOW.getTime() + 60_000), "transient");
+    // The other customer's earlier due date reproduces historical refreshes
+    // ahead of a viewed order, without needing thousands of provider calls.
+    await pool.query(`UPDATE oms.customer_order_actions SET snapshot=$1,computed_generation=generation,
+      verified_at=$2,valid_until=$3,next_refresh_at=$2 WHERE oms_order_id<>100`,
+    [SNAPSHOT, new Date(NOW.getTime()-86_400_000), NOW]);
+    const before=(await pool.query("SELECT to_jsonb(o) AS facts FROM oms.oms_orders o ORDER BY id")).rows;
+    const later = new Date(NOW.getTime()+120_000);
+    await store.requestRefresh({ channelId:36, externalCustomerId:"100", orders:[identity] }, later);
+    expect((await read("100",later)).orders[0]).toMatchObject({state:"refreshing",snapshot:null});
+    const scopes=await store.claim(1,later,OTHER_LEASE);
+    expect(scopes.map(item=>item.omsOrderId)).toEqual([100]);
+    expect(scopes[0].attempts).toBe(1);
+    expect(await store.complete(scopes[0],SNAPSHOT,later,new Date(later.getTime()+60_000))).toBe(true);
+    expect((await read("100",later)).orders[0]).toMatchObject({state:"ready",snapshot:SNAPSHOT});
+    expect((await pool.query("SELECT to_jsonb(o) AS facts FROM oms.oms_orders o ORDER BY id")).rows).toEqual(before);
+  });
+  it("coalesces concurrent requests, preserves leases and cooldowns, and never resets the failure budget", async () => {
+    const scope=await claim();
+    const input={channelId:36,externalCustomerId:"100",orders:[identity]};
+    await store.requestRefresh(input,NOW);
+    expect((await pool.query("SELECT lease_id FROM oms.customer_order_actions WHERE oms_order_id=100")).rows[0].lease_id).toBe(LEASE);
+    await store.complete(scope,{...SNAPSHOT,returnFailed:true},NOW,new Date(NOW.getTime()+60_000),"transient");
+    await store.requestRefresh(input,new Date(NOW.getTime()+1_000));
+    expect((await read()).orders[0].state).toBe("ready");
+    const later=new Date(NOW.getTime()+120_000);
+    await Promise.all([store.requestRefresh(input,later),store.requestRefresh(input,later)]);
+    const scopes=await Promise.all([store.claim(1,later,LEASE),store.claim(1,later,OTHER_LEASE)]);
+    const selected=scopes.flat().filter(item=>item.omsOrderId===100);
+    expect(selected).toHaveLength(1);expect(selected[0].attempts).toBe(1);
+    await store.fail(selected[0],later,new Date(later.getTime()+60_000),"ORDER_ACTION_INSPECTION_FAILED");
+    await pool.query("UPDATE oms.customer_order_actions SET attempts=5,last_error_class='permanent',next_refresh_at='infinity' WHERE oms_order_id=100");
+    await store.requestRefresh(input,new Date(later.getTime()+600_000));
+    expect((await pool.query("SELECT attempts,next_refresh_at='infinity'::timestamptz AS stopped FROM oms.customer_order_actions WHERE oms_order_id=100")).rows[0]).toEqual({attempts:5,stopped:true});
+  });
+  it("does not promote foreign orders, swapped references, or healthy current evidence", async () => {
+    const scope=await claim();await store.complete(scope,SNAPSHOT,NOW,new Date(NOW.getTime()+86_400_000));
+    const before=(await pool.query("SELECT to_jsonb(p) AS facts FROM oms.customer_order_actions p ORDER BY oms_order_id")).rows;
+    await store.requestRefresh({channelId:36,externalCustomerId:"200",orders:[identity]},new Date(NOW.getTime()+120_000));
+    await store.requestRefresh({channelId:36,externalCustomerId:"100",orders:[{...identity,orderReference:"#OTHER"}]},new Date(NOW.getTime()+120_000));
+    await store.requestRefresh({channelId:37,externalCustomerId:"100",orders:[identity]},new Date(NOW.getTime()+120_000));
+    await store.requestRefresh({channelId:36,externalCustomerId:"100",orders:[identity]},new Date(NOW.getTime()+120_000));
+    expect((await pool.query("SELECT to_jsonb(p) AS facts FROM oms.customer_order_actions p ORDER BY oms_order_id")).rows).toEqual(before);
+  });
 });

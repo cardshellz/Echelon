@@ -2,10 +2,12 @@ import type { Pool } from "pg";
 import { z } from "zod";
 import { customerAccountOrderSummariesInputSchema } from "@shared/customer-account/customer-account-orders";
 import { customerOrderActionReferenceKey, customerOrderActionPageSchema, customerOrderActionsSchema, customerOrderActionSnapshotSchema, type CustomerOrderActionSnapshot } from "@shared/customer-account/order-actions";
-import { orderActionScopeSchema, orderActionMaintenanceIdsSchema, type OrderActionScope, type OrderActionProjectionStore } from "../application/order-action-projection.ports";
+import { orderActionScopeSchema, orderActionMaintenanceIdsSchema, type OrderActionScope, type OrderActionProjectionStore, type OrderActionProjectionRefresher } from "../application/order-action-projection.ports";
 import { logger } from "../../../platform/observability/logger";
 
 const LEASE_MS = 5 * 60_000;
+const CUSTOMER_REFRESH_COOLDOWN_MS = 60_000;
+const MAX_INSPECTION_ATTEMPTS = 5;
 const principalSchema = z.object({ channelId: z.number().int().positive().safe(), externalCustomerId: z.string().regex(/^[1-9][0-9]*$/).max(30) });
 const resultRowSchema = z.object({
   externalOrderId: z.string(), orderReference: z.string(), omsOrderId: z.coerce.number().int().positive().safe(),
@@ -15,7 +17,7 @@ const resultRowSchema = z.object({
 
 /** The customer read is a bounded local lookup. It cannot enqueue work or call
  * a provider. Ownership is checked against current OMS, not the cached document. */
-export class PostgresOrderActionProjectionStore implements OrderActionProjectionStore {
+export class PostgresOrderActionProjectionStore implements OrderActionProjectionStore, OrderActionProjectionRefresher {
   private readonly shopDomains: readonly string[];
   private readonly maintenanceIds: readonly number[] | null;
   constructor(private readonly pool: Pick<Pool, "query">, shopDomains: readonly string[] = [], maintenanceIds?: readonly number[]) {
@@ -31,8 +33,9 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
     const result = await this.pool.query(`SELECT replace(o.external_order_id,'gid://shopify/Order/','') AS "externalOrderId",
       o.external_order_number AS "orderReference",o.id AS "omsOrderId",p.snapshot,
       COALESCE(p.computed_generation=p.generation AND p.valid_until>$4 AND p.verified_at<=$4
+        AND p.next_refresh_at<>'-infinity'::timestamptz
         AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations dirty WHERE dirty.oms_order_id=o.id),false) AS current,
-      COALESCE(p.last_error_code IS NOT NULL,false) AS failed,p.verified_at AS "verifiedAt",p.valid_until AS "validUntil"
+      COALESCE(p.last_error_code IS NOT NULL AND p.next_refresh_at<>'-infinity'::timestamptz,false) AS failed,p.verified_at AS "verifiedAt",p.valid_until AS "validUntil"
       FROM oms.oms_orders o LEFT JOIN oms.customer_order_actions p ON p.oms_order_id=o.id
       WHERE o.channel_id=$1 AND o.external_customer_id=$2
       AND (o.external_order_id=ANY($3::text[]) OR o.external_order_id=ANY($5::text[]))`,
@@ -53,6 +56,36 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
         error_code: "ORDER_ACTION_PROJECTION_INVALID" });
       return { ...value, state: "failed", snapshot: null };
     }) });
+  }
+
+  async requestRefresh(raw: Parameters<OrderActionProjectionRefresher["requestRefresh"]>[0], now: Date): Promise<void> {
+    const { channelId, externalCustomerId } = principalSchema.parse(raw);
+    const input = customerAccountOrderSummariesInputSchema.parse({ orders: raw.orders });
+    z.date().parse(now);
+    // Reuse the worker's existing urgent deadline. An atomic upsert cannot
+    // duplicate work, reset the bounded retry budget, or steal a live lease.
+    // Exact paired identity and current ownership are checked in this statement;
+    // a customer's browser cannot promote another order or manufacture grants.
+    const result = await this.pool.query(`WITH requested AS (
+      SELECT * FROM jsonb_to_recordset($3::jsonb) AS r("externalOrderId" text,"orderReference" text)
+    ), owned AS (
+      SELECT o.id FROM requested r JOIN oms.oms_orders o ON o.channel_id=$1 AND o.external_customer_id=$2
+      AND o.external_order_id IN(r."externalOrderId",'gid://shopify/Order/'||r."externalOrderId")
+      AND regexp_replace(o.external_order_number,'^#','')=regexp_replace(r."orderReference",'^#','')
+      WHERE (SELECT count(*) FROM oms.oms_orders sibling WHERE sibling.channel_id=$1 AND sibling.external_customer_id=$2
+        AND sibling.external_order_id IN(r."externalOrderId",'gid://shopify/Order/'||r."externalOrderId"))=1
+    ) INSERT INTO oms.customer_order_actions(oms_order_id) SELECT id FROM owned ORDER BY id
+    ON CONFLICT(oms_order_id) DO UPDATE SET next_refresh_at='-infinity'
+    WHERE oms.customer_order_actions.next_refresh_at<>'-infinity'::timestamptz
+      AND (oms.customer_order_actions.lease_until IS NULL OR oms.customer_order_actions.lease_until<=$4)
+      AND oms.customer_order_actions.attempts<$6
+      AND (oms.customer_order_actions.verified_at IS NULL OR oms.customer_order_actions.verified_at<=$5)
+      AND (oms.customer_order_actions.snapshot IS NULL OR oms.customer_order_actions.valid_until<=$4
+        OR oms.customer_order_actions.last_error_code IS NOT NULL)`,
+    [channelId, externalCustomerId, JSON.stringify(input.orders), now,
+      new Date(now.getTime() - CUSTOMER_REFRESH_COOLDOWN_MS), MAX_INSPECTION_ATTEMPTS]);
+    logger.info("customer_order_action_refresh", { outcome: "requested", channelId, externalCustomerId,
+      requestedCount: input.orders.length, queuedCount: result.rowCount ?? 0 });
   }
 
   async drainInvalidations(limit: number): Promise<number> {
@@ -104,7 +137,8 @@ export class PostgresOrderActionProjectionStore implements OrderActionProjection
       SELECT p.oms_order_id,eligible.connection_id FROM eligible
       JOIN oms.customer_order_actions p ON p.oms_order_id=eligible.oms_order_id
       WHERE p.next_refresh_at<=$2 AND (p.lease_until IS NULL OR p.lease_until<=$2)
-      ORDER BY (p.verified_at IS NOT NULL OR p.attempts>0) DESC,p.next_refresh_at,p.oms_order_id DESC
+      ORDER BY (p.next_refresh_at='-infinity'::timestamptz AND (p.verified_at IS NOT NULL OR p.attempts>0)) DESC,
+        (p.verified_at IS NOT NULL OR p.attempts>0) DESC,p.next_refresh_at,p.oms_order_id DESC
       LIMIT 1 FOR UPDATE OF p SKIP LOCKED
     ), remaining_slots AS MATERIALIZED (
       SELECT p.oms_order_id,eligible.connection_id FROM eligible

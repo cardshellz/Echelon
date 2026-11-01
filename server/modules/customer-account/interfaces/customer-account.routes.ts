@@ -250,6 +250,10 @@ async function dispatch(
     empty.parse(query);
     return customerOrderActionPageSchema.parse(await services.orders.actions(body));
   }
+  if (path === "/account/order-actions/refresh" && !read) {
+    empty.parse(query);
+    return customerOrderActionPageSchema.parse(await services.orders.refreshActions(body));
+  }
   if (path === "/account/order-details" && !read) {
     empty.parse(query);
     return customerAccountOrderDetailsSchema.parse(await services.orders.details(body));

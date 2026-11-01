@@ -20,6 +20,10 @@ export const orderActionMaintenanceIdsSchema = z.array(z.number().int().positive
 export interface OrderActionProjectionReader {
   read(input: CustomerAccountOrderSummariesInput & { channelId: number; externalCustomerId: string }, now: Date): Promise<CustomerOrderActionPage>;
 }
+/** Explicit presentation-cache recovery. No business command or provider port. */
+export interface OrderActionProjectionRefresher {
+  requestRefresh(input: CustomerAccountOrderSummariesInput & { channelId: number; externalCustomerId: string }, now: Date): Promise<void>;
+}
 export interface OrderActionProjectionStore extends OrderActionProjectionReader {
   drainInvalidations(limit: number): Promise<number>;
   seed(limit: number): Promise<number>;
