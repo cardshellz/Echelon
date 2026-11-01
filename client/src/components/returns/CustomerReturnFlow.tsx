@@ -40,6 +40,7 @@ export interface CustomerReturnFlowProps {
   gateway: CustomerReturnFlowGateway;
   onAccessDenied: (message: string) => void;
   onClose?: () => void;
+  shoppingHref?: string;
   closeDisabled?: boolean;
   onBusy?: (busy: boolean) => void;
   notice?: ReactNode;
@@ -74,6 +75,7 @@ export function CustomerReturnFlow({
   gateway,
   onAccessDenied,
   onClose,
+  shoppingHref,
   closeDisabled = false,
   onBusy,
   notice,
@@ -266,6 +268,7 @@ export function CustomerReturnFlow({
       ref={canvas}
       testId="preview-canvas"
       onClose={onClose}
+      shoppingHref={shoppingHref}
       closeDisabled={busy || closeDisabled}
     >
       <ol
