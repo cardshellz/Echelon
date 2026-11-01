@@ -5,11 +5,22 @@ import { runPostgresShard } from "./postgres-tests";
 import { selectedPostgresShards } from "./postgres-test-impact";
 
 export const RETURN_ACCEPTANCE_DATABASE_FILES = [
+  "server/modules/shipping/__tests__/integration/package-history.integration.test.ts",
+  "server/modules/shipping/__tests__/integration/carrier-tracking-recovery.integration.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-complex-flow.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-labels.repository.test.ts",
   "server/modules/customer-account/__tests__/integration/order-action-projection.repository.test.ts",
 ] as const;
 const UNIT_FILES = [
+  "server/modules/shipping/__tests__/unit/sales-channel-delivery.test.ts",
+  "client/src/customer-account/__tests__/unit/customer-order-progress-presentation.test.ts",
+  "server/modules/shipping/__tests__/unit/saved-label-status.source.test.ts",
+  "client/src/customer-account/__tests__/customer-account.transport.test.ts",
+  "server/modules/customer-account/__tests__/unit/customer-order-progress.test.ts",
+  "server/modules/customer-account/__tests__/unit/customer-account-order-queries.test.ts",
+  "server/modules/shipping/__tests__/unit/saved-label-status.test.ts",
+  "server/modules/shipping/__tests__/unit/carrier-tracking.service.test.ts",
+  "server/modules/shipping/__tests__/unit/carrier-tracking-projection.repository.test.ts",
   "server/modules/returns/__tests__/unit/customer-return-workflow.worker.test.ts",
   "server/modules/returns/__tests__/unit/customer-return-submission.service.test.ts",
   "server/modules/returns/__tests__/unit/customer-return-customer-operations.service.test.ts",

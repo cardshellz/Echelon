@@ -1,12 +1,12 @@
 import {
   purchaseCostAuthorityInputSchema, purchaseCostAuthoritySchema,
+  isApprovedCostInvoiceStatus,
   type PurchaseCostAmount, type PurchaseCostAuthority, type PurchaseCostAuthorityInput, type PurchaseCostInvoice,
 } from "@shared/procurement/purchase-cost-authority";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
 import { costFingerprint } from "../../inventory/domain/cost-fingerprint";
 import { exactAuthorityMoney, projectAuthorityAmount, PurchaseCostAuthorityError, sumAuthorityAmounts } from "./purchase-cost-authority-money";
 
-const approved = new Set(["approved", "partially_paid", "paid"]);
 const key = (row: { reference: { documentId: number; lineId: number } }): string => `${row.reference.documentId}:${row.reference.lineId}`;
 const compareReference = (left: PurchaseCostInvoice, right: PurchaseCostInvoice): number =>
   left.reference.documentId - right.reference.documentId || left.reference.lineId - right.reference.lineId;
@@ -92,7 +92,7 @@ export function projectPurchaseCostAuthority(value: unknown): PurchaseCostAuthor
     fields: parsed.error.issues.map(issue => issue.path.join(".")),
   });
   const input = parsed.data;
-  const invoices = input.invoices.filter(row => approved.has(row.status)).sort(compareReference);
+  const invoices = input.invoices.filter(row => isApprovedCostInvoiceStatus(row.status)).sort(compareReference);
   const invoiceByReference = new Map(invoices.map(row => [key(row), row]));
   const issues = coverageIssues(input, invoices);
   if (input.scope.currency !== "USD") issues.push({ code: "COST_CURRENCY_REVIEW", message: "This costing contract requires explicit USD evidence; no currency conversion was inferred." });

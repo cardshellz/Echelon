@@ -2,12 +2,14 @@ import {
   CARRIER_TRACKING_PARSER_VERSION,
   CarrierTrackingPayloadError,
   normalizeShipStationLabelObservation,
+  normalizeTrackingNumber,
   normalizeShipStationTrackingWebhook,
   resolveCarrierTrackingMatch,
   type CarrierDispatchEvidence,
   type CarrierTrackingMatchStatus,
   type NormalizedCarrierTrackingEvent,
   type VerifiedCarrierWebhookReceipt,
+  type NormalizedShippingProviderLabelObservation,
 } from "./carrier-tracking.domain";
 import { shippingPackageDimensionObservationSchema } from "@shared/shipping/package-dimensions";
 import type {
@@ -224,6 +226,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       dispatchLeaseOwner?: string;
       /** Channel-owned correction intake; no remote mutation during observation. */
       labelVoidObserver?: { observe(labelId: number): Promise<void> };
+      captureSavedLabels?: () => Promise<{ errors: number }>;
     },
   ) {}
 
@@ -257,6 +260,30 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       },
     });
     return result;
+  }
+
+  /** Status capture has no contents/link or outbound-dispatch authority. V1
+   * shipment IDs and V2 se-* label IDs remain distinct immutable identities. */
+  async observeStatusLabel(observation: NormalizedShippingProviderLabelObservation) {
+    if (observation.observationSource !== "shipstation_status_observation") throw new Error("Invalid status observation source");
+    return this.dependencies.repository.observeProviderLabel(observation);
+  }
+
+  async ingestStatusSnapshot(payload: Record<string,unknown>, identity: {
+    providerLabelId: string; carrierCode: string; trackingNumber: string;
+  }): Promise<CarrierTrackingNormalizedIngestResult & { canonicalStatus: NormalizedCarrierTrackingEvent["canonicalStatus"]; eventOccurredAt: Date|null }> {
+    const event = normalizeShipStationTrackingWebhook({ resource_type: "API_TRACK",
+      resource_url: createShipStationTrackingHydrationRequest(identity).resourceUrl,
+      data: { ...payload, label_id: identity.providerLabelId } }, this.dependencies.clock.now());
+    if (event.normalizedTrackingNumber !== normalizeTrackingNumber(identity.trackingNumber))
+      throw new Error("Status capture returned another tracking identity");
+    // Distinct immutable journal identity prevents this read-only capture from
+    // colliding with, or downgrading, a later authoritative dispatch webhook.
+    const { createHash } = await import("node:crypto");
+    const stored = await this.persistAndMatch({ source: "new", event: { ...event,
+      eventHash: createHash("sha256").update(`status-only:${event.eventHash}`).digest("hex"),
+      dispatchEvidence: "not_confirmed", sanitizedPayload: { ...event.sanitizedPayload, statusOnly: true } } });
+    return { ...stored, canonicalStatus: event.canonicalStatus, eventOccurredAt: event.eventOccurredAt };
   }
 
   async reconcileShipStationLabel(
@@ -536,6 +563,20 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
     summary.dispatchAuthorityConfigured =
       dispatchSummary.dispatchAuthorityConfigured;
     summary.errors += dispatchSummary.errors;
+
+    // Historical provider reads may page through an old purchase. Finish the
+    // existing dispatch/reconciliation owners first so capture cannot delay them.
+    try {
+      const capture = await this.dependencies.captureSavedLabels?.();
+      if (capture) {
+        if (!Number.isSafeInteger(capture.errors) || capture.errors < 0) throw new Error("Invalid shipping capture result");
+        summary.errors += capture.errors;
+      }
+    }
+    catch {
+      summary.errors += 1;
+      this.dependencies.logger.error({ code: "SAVED_LABEL_STATUS_SWEEP_FAILED", message: "Saved-label tracking capture will retry on the next sweep." });
+    }
 
     return summary;
   }
@@ -1247,6 +1288,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         && resolution.status === "matched"
         && selectedCandidate !== null
         && selectedCandidate.labelDirection === "outbound"
+        && selectedCandidate.statusOnly !== true
         && selectedCandidate.linkCount > 0
         && match.shippingProviderLabelId !== null
           ? await transaction.enqueueDispatchCommand(

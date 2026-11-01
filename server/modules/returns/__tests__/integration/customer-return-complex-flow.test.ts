@@ -1,3 +1,14 @@
+import { PostgresPackageHistoryStore } from "../../../shipping/package-history.repository";
+import { PostgresSalesChannelDeliveryEvidenceStore } from "../../../shipping/sales-channel-delivery.repository";
+import { deriveSalesChannelDeliveryEvidence } from "../../../shipping/sales-channel-delivery.domain";
+import { PostgresCustomerReturnProgressReader } from "../../infrastructure/customer-return-progress.reader";
+import { PostgresCustomerOrderDeliveryReader } from "../../../shipping/customer-order-delivery.reader";
+import { CarrierTrackingService } from "../../../shipping/carrier-tracking.service";
+import { createDrizzleCarrierTrackingRepository } from "../../../shipping/carrier-tracking.repository";
+import { SavedLabelStatusWorker } from "../../../shipping/saved-label-status.worker";
+import { enqueueSavedLabelStatus, SAVED_LABEL_STATUS_LEASE_MS, PostgresSavedLabelStatusStore } from "../../../shipping/saved-label-status.repository";
+import { createSavedLabelStatusSource } from "../../../shipping/saved-label-status.source";
+import { normalizeSavedLabelStatusObservation } from "../../../shipping/saved-label-status.domain";
 import { CustomerReturnCustomerOperationsService } from "../../application/customer-return-customer-operations.service";
 import { CustomerReturnOrderAccessService } from "../../application/customer-return-order-access.service";
 import { PostgresCustomerReturnOrderAccessRepository } from "../../infrastructure/customer-return-order-access.repository";
@@ -129,6 +140,10 @@ integration(
         ),
       );
       await createIntakeActionProjectionSchema(pool);
+      await pool.query(readFileSync("migrations/900000036000019300001_shipping_package_history.sql", "utf8"));
+      const dispatch = readFileSync("migrations/165_carrier_dispatch_authority_cutover.sql", "utf8");
+      await pool.query(dispatch.slice(0,dispatch.indexOf("CREATE TABLE IF NOT EXISTS wms.carrier_dispatch_attempts")));
+
       const database = drizzle(pool, { schema });
       globalConnection.transaction.mockImplementation(
         (work: Parameters<typeof database.transaction>[0]) =>
@@ -138,6 +153,7 @@ integration(
     beforeEach(async () => {
       instant = new Date(INTAKE_NOW);
       leaseSequence = 0;
+      await pool.query("TRUNCATE wms.saved_label_status_jobs CASCADE");
       await seedComplexSource(pool);
     });
     afterAll(async () => {
@@ -361,6 +377,198 @@ integration(
       expect(s.purchase).toHaveBeenCalledTimes(2);
       expect((await pool.query("SELECT count(*)::int AS count FROM returns.customer_return_authorizations")).rows[0].count).toBe(1);
     });
+    it("keeps original delivery, two return boxes, receiving and payment independent through actual capture and retries", async () => {
+      await publishIntakeTestPolicyShipping(pool, { contactPhone: "555-010-1000" });
+      const carrier=shipStationReturnWorkflowFixture(()=>new Date(instant));
+      const s=await setup(false,undefined,carrier.provider), w=workflow(s);
+      await w.enqueue();await w.worker.run();await w.worker.run();await w.worker.run();
+      const saved=(await w.read())!, ready=await s.labels.status(36,saved.authorizationId!);
+      await pool.query("UPDATE oms.oms_orders SET fulfillment_status='fulfilled' WHERE id=100");
+      const historyStore=new PostgresPackageHistoryStore(pool,()=>new Date(instant));
+      await historyStore.drain(1000,{orderIds:[100]});
+      const claims=await historyStore.claim(1,instant,"19600000-0000-4000-8000-000000000099",{orderIds:[100]});
+      expect(claims).toHaveLength(1);
+      expect(await historyStore.complete(claims[0],complexHistory(s.provider),instant)).toBe(true);
+      const outboundCodes=new Map([['SYNTHETIC-OUTBOUND-1','IT'],['SYNTHETIC-OUTBOUND-2','UN'],['SYNTHETIC-OUTBOUND-3','IT']]);
+      const providerGet:typeof fetch=async(target,options)=>{
+        const url=new URL(String(target));
+        if(url.origin==='https://ssapi.shipstation.com'){
+          expect(options?.method).toBe('GET');const number=url.searchParams.get('trackingNumber')!;
+          const index=Number(number.split('-').at(-1));
+          return Response.json({shipments:[{shipmentId:900+index,trackingNumber:number,isReturnLabel:false,voided:false,
+            carrierCode:'ups',serviceCode:'ups_ground',shipDate:'2026-09-20',createDate:'2026-09-20T05:00:00',shipmentItems:[]}],page:1,pages:1,total:1});
+        }
+        if(/^\/v2\/labels\/se-90[123]$/.test(url.pathname)){
+          const index=Number(url.pathname.slice(-1));
+          return Response.json({label_id:`se-${900+index}`,tracking_number:`SYNTHETIC-OUTBOUND-${index}`,is_return_label:false,created_at:'2026-09-20T12:00:00Z'});
+        }
+        if(/^\/v2\/labels\/se-90[123]\/track$/.test(url.pathname)){
+          expect(options?.method).toBe('GET');const index=Number(url.pathname.split('/').at(-2)!.slice(-1)),number=`SYNTHETIC-OUTBOUND-${index}`,code=outboundCodes.get(number)!;
+          return Response.json({label_id:`se-${900+index}`,tracking_number:number,carrier_code:'ups',status_code:code,
+            events:[{occurred_at:index===1&&code==='IT'?'2026-09-20T13:00:00Z':instant.toISOString(),status_code:code}]});
+        }
+        return carrier.fetchFn(target,options);
+      };
+
+      const scope={channelId:36,externalCustomerId:"901",orders:[{omsOrderId:100,externalOrderId:"1000"}]};
+      const read=()=>new PostgresCustomerReturnProgressReader(pool).read(scope,instant);
+      const first=(await read()).get(100)!;
+      expect(first.returns).toHaveLength(1);
+      expect(first.returns[0]).toMatchObject({status:{code:"label_ready"},refund:{code:"not_started"},quantity:13,receivedQuantity:0});
+      await pool.query("UPDATE wms.saved_label_status_jobs SET last_error_code='SAVED_LABEL_STATUS_VOID_TIME_UNAVAILABLE' WHERE source_kind='return'");
+      expect((await read()).get(100)!.returns[0].status.code).toBe("needs_attention");
+      await pool.query("UPDATE wms.saved_label_status_jobs SET last_error_code=NULL WHERE source_kind='return'");
+      expect((await read()).get(100)!.returns[0].status.code).toBe("label_ready");
+      const immutable=await sourceFacts();
+      const tracking=new CarrierTrackingService({repository:createDrizzleCarrierTrackingRepository(drizzle(pool)),clock:{now:()=>new Date(instant)},logger:{info:vi.fn(),warn:vi.fn(),error:vi.fn()}});
+      const laterDelivery=structuredClone(s.provider);
+      laterDelivery.fulfillments[0].deliveredAt='2026-09-21T12:00:00Z';
+      const nativeRead=vi.fn(async()=>laterDelivery);
+      const statusSource=createSavedLabelStatusSource({pool,now:()=>new Date(instant),v1Key:"synthetic-v1",v1Secret:"synthetic-secret",v2Key:"synthetic-status-key",request:providerGet,shopify:{read:nativeRead}});
+      const channelEvidence=new PostgresSalesChannelDeliveryEvidenceStore(pool);
+      const capture=new SavedLabelStatusWorker({store:new PostgresSavedLabelStatusStore(pool),
+        channelEvidence,
+        source:statusSource,
+        tracking,now:()=>new Date(instant),newToken:()=>`19600000-0000-4000-8000-${String(++leaseSequence).padStart(12,"0")}`,report:vi.fn()});
+      expect((await capture.run()).errors).toBe(0);
+      expect(nativeRead).toHaveBeenCalledTimes(3);
+      for(const call of nativeRead.mock.calls)expect(call).toHaveLength(1);
+      const historicalEvidence=deriveSalesChannelDeliveryEvidence(complexHistory(s.provider),"901",laterDelivery,instant);
+      await Promise.all([channelEvidence.append(historicalEvidence),channelEvidence.append(historicalEvidence)]);
+      expect((await pool.query("SELECT count(*)::int AS n FROM wms.sales_channel_delivery_evidence")).rows[0].n).toBe(2);
+      await expect(pool.query("UPDATE wms.sales_channel_delivery_evidence SET actor='changed'")).rejects.toThrow(/immutable/);
+      const deliveryReader=new PostgresCustomerOrderDeliveryReader(pool);
+      expect((await deliveryReader.read(scope,instant)).get(100)).toMatchObject({delivery:{code:"partially_delivered"},packages:expect.arrayContaining([{key:"physical:3",trackingNumber:"SYNTHETIC-OUTBOUND-3",status:{code:"in_transit",label:"In transit"}}])});
+      expect((await pool.query("SELECT count(*)::int AS n FROM wms.shipping_provider_labels WHERE label_direction='return'")).rows[0].n).toBe(2);
+      expect((await read()).get(100)!.returns[0].status.code).toBe("label_ready");
+      carrier.setTracking(ready.parcels[0].trackingNumber!,"IT");
+      instant=new Date(instant.getTime()+6*60*60_000+1);
+      await Promise.all([capture.run(),capture.run()]);
+      expect((await read()).get(100)!.returns[0].status.code).toBe("in_transit");
+      for(const parcel of ready.parcels)carrier.setTracking(parcel.trackingNumber!,"DE");
+      outboundCodes.set("SYNTHETIC-OUTBOUND-3","DE");
+      instant=new Date(instant.getTime()+6*60*60_000+1);await capture.run();
+      expect((await read()).get(100)!.returns[0]).toMatchObject({status:{code:"delivered"},receivedQuantity:0,refund:{code:"not_started"}});
+      // Receiving a mixed box uses the existing receipt owner and remains idempotent.
+      const boxes=new ReturnParcelReceivingService(new PostgresReturnParcelReceivingStore(),()=>new Date(instant));
+      for(const [index,parcel]of ready.parcels.entries()){
+        const box=await boxes.lookup(parcel.trackingNumber!);
+        const command={idempotencyKey:`19600000-0000-4000-9000-${String(box.boxNumber).padStart(12,"0")}`,notes:null,
+          lines:box.lines.map(line=>({authorizationLineId:line.authorizationLineId,expectedCurrentReceivedQuantity:0,quantityReceivedNow:line.expectedQuantity}))};
+        await boxes.receive(box.parcelId,command,"synthetic-status-receiver");
+        expect((await boxes.receive(box.parcelId,command,"synthetic-retry")).replayed).toBe(true);
+        expect((await read()).get(100)!.returns[0].status.code).toBe(index===0?"partially_received":"received");
+      }
+      expect((await read()).get(100)!.refunds).toEqual([]);
+      expect((await read()).get(100)!.returns[0].refund.code).toBe("not_started");
+      expect((await pool.query("SELECT count(*)::int AS n FROM wms.carrier_dispatch_commands")).rows[0].n).toBe(0);
+      expect((await pool.query("SELECT count(*)::int AS n FROM returns.return_case_customer_refunds")).rows[0].n).toBe(0);
+      expect(await sourceFacts()).toEqual(immutable);
+      expect(carrier.calls.filter(call=>call.method==="POST")).toHaveLength(2);
+      expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("delivered");
+      // Historical evidence is bound to its exact current source revision; a
+      // differently bound event cannot complete or damage another package.
+      await channelEvidence.append(historicalEvidence.map(event=>({...event,nativeRevision:"f".repeat(64),canonicalStatus:"exception",eventId:"unrelated-revision"})));
+      expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("delivered");
+      await expect(channelEvidence.append([...historicalEvidence,...historicalEvidence.map(event=>({...event,omsOrderId:200}))])).rejects.toThrow("BATCH_MISMATCH");
+      await expect(channelEvidence.append(historicalEvidence.map(event=>({...event,externalCustomerId:"902"})))).rejects.toThrow("OWNER_CHANGED");
+      await tracking.ingestStatusSnapshot({tracking_number:"SYNTHETIC-OUTBOUND-1",carrier_code:"ups",status_code:"EX",events:[{occurred_at:instant.toISOString(),status_code:"EX"}]},
+        {providerLabelId:"901",carrierCode:"ups",trackingNumber:"SYNTHETIC-OUTBOUND-1"});
+      expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("delivery_issue");
+      instant=new Date(instant.getTime()+1000);
+      await tracking.ingestStatusSnapshot({tracking_number:"SYNTHETIC-OUTBOUND-1",carrier_code:"ups",status_code:"DE",events:[{occurred_at:instant.toISOString(),status_code:"DE"}]},
+        {providerLabelId:"901",carrierCode:"ups",trackingNumber:"SYNTHETIC-OUTBOUND-1"});
+      expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("delivered");
+      expect(nativeRead).toHaveBeenCalledTimes(4);
+      for(const invalid of [{...scope,externalCustomerId:"902"},{...scope,channelId:37},{...scope,orders:[{omsOrderId:100,externalOrderId:"2000"},{omsOrderId:200,externalOrderId:"1000"}]}]){
+        expect((await deliveryReader.read(invalid,instant)).size).toBe(0);
+        expect((await new PostgresCustomerReturnProgressReader(pool).read(invalid,instant)).size).toBe(0);
+      }
+      await tracking.ingestStatusSnapshot({tracking_number:"SYNTHETIC-OUTBOUND-3",carrier_code:"ups",status_code:"IT",events:[{occurred_at:new Date(instant.getTime()-60000).toISOString(),status_code:"IT"}]},
+        {providerLabelId:"903",carrierCode:"ups",trackingNumber:"SYNTHETIC-OUTBOUND-3"});
+      expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("delivered");
+      await tracking.ingestStatusSnapshot({tracking_number:"SYNTHETIC-OUTBOUND-3",carrier_code:"ups",status_code:"EX",events:[{occurred_at:new Date(instant.getTime()+86400000).toISOString(),status_code:"EX"}]},
+        {providerLabelId:"903",carrierCode:"ups",trackingNumber:"SYNTHETIC-OUTBOUND-3"});
+      expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("delivered");
+      // New native units must prevent a previous delivered package set from
+      // claiming the entire revised order was delivered.
+      await pool.query("UPDATE wms.order_items SET quantity=quantity+1 WHERE id=(SELECT min(id) FROM wms.order_items)");
+      expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("partially_delivered");
+    });
+
+    it("retains the full supported OMS bigint identity without narrowing shipping evidence to 32 bits",async()=>{
+      const provider=complexProvider(), omsOrderId=Number.MAX_SAFE_INTEGER;
+      await pool.query(`INSERT INTO oms.oms_orders(id,channel_id,external_order_id,external_order_number,external_customer_id,ordered_at)
+        OVERRIDING SYSTEM VALUE VALUES($1,36,'1001','#BIGINT-TEST','901',$2)`,[omsOrderId,instant]);
+      const evidence=deriveSalesChannelDeliveryEvidence(complexHistory(provider),"901",provider,instant)
+        .map(event=>({...event,omsOrderId,externalOrderId:"1001"}));
+      await new PostgresSalesChannelDeliveryEvidenceStore(pool).append(evidence);
+      expect((await pool.query("SELECT oms_order_id::text AS id FROM wms.sales_channel_delivery_evidence WHERE oms_order_id=$1",[omsOrderId])).rows).toEqual([{id:String(omsOrderId)}]);
+    });
+
+    it("fences concurrent status workers and expired leases, retains immutable attempts and stable source identity",async()=>{
+      for(let index=1;index<=10;index++)await enqueueSavedLabelStatus(pool,{kind:"history",sourceId:100,providerReference:String(900+index),trackingNumber:`SYNTHETIC-${index}`},instant);
+      const store=new PostgresSavedLabelStatusStore(pool);
+      const claims=await Promise.all([store.claim(5,instant,"19600000-0000-4000-8000-000000000101"),store.claim(5,instant,"19600000-0000-4000-8000-000000000102")]);
+      expect(claims.flat()).toHaveLength(10);expect(new Set(claims.flat().map(c=>c.id)).size).toBe(10);
+      expect(await store.claim(1,instant,"19600000-0000-4000-8000-000000000103")).toEqual([]);
+      instant=new Date(instant.getTime()+SAVED_LABEL_STATUS_LEASE_MS+1);
+      const next=await store.claim(10,instant,"19600000-0000-4000-8000-000000000104");
+      expect(next).toHaveLength(10);
+      const outcome={state:"complete" as const,status:"delivered",code:null,nextAttemptAt:null};
+      expect(await store.settle(claims[0][0],outcome,instant)).toBe(false);
+      for(const claim of next)expect(await store.settle(claim,outcome,instant)).toBe(true);
+      expect((await pool.query("SELECT count(*)::int AS n FROM wms.saved_label_status_attempts")).rows[0].n).toBe(10);
+      await expect(pool.query("UPDATE wms.saved_label_status_attempts SET actor='changed'")).rejects.toThrow(/immutable/);
+      await expect(enqueueSavedLabelStatus(pool,{kind:"history",sourceId:100,providerReference:"901",trackingNumber:"ANOTHER-TRACK"},instant)).rejects.toThrow(/IDENTITY_CHANGED/);
+    });
+
+    it("never lets historical tracking backlog starve a new return or normal shipment",async()=>{
+      await pool.query(`INSERT INTO wms.saved_label_status_jobs(source_kind,source_id,provider_reference,tracking_number,priority,next_attempt_at,created_at,updated_at)
+        SELECT 'history',100,n::text,'OLD-'||n,2,$1,$1,$1 FROM generate_series(1,30)n`,[instant]);
+      await enqueueSavedLabelStatus(pool,{kind:"history",sourceId:100,providerReference:"901",trackingNumber:"CURRENT-OUTBOUND"},instant);
+      await enqueueSavedLabelStatus(pool,{kind:"return",sourceId:1,providerReference:"se-901",trackingNumber:"CURRENT-RETURN"},instant);
+      const selected=await new PostgresSavedLabelStatusStore(pool).claim(2,instant,"19600000-0000-4000-8000-000000000105");
+      expect(selected.map(c=>c.kind)).toEqual(["return","history"]);expect(selected[1].providerReference).toBe("901");
+    });
+
+    it("bootstraps existing successful labels and verified packages idempotently without altering their source records",async()=>{
+      const s=await setup(),w=workflow(s);await w.enqueue();await w.worker.run();await w.worker.run();await w.worker.run();
+      const history=new PostgresPackageHistoryStore(pool,()=>new Date(instant));
+      await history.drain(1000,{orderIds:[100]});
+      const [claim]=await history.claim(1,instant,"19600000-0000-4000-8000-000000000106",{orderIds:[100]});
+      expect(await history.complete(claim,complexHistory(s.provider),instant)).toBe(true);
+      const before=await sourceFacts(),beforeCounts=await counts();
+      await pool.query("TRUNCATE wms.saved_label_status_jobs CASCADE");
+      const migration=readFileSync("migrations/900000045000019690001_customer_order_progress_capture.sql","utf8");
+      const seed=migration.slice(migration.indexOf("-- Existing successful labels"));
+      await pool.query(seed);await pool.query(seed);
+      const jobs=(await pool.query("SELECT source_kind,priority,count(*)::int AS n FROM wms.saved_label_status_jobs GROUP BY source_kind,priority ORDER BY source_kind")).rows;
+      expect(jobs).toEqual([{source_kind:"history",priority:1,n:3},{source_kind:"return",priority:0,n:2}]);
+      expect(await sourceFacts()).toEqual(before);expect(await counts()).toEqual(beforeCounts);
+    });
+
+    it("uses current replacement-label tracking and refuses ambiguous active labels on the same physical package",async()=>{
+      await setup();
+      const tracking=new CarrierTrackingService({repository:createDrizzleCarrierTrackingRepository(drizzle(pool)),clock:{now:()=>new Date(instant)},logger:{info:vi.fn(),warn:vi.fn(),error:vi.fn()}});
+      const observe=async(reference:string,number:string,voided=false)=>tracking.observeStatusLabel(normalizeSavedLabelStatusObservation(
+        {kind:"history",sourceId:100,providerReference:reference,trackingNumber:number},
+        {providerReference:reference,trackingNumber:number,carrierCode:"ups",serviceCode:"ups_ground",direction:"outbound",voided,voidedAt:voided?instant.toISOString():null},instant));
+      const old=await observe("901","SYNTHETIC-OLD-LABEL"),current=await observe("1901","SYNTHETIC-CURRENT-LABEL");
+      for(const label of [old,current])await pool.query(`INSERT INTO wms.shipping_provider_label_links(shipping_provider_label_id,physical_shipment_id,source,created_at)
+        VALUES($1,1,'provider_physical_identity',$2)`,[label.shippingProviderLabelId,instant]);
+      await observe("901","SYNTHETIC-OLD-LABEL",true);
+      await tracking.ingestStatusSnapshot({tracking_number:"SYNTHETIC-CURRENT-LABEL",status_code:"DE",carrier_code:"ups",events:[{occurred_at:instant.toISOString(),status_code:"DE"}]},
+        {providerLabelId:"1901",carrierCode:"ups",trackingNumber:"SYNTHETIC-CURRENT-LABEL"});
+      const reader=new PostgresCustomerOrderDeliveryReader(pool),scope={channelId:36,externalCustomerId:"901",orders:[{omsOrderId:100,externalOrderId:"1000"}]};
+      expect((await reader.read(scope,instant)).get(100)!.packages.find(p=>p.key==="physical:1")).toMatchObject({trackingNumber:"SYNTHETIC-CURRENT-LABEL",status:{code:"delivered"}});
+      const ambiguous=await observe("2901","SYNTHETIC-OTHER-ACTIVE-LABEL");
+      await pool.query(`INSERT INTO wms.shipping_provider_label_links(shipping_provider_label_id,physical_shipment_id,source,created_at)
+        VALUES($1,1,'provider_physical_identity',$2)`,[ambiguous.shippingProviderLabelId,instant]);
+      expect((await reader.read(scope,instant)).get(100)!.packages.find(p=>p.key==="physical:1")).toMatchObject({trackingNumber:null,status:{code:"unknown"}});
+      expect((await pool.query("SELECT count(*)::int AS n FROM wms.carrier_dispatch_commands")).rows[0].n).toBe(0);
+    });
+
     it("automatically reconciles a lost carrier reply before buying another reviewed box", async () => {
       const s = await setup(), w = workflow(s);
       s.purchase.mockImplementationOnce(async input => {

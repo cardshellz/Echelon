@@ -130,6 +130,7 @@ const reasons: Readonly<Record<string, string>> = {
   INVENTORY_MAPPING_MISSING: "The existing channel inventory link needs an ATP check.",
   STOCK_LINK_NOT_ON_SALE: "The channel item is not eligible for inventory linking.",
   STOCK_LINK_NOT_LISTED: "No matching channel item was found.",
+  STOCK_LINK_NOT_CARRIED: "This item has no eligible listing selected for inventory at this destination.",
   STOCK_LINK_SKU_DUPLICATE: "More than one channel item matches this SKU. Review the matching items.",
   STOCK_LINK_SELECTION_BLOCKED: "The channel's listing rules currently exclude this item.",
 };
@@ -145,8 +146,10 @@ function ProductSyncDestinations({ review, workflow }: { review: InventoryProduc
         const progress = workflow?.delivery?.rows.find(item => item.outboxId === receiptRow?.outboxId);
         const missing = row.blockers.includes("PUBLICATION_TARGET_VARIANT_MAPPING_MISSING");
         const codes = row.blockers.filter(message => !message.startsWith("Last saved stock-link check:"));
+        const specificCodes = codes.filter(code => code !== "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING");
+        const displayCodes = missing && specificCodes.length > 0 ? specificCodes : codes;
         const messages = missing && !settled ? ["Existing inventory link will be checked during sync."]
-          : [...new Set(codes.map(code => reasons[code.split(":", 1)[0]] ?? (/^[A-Z_]+$/.test(code) ? "Inventory needs attention. See details below." : code)))];
+          : [...new Set(displayCodes.map(code => reasons[code.split(":", 1)[0]] ?? (/^[A-Z_]+$/.test(code) ? "Inventory needs attention. See details below." : code)))];
         return <div key={row.productVariantId} className="mt-2 border-t pt-2">
           <div className="flex flex-wrap justify-between gap-2"><span className="break-all font-mono">{row.sku ?? `SKU #${row.productVariantId}`}</span>
             <span>{receiptRow ? `${formatUnits(receiptRow.quantity)} units` : row.quantity !== null ? `${formatUnits(row.quantity)} units` : "Check required"}</span></div>

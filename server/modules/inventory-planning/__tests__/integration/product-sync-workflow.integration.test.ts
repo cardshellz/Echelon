@@ -6,6 +6,7 @@ import type { InventoryCutoverTestDatabase } from "../../../inventory/__tests__/
 import { createStockLinkDatabase, createLiveShopifyTarget, installStockLinkConnectionColumns,
   installStockLinkTickColumns, addShopifyFeed, readStockLinkCheck } from "../fixtures/stock-link.fixture";
 import { createShopifyStockLinkSource } from "../../../channels/shopify-stock-link-source";
+import { createChannelEbayStockLinkSource } from "../../../channels/infrastructure/ebay-stock-link-source";
 import type { StockLinkAdapter } from "../../application/stock-link.ports";
 import type { StockLinkStoreItem } from "@shared/types/stock-link";
 import { createStockLinkService } from "../../infrastructure/stock-link.factory";
@@ -40,6 +41,7 @@ dbDescribe.sequential("product sync: saved links through canonical registration,
   let workflow: ProductSyncWorkflowService;
   let checks: ReturnType<typeof vi.fn<(skus: readonly string[]) => void>>;
   let unavailableTarget: number | null;
+  let shopifyAdapter: StockLinkAdapter;
   const source = createShopifyStockLinkSource();
   const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   let lease = 0;
@@ -69,6 +71,7 @@ dbDescribe.sequential("product sync: saved links through canonical registration,
           observations: ids.map(itemId => ({ itemId, item: items.find(item => item.itemId === itemId) ?? null })) };
       },
     };
+    shopifyAdapter = adapter;
     const links = createStockLinkService({ pool: database.pool, bindings: [{ adapter, source }], clock: () => now,
       monotonicNow: () => 0, random: () => 0.5, newLeaseToken: token, logger: log });
     store = new PostgresProductSyncWorkflowStore(database.pool);
@@ -114,6 +117,69 @@ dbDescribe.sequential("product sync: saved links through canonical registration,
     await worker.processDue();
     expect((await workflow.progress(key,"operator")).delivery?.rows.find(row => row.publicationTargetId === targetId)?.state).toBe("verified");
     expect(await warehouse()).toEqual(before);
+  }, 60_000);
+
+  it("settles a real enrollment source with no eligible listing while publishing the linked destination", async () => {
+    // The affected product has a saved publish request stopped on missing photos,
+    // but no published eBay listing. Reproduce both owners' actual source reads.
+    await database.pool.query(`BEGIN;
+      ALTER TABLE channels.ebay_listing_sync_jobs ADD COLUMN IF NOT EXISTS operation text,
+        ADD COLUMN IF NOT EXISTS provider_identity jsonb;
+      CREATE TABLE ebay.ebay_oauth_tokens(channel_id integer,environment text,external_account_id text,
+        external_account_identity_scheme text,external_account_verified_at timestamptz);
+      INSERT INTO channels.channels(id,name,provider,status,sync_enabled,sync_mode) VALUES(67,'Test eBay','ebay','active',true,'live');
+      INSERT INTO channels.channel_connections(id,channel_id) VALUES(9,67);
+      INSERT INTO ebay.ebay_oauth_tokens VALUES(67,'production','seller-67','provider_user_id',transaction_timestamp());
+      INSERT INTO channels.ebay_listing_sync_jobs(id,channel_id,connection_id,product_id,operation,state,identity,identity_hash,
+        requested_by,next_attempt_at,created_at,updated_at,error_code)
+        VALUES('00000000-0000-4000-8000-000000000067',67,9,20,'publish','needs_attention',
+          '{"channelId":67,"connectionId":9,"productId":20,"accountId":"seller-67","variants":[{"variantId":101,"sku":"P5","offerId":null,"listingId":null}]}',
+          repeat('e',64),'fixture',transaction_timestamp(),transaction_timestamp(),transaction_timestamp(),'EBAY_CATALOG_PHOTO_REQUIRED');
+      INSERT INTO inventory.inventory_publication_targets(channel_id,channel_connection_id,fulfillment_node_id,provider_scope_type,
+        external_scope_id,publication_authority,state,change_reason,created_by)
+        VALUES(67,9,1,'account','seller-67','echelon','disabled','Unlisted product regression','fixture');
+      INSERT INTO inventory.publication_source_binding_versions(publication_target_id,version,definition_hash,change_reason,idempotency_key,request_hash,created_by)
+        SELECT id,1,repeat('e',64),'Source','unlisted-source',repeat('e',64),'fixture' FROM inventory.inventory_publication_targets WHERE channel_id=67;
+      INSERT INTO inventory.publication_source_binding_heads(publication_target_id,draft_binding_id,revision,updated_by,update_reason)
+        SELECT publication_target_id,id,1,'fixture','Source' FROM inventory.publication_source_binding_versions WHERE idempotency_key='unlisted-source';
+      INSERT INTO inventory.publication_source_binding_members(binding_id,publication_target_id,fulfillment_node_id,priority)
+        SELECT id,publication_target_id,1,1 FROM inventory.publication_source_binding_versions WHERE idempotency_key='unlisted-source';
+      UPDATE inventory.publication_source_binding_versions SET lifecycle_status='sealed',sealed_by='fixture',sealed_at=transaction_timestamp() WHERE idempotency_key='unlisted-source';
+      UPDATE inventory.publication_source_binding_heads SET active_binding_id=draft_binding_id,draft_binding_id=NULL,revision=revision+1
+        WHERE publication_target_id IN (SELECT id FROM inventory.inventory_publication_targets WHERE channel_id=67);
+      UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,activated_by='fixture',activated_at=transaction_timestamp() WHERE channel_id=67;
+      UPDATE inventory.inventory_publication_targets SET state='live',revision=revision+1 WHERE channel_id=67;
+      INSERT INTO inventory.channel_exposure_policy_versions(scope_key,channel_id,scope_type,version,allocation_semantics,eligible,share_bps,holdback_sellable_units,max_publish_mode,min_publish_sellable_units,definition_hash,change_reason,idempotency_key,request_hash,created_by)
+        VALUES('channel:67',67,'channel',1,'exposure',true,10000,0,'unlimited',0,repeat('e',64),'Full exposure','unlisted-exposure',repeat('e',64),'fixture');
+      INSERT INTO inventory.channel_exposure_policy_heads(scope_key,channel_id,draft_policy_id,revision,updated_by,update_reason)
+        SELECT scope_key,channel_id,id,1,'fixture','Exposure' FROM inventory.channel_exposure_policy_versions WHERE scope_key='channel:67';
+      UPDATE inventory.channel_exposure_policy_versions SET lifecycle_status='sealed',sealed_by='fixture',sealed_at=transaction_timestamp() WHERE scope_key='channel:67';
+      UPDATE inventory.channel_exposure_policy_heads SET active_policy_id=draft_policy_id,draft_policy_id=NULL,revision=revision+1 WHERE scope_key='channel:67';
+      COMMIT;`);
+    const excludedTarget = (await database.pool.query("SELECT id FROM inventory.inventory_publication_targets WHERE channel_id=67")).rows[0].id as number;
+    const lookup = vi.fn(async () => { throw new Error("An excluded listing must not call its provider."); });
+    const writer = vi.fn(async () => { throw new Error("An excluded listing must not create a mapping."); });
+    const links = createStockLinkService({ pool: database.pool, bindings: [
+      { adapter: shopifyAdapter, source },
+      { kind: "listing_enrollment", source: createChannelEbayStockLinkSource(), writer,
+        adapter: { destinationKind: "channel_connection", providerKey: "ebay", findOffersBySku: lookup } },
+    ], clock: () => now, monotonicNow: () => 0, random: () => 0.5, newLeaseToken: token, logger: log });
+    const complete = new ProductSyncWorkflowService({ store, publication, links, clock: () => now,
+      newLeaseToken: token, enabled: () => true, logger: log });
+    const before = await warehouse();
+    await complete.start(request, "operator");
+    await complete.tick();
+    const result = await complete.progress(key, "operator");
+    expect(result.state).toBe("queued");
+    expect(result.review.rows.find(row => row.publicationTargetId === excludedTarget && row.productVariantId === 101)?.blockers)
+      .toContain("STOCK_LINK_NOT_CARRIED");
+    expect(await readStockLinkCheck(database.pool, excludedTarget, 101)).toMatchObject({ status: "waiting", reason_code: "STOCK_LINK_NOT_CARRIED", lease_token: null });
+    expect(result.delivery?.receipt.rows.every(row => row.publicationTargetId === targetId)).toBe(true);
+    expect(result.delivery?.receipt.rows).toHaveLength(1);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(writer).not.toHaveBeenCalled();
+    expect(await warehouse()).toEqual(before);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.publication_variant_mapping_heads WHERE publication_target_id=$1",[excludedTarget])).rows[0].count).toBe(0);
   }, 60_000);
 
   it("never discovers, claims, registers or publishes another product even when its check is due", async () => {

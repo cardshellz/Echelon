@@ -467,6 +467,17 @@ describe("StockLinkService.tick (PLAN-CH2 v4.1 §7.2, §11.3)", () => {
       expect(h.stateOf(1).deadLetterCursor).toBe("2026-10-27T11:59:00.123456Z");
     });
 
+    it("retains a scoped selection exclusion without registering or calling the provider", async () => {
+      const h = oneDestination();
+      h.addSize(1, 101, { productId: 20, selection: { action: "read_only", blockerCodes: [] } });
+      await h.service.checkProduct({ productId: 20, targets: [{ publicationTargetId: 1, productVariantIds: [101] }] });
+      expect(h.deletedClaimed).toEqual([]);
+      expect(h.row(1, 101)).toMatchObject({ status: "waiting", reasonCode: "STOCK_LINK_SELECTION_BLOCKED", leaseToken: null });
+      expect(h.row(1, 101).nextCheckAt!.getTime()).toBeGreaterThan(START);
+      expect(h.calls).toEqual([]);
+      expect(h.commands).toEqual([]);
+    });
+
     it("deletes the row of a claimed size the selection no longer carries and that is not linked (D-P6-10)", async () => {
       const h = oneDestination();
       h.addSize(1, 101, { selection: { action: "read_only", blockerCodes: [] } });
