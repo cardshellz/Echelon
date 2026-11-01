@@ -14,7 +14,7 @@ import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
 import type { AmendmentDatabase, AmendmentTransaction } from "../../po-quantity-amendment.repository";
 import type { ShipmentTrackingService } from "../../shipment-tracking.service";
 import { createShipmentCostReconciliationService, shipmentReconciliationScope } from "../../shipment-cost-reconciliation.service";
-import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence.repository";
+import { costFingerprint, lockInventoryCostGraph } from "../../../inventory/infrastructure/cost-evidence.repository";
 import { readPoTaxEvidence } from "../../purchase-tax-evidence.repository";
 import { purchaseTaxAmounts } from "../../domain/purchase-tax";
 
@@ -44,7 +44,8 @@ export function registerPurchaseTaxCases(fixture: {
     const response = await requestLocalHttp(`${endpoint}/tax-changes${path}`, { method: "POST", headers: {
       "Content-Type": "application/json", ...(key ? { "Idempotency-Key": key } : {}),
     }, body: JSON.stringify(body) });
-    return { status: response.status, body: await response.json(), replayed: response.headers.get("Idempotency-Replayed") };
+    return { status: response.status, body: await response.json(), replayed: response.headers.get("Idempotency-Replayed"),
+      retryAfter: response.headers.get("Retry-After") };
   }
   async function review(change: PurchaseTaxChange) {
     const current = await context({ kind: change.kind, id: change.id } as PurchaseTaxTarget);
@@ -285,8 +286,58 @@ export function registerPurchaseTaxCases(fixture: {
     it("retries concurrent identical approvals through one financial command", async () => {
       await setup(); await fixture.receive(); await applyShipment(); const { request } = await review(typeChange("recoverable")), key = randomUUID();
       const responses = await Promise.all([post("", request, key), post("", request, key)]);
-      expect(responses.map(row => row.status)).toEqual([200, 200]); expect(responses[0].body).toEqual(responses[1].body);
-      expect(responses.filter(row => row.replayed === "true")).toHaveLength(1);
+      const completed = responses.find(row => row.status === 200);
+      expect(completed, JSON.stringify(responses)).toBeDefined();
+      purchaseTaxResultSchema.parse(completed!.body);
+      for (const response of responses) {
+        if (response.status === 409) {
+          expect(response.body).toMatchObject({ code: "FINANCIAL_COMMAND_IN_PROGRESS" });
+          expect(response.retryAfter).toMatch(/^[1-9]\d*$/);
+        } else {
+          expect(response.status, JSON.stringify(response.body)).toBe(200);
+          expect(response.body).toEqual(completed!.body);
+        }
+      }
+      expect(responses.filter(row => row.status === 200 && row.replayed === "false")).toHaveLength(1);
+      const saved = await state();
+      expect(await post("", request, key)).toMatchObject({ status: 200, replayed: "true", body: completed!.body });
+      expect(await state()).toEqual(saved);
+      expect((await query("SELECT count(*)::int AS count FROM public.audit_events WHERE action='procurement.tax.approved' AND context->>'commandKey'=$1", [key])).rows[0].count).toBe(1);
+    });
+
+    it("returns a retryable busy receipt while an identical approval is running and replays its single posting", async () => {
+      await setup(); await fixture.receive(); await applyShipment();
+      const { request } = await review(typeChange("recoverable")), key = randomUUID();
+      let unlock!: () => void, announce!: () => void;
+      const released = new Promise<void>(resolve => { unlock = resolve; });
+      const ready = new Promise<void>(resolve => { announce = resolve; });
+      // Hold the real graph lock so the first durable command cannot finish
+      // before its duplicate arrives. No timing or cost-owner mock is needed.
+      const blocker = fixture.database().transaction(async tx => {
+        await lockInventoryCostGraph(tx); announce(); await released;
+      });
+      await Promise.race([ready, blocker]);
+      const first = post("", request, key);
+      void first.catch(() => {}); // Observed again below after releasing the blocker.
+      let completed: Awaited<typeof first>;
+      try {
+        const commandClaimTimeoutMs = 10_000;
+        await expect.poll(async () => (await query("SELECT status FROM public.financial_command_results WHERE idempotency_key=$1", [key])).rows[0]?.status,
+          { timeout: commandClaimTimeoutMs }).toBe("claimed");
+        const duplicate = await post("", request, key);
+        expect(duplicate).toMatchObject({ status: 409, body: { code: "FINANCIAL_COMMAND_IN_PROGRESS" } });
+        expect(duplicate.retryAfter).toMatch(/^[1-9]\d*$/);
+      } finally {
+        unlock(); completed = (await Promise.all([blocker, first]))[1];
+      }
+      expect(completed.status, JSON.stringify(completed.body)).toBe(200);
+      purchaseTaxResultSchema.parse(completed.body);
+      const saved = await state();
+      expect(await post("", request, key)).toMatchObject({ status: 200, replayed: "true", body: completed.body });
+      expect(await state()).toEqual(saved);
+      expect((await query("SELECT revision FROM procurement.purchase_tax_types WHERE id=1")).rows[0].revision).toBe(2);
+      expect(await lotTotals()).toMatchObject([{ product_total_cost_mills: "1000000", packaging_total_cost_mills: "100000" }]);
+      expect((await query("SELECT count(*)::int AS count FROM public.audit_events WHERE action='procurement.tax.approved' AND context->>'commandKey'=$1", [key])).rows[0].count).toBe(1);
     });
 
     it("records mixed invoice tax treatments once with exact billed conservation", async () => {

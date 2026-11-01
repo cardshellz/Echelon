@@ -21,6 +21,8 @@ export function registerPurchaseTaxRoutes(app: Express, service = createPurchase
       || error instanceof CostEvidenceError || error instanceof ShipmentTrackingError || error instanceof PoQuantityAmendmentError
       || error instanceof ApLedgerError || error instanceof MoneyInputError || error instanceof z.ZodError;
     const context = { actor_id: req.session.user?.id, error_class: error instanceof Error ? error.name : "UnknownError",
+      ...(error instanceof FinancialCommandError || error instanceof PurchaseTaxError
+        || error instanceof InvoiceQuantityCorrectionError || error instanceof MoneyInputError ? { error_code: error.code } : {}),
       ...(error instanceof z.ZodError ? { invalid_fields: error.issues.map(issue => ({ path: issue.path.join("."), code: issue.code })) } : {}) };
     if (classified) logger.warn("procurement.tax.change.rejected", context);
     else logger.error("procurement.tax.change.failed", context);
