@@ -123,7 +123,7 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
     retry: shouldRetryFinancialCommand, retryDelay: financialCommandRetryDelay,
     onMutate: () => setBusy(true),
     onSuccess: (result) => {
-      setSaved(result); setUnresolved(null); active.current = null; setBusy(false);
+      setSaved(result); setUnresolved(null); active.current = null; setBusy(false); setStale(false);
       try { sessionStorage.removeItem(storageKey); } catch { setError("Correction saved. The browser could not clear its retry receipt; reopening will safely verify the same confirmation."); }
       onSaved();
     },
