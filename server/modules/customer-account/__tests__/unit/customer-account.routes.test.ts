@@ -26,13 +26,14 @@ describe("customer account signed storefront HTTP boundary", () => {
   const services = vi.fn((_principal: CustomerReturnCustomerSession) => ({ edits: { connection }, returns: vi.fn() }));
   const report = vi.fn();
   let enabled = true;
+  let additionalThemeIds: string[] | undefined;
   beforeEach(async () => {
-    vi.clearAllMocks(); enabled = true;
+    vi.clearAllMocks(); enabled = true; additionalThemeIds = undefined;
     services.mockImplementation(() => ({ edits: { connection }, returns: vi.fn() }));
     const auth = new CustomerReturnCustomerAuthService({ config, challenges: { create: vi.fn(), consume: vi.fn() },
       shops: async () => [{ channelId: 2, connectionId: 4, shopDomain: "fixture.myshopify.com", displayName: "Shopify" }], now: () => now, randomState: () => "a".repeat(43) });
     const app = express(); app.use(express.json());
-    registerCustomerAccountRoutes(app, { services, context: async () => ({ config, auth }), staging: () => enabled ? staging : null, report } as unknown as CustomerAccountRouteDependencies);
+    registerCustomerAccountRoutes(app, { services, context: async () => ({ config, auth }), staging: () => enabled ? { ...staging, ...(additionalThemeIds ? { additionalThemeIds } : {}) } : null, report } as unknown as CustomerAccountRouteDependencies);
     server = await new Promise<Server>(resolve => { const value = app.listen(0, "127.0.0.1", () => resolve(value)); });
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${CUSTOMER_ACCOUNT_PROXY_API}`;
   });
@@ -50,6 +51,24 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(await anonymous.json()).toEqual({ error: { code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", message: "Sign in again to manage your orders." } });
     expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", path: "/account/bootstrap" });
     expect(services).toHaveBeenCalledTimes(1);
+  });
+  it("admits a configured live theme through the same signed boundary while keeping staging usable", async () => {
+    const live = { themeId: "174464958623" };
+    expect((await request(live)).status).toBe(403);
+    expect(services).not.toHaveBeenCalled();
+    additionalThemeIds = [live.themeId];
+    expect((await request(live)).status).toBe(200);
+    expect(services).toHaveBeenCalledTimes(1);
+    expect((await request(live, proof({ logged_in_customer_id: "" }), { Cookie: "staff-session=fake" })).status).toBe(401);
+    expect((await request({ ...live, expectedCustomerId: "101" })).status).toBe(401);
+    expect((await request(live, proof(), { Origin: "https://evil.test" })).status).toBe(403);
+    expect((await request({ themeId: "999" })).status).toBe(403);
+    expect(services).toHaveBeenCalledTimes(1);
+    expect((await request()).status).toBe(200);
+    expect(services).toHaveBeenCalledTimes(2);
+    enabled = false;
+    expect((await request(live)).status).toBe(403);
+    expect(services).toHaveBeenCalledTimes(2);
   });
   it("records a database failure code without exposing SQL or connection details", async () => {
     connection.mockRejectedValueOnce(Object.assign(new Error("private database query and credentials"), { code: "55P03" }));
