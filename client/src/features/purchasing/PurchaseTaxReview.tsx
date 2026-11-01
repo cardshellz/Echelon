@@ -36,6 +36,8 @@ function TaxImpact({ preview }: { preview: PurchaseTaxPreview }) {
     </section>
     {preview.after.map(after => {
       const before = preview.before.find(row => row.kind === after.kind && row.id === after.id && row.currency === after.currency);
+      const amountFields = ["taxMills", "inventoryMills", "recoverableMills", "unclassifiedMills"] as const;
+      if (amountFields.every(field => after[field] === 0 && (before?.[field] ?? 0) === 0)) return null;
       return <section key={`${after.kind}:${after.id}:${after.currency}`} className="rounded border p-3"><h3 className="font-semibold">{sourceLabel(after.kind)} · {after.reference}</h3>
         <table aria-label={`Tax changes ${after.reference}`} className="w-full table-fixed"><thead><tr><th className="w-[40%] text-left py-2">Tax amount</th><th className="text-right">Before</th><th className="text-right">After</th></tr></thead>
           <tbody>{([ ["On the document", "taxMills"], ["Included in inventory", "inventoryMills"], ["Recoverable tax", "recoverableMills"], ["Needs a tax type", "unclassifiedMills"] ] as const)
@@ -96,7 +98,11 @@ function TaxEditor({ loaded, storageKey, setBusy, close, reload }: { loaded: Pur
   const preview = useMutation<PurchaseTaxPreview, Error>({ mutationFn: async () => {
     let change: PurchaseTaxChange;
     try { change = draft(); }
-    catch (error) { throw error instanceof z.ZodError ? new Error("Choose a tax type and check the product, packaging and tax amounts.") : error; }
+    catch (error) {
+      if (error instanceof z.ZodError) throw new Error(error.issues.find(issue => issue.path[0] === "code")?.message
+        ?? "Choose a tax type and check the product, packaging and tax amounts.");
+      throw error;
+    }
     const request = { sourceVersion: context.sourceVersion, change };
     const result = purchaseTaxPreviewSchema.parse(await financialCommandFetchJson("/api/purchasing/tax-changes/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }));
     if (result.sourceVersion !== request.sourceVersion || canonicalJson(result.change) !== canonicalJson(request.change)) throw new Error("The tax preview does not match this change. Reload it.");
@@ -130,7 +136,7 @@ function TaxEditor({ loaded, storageKey, setBusy, close, reload }: { loaded: Pur
       {recovery.current.error && <p role="alert">{recovery.current.error}</p>}
       {!impact && <fieldset disabled={locked || !context.canApprove} className="space-y-3">
         {context.target.kind === "tax_type" ? <>
-          <div><Label htmlFor="purchase-tax-code">Tax code</Label><Input id="purchase-tax-code" maxLength={40} value={code} onChange={event => setCode(event.target.value.toUpperCase())} /></div>
+          <div><Label htmlFor="purchase-tax-code">Tax code</Label><Input id="purchase-tax-code" aria-describedby="purchase-tax-code-help" maxLength={40} value={code} onChange={event => setCode(event.target.value.toUpperCase())} /><p id="purchase-tax-code-help" className="mt-1 text-xs text-muted-foreground">Start with a letter. Use letters, numbers or underscores, such as IMPORT_VAT.</p></div>
           <div><Label htmlFor="purchase-tax-name">Tax name</Label><Input id="purchase-tax-name" maxLength={100} value={name} onChange={event => setName(event.target.value)} /></div>
           <div><Label htmlFor="purchase-tax-treatment">How this tax is recorded</Label><select id="purchase-tax-treatment" className="w-full rounded border bg-background p-2" value={treatment} onChange={event => setTreatment(event.target.value)}><option value="">Choose a treatment</option><option value="inventory">Include in inventory cost</option><option value="recoverable">Record separately as recoverable tax</option></select></div>
           <p className="text-sm text-muted-foreground">Changing a saved treatment reviews every linked purchase, invoice and shipment. Existing costs are updated through the same costing flow.</p>

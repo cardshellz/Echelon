@@ -9,7 +9,7 @@ const auditId = z.number().int().positive().safe();
 const money = z.number().int().nonnegative().safe();
 export const purchaseTaxTreatmentSchema = z.enum(["inventory", "recoverable"]);
 export const purchaseTaxTypeInputSchema = z.object({
-  code: z.string().trim().regex(/^[A-Z][A-Z0-9_]{0,39}$/),
+  code: z.string().trim().regex(/^[A-Z][A-Z0-9_]{0,39}$/, "Tax code must start with a letter and contain only letters, numbers or underscores (up to 40 characters)."),
   name: z.string().trim().min(1).max(100),
   treatment: purchaseTaxTreatmentSchema,
 }).strict();
