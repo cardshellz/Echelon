@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { shopifyProductConnectionRequestSchema } from "@shared/catalog/shopify-product-connection";
 import { buildShopifyConnectionCreateSpec } from "../../shopify-product-connection.domain";
-import { connectionOwnership, createShopifyProductConnectionProvider } from "../../shopify-product-connection.provider";
+import { buildShopifyProductSearchQuery, connectionOwnership, createShopifyProductConnectionProvider } from "../../shopify-product-connection.provider";
 import { createProductConnectionApi } from "../support/shopify-product-connection.api";
 import { CONNECTION_COMMAND_KEY, connectionSource } from "../support/shopify-product-connection.fixture";
 
@@ -16,6 +16,50 @@ function setup() {
 }
 
 describe("Shopify product connection native boundary", () => {
+  it("searches title words and SKU prefixes without accepting operator filter syntax", () => {
+    expect(buildShopifyProductSearchQuery(" PSA Binder ")).toBe('(title:PSA* AND title:Binder*) OR sku:"PSA Binder"');
+    expect(buildShopifyProductSearchQuery("SHLZ-BNDR-PAGE")).toBe("(title:SHLZ-BNDR-PAGE*) OR sku:SHLZ-BNDR-PAGE*");
+    expect(buildShopifyProductSearchQuery('PSA) OR status:ACTIVE')).toBe('(title:PSA\\)* AND title:OR* AND title:status\\:ACTIVE*) OR sku:"PSA) OR status:ACTIVE"');
+    expect(buildShopifyProductSearchQuery('-a*"\\')).toBe('(title:\\-a\\*\\"\\\\*) OR sku:\\-a\\*\\"\\\\*');
+    for (const input of ["", "a", "x".repeat(201), "ab\u0000cd"]) expect(() => buildShopifyProductSearchQuery(input)).toThrow();
+  });
+  it("pages draft and active products using the selected store without a mutation", async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ data: { products: {
+      nodes: [{ id: "gid://shopify/Product/900", title: "PSA Binder", status: "DRAFT" }, { id: "gid://shopify/Product/901", title: "PSA Binder pages", status: "ACTIVE" }],
+      pageInfo: { hasNextPage: true, endCursor: "next-page" },
+    } } })));
+    const provider = createShopifyProductConnectionProvider({ fetchImpl });
+    expect(await provider.search(credentials, { query: "PSA Binder", cursor: "previous-page" })).toEqual({
+      products: [{ id: "900", title: "PSA Binder", status: "DRAFT" }, { id: "901", title: "PSA Binder pages", status: "ACTIVE" }], nextCursor: "next-page",
+    });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toContain("https://test-store.myshopify.com/admin/api/2026-01/");
+    const body = JSON.parse(String(init.body));
+    expect(body.variables).toEqual({ query: '(title:PSA* AND title:Binder*) OR sku:"PSA Binder"', after: "previous-page" });
+    expect(body.query).toContain("products(first: 20"); expect(body.query).not.toContain("mutation");
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+  it("accepts empty results and rejects invalid or nonadvancing search pages", async () => {
+    const node = { id: "gid://shopify/Product/900", title: "Draft", status: "DRAFT" };
+    const fetchImpl = vi.fn();
+    const provider = createShopifyProductConnectionProvider({ fetchImpl });
+    const respond = (products: unknown) => fetchImpl.mockResolvedValue(new Response(JSON.stringify({ data: { products } })));
+    respond({ nodes: [], pageInfo: { hasNextPage: false, endCursor: null } });
+    expect(await provider.search(credentials, { query: "Nothing" })).toEqual({ products: [], nextCursor: null });
+    respond({ nodes: [node, { ...node, id: "gid://shopify/Product/901", status: "UNLISTED" }], pageInfo: { hasNextPage: false, endCursor: null } });
+    expect((await provider.search(credentials, { query: "Draft" })).products.map(product => product.status)).toEqual(["DRAFT", "UNLISTED"]);
+    for (const products of [
+      { nodes: [node], pageInfo: { hasNextPage: true, endCursor: null } },
+      { nodes: [node], pageInfo: { hasNextPage: true, endCursor: "same" } },
+      { nodes: [], pageInfo: { hasNextPage: true, endCursor: "next" } },
+      { nodes: [node, node], pageInfo: { hasNextPage: false, endCursor: null } },
+      { nodes: [{ ...node, status: "UNKNOWN" }], pageInfo: { hasNextPage: false, endCursor: null } },
+      { nodes: Array.from({ length: 21 }, () => node), pageInfo: { hasNextPage: false, endCursor: null } },
+    ]) {
+      respond(products);
+      await expect(provider.search(credentials, { query: "PSA", cursor: "same" })).rejects.toMatchObject({ code: "SHOPIFY_SEARCH_INVALID" });
+    }
+  });
   it.each([
     new Response(JSON.stringify({ data: null, errors: [{ message: "Internal failure", extensions: { code: "INTERNAL_SERVER_ERROR" } }] }), { status: 200 }),
     new Response("Request timeout", { status: 408 }),

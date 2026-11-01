@@ -51,6 +51,7 @@ function fixture(variantCount = 2) {
     }),
   };
   const provider: ShopifyProductConnectionProvider = {
+    search: vi.fn(async () => ({ products: [{ id: "900", title: "Existing binder", status: "DRAFT" as const }], nextCursor: null })),
     capabilities: vi.fn(async () => ({ scopes: new Set(["read_products", "write_products", "read_publications", "write_publications"]), currency: "USD" })),
     publications: vi.fn(async () => [{ id: "777", name: "Online Store" }]),
     verifyMedia: vi.fn(async () => undefined),
@@ -106,6 +107,28 @@ function fixture(variantCount = 2) {
 }
 
 describe("product-scoped Shopify command recovery", () => {
+  it("searches only the selected configured store and creates no command or mapping", async () => {
+    const f = fixture();
+    const result = await f.service.search(41, { channelId: 7, query: "PSA", cursor: "page-two" });
+    expect(result.products[0].status).toBe("DRAFT");
+    expect(f.repository.source).toHaveBeenCalledWith(41, 7);
+    expect(f.provider.search).toHaveBeenCalledWith(expect.objectContaining({ shopDomain: f.local.channel.shopDomain }), { query: "PSA", cursor: "page-two" });
+    expect(f.repository.reserve).not.toHaveBeenCalled(); expect(f.repair).not.toHaveBeenCalled(); expect(f.onConnected).not.toHaveBeenCalled();
+    expect(f.provider.create).not.toHaveBeenCalled(); expect(f.provider.publish).not.toHaveBeenCalled();
+  });
+  it("rejects unavailable channels and invalid search input before provider access", async () => {
+    const f = fixture();
+    await expect(f.service.search(41, { channelId: 8, query: "PSA" })).rejects.toMatchObject({ code: "SHOPIFY_CHANNEL_UNAVAILABLE" });
+    await expect(f.service.search(41, { channelId: 7, query: "x" })).rejects.toThrow();
+    expect(f.repository.source).not.toHaveBeenCalled(); expect(f.provider.search).not.toHaveBeenCalled();
+    expect(f.repository.credentials).not.toHaveBeenCalled();
+  });
+  it("propagates search failures without reserving a write", async () => {
+    const f = fixture();
+    vi.mocked(f.provider.search).mockRejectedValue(new ShopifyProductConnectionError("SHOPIFY_THROTTLED", "Retry search", 429, true));
+    await expect(f.service.search(41, { channelId: 7, query: "PSA" })).rejects.toMatchObject({ code: "SHOPIFY_THROTTLED" });
+    expect(f.saved()).toBeNull(); expect(f.repair).not.toHaveBeenCalled();
+  });
   it("rechecks a queued product before any external creation when it is archived or edited", async () => {
     for (const change of [(f: ReturnType<typeof fixture>) => { f.local.product.isActive = false; },
       (f: ReturnType<typeof fixture>) => { f.local.variants[0].priceCents = 9999; }]) {

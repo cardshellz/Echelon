@@ -4,6 +4,7 @@ import {
   shopifyProductConnectionExecuteSchema, shopifyProductConnectionRequestSchema,
   shopifyProductConnectionContextSchema, shopifyProductConnectionCommandSchema,
   shopifyProductConnectionPreviewSchema, shopifyProductConnectionResultSchema,
+  shopifyProductSearchRequestSchema, shopifyProductSearchResultSchema,
 } from "@shared/catalog/shopify-product-connection";
 import { requirePermission } from "../../routes/middleware";
 import { createDefaultShopifyProductConnectionService } from "../../services/shopify-product-connection";
@@ -12,6 +13,7 @@ import { ShopifyProductConnectionError } from "./shopify-product-connection.doma
 
 const productIdSchema = z.coerce.number().int().positive().max(2_147_483_647);
 const commandKeySchema = z.string().uuid();
+const searchQuerySchema = shopifyProductSearchRequestSchema.extend({ channelId: z.string().regex(/^[1-9][0-9]*$/).pipe(productIdSchema) });
 
 function sendResult(res: Response, schema: z.ZodTypeAny, value: unknown, status = 200): void {
   res.setHeader("Cache-Control", "no-store");
@@ -54,6 +56,11 @@ export function registerShopifyProductConnectionRoutes(app: Express, dependencie
       const productId = productIdSchema.parse(req.params.id);
       const channelId = req.query.channelId === undefined ? undefined : productIdSchema.parse(req.query.channelId);
       sendResult(res, shopifyProductConnectionContextSchema, await service.context(productId, channelId));
+    } catch (error) { sendError(res, error); }
+  });
+  app.get(`${base}/search`, requirePermission("inventory", "view"), requirePermission("channels", "view"), async (req, res) => {
+    try {
+      sendResult(res, shopifyProductSearchResultSchema, await service.search(productIdSchema.parse(req.params.id), searchQuerySchema.parse(req.query)));
     } catch (error) { sendError(res, error); }
   });
   app.get(`${base}/commands/:commandKey`, requirePermission("inventory", "view"), requirePermission("channels", "view"), async (req, res) => {
