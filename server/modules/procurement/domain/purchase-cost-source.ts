@@ -216,7 +216,23 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
 
 export function resolvePurchaseCostSource(source: ReceiptInvoiceSource): CostRevisionInput[] {
   if (!source.receiptCosting) return resolveLegacyPurchaseCostSource(source);
-  try { return resolveReceiptInvoiceSources(source, resolveLegacyPurchaseCostSource); }
+  try {
+    // A proved complete return before acceptance has no receipt cost to assign.
+    // Preserve that existing source disposition and its independent live-history
+    // verification; this does not attribute a credit to any inventory batch.
+    if (
+      source.supplierCredits?.length &&
+      source.receiptCosting.receipts.length === 0 &&
+      source.receiptCosting.allocations.length === 0
+    ) {
+      const returned = resolveLegacyPurchaseCostSource(source);
+      if (
+        returned.length === 2 &&
+        returned.every(row => row.inventoryEffect && row.evidence === "confirmed")
+      ) return returned;
+    }
+    return resolveReceiptInvoiceSources(source, resolveLegacyPurchaseCostSource);
+  }
   catch (error) {
     if (!(error instanceof CostEvidenceError || error instanceof z.ZodError || error instanceof RangeError)) throw error;
     // Invalidated receipt/invoice membership remains visible. Existing values

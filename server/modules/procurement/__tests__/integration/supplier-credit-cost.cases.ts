@@ -198,8 +198,8 @@ export function registerSupplierCreditCostCases(fixture: {
     await query(`INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status,warehouse_id)
         VALUES(20,'FULL-RETURN-PO',5,'sent',1);
       INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,product_id,product_variant_id,expected_receive_variant_id,expected_receive_units_per_variant,sku,
-        order_qty,unit_cost_cents,unit_cost_mills,total_product_cost_cents,packaging_cost_cents,line_total_cents,status)
-        VALUES(22,20,1,100,200,200,50,'AUDIT-PRODUCT',100,100,10000,10000,1000,11000,'open');
+        order_qty,unit_cost_cents,unit_cost_mills,total_product_cost_cents,packaging_cost_cents,line_total_cents,status,receipt_costing_enabled)
+        VALUES(22,20,1,100,200,200,50,'AUDIT-PRODUCT',100,100,10000,10000,1000,11000,'open',1);
       INSERT INTO procurement.inbound_shipments(id,shipment_number,status,allocation_method_default)
         VALUES(2,'FULL-RETURN-SHIP','costing','by_line_count');
       INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,product_variant_id,sku,qty_shipped,carton_count,allocated_cost_cents)
