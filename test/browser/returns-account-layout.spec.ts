@@ -225,6 +225,7 @@ for(const lostReply of [false,true]) test(`account cancellation updates the list
   await expect(panel.getByRole("definition").filter({hasText:/^Cancelled$/})).toHaveCount(1);
   await expect(panel.getByRole("button",{name:"Edit order",exact:true})).toHaveCount(0);
   await expect(panel.getByRole("button",{name:"Cancel order",exact:true})).toHaveCount(0);
+  await expect(panel.getByRole("heading",{name:"Delivery and returns",exact:true})).toHaveCount(0);
   await page.screenshot({path:info.outputPath(`cancelled-refunded-${lostReply}.png`),fullPage:false});
   expect(f.cancellationPosts()).toBe(1);
   expect(f.calls.filter(call=>call.commandKey && call.path!=="/account/orders/10/cancellation")).toEqual([]);

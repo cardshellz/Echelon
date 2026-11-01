@@ -146,6 +146,8 @@ export function CustomerOrderPanel({
   const returns =
     history?.returns.filter((item) => item.omsOrderId === state.omsOrderId) ??
     [];
+  const returnItemsAvailable = !cancelled && Boolean(state.returnOrder?.order.lines.some(line => line.eligibleQuantity > 0));
+  const returnLookupAvailable = !cancelled && !state.returnOrder && state.returnLookupAvailable && state.omsOrderId !== null;
   const editing = Boolean(
     order?.activeOperationId && order.activeOperationKind !== "cancel_order",
   );
@@ -434,7 +436,7 @@ export function CustomerOrderPanel({
             {restriction && (
               <p className="csz-panel-explanation">{restriction}</p>
             )}
-            {(trackUrl || state.returnOrder || state.returnLookupAvailable || returns.length > 0) && (
+            {(trackUrl || returnItemsAvailable || returnLookupAvailable || returns.length > 0) && (
               <h3 className="csz-panel-group">Delivery and returns</h3>
             )}
             {trackUrl && (
@@ -443,10 +445,8 @@ export function CustomerOrderPanel({
                 <ChevronRight aria-hidden="true" size={16} />
               </a>
             )}
-            {!cancelled && state.returnOrder?.order.lines.some(
-              (line) => line.eligibleQuantity > 0,
-            ) && option("Return items", () => onReturn(state.returnOrder!))}
-            {!cancelled && !state.returnOrder && state.returnLookupAvailable && state.omsOrderId !== null
+            {returnItemsAvailable && option("Return items", () => onReturn(state.returnOrder!))}
+            {returnLookupAvailable
               && option("Return items", () => onStartReturn(state.omsOrderId!))}
             {returns.map((item) => (
               <button
@@ -483,6 +483,7 @@ export function CustomerOrderPanel({
                 </button>
               </div>
             )}
+            {(showCancellation || showChangeActions) && <h3 className="csz-panel-group">Cancellation</h3>}
             {showCancellation
               ? option(
                   cancellationRequest ? "View cancellation" : "Cancel order",
