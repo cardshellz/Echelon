@@ -833,6 +833,7 @@ function lineValues(
 
   return {
     purchaseOrderId,
+    receiptCostingEnabled: 1,
     lineNumber,
     lineType: "product" as const,
     productId: input.productId,

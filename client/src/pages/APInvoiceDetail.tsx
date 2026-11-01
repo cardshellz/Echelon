@@ -1,3 +1,4 @@
+import { ReceiptInvoiceCosts } from "@/features/purchasing/ReceiptInvoiceCosts";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { ApPaymentRecovery } from "@/features/purchasing/ApPaymentRecovery";
 import { useApPaymentCommands } from "@/features/purchasing/use-ap-payment-commands";
@@ -788,6 +789,7 @@ export default function APInvoiceDetail() {
                             <InvoiceQuantityCorrection lineId={line.id} lineNumber={line.lineNumber} needsCorrection={["qty_discrepancy", "over_billed", "price_discrepancy"].includes(line.matchStatus)} allowMatched={line.purchaseOrderLineId != null && invoice.status !== "voided"} onSaved={invalidate} />
                           </TableCell>
                           <TableCell><div className="flex flex-wrap gap-2"><InvoiceLineCostReview line={line} invoiceId={invoice.id} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} />
+                            {line.purchaseOrderLineId && <ReceiptInvoiceCosts purchaseOrderLineId={line.purchaseOrderLineId} />}
                             {line.purchaseOrderLineId && invoice.status !== "voided" && <PurchaseTaxReview target={{ kind: "invoice_line", id: line.id }} label="Tax amounts" />}</div></TableCell>
                           {canEdit && (
                             <TableCell>

@@ -88,7 +88,7 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
       schema.inboundShipments, schema.inboundShipmentLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
       schema.receivingOrders, schema.receivingLines,
       schema.poReceipts, schema.poStatusHistory, schema.vendorInvoices, schema.vendorInvoiceLines,
-      schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes,
+      schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.receiptInvoiceCostAllocations,
       schema.supplierCredits, schema.supplierCreditLines, schema.supplierCreditApplications,
       schema.supplierCreditApplicationReversals, schema.supplierReturnLines, schema.receiptReversals,
       schema.notificationTypes, schema.notificationPreferences, schema.notifications, schema.echelonSettings,

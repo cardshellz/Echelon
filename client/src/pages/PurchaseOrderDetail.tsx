@@ -1,3 +1,4 @@
+import { ReceiptInvoiceApprovalHistory } from "@/features/purchasing/ReceiptInvoiceCosts";
 import { usePurchaseOrderEntry } from "@/hooks/use-purchase-order-entry";
 import { PurchaseOrderEntryRecoveryNotice } from "@/features/purchasing/PurchaseOrderEntryRecovery";
 import { PurchaseOrderStatusBadge } from "@/features/purchasing/PurchaseOrderStatusBadge";
@@ -4015,6 +4016,7 @@ export default function PurchaseOrderDetail() {
         <TabsContent value="history" className="space-y-4">
           {poId !== null && <PoAmendmentHistory purchaseOrderId={poId} />}
           {poId !== null && <PurchaseTaxApprovalHistory purchaseOrderId={poId} />}
+          {poId !== null && <ReceiptInvoiceApprovalHistory purchaseOrderId={poId} />}
           {shipmentCosts.isPending && <p role="status">Loading cost approval history…</p>}
           {shipmentCosts.isError && <p role="alert">Cost approval history could not be loaded. <Button variant="outline" onClick={() => void shipmentCosts.refetch()}>Reload cost history</Button></p>}
           {shipmentCosts.data?.supplierCosts && <PurchaseCostOriginHistory status={shipmentCosts.data.supplierCosts} />}

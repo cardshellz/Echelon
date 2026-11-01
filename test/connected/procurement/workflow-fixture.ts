@@ -50,6 +50,8 @@ export async function installConnectedWorkflowFixture(pool: Pool): Promise<void>
 /** Persisted physical/financial/command evidence for connected assertions, never API substitutes. */
 export async function readConnectedWorkflowState(pool: Pool) {
   return (await pool.query(`SELECT
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.receipt_invoice_cost_allocations t) AS "receiptInvoiceAllocations",
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM public.audit_events t WHERE action='procurement.receipt_invoice_costs.approved') AS "receiptInvoiceApprovals",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.receipt_cost_requests t) AS "receiptCostRequests",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.receipt_cost_attempts t) AS "receiptCostAttempts",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.purchase_orders t) AS "purchaseOrders",
@@ -74,4 +76,25 @@ export async function readConnectedWorkflowState(pool: Pool) {
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM inventory.inventory_lots t) AS lots,
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM inventory.quantity_commands t) AS "quantityCommands",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY idempotency_key),'[]'::jsonb) FROM public.financial_command_results t) AS commands`)).rows[0];
+}
+
+/** Synthetic scenario only, called through the loopback child's token-guarded
+ * control endpoint before any receipt exists. No production server imports it. */
+export async function seedReceiptInvoiceWorkflow(pool: Pool): Promise<void> {
+  if ((await pool.query("SELECT count(*)::int AS count FROM procurement.receiving_orders WHERE purchase_order_id=11")).rows[0].count !== 0)
+    throw new Error("Receipt invoice scenario requires an untouched synthetic PO");
+  await pool.query(`UPDATE procurement.purchase_order_lines SET order_qty=50,total_product_cost_cents=5000,line_total_cents=5000,receipt_costing_enabled=1 WHERE id=21;
+    UPDATE procurement.purchase_orders SET subtotal_cents=5000,total_cents=5000,invoiced_total_cents=5500,outstanding_cents=5500 WHERE id=11;
+    UPDATE procurement.vendor_invoice_lines SET qty_ordered=50 WHERE purchase_order_line_id=21;
+    INSERT INTO procurement.vendor_invoices(id,invoice_number,vendor_id,status,invoiced_amount_cents,balance_cents,currency,approved_at,approved_by)
+      VALUES(81,'CONNECTED-SECOND-BATCH',5,'approved',3000,3000,'USD','2026-10-24 12:00:00','connected-admin');
+    INSERT INTO procurement.vendor_invoice_lines(vendor_invoice_id,purchase_order_line_id,product_variant_id,line_number,sku,product_name,
+      qty_invoiced,qty_ordered,qty_received,unit_cost_cents,unit_cost_mills,line_total_cents,cost_component_evidence)
+      VALUES(81,21,101,1,'PACK','Connected five-piece case',25,50,0,120,12000,3000,
+      '{"contractVersion":1,"source":"operator_review","packagingTreatment":"included_in_product","productMills":300000,"packagingMills":0,"adjustmentMills":0}');
+    INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id,allocated_amount_cents) VALUES(81,11,3000);
+    INSERT INTO procurement.inbound_shipments(id,shipment_number,status,mode,warehouse_id,total_pieces,total_cartons,allocation_method_default,created_by)
+      VALUES(32,'CONNECTED-SECOND-SHIPMENT','in_transit','ocean',1,25,5,'by_value','connected-receiver');
+    INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,product_variant_id,sku,qty_shipped,units_per_variant_snapshot,carton_count)
+      VALUES(43,32,11,21,101,'P5',25,5,5)`);
 }

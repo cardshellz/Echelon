@@ -1,3 +1,4 @@
+import { registerReceiptInvoiceCostCases } from "./receipt-invoice-costs.cases";
 import { randomUUID } from "node:crypto";
 import { createReceiptCostRecoveryRepository } from "../../receipt-cost-recovery.repository";
 import { runReceiptCostRecoveryBatch } from "../../receipt-cost-recovery.worker";
@@ -58,7 +59,7 @@ const TABLES = [
   schema.poApprovalTiers, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoiceLineTaxes,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoiceLineTaxes, schema.receiptInvoiceCostAllocations,
   schema.vendorInvoicePoLinks, schema.poStatusHistory, schema.poEvents, schema.poExceptions,
   schema.apPayments, schema.apPaymentAllocations,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
@@ -1585,6 +1586,22 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     actorId, at: NOW });
   registerInvoiceCorrectionCostCases({ pool: () => pool, database: () => database, actorId, at: NOW,
     receive, consume: seedConsumedCost });
+  registerReceiptInvoiceCostCases({
+    transferFirstAndSell: async()=>{
+      await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'RECEIPT-COST-PICK')");
+      await inventory.transfer({productVariantId:200,fromLocationId:99,toLocationId:100,qty:1,userId:actorId});
+      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
+    },
+    breakFirst: async()=>{
+      await pool.query("UPDATE catalog.product_variants SET parent_variant_id=201 WHERE id=200");
+      const {BreakAssemblyUseCases}=await import("../../../inventory/application/break-assembly.use-cases");
+      const {legacyTransformationExecutionAuthority}=await import("../../../inventory/application/transformation-execution-authority.port");
+      // This suite explicitly owns a pre-cutover fixture. Package/runtime
+      // authorization remains in its own integration suite; financial owners
+      // and saved receipt/contribution intervals here are real.
+      await new BreakAssemblyUseCases(database,inventory,()=>NOW,legacyTransformationExecutionAuthority).breakVariant({commandKey:randomUUID(),sourceVariantId:200,targetVariantId:201,warehouseLocationId:99,targetLocationId:99,sourceQty:1,userId:actorId});
+    }, shipments: () => shipment, pool: () => pool, database: () => database, actorId, at: NOW, receive, consume: seedConsumedCost, receivingLines: id => storage.getReceivingLines(id), receiving: () => receiving, purchasing: () => purchasing });
   registerPurchaseTaxCases({ pool: () => pool, database: () => database, actorId, at: NOW,
     receive, consume: seedConsumedCost, shipments: () => shipment, historicalGaps: legacyQuantityGaps });
   registerReceiptConfigurationAuthorityCases({ pool: () => pool, database: () => database,

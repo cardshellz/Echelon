@@ -1383,6 +1383,9 @@
   "procurement.receipt_cost_requests": [
     "modules/procurement"
   ],
+  "procurement.receipt_invoice_cost_allocations": [
+    "modules/procurement"
+  ],
   "procurement.receipt_reversals": [
     "modules/procurement"
   ],

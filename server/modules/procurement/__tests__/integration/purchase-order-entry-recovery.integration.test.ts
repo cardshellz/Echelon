@@ -183,6 +183,8 @@ integration.sequential("purchase order entry HTTP and PostgreSQL recovery", () =
     const saved = await ledger(key); expect(saved.status).toBe("succeeded");
     expect(await post("/api/purchase-orders", key, body)).toEqual({ status: 201, body: saved.response_body, replayed: "true" });
     const result = purchaseOrderEntryCommandResultSchema.parse(saved.response_body);
+    expect((await pool.query("SELECT receipt_costing_enabled FROM procurement.purchase_order_lines WHERE purchase_order_id=$1",[result.po.id])).rows)
+      .toEqual([{receipt_costing_enabled:1}]);
     expect(await counts()).toEqual({ orders: before.orders + 1, lines: before.lines + 1, events: before.events + 2, history: before.history + 1 });
     const audit = (await pool.query("SELECT * FROM procurement.po_events WHERE po_id=$1 AND event_type='entry_create'", [result.po.id])).rows[0];
     expect(audit).toMatchObject({ actor_id: ACTOR, created_at: NOW, payload_json: { before: null, command_key: key, after: { po: { id: result.po.id } } } });
@@ -204,6 +206,17 @@ integration.sequential("purchase order entry HTTP and PostgreSQL recovery", () =
     }))?.status).toBe(200);
     expect(await http("PUT", `/api/purchase-orders/${id}/draft`, firstKey, firstBody)).toEqual({ status: 200, body: saved, replayed: "true" });
     expect((await pool.query("SELECT vendor_notes FROM procurement.purchase_orders WHERE id=$1", [id])).rows[0].vendor_notes).toBe("Later reviewed terms");
+  });
+
+  it("enables receipt costing for an added draft line without activating its historical sibling",async()=>{
+    const original=await create("receipt-policy-draft");
+    await pool.query("UPDATE procurement.purchase_order_lines SET receipt_costing_enabled=0 WHERE id=$1",[original.lines[0].id]);
+    const saved=await http("PUT",`/api/purchase-orders/${original.po.id}/draft`,"po-entry:receipt-policy-added",{
+      ...input(),expected_updated_at:original.po.updatedAt,lines:[{...line(),line_id:original.lines[0].id},{...line(),client_id:"added-batch"}],
+    });
+    expect(saved?.status,JSON.stringify(saved?.body)).toBe(200);
+    expect((await pool.query("SELECT receipt_costing_enabled FROM procurement.purchase_order_lines WHERE purchase_order_id=$1 ORDER BY id",[original.po.id])).rows)
+      .toEqual([{receipt_costing_enabled:0},{receipt_costing_enabled:1}]);
   });
 
   it("keeps a saved draft when supplier preparation rejects and replays that exact partial outcome", async () => {
