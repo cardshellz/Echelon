@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   customerOrderProgressSchema,
+  customerRefundActivitiesSchema,
   type CustomerOrderProgress,
 } from "@shared/customer-account/order-progress";
 import {
@@ -8,6 +9,7 @@ import {
   type CustomerAccountProgressReader,
   type CustomerAccountDeliveryProgressReader,
   type CustomerAccountReturnProgressReader,
+  type CustomerAccountCancellationRefundReader,
 } from "./customer-account-progress.ports";
 
 /** Combines query-only owner projections. A delivery outage never fabricates an
@@ -19,6 +21,7 @@ export class CustomerAccountProgressService
     private readonly dependencies: {
       delivery: CustomerAccountDeliveryProgressReader;
       returns: CustomerAccountReturnProgressReader;
+      cancellations?: CustomerAccountCancellationRefundReader;
       report(event: { code: string }): void;
     },
   ) {}
@@ -30,13 +33,15 @@ export class CustomerAccountProgressService
       now = z.date().parse(instant);
     const output = new Map<number, CustomerOrderProgress>();
     if (!scope.orders.length) return output;
-    const [delivery, returns] = await Promise.allSettled([
+    const [delivery, returns, cancellations] = await Promise.allSettled([
       this.dependencies.delivery.read(scope, now),
       this.dependencies.returns.read(scope, now),
+      this.dependencies.cancellations?.read(scope, now) ?? Promise.resolve(new Map<number, CustomerOrderProgress["refunds"]>(scope.orders.map(order => [order.omsOrderId, []]))),
     ]);
     for (const [track, result] of [
       ["delivery", delivery],
       ["returns", returns],
+      ["cancellation_refunds", cancellations],
     ] as const) {
       if (result.status === "rejected")
         this.dependencies.report({
@@ -52,6 +57,8 @@ export class CustomerAccountProgressService
         );
     }
     for (const order of scope.orders) {
+      const cancellationRefunds = cancellations.status === "fulfilled"
+        ? customerRefundActivitiesSchema.safeParse(cancellations.value.get(order.omsOrderId)) : null;
       let shipping =
         delivery.status === "fulfilled"
           ? delivery.value.get(order.omsOrderId)
@@ -86,17 +93,21 @@ export class CustomerAccountProgressService
           code: "CUSTOMER_ACCOUNT_RETURNS_PROGRESS_INVALID",
         });
       }
+      const refunds = customerRefundActivitiesSchema.safeParse([...(returned?.refunds ?? []), ...(cancellationRefunds?.success ? cancellationRefunds.data : [])]);
+      const uniqueRefunds = refunds.success && new Set(refunds.data.map(item => item.key)).size === refunds.data.length;
+      if (!uniqueRefunds) this.dependencies.report({ code: "CUSTOMER_ACCOUNT_REFUND_PROGRESS_INVALID" });
       output.set(
         order.omsOrderId,
         customerOrderProgressSchema.parse({
           delivery: shipping?.delivery ?? null,
           packages: shipping?.packages ?? [],
           returns: returned?.returns ?? [],
-          refunds: returned?.refunds ?? [],
-          unavailable: [
+          refunds: refunds.success && uniqueRefunds ? refunds.data : [],
+          unavailable: [...new Set([
             ...(!shipping ? ["delivery"] : []),
             ...(returned === undefined ? ["returns", "refunds"] : []),
-          ],
+            ...(!cancellationRefunds?.success || !uniqueRefunds ? ["refunds"] : []),
+          ])],
         }),
       );
     }

@@ -43,6 +43,7 @@ import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { isWmsOrderOnHold, isWmsOrderTerminal } from "@shared/wms-order-listing";
 import {
   Card,
   CardContent,
@@ -435,7 +436,7 @@ function PriorityControlCard({ order, onUpdated }: { order: OrderDetail; onUpdat
 
   const permissions = (authData as any)?.permissions || (authData as any)?.user?.permissions || {};
   const isAuthorized = authData?.user?.role === "admin" || permissions?.orders?.includes("override_priority");
-  if (!isAuthorized) return null;
+  if (!isAuthorized || isWmsOrderTerminal(order)) return null;
 
   const isBumped = order.priority >= 9999;
   const isHeld = order.priority < 0;
@@ -634,13 +635,13 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
             {order.priority >= 9999 && (
               <Badge className="text-xs bg-red-500 text-white">🔼 BUMPED</Badge>
             )}
-            {order.priority < 0 && (
+            {order.priority < 0 && !isWmsOrderTerminal(order) && (
               <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>
             )}
             {order.priority >= 300 && order.priority < 9999 && (
               <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>
             )}
-            {order.onHold === 1 && <Badge variant="destructive" className="text-xs">ON HOLD</Badge>}
+            {isWmsOrderOnHold(order) && <Badge variant="destructive" className="text-xs">ON HOLD</Badge>}
             {order.batchId && (
               <Badge variant="outline" className="text-xs bg-violet-50 text-violet-700 border-violet-200">
                 Batch: {order.batchId}
@@ -1451,7 +1452,7 @@ export default function Orders() {
                                   {order.combinedOrders.length} Orders Combined
                                 </Badge>
                                 {order.priority >= 9999 && <Badge className="text-xs bg-red-500 text-white">🔼 BUMPED</Badge>}
-                                {order.priority < 0 && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
+                                {order.priority < 0 && !isWmsOrderTerminal(order) && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
                                 {order.priority >= 300 && order.priority < 9999 && <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>}
                                 <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
                                   {getWmsStatusLabel(order.warehouseStatus)}
@@ -1480,7 +1481,7 @@ export default function Orders() {
                                   <Badge variant="outline" className="text-xs">Manual</Badge>
                                 )}
                                 {order.priority >= 9999 && <Badge className="text-xs bg-red-500 text-white">🔼 BUMPED</Badge>}
-                                {order.priority < 0 && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
+                                {order.priority < 0 && !isWmsOrderTerminal(order) && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
                                 {order.priority >= 300 && order.priority < 9999 && <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>}
                                 <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
                                   {getWmsStatusLabel(order.warehouseStatus)}
@@ -1502,7 +1503,7 @@ export default function Orders() {
                                     {order.slaStatus === "overdue" ? "SLA Overdue" : "SLA At Risk"}
                                   </Badge>
                                 )}
-                                {order.onHold === 1 && (
+                                {isWmsOrderOnHold(order) && (
                                   <Badge variant="destructive" className="text-xs">ON HOLD</Badge>
                                 )}
                               </div>

@@ -13,6 +13,7 @@ import { ClubOrderEditCodeRedemptions } from "../../order-edits/infrastructure/c
 import { CustomerAccountOrderQueriesService } from "../application/customer-account-order-queries.service";
 import { PostgresCustomerAccountOrderContextReader } from "./customer-account-order-context.repository";
 import { PostgresOrderActionProjectionStore } from "./order-action-projection.repository";
+import { PostgresCancellationRefundProgressReader } from "./cancellation-refund-progress.reader";
 
 export function customerAccountServices(pool: Pool, edits: OrderEditService) {
   const store = new PostgresOrderEditStore(pool);
@@ -50,6 +51,7 @@ export function customerAccountServices(pool: Pool, edits: OrderEditService) {
         progress: new CustomerAccountProgressService({
           delivery: new PostgresCustomerOrderDeliveryReader(pool),
           returns: new PostgresCustomerReturnProgressReader(pool),
+          cancellations: new PostgresCancellationRefundProgressReader(pool),
           report: event => console.error(JSON.stringify({ event: "customer_account_progress_read_failed", ...event })),
         }),
         now: () => new Date(),

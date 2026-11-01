@@ -7,6 +7,7 @@ import {
   parsePositiveInteger,
   parseWmsOrderBucket,
   type WmsOrderListOrder,
+  isWmsOrderOnHold,
 } from "../../wms-order-listing";
 
 function order(overrides: Partial<WmsOrderListOrder>): WmsOrderListOrder {
@@ -27,6 +28,12 @@ function order(overrides: Partial<WmsOrderListOrder>): WmsOrderListOrder {
 }
 
 describe("WMS order listing bucket rules", () => {
+  it.each(["cancelled","shipped"])("keeps retained holds out of active issues for %s orders",warehouseStatus=>{
+    const terminal=order({warehouseStatus,onHold:1});const before=structuredClone(terminal);
+    expect(isWmsOrderOnHold(terminal)).toBe(false);expect(orderMatchesBucket(terminal,"issues")).toBe(false);
+    expect(orderMatchesBucket(terminal,warehouseStatus as "cancelled"|"shipped")).toBe(true);
+    expect(buildWmsOrderBucketCounts([terminal]).issues).toBe(0);expect(terminal).toEqual(before);
+  });
   it("classifies picked-but-unshipped WMS orders as picked, not shipped or needs_pick", () => {
     const completed = order({ warehouseStatus: "completed", orderNumber: "#58391" });
 

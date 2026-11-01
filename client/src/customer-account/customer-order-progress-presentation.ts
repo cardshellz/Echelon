@@ -1,4 +1,19 @@
 import type { CustomerOrderProgress } from "@shared/customer-account/order-progress";
+import type { CustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
+
+export function orderDeliveryLabel(
+  cancelled: boolean,
+  fulfillment: CustomerOrderFulfillment | undefined,
+  progress: CustomerOrderProgress | null | undefined,
+  fallback: string,
+): string | null {
+  const carrier = progress?.delivery;
+  const physicallyMoving = carrier && !["awaiting_carrier", "unknown"].includes(carrier.code);
+  if (cancelled && !physicallyMoving && !["shipped", "partially_shipped"].includes(fulfillment?.code ?? "")) return null;
+  if (carrier && (!cancelled || physicallyMoving)) return carrier.label;
+  if (["cancelled", "cancelling"].includes(fulfillment?.code ?? "")) return null;
+  return fulfillment?.label ?? fallback;
+}
 
 export function returnProgressLabel(
   progress: CustomerOrderProgress | null | undefined,
@@ -26,8 +41,6 @@ export function refundActivityLabel(
   progress: CustomerOrderProgress | null | undefined,
 ): string | null {
   if (financialStatus.toLowerCase() === "refunded") return null;
-  if (progress === null || progress?.unavailable.includes("refunds"))
-    return "Refund status unavailable";
   const statuses = progress?.refunds.map((refund) => refund.status.code) ?? [];
   if (statuses.includes("failed")) return "Refund needs attention";
   if (statuses.includes("processing")) return "Refund processing";
@@ -38,5 +51,7 @@ export function refundActivityLabel(
     )
   )
     return "Refund issued";
+  if (progress === null || progress?.unavailable.includes("refunds"))
+    return "Refund status unavailable";
   return null;
 }
