@@ -4,7 +4,7 @@ import { purchaseLineNeedsCostReview } from "./purchase-cost-status";
 import { formatShipmentExceptionAmount, type ShipmentCostException } from "./shipment-cost-exception";
 
 export type CostReviewAction = "invoice_amounts" | "invoice_quantity" | "record_invoice" | "apply_supplier"
-  | "repair_origin" | "repair_links" | "review_history" | "update_shipment" | "measurements" | "tax_treatment" | "receipt_invoice" | "accounting";
+  | "repair_origin" | "repair_links" | "review_history" | "update_shipment" | "measurements" | "tax_treatment" | "receipt_invoice" | "receive_goods" | "accounting";
 export interface CostReviewTask {
   id: string;
   title: string;
@@ -64,7 +64,11 @@ export function supplierCostReviewTasks(line: PurchaseLineCostStatus): CostRevie
     if (issues.some(issue=>issue.code.startsWith("RECEIPT_INVOICE"))) {
       add({ title:"Review receipt invoice assignments", explanation:"The saved receipt and invoice coverage no longer matches the current documents. Review the affected assignments before replacing inventory costs.", action:"receipt_invoice" },"receipt_invoice");
     } else if ((coverage.unassignedInvoicePieces ?? 0)>0) {
-      add({ title:"Assign invoice costs to receipts", explanation:`${quantity(coverage.unassignedInvoicePieces!)} invoiced pieces are not assigned to a receipt. Other pieces keep their provisional PO costs. Review the exact changes before approving.`, action:"receipt_invoice" },"receipt_invoice");
+      if (coverage.receipts.some(receipt => receipt.provisionalPieces > 0)) {
+        add({ title:"Assign invoice costs to receipts", explanation:`${quantity(coverage.unassignedInvoicePieces!)} invoiced pieces are not assigned to a receipt. Other pieces keep their provisional PO costs. Review the exact changes before approving.`, action:"receipt_invoice" },"receipt_invoice");
+      } else if (!line.lots.some(lot => lot.origin === "unproven")) {
+        add({title:"Receive the invoiced goods",explanation:"The remaining invoice pieces have no unassigned received batch. Record their actual receipt, then assign the invoice cost. Existing receipt costs stay unchanged.",action:"receive_goods"},"receiving");
+      }
     } else if ((coverage.provisionalPieces ?? 0)>0) {
       add({ title:"Remaining pieces use provisional PO costs", explanation:`${quantity(coverage.provisionalPieces!)} pieces still use the PO estimate. Record and approve their supplier invoice, then assign it to the receipt. Previously assigned receipt costs stay unchanged.`, action:"record_invoice" },"provisional");
     }

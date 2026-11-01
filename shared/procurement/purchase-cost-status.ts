@@ -116,6 +116,14 @@ export type PurchaseLineCostStatus = z.infer<
 >;
 export type PurchaseCostStatus = z.infer<typeof purchaseCostStatusSchema>;
 
+/** No invoice-to-inventory action exists for goods returned before acceptance.
+ * Historical lines first need a proved receipt origin; current-policy lines
+ * expose their own frozen receipt destinations directly. */
+export function hasReceiptInvoiceCostDestinations(line: PurchaseLineCostStatus): boolean {
+  return !line.components.some(component => component.inventoryEffect)
+    && (line.receiptCosting ? line.receiptCosting.receipts.length > 0 : line.lots.some(lot => lot.origin === "receipt"));
+}
+
 /** This uses the same posting decision as landed costs. Product and packaging
  * never inherit a shipment approval: each component needs its own application. */
 export function purchaseComponentPostingStatus(input: {

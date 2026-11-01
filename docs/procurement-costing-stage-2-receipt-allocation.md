@@ -1,6 +1,6 @@
 # Receipt-specific supplier invoice costing
 
-Status: implementation in progress on PR #1979; no production activation or acceptance claimed.
+Status: locally verified implementation on PR #1979; hosted CI and review remain required. No production activation or acceptance claimed.
 
 Confirmed policy: each receipt keeps its own invoice cost. Uncovered pieces keep the provisional PO source. Explicit admin approval binds the exact before/after; receiving, shipments, stock counts, supplier bills and payments retain their owning facts.
 
@@ -31,9 +31,12 @@ Only completed receipts with a proved saved piece conversion and complete cost-o
 - Full receipt/AP/freight suite: 325 tests passed. The additional two policy-edit cases passed in the 21-case targeted run; these scopes overlap and are not added together. These are owned disposable SQL fixtures, not production data.
 - PO entry HTTP/SQL recovery: 22 passed in CI's UTC timezone. Inline creation and adding a new draft line enable the policy; editing an existing historical line preserves its original policy.
 - Desktop/mobile mocked browser: all 18 passed, including lost-response/reopened approval recovery, definite permission rejection and saved approval details. Visual review found cramped mobile amount spacing; explicit column spacing is now included.
-- Production, server-test and client-test TypeScript projects passed; the production build passed. Final changes are being checked again before review.
+- Production, server-test and client-test TypeScript projects passed; the production build passed. The final shared action refinement also passed 244 purchasing UI/domain and money-boundary tests; final-head hosted compilation remains part of CI.
 - The actual migration's four PostgreSQL cases passed, including adjacent intervals and both overlap exclusions. The new suite is registered in the shard inventory and its independent coverage guard.
 - The ownership baseline adds only `procurement.receipt_invoice_cost_allocations -> modules/procurement`; existing public audit ownership is retained. Latest main `b80898c9b` is incorporated; its changes concern customer-account live-theme configuration.
 - Hosted preflight identified two unchecked native conversions. They now use the existing exact readers; the money-boundary/domain repeat passed 27 tests without new exemptions.
+- Rebuilt connected browser acceptance passed all four desktop/mobile receipt and tax cases, including clean database teardown. The receipt case receives two batches through the real UI, previews different invoice prices without writes, approves once, checks unchanged counts/bills and reads the original approval from PO History. Unreceived invoice pieces lead to receiving; returns with no accepted inventory do not offer a receipt-cost assignment. Missing return proof remains in review.
 
-Remaining gates: final affected SQL/types/connected browser runs, final-head hosted CI and a ready-for-review PR. One concurrent local browser run completed its assertions but failed database cleanup; isolated acceptance must confirm cleanup before claiming success. No live financial or inventory record has been changed. Merge, deployment and production acceptance remain separate gates.
+An earlier local browser run completed its assertions but failed cleanup while PostgreSQL was performing a 66-second checkpoint (recorded in the owned cluster log). After a normal checkpoint, the complete four-case repeat passed without changing cleanup checks or durability settings. No connected test databases or application connections remained. The owned test cluster stopped cleanly at 16:41:31 local on 2026-11-01.
+
+Remaining gates: final-head hosted CI, review, merge, deployment and production acceptance. No live financial or inventory record has been changed. This slice does not close the plan's remaining combined/credit/header-source or external recognition work.

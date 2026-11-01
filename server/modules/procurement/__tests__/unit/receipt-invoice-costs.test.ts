@@ -176,6 +176,9 @@ describe("receipt-specific supplier source and exact intervals", () => {
         title: "Assign invoice costs to receipts",
       }),
     ]);
+    const withoutReceivedCapacity=structuredClone(line);
+    withoutReceivedCapacity.receiptCosting!.receipts=[];
+    expect(supplierCostReviewTasks(withoutReceivedCapacity)).toEqual([expect.objectContaining({action:"receive_goods",title:"Receive the invoiced goods"})]);
     line.receiptCosting!.unassignedInvoicePieces = 0;
     expect(supplierCostReviewTasks(line)).toEqual([
       expect.objectContaining({
