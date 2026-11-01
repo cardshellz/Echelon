@@ -1,4 +1,4 @@
-import type { Express, Request, Response } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import {
   shopifyProductConnectionExecuteSchema, shopifyProductConnectionRequestSchema,
@@ -46,6 +46,18 @@ function actor(req: Request): string {
   return `user:${id}`;
 }
 
+// Linking now admits a durable ATP sync. Check the initiating operator's
+// activation permission at both review and admission, before any provider write.
+function requireLinkInventoryActivation(req: Request, res: Response, next: NextFunction) {
+  if (req.body?.mode === "link" || req.body?.request?.mode === "link") {
+    return requirePermission("inventory_planning", "activate")(req, res, error => {
+      if (error) return next(error);
+      return requirePermission("inventory_planning", "view")(req, res, next);
+    });
+  }
+  next();
+}
+
 export function registerShopifyProductConnectionRoutes(app: Express, dependencies: {
   service?: ShopifyProductConnectionService;
 } = {}): void {
@@ -67,13 +79,13 @@ export function registerShopifyProductConnectionRoutes(app: Express, dependencie
     try { sendResult(res, shopifyProductConnectionCommandSchema, await service.status(productIdSchema.parse(req.params.id), commandKeySchema.parse(req.params.commandKey))); }
     catch (error) { sendError(res, error); }
   });
-  app.post(`${base}/preview`, requirePermission("inventory", "edit"), requirePermission("channels", "edit"), async (req, res) => {
+  app.post(`${base}/preview`, requirePermission("inventory", "edit"), requirePermission("channels", "edit"), requireLinkInventoryActivation, async (req, res) => {
     try {
       actor(req);
       sendResult(res, shopifyProductConnectionPreviewSchema, await service.preview(productIdSchema.parse(req.params.id), shopifyProductConnectionRequestSchema.parse(req.body)));
     } catch (error) { sendError(res, error); }
   });
-  app.post(`${base}/execute`, requirePermission("inventory", "edit"), requirePermission("channels", "edit"), async (req, res) => {
+  app.post(`${base}/execute`, requirePermission("inventory", "edit"), requirePermission("channels", "edit"), requireLinkInventoryActivation, async (req, res) => {
     try {
       const result = await service.submit(productIdSchema.parse(req.params.id), shopifyProductConnectionExecuteSchema.parse(req.body), actor(req));
       sendResult(res, shopifyProductConnectionResultSchema, result, result.command.state === "complete" ? 200 : 202);
