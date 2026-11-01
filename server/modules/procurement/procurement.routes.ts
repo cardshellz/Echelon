@@ -1,3 +1,4 @@
+import { registerReceiptInvoiceCostRoutes } from "./receipt-invoice-costs.routes";
 import { registerPurchasePipelineRoutes } from "./purchase-pipeline.routes";
 import { registerPurchaseTaxRoutes } from "./purchase-tax.routes";
 import { db } from "../../db";
@@ -29,6 +30,7 @@ import { registerPurchaseForecastBacktestingRoutes } from "./purchase-forecast-b
 
 export function registerPurchasingRoutes(app: Express) {
   registerPurchaseTaxRoutes(app);
+  registerReceiptInvoiceCostRoutes(app);
   registerDocumentRelationshipRoutes(app, createDocumentRelationshipService(createDocumentRelationshipRepository(db)));
   // ===== VENDORS API =====
   

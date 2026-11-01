@@ -1,3 +1,5 @@
+import { sql } from "drizzle-orm";
+import { refreshReceiptCostProvisionalForLine } from "./purchase-cost-application.service";
 import { recordCostRevision } from "./cost-source-revision.repository";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
 import { costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../inventory/infrastructure/cost-evidence.repository";
@@ -36,6 +38,10 @@ export async function applyShipmentCostRevisions(tx: CostEvidenceTransaction, sh
   const { revisions, issues } = await recordShipmentCostRevisions(tx, shipmentId, actorId, now);
   const applications = [];
   for (const revision of revisions) applications.push(await applyCostRevision(tx, revision, writer, actorId, now, options));
+  const ids = [...new Set(revisions.map(row => row.contract.scope.purchaseOrderLineId))];
+  const receiptScoped = ids.length ? (await tx.execute(sql`SELECT id FROM procurement.purchase_order_lines
+    WHERE id=ANY(${sql.param(ids)}::int[]) AND receipt_costing_enabled=1`)).rows : [];
+  for (const row of receiptScoped) await refreshReceiptCostProvisionalForLine(tx, costInteger(row.id,"purchase line",1), actorId, now);
   return {
     updated: applications.filter((application) => !application.replayed).reduce((sum, application) => sum + application.lotsUpdated, 0),
     total: applications.reduce((sum, application) => sum + application.lotsUpdated, 0),

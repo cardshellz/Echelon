@@ -4,7 +4,7 @@ import { purchaseLineNeedsCostReview } from "./purchase-cost-status";
 import { formatShipmentExceptionAmount, type ShipmentCostException } from "./shipment-cost-exception";
 
 export type CostReviewAction = "invoice_amounts" | "invoice_quantity" | "record_invoice" | "apply_supplier"
-  | "repair_origin" | "repair_links" | "review_history" | "update_shipment" | "measurements" | "tax_treatment" | "accounting";
+  | "repair_origin" | "repair_links" | "review_history" | "update_shipment" | "measurements" | "tax_treatment" | "receipt_invoice" | "accounting";
 export interface CostReviewTask {
   id: string;
   title: string;
@@ -59,7 +59,17 @@ export function supplierCostReviewTasks(line: PurchaseLineCostStatus): CostRevie
     add({ title: "Check the supplier return", explanation: "The recorded return could not be verified against its cost records. There is no automatic cost retry for this case; review the saved return and invoice evidence.", action: "accounting" }, "return");
     return tasks;
   }
-  if (!line.invoices.length && line.components.some(component => component.sourceEvidence !== "confirmed")) {
+  if (line.receiptCosting) {
+    const coverage = line.receiptCosting;
+    if (issues.some(issue=>issue.code.startsWith("RECEIPT_INVOICE"))) {
+      add({ title:"Review receipt invoice assignments", explanation:"The saved receipt and invoice coverage no longer matches the current documents. Review the affected assignments before replacing inventory costs.", action:"receipt_invoice" },"receipt_invoice");
+    } else if ((coverage.unassignedInvoicePieces ?? 0)>0) {
+      add({ title:"Assign invoice costs to receipts", explanation:`${quantity(coverage.unassignedInvoicePieces!)} invoiced pieces are not assigned to a receipt. Other pieces keep their provisional PO costs. Review the exact changes before approving.`, action:"receipt_invoice" },"receipt_invoice");
+    } else if ((coverage.provisionalPieces ?? 0)>0) {
+      add({ title:"Remaining pieces use provisional PO costs", explanation:`${quantity(coverage.provisionalPieces!)} pieces still use the PO estimate. Record and approve their supplier invoice, then assign it to the receipt. Previously assigned receipt costs stay unchanged.`, action:"record_invoice" },"provisional");
+    }
+    for (const lineId of facts?.missingAmountLineIds ?? []) add({title:"Confirm the supplier amounts",explanation:"Confirm this invoice's product, packaging and tax amounts before assigning it to a receipt.",action:"invoice_amounts",invoiceLineId:lineId},`amounts:${lineId}`);
+  } else if (!line.invoices.length && line.components.some(component => component.sourceEvidence !== "confirmed")) {
     add({ title: "Record the supplier invoice", explanation: "The supplier invoice has not been approved for this product. Saved PO prices may still be used as estimates.", action: "record_invoice" }, "invoice");
   } else {
     if (facts && !facts.quantityMatches && issues.some(issue => issue.code === "INVOICE_COMPONENT_REVIEW_REQUIRED")) {
@@ -85,7 +95,7 @@ export function supplierCostReviewTasks(line: PurchaseLineCostStatus): CostRevie
   if (issues.some(issue => receiptCostHistoryCodes.has(issue.code))) {
     add({ title: "Check the original receipt", explanation: "Confirm the original receipt quantity and cost link, including any receipt reversal. Its stock costs are not yet confirmed.", action: "review_history" }, "receipt");
   }
-  const otherIssues = issues.filter(issue => !issue.code.startsWith("INVOICE_") && issue.code !== "PURCHASE_ADJUSTMENT_REVIEW"
+  const otherIssues = issues.filter(issue => !issue.code.startsWith("INVOICE_") && !issue.code.startsWith("RECEIPT_INVOICE") && issue.code !== "PURCHASE_ADJUSTMENT_REVIEW"
     && !historyCodes.has(issue.code) && !receiptCostHistoryCodes.has(issue.code) && issue.code !== "PURCHASE_TAX_TYPE_REQUIRED");
   if (otherIssues.length) add({ title: "Check the recorded cost", explanation: otherIssues.map(issue => issue.message).join(" "), action: "accounting" }, "record");
   if (!tasks.length) add({ title: "Apply the supplier costs", explanation: "The supplier amounts are recorded. Apply them to the remaining stock and verified sales; review the saved result afterwards.", action: "apply_supplier" }, "apply");

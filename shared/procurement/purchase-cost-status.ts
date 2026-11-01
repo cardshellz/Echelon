@@ -1,3 +1,4 @@
+import { receiptInvoiceCostRowSchema } from "./receipt-invoice-costs";
 import { z } from "zod";
 import { canonicalJson } from "../utils/canonical-json";
 import { costInventoryEffectSchema, costIssueSchema, type CostInventoryEffect } from "./cost-source-contracts";
@@ -56,6 +57,8 @@ export const purchaseLineCostStatusSchema = z
     sku: z.string().nullable(),
     poNumber: z.string().nullable().optional(),
     reviewFacts: supplierCostReviewFactsSchema.optional(),
+    receiptCosting: z.object({ receipts: z.array(receiptInvoiceCostRowSchema), provisionalPieces: z.number().int().nonnegative().safe().nullable(),
+      unassignedInvoicePieces: z.number().int().nonnegative().safe().nullable() }).strict().optional(),
     components: z.array(purchaseCostComponentStatusSchema).length(2),
     invoices: z.array(
       z.object({

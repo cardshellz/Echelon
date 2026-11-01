@@ -157,6 +157,10 @@ async function main(): Promise<void> {
       try { res.json(await navigation.readConnectedNavigationState(context.pool)); }
       catch (error) { next(error); }
     });
+    app.post("/__test/receipt-invoice-workflow", async (_req, res, next) => {
+      try { await workflow.seedReceiptInvoiceWorkflow(context.pool); res.json({ ready: true }); }
+      catch (error) { next(error); }
+    });
     app.get("/__test/workflow-state", async (_req, res, next) => {
       try { res.json(await workflow.readConnectedWorkflowState(context.pool)); }
       catch (error) { next(error); }

@@ -31,7 +31,7 @@ export async function readTaxedShipmentSupplierCosts(tx: CostEvidenceTransaction
   for (const line of lines) {
     const source = line.purchaseOrderLineId == null ? null : sources.get(line.purchaseOrderLineId);
     if (!source) continue; // The existing product-source validation owns the missing link.
-    const result = projectTaxedShipmentSupplierCost(source, line.qtyShipped, shipmentHasTax);
+    const result = projectTaxedShipmentSupplierCost(source, line.qtyShipped, shipmentHasTax, line.id);
     if (result) values.set(line.id, result);
   }
   return values;

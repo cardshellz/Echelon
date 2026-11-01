@@ -2355,6 +2355,11 @@ export function createPurchasingService(
   }
 
   async function updateLine(lineId: number, updates: Record<string, any>, userId?: string) {
+    if ("receiptCostingEnabled" in updates || "receipt_costing_enabled" in updates) {
+      throw new PurchasingError("Receipt invoice costing policy cannot be changed by a PO line edit.", 400, {
+        code: "RECEIPT_COST_POLICY_NOT_EDITABLE",
+      });
+    }
     const line = await storage.getPurchaseOrderLineById(lineId);
     if (!line) throw new PurchasingError("PO line not found", 404);
 

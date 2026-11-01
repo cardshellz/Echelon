@@ -58,7 +58,7 @@ export function createPurchaseTaxChangeService(database: AmendmentDatabase, ship
       // A quote-tax edit cannot take ownership back from unchanged invoices or
       // apply an unchanged legacy averaged source to newly linked stock.
       if (previous && costFingerprint(selected) === costFingerprint(resolvePurchaseCostSource(previous))) continue;
-      if (current.approvedInvoices.length > 1 && selected.some(row => row.evidence === "confirmed")) {
+      if (!current.receiptCosting && current.approvedInvoices.length > 1 && selected.some(row => row.evidence === "confirmed")) {
         throw new PurchaseTaxError("Several invoices cover this line. Receipt-specific cost allocation is required before changing its tax cost; this editor cannot average their prices.", "PURCHASE_TAX_RECEIPT_ALLOCATION_REQUIRED");
       }
       const result = await reconcilePurchaseCostEvidence(tx, lineId, writer, actorId, at);
