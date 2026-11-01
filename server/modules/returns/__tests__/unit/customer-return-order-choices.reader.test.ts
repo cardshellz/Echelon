@@ -23,6 +23,25 @@ function fixture() {
   return { owned, row, read, reader };
 }
 describe("local return order chooser", () => {
+  it.each(["ready", "refreshing", "failed"] as const)("omits channel-cancelled purchases before a %s cache can advertise them", async state => {
+    const s = fixture();
+    s.row.state = state;
+    const result = await s.reader.read([{ ...s.owned, cancelledAt: NOW.toISOString() }]);
+    expect(result).toEqual({ orders: [], unavailableOrderCount: 0 });
+    expect(s.read).not.toHaveBeenCalled();
+  });
+  it("retains non-cancelled purchases when cancellation evidence is absent or explicitly null", async () => {
+    const s = fixture();
+    expect((await s.reader.read([{ ...s.owned, cancelledAt: null }])).orders).toHaveLength(1);
+    expect((await s.reader.read([s.owned])).orders).toHaveLength(1);
+  });
+  it("filters a mixed page without disturbing the remaining purchase/cache identities", async () => {
+    const s = fixture();
+    const result = await s.reader.read([{ ...s.owned, omsOrderId: 8, externalOrderId: "8000",
+      externalOrderNumber: "TEST-CANCELLED", cancelledAt: NOW.toISOString() }, s.owned]);
+    expect(result.orders.map(order => order.omsOrderId)).toEqual([7]);
+    expect(s.read.mock.calls[0][0].orders).toEqual([{ externalOrderId: "7000", orderReference: s.owned.externalOrderNumber }]);
+  });
   it("uses one ownership-scoped cache lookup without exposing its full document", async () => {
     const s = fixture(); const result = await s.reader.read([s.owned]);
     expect(s.read).toHaveBeenCalledExactlyOnceWith({ channelId: 36, externalCustomerId: "123",

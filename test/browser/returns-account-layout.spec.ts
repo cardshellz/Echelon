@@ -189,6 +189,7 @@ async function assertFrame(page: Page) {
   await expect(page.locator(".csz-return-brand")).toHaveCount(1);
   await expect(page.locator(".csz-dialog-heading")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Close returns" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Back to shopping", exact: true })).toHaveCount(0);
   const measurements = await page.locator(".csz-return-ui").evaluate(root => {
     const heading = root.querySelector("h1")!;
     const title = root.querySelector(".csz-return-item-title");

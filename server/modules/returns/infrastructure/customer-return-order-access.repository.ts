@@ -16,6 +16,7 @@ const candidateRow = z.object({
   external_customer_id: z.string().min(1).max(100).nullable(),
   external_order_id: z.string().min(1).max(100),
   external_order_number: z.string().min(1).max(50),
+  cancelled_at: z.coerce.date().nullable().optional(),
 }).strict();
 
 const queryInput = z.object({
@@ -30,12 +31,14 @@ const ownedInput = customerReturnOwnedOrderInputSchema.extend({ channelId: query
 const listInput = customerReturnOrderListInputSchema.extend({ channelId: queryInput.shape.channelId,
   externalCustomerId: z.string().min(1).max(100) });
 const candidateColumns = `oo.id AS oms_order_id, oo.channel_id, oo.external_customer_id,
-  oo.external_order_id, oo.external_order_number`;
+  oo.external_order_id, oo.external_order_number,
+  oo.cancelled_at AT TIME ZONE 'UTC' AS cancelled_at`;
 
 function candidates(rows: unknown, maximum: number): CustomerReturnOrderCandidate[] {
   return z.array(candidateRow).max(maximum).parse(rows).map(row => ({
     omsOrderId: row.oms_order_id, channelId: row.channel_id, externalCustomerId: row.external_customer_id,
     externalOrderId: row.external_order_id, externalOrderNumber: row.external_order_number,
+    ...(row.cancelled_at === undefined ? {} : { cancelledAt: row.cancelled_at?.toISOString() ?? null }),
   }));
 }
 
@@ -102,7 +105,8 @@ export class PostgresCustomerReturnOrderAccessRepository implements CustomerRetu
       // Two canonical rows are sufficient to detect ambiguity. Never choose the first.
       const result = await this.database.query(`
         SELECT oo.id AS oms_order_id, oo.channel_id, oo.external_customer_id,
-               oo.external_order_id, oo.external_order_number
+               oo.external_order_id, oo.external_order_number,
+               oo.cancelled_at AT TIME ZONE 'UTC' AS cancelled_at
         FROM oms.oms_orders oo
         WHERE oo.channel_id = $1
           AND oo.external_order_number = ANY($2::text[])

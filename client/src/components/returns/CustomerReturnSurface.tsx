@@ -1,5 +1,5 @@
 import { createContext, forwardRef, type ReactNode } from "react";
-import { Package, X } from "lucide-react";
+import { ArrowLeft, Package, X } from "lucide-react";
 import "./customer-return.css";
 
 // Packing tools replace the current step inside the account dialog. They must
@@ -14,6 +14,7 @@ export const CustomerReturnSurface = forwardRef<
     closeDisabled?: boolean;
     label?: string;
     testId?: string;
+    shoppingHref?: string;
   }
 >(function CustomerReturnSurface(
   {
@@ -22,6 +23,7 @@ export const CustomerReturnSurface = forwardRef<
     closeDisabled = false,
     label = "Customer return experience",
     testId,
+    shoppingHref,
   },
   ref,
 ) {
@@ -33,12 +35,18 @@ export const CustomerReturnSurface = forwardRef<
         aria-label={label}
         data-testid={testId}
       >
-        <header className="csz-return-brand">
+        <header className="csz-return-brand" data-shopping={Boolean(shoppingHref && !onClose)}>
           <div className="csz-return-brand-name">
             <Package aria-hidden="true" size={24} />
             <span>CARD SHELLZ</span>
             <span className="csz-return-brand-section">Returns</span>
           </div>
+          {shoppingHref && !onClose && (
+            <a className="csz-return-shopping" href={shoppingHref}>
+              <ArrowLeft aria-hidden="true" size={16} />
+              Back to shopping
+            </a>
+          )}
           {onClose && (
             <button
               type="button"
