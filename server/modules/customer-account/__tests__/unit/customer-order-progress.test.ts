@@ -42,13 +42,13 @@ describe("adversarial separation of payment, original delivery and returns", () 
   });
   it("isolates a cancellation-receipt outage to refunds",async()=>{
     const report=vi.fn();const reader=new CustomerAccountProgressService({delivery:{read:async()=>new Map([[10,{delivery:null,packages:[]}]])},
-      returns:{read:async()=>new Map([[10,{returns:[],refunds:[]}]])},cancellations:{read:async()=>{throw new Error("unavailable");}},report});
+      returns:{read:async()=>new Map([[10,{returns:[],refunds:[{key:"return:fixture",reference:"Return",status:{code:"processing",label:"Refund processing"}}]}]])},cancellations:{read:async()=>{throw new Error("unavailable");}},report});
     expect((await reader.read(scope,now)).get(10)?.unavailable).toEqual(["refunds"]);
     expect(report).toHaveBeenCalledWith({code:"CUSTOMER_ACCOUNT_CANCELLATION_REFUNDS_PROGRESS_UNAVAILABLE"});
   });
   it("isolates oversized combined refund history without dropping delivery or physical returns",async()=>{
     const refunds=Array.from({length:200},(_,i)=>({key:`return:${i}`,reference:`Return ${i}`,status:{code:"not_started" as const,label:"Not started"}}));
-    const reader=new CustomerAccountProgressService({delivery:{read:async()=>new Map([[10,{delivery:delivered,packages:[]}]])},
+    const reader=new CustomerAccountProgressService({delivery:{read:async()=>new Map([[10,{delivery:delivered,packages:[{key:"original",trackingNumber:null,status:delivered}]}]])},
       returns:{read:async()=>new Map([[10,{returns:[],refunds}]])},
       cancellations:{read:async()=>new Map([[10,[{key:"cancellation:fixture",reference:"Order cancellation",status:{code:"processing",label:"Refund processing"}}]]])},report:vi.fn()});
     expect((await reader.read(scope,now)).get(10)).toMatchObject({delivery:delivered,returns:[],refunds:[],unavailable:["refunds"]});

@@ -95,6 +95,7 @@ export class CustomerAccountProgressService
       }
       const refunds = customerRefundActivitiesSchema.safeParse([...(returned?.refunds ?? []), ...(cancellationRefunds?.success ? cancellationRefunds.data : [])]);
       const uniqueRefunds = refunds.success && new Set(refunds.data.map(item => item.key)).size === refunds.data.length;
+      const refundsUnavailable = returned === undefined || !cancellationRefunds?.success || !uniqueRefunds;
       if (!uniqueRefunds) this.dependencies.report({ code: "CUSTOMER_ACCOUNT_REFUND_PROGRESS_INVALID" });
       output.set(
         order.omsOrderId,
@@ -102,7 +103,7 @@ export class CustomerAccountProgressService
           delivery: shipping?.delivery ?? null,
           packages: shipping?.packages ?? [],
           returns: returned?.returns ?? [],
-          refunds: refunds.success && uniqueRefunds ? refunds.data : [],
+          refunds: !refundsUnavailable && refunds.success ? refunds.data : [],
           unavailable: [...new Set([
             ...(!shipping ? ["delivery"] : []),
             ...(returned === undefined ? ["returns", "refunds"] : []),

@@ -41,6 +41,8 @@ export function refundActivityLabel(
   progress: CustomerOrderProgress | null | undefined,
 ): string | null {
   if (financialStatus.toLowerCase() === "refunded") return null;
+  if (progress === null || progress?.unavailable.includes("refunds"))
+    return "Refund status unavailable";
   const statuses = progress?.refunds.map((refund) => refund.status.code) ?? [];
   if (statuses.includes("failed")) return "Refund needs attention";
   if (statuses.includes("processing")) return "Refund processing";
@@ -51,7 +53,5 @@ export function refundActivityLabel(
     )
   )
     return "Refund issued";
-  if (progress === null || progress?.unavailable.includes("refunds"))
-    return "Refund status unavailable";
   return null;
 }
