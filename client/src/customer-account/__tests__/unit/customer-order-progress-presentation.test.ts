@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { customerOrderProgressSchema, type CustomerReturnProgressStatus } from "@shared/customer-account/order-progress";
-import { refundActivityLabel, returnProgressLabel, orderDeliveryLabel } from "../../customer-order-progress-presentation";
+import { customerPaymentPresentation, refundActivityLabel, returnProgressLabel, orderDeliveryLabel } from "../../customer-order-progress-presentation";
 
 function progress(codes: CustomerReturnProgressStatus["code"][] = []) {
   return customerOrderProgressSchema.parse({ delivery: null, packages: [], refunds: [], returns: codes.map((code, index) => ({
@@ -9,6 +9,24 @@ function progress(codes: CustomerReturnProgressStatus["code"][] = []) {
   })) });
 }
 describe("independent compact customer status labels", () => {
+  it.each([
+    ["Paid", "processing", "Refund pending", null],
+    ["Partially refunded", "processing", "Refund pending", "Partially refunded"],
+    ["Paid", "failed", "Refund needs attention", null],
+    ["Paid", "completed", "Refund issued", null],
+    ["Refunded", "processing", "Refunded", null],
+    ["Paid", "not_required", "Paid", null],
+  ] as const)("presents %s with %s refund evidence as %s", (financialStatus, code, label, detail) => {
+    const data = { ...progress(), refunds: [{ key: "cancellation:fixture", reference: "Order cancellation", status: { code, label: code } }] };
+    expect(customerPaymentPresentation(financialStatus, data)).toEqual({ label, detail });
+  });
+  it("does not infer a refund from missing evidence, a physical return, or a failed owner read", () => {
+    expect(customerPaymentPresentation("Paid", undefined)).toEqual({ label: "Paid", detail: null });
+    expect(customerPaymentPresentation("Paid", progress(["received"]))).toEqual({ label: "Paid", detail: null });
+    expect(customerPaymentPresentation("Paid", null)).toEqual({ label: "Paid", detail: "Refund status unavailable" });
+    expect(customerPaymentPresentation("Paid", { ...progress(), unavailable: ["refunds"] })).toEqual({ label: "Paid", detail: "Refund status unavailable" });
+    expect(customerPaymentPresentation("Refunded", null)).toEqual({ label: "Refunded", detail: null });
+  });
   it("keeps order cancellation out of delivery while preserving actual delivery on a cancelled purchase",()=>{
     expect(orderDeliveryLabel(true,{code:"cancelling",label:"Cancellation processing"},undefined,"Not shipped")).toBeNull();
     expect(orderDeliveryLabel(true,{code:"on_hold",label:"On hold"},progress(),"Not shipped")).toBeNull();

@@ -1,6 +1,6 @@
 import type { CustomerOrderProgress } from "@shared/customer-account/order-progress";
 import {
-  refundActivityLabel,
+  customerPaymentPresentation,
   returnProgressLabel,
 } from "./customer-order-progress-presentation";
 
@@ -16,15 +16,15 @@ export function CustomerOrderProgressSummary({
   progress?: CustomerOrderProgress | null;
 }) {
   const returned = returnProgressLabel(progress),
-    refund = refundActivityLabel(financialStatus, progress);
+    payment = customerPaymentPresentation(financialStatus, progress);
   return (
     <dl className="csz-order-tracks">
       {cancelled && <div><dt>Order</dt><dd>Cancelled</dd></div>}
       <div>
         <dt>Payment</dt>
         <dd>
-          {financialStatus}
-          {refund && <small>{refund}</small>}
+          {payment.label}
+          {payment.detail && <small>{payment.detail}</small>}
         </dd>
       </div>
       {deliveryLabel && <div>

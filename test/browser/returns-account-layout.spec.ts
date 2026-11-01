@@ -18,6 +18,8 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
   failRefreshOnce?: boolean;
   cancellationFlow?: boolean;
   loseCancellationReply?: boolean;
+  cancelledOnLoad?: boolean;
+  missingRefundProgress?: boolean;
 } = {}) {
   const service = new CustomerReturnPreviewService();
   const { mode: _mode, scenarioId: _scenario, ...fields } = service.lookup({ scenarioId: "split_delivered", orderReference: "TEST-1001" });
@@ -54,7 +56,8 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     };
   });
   const calls: CustomerAccountRequest[] = [];
-  let cancellationPhase: "open" | "refunding" | "completed" = "open", cancellationRequest: string | null = null, cancellationPosts = 0, summaryReads = 0;
+  let cancellationPhase: "open" | "refunding" | "completed" = options.cancelledOnLoad ? "refunding" : "open", cancellationRequest: string | null = null, cancellationPosts = 0, summaryReads = 0;
+  let refundProgressAvailable = !options.missingRefundProgress, failSummary = false;
   const cancellationResult = () => ({operationId:"40000000-0000-4000-8000-000000000001",requestKey:cancellationRequest,
     omsOrderId:10,orderNumber:"#TEST-1001",currency:"USD",status:cancellationPhase === "completed" ? "completed" : "refunding",
     refundCents:741,refundStatus:cancellationPhase === "completed" ? "completed" : "pending",
@@ -88,10 +91,12 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       return route.fulfill({json:cancellationResult()});
     }
     if (input.path === "/account/orders/10/cancellation/status") return route.fulfill({json:cancellationResult()});
-    if (input.path === "/account/order-summaries") { summaryReads++;return route.fulfill({ json: {
+    if (input.path === "/account/order-summaries") { summaryReads++;
+      if (failSummary) return route.fulfill({status:503,json:{error:{code:"CUSTOMER_ACCOUNT_REQUEST_FAILED"}}});
+      return route.fulfill({ json: {
       orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10, currency: "USD", totalCents: cancellationPhase === "open" ? 741 : 0,
         financialStatus:cancellationPhase === "completed" ? "Refunded" : "Paid", cancelled:cancellationPhase !== "open", fulfillment,
-        ...(options.cancellationFlow ? {progress:{unavailable:[],delivery:null,packages:[],returns:[],refunds:cancellationPhase === "open" ? [] : [
+        ...(options.cancellationFlow ? {progress:{unavailable:[],delivery:null,packages:[],returns:[],refunds:cancellationPhase === "open" || !refundProgressAvailable ? [] : [
           {key:"cancellation:40000000-0000-4000-8000-000000000001",reference:"Order cancellation",status:{code:cancellationPhase === "completed" ? "completed" : "processing",label:cancellationPhase === "completed" ? "Refund issued" : "Refund processing"}}]}} : {})}],
       unavailableExternalOrderIds: [], statusUnavailable: false,
     } }); }
@@ -169,13 +174,14 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     </main><div id="csz-customer-account-tools"></div><script type="application/json" id="csz-customer-account-config">${JSON.stringify({ themeId: "174740308127", customerId: "100", proxyPath: "/apps/echelon-returns", loginPath: "/account/login" })}</script><script src="/return-layout-assets/csz-customer-account.js"></script></body></html>` }));
   await page.goto("/__return-account-layout");
   await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
-  await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled();
+  if (!options.cancelledOnLoad) await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled();
   if (options.openReturn !== false) {
     await page.getByRole("button", { name: "Return items", exact: true }).click();
     await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
   }
   return { calls, errors, submitCount: () => submitCount, actionReads: () => actionReads, completeWorkflow: () => { workflowReady = true; },
-    completeCancellation:()=>{cancellationPhase="completed";},summaryReads:()=>summaryReads,cancellationPosts:()=>cancellationPosts };
+    completeCancellation:()=>{cancellationPhase="completed";},summaryReads:()=>summaryReads,cancellationPosts:()=>cancellationPosts,
+    exposeRefundProgress:()=>{refundProgressAvailable=true;},failSummary:(fail:boolean)=>{failSummary=fail;} };
 }
 
 async function assertFrame(page: Page) {
@@ -203,6 +209,57 @@ async function pack(page: Page, quantity = "1") {
   await page.getByRole("combobox", { name: "Box size for box 1", exact: true }).selectOption({ index: 1 });
 }
 
+for (const signal of ["focus", "visibilitychange"] as const) test(`returning to an older account summary discovers the pending refund and settles automatically (${signal})`,async({page},info)=>{
+  await page.clock.install({time:new Date()});
+  const f=await fixture(page,{openReturn:false,heldOrder:true,cancellationFlow:true,cancelledOnLoad:true,missingRefundProgress:true,actionState:"failed"});
+  await page.getByRole("button",{name:"Close order options",exact:true}).click();
+  const row=page.locator("[data-csz-account-order]"), payment=row.locator("[data-csz-order-financial-status]");
+  await expect(row.locator("[data-csz-order-order-track]")).toBeVisible();
+  await expect(payment).toHaveText("Paid");
+  // Reproduce the observed stale tab: cached actions cannot identify the active
+  // cancellation and the original summary predates refund enrichment.
+  f.exposeRefundProgress();const before=f.summaryReads();
+  await page.clock.fastForward(20_000);expect(f.summaryReads()).toBe(before);
+  await page.evaluate(event=>{
+    const target=event==="focus"?window:document;
+    target.dispatchEvent(new Event(event));target.dispatchEvent(new Event(event));
+  },signal);
+  await expect(payment).toHaveText("Refund pending");
+  expect(f.summaryReads()).toBe(before+1);
+  await page.screenshot({path:info.outputPath(`refund-pending-${signal}.png`),fullPage:false});
+  await page.getByRole("button",{name:"Manage order #TEST-1001",exact:true}).click();
+  await expect(page.getByRole("dialog").getByRole("definition").filter({hasText:/^Refund pending$/})).toHaveCount(1);
+  await page.getByRole("button",{name:"Close order options",exact:true}).click();
+  f.failSummary(true);await page.clock.fastForward(6_000);
+  await expect(payment).toHaveText("Refund pending"); // Failed refresh must not restore Paid.
+  f.failSummary(false);f.completeCancellation();await page.clock.fastForward(6_000);
+  await expect(payment).toHaveText("Refunded");
+  await expect(row.locator("[data-csz-order-delivery-track]")).toBeHidden();
+  const completed=f.summaryReads();await page.clock.fastForward(20_000);expect(f.summaryReads()).toBe(completed);
+  await page.screenshot({path:info.outputPath(`refund-settled-${signal}.png`),fullPage:false});
+  expect(f.cancellationPosts()).toBe(0);expect(f.calls.filter(call=>call.commandKey)).toEqual([]);
+  expect(f.errors).toEqual([]);
+});
+
+test("a hidden account cannot refresh summaries until it becomes visible",async({page})=>{
+  await page.clock.install({time:new Date()});
+  const f=await fixture(page,{openReturn:false,heldOrder:true,cancellationFlow:true,cancelledOnLoad:true,missingRefundProgress:true,actionState:"failed"});
+  await page.getByRole("button",{name:"Close order options",exact:true}).click();
+  await expect(page.locator("[data-csz-order-financial-status]")).toHaveText("Paid");
+  f.exposeRefundProgress();const before=f.summaryReads();
+  await page.evaluate(()=>{
+    Object.defineProperty(document,"visibilityState",{configurable:true,value:"hidden"});
+    window.dispatchEvent(new Event("focus"));document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.fastForward(6_000);expect(f.summaryReads()).toBe(before);
+  await page.evaluate(()=>{
+    Object.defineProperty(document,"visibilityState",{configurable:true,value:"visible"});
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(page.locator("[data-csz-order-financial-status]")).toHaveText("Refund pending");
+  expect(f.calls.filter(call=>call.commandKey)).toEqual([]);
+});
+
 for(const lostReply of [false,true]) test(`account cancellation updates the list through refund settlement after closing the panel (lost reply=${lostReply})`,async({page},info)=>{
   await page.clock.install({time:new Date()});
   const f=await fixture(page,{openReturn:false,heldOrder:true,cancellationFlow:true,loseCancellationReply:lostReply});
@@ -214,11 +271,11 @@ for(const lostReply of [false,true]) test(`account cancellation updates the list
   const row=page.locator("[data-csz-account-order]");
   await expect(row.locator("[data-csz-order-order-track]")).toBeVisible();
   await expect(row.locator("[data-csz-order-delivery-track]")).toBeHidden();
-  await expect(row.locator("[data-csz-order-financial-status]")).toContainText("Refund processing");
+  await expect(row.locator("[data-csz-order-financial-status]")).toHaveText("Refund pending");
   await expect(row.locator("[data-csz-order-total]")).toContainText("$0.00");
   f.completeCancellation();await page.clock.fastForward(6_000);
   await expect(row.locator("[data-csz-order-financial-status]")).toContainText("Refunded");
-  await expect(row.locator("[data-csz-order-financial-status]")).not.toContainText("Refund processing");
+  await expect(row.locator("[data-csz-order-financial-status]")).not.toContainText("Refund pending");
   const reads=f.summaryReads();await page.clock.fastForward(20_000);expect(f.summaryReads()).toBe(reads);
   await page.getByRole("button",{name:"Manage order #TEST-1001",exact:true}).click();
   const panel=page.getByRole("dialog");

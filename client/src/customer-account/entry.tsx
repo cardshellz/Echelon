@@ -350,6 +350,26 @@ function CustomerAccount({
 
   useEffect(() => {
     if (!session) return;
+    const controller = new AbortController();
+    const refreshVisibleSummaries = () => {
+      if (document.visibilityState !== "visible" || settlementReadBusy.current) return;
+      settlementReadBusy.current = true;
+      // A tab can outlive a backend release or a refund made elsewhere. Refresh
+      // its read model on return even if its old summary had no refund activity
+      // from which to start settlement polling. This submits no command.
+      void loadSummaries(rows, controller.signal).finally(() => { settlementReadBusy.current = false; });
+    };
+    window.addEventListener("focus", refreshVisibleSummaries);
+    document.addEventListener("visibilitychange", refreshVisibleSummaries);
+    return () => {
+      controller.abort();
+      window.removeEventListener("focus", refreshVisibleSummaries);
+      document.removeEventListener("visibilitychange", refreshVisibleSummaries);
+    };
+  }, [session, rows, loadSummaries]);
+
+  useEffect(() => {
+    if (!session) return;
     const selected = rows.filter(row => {
       const summary = totals.get(row);
       return needsCancellationSettlementRefresh(summary?.status === "verified" ? summary.order : null, actions.get(row));
