@@ -272,6 +272,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/marketplace-listings/__tests__/integration/channel-identifiers-propagation.integration.test.ts",
       "server/modules/oms/__tests__/integration/channel-merchandise-quantity.integration.test.ts",
       "server/modules/oms/__tests__/integration/shopify-merchandise-refund.integration.test.ts",
+      "server/modules/catalog/__tests__/integration/product-category-update.integration.test.ts",
       "server/modules/procurement/__tests__/integration/purchase-tax-migration.integration.test.ts",
       "server/modules/procurement/__tests__/integration/receipt-invoice-migration.integration.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-guest.repository.test.ts",
