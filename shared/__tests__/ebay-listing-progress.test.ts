@@ -28,7 +28,7 @@ describe("saved eBay listing progress presentation", () => {
     const running = presentEbayListingJob({ ...job, state: "running", progress: { ...progress, queuedAhead: null, phase: "verify", phaseState: "completed" } });
     expect(running.summary).toBe("Verification recorded; saving the result");
     expect(running.summary).not.toContain("pictures verified");
-    expect(presentEbayListingJob({ ...job, state: "completed", progress }).summary).toBe("Listing and pictures verified.");
+    expect(presentEbayListingJob({ ...job, state: "completed", progress }).summary).toBe("Listing sync completed.");
     expect(presentEbayListingJob({ ...job, state: "completed", progress }).times).toEqual([]);
   });
   it("keeps durable state authoritative when evidence contains a completed step", () => {
@@ -103,7 +103,7 @@ describe("independent stock reconciliation evidence", () => {
   it("keeps completed content separate from pending stock and legacy missing evidence", () => {
     const completed = { ...job, state: "completed" as const };
     const presented = presentEbayListingJob({ ...completed, inventoryReconciliation });
-    expect(presented.summary).toBe("Listing and pictures verified.");
+    expect(presented.summary).toBe("Listing sync completed.");
     expect(presented.inventory?.summary).toBe("Checking current stock");
     expect(presented.inventory?.detail).toContain("does not confirm current stock");
     expect(presentEbayListingJob(completed).inventory).toBeNull();
@@ -127,14 +127,14 @@ describe("independent stock reconciliation evidence", () => {
     const presented = presentEbayListingJob({ ...job, state: "completed", inventoryReconciliation: {
       ...inventoryReconciliation, state: "unavailable", nextCheckAt: null, code: "PUBLICATION_RECONCILIATION_STATUS_UNAVAILABLE",
     } });
-    expect(presented.summary).toBe("Listing and pictures verified.");
+    expect(presented.summary).toBe("Listing sync completed.");
     expect(presented.inventory).toMatchObject({ summary: "Stock verification status is unavailable.", times: [] });
   });
   it.each([null, "Provider read failed: Bearer private-token"])("shows a safe stock failure and its automatic follow-up (%s)", message => {
     const presented = presentEbayListingJob({ ...job, state: "completed", inventoryReconciliation: {
       ...inventoryReconciliation, state: "needs_attention", code: "PUBLICATION_RECONCILIATION_FAILED", message,
     } });
-    expect(presented.summary).toBe("Listing and pictures verified.");
+    expect(presented.summary).toBe("Listing sync completed.");
     expect(presented.inventory?.summary).toBe("Stock check could not finish");
     expect(presented.inventory?.detail).toContain("Stock monitoring will retry automatically.");
     expect(presented.inventory?.detail).not.toContain("private-token");

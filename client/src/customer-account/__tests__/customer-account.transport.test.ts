@@ -6,6 +6,37 @@ const connection = { connectionId: 4, channelId: 2, name: "Shopify", shopDomain:
 const key = "a".repeat(43);
 const bootstrap = { session: { authenticated: true, privateTesting: true, sessionKey: key }, connection };
 describe("storefront transport reuses canonical clients", () => {
+  it("routes native chooser pagination and history through the same-origin proxy without mutation keys", async () => {
+    const request = vi.fn(async (_url: RequestInfo | URL, options?: RequestInit) => {
+      const input = JSON.parse(String(options?.body));
+      if (input.path === "/account/bootstrap") return Response.json(bootstrap);
+      return Response.json(input.path === "/returns/order-options"
+        ? { orders: [{ omsOrderId: 10, orderReference: "#TEST-1001", purchasedAt: null, eligibleItemCount: 1 }], nextBeforeOmsOrderId: null }
+        : { returns: [], nextBeforeAuthorizationId: null });
+    });
+    const api = createCustomerAccountTransport(config, request);
+    await api.bootstrap();
+    const returns = api.returns(key);
+    await returns.orderChoices(20, new AbortController().signal);
+    await returns.history(null, new AbortController().signal);
+    for (const [url, options] of request.mock.calls.slice(1)) {
+      expect(url).toBe("/apps/echelon-returns/account");
+      expect(options).toMatchObject({ credentials: "same-origin", redirect: "error", cache: "no-store" });
+      expect(JSON.parse(String(options?.body))).toMatchObject({ method: "GET", expectedCustomerId: "100", sessionKey: key });
+      expect(JSON.parse(String(options?.body)).commandKey).toBeUndefined();
+    }
+    expect(JSON.parse(String(request.mock.calls[1][1]?.body))).toMatchObject({ path: "/returns/order-options", query: { before: "20" } });
+  });
+  it("sends cache recovery to the explicit refresh path with paired identities and no financial command",async()=>{
+    const identity={externalOrderId:"99",orderReference:"#49180"};
+    const request=vi.fn(async()=>Response.json({orders:[{...identity,omsOrderId:10,state:"refreshing",snapshot:null,verifiedAt:null,validUntil:null}]}));
+    const api=createCustomerAccountTransport(config,request);
+    await api.orderActions({orders:[identity]},undefined,true);
+    const calls=request.mock.calls as unknown as [string,RequestInit][];
+    const input=JSON.parse(String(calls[0][1].body));
+    expect(input).toMatchObject({method:"POST",path:"/account/order-actions/refresh",expectedCustomerId:"100",body:{orders:[identity]}});
+    expect(input.commandKey).toBeUndefined();
+  });
   it("binds batch history and inline details to the signed session without creating a financial command key", async () => {
     const request = vi.fn(async () => Response.json(bootstrap));
     const api = createCustomerAccountTransport(config, request); await api.bootstrap();
@@ -32,6 +63,22 @@ describe("storefront transport reuses canonical clients", () => {
   it("rejects a late detail reply for a different order instead of displaying its money", async () => {
     const api = createCustomerAccountTransport(config, async () => Response.json({ externalOrderId: "98", orderReference: "#other", currency: "USD", totalCents: 917, lines: [] }));
     await expect(api.orderDetails({ externalOrderId: "99", orderReference: "#49180" })).rejects.toMatchObject({ code: "CUSTOMER_ACCOUNT_ORDER_MISMATCH" });
+  });
+  it("survives an older backend during a rolling theme deployment with one read-only compatibility retry",async()=>{
+    const request=vi.fn(async()=>Response.json({error:{code:"RETURN_CUSTOMER_INPUT_INVALID",message:"The return request is invalid."}},{status:400}));
+    request.mockResolvedValueOnce(Response.json({error:{code:"RETURN_CUSTOMER_INPUT_INVALID",message:"The return request is invalid."}},{status:400}))
+      .mockResolvedValueOnce(Response.json({orders:[{externalOrderId:"99",orderReference:"#49180",omsOrderId:null,currency:"USD",totalCents:0,cancelled:true,financialStatus:"Refunded"}],unavailableExternalOrderIds:[],statusUnavailable:false}));
+    const api=createCustomerAccountTransport(config,request);
+    expect((await api.orderSummaries({orders:[{externalOrderId:"99",orderReference:"#49180"}]})).orders[0].totalCents).toBe(0);
+    expect(request).toHaveBeenCalledTimes(2);
+    const calls=request.mock.calls as unknown as [string,RequestInit][];
+    expect(JSON.parse(String(calls[0][1].body))).toMatchObject({query:{statusDisplayVersion:"v2"}});
+    const second=JSON.parse(String(calls[1][1].body));expect(second.query??{}).toEqual({});expect(second.commandKey).toBeUndefined();
+  });
+  it.each([401,403,503])("does not downgrade progress negotiation after a %i access/service failure",async status=>{
+    const request=vi.fn(async()=>Response.json({error:{code:"RETURN_CUSTOMER_INPUT_INVALID",message:"Failure"}},{status}));
+    const api=createCustomerAccountTransport(config,request);
+    await expect(api.orderSummaries({orders:[{externalOrderId:"99",orderReference:"#49180"}]})).rejects.toThrow();expect(request).toHaveBeenCalledOnce();
   });
   it("binds rewards issuance to the same signed session and preserves its request identity", async () => {
     const request = vi.fn(async () => Response.json(bootstrap));

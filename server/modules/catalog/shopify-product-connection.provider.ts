@@ -1,10 +1,16 @@
 import { z } from "zod";
+import { STOCK_LINK_SKU_MAX_LENGTH } from "@shared/types/stock-link";
 import sanitizeHtml from "sanitize-html";
-import { formatShopifyConnectionMoney, parseShopifyConnectionMoney } from "@shared/catalog/shopify-product-connection";
+import {
+  formatShopifyConnectionMoney, parseShopifyConnectionMoney, SHOPIFY_CONNECTION_SEARCH_PAGE_SIZE,
+  shopifyProductSearchTermSchema, shopifyProductSearchCursorSchema, shopifyProductSearchResultSchema,
+  type ShopifyProductSearchResult,
+} from "@shared/catalog/shopify-product-connection";
 import type { ShopifyConnectionCredentials } from "./shopify-product-connection.repository";
 import {
   ShopifyProductConnectionError, type ShopifyConnectionCreateSpec,
   type ShopifyConnectionRemoteProduct,
+  type ShopifyConnectionSkuAssignment,
 } from "./shopify-product-connection.domain";
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -15,6 +21,16 @@ export const SHOPIFY_VARIANT_WRITE_BATCH_SIZE = 100;
 const SKU_SEARCH_BATCH_SIZE = 25;
 const METAFIELD_NAMESPACE = "echelon";
 const COMMAND_METAFIELD_KEY = "connection_command";
+
+/** Treat operator input as literal name/SKU text, never as Shopify filter syntax.
+ * Each title word is a prefix; a single SKU prefix also finds package variants. */
+export function buildShopifyProductSearchQuery(input: string): string {
+  const query = shopifyProductSearchTermSchema.parse(input);
+  const terms = query.split(/\s+/).map(term => term.replace(/[\\:()"'*<>=]/g, "\\$&").replace(/^-/, "\\-"));
+  const title = terms.map(term => `title:${term}*`).join(" AND ");
+  const sku = terms.length === 1 ? `${terms[0]}*` : searchValue(query);
+  return `(${title}) OR sku:${sku}`;
+}
 
 export class ShopifyConnectionProviderError extends ShopifyProductConnectionError {
   constructor(code: string, message: string, public readonly writeOutcome: "not_applied" | "unknown", statusCode = 502, retryable = true) {
@@ -62,7 +78,7 @@ function numericId(value: string, kind: "Product" | "ProductVariant" | "Inventor
   return match[1];
 }
 
-function gid(value: string, kind: "Product" | "Publication"): string {
+function gid(value: string, kind: "Product" | "ProductVariant" | "InventoryItem" | "Publication"): string {
   if (!/^[1-9][0-9]{0,29}$/.test(value)) throw new ShopifyProductConnectionError("SHOPIFY_ID_INVALID", "The Shopify identity is invalid.", 400);
   return `gid://shopify/${kind}/${value}`;
 }
@@ -332,7 +348,72 @@ export function createShopifyProductConnectionProvider(input: {
     if (userErrors(data.publishablePublish).length) throw new ShopifyProductConnectionError("SHOPIFY_PUBLICATION_REFUSED", "Shopify could not publish the mapped product to the selected publication. Resume the saved command.", 422, true);
   }
 
-  return { product, matches, owned, create, createVariants, capabilities, verifyMedia, publications, published, activate, publish };
+  async function search(credentials: ShopifyConnectionCredentials, input: { query: string; cursor?: string }): Promise<ShopifyProductSearchResult> {
+    const query = buildShopifyProductSearchQuery(input.query);
+    const after = input.cursor === undefined ? null : shopifyProductSearchCursorSchema.parse(input.cursor);
+    const data = await graphql(credentials, `query EchelonConnectionProductSearch($query: String!, $after: String) {
+      products(first: ${SHOPIFY_CONNECTION_SEARCH_PAGE_SIZE}, after: $after, query: $query, sortKey: ID) {
+        nodes { id title status } pageInfo { hasNextPage endCursor }
+      }
+    }`, { query, after });
+    const parsed = z.object({
+      nodes: z.array(z.object({ id: z.string(), title: z.string().min(1), status: z.enum(["ACTIVE", "DRAFT", "ARCHIVED", "UNLISTED"]) })).max(SHOPIFY_CONNECTION_SEARCH_PAGE_SIZE),
+      pageInfo: pageInfoSchema,
+    }).safeParse(data.products);
+    if (!parsed.success || parsed.data.pageInfo.hasNextPage && (!parsed.data.nodes.length || !parsed.data.pageInfo.endCursor || parsed.data.pageInfo.endCursor === after)) {
+      throw new ShopifyProductConnectionError("SHOPIFY_SEARCH_INVALID", "Shopify returned an incomplete product search. Retry the search.", 502, true);
+    }
+    const result = shopifyProductSearchResultSchema.safeParse({
+      products: parsed.data.nodes.map(node => ({ ...node, id: numericId(node.id, "Product") })),
+      nextCursor: parsed.data.pageInfo.hasNextPage ? parsed.data.pageInfo.endCursor : null,
+    });
+    if (!result.success) throw new ShopifyProductConnectionError("SHOPIFY_SEARCH_INVALID", "Shopify returned an invalid product search. Retry the search.", 502, true);
+    return result.data;
+  }
+
+  async function fillBlankSku(credentials: ShopifyConnectionCredentials, productId: string, assignment: ShopifyConnectionSkuAssignment,
+    heartbeat?: () => Promise<void>): Promise<"filled" | "already_set"> {
+    gid(productId, "Product"); gid(assignment.remoteVariantId, "ProductVariant"); gid(assignment.inventoryItemId, "InventoryItem");
+    if (typeof assignment.sku !== "string" || !assignment.sku.trim() || assignment.sku !== assignment.sku.trim()
+      || Array.from(assignment.sku).length > STOCK_LINK_SKU_MAX_LENGTH || /[\u0000-\u001f\u007f]/.test(assignment.sku)
+      || (assignment.beforeSku !== null && (typeof assignment.beforeSku !== "string" || assignment.beforeSku.trim() !== ""))) {
+      throw new ShopifyProductConnectionError("SHOPIFY_SKU_ASSIGNMENT_INVALID", "Only a reviewed blank SKU can be filled with a valid inventory SKU.", 422);
+    }
+    const itemSchema = z.object({ id: z.string(), sku: z.string().nullable(),
+      variant: z.object({ id: z.string(), product: z.object({ id: z.string(), status: z.enum(["ACTIVE", "DRAFT"]) }) }) });
+    const read = async () => {
+      const data = await graphql(credentials, `query EchelonConnectionSkuRead($id: ID!) {
+        inventoryItem(id: $id) { id sku variant { id product { id status } } }
+      }`, { id: gid(assignment.inventoryItemId, "InventoryItem") }, false, heartbeat);
+      const item = itemSchema.safeParse(data.inventoryItem);
+      if (!item.success || numericId(item.data.id, "InventoryItem") !== assignment.inventoryItemId
+        || numericId(item.data.variant.id, "ProductVariant") !== assignment.remoteVariantId
+        || numericId(item.data.variant.product.id, "Product") !== productId) {
+        throw new ShopifyProductConnectionError("SHOPIFY_SKU_IDENTITY_CHANGED", "The reviewed Shopify inventory item no longer belongs to the selected active or draft variant.");
+      }
+      return item.data;
+    };
+    // Shopify exposes no compare-and-set for SKU. Re-read the exact item just
+    // before writing, serialize our commands, and verify again afterward. An
+    // external admin/app edit between the read and mutation cannot be locked here.
+    const before = await read();
+    if (before.sku === assignment.sku) return "already_set";
+    if (before.sku?.trim()) throw new ShopifyProductConnectionError("SHOPIFY_SKU_CHANGED", "This Shopify variant now has a SKU. It was not overwritten; review the current product.");
+    const data = await graphql(credentials, `mutation EchelonConnectionSkuFill($id: ID!, $input: InventoryItemInput!) {
+      inventoryItemUpdate(id: $id, input: $input) { inventoryItem { id sku } userErrors { field message } }
+    }`, { id: gid(assignment.inventoryItemId, "InventoryItem"), input: { sku: assignment.sku } }, true, heartbeat);
+    if (userErrors(data.inventoryItemUpdate).length) {
+      throw new ShopifyConnectionProviderError("SHOPIFY_SKU_REFUSED", "Shopify refused the SKU update. Review the saved command and channel permissions.", "not_applied", 422, false);
+    }
+    const reply = z.object({ inventoryItem: z.object({ id: z.string(), sku: z.string() }) }).safeParse(data.inventoryItemUpdate);
+    if (!reply.success || reply.data.inventoryItem.id !== gid(assignment.inventoryItemId, "InventoryItem") || reply.data.inventoryItem.sku !== assignment.sku) {
+      throw new ShopifyConnectionProviderError("SHOPIFY_SKU_UNCONFIRMED", "Shopify did not confirm the SKU update. Resume the saved command to check its outcome.", "unknown");
+    }
+    if ((await read()).sku !== assignment.sku) throw new ShopifyProductConnectionError("SHOPIFY_SKU_CHANGED", "The Shopify SKU changed during verification. Review the current product before syncing inventory.");
+    return "filled";
+  }
+
+  return { product, matches, search, fillBlankSku, owned, create, createVariants, capabilities, verifyMedia, publications, published, activate, publish };
 }
 
 export type ShopifyProductConnectionProvider = ReturnType<typeof createShopifyProductConnectionProvider>;

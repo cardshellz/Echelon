@@ -7,6 +7,7 @@ import {
   customerReturnSessionStateSchema,
   customerReturnCustomerOrderSchema,
   customerReturnCustomerOrderPageSchema,
+  customerReturnOrderChoicesSchema,
 } from "@shared/returns/customer-return-access.contract";
 import {
   customerReturnCustomerSubmitInputSchema,
@@ -198,6 +199,16 @@ export function createCustomerReturnTransport(
       call("/session", signal, customerReturnSessionStateSchema),
     logout: (signal: AbortSignal) =>
       call("/logout", signal, z.object({ ok: z.literal(true) }).strict(), {}),
+    async orderChoices(before: number | null, signal: AbortSignal) {
+      const result = await call(
+        `/order-options${before === null ? "" : `?before=${id.parse(before)}`}`,
+        signal, customerReturnOrderChoicesSchema,
+      );
+      if ((before !== null && result.orders.some(order => order.omsOrderId >= before)) ||
+          (before !== null && result.nextBeforeOmsOrderId !== null && result.nextBeforeOmsOrderId >= before))
+        throw new Error("The order page changed. Refresh your orders.");
+      return result;
+    },
     async orders(before: number | null, signal: AbortSignal) {
       const result = await call(
         `/orders${before === null ? "" : `?before=${id.parse(before)}`}`,

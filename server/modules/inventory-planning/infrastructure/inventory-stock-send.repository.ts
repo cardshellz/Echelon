@@ -12,9 +12,9 @@ import { InventoryAvailabilityRuntimePublicationError } from "../application/inv
 import { createTransactionScopedInventoryPublicationService } from "./inventory-availability-runtime-publication.repository";
 import { loadAndLockRuntimeAuthority } from "./inventory-availability-runtime-atp.repository";
 import { loadManagedSellableVariantIds } from "./inventory-channel-exposure-runtime.repository";
+import { executeInventoryPublicationCommand } from "./inventory-publication-command-transaction";
 
 const RECEIPT_PREFIX = "inventory-stock-send:";
-const MAX_TRANSACTION_ATTEMPTS = 3;
 type Target = {
   id: number; channelId: number; channelName: string; externalScopeId: string; revision: string;
   state: string; publicationAuthority: string; heldAt: Date | null; channelStatus: string; connectionValid: boolean;
@@ -98,25 +98,7 @@ export class PostgresInventoryStockSendStore implements InventoryStockSendStore 
     });
   }
   private async transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
-    for (let attempt = 1; ; attempt++) {
-      const client = await this.connectionPool.connect();
-      let discard: Error | undefined;
-      try {
-        await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
-        await client.query("SET LOCAL lock_timeout='5s'");
-        await client.query("SET LOCAL statement_timeout='60s'");
-        const result = await work(client);
-        await client.query("COMMIT");
-        return result;
-      } catch (error) {
-        try { await client.query("ROLLBACK"); }
-        catch (rollback) { discard = rollback instanceof Error ? rollback : new Error(String(rollback));
-          throw new AggregateError([error, rollback], "Stock-send rollback failed; retry the same command key."); }
-        const code = error && typeof error === "object" && "code" in error ? error.code : null;
-        if (attempt < MAX_TRANSACTION_ATTEMPTS && (code === "40001" || code === "40P01")) continue;
-        throw error;
-      } finally { client.release(discard); }
-    }
+    return executeInventoryPublicationCommand(this.connectionPool, work);
   }
 }
 

@@ -28,10 +28,22 @@ describe("shipment cost command boundary", () => {
   });
 
   it("accepts all existing cost types and allocation methods", () => {
-    for (const costType of SHIPMENT_COST_TYPES) expect(shipmentCostCreateSchema.safeParse({ costType }).success).toBe(true);
+    for (const costType of SHIPMENT_COST_TYPES) {
+      const taxType = costType === "tax" || costType === "duty" ? { taxTypeId: 1 } : {};
+      expect(shipmentCostCreateSchema.safeParse({ costType, ...taxType }).success).toBe(true);
+    }
     for (const allocationMethod of [...SHIPMENT_COST_ALLOCATION_METHODS, null]) {
       expect(shipmentCostPatchSchema.safeParse({ expectedVersion, allocationMethod }).success).toBe(true);
     }
+  });
+
+  it.each(["tax", "duty"])("requires a configured type for a new %s charge", (costType) => {
+    for (const taxTypeId of [undefined, null, 0, -1, "1", 1.5, 2_147_483_648]) {
+      expect(shipmentCostCreateSchema.safeParse({ costType, taxTypeId }).success).toBe(false);
+    }
+    expect(shipmentCostCreateSchema.parse({ costType, taxTypeId: 12, actualCents: 0 })).toEqual({
+      costType, taxTypeId: 12, actualCents: 0,
+    });
   });
 
   it.each([

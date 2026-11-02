@@ -5,6 +5,7 @@ import type { StockLinkRecentCursor } from "../application/stock-link.ports";
 import type { StockLinkCheckFacts, StockLinkCheckWrite } from "../domain/stock-link-check-outcome";
 import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../domain/stock-link-errors";
 import { stockLinkRetiresWithoutReplacementCountText } from "./stock-link-health.sql";
+import { productSyncLinkScopeSchema, type ProductSyncLinkScope } from "@shared/types/inventory-product-sync-workflow";
 
 /**
  * The stock-link check rows and destination state (inventory.stock_link_checks / stock_link_destinations, M1)
@@ -20,6 +21,30 @@ import { stockLinkRetiresWithoutReplacementCountText } from "./stock-link-health
 
 type Queryable = { query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string, values?: unknown[]):
   Promise<{ rows: Row[]; rowCount: number | null }> };
+
+/** Called inside the durable product request's acceptance transaction. Existing
+ * permanent errors, live claims and destination controls retain their authority. */
+export async function requestProductStockLinkChecks(client: Queryable, input: ProductSyncLinkScope, now: Date): Promise<void> {
+  const scope = productSyncLinkScopeSchema.parse(input);
+  const pairs = scope.targets.flatMap(target => target.productVariantIds.map(productVariantId =>
+    ({ publicationTargetId: target.publicationTargetId, productVariantId })));
+  if (!pairs.length) return;
+  await client.query(`INSERT INTO inventory.stock_link_checks
+    (publication_target_id,product_variant_id,status,next_check_at,created_at,updated_at)
+    SELECT t.id,v.id,'waiting',$3,$3,$3 FROM jsonb_to_recordset($1::jsonb)
+      AS p("publicationTargetId" integer,"productVariantId" integer)
+    JOIN catalog.product_variants v ON v.id=p."productVariantId" AND v.product_id=$2
+    JOIN inventory.inventory_publication_targets t ON t.id=p."publicationTargetId"
+    LEFT JOIN inventory.stock_link_destinations d ON d.publication_target_id=t.id
+    WHERE t.state='live' AND t.publication_authority='echelon' AND t.held_at IS NULL
+      AND COALESCE(d.auto_link_enabled,true) AND d.halted_at IS NULL AND (d.paused_until IS NULL OR d.paused_until <= $3)
+    ORDER BY t.id,v.id
+    ON CONFLICT (publication_target_id,product_variant_id) DO UPDATE
+      SET next_check_at=$3,updated_at=$3,revision=stock_link_checks.revision+1
+      WHERE stock_link_checks.status<>'error' AND stock_link_checks.next_check_at>$3
+        AND (stock_link_checks.lease_token IS NULL OR stock_link_checks.lease_expires_at<=$3)`,
+  [JSON.stringify(pairs),scope.productId,now]);
+}
 
 /** The receipt's command type in public.idempotency_keys.response_body (key `stock-link:<commandKey>`, §4.3 step 3). */
 export const STOCK_LINK_RECEIPT_COMMAND_TYPE = "stock_link_command";
@@ -382,12 +407,14 @@ export async function saveStockLinkCursors(pool: Pick<Pool, "connect">, publicat
  * FOR KEY SHARE first, so a size deleted meanwhile is skipped instead of failing the row's key. Returns the sizes added.
  */
 export async function insertMissingStockLinkChecks(pool: Pick<Pool, "connect">, publicationTargetId: number,
-  rows: readonly { productVariantId: number; firstVerifyAt: Date }[], now: Date): Promise<number[]> {
+  rows: readonly { productVariantId: number; firstVerifyAt: Date }[], now: Date, productId?: number): Promise<number[]> {
+  if (productId !== undefined) z.number().int().positive().parse(productId);
   if (rows.length === 0) return [];
   const sorted = [...rows].sort((a, b) => a.productVariantId - b.productVariantId);
   return inShortStockLinkTransaction(pool, async client => (await client.query<{ product_variant_id: number }>(`
     WITH sizes AS (
-      SELECT v.id FROM catalog.product_variants v WHERE v.id = ANY($2::integer[]) ORDER BY v.id FOR KEY SHARE
+      SELECT v.id FROM catalog.product_variants v WHERE v.id = ANY($2::integer[])
+        AND ($5::integer IS NULL OR v.product_id=$5) ORDER BY v.id FOR KEY SHARE
     ), wanted AS (
       SELECT w.variant_id, w.first_verify_at FROM unnest($2::integer[], $3::timestamptz[]) AS w(variant_id, first_verify_at)
     )
@@ -400,7 +427,7 @@ export async function insertMissingStockLinkChecks(pool: Pick<Pool, "connect">, 
     ORDER BY w.variant_id
     ON CONFLICT (publication_target_id, product_variant_id) DO NOTHING
     RETURNING product_variant_id`,
-  [publicationTargetId, sorted.map(row => row.productVariantId), sorted.map(row => row.firstVerifyAt), now])).rows
+  [publicationTargetId, sorted.map(row => row.productVariantId), sorted.map(row => row.firstVerifyAt), now, productId ?? null])).rows
     .map(row => Number(row.product_variant_id)).sort((a, b) => a - b));
 }
 
@@ -484,12 +511,18 @@ const claimedRowSchema = z.object({
  * A row stopped on an error is never due; an expired lease is claimable.
  */
 export async function claimDueStockLinkChecks(pool: Pick<Pool, "connect">, publicationTargetId: number, input: {
-  now: Date; leaseToken: string; leaseMs: number; limit: number }): Promise<StockLinkClaimedCheck[]> {
+  now: Date; leaseToken: string; leaseMs: number; limit: number;
+  productId?: number; productVariantIds?: readonly number[] }): Promise<StockLinkClaimedCheck[]> {
+  const scope = input.productId === undefined && input.productVariantIds === undefined ? null
+    : z.object({ productId: z.number().int().positive(), productVariantIds: z.array(z.number().int().positive()).min(1).max(1000) })
+      .parse({ productId: input.productId, productVariantIds: input.productVariantIds });
   const leaseExpiresAt = new Date(input.now.getTime() + input.leaseMs);
   return inShortStockLinkTransaction(pool, async client => (await client.query(`
     WITH due AS (
       SELECT id FROM inventory.stock_link_checks
       WHERE publication_target_id = $1 AND status <> 'error' AND next_check_at <= $2
+        AND ($6::integer IS NULL OR (product_variant_id = ANY($7::integer[]) AND EXISTS (
+          SELECT 1 FROM catalog.product_variants v WHERE v.id = stock_link_checks.product_variant_id AND v.product_id = $6)))
         AND (lease_token IS NULL OR lease_expires_at <= $2)
       ORDER BY next_check_at, id LIMIT $5
       FOR UPDATE SKIP LOCKED
@@ -497,7 +530,8 @@ export async function claimDueStockLinkChecks(pool: Pick<Pool, "connect">, publi
     UPDATE inventory.stock_link_checks c SET lease_token = $3, lease_expires_at = $4, revision = c.revision + 1
     FROM due WHERE c.id = due.id
     RETURNING c.id, c.product_variant_id, c.revision::text AS revision, c.status, c.observed_sku, c.next_check_at`,
-  [publicationTargetId, input.now, input.leaseToken, leaseExpiresAt, input.limit])).rows
+  [publicationTargetId, input.now, input.leaseToken, leaseExpiresAt, input.limit, scope?.productId ?? null,
+    scope?.productVariantIds ?? null])).rows
     .map(raw => claimedRowSchema.parse(raw))
     .sort((a, b) => a.next_check_at.getTime() - b.next_check_at.getTime() || a.id - b.id)
     .map(row => ({ productVariantId: row.product_variant_id, leaseToken: input.leaseToken, revision: row.revision,

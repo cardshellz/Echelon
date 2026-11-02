@@ -1,0 +1,201 @@
+{
+  "purpose": "Characterize current production domain functions against the agreed costing design",
+  "noInvoice": [
+    {
+      "component": "product",
+      "amountMills": 9000000,
+      "basePieces": 100,
+      "evidence": "estimated",
+      "issue": null,
+      "sourceKinds": [
+        "purchase_order_line"
+      ]
+    },
+    {
+      "component": "packaging",
+      "amountMills": 1000000,
+      "basePieces": 100,
+      "evidence": "estimated",
+      "issue": null,
+      "sourceKinds": [
+        "purchase_order_line"
+      ]
+    }
+  ],
+  "fullInvoice": [
+    {
+      "component": "product",
+      "amountMills": 11000000,
+      "basePieces": 100,
+      "evidence": "confirmed",
+      "issue": null,
+      "sourceKinds": [
+        "vendor_invoice_line"
+      ]
+    },
+    {
+      "component": "packaging",
+      "amountMills": 1000000,
+      "basePieces": 100,
+      "evidence": "confirmed",
+      "issue": null,
+      "sourceKinds": [
+        "vendor_invoice_line"
+      ]
+    }
+  ],
+  "partialInvoice": [
+    {
+      "component": "product",
+      "amountMills": 9000000,
+      "basePieces": 100,
+      "evidence": "review_required",
+      "issue": "INVOICE_COMPONENT_REVIEW_REQUIRED",
+      "sourceKinds": [
+        "purchase_order_line"
+      ]
+    },
+    {
+      "component": "packaging",
+      "amountMills": 1000000,
+      "basePieces": 100,
+      "evidence": "review_required",
+      "issue": "INVOICE_COMPONENT_REVIEW_REQUIRED",
+      "sourceKinds": [
+        "purchase_order_line"
+      ]
+    }
+  ],
+  "missingBreakdown": [
+    {
+      "component": "product",
+      "amountMills": 9000000,
+      "basePieces": 100,
+      "evidence": "review_required",
+      "issue": "INVOICE_COMPONENT_REVIEW_REQUIRED",
+      "sourceKinds": [
+        "purchase_order_line"
+      ]
+    },
+    {
+      "component": "packaging",
+      "amountMills": 1000000,
+      "basePieces": 100,
+      "evidence": "review_required",
+      "issue": "INVOICE_COMPONENT_REVIEW_REQUIRED",
+      "sourceKinds": [
+        "purchase_order_line"
+      ]
+    }
+  ],
+  "invoiceDiscount": [
+    {
+      "component": "product",
+      "amountMills": 11000000,
+      "basePieces": 100,
+      "evidence": "review_required",
+      "issue": "INVOICE_COMPONENT_TOTAL_REVIEW",
+      "sourceKinds": [
+        "vendor_invoice_line"
+      ]
+    },
+    {
+      "component": "packaging",
+      "amountMills": 1000000,
+      "basePieces": 100,
+      "evidence": "review_required",
+      "issue": "INVOICE_COMPONENT_TOTAL_REVIEW",
+      "sourceKinds": [
+        "vendor_invoice_line"
+      ]
+    }
+  ],
+  "differentCostProjectionsForSameSyntheticGoods": {
+    "selectedSupplierInvoiceCents": 120000,
+    "allocatedShipmentCents": 20000,
+    "agreedDesignLandedCents": 140000,
+    "poProjectionCents": 120000,
+    "shipmentProjectionCents": 110000
+  },
+  "freightVariance": {
+    "evidence": "review_required",
+    "issue": {
+      "code": "LANDED_INVOICE_AMOUNT_REVIEW",
+      "message": "Shipment charge 40 differs from its invoice allocation. Reconcile the charge and invoice before applying costs."
+    },
+    "confirmedCharge": null,
+    "approvedInvoiceLineIds": []
+  },
+  "freightPaymentStates": [
+    {
+      "status": "approved",
+      "result": {
+        "evidence": "confirmed",
+        "issue": null,
+        "confirmedCharge": null,
+        "approvedInvoiceLineIds": [
+          80
+        ]
+      }
+    },
+    {
+      "status": "partially_paid",
+      "result": {
+        "evidence": "confirmed",
+        "issue": null,
+        "confirmedCharge": null,
+        "approvedInvoiceLineIds": [
+          80
+        ]
+      }
+    },
+    {
+      "status": "paid",
+      "result": {
+        "evidence": "confirmed",
+        "issue": null,
+        "confirmedCharge": null,
+        "approvedInvoiceLineIds": [
+          80
+        ]
+      }
+    }
+  ],
+  "savedApplicationThenNewDescendant": {
+    "before": {
+      "component": "product",
+      "status": "applied",
+      "sourceEvidence": "confirmed",
+      "sourceCurrent": true,
+      "sourceRevisionId": 1,
+      "applicationId": 2,
+      "issues": []
+    },
+    "after": {
+      "component": "product",
+      "status": "review_required",
+      "sourceEvidence": "confirmed",
+      "sourceCurrent": true,
+      "sourceRevisionId": 1,
+      "applicationId": 2,
+      "issues": [
+        {
+          "code": "COST_APPLICATION_SCOPE_CHANGED",
+          "message": "The recorded application does not cover the current receipt and transformed lots. Apply the current supplier costs."
+        }
+      ]
+    }
+  },
+  "paymentOnlySourceChange": {
+    "unchangedAmountMills": 2200000,
+    "issue": {
+      "code": "COST_UPDATE_OUTDATED",
+      "message": "Shipment charges, allocation or source evidence changed. Review the current split, then update costs."
+    }
+  },
+  "quoteEditAfterInvoice": {
+    "unchangedSelectedInvoiceAmountMills": 11000000,
+    "selectedInputUnchanged": true,
+    "wholeSourceFingerprintChanges": true
+  }
+}

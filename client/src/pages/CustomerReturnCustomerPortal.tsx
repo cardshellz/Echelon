@@ -22,11 +22,14 @@ import {
   downloadCustomerReturnLabel,
 } from "@/lib/customer-return-customer";
 import type { CustomerReturnFlowGateway } from "@/lib/customer-return-gateway";
-import type { CustomerReturnCustomerOrder } from "@shared/returns/customer-return-access.contract";
+import type { CustomerReturnCustomerOrder, CustomerReturnOrderChoice } from "@shared/returns/customer-return-access.contract";
 import type { CustomerReturnCustomerLabelStatus } from "@shared/returns/customer-return-customer.contract";
 
 const RETURN_OBSERVATION_INTERVAL_MS = 2_000;
 const MAX_RETURN_OBSERVATION_FAILURES = 3;
+// This customer portal is branded for Card Shellz. Use its public storefront,
+// never the backend origin, referrer, or a caller-supplied redirect destination.
+const CUSTOMER_RETURN_SHOPPING_URL = "https://www.cardshellz.com/";
 
 type Session = Awaited<
   ReturnType<ReturnType<typeof createCustomerReturnTransport>["session"]>
@@ -95,7 +98,7 @@ export default function CustomerReturnCustomerPortal() {
             onSignedOut={signedOut}
           />
         ) : (
-          <CustomerReturnSurface>
+          <CustomerReturnSurface shoppingHref={CUSTOMER_RETURN_SHOPPING_URL}>
             <div className="csz-return-status">
               <h1 className="text-2xl font-semibold">Return an order</h1>
               <PreviewError message={error} />
@@ -140,6 +143,7 @@ export function CustomerWorkspace({
   downloadRequest = fetch,
   embedded = false,
   onBusy,
+  signOutHref,
 }: {
   sessionKey: string;
   onDenied: (message: string) => void;
@@ -151,11 +155,14 @@ export function CustomerWorkspace({
   downloadRequest?: typeof fetch;
   embedded?: boolean;
   onBusy?: (busy: boolean) => void;
+  /** Native Shopify pages sign out through Shopify, not the backend cookie. */
+  signOutHref?: string;
 }) {
   const api = useMemo(
     () => transport ?? createCustomerReturnTransport(fetch, sessionKey),
     [sessionKey, transport],
   );
+  const shoppingHref = embedded ? undefined : CUSTOMER_RETURN_SHOPPING_URL;
   const [commands] = useState(() => {
     let storage: Storage | null = null;
     try {
@@ -169,7 +176,7 @@ export function CustomerWorkspace({
     commands.subscribe,
     commands.getSnapshot,
   );
-  const [orders, setOrders] = useState<CustomerReturnCustomerOrder[]>([]);
+  const [orders, setOrders] = useState<CustomerReturnOrderChoice[]>([]);
   const [nextOrder, setNextOrder] = useState<number | null>(null);
   const [unavailableOrders, setUnavailableOrders] = useState(0);
   const [history, setHistory] = useState<History>({
@@ -290,7 +297,7 @@ export function CustomerWorkspace({
     if (command.record || embedded || directOrderId !== null) return;
     void run(async (signal) => {
       const [page, prior] = await Promise.allSettled([
-        api.orders(null, signal),
+        api.orderChoices(null, signal),
         api.history(null, signal),
       ]);
       if (signal.aborted) return;
@@ -444,7 +451,10 @@ export function CustomerWorkspace({
     onBusy?.(busy || flowBusy);
     return () => onBusy?.(false);
   }, [busy, flowBusy, onBusy]);
-  const signOut = embedded ? null : (
+  const signOut = embedded ? null : signOutHref ? (
+    requestBusy ? <Button variant="ghost" disabled>Sign out</Button> :
+      <Button variant="ghost" asChild><a href={signOutHref}>Sign out</a></Button>
+  ) : (
     <Button
       variant="ghost"
       disabled={requestBusy}
@@ -485,7 +495,7 @@ export function CustomerWorkspace({
   }
   if (showStatus)
     return (
-      <CustomerReturnSurface label="Your return" onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
+      <CustomerReturnSurface label="Your return" shoppingHref={shoppingHref} onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
         <div className="csz-return-status">
           <h1 ref={statusHeading} tabIndex={-1} className="text-2xl font-semibold outline-none">
             {status
@@ -583,6 +593,7 @@ export function CustomerWorkspace({
           gateway={gateway}
           onAccessDenied={onDenied}
           onClose={embedded ? onSignedOut : undefined}
+          shoppingHref={shoppingHref}
           closeDisabled={busy || flowBusy}
           onBusy={setFlowBusy}
           notice={<>
@@ -600,7 +611,7 @@ export function CustomerWorkspace({
 
   if (directOrderId !== null)
     return (
-      <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
+      <CustomerReturnSurface shoppingHref={shoppingHref} onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
         <div className="csz-return-status">
           <h1 className="text-2xl font-semibold">Return items</h1>
           <PreviewError message={error} />
@@ -618,7 +629,7 @@ export function CustomerWorkspace({
     );
 
   return (
-    <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
+    <CustomerReturnSurface shoppingHref={shoppingHref} onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
       <div className="csz-return-status">
         <h1
           ref={chooser}
@@ -648,15 +659,11 @@ export function CustomerWorkspace({
             >
               <div>
                 <h2 className="font-semibold">
-                  Order #{item.order.orderReference.replace(/^#\s*/, "")}
+                  Order #{item.orderReference.replace(/^#\s*/, "")}
                 </h2>
                 <p className="text-sm text-muted-foreground">
-                  {new Date(item.order.purchasedAt).toLocaleDateString()} ·{" "}
-                  {item.order.lines.reduce(
-                    (sum, line) => sum + line.eligibleQuantity,
-                    0,
-                  )}{" "}
-                  items available
+                  {item.purchasedAt && <>{new Date(item.purchasedAt).toLocaleDateString()} · </>}
+                  {item.eligibleItemCount === null ? "Choose the items you want to return." : `${item.eligibleItemCount} items available`}
                 </p>
               </div>
               <Button
@@ -688,7 +695,7 @@ export function CustomerWorkspace({
               disabled={busy}
               onClick={() =>
                 void run(async (signal) => {
-                  const page = await api.orders(nextOrder, signal);
+                  const page = await api.orderChoices(nextOrder, signal);
                   if (!signal.aborted) {
                     setOrders((previous) => [
                       ...previous.filter(

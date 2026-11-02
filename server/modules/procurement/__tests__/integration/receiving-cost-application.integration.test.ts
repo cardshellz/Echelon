@@ -1,3 +1,4 @@
+import { registerReceiptInvoiceCostCases } from "./receipt-invoice-costs.cases";
 import { randomUUID } from "node:crypto";
 import { createReceiptCostRecoveryRepository } from "../../receipt-cost-recovery.repository";
 import { runReceiptCostRecoveryBatch } from "../../receipt-cost-recovery.worker";
@@ -40,6 +41,9 @@ import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
 import { registerHistoricalCostTimestampCases } from "./historical-cost-timestamps.cases";
 import { registerPurchaseCostStatusBatchCases } from "./purchase-cost-status-batch.cases";
 import { registerReceiptConfigurationAuthorityCases } from "./receipt-configuration-authority.cases";
+import { registerCostSourceCompatibilityCases } from "./cost-source-compatibility.cases";
+import { registerInvoiceCorrectionCostCases } from "./invoice-correction-costs.cases";
+import { registerPurchaseTaxCases } from "./purchase-tax.cases";
 import type { ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../receiving.service";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
@@ -50,13 +54,14 @@ const audit = enabled ? describe : describe.skip;
 const NOW = new Date("2026-09-06T12:00:00.000Z");
 const TABLES = [
   schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
-  schema.products, schema.productVariants, schema.vendors, schema.purchaseOrders,
+  schema.products, schema.productVariants, schema.vendors, schema.purchaseTaxTypes, schema.purchaseOrders,
   schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.poApprovalTiers, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoiceLineTaxes, schema.receiptInvoiceCostAllocations,
   schema.vendorInvoicePoLinks, schema.poStatusHistory, schema.poEvents, schema.poExceptions,
+  schema.apPayments, schema.apPaymentAllocations,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.productLocations, schema.inventoryLevels,
@@ -1446,9 +1451,10 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect(projectPoLineLandedCosts({
       poHeader: { totalCents: 22500, taxCents: 200, shippingCostCents: 300 },
       poLines: [{ id: 21, orderQty: 200, lineTotalCents: 22000 }], costs,
-    })).toEqual({ status: "complete", poLevelAdjustmentCents: 500, lines: [
-      { purchaseOrderLineId: 21, pieces: 200, supplierCents: 22000, shipmentCents: 5000, totalCents: 27000 },
-    ] });
+    })).toEqual({ status: "unavailable", reason: "Choose the supplier tax type before using its inventory cost. Other PO charges still need their inventory cost allocation." });
+    // Financial cards retain every saved dollar above. An unclassified tax and
+    // unallocated header freight cannot be asserted as a posted inventory value.
+    expect(costs?.taxCosts?.inventoryLandedCents).toBeNull();
     expect(costs?.lines[0].applicationId).toBeGreaterThan(0);
     expect(costs?.lines[0].recordedAt).toBeTruthy();
     expect(await state()).toEqual(before);
@@ -1575,6 +1581,29 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await failAudit(async () => { await expect(approveEvidence()).rejects.toThrow(/cost audit injected AP audit failure/); });
     expect(await state()).toEqual(before);
   });
+  registerCostSourceCompatibilityCases({ pool: () => pool, database: () => database, shipment: () => shipment,
+    receive, approveSupplier: approveEvidence, retrySupplier: () => database.transaction(tx => reconcile(21, tx, actorId)),
+    actorId, at: NOW });
+  registerInvoiceCorrectionCostCases({ pool: () => pool, database: () => database, actorId, at: NOW,
+    receive, consume: seedConsumedCost });
+  registerReceiptInvoiceCostCases({
+    transferFirstAndSell: async()=>{
+      await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'RECEIPT-COST-PICK')");
+      await inventory.transfer({productVariantId:200,fromLocationId:99,toLocationId:100,qty:1,userId:actorId});
+      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
+    },
+    breakFirst: async()=>{
+      await pool.query("UPDATE catalog.product_variants SET parent_variant_id=201 WHERE id=200");
+      const {BreakAssemblyUseCases}=await import("../../../inventory/application/break-assembly.use-cases");
+      const {legacyTransformationExecutionAuthority}=await import("../../../inventory/application/transformation-execution-authority.port");
+      // This suite explicitly owns a pre-cutover fixture. Package/runtime
+      // authorization remains in its own integration suite; financial owners
+      // and saved receipt/contribution intervals here are real.
+      await new BreakAssemblyUseCases(database,inventory,()=>NOW,legacyTransformationExecutionAuthority).breakVariant({commandKey:randomUUID(),sourceVariantId:200,targetVariantId:201,warehouseLocationId:99,targetLocationId:99,sourceQty:1,userId:actorId});
+    }, shipments: () => shipment, pool: () => pool, database: () => database, actorId, at: NOW, receive, consume: seedConsumedCost, receivingLines: id => storage.getReceivingLines(id), receiving: () => receiving, purchasing: () => purchasing });
+  registerPurchaseTaxCases({ pool: () => pool, database: () => database, actorId, at: NOW,
+    receive, consume: seedConsumedCost, shipments: () => shipment, historicalGaps: legacyQuantityGaps });
   registerReceiptConfigurationAuthorityCases({ pool: () => pool, database: () => database,
     purchasing: () => purchasing, shipments: () => shipment, actorId,
     receivingLines: (id) => storage.getReceivingLines(id), receivingWithWarnings: (evaluator, reporter) => receivingWithWarnings(evaluator, reporter),

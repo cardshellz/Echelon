@@ -1,3 +1,4 @@
+import { registerCustomerReturnGuestRoutes } from "./customer-return-guest.routes";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { rateLimit } from "express-rate-limit";
@@ -14,6 +15,7 @@ export interface CustomerReturnCustomerRouteDependencies extends CustomerReturnC
 const id = (raw: unknown) => z.string().regex(/^[1-9][0-9]*$/).transform(Number).pipe(z.number().int().positive().safe()).parse(raw);
 const cursor = (raw: unknown) => z.object({ before: z.string().optional() }).strict().parse(raw).before;
 export function registerCustomerReturnCustomerRoutes(app: Express, dependencies: CustomerReturnCustomerRouteDependencies = {}) {
+  registerCustomerReturnGuestRoutes(app);
   const context = dependencies.context ?? createCustomerReturnCustomerAuth;
   const services = dependencies.services ?? createCustomerReturnCustomerServices;
   registerCustomerReturnShopifyProxyRoutes(app, { context });
@@ -38,6 +40,10 @@ export function registerCustomerReturnCustomerRoutes(app: Express, dependencies:
   };
   const noQuery = (req: Request) => z.object({}).strict().parse(req.query);
   const emptyCommand = (req: Request) => { noQuery(req); z.object({}).strict().parse(req.body); };
+  app.get(`${CUSTOMER_RETURNS_API}/order-options`, handle(false, (req, value) => {
+    const before = cursor(req.query);
+    return value.orders.choices(before === undefined ? {} : { beforeOmsOrderId: id(before) });
+  }));
   app.get(`${CUSTOMER_RETURNS_API}/orders`, handle(false, (req, value) => {
     const before = cursor(req.query);
     return value.orders.list(before === undefined ? {} : { beforeOmsOrderId: id(before) });

@@ -9,6 +9,15 @@ import type {
   EbayObservedOffer,
   EbayListingLifecycleClient,
 } from "../../listing-connectors/ebay-listing.connector";
+import type {ChannelPublishedContent} from "../../../marketplace-listings/domain/channel-publication-content";
+
+/** Unit-provider state projection. Pixel/transport regressions use real images
+ * and native XML separately; this fixture never reads the desired draft. */
+export function publishedContentFixture(listingId:string,skus:readonly string[],urls:readonly string[],policy:EbayObservedOffer["listingPolicies"]|undefined):ChannelPublishedContent {
+  return {listingId,skus:[...skus],policies:{...(policy?.fulfillmentPolicyId?{shipping:policy.fulfillmentPolicyId}:{}),
+    ...(policy?.returnPolicyId?{return:policy.returnPolicyId}:{}),...(policy?.paymentPolicyId?{payment:policy.paymentPolicyId}:{})},
+    firstPhotoSource:urls[0]??null,photos:urls.map(url=>({url,width:640,height:640}))};
+}
 export const syncIdentity: EbayListingSyncIdentity = {
   channelId: 1,
   connectionId: 1,
@@ -26,7 +35,7 @@ export const syncIdentity: EbayListingSyncIdentity = {
     },
   ],
 };
-export function syncProviderFixture() {
+export function syncProviderFixture(options: { grouped?: boolean } = {}) {
   let quantity = 7;
   let item: EbayInventoryItem = {
     sku: "P5",
@@ -64,6 +73,8 @@ export function syncProviderFixture() {
     variesBy: { specifications: [{ name: "Pack Size", values: ["5"] }] },
   };
   const client: EbayListingLifecycleClient = {
+    getPublishedListingContent: vi.fn(async () => publishedContentFixture("listing-20",options.grouped === false ? [item.sku] : group.variantSKUs ?? [item.sku],
+      (options.grouped === false ? item.product?.imageUrls : group.imageUrls) ?? [],offer.listingPolicies)),
     getInventoryItem: vi.fn(async () => structuredClone(item)),
     getOffers: vi.fn(async () => ({ offers: [structuredClone(offer)] })),
     getInventoryItemGroup: vi.fn(async () => structuredClone(group)),

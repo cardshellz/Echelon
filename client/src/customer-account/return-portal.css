@@ -1,0 +1,13 @@
+.csz-return-page { max-width: 960px; margin: 32px auto; padding: 0 20px; }
+.csz-return-page .csz-return-ui { width: 100%; }
+.csz-guest-access { max-width: 560px; margin: 0 auto; }
+/* Store themes can apply an important font shorthand to every heading. */
+.csz-return-ui .csz-guest-access h1 { font-size: 26px !important; font-weight: 600 !important; margin: 0 0 16px; }
+.csz-guest-access form { display: grid; gap: 12px; margin: 24px 0; }
+.csz-guest-access label { font-weight: 500; }
+.csz-guest-access input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font: inherit; font-size: 16px; }
+.csz-guest-access input:focus-visible { outline: 2px solid #3b5bdb; outline-offset: 2px; }
+.csz-guest-code-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+.csz-guest-account { padding: 20px; margin-bottom: 16px; border: 1px solid #dbe1ea; border-radius: 10px; background: #fff; }
+.csz-guest-account p { margin-bottom: 12px; }
+@media (max-width: 600px) { .csz-return-page { margin: 20px auto; padding: 0 12px; } }

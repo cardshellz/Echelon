@@ -944,6 +944,8 @@ test("a Shopify destination turns linking off only after a confirm, back on dire
   await page.getByRole("button", { name: /^Stock update details for us-store/ }).click();
   const details = page.getByRole("dialog");
   await expect(details).toContainText("12 linked · 3 waiting for a store item · 1 need a fix · 0 failed");
+  await expect(details).toContainText("Verified active and draft Shopify products can be linked for inventory. Archived products cannot. Linking leaves the product’s Shopify status unchanged.");
+  await expect(details).toContainText("Use Check again to retry items waiting after a previous product status check.");
   await expect(details).toContainText("26 items lost their SKU today. Echelon kept their links.");
   await details.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(details.getByRole("button", { name: "Continue", exact: true })).toHaveCount(0);

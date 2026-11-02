@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { receiptSegmentCost, receiptCostSegmentSchema } from "./receipt-cost-segments";
 
 /** Mills are 1/100 of a cent in the existing inventory owners. */
 export const COST_COMPONENTS = ["product", "packaging", "landed"] as const;
@@ -128,12 +129,25 @@ export const costSourceRevisionSchema = z.object({
   // The exact extended amount belongs to this many base pieces, not cartons or
   // today's catalog variant factor. Unknown history must retain null.
   basePieces: nonnegativeInteger.nullable(),
+  receiptCostSegments: z.array(receiptCostSegmentSchema).min(1).max(2001).optional(),
   inventoryEffect: costInventoryEffectSchema.optional(),
   evidence: z.enum(COST_SOURCE_EVIDENCE_STATES),
   packagingTreatment: z.enum(["separate", "included_in_product", "not_applicable", "unknown"]),
   issue: costIssueSchema.nullable(),
   manualOverride: costManualOverrideSchema.nullable(),
 }).strict().superRefine((source, context) => {
+  if (source.receiptCostSegments) {
+    if (source.scope.kind !== "purchase_order_line" || source.component === "landed" || source.inventoryEffect
+      || source.totalMills === null || source.basePieces === null || !Number.isSafeInteger(source.basePieces)) {
+      context.addIssue({ code: "custom", message: "Receipt cost intervals require a supported supplier source." });
+    } else {
+      try {
+        const amount = receiptSegmentCost(source.receiptCostSegments, 0, source.basePieces);
+        if (amount.totalMills !== source.totalMills || (source.evidence === "confirmed") !== (amount.provisionalPieces === 0))
+          context.addIssue({ code: "custom", message: "Receipt costs must conserve the exact total and provisional coverage." });
+      } catch { context.addIssue({ code: "custom", message: "Receipt cost intervals must cover the complete source exactly once." }); }
+    }
+  }
   if (source.inventoryEffect) {
     const returnSourceIds = new Set(source.sources.filter(row => row.kind === "supplier_credit_line").map(row => row.lineId));
     if (source.scope.kind !== "purchase_order_line" || source.component === "landed"

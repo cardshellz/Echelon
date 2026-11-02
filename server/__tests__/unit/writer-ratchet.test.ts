@@ -34,6 +34,12 @@ describe("writer-ratchet (P2.1)", () => {
     roots: ["server", "scripts"],
   });
 
+  it("Catalog owns runtime image writes and the legacy direct import cannot write photos", () => {
+    expect(current["catalog.product_assets"]).toEqual(["modules/catalog"]);
+    expect(baseline["catalog.product_assets"]).toEqual(["modules/catalog"]);
+    expect(currentIncludingScripts["catalog.product_assets"]).not.toContain("scripts/import_ebay_to_echelon.ts");
+  });
+
   it.each([
     ["oms.customer_order_actions", "modules/customer-account"],
     ["oms.customer_order_action_invalidations", "modules/customer-account"],
@@ -44,10 +50,15 @@ describe("writer-ratchet (P2.1)", () => {
     ["returns.customer_return_box_measurements", "modules/returns"],
     ["returns.customer_return_parcel_receipts", "modules/returns"],
     ["returns.customer_return_workflows", "modules/returns"],
+    ["returns.customer_return_guest_challenges", "modules/returns"],
+    ["returns.customer_return_guest_events", "modules/returns"],
     ["returns.customer_return_workflow_events", "modules/returns"],
     ["returns.customer_return_parcel_receipt_allocations", "modules/returns"],
     ["wms.picking_commands", "modules/wms"],
     ["procurement.receiving_custody_fence", "modules/procurement"],
+    ["procurement.purchase_tax_types", "modules/procurement"],
+    ["procurement.vendor_invoice_line_taxes", "modules/procurement"],
+    ["procurement.receipt_invoice_cost_allocations", "modules/procurement"],
     ["procurement.receiving_quarantine_observations", "modules/procurement"],
     ["procurement.receiving_quarantine_acceptances", "modules/procurement"],
     ["procurement.receiving_quarantine_dispositions", "modules/procurement"],
@@ -62,6 +73,8 @@ describe("writer-ratchet (P2.1)", () => {
   });
 
   it.each([
+    ["catalog.product_asset_versions", "modules/catalog"],
+    ["catalog.product_asset_renditions", "modules/catalog"],
     [
         "catalog.publication_media_references",
         "modules/catalog"
@@ -101,7 +114,7 @@ describe("writer-ratchet (P2.1)", () => {
       expect(baseline[table]).toEqual([owner]);
     });
 
-  it.each(["inventory.stock_link_checks", "inventory.stock_link_destinations"])(
+  it.each(["inventory.stock_link_checks", "inventory.stock_link_destinations", "inventory.product_inventory_sync_requests"])(
     "%s has only the inventory-planning engine as writer, including scripts (PLAN-CH2 §3)", (table) => {
       // The check rows gained their writer with the command (P4), the destination rows with the tick (P7).
       expect(current[table]).toEqual(["modules/inventory-planning"]);

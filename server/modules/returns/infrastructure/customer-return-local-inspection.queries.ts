@@ -38,7 +38,7 @@ export const inspectionQueries = Object.freeze({
     oo.cancelled_at AT TIME ZONE 'UTC' AS "cancelledAt",
     EXISTS (SELECT 1 FROM dropship.dropship_order_intake doi WHERE doi.oms_order_id = oo.id) AS "isDropship"
     FROM oms.oms_orders oo WHERE oo.channel_id = $1 AND oo.id = $2
-      AND oo.external_order_id = $3 AND oo.external_customer_id = $4
+      AND oo.external_order_id = $3 AND oo.external_customer_id IS NOT DISTINCT FROM $4
     LIMIT 2`,
 
   lines: `SELECT line.id AS "omsOrderLineId", line.external_line_item_id AS "externalLineItemId",

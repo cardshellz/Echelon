@@ -1,28 +1,53 @@
-import { useEffect } from "react";
+import { useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import type { CustomerOrderTotalsState } from "./CustomerAccountOrderTotals";
+import {
+  returnProgressLabel,
+  customerPaymentPresentation,
+  orderDeliveryLabel,
+} from "./customer-order-progress-presentation";
 import { knownCustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
 
-/** Fulfillment presentation comes from the warehouse owner, never from edit
- * eligibility or a reason string. Native Shopify status remains the fallback. */
+/** Owner-projected delivery, physical return and money remain independent.
+ * Native financial and warehouse facts stay visible when enrichment is absent. */
 export function CustomerAccountOrderStatus({
   states,
 }: {
   states: ReadonlyMap<HTMLElement, CustomerOrderTotalsState>;
 }) {
-  useEffect(() => {
+  useLayoutEffect(() => {
     for (const [row, state] of states) {
+      const order = state.status === "verified" ? state.order : null;
+      const progress = order && "progress" in order ? order.progress : undefined;
+      const cancelled = order && "cancelled" in order ? order.cancelled : row.dataset.cancelled === "true";
+      const delivery = order ? orderDeliveryLabel(cancelled, order.fulfillment, progress, "Status unavailable", row.dataset.fulfillment) : undefined;
+      const deliveryTrack = row.querySelector<HTMLElement>("[data-csz-order-delivery-track]");
+      if (deliveryTrack) deliveryTrack.hidden = delivery === null;
+      const orderTrack = row.querySelector<HTMLElement>("[data-csz-order-order-track]");
+      if (orderTrack) orderTrack.hidden = !cancelled;
       const fallback = row.querySelector<HTMLElement>(
         "[data-csz-order-fulfillment-native]",
       );
       if (fallback)
         fallback.hidden =
           state.status === "verified" &&
-          knownCustomerOrderFulfillment(state.order.fulfillment) !== undefined;
+          (("progress" in state.order ? state.order.progress : undefined)
+            ?.delivery != null ||
+            knownCustomerOrderFulfillment(state.order.fulfillment) !==
+              undefined);
       const financial = row.querySelector<HTMLElement>(
         "[data-csz-order-financial-native]",
       );
       if (financial) financial.hidden = state.status === "verified";
+      const returned = row.querySelector<HTMLElement>(
+        "[data-csz-order-return-track]",
+      );
+      if (returned)
+        returned.hidden =
+          state.status !== "verified" ||
+          returnProgressLabel(
+            "progress" in state.order ? state.order.progress : undefined,
+          ) === null;
     }
     return () => {
       for (const row of states.keys())
@@ -33,6 +58,14 @@ export function CustomerAccountOrderStatus({
           .forEach((fallback) => {
             fallback.hidden = false;
           });
+      for (const row of states.keys()) {
+        const delivery = row.querySelector<HTMLElement>("[data-csz-order-delivery-track]");
+        if (delivery) delivery.hidden = row.dataset.cancelled === "true" && !["fulfilled", "partial"].includes(row.dataset.fulfillment ?? "");
+        const returned = row.querySelector<HTMLElement>(
+          "[data-csz-order-return-track]",
+        );
+        if (returned) returned.hidden = true;
+      }
     };
   }, [states]);
   return (
@@ -42,28 +75,62 @@ export function CustomerAccountOrderStatus({
           state.status === "verified"
             ? knownCustomerOrderFulfillment(state.order.fulfillment)
             : undefined;
+        const progress = state.status === "verified" && "progress" in state.order ? state.order.progress : undefined;
+        const payment = state.status === "verified" ? customerPaymentPresentation(state.order.financialStatus, progress) : null;
+        const deliveryLabel = state.status === "verified"
+          ? orderDeliveryLabel("cancelled" in state.order ? state.order.cancelled : row.dataset.cancelled === "true", fulfillment, progress, "Status unavailable", row.dataset.fulfillment) : null;
         const target = row.querySelector<HTMLElement>(
           "[data-csz-order-fulfillment]",
         );
         const financial = row.querySelector<HTMLElement>(
           "[data-csz-order-financial-status]",
         );
+        const returned = row.querySelector<HTMLElement>(
+          "[data-csz-order-return-status]",
+        );
+        const returnLabel =
+          state.status === "verified"
+            ? returnProgressLabel(
+                "progress" in state.order ? state.order.progress : undefined,
+              )
+            : null;
         return state.status !== "verified"
           ? []
           : [
-              ...(target && fulfillment
+              ...(target &&
+              deliveryLabel && (fulfillment ||
+                ("progress" in state.order ? state.order.progress : undefined)
+                  ?.delivery)
                 ? [
                     createPortal(
-                      <span>{fulfillment.label}</span>,
+                      <span>
+                        {deliveryLabel}
+                      </span>,
                       target,
                       `${row.dataset.externalOrderId}:fulfillment`,
+                    ),
+                  ]
+                : []),
+              ...(returned && returnLabel
+                ? [
+                    createPortal(
+                      <span>{returnLabel}</span>,
+                      returned,
+                      `${row.dataset.externalOrderId}:return-status`,
                     ),
                   ]
                 : []),
               ...(financial
                 ? [
                     createPortal(
-                      <span>{state.order.financialStatus}</span>,
+                      <span>
+                        {payment?.label}
+                        {payment?.detail && (
+                          <small className="csz-refund-activity">
+                            {payment.detail}
+                          </small>
+                        )}
+                      </span>,
                       financial,
                       `${row.dataset.externalOrderId}:financial-status`,
                     ),

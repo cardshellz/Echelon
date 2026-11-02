@@ -30,7 +30,7 @@ import { ProductPicker } from "./ProductPicker";
 import { PublicationStatus } from "./PublicationStatus";
 import { Callout, SectionCard, SourceTag, StatePill } from "./primitives";
 import { NoDestinationYet } from "./SupplyTab";
-import { InventoryStockSendButton } from "./InventoryStockSend";
+import { InventoryProductSyncButton } from "./InventoryProductSync";
 
 const NO_SNAPSHOT_CODE = "INVENTORY_CHANNEL_EXPOSURE_SHADOW_NOT_FOUND";
 
@@ -85,9 +85,7 @@ export function QuantitiesTab({ view, channel, target, canEdit, productId, onPro
             <RefreshCw className={cn("mr-1 h-3.5 w-3.5", snapshot.isPending && "animate-spin")} aria-hidden="true" />
             {snapshot.isPending ? "Calculating…" : "Recalculate stock"}
           </Button>}
-          {channel.provider.toLowerCase() === "shopify" && target.destinationKind === "channel_connection" && (
-            <InventoryStockSendButton productId={productId} channelId={channel.id} publicationTargetId={target.id} />
-          )}
+          <InventoryProductSyncButton productId={productId} />
         </div>
       ) : undefined}
     >

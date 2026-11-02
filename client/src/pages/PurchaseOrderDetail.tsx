@@ -1,3 +1,4 @@
+import { ReceiptInvoiceApprovalHistory } from "@/features/purchasing/ReceiptInvoiceCosts";
 import { usePurchaseOrderEntry } from "@/hooks/use-purchase-order-entry";
 import { PurchaseOrderEntryRecoveryNotice } from "@/features/purchasing/PurchaseOrderEntryRecovery";
 import { PurchaseOrderStatusBadge } from "@/features/purchasing/PurchaseOrderStatusBadge";
@@ -16,6 +17,7 @@ import { parseShipmentCreateSources } from "@shared/procurement/shipment-create-
 import { parseSupplierDispatchResult, parseSupplierPreparationResult, supplierDispatchReviewedVersion } from "@/lib/supplier-dispatch";
 import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
 import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSummary";
+import { PurchaseTaxReview, PurchaseTaxApprovalHistory } from "@/features/purchasing/PurchaseTaxReview";
 import { PoFinancialEvidence, usePoFinancialEvidence } from "@/features/purchasing/PoFinancialEvidence";
 import { usePoShipmentCosts } from "@/features/purchasing/use-po-shipment-costs";
 import { PoAmendmentHistory } from "@/features/purchasing/PoAmendmentHistory";
@@ -3290,7 +3292,8 @@ export default function PurchaseOrderDetail() {
 
       </div>
 
-      {poId && <PoShipmentCostSummary purchaseOrderId={poId} query={shipmentCosts} onViewShipments={() => setActiveTab("shipments")} />}
+      {poId && <div className="space-y-3"><PoShipmentCostSummary purchaseOrderId={poId} query={shipmentCosts} onViewShipments={() => setActiveTab("shipments")} />
+        <PurchaseTaxReview target={{ kind: "purchase_order", id: poId }} label="Tax treatment" /></div>}
 
       {/* Auto-Draft Banner */}
       {immutableRecommendationPo && (
@@ -4012,6 +4015,8 @@ export default function PurchaseOrderDetail() {
 
         <TabsContent value="history" className="space-y-4">
           {poId !== null && <PoAmendmentHistory purchaseOrderId={poId} />}
+          {poId !== null && <PurchaseTaxApprovalHistory purchaseOrderId={poId} />}
+          {poId !== null && <ReceiptInvoiceApprovalHistory purchaseOrderId={poId} />}
           {shipmentCosts.isPending && <p role="status">Loading cost approval history…</p>}
           {shipmentCosts.isError && <p role="alert">Cost approval history could not be loaded. <Button variant="outline" onClick={() => void shipmentCosts.refetch()}>Reload cost history</Button></p>}
           {shipmentCosts.data?.supplierCosts && <PurchaseCostOriginHistory status={shipmentCosts.data.supplierCosts} />}

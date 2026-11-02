@@ -10,6 +10,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import * as schema from "@shared/schema";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { fixtureTable, fixtureForeignKeys } from "./shipment-line-fixture";
@@ -33,6 +34,10 @@ import { readQuantityAmendmentSource } from "../../po-quantity-amendment.reposit
 import { computePurchaseOrderInvoiceMatchSourceFingerprint } from "../../purchase-order-invoice-match";
 import { resolveException, acknowledgeException } from "../../po-exceptions.service";
 import { registerInvoiceQuantityCorrectionRoutes } from "../../invoice-quantity-correction.routes";
+import { InvoiceQuantityCorrectionError } from "../../invoice-quantity-correction.policy";
+import { PurchaseApprovalAuthorityError } from "../../purchase-order-approval.policy";
+import { PoQuantityAmendmentError } from "../../po-quantity-amendment.policy";
+import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
 
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
@@ -49,10 +54,23 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   let ownsAudit = false;
   const ownedSchemas: string[] = [];
   let requestActor: string | null = "admin-user";
+  async function reviewInvoiceRequest(request: InvoiceQuantityApprovalRequest, actorId = "admin-user"): Promise<InvoiceQuantityApprovalRequest> {
+    const { reason: _reason, approvalConfirmed: _confirmed, previewVersion: _version, ...draft } = request;
+    try {
+      const preview = await invoiceService.preview(81, draft, actorId);
+      return { ...request, previewVersion: preview.previewVersion };
+    } catch (error) {
+      // Invalid/stale/unauthorized cases must still reach the independent
+      // approval checks. Infrastructure failures are never hidden by a helper.
+      if (error instanceof InvoiceQuantityCorrectionError || error instanceof PurchaseApprovalAuthorityError
+        || error instanceof PoQuantityAmendmentError || error instanceof CostEvidenceError || error instanceof z.ZodError) return request;
+      throw error;
+    }
+  }
   const tables: Parameters<typeof fixtureTable>[0][] = [schema.products, schema.productVariants, schema.vendors, schema.vendorProducts, schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
-    schema.purchaseOrders, schema.purchaseOrderLines, schema.poApprovalTiers, schema.poStatusHistory, schema.poRevisions, schema.poEvents, schema.poExceptions,
+    schema.purchaseTaxTypes, schema.purchaseOrders, schema.purchaseOrderLines, schema.poApprovalTiers, schema.poStatusHistory, schema.poRevisions, schema.poEvents, schema.poExceptions,
     schema.purchasingRecommendationPoHandoffs, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poReceipts,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoiceLineTaxes, schema.vendorInvoicePoLinks, schema.poReceipts,
     schema.warehouseSettings, schema.apPayments, schema.apPaymentAllocations, schema.receivingOrders, schema.receivingLines, schema.inventoryLots, schema.auditEvents];
   tables.push(schema.inboundShipments, schema.inboundShipmentLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
     schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receiptReversals, schema.inventoryTransactions, schema.orderItemCosts, schema.orderLineCosts);
@@ -440,8 +458,8 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       const poRequest = { ...await editRequest({ quantityPieces: 20, pricing: { basis: "per_piece", quantityPieces: 20, unitCostMills: 15000 }, packagingCostCents: 100, discountCents: 0, taxCents: 0 }), closedPurchaseOrderConfirmed: true as const };
       expect(await post(poRequest)).toMatchObject({ status: 200, body: { preview: { afterTotalCents: 3100, afterStatus: "closed" } } });
       const invoiceContext = await invoiceService.context(81, "admin-user");
-      const invoiceRequest = { sourceVersion: invoiceContext.sourceVersion, quantityPieces: 20, unitCostMills: 15000, lineTotalCents: 3100,
-        closedPurchaseOrderConfirmed: true, approvalConfirmed: true, reason: "Supplier invoice confirms these manually corrected values" };
+      const invoiceRequest = await reviewInvoiceRequest({ sourceVersion: invoiceContext.sourceVersion, quantityPieces: 20, unitCostMills: 15000, lineTotalCents: 3100,
+        closedPurchaseOrderConfirmed: true, approvalConfirmed: true, reason: "Supplier invoice confirms these manually corrected values" });
       const invoiceReply = await requestLocalHttp(url + "/api/vendor-invoice-lines/81/quantity-correction", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: JSON.stringify(invoiceRequest) });
       expect(invoiceReply.status).toBe(200); expect(await invoiceReply.json()).toMatchObject({ preview: { afterMatch: "matched", afterBalanceCents: 2100 } });
       expect((await pool.query("SELECT status,physical_status,closed_at,closed_by FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual(closure);
@@ -571,10 +589,11 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       // The PO has already been corrected; receiving and the paid bill remain intact.
       await pool.query("UPDATE procurement.purchase_order_lines SET order_qty=20,total_product_cost_cents=2000,line_total_cents=2100 WHERE id=11; UPDATE procurement.purchase_orders SET subtotal_cents=2100,total_cents=2100 WHERE id=1");
     });
-    const invoiceBody = async (quantityPieces = 20, actorId = "admin-user"): Promise<InvoiceQuantityApprovalRequest> => ({
+    const rawInvoiceBody = async (quantityPieces = 20, actorId = "admin-user"): Promise<InvoiceQuantityApprovalRequest> => ({
       sourceVersion: (await invoiceService.context(81, actorId)).sourceVersion, quantityPieces,
       reason: "Supplier confirmed the invoice piece quantity", approvalConfirmed: true,
     });
+    const invoiceBody = async (quantityPieces = 20, actorId = "admin-user") => reviewInvoiceRequest(await rawInvoiceBody(quantityPieces, actorId), actorId);
     const invoiceDescriptor = (request: unknown, key = randomUUID(), actorId = "admin-user"): FinancialCommandDescriptor => ({
       actorType: "user", actorId, method: "POST", routeTemplate: "/api/vendor-invoice-lines/:lineId/quantity-correction", resourceKey: "vendor_invoice_line:81",
       idempotencyKey: key, requestHash: createHash("sha256").update(canonicalJson(request)).digest("hex"), commandName: "ap.invoice.quantity_correction", contractVersion: 1,
@@ -589,7 +608,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       po: (await pool.query("SELECT * FROM procurement.purchase_orders ORDER BY id")).rows,
       poLines: (await pool.query("SELECT * FROM procurement.purchase_order_lines ORDER BY id")).rows,
     });
-    const economicBody = async (fields = {}): Promise<InvoiceQuantityApprovalRequest> => ({ ...await invoiceBody(), unitCostMills: 10000, lineTotalCents: 2000, ...fields });
+    const economicBody = async (fields = {}): Promise<InvoiceQuantityApprovalRequest> => reviewInvoiceRequest({ ...await rawInvoiceBody(), unitCostMills: 10000, lineTotalCents: 2000, ...fields });
     const stockAndPayments = async () => {
       const records = await protectedRecords();
       delete records["procurement.vendor_invoices"]; delete records.invoiceEconomics;
@@ -600,7 +619,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       const closed = (await pool.query("SELECT status,closed_at,closed_by,total_cents FROM procurement.purchase_orders WHERE id=1")).rows[0];
       const stock = await stockAndPayments(), poLines = (await pool.query("SELECT * FROM procurement.purchase_order_lines")).rows;
       const request = await economicBody({ closedPurchaseOrderConfirmed: true }), key = randomUUID();
-      const { reason: _reason, approvalConfirmed: _confirmed, ...previewRequest } = request;
+      const { reason: _reason, approvalConfirmed: _confirmed, previewVersion: _version, ...previewRequest } = request;
       const preview = await invoiceService.preview(81, previewRequest, "admin-user");
       expect(preview).toMatchObject({ afterInvoiceAmountCents: 2000, paidAmountCents: 1000, afterBalanceCents: 1000, afterInvoiceStatus: "partially_paid" });
       const first = await invoicePost(request, key); expect(first.status).toBe(200);
@@ -663,7 +682,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       expect((await invoiceService.approve(81, request, "admin-user", command)).httpStatus).toBe(200);
     });
     it("serializes financial corrections and records only one economic result", async () => {
-      const request = await economicBody(), other = { ...request, lineTotalCents: 2500 };
+      const request = await economicBody(), other = await economicBody({ lineTotalCents: 2500 });
       const results = await Promise.all([invoiceService.approve(81, request, "admin-user", invoiceDescriptor(request)), invoiceService.approve(81, other, "admin-user", invoiceDescriptor(other))]);
       expect(results.map(row => row.httpStatus).sort()).toEqual([200, 409]);
       expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events WHERE event_type='invoice_line_corrected'")).rows[0].count).toBe(1);
@@ -707,7 +726,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       expect((await pool.query("SELECT COUNT(*)::int AS count FROM public.audit_events WHERE action='procurement.invoice.quantity_corrected'")).rows[0].count).toBe(1);
     });
     it("serializes competing invoice corrections and allows only one from a source version", async () => {
-      const request = await invoiceBody(), other = { ...request, quantityPieces: 15 };
+      const request = await invoiceBody(), other = await invoiceBody(15);
       const results = await Promise.all([invoiceService.approve(81, request, "admin-user", invoiceDescriptor(request)), invoiceService.approve(81, other, "admin-user", invoiceDescriptor(other))]);
       expect(results.map((result) => result.httpStatus).sort()).toEqual([200, 409]);
       expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events")).rows[0].count).toBe(1);

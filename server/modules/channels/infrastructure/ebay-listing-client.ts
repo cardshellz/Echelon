@@ -28,6 +28,7 @@ import {
 import { EbayApiRequestError, isMissingEbayInventoryResource, isMissingEbayOfferCollection } from "../adapters/ebay/ebay-api-error";
 import { readExistingEbayListingPhotos } from "../adapters/ebay/ebay-listing-photos.reader";
 import { readEbayNativePackage } from "../adapters/ebay/ebay-native-package.reader";
+import { readEbayPublishedContent } from "../adapters/ebay/ebay-published-content.reader";
 import { normalizeEbayObservedOffers } from "../adapters/ebay/ebay-offer-observation";
 export { normalizeEbayObservedOffers } from "../adapters/ebay/ebay-offer-observation";
 import type {
@@ -156,6 +157,11 @@ export function createEbayRouteListingClient(
   const request = createEbayRouteRequest(input);
   const client: EbayListingConnectorClient = {
     quantityRequestJournalVersion: 1,
+    getPublishedListingContent: async listingId => {
+      const auth = getAuthService();
+      if (!auth) throw new EbayListingSyncError("EBAY_SYNC_AUTH_REQUIRED", "An exact eBay environment is required to verify the published listing.");
+      return readEbayPublishedContent({ listingId, accessToken: input.accessToken, environment: auth.getEnvironment() });
+    },
     getListingPackageType: async (sku, marketplaceId, observedOffers) => {
       const auth = getAuthService();
       if (!auth) throw new EbayListingSyncError("EBAY_SYNC_AUTH_REQUIRED", "An exact eBay environment is required to read package configuration.");

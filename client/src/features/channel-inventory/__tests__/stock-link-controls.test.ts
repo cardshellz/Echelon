@@ -59,6 +59,9 @@ describe("stock-link details", () => {
     const html = details(describeStockLink(stockLinkStatus(), false));
     expect(html).toContain("Link store items by SKU · On");
     expect(html).toContain("12 linked · 3 waiting for a store item · 1 need a fix · 0 failed");
+    expect(html).toContain("Verified active and draft Shopify products can be linked for inventory.");
+    expect(html).toContain("Archived products cannot. Linking leaves the product’s Shopify status unchanged.");
+    expect(html).toContain("Use Check again to retry items waiting after a previous product status check.");
     expect(html).toContain(">Check again<");
     expect(html).not.toContain(">Continue<");
     expect(html).not.toContain("requires inventory activation permission");

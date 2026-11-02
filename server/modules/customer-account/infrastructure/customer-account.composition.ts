@@ -1,4 +1,7 @@
 import type { Pool } from "pg";
+import { CustomerAccountProgressService } from "../application/customer-account-progress.service";
+import { PostgresCustomerOrderDeliveryReader } from "../../shipping/customer-order-delivery.reader";
+import { PostgresCustomerReturnProgressReader } from "../../returns/infrastructure/customer-return-progress.reader";
 import type { OrderEditService } from "../../order-edits/application/order-edit.service";
 import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
 import { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
@@ -10,6 +13,7 @@ import { ClubOrderEditCodeRedemptions } from "../../order-edits/infrastructure/c
 import { CustomerAccountOrderQueriesService } from "../application/customer-account-order-queries.service";
 import { PostgresCustomerAccountOrderContextReader } from "./customer-account-order-context.repository";
 import { PostgresOrderActionProjectionStore } from "./order-action-projection.repository";
+import { PostgresCancellationRefundProgressReader } from "./cancellation-refund-progress.reader";
 
 export function customerAccountServices(pool: Pool, edits: OrderEditService) {
   const store = new PostgresOrderEditStore(pool);
@@ -43,6 +47,13 @@ export function customerAccountServices(pool: Pool, edits: OrderEditService) {
         connection: () => customerEdits.connection(),
         context: new PostgresCustomerAccountOrderContextReader(pool),
         actions: new PostgresOrderActionProjectionStore(pool),
+        actionRefresh: new PostgresOrderActionProjectionStore(pool),
+        progress: new CustomerAccountProgressService({
+          delivery: new PostgresCustomerOrderDeliveryReader(pool),
+          returns: new PostgresCustomerReturnProgressReader(pool),
+          cancellations: new PostgresCancellationRefundProgressReader(pool),
+          report: event => console.error(JSON.stringify({ event: "customer_account_progress_read_failed", ...event })),
+        }),
         now: () => new Date(),
         report: (event) =>
           console.error(

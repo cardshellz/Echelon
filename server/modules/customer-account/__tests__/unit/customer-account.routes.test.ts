@@ -26,13 +26,14 @@ describe("customer account signed storefront HTTP boundary", () => {
   const services = vi.fn((_principal: CustomerReturnCustomerSession) => ({ edits: { connection }, returns: vi.fn() }));
   const report = vi.fn();
   let enabled = true;
+  let additionalThemeIds: string[] | undefined;
   beforeEach(async () => {
-    vi.clearAllMocks(); enabled = true;
+    vi.clearAllMocks(); enabled = true; additionalThemeIds = undefined;
     services.mockImplementation(() => ({ edits: { connection }, returns: vi.fn() }));
     const auth = new CustomerReturnCustomerAuthService({ config, challenges: { create: vi.fn(), consume: vi.fn() },
       shops: async () => [{ channelId: 2, connectionId: 4, shopDomain: "fixture.myshopify.com", displayName: "Shopify" }], now: () => now, randomState: () => "a".repeat(43) });
     const app = express(); app.use(express.json());
-    registerCustomerAccountRoutes(app, { services, context: async () => ({ config, auth }), staging: () => enabled ? staging : null, report } as unknown as CustomerAccountRouteDependencies);
+    registerCustomerAccountRoutes(app, { services, context: async () => ({ config, auth }), staging: () => enabled ? { ...staging, ...(additionalThemeIds ? { additionalThemeIds } : {}) } : null, report } as unknown as CustomerAccountRouteDependencies);
     server = await new Promise<Server>(resolve => { const value = app.listen(0, "127.0.0.1", () => resolve(value)); });
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${CUSTOMER_ACCOUNT_PROXY_API}`;
   });
@@ -41,6 +42,30 @@ describe("customer account signed storefront HTTP boundary", () => {
     return fetch(`${base}?${signed}`, { method: "POST", headers: { Origin: "https://shop.test", "Content-Type": "application/json", [CUSTOMER_ACCOUNT_COMMAND_HEADER]: "1", ...headers },
       body: JSON.stringify({ themeId: staging.themeId, expectedCustomerId: "100", method: "GET", path: "/account/bootstrap", query: {}, ...body }) });
   }
+  it("serves the native returns chooser through the existing signed customer scope and cached reader", async () => {
+    const page = { orders: [{ omsOrderId: 10, orderReference: "#TEST-1001", purchasedAt: null, eligibleItemCount: 1 }], nextBeforeOmsOrderId: null, unavailableOrderCount: 0 };
+    const choices = vi.fn(async () => page);
+    const returns = vi.fn(async () => ({ orders: { choices } }));
+    services.mockImplementation(() => ({ edits: { connection }, returns }) as never);
+    const sessionKey = (await (await request()).json()).session.sessionKey;
+    const input = { path: "/returns/order-options", sessionKey };
+    const response = await request(input);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(page);
+    expect(choices).toHaveBeenCalledExactlyOnceWith({});
+    expect(services.mock.calls.at(-1)?.[0]).toMatchObject({ channelId: 2, externalCustomerId: "100" });
+    expect((await request({ ...input, query: { before: "20" } })).status).toBe(200);
+    expect(choices).toHaveBeenLastCalledWith({ beforeOmsOrderId: 20 });
+    const count = choices.mock.calls.length;
+    for (const change of [{ query: { before: "0" } }, { query: { before: "1.5" } }, { query: { customerId: "101" } }, { body: { customerId: "101" } }])
+      expect((await request({ ...input, ...change })).status).toBe(400);
+    expect((await request({ ...input, method: "POST", body: {} })).status).toBe(404);
+    expect((await request(input, proof({ logged_in_customer_id: "" }))).status).toBe(401);
+    expect((await request({ ...input, expectedCustomerId: "101" })).status).toBe(401);
+    expect((await request({ ...input, sessionKey: "b".repeat(43) })).status).toBe(401);
+    expect((await request(input, proof(), { Origin: "https://evil.test" })).status).toBe(403);
+    expect(choices).toHaveBeenCalledTimes(count);
+  });
   it("verifies Shopify per request without accepting staff cookies or a theme ID as identity", async () => {
     const response = await request(); expect(response.status).toBe(200);
     expect((await response.json()).session).toMatchObject({ authenticated: true, privateTesting: true });
@@ -50,6 +75,24 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(await anonymous.json()).toEqual({ error: { code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", message: "Sign in again to manage your orders." } });
     expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", path: "/account/bootstrap" });
     expect(services).toHaveBeenCalledTimes(1);
+  });
+  it("admits a configured live theme through the same signed boundary while keeping staging usable", async () => {
+    const live = { themeId: "174464958623" };
+    expect((await request(live)).status).toBe(403);
+    expect(services).not.toHaveBeenCalled();
+    additionalThemeIds = [live.themeId];
+    expect((await request(live)).status).toBe(200);
+    expect(services).toHaveBeenCalledTimes(1);
+    expect((await request(live, proof({ logged_in_customer_id: "" }), { Cookie: "staff-session=fake" })).status).toBe(401);
+    expect((await request({ ...live, expectedCustomerId: "101" })).status).toBe(401);
+    expect((await request(live, proof(), { Origin: "https://evil.test" })).status).toBe(403);
+    expect((await request({ themeId: "999" })).status).toBe(403);
+    expect(services).toHaveBeenCalledTimes(1);
+    expect((await request()).status).toBe(200);
+    expect(services).toHaveBeenCalledTimes(2);
+    enabled = false;
+    expect((await request(live)).status).toBe(403);
+    expect(services).toHaveBeenCalledTimes(2);
   });
   it("records a database failure code without exposing SQL or connection details", async () => {
     connection.mockRejectedValueOnce(Object.assign(new Error("private database query and credentials"), { code: "55P03" }));
@@ -74,6 +117,28 @@ describe("customer account signed storefront HTTP boundary", () => {
     enabled = false;
     expect((await request({ method: "POST", path: "/account/order-details", sessionKey, body: input })).status).toBe(403);
     expect(orders.details).toHaveBeenCalledTimes(1);
+  });
+  it("authenticates explicit presentation refreshes without submitting a business command",async()=>{
+    const input={externalOrderId:"99",orderReference:"#49180"};
+    const refreshActions=vi.fn(async()=>({orders:[{...input,omsOrderId:10,state:"refreshing",snapshot:null,verifiedAt:null,validUntil:null}]}));
+    services.mockImplementation(()=>({edits:{connection},orders:{refreshActions},returns:vi.fn()}) as never);
+    const sessionKey=(await(await request()).json()).session.sessionKey;
+    expect((await request({method:"POST",path:"/account/order-actions/refresh",sessionKey,body:{orders:[input]}})).status).toBe(200);
+    expect(refreshActions).toHaveBeenCalledExactlyOnceWith({orders:[input]});
+    expect((await request({method:"POST",path:"/account/order-actions/refresh",sessionKey,body:{orders:[input]}},proof({logged_in_customer_id:""}))).status).toBe(401);
+    expect(refreshActions).toHaveBeenCalledOnce();
+  });
+  it("opts into the new progress response only for the supported explicit version", async()=>{
+    const input={externalOrderId:"99",orderReference:"#49180"};
+    const summaries=vi.fn(async()=>({orders:[{...input,omsOrderId:null,currency:"USD",totalCents:0,cancelled:true,financialStatus:"Refunded",progress:{delivery:null,packages:[],returns:[],refunds:[]}}],unavailableExternalOrderIds:[],statusUnavailable:false}));
+    services.mockImplementation(()=>({edits:{connection},orders:{summaries},returns:vi.fn()}) as never);
+    const sessionKey=(await(await request()).json()).session.sessionKey;
+    const result=await request({method:"POST",path:"/account/order-summaries",query:{statusDisplayVersion:"v2"},sessionKey,body:{orders:[input]}});
+    expect(result.status).toBe(200);expect(summaries).toHaveBeenCalledExactlyOnceWith({orders:[input]},{progress:true});
+    for(const query of [{statusDisplayVersion:"v3"},{statusDisplayVersion:"v2",unrecognized:"true"}]){
+      expect((await request({method:"POST",path:"/account/order-summaries",query,sessionKey,body:{orders:[input]}})).status).toBe(400);
+    }
+    expect(summaries).toHaveBeenCalledTimes(1);
   });
   it.each([
     { signed: () => `${proof()}&signature=duplicate` },

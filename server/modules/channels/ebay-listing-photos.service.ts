@@ -7,6 +7,10 @@ import {
 } from "../catalog/catalog-publication-images.reader";
 import { readChannelPhotoOverrides, readChannelPhotoSkuAliases } from "./ebay-listing-photos.repository";
 import type { CatalogPublicImageUrl } from "../catalog/catalog-public-image";
+import { assertCatalogPublicationPhotoRequirements, createCatalogImageInspector, type CatalogImageInspector } from "../catalog/catalog-image-inspection";
+import { ProductAssetError } from "../catalog/product-asset-errors";
+import { ChannelProviderReadError } from "@shared/channel-provider-read";
+import { EBAY_MINIMUM_PHOTO_LONGEST_SIDE, ebayOriginalPhotoUrl } from "./adapters/ebay/ebay-photo-requirements";
 import {
   EBAY_LISTING_MAX_PHOTOS, EbayListingPhotoError, assertEbayPhotoUrl, assertEbayPhotoVariants,
   buildEbayListingPhotoPlan, resolveEbayListingPhotoUrls, type EbayListingPhotoPlan, type EbayPhotoVariant,
@@ -27,11 +31,27 @@ export interface EbayListingPhotoResolver {
 
 /** One Catalog selection contract for direct eBay writers and Dropship previews. No inventory writes. */
 export class ChannelEbayListingPhotoResolver implements EbayListingPhotoResolver {
-  constructor(private readonly database: Pick<Pool, "connect">, private readonly publicUrl: CatalogPublicImageUrl) {}
+  constructor(private readonly database: Pick<Pool, "connect">, private readonly publicUrl: CatalogPublicImageUrl,
+    private readonly images: CatalogImageInspector = createCatalogImageInspector()) {}
 
   async resolve(input: EbayListingPhotoRequest): Promise<EbayListingPhotoPlan> {
     validateRequest(input);
-    try { return await this.resolveValidated(input); }
+    try {
+      const plan = await this.resolveValidated(input);
+      // Resolve/commit/release the source snapshot before any network read. Both
+      // Catalog and source-locked galleries must meet the provider's real rule.
+      const urls = [...plan.groupImageUrls, ...[...plan.byVariantId.values()].flat()].map(ebayOriginalPhotoUrl);
+      try {
+        await assertCatalogPublicationPhotoRequirements(this.images, urls, { minimumLongestSide: EBAY_MINIMUM_PHOTO_LONGEST_SIDE });
+      } catch (cause) {
+        if (cause instanceof ProductAssetError && cause.status < 500)
+          throw new EbayListingPhotoError(cause.code === "CATALOG_IMAGE_RESOLUTION_TOO_SMALL" ? "EBAY_PHOTO_RESOLUTION_TOO_SMALL" : "EBAY_CATALOG_PHOTO_UNAVAILABLE",
+            cause.message, { productId: input.productId }, { cause });
+        throw new EbayListingPhotoError("EBAY_PHOTO_READ_FAILED", "The selected photos could not be checked. This update has not replaced the listing's photos.",
+          { productId: input.productId }, { cause: new ChannelProviderReadError({ provider: "ebay", resource: "photo_source", method: "GET", kind: "unavailable" }, { cause }) });
+      }
+      return plan;
+    }
     catch (error) {
       console.error(JSON.stringify({ event: "ebay_listing_photo_resolution_failed", productId: input.productId, channelId: input.channelId,
         code: error instanceof EbayListingPhotoError ? error.code : "EBAY_PHOTO_READ_FAILED",
@@ -63,6 +83,7 @@ export class ChannelEbayListingPhotoResolver implements EbayListingPhotoResolver
         mediaPlan = await new PgCatalogVariantPublicationPhotoReader(client, this.publicUrl).listPublicationPlan({
           productId: input.productId, productVariantIds: input.variants.map(variant => variant.variantId),
           maxPhotosPerVariant: EBAY_LISTING_MAX_PHOTOS, maxGroupPhotos: EBAY_LISTING_MAX_PHOTOS, overrides,
+          minimumLongestSide: EBAY_MINIMUM_PHOTO_LONGEST_SIDE,
         });
         for (const variant of input.variants) {
           const resolved = mediaPlan.variants.find(candidate => candidate.variantId === variant.variantId)?.gallery;

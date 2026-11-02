@@ -1,3 +1,6 @@
+import { z } from "zod";
+import { CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
+import { resolveReceiptInvoiceSources, type ReceiptInvoiceSource } from "./receipt-invoice-costs";
 import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
 import {
   costFingerprint,
@@ -6,6 +9,8 @@ import {
 import type { CostRevisionInput } from "../../inventory/infrastructure/cost-evidence.repository";
 import { resolveSupplierCreditReductions, type SupplierCreditCostRow } from "./supplier-credit-source";
 import { supplierCostReviewFactsSchema } from "@shared/procurement/cost-review-facts";
+import { purchaseTaxEvidence, purchaseTaxAmounts, taxTreatmentIssue } from "./purchase-tax";
+import { readIntegerMills } from "@shared/money-read";
 
 /** The single product/packaging source decision, shared by posting and reads. */
 function purchaseInvoiceEvidence(source: {
@@ -52,7 +57,7 @@ export function purchaseCostReviewFacts(source: Parameters<typeof purchaseInvoic
   });
 }
 
-export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvoiceEvidence>[0]): CostRevisionInput[] {
+function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoiceEvidence>[0]): CostRevisionInput[] {
   const { line, approvedInvoices, purchaseOrderLineId, qty, coverageQty, credits, approvedQty, parsed, fullQuarantineReturn } = purchaseInvoiceEvidence(source);
   // This is a source disposition, not proof of inventory completion. The
   // application owner must independently verify live custody and cost history.
@@ -94,6 +99,8 @@ export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvo
       if (!evidence.success)
         throw new Error("Validated invoice evidence changed in memory");
       const components = evidence.data;
+      const taxes = purchaseTaxEvidence(approvedInvoices[index].tax_cost_evidence);
+      const tax = purchaseTaxAmounts(taxes);
       const total =
         BigInt(components.productMills) +
         BigInt(components.packagingMills) +
@@ -107,7 +114,7 @@ export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvo
             ),
           ) *
             BigInt(100) ||
-        components.adjustmentMills !== 0 ||
+        components.adjustmentMills !== tax.taxMills ||
         (components.packagingTreatment === "included_in_product" &&
           components.packagingMills !== 0)
       ) {
@@ -117,7 +124,8 @@ export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvo
             "The recorded invoice components do not have a supported, exact reconciliation to the document total.",
         };
       }
-      product += BigInt(components.productMills);
+      issue ??= taxTreatmentIssue(taxes);
+      product += BigInt(components.productMills) + BigInt(tax.inventoryMills);
       packaging += BigInt(components.packagingMills);
       if (components.packagingTreatment === "included_in_product")
         packagingTreatment = "included_in_product";
@@ -134,16 +142,22 @@ export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvo
       (netPackaging < BigInt(0) ? packaging : netPackaging).toString(),
       "invoice.packagingMills",
     );
-  } else if (
-    costInteger(line.discount_cents ?? 0, "discountCents") !== 0 ||
-    costInteger(line.tax_cents ?? 0, "taxCents") !== 0
-  ) {
+  } else if (costInteger(line.discount_cents ?? 0, "discountCents") !== 0
+    || (costInteger(line.tax_cents ?? 0, "taxCents") !== 0 && line.tax_cost_evidence === undefined)) {
     issue ??= {
       code: "PURCHASE_ADJUSTMENT_REVIEW",
       message:
         "The purchase has a discount or tax requiring an explicit cost component disposition.",
     };
   }
+  if (!actual && line.tax_cost_evidence !== undefined) {
+    const taxes = purchaseTaxEvidence(line.tax_cost_evidence), amounts = purchaseTaxAmounts(taxes);
+    issue ??= taxTreatmentIssue(taxes);
+    productMills = readIntegerMills(BigInt(productMills) + BigInt(amounts.inventoryMills), "product and capitalized tax");
+  }
+  if (credits.sources.length && (approvedInvoices.some(row => purchaseTaxEvidence(row.tax_cost_evidence).some(tax => tax.amountMills !== 0)))) issue ??= {
+    code: "PURCHASE_TAX_CREDIT_REVIEW", message: "This supplier credit needs its tax amounts checked against the original taxed invoice before inventory costs can be replaced.",
+  };
   issue ??= credits.issues[0] ?? null;
   const currency = actual
     ? approvedInvoices.every((row) => row.currency === "USD")
@@ -198,4 +212,32 @@ export function resolvePurchaseCostSource(source: Parameters<typeof purchaseInvo
     issue,
     manualOverride: null,
   }));
+}
+
+export function resolvePurchaseCostSource(source: ReceiptInvoiceSource): CostRevisionInput[] {
+  if (!source.receiptCosting) return resolveLegacyPurchaseCostSource(source);
+  try {
+    // A proved complete return before acceptance has no receipt cost to assign.
+    // Preserve that existing source disposition and its independent live-history
+    // verification; this does not attribute a credit to any inventory batch.
+    if (
+      source.supplierCredits?.length &&
+      source.receiptCosting.receipts.length === 0 &&
+      source.receiptCosting.allocations.length === 0
+    ) {
+      const returned = resolveLegacyPurchaseCostSource(source);
+      if (
+        returned.length === 2 &&
+        returned.every(row => row.inventoryEffect && row.evidence === "confirmed")
+      ) return returned;
+    }
+    return resolveReceiptInvoiceSources(source, resolveLegacyPurchaseCostSource);
+  }
+  catch (error) {
+    if (!(error instanceof CostEvidenceError || error instanceof z.ZodError || error instanceof RangeError)) throw error;
+    // Invalidated receipt/invoice membership remains visible. Existing values
+    // are retained until an admin repairs coverage; never fall back to averaging.
+    return resolveLegacyPurchaseCostSource({ ...source, approvedInvoices: [] }).map(row => ({ ...row,
+      evidence: "review_required", issue: { code: "RECEIPT_INVOICE_ALLOCATION_REVIEW", message: error.message } }));
+  }
 }

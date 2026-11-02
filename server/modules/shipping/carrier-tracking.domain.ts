@@ -227,7 +227,7 @@ export interface NormalizedShippingProviderLabelObservation {
   voidedAt: Date | null;
   providerOccurredAt: Date | null;
   shipmentContentsEvidence: ShipStationShipmentContentsEvidence;
-  observationSource: typeof SHIPSTATION_LABEL_OBSERVATION_SOURCE;
+  observationSource: typeof SHIPSTATION_LABEL_OBSERVATION_SOURCE | "shipstation_status_observation";
   sourceObservationHash: string;
   eventHash: string;
   sanitizedPayload: Record<string, unknown>;
@@ -590,6 +590,8 @@ function redactShipStationSourceItems(rawItems: unknown): Readonly<Record<string
 }
 
 export interface CarrierTrackingMatchCandidate {
+  /** Read-only status capture can never authorize outbound dispatch. */
+  statusOnly?: boolean;
   shippingProviderLabelId: number;
   providerLabelId: string;
   labelStatus: ShippingProviderLabelStatus;
@@ -1049,6 +1051,7 @@ function mergeCandidate(
         ? "superseded"
         : "unknown";
   return {
+    ...(existing.statusOnly || incoming.statusOnly ? { statusOnly: true } : {}),
     shippingProviderLabelId: existing.shippingProviderLabelId,
     providerLabelId: existing.providerLabelId,
     labelStatus: status,
@@ -1106,6 +1109,7 @@ export function resolveCarrierTrackingMatch(
     reasonCode,
     candidates: candidates.map((candidate) => ({
       identity: candidateIdentity(candidate),
+      ...(candidate.statusOnly ? { statusOnly: true } : {}),
       labelStatus: candidate.labelStatus,
       labelDirection: candidate.labelDirection,
       shippingProviderLabelId: candidate.shippingProviderLabelId,

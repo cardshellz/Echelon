@@ -1,3 +1,9 @@
+import { randomUUID as newShippingStatusToken } from "node:crypto";
+import { createSavedLabelStatusSource } from "../modules/shipping/saved-label-status.source";
+import { PostgresSalesChannelDeliveryEvidenceStore } from "../modules/shipping/sales-channel-delivery.repository";
+import { ShopifyCustomerReturnSnapshotReader } from "../modules/returns/infrastructure/customer-return-shopify-snapshot.reader";
+import { PostgresSavedLabelStatusStore } from "../modules/shipping/saved-label-status.repository";
+import { SavedLabelStatusWorker } from "../modules/shipping/saved-label-status.worker";
 import { createReservedInventoryTransferOwner } from "../modules/inventory-planning/infrastructure/reserved-inventory-transfer.repository";
 import { createPackageReconciliationService } from "./package-reconciliation";
 /**
@@ -134,6 +140,12 @@ import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-cl
 import { ChannelIdentityService } from "../modules/channels/channel-identity.service";
 import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../modules/channels/shopify-stock-link-source";
 import { createStockLinkService } from "../modules/inventory-planning/infrastructure/stock-link.factory";
+import { randomUUID } from "node:crypto";
+import { ProductSyncWorkflowService } from "../modules/inventory-planning/application/product-sync-workflow.service";
+import { PostgresProductSyncWorkflowStore } from "../modules/inventory-planning/infrastructure/product-sync-workflow.repository";
+import { InventoryProductSyncService } from "../modules/inventory-planning/application/inventory-product-sync.service";
+import { PostgresInventoryProductSyncStore } from "../modules/inventory-planning/infrastructure/inventory-product-sync.repository";
+import { stockLinkRunnerDisableReason } from "../modules/inventory-planning/infrastructure/stock-link-runner-switch";
 import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../modules/channels/channel-fulfillment-provider-clients.service";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
@@ -494,6 +506,12 @@ export function createServices(
     monotonicNow: () => performance.now(),
     random: Math.random,
   });
+  const productInventorySync = new ProductSyncWorkflowService({
+    store: new PostgresProductSyncWorkflowStore(databasePool),
+    publication: new InventoryProductSyncService(new PostgresInventoryProductSyncStore(databasePool)),
+    links: stockLink, clock: () => new Date(), newLeaseToken: randomUUID,
+    enabled: () => stockLinkRunnerDisableReason(process.env) === null, logger: platformLogger,
+  });
   const channelShippingCapabilities = new ChannelShippingCapabilityRegistry();
   channelShippingCapabilities.register(shopifyAdapter);
   channelShippingCapabilities.register(ebayAdapter);
@@ -657,13 +675,24 @@ export function createServices(
       return providerDispatchAuthority.confirmDispatch(input);
     },
   };
-  const carrierTracking = new CarrierTrackingService({
+  const carrierTracking: CarrierTrackingService = new CarrierTrackingService({
     repository: createDrizzleCarrierTrackingRepository(db),
     clock: systemCarrierTrackingClock,
     logger: carrierTrackingLogger,
     trackingEventsClient: createShipStationTrackingEventsClient(),
     dispatchAuthority: dispatchAuthorityProxy,
     labelVoidObserver: shopifyLabelLifecycle,
+    captureSavedLabels: (): Promise<{ errors: number }> => savedLabelStatus.run(),
+  });
+  const savedLabelStatus: SavedLabelStatusWorker = new SavedLabelStatusWorker({
+    store: new PostgresSavedLabelStatusStore(databasePool),
+    channelEvidence: new PostgresSalesChannelDeliveryEvidenceStore(databasePool),
+    source: createSavedLabelStatusSource({ pool: databasePool, now: () => systemCarrierTrackingClock.now(),
+      shopify: new ShopifyCustomerReturnSnapshotReader({ resolveConnection: channelId => new ChannelIdentityService(db).shopifyConnection(channelId), request: fetch, now: () => systemCarrierTrackingClock.now() }),
+      v1Key: process.env.SHIPSTATION_API_KEY, v1Secret: process.env.SHIPSTATION_API_SECRET,
+      v2Key: process.env.SHIPSTATION_V2_API_KEY }),
+    tracking: carrierTracking, now: () => systemCarrierTrackingClock.now(), newToken: newShippingStatusToken,
+    report: event => carrierTrackingLogger.warn({ code: event.code, message: "Saved-label status capture needs retry or review.", context: { jobId: event.jobId, attempt: event.attempt } }),
   });
   const labelCommercialFulfillment =
     new PackageAllocationLabelCommercialFulfillmentService({
@@ -799,6 +828,7 @@ export function createServices(
     ebayPublicationReconciliation,
     inventoryPublicationReadback,
     stockLink,
+    productInventorySync,
     inventoryAvailabilityClaims,
     assemblyWork,
     assemblyExecution,

@@ -45,7 +45,7 @@ type ReadDatabase = Pick<typeof db, "select">;
 function bucketPredicate(bucket: WmsOrderBucket): SQL {
   if (bucket === "all") return sql`true`;
   const normalizedStatus = sql`lower(btrim(${orders.warehouseStatus}))`;
-  const held = sql`(coalesce(${orders.onHold}, 0) = 1 or ${normalizedStatus} = 'on_hold')`;
+  const held = sql`(${normalizedStatus} not in ('cancelled','shipped') and (coalesce(${orders.onHold}, 0) = 1 or ${normalizedStatus} = 'on_hold'))`;
   const matchesStatus = inArray(normalizedStatus, [...WMS_BUCKET_STATUSES[bucket]]);
   return bucket === "issues" ? sql`(${held} or ${matchesStatus})` : sql`(not ${held} and ${matchesStatus})`;
 }

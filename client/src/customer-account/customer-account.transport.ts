@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CUSTOMER_ORDER_PROGRESS_VERSION } from "@shared/customer-account/order-progress";
 import { CUSTOMER_ACCOUNT_COMMAND_HEADER, customerAccountRequestSchema, customerAccountBootstrapSchema, customerAccountOrderIdentitySchema, customerAccountOrderIdentityInputSchema } from "@shared/customer-account/customer-account.contract";
 import { ORDER_EDIT_API } from "@shared/order-edits/order-edit.contract";
 import { CUSTOMER_RETURNS_API, RETURN_CUSTOMER_SESSION_HEADER } from "@shared/returns/customer-return-access.contract";
@@ -92,9 +93,9 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
       return result;
     },
     resolve: async (raw: unknown, signal?: AbortSignal) => json(await call({ method: "POST", path: "/account/resolve", body: customerAccountOrderIdentityInputSchema.parse(raw) }, signal), customerAccountOrderIdentitySchema),
-    orderActions: async (raw: unknown, signal?: AbortSignal) => {
+    orderActions: async (raw: unknown, signal?: AbortSignal, refresh = false) => {
       const input = customerAccountOrderSummariesInputSchema.parse(raw);
-      const result = await json(await call({ method: "POST", path: "/account/order-actions", body: input }, signal), customerOrderActionPageSchema);
+      const result = await json(await call({ method: "POST", path: refresh ? "/account/order-actions/refresh" : "/account/order-actions", body: input }, signal), customerOrderActionPageSchema);
       if (result.orders.length !== input.orders.length || result.orders.some(row => !input.orders.some(
         expected => row.externalOrderId === expected.externalOrderId && row.orderReference === expected.orderReference)))
         throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_ACTION_MISMATCH", "Order options could not be verified. Please try again.");
@@ -102,7 +103,18 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
     },
     orderSummaries: async (raw: unknown, signal?: AbortSignal) => {
       const input = customerAccountOrderSummariesInputSchema.parse(raw);
-      const result = await json(await call({ method: "POST", path: "/account/order-summaries", body: input }, signal), customerAccountOrderSummariesSchema);
+      let response = await call({ method: "POST", path: "/account/order-summaries", query: { statusDisplayVersion: CUSTOMER_ORDER_PROGRESS_VERSION }, body: input }, signal);
+      if (response.status === 400 && !signal?.aborted) {
+        const rejected: unknown = await response.clone().json().catch(() => null);
+        const invalid = z.object({error:z.object({code:z.literal("RETURN_CUSTOMER_INPUT_INVALID")})}).safeParse(rejected);
+        if (invalid.success) {
+          // A theme may reach a still-running older backend during deployment.
+          // Only this read is retried without the additive version; signed
+          // ownership and strict money/identity validation stay in force.
+          response = await call({ method: "POST", path: "/account/order-summaries", body: input }, signal);
+        }
+      }
+      const result = await json(response, customerAccountOrderSummariesSchema);
       const expected = input.orders.map(order => order.externalOrderId);
       const received = [...result.orders.map(order => order.externalOrderId), ...result.unavailableExternalOrderIds];
       if (received.length !== expected.length || received.some(id => !expected.includes(id)) || result.orders.some(order => !input.orders.some(item => item.externalOrderId === order.externalOrderId && item.orderReference === order.orderReference)))

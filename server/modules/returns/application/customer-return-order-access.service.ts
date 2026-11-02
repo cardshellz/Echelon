@@ -49,6 +49,9 @@ export const customerReturnOrderCandidateSchema = z.object({
   externalOrderId: externalIdSchema,
   externalOrderNumber: z.string().min(1).max(MAX_CUSTOMER_RETURN_ORDER_REFERENCE_LENGTH),
   externalCustomerId: externalIdSchema.nullable(),
+  // Channel-owned cancellation evidence, independent of payment/refund status.
+  // Optional for older adapters; missing evidence must not mean cancelled.
+  cancelledAt: z.string().datetime().nullable().optional(),
 }).strict();
 
 export type CustomerReturnOrderCandidate = z.infer<typeof customerReturnOrderCandidateSchema>;
@@ -57,7 +60,11 @@ export const customerReturnCanonicalOrderScopeSchema = z.object({
   channelId: canonicalIdSchema,
   omsOrderId: canonicalIdSchema,
   externalOrderId: externalIdSchema,
-  externalCustomerId: externalIdSchema,
+  // A verified order grant may cover a purchase with no Shopify customer.
+  // The canonical channel/order IDs remain mandatory for every command.
+  externalCustomerId: externalIdSchema.nullable(),
+  verifiedPurchase: z.object({ email: z.string().email().max(254),
+    customerId: z.string().regex(/^gid:\/\/shopify\/Customer\/[1-9][0-9]*$/).nullable() }).strict().optional(),
 }).strict();
 /** Trusted request-scoped identity, never an unchecked public request body. */
 export type CustomerReturnCanonicalOrderScope = z.infer<typeof customerReturnCanonicalOrderScopeSchema>;

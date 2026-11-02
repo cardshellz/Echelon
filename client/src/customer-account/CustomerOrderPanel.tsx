@@ -1,3 +1,4 @@
+import { CustomerOrderProgressSummary, CustomerOrderProgressDetails } from "./CustomerOrderProgress";
 import { useEffect, useRef, useState } from "react";
 import { ChevronRight, X } from "lucide-react";
 import type { OrderEditOrder } from "@shared/order-edits/order-edit.contract";
@@ -9,6 +10,7 @@ import { formatOrderEditMoney } from "@/lib/order-edits";
 import { knownCustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
 import type { CustomerAccountOrderSummary } from "@shared/customer-account/customer-account-orders";
 import { CustomerOrderDetails } from "./CustomerOrderDetails";
+import { orderDeliveryLabel } from "./customer-order-progress-presentation";
 
 export interface CustomerOrderPanelState {
   loading: boolean;
@@ -97,6 +99,8 @@ export function CustomerOrderPanel({
   const order = state.order;
   // A newer native financial summary must not be replaced by cached action data.
   const displayedOrder = summary ?? order;
+  const progress = displayedOrder && "progress" in displayedOrder ? displayedOrder.progress : undefined;
+  const cancelled = displayedOrder && "cancelled" in displayedOrder ? displayedOrder.cancelled : row.dataset.cancelled === "true";
   const fulfillmentLabel =
     knownCustomerOrderFulfillment(displayedOrder?.fulfillment)?.label ??
     (row
@@ -142,6 +146,8 @@ export function CustomerOrderPanel({
   const returns =
     history?.returns.filter((item) => item.omsOrderId === state.omsOrderId) ??
     [];
+  const returnItemsAvailable = !cancelled && Boolean(state.returnOrder?.order.lines.some(line => line.eligibleQuantity > 0));
+  const returnLookupAvailable = !cancelled && !state.returnOrder && state.returnLookupAvailable && state.omsOrderId !== null;
   const editing = Boolean(
     order?.activeOperationId && order.activeOperationKind !== "cancel_order",
   );
@@ -149,6 +155,7 @@ export function CustomerOrderPanel({
     editing && order?.activeOperationStatus === "review_required";
   const canEdit =
     enabled &&
+    !cancelled &&
     order &&
     order.activeOperationKind !== "cancel_order" &&
     (editing || order.eligibility.editable);
@@ -157,10 +164,10 @@ export function CustomerOrderPanel({
   const showCancellation = Boolean(
     connectionId &&
       state.omsOrderId &&
-      (cancellationRequest || (enabled && order?.cancellation?.canReview)),
+      (cancellationRequest || (enabled && !cancelled && order?.cancellation?.canReview)),
   );
   const showChangeActions =
-    row.dataset.cancelled !== "true" && row.dataset.fulfillment !== "fulfilled";
+    !cancelled && row.dataset.fulfillment !== "fulfilled";
   const canChangeAddress = Boolean(
     enabled &&
       addressUrl &&
@@ -262,7 +269,8 @@ export function CustomerOrderPanel({
             <p role="status">Loading order details…</p>
           ) : (
             <div className="csz-panel-summary">
-              <span>{fulfillmentLabel}</span>
+              <CustomerOrderProgressSummary financialStatus={displayedOrder?.financialStatus ?? "Status unavailable"}
+                cancelled={cancelled} deliveryLabel={orderDeliveryLabel(cancelled, displayedOrder?.fulfillment, progress, fulfillmentLabel, row.dataset.fulfillment)} progress={progress} />
               <strong>
                 {displayedOrder
                   ? formatOrderEditMoney(
@@ -271,9 +279,7 @@ export function CustomerOrderPanel({
                     )
                   : "Total unavailable"}
               </strong>
-              {displayedOrder && (
-                <small>{displayedOrder.financialStatus}</small>
-              )}
+
             </div>
           ))}
         {view === "cancellation" && connectionId && state.omsOrderId ? (
@@ -282,6 +288,7 @@ export function CustomerOrderPanel({
             scope={{ customerId, connectionId, omsOrderId: state.omsOrderId }}
             existingRequestKey={cancellationRequest}
             onBack={() => setView("options")}
+            onChanged={onChanged}
             onDone={() => {
               onChanged?.();
               onClose();
@@ -312,7 +319,7 @@ export function CustomerOrderPanel({
             )}
             {!accessNotice && state.error && (
               <div className="csz-panel-error" role="alert">
-                <p>Some order options couldn’t be loaded.</p>
+                <p>{state.error}</p>
                 <button
                   type="button"
                   className="csz-action"
@@ -345,6 +352,8 @@ export function CustomerOrderPanel({
                 cancellation are unavailable until it is resolved.
               </p>
             )}
+            <CustomerOrderProgressDetails progress={progress}
+              showDelivery={orderDeliveryLabel(cancelled, displayedOrder?.fulfillment, progress, fulfillmentLabel, row.dataset.fulfillment) !== null} />
             <h3 className="csz-panel-group">Your order</h3>
             {row.dataset.externalOrderId && row.dataset.orderReference && (
               <CustomerOrderDetails
@@ -383,12 +392,12 @@ export function CustomerOrderPanel({
                     aria-describedby={
                       reviewNotice
                         ? "csz-order-review-notice"
-                        : "csz-address-restriction"
+                        : order ? "csz-address-restriction" : undefined
                     }
                   >
                     Change shipping address
                   </button>
-                  {!reviewNotice && (
+                  {!reviewNotice && order && (
                     <p
                       id="csz-address-restriction"
                       className="csz-panel-restriction"
@@ -427,7 +436,7 @@ export function CustomerOrderPanel({
             {restriction && (
               <p className="csz-panel-explanation">{restriction}</p>
             )}
-            {(trackUrl || state.returnOrder || state.returnLookupAvailable || returns.length > 0) && (
+            {(trackUrl || returnItemsAvailable || returnLookupAvailable || returns.length > 0) && (
               <h3 className="csz-panel-group">Delivery and returns</h3>
             )}
             {trackUrl && (
@@ -436,10 +445,8 @@ export function CustomerOrderPanel({
                 <ChevronRight aria-hidden="true" size={16} />
               </a>
             )}
-            {state.returnOrder?.order.lines.some(
-              (line) => line.eligibleQuantity > 0,
-            ) && option("Return items", () => onReturn(state.returnOrder!))}
-            {!state.returnOrder && state.returnLookupAvailable && state.omsOrderId !== null
+            {returnItemsAvailable && option("Return items", () => onReturn(state.returnOrder!))}
+            {returnLookupAvailable
               && option("Return items", () => onStartReturn(state.omsOrderId!))}
             {returns.map((item) => (
               <button
@@ -476,6 +483,7 @@ export function CustomerOrderPanel({
                 </button>
               </div>
             )}
+            {(showCancellation || showChangeActions) && <h3 className="csz-panel-group">Cancellation</h3>}
             {showCancellation
               ? option(
                   cancellationRequest ? "View cancellation" : "Cancel order",
@@ -491,12 +499,12 @@ export function CustomerOrderPanel({
                       aria-describedby={
                         reviewNotice
                           ? "csz-order-review-notice"
-                          : "csz-cancellation-restriction"
+                          : order ? "csz-cancellation-restriction" : undefined
                       }
                     >
                       Cancel order
                     </button>
-                    {!reviewNotice && (
+                    {!reviewNotice && order && (
                       <p
                         id="csz-cancellation-restriction"
                         className="csz-panel-restriction"

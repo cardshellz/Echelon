@@ -1,3 +1,4 @@
+import { ReceiptInvoiceCosts } from "@/features/purchasing/ReceiptInvoiceCosts";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { ApPaymentRecovery } from "@/features/purchasing/ApPaymentRecovery";
 import { useApPaymentCommands } from "@/features/purchasing/use-ap-payment-commands";
@@ -6,6 +7,7 @@ import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contra
 import { InvoicePurchaseOrderSelector } from "@/features/purchasing/InvoicePurchaseOrderSelector";
 import { invalidateApInvoiceQueries, invalidateApPaymentQueries } from "@/features/purchasing/ap-work-list-query";
 import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
+import { PurchaseTaxReview } from "@/features/purchasing/PurchaseTaxReview";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { InvoiceShipmentReplacement } from "@/features/purchasing/InvoiceShipmentReplacement";
 import { invoiceSourceCapabilitiesSchema } from "@shared/procurement/shipment-billing-ownership";
@@ -786,7 +788,9 @@ export default function APInvoiceDetail() {
                             <span className={`text-xs px-1.5 py-0.5 rounded ${match.className}`}>{match.label}</span>
                             <InvoiceQuantityCorrection lineId={line.id} lineNumber={line.lineNumber} needsCorrection={["qty_discrepancy", "over_billed", "price_discrepancy"].includes(line.matchStatus)} allowMatched={line.purchaseOrderLineId != null && invoice.status !== "voided"} onSaved={invalidate} />
                           </TableCell>
-                          <TableCell><InvoiceLineCostReview line={line} invoiceId={invoice.id} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} /></TableCell>
+                          <TableCell><div className="flex flex-wrap gap-2"><InvoiceLineCostReview line={line} invoiceId={invoice.id} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} />
+                            {line.purchaseOrderLineId && <ReceiptInvoiceCosts purchaseOrderLineId={line.purchaseOrderLineId} />}
+                            {line.purchaseOrderLineId && invoice.status !== "voided" && <PurchaseTaxReview target={{ kind: "invoice_line", id: line.id }} label="Tax amounts" />}</div></TableCell>
                           {canEdit && (
                             <TableCell>
                               <Button size="sm" variant="ghost" className="min-h-[44px] min-w-[44px] text-muted-foreground"

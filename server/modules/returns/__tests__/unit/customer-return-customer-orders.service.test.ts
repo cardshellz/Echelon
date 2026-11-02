@@ -16,8 +16,10 @@ function setup() {
   const access = { list: vi.fn(async () => ({ orders: [candidate], nextBeforeOmsOrderId: null as number | null })), resolveOwned: vi.fn(async () => candidate) };
   const live = { lookupCanonical: vi.fn(async () => order), reviewCanonical: vi.fn() };
   const reportUnavailableOrder = vi.fn();
-  const service = new CustomerReturnCustomerOrdersService({ principal, access, live, shippingVersion: async () => 2, reportUnavailableOrder });
-  return { service, order, access, live, candidate, principal, reportUnavailableOrder };
+  const choices = { read: vi.fn(async () => ({ orders: [{ omsOrderId: 7, orderReference: order.orderReference,
+    purchasedAt: null, eligibleItemCount: null }], unavailableOrderCount: 0 })) };
+  const service = new CustomerReturnCustomerOrdersService({ principal, access, live, choices, shippingVersion: async () => 2, reportUnavailableOrder });
+  return { service, order, access, live, choices, candidate, principal, reportUnavailableOrder };
 }
 
 function setupLiveInspection() {
@@ -37,10 +39,33 @@ function setupLiveInspection() {
   const reportUnavailableOrder = vi.fn();
   const service = new CustomerReturnCustomerOrdersService({ principal: { channelId: 36, externalCustomerId: "123" },
     access: { list: async () => ({ orders: [candidate], nextBeforeOmsOrderId: null }), resolveOwned: async () => candidate },
-    live, shippingVersion: async () => 2, reportUnavailableOrder });
+    live, choices: { read: async () => ({ orders: [], unavailableOrderCount: 0 }) }, shippingVersion: async () => 2, reportUnavailableOrder });
   return { service, localFacts, shopifyFacts, reportUnavailableOrder };
 }
 describe("customer eligible-order list", () => {
+  it("reads choices from the owned presentation cache without starting live inspections", async () => {
+    const s = setup();
+    const result = await s.service.choices({ beforeOmsOrderId: 9 });
+    expect(s.access.list).toHaveBeenCalledExactlyOnceWith({ beforeOmsOrderId: 9, pageSize: 10 });
+    expect(s.choices.read).toHaveBeenCalledExactlyOnceWith([s.candidate]);
+    expect(result.orders[0].eligibleItemCount).toBeNull();
+    expect(s.live.lookupCanonical).not.toHaveBeenCalled();
+    expect(s.live.reviewCanonical).not.toHaveBeenCalled();
+  });
+  it("preserves the owned page cursor and rejects cache data for a different purchase", async () => {
+    const s = setup();
+    s.access.list.mockResolvedValue({ orders: [s.candidate], nextBeforeOmsOrderId: 7 });
+    expect((await s.service.choices({})).nextBeforeOmsOrderId).toBe(7);
+    s.choices.read.mockResolvedValue({ orders: [{ omsOrderId: 8, orderReference: s.order.orderReference,
+      purchasedAt: null, eligibleItemCount: null }], unavailableOrderCount: 0 });
+    await expect(s.service.choices({})).rejects.toMatchObject({ code: "RETURN_ORDER_CHOICES_SCOPE_MISMATCH", status: 503 });
+    expect(s.live.lookupCanonical).not.toHaveBeenCalled();
+  });
+  it("does not turn a cache read failure into provider fan-out", async () => {
+    const s = setup(); s.choices.read.mockRejectedValue(new Error("cache unavailable"));
+    await expect(s.service.choices({})).rejects.toThrow("cache unavailable");
+    expect(s.live.lookupCanonical).not.toHaveBeenCalled();
+  });
   it("passes only trusted canonical identity to the live verifier and removes private mode", async () => {
     const { service, live, principal } = setup();
     const result = await service.list({});

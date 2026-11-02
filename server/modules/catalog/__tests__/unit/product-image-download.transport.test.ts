@@ -36,9 +36,21 @@ describe("catalog external image transport", () => {
     const [url, options] = dependencies.request.mock.calls[0];
     expect(url.host).toBe("cdn.example.com"); expect(url.search).toBe("?v=1");
     expect(options).toMatchObject({ agent: false, family: 4, rejectUnauthorized: true, autoSelectFamily: false });
+    expect(options.headers).toMatchObject({Accept:"image/*"});
     const callback = vi.fn(); options.lookup!(url.hostname, {}, callback);
     expect(callback).toHaveBeenCalledWith(null, "8.8.8.8", 4);
     expect(options.headers).not.toHaveProperty("authorization");
+  });
+  it("requests the reviewed format and refuses a negotiated replacement", async () => {
+    const matching = transport();
+    await expect(fetchProductImage("https://cdn.example.com/photo",matching,{acceptMimeType:"image/png"})).resolves.toMatchObject({mimeType:"image/png"});
+    expect(matching.request.mock.calls[0][1].headers).toMatchObject({Accept:"image/png"});
+    await expect(fetchProductImage("https://cdn.example.com/photo",transport(),{acceptMimeType:"image/jpeg"}))
+      .rejects.toMatchObject({code:"IMAGE_SOURCE_FORMAT_CHANGED"});
+    const invalid = transport();
+    await expect(fetchProductImage("https://cdn.example.com/photo",invalid,{acceptMimeType:"text/html"}))
+      .rejects.toMatchObject({code:"IMAGE_FORMAT_UNSUPPORTED"});
+    expect(invalid.request).not.toHaveBeenCalled();
   });
   it.each(["http://127.0.0.1/photo", "http://169.254.169.254/latest", "http://10.0.0.2/photo", "http://192.168.0.1/photo", "http://100.64.0.1/photo"])("rejects non-public address %s", async url => {
     const dependencies = transport();

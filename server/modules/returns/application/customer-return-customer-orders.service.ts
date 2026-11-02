@@ -1,10 +1,10 @@
 import { z } from "zod";
 import { customerReturnFlowOrderSchema, customerReturnFlowReviewInputSchema, customerReturnFlowReviewSchema } from "@shared/returns/customer-return-flow.contract";
-import { customerReturnCustomerOrderSchema, customerReturnCustomerOrderPageSchema } from "@shared/returns/customer-return-access.contract";
-import type { CustomerReturnCustomerSession } from "./customer-return-customer-auth.service";
-import type { CustomerReturnOrderAccessService } from "./customer-return-order-access.service";
+import { customerReturnCustomerOrderSchema, customerReturnCustomerOrderPageSchema, customerReturnOrderChoicesSchema } from "@shared/returns/customer-return-access.contract";
+import type { CustomerReturnOrderAccessService, CustomerReturnCanonicalOrderScope } from "./customer-return-order-access.service";
 import type { CustomerReturnLiveService } from "./customer-return-live.service";
 import { CustomerReturnLiveError } from "./customer-return-live-error";
+import { CustomerReturnOrderChoicesError, type CustomerReturnOrderChoicesReader } from "./customer-return-order-choices.ports";
 
 // Error codes are strings at the live-service boundary. Only these fixed
 // classifications may reach logs; arbitrary provider codes/messages may hold PII.
@@ -35,12 +35,30 @@ function inspectionCauseCode(error: unknown): string {
 export const customerReturnCustomerReviewInputSchema = customerReturnFlowReviewInputSchema.omit({ orderReference: true }).strict();
 export class CustomerReturnCustomerOrdersService {
   constructor(private readonly dependencies: {
-    principal: Pick<CustomerReturnCustomerSession, "channelId" | "externalCustomerId">;
+    principal: Pick<CustomerReturnCanonicalOrderScope, "channelId" | "externalCustomerId" | "verifiedPurchase">;
     access: Pick<CustomerReturnOrderAccessService, "list" | "resolveOwned">;
     live: Pick<CustomerReturnLiveService, "lookupCanonical" | "reviewCanonical">;
     shippingVersion: () => Promise<number | null>;
+    choices: CustomerReturnOrderChoicesReader;
     reportUnavailableOrder: (context: { channelId: number; omsOrderId: number; reason: "invalid_response" | "inspection_failed"; causeCode: string }) => void;
   }) {}
+
+  /** The chooser must not run live provider inspections for an entire page. */
+  async choices(raw: unknown) {
+    const input = z.object({ beforeOmsOrderId: z.number().int().positive().safe().optional() }).strict().parse(raw);
+    const page = await this.dependencies.access.list({ ...input, pageSize: 10 });
+    const result = customerReturnOrderChoicesSchema.parse({
+      ...await this.dependencies.choices.read(page.orders), nextBeforeOmsOrderId: page.nextBeforeOmsOrderId,
+    });
+    let previousIndex = -1;
+    for (const choice of result.orders) {
+      const index = page.orders.findIndex(order => order.omsOrderId === choice.omsOrderId &&
+        order.externalOrderNumber.replace(/^#/, "") === choice.orderReference.replace(/^#/, ""));
+      if (index <= previousIndex) throw new CustomerReturnOrderChoicesError("RETURN_ORDER_CHOICES_SCOPE_MISMATCH");
+      previousIndex = index;
+    }
+    return result;
+  }
 
   async list(raw: unknown) {
     const input = z.object({ beforeOmsOrderId: z.number().int().positive().safe().optional() }).strict().parse(raw);

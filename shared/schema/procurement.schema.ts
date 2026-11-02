@@ -444,6 +444,19 @@ export type ReceivingLine = typeof receivingLines.$inferSelect;
 
 // ===== PURCHASE ORDERS =====
 
+export const purchaseTaxTypes = procurementSchema.table("purchase_tax_types", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 40 }).notNull(),
+  name: varchar("name", { length: 100 }).notNull(),
+  treatment: varchar("treatment", { length: 20 }).notNull(),
+  revision: integer("revision").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  updatedBy: varchar("updated_by").notNull().references(() => users.id, { onDelete: "restrict" }),
+}, table => [uniqueIndex("purchase_tax_types_code_uq").on(table.code),
+  check("purchase_tax_types_treatment_ck", sql`${table.treatment} IN ('inventory','recoverable')`),
+  check("purchase_tax_types_revision_ck", sql`${table.revision} > 0`)]);
+
 export const purchaseOrders = procurementSchema.table("purchase_orders", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   poNumber: varchar("po_number", { length: 30 }).notNull(), // Auto: PO-YYYYMMDD-### (partial unique index in table constraints)
@@ -469,6 +482,7 @@ export const purchaseOrders = procurementSchema.table("purchase_orders", {
   subtotalCents: bigint("subtotal_cents", { mode: "number" }).default(0), // Sum of line totals
   discountCents: bigint("discount_cents", { mode: "number" }).default(0), // Header-level discount
   taxCents: bigint("tax_cents", { mode: "number" }).default(0),
+  taxTypeId: integer("tax_type_id").references(() => purchaseTaxTypes.id, { onDelete: "restrict" }),
   shippingCostCents: bigint("shipping_cost_cents", { mode: "number" }).default(0), // Freight estimate
   totalCents: bigint("total_cents", { mode: "number" }).default(0), // Grand total
   paymentTermsDays: integer("payment_terms_days"), // Copied from vendor, editable
@@ -568,6 +582,7 @@ export type PurchaseOrder = typeof purchaseOrders.$inferSelect;
 // ===== PURCHASE ORDER LINES =====
 
 export const purchaseOrderLines = procurementSchema.table("purchase_order_lines", {
+  receiptCostingEnabled: integer("receipt_costing_enabled").notNull().default(0),
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
   lineNumber: integer("line_number").notNull(), // Sequential for display
@@ -610,6 +625,7 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   discountCents: bigint("discount_cents", { mode: "number" }).default(0), // Computed
   taxRatePercent: numeric("tax_rate_percent", { precision: 5, scale: 2 }).default("0"),
   taxCents: bigint("tax_cents", { mode: "number" }).default(0),
+  taxTypeId: integer("tax_type_id").references(() => purchaseTaxTypes.id, { onDelete: "restrict" }),
   lineTotalCents: bigint("line_total_cents", { mode: "number" }), // (order_qty * unit_cost_cents) - discount + tax
 
   // Totals-based cost (Spec F Phase 1) — new source of truth.
@@ -812,6 +828,7 @@ export { PO_LINE_TYPES, isPoLineType, type PoLineType } from "../procurement/po-
 
 export const insertPurchaseOrderLineSchema = createInsertSchema(purchaseOrderLines).omit({
   id: true,
+  receiptCostingEnabled: true,
   createdAt: true,
   updatedAt: true,
 });
@@ -1671,6 +1688,7 @@ export const inboundFreightCosts = procurementSchema.table("inbound_freight_cost
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inboundShipmentId: integer("inbound_shipment_id").notNull().references(() => inboundShipments.id, { onDelete: "cascade" }),
   costType: varchar("cost_type", { length: 30 }).notNull(),
+  taxTypeId: integer("tax_type_id").references(() => purchaseTaxTypes.id, { onDelete: "restrict" }),
   description: text("description"),
   estimatedCents: bigint("estimated_cents", { mode: "number" }),
   actualCents: bigint("actual_cents", { mode: "number" }),
@@ -1747,6 +1765,7 @@ export const landedCostSnapshots = procurementSchema.table("landed_cost_snapshot
   dutyAllocatedCents: bigint("duty_allocated_cents", { mode: "number" }),
   insuranceAllocatedCents: bigint("insurance_allocated_cents", { mode: "number" }),
   otherAllocatedCents: bigint("other_allocated_cents", { mode: "number" }),
+  recoverableTaxAllocatedCents: bigint("recoverable_tax_allocated_cents", { mode: "number" }).notNull().default(0),
   totalLandedCostCents: bigint("total_landed_cost_cents", { mode: "number" }),
   landedUnitCostCents: bigint("landed_unit_cost_cents", { mode: "number" }),
   qty: integer("qty"),
@@ -1869,6 +1888,16 @@ export const insertVendorInvoiceLineSchema = createInsertSchema(vendorInvoiceLin
 
 export type InsertVendorInvoiceLine = z.infer<typeof insertVendorInvoiceLineSchema>;
 export type VendorInvoiceLine = typeof vendorInvoiceLines.$inferSelect;
+
+/** These are parts of the existing billed line amount, never added to AP again. */
+export const vendorInvoiceLineTaxes = procurementSchema.table("vendor_invoice_line_taxes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vendorInvoiceLineId: integer("vendor_invoice_line_id").notNull().references(() => vendorInvoiceLines.id, { onDelete: "restrict" }),
+  taxTypeId: integer("tax_type_id").notNull().references(() => purchaseTaxTypes.id, { onDelete: "restrict" }),
+  amountMills: bigint("amount_mills", { mode: "number" }).notNull(),
+}, table => [uniqueIndex("vendor_invoice_line_taxes_source_uq").on(table.vendorInvoiceLineId, table.taxTypeId),
+  index("vendor_invoice_line_taxes_type_idx").on(table.taxTypeId),
+  check("vendor_invoice_line_taxes_amount_ck", sql`${table.amountMills} >= 0 AND ${table.amountMills} % 100 = 0`)]);
 
 // Immutable evidence for the conservative historical repair that restores
 // missing invoice mills from a linked PO without erasing real price variance.
@@ -2481,3 +2510,20 @@ export const supplierCreditApplicationReversals = procurementSchema.table("suppl
   actorId: varchar("actor_id").notNull().references(() => users.id, { onDelete: "restrict" }),
   recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(), reason: text("reason").notNull(),
 }, table => [uniqueIndex("supplier_credit_reversals_application_idx").on(table.applicationId)]);
+
+/** Current approved coverage; immutable before/after remains in audit/PO events. */
+export const receiptInvoiceCostAllocations = procurementSchema.table("receipt_invoice_cost_allocations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  purchaseOrderLineId: integer("purchase_order_line_id").notNull().references(() => purchaseOrderLines.id),
+  receivingLineId: integer("receiving_line_id").notNull().references(() => receivingLines.id),
+  invoiceLineId: integer("invoice_line_id").notNull().references(() => vendorInvoiceLines.id),
+  receiptStartPiece: bigint("receipt_start_piece", { mode: "number" }).notNull(),
+  invoiceStartPiece: bigint("invoice_start_piece", { mode: "number" }).notNull(),
+  pieces: bigint("pieces", { mode: "number" }).notNull(),
+  approvedBy: varchar("approved_by").notNull().references(() => users.id),
+  approvedAt: timestamp("approved_at", { withTimezone: true }).notNull(),
+}, table => [
+  uniqueIndex("receipt_invoice_cost_receipt_interval_uidx").on(table.receivingLineId, table.receiptStartPiece),
+  uniqueIndex("receipt_invoice_cost_invoice_interval_uidx").on(table.invoiceLineId, table.invoiceStartPiece),
+  check("receipt_invoice_cost_interval_check", sql`${table.pieces} > 0 AND ${table.receiptStartPiece} >= 0 AND ${table.invoiceStartPiece} >= 0`),
+]);

@@ -7,6 +7,10 @@
 export const POSTGRES_SHARD_COUNT = 8;
 
 export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
+  "server/modules/procurement/__tests__/integration/receipt-invoice-migration.integration.test.ts",
+  "server/modules/procurement/__tests__/integration/purchase-tax-migration.integration.test.ts",
+  "server/modules/catalog/__tests__/integration/catalog-image-originals.integration.test.ts",
+  "server/modules/oms/__tests__/integration/shopify-paid-event-replay.integration.test.ts",
   "server/modules/catalog/__tests__/integration/shopify-product-connection.integration.test.ts",
   "server/modules/oms/__tests__/integration/package-reconciliation.integration.test.ts",
   "server/modules/procurement/__tests__/integration/shipment-cost-read-batching.integration.test.ts",
@@ -158,6 +162,8 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-resume.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-enable.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-stock-send.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/inventory-product-sync.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/product-sync-workflow.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/transformation-execution-authority.integration.test.ts",
   "server/modules/inventory/__tests__/integration/build-order-transformation-authority.integration.test.ts",
   "server/modules/catalog/__tests__/integration/piece-variant-backfill.integration.test.ts",
@@ -169,6 +175,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/catalog/__tests__/integration/product-102-cleanup.integration.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-order-access.repository.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-customer-auth.repository.test.ts",
+  "server/modules/returns/__tests__/integration/customer-return-guest.repository.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-customer-ownership.repository.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-authorization.repository.test.ts",
   "server/modules/returns/__tests__/integration/customer-return-local-inspection.reader.test.ts",

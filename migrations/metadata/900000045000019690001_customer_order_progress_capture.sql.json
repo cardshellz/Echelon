@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000045000019690001_customer_order_progress_capture.sql",
+  "generation": 45,
+  "pr": 1969,
+  "ordinal": 1,
+  "after": [
+    "900000044000019650001_product_inventory_sync_requests.sql"
+  ]
+}

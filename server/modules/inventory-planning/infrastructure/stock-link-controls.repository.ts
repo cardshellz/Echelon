@@ -4,7 +4,7 @@ import type { StockLinkSupportedStatus } from "@shared/types/stock-link";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
 import { STOCK_LINK_DECISION_CODES, STOCK_LINK_RETIRE_HOLD } from "../domain/stock-link";
 import {
-  STOCK_LINK_CHECK_AGAIN_STATUSES, STOCK_LINK_CONTROL_AUDIT_ACTIONS, planStockLinkControl,
+  STOCK_LINK_CHECK_AGAIN_STATUSES, STOCK_LINK_CONTROL_AUDIT_ACTIONS, planStockLinkControl, stockLinkCheckAgainWaitingReasons,
   type StockLinkControlPlan,
 } from "../domain/stock-link-controls";
 import type {
@@ -66,8 +66,8 @@ const DESTINATION_COLUMNS = `auto_link_enabled, paused_until, paused_code, pause
 const NO_ROW: DestinationRow = { auto_link_enabled: true, paused_until: null, paused_code: null, paused_since: null,
   halted_at: null, halted_code: null, retires_released_at: null, retires_released_by: null, revision: "0" };
 
-/** Whether the engine runs for the target, or null when the target does not exist. */
-async function readTargetSupport(client: Queryable, publicationTargetId: number): Promise<boolean | null> {
+/** The supported destination identity, false when unsupported, or null when absent. */
+async function readTargetSupport(client: Queryable, publicationTargetId: number): Promise<z.infer<typeof targetRowSchema> | false | null> {
   const raw = (await client.query(`SELECT t.destination_kind,
       CASE t.destination_kind WHEN 'channel_connection' THEN lower(c.provider) ELSE lower(d.platform) END AS provider_key
     FROM inventory.inventory_publication_targets t
@@ -77,7 +77,7 @@ async function readTargetSupport(client: Queryable, publicationTargetId: number)
   if (!raw) return null;
   const row = targetRowSchema.parse(raw);
   return STOCK_LINK_CONTROLLED_DESTINATIONS.some(entry => entry.destinationKind === row.destination_kind
-    && entry.providerKey === row.provider_key);
+    && entry.providerKey === row.provider_key) ? row : false;
 }
 
 async function readDestination(client: Queryable, publicationTargetId: number, lock: "" | "FOR UPDATE"):
@@ -199,7 +199,8 @@ export class PostgresStockLinkControlsStore implements StockLinkControlsStore {
     }
 
     await this.writeDestination(client, publicationTargetId, plan, command);
-    const madeDue = plan.makeRowsDue ? await makeChecksDue(client, publicationTargetId, now)
+    const waitingReasons = stockLinkCheckAgainWaitingReasons({ destinationKind: supported.destination_kind, providerKey: supported.provider_key });
+    const madeDue = plan.makeRowsDue ? await makeChecksDue(client, publicationTargetId, now, waitingReasons)
       : plan.releaseRetires ? await makeHeldRetiresDue(client, publicationTargetId, now) : [];
     const after = (await readDestination(client, publicationTargetId, ""))!;
     const beforeView = snapshot(before);
@@ -231,15 +232,16 @@ export class PostgresStockLinkControlsStore implements StockLinkControlsStore {
 }
 
 /**
- * Check again (§7.3): every error, flagged and linked row of the destination is due now with its attempts and streaks
- * reset. A row stopped on an error comes back as `linked` when its size still has an active link, else `waiting`
+ * Check again: standard statuses and the domain's provider-specific waiting reasons are due now with attempts and
+ * streaks reset. A row stopped on an error comes back as `linked` when its size still has an active link, else `waiting`
  * (the next check decides again; nothing about the error is kept but the audit row). Rows another transaction holds
  * (SKIP LOCKED) or a live claim leases are left to that claim. Returns the sizes made due.
  */
-async function makeChecksDue(client: Queryable, publicationTargetId: number, now: Date): Promise<number[]> {
+async function makeChecksDue(client: Queryable, publicationTargetId: number, now: Date, waitingReasons: readonly string[]): Promise<number[]> {
   const rows = (await client.query<{ product_variant_id: number }>(`WITH due AS (
       SELECT c.id FROM inventory.stock_link_checks c
-      WHERE c.publication_target_id = $1 AND c.status = ANY($3::text[])
+      WHERE c.publication_target_id = $1
+        AND (c.status = ANY($3::text[]) OR (c.status = 'waiting' AND c.reason_code = ANY($4::text[])))
         AND (c.lease_token IS NULL OR c.lease_expires_at <= $2)
       ORDER BY c.id FOR UPDATE SKIP LOCKED
     )
@@ -254,7 +256,7 @@ async function makeChecksDue(client: Queryable, publicationTargetId: number, now
       attempt_count = 0, first_failure_at = NULL, busy_since = NULL,
       next_check_at = $2, updated_at = $2, revision = c.revision + 1
     FROM due WHERE c.id = due.id
-    RETURNING c.product_variant_id`, [publicationTargetId, now, [...STOCK_LINK_CHECK_AGAIN_STATUSES]])).rows;
+    RETURNING c.product_variant_id`, [publicationTargetId, now, [...STOCK_LINK_CHECK_AGAIN_STATUSES], [...waitingReasons]])).rows;
   return rows.map(row => Number(row.product_variant_id)).sort((a, b) => a - b);
 }
 

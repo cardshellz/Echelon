@@ -26,7 +26,7 @@ export const BROWSER_FEATURES = Object.freeze({
         "test/browser/bulk-inventory-tracking.spec.ts",
         "test/browser/catalog-images.spec.ts",
         "test/browser/shopify-product-connection.spec.ts",
-        "test/browser/shopify-inventory-send.spec.ts",
+        "test/browser/inventory-product-sync.spec.ts",
         "test/browser/channel-package-data.spec.ts"
       ],
       "roots": []
@@ -79,10 +79,12 @@ export const BROWSER_FEATURES = Object.freeze({
         "test/browser/returns-portal-preview.spec.ts",
         "test/browser/returns-policy-shipping.spec.ts",
         "test/browser/returns-customer.spec.ts",
-        "test/browser/returns-account-layout.spec.ts"
+        "test/browser/returns-account-layout.spec.ts",
+        "test/browser/returns-storefront-page.spec.ts"
       ],
       "roots": [
-        "client/src/customer-account/entry.tsx"
+        "client/src/customer-account/entry.tsx",
+        "client/src/customer-account/return-portal.entry.tsx"
       ],
       "appRoutes": ["/returns", "/return-policies", "/customer-returns"]
     }

@@ -1,3 +1,4 @@
+import { receiptInvoiceCostRows } from "./domain/receipt-invoice-preview";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -13,6 +14,7 @@ import {
 } from "../inventory/infrastructure/cost-evidence.repository";
 import { readPurchaseCostSources } from "./purchase-cost-source.repository";
 import { purchaseCostReviewFacts, resolvePurchaseCostSource } from "./domain/purchase-cost-source";
+import { retainEquivalentPurchaseCostSource } from "./domain/purchase-cost-source-identity";
 import { projectPurchaseComponentStatus } from "./domain/purchase-cost-status";
 import { costIssueSchema, costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import { originRepairApprovalSchema } from "@shared/procurement/cost-origin-repair";
@@ -63,7 +65,7 @@ export async function readPurchaseCostStatus(
   const noInventoryEffects = await readNoInventoryEffectEvidence(tx, [...resolvedSources]
     .filter(([, inputs]) => inputs.some(input => input.inventoryEffect)).map(([id]) => id));
   const revisions = (
-    await tx.execute(sql`SELECT revision.id,revision.purchase_order_line_id,revision.component,revision.contract,
+    await tx.execute(sql`SELECT revision.id,revision.purchase_order_line_id,revision.component,revision.contract,revision.fingerprint,revision.source_evidence,
     application.id AS application_id,application.status,application.evidence,application.recorded_at,
     COALESCE(NULLIF(btrim(actor.display_name),''),actor.username,application.recorded_by) AS actor_name,
     event.payload AS reporting_payload
@@ -142,11 +144,11 @@ export async function readPurchaseCostStatus(
       );
     const lineLots = lots.filter((lot) => Number(lot.line_id) === lineId);
     const components: PurchaseCostStatus["lines"][number]["components"] = [];
-    for (const input of resolvedSources.get(lineId)!) {
+    for (const resolvedInput of resolvedSources.get(lineId)!) {
       const matches = revisions.filter(
         (row) =>
           Number(row.purchase_order_line_id) === lineId &&
-          row.component === input.component,
+          row.component === resolvedInput.component,
       );
       if (matches.length > 1)
         throw new CostEvidenceError(
@@ -154,10 +156,11 @@ export async function readPurchaseCostStatus(
           "More than one current component revision was recorded.",
         );
       const row = matches[0];
-      const currentFingerprint = costFingerprint({
-        input,
-        sourceEvidence: source,
-      });
+      const current = { input: resolvedInput, sourceEvidence: source };
+      const candidateFingerprint = costFingerprint(current);
+      const proposal = row?.fingerprint === candidateFingerprint ? current : retainEquivalentPurchaseCostSource(current, row);
+      const input = proposal.input;
+      const currentFingerprint = proposal === current ? candidateFingerprint : costFingerprint(proposal);
       const contract = costSourceRevisionSchema.safeParse(row?.contract);
       const savedIssues = z.array(costIssueSchema).safeParse(row?.evidence?.result?.issues);
       const plan = contract.success && savedIssues.success && savedIssues.data.length > 0 && contract.data.fingerprint === currentFingerprint
@@ -264,6 +267,14 @@ export async function readPurchaseCostStatus(
       poNumber: line.po_number == null ? null : String(line.po_number),
       reviewFacts: purchaseCostReviewFacts(source),
       components,
+      ...(source.receiptCosting ? { receiptCosting: {
+        receipts: receiptInvoiceCostRows(source,source.receiptCosting.receipts),
+        provisionalPieces: resolvedSources.get(lineId)![0]?.receiptCostSegments
+          ? costInteger(resolvedSources.get(lineId)![0].receiptCostSegments!.filter(row=>row.evidence==="estimated").reduce((sum,row)=>sum+BigInt(row.pieces),BigInt(0)).toString(),"provisional pieces") : null,
+        unassignedInvoicePieces: resolvedSources.get(lineId)![0]?.receiptCostSegments
+          ? costInteger((source.approvedInvoices.reduce((sum,row)=>sum+BigInt(String(row.qty_invoiced)),BigInt(0))
+            -source.receiptCosting.allocations.reduce((sum,row)=>sum+BigInt(row.pieces),BigInt(0))).toString(),"unassigned invoice pieces") : null,
+      } } : {}),
       originRepairs: repairs.filter(repair => Number(repair.purchase_order_line_id) === lineId).map(repair => ({
         ...originRepairApprovalSchema.parse({ id: costInteger(repair.id, "repairId", 1), actorName: repair.actor_name,
           reason: repair.reason, recordedAt: new Date(repair.recorded_at).toISOString(), destination: repair.evidence.choices.destination,

@@ -12,7 +12,7 @@ import React, { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { ShopifyOwnershipReview } from "@/components/ShopifyOwnershipReview";
-import { InventoryStockSendButton } from "@/features/channel-inventory/components/InventoryStockSend";
+import { InventoryProductSyncButton } from "@/features/channel-inventory/components/InventoryProductSync";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1054,7 +1054,7 @@ export default function ShopifyChannelPage() {
                           )}
                         </TableCell>
                         <TableCell>
-                          <InventoryStockSendButton productId={item.productId} channelId={shopifyChannel.id} disabled={!item.isActive} />
+                          <InventoryProductSyncButton productId={item.productId} disabled={!item.isActive} />
                         </TableCell>
                       </TableRow>
                     ))}

@@ -1,7 +1,12 @@
 {
+  "catalog.product_asset_renditions": [
+    "modules/catalog"
+  ],
+  "catalog.product_asset_versions": [
+    "modules/catalog"
+  ],
   "catalog.product_assets": [
-    "modules/catalog",
-    "server/routes/ebay/ebay-policies.routes.ts"
+    "modules/catalog"
   ],
   "catalog.product_categories": [
     "modules/catalog"
@@ -941,6 +946,9 @@
   "inventory.stock_link_checks": [
     "modules/inventory-planning"
   ],
+  "inventory.product_inventory_sync_requests": [
+    "modules/inventory-planning"
+  ],
   "inventory.stock_link_destinations": [
     "modules/inventory-planning"
   ],
@@ -1354,6 +1362,9 @@
   "procurement.purchase_supplier_progress_revisions": [
     "modules/procurement"
   ],
+  "procurement.purchase_tax_types": [
+    "modules/procurement"
+  ],
   "procurement.purchasing_recommendation_decisions": [
     "modules/procurement"
   ],
@@ -1370,6 +1381,9 @@
     "modules/procurement"
   ],
   "procurement.receipt_cost_requests": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_invoice_cost_allocations": [
     "modules/procurement"
   ],
   "procurement.receipt_reversals": [
@@ -1453,6 +1467,9 @@
   "procurement.vendor_invoice_attachments": [
     "modules/procurement"
   ],
+  "procurement.vendor_invoice_line_taxes": [
+    "modules/procurement"
+  ],
   "procurement.vendor_invoice_lines": [
     "modules/procurement"
   ],
@@ -1471,7 +1488,7 @@
   "public.audit_events": [
     "modules/inventory-planning",
     "modules/procurement",
-    "server/infrastructure/auditLogger.ts"
+    "server/infrastructure/transactional-audit.ts"
   ],
   "public.auto_draft_runs": [
     "modules/procurement"
@@ -1528,6 +1545,12 @@
     "modules/returns"
   ],
   "returns.customer_return_case_links": [
+    "modules/returns"
+  ],
+  "returns.customer_return_guest_challenges": [
+    "modules/returns"
+  ],
+  "returns.customer_return_guest_events": [
     "modules/returns"
   ],
   "returns.customer_return_intakes": [
@@ -1949,6 +1972,15 @@
   ],
   "wms.returns": [
     "modules/wms"
+  ],
+  "wms.sales_channel_delivery_evidence": [
+    "modules/shipping"
+  ],
+  "wms.saved_label_status_attempts": [
+    "modules/shipping"
+  ],
+  "wms.saved_label_status_jobs": [
+    "modules/shipping"
   ],
   "wms.shipment_request_items": [
     "modules/oms"

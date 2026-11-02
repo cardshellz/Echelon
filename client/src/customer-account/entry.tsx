@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { ACCOUNT_SETTLEMENT_REFRESH_MS, needsCancellationSettlementRefresh } from "./account-settlement-refresh";
 import type { CustomerOrderActions } from "@shared/customer-account/order-actions";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
@@ -205,8 +206,10 @@ function CustomerAccount({
   const requestGeneration = useRef(new Map<HTMLElement, number>());
   const accountRequests = useRef<AbortController | null>(null);
   const actionGeneration = useRef(0);
+  const requestedActionRefreshes = useRef(new Set<string>());
+  const settlementReadBusy = useRef(false);
 
-  const loadActions = useCallback(async (signal?: AbortSignal) => {
+  const loadActions = useCallback(async (signal?: AbortSignal, retry = false) => {
     if (!rows.length) return;
     const generation = ++actionGeneration.current;
     try {
@@ -215,6 +218,28 @@ function CustomerAccount({
       if (signal?.aborted || generation !== actionGeneration.current) return;
       setActions(new Map(rows.map(row => [row, result.orders.find(item => item.externalOrderId === row.dataset.externalOrderId)!])));
       setActionError(false);
+      for (const item of result.orders) {
+        if (item.state === "ready" && !item.snapshot?.orderFailed && !item.snapshot?.returnFailed)
+          requestedActionRefreshes.current.delete(item.externalOrderId);
+      }
+      const unavailable = result.orders.filter(item => item.state === "failed" || item.state === "refreshing"
+        || item.snapshot?.orderFailed || item.snapshot?.returnFailed);
+      const requested = unavailable.filter(item => retry || !requestedActionRefreshes.current.has(item.externalOrderId));
+      if (requested.length) {
+        for (const item of requested) requestedActionRefreshes.current.add(item.externalOrderId);
+        // Explicit cache recovery only. Rendering and polling remain local
+        // lookups; the durable worker owns every external inspection.
+        const refreshed = await api.orderActions({ orders: requested.map(({ externalOrderId, orderReference }) => ({ externalOrderId, orderReference })) }, signal, true);
+        if (signal?.aborted || generation !== actionGeneration.current) return;
+        for (const item of refreshed.orders) {
+          // A recent partial inspection may still be in its cooldown. Allow a
+          // later ordinary lookup to request recovery once it becomes due.
+          if (item.state === "ready") requestedActionRefreshes.current.delete(item.externalOrderId);
+        }
+        const replacements = new Map(refreshed.orders.map(item => [item.externalOrderId, item]));
+        setActions(new Map(rows.map(row => [row, replacements.get(row.dataset.externalOrderId!)
+          ?? result.orders.find(item => item.externalOrderId === row.dataset.externalOrderId)!])));
+      }
     } catch {
       if (!signal?.aborted && generation === actionGeneration.current) setActionError(true);
     }
@@ -244,6 +269,7 @@ function CustomerAccount({
       if (!selected.length) return;
       setError(null);
       setTotals((previous) => {
+        if (selected.every(row => previous.get(row)?.status === "verified")) return previous;
         const next = new Map(previous);
         for (const row of selected)
           if (previous.get(row)?.status !== "verified")
@@ -321,6 +347,48 @@ function CustomerAccount({
     },
     [api, accessSurface],
   );
+
+  useEffect(() => {
+    if (!session) return;
+    const controller = new AbortController();
+    const refreshVisibleSummaries = () => {
+      if (document.visibilityState !== "visible" || settlementReadBusy.current) return;
+      settlementReadBusy.current = true;
+      // A tab can outlive a backend release or a refund made elsewhere. Refresh
+      // its read model on return even if its old summary had no refund activity
+      // from which to start settlement polling. This submits no command.
+      void loadSummaries(rows, controller.signal).finally(() => { settlementReadBusy.current = false; });
+    };
+    window.addEventListener("focus", refreshVisibleSummaries);
+    document.addEventListener("visibilitychange", refreshVisibleSummaries);
+    return () => {
+      controller.abort();
+      window.removeEventListener("focus", refreshVisibleSummaries);
+      document.removeEventListener("visibilitychange", refreshVisibleSummaries);
+    };
+  }, [session, rows, loadSummaries]);
+
+  useEffect(() => {
+    if (!session) return;
+    const selected = rows.filter(row => {
+      const summary = totals.get(row);
+      return needsCancellationSettlementRefresh(summary?.status === "verified" ? summary.order : null, actions.get(row));
+    });
+    if (!selected.length) return;
+    const controller = new AbortController();
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const observe = async () => {
+      if (document.visibilityState === "visible" && !settlementReadBusy.current) {
+        settlementReadBusy.current = true;
+        try { await loadSummaries(selected, controller.signal); }
+        finally { settlementReadBusy.current = false; }
+      }
+      if (!stopped) timer = setTimeout(() => { void observe(); }, ACCOUNT_SETTLEMENT_REFRESH_MS);
+    };
+    timer = setTimeout(() => { void observe(); }, ACCOUNT_SETTLEMENT_REFRESH_MS);
+    return () => { stopped = true; controller.abort(); if (timer) clearTimeout(timer); };
+  }, [session, rows, totals, actions, loadSummaries]);
 
   const closePanel = useCallback(() => setManaged(null), []);
   const closeModal = () => {
@@ -512,7 +580,7 @@ function CustomerAccount({
             void loadSummaries([managed.row]);
             void loadActions(accountRequests.current?.signal);
           }}
-          onActionRetry={() => { void loadActions(accountRequests.current?.signal); }}
+          onActionRetry={() => { void loadActions(accountRequests.current?.signal, true); }}
           onAccessRetry={() => setAttempt((value) => value + 1)}
           onEdit={(omsOrderId) => {
             setManaged(null);

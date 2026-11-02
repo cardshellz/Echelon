@@ -30,7 +30,7 @@ suite.sequential("supplier return under activated quantity authority", () => {
     for (const table of [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
       schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines, schema.receivingOrders, schema.receivingLines,
       schema.receiptReversals, schema.inboundShipments, schema.inboundShipmentLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
-      schema.vendorInvoices, schema.vendorInvoiceLines, schema.supplierCredits, schema.supplierCreditLines,
+      schema.vendorInvoices, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines, schema.supplierCredits, schema.supplierCreditLines,
       schema.supplierCreditApplications, schema.supplierCreditApplicationReversals]) {
       const exists = (await pool.query("SELECT to_regclass($1) AS relation", [qualifiedTable(table)])).rows[0].relation;
       if (exists !== null) throw new Error(`Supplier return fixture unexpectedly inherited ${qualifiedTable(table)}`);

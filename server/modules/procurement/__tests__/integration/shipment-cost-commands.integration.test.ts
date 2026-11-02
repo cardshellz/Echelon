@@ -131,7 +131,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     await pool.query("CREATE SCHEMA inventory");
     ownsInventory = true;
     for (const table of [schema.vendors, schema.inboundShipments, schema.inboundShipmentLines, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.inboundFreightCosts, schema.inboundFreightAllocations, schema.vendorInvoiceLines, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receivingOrders, schema.inboundShipmentStatusHistory, schema.purchaseOrders, schema.purchaseOrderLines, schema.receivingLines, schema.inventoryLots]) {
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.inboundFreightCosts, schema.inboundFreightAllocations, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receivingOrders, schema.inboundShipmentStatusHistory, schema.purchaseOrders, schema.purchaseOrderLines, schema.receivingLines, schema.inventoryLots]) {
       await pool.query(fixtureTable(table));
     }
     for (const foreignKey of [

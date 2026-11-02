@@ -1,4 +1,6 @@
 import { DocumentRelationships } from "@/features/purchasing/DocumentRelationships";
+import { PurchaseTaxReview } from "@/features/purchasing/PurchaseTaxReview";
+import { usePurchaseTaxTypes } from "@/features/purchasing/PurchaseTaxTypes";
 import { ShipmentHistoryCorrection } from "@/features/purchasing/ShipmentHistoryCorrection";
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
@@ -114,6 +116,7 @@ const COST_TYPE_OPTIONS = [
   { value: "freight", label: "Freight" },
   { value: "dimensions_adjustment", label: "Dimensions Adjustment" },
   { value: "duty", label: "Duty" },
+  { value: "tax", label: "Tax" },
   { value: "insurance", label: "Insurance" },
   { value: "brokerage", label: "Brokerage" },
   { value: "platform_fee", label: "Platform Fee" },
@@ -146,6 +149,7 @@ const ALLOCATION_METHOD_LABELS: Record<string, string> = {
 // Cost types that force a specific allocation method
 const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
   duty: "by_value",
+  tax: "by_value",
   brokerage: "by_line_count",
   inspection: "by_line_count",
   platform_fee: "by_line_count",
@@ -417,6 +421,7 @@ export default function InboundShipmentDetail() {
     performedByName: "",
     costDate: "",
   });
+  const purchaseTaxTypes = usePurchaseTaxTypes(["duty", "tax"].includes(newCost.costType));
 
   // Edit cost form
   const [editingCost, setEditingCost] = useState<ShipmentCostEditor | null>(null);
@@ -1730,6 +1735,7 @@ export default function InboundShipmentDetail() {
                             </Link>
                           )}
                           {invoiceRecoveryLink(cost)}
+                          {["tax", "duty"].includes(cost.costType) && <div className="mt-2"><PurchaseTaxReview target={{ kind: "shipment_charge", id: cost.id }} label="Tax treatment" /></div>}
                         </div>
                         {isEditable && (
                           <div className="flex gap-1">
@@ -1803,6 +1809,7 @@ export default function InboundShipmentDetail() {
                         </TableCell>
                         <TableCell>
                           <Badge variant="outline" className="text-xs capitalize">{cost.costType.replace(/_/g, " ")}</Badge>
+                          {["tax", "duty"].includes(cost.costType) && <div className="mt-2"><PurchaseTaxReview target={{ kind: "shipment_charge", id: cost.id }} label="Tax treatment" /></div>}
                         </TableCell>
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(effectiveShipmentCostCents(cost))}</TableCell>
@@ -2517,6 +2524,12 @@ export default function InboundShipmentDetail() {
               </Select>
             </div>
 
+            {["tax", "duty"].includes(newCost.costType) && <div className="space-y-2"><Label htmlFor="new-cost-tax-type">Tax type</Label>
+              <select id="new-cost-tax-type" className="w-full rounded border bg-background p-2" value={newCost.taxTypeId ?? ""} onChange={event => setNewCost(previous => ({ ...previous, taxTypeId: event.target.value }))}>
+                <option value="">Choose a tax type</option>{purchaseTaxTypes.data?.map(type => <option value={type.id} key={type.id}>{type.code} · {type.name}</option>)}</select>
+              {purchaseTaxTypes.error && <p role="alert">{purchaseTaxTypes.error.message}</p>}
+              <p className="text-xs text-muted-foreground">Uses the treatment saved in Settings → Procurement. Receiving inherits it automatically.</p>
+            </div>}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label>Date</Label>

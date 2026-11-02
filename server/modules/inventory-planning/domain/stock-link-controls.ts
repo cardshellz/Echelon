@@ -1,3 +1,5 @@
+import { STOCK_LINK_DECISION_CODES } from "./stock-link";
+
 /**
  * What a person's stock-link control changes on one destination (channels PR2, PLAN-CH2 v4.1 §7.3): the per-store
  * switch, Continue and Check again. Pure: the repository passes the destination row as it locked it (FOR UPDATE) and
@@ -9,8 +11,9 @@
  *   held sizes due now so the next tick decides them instead of in 24 h (review LNK-1), and makes a
  *   paused destination try again on the next tick (the pause's code and start stay: a store that still refuses is
  *   paused again and its "paused for over an hour" clock keeps running). Neither held nor paused: nothing changes.
- * - Check again: every `error`, `flagged` and `linked` row is due now with its attempts and streaks reset, and a halt
- *   is cleared. Always written: it is a person's request to look again, recorded even when no row was due.
+ * - Check again: every `error`, `flagged` and `linked` row, plus Shopify status-ineligible waiting rows, is due now
+ *   with its attempts and streaks reset, and a halt is cleared. Always written: it is a person's request to look
+ *   again, recorded even when no row was due.
  */
 
 export const STOCK_LINK_CONTROL_KINDS = ["switch", "continue", "check_again"] as const;
@@ -23,8 +26,21 @@ export const STOCK_LINK_CONTROL_AUDIT_ACTIONS: Readonly<Record<StockLinkControlK
   check_again: "inventory_availability.stock_link.check_requested",
 });
 
-/** Check-row statuses Check again makes due (§7.3); `waiting` rows already come back on their own schedule. */
+/** Check-row statuses always made due. Other waiting rows keep their normal retry schedule. */
 export const STOCK_LINK_CHECK_AGAIN_STATUSES = Object.freeze(["error", "flagged", "linked"] as const);
+
+const SHOPIFY_WAITING_RECHECK_REASONS = Object.freeze([STOCK_LINK_DECISION_CODES.notOnSale]);
+const NO_WAITING_RECHECK_REASONS: readonly string[] = Object.freeze([]);
+
+/** A draft rejected by the former ACTIVE-only policy must be recheckable without
+ * waiting for its historical backoff. This does not change other providers' eligibility. */
+export function stockLinkCheckAgainWaitingReasons(destination: {
+  readonly destinationKind: string;
+  readonly providerKey: string | null;
+}): readonly string[] {
+  return destination.destinationKind === "channel_connection" && destination.providerKey === "shopify"
+    ? SHOPIFY_WAITING_RECHECK_REASONS : NO_WAITING_RECHECK_REASONS;
+}
 
 export interface StockLinkControlDestinationState {
   readonly autoLinkEnabled: boolean;
@@ -50,7 +66,7 @@ export interface StockLinkControlPlan {
   readonly resumePause: boolean;
   /** halted_at/code := NULL. */
   readonly clearHalt: boolean;
-  /** error/flagged/linked rows due now, attempts and streaks reset. */
+  /** Standard statuses and provider-specific waiting reasons due now, attempts and streaks reset. */
   readonly makeRowsDue: boolean;
 }
 
