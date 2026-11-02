@@ -309,9 +309,6 @@ Earlier foundation/compatibility entry points:
 | Date | Change | Evidence / boundary |
 | --- | --- | --- |
 | 2026-11-01 | Verified #1979 deployment and continued S2 with freight invoice reconciliation | [Read-only production evidence](procurement-costing-deployment-1979.md): v3445 includes #1979, but zero assignments/enabled lines/approval audits prevent claiming live receipt-specific posting. [#1983](https://github.com/cardshellz/Echelon/pull/1983) uses the existing AP/allocation/application owners with one reviewed current-admin approval, original estimates/approvals, exact shared-shipment shares, durable retries and immutable history. 18 targeted SQL, 14 mocked and four connected browser cases, 164 focused/guard tests, 313 related regressions, all four TypeScript projects and production build passed. Full 346-case SQL and final-head hosted acceptance are tracked on the PR. Broad S2/S3/S4 and live financial acceptance remain separate |
-
-| Date | Change | Evidence/state |
-| --- | --- | --- |
 | 2026-10-30 | Established the active cleanup tracker, preserved all nine audit findings and synthetic evidence, and recorded ownership rules, stages, acceptance and resumption procedure | Planning/evidence only; implementation not started |
 | 2026-10-30 | Implemented the additive S1 contract/projection and compatibility hash extraction, documented the owning paths/recognition limits, and added target/validation tests | 480 tests / 16 files and production/server-test TypeScript passed; policy answers pending; no activation/live writes |
 | 2026-10-30 | Incorporated refreshed main `31c03b80b` and opened draft PR #1964 for the contract foundation and durable plan | No audited cost owner changed upstream; 480 tests and both TypeScript checks passed again on merged code `c157e98f7`; hosted CI running; no deployment or financial writes |
