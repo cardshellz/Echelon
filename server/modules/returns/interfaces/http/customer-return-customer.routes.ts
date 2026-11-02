@@ -1,3 +1,4 @@
+import { registerCustomerReturnGuestRoutes } from "./customer-return-guest.routes";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { rateLimit } from "express-rate-limit";
@@ -14,6 +15,7 @@ export interface CustomerReturnCustomerRouteDependencies extends CustomerReturnC
 const id = (raw: unknown) => z.string().regex(/^[1-9][0-9]*$/).transform(Number).pipe(z.number().int().positive().safe()).parse(raw);
 const cursor = (raw: unknown) => z.object({ before: z.string().optional() }).strict().parse(raw).before;
 export function registerCustomerReturnCustomerRoutes(app: Express, dependencies: CustomerReturnCustomerRouteDependencies = {}) {
+  registerCustomerReturnGuestRoutes(app);
   const context = dependencies.context ?? createCustomerReturnCustomerAuth;
   const services = dependencies.services ?? createCustomerReturnCustomerServices;
   registerCustomerReturnShopifyProxyRoutes(app, { context });

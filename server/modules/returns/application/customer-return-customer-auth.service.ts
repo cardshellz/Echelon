@@ -171,6 +171,15 @@ export class CustomerReturnCustomerAuthService {
     });
   }
 
+  /** A signed proxy proves the shop even for a logged-out shopper. This grants
+   * no order access; guest email verification supplies that separate proof. */
+  async storefrontShop(rawQuery: string): Promise<{ channelId: number; shopDomain: string }> {
+    const proof = this.verifyProof(rawQuery, this.now());
+    const shop = await this.requireShop(proof.shop);
+    this.verifyProof(rawQuery, this.now());
+    return { channelId: shop.channelId, shopDomain: proof.shop };
+  }
+
   private verifyProof(rawQuery: string, now: Date): CustomerReturnShopifyProof {
     if (typeof rawQuery !== "string" || Buffer.byteLength(rawQuery, "utf8") > MAX_PROXY_QUERY_BYTES) throw customerAuthenticationRequired();
     // The unverified shop is solely a credential lookup hint. The verifier

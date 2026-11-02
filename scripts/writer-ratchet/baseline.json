@@ -1547,6 +1547,12 @@
   "returns.customer_return_case_links": [
     "modules/returns"
   ],
+  "returns.customer_return_guest_challenges": [
+    "modules/returns"
+  ],
+  "returns.customer_return_guest_events": [
+    "modules/returns"
+  ],
   "returns.customer_return_intakes": [
     "modules/returns"
   ],

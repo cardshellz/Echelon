@@ -321,7 +321,10 @@ function verifyCanonicalOwnership(local: CustomerReturnLocalInspectionSnapshot, 
 function verifyProviderOwnership(provider: CustomerReturnShopifySnapshot, scope: CustomerReturnCanonicalOrderScope): void {
   // Normalize trusted numeric/GID customer identities as strings: Number would
   // make distinct Shopify IDs above the safe integer limit compare as equal.
-  if (!provider.order.customerId || provider.order.customerId !== gid("Customer", scope.externalCustomerId)) {
+  const expectedCustomer = scope.verifiedPurchase ? scope.verifiedPurchase.customerId
+    : scope.externalCustomerId === null ? null : gid("Customer", scope.externalCustomerId);
+  if (provider.order.customerId !== expectedCustomer || (scope.verifiedPurchase
+      && provider.order.email?.toLowerCase() !== scope.verifiedPurchase.email.toLowerCase())) {
     throw new CustomerReturnLiveError("RETURN_LIVE_ORDER_NOT_FOUND", "This order is unavailable for returns.", 404);
   }
 }
@@ -355,7 +358,10 @@ function verifyIdentity(local: CustomerReturnLocalInspectionSnapshot, provider: 
 /** Only facts used by purchase entitlement or label creation invalidate review.
  * Delivery/picking observations and financial refund updates are independent. */
 function purchasedReturnSource(local: CustomerReturnLocalInspectionSnapshot, provider: CustomerReturnShopifySnapshot) {
-  const { updatedAt: _updated, ...purchase } = provider.order;
+  // Guest contact evidence is reauthorized against its verified purchase scope.
+  // Adding this read field must not invalidate existing signed-in/staff review
+  // receipts or already queued label intents whose entitlement facts are equal.
+  const { updatedAt: _updated, email: _contactEmail, ...purchase } = provider.order;
   return { shop: local.shop, localOrder: local.order,
     localLines: local.lines.map(line => ({ omsOrderLineId: line.omsOrderLineId, externalLineItemId: line.externalLineItemId,
       quantity: line.quantity, requiresShipping: line.requiresShipping, unitWeightGrams: line.unitWeightGrams })),
