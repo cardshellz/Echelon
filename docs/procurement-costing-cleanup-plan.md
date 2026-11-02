@@ -10,7 +10,7 @@ This is the active tracker for consolidating purchase costing from PO through sh
 | Next work item | Finish A1 standalone supplier-review approval acceptance, then A2 ordinary AP transitions and A3/A4 combined/header/credit adapters. [Finite remaining delivery gates](procurement-costing-remaining-delivery.md) define the remaining command, downstream, consumer and acceptance work |
 | Working branch | `codex/purchase-cost-review-approval` |
 | Plan branch base | `e5d69368639528cdf9c73d60799184591f8d8e88` |
-| Latest main incorporated | `3b939555258658874859cf491f1cd4e1322d5806` (#1963), integrated by `5957b5df5eb7f66bac0d69d3a7ca76d4b60fb53c`. Its Catalog/publication/CI changes do not overlap procurement owners. The separately verified #1983 deployed merge is `56c547ae5f8e0ff60e7d0570999a58f3b973ef92` / v3447 |
+| Latest main incorporated | `3ffe92e6b5d772c9cc586c5d2505bca13af6e30f` (#1985/#1986), following `3b9395552` (#1963). The new returns/listing-sync and prior Catalog/publication/CI changes do not overlap procurement costing owners. The separately verified #1983 deployed merge is `56c547ae5f8e0ff60e7d0570999a58f3b973ef92` / v3447 |
 | Audited main baseline | `e571bcac780852c3ac6b488354c10aaf7f1c417c`, the historical F1-F9 audit baseline. Later implementation and deployment evidence is recorded below; this baseline is not current production acceptance proof |
 | Audit | [Purchase costing authority review](procurement-costing-authority-audit-2026-10-30.md) |
 | Stage 1 contract and ownership map | [Contract, compatibility and recognition boundary](procurement-costing-stage-1-contract.md) |
