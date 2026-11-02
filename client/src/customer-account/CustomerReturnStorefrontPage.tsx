@@ -5,6 +5,7 @@ import { CustomerWorkspace } from "@/pages/CustomerReturnCustomerPortal";
 import { customerAccountAccessNotice, customerAccountSignInUrl, type CustomerAccountAccessNotice } from "./customer-account-access";
 import { createCustomerAccountTransport, type CustomerAccountTransport } from "./customer-account.transport";
 import type { ReturnPortalPageConfig } from "./return-portal-config";
+import { CustomerReturnGuestAccess } from "./CustomerReturnGuestAccess";
 
 type Bootstrap = Awaited<ReturnType<CustomerAccountTransport["bootstrap"]>>;
 
@@ -35,6 +36,7 @@ export function CustomerReturnStorefrontPage({ config }: { config: ReturnPortalP
 
   const returns = useMemo(() => session?.session.sessionKey && api
     ? api.returns(session.session.sessionKey) : null, [api, session]);
+  if (!api) return <CustomerReturnGuestAccess config={config} loginHref={loginHref} />;
   if (api && session?.session.sessionKey && returns) return (
     <CustomerWorkspace key={session.session.sessionKey}
       sessionKey={session.session.sessionKey} transport={returns} downloadRequest={api.request}

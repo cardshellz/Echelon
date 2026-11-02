@@ -40,27 +40,37 @@ export function requireCustomerAccountStaging(input: {
   principal: CustomerReturnCustomerSession; themeId: string; expectedCustomerId: string;
   origin: string | undefined; commandHeader: string | undefined; sessionKey?: string | null;
 }): void {
-  const { config, principal } = input;
+  requireCustomerAccountStorefront({ ...input, shopDomain: input.principal.shopDomain });
+  const { principal } = input;
+  if (principal.externalCustomerId !== input.expectedCustomerId ||
+      (input.sessionKey !== undefined && input.sessionKey !== principal.sessionKey)) {
+    throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_IDENTITY_CHANGED", "Your sign-in changed. Reload your account page before continuing.", 401);
+  }
+}
+
+/** Storefront transport gate only; callers must independently authenticate a
+ * signed customer or a verified guest order before reading any purchase. */
+export function requireCustomerAccountStorefront(input: {
+  config: CustomerAccountStagingConfig | null; authConfig: ReturnCustomerAuthConfig;
+  shopDomain: string; themeId: string; origin: string | undefined; commandHeader: string | undefined;
+}): void {
+  const { config, shopDomain } = input;
   if (!config || (config.themeId !== input.themeId && !config.additionalThemeIds?.includes(input.themeId)) ||
-      !config.shops[principal.shopDomain]?.enabled) {
+      !config.shops[shopDomain]?.enabled) {
     throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_TESTING_UNAVAILABLE", "Account tools are not enabled yet.", 403);
   }
-  const shop = input.authConfig.shops[principal.shopDomain];
+  const shop = input.authConfig.shops[shopDomain];
   // Shopify serves theme previews on the shop's canonical myshopify host.
   // This origin comes from the independently verified Shopify principal, not
   // a client-supplied host or a wildcard across other Shopify stores.
   const origin: CustomerAccountOriginContext["origin"] = !input.origin ? "missing"
     : shop && input.origin === new URL(shop.proxyUrl).origin ? "primary_storefront"
-    : shop && input.origin === `https://${principal.shopDomain}` ? "shopify_storefront" : "rejected";
+    : shop && input.origin === `https://${shopDomain}` ? "shopify_storefront" : "rejected";
   const commandHeader: CustomerAccountOriginContext["commandHeader"] = input.commandHeader === "1" ? "valid"
     : input.commandHeader === undefined ? "missing" : "rejected";
   if ((origin !== "primary_storefront" && origin !== "shopify_storefront") || commandHeader !== "valid") {
     // Classifications make transport failures diagnosable without logging raw
     // headers, signed URLs, customer identifiers or authentication material.
     throw new CustomerAccountOriginAccessError({ origin, commandHeader });
-  }
-  if (principal.externalCustomerId !== input.expectedCustomerId ||
-      (input.sessionKey !== undefined && input.sessionKey !== principal.sessionKey)) {
-    throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_IDENTITY_CHANGED", "Your sign-in changed. Reload your account page before continuing.", 401);
   }
 }

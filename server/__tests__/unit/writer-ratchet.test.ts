@@ -50,6 +50,8 @@ describe("writer-ratchet (P2.1)", () => {
     ["returns.customer_return_box_measurements", "modules/returns"],
     ["returns.customer_return_parcel_receipts", "modules/returns"],
     ["returns.customer_return_workflows", "modules/returns"],
+    ["returns.customer_return_guest_challenges", "modules/returns"],
+    ["returns.customer_return_guest_events", "modules/returns"],
     ["returns.customer_return_workflow_events", "modules/returns"],
     ["returns.customer_return_parcel_receipt_allocations", "modules/returns"],
     ["wms.picking_commands", "modules/wms"],
