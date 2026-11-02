@@ -7,15 +7,23 @@ import { customerReturnFlowReviewInputSchema } from "../../shared/returns/custom
 import type { CustomerAccountRequest } from "../../shared/customer-account/customer-account.contract";
 
 // Actual compiled theme assets; every service call is synthetic and intercepted.
-async function fixture(page: Page, options: { guest?: boolean; invalid?: boolean; bootstrapFailure?: "session" | "service"; loseSubmit?: boolean; loseLookup?: boolean; loseVerify?: boolean } = {}) {
+async function fixture(page: Page, options: { guest?: boolean; invalid?: boolean; bootstrapFailure?: "session" | "service"; loseSubmit?: boolean; loseLookup?: boolean; loseVerify?: boolean;
+  noOrders?: boolean; historyFailure?: boolean; ordersFailure?: boolean; noProgress?: boolean; multiBox?: boolean; staleLabel?: boolean;
+} = {}) {
   const guestCalls: Record<string, any>[] = []; let lookupLost=false, verifyLost=false;
   const calls: CustomerAccountRequest[] = [], errors: string[] = [], external: string[] = [];
   const { mode: _mode, scenarioId: _scenario, ...fields } = new CustomerReturnPreviewService().lookup({ scenarioId: "split_delivered", orderReference: "TEST-1001" });
   const order = { ...fields, sourceRevision: "a".repeat(64), boxOptions: [{ id: `box-${"b".repeat(64)}`,
     dimensions: { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 }, items: [{ lineId: fields.lines[0].id, quantity: 1 }] }] };
   const labels = { authorizationId: 20, authorizationNumber: "RMA-20", canProgress: false,
-    parcels: [{ parcelId: 30, number: 1, status: "ready", trackingNumber: "SYNTHETIC-TRACK", downloadPath: "/api/returns/customer/returns/20/parcels/30/download" }] };
-  let saved: { idempotencyKey: string } | null = null, ready = false, submissions = 0, bootstrapReads = 0;
+    parcels: [{ parcelId: 30, number: 1, status: "ready", trackingNumber: "SYNTHETIC-TRACK", downloadPath: "/api/returns/customer/returns/20/parcels/30/download" },
+      ...(options.multiBox ? [{ parcelId: 31, number: 2, status: "ready", trackingNumber: "SYNTHETIC-TRACK-2", downloadPath: "/api/returns/customer/returns/20/parcels/31/download" }] : [])] };
+  let saved: { idempotencyKey: string } | null = null, ready = false, submissions = 0, bootstrapReads = 0, orderReads = 0, historyReads = 0, received = false;
+  const returnProgress = () => ({ key: "authorization:20", reference: "RMA-20",
+    status: { code: received ? "received" : "label_ready", label: received ? "Return received" : "Return label ready" },
+    refund: { code: received ? "processing" : "not_started", label: received ? "Refund processing" : "Refund not started" },
+    quantity: 1, receivedQuantity: received ? 1 : 0, parcels: [{ key: "parcel:30", trackingNumber: "SYNTHETIC-TRACK", status: { code: "awaiting_carrier", label: "Awaiting carrier" } },
+      ...(options.multiBox ? [{ key: "parcel:31", trackingNumber: null, status: { code: "awaiting_carrier", label: "Awaiting carrier" } }] : [])] });
   const workflow = () => ({ requestKey: saved!.idempotencyKey, omsOrderId: 10, phase: ready ? "ready" : "queued",
     reason: null, labels: ready ? labels : null, updatedAt: "2026-11-01T12:00:00.000Z" });
   page.on("pageerror", error => errors.push(error.message));
@@ -57,8 +65,17 @@ async function fixture(page: Page, options: { guest?: boolean; invalid?: boolean
         connection: { connectionId: 4, channelId: 2, name: "Shopify", shopDomain: "fixture.myshopify.com", enabled: true, paymentWindowMinutes: 30 } } });
     }
     expect(input.sessionKey).toBe("a".repeat(43));
-    if (input.path === "/returns/order-options") return route.fulfill({ json: { orders: [{ omsOrderId: 10, orderReference: "TEST-1001", purchasedAt: null, eligibleItemCount: 1 }], nextBeforeOmsOrderId: null } });
-    if (input.path === "/returns/returns") return route.fulfill({ json: { returns: [{ authorizationId: 20, authorizationNumber: "RMA-20", omsOrderId: 10, orderReference: "TEST-1001", createdAt: "2026-11-01T12:00:00Z" }], nextBeforeAuthorizationId: null } });
+    if (input.path === "/returns/order-options") {
+      orderReads++;
+      if (options.ordersFailure && orderReads === 1) return route.fulfill({ status: 503, json: { error: { code: "RETURN_CUSTOMER_UNAVAILABLE" } } });
+      return route.fulfill({ json: { orders: options.noOrders ? [] : [{ omsOrderId: 10, orderReference: "TEST-1001", purchasedAt: null, eligibleItemCount: 1 }], nextBeforeOmsOrderId: null } });
+    }
+    if (input.path === "/returns/returns") {
+      historyReads++;
+      if (options.historyFailure && historyReads === 1) return route.fulfill({ status: 503, json: { error: { code: "RETURN_CUSTOMER_UNAVAILABLE" } } });
+      return route.fulfill({ json: { returns: [{ authorizationId: 20, authorizationNumber: "RMA-20", omsOrderId: 10, orderReference: "TEST-1001", createdAt: "2026-11-01T12:00:00Z",
+        ...(!options.noProgress ? { progress: returnProgress() } : {}) }], nextBeforeAuthorizationId: null } });
+    }
     if (input.path === "/returns/orders/10/label-requests" && input.method === "GET") return saved
       ? route.fulfill({ json: { workflow: workflow(), input: saved } })
       : route.fulfill({ status: 404, json: { error: { code: "RETURN_WORKFLOW_NOT_FOUND" } } });
@@ -75,7 +92,7 @@ async function fixture(page: Page, options: { guest?: boolean; invalid?: boolean
       return route.fulfill({ json: workflow() });
     }
     if (input.path.startsWith("/returns/label-requests/")) return route.fulfill({ json: workflow() });
-    if (input.path === "/returns/returns/20") return route.fulfill({ json: labels });
+    if (input.path === "/returns/returns/20") return route.fulfill({ json: options.staleLabel ? { ...labels, parcels: labels.parcels.map(parcel => ({ ...parcel, status: "needs_review", downloadPath: null })) } : labels });
     if (input.path === "/returns/returns/20/label-requests") return route.fulfill({ status: 404, json: { error: { code: "RETURN_WORKFLOW_NOT_FOUND" } } });
     if (input.path === "/returns/returns/20/parcels/30/download") return route.fulfill({ contentType: "application/pdf", body: "%PDF-1.4 Synthetic label" });
     return route.fulfill({ status: 500, json: { error: { code: "UNEXPECTED_FIXTURE_ROUTE", message: input.path } } });
@@ -87,18 +104,26 @@ async function fixture(page: Page, options: { guest?: boolean; invalid?: boolean
     <footer id="store-footer">Store footer</footer><script type="application/json" id="csz-return-portal-config">${JSON.stringify({ themeId: "174740308127", customerId: options.guest ? null : "100", proxyPath: options.invalid ? "https://evil.test/apps/returns" : "/apps/echelon-returns", loginPath: "/account/login", logoutPath: "/account/logout" })}</script>
     <script src="/__portal-assets/csz-return-portal.js"></script></body></html>` }));
   await page.goto("/pages/start-a-return?preview_theme_id=174740308127&view=return-portal");
-  return { calls, guestCalls, errors, external, complete: () => { ready = true; }, submissions: () => submissions };
+  return { calls, guestCalls, errors, external, complete: () => { ready = true; }, receive: () => { received = true; }, submissions: () => submissions };
 }
 
 async function assertStoreFrame(page: Page) {
   await expect(page.locator("#store-header")).toBeVisible();
   await expect(page.locator("#store-footer")).toBeVisible();
   expect(await page.locator("iframe, dialog").count()).toBe(0);
+  const overflow = await page.locator("body *").evaluateAll(elements => elements.flatMap(element => {
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.right > window.innerWidth + 1 ? [{ tag: element.tagName, className: element.className, right: rect.right }] : [];
+  }));
+  expect(overflow).toEqual([]);
   expect(await page.locator("body").evaluate(body => ({ overflow: body.scrollWidth > window.innerWidth, font: getComputedStyle(body).fontFamily })))
     .toEqual({ overflow: false, font: "Impact, fantasy" });
-  expect(await page.locator(".csz-return-ui h1").evaluate(h => getComputedStyle(h).fontFamily)).not.toMatch(/Impact|fantasy/);
-  await expect(page.getByRole("link", { name: "Back to shopping", exact: true })).toHaveAttribute("href", "https://www.cardshellz.com/");
+  expect(await page.locator("[data-return-heading]").first().evaluate(h => getComputedStyle(h).fontFamily)).not.toMatch(/Impact|fantasy/);
+  await expect(page.getByRole("link", { name: "Continue shopping", exact: true })).toHaveAttribute("href", "https://www.cardshellz.com/");
   expect(new URL(page.url()).pathname).toBe("/pages/start-a-return");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Returns");
+  await expect(page.locator(".csz-return-brand")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Refresh orders", exact: true })).toHaveCount(0);
 }
 
 test("guests sign in through Shopify and return to the same storefront page", async ({ page }) => {
@@ -113,10 +138,10 @@ test("guests sign in through Shopify and return to the same storefront page", as
 
 test("signed-in chooser and protected label downloads stay on Shopify", async ({ page }) => {
   const f = await fixture(page);
-  await expect(page.getByRole("heading", { name: "Choose an order to return" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Sign out", exact: true })).toHaveAttribute("href", "/account/logout");
+  await expect(page.getByRole("heading", { name: "Start a return" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign out", exact: true })).toHaveCount(0);
   await assertStoreFrame(page);
-  await page.getByRole("button", { name: "RMA-20 · Order TEST-1001", exact: true }).click();
+  await page.getByRole("button", { name: "View return", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Return RMA-20" })).toBeVisible();
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download label for box 1", exact: true }).click();
@@ -153,7 +178,7 @@ test("selection, packing, review and lost-response recovery reuse one durable re
 test("inactive Shopify sign-in offers sign-in; service errors offer retry", async ({ page }) => {
   const f = await fixture(page, { bootstrapFailure: "service" });
   await page.getByRole("button", { name: "Try again", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Choose an order to return" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Start a return" })).toBeVisible();
   expect(f.calls.filter(call => call.path === "/account/bootstrap")).toHaveLength(2);
   await fixture(page, { bootstrapFailure: "session" });
   await expect(page.getByRole("link", { name: "Sign in to your account" })).toBeVisible();
@@ -166,6 +191,94 @@ test("invalid page configuration shows a useful error without sending a request"
   expect(f.calls).toEqual([]); expect(f.external).toEqual([]);
 });
 
+test("integrated empty state shows the existing return with a protected one-click label download", async ({ page }) => {
+  const f = await fixture(page, { noOrders: true });
+  await expect(page.getByText("No orders available for a new return", { exact: true })).toBeVisible();
+  await expect(page.getByText("You can still manage your existing returns below.", { exact: true })).toBeVisible();
+  const card = page.getByRole("article", { name: "Return RMA-20", exact: true });
+  await expect(card.getByRole("heading", { name: "Order #TEST-1001" })).toBeVisible();
+  await expect(card.getByText("Return label ready", { exact: true })).toBeVisible();
+  expect(f.calls.filter(call => call.path === "/returns/returns/20")).toHaveLength(0);
+  const download = page.waitForEvent("download");
+  await card.getByRole("button", { name: "Download label", exact: true }).click();
+  expect((await download).suggestedFilename()).toMatch(/\.pdf$/);
+  expect(f.calls.filter(call => call.path === "/returns/returns/20")).toHaveLength(1);
+  expect(f.calls.every(call => call.method === "GET")).toBe(true);
+  await assertStoreFrame(page);
+  await page.screenshot({ path: `.codex-artifacts/integrated-returns-${test.info().project.name}.png`, fullPage: true });
+  expect(f.errors).toEqual([]); expect(f.external).toEqual([]);
+});
+
+test("stale label summaries cannot bypass current artifact checks", async ({ page }) => {
+  const f = await fixture(page, { staleLabel: true });
+  await page.getByRole("button", { name: "Download label", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Return RMA-20", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download label for box 1", exact: true })).toHaveCount(0);
+  expect(f.calls.some(call => call.path.endsWith("/download"))).toBe(false);
+  expect(f.submissions()).toBe(0);
+});
+
+test("multiple return boxes offer label selection rather than downloading an arbitrary box", async ({ page }) => {
+  const f = await fixture(page, { multiBox: true });
+  await page.getByRole("button", { name: "View labels", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Download label for box 1", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download label for box 2", exact: true })).toBeVisible();
+  expect(f.calls.some(call => call.path.endsWith("/download"))).toBe(false);
+  expect(f.submissions()).toBe(0);
+});
+
+test("the integrated page fits narrow phones with visible shopping and support paths", async ({ page }) => {
+  await fixture(page, { guest: true });
+  await page.setViewportSize({ width: 320, height: 780 });
+  await expect(page.getByRole("heading", { name: "Find your order", exact: true })).toBeVisible();
+  await assertStoreFrame(page);
+  await expect(page.getByRole("complementary", { name: "Returns help" })).toBeVisible();
+});
+
+test("old history responses stay usable without claiming label or receipt status", async ({ page }) => {
+  const f = await fixture(page, { noProgress: true });
+  const card = page.getByRole("article", { name: "Return RMA-20", exact: true });
+  await expect(card.getByRole("button", { name: "View return", exact: true })).toBeVisible();
+  await expect(card.getByText("Return label ready", { exact: true })).toHaveCount(0);
+  await card.getByRole("button", { name: "View return", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Return RMA-20", exact: true })).toBeVisible();
+  expect(f.submissions()).toBe(0);
+});
+
+test("failed reads offer retry instead of claiming no eligible orders or no saved returns", async ({ page }) => {
+  const f = await fixture(page, { ordersFailure: true, historyFailure: true });
+  await expect(page.getByRole("button", { name: "Try again", exact: true })).toBeVisible();
+  await expect(page.getByText("No orders available for a new return", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Your saved returns will appear here.", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeVisible();
+  await expect(page.getByRole("article", { name: "Return RMA-20", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again", exact: true })).toHaveCount(0);
+  expect(f.submissions()).toBe(0);
+});
+
+test("page focus refreshes physical return and refund summaries using only saved reads", async ({ page }) => {
+  const f = await fixture(page);
+  await expect(page.getByText("Return label ready", { exact: true })).toBeVisible();
+  f.receive();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByText("Return received", { exact: true })).toBeVisible();
+  await expect(page.getByText("Refund processing", { exact: true })).toBeVisible();
+  await expect(page.getByText("Ready to send back", { exact: true })).toHaveCount(0);
+  expect(f.calls.every(call => call.method === "GET")).toBe(true);
+  expect(f.submissions()).toBe(0);
+});
+
+test("another-order lookup stays in the same shell and returns to the signed-in account", async ({ page }) => {
+  const f = await fixture(page, { noOrders: true });
+  await page.getByRole("button", { name: "Find another order", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Find your order", exact: true })).toBeVisible();
+  await assertStoreFrame(page);
+  await page.getByRole("button", { name: "Back to your orders", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Start a return", exact: true })).toBeVisible();
+  expect(f.guestCalls).toEqual([]); expect(f.submissions()).toBe(0);
+});
+
 async function enterGuest(page: Page, options: { retries?: boolean; openOrder?: boolean } = {}) {
   await page.getByLabel("Order number",{exact:true}).fill("TEST-1001");
   await page.getByLabel("Email used at checkout",{exact:true}).fill("guest@example.test");
@@ -174,7 +287,7 @@ async function enterGuest(page: Page, options: { retries?: boolean; openOrder?: 
   await page.getByLabel("Email verification code",{exact:true}).fill("87654321");
   await page.getByRole("button",{name:"Verify and continue",exact:true}).click();
   if(options.retries) { await expect(page.getByRole("alert")).toBeVisible(); await page.getByRole("button",{name:"Verify and continue",exact:true}).click(); }
-  await expect(page.getByRole("heading",{name:"Choose an order to return",exact:true})).toBeVisible();
+  await expect(page.getByRole("heading",{name:"Start a return",exact:true})).toBeVisible();
   expect(await page.locator(".csz-guest-account button").evaluate(button => getComputedStyle(button).fontFamily)).not.toMatch(/Impact|fantasy/);
   await page.screenshot({ path: `.codex-artifacts/guest-verified-${test.info().project.name}.png`, fullPage: true });
   if(options.openOrder!==false) {
@@ -189,7 +302,7 @@ test("guest lost replies retain one email challenge and one verification, then r
   expect(lookups).toHaveLength(2);expect(lookups[1].input).toEqual(lookups[0].input);
   expect(verifications).toHaveLength(2);expect(verifications[1].input).toEqual(verifications[0].input);
   expect(f.guestCalls.some(call=>call.action==="account")).toBe(false);
-  await page.reload();await expect(page.getByRole("heading",{name:"Choose an order to return",exact:true})).toBeVisible();
+  await page.reload();await expect(page.getByRole("heading",{name:"Start a return",exact:true})).toBeVisible();
   await page.getByRole("button",{name:"Return items",exact:true}).click();
   await expect(page.getByRole("heading",{name:"What would you like to return?",exact:true})).toBeVisible();
   expect(f.guestCalls.filter(call=>call.action==="verify")).toHaveLength(2);
@@ -225,7 +338,7 @@ test("guest account activation is optional and the return remains usable",async(
 
 test("guest can reopen the verified order's existing return in a new browser session",async({page})=>{
   const f=await fixture(page,{guest:true});await enterGuest(page,{openOrder:false});
-  const existing=page.getByRole("button",{name:/RMA-20.*Order TEST-1001/});await existing.click();
+  const existing=page.getByRole("button",{name:"View return",exact:true});await existing.click();
   await expect(page.getByRole("heading",{name:"Return RMA-20",exact:true})).toBeVisible();
   const download=page.waitForEvent("download");await page.getByRole("button",{name:"Download label for box 1",exact:true}).click();
   expect((await download).suggestedFilename()).toMatch(/\.pdf$/);

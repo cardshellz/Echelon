@@ -1,6 +1,7 @@
 import { customerReturnWorkflowStatusSchema, customerReturnWorkflowResumeSchema } from "@shared/returns/customer-return-workflow.contract";
 import type { CustomerReturnWorkflowStore, ReturnWorkflowRecord } from "./customer-return-workflow.ports";
 import { z } from "zod";
+import { customerReturnProgressSchema, type CustomerReturnProgress } from "@shared/customer-account/order-progress";
 import {
   CUSTOMER_RETURN_CUSTOMER_API,
   customerReturnCustomerLabelStatusSchema,
@@ -45,6 +46,8 @@ export interface CustomerReturnCustomerOperationsDependencies {
   labels: Pick<CustomerReturnLabelsService, "status" | "progress" | "artifact">;
   workflows?: CustomerReturnWorkflowStore;
   now?: () => Date;
+  historyProgress?: { readHistory(principal: CustomerReturnCustomerPrincipal, rows: readonly { authorizationId: number; omsOrderId: number }[], now: Date): Promise<ReadonlyMap<number, CustomerReturnProgress>> };
+  reportHistoryUnavailable?: () => void;
 }
 
 /** Request-scoped public boundary; existing staff authorization is intentionally unchanged. */
@@ -65,7 +68,25 @@ export class CustomerReturnCustomerOperationsService {
     if (rows.some((row, index) => (input.beforeAuthorizationId !== undefined && row.authorizationId >= input.beforeAuthorizationId)
       || (index > 0 && row.authorizationId >= rows[index - 1].authorizationId))) throw customerReturnUnavailable();
     const page = rows.slice(0, input.pageSize);
-    return customerReturnCustomerHistorySchema.parse({ returns: page,
+    let progress: ReadonlyMap<number, CustomerReturnProgress> | null = null;
+    if (page.length && this.dependencies.historyProgress) {
+      try {
+        progress = await this.dependencies.historyProgress.readHistory(this.principal, page, this.workflowNow());
+        for (const row of page) {
+          const value = progress.get(row.authorizationId);
+          if (value && customerReturnProgressSchema.parse(value).key !== `authorization:${row.authorizationId}`)
+            throw customerReturnUnavailable();
+        }
+      } catch {
+        // Accepted history stays accessible if the supplementary physical/
+        // refund projection fails. Do not turn this into "no returns".
+        this.dependencies.reportHistoryUnavailable?.();
+        progress = null;
+      }
+    }
+    return customerReturnCustomerHistorySchema.parse({ returns: page.map(row => ({ ...row,
+      ...(this.dependencies.historyProgress ? { progress: progress?.get(row.authorizationId) ?? null } : {}),
+    })),
       nextBeforeAuthorizationId: rows.length > input.pageSize ? page[page.length - 1].authorizationId : null,
     });
   }

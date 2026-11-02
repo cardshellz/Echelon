@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { PostgresCustomerReturnProgressReader } from "./customer-return-progress.reader";
 import { z } from "zod";
 import type { ReturnCustomerAuthConfig } from "../application/customer-return-customer-auth.service";
 import { CustomerReturnCustomerAccessError } from "../application/customer-return-customer-auth.service";
@@ -52,6 +53,8 @@ export async function createGuestReturnServices(purchase: GuestPurchase) {
     orders: new CustomerReturnGuestOrdersService({ omsOrderId: purchase.omsOrderId, access, orders }),
     operations: new CustomerReturnCustomerOperationsService({ principal: { ...principal, orderScope: { omsOrderId: purchase.omsOrderId, externalOrderId: purchase.externalOrderId } },
       orderAccess: access, ownership: new PostgresCustomerReturnCustomerOwnershipReader(pool), submissions: internal.submissions, labels: internal.labels,
+      historyProgress: new PostgresCustomerReturnProgressReader(pool),
+      reportHistoryUnavailable: () => console.warn(JSON.stringify({ event: "guest_return_history_progress_unavailable", code: "RETURN_HISTORY_PROGRESS_UNAVAILABLE", channelId: purchase.channelId, omsOrderId: purchase.omsOrderId })),
       workflows: new PostgresCustomerReturnWorkflowStore(pool), now: () => new Date() }),
     download: internal.download,
   };

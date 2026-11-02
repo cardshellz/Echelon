@@ -6,6 +6,8 @@ import { CustomerWorkspace } from "@/pages/CustomerReturnCustomerPortal";
 import { returnGuestSessionSchema, type ReturnGuestSession } from "@shared/returns/customer-return-guest.contract";
 import { createGuestReturnTransport } from "./customer-return-guest.transport";
 import type { ReturnPortalPageConfig } from "./return-portal-config";
+import { CustomerReturnStorefrontLayout } from "./CustomerReturnStorefrontLayout";
+import { CustomerReturnHeading } from "@/components/returns/CustomerReturnPresentation";
 
 const draftSchema = z.object({ requestKey: z.string().uuid(), browserKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   email: z.string().max(254), orderReference: z.string().max(100), expiresAt: z.string().datetime().nullable() });
@@ -16,7 +18,9 @@ function newDraft(): Draft {
     email: "", orderReference: "", expiresAt: null };
 }
 
-export function CustomerReturnGuestAccess({ config, loginHref }: { config: ReturnPortalPageConfig; loginHref: string }) {
+export function CustomerReturnGuestAccess({ config, loginHref, onBackToAccount }: {
+  config: ReturnPortalPageConfig; loginHref: string; onBackToAccount?: () => void;
+}) {
   const api = useMemo(() => createGuestReturnTransport(config), [config]);
   const storageKey = `csz-guest-return:${config.proxyPath}`;
   const [draft, setDraft] = useState<Draft>(() => {
@@ -60,22 +64,25 @@ export function CustomerReturnGuestAccess({ config, loginHref }: { config: Retur
     if (!signal.aborted) { setDraft({ ...current, expiresAt: result.expiresAt }); setCode(""); }
   }
   const gateway = useMemo(() => session ? api.returns(session) : null, [api, session]);
-  if (session && gateway) return <>
-    <div className="csz-return-ui csz-guest-account">
+  if (session && gateway) return <CustomerReturnStorefrontLayout
+    sessionTools={<><span>Returning this order as a guest</span><Button variant="link" disabled={busy} onClick={reset}>Use a different email</Button></>}
+    accountTools={<section className="csz-guest-account">
+      <h2>Save time next time</h2>
       <p>You’re returning this order as a guest. An account is optional.</p>
       {error && <p role="alert">{error}</p>}
       {accountLink ? <><Button asChild><a href={accountLink.url} target="_blank" rel="noopener noreferrer" aria-describedby="guest-account-navigation">{accountLink.kind === "activate" ? "Activate your account" : accountLink.kind === "sign_in" ? "Sign in to your account" : "Create an account"}</a></Button>
         <p id="guest-account-navigation">Account setup opens in a new tab. Your return stays open here.</p>
         {accountLink.kind === "register" && <p>You can create an account for future purchases. Continue this return here as a guest.</p>}</>
         : <Button variant="outline" disabled={busy} onClick={() => void run(async signal => { const result = await api.account(session, signal); if (!signal.aborted) setAccountLink(result); })}>Set up account access</Button>}
-    </div>
+    </section>}>
     <CustomerWorkspace key={session.sessionKey} sessionKey={session.sessionKey}
       transport={gateway.transport} downloadRequest={gateway.request} onSignedOut={reset}
+      onFindOrder={reset}
       onDenied={requireVerification} />
-  </>;
-  return <CustomerReturnSurface shoppingHref="https://www.cardshellz.com/">
+  </CustomerReturnStorefrontLayout>;
+  return <CustomerReturnStorefrontLayout><CustomerReturnSurface>
     <div className="csz-return-status csz-guest-access">
-      <h1>Find your order</h1>
+      <CustomerReturnHeading>Find your order</CustomerReturnHeading>
       <p>Purchased as a guest? Enter the order number and email used at checkout. We’ll email you a verification code.</p>
       {error && <p role="alert">{error}</p>}
       <form onSubmit={event => { event.preventDefault(); void run(async signal => {
@@ -100,7 +107,7 @@ export function CustomerReturnGuestAccess({ config, loginHref }: { config: Retur
         <Button variant="ghost" disabled={busy} onClick={reset}>Change order or email</Button>
       </div>}
       <p>Already have an account? <a href={loginHref}>Sign in</a></p>
-      <p>Can’t find your order or email code? <a href="/pages/contact-us">Contact us</a>.</p>
+      {onBackToAccount && <Button variant="link" disabled={busy} onClick={onBackToAccount}>Back to your orders</Button>}
     </div>
-  </CustomerReturnSurface>;
+  </CustomerReturnSurface></CustomerReturnStorefrontLayout>;
 }

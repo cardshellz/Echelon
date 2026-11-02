@@ -415,6 +415,17 @@ integration(
       const first=(await read()).get(100)!;
       expect(first.returns).toHaveLength(1);
       expect(first.returns[0]).toMatchObject({status:{code:"label_ready"},refund:{code:"not_started"},quantity:13,receivedQuantity:0});
+      const historyReader = new PostgresCustomerReturnProgressReader(pool);
+      const historyPage = [{ authorizationId: ready.authorizationId, omsOrderId: 100 }];
+      const historyPrincipal = { channelId: 36, externalCustomerId: "901" };
+      const readHistory = () => historyReader.readHistory(historyPrincipal, historyPage, instant);
+      expect((await readHistory()).get(ready.authorizationId)).toEqual(first.returns[0]);
+      expect((await historyReader.readHistory({ ...historyPrincipal, externalCustomerId: "902" }, historyPage, instant)).size).toBe(0);
+      expect((await historyReader.readHistory({ ...historyPrincipal, channelId: 37 }, historyPage, instant)).size).toBe(0);
+      const purchaseId = (await pool.query("SELECT external_order_id FROM oms.oms_orders WHERE id=100")).rows[0].external_order_id;
+      const guestPrincipal = { ...historyPrincipal, orderScope: { omsOrderId: 100, externalOrderId: purchaseId } };
+      expect((await historyReader.readHistory(guestPrincipal, historyPage, instant)).get(ready.authorizationId)).toEqual(first.returns[0]);
+      expect((await historyReader.readHistory({ ...guestPrincipal, orderScope: { ...guestPrincipal.orderScope, externalOrderId: "999" } }, historyPage, instant)).size).toBe(0);
       await pool.query("UPDATE wms.saved_label_status_jobs SET last_error_code='SAVED_LABEL_STATUS_VOID_TIME_UNAVAILABLE' WHERE source_kind='return'");
       expect((await read()).get(100)!.returns[0].status.code).toBe("needs_attention");
       await pool.query("UPDATE wms.saved_label_status_jobs SET last_error_code=NULL WHERE source_kind='return'");
@@ -445,10 +456,12 @@ integration(
       instant=new Date(instant.getTime()+6*60*60_000+1);
       await Promise.all([capture.run(),capture.run()]);
       expect((await read()).get(100)!.returns[0].status.code).toBe("in_transit");
+      expect((await readHistory()).get(ready.authorizationId)?.status.code).toBe("in_transit");
       for(const parcel of ready.parcels)carrier.setTracking(parcel.trackingNumber!,"DE");
       outboundCodes.set("SYNTHETIC-OUTBOUND-3","DE");
       instant=new Date(instant.getTime()+6*60*60_000+1);await capture.run();
       expect((await read()).get(100)!.returns[0]).toMatchObject({status:{code:"delivered"},receivedQuantity:0,refund:{code:"not_started"}});
+      expect((await readHistory()).get(ready.authorizationId)).toMatchObject({status:{code:"delivered"},receivedQuantity:0,refund:{code:"not_started"}});
       // Receiving a mixed box uses the existing receipt owner and remains idempotent.
       const boxes=new ReturnParcelReceivingService(new PostgresReturnParcelReceivingStore(),()=>new Date(instant));
       for(const [index,parcel]of ready.parcels.entries()){
@@ -494,6 +507,12 @@ integration(
       // claiming the entire revised order was delivered.
       await pool.query("UPDATE wms.order_items SET quantity=quantity+1 WHERE id=(SELECT min(id) FROM wms.order_items)");
       expect((await deliveryReader.read(scope,instant)).get(100)?.delivery?.code).toBe("partially_delivered");
+      // Exercise changed/null imported identity after the shipping-capture
+      // scenario so it does not change that scenario's immutable source fence.
+      const currentHistory = (await readHistory()).get(ready.authorizationId);
+      await pool.query("UPDATE oms.oms_orders SET external_customer_id=NULL WHERE id=100");
+      expect((await historyReader.readHistory({ ...guestPrincipal, externalCustomerId: null }, historyPage, instant)).get(ready.authorizationId)).toEqual(currentHistory);
+      expect((await historyReader.readHistory(guestPrincipal, historyPage, instant)).size).toBe(0);
     });
 
     it("retains the full supported OMS bigint identity without narrowing shipping evidence to 32 bits",async()=>{

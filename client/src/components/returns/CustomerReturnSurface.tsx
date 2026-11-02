@@ -1,4 +1,5 @@
-import { createContext, forwardRef, type ReactNode } from "react";
+import { createContext, forwardRef, useContext, type ReactNode } from "react";
+import { CustomerReturnPresentationContext } from "./CustomerReturnPresentation";
 import { ArrowLeft, Package, X } from "lucide-react";
 import "./customer-return.css";
 
@@ -27,15 +28,17 @@ export const CustomerReturnSurface = forwardRef<
   },
   ref,
 ) {
+  const storefront = useContext(CustomerReturnPresentationContext) === "storefront";
   return (
     <CustomerReturnEmbeddedContext.Provider value={Boolean(onClose)}>
       <section
         ref={ref}
         className="csz-return-ui"
+        data-presentation={storefront ? "storefront" : "branded"}
         aria-label={label}
         data-testid={testId}
       >
-        <header className="csz-return-brand" data-shopping={Boolean(shoppingHref && !onClose)}>
+        {!storefront && <header className="csz-return-brand" data-shopping={Boolean(shoppingHref && !onClose)}>
           <div className="csz-return-brand-name">
             <Package aria-hidden="true" size={24} />
             <span>CARD SHELLZ</span>
@@ -58,7 +61,7 @@ export const CustomerReturnSurface = forwardRef<
               <X aria-hidden="true" size={20} />
             </button>
           )}
-        </header>
+        </header>}
         <div className="csz-return-content">{children}</div>
       </section>
     </CustomerReturnEmbeddedContext.Provider>

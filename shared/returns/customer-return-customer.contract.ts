@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { customerReturnProgressSchema } from "../customer-account/order-progress";
 import {
   customerReturnLabelStatusSchema,
   customerReturnLabelSubmitInputSchema,
@@ -34,6 +35,9 @@ export const customerReturnCustomerHistoryItemSchema = z.object({
   omsOrderId: z.number().int().positive().safe(),
   orderReference: z.string().min(1).max(100).nullable(),
   createdAt: z.string().datetime({ offset: true }),
+  // Optional during a rolling deployment; missing progress must never be
+  // presented as a label, physical receipt, or financial settlement.
+  progress: customerReturnProgressSchema.nullable().optional(),
 }).strict();
 export const customerReturnCustomerHistorySchema = z.object({
   returns: z.array(customerReturnCustomerHistoryItemSchema).max(20),
