@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000049000019830001_freight_invoice_approval_history_lookup.sql",
+  "generation": 49,
+  "pr": 1983,
+  "ordinal": 1,
+  "after": [
+    "900000048000019840001_customer_return_guest_verification.sql"
+  ]
+}

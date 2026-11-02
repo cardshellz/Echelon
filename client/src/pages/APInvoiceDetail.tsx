@@ -1,4 +1,5 @@
 import { ReceiptInvoiceCosts } from "@/features/purchasing/ReceiptInvoiceCosts";
+import { FreightInvoiceCosts } from "@/features/purchasing/FreightInvoiceCosts";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { ApPaymentRecovery } from "@/features/purchasing/ApPaymentRecovery";
 import { useApPaymentCommands } from "@/features/purchasing/use-ap-payment-commands";
@@ -529,6 +530,10 @@ export default function APInvoiceDetail() {
 
   const status = invoice.status;
   const canApprove = hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.approval.allowed && ["received", "disputed"].includes(status);
+  // Keep a financial review mounted while its parent invoice refetches. This
+  // cached document identity only opens the review; its own current context and
+  // locked server approval enforce authority and source/impact versions.
+  const recordedSourceCapabilities = invoiceSourceCapabilitiesSchema.safeParse(invoice.id === invoiceId ? invoice.sourceCapabilities : undefined);
   const canDispute = hasPermission("purchasing", "edit") && ["received", "approved", "partially_paid"].includes(status);
   const canVoid = hasPermission("purchasing", "approve") && status !== "voided" && invoice.paidAmountCents === 0 && invoice.creditedAmountCents === 0 && invoice.hasSupplierCreditHistory === false;
   const canPay = !invoiceError && !invoiceRefreshing && hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.payment.allowed && !invoice.paymentReviewRequired && !invoice.settlementReviewRequired && ["approved", "partially_paid"].includes(status);
@@ -606,7 +611,10 @@ export default function APInvoiceDetail() {
 
         {!isVoided && (
           <div className="flex gap-2 flex-wrap justify-end">
-            {canApprove && (
+            {invoiceId !== null && recordedSourceCapabilities.success && recordedSourceCapabilities.data.freightSourceLineIds.length > 0 && (
+              <FreightInvoiceCosts invoiceId={invoiceId} label={canApprove ? "Review & approve" : "Shipment costs"} />
+            )}
+            {canApprove && sourceCapabilities.success && sourceCapabilities.data.freightSourceLineIds.length === 0 && (
               <Button size="sm" onClick={() => approveMutation.mutate()} disabled={approveMutation.isPending}>
                 <CheckCircle className="h-4 w-4 mr-1" />
                 Approve

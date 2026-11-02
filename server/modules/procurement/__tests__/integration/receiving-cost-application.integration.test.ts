@@ -1,4 +1,5 @@
 import { registerReceiptInvoiceCostCases } from "./receipt-invoice-costs.cases";
+import { registerFreightInvoiceCostCases } from "./freight-invoice-costs.cases";
 import { randomUUID } from "node:crypto";
 import { createReceiptCostRecoveryRepository } from "../../receipt-cost-recovery.repository";
 import { runReceiptCostRecoveryBatch } from "../../receipt-cost-recovery.worker";
@@ -1586,6 +1587,8 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     actorId, at: NOW });
   registerInvoiceCorrectionCostCases({ pool: () => pool, database: () => database, actorId, at: NOW,
     receive, consume: seedConsumedCost });
+  registerFreightInvoiceCostCases({ pool: () => pool, database: () => database, shipments: () => shipment,
+    actorId, at: NOW, receive, consume: seedConsumedCost });
   registerReceiptInvoiceCostCases({
     transferFirstAndSell: async()=>{
       await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'RECEIPT-COST-PICK')");
