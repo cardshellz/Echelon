@@ -29,6 +29,7 @@ import type { EbayAutomaticPublicationRecoveryService, EbayRequestJournalContrac
 import { withEbayQuantityRequestJournalContract } from "../inventory-planning/quantity-publication";
 import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
 import { logger as platformLogger } from "../../platform/observability/logger";
+import { runDueListingWork } from "../marketplace-listings/listing-work-runner";
 
 export interface PreparedEbayListingSync {
   sourceIdentity?: EbayListingSyncIdentity;
@@ -360,106 +361,107 @@ export class EbayListingSyncService {
     this.running = true;
     const result = { processed: 0, failed: 0 };
     try {
-      for (let index = 0; index < limit; index++) {
-        const claim = await this.store.claim(
+      await runDueListingWork({
+        limit: id ? 1 : limit,
+        claim: () => this.store.claim(
           this.now(),
           z.string().uuid().parse(this.uuid()),
           id,
-        );
-        if (!claim) break;
-        const { job } = claim;
-        const publicationProgress = { started: job.publicationWriteStarted,
-          completed: job.publicationWriteCompleted, accepted: job.publicationAccepted };
-        let withdrawalCompleted = job.withdrawalWriteCompleted;
-        let withdrawalStarted = job.withdrawalWriteStarted;
-        try {
-          const output = ebayProductSyncResultSchema.parse(
-            await this.executor.execute(
-              job.identity,
-              async (key, hash, work, journalContract) => {
-                await this.store.stage(job, key, hash, "started", this.now(), journalContract);
-                if (job.operation === "withdraw" && key === "withdraw") withdrawalStarted = true;
-                if (job.operation === "publish" && key === "publish") {
-                  publicationProgress.started = true;
-                }
-                if (journalContract) {
-                  if (!this.store.assertPublicationOwner) throw new EbayListingSyncError("EBAY_SYNC_OWNER_LOST", "Publication requires its original saved-job owner before admission.");
-                  // Revalidate this exact channel session/token after inventory
-                  // has acquired its scope locks. A delayed pre-admission read
-                  // must not let an old worker publish after session takeover.
-                  await withEbayQuantityRequestJournalContract(journalContract, work,
-                    () => this.store.assertPublicationOwner!(job));
-                } else await work();
-                await this.store.stage(job, key, hash, "completed", this.now());
-                if (job.operation === "publish" && key === "publish") publicationProgress.completed = true;
-                if (job.operation === "withdraw" && key === "withdraw") withdrawalCompleted = true;
+        ),
+        process: async claim => {
+          const { job } = claim;
+          const publicationProgress = { started: job.publicationWriteStarted,
+            completed: job.publicationWriteCompleted, accepted: job.publicationAccepted };
+          let withdrawalCompleted = job.withdrawalWriteCompleted;
+          let withdrawalStarted = job.withdrawalWriteStarted;
+          try {
+            const output = ebayProductSyncResultSchema.parse(
+              await this.executor.execute(
+                job.identity,
+                async (key, hash, work, journalContract) => {
+                  await this.store.stage(job, key, hash, "started", this.now(), journalContract);
+                  if (job.operation === "withdraw" && key === "withdraw") withdrawalStarted = true;
+                  if (job.operation === "publish" && key === "publish") {
+                    publicationProgress.started = true;
+                  }
+                  if (journalContract) {
+                    if (!this.store.assertPublicationOwner) throw new EbayListingSyncError("EBAY_SYNC_OWNER_LOST", "Publication requires its original saved-job owner before admission.");
+                    // Revalidate this exact channel session/token after inventory
+                    // has acquired its scope locks. A delayed pre-admission read
+                    // must not let an old worker publish after session takeover.
+                    await withEbayQuantityRequestJournalContract(journalContract, work,
+                      () => this.store.assertPublicationOwner!(job));
+                  } else await work();
+                  await this.store.stage(job, key, hash, "completed", this.now());
+                  if (job.operation === "publish" && key === "publish") publicationProgress.completed = true;
+                  if (job.operation === "withdraw" && key === "withdraw") withdrawalCompleted = true;
+                },
+                job.verificationRevision === job.claimedRevision
+                  ? job.verificationIntentHash
+                  : null,
+                (resolved, observation, source) => this.store.bindProviderIdentity(job, resolved, this.now(), observation, source),
+                { operation: job.operation, jobId: job.id, requestedBy: job.requestedBy, providerIdentity: job.providerIdentity, publicationTarget: job.publicationTarget,
+                  withdrawalWriteCompleted: job.withdrawalWriteCompleted,
+                  withdrawalWriteStarted: job.withdrawalWriteStarted,
+                  publicationAccepted: job.publicationAccepted, publicationWriteCompleted: job.publicationWriteCompleted,
+                  publicationWriteStarted: job.publicationWriteStarted, publicationAcceptedRevision: job.publicationAcceptedRevision,
+                  publicationIntentHash: job.publicationIntentHash,
+                  claimedRevision: job.claimedRevision ?? job.revision,
+                  ...(this.store.recoverTerminalPublicationWrite ? { recoverTerminalPublicationWrite: async (identity: EbayListingSyncIdentity) => {
+                    const recovered = await this.store.recoverTerminalPublicationWrite!(job, identity, this.now());
+                    if (recovered) publicationProgress.started = false;
+                    return recovered;
+                  } } : {}),
+                  ...(this.store.persistPreparedIntent ? { persistPreparedIntent: (intent: ChannelPreparedIntent) => this.store.persistPreparedIntent!(job, intent, this.now()) } : {}),
+                  bindPublicationTarget: target => this.store.bindPublicationTarget(job, target, this.now()),
+                  bindPublicationAccepted: async accepted => { await this.store.bindPublicationAccepted(job, accepted, this.now()); publicationProgress.accepted = accepted; } },
+              ),
+            );
+            await this.store.finish(
+              job,
+              {
+                state: output.errors ? "needs_attention" : "completed",
+                result: output,
+                code: output.errors ? "EBAY_LISTING_SYNC_INCOMPLETE" : null,
+                message: output.details.find((d) => !d.success)?.error ?? null,
+                nextAttemptAt: this.now(),
+                // A newer command can requeue this successful pass. Only failures
+                // consume its retry budget; every stage remains in the audit trail.
+                resetAttempts: output.errors === 0,
               },
-              job.verificationRevision === job.claimedRevision
-                ? job.verificationIntentHash
-                : null,
-              (resolved, observation, source) => this.store.bindProviderIdentity(job, resolved, this.now(), observation, source),
-              { operation: job.operation, jobId: job.id, requestedBy: job.requestedBy, providerIdentity: job.providerIdentity, publicationTarget: job.publicationTarget,
-                withdrawalWriteCompleted: job.withdrawalWriteCompleted,
-                withdrawalWriteStarted: job.withdrawalWriteStarted,
-                publicationAccepted: job.publicationAccepted, publicationWriteCompleted: job.publicationWriteCompleted,
-                publicationWriteStarted: job.publicationWriteStarted, publicationAcceptedRevision: job.publicationAcceptedRevision,
-                publicationIntentHash: job.publicationIntentHash,
-                claimedRevision: job.claimedRevision ?? job.revision,
-                ...(this.store.recoverTerminalPublicationWrite ? { recoverTerminalPublicationWrite: async (identity: EbayListingSyncIdentity) => {
-                  const recovered = await this.store.recoverTerminalPublicationWrite!(job, identity, this.now());
-                  if (recovered) publicationProgress.started = false;
-                  return recovered;
-                } } : {}),
-                ...(this.store.persistPreparedIntent ? { persistPreparedIntent: (intent: ChannelPreparedIntent) => this.store.persistPreparedIntent!(job, intent, this.now()) } : {}),
-                bindPublicationTarget: target => this.store.bindPublicationTarget(job, target, this.now()),
-                bindPublicationAccepted: async accepted => { await this.store.bindPublicationAccepted(job, accepted, this.now()); publicationProgress.accepted = accepted; } },
-            ),
-          );
-          await this.store.finish(
-            job,
-            {
-              state: output.errors ? "needs_attention" : "completed",
-              result: output,
-              code: output.errors ? "EBAY_LISTING_SYNC_INCOMPLETE" : null,
-              message: output.details.find((d) => !d.success)?.error ?? null,
-              nextAttemptAt: this.now(),
-              // A newer command can requeue this successful pass. Only failures
-              // consume its retry budget; every stage remains in the audit trail.
-              resetAttempts: output.errors === 0,
-            },
-            this.now(),
-          );
-          result.processed++;
-        } catch (error) {
-          result.failed++;
-          const failure = syncFailure(error, job.attempts, this.now(), job.readFailureCount ?? 0, job.code, !!job.providerRead);
-          // Never retire a publication's unresolved write barrier. A new command
-          // must join this job and retain its acceptance/start evidence.
-          if (job.operation === "publish" && (publicationProgress.started || publicationProgress.completed || publicationProgress.accepted)) {
-            failure.state = publicationProgress.accepted || publicationProgress.completed ? "recovering" : "awaiting_evidence";
-            failure.resetAttempts = true;
+              this.now(),
+            );
+            result.processed++;
+          } catch (error) {
+            result.failed++;
+            const failure = syncFailure(error, job.attempts, this.now(), job.readFailureCount ?? 0, job.code, !!job.providerRead);
+            // Never retire a publication's unresolved write barrier. A new command
+            // must join this job and retain its acceptance/start evidence.
+            if (job.operation === "publish" && (publicationProgress.started || publicationProgress.completed || publicationProgress.accepted)) {
+              failure.state = publicationProgress.accepted || publicationProgress.completed ? "recovering" : "awaiting_evidence";
+              failure.resetAttempts = true;
+            }
+            if (job.operation === "withdraw" && (withdrawalStarted || withdrawalCompleted)) {
+              failure.state = withdrawalCompleted ? "recovering" : "awaiting_evidence";
+              failure.resetAttempts = true;
+            }
+            const diagnostic = ebayListingFailureDiagnostic(error);
+            // Log before the final transaction: a failed database commit must not
+            // erase the original failure and its exact inventory scope.
+            console.error(JSON.stringify({ event: "ebay_listing_sync_followup", jobId: job.id,
+              productId: job.productId, ...diagnostic }));
+            // A failed final commit is retained as running. Never overwrite a newer
+            // owner's progress after losing this connection or its fencing token.
+            await this.store.finish(
+              job,
+              { ...failure, result: null, diagnostic },
+              this.now(),
+            );
+          } finally {
+            await claim.release();
           }
-          if (job.operation === "withdraw" && (withdrawalStarted || withdrawalCompleted)) {
-            failure.state = withdrawalCompleted ? "recovering" : "awaiting_evidence";
-            failure.resetAttempts = true;
-          }
-          const diagnostic = ebayListingFailureDiagnostic(error);
-          // Log before the final transaction: a failed database commit must not
-          // erase the original failure and its exact inventory scope.
-          console.error(JSON.stringify({ event: "ebay_listing_sync_followup", jobId: job.id,
-            productId: job.productId, ...diagnostic }));
-          // A failed final commit is retained as running. Never overwrite a newer
-          // owner's progress after losing this connection or its fencing token.
-          await this.store.finish(
-            job,
-            { ...failure, result: null, diagnostic },
-            this.now(),
-          );
-        } finally {
-          await claim.release();
-        }
-        if (id) break;
-      }
+        },
+      });
       return result;
     } finally {
       this.running = false;
