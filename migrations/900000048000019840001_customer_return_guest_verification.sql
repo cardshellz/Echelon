@@ -1,5 +1,5 @@
--- Allocate this forward-only schema through create-migration.mjs once the PR
--- number exists. Integration tests install this same SQL in a disposable DB.
+-- Browser-bound guest email verification for the existing returns flow.
+-- Does not edit source orders, financial records, inventory or points.
 CREATE TABLE returns.customer_return_guest_challenges (
   id uuid PRIMARY KEY,
   channel_id bigint NOT NULL REFERENCES channels.channels(id),

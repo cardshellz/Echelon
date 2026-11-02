@@ -35,7 +35,7 @@ integration("guest verification PostgreSQL retries and isolation",()=>{
     const evidence=readFileSync("migrations/0699_customer_return_authorizations.sql","utf8").match(/CREATE FUNCTION returns\.reject_customer_return_authorization_evidence_mutation[\s\S]*?\$\$;/)?.[0];
     if(!evidence) throw new Error("Immutable evidence function missing");
     await pool.query(evidence.replace("CREATE FUNCTION","CREATE OR REPLACE FUNCTION"));
-    await pool.query(readFileSync("server/modules/returns/infrastructure/customer-return-guest-schema.sql","utf8"));
+    await pool.query(readFileSync("migrations/900000048000019840001_customer_return_guest_verification.sql","utf8"));
     await pool.query(`CREATE TABLE IF NOT EXISTS oms.oms_orders(id bigint PRIMARY KEY,channel_id integer NOT NULL,
       external_order_id text NOT NULL,external_customer_id text,external_order_number text NOT NULL,cancelled_at timestamp);
       CREATE TABLE IF NOT EXISTS returns.customer_return_authorizations(id bigint PRIMARY KEY,channel_id integer NOT NULL,
