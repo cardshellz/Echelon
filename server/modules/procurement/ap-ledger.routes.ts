@@ -7,6 +7,7 @@ import { z } from "zod";
 import { invoiceWorkListQuerySchema, paymentWorkListQuerySchema } from "@shared/procurement/ap-work-list";
 import { registerPoFinancialEvidenceRoutes } from "./po-financial-evidence.routes";
 import { invoiceCostReviewCommands } from "./invoice-cost-review.service";
+import { registerInvoiceCostReviewRoute } from "./invoice-cost-review.routes";
 import { previewInvoiceCostReview } from "./invoice-cost-review-preview.service";
 import { registerInvoiceCostReviewPreviewRoute } from "./invoice-cost-review-preview.routes";
 import { registerInvoiceQuantityCorrectionRoutes } from "./invoice-quantity-correction.routes";
@@ -315,18 +316,7 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/vendor-invoice-lines/:lineId/cost-components", requirePermission("purchasing", "approve"), async (req, res) => {
-    try {
-      const lineId = Number(req.params.lineId);
-      const actorId = getUserId(req);
-      const descriptor = financialCommandFromRequest(req, { actorId, routeTemplate: "/api/vendor-invoice-lines/:lineId/cost-components",
-        resourceKey: `vendor_invoice_line:${lineId}`, commandName: "ap.invoice.cost_components" });
-      return sendFinancialCommandResult(res, await invoiceCostReviewCommands.review(lineId, req.body, actorId || "", descriptor));
-    } catch (error) {
-      if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
-      return handleApLedgerError(res, error, 500);
-    }
-  });
+  registerInvoiceCostReviewRoute(app, invoiceCostReviewCommands);
 
   app.patch("/api/vendor-invoice-lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
     try {

@@ -10,6 +10,8 @@ vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: 
 import { registerInvoiceCostReviewPreviewRoute } from "../../invoice-cost-review-preview.routes";
 import { ApLedgerError } from "../../ap-ledger.service";
 import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
+import { PoQuantityAmendmentError } from "../../po-quantity-amendment.policy";
+import { MoneyInputError } from "@shared/money-read";
 
 describe("invoice cost preview HTTP boundary", () => {
   let server: http.Server, base: string;
@@ -46,5 +48,13 @@ describe("invoice cost preview HTTP boundary", () => {
     preview.mockRejectedValueOnce(new Error("private database connection"));
     const failure = await call(); expect(failure.status).toBe(503); expect(await failure.text()).not.toContain("private database");
     expect(logged).toHaveBeenCalledWith(expect.not.stringContaining("private database"));
+  });
+  it.each([
+    new PoQuantityAmendmentError("The complete dependency review exceeds its supported size.", "PO_AMENDMENT_DEPENDENCY_LIMIT"),
+    new MoneyInputError("recorded supplier amount", "mills", true),
+  ])("classifies a permanent source/limit failure without suggesting a server retry: %s", async error => {
+    preview.mockRejectedValueOnce(error);
+    const result = await call();
+    expect(result.status).toBe(409); expect(await result.json()).toMatchObject({ error: error.message, details: { code: error.code } });
   });
 });

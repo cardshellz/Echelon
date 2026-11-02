@@ -28,7 +28,7 @@ export async function installFixtures(page: Page, options: { permissions?: reado
       const parts = path.split("/");
       json = relationshipFixture({ kind: parts[4] as "purchase" | "shipment" | "receipt", id: Number(parts[5]) });
     }
-    else if (path === "/api/auth/me") json = { user: { id: "test-user", username: "test", role: "admin" }, permissions, roles: ["admin"] };
+    else if (path === "/api/auth/me") json = { user: { id: "test-user", username: "test", role: "admin" }, permissions, roles: [SYSTEM_ROLES.admin.name] };
     else if (path === "/api/settings/procurement") json = { useNewPoEditor: true };
     else if (/^\/api\/purchase-orders\/\d+\/financial-evidence$/.test(path)) json = {
       purchaseOrderId: Number(path.split("/")[3]), currency: "USD", state: "complete",

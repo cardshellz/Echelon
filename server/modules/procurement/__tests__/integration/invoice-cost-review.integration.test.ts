@@ -16,7 +16,8 @@ config({ path: resolve(process.cwd(), ".env.test") });
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const integration = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const NOW = new Date("2026-09-07T12:00:00Z");
-const TABLES = [schema.vendors, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+const TABLES = [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
+  schema.vendors, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
   ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines];
 
 // The command, advisory lock, version check, audit and durable command repository
@@ -30,6 +31,8 @@ integration.sequential("invoice component review transaction and replay", () => 
   let ownsProcurement = false, ownsAudit = false, ownsCommands = false, ownsRecoveries = false;
   let commands: ReturnType<typeof import("../../invoice-cost-review.service").createInvoiceCostReviewCommands>;
   let versionOf: typeof import("../../ap-ledger.service").invoiceCostReviewVersion;
+  let preview: ReturnType<typeof import("../../invoice-cost-review-preview.service").createInvoiceCostReviewPreviewService>;
+  let ownsIdentity = false;
 
   let ownsSupplierReturnInventory = false;
   beforeAll(async () => {
@@ -43,6 +46,7 @@ integration.sequential("invoice component review transaction and replay", () => 
     if (!lock.rows[0].acquired) throw new Error("Another procurement fixture owns the schema lease");
     await pool.query("CREATE SCHEMA inventory"); ownsSupplierReturnInventory = true;
     await pool.query("CREATE SCHEMA procurement"); ownsProcurement = true;
+    await pool.query("CREATE SCHEMA identity"); ownsIdentity = true;
     for (const table of TABLES) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) {
@@ -64,6 +68,8 @@ integration.sequential("invoice component review transaction and replay", () => 
       modulePool.query = pool.query.bind(pool) as typeof modulePool.query;
       modulePool.connect = pool.connect.bind(pool) as typeof modulePool.connect;
       commands = commandModule.createInvoiceCostReviewCommands(repository.createDrizzleFinancialCommandRepository(drizzle(pool, { schema })), () => NOW);
+      const previewModule = await import("../../invoice-cost-review-preview.service");
+      preview = previewModule.createInvoiceCostReviewPreviewService(drizzle(pool, { schema }), () => NOW);
       versionOf = ap.invoiceCostReviewVersion;
     } finally {
       if (priorDatabase === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = priorDatabase;
@@ -75,6 +81,11 @@ integration.sequential("invoice component review transaction and replay", () => 
     await pool.query(`TRUNCATE ${TABLES.map(qualifiedTable).join(",")} RESTART IDENTITY CASCADE`);
     await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
     await pool.query("DELETE FROM public.financial_command_results WHERE actor_id=$1", [actorId]);
+    await pool.query("INSERT INTO identity.users(id,username,password,active) VALUES($1,'component-reviewer','unused',1)", [actorId]);
+    await pool.query(`INSERT INTO identity.auth_roles(id,name,is_system) VALUES(1,'Administrator',1);
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(1,'purchasing','approve','purchasing');
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id,constraints) VALUES(1,1,NULL)`);
+    await pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,1)", [actorId]);
     await pool.query(`INSERT INTO procurement.vendors(id,code,name) VALUES(5,'REVIEW-VENDOR','Synthetic vendor');
       INSERT INTO procurement.vendor_invoices(id,vendor_id,invoice_number,status,currency,invoiced_amount_cents,balance_cents)
         VALUES(71,5,'REVIEW-INVOICE','received','USD',11800,11800);
@@ -89,6 +100,7 @@ integration.sequential("invoice component review transaction and replay", () => 
         if (ownsRecoveries) await pool.query("DROP TABLE public.financial_command_recoveries");
         if (ownsCommands) await pool.query("DROP TABLE public.financial_command_results"); else await pool.query("DELETE FROM public.financial_command_results WHERE actor_id=$1", [actorId]);
         await pool.query("DROP SCHEMA procurement CASCADE");
+        if (ownsIdentity) await pool.query("DROP SCHEMA identity CASCADE");
       }
     } finally {
       if (lease) { await lease.query("SELECT pg_advisory_unlock(hashtext('echelon.procurement.cost-audit-fixture'))"); lease.release(); }
@@ -101,9 +113,10 @@ integration.sequential("invoice component review transaction and replay", () => 
     return versionOf({ id: line.id, qtyInvoiced: line.qty_invoiced, unitCostCents: Number(line.unit_cost_cents),
       unitCostMills: line.unit_cost_mills === null ? null : Number(line.unit_cost_mills), lineTotalCents: Number(line.line_total_cents), costComponentEvidence: line.cost_component_evidence });
   }
-  async function input(patch: Record<string, unknown> = {}) {
-    return { expectedVersion: await version(), packagingTreatment: "separate", productMills: 1_000_000, packagingMills: 180_000,
+  async function input(patch: Record<string, unknown> = {}, reviewed = true) {
+    const body = { expectedVersion: await version(), packagingTreatment: "separate", productMills: 1_000_000, packagingMills: 180_000,
       adjustmentMills: 0, reason: "Supplier breakdown reviewed", ...patch };
+    return { ...body, previewVersion: reviewed ? (await preview(72, body, actorId)).preview.previewVersion : "f".repeat(64) };
   }
   function descriptor(body: unknown, key = randomUUID()): FinancialCommandDescriptor {
     const scope = { method: "POST", routeTemplate: "/api/vendor-invoice-lines/:lineId/cost-components", resourceKey: "vendor_invoice_line:72" };
@@ -135,7 +148,7 @@ integration.sequential("invoice component review transaction and replay", () => 
     expect(await rows()).toEqual(before);
   });
   it("rejects an exact one-mill mismatch without rounding it into the document", async () => {
-    const before = await rows(), body = await input({ adjustmentMills: -1 });
+    const before = await rows(), body = await input({ adjustmentMills: -1 }, false);
     expect(await commands.review(72, body, actorId, descriptor(body))).toMatchObject({ httpStatus: 422, body: { details: { code: "INVOICE_COST_COMPONENT_TOTAL_MISMATCH" } } });
     expect(await rows()).toEqual(before);
   });
@@ -162,14 +175,14 @@ integration.sequential("invoice component review transaction and replay", () => 
     expect((await rows()).audits).toHaveLength(1);
   });
   it("serializes competing reviewers so only one current-version review can commit", async () => {
-    const body = await input(), alternative = { ...body, productMills: 1_100_000, packagingMills: 80_000, reason: "Alternative evidence" };
+    const body = await input(), alternative = await input({ productMills: 1_100_000, packagingMills: 80_000, reason: "Alternative evidence" });
     const results = await Promise.all([commands.review(72, body, actorId, descriptor(body)), commands.review(72, alternative, actorId, descriptor(alternative))]);
     expect(results.map((result) => result.httpStatus).sort()).toEqual([200, 409]);
     expect((await rows()).audits).toHaveLength(1);
   });
   it.each(["voided", "EUR"])("retains read-only evidence for %s invoices", async (state) => {
     await pool.query("UPDATE procurement.vendor_invoices SET status=$1,currency=$2 WHERE id=71", [state === "voided" ? "voided" : "received", state === "EUR" ? "EUR" : "USD"]);
-    const before = await rows(), body = await input();
+    const before = await rows(), body = await input({}, false);
     expect(await commands.review(72, body, actorId, descriptor(body))).toMatchObject({ httpStatus: 409 });
     expect(await rows()).toEqual(before);
   });
@@ -181,8 +194,8 @@ integration.sequential("invoice component review transaction and replay", () => 
   });
   it("refuses to fingerprint an unsafe historical BIGINT by rounding it", async () => {
     await pool.query("UPDATE procurement.vendor_invoice_lines SET line_total_cents=9007199254740993 WHERE id=72");
-    const before = await rows(), body = await input();
-    await expect(commands.review(72, body, actorId, descriptor(body))).rejects.toThrow();
+    const before = await rows(), body = await input({}, false);
+    expect(await commands.review(72, body, actorId, descriptor(body))).toMatchObject({ httpStatus: 409 });
     expect(await rows()).toEqual(before);
     expect((await rows()).line.line_total_cents).toBe("9007199254740993");
   });
