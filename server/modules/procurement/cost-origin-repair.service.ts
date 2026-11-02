@@ -221,7 +221,7 @@ async function executeRepair(
     },
     actorId,
     now,
-    false,
+    { kind: "nested" },
   );
   await restoreReceiptCostFields(tx, facts, choices.unitsPerCase, actorId, now);
   await recordReceiptCostOrigin(

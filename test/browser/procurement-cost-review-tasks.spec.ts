@@ -139,7 +139,7 @@ test("viewers can read the task but cannot approve supplier costs", async ({ pag
   const { state, failures } = await setup(page, { cannotApprove: true });
   await page.getByTestId("cost-review-purchase:21").getByRole("button", { name: "Confirm invoice", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("Purchasing approval permission is required");
+  await expect(dialog).toContainText("An Administrator with purchasing approval permission must approve supplier cost changes.");
   await expect(dialog.getByRole("button", { name: "Review cost changes", exact: true })).toHaveCount(0);
   expect(state.previews).toBe(0); expect(state.approvals).toHaveLength(0); expect(failures).toEqual([]);
 });

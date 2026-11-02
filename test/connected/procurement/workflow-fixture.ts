@@ -51,6 +51,10 @@ export async function installConnectedWorkflowFixture(pool: Pool): Promise<void>
 /** Persisted physical/financial/command evidence for connected assertions, never API substitutes. */
 export async function readConnectedWorkflowState(pool: Pool) {
   return (await pool.query(`SELECT
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.vendor_invoice_lines t) AS "invoiceLines",
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.po_events t WHERE event_type='invoice_cost_components_approved') AS "supplierCostApprovals",
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM inventory.cost_reconciliation_postings t) AS "historicalCostPostings",
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM oms.order_item_costs t) AS "orderCosts",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM public.audit_events t WHERE action='procurement.freight_invoice_costs.approved') AS "freightInvoiceApprovals",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.inbound_freight_costs t) AS "freightCosts",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.inbound_freight_allocations t) AS "freightAllocations",

@@ -5,7 +5,7 @@ import { approveSupplierCostReview, installInvoiceCostPreview } from "../fixture
 
 const version = "a".repeat(64), nextVersion = "b".repeat(64);
 
-async function setup(page: Page, options: { canApprove?: boolean; currency?: string; lostResponse?: boolean; stale?: boolean; needsReview?: boolean } = {}) {
+async function setup(page: Page, options: { canApprove?: boolean; isAdmin?: boolean; currency?: string; lostResponse?: boolean; stale?: boolean; needsReview?: boolean } = {}) {
   const failures = await installFixtures(page);
   await installInvoiceCostPreview(page, 72, 11800);
   const invoice = { id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test supplier", status: "received", currency: options.currency ?? "USD",
@@ -15,7 +15,7 @@ async function setup(page: Page, options: { canApprove?: boolean; currency?: str
   const commands: Array<{ key: string; body: InvoiceCostReview }> = [];
   const replays = new Map<string, InvoiceCostReviewResult>();
   let lost = false, stale = options.stale ?? false;
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: { user: { id: "cost-reviewer", username: "test", role: "admin" }, permissions: options.canApprove === false ? ["purchasing:view"] : ["purchasing:view", "purchasing:approve"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: { user: { id: "cost-reviewer", username: "test", role: "admin" }, permissions: options.canApprove === false ? ["purchasing:view"] : ["purchasing:view", "purchasing:approve"], roles: [options.isAdmin === false ? "Team Lead" : "Administrator"] } }));
   await page.route("**/api/vendor-invoices/71", (route) => route.fulfill({ json: invoice }));
   await page.route("**/api/vendor-invoice-lines/72/cost-components", async (route) => {
     const request = route.request(), key = request.headers()["idempotency-key"], body = request.postDataJSON() as InvoiceCostReview;
@@ -81,6 +81,29 @@ test("requires exact reconciliation and explicit packaging treatment before savi
   expect(failures).toEqual([]);
 });
 
+test("shows exact remaining stock value and explains an unverified value before approval", async ({ page }) => {
+  const { commands, failures } = await setup(page);
+  await page.route("**/api/vendor-invoice-lines/72/cost-components/preview", async route => {
+    const body = route.request().postDataJSON();
+    await route.fulfill({ json: { preview: { lineId: 72, lineTotalCents: 11800, previewVersion: "b".repeat(64), before: null,
+      after: { contractVersion: 1, source: "operator_review", packagingTreatment: body.packagingTreatment,
+        productMills: body.productMills, packagingMills: body.packagingMills, adjustmentMills: body.adjustmentMills },
+      impact: { lots: [], orderCosts: [], historicalCosts: [] }, inventoryValues: [
+        { lotId: 1, lotNumber: "EXACT-LOT", onHandUnits: 200000, beforeMills: 1234567, afterMills: 1234568, reviewReason: null },
+        { lotId: 2, lotNumber: "UNVERIFIED-LOT", onHandUnits: 1, beforeMills: null, afterMills: null, reviewReason: "The remaining stock value cannot be verified from the saved history." },
+      ] }, application: null } });
+  });
+  await fill(page);
+  await page.getByRole("button", { name: "Review cost changes", exact: true }).click();
+  const changes = page.getByRole("region", { name: "Supplier cost changes" });
+  await expect(changes.getByRole("row", { name: /EXACT-LOT/ })).toContainText("123.4567 USD");
+  await expect(changes.getByRole("row", { name: /EXACT-LOT/ })).toContainText("123.4568 USD");
+  await expect(changes.getByRole("row", { name: /UNVERIFIED-LOT/ })).toContainText("Not confirmed");
+  await expect(changes).toContainText("UNVERIFIED-LOT: The remaining stock value cannot be verified");
+  expect(commands).toEqual([]); expect(failures).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test("preserves signed adjustments and distinguishes evidence saved from application review", async ({ page }) => {
   const { commands, failures } = await setup(page, { needsReview: true });
   await fill(page, { product: "101.0375", packaging: "17.9625", adjustment: "-1" });
@@ -111,7 +134,15 @@ test("keeps the reviewed snapshot on a stale response and requires explicit relo
 
 test("view permission permits inspection and approval permission gates the command", async ({ page }) => {
   const { commands, failures } = await setup(page, { canApprove: false });
-  await expect(page.getByText("Purchasing approval permission is required", { exact: false })).toBeVisible();
+  await expect(page.getByText("An Administrator with purchasing approval permission must approve supplier cost changes.", { exact: true })).toBeVisible();
+  await expect(page.getByLabel(/^Product total/)).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Review cost changes", exact: true })).toHaveCount(0);
+  expect(commands).toEqual([]); expect(failures).toEqual([]);
+});
+
+test("approval permission without the administrator role leaves cost review read only", async ({ page }) => {
+  const { commands, failures } = await setup(page, { isAdmin: false });
+  await expect(page.getByText("An Administrator with purchasing approval permission must approve supplier cost changes.", { exact: true })).toBeVisible();
   await expect(page.getByLabel(/^Product total/)).toBeDisabled();
   await expect(page.getByRole("button", { name: "Review cost changes", exact: true })).toHaveCount(0);
   expect(commands).toEqual([]); expect(failures).toEqual([]);

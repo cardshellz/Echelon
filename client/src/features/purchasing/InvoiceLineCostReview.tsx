@@ -39,7 +39,7 @@ function ReviewResult({ result }: { result: InvoiceCostReviewResult }) {
   const needsReview = application?.costApplications.some((item) => item.status === "review_required") ?? false;
   return <div role="status" className="space-y-2 rounded border bg-muted/30 p-3 text-sm">
     <p className="font-medium">Supplier amounts saved. The invoice total is unchanged.</p>
-    {application === null ? <p>No purchase order line is linked to this invoice line.</p> : <p>{application.lotsUpdated} stock records and {application.cogsRowsUpdated} sold-order costs updated.</p>}
+    {application === null ? <p>No purchase order line is linked to this invoice line.</p> : <p>{application.lotsUpdated} stock records and {application.cogsRowsUpdated} order cost records updated.</p>}
     {needsReview && <p className="font-medium text-amber-700 dark:text-amber-300">Further cost review is required before all linked costs can be applied.</p>}
     {issues.length > 0 && <ul className="list-disc space-y-1 pl-4">{issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul>}
   </div>;
@@ -51,8 +51,10 @@ export function InvoiceCostImpactReview({ preview, currency }: { preview: Invoic
     ["Product amount", preview.before?.productMills ?? null, preview.after.productMills],
     ["Packaging amount", preview.before?.packagingMills ?? null, preview.after.packagingMills],
     ["Other adjustments", preview.before?.adjustmentMills ?? null, preview.after.adjustmentMills],
-    ...preview.impact.lots.filter(row => row.unitCostMills.before !== row.unitCostMills.after).map(row => [`${row.lotNumber} · cost per stock unit`, row.unitCostMills.before, row.unitCostMills.after] as [string, number | null, number | null]),
-    ...preview.impact.orderCosts.filter(row => row.totalMills.before !== row.totalMills.after).map(row => [`Sold order #${row.orderId}`, row.totalMills.before, row.totalMills.after] as [string, number | null, number | null]),
+    ...(preview.inventoryValues === undefined
+      ? preview.impact.lots.filter(row => row.unitCostMills.before !== row.unitCostMills.after).map(row => [`${row.lotNumber} · cost per stock unit`, row.unitCostMills.before, row.unitCostMills.after] as [string, number | null, number | null])
+      : preview.inventoryValues.map(row => [`${row.lotNumber} · value of ${row.onHandUnits.toLocaleString()} stock units on hand`, row.beforeMills, row.afterMills] as [string, number | null, number | null])),
+    ...preview.impact.orderCosts.filter(row => row.totalMills.before !== row.totalMills.after).map(row => [`Order #${row.orderId} · cost basis`, row.totalMills.before, row.totalMills.after] as [string, number | null, number | null]),
     ...preview.impact.historicalCosts.filter(row => row.totalMills.before !== row.totalMills.after).map(row => [reconciliationDestinations[row.destination], row.totalMills.before, row.totalMills.after] as [string, number | null, number | null]),
   ];
   return <section aria-label="Supplier cost changes" className="space-y-2 text-sm">
@@ -60,6 +62,7 @@ export function InvoiceCostImpactReview({ preview, currency }: { preview: Invoic
     <table className="w-full table-fixed"><thead><tr className="border-b"><th className="w-[46%] text-left py-2">What changes</th><th className="text-right p-2">Before</th><th className="text-right py-2">After</th></tr></thead>
       <tbody>{rows.map(([label, before, after], index) => <tr key={`${label}:${index}`} className="border-b"><th className="text-left py-2 pr-2 font-normal break-words">{label}</th><td className="text-right p-2 break-words">{money(before)}</td><td className="text-right py-2 font-medium break-words">{money(after)}</td></tr>)}</tbody></table>
     <p>Invoice total: {exactMoneyAsInput(preview.lineTotalCents, 2)} {currency} → {exactMoneyAsInput(preview.lineTotalCents, 2)} {currency}. Stock quantities do not change.</p>
+    {preview.inventoryValues?.filter(row => row.reviewReason !== null).map(row => <p key={row.lotId} className="text-amber-700">{row.lotNumber}: {row.reviewReason}</p>)}
   </section>;
 }
 
@@ -183,7 +186,7 @@ export function InvoiceLineCostReview({ line, currency, invoiceStatus, invoiceId
   line: ReviewLine; currency: string; invoiceStatus: string; invoiceId: number; onSaved: () => void;
   open?: boolean; onOpenChange?: (value: boolean) => void; hideTrigger?: boolean;
 }) {
-  const { hasPermission } = useAuth();
+  const { hasPermission, roles } = useAuth();
   const [snapshot, setSnapshot] = useState<ReviewLine | null>(null);
   const [busy, setBusy] = useState(false);
   const search = useSearch();
@@ -200,7 +203,7 @@ export function InvoiceLineCostReview({ line, currency, invoiceStatus, invoiceId
     }
   }, [search, line]);
   const known = invoiceCostComponentEvidenceSchema.safeParse(line.costComponentEvidence).success;
-  const blockedReason = !hasPermission("purchasing", "approve") ? "Purchasing approval permission is required to save cost evidence."
+  const blockedReason = !hasPermission("purchasing", "approve") || !roles.includes("Administrator") ? "An Administrator with purchasing approval permission must approve supplier cost changes."
     : invoiceStatus === "voided" ? "Voided invoice cost evidence is read only."
       : currency !== "USD" ? "This currency requires cost review outside the current USD application owner."
         : !Number.isSafeInteger(line.lineTotalCents) || !costFingerprintSchema.safeParse(line.costReviewVersion).success ? "Current invoice evidence is unavailable. Reload the invoice before reviewing costs." : null;

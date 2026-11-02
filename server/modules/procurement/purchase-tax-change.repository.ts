@@ -173,7 +173,7 @@ export async function persistPurchaseTaxChange(tx: AmendmentTransaction, source:
       productMills: change.components.productMills, packagingMills: change.components.packagingMills, adjustmentMills: change.components.adjustmentMills,
       expectedVersion: invoiceCostReviewVersion({ id: change.id, qtyInvoiced: costInteger(row.qty_invoiced, "quantity"), unitCostCents: readIntegerCents(row.unit_cost_cents, "unit price"),
         unitCostMills: row.unit_cost_mills == null ? null : readIntegerMills(row.unit_cost_mills, "unit price"), lineTotalCents: readIntegerCents(row.line_total_cents, "invoice line"), costComponentEvidence: row.cost_component_evidence }), reason,
-    }, actorId, at, false);
+    }, actorId, at, { kind: "nested" });
     await tx.execute(sql`DELETE FROM procurement.vendor_invoice_line_taxes WHERE vendor_invoice_line_id=${change.id}`);
     for (const tax of change.taxes) await tx.execute(sql`INSERT INTO procurement.vendor_invoice_line_taxes(vendor_invoice_line_id,tax_type_id,amount_mills)
       VALUES(${change.id},${tax.taxTypeId},${tax.amountMills})`);

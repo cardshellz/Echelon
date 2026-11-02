@@ -13,6 +13,10 @@ export const invoiceCostReviewSchema = z.object({
 }).strict().superRefine(validateInvoiceCostPackaging);
 export type InvoiceCostReview = z.infer<typeof invoiceCostReviewSchema>;
 
+const inventoryValueSchema = z.object({
+  lotId: z.number().int().positive().safe(), lotNumber: z.string(), onHandUnits: z.number().int().nonnegative().safe(),
+  beforeMills: z.number().int().safe().nullable(), afterMills: z.number().int().safe().nullable(), reviewReason: z.string().nullable(),
+}).strict();
 export const invoiceCostImpactPreviewSchema = z.object({
   lineId: z.number().int().positive().safe(),
   previewVersion: costFingerprintSchema,
@@ -20,6 +24,9 @@ export const invoiceCostImpactPreviewSchema = z.object({
   before: invoiceCostComponentEvidenceSchema.nullable(),
   after: invoiceCostComponentEvidenceSchema,
   impact: poAmendmentImpactSchema.pick({ lots: true, orderCosts: true, historicalCosts: true }),
+  // Older committed command responses remain readable; new previews always
+  // include exact remaining-stock values from the existing valuation owner.
+  inventoryValues: z.array(inventoryValueSchema).optional(),
 }).strict();
 export type InvoiceCostImpactPreview = z.infer<typeof invoiceCostImpactPreviewSchema>;
 
