@@ -1,4 +1,5 @@
 import { PostgresCustomerReturnWorkflowStore } from "./customer-return-workflow.repository";
+import { PostgresCustomerReturnProgressReader } from "./customer-return-progress.reader";
 import type { CustomerReturnCustomerSession } from "../application/customer-return-customer-auth.service";
 import { CustomerReturnOrderAccessService } from "../application/customer-return-order-access.service";
 import { PostgresCustomerReturnOrderAccessRepository } from "./customer-return-order-access.repository";
@@ -33,6 +34,8 @@ export async function createCustomerReturnCustomerServices(session: CustomerRetu
       shippingVersion: () => settings.customerVersion(principal.channelId) }),
     operations: new CustomerReturnCustomerOperationsService({ principal, orderAccess: access,
       ownership: new PostgresCustomerReturnCustomerOwnershipReader(pool),
+      historyProgress: new PostgresCustomerReturnProgressReader(pool),
+      reportHistoryUnavailable: () => console.warn(JSON.stringify({ event: "customer_return_history_progress_unavailable", code: "RETURN_HISTORY_PROGRESS_UNAVAILABLE", channelId: principal.channelId })),
       submissions: internal.submissions, labels: internal.labels, workflows: new PostgresCustomerReturnWorkflowStore(pool), now: () => new Date() }),
     download: internal.download,
   };
