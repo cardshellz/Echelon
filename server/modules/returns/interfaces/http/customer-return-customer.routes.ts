@@ -1,6 +1,7 @@
 import { registerCustomerReturnGuestRoutes } from "./customer-return-guest.routes";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
+import { customerReturnCustomerHistoryQuerySchema } from "@shared/returns/customer-return-customer.contract";
 import { rateLimit } from "express-rate-limit";
 import { CUSTOMER_RETURNS_API, CUSTOMER_RETURNS_PAGE } from "@shared/returns/customer-return-access.contract";
 import { createCustomerReturnCustomerAuth } from "../../infrastructure/customer-return-customer-auth.composition";
@@ -74,8 +75,8 @@ export function registerCustomerReturnCustomerRoutes(app: Express, dependencies:
     emptyCommand(req); return value.operations.queueExistingLabels(id(req.params.authorizationId));
   }));
   app.get(`${CUSTOMER_RETURNS_API}/returns`, handle(false, (req, value) => {
-    const before = cursor(req.query);
-    return value.operations.listReturns(before === undefined ? {} : { beforeAuthorizationId: id(before) });
+    const parsed = customerReturnCustomerHistoryQuerySchema.parse(req.query);
+    return value.operations.listReturns({ ...(parsed.before ? { beforeAuthorizationId: parsed.before } : {}), ...(parsed.progress ? { includeProgress: true } : {}) });
   }));
   const commandPath = `${CUSTOMER_RETURNS_API}/commands/:key`;
   app.get(commandPath, handle(false, (req, value) => { noQuery(req); return value.operations.submissionStatus(req.params.key); }));

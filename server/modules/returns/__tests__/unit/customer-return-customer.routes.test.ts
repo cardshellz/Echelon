@@ -47,6 +47,16 @@ describe("customer returns HTTP boundaries", () => {
       headers: { "X-Return-Session": principal.sessionKey, ...options.headers } });
   }
   afterEach(async () => { if (server) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
+  it("validates the optional history extension and preserves legacy requests", async () => {
+    const request = await start();
+    expect((await request("/api/returns/customer/returns?progress=1&before=20")).status).toBe(200);
+    const first = await services.mock.results[0].value;
+    expect(first.operations.listReturns).toHaveBeenCalledWith({ beforeAuthorizationId: 20, includeProgress: true });
+    expect((await request("/api/returns/customer/returns")).status).toBe(200);
+    const second = await services.mock.results[1].value;
+    expect(second.operations.listReturns).toHaveBeenCalledWith({});
+    expect((await request("/api/returns/customer/returns?progress=unexpected")).status).toBe(400);
+  });
   it("serves choices only to an independently authenticated customer and does not issue commands", async () => {
     const request = await start(false);
     expect((await request("/api/returns/customer/order-options?before=9")).status).toBe(200);

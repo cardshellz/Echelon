@@ -39,6 +39,7 @@ import { ebayListingFailureDiagnosticSchema } from "../ebay-listing-failure-diag
 import type { EbayPublicationRejectionReader, EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
 import { ebayListingPublicationScopes } from "../ebay-listing-request-recovery";
 import { proveLegacyEbayPublicationPreflight, validateEbayPublicationStageContract, type EbayPublicationStageEvent } from "../ebay-publication-preflight-evidence";
+import { releaseListingWorkPermit, tryAcquireListingWorkPermit } from "../../marketplace-listings/listing-work-permits";
 
 const LOCK_NAMESPACE = 918427;
 import { canSettleUnsentListingFailure } from "../../marketplace-listings/domain/listing-work-obligation";
@@ -298,7 +299,11 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         // previous error. Preserve live ownership and publication/withdrawal
         // barriers. The worker still revalidates every inventory fence; history
         // stays in the immutable events even when the current error is cleared.
-        `UPDATE channels.ebay_listing_sync_jobs SET revision=revision+1,updated_at=$2,next_attempt_at=$2,
+        // A new command may bring a queued retry forward, but must not move
+        // already-due work behind newer listings. Running and recovery states
+        // retain their existing continuation semantics.
+        `UPDATE channels.ebay_listing_sync_jobs SET revision=revision+1,updated_at=$2,
+          next_attempt_at=CASE WHEN state='queued' THEN LEAST(next_attempt_at,$2::timestamptz) ELSE $2::timestamptz END,
           read_retry_paused=false,read_failure_count=0,
           state=CASE WHEN $3::boolean THEN 'queued' ELSE state END,
           error_code=CASE WHEN $3::boolean THEN NULL ELSE error_code END,
@@ -673,6 +678,11 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     let lockedId: string | null = null;
     let lockedWorkflowKey: string | null = null;
     try {
+      const permit = await tryAcquireListingWorkPermit(client);
+      if (permit === null) {
+        client.release();
+        return null;
+      }
       await client.query("BEGIN");
       const rows = (
         await client.query<{ id: string; channel_id: number; product_id: number }>(
@@ -724,6 +734,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
                 LOCK_NAMESPACE,
                 row.id,
               ]);
+              await releaseListingWorkPermit(client, permit);
               client.release();
             } catch (error) {
               client.release(true);
@@ -733,6 +744,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         };
       }
       await client.query("COMMIT");
+      await releaseListingWorkPermit(client, permit);
       client.release();
       return null;
     } catch (error) {
