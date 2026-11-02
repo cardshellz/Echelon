@@ -1,0 +1,3 @@
+.csz-return-page { max-width: 960px; margin: 32px auto; padding: 0 20px; }
+.csz-return-page .csz-return-ui { width: 100%; }
+@media (max-width: 600px) { .csz-return-page { margin: 20px auto; padding: 0 12px; } }

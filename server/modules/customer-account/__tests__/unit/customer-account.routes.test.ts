@@ -42,6 +42,30 @@ describe("customer account signed storefront HTTP boundary", () => {
     return fetch(`${base}?${signed}`, { method: "POST", headers: { Origin: "https://shop.test", "Content-Type": "application/json", [CUSTOMER_ACCOUNT_COMMAND_HEADER]: "1", ...headers },
       body: JSON.stringify({ themeId: staging.themeId, expectedCustomerId: "100", method: "GET", path: "/account/bootstrap", query: {}, ...body }) });
   }
+  it("serves the native returns chooser through the existing signed customer scope and cached reader", async () => {
+    const page = { orders: [{ omsOrderId: 10, orderReference: "#TEST-1001", purchasedAt: null, eligibleItemCount: 1 }], nextBeforeOmsOrderId: null, unavailableOrderCount: 0 };
+    const choices = vi.fn(async () => page);
+    const returns = vi.fn(async () => ({ orders: { choices } }));
+    services.mockImplementation(() => ({ edits: { connection }, returns }) as never);
+    const sessionKey = (await (await request()).json()).session.sessionKey;
+    const input = { path: "/returns/order-options", sessionKey };
+    const response = await request(input);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(page);
+    expect(choices).toHaveBeenCalledExactlyOnceWith({});
+    expect(services.mock.calls.at(-1)?.[0]).toMatchObject({ channelId: 2, externalCustomerId: "100" });
+    expect((await request({ ...input, query: { before: "20" } })).status).toBe(200);
+    expect(choices).toHaveBeenLastCalledWith({ beforeOmsOrderId: 20 });
+    const count = choices.mock.calls.length;
+    for (const change of [{ query: { before: "0" } }, { query: { before: "1.5" } }, { query: { customerId: "101" } }, { body: { customerId: "101" } }])
+      expect((await request({ ...input, ...change })).status).toBe(400);
+    expect((await request({ ...input, method: "POST", body: {} })).status).toBe(404);
+    expect((await request(input, proof({ logged_in_customer_id: "" }))).status).toBe(401);
+    expect((await request({ ...input, expectedCustomerId: "101" })).status).toBe(401);
+    expect((await request({ ...input, sessionKey: "b".repeat(43) })).status).toBe(401);
+    expect((await request(input, proof(), { Origin: "https://evil.test" })).status).toBe(403);
+    expect(choices).toHaveBeenCalledTimes(count);
+  });
   it("verifies Shopify per request without accepting staff cookies or a theme ID as identity", async () => {
     const response = await request(); expect(response.status).toBe(200);
     expect((await response.json()).session).toMatchObject({ authenticated: true, privateTesting: true });

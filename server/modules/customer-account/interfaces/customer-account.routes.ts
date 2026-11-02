@@ -369,6 +369,12 @@ async function dispatch(
   }
   if (!path.startsWith("/returns/")) throw notFound();
   const returns = await services.returns();
+  if (path === "/returns/order-options" && read) {
+    const parsed = z.object({ before: id.optional() }).strict().parse(query);
+    return returns.orders.choices(
+      parsed.before ? { beforeOmsOrderId: parsed.before } : {},
+    );
+  }
   const returnOrder =
     /^\/returns\/orders\/([1-9][0-9]*)(?:\/(review|returns|label-requests))?$/.exec(path);
   if (returnOrder) {
