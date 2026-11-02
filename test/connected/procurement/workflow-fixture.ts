@@ -23,6 +23,7 @@ export async function installConnectedWorkflowFixture(pool: Pool): Promise<void>
     await pool.query(readFileSync(resolve(process.cwd(), "migrations", name), "utf8"));
   }
   await installSupplierReturnCompletionFixture(pool);
+  await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000048000019830001_freight_invoice_approval_history_lookup.sql"), "utf8"));
   // Legacy runtime DDL in server/db.ts, with bigint money from migration 0576;
   // the AP owner still appends this audit alongside immutable cost evidence.
   await pool.query(`CREATE TABLE inventory.cost_adjustment_log (

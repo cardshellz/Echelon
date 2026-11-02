@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
@@ -59,6 +61,7 @@ export function registerFreightInvoiceCostCases(fixture: {
   }
   describe("freight invoice cost approval through public routes and real cost owners", () => {
     beforeAll(async () => {
+      await query(readFileSync(resolve(process.cwd(), "migrations/900000048000019830001_freight_invoice_approval_history_lookup.sql"), "utf8"));
       const app = express(); app.use(express.json());
       app.use((req, _res, next) => { (req as unknown as { session: unknown }).session = { user: { id: req.header("X-Test-Actor") ?? fixture.actorId, role: "admin" } }; next(); });
       registerFreightInvoiceCostRoutes(app, createFreightInvoiceCostService(fixture.database(), fixture.shipments(), () => fixture.at));
@@ -161,6 +164,7 @@ export function registerFreightInvoiceCostCases(fixture: {
       expect((await post(id, "approve", body, randomUUID())).status).toBe(200);
       expect((await query("SELECT count(*)::int AS n FROM inventory.inventory_lots WHERE po_line_id=22")).rows[0].n).toBe(0);
       expect((await query("SELECT po_id FROM procurement.po_events WHERE event_type='freight_invoice_costs_approved' ORDER BY po_id")).rows).toEqual([{ po_id: 10 }, { po_id: 20 }]);
+      expect((await context(id)).history).toHaveLength(1);
     });
     it("leaves costs visibly pending finalization on an open shipment", async () => {
       const id = await setup({ close: false });
@@ -177,6 +181,57 @@ export function registerFreightInvoiceCostCases(fixture: {
       expect((await post(id, "approve", body, randomUUID())).status).toBe(200);
       expect((await query("SELECT cost_provisional FROM inventory.inventory_lots ORDER BY id")).rows).toEqual([{ cost_provisional: 1 }]);
       expect((await query("SELECT count(*)::int AS n FROM procurement.receipt_invoice_cost_allocations")).rows[0].n).toBe(0);
+    });
+    it("retains the same approval in both views after the operational audit copy is removed", async () => {
+      const id = await setup(), { body } = await review(id);
+      const key = randomUUID(), saved = await post(id, "approve", body, key);
+      expect(saved.status).toBe(200);
+      const approved = await context(id), original = approved.history;
+      await query("DELETE FROM public.audit_events WHERE action='procurement.freight_invoice_costs.approved' AND target=$1", [`vendor_invoice:${id}`]);
+      const retained = await context(id);
+      expect(retained.history).toEqual(original); expect(retained.sourceVersion).toBe(approved.sourceVersion);
+      const replay = await post(id, "approve", body, key);
+      expect(replay.replayed).toBe("true"); expect(replay.body).toEqual(saved.body);
+      const response = await requestLocalHttp(`${endpoint.replace('/vendor-invoices','/purchase-orders')}/10/freight-invoice-cost-approvals`);
+      expect(response.status).toBe(200); expect(await response.json()).toEqual(original);
+      const row = (await query("SELECT id,payload_json FROM procurement.po_events WHERE event_type='freight_invoice_costs_approved'")).rows[0];
+      expect(row.id).toBe(String(saved.body.approvalEventId));
+      const event = row.payload_json;
+      expect(event.authority).toBeDefined(); expect(event.preview).toEqual(original[0].preview); expect(event.commandKey).toBeDefined();
+      await query("UPDATE procurement.inbound_shipment_lines SET purchase_order_id=NULL,purchase_order_line_id=NULL WHERE id=11");
+      expect((await context(id)).history).toEqual(original);
+    });
+    it("requires a purchase relationship before a cost approval can be retained", async () => {
+      const id = await setup();
+      await query("UPDATE procurement.inbound_shipment_lines SET purchase_order_id=NULL,purchase_order_line_id=NULL WHERE id=11");
+      const loaded = await context(id), before = await state();
+      expect(loaded.blockedReason).toContain("Link this shipment to its purchase order");
+      expect((await post(id, "preview", { sourceVersion: loaded.sourceVersion })).status).toBe(409);
+      expect(await state()).toEqual(before);
+    });
+    it("retains distinct approvals when different administrators use the same client key", async () => {
+      const id = await setup(), { body } = await review(id), key = randomUUID();
+      expect((await post(id, "approve", body, key)).status).toBe(200);
+      // A subsequent, independently recorded bill correction creates a new
+      // variance. The second actor's key belongs to a separate command scope.
+      await query("UPDATE procurement.vendor_invoices SET invoiced_amount_cents=5600,balance_cents=5600 WHERE id=$1", [id]);
+      await query("UPDATE procurement.vendor_invoice_lines SET unit_cost_cents=5600,unit_cost_mills=560000,line_total_cents=5600 WHERE vendor_invoice_id=$1", [id]);
+      const loaded = freightInvoiceContextSchema.parse(await (await requestLocalHttp(`${endpoint}/${id}/shipment-cost-review`, { headers: { "X-Test-Actor": "admin-user" } })).json());
+      const measured = await post(id, "preview", { sourceVersion: loaded.sourceVersion }, undefined, "admin-user");
+      expect(measured.status).toBe(200);
+      const result = await post(id, "approve", { ...body, sourceVersion: loaded.sourceVersion, previewVersion: measured.body.previewVersion }, key, "admin-user");
+      expect(result.status, JSON.stringify(result.body)).toBe(200);
+      expect((await context(id)).history).toHaveLength(2);
+    });
+    it("returns the exact canonical approval reference beyond a 32-bit event identifier", async () => {
+      const id = await setup(), firstLargeEventId = 2_147_483_648;
+      await query("SELECT setval(pg_get_serial_sequence('procurement.po_events','id'),$1::bigint,false)", [firstLargeEventId]);
+      const { body } = await review(id), saved = await post(id, "approve", body, randomUUID());
+      expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+      expect(saved.body.approvalEventId).toBeGreaterThanOrEqual(firstLargeEventId);
+      const row = (await query("SELECT id::text AS id FROM procurement.po_events WHERE event_type='freight_invoice_costs_approved'")).rows[0];
+      expect(String(saved.body.approvalEventId)).toBe(row.id);
+      expect((await context(id)).history).toHaveLength(1);
     });
   });
 }

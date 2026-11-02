@@ -38,7 +38,7 @@ async function setup(page: Page, options: { saved?: boolean; forbidden?: "termin
     if (forbidden) return route.fulfill({ status: 403, ...(forbidden === "terminal" ? { headers: { "Idempotency-Replayed": "false" } } : {}), json: { code: "FREIGHT_INVOICE_ADMIN_REQUIRED", error: "Administrator approval is required." } });
     accepted = true;
     if (lost) return route.abort("failed");
-    return route.fulfill({ json: { auditEventId: 421, preview: measured } });
+    return route.fulfill({ json: { approvalEventId: 421, auditEventId: 422, preview: measured } });
   });
   await page.goto("/ap-invoices/71?tab=lines&purchase=purchase%3A17%3Alines&via=shipment%3A42%3Aallocation");
   async function open() {

@@ -62,6 +62,7 @@ export const freightInvoiceContextSchema = z.object({
   history: freightInvoiceApprovalHistorySchema,
 }).strict();
 export const freightInvoiceResultSchema = z.object({
+  approvalEventId: z.number().int().positive().safe(),
   auditEventId: z.number().int().positive().safe(), preview: freightInvoicePreviewSchema,
 }).strict();
 export type FreightInvoiceCharge = z.infer<typeof freightInvoiceChargeSchema>;

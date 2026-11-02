@@ -17,13 +17,25 @@ const MAX_CHARGES = 500;
 const dateText = (value: unknown) => value == null ? null : z.coerce.date().parse(value).toISOString();
 const optionalCents = (value: unknown) => value == null ? null : readIntegerCents(value, "shipment charge");
 
-export async function readPoFreightInvoiceApprovalHistory(tx: AmendmentTransaction, purchaseOrderId: number) {
-  const rows = (await tx.execute(sql`SELECT payload_json FROM procurement.po_events
-    WHERE po_id=${purchaseOrderId} AND event_type='freight_invoice_costs_approved' ORDER BY id DESC LIMIT 20`)).rows;
+function approvalHistory(rows: Array<Record<string, unknown>>) {
   return freightInvoiceApprovalHistorySchema.parse(rows.map(row => {
     const payload = z.object({ actorName: z.string(), approvedAt: z.string(), reason: z.string(), preview: z.unknown() }).parse(row.payload_json);
     return { actorName: payload.actorName, approvedAt: payload.approvedAt, reason: payload.reason, preview: payload.preview };
   }));
+}
+export async function readPoFreightInvoiceApprovalHistory(tx: AmendmentTransaction, purchaseOrderId: number) {
+  return approvalHistory((await tx.execute(sql`SELECT payload_json FROM procurement.po_events
+    WHERE po_id=${purchaseOrderId} AND event_type='freight_invoice_costs_approved' ORDER BY id DESC LIMIT 20`)).rows);
+}
+/** PO events are protected by migration 227. The general audit table is an
+ * operational copy, not a second approval authority. Deduplicate a shared
+ * shipment's identical PO events before taking the most recent 20 approvals. */
+async function readInvoiceFreightApprovalHistory(tx: AmendmentTransaction, invoiceId: number) {
+  return approvalHistory((await tx.execute(sql`SELECT payload_json FROM (
+    SELECT DISTINCT ON (actor_id,payload_json->>'commandKey') id,payload_json FROM procurement.po_events
+    WHERE event_type='freight_invoice_costs_approved' AND payload_json#>>'{preview,invoiceId}'=${String(invoiceId)}
+    ORDER BY actor_id,payload_json->>'commandKey',id DESC
+  ) approvals ORDER BY id DESC LIMIT 20`)).rows);
 }
 
 /** Graph lock precedes documents, complete shared-shipment dependencies and IAM.
@@ -78,14 +90,13 @@ export async function readFreightInvoiceReviewSource(tx: AmendmentTransaction, i
   const dependencies = await readPoAmendmentDependencies(tx, [], { shipmentIds });
   const poIds = [...new Set(dependencies.shipmentLines.flatMap(row => row.purchase_order_id == null ? [] : [costInteger(row.purchase_order_id, "purchaseOrderId", 1)]))];
   const purchaseOrders = (await tx.execute(sql`SELECT id,po_number FROM procurement.purchase_orders WHERE id=ANY(${sql.param(poIds)}::int[]) ORDER BY id FOR SHARE`)).rows;
+  if (!poIds.length || purchaseOrders.length !== poIds.length)
+    blockedReason ??= "Link this shipment to its purchase order using Edit shipment before approving its invoice costs.";
   const actor = await readPurchaseApprovalActor(tx, actorId);
   const actorName = await readPurchaseApproverName(tx, actorId);
   const canApprove = hasQuantityAmendmentAuthority(actor);
-  const history = freightInvoiceApprovalHistorySchema.parse((await tx.execute(sql`SELECT context->>'actorName' AS actor_name,
-    context->>'reason' AS reason,timestamp,changes->'preview' AS preview FROM public.audit_events
-    WHERE action='procurement.freight_invoice_costs.approved' AND target=${`vendor_invoice:${invoiceId}`} ORDER BY id DESC LIMIT 20`)).rows
-    .map(row => ({ actorName: String(row.actor_name), reason: String(row.reason), approvedAt: dateText(row.timestamp), preview: row.preview })));
-  const sourceVersion = costFingerprint({ reviewVersion: 1, invoice, lines, charges, capabilities, hasCreditHistory, purchaseLinks, dependencies, purchaseOrders, actor });
+  const history = await readInvoiceFreightApprovalHistory(tx, invoiceId);
+  const sourceVersion = costFingerprint({ reviewVersion: 2, invoice, lines, charges, capabilities, hasCreditHistory, purchaseLinks, dependencies, purchaseOrders, actor });
   const context = freightInvoiceContextSchema.parse({
     invoiceId, invoiceNumber: facts.invoice.number, sourceVersion, canApprove,
     blockedReason: !canApprove && plan?.requiresChange ? "A current Administrator with purchasing approval permission must approve this update." : blockedReason,
@@ -115,12 +126,18 @@ export async function persistFreightInvoiceChargeAmounts(tx: AmendmentTransactio
 export async function recordFreightInvoiceCostApproval(tx: AmendmentTransaction,
   source: Awaited<ReturnType<typeof readFreightInvoiceReviewSource>>, preview: FreightInvoicePreview,
   actorId: string, reason: string, commandKey: string, at: Date, applications: unknown) {
+  const poIds = source.purchaseOrders.map(row => costInteger(row.id, "purchaseOrderId", 1)).sort((a, b) => a - b);
+  if (!poIds.length) throw new FreightInvoiceCostError("A linked purchase order is required to retain this approval.", "FREIGHT_INVOICE_PURCHASE_SCOPE_REVIEW");
   const audit = (await tx.execute(sql`INSERT INTO public.audit_events(action,actor,target,changes,context,timestamp,level)
     VALUES('procurement.freight_invoice_costs.approved',${actorId},${`vendor_invoice:${preview.invoiceId}`},
       ${canonicalJson({ preview, applications })}::jsonb,${canonicalJson({ actorName: source.actorName, reason, commandKey, authority: source.actor })}::jsonb,${at},'AUDIT') RETURNING id`)).rows[0];
   const auditEventId = costInteger(audit?.id, "auditEventId", 1);
-  const poIds = [...new Set(source.dependencies.shipmentLines.flatMap(row => row.purchase_order_id == null ? [] : [costInteger(row.purchase_order_id, "purchaseOrderId", 1)]))].sort((a, b) => a - b);
-  for (const poId of poIds) await tx.execute(sql`INSERT INTO procurement.po_events(po_id,event_type,actor_type,actor_id,payload_json,created_at)
-    VALUES(${poId},'freight_invoice_costs_approved','user',${actorId},${canonicalJson({ auditEventId, actorName: source.actorName, approvedAt: at.toISOString(), reason, preview })}::jsonb,${at})`);
-  return auditEventId;
+  let approvalEventId: number | null = null;
+  for (const poId of poIds) {
+    const event = (await tx.execute(sql`INSERT INTO procurement.po_events(po_id,event_type,actor_type,actor_id,payload_json,created_at)
+      VALUES(${poId},'freight_invoice_costs_approved','user',${actorId},${canonicalJson({ auditEventId, actorName: source.actorName, approvedAt: at.toISOString(), reason, commandKey, authority: source.actor, preview })}::jsonb,${at}) RETURNING id`)).rows[0];
+    const id = costInteger(event?.id, "approvalEventId", 1);
+    approvalEventId ??= id;
+  }
+  return { auditEventId, approvalEventId };
 }

@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import { financialWorkflowFixture } from "../fixtures/po-financial-workflow";
+import { freightInvoiceContextSchema } from "../../shared/procurement/freight-invoice-costs";
 
 const emptyInvoices = { invoices: [], summary: { totalInvoicedCents: 0, totalPaidCents: 0, outstandingCents: 0, invoiceCount: 0, activeInvoiceCount: 0 } };
 async function shipmentSetup(page: Page, options: { lose?: boolean; malformed?: boolean; reject?: boolean; vendorsFail?: boolean; costsFail?: boolean; invoicesFail?: boolean } = {}) {
@@ -117,8 +118,22 @@ for (const kind of ["ordinary", "shipment", "review", "malformed"] as const) tes
   await page.goto("/ap-invoices/71");
   await expect(page.getByRole("button", { name: "Link PO", exact: true })).toHaveCount(kind === "ordinary" ? 1 : 0);
   await expect(page.getByRole("button", { name: "Unlink PO PO-17", exact: true })).toHaveCount(kind === "ordinary" ? 1 : 0);
-  await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(kind === "ordinary" || kind === "shipment" ? 1 : 0);
-  if (kind === "shipment") await expect(page.getByText("Shipment charge invoices cannot import or remove purchase order lines.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(kind === "ordinary" ? 1 : 0);
+  await expect(page.getByRole("button", { name: "Review & approve", exact: true })).toHaveCount(kind === "shipment" ? 1 : 0);
+  if (kind === "shipment") {
+    await expect(page.getByText("Shipment charge invoices cannot import or remove purchase order lines.", { exact: true })).toBeVisible();
+    await page.route("**/api/vendor-invoices/71/shipment-cost-review", route => route.fulfill({ json: freightInvoiceContextSchema.parse({
+      invoiceId: 71, invoiceNumber: "SOURCE-71", sourceVersion: "a".repeat(64), canApprove: true, blockedReason: null, requiresChange: true,
+      charges: [{ chargeId: 9, shipmentId: 42, label: "Shipment freight", estimatedCents: 10000, actualCents: null, invoiceCents: 10000 }],
+      shipments: [{ id: 42, number: "TEST-SHIP-42", status: "booked" }], invoiceStatus: "received",
+      invoiceAmountCents: 10000, paidAmountCents: 0, balanceCents: 10000,
+      originalApproval: { actorId: null, actorName: null, approvedAt: null }, history: [],
+    }) }));
+    await page.getByRole("button", { name: "Review & approve", exact: true }).click();
+    const review = page.getByRole("dialog", { name: "Use invoice amounts for shipment costs", exact: true });
+    await expect(review.getByRole("button", { name: "Review changes", exact: true })).toBeEnabled();
+    await expect(review.getByRole("button", { name: "Approve & update costs", exact: true })).toHaveCount(0);
+  }
   if (kind === "review" || kind === "malformed") await expect(page.getByRole("button", { name: "Reload invoice ownership", exact: true })).toBeVisible();
   expect(failures).toEqual([]);
 });

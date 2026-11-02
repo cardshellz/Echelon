@@ -98,8 +98,8 @@ export function createFreightInvoiceCostService(database: AmendmentDatabase,
       issues: [...new Map([...generalIssues, ...applications.flatMap(row => row.issues)].map(issue => [canonicalJson({ code: issue.code, message: issue.message }), { code: issue.code, message: issue.message }])).values()],
     };
     const preview = freightInvoicePreviewSchema.parse({ ...reviewed, previewVersion: costFingerprint(reviewed) });
-    const auditEventId = await recordFreightInvoiceCostApproval(tx, source, preview, actorId, reason, key, at, applications);
-    return freightInvoiceResultSchema.parse({ auditEventId, preview });
+    const approval = await recordFreightInvoiceCostApproval(tx, source, preview, actorId, reason, key, at, applications);
+    return freightInvoiceResultSchema.parse({ ...approval, preview });
   }
   return {
     history: (purchaseOrderId: number) => database.transaction(tx => readPoFreightInvoiceApprovalHistory(tx, freightInvoiceIdSchema.parse(purchaseOrderId))),
@@ -136,7 +136,7 @@ export function createFreightInvoiceCostService(database: AmendmentDatabase,
           assertInvoiceQuantityAuthority(source.actor); current(source.context.sourceVersion, request.sourceVersion);
           const result = await execute(tx, source, actorId, request.reason, descriptor.idempotencyKey);
           current(result.preview.previewVersion, request.previewVersion);
-          return { httpStatus: 200, body: result, resultType: "freight_invoice_cost_approval", resultId: result.auditEventId };
+          return { httpStatus: 200, body: result, resultType: "freight_invoice_cost_approval", resultId: result.approvalEventId };
         },
       });
     },
