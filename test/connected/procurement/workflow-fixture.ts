@@ -50,6 +50,9 @@ export async function installConnectedWorkflowFixture(pool: Pool): Promise<void>
 /** Persisted physical/financial/command evidence for connected assertions, never API substitutes. */
 export async function readConnectedWorkflowState(pool: Pool) {
   return (await pool.query(`SELECT
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM public.audit_events t WHERE action='procurement.freight_invoice_costs.approved') AS "freightInvoiceApprovals",
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.inbound_freight_costs t) AS "freightCosts",
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.inbound_freight_allocations t) AS "freightAllocations",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.receipt_invoice_cost_allocations t) AS "receiptInvoiceAllocations",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM public.audit_events t WHERE action='procurement.receipt_invoice_costs.approved') AS "receiptInvoiceApprovals",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.receipt_cost_requests t) AS "receiptCostRequests",
@@ -97,4 +100,32 @@ export async function seedReceiptInvoiceWorkflow(pool: Pool): Promise<void> {
       VALUES(32,'CONNECTED-SECOND-SHIPMENT','in_transit','ocean',1,25,5,'by_value','connected-receiver');
     INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,product_variant_id,sku,qty_shipped,units_per_variant_snapshot,carton_count)
       VALUES(43,32,11,21,101,'P5',25,5,5)`);
+}
+
+/** The navigation bootstrap includes an unused sample freight bill. This
+ * scenario starts before receiving/posting and removes only that synthetic
+ * document so the UI can create the real test bill after costing the shipment.
+ * It never disables a constraint and is not imported by production code. */
+export async function seedFreightInvoiceWorkflow(pool: Pool): Promise<void> {
+  const evidence = (await pool.query(`SELECT
+    (SELECT count(*)::int FROM procurement.receiving_orders WHERE purchase_order_id IN (11,12)) AS receipts,
+    (SELECT count(*)::int FROM inventory.cost_applications) AS applications,
+    (SELECT count(*)::int FROM procurement.ap_payment_allocations WHERE vendor_invoice_id=72) AS payments`)).rows[0];
+  if (evidence.receipts !== 0 || evidence.applications !== 0 || evidence.payments !== 0)
+    throw new Error("Freight scenario requires untouched synthetic source records");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`
+    UPDATE procurement.inbound_freight_costs SET vendor_invoice_id=NULL,invoice_number=NULL,cost_status='finalized',estimated_cents=1500 WHERE id=61;
+    DELETE FROM procurement.vendor_invoice_lines WHERE vendor_invoice_id=72;
+    DELETE FROM procurement.vendor_invoices WHERE id=72;
+    `);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
