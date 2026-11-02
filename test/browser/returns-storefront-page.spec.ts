@@ -122,6 +122,7 @@ async function assertStoreFrame(page: Page) {
     .toEqual({ overflow: false, font: "Impact, fantasy" });
   expect(await page.locator("[data-return-heading]").first().evaluate(h => getComputedStyle(h).fontFamily)).not.toMatch(/Impact|fantasy/);
   await expect(page.getByRole("link", { name: "Continue shopping", exact: true })).toHaveAttribute("href", "https://www.cardshellz.com/");
+  await expect(page.getByRole("link", { name: "Read the return policy", exact: true })).toHaveAttribute("href", "/policies/refund-policy");
   expect(new URL(page.url()).pathname).toBe("/pages/start-a-return");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Returns");
   await expect(page.locator(".csz-return-brand")).toHaveCount(0);
