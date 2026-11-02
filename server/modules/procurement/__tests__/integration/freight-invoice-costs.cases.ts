@@ -61,7 +61,7 @@ export function registerFreightInvoiceCostCases(fixture: {
   }
   describe("freight invoice cost approval through public routes and real cost owners", () => {
     beforeAll(async () => {
-      await query(readFileSync(resolve(process.cwd(), "migrations/900000048000019830001_freight_invoice_approval_history_lookup.sql"), "utf8"));
+      await query(readFileSync(resolve(process.cwd(), "migrations/900000049000019830001_freight_invoice_approval_history_lookup.sql"), "utf8"));
       const app = express(); app.use(express.json());
       app.use((req, _res, next) => { (req as unknown as { session: unknown }).session = { user: { id: req.header("X-Test-Actor") ?? fixture.actorId, role: "admin" } }; next(); });
       registerFreightInvoiceCostRoutes(app, createFreightInvoiceCostService(fixture.database(), fixture.shipments(), () => fixture.at));
