@@ -1,6 +1,6 @@
 # S2: approved freight invoice amounts reach shipment costs
 
-Bounded COST-04 / COST-08 continuation, based on pinned deployed main `5407e8938999f8967aab2f4265849f8cab533a2d`. No migration, production backfill or new expense destination is introduced. This is not completion of the whole costing plan.
+Bounded COST-04 / COST-08 continuation in [PR #1983](https://github.com/cardshellz/Echelon/pull/1983), based on pinned deployed main `5407e8938999f8967aab2f4265849f8cab533a2d`. [Exact-head checks and current acceptance](https://github.com/cardshellz/Echelon/pull/1983/checks) are separate from deployment. No migration, production backfill or new expense destination is introduced. This is not completion of the whole costing plan.
 
 ## Exact execution and ownership
 
