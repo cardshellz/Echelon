@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import { receiveShipmentPurchase as receive } from "./receiving-workflow";
 import { test, expect, login, type Backend } from "./fixtures";
 
 type Row = Record<string, unknown>;
@@ -16,88 +16,6 @@ interface State {
 }
 const state = (backend: Backend) => backend.control<State>("workflow-state");
 
-async function receive(page: Page, backend: Backend, shipmentId: number) {
-  await page.goto(`${backend.url}/shipments/${shipmentId}`);
-  await page.getByRole("button", { name: "Delivered", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Create Receipt", exact: true }),
-  ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Create Receipt", exact: true })
-    .click();
-  const picker = page.getByRole("dialog", {
-    name: "Receive shipment — choose a PO",
-    exact: true,
-  });
-  await expect
-    .poll(
-      async () =>
-        new URL(page.url()).pathname === "/receiving" ||
-        (await picker.isVisible()),
-    )
-    .toBe(true);
-  if (await picker.isVisible())
-    await picker
-      .getByTestId("shipment-receive-option-11")
-      .getByRole("button", { name: "Receive", exact: true })
-      .click();
-  await expect(page).toHaveURL(/\/receiving\?open=\d+/);
-  const receiptId = Number(new URL(page.url()).searchParams.get("open"));
-  const [line] = (await state(backend)).receivingLines.filter(
-    (row) => Number(row.receiving_order_id) === receiptId,
-  );
-  expect(line).toMatchObject({
-    units_per_variant_snapshot: 5,
-    expected_qty: 5,
-  });
-  await page
-    .getByRole("button", { name: "Start receiving", exact: true })
-    .click();
-  const warehouse = page.getByRole("combobox", {
-    name: "Receiving warehouse",
-    exact: true,
-  });
-  if (await warehouse.isVisible()) {
-    await warehouse.click();
-    await page.getByRole("option", { name: /MAIN/ }).click();
-  }
-  await page
-    .getByRole("combobox", { name: "Default receiving location", exact: true })
-    .click();
-  await page.getByRole("option", { name: /PICK/ }).click();
-  await expect
-    .poll(
-      async () =>
-        (await state(backend)).receivingLines.find((row) => row.id === line.id)
-          ?.putaway_location_id,
-    )
-    .toBe(100);
-  await page
-    .getByLabel(`Received count for line ${line.id}`, { exact: true })
-    .filter({ visible: true })
-    .fill("5");
-  await page
-    .getByTestId(`btn-complete-line-${line.id}`)
-    .filter({ visible: true })
-    .click();
-  await expect(
-    page
-      .getByLabel(`Received count confirmed for line ${line.id}`, {
-        exact: true,
-      })
-      .filter({ visible: true }),
-  ).toBeVisible();
-  await page.getByTestId("btn-close-receipt").click();
-  await expect
-    .poll(
-      async () =>
-        (await state(backend)).receipts.find(
-          (row) => Number(row.id) === receiptId,
-        )?.status,
-    )
-    .toBe("closed");
-  return receiptId;
-}
 
 test("admin assigns two invoice prices to separate receipts without changing counts or bills", async ({
   page,

@@ -117,7 +117,13 @@ jobs:
         run: npx tsc -p tsconfig.tests.server.json
       - name: Client test types
         if: matrix.project == 'client-tests'
-        run: npx tsc -p tsconfig.tests.client.json
+        # Hosted Node exhausted its default ~2 GB heap at 2,017 MB (Nov 2026).
+        # Full local check: 3,445,442K used; passed with 6144 MB. Keep the
+        # complete program and the application's 6 GB headroom on
+        # this isolated runner; diagnostics retain evidence for future sizing.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: npx tsc -p tsconfig.tests.client.json --extendedDiagnostics
 
   unit-tests:
     name: Unit tests (${{ matrix.shard }}/4)
