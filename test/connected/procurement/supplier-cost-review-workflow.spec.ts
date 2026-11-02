@@ -55,7 +55,13 @@ test("one reviewed supplier split updates stock components and retains the appro
   expect(after.invoices).toEqual(before.invoices);
   expect(after.payments).toEqual(before.payments); expect(after.paymentAllocations).toEqual(before.paymentAllocations);
   expect(after.historicalCostPostings).toEqual(before.historicalCostPostings); expect(after.historicalCostPostings).toEqual([]);
-  expect(after.orderCosts).toEqual(before.orderCosts); expect(after.orderCosts).toEqual([]);
+  // The cutover base fixture already contains order cost #9 for unrelated lot
+  // #4, including integers beyond JS's safe range. Preserve its exact strings;
+  // neither of these newly received lots has a sale or order-cost assignment.
+  expect(before.orderCosts).toEqual([expect.objectContaining({ id: 9, unit_cost_mills: "9007199254740995", total_cost_mills: "18014398509481990" })]);
+  expect(after.orderCosts).toEqual(before.orderCosts);
+  const receiptLotIds = new Set(before.lots.filter(row => [21, 22].includes(Number(row.po_line_id))).map(row => row.id));
+  expect(after.orderCosts.filter(row => receiptLotIds.has(row.inventory_lot_id))).toEqual([]);
   expect(after.invoiceLines.filter(row => row.id !== source.id)).toEqual(before.invoiceLines.filter(row => row.id !== source.id));
   const savedLine = after.invoiceLines.find(row => row.id === source.id)!;
   expect(savedLine.qty_invoiced).toEqual(source.qty_invoiced); expect(savedLine.line_total_cents).toEqual(source.line_total_cents);
@@ -73,6 +79,9 @@ test("one reviewed supplier split updates stock components and retains the appro
     actorName: expect.any(String), approvedAt: expect.any(String), reason: "Supplier confirms $20 goods and $5 packaging for this receipt.",
     preview: { before: { productMills: 250000, packagingMills: 0 }, after: { productMills: 200000, packagingMills: 50000 } },
   } });
-  await page.reload();
+  const readback = await page.request.get(`${backend.url}/api/vendor-invoices/71`);
+  expect(readback.ok()).toBe(true);
+  const invoice = await readback.json() as { lines: Array<{ id: number; costComponentEvidence: unknown }> };
+  expect(invoice.lines.find(row => row.id === source.id)?.costComponentEvidence).toMatchObject({ productMills: 200000, packagingMills: 50000 });
   expect((await backend.control<State>("workflow-state")).supplierCostApprovals).toEqual(after.supplierCostApprovals);
 });
